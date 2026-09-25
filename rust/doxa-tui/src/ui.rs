@@ -1165,6 +1165,10 @@ impl App {
                     self.lore_picker = None;
                     self.notice = "Enlarge terminal to open LORE beliefs".into();
                 }
+                if self.stop_confirmation.is_some() && !self.stop_confirmation_fits() {
+                    self.stop_confirmation = None;
+                    self.notice = "Session stop cancelled · enlarge terminal to confirm".into();
+                }
                 if ((self.model_picker.is_some() || self.engine_picker || self.new_session.is_some()) && (w < 29 || h < 11))
                     || (self.permission_picker.is_some() && (w < 60 || h < 15)) {
                     self.model_picker = None;
@@ -1950,8 +1954,12 @@ impl App {
         true
     }
 
+    fn stop_confirmation_fits(&self) -> bool {
+        self.size.width == 0 || (self.size.width >= 40 && self.size.height >= 12)
+    }
+
     fn open_stop_confirmation(&mut self) {
-        if self.size.width > 0 && (self.size.width < 40 || self.size.height < 12) {
+        if !self.stop_confirmation_fits() {
             self.notice = "Enlarge terminal to confirm session stop".into();
             return;
         }
@@ -1970,7 +1978,8 @@ impl App {
     fn stop_confirmation_key(&mut self, key: KeyEvent) -> bool {
         match key.code {
             KeyCode::Esc | KeyCode::Char('n' | 'N') => self.stop_confirmation = None,
-            KeyCode::Char('y' | 'Y') if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT => {
+            KeyCode::Char('y' | 'Y') if (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
+                && self.stop_confirmation_fits() => {
                 let id = self.stop_confirmation.take().unwrap();
                 self.pending_stops.push(id.clone());
                 self.notice = format!("Requesting stop · {}", safe_label(&id));
@@ -3540,6 +3549,19 @@ mod tests {
         assert!(!app.offline_ids.contains("first"));
         assert_eq!(app.input, "keep this");
         assert!(app.notice.contains("busy"));
+    }
+
+    #[test]
+    fn shrinking_terminal_cancels_hidden_stop_confirmation() {
+        let mut app = App::default();
+        app.handle(Event::Resize(100, 28));
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"first"}));
+        app.open_stop_confirmation();
+        assert_eq!(app.stop_confirmation.as_deref(), Some("first"));
+        app.handle(Event::Resize(39, 11));
+        assert!(app.stop_confirmation.is_none());
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)));
+        assert!(app.pending_stops.is_empty());
     }
 
     #[test]
