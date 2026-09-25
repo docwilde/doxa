@@ -37,7 +37,8 @@ across grouped tabs and two-pane splits with separate prompts, inspect bounded
 worktree diffs and tool cards, change supported models and permissions, and
 browse LORE beliefs and peer activity. The [Rust guide](rust/README.md)
 describes its current capabilities and limits. Managed worktrees, diff hunk
-rejection, LORE proposal review, and Python-backed fleet operation are in the
+rejection, guarded session checkout recovery, reviewed LORE belief actions,
+LORE proposal review, and Python-backed fleet operation are in the
 alpha. Native fleet supervision and remote control are still being ported.
 
 ## Gallery

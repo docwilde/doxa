@@ -194,8 +194,10 @@ bounded transcript tails. Archived transcripts open read-only and never receive
 prompts. `/search TEXT` scans a bounded older archived tail. `/resume [ID or
 prefix]` opens a picker that can attach a live session or start a saved Claude,
 Codex, or vendor session when its engine, model, and stored history can be
-verified. The recorded directory must still exist for archived resume;
-deleted managed worktrees cannot yet be reconstructed. `/queue` opens a picker
+verified. If a managed checkout was deleted, DOXA can recreate it from its
+retained session branch when the owned sidecar, pinned base commit, and Git
+registration all agree. A plain deleted directory or uncertain metadata is
+refused; uncommitted files from a deleted checkout cannot be restored. `/queue` opens a picker
 above the active prompt for a live session. Its previews are scrubbed by LORE;
 press `X` to cancel the selected waiting prompt by its stable ID, `R` to
 refresh, or `Esc` to close it. `F2` (or `Alt+G`) opens a 256 KiB worktree diff in an
@@ -276,6 +278,14 @@ Entering `dontAsk` requires a second Enter confirmation because unapproved
 calls are silently denied.
 `Alt+L` opens the LORE picker when the external bridge is available. It shows
 bounded recent beliefs, a search hit, and evidence for the selected belief.
+Select a belief to review its complete subject and claim. LORE refuses an
+action if its scrubber would hide any part of the claim. After
+reading to the end, choose `C` to confirm, `X` to contradict, `S` to mark
+stale, or `R` to retract. Enter a note and press Enter to apply; retract also
+requires a separate `Y` confirmation. LORE verifies the original claim,
+scope, and active status under its write lock. A changed belief is refused;
+inspect LORE before retrying if a transport error leaves the result unknown.
+Older LORE builds without reviewed belief actions keep this picker read only.
 Press `P` with an empty search to page staged proposals, then Enter to scroll
 the complete raw proposal. After reading to the end, `A` or `R` arms one
 approval or rejection; Enter confirms it. The sidecar rechecks the displayed
