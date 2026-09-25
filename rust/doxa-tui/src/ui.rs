@@ -51,7 +51,7 @@ const MAX_ANSWER_BYTES: usize = 10 * 1024;
 // Reserve metadata wrapping even in a narrow review modal. This is also the
 // number used by the read-through gate, so it never credits hidden raw rows.
 const REVIEW_BODY_RESERVE: u16 = 10;
-const ACTIONS: [(&str, &str); 13] = [
+const ACTIONS: [(&str, &str); 14] = [
     ("Peer map", "Ctrl+M"),
     ("Tool activity", "Ctrl+T"),
     ("Open selected session", "rail selection"),
@@ -65,8 +65,9 @@ const ACTIONS: [(&str, &str); 13] = [
     ("Session model", "Alt+M"),
     ("Claude permissions", "Alt+P"),
     ("Stop active session", "Alt+X"),
+    ("Move tab to other pane", "/movepane"),
 ];
-const SLASH_COMMANDS: [(&str, &str); 25] = [
+const SLASH_COMMANDS: [(&str, &str); 26] = [
     ("/help", "Open actions"), ("/about", "Show Rust version"),
     ("/sessions", "Browse sessions"), ("/search", "Search saved sessions"),
     ("/resume", "Resume saved session"), ("/attach", "Attach live session"),
@@ -79,7 +80,7 @@ const SLASH_COMMANDS: [(&str, &str); 25] = [
     ("/rename", "Rename session"), ("/split", "Horizontal split"),
     ("/vsplit", "Vertical split"), ("/pane", "Switch pane"),
     ("/sidebar", "Session rail"), ("/detach", "Close tab"),
-    ("/dir", "Session directory"),
+    ("/dir", "Session directory"), ("/movepane", "Move active tab"),
 ];
 
 const ENGINE_CHOICES: [&str; 4] = ["codex", "claude", "deepseek", "glm"];
@@ -891,6 +892,7 @@ pub struct App {
     pub input: String,
     input_cursor: usize,
     input_drafts: HashMap<(usize, String), (String, usize)>,
+    moved_active_tab: bool,
     session_identity: HashMap<String, (Option<String>, Option<String>)>,
     session_efforts: HashMap<String, String>,
     catalog_efforts: HashMap<(String, String), Vec<String>>,
@@ -1025,6 +1027,7 @@ impl Default for App {
             input: String::new(),
             input_cursor: 0,
             input_drafts: HashMap::new(),
+            moved_active_tab: false,
             session_identity: HashMap::new(),
             session_efforts: HashMap::new(),
             catalog_efforts: HashMap::new(),
@@ -1897,9 +1900,20 @@ impl App {
         };
         let after = (self.active_group, self.groups[self.active_group].active_id().unwrap_or("").to_owned());
         if before != after {
-            self.input_drafts
-                .insert(before, (std::mem::take(&mut self.input), self.input_cursor));
-            (self.input, self.input_cursor) = self.input_drafts.remove(&after).unwrap_or_default();
+            let moved_active_tab = std::mem::take(&mut self.moved_active_tab)
+                && !before.1.is_empty() && before.1 == after.1
+                && !self.groups[before.0].tabs.contains(&before.1)
+                && self.groups[after.0].tabs.contains(&after.1);
+            if moved_active_tab {
+                // The draft follows its tab rather than remaining under the
+                // old pane key. A command has already consumed its own input.
+                self.input_drafts.remove(&before);
+                self.input_drafts.remove(&after);
+            } else {
+                self.input_drafts
+                    .insert(before, (std::mem::take(&mut self.input), self.input_cursor));
+                (self.input, self.input_cursor) = self.input_drafts.remove(&after).unwrap_or_default();
+            }
             self.slash_selected = 0;
             self.slash_dismissed = false;
         }
@@ -2529,7 +2543,20 @@ impl App {
                 self.notice = "Local command unavailable: /mesh arguments".into(); true
             }
             "/mesh" | "/msg" => false,
-            "/movepane" | "/collection" | "/fleet" | "/img" | "/login"
+            "/movepane" => {
+                let target = match args.split_whitespace().collect::<Vec<_>>().as_slice() {
+                    [] => 1 - self.active_group,
+                    ["1"] => 0,
+                    ["2"] => 1,
+                    _ => { self.notice = "Usage: /movepane [1|2]".into(); return true; }
+                };
+                if self.move_active_tab(target) {
+                    self.input.clear();
+                    self.input_cursor = 0;
+                }
+                true
+            }
+            "/collection" | "/fleet" | "/img" | "/login"
             | "/logout" | "/settings" | "/setup" | "/doctor" | "/plugins"
             | "/reload-plugins" | "/effort" | "/usage"
             | "/context" | "/clear" | "/cd"
@@ -4262,6 +4289,7 @@ impl App {
                     10 => self.open_model_picker(),
                     11 => self.open_permission_picker(),
                     12 => self.open_stop_confirmation(),
+                    13 => { self.move_active_tab(1 - self.active_group); }
                     _ => unreachable!("fixed action list"),
                 }
             }
@@ -4516,6 +4544,45 @@ impl App {
             self.split_requested = false;
         }
         self.focus = Focus::Prompt;
+    }
+
+    /// Move the active session tab to the opposite group. Keep a source tab
+    /// so moving never implicitly closes a pane group.
+    fn move_active_tab(&mut self, target: usize) -> bool {
+        if target > 1 || target == self.active_group {
+            self.notice = "Choose the other pane group (1 or 2)".into();
+            return false;
+        }
+        let source = self.active_group;
+        let Some(id) = self.groups[source].active_id().map(str::to_owned) else {
+            self.notice = "No active tab to move".into();
+            return false;
+        };
+        if self.offline_ids.contains(&id) {
+            self.notice = "Archived transcript cannot be moved".into();
+            return false;
+        }
+        if self.groups[source].tabs.len() < 2 {
+            self.notice = "Cannot move the last tab out of a pane".into();
+            return false;
+        }
+        if self.groups[target].tabs.contains(&id) {
+            self.notice = "Session is already open in that pane".into();
+            return false;
+        }
+        let current = self.groups[source].active;
+        self.groups[source].tabs.remove(current);
+        self.groups[source].active = current.min(self.groups[source].tabs.len() - 1);
+        self.groups[source].scroll = 0;
+        self.groups[target].tabs.push(id);
+        self.groups[target].active = self.groups[target].tabs.len() - 1;
+        self.groups[target].scroll = 0;
+        self.active_group = target;
+        self.moved_active_tab = true;
+        self.split_requested = true;
+        self.focus = Focus::Prompt;
+        self.notice = format!("Tab moved to pane {}", target + 1);
+        true
     }
 
     fn previous_tab(&mut self) {
@@ -7847,7 +7914,7 @@ for line in sys.stdin:
         for ch in "/mo".chars() {
             app.handle(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
         }
-        assert_eq!(app.slash_suggestions().len(), 2);
+        assert_eq!(app.slash_suggestions().len(), 3);
         painted(&app);
         let menu = app.active_chooser_rect().unwrap();
         app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),

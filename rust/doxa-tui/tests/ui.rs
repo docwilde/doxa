@@ -193,6 +193,80 @@ fn same_session_in_two_panes_keeps_independent_drafts() {
 }
 
 #[test]
+fn move_tab_command_rehomes_active_session_and_keeps_other_drafts() {
+    let mut app = App::default();
+    for id in ["one", "two", "three"] {
+        app.apply_update(doxa_tui::ui::DaemonUpdate::Upsert(session(id, "Work")));
+    }
+    app.groups[0].tabs = vec!["one".into(), "two".into()];
+    app.groups[1].tabs = vec!["three".into()];
+    app.input = "first draft".into();
+    app.handle(key(KeyCode::Tab, KeyModifiers::SHIFT));
+    app.input = "third draft".into();
+    app.handle(key(KeyCode::Tab, KeyModifiers::SHIFT));
+    assert_eq!(app.input, "first draft");
+    app.input = "/movepane 2".into();
+    assert!(app.handle(key(KeyCode::Enter, KeyModifiers::NONE)));
+    assert_eq!(app.groups[0].tabs, ["two"]);
+    assert_eq!(app.groups[1].tabs, ["three", "one"]);
+    assert_eq!(app.groups[1].active, 1);
+    assert_eq!(app.active_group, 1);
+    assert_eq!(app.focus, Focus::Prompt);
+    assert!(app.input.is_empty());
+    app.handle(key(KeyCode::Tab, KeyModifiers::NONE));
+    app.handle(key(KeyCode::Left, KeyModifiers::NONE));
+    app.handle(key(KeyCode::Esc, KeyModifiers::NONE));
+    assert_eq!(app.input, "third draft");
+    assert!(app.take_prompts().is_empty());
+}
+
+#[test]
+fn move_tab_action_carries_live_draft_and_refuses_last_source_tab() {
+    let mut app = App::default();
+    for id in ["one", "two"] {
+        app.apply_update(doxa_tui::ui::DaemonUpdate::Upsert(session(id, "Work")));
+    }
+    app.groups[0].tabs = vec!["one".into(), "two".into()];
+    for c in "keep this draft".chars() { app.handle(key(KeyCode::Char(c), KeyModifiers::NONE)); }
+    app.handle(key(KeyCode::Char('p'), KeyModifiers::CONTROL));
+    for _ in 0..13 { app.handle(key(KeyCode::Down, KeyModifiers::NONE)); }
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(app.groups[0].tabs, ["two"]);
+    assert_eq!(app.groups[1].tabs, ["one"]);
+    assert_eq!(app.input, "keep this draft");
+    app.handle(key(KeyCode::Backspace, KeyModifiers::NONE));
+    assert_eq!(app.input, "keep this draf");
+    app.input = "/movepane 1".into();
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(app.groups[1].tabs, ["one"]);
+    assert_eq!(app.active_group, 1);
+    assert_eq!(app.input, "/movepane 1");
+    assert!(app.notice.contains("last tab"));
+    assert!(app.take_prompts().is_empty());
+}
+
+#[test]
+fn move_tab_rejects_invalid_destination_and_duplicate_without_mutation() {
+    let mut app = App::default();
+    app.groups[0].tabs = vec!["one".into(), "two".into()];
+    app.groups[1].tabs = vec!["one".into()];
+    for command in ["/movepane 3", "/movepane 1", "/movepane 2"] {
+        app.input = command.into();
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.input, command);
+        assert_eq!(app.groups[0].tabs, ["one", "two"]);
+        assert_eq!(app.groups[1].tabs, ["one"]);
+        assert_eq!(app.active_group, 0);
+        assert!(app.take_prompts().is_empty());
+    }
+    app.groups[0].tabs.clear();
+    app.input = "/movepane".into();
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(app.input, "/movepane");
+    assert!(app.notice.contains("No active tab"));
+}
+
+#[test]
 fn visible_tab_labels_switch_sessions_and_restore_drafts_by_mouse() {
     let mut app = App::default();
     app.handle(Event::Resize(100, 24));
