@@ -3380,11 +3380,9 @@ impl App {
         };
         let source = self.session_cwds.get(id).cloned();
         let current = source.as_deref().and_then(safe_repo_directory)
-            .or_else(|| source.as_deref().and_then(Path::parent).and_then(safe_repo_directory))
-            .or_else(|| self.sessions.iter().filter_map(|session|
-                self.session_cwds.get(&session.id).and_then(|path| safe_repo_directory(path))).next());
+            .or_else(|| source.as_deref().and_then(Path::parent).and_then(safe_repo_directory));
         let Some(current_dir) = current else {
-            self.notice = "No known directories are available".into();
+            self.notice = "Current session directory is unavailable".into();
             return;
         };
         self.chip_info = None;
@@ -9412,6 +9410,18 @@ for line in sys.stdin:
         app.repo_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(app.repo_picker.as_ref().unwrap().current_dir, child);
         assert!(app.pending_launches.is_empty());
+    }
+
+    #[test]
+    fn repo_picker_does_not_substitute_another_sessions_directory() {
+        let other = tempfile::tempdir().unwrap();
+        let mut app = App::default();
+        app.handle(Event::Resize(100, 28));
+        app.groups[0].tabs.push("missing".into());
+        app.session_cwds.insert("other".into(), other.path().to_path_buf());
+        app.open_repo_picker(0);
+        assert!(app.repo_picker.is_none());
+        assert_eq!(app.notice, "Current session directory is unavailable");
     }
 
     #[test]

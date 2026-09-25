@@ -13,9 +13,10 @@ the stable 2.0 release has not been cut.
 - Invalidate context after Codex compaction until a fresh token count arrives,
   and open rollout files through pinned directory handles to reject symlink
   redirects.
-- Open a directory picker from the repository chip, with keyboard and mouse
-  selection, hover highlighting, and a draggable upper border.
-- Highlight selectable rows under the pointer across the inline pickers.
+- Open a directory browser from the repository chip with bounded parent and
+  child navigation, keyboard and mouse selection, and a draggable upper border.
+- Highlight selectable rows under the pointer across the inline pickers;
+  `ask_user` choices can now be hovered and clicked above the prompt.
 - Replace the installed sidecar pointer on upgrade even when the old pointer
   is a symlink to a directory; verify it points to the new build before
   completing installation.
