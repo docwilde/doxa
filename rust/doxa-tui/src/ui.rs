@@ -714,6 +714,9 @@ pub struct App {
     chip_offsets: [usize; 2],
     chip_hover: Option<ChipHit>,
     chip_info: Option<ChipInfo>,
+    // Mouse coordinates must come from the last painted frame, which may
+    // differ from the terminal size reported by an earlier resize event.
+    rendered_chip_hits: RefCell<Option<Vec<ChipHit>>>,
     blink_on: bool,
     blink_at: Instant,
     model_capabilities: HashMap<String, bool>,
@@ -823,6 +826,7 @@ impl Default for App {
             chip_offsets: [0, 0],
             chip_hover: None,
             chip_info: None,
+            rendered_chip_hits: RefCell::new(None),
             blink_on: true,
             blink_at: Instant::now(),
             model_capabilities: HashMap::new(),
@@ -1496,6 +1500,7 @@ impl App {
                 self.size = Rect::new(0, 0, w, h);
                 self.drag = None;
                 self.chip_hover = None;
+                *self.rendered_chip_hits.borrow_mut() = None;
                 if self.chip_info.is_some() && self.active_chooser_rect().is_none() {
                     self.chip_info = None;
                 }
@@ -3871,6 +3876,12 @@ impl App {
     }
 
     fn chip_hit_at(&self, column: u16, row: u16) -> Option<ChipHit> {
+        if let Some(hits) = self.rendered_chip_hits.borrow().as_ref() {
+            return hits.iter().find(|hit| hit.rect.contains(
+                ratatui::layout::Position::new(column, row))).cloned();
+        }
+        // Before the first paint, tests and synthetic input may still use
+        // the current size. Interactive input always uses painted regions.
         let layout = self.layout(self.size);
         let panes = layout.panes.map(|panes| vec![(0, panes[0]), (1, panes[1])])
             .unwrap_or_else(|| vec![(self.active_group, layout.body)]);
@@ -4283,6 +4294,7 @@ impl App {
     pub fn draw(&self, frame: &mut Frame) {
         let area = frame.area();
         self.visible_tool_sections.borrow_mut().clear();
+        *self.rendered_chip_hits.borrow_mut() = Some(Vec::new());
         frame.render_widget(Block::default().style(Style::default().bg(theme::BASE).fg(theme::TEXT)), area);
         if area.width < 20 || area.height < 5 {
             frame.render_widget(Paragraph::new("DOXA · enlarge terminal"), area);
@@ -4982,9 +4994,19 @@ impl App {
             }
         }
         let mut chip_spans = Vec::new();
+        let mut chip_x = inner[3].x;
         for (kind, label) in self.chip_window(index, usize::from(inner[3].width)) {
             if !chip_spans.is_empty() { chip_spans.push(Span::raw(" ")); }
-            chip_spans.push(Span::styled(chip_text(kind, &label),
+            let text = chip_text(kind, &label);
+            let end = chip_x.saturating_add(text.width() as u16).min(inner[3].right());
+            if end > chip_x {
+                if let Some(hits) = self.rendered_chip_hits.borrow_mut().as_mut() {
+                    hits.push(ChipHit { group: index, kind,
+                        rect: Rect::new(chip_x, inner[3].y, end - chip_x, 1), pane: area });
+                }
+            }
+            chip_x = end.saturating_add(1);
+            chip_spans.push(Span::styled(text,
                 Style::default().fg(if matches!(kind, "engine" | "more") { theme::ACCENT } else { theme::TEXT })
                     .bg(theme::HIGHLIGHT)));
         }
@@ -6082,6 +6104,41 @@ mod tests {
     }
 
     #[test]
+    fn chip_hits_match_painted_cells_and_exclude_prompt_separator() {
+        let mut app = App::default();
+        app.rail_visible = false;
+        app.handle(Event::Resize(140, 32));
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"s", "engine":"claude",
+            "model":"sonnet", "permission_mode":"auto", "can_set_permission_mode":true}));
+        app.groups[0].tabs = vec!["s".into()];
+
+        // A redraw can observe new dimensions before its Resize event reaches
+        // the input loop. Mouse hits must follow the frame the user sees.
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let hits = app.rendered_chip_hits.borrow().clone().unwrap();
+        let permission = hits.iter().find(|hit| hit.kind == "permission").unwrap();
+        let stale_pane = app.layout(app.size).body;
+        assert_ne!(permission.rect.y, app.pane_regions(0, stale_pane)[3].y);
+        for hit in &hits {
+            for x in hit.rect.x..hit.rect.right() {
+                assert_eq!(terminal.backend().buffer()[(x, hit.rect.y)].bg, theme::HIGHLIGHT);
+                assert_eq!(app.chip_hit_at(x, hit.rect.y).as_ref().map(|hit| hit.kind), Some(hit.kind));
+            }
+            assert!(app.chip_hit_at(hit.rect.x, hit.rect.y - 1).is_none());
+            assert!(app.chip_hit_at(hit.rect.x, hit.rect.y + 1).is_none());
+        }
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Moved,
+            column: permission.rect.x + 1, row: permission.rect.y + 1,
+            modifiers: KeyModifiers::NONE }));
+        assert!(app.chip_hover.is_none());
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: permission.rect.x + 1, row: permission.rect.y,
+            modifiers: KeyModifiers::NONE }));
+        assert!(app.permission_picker.is_some());
+    }
+
+    #[test]
     fn multiline_prompt_edits_at_cursor_and_enter_submits() {
         let mut app = App::default();
         app.groups[0].tabs.push("s".into());
@@ -6486,6 +6543,7 @@ mod tests {
             belief_x += chip_text(kind, &label).width() as u16 + 1;
         }
         let chip_y = pane.bottom().saturating_sub(prompt_height("", pane.height) + 2);
+        painted(&app);
         app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
             column: belief_x + 2, row: chip_y, modifiers: KeyModifiers::NONE }));
         assert_eq!(app.active_group, 1);
