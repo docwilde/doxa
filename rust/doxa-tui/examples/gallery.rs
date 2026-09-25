@@ -45,8 +45,8 @@ fn scene(name: &str) -> App {
             app.groups[0].tabs = vec!["demo-codex-01".into(), "demo-claude-02".into(), "demo-deepseek-03".into()];
             app.set_repo_status("demo-codex-01", RepoStatus::Repository {
                 repo: "project".into(), base: Some("main".into()),
-                checked_out: Some("doxa/demo-cod".into()), sha: Some("a1b2c3d".into()),
-                worktree: Some("doxa/demo-cod".into()),
+                checked_out: Some("feat".into()), sha: Some("a1b2c3d".into()),
+                worktree: Some("feat".into()),
             });
         }
         "tool-activity" => {

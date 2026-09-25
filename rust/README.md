@@ -206,7 +206,7 @@ index. Duplicate queued hunks are refused. Pending
 rejections block closing the diff or leaving the UI until they finish, and are
 cancelled if the session ends. The diff pane requires enough
 terminal space for two panes. Each split pane has its own prompt and keeps a draft for its active
-session. Its chip row shows engine, model, repository, context, curated memory, beliefs,
+session. Its chip row shows engine, model, reasoning effort, repository, context, curated memory, beliefs,
 and available billing data. Dollar cost appears only for API-billed sessions. A connected
 Claude subscription shows its reported plan and cached quota when the local
 CLI cache belongs to the same account; `~` marks stale cached usage. Codex
@@ -231,12 +231,18 @@ lines; `Home`, `End`, `Backspace`, and `Delete` edit at the cursor. Bracketed
 paste preserves line breaks, removes terminal control characters, and never
 submits. Prompts are capped at 10 KiB; an oversized paste is truncated with a
 notice. Drafts and cursor positions stay with each session pane.
-Engine, model, permission, and LORE belief chips share one row directly above
+Permission, engine, model, effort, repository, and LORE chips share one row directly above
 each pane's prompt. Their pickers, the action menu, and daemon question choices
 expand upward in the active pane, leaving its prompt and the other pane visible.
 `Alt+E` opens an engine picker,
-then a model and first-prompt form that starts a new session in the selected
-pane. A blank model uses the configured default. Claude uses the sidecar
+then a model, reasoning effort, and first-prompt form that starts a new session
+in the selected pane. DeepSeek and GLM model choices follow the selected
+vendor; effort choices follow that vendor and model. A blank model for other
+engines uses the configured default. The effort chip immediately follows the
+model chip and displays the active daemon's reported value, or `?` when it
+has no verified value. `Alt+F` and bare `/effort` open an inline picker for a
+new-session default where supported. Selecting there does not change the
+active session. Claude uses the sidecar
 installed beside `doxa-rs`; `DOXA_CLAUDE_SCRIPT` can select another absolute
 path during development. The active
 session's engine cannot be switched. `Alt+M` opens the live model picker when the daemon

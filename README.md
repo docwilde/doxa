@@ -64,6 +64,10 @@ alpha. Native fleet supervision and remote control are still being ported.
 
 *The queue picker shows waiting prompts and cancels the selected item by its ID.*
 
+![Rust LORE memory submenu above the prompt showing curated user and project entries plus global beliefs](assets/shots/rust-memory.png)
+
+*The memory chip opens scoped curated entries and a separate list of global beliefs.*
+
 These images come from `python3 scripts/rust_gallery.py`, which renders the
 production `doxa_tui::ui::App` through Ratatui's test backend. The sessions,
 events, and usage numbers are fixtures; they are examples of UI behavior,

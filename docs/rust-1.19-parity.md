@@ -29,14 +29,14 @@ commands still pass to the active engine.
 | `/peers`, `/mesh`, `/msg` | Local or partial | Rich peer details, browser mesh and remote peers |
 | `/diff` | Partial | Full 1.19 diff command options and worktree controls |
 | `/fleet` | Bridge or partial | Native supervisor, approval desk, barrier, budgets and fleet tab |
-| `/model`, `/engine`, `/mode` | Local picker for bare form | Supported argument forms and provider-specific capabilities |
+| `/model`, `/engine`, `/mode`, `/effort` | Local picker for bare form; model and effort choices gated by available provider capability, with new-session vendor effort selection | Supported argument forms and live effort changes where the native host allows them |
 | `/beliefs`, `/pending` | Belief reading and staged approve/reject after complete raw review | Belief confirm/contradict/stale/retract controls |
 | `/sessions`, `/search`, `/resume`, `/attach` | Bounded archived transcript search, verified saved Claude/Codex/vendor resume when the recorded directory exists, CLI attach/Claude resume and live TUI attach picker with ID/title search | Full indexed cross-session search and deleted-worktree recovery |
 | `/usage`, `/context`, `/queue` | Summary chips and queued prompt list/cancel picker | Detailed usage and context screens |
 | `/help`, `/about` | Local action menu/version | Registry-wide help and full diagnostics |
 | `/compact` | Blocked locally | LORE review before provider compaction |
 | `/movepane`, `/collection`, `/rename`, `/cd`, `/clear` | `/rename` local; others missing | Tab/collection state and safe new-session directory controls |
-| `/branch`, `/effort` | `new --branch`, idle live base switch, CLI branch listing | Effort controls |
+| `/branch` | `new --branch`, idle live base switch, CLI branch listing | Full branch command argument forms |
 | `/login`, `/logout`, `/settings`, `/setup`, `/doctor`, `/update` | CLI doctor only | Interactive operations and 1.19 setup checks |
 | `/plugins`, `/reload-plugins` | Missing | Plugin discovery, adoption policy and refresh |
 | `/img` | Missing | Terminal image capability/reporting if required for stable parity |

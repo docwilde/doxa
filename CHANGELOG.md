@@ -33,6 +33,10 @@ the stable 2.0 release has not been cut.
 - Open the user/project memory chip into an inline, read-only LORE view. It
   lists the scoped curated entries and up to 20 current global beliefs;
   worktree sessions resolve project memory through the main repository.
+- Put the daemon-reported reasoning effort immediately after the model chip.
+  DeepSeek and GLM session creation offers only the selected vendor's vetted
+  models and supported effort levels. The effort picker states that its
+  selection applies to new sessions; it does not change an active turn.
 
 ## 2.0.0-alpha.12 — 2026-09-25
 
