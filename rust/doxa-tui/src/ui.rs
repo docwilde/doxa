@@ -5296,6 +5296,27 @@ impl App {
             || self.stop_confirmation.is_some()
             || self.new_session.is_some()
         {
+            // A request belongs to its session, not the whole terminal. Let
+            // the user focus the other pane and keep working while this one
+            // waits for an answer. The request stays visible in its own pane.
+            if self.active_request_index().is_some()
+                && mouse.kind == MouseEventKind::Down(MouseButton::Left)
+                && self.layout(self.size).panes.is_some_and(|panes| {
+                    panes[1 - self.active_group].contains(
+                        ratatui::layout::Position::new(mouse.column, mouse.row))
+                })
+            {
+                let other = 1 - self.active_group;
+                let pane = self.layout(self.size).panes.unwrap()[other];
+                let prompt = self.pane_regions(other, pane)[4];
+                self.active_group = other;
+                self.focus = if prompt.contains(ratatui::layout::Position::new(mouse.column, mouse.row)) {
+                    Focus::Prompt
+                } else {
+                    Focus::Transcript
+                };
+                return true;
+            }
             self.drag = None;
             return false;
         }
@@ -7862,6 +7883,40 @@ for line in sys.stdin:
         assert!(app.link_hover.is_none());
         assert_eq!(pointer_shape(true), b"\x1b]22;pointer\x1b\\");
         assert_eq!(pointer_shape(false), b"\x1b]22;\x1b\\");
+    }
+
+    #[test]
+    fn clicking_second_prompt_accepts_text_while_first_pane_waits_for_input() {
+        for split in [Split::Vertical, Split::Horizontal] {
+        let mut app = App::default();
+        app.rail_visible = false;
+        app.handle(Event::Resize(100, 30));
+        for id in ["first", "second"] {
+            app.apply_daemon_frame(&json!({"type":"hello", "session_id":id,
+                "engine":"codex"}));
+        }
+        app.groups[0].tabs = vec!["first".into()];
+        app.groups[1].tabs = vec!["second".into()];
+        app.split_requested = true;
+        app.split = split;
+        app.input = "first draft".into();
+        app.input_cursor = app.input.len();
+        app.apply_daemon_frame(&json!({"type":"event", "session_id":"first",
+            "event":{"type":"needs_input", "data":{"id":"req", "kind":"ask_user",
+                "questions":[{"question":"Choose", "options":[{"label":"Yes"}]}]}}}));
+        assert!(app.active_request_index().is_some());
+        let pane = app.layout(app.size).panes.unwrap()[1];
+        let prompt = app.pane_regions(1, pane)[4];
+        let point = MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: prompt.x + 2, row: prompt.y + 1, modifiers: KeyModifiers::NONE };
+        assert!(app.handle(Event::Mouse(point)));
+        assert_eq!(app.active_group, 1);
+        assert_eq!(app.focus, Focus::Prompt);
+        assert!(app.handle(Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))));
+        assert_eq!(app.input, "x");
+        assert_eq!(app.input_drafts.get(&(0, "first".into())).unwrap().0, "first draft");
+        assert!(app.input_requests.iter().any(|request| request.session_id == "first"));
+        }
     }
 
     #[test]
