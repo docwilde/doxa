@@ -68,21 +68,54 @@ const ACTIONS: [(&str, &str); 14] = [
     ("Stop active session", "Alt+X"),
     ("Move tab to other pane", "/movepane"),
 ];
-const SLASH_COMMANDS: [(&str, &str); 27] = [
-    ("/help", "Open actions"), ("/about", "Show Rust version"),
-    ("/sessions", "Browse sessions"), ("/search", "Search saved sessions"),
-    ("/resume", "Resume saved session"), ("/attach", "Attach live session"),
-    ("/queue", "Queued prompts"), ("/pending", "LORE proposals"),
-    ("/model", "Select model"), ("/effort", "Reasoning effort"),
-    ("/engine", "Select engine"), ("/mode", "Permissions"),
-    ("/beliefs", "LORE beliefs"), ("/diff", "Worktree diff"),
-    ("/peers", "Peer map"), ("/mesh", "Peer map"),
-    ("/msg", "Message a peer"), ("/branch", "Switch branch"),
-    ("/rename", "Rename session"), ("/split", "Horizontal split"),
-    ("/vsplit", "Vertical split"), ("/pane", "Switch pane"),
-    ("/sidebar", "Session rail"), ("/detach", "Close tab"),
-    ("/dir", "Session directory"), ("/cd", "Open directory in new tab"),
-    ("/movepane", "Move active tab"),
+struct CommandHelp { name: &'static str, form: &'static str,
+    summary: &'static str, support: &'static str }
+
+// Names mirror Python 1.19's command registry. Forms and support describe
+// this Rust frontend, including commands the Python frontend alone provides.
+const COMMANDS: &[CommandHelp] = &[
+    CommandHelp { name: "/peers", form: "/peers", summary: "Peer map", support: "local" },
+    CommandHelp { name: "/split", form: "/split", summary: "Stacked pane split", support: "local" },
+    CommandHelp { name: "/vsplit", form: "/vsplit", summary: "Side-by-side pane split", support: "local" },
+    CommandHelp { name: "/diff", form: "/diff", summary: "Worktree diff", support: "local · active worktree" },
+    CommandHelp { name: "/pane", form: "/pane [1|2]", summary: "Switch pane", support: "local · two panes" },
+    CommandHelp { name: "/movepane", form: "/movepane [1|2]", summary: "Move active tab", support: "local · two panes" },
+    CommandHelp { name: "/sidebar", form: "/sidebar [on|off|wider|narrower|width N]", summary: "Session rail", support: "local" },
+    CommandHelp { name: "/collection", form: "/collection [action] [name]", summary: "Organize sessions", support: "local · list/new/rename/delete/add/remove" },
+    CommandHelp { name: "/msg", form: "/msg <peer> <text>", summary: "Message a peer", support: "local · same project" },
+    CommandHelp { name: "/fleet", form: "/fleet ...", summary: "Fleet control", support: "unavailable in Rust" },
+    CommandHelp { name: "/mesh", form: "/mesh", summary: "Peer map", support: "local · arguments unavailable" },
+    CommandHelp { name: "/img", form: "/img [path]", summary: "Image support", support: "unavailable in Rust" },
+    CommandHelp { name: "/login", form: "/login [provider]", summary: "Provider login", support: "unavailable in Rust" },
+    CommandHelp { name: "/logout", form: "/logout [provider]", summary: "Provider logout", support: "unavailable in Rust" },
+    CommandHelp { name: "/settings", form: "/settings", summary: "Settings", support: "unavailable in Rust" },
+    CommandHelp { name: "/setup", form: "/setup", summary: "Setup checks", support: "unavailable in Rust" },
+    CommandHelp { name: "/doctor", form: "/doctor", summary: "Health checks", support: "unavailable in Rust" },
+    CommandHelp { name: "/plugins", form: "/plugins", summary: "Plugin inventory", support: "unavailable in Rust" },
+    CommandHelp { name: "/reload-plugins", form: "/reload-plugins", summary: "Refresh plugins", support: "unavailable in Rust" },
+    CommandHelp { name: "/model", form: "/model", summary: "Select session model", support: "local · picker; name argument unavailable" },
+    CommandHelp { name: "/engine", form: "/engine", summary: "Engine for new sessions", support: "local · picker; ID argument unavailable" },
+    CommandHelp { name: "/branch", form: "/branch [name]", summary: "Switch base branch", support: "local · active session" },
+    CommandHelp { name: "/mode", form: "/mode", summary: "Permission mode", support: "local · picker; name argument unavailable" },
+    CommandHelp { name: "/effort", form: "/effort", summary: "Reasoning effort", support: "local · picker; level argument unavailable" },
+    CommandHelp { name: "/usage", form: "/usage", summary: "Session usage", support: "local · reported totals only" },
+    CommandHelp { name: "/context", form: "/context", summary: "Context window", support: "local · measured totals; no component breakdown" },
+    CommandHelp { name: "/queue", form: "/queue", summary: "Queued prompts", support: "local · cancel selected item with X" },
+    CommandHelp { name: "/clear", form: "/clear", summary: "Fresh session in this tab", support: "local · idle session and writable tabset required" },
+    CommandHelp { name: "/detach", form: "/detach", summary: "Leave session running", support: "local" },
+    CommandHelp { name: "/attach", form: "/attach [prefix]", summary: "Attach live session", support: "local · new tab" },
+    CommandHelp { name: "/sessions", form: "/sessions", summary: "Session history", support: "local · history browser; kill unavailable" },
+    CommandHelp { name: "/rename", form: "/rename [name]", summary: "Name active tab", support: "local" },
+    CommandHelp { name: "/dir", form: "/dir", summary: "Session directory", support: "local" },
+    CommandHelp { name: "/cd", form: "/cd <path>", summary: "Open directory", support: "local · new tab" },
+    CommandHelp { name: "/beliefs", form: "/beliefs", summary: "LORE beliefs", support: "local · requires LORE" },
+    CommandHelp { name: "/pending", form: "/pending", summary: "LORE proposals", support: "local · requires LORE" },
+    CommandHelp { name: "/search", form: "/search [terms]", summary: "Search saved sessions", support: "local · LORE index then bounded transcript scan" },
+    CommandHelp { name: "/resume", form: "/resume [session-id]", summary: "Resume conversation", support: "local · new tab" },
+    CommandHelp { name: "/compact", form: "/compact", summary: "Compact transcript", support: "Claude only · completed LORE review required" },
+    CommandHelp { name: "/update", form: "/update [--restart]", summary: "Update DOXA", support: "unavailable in Rust" },
+    CommandHelp { name: "/help", form: "/help", summary: "Command registry", support: "local" },
+    CommandHelp { name: "/about", form: "/about", summary: "Rust version", support: "local · version only" },
 ];
 
 const ENGINE_CHOICES: [&str; 4] = ["codex", "claude", "deepseek", "glm"];
@@ -193,6 +226,20 @@ struct NewSession {
     effort: Option<String>,
     prompt: String,
     field: usize,
+}
+
+#[derive(Debug)]
+struct ClearPending {
+    old_id: String,
+    group: usize,
+}
+
+#[derive(Debug)]
+struct ClearSwap {
+    old_id: String,
+    new_id: String,
+    group: usize,
+    position: usize,
 }
 
 #[derive(Debug)]
@@ -1068,6 +1115,11 @@ pub struct App {
     pending_permission_changes: Vec<(String, String)>,
     stop_confirmation: Option<String>,
     pending_stops: Vec<String>,
+    pending_clear_finalizes: Vec<String>,
+    pub(crate) clear_stop_after_save: Vec<String>,
+    clear_pending: Option<ClearPending>,
+    clear_swap: Option<ClearSwap>,
+    clear_preflight_error: Option<&'static str>,
     model_picker: Option<ModelPicker>,
     effort_picker: Option<EffortPicker>,
     attach_picker: Option<AttachPicker>,
@@ -1202,6 +1254,11 @@ impl Default for App {
             pending_permission_changes: Vec::new(),
             stop_confirmation: None,
             pending_stops: Vec::new(),
+            pending_clear_finalizes: Vec::new(),
+            clear_stop_after_save: Vec::new(),
+            clear_pending: None,
+            clear_swap: None,
+            clear_preflight_error: Some("persistent tabset unavailable"),
             model_picker: None,
             effort_picker: None,
             attach_picker: None,
@@ -1391,6 +1448,43 @@ impl App {
             "launch_reply" => {
                 if !self.launching { return false; }
                 self.launching = false;
+                if let Some(clear) = self.clear_pending.take() {
+                    if frame["ok"] == true {
+                        if let Some(id) = frame["session_id"].as_str().filter(|id| crate::discovery::valid_id(id)) {
+                            if let Some(position) = self.groups[clear.group].tabs.iter().position(|tab| tab == &clear.old_id) {
+                                // A hello can arrive before this reply and provisionally
+                                // insert the new session into the first pane.
+                                for group in &mut self.groups {
+                                    if let Some(provisional) = group.tabs.iter().position(|tab| tab == id) {
+                                        group.tabs.remove(provisional);
+                                        group.active = group.active.min(group.tabs.len().saturating_sub(1));
+                                    }
+                                }
+                                let group = &mut self.groups[clear.group];
+                                let position = group.tabs.iter().position(|tab| tab == &clear.old_id).unwrap_or(position);
+                                group.tabs[position] = id.to_owned();
+                                group.active = position;
+                                group.scroll = 0;
+                                self.active_group = clear.group;
+                                for collection in &mut self.collections {
+                                    if let Some(member) = collection.sessions.iter_mut().find(|member| member.as_str() == clear.old_id) {
+                                        *member = id.to_owned();
+                                    }
+                                }
+                                self.clear_swap = Some(ClearSwap { old_id: clear.old_id.clone(),
+                                    new_id: id.to_owned(), group: clear.group, position });
+                                self.clear_stop_after_save.push(clear.old_id);
+                                self.notice = format!("Fresh session ready · {}", safe_label(id));
+                                return true;
+                            }
+                        }
+                    } else {
+                        self.notice = format!("Clear failed; previous session preserved · {}",
+                            safe_label(frame["message"].as_str().unwrap_or("unknown error")));
+                        return true;
+                    }
+                    self.notice = "Clear target changed; new session kept as a separate tab".into();
+                }
                 if frame["ok"] == true {
                     if let Some(id) = frame["session_id"].as_str().filter(|id| crate::discovery::valid_id(id)) {
                         self.offline_ids.remove(id);
@@ -1765,6 +1859,40 @@ impl App {
                     self.notice = format!("Stop accepted · {}", safe_label(id));
                 } else {
                     self.notice = format!("Stop failed · {}", safe_label(frame["error"].as_str().unwrap_or("unknown error")));
+                }
+                true
+            }
+            "clear_finalize_reply" => {
+                let Some(id) = frame["session_id"].as_str() else { return false; };
+                if frame["ok"] == true {
+                    self.sessions.retain(|session| session.id != id);
+                    self.session_activity.remove(id);
+                    self.session_identity.remove(id);
+                    self.session_cwds.remove(id);
+                    self.session_efforts.remove(id);
+                    self.next_efforts.remove(id);
+                    self.session_telemetry.remove(id);
+                    self.memory_cache.remove(id);
+                    self.memory_repo.remove(id);
+                    self.repo_cache.remove(id);
+                    self.repo_epoch.remove(id);
+                    self.model_capabilities.remove(id);
+                    self.permission_capabilities.remove(id);
+                    self.permission_modes.remove(id);
+                    self.streaming_text.remove(id);
+                    self.reasoning_streams.remove(id);
+                    self.custom_names.remove(id);
+                    self.input_drafts.retain(|(_, session), _| session != id);
+                    self.rejected_drafts.remove(id);
+                    self.expanded_tool_sections.remove(id);
+                    self.selected_tool_sections.remove(id);
+                    self.tool_cards_revision.remove(id);
+                    self.input_requests.retain(|request| request.session_id != id);
+                    self.rail_selected = self.rail_selected.min(self.rail_order().len().saturating_sub(1));
+                    self.notice = "Previous session finalized".into();
+                } else {
+                    self.notice = format!("Previous session remains live · {}",
+                        safe_label(frame["error"].as_str().unwrap_or("finalization refused")));
                 }
                 true
             }
@@ -2144,7 +2272,8 @@ impl App {
         }
         let query = self.input.as_str();
         if !query.starts_with('/') || query.chars().any(char::is_whitespace) { return Vec::new(); }
-        SLASH_COMMANDS.iter().copied().filter(|(name, _)| name.starts_with(query)).collect()
+        COMMANDS.iter().filter(|row| row.name.starts_with(query))
+            .map(|row| (row.name, row.summary)).collect()
     }
 
     fn complete_slash(&mut self) -> bool {
@@ -2174,9 +2303,8 @@ impl App {
     }
 
     /// Handle bare DOXA commands before a prompt can reach an agent. Unknown
-    /// slash commands still go to the provider (except reviewed `/compact`
-    /// and plugin commands). Known commands with arguments stay in the draft
-    /// until Rust has an explicit implementation for that form.
+    /// provider and plugin commands still pass through. Known unsupported
+    /// forms stay in the draft.
     fn dispatch_prompt_command(&mut self) -> bool {
         let input = self.input.trim();
         if !input.starts_with('/') || input.contains('\n') {
@@ -2228,8 +2356,7 @@ impl App {
         self.input_cursor = 0;
         match name.as_str() {
             "/help" => {
-                self.action_menu = true;
-                self.action_selected = 0;
+                self.open_help();
             }
             "/about" => self.notice = format!("DOXA Rust {}", env!("CARGO_PKG_VERSION")),
             "/sessions" => self.open_history(),
@@ -2306,7 +2433,7 @@ impl App {
                 return true;
             }
             if let Some(info) = self.chip_info.as_mut().filter(|info|
-                matches!(info.kind, "memory" | "usage" | "context")) {
+                matches!(info.kind, "memory" | "usage" | "context" | "help")) {
                 match key.code {
                     KeyCode::Up => info.scroll = info.scroll.saturating_sub(1),
                     KeyCode::Down => info.scroll = info.scroll.saturating_add(1).min(info.lines.len().saturating_sub(1)),
@@ -2611,6 +2738,11 @@ impl App {
             }
             KeyCode::Enter if self.focus == Focus::Prompt => {
                 if !self.input.is_empty() {
+                    if self.input.contains('\n') && self.input.split_whitespace().next()
+                        .is_some_and(|name| COMMANDS.iter().any(|row| row.name == name)) {
+                        self.notice = "DOXA commands must be a single line".into();
+                        return true;
+                    }
                     if self.dispatch_prompt_command() { return true; }
                     if self.submit_local_command() { return true; }
                     if let Some(id) = self.groups[self.active_group].active_id() {
@@ -2685,6 +2817,7 @@ impl App {
                 true
             }
             "/rename" => { self.local_rename(args); true }
+            "/clear" => { self.local_clear(args); true }
             "/usage" | "/context" => {
                 if !args.trim().is_empty() {
                     self.notice = format!("Usage: {command}");
@@ -2715,7 +2848,16 @@ impl App {
             "/mesh" if !args.trim().is_empty() => {
                 self.notice = "Local command unavailable: /mesh arguments".into(); true
             }
-            "/mesh" | "/msg" => false,
+            "/mesh" => {
+                self.map_modal = true;
+                self.peer_map.selected = 0;
+                self.pending_peer_refresh = Some(
+                    self.groups[self.active_group].active_id().unwrap_or("").to_owned());
+                self.input.clear();
+                self.input_cursor = 0;
+                true
+            }
+            "/msg" => { self.local_message(args); true }
             "/movepane" => {
                 let target = match args.split_whitespace().collect::<Vec<_>>().as_slice() {
                     [] => 1 - self.active_group,
@@ -2732,7 +2874,6 @@ impl App {
             "/fleet" | "/img" | "/login"
             | "/logout" | "/settings" | "/setup" | "/doctor" | "/plugins"
             | "/reload-plugins" | "/effort"
-            | "/clear"
             | "/update" => {
                 self.notice = format!("Local command unavailable: {}", safe_label(command));
                 true
@@ -2741,7 +2882,31 @@ impl App {
             "/resume" => { self.local_resume(args); true }
             "/queue" if args.trim().is_empty() => { self.open_queue(); true }
             "/queue" => { self.notice = "queue: open the picker and use X to cancel a selected item".into(); true }
-            _ => false, // Provider and plugin slash commands remain available.
+            _ if COMMANDS.iter().any(|row| row.name == command) => {
+                self.notice = format!("Local command unavailable: {}", safe_label(command));
+                true
+            }
+            _ => false, // Unknown provider and plugin slash commands remain available.
+        }
+    }
+
+    fn local_message(&mut self, args: &str) {
+        let Some(id) = self.groups[self.active_group].active_id().map(str::to_owned) else {
+            self.notice = "Select a session before messaging a peer".into();
+            return;
+        };
+        let mut parts = args.trim().splitn(2, char::is_whitespace);
+        let target = parts.next().unwrap_or("");
+        let body = parts.next().unwrap_or("").trim();
+        if target.is_empty() || body.is_empty() {
+            self.notice = "Usage: /msg <session_prefix> <text>".into();
+        } else if self.pending_peer_messages.len() >= MAX_PENDING_PROMPTS {
+            self.notice = "Peer message queue full · wait for daemon".into();
+        } else {
+            self.pending_peer_messages.push((id, target.to_owned(), body.to_owned()));
+            self.input.clear();
+            self.input_cursor = 0;
+            self.notice = "Peer message queued".into();
         }
     }
 
@@ -2846,6 +3011,108 @@ impl App {
         self.input.clear();
         self.input_cursor = 0;
         self.notice = format!("Attaching · {}", safe_label(id));
+    }
+
+    pub(crate) fn has_offline_open_tabs(&self) -> bool {
+        self.groups.iter().any(|group| group.tabs.iter().any(|id| self.offline_ids.contains(id)))
+    }
+
+    fn rollback_clear(&mut self, swap: ClearSwap) {
+        for group in &mut self.groups {
+            if let Some(index) = group.tabs.iter().position(|tab| tab == &swap.new_id) {
+                group.tabs.remove(index);
+                group.active = group.active.min(group.tabs.len().saturating_sub(1));
+            }
+        }
+        let group = &mut self.groups[swap.group];
+        if let Some(index) = group.tabs.iter().position(|tab| tab == &swap.old_id) {
+            group.active = index;
+        } else {
+            let position = swap.position.min(group.tabs.len());
+            group.tabs.insert(position, swap.old_id.clone());
+            group.active = position;
+        }
+        group.scroll = 0;
+        self.active_group = swap.group;
+        for collection in &mut self.collections {
+            if let Some(member) = collection.sessions.iter_mut().find(|member| member.as_str() == swap.new_id) {
+                *member = swap.old_id.clone();
+            }
+        }
+        self.clear_stop_after_save.retain(|id| id != &swap.old_id);
+        self.pending_clear_finalizes.push(swap.new_id);
+        self.notice = "Clear cancelled · tabset could not be saved; previous session preserved".into();
+    }
+
+    fn finish_clear_swap(&mut self, persisted: bool) -> bool {
+        let Some(swap) = self.clear_swap.take() else { return false; };
+        if persisted {
+            self.clear_stop_after_save.retain(|id| id != &swap.old_id);
+            self.pending_clear_finalizes.push(swap.old_id);
+            self.notice = "Fresh session ready · finalizing previous session".into();
+        } else {
+            self.rollback_clear(swap);
+        }
+        true
+    }
+
+    fn local_clear(&mut self, args: &str) {
+        if !args.trim().is_empty() {
+            self.notice = "Usage: /clear".into();
+            return;
+        }
+        if let Some(reason) = self.clear_preflight_error {
+            self.notice = format!("clear unavailable · {reason}");
+            return;
+        }
+        if self.launching {
+            self.notice = "clear: wait for the current session launch".into();
+            return;
+        }
+        let group = self.active_group;
+        let Some(id) = self.groups[group].active_id().map(str::to_owned) else {
+            self.notice = "clear: select a session first".into();
+            return;
+        };
+        if self.offline_ids.contains(&id) {
+            self.notice = "clear: archived sessions cannot be replaced".into();
+            return;
+        }
+        if self.session_activity.get(&id).is_some_and(|(running, queued)| *running || *queued > 0)
+            || self.input_requests.iter().any(|request| request.session_id == id)
+            || self.pending_prompts.iter().any(|(session, _)| session == &id) {
+            self.notice = "clear: wait for the current turn and queued prompts to finish".into();
+            return;
+        }
+        let Some(engine) = self.session_identity.get(&id).and_then(|identity| identity.0.as_deref()) else {
+            self.notice = "clear: session engine is unavailable".into();
+            return;
+        };
+        let engine = match engine {
+            "codex" => launch::Engine::Codex,
+            "claude" => launch::Engine::Claude,
+            "deepseek" => launch::Engine::DeepSeek,
+            "glm" => launch::Engine::Glm,
+            _ => { self.notice = "clear: session engine cannot be relaunched".into(); return; }
+        };
+        let Some(cwd) = self.session_cwds.get(&id).cloned().filter(|path| path.is_absolute()) else {
+            self.notice = "clear: session directory is unavailable".into();
+            return;
+        };
+        // A managed session's cwd is its private worktree. A fresh session
+        // starts from the shared checkout, as the Python session factory
+        // does, instead of branching from the old session's branch.
+        let launch_cwd = crate::discovery::repo_root_for(&cwd).unwrap_or(cwd);
+        let mut options = launch::LaunchOptions { engine, cwd: Some(launch_cwd), ..Default::default() };
+        if engine == launch::Engine::Claude {
+            options.claude_script = std::env::var_os("DOXA_CLAUDE_SCRIPT").map(PathBuf::from);
+        }
+        self.clear_pending = Some(ClearPending { old_id: id, group });
+        self.pending_launches.push((options, None, group));
+        self.launching = true;
+        self.input.clear();
+        self.input_cursor = 0;
+        self.notice = "Starting a fresh session in this tab…".into();
     }
 
     fn local_cd(&mut self, args: &str) {
@@ -3379,8 +3646,11 @@ impl App {
                 let (tx, rx) = mpsc::sync_channel(1);
                 self.history_pending = Some(rx);
                 let query = query.to_owned();
+                let cwd = self.groups[self.active_group].active_id()
+                    .and_then(|id| self.session_cwds.get(id)).cloned()
+                    .or_else(|| std::env::current_dir().ok()).unwrap_or_default();
                 self.history_scan_query = Some(query.to_lowercase());
-                std::thread::spawn(move || { let _ = tx.send(history::discover_query(&query)); });
+                std::thread::spawn(move || { let _ = tx.send(history::discover_query(&query, &cwd)); });
             }
         }
     }
@@ -4975,7 +5245,7 @@ impl App {
         } else if self.action_menu {
             (ACTIONS.len() + 2).min(15) as u16
         } else if self.chip_info.is_some() {
-            self.chip_info.as_ref().map_or(5, |info| if matches!(info.kind, "memory" | "usage" | "context") {
+            self.chip_info.as_ref().map_or(5, |info| if matches!(info.kind, "memory" | "usage" | "context" | "help") {
                 (info.lines.len() + 2).clamp(7, 19) as u16
             } else { 5 })
         } else if self.history_modal {
@@ -5234,6 +5504,22 @@ impl App {
         if self.active_chooser_rect().is_none() {
             self.chip_info = None;
             self.notice = "Enlarge active pane to inspect chip details".into();
+        }
+    }
+
+    fn open_help(&mut self) {
+        let mut lines = vec!["Rust DOXA commands · forms shown below".to_owned(),
+            "Unavailable commands stay local; unknown provider commands pass through".to_owned(),
+            String::new()];
+        for row in COMMANDS {
+            lines.push(format!("{} · {}", row.form, row.summary));
+            lines.push(format!("  {}", row.support));
+        }
+        self.chip_info = Some(ChipInfo { kind: "help", label: String::new(), lines,
+            scroll: 0, owner: None });
+        if self.active_chooser_rect().is_none() {
+            self.chip_info = None;
+            self.notice = "Enlarge active pane to open help".into();
         }
     }
 
@@ -6051,7 +6337,7 @@ impl App {
 
     fn draw_chip_info(&self, frame: &mut Frame, area: Rect) {
         let Some(info) = &self.chip_info else { return; };
-        if matches!(info.kind, "memory" | "usage" | "context") {
+        if matches!(info.kind, "memory" | "usage" | "context" | "help") {
             let current = self.groups[self.active_group].active_id().and_then(|id|
                 self.session_cwds.get(id).and_then(|cwd| cwd.to_str()).map(|cwd| (id, cwd)));
             let owner_matches = info.owner.as_ref().is_some_and(|(id, cwd)| {
@@ -6915,6 +7201,9 @@ fn run_loop(
             terminal.draw(|frame| app.draw(frame))?;
             changed = false;
         }
+        app.clear_preflight_error = state.as_ref()
+            .map_or(Some("persistent tabset unavailable"), |(store, _, complete)|
+                store.clear_preflight(&app, complete).err());
         if event::poll(Duration::from_millis(10))? {
             changed |= app.handle(event::read()?);
         }
@@ -6948,6 +7237,7 @@ fn run_loop(
             if !app.pending_launches.is_empty() {
                 app.pending_launches.clear();
                 app.launching = false;
+                app.clear_pending = None;
                 app.notice = "Session launch unavailable · daemon connection closed".into();
                 changed = true;
             }
@@ -6960,6 +7250,16 @@ fn run_loop(
             if !app.pending_stops.is_empty() {
                 app.pending_stops.clear();
                 app.notice = "Session stop unavailable · daemon connection closed".into();
+                changed = true;
+            }
+            if !app.clear_stop_after_save.is_empty() {
+                app.clear_stop_after_save.clear();
+                app.notice = "Previous session could not be finalized · daemon connection closed".into();
+                changed = true;
+            }
+            if !app.pending_clear_finalizes.is_empty() {
+                app.pending_clear_finalizes.clear();
+                app.notice = "Previous session could not be finalized · daemon connection closed".into();
                 changed = true;
             }
             if !app.pending_queue_commands.is_empty() {
@@ -6985,7 +7285,6 @@ fn run_loop(
             let disconnected = dispatch_peer_messages(&mut app, sender) || disconnected;
             let disconnected = dispatch_model_controls(&mut app, sender) || disconnected;
             let disconnected = dispatch_queue_commands(&mut app, sender) || disconnected;
-            let disconnected = dispatch_stops(&mut app, sender) || disconnected;
             if disconnected {
                 prompt_sender = None;
                 app.session_activity.clear();
@@ -6998,6 +7297,14 @@ fn run_loop(
             changed |= save_layout_if_changed(&mut app, store, complete, &mut saved_layout);
         } else {
             saved_layout = crate::ui_state::LayoutSignature::capture(&app);
+        }
+        changed |= app.finish_clear_swap(state.is_some()
+            && saved_layout == crate::ui_state::LayoutSignature::capture(&app));
+        if let Some(sender) = &prompt_sender {
+            if dispatch_stops(&mut app, sender) || dispatch_clear_finalizes(&mut app, sender) {
+                prompt_sender = None;
+                changed = true;
+            }
         }
         if changed {
             terminal.draw(|frame| app.draw(frame))?;
@@ -7020,6 +7327,7 @@ fn dispatch_launches(app: &mut App, sender: &SyncSender<crate::bridge::WorkerCom
             Err(TrySendError::Disconnected(_)) => {
                 app.attaching_ids.clear();
                 app.launching = false;
+                app.clear_pending = None;
                 app.notice = "Session launch unavailable".into();
                 return true;
             }
@@ -7060,6 +7368,25 @@ fn dispatch_stops(app: &mut App, sender: &SyncSender<crate::bridge::WorkerComman
             }
             Err(TrySendError::Disconnected(_)) => {
                 app.notice = "Session stop unavailable · daemon connection closed".into();
+                return true;
+            }
+            Err(_) => unreachable!(),
+        }
+    }
+    false
+}
+
+fn dispatch_clear_finalizes(app: &mut App, sender: &SyncSender<crate::bridge::WorkerCommand>) -> bool {
+    let mut pending = std::mem::take(&mut app.pending_clear_finalizes).into_iter();
+    while let Some(id) = pending.next() {
+        match sender.try_send(crate::bridge::WorkerCommand::FinalizeForClear(id)) {
+            Ok(()) => {}
+            Err(TrySendError::Full(crate::bridge::WorkerCommand::FinalizeForClear(id))) => {
+                app.pending_clear_finalizes.extend(std::iter::once(id).chain(pending));
+                return false;
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                app.notice = "Previous session could not be finalized · daemon connection closed".into();
                 return true;
             }
             Err(_) => unreachable!(),
@@ -7992,6 +8319,103 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn clear_replaces_only_active_tab_after_launch_and_defers_finalization() {
+        let mut app = App::default();
+        app.clear_preflight_error = None;
+        app.groups[0].tabs = vec!["other".into(), "old".into()];
+        app.groups[0].active = 1;
+        app.session_identity.insert("old".into(), (Some("codex".into()), Some("old-model".into())));
+        app.session_cwds.insert("old".into(), PathBuf::from("/repo"));
+        app.session_activity.insert("old".into(), (false, 0));
+        app.collections.push(crate::collections::Collection { name:"Work".into(), sessions:vec!["old".into()], collapsed:false });
+        app.input = "/clear".into();
+        assert!(app.submit_local_command());
+        assert_eq!(app.pending_launches.len(), 1);
+        assert_eq!(app.pending_launches[0].0.engine, launch::Engine::Codex);
+        assert_eq!(app.pending_launches[0].0.cwd.as_deref(), Some(Path::new("/repo")));
+        assert!(app.pending_stops.is_empty());
+        app.apply_daemon_frame(&json!({"type":"launch_reply","ok":true,"session_id":"fresh","group":0}));
+        assert_eq!(app.groups[0].tabs, ["other", "fresh"]);
+        assert_eq!(app.groups[0].active_id(), Some("fresh"));
+        assert_eq!(app.collections[0].sessions, ["fresh"]);
+        assert_eq!(app.clear_stop_after_save, ["old"]);
+        assert!(app.pending_stops.is_empty());
+        assert!(app.finish_clear_swap(true));
+        assert_eq!(app.pending_clear_finalizes, ["old"]);
+        assert!(app.clear_stop_after_save.is_empty());
+    }
+
+    #[test]
+    fn clear_failure_and_unsupported_forms_preserve_the_old_session() {
+        let mut app = App::default();
+        app.clear_preflight_error = None;
+        app.groups[0].tabs = vec!["old".into()];
+        app.session_identity.insert("old".into(), (Some("codex".into()), None));
+        app.session_cwds.insert("old".into(), PathBuf::from("/repo"));
+        app.input = "/clear now".into();
+        assert!(app.submit_local_command());
+        assert_eq!(app.notice, "Usage: /clear");
+        assert!(app.pending_launches.is_empty());
+        app.input = "/clear".into();
+        assert!(app.submit_local_command());
+        app.pending_launches.clear(); // the bridge accepted the launch
+        app.apply_daemon_frame(&json!({"type":"launch_reply","ok":false,"message":"spawn failed"}));
+        assert_eq!(app.groups[0].tabs, ["old"]);
+        assert!(app.clear_stop_after_save.is_empty());
+        assert!(app.pending_stops.is_empty());
+        assert!(app.pending_prompts.is_empty());
+        app.session_activity.insert("old".into(), (true, 1));
+        app.input = "/clear".into();
+        assert!(app.submit_local_command());
+        assert!(app.notice.contains("wait for the current turn"));
+        assert!(app.pending_launches.is_empty());
+    }
+
+    #[test]
+    fn clear_requires_persistent_state_and_rolls_back_unsaved_swap() {
+        let mut app = App::default();
+        app.groups[0].tabs = vec!["old".into()];
+        app.session_identity.insert("old".into(), (Some("codex".into()), None));
+        app.session_cwds.insert("old".into(), PathBuf::from("/repo"));
+        app.input = "/clear".into();
+        assert!(app.submit_local_command());
+        assert!(app.notice.contains("persistent tabset unavailable"));
+        assert!(app.pending_launches.is_empty());
+
+        app.clear_preflight_error = None;
+        app.input = "/clear".into();
+        assert!(app.submit_local_command());
+        app.apply_daemon_frame(&json!({"type":"launch_reply","ok":true,"session_id":"fresh","group":0}));
+        assert!(app.finish_clear_swap(false));
+        assert_eq!(app.groups[0].tabs, ["old"]);
+        assert!(app.clear_stop_after_save.is_empty());
+        assert_eq!(app.pending_clear_finalizes, ["fresh"]);
+    }
+
+    #[test]
+    fn clear_restarts_from_shared_checkout_when_old_session_is_in_a_worktree() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("main");
+        let old_tree = dir.path().join("old-tree");
+        std::fs::create_dir(&main).unwrap();
+        let git = |args: &[&str]| assert!(std::process::Command::new("git").args(args)
+            .current_dir(&main).status().unwrap().success());
+        git(&["init", "-q"]);
+        std::fs::write(main.join("tracked.txt"), "base\n").unwrap();
+        git(&["add", "tracked.txt"]);
+        git(&["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "test: base"]);
+        git(&["worktree", "add", "--detach", "-q", old_tree.to_str().unwrap()]);
+        let mut app = App::default();
+        app.clear_preflight_error = None;
+        app.groups[0].tabs.push("old".into());
+        app.session_identity.insert("old".into(), (Some("codex".into()), None));
+        app.session_cwds.insert("old".into(), old_tree);
+        app.input = "/clear".into();
+        assert!(app.submit_local_command());
+        assert_eq!(app.pending_launches[0].0.cwd.as_deref(), Some(main.as_path()));
+    }
+
+    #[test]
     fn launch_reply_keeps_the_group_chosen_when_launch_started() {
         let mut app = App::default();
         app.launching = true;
@@ -8335,7 +8759,7 @@ for line in sys.stdin:
         for ch in "/he".chars() {
             app.handle(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
         }
-        assert_eq!(app.slash_suggestions(), vec![("/help", "Open actions")]);
+        assert_eq!(app.slash_suggestions(), vec![("/help", "Command registry")]);
         assert!(painted(&app).contains("Commands"));
         assert!(app.active_chooser_rect().is_some());
         app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
@@ -8343,7 +8767,7 @@ for line in sys.stdin:
         assert!(app.slash_suggestions().is_empty());
         assert!(app.pending_prompts.is_empty());
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
-        assert!(app.action_menu);
+        assert_eq!(app.chip_info.as_ref().map(|info| info.kind), Some("help"));
         assert!(app.pending_prompts.is_empty());
     }
 
@@ -8360,13 +8784,13 @@ for line in sys.stdin:
         let menu = app.active_chooser_rect().unwrap();
         app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
             column: menu.x + 2, row: menu.y + 2, modifiers: KeyModifiers::NONE }));
-        assert_eq!(app.input, "/mode");
+        assert_eq!(app.input, "/model");
         assert!(app.slash_suggestions().is_empty());
         app.handle(Event::Key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)));
-        assert_eq!(app.input, "/mod");
+        assert_eq!(app.input, "/mode");
         assert!(!app.slash_suggestions().is_empty());
         app.handle(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
-        assert_eq!(app.input, "/mod");
+        assert_eq!(app.input, "/mode");
         assert!(app.slash_suggestions().is_empty());
         assert!(app.pending_prompts.is_empty());
     }
@@ -8380,10 +8804,10 @@ for line in sys.stdin:
         app.input = "/help".into();
         app.input_cursor = app.input.len();
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
-        assert!(app.action_menu);
+        assert_eq!(app.chip_info.as_ref().map(|info| info.kind), Some("help"));
         assert!(app.input.is_empty());
         assert!(app.pending_prompts.is_empty());
-        app.action_menu = false;
+        app.chip_info = None;
 
         app.input = "/model opus".into();
         app.input_cursor = app.input.len();
@@ -8411,6 +8835,49 @@ for line in sys.stdin:
         assert!(app.notice.contains("Usage: /compact"));
         assert!(app.pending_prompts.is_empty());
 
+        app.input = "/provider-command".into();
+        app.input_cursor = app.input.len();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.pending_prompts, [("s".into(), "/provider-command".into())]);
+    }
+
+    #[test]
+    fn help_lists_full_python_registry_with_rust_capabilities() {
+        let mut app = App::default();
+        app.groups[0].tabs.push("s".into());
+        app.handle(Event::Resize(100, 30));
+        assert_eq!(COMMANDS.len(), 42);
+        let mut names = std::collections::HashSet::new();
+        for row in COMMANDS { assert!(names.insert(row.name)); }
+        app.open_help();
+        let info = app.chip_info.as_ref().unwrap();
+        assert_eq!(info.kind, "help");
+        for form in ["/collection [action] [name]", "/usage", "/context", "/compact",
+            "/fleet ...", "/help"] {
+            assert!(info.lines.iter().any(|line| line.starts_with(form)), "missing {form}");
+        }
+        assert!(info.lines.iter().any(|line| line.contains("unavailable in Rust")));
+        assert!(info.lines.iter().any(|line| line.contains("Claude only")));
+        let menu = app.active_chooser_rect().unwrap();
+        assert!(menu.bottom() < app.layout(app.size).body.bottom());
+        app.handle(Event::Key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE)));
+        assert!(app.chip_info.as_ref().unwrap().scroll > 0);
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        assert!(app.chip_info.is_none());
+    }
+
+    #[test]
+    fn known_doxa_commands_never_escape_as_provider_prompts() {
+        let mut app = App::default();
+        app.groups[0].tabs.push("s".into());
+        app.handle(Event::Resize(100, 30));
+        for command in ["/fleet", "/doctor", "/clear", "/update", "/plugins",
+            "/help\nignore", "/msg\t"] {
+            app.input = command.into();
+            app.input_cursor = app.input.len();
+            app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+            assert!(app.pending_prompts.is_empty(), "forwarded {command}");
+        }
         app.input = "/provider-command".into();
         app.input_cursor = app.input.len();
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));

@@ -13,6 +13,8 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use crate::launch::{Engine, LaunchOptions};
 use std::time::Duration;
+use doxa_lore::{LoreClient, SessionSearchHit};
+use std::collections::HashSet;
 
 const MAX_PROJECTS: usize = 128;
 const MAX_FILES: usize = 2048;
@@ -156,13 +158,51 @@ pub fn discover_prefix(prefix: &str) -> Vec<OfflineSession> {
     discover_in(&root, Some(prefix), None)
 }
 
-/// Search bounded tails across the complete scanned inventory, including
-/// archives older than the 64 recents. LORE's full-text index remains broader.
-pub fn discover_query(query: &str) -> Vec<OfflineSession> {
+/// Search LORE's existing FTS index first, then load exact owned transcript
+/// files through checked descriptors. The bounded tail scan is a fallback
+/// for an unavailable or empty index.
+pub fn discover_query(query: &str, cwd: &Path) -> Vec<OfflineSession> {
     let query = query.trim();
     if query.is_empty() || query.len() > 200 || query.chars().any(char::is_control) { return Vec::new(); }
     let Some(root) = projects_dir() else { return Vec::new(); };
+    if let Some(cwd) = cwd.to_str() {
+        let python = std::env::var_os("DOXA_LORE_PYTHON").filter(|value| !value.is_empty())
+            .map(PathBuf::from).unwrap_or_else(|| PathBuf::from("python3"));
+        if let Ok(mut lore) = LoreClient::spawn(&python, Duration::from_secs(3)) {
+            if let Ok(hits) = lore.session_search(cwd, query) {
+                let found = indexed_hits_in(&root, hits);
+                if !found.is_empty() { return found; }
+            }
+        }
+    }
     discover_in(&root, None, Some(query))
+}
+
+fn indexed_hits_in(root: &Path, hits: Vec<SessionSearchHit>) -> Vec<OfflineSession> {
+    let uid = unsafe { libc::geteuid() };
+    let Ok(root) = OpenOptions::new().read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC).open(root)
+        else { return Vec::new(); };
+    if !owned_dir(&root, uid) { return Vec::new(); }
+    let mut found = Vec::new();
+    let mut seen = HashSet::new();
+    for hit in hits {
+        if !crate::discovery::valid_id(&hit.session_id)
+            || hit.project.is_empty() || hit.project.len() > 255
+            || hit.project.contains('/') || hit.project.contains('\\')
+            || hit.project.chars().any(char::is_control) { continue; }
+        if !seen.insert((hit.project.clone(), hit.session_id.clone())) { continue; }
+        let Some(dir) = open_at(&root, OsStr::new(&hit.project), libc::O_RDONLY | libc::O_DIRECTORY) else { continue; };
+        if !owned_dir(&dir, uid) { continue; }
+        let name = format!("{}.jsonl", hit.session_id);
+        let Some(mut file) = open_at(&dir, OsStr::new(&name), libc::O_RDONLY | libc::O_NONBLOCK) else { continue; };
+        if !file.metadata().is_ok_and(|meta| meta.is_file() && meta.uid() == uid) { continue; }
+        let cwd = recorded_cwd(&mut file);
+        if let Some(markdown) = read_offline(file, uid) {
+            found.push(OfflineSession { id: hit.session_id, project: hit.project, markdown, cwd });
+        }
+    }
+    found
 }
 
 fn tail_matches(file: &mut File, query: &str) -> bool {
@@ -910,6 +950,33 @@ for line in sys.stdin:
         let hits = discover_in(&root, None, Some("needle"));
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, "z-archive");
+    }
+
+    #[test]
+    fn indexed_identity_opens_exact_owned_transcript_without_inventory_walk() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("projects");
+        fs::create_dir_all(root.join("project")).unwrap();
+        let mut transcript = b"{\"type\":\"user\",\"message\":{\"content\":\"indexed history\"}}\n".to_vec();
+        transcript.extend_from_slice(b"{\"type\":\"user\",\"message\":{\"content\":\"");
+        transcript.extend(std::iter::repeat_n(b'x', 20 * 1024));
+        transcript.extend_from_slice(b"\"}}\n");
+        fs::write(root.join("project/old-archive.jsonl"), transcript).unwrap();
+        let mut file = File::open(root.join("project/old-archive.jsonl")).unwrap();
+        assert!(!tail_matches(&mut file, "indexed history"));
+        for index in 0..(MAX_FILES + 1) {
+            fs::write(root.join(format!("project/junk-{index:04}.txt")), b"x").unwrap();
+        }
+        let hit = SessionSearchHit { session_id: "old-archive".into(), project: "project".into(),
+            snippet: "indexed history".into() };
+        let found = indexed_hits_in(&root, vec![hit.clone()]);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id, "old-archive");
+        assert!(found[0].markdown.contains("indexed history"));
+        fs::remove_file(root.join("project/old-archive.jsonl")).unwrap();
+        symlink(temp.path().join("outside.jsonl"), root.join("project/old-archive.jsonl")).unwrap();
+        fs::write(temp.path().join("outside.jsonl"), b"secret").unwrap();
+        assert!(indexed_hits_in(&root, vec![hit]).is_empty());
     }
 
     #[test]

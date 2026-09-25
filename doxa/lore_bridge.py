@@ -25,6 +25,7 @@ _READ_OPS = ("consult", "beliefs", "evidence")
 _REVIEW_OP = "pending_review_v1"
 _RESOLVE_OP = "resolve_reviewed_v1"
 _INDEX_OP = "index_transcript_v1"
+_SESSION_SEARCH_OP = "session_search_v1"
 _MEMORY_USAGE_OP = "memory_usage_v1"
 _BELIEF_REVIEW_OP = "belief_review_v1"
 _BELIEF_ACTION_OP = "belief_action_v1"
@@ -134,6 +135,52 @@ def _read_ops() -> tuple[Any, Any] | None:
         return db_connect, fts_expr
     except Exception:  # noqa: BLE001 -- older LORE may not expose FTS
         return None
+
+
+def _session_search(cwd: str, query: str, ops: tuple[Any, Any],
+                    ext: tuple[Any, Any, Any, Any], scrub: Any) -> list[dict[str, str]]:
+    """Serve existing LORE FTS rows without indexing or reading transcripts."""
+    if (not isinstance(cwd, str) or not cwd or len(cwd) > 4096 or "\x00" in cwd
+            or not isinstance(query, str) or not query.strip()
+            or len(query.encode("utf-8")) > 200
+            or any(ord(ch) < 32 or ord(ch) == 127 for ch in query)):
+        raise ValueError("invalid session search input")
+    exprs = list(dict.fromkeys(expr for expr in
+        (ops[1](query), ops[1](query, " OR ")) if expr))
+    slug = ext[0](cwd)
+    conn = ops[0]()
+    try:
+        for scope in (slug, None):
+            for expr in exprs:
+                sql = ("SELECT m.session_id, m.project, "
+                       "snippet(msg, 4, '[', ']', '…', 16) "
+                       "FROM msg m WHERE msg MATCH ?")
+                params: list[Any] = [expr]
+                if scope:
+                    sql += " AND m.project = ?"
+                    params.append(scope)
+                sql += " ORDER BY bm25(msg) LIMIT 20"
+                rows = conn.execute(sql, params).fetchall()
+                if rows:
+                    hits: list[dict[str, str]] = []
+                    seen: set[tuple[str, str]] = set()
+                    for session_id, project, snippet in rows:
+                        if (not isinstance(session_id, str) or _SESSION_ID.fullmatch(session_id) is None
+                                or not isinstance(project, str) or not project
+                                or len(project.encode("utf-8")) > 255 or "/" in project
+                                or "\\" in project or any(ord(ch) < 32 for ch in project)
+                                or (project, session_id) in seen):
+                            continue
+                        safe = scrub(str(snippet or ""))
+                        if not isinstance(safe, str):
+                            raise TypeError("invalid scrub result")
+                        hits.append({"session_id": session_id, "project": project,
+                                     "snippet": " ".join(safe.split())[:280]})
+                        seen.add((project, session_id))
+                    return hits
+    finally:
+        conn.close()
+    return []
 
 
 def _belief_action_ops() -> tuple[Any, Any, Any, Any, Any] | None:
@@ -549,6 +596,7 @@ def serve() -> None:
             "capabilities": (list(_OPS if ext is not None else _OPS[:2])
                              + (list(_READ_OPS) if read_ops is not None else [])
                              + ([_INDEX_OP] if index_ops is not None else [])
+                             + ([_SESSION_SEARCH_OP] if read_ops is not None and ext is not None else [])
                              + ([_MEMORY_USAGE_OP] if memory_ops is not None else [])
                              + ([_REVIEW_OP] if review is not None else [])
                              + ([_RESOLVE_OP] if resolver is not None else [])
@@ -588,6 +636,10 @@ def serve() -> None:
                 continue
             if op == _INDEX_OP and ext is not None and index_ops is not None:
                 result = _index_transcript(req.get("cwd"), req.get("session_id"), ext, index_ops)
+                _write({"type": "reply", "id": rid, "ok": True, "value": result})
+                continue
+            if op == _SESSION_SEARCH_OP and ext is not None and read_ops is not None:
+                result = _session_search(req.get("cwd"), req.get("query"), read_ops, ext, scrub)
                 _write({"type": "reply", "id": rid, "ok": True, "value": result})
                 continue
             if op == _REVIEW_OP and ext is not None and review is not None:

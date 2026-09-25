@@ -5,6 +5,18 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.23 — 2026-09-25
+
+- Add a scrollable `/help` registry for all 42 Python 1.19 DOXA command
+  names, with Rust-specific forms and availability notes. Keep known DOXA
+  commands local even when their Rust form is unavailable.
+- Search LORE's existing session index before the bounded transcript scan.
+  Indexed hits open exact, owned transcript files through checked descriptors;
+  the old bounded scan remains the fallback when the index is unavailable.
+- Add guarded `/clear` to start a fresh session in the same tab. The old
+  session stays live until the replacement tabset saves; a failed save rolls
+  the tab back and finalizes the unsaved new session.
+
 ## 2.0.0-alpha.22 — 2026-09-25
 
 - Add native fleet preflight reporting for supervisor capacity, shared memory

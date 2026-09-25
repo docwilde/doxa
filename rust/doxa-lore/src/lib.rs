@@ -143,6 +143,13 @@ pub struct ConsultHit {
     pub score: f64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionSearchHit {
+    pub session_id: String,
+    pub project: String,
+    pub snippet: String,
+}
+
 #[derive(Debug)]
 pub enum LoreError {
     Io(io::Error),
@@ -369,6 +376,30 @@ impl LoreClient {
             return Err(LoreError::InvalidFrame);
         }
         Ok(indexed)
+    }
+
+    /// Query LORE's existing session FTS index. This does not grow the index
+    /// or open transcript files; the caller checks any returned identity
+    /// before reading its own bounded transcript view.
+    pub fn session_search(&mut self, cwd: &str, query: &str) -> Result<Vec<SessionSearchHit>, LoreError> {
+        if cwd.is_empty() || cwd.len() > 4096 || cwd.contains('\0')
+            || query.trim().is_empty() || query.len() > 200
+            || query.chars().any(char::is_control) {
+            return Err(LoreError::InvalidFrame);
+        }
+        let value = self.request_value("session_search_v1", json!({"cwd":cwd,"query":query}))?;
+        let rows = value.as_array().filter(|rows| rows.len() <= 20).ok_or(LoreError::InvalidFrame)?;
+        rows.iter().map(|row| {
+            let id = row["session_id"].as_str().filter(|id| !id.is_empty() && id.len() <= 128
+                && id.bytes().enumerate().all(|(i, b)| b.is_ascii_alphanumeric() || (i > 0 && b == b'-')))
+                .ok_or(LoreError::InvalidFrame)?;
+            let project = row["project"].as_str().filter(|project| !project.is_empty()
+                && project.len() <= 255 && !project.contains('/') && !project.contains('\\')
+                && !project.chars().any(char::is_control)).ok_or(LoreError::InvalidFrame)?;
+            let snippet = row["snippet"].as_str().filter(|snippet| snippet.len() <= 1120
+                && !snippet.chars().any(char::is_control)).ok_or(LoreError::InvalidFrame)?;
+            Ok(SessionSearchHit { session_id: id.to_owned(), project: project.to_owned(), snippet: snippet.to_owned() })
+        }).collect()
     }
 
     pub fn pending(&mut self, cwd: &str, offset: u16, limit: u8) -> Result<Vec<Value>, LoreError> {

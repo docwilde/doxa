@@ -36,6 +36,7 @@ pub enum WorkerCommand {
     QueueCancel(String, String),
     Status(String),
     Stop(String),
+    FinalizeForClear(String),
 }
 
 fn safe_queue_rows(reply: &Value) -> Vec<Value> {
@@ -76,12 +77,13 @@ fn attach_worker(session: &Session, frames: &SyncSender<Value>, guard: &Arc<Mute
     let worker = thread::spawn(move || {
         let cursor = AtomicU64::new(client.cursor);
         let stopped = AtomicBool::new(false);
+        let cleared = AtomicBool::new(false);
         let mut current = (client, snapshot);
         loop {
-            worker_loop(current.0, current.1, &frames, &rx, &cursor, Some(&guard), &stopped);
+            worker_loop(current.0, current.1, &frames, &rx, &cursor, Some(&guard), &stopped, &cleared);
             connected_worker.store(false, Ordering::Release);
             if stopped.load(Ordering::Acquire) {
-                revoke(&guard);
+                if !cleared.load(Ordering::Acquire) { revoke(&guard); }
                 while let Ok(command) = rx.try_recv() {
                     let _ = frames.send(rejected(command, "Session is stopping"));
                 }
@@ -252,7 +254,8 @@ pub fn connect_sessions(sessions: &[Session]) -> io::Result<MultiBridge> {
                 | WorkerCommand::SetPermissionMode(id, _) | WorkerCommand::QueueList(id) | WorkerCommand::Status(id)
                 | WorkerCommand::Branch(id, _)
                 | WorkerCommand::QueueCancel(id, _) => id,
-                WorkerCommand::Message(id, _, _) | WorkerCommand::Stop(id) => id,
+                WorkerCommand::Message(id, _, _) | WorkerCommand::Stop(id)
+                | WorkerCommand::FinalizeForClear(id) => id,
                 WorkerCommand::Launch(_, _, _) | WorkerCommand::Attach(_, _) => unreachable!(),
             };
             let Some((route, connected)) = routes.get(id) else {
@@ -312,6 +315,8 @@ fn rejected(command: WorkerCommand, message: &str) -> Value {
             "queue_id":queue_id, "ok":false, "error":message}),
         WorkerCommand::Stop(id) => json!({"type":"stop_reply", "session_id":id,
             "ok":false, "error":message}),
+        WorkerCommand::FinalizeForClear(id) => json!({"type":"clear_finalize_reply", "session_id":id,
+            "ok":false, "error":message}),
     }
 }
 
@@ -364,7 +369,8 @@ fn spawn_worker_with_snapshot(client: DaemonClient, snapshot: Option<crate::tran
     let worker = thread::spawn(move || {
         let cursor = AtomicU64::new(client.cursor);
         let stopped = AtomicBool::new(false);
-        worker_loop(client, snapshot, &frame_tx, &prompt_rx, &cursor, None, &stopped);
+        let cleared = AtomicBool::new(false);
+        worker_loop(client, snapshot, &frame_tx, &prompt_rx, &cursor, None, &stopped, &cleared);
     });
     (frame_rx, prompt_tx, worker)
 }
@@ -377,6 +383,7 @@ fn worker_loop(
     cursor: &AtomicU64,
     roster_guard: Option<&Mutex<bool>>,
     stopped: &AtomicBool,
+    cleared: &AtomicBool,
 ) {
     let session_id = client.hello["session_id"]
         .as_str()
@@ -400,9 +407,15 @@ fn worker_loop(
         // Bound prompt work so a burst cannot starve incoming daemon events.
         for _ in 0..32 {
             match prompts.try_recv() {
-                Ok(WorkerCommand::Stop(id)) => {
+                Ok(command @ (WorkerCommand::Stop(_) | WorkerCommand::FinalizeForClear(_))) => {
+                    let (id, for_clear) = match command {
+                        WorkerCommand::Stop(id) => (id, false),
+                        WorkerCommand::FinalizeForClear(id) => (id, true),
+                        _ => unreachable!(),
+                    };
+                    let reply_type = if for_clear { "clear_finalize_reply" } else { "stop_reply" };
                     if id != session_id {
-                        let _ = frames.send(json!({"type":"stop_reply", "session_id":id,
+                        let _ = frames.send(json!({"type":reply_type, "session_id":id,
                             "ok":false, "error":"Stop target is not attached"}));
                         continue;
                     }
@@ -415,9 +428,10 @@ fn worker_loop(
                     };
                     if accepted {
                         stopped.store(true, Ordering::Release);
-                        if let Some(guard) = roster_guard { revoke(guard); }
+                        if for_clear { cleared.store(true, Ordering::Release); }
+                        else if let Some(guard) = roster_guard { revoke(guard); }
                     }
-                    if frames.send(json!({"type":"stop_reply", "session_id":id,
+                    if frames.send(json!({"type":reply_type, "session_id":id,
                         "ok":accepted, "error":error})).is_err() { return; }
                     if accepted {
                         return;
@@ -756,6 +770,39 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static NEXT_SOCKET: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn intentional_clear_finalization_keeps_complete_roster_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("daemon.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            writeln!(socket, "{}", json!({"type":"hello", "proto":1,
+                "session_id":"old", "engine":"codex", "cwd":"/repo", "next_seq":0})).unwrap();
+            let mut reader = BufReader::new(socket.try_clone().unwrap());
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap(); // attach
+            line.clear();
+            reader.read_line(&mut line).unwrap();
+            let call: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(call["method"], "stop");
+            writeln!(socket, "{}", json!({"type":"reply", "id":call["id"], "ok":true})).unwrap();
+        });
+        let session = Session { id:"old".into(), title:String::new(), socket:path,
+            scope_key:String::new(), clients:None, started_at:String::new() };
+        let (frame_tx, frame_rx) = mpsc::sync_channel(16);
+        let complete = Arc::new(Mutex::new(true));
+        let (commands, _, worker) = attach_worker(&session, &frame_tx, &complete).unwrap();
+        assert_eq!(frame_rx.recv_timeout(Duration::from_secs(2)).unwrap()["type"], "hello");
+        commands.send(WorkerCommand::FinalizeForClear("old".into())).unwrap();
+        let reply = frame_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(reply["type"], "clear_finalize_reply");
+        assert_eq!(reply["ok"], true);
+        worker.join().unwrap();
+        server.join().unwrap();
+        assert!(*complete.lock().unwrap());
+    }
 
     #[test]
     fn queue_rows_scrub_raw_python_prompts_before_ui_delivery() {

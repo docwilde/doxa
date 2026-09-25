@@ -15,6 +15,28 @@ import pytest
 from doxa import lore_bridge
 
 
+def test_indexed_session_search_is_project_first_bounded_and_scrubbed():
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE VIRTUAL TABLE msg USING fts5(session_id UNINDEXED, project UNINDEXED, "
+                 "ts UNINDEXED, role UNINDEXED, content)")
+    conn.executemany("INSERT INTO msg VALUES (?, ?, '', 'user', ?)", [
+        ("other-1", "other", "rare token"),
+        ("local-1", "project", "rare SECRET token"),
+    ])
+    conn.execute("PRAGMA query_only=ON")
+    hits = lore_bridge._session_search(
+        "/repo", "rare token", (lambda: conn, lambda q, sep=" ": sep.join(q.split())),
+        (lambda cwd: "project", None, None, None),
+        lambda text: text.replace("SECRET", "[redacted]"),
+    )
+    assert [hit["session_id"] for hit in hits] == ["local-1"]
+    assert "SECRET" not in hits[0]["snippet"]
+    assert "[redacted]" in hits[0]["snippet"]
+    with pytest.raises(ValueError):
+        lore_bridge._session_search("/repo", "x" * 201, (lambda: None, lambda q: q),
+                                    (lambda cwd: "project", None, None, None), lambda x: x)
+
+
 def test_reviewed_resolve_with_pinned_lore_rejects_one_exact_snapshot(tmp_path):
     source = os.environ.get("DOXA_TEST_LORE_API_PATH")
     if source and not (Path(source) / "lore_core" / "pending.py").is_file():
