@@ -454,7 +454,9 @@ fn finalize_locked(path: &Path) -> String {
         git(&main, &["merge-base", "--is-ancestor", oid, &record.branch], Duration::from_secs(10))
             .is_some_and(|(ok, _)| ok)
     }) { return keep(); }
-    let Some(status) = git_text(&record.path, &["status", "--porcelain", "--untracked-files=all"]) else { return keep(); };
+    // Git considers ignored files disposable during `worktree remove`, even
+    // without --force. They may still be valuable user data.
+    let Some(status) = git_text(&record.path, &["status", "--porcelain", "--ignored", "--untracked-files=all"]) else { return keep(); };
     if !status.is_empty() { return keep(); }
     let spec = format!("{base}..{}", record.branch);
     if git_text(&record.path, &["rev-list", "--count", &spec]).as_deref() != Some("0") { return keep(); }
@@ -510,16 +512,18 @@ pub struct OrphanPreview {
 }
 
 fn orphan_state(record: &Record, base: &str, main: &Path, base_oid: Option<&str>) -> OrphanState {
+    // Python 1.19 does not write base_oid or hold the Rust advisory lock.
+    // Its daemon may be starting before registry publication, so those
+    // sidecars are survey-only and never eligible for automated cleanup.
+    let Some(base_oid) = base_oid else { return OrphanState::Uncertain; };
     if worktree_for_branch(main, &record.branch).as_ref() != Some(&record.path)
         || git_text(&record.path, &["symbolic-ref", "--quiet", "--short", "HEAD"])
             .as_deref() != Some(record.branch.as_str()) {
         return OrphanState::Uncertain;
     }
-    if !base_oid.is_none_or(|oid| {
-        git(main, &["merge-base", "--is-ancestor", oid, &record.branch], Duration::from_secs(10))
-            .is_some_and(|(ok, _)| ok)
-    }) { return OrphanState::Uncertain; }
-    let Some(status) = git_text(&record.path, &["status", "--porcelain", "--untracked-files=all"])
+    if !git(main, &["merge-base", "--is-ancestor", base_oid, &record.branch], Duration::from_secs(10))
+        .is_some_and(|(ok, _)| ok) { return OrphanState::Uncertain; }
+    let Some(status) = git_text(&record.path, &["status", "--porcelain", "--ignored", "--untracked-files=all"])
         else { return OrphanState::Uncertain; };
     if !status.is_empty() { return OrphanState::Dirty; }
     let spec = format!("{base}..{}", record.branch);
@@ -810,6 +814,14 @@ mod tests {
             .find(|row| row.record.path == orphan_path).unwrap();
         assert_eq!(stale_preview.state, OrphanState::Uncertain);
         assert!(matches!(cleanup_orphan(&preview, || Some(HashSet::new())), CleanupResult::Kept(_)));
+        fs::write(&sidecar, &original_sidecar).unwrap();
+        let mut legacy: serde_json::Value = serde_json::from_slice(&fs::read(&sidecar).unwrap()).unwrap();
+        legacy.as_object_mut().unwrap().remove("base_oid");
+        fs::write(&sidecar, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        let legacy_preview = preview_orphans(&HashSet::new()).into_iter()
+            .find(|row| row.record.path == orphan_path).unwrap();
+        assert_eq!(legacy_preview.state, OrphanState::Uncertain);
+        assert!(matches!(cleanup_orphan(&preview, || Some(HashSet::new())), CleanupResult::Kept(_)));
         fs::write(&sidecar, original_sidecar).unwrap();
         assert_eq!(cleanup_orphan(&preview, || Some(HashSet::new())), CleanupResult::Removed);
         assert!(!orphan_path.exists());
@@ -845,6 +857,19 @@ mod tests {
         fs::write(race_path.join("new"), "changed since preview").unwrap();
         assert!(matches!(cleanup_orphan(&preview, || Some(HashSet::new())), CleanupResult::Kept(_)));
         assert!(race_path.exists());
+
+        fs::write(main.join(".gitignore"), "cache/\n").unwrap();
+        run_git(&main, &["add", ".gitignore"]);
+        run_git(&main, &["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "test: ignore cache"]);
+        let mut ignored = create(&main, "l1b2c3d4ignored").unwrap();
+        let ignored_path = ignored.path().to_path_buf();
+        fs::create_dir(ignored_path.join("cache")).unwrap();
+        fs::write(ignored_path.join("cache/user.txt"), "valuable ignored data\n").unwrap();
+        let preview = preview_orphans(&HashSet::new()).into_iter()
+            .find(|row| row.record.path == ignored_path).unwrap();
+        assert_eq!(preview.state, OrphanState::Dirty);
+        assert!(ignored.finish().contains("kept"));
+        assert_eq!(fs::read_to_string(ignored_path.join("cache/user.txt")).unwrap(), "valuable ignored data\n");
 
         env::remove_var("DOXA_HOME");
         env::remove_var("DOXA_WORKTREE");
