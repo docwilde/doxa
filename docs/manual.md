@@ -1951,8 +1951,13 @@ shared with the Claude Code LORE plugin on purpose.
 
 ## Screenshots
 
-Every still and GIF under [`assets/shots/`](../assets/shots/) is generated
-headlessly from the real app by
+The six `rust-*.png` stills under [`assets/shots/`](../assets/shots/) are
+generated from the Rust 2.0 alpha frontend with fixture daemon frames by
+[`scripts/rust_gallery.py`](../scripts/rust_gallery.py) and
+[`rust/doxa-tui/examples/gallery.rs`](../rust/doxa-tui/examples/gallery.rs).
+They are reproducible Ratatui `TestBackend` captures without provider calls.
+
+The Python 1.x stills and GIFs are generated headlessly from the real app by
 [`scripts/screenshot.py`](../scripts/screenshot.py) and
 [`scripts/record_gif.py`](../scripts/record_gif.py) — a scripted session,
 no spend, fake account numbers — and each still keeps its source SVG
@@ -1964,12 +1969,12 @@ repository's one DevTools-protocol client — shared with
 `tests/test_mesh_page.py`, which loads the same page in the same way and
 asserts on what it renders, so the driver behind the picture is the
 driver the suite exercises.
-**Thirty-four images, each named exactly once** — the
-[README](../README.md#gallery) captions sixteen of them, counting the
-hero, and the other eighteen are catalogued below so that **no rendered
-asset is left unnamed by any document**. That is the exact
+The Python set has thirty-four images, each named exactly once: the
+[README](../README.md#gallery) captions sixteen of them and the other
+eighteen are catalogued below. The README also captions all six Rust stills.
+That is the exact
 condition `beliefs-browser.png` needed to sit wrong for eighteen releases
-before v0.87.0 deleted it. All thirty-four are 3068x1734, but they are not
+before v0.87.0 deleted it. The Python stills are 3068x1734, but they are not
 all from one pass: an image that still matches the feature it shows is
 left alone rather than re-rendered, so the gallery sits at mixed versions
 by design.
