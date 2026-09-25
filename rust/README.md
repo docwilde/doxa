@@ -53,7 +53,8 @@ sessions, use `--list` and select one by full ID or unique ID prefix.
 without a connection. `Ctrl+P` opens the action menu; use Up/Down, Enter, and
 Esc to navigate the peer map, tool activity, session rail selection, tabs, and
 panes. `Ctrl+M` and `Ctrl+T` remain direct shortcuts. `Ctrl+Q` detaches the Rust UI
-without stopping its daemon. `Ctrl+M` opens the read-only peer communications
+without stopping its daemon; `Ctrl+C` is left available for terminal copy.
+`Ctrl+M` opens the read-only peer communications
 map; Up/Down selects a peer, R refreshes the live roster, and Esc closes it.
 The map uses `tui-nodes` 0.9 with the Rust frontend's Ratatui 0.29.
 Lines show observed traffic and the detail row names sent and received counts.
@@ -223,7 +224,10 @@ turn only, under a memory header and footer. The snapshot is absent from the
 displayed prompt and transcript, and a resumed provider thread receives no
 duplicate. If the snapshot is unavailable or too large, the turn proceeds
 without context; LORE scrubbing remains required for visible and persisted
-text. After each native Codex turn and at shutdown, the external LORE sidecar
+text. Transcript or thread-state write failures withhold a turn or stop the
+session. An interrupted or failed Codex turn leaves a durable incomplete marker
+and refuses unsafe thread resume after restart. After each native Codex turn
+and at shutdown, the external LORE sidecar
 incrementally indexes its verified transcript descriptor when LORE 0.58.4 or
 newer exposes `index_live_fd`. Older installed LORE plugins still provide
 scrubbing and snapshots but cannot advertise transcript indexing. Automatic Codex proposal
