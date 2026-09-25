@@ -4874,11 +4874,29 @@ impl App {
             if !menu.contains(ratatui::layout::Position::new(mouse.column, mouse.row)) { return true; }
             let picker = self.lore_picker.as_mut().unwrap();
             if picker.pending.is_some() || picker.resolving { return true; }
-            if picker.belief_review.is_some() {
+            if let Some(review) = &picker.belief_review {
+                let width = usize::from(menu.width.saturating_sub(3)).max(1);
+                let visible = usize::from(menu.height.saturating_sub(REVIEW_BODY_RESERVE));
+                let full = format!("Subject: {}\nClaim: {}", review.subject(), review.claim());
+                let total = raw_visual_rows(&full, width).len();
+                if picker.review_width != width {
+                    picker.review_width = width;
+                    picker.review_scroll = 0;
+                    picker.review_seen = 0;
+                    picker.belief_action = None;
+                    picker.retract_armed = false;
+                }
+                if visible > 0 && picker.review_scroll <= picker.review_seen {
+                    picker.review_seen = picker.review_seen.max(picker.review_scroll.saturating_add(visible)).min(total);
+                }
+                let max_scroll = total.saturating_sub(visible);
                 match mouse.kind {
                     MouseEventKind::ScrollUp => picker.review_scroll = picker.review_scroll.saturating_sub(3),
-                    MouseEventKind::ScrollDown => picker.review_scroll = picker.review_scroll.saturating_add(3),
+                    MouseEventKind::ScrollDown => picker.review_scroll = picker.review_scroll.saturating_add(3).min(max_scroll),
                     _ => {}
+                }
+                if visible > 0 && picker.review_scroll <= picker.review_seen {
+                    picker.review_seen = picker.review_seen.max(picker.review_scroll.saturating_add(visible)).min(total);
                 }
                 return true;
             }
@@ -8707,6 +8725,23 @@ for line in sys.stdin:
         assert!(picker.status.contains("Belief changed"));
         assert!(app.pending_queue_commands.is_empty());
         assert!(!app.notice.contains("applied"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wheel_scroll_can_complete_exact_belief_review() {
+        let mut app = app_with_review();
+        let menu = app.active_chooser_rect().unwrap();
+        for _ in 0..100 {
+            app.mouse(MouseEvent { kind: MouseEventKind::ScrollDown,
+                column: menu.x + 3, row: menu.y + 6, modifiers: KeyModifiers::NONE });
+        }
+        let picker = app.lore_picker.as_ref().unwrap();
+        let review = picker.belief_review.as_ref().unwrap();
+        let full = format!("Subject: {}\nClaim: {}", review.subject(), review.claim());
+        assert_eq!(picker.review_seen, raw_visual_rows(&full, picker.review_width).len());
+        app.lore_picker_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+        assert_eq!(app.lore_picker.as_ref().unwrap().belief_action, Some(doxa_lore::BeliefAction::Stale));
     }
 
     #[cfg(unix)]
