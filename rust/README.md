@@ -237,7 +237,12 @@ expand upward in the active pane, leaving its prompt and the other pane visible.
 `Alt+E` opens an engine picker,
 then a model, reasoning effort, and first-prompt form that starts a new session
 in the selected pane. DeepSeek and GLM model choices follow the selected
-vendor; effort choices follow that vendor and model. A blank model for other
+vendor. With an API key, DOXA refreshes that vendor's bounded model catalog
+without blocking redraw. DeepSeek's reported per-model effort levels drive
+the form; known GLM models use measured effort levels because its catalog
+does not expose a verified effort contract. If the lookup fails, the form
+labels its static fallback. A live catalog with no supported model/effort
+pair leaves launch disabled with an explanation. A blank model for other
 engines uses the configured default. The effort chip immediately follows the
 model chip and displays the active daemon's reported value, or `?` when it
 has no verified value. `Alt+F` and bare `/effort` open an inline picker for a
