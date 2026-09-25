@@ -5,6 +5,11 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.17 — 2026-09-25
+
+- Show the newest Rust preview in the README release badge and link directly
+  to its prerelease. Clarify why GitHub's latest stable label remains at 1.19.
+
 ## 2.0.0-alpha.16 — 2026-09-25
 
 - Recover a deleted managed checkout when its owned sidecar, pinned base,
