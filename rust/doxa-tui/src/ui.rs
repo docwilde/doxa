@@ -65,6 +65,21 @@ const ACTIONS: [(&str, &str); 13] = [
     ("Claude permissions", "Alt+P"),
     ("Stop active session", "Alt+X"),
 ];
+const SLASH_COMMANDS: [(&str, &str); 25] = [
+    ("/help", "Open actions"), ("/about", "Show Rust version"),
+    ("/sessions", "Browse sessions"), ("/search", "Search saved sessions"),
+    ("/resume", "Resume saved session"), ("/attach", "Attach live session"),
+    ("/queue", "Queued prompts"), ("/pending", "LORE proposals"),
+    ("/model", "Select model"), ("/effort", "Reasoning effort"),
+    ("/engine", "Select engine"), ("/mode", "Permissions"),
+    ("/beliefs", "LORE beliefs"), ("/diff", "Worktree diff"),
+    ("/peers", "Peer map"), ("/mesh", "Peer map"),
+    ("/msg", "Message a peer"), ("/branch", "Switch branch"),
+    ("/rename", "Rename session"), ("/split", "Horizontal split"),
+    ("/vsplit", "Vertical split"), ("/pane", "Switch pane"),
+    ("/sidebar", "Session rail"), ("/detach", "Close tab"),
+    ("/dir", "Session directory"),
+];
 
 const ENGINE_CHOICES: [&str; 4] = ["codex", "claude", "deepseek", "glm"];
 // Fallback model IDs measured from the vendors' catalogues in Python 1.19.
@@ -942,6 +957,8 @@ pub struct App {
     map_modal: bool,
     action_menu: bool,
     action_selected: usize,
+    slash_selected: usize,
+    slash_dismissed: bool,
     history_modal: bool,
     history_resume: bool,
     history_explicit: bool,
@@ -1067,6 +1084,8 @@ impl Default for App {
             map_modal: false,
             action_menu: false,
             action_selected: 0,
+            slash_selected: 0,
+            slash_dismissed: false,
             history_modal: false,
             history_resume: false,
             history_explicit: false,
@@ -1872,6 +1891,8 @@ impl App {
             self.input_drafts
                 .insert(before, (std::mem::take(&mut self.input), self.input_cursor));
             (self.input, self.input_cursor) = self.input_drafts.remove(&after).unwrap_or_default();
+            self.slash_selected = 0;
+            self.slash_dismissed = false;
         }
         changed
     }
@@ -1912,6 +1933,8 @@ impl App {
         if !clean.is_empty() {
             self.input.insert_str(self.input_cursor, &clean);
             self.input_cursor += clean.len();
+            self.slash_selected = 0;
+            self.slash_dismissed = false;
         }
         if truncated { self.notice = "Prompt input limit reached · paste truncated".into(); }
         !clean.is_empty() || truncated
@@ -1934,7 +1957,34 @@ impl App {
         } else {
             self.input.insert(self.input_cursor, ch);
             self.input_cursor += ch.len_utf8();
+            self.slash_selected = 0;
+            self.slash_dismissed = false;
         }
+        true
+    }
+
+    fn slash_suggestions(&self) -> Vec<(&'static str, &'static str)> {
+        if self.focus != Focus::Prompt || self.slash_dismissed
+            || self.active_request_index().is_some() || self.stop_confirmation.is_some()
+            || self.chip_info.is_some() || self.lore_picker.is_some()
+            || self.new_session.is_some() || self.model_picker.is_some()
+            || self.effort_picker.is_some() || self.permission_picker.is_some()
+            || self.engine_picker || self.action_menu || self.history_modal
+            || self.queue_picker.is_some() || self.attach_picker.is_some()
+            || self.diff_modal || self.map_modal || self.tool_modal {
+            return Vec::new();
+        }
+        let query = self.input.as_str();
+        if !query.starts_with('/') || query.chars().any(char::is_whitespace) { return Vec::new(); }
+        SLASH_COMMANDS.iter().copied().filter(|(name, _)| name.starts_with(query)).collect()
+    }
+
+    fn complete_slash(&mut self) -> bool {
+        let matches = self.slash_suggestions();
+        let Some((command, _)) = matches.get(self.slash_selected.min(matches.len().saturating_sub(1))) else { return false; };
+        self.input = (*command).to_owned();
+        self.input_cursor = self.input.len();
+        self.slash_dismissed = true;
         true
     }
 
@@ -2215,6 +2265,30 @@ impl App {
                 _ => {}
             }
         }
+        if !ctrl && !alt && !key.modifiers.contains(KeyModifiers::SHIFT) {
+            let suggestions = self.slash_suggestions();
+            if !suggestions.is_empty() {
+                match key.code {
+                    KeyCode::Up => {
+                        self.slash_selected = self.slash_selected.saturating_sub(1);
+                        return true;
+                    }
+                    KeyCode::Down => {
+                        self.slash_selected = (self.slash_selected + 1).min(suggestions.len() - 1);
+                        return true;
+                    }
+                    KeyCode::Tab => return self.complete_slash(),
+                    KeyCode::Esc => {
+                        self.slash_dismissed = true;
+                        return true;
+                    }
+                    KeyCode::Enter if suggestions[self.slash_selected.min(suggestions.len() - 1)].0 != self.input => {
+                        return self.complete_slash();
+                    }
+                    _ => {}
+                }
+            }
+        }
         match key.code {
             KeyCode::F(3) => {
                 self.rail_visible = !self.rail_visible;
@@ -2342,12 +2416,16 @@ impl App {
                 if let Some((index, _)) = self.input[..self.input_cursor].char_indices().next_back() {
                     self.input.drain(index..self.input_cursor);
                     self.input_cursor = index;
+                    self.slash_selected = 0;
+                    self.slash_dismissed = false;
                     true
                 } else { false }
             }
             KeyCode::Delete if self.focus == Focus::Prompt => {
                 if let Some(ch) = self.input[self.input_cursor..].chars().next() {
                     self.input.drain(self.input_cursor..self.input_cursor + ch.len_utf8());
+                    self.slash_selected = 0;
+                    self.slash_dismissed = false;
                     true
                 } else { false }
             }
@@ -4562,6 +4640,8 @@ impl App {
             (picker.rows.len() + 3).clamp(5, 15) as u16
         } else if self.attach_picker.is_some() {
             (self.attach_matches().len() + 3).clamp(5, 15) as u16
+        } else if !self.slash_suggestions().is_empty() {
+            (self.slash_suggestions().len() + 2).clamp(5, 10) as u16
         } else {
             return None;
         };
@@ -4850,6 +4930,34 @@ impl App {
                 self.memory_menu_pending = None;
                 if inside { return true; }
             } else { return false; }
+        }
+        let suggestions = self.slash_suggestions();
+        if !suggestions.is_empty() {
+            if let Some(menu) = self.active_chooser_rect() {
+                if menu.contains(ratatui::layout::Position::new(mouse.column, mouse.row)) {
+                    match mouse.kind {
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            let visible = usize::from(menu.height.saturating_sub(2)).max(1);
+                            let start = self.slash_selected.saturating_sub(visible.saturating_sub(1));
+                            let position = start + usize::from(mouse.row.saturating_sub(menu.y + 1));
+                            if mouse.row > menu.y && position < suggestions.len() {
+                                self.slash_selected = position;
+                                self.complete_slash();
+                            }
+                            return true;
+                        }
+                        MouseEventKind::ScrollUp => {
+                            self.slash_selected = self.slash_selected.saturating_sub(1);
+                            return true;
+                        }
+                        MouseEventKind::ScrollDown => {
+                            self.slash_selected = (self.slash_selected + 1).min(suggestions.len() - 1);
+                            return true;
+                        }
+                        _ => {}
+                    }
+                }
+            }
         }
         if self.attach_picker.is_some() {
             let Some(menu) = self.active_chooser_rect() else { return false; };
@@ -5548,6 +5656,27 @@ impl App {
             .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED))), area);
     }
 
+    fn draw_slash_suggestions(&self, frame: &mut Frame, area: Rect) {
+        let matches = self.slash_suggestions();
+        if matches.is_empty() { return; }
+        let visible = usize::from(area.height.saturating_sub(2)).max(1);
+        let selected = self.slash_selected.min(matches.len() - 1);
+        let start = selected.saturating_sub(visible.saturating_sub(1));
+        let rows: Vec<Line> = matches.iter().enumerate().skip(start).take(visible)
+            .map(|(index, (command, description))| {
+                let label = format!(" {} {:<12} {}", if index == selected { '›' } else { ' ' }, command, description);
+                let label = clipped_title(&label, usize::from(area.width.saturating_sub(2))).0;
+                let style = if index == selected {
+                    Style::default().fg(theme::ACCENT).bg(theme::HIGHLIGHT).add_modifier(Modifier::BOLD)
+                } else { Style::default().fg(theme::SECONDARY) };
+                Line::styled(label, style)
+            }).collect();
+        frame.render_widget(Paragraph::new(rows).block(Block::default()
+            .title(" Commands · ↑/↓ select · Tab complete ")
+            .borders(Borders::ALL).border_style(Style::default().fg(theme::ACCENT)))
+            .style(Style::default().bg(theme::RAISED)), area);
+    }
+
     fn draw_queue_picker(&self, frame: &mut Frame, area: Rect) {
         let Some(picker) = &self.queue_picker else { return; };
         let mut lines = vec![Line::from(if picker.loading { " Refreshing queue…" }
@@ -6066,6 +6195,8 @@ impl App {
                 self.draw_queue_picker(frame, inner[2]);
             } else if self.attach_picker.is_some() {
                 self.draw_attach_picker(frame, inner[2]);
+            } else if !self.slash_suggestions().is_empty() {
+                self.draw_slash_suggestions(frame, inner[2]);
             }
         }
         let mut chip_spans = Vec::new();
@@ -7570,6 +7701,50 @@ for line in sys.stdin:
         assert_eq!(app.pending_prompts, [("s".into(), "first\n\nlast".into())]);
         assert!(app.input.is_empty());
         assert_eq!(app.input_cursor, 0);
+    }
+
+    #[test]
+    fn slash_autocomplete_appears_above_prompt_and_completes_without_sending() {
+        let mut app = App::default();
+        app.groups[0].tabs.push("s".into());
+        app.handle(Event::Resize(100, 28));
+        for ch in "/he".chars() {
+            app.handle(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
+        }
+        assert_eq!(app.slash_suggestions(), vec![("/help", "Open actions")]);
+        assert!(painted(&app).contains("Commands"));
+        assert!(app.active_chooser_rect().is_some());
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+        assert_eq!(app.input, "/help");
+        assert!(app.slash_suggestions().is_empty());
+        assert!(app.pending_prompts.is_empty());
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(app.action_menu);
+        assert!(app.pending_prompts.is_empty());
+    }
+
+    #[test]
+    fn slash_autocomplete_mouse_choice_and_escape_preserve_draft() {
+        let mut app = App::default();
+        app.groups[0].tabs.push("s".into());
+        app.handle(Event::Resize(100, 28));
+        for ch in "/mo".chars() {
+            app.handle(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
+        }
+        assert_eq!(app.slash_suggestions().len(), 2);
+        painted(&app);
+        let menu = app.active_chooser_rect().unwrap();
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: menu.x + 2, row: menu.y + 2, modifiers: KeyModifiers::NONE }));
+        assert_eq!(app.input, "/mode");
+        assert!(app.slash_suggestions().is_empty());
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)));
+        assert_eq!(app.input, "/mod");
+        assert!(!app.slash_suggestions().is_empty());
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        assert_eq!(app.input, "/mod");
+        assert!(app.slash_suggestions().is_empty());
+        assert!(app.pending_prompts.is_empty());
     }
 
     #[test]

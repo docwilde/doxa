@@ -195,6 +195,10 @@ count. Its text becomes available only after the completed stream is scrubbed;
 Codex reasoning summaries fold into the same row. Select the row
 and press `Enter` or click to expand it. The processing spinner appears below
 the transcript while a turn is running.
+Typing `/` at the start of the prompt shows matching DOXA commands above the
+prompt. Use Up/Down or the mouse to choose one and Tab to complete it. The
+completed command runs only when you press Enter; unknown provider and plugin
+slash commands continue through the normal prompt path.
 Expanded sections show bounded live tool inputs and results from the daemon
 event stream. `Ctrl+T`
 remains the separate tool activity card view.

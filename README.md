@@ -67,6 +67,10 @@ token counter, and expanded tool activity shows scrubbed result detail.
 
 *Streamed reasoning stays folded while its approximate token count updates.*
 
+![Rust prompt showing slash command suggestions above the input](assets/shots/rust-commands.png)
+
+*Typing a slash command filters local DOXA actions; Tab completes the selected entry.*
+
 ![Rust input request choices expanded above the prompt in a single session pane](assets/shots/rust-needs-input.png)
 
 *A daemon input request expands above the active prompt.*

@@ -21,6 +21,8 @@ the stable 2.0 release has not been cut.
 - Stream scrubbed Codex and Claude tool results into expandable tool detail
   instead of showing only the 280-character summary. Mark the 256 KiB detail
   display limit explicitly when reached.
+- Suggest supported DOXA slash commands above the prompt as `/` is typed.
+  Arrow keys and mouse choose a command; Tab completes it without submitting.
 
 ## 2.0.0-alpha.17 — 2026-09-25
 

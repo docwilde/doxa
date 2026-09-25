@@ -84,6 +84,10 @@ fn scene(name: &str) -> App {
             event(&mut app,"demo-deepseek-03","turn_started",json!({"prompt":"Compare the two parser designs."}));
             event(&mut app,"demo-deepseek-03","reasoning_progress",json!({"approx_tokens":128}));
         }
+        "commands" => {
+            app.groups[0].tabs = vec!["demo-codex-01".into()];
+            for ch in "/mo".chars() { key(&mut app, KeyCode::Char(ch), KeyModifiers::NONE); }
+        }
         "needs-input" => {
             event(&mut app,"demo-codex-01","needs_input",json!({"id":"req-1","kind":"ask_user","title":"Choose migration target","questions":[{"question":"Where should the migration run?","header":"Environment","options":[{"label":"Staging","description":"Validate before release"},{"label":"Production","description":"Apply to live data"}]}]}));
         }
@@ -141,7 +145,7 @@ fn rgb(color: Color) -> [u8; 3] {
 fn main() {
     let name = std::env::args().nth(1).expect("scene name");
     let (width,height) = match name.as_str() {
-        "hero" | "tool-activity" | "tool-expanded" | "processing" | "reasoning" | "needs-input" | "permissions" | "effort" | "history" | "queue" | "memory" => (126,31),
+        "hero" | "tool-activity" | "tool-expanded" | "processing" | "reasoning" | "commands" | "needs-input" | "permissions" | "effort" | "history" | "queue" | "memory" => (126,31),
         _ => panic!("unknown scene"),
     };
     let app = scene(&name);
