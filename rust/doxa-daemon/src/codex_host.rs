@@ -207,6 +207,9 @@ impl CodexHost {
 }
 
 impl Host for CodexHost {
+    fn lore_scrub_status(&self) -> Option<&'static str> {
+        Some(if self.scrub_failed.load(Ordering::Acquire) { "unavailable" } else { "ready" })
+    }
     fn transcript_snapshot(&self) -> io::Result<Option<(PathBuf, u64)>> {
         self.store.transcript_snapshot()
     }

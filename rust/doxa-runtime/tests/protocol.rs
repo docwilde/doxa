@@ -26,6 +26,7 @@ impl Host for CapabilityProbe {
     }
     fn can_set_model(&self) -> bool { self.check(); true }
     fn can_set_permission_mode(&self) -> bool { self.check(); true }
+    fn lore_scrub_status(&self) -> Option<&'static str> { self.check(); Some("ready") }
 }
 
 #[test]
@@ -41,10 +42,14 @@ fn hello_and_status_capabilities_can_access_session_state() {
         assert!(rx.recv_timeout(Duration::from_secs(1)).is_ok(), "host capability ran under state lock");
     }));
     let (mut reader, mut writer) = connect(handle.socket_path());
-    assert_eq!(recv(&mut reader)["type"], "hello");
+    let hello = recv(&mut reader);
+    assert_eq!(hello["type"], "hello");
+    assert_eq!(hello["lore_scrub"], "ready");
     send(&mut writer, json!({"type":"attach","cursor":null}));
     send(&mut writer, json!({"type":"call","id":1,"method":"status","params":{}}));
-    assert_eq!(recv(&mut reader)["status"]["can_set_model"], true);
+    let status = recv(&mut reader)["status"].clone();
+    assert_eq!(status["can_set_model"], true);
+    assert_eq!(status["lore_scrub"], "ready");
     *host.0.lock().unwrap() = None;
 }
 

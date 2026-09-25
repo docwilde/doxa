@@ -235,6 +235,101 @@ pub struct Session {
     pub status: String,
 }
 
+#[derive(Clone, Debug, Default)]
+struct SessionTelemetry {
+    context: Option<String>,
+    usage: Option<String>,
+    cost: Option<String>,
+    lore: Option<String>,
+}
+
+impl SessionTelemetry {
+    fn update_turn(&mut self, data: &serde_json::Value) {
+        let context = data["ctx_percentage"].as_f64()
+            .filter(|value| value.is_finite() && (0.0..=100.0).contains(value))
+            .map(|value| format!("{value:.0}%"));
+        let absolute = data["ctx_tokens"].as_u64().zip(data["ctx_max_tokens"].as_u64())
+            .filter(|(used, limit)| *limit > 0 && used <= limit)
+            .map(|(used, limit)| format!("{used}/{limit}"));
+        if data.get("ctx_percentage").is_some() || data.get("ctx_tokens").is_some() {
+            self.context = context.or(absolute);
+        }
+        let scope = data["usage_scope"].as_str();
+        let source = data["usage_source"].as_str();
+        let tokens = match (scope, source) {
+            (Some("session"), Some("codex_cli_turn_completed")) =>
+                data["input_tokens"].as_u64().zip(data["output_tokens"].as_u64())
+                    .map(|(input, output)| (input, output, "session")),
+            (Some("turn"), Some("vendor_response")) =>
+                data["prompt_tokens"].as_u64().zip(data["completion_tokens"].as_u64())
+                    .map(|(input, output)| (input, output, "turn")),
+            _ => None,
+        };
+        if let Some((input, output, scope)) = tokens {
+            self.usage = Some(format!("{input}/{output} {scope}"));
+        } else if self.usage.as_deref().is_some_and(|usage| usage.ends_with(" turn")) {
+            self.usage = None;
+        }
+        if let Some(cost) = data["session_cost_usd"].as_f64()
+            .filter(|value| value.is_finite() && *value >= 0.0) {
+            self.cost = Some(format!("${cost:.4} session"));
+        } else if let Some(cost) = data["cost_usd"].as_f64()
+            .filter(|value| value.is_finite() && *value >= 0.0) {
+            self.cost = Some(format!("${cost:.4} turn"));
+        } else if data.get("session_cost_usd").is_some() || data.get("cost_usd").is_some() {
+            self.cost = None;
+        }
+    }
+
+    fn update_status(&mut self, status: &serde_json::Value) {
+        let context = status["ctx_percentage"].as_f64()
+            .filter(|value| value.is_finite() && (0.0..=100.0).contains(value))
+            .map(|value| format!("{value:.0}%"));
+        let absolute = status["ctx_tokens"].as_u64().zip(status["ctx_max_tokens"].as_u64())
+            .filter(|(used, limit)| *limit > 0 && used <= limit)
+            .map(|(used, limit)| format!("{used}/{limit}"));
+        if status.get("ctx_percentage").is_some() || status.get("ctx_tokens").is_some() {
+            self.context = context.or(absolute);
+        }
+        if let Some(cost) = status["total_cost_usd"].as_f64()
+            .filter(|value| value.is_finite() && *value >= 0.0) {
+            let label = if status["usage"]["cost_basis"].as_str().is_some() {
+                if status["usage"]["unpriced_models"].as_array().is_some_and(|models| !models.is_empty()) {
+                    "est partial"
+                } else { "est" }
+            } else { "session" };
+            self.cost = Some(format!("${cost:.4} {label}"));
+        } else if status.get("total_cost_usd").is_some() {
+            self.cost = None;
+        }
+        let usage = &status["usage"];
+        if usage["num_turns"].as_u64().is_some_and(|turns| turns > 0) {
+            if let Some((input, output)) = usage["input_tokens"].as_u64().zip(usage["output_tokens"].as_u64()) {
+                self.usage = Some(format!("{input}/{output} session"));
+            }
+        } else if usage["num_turns"].as_u64() == Some(0) {
+            self.usage = None;
+        }
+        if let Some(count) = status["belief_count"].as_u64() {
+            self.lore = Some(format!("{count} beliefs"));
+        } else if status.get("lore_scrub").is_some() {
+            self.lore = match status["lore_scrub"].as_str() {
+                Some("ready") => Some("scrub ready".into()),
+                Some("unavailable") => Some("scrub unavailable".into()),
+                _ => None,
+            };
+        }
+    }
+
+    fn line(&self) -> String {
+        format!(" Ctx {}  Tokens {}  Cost {}  LORE {}",
+            self.context.as_deref().unwrap_or("?"),
+            self.usage.as_deref().unwrap_or("?"),
+            self.cost.as_deref().unwrap_or("?"),
+            self.lore.as_deref().unwrap_or("?"))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PaneGroup {
     pub tabs: Vec<String>,
@@ -418,6 +513,7 @@ pub struct App {
     pub input: String,
     input_drafts: HashMap<(usize, String), String>,
     session_identity: HashMap<String, (Option<String>, Option<String>)>,
+    session_telemetry: HashMap<String, SessionTelemetry>,
     model_capabilities: HashMap<String, bool>,
     permission_capabilities: HashMap<String, bool>,
     permission_modes: HashMap<String, String>,
@@ -490,6 +586,7 @@ impl Default for App {
             input: String::new(),
             input_drafts: HashMap::new(),
             session_identity: HashMap::new(),
+            session_telemetry: HashMap::new(),
             model_capabilities: HashMap::new(),
             permission_capabilities: HashMap::new(),
             permission_modes: HashMap::new(),
@@ -603,6 +700,7 @@ impl App {
                 let model = frame.get("model").and_then(|v| v.as_str()).map(safe_label).filter(|s| !s.is_empty());
                 let engine = frame.get("engine").and_then(|v| v.as_str()).map(safe_label).filter(|s| !s.is_empty());
                 self.session_identity.insert(id.to_owned(), (engine, model.clone()));
+                self.session_telemetry.entry(id.to_owned()).or_default().update_status(frame);
                 self.model_capabilities.insert(id.to_owned(), frame["can_set_model"] == true);
                 self.permission_capabilities.insert(id.to_owned(), frame["can_set_permission_mode"] == true);
                 if let Some(mode) = frame["permission_mode"].as_str().filter(|mode| permission_index(mode).is_some()) {
@@ -692,6 +790,7 @@ impl App {
                         true
                     }
                     "turn_done" => {
+                        self.session_telemetry.entry(id.clone()).or_default().update_turn(data);
                         self.session_activity.entry(id.clone()).or_default().0 = false;
                         let status = if data.get("is_error").and_then(|v| v.as_bool()) == Some(true)
                         {
@@ -825,6 +924,7 @@ impl App {
                     let id = status.get("session_id").and_then(|v| v.as_str())
                         .or_else(|| frame.get("session_id").and_then(|v| v.as_str()));
                     if let Some(id) = id {
+                        self.session_telemetry.entry(id.to_owned()).or_default().update_status(status);
                         let identity = self.session_identity.entry(id.to_owned()).or_default();
                         if status.get("engine").is_some() {
                             identity.0 = status.get("engine").and_then(|v| v.as_str()).map(safe_label).filter(|s| !s.is_empty());
@@ -2596,7 +2696,7 @@ impl App {
                 Constraint::Length(2),
                 Constraint::Min(1),
                 Constraint::Length(3),
-                Constraint::Length(1),
+                Constraint::Length(2),
             ])
             .split(area);
         let titles: Vec<Line> = group
@@ -2694,7 +2794,14 @@ impl App {
         }
         frame.render_widget(
             Paragraph::new(Line::from(status_spans)).style(Style::default().bg(theme::RAISED)),
-            inner[3],
+            Rect { height: 1, ..inner[3] },
+        );
+        let telemetry = group.active_id().and_then(|id| self.session_telemetry.get(id));
+        let telemetry_line = telemetry.map(SessionTelemetry::line)
+            .unwrap_or_else(|| SessionTelemetry::default().line());
+        frame.render_widget(
+            Paragraph::new(telemetry_line).style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)),
+            Rect { y: inner[3].y.saturating_add(1), height: 1, ..inner[3] },
         );
     }
 }

@@ -36,6 +36,7 @@ pub struct CodexJsonlNormalizer {
     thread_id: Option<String>,
     started: HashMap<String, Instant>,
     usage: TokenUsage,
+    usage_observed: bool,
     bad_frames: usize,
     bad_sample: String,
     closed: bool,
@@ -46,7 +47,7 @@ impl CodexJsonlNormalizer {
     pub fn new(scrub: impl Fn(&str) -> String + Send + Sync + 'static) -> Self {
         Self {
             scrub: Box::new(scrub), pending: Vec::new(), thread_id: None,
-            started: HashMap::new(), usage: TokenUsage::default(),
+            started: HashMap::new(), usage: TokenUsage::default(), usage_observed: false,
             bad_frames: 0, bad_sample: String::new(), closed: false, num_turns: 0,
         }
     }
@@ -109,6 +110,7 @@ impl CodexJsonlNormalizer {
         });
         if let Some(reason) = &failure { out.push(EngineEvent::new("text_delta", json!({"text": format!("codex: {reason}")}))); }
         let mut data = turn_done_data(duration_ms, self.num_turns, failure.is_some());
+        self.attach_usage(&mut data);
         if let Some(reason) = failure { data["error"] = Value::String(reason); }
         out.push(EngineEvent::new("turn_done", data));
         out
@@ -144,6 +146,7 @@ impl CodexJsonlNormalizer {
                     .filter(|v| !v.is_null()).map(value_string).unwrap_or_else(|| kind.clone());
                 let message = truncate(&(self.scrub)(&message), RESULT_SUMMARY_CHARS);
                 let mut data = turn_done_data(None, self.num_turns, true);
+                self.attach_usage(&mut data);
                 data["error"] = Value::String(message.clone());
                 vec![EngineEvent::new("text_delta", json!({"text": format!("codex: {message}")})), EngineEvent::new("turn_done", data)]
             }
@@ -236,6 +239,10 @@ impl CodexJsonlNormalizer {
 
     fn absorb_usage(&mut self, usage: Option<&Value>) {
         let Some(usage) = usage.and_then(Value::as_object) else { return; };
+        if usage.get("input_tokens").and_then(Value::as_u64).is_some()
+            || usage.get("output_tokens").and_then(Value::as_u64).is_some() {
+            self.usage_observed = true;
+        }
         for (key, total) in [
             ("input_tokens", &mut self.usage.input_tokens),
             ("output_tokens", &mut self.usage.output_tokens),
@@ -243,6 +250,15 @@ impl CodexJsonlNormalizer {
             ("reasoning_output_tokens", &mut self.usage.reasoning_output_tokens),
         ] {
             if let Some(n) = usage.get(key).and_then(Value::as_u64) { *total = total.saturating_add(n); }
+        }
+    }
+
+    fn attach_usage(&self, data: &mut Value) {
+        if self.usage_observed {
+            data["input_tokens"] = json!(self.usage.input_tokens);
+            data["output_tokens"] = json!(self.usage.output_tokens);
+            data["usage_scope"] = json!("session");
+            data["usage_source"] = json!("codex_cli_turn_completed");
         }
     }
 }

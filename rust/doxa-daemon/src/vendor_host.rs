@@ -17,6 +17,7 @@ pub struct VendorHost {
     model: String,
     effort: String,
     lore: Mutex<LoreClient>,
+    scrub_failed: AtomicBool,
     history: Mutex<Vec<Value>>,
     store: TranscriptStore,
     cwd: String,
@@ -106,6 +107,7 @@ impl VendorHost {
             model,
             effort,
             lore: Mutex::new(lore),
+            scrub_failed: AtomicBool::new(false),
             history: Mutex::new(history),
             store,
             cwd: cwd.into_owned(),
@@ -121,11 +123,10 @@ impl VendorHost {
     }
 
     fn scrub(&self, text: &str) -> Result<String, ()> {
-        self.lore
-            .lock()
-            .map_err(|_| ())?
-            .scrub(text)
-            .map_err(|_| ())
+        let result = self.lore.lock().map_err(|_| ())
+            .and_then(|mut lore| lore.scrub(text).map_err(|_| ()));
+        if result.is_err() { self.scrub_failed.store(true, Ordering::Release); }
+        result
     }
 
     pub fn shutdown(&self) {
@@ -143,6 +144,9 @@ impl VendorHost {
 }
 
 impl Host for VendorHost {
+    fn lore_scrub_status(&self) -> Option<&'static str> {
+        Some(if self.scrub_failed.load(Ordering::Acquire) { "unavailable" } else { "ready" })
+    }
     fn public_prompt(&self, text: &str) -> Result<String, String> {
         self.scrub(text)
             .map_err(|_| "LORE scrub failed; prompt withheld".into())
@@ -293,6 +297,7 @@ impl Host for VendorHost {
                         "num_turns":turns,"model":model,
                         "prompt_tokens":outcome.usage.prompt_tokens,
                         "completion_tokens":outcome.usage.completion_tokens,
+                        "usage_scope":"turn","usage_source":"vendor_response",
                         "cost_usd":null,"session_cost_usd":null,
                         "ctx_percentage":null,"ctx_tokens":null,"ctx_max_tokens":null}}));
                 } else {
