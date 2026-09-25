@@ -25,10 +25,12 @@ evidence-backed beliefs and an informational source-engine label. See the
 [engine capabilities](docs/manual.md#engine-capabilities) and
 [LORE integration](docs/manual.md#lore-integration) guides.
 
-![DOXA shell: three tabs, one per model tier; a turn answered with a table of belief ids and status above a collapsed tool-calls fold; a status bar led by the permission-mode chip](assets/shots/hero.png)
+![Rust 2.0 alpha terminal with a session rail and two panes showing Codex and Claude fixture transcripts](assets/shots/rust-hero.png)
 
-*Every image here is rendered headlessly from the real app — scripted, no
-spend, fake account numbers. See
+*The lead image and the Rust gallery below are rendered by the real Rust 2.0
+alpha.9 Ratatui frontend from deterministic fixture events. The later Python
+1.x gallery shows features that have a different or unfinished Rust interface.
+No provider calls or account data are used. See
 [screenshots](docs/manual.md#screenshots).*
 
 ## What you get
@@ -45,6 +47,39 @@ palette, [fleets](docs/fleet.md), and [remote access](docs/plans/remote.md)
 while those workflows move to Rust.
 
 ## Gallery
+
+### Rust 2.0 alpha.9
+
+![Two independent Rust session panes showing different engines, transcripts, prompts, and usage rows](assets/shots/rust-split-panes.png)
+
+*Split panes keep separate session transcripts and prompts.*
+
+![Rust tool activity modal showing completed Read and Edit calls with input and result details](assets/shots/rust-tool-activity.png)
+
+*Tool activity shows calls, inputs, and results.*
+
+![Rust input request dialog asking which environment should receive a migration](assets/shots/rust-needs-input.png)
+
+*A daemon input request opens a choice dialog.*
+
+![Rust Claude permission picker with the available modes and the current mode marked](assets/shots/rust-permissions.png)
+
+*Claude sessions can change their permission mode when the daemon supports it.*
+
+![Rust session history picker listing attached fixture sessions](assets/shots/rust-history.png)
+
+*Session history searches attached and archived transcripts.*
+
+These images come from `python3 scripts/rust_gallery.py`, which renders the
+production `doxa_tui::ui::App` through Ratatui's test backend. The sessions,
+events, and usage numbers are fixtures; they are examples of UI behavior,
+not a live provider run.
+
+### Python 1.x
+
+The following captures show the supported Python frontend. Some workflows,
+including hunk rejection, fleet views, and inline belief rating, have not
+reached the same interface in the Rust preview.
 
 ![A session left, its live diff right, headed '2 files changed, +9 -1 against main'; one hunk carries an amber 'reject queued' badge above a disabled reject button](assets/shots/live-diff.png)
 
