@@ -145,17 +145,26 @@ def test_default_installs_rust_doxa_and_importable_sidecars(tmp_path):
 
 def test_shortcut_uses_installed_path_with_spaces_and_updates_on_reinstall(tmp_path):
     repo = _source_repo(tmp_path)
-    custom_bin = tmp_path / "bin dir $draft"
+    custom_bin = tmp_path / "bin dir $draft %two"
     options = {"DOXA_RUST_BIN_DIR": str(custom_bin)}
     first, home, _ = _run(tmp_path, repo, env_overrides=options)
     assert first.returncode == 0, first.stderr
     desktop = home / ".local/share/applications/doxa.desktop"
-    expected_exec = f'Exec="{custom_bin / "doxa"}"\n'.replace("$", r"\$")
+    expected_exec = f'Exec="{custom_bin / "doxa"}"\n'.replace("$", r"\$").replace("%", "%%")
     assert expected_exec in desktop.read_text()
     desktop.write_text("stale entry\n")
     second, _, _ = _run(tmp_path, repo, env_overrides=options)
     assert second.returncode == 0, second.stderr
     assert expected_exec in desktop.read_text()
+
+
+def test_shortcut_rejects_unrepresentable_launcher_path(tmp_path):
+    repo = _source_repo(tmp_path)
+    custom_bin = tmp_path / "bin\nInjected=true"
+    proc, home, _ = _run(tmp_path, repo, env_overrides={"DOXA_RUST_BIN_DIR": str(custom_bin)})
+    assert proc.returncode == 0, proc.stderr
+    assert "could not install desktop shortcut" in proc.stderr
+    assert not (home / ".local/share/applications/doxa.desktop").exists()
 
 
 def test_shortcut_opt_out(tmp_path):

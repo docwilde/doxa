@@ -173,9 +173,13 @@ if sys.platform == "linux":
     if not data_home.is_absolute():
         raise ValueError("XDG_DATA_HOME must be absolute")
 
-    # The Desktop Entry Specification requires quoting reserved characters,
-    # then escaping these four characters inside the quoted Exec argument.
-    exec_word = str(command)
+    # Exec is a desktop-entry command, not a shell command. Reject characters
+    # forbidden in its executable path before writing a launchable entry.
+    if any(ord(char) < 32 or ord(char) == 127 for char in str(command)) or "=" in str(command):
+        raise ValueError("installed launcher path cannot be represented in a desktop entry")
+    # Percent signs are field codes even in quoted arguments; %% is literal.
+    # Quote reserved characters, then escape the reserved characters below.
+    exec_word = str(command).replace("%", "%%")
     if any(char in exec_word for char in " \t\n\"'\\><~|&;$*?#()`"):
         for char in ("\\", '"', "`", "$"):
             exec_word = exec_word.replace(char, "\\" + char)
