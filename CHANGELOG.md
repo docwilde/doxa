@@ -5,6 +5,17 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.19 — 2026-09-25
+
+- Keep scrubbed Claude tool input and result detail in the expandable fold
+  when reopening a persisted session. Collapsed summaries stay short; expanded
+  details preserve line breaks up to an explicit 256 KiB display limit.
+- Clip restored transcript views at paragraph boundaries so a partial internal
+  detail record cannot appear as prose after the 480 KiB view limit.
+- Omit visible `You` and `Assistant` labels from transcript turns while keeping
+  the user turn highlight. Open HTTP(S) transcript links on Ctrl+left click;
+  supported terminals show a pointer cursor when hovering a link.
+
 ## 2.0.0-alpha.18 — 2026-09-25
 
 - Add `doxa worktrees cleanup FULL_SESSION_ID --confirm` for one verified clean

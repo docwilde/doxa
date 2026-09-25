@@ -13,6 +13,7 @@ use super::tool_cards::ToolCard;
 
 pub(super) const REASONING_PREFIX: &str = "\u{001e}DOXA_REASONING:";
 pub(super) const TOOL_ID_PREFIX: &str = "\u{001f}DOXA_TOOL_ID:";
+pub(crate) const RESTORED_TOOL_PREFIX: &str = "\u{001e}DOXA_RESTORED_TOOL:";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Section {
@@ -37,6 +38,7 @@ fn reasoning_block(paragraph: &str) -> Option<Block<'_>> {
 }
 
 fn is_tool_row(paragraph: &str) -> bool {
+    let paragraph = paragraph.split_once(RESTORED_TOOL_PREFIX).map_or(paragraph, |(display, _)| display);
     let paragraph = paragraph.split_once(TOOL_ID_PREFIX).map_or(paragraph, |(display, _)| display);
     if paragraph.contains('\n') { return false; }
     let Some(row) = paragraph.strip_prefix("Tool: ") else {
@@ -46,6 +48,7 @@ fn is_tool_row(paragraph: &str) -> bool {
 }
 
 fn tool_name(row: &str) -> &str {
+    let row = row.split_once(RESTORED_TOOL_PREFIX).map_or(row, |(display, _)| display);
     let row = row.split_once(TOOL_ID_PREFIX).map_or(row, |(display, _)| display);
     let row = row.strip_prefix("Tool: ").or_else(|| row.strip_prefix("[Tool: "))
         .unwrap_or("Tool");
@@ -55,8 +58,20 @@ fn tool_name(row: &str) -> &str {
 }
 
 fn tool_identity(row: &str) -> (&str, Option<String>) {
+    let row = row.split_once(RESTORED_TOOL_PREFIX).map_or(row, |(display, _)| display);
     let Some((display, encoded)) = row.split_once(TOOL_ID_PREFIX) else { return (row, None); };
     (display, serde_json::from_str::<String>(encoded).ok())
+}
+
+fn restored_detail(row: &str) -> Option<(&str, String)> {
+    let (_, encoded) = row.split_once(RESTORED_TOOL_PREFIX)?;
+    let detail: serde_json::Value = serde_json::from_str(encoded).ok()?;
+    let label = match detail.get("kind")?.as_str()? {
+        "input" => "Input",
+        "result" => "Result",
+        _ => return None,
+    };
+    Some((label, detail.get("text")?.as_str()?.to_owned()))
 }
 
 fn plain_detail(lines: &mut Vec<Line<'static>>, label: &str, value: &str, width: u16) {
@@ -94,9 +109,11 @@ fn render_turn(blocks: &mut Vec<Block<'_>>, lines: &mut Vec<Line<'static>>,
         match block {
             Block::Heading(paragraph) => {
                 flush_prose(&mut prose, lines, speaker);
-                let (next_speaker, heading) = transcript_roles::heading(paragraph)
+                if !lines.is_empty() && !lines.last().is_some_and(|line| line.spans.is_empty()) {
+                    lines.push(Line::default());
+                }
+                let next_speaker = transcript_roles::heading(paragraph)
                     .expect("heading blocks contain a recognized role");
-                lines.push(heading);
                 speaker = Some(next_speaker);
             }
             Block::Prose(paragraph) => {
@@ -108,7 +125,10 @@ fn render_turn(blocks: &mut Vec<Block<'_>>, lines: &mut Vec<Line<'static>>,
                 speaker = Some(Speaker::Assistant);
                 let index = sections.len();
                 sections.push(Section { index, line: lines.len() });
-                let calls = tools.iter().filter(|row| row.contains(" started") || row.starts_with("[Tool: ")).count();
+                let calls = tools.iter().filter(|row| {
+                    let display = row.split_once(RESTORED_TOOL_PREFIX).map_or(**row, |(display, _)| display);
+                    display.contains(" started") || display.starts_with("[Tool: ")
+                }).count();
                 let count = if calls == 0 { tools.len() } else { calls };
                 let open = expanded.is_some_and(|set| set.contains(&index));
                 let marker = if open { "▾" } else { "▸" };
@@ -132,7 +152,13 @@ fn render_turn(blocks: &mut Vec<Block<'_>>, lines: &mut Vec<Line<'static>>,
                             if let Some(input) = &card.input { plain_detail(lines, "Input", input, width); }
                             if let Some(result) = &card.result { plain_detail(lines, "Result", result, width); }
                         } else {
-                            lines.extend(markdown::render(display, width));
+                            if let Some((label, detail)) = restored_detail(row) {
+                                let status = display.split_once(" · ").map_or(display, |(status, _)| status);
+                                lines.push(Line::styled(format!("  {status}"), Style::default().fg(theme::ACCENT)));
+                                plain_detail(lines, label, &detail, width);
+                            } else {
+                                lines.extend(markdown::render(display, width));
+                            }
                         }
                     }
                 }
@@ -285,14 +311,37 @@ mod tests {
     }
 
     #[test]
+    fn restored_tool_detail_is_hidden_until_expanded_and_keeps_multiline_result() {
+        let result = "first line\n".to_owned() + &"second line ".repeat(80);
+        let records = format!("{}\n{}\n{}\n",
+            serde_json::json!({"type":"user","message":{"content":"question"}}),
+            serde_json::json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Read","input":{"path":"src/main.rs"}}]}}),
+            serde_json::json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":result}]}}));
+        let source = crate::history::render(&crate::transport::TranscriptSnapshot {
+            bytes: records.into_bytes(), earlier_bytes_omitted: false,
+        });
+        let (collapsed, sections) = render(&source, 80, None, None);
+        assert_eq!(sections.len(), 1);
+        assert!(shown(&collapsed).contains("1 tool call"));
+        assert!(!shown(&collapsed).contains("second line"));
+        let (expanded, _) = render(&source, 80, Some(&HashSet::from([0])), None);
+        let visible = shown(&expanded);
+        assert!(visible.contains("src/main.rs"));
+        assert!(visible.contains("first line"));
+        assert!(visible.contains("second line"));
+        assert!(!visible.contains(RESTORED_TOOL_PREFIX));
+    }
+
+    #[test]
     fn speakers_stay_distinct_around_a_collapsed_tool_section() {
         let source = "**You:**\n\nCheck **this**.\n\n**Assistant:**\n\nWorking.\n\nTool: Read started · hidden-path\n\nDone.";
         let (lines, sections) = render(source, 40, None, None);
         assert_eq!(sections.len(), 1);
-        assert_eq!(lines[0].to_string(), "❯ You");
+        assert!(lines[0].to_string().starts_with("│ Check this."));
         assert!(lines.iter().any(|line| line.to_string().starts_with("│ Check this.")
             && line.style.bg == Some(theme::HIGHLIGHT)));
-        assert!(lines.iter().any(|line| line.to_string() == "● Assistant"));
+        assert!(!shown(&lines).contains("● Assistant"));
+        assert!(!shown(&lines).contains("❯ You"));
         assert!(shown(&lines).contains("1 tool call"));
         assert!(!shown(&lines).contains("hidden-path"));
         assert!(shown(&lines).contains("Done."));
@@ -320,7 +369,7 @@ mod tests {
     fn code_fence_role_label_is_not_a_message_heading() {
         let (lines, sections) = render("**Assistant:**\n\n```text\n\n**You:**\n\n```\n\nDone.", 80, None, None);
         assert!(sections.is_empty());
-        assert_eq!(shown(&lines).matches("● Assistant").count(), 1);
+        assert!(!shown(&lines).contains("● Assistant"));
         assert!(!shown(&lines).contains("❯ You"));
         assert!(shown(&lines).contains("**You:**"));
         assert!(shown(&lines).contains("Done."));

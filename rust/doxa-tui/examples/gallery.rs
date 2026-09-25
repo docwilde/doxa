@@ -1,6 +1,7 @@
 //! Deterministic gallery frames rendered through the production Ratatui App.
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use doxa_tui::ui::App;
+use doxa_tui::{history, transport::TranscriptSnapshot};
 use doxa_worktrees::RepoStatus;
 use ratatui::{backend::TestBackend, style::Color, Terminal};
 use serde_json::{json, Value};
@@ -42,7 +43,7 @@ fn fixture() -> App {
     event(&mut app,"demo-codex-01","turn_done",json!({"input_tokens":4821,"output_tokens":918,"usage_scope":"session","usage_source":"codex_cli_turn_completed","ctx_percentage":18.0,"session_cost_usd":0.0187}));
     event(&mut app,"demo-claude-02","text_delta",json!({"text":"## Test review\n\nThe new cases cover clipped input and reconnects. One edge case remains in the transport fixture."}));
     event(&mut app,"demo-claude-02","turn_done",json!({"ctx_percentage":9.0,"session_cost_usd":0.0062}));
-    app.notice = "Rust 2.0.0-alpha.18 · fixture session".into();
+    app.notice = "Rust 2.0.0-alpha.19 · fixture session".into();
     app
 }
 
@@ -65,6 +66,23 @@ fn scene(name: &str) -> App {
             tool_activity(&mut app);
             key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
             key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        }
+        "restored-tool" => {
+            app.groups[0].tabs = vec!["demo-claude-02".into()];
+            if let Some(session) = app.sessions.iter_mut().find(|session| session.id == "demo-claude-02") {
+                session.transcript.clear();
+            }
+            let records = [
+                json!({"type":"user","message":{"content":"Review the parser after reconnect."}}),
+                json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"restore-1","name":"Read","input":{"path":"src/parser.rs"}}]}}),
+                json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"restore-1","content":"pub fn parse(input: &str) -> Result<Node, Error> {\n    check_bounds(input)?;\n    decode(input)\n}\n\nThe remaining boundary case is covered by parser_test.rs."}]}}),
+            ];
+            let bytes = records.iter().map(Value::to_string).collect::<Vec<_>>().join("\n").into_bytes();
+            let markdown = history::render(&TranscriptSnapshot { bytes, earlier_bytes_omitted: false });
+            event(&mut app, "demo-claude-02", "text_delta", json!({"text":markdown,"snapshot":true}));
+            key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+            key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+            app.notice = "Restored session · expanded tool detail".into();
         }
         "processing" => {
             app.groups[0].tabs = vec!["demo-codex-01".into()];
@@ -105,7 +123,7 @@ fn scene(name: &str) -> App {
             event(&mut app,"demo-deepseek-03","text_delta",json!({"text":
                 "## Model options\n\nThe selected model supports reasoning effort controls.\n\n- This session reports high effort\n- Its next turn may use a different level\n- Model choices follow the selected engine"}));
             key(&mut app, KeyCode::Char('f'), KeyModifiers::ALT);
-            app.notice = "Rust 2.0.0-alpha.18 · effort fixture".into();
+            app.notice = "Rust 2.0.0-alpha.19 · effort fixture".into();
         }
         "history" => {
             key(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL);
@@ -145,7 +163,7 @@ fn rgb(color: Color) -> [u8; 3] {
 fn main() {
     let name = std::env::args().nth(1).expect("scene name");
     let (width,height) = match name.as_str() {
-        "hero" | "tool-activity" | "tool-expanded" | "processing" | "reasoning" | "commands" | "needs-input" | "permissions" | "effort" | "history" | "queue" | "memory" => (126,31),
+        "hero" | "tool-activity" | "tool-expanded" | "restored-tool" | "processing" | "reasoning" | "commands" | "needs-input" | "permissions" | "effort" | "history" | "queue" | "memory" => (126,31),
         _ => panic!("unknown scene"),
     };
     let app = scene(&name);

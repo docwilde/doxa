@@ -1,8 +1,8 @@
-//! Compact speaker styling for transcript headings and message bodies.
+//! Compact speaker styling for transcript message bodies.
 //! The transcript remains ordinary Markdown for persistence and replay.
 
 use ratatui::{
-    style::{Modifier, Style},
+    style::Style,
     text::{Line, Span},
 };
 
@@ -14,36 +14,19 @@ pub(super) enum Speaker {
     Assistant,
 }
 
-/// Recognize a standalone transcript heading. Callers should avoid treating
-/// text inside a fenced code block as a heading.
-pub(super) fn heading(paragraph: &str) -> Option<(Speaker, Line<'static>)> {
+/// Recognize a standalone transcript role marker. Callers should avoid
+/// treating text inside a fenced code block as a marker.
+pub(super) fn heading(paragraph: &str) -> Option<Speaker> {
     match paragraph {
-        "**You:**" => Some((
-            Speaker::User,
-            Line::styled(
-                "❯ You",
-                Style::default()
-                    .fg(theme::ACCENT)
-                    .bg(theme::HIGHLIGHT)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        )),
-        "**Assistant:**" => Some((
-            Speaker::Assistant,
-            Line::styled(
-                "● Assistant",
-                Style::default()
-                    .fg(theme::SECONDARY)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        )),
+        "**You:**" => Some(Speaker::User),
+        "**Assistant:**" => Some(Speaker::Assistant),
         _ => None,
     }
 }
 
 /// Render message Markdown at its actual content width. User messages get a
 /// warm highlight and a narrow left rule; assistant text retains the normal
-/// transcript surface. There are no spacer rows between heading and body.
+/// transcript surface. Role marker rows are not drawn.
 pub(super) fn render(source: &str, width: u16, speaker: Option<Speaker>) -> Vec<Line<'static>> {
     let user = speaker == Some(Speaker::User);
     let rule = user && width > 2;
@@ -65,17 +48,14 @@ pub(super) fn render(source: &str, width: u16, speaker: Option<Speaker>) -> Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::style::Modifier;
 
     #[test]
-    fn standalone_headings_are_distinct_without_changing_transcript_text() {
-        let (user, user_line) = heading("**You:**").unwrap();
-        let (assistant, assistant_line) = heading("**Assistant:**").unwrap();
+    fn standalone_role_markers_select_body_style() {
+        let user = heading("**You:**").unwrap();
+        let assistant = heading("**Assistant:**").unwrap();
         assert_eq!(user, Speaker::User);
         assert_eq!(assistant, Speaker::Assistant);
-        assert_eq!(user_line.to_string(), "❯ You");
-        assert_eq!(assistant_line.to_string(), "● Assistant");
-        assert_eq!(user_line.style.bg, Some(theme::HIGHLIGHT));
-        assert_ne!(user_line.style.fg, assistant_line.style.fg);
         assert!(heading("**You:** more text").is_none());
         assert!(heading("**Assistant:** more text").is_none());
     }

@@ -45,7 +45,7 @@ struct Renderer {
 }
 
 /// Render CommonMark and GFM tables to styled terminal lines. Link destinations
-/// are visible text; this API has no click coordinates or opener. Model supplied
+/// are visible text; the UI derives click coordinates from the rendered lines. Model supplied
 /// control characters are replaced so they cannot become terminal commands.
 pub fn render(source: &str, width: u16) -> Vec<Line<'static>> {
     let mut renderer = Renderer {
