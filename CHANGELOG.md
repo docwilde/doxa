@@ -5,6 +5,15 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.22 — 2026-09-25
+
+- Add native fleet preflight reporting for supervisor capacity, shared memory
+  and budget division, and approval policy. Fleet execution still uses the
+  Python bridge.
+- Show per-session usage and context details in scrollable panels above the
+  active prompt; unavailable provider telemetry remains explicitly unknown.
+- Add named session collections with ordering and local collection commands.
+
 ## 2.0.0-alpha.21 — 2026-09-25
 
 - Open a fresh session tab in a verified directory with `/cd <path>` while
