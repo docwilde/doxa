@@ -53,7 +53,8 @@ sessions, use `--list` and select one by full ID or unique ID prefix.
 without a connection. `Ctrl+P` opens the action menu; use Up/Down, Enter, and
 Esc to navigate the peer map, tool activity, session rail selection, tabs, and
 panes. `Ctrl+M` and `Ctrl+T` remain direct shortcuts. `Ctrl+Q` detaches the Rust UI
-without stopping its daemon. `Ctrl+M` opens the read-only peer communications
+without stopping its daemon; `Ctrl+C` is left available for terminal copy.
+`Ctrl+M` opens the read-only peer communications
 map; Up/Down selects a peer, R refreshes the live roster, and Esc closes it.
 The map uses `tui-nodes` 0.9 with the Rust frontend's Ratatui 0.29.
 Lines show observed traffic and the detail row names sent and received counts.
@@ -67,7 +68,7 @@ the JSONL file retains the full history. Older daemons without snapshot
 metadata fall back to their 512-event replay ring. A turn still running at
 attach can have text that was streamed but not yet persisted, so its earlier
 in-flight deltas may be absent. `Ctrl+T` opens bounded tool activity cards;
-clickable links are still 2.0 work. The binary version is `2.0.0-alpha.8` for this
+clickable links are still 2.0 work. The binary version is `2.0.0-alpha.9` for this
 separate development line, not a DOXA 2.0 release.
 
 `Ctrl+R` opens a searchable picker for attached and archived sessions with
@@ -82,7 +83,14 @@ closes. The diff pane is read-only and requires enough terminal space for two
 panes. Each split pane has its own prompt and keeps a draft for its active
 session. Its status rows show engine and model chips, plus context, token usage,
 cost, and LORE status when the daemon reports them. Unknown values display `?`;
-token scope and estimated cost are labeled. `Alt+E` opens an engine picker,
+token scope and estimated cost are labeled. In a prompt, `Enter` submits, while
+`Shift+Enter` or `Alt+Enter` inserts a newline (`Ctrl+J` also works when
+reported distinctly by the terminal). Arrow keys move the cursor across
+lines; `Home`, `End`, `Backspace`, and `Delete` edit at the cursor. Bracketed
+paste preserves line breaks, removes terminal control characters, and never
+submits. Prompts are capped at 10 KiB; an oversized paste is truncated with a
+notice. Drafts and cursor positions stay with each session pane.
+`Alt+E` opens an engine picker,
 then a model and first-prompt form that starts a new session in the selected
 pane. A blank model uses the configured default. Claude uses the sidecar
 installed beside `doxa-rs`; `DOXA_CLAUDE_SCRIPT` can select another absolute
@@ -216,7 +224,10 @@ turn only, under a memory header and footer. The snapshot is absent from the
 displayed prompt and transcript, and a resumed provider thread receives no
 duplicate. If the snapshot is unavailable or too large, the turn proceeds
 without context; LORE scrubbing remains required for visible and persisted
-text. After each native Codex turn and at shutdown, the external LORE sidecar
+text. Transcript or thread-state write failures withhold a turn or stop the
+session. An interrupted or failed Codex turn leaves a durable incomplete marker
+and refuses unsafe thread resume after restart. After each native Codex turn
+and at shutdown, the external LORE sidecar
 incrementally indexes its verified transcript descriptor when LORE 0.58.4 or
 newer exposes `index_live_fd`. Older installed LORE plugins still provide
 scrubbing and snapshots but cannot advertise transcript indexing. Automatic Codex proposal

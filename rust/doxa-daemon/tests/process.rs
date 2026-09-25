@@ -737,6 +737,7 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"fixture-
         let mut process = Process::start_codex(dir.path(), &codex, &python);
         let (mut reader, mut socket) = process.connect();
         let hello = receive(&mut reader);
+        assert_eq!(hello["doxa"], env!("CARGO_PKG_VERSION"));
         if index == 1 {
             assert_eq!(
                 hello["transcript_path"],
@@ -787,9 +788,169 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"fixture-
     .unwrap();
     assert_eq!(thread["thread_id"], "thread_1");
     assert_eq!(thread["session_id"], "codex-session");
+    assert_eq!(thread["turn_incomplete"], false);
     assert!(fs::read_to_string(args)
         .unwrap()
         .contains("exec\nresume\nthread_1\n"));
+}
+
+#[test]
+fn codex_prompt_append_failure_withholds_provider_execution() {
+    let dir = tempfile::tempdir().unwrap();
+    let codex = dir.path().join("codex-fixture");
+    let python = dir.path().join("lore-fixture");
+    let invoked = dir.path().join("provider-invoked");
+    fake_scrubber(&python, false);
+    executable(&codex, &format!("#!/bin/sh\ntouch '{}'\n", invoked.display()));
+    let mut process = Process::start_codex(dir.path(), &codex, &python);
+    let (mut reader, mut socket) = process.connect();
+    receive(&mut reader);
+    send(&mut socket, json!({"type":"attach","cursor":null}));
+    let transcript = dir.path().join("project/codex-session.jsonl");
+    std::os::unix::fs::symlink("/dev/full", &transcript).unwrap();
+    send(&mut socket, json!({"type":"prompt","id":1,"text":"hello"}));
+    assert_eq!(receive(&mut reader)["ok"], true);
+    loop {
+        let frame = receive(&mut reader);
+        if frame["event"]["type"] == "turn_done" {
+            assert_eq!(frame["event"]["data"]["is_error"], true);
+            assert!(frame["event"]["data"]["error"]
+                .as_str()
+                .unwrap()
+                .contains("prompt could not be persisted"));
+            break;
+        }
+    }
+    assert!(!invoked.exists());
+    send(&mut socket, json!({"type":"prompt","id":2,"text":"again"}));
+    assert_eq!(receive(&mut reader)["ok"], true);
+    loop {
+        let frame = receive(&mut reader);
+        if frame["event"]["type"] == "turn_done" {
+            assert_eq!(frame["event"]["data"]["is_error"], true);
+            break;
+        }
+    }
+    assert!(!invoked.exists());
+    send(&mut socket, json!({"type":"call","id":3,"method":"stop","params":{}}));
+    assert_eq!(receive(&mut reader)["ok"], true);
+    wait_until(|| process.exited());
+}
+
+#[test]
+fn codex_thread_write_failure_reports_turn_error_and_stops_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let codex = dir.path().join("codex-fixture");
+    let python = dir.path().join("lore-fixture");
+    let invoked = dir.path().join("provider-invoked");
+    fake_scrubber(&python, false);
+    executable(
+        &codex,
+        &format!(
+            "#!/bin/sh\ntouch '{}'\ncat >/dev/null\necho '{{\"type\":\"thread.started\",\"thread_id\":\"thread_1\"}}'\necho '{{\"type\":\"item.completed\",\"item\":{{\"type\":\"agent_message\",\"text\":\"answer\"}}}}'\n",
+            invoked.display()
+        ),
+    );
+    let mut process = Process::start_codex(dir.path(), &codex, &python);
+    let (mut reader, mut socket) = process.connect();
+    receive(&mut reader);
+    send(&mut socket, json!({"type":"attach","cursor":null}));
+    fs::create_dir(dir.path().join("project/codex-session.codex.json")).unwrap();
+    send(&mut socket, json!({"type":"prompt","id":1,"text":"hello"}));
+    assert_eq!(receive(&mut reader)["ok"], true);
+    loop {
+        let frame = receive(&mut reader);
+        if frame["event"]["type"] == "turn_done" {
+            assert_eq!(frame["event"]["data"]["is_error"], true);
+            assert!(frame["event"]["data"]["error"]
+                .as_str()
+                .unwrap()
+                .contains("persistence failed"));
+            break;
+        }
+    }
+    assert!(invoked.exists());
+    send(&mut socket, json!({"type":"prompt","id":2,"text":"again"}));
+    assert_eq!(receive(&mut reader)["ok"], true);
+    loop {
+        let frame = receive(&mut reader);
+        if frame["event"]["type"] == "turn_done" {
+            assert_eq!(frame["event"]["data"]["is_error"], true);
+            break;
+        }
+    }
+    send(&mut socket, json!({"type":"call","id":3,"method":"stop","params":{}}));
+    assert_eq!(receive(&mut reader)["ok"], true);
+    wait_until(|| process.exited());
+}
+
+#[test]
+fn codex_assistant_append_failure_overrides_successful_provider_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let codex = dir.path().join("codex-fixture");
+    let python = dir.path().join("lore-fixture");
+    let ready = dir.path().join("provider-ready");
+    let release = dir.path().join("provider-release");
+    fake_scrubber(&python, false);
+    executable(
+        &codex,
+        &format!(
+            "#!/bin/sh\ncat >/dev/null\necho '{{\"type\":\"thread.started\",\"thread_id\":\"thread_1\"}}'\ntouch '{}'\nwhile [ ! -e '{}' ]; do sleep 0.01; done\necho '{{\"type\":\"item.completed\",\"item\":{{\"type\":\"agent_message\",\"text\":\"answer\"}}}}'\n",
+            ready.display(),
+            release.display()
+        ),
+    );
+    let mut process = Process::start_codex(dir.path(), &codex, &python);
+    let (mut reader, mut socket) = process.connect();
+    receive(&mut reader);
+    send(&mut socket, json!({"type":"attach","cursor":null}));
+    send(&mut socket, json!({"type":"prompt","id":1,"text":"hello"}));
+    assert_eq!(receive(&mut reader)["ok"], true);
+    wait_until(|| ready.exists());
+    let transcript = dir.path().join("project/codex-session.jsonl");
+    let saved = dir.path().join("project/saved-user.jsonl");
+    fs::rename(&transcript, &saved).unwrap();
+    std::os::unix::fs::symlink("/dev/full", &transcript).unwrap();
+    fs::write(&release, "").unwrap();
+    loop {
+        let frame = receive(&mut reader);
+        if frame["event"]["type"] == "turn_done" {
+            assert_eq!(frame["event"]["data"]["is_error"], true);
+            assert!(frame["event"]["data"]["error"]
+                .as_str()
+                .unwrap()
+                .contains("persistence failed"));
+            break;
+        }
+    }
+    assert!(fs::read_to_string(saved).unwrap().contains("hello"));
+    let thread: Value = serde_json::from_slice(
+        &fs::read(dir.path().join("project/codex-session.codex.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(thread["thread_id"], "thread_1");
+    assert_eq!(thread["turn_incomplete"], true);
+    send(&mut socket, json!({"type":"call","id":2,"method":"stop","params":{}}));
+    assert_eq!(receive(&mut reader)["ok"], true);
+    wait_until(|| process.exited());
+    let restart = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+        .args([
+            "--runtime-dir",
+            dir.path().to_str().unwrap(),
+            "--cwd",
+            dir.path().to_str().unwrap(),
+            "--session-id",
+            "codex-session",
+            "--engine",
+            "codex",
+            "--codex-bin",
+            codex.to_str().unwrap(),
+            "--lore-python",
+            python.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(!restart.status.success());
 }
 
 #[test]
@@ -1090,7 +1251,7 @@ fn interrupt_reaps_codex_process_group() {
     executable(
         &codex,
         &format!(
-            "#!/bin/sh\ncat >/dev/null\nsh -c 'sleep 1; echo leaked > {}' &\nwait\n",
+            "#!/bin/sh\ncat >/dev/null\necho '{{\"type\":\"thread.started\",\"thread_id\":\"thread_1\"}}'\nsh -c 'sleep 1; echo leaked > {}' &\nwait\n",
             marker.display()
         ),
     );
@@ -1101,6 +1262,8 @@ fn interrupt_reaps_codex_process_group() {
     send(&mut socket, json!({"type":"prompt","id":1,"text":"hello"}));
     assert_eq!(receive(&mut reader)["ok"], true);
     assert_eq!(receive(&mut reader)["event"]["type"], "turn_started");
+    let thread_path = dir.path().join("project/codex-session.codex.json");
+    wait_until(|| thread_path.exists());
     send(
         &mut socket,
         json!({"type":"call","id":2,"method":"interrupt","params":{}}),
@@ -1120,12 +1283,26 @@ fn interrupt_reaps_codex_process_group() {
     }
     thread::sleep(Duration::from_millis(1200));
     assert!(!marker.exists(), "Codex descendant survived interruption");
+    let thread: Value = serde_json::from_slice(&fs::read(&thread_path).unwrap()).unwrap();
+    assert_eq!(thread["thread_id"], "thread_1");
+    assert_eq!(thread["turn_incomplete"], true);
     send(
         &mut socket,
         json!({"type":"call","id":3,"method":"stop","params":{}}),
     );
     assert_eq!(receive(&mut reader)["ok"], true);
     wait_until(|| process.exited());
+    let restart = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+        .args([
+            "--runtime-dir", dir.path().to_str().unwrap(),
+            "--cwd", dir.path().to_str().unwrap(),
+            "--session-id", "codex-session", "--engine", "codex",
+            "--codex-bin", codex.to_str().unwrap(),
+            "--lore-python", python.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(!restart.status.success(), "incomplete turn must refuse restart");
 }
 
 #[test]
