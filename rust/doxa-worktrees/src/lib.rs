@@ -176,7 +176,7 @@ pub fn switch_base(path: &Path, requested: &str) -> Result<String, String> {
     if target == record.branch {
         return Err("this session's own branch cannot be its base".into());
     }
-    let status = git_text(&record.path, &["status", "--porcelain", "--untracked-files=all"])
+    let status = git_text(&record.path, &["status", "--porcelain", "--untracked-files=all", "--ignored"])
         .ok_or_else(|| "could not inspect worktree status; switch refused".to_owned())?;
     if !status.is_empty() { return Err(format!("{} has uncommitted changes; {}", record.branch, keep())); }
     let spec = format!("{old_base}..{}", record.branch);
@@ -192,10 +192,19 @@ pub fn switch_base(path: &Path, requested: &str) -> Result<String, String> {
     let target_oid = git_text(&record.path, &["rev-parse", "--verify", &format!("{target}^{{commit}}")])
         .filter(|oid| valid_commit_oid(oid))
         .ok_or_else(|| "could not verify target commit; switch refused".to_owned())?;
-    // A clean, commit-free session may move to a different base. Rebase does
-    // the checkout/index update as one Git operation and refuses locked trees.
-    if !git(&record.path, &["rebase", &target_oid], Duration::from_secs(30)).is_some_and(|(ok, _)| ok) {
-        return Err(format!("rebase onto {target} failed; inspect {}; {}", record.path.display(), keep()));
+    // Update the checkout/index to the exact target tree without asking Git
+    // to infer a replay range. A moving old base can make `git rebase target`
+    // replay commits that belonged to that base, even with zero unique work.
+    // read-tree refuses local file conflicts; if the ref CAS fails afterward,
+    // the resulting staged changes remain visible and finalize keeps them.
+    if !git(&record.path, &["read-tree", "-m", "-u", &before, &target_oid], Duration::from_secs(30))
+        .is_some_and(|(ok, _)| ok) {
+        return Err(format!("checkout of {target} failed; inspect {}; {}", record.path.display(), keep()));
+    }
+    let full_ref = format!("refs/heads/{}", record.branch);
+    if !git(&main, &["update-ref", &full_ref, &target_oid, &before], Duration::from_secs(10))
+        .is_some_and(|(ok, _)| ok) {
+        return Err(format!("branch moved during switch; inspect {}; {}", record.path.display(), keep()));
     }
     let after = git_text(&record.path, &["rev-parse", "--verify", "HEAD^{commit}"]);
     if after.as_deref() != Some(target_oid.as_str())
@@ -652,6 +661,64 @@ mod tests {
         assert!(switch_base(&path, "main").unwrap_err().contains("ahead"));
         assert_eq!(git_text(&path, &["rev-parse", "HEAD"]).as_deref(), Some(own_oid.as_str()));
         assert!(tree.finish().contains("kept"));
+    }
+    #[test]
+    fn switch_does_not_replay_old_base_commits_when_base_advanced() {
+        let dir = tempfile::tempdir().unwrap();
+        env::set_var("DOXA_HOME", dir.path().join("home"));
+        env::set_var("DOXA_WORKTREE", "1");
+        let main = dir.path().join("repo");
+        fs::create_dir(&main).unwrap();
+        run_git(&main, &["init", "-q", "-b", "main"]);
+        fs::write(main.join("file"), "A\n").unwrap();
+        run_git(&main, &["add", "file"]);
+        run_git(&main, &["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "test: A"]);
+        let a = git_text(&main, &["rev-parse", "HEAD"]).unwrap();
+        fs::write(main.join("file"), "B\n").unwrap();
+        run_git(&main, &["add", "file"]);
+        run_git(&main, &["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "test: B"]);
+        let mut tree = create(&main, "baseadv1").unwrap();
+        let path = tree.path().to_path_buf();
+        fs::write(main.join("file"), "C\n").unwrap();
+        run_git(&main, &["add", "file"]);
+        run_git(&main, &["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "test: C"]);
+        run_git(&main, &["branch", "feature", &a]);
+        run_git(&main, &["checkout", "-q", "feature"]);
+        fs::write(main.join("file"), "X\n").unwrap();
+        run_git(&main, &["add", "file"]);
+        run_git(&main, &["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "test: X"]);
+        let x = git_text(&main, &["rev-parse", "HEAD"]).unwrap();
+        run_git(&main, &["checkout", "-q", "main"]);
+        assert!(switch_base(&path, "feature").unwrap().contains("now based"));
+        assert_eq!(git_text(&path, &["rev-parse", "HEAD"]).as_deref(), Some(x.as_str()));
+        assert_eq!(fs::read_to_string(path.join("file")).unwrap(), "X\n");
+        assert_eq!(git_text(&path, &["status", "--porcelain"]).unwrap(), "");
+        assert!(tree.finish().is_empty());
+    }
+    #[test]
+    fn switch_refuses_ignored_files_that_target_would_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        env::set_var("DOXA_HOME", dir.path().join("home"));
+        env::set_var("DOXA_WORKTREE", "1");
+        let main = dir.path().join("repo");
+        fs::create_dir(&main).unwrap();
+        run_git(&main, &["init", "-q", "-b", "main"]);
+        fs::write(main.join(".gitignore"), "cache/\n").unwrap();
+        run_git(&main, &["add", ".gitignore"]);
+        run_git(&main, &["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "test: ignore cache"]);
+        let mut tree = create(&main, "ignored1").unwrap();
+        let path = tree.path().to_path_buf();
+        fs::create_dir(path.join("cache")).unwrap();
+        fs::write(path.join("cache/user.txt"), "private work\n").unwrap();
+        run_git(&main, &["checkout", "-qb", "feature"]);
+        fs::create_dir(main.join("cache")).unwrap();
+        fs::write(main.join("cache/user.txt"), "tracked target\n").unwrap();
+        run_git(&main, &["add", "-f", "cache/user.txt"]);
+        run_git(&main, &["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "test: track cache"]);
+        assert!(switch_base(&path, "feature").unwrap_err().contains("uncommitted"));
+        assert_eq!(fs::read_to_string(path.join("cache/user.txt")).unwrap(), "private work\n");
+        // Finalization's ignored-file rule is covered by orphan cleanup.
+        let _ = tree.finish();
     }
     #[test]
     fn clean_tree_is_removed_but_dirty_and_committed_work_are_kept() {
