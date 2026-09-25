@@ -63,6 +63,7 @@ pub fn repo_status(cwd: &Path) -> Option<RepoStatus> {
     Some(RepoStatus::Repository { repo, base, checked_out, sha, worktree })
 }
 
+#[derive(Debug)]
 pub struct Managed {
     path: PathBuf,
     created: bool,
@@ -440,16 +441,27 @@ pub fn create_from(cwd: &Path, id: &str, requested_base: Option<&str>) -> Option
     let worktrees = ensure_owned_dir(&root()?)?;
     let path = worktrees.join(format!("{repo}-{short}"));
     if let Some(existing) = worktree_for_branch(&main, &branch) {
-        let (record, old_base, _, _) = read_record(&existing)?;
+        let (record, old_base, recorded_main, pinned) = read_record(&existing)?;
         if record.path != existing.canonicalize().ok()? || record.session_id != id || record.path != path
+            || recorded_main != main
             || requested_base.is_some() && old_base != base
             || branch == base && cwd.canonicalize().ok()? != record.path {
             return None;
         }
         let lock = lock_worktree(&record.path)?;
         // The metadata may have changed while we waited for the lock.
-        let (locked, _, _, _) = read_record(&record.path)?;
-        if locked.path != record.path || locked.session_id != id { return None; }
+        let (locked, locked_base, locked_main, locked_pin) = read_record(&record.path)?;
+        if locked.path != record.path || locked.session_id != id || locked.branch != branch
+            || locked_base != old_base || locked_main != main || locked_pin != pinned
+            || worktree_for_branch(&main, &branch).as_ref() != Some(&record.path)
+            || git_text(&record.path, &["symbolic-ref", "--quiet", "--short", "HEAD"]).as_deref() != Some(branch.as_str()) {
+            return None;
+        }
+        let head = git_text(&record.path, &["rev-parse", "--verify", "HEAD^{commit}"])
+            .filter(|oid| valid_commit_oid(oid))?;
+        if pinned.as_deref().is_some_and(|oid| !git(&main,
+            &["merge-base", "--is-ancestor", oid, &head], Duration::from_secs(10))
+                .is_some_and(|(ok, _)| ok)) { return None; }
         return Some(Managed { path: record.path, created: false, finished: false, lock: Some(lock) });
     }
     if branch == base { return None; }
@@ -473,6 +485,105 @@ pub fn create_from(cwd: &Path, id: &str, requested_base: Option<&str>) -> Option
     }
     let lock = lock_worktree(&path)?;
     Some(Managed { path, created: true, finished: false, lock: Some(lock) })
+}
+
+/// Recreate an archived session checkout whose directory has disappeared.
+/// The sidecar, pinned base commit, branch and Git's old registration must all
+/// agree. This cannot recover uncommitted files from a deleted directory; the
+/// branch and all its commits are retained. A recovered tree is never
+/// automatically finalized when this handle is dropped.
+pub fn recover_missing(path: &Path, session_id: &str) -> Result<Managed, String> {
+    let refuse = |reason: &str| format!("worktree recovery refused: {reason}");
+    if session_id.is_empty() { return Err(refuse("session ID is empty")); }
+    let worktrees = root().ok_or_else(|| refuse("DOXA home is unavailable"))?;
+    let worktrees = worktrees.canonicalize().map_err(|_| refuse("DOXA worktree root is unavailable"))?;
+    owned_dir(&worktrees).ok_or_else(|| refuse("DOXA worktree root is untrusted"))?;
+    let meta_dir = worktrees.join(".meta");
+    owned_dir(&meta_dir).ok_or_else(|| refuse("DOXA metadata directory is untrusted"))?;
+    let name = path.file_name().and_then(|v| v.to_str()).ok_or_else(|| refuse("invalid worktree path"))?;
+    let expected = worktrees.join(name);
+    if path != expected { return Err(refuse("worktree path is outside the managed root")); }
+    if fs::symlink_metadata(path).is_ok() { return Err(refuse("checkout path already exists")); }
+    let sidecar = meta_dir.join(format!("{name}.json"));
+    let read_sidecar = || -> Option<(Vec<u8>, u64, u64)> {
+        let raw = fs::symlink_metadata(&sidecar).ok()?;
+        if !raw.file_type().is_file() || raw.uid() != unsafe { libc::geteuid() }
+            || raw.permissions().mode() & 0o077 != 0 || raw.len() > MAX_META_BYTES { return None; }
+        let file = OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(&sidecar).ok()?;
+        let stat = file.metadata().ok()?;
+        if (stat.dev(), stat.ino()) != (raw.dev(), raw.ino()) { return None; }
+        let mut bytes = Vec::new();
+        file.take(MAX_META_BYTES + 1).read_to_end(&mut bytes).ok()?;
+        if bytes.len() as u64 > MAX_META_BYTES { return None; }
+        Some((bytes, stat.dev(), stat.ino()))
+    };
+    let snapshot = read_sidecar().ok_or_else(|| refuse("sidecar is missing or untrusted"))?;
+    let data: serde_json::Value = serde_json::from_slice(&snapshot.0)
+        .map_err(|_| refuse("sidecar is invalid"))?;
+    if data.get("machine_id").and_then(|v| v.as_str()).is_some_and(|v| !v.is_empty()) {
+        return Err(refuse("sidecar belongs to another machine"));
+    }
+    let short = short_id(session_id);
+    let branch = format!("doxa/{short}");
+    let main = data.get("main_root").and_then(|v| v.as_str()).map(PathBuf::from)
+        .ok_or_else(|| refuse("sidecar has no repository"))?;
+    if !main.is_absolute() || main.canonicalize().ok().as_ref() != Some(&main)
+        || main_root(&main).as_ref() != Some(&main)
+        || main.file_name().and_then(|v| v.to_str()).map(|v| format!("{v}-{short}")) != Some(name.to_owned())
+        || data.get("session_id").and_then(|v| v.as_str()) != Some(session_id)
+        || data.get("branch").and_then(|v| v.as_str()) != Some(branch.as_str()) {
+        return Err(refuse("sidecar identity does not match this session and repository"));
+    }
+    let base = data.get("base_ref").and_then(|v| v.as_str())
+        .filter(|v| safe_ref(v) && *v != branch)
+        .ok_or_else(|| refuse("sidecar base is invalid"))?;
+    let base_oid = data.get("base_oid").and_then(|v| v.as_str())
+        .filter(|v| valid_commit_oid(v))
+        .ok_or_else(|| refuse("sidecar lacks a pinned base commit"))?;
+    let lock = lock_worktree(path).ok_or_else(|| refuse("worktree lock is busy or untrusted"))?;
+    if read_sidecar().as_ref() != Some(&snapshot) {
+        return Err(refuse("sidecar changed while locking"));
+    }
+    if fs::symlink_metadata(path).is_ok() { return Err(refuse("checkout path was occupied")); }
+    let branch_oid = git_text(&main, &["rev-parse", "--verify", &format!("refs/heads/{branch}^{{commit}}")])
+        .filter(|v| valid_commit_oid(v))
+        .ok_or_else(|| refuse("session branch is missing"))?;
+    if !git(&main, &["cat-file", "-e", &format!("{base_oid}^{{commit}}")], Duration::from_secs(10))
+        .is_some_and(|(ok, _)| ok)
+        || !git(&main, &["merge-base", "--is-ancestor", base_oid, &branch_oid], Duration::from_secs(10))
+            .is_some_and(|(ok, _)| ok) {
+        return Err(refuse("pinned base does not belong to session branch"));
+    }
+    // A stale registration at this exact path is expected after manual
+    // deletion. A registration elsewhere means this branch belongs to a
+    // different checkout and must never be seized with --force.
+    let registration = worktree_for_branch(&main, &branch);
+    if registration.as_ref().is_some_and(|registered| registered != path) {
+        return Err(refuse("session branch is registered to another checkout"));
+    }
+    if read_sidecar().as_ref() != Some(&snapshot) || fs::symlink_metadata(path).is_ok() {
+        return Err(refuse("path or sidecar changed before checkout"));
+    }
+    let path_str = path.to_str().ok_or_else(|| refuse("worktree path is not UTF-8"))?;
+    let args: Vec<&str> = if registration.is_some() {
+        vec!["worktree", "add", "--force", "-q", path_str, &branch]
+    } else {
+        vec!["worktree", "add", "-q", path_str, &branch]
+    };
+    if !git(&main, &args, Duration::from_secs(30)).is_some_and(|(ok, _)| ok) {
+        return Err(refuse("Git could not restore the checkout; inspect its path and branch"));
+    }
+    if read_sidecar().as_ref() != Some(&snapshot)
+        || read_record(path).is_none_or(|(record, recorded_base, recorded_main, pinned)|
+            record.session_id != session_id || record.branch != branch || record.path != path
+                || recorded_main != main || recorded_base != base || pinned.as_deref() != Some(base_oid))
+        || worktree_for_branch(&main, &branch).as_ref() != Some(&path.to_path_buf())
+        || git_text(path, &["symbolic-ref", "--quiet", "--short", "HEAD"]).as_deref() != Some(branch.as_str())
+        || git_text(path, &["rev-parse", "--verify", "HEAD^{commit}"]).as_deref() != Some(branch_oid.as_str()) {
+        return Err(refuse("restored checkout could not be verified; it was kept for inspection"));
+    }
+    Ok(Managed { path: path.to_path_buf(), created: false, finished: false, lock: Some(lock) })
 }
 
 /// Remove only a verified, clean managed worktree with no unique commits.
@@ -653,6 +764,57 @@ mod tests {
     fn run_git(cwd: &Path, args: &[&str]) {
         let result = Command::new("git").args(args).current_dir(cwd).output().unwrap();
         assert!(result.status.success(), "git {:?}: {}", args, String::from_utf8_lossy(&result.stderr));
+    }
+    #[test]
+    fn recovers_deleted_checkout_from_pinned_sidecar_and_keeps_unique_commits() {
+        let _serial = TEST_ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        env::set_var("DOXA_HOME", dir.path().join("home"));
+        env::set_var("DOXA_WORKTREE", "1");
+        let main = dir.path().join("repo");
+        fs::create_dir(&main).unwrap();
+        run_git(&main, &["init", "-q", "-b", "main"]);
+        fs::write(main.join("file"), "base\n").unwrap();
+        run_git(&main, &["add", "file"]);
+        run_git(&main, &["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "test: base"]);
+        let mut tree = create(&main, "recover01").unwrap();
+        let path = tree.path().to_path_buf();
+        fs::write(path.join("file"), "unique commit\n").unwrap();
+        run_git(&path, &["add", "file"]);
+        run_git(&path, &["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "test: keep"]);
+        let unique_oid = git_text(&path, &["rev-parse", "HEAD"]).unwrap();
+        assert!(tree.finish().contains("kept"));
+        fs::remove_dir_all(&path).unwrap();
+        assert!(!path.exists());
+        let recovered = recover_missing(&path, "recover01").unwrap();
+        assert_eq!(recovered.path(), path);
+        assert_eq!(git_text(&path, &["rev-parse", "HEAD"]).as_deref(), Some(unique_oid.as_str()));
+        assert_eq!(fs::read_to_string(path.join("file")).unwrap(), "unique commit\n");
+        drop(recovered);
+        assert!(path.exists());
+        assert!(recover_missing(&path, "recover01").unwrap_err().contains("already exists"));
+        fs::remove_dir_all(&path).unwrap();
+        assert!(recover_missing(&path, "wrong-id").unwrap_err().contains("identity"));
+        let sidecar = meta_path(&path).unwrap();
+        let original = fs::read(&sidecar).unwrap();
+        let mut data: serde_json::Value = serde_json::from_slice(&original).unwrap();
+        data.as_object_mut().unwrap().remove("base_oid");
+        fs::write(&sidecar, serde_json::to_vec(&data).unwrap()).unwrap();
+        assert!(recover_missing(&path, "recover01").unwrap_err().contains("pinned base"));
+        fs::write(&sidecar, &original).unwrap();
+        let blocker = path.clone();
+        std::os::unix::fs::symlink(main.join("file"), &blocker).unwrap();
+        assert!(recover_missing(&path, "recover01").unwrap_err().contains("already exists"));
+        assert!(blocker.is_symlink());
+        fs::remove_file(&blocker).unwrap();
+        // A registered branch at a different path cannot be seized.
+        run_git(&main, &["worktree", "prune", "--expire=now"]);
+        let elsewhere = dir.path().join("elsewhere");
+        run_git(&main, &["worktree", "add", "-q", elsewhere.to_str().unwrap(), "doxa/recover0"]);
+        assert!(recover_missing(&path, "recover01").unwrap_err().contains("another checkout"));
+        assert_eq!(git_text(&elsewhere, &["rev-parse", "HEAD"]).as_deref(), Some(unique_oid.as_str()));
+        env::remove_var("DOXA_HOME");
+        env::remove_var("DOXA_WORKTREE");
     }
     #[test]
     fn live_switch_updates_base_and_preserves_dirty_or_unique_work() {
@@ -861,6 +1023,14 @@ mod tests {
         assert!(dirty_path.join("untracked.txt").exists());
         assert!(create_from(&main, "b1b2c3d4dirty", Some("feature")).is_none());
         assert_eq!(read_record(&dirty_path).unwrap().1, "main");
+        let original = git_text(&dirty_path, &["rev-parse", "HEAD"]).unwrap();
+        let tree = git_text(&main, &["rev-parse", "HEAD^{tree}"]).unwrap();
+        let unrelated = git_text(&main, &["-c", "user.name=Test", "-c", "user.email=test@example.com",
+            "commit-tree", &tree, "-m", "unrelated history"]).unwrap();
+        run_git(&main, &["update-ref", "refs/heads/doxa/b1b2c3d4", &unrelated]);
+        assert!(create(&dirty_path, "b1b2c3d4dirty").is_none());
+        run_git(&main, &["update-ref", "refs/heads/doxa/b1b2c3d4", &original]);
+        assert!(dirty_path.join("untracked.txt").exists());
 
         let mut switched = create(&main, "e1b2c3d4switched").unwrap();
         let switched_path = switched.path().to_path_buf();

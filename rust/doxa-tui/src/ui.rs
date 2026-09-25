@@ -147,6 +147,13 @@ struct LorePicker {
     armed_resolution: Option<doxa_lore::PendingDecision>,
     can_resolve: bool,
     resolving: bool,
+    belief_review: Option<doxa_lore::BeliefReview>,
+    can_act_on_beliefs: bool,
+    belief_action: Option<doxa_lore::BeliefAction>,
+    belief_note: String,
+    retract_armed: bool,
+    belief_acting: bool,
+    result_status: Option<String>,
     cwd: String,
     selected: usize,
     offset: u16,
@@ -3028,6 +3035,9 @@ impl App {
             proposals: Vec::new(), proposal_mode, review: None,
             review_scroll: 0, review_seen: 0, review_width: 0,
             armed_resolution: None, can_resolve: false, resolving: false, cwd: cwd.clone(),
+            belief_review: None, can_act_on_beliefs: false, belief_action: None,
+            belief_note: String::new(), retract_armed: false, belief_acting: false,
+            result_status: None,
             evidence: None, status: String::new(), pending: None,
         });
         if proposal_mode { self.load_lore(lore_picker::Query::Proposals(cwd, 0)); }
@@ -3036,8 +3046,10 @@ impl App {
 
     fn load_lore(&mut self, query: lore_picker::Query) {
         let Some(picker) = &mut self.lore_picker else { return; };
-        picker.resolving = matches!(&query, lore_picker::Query::Resolve(..));
-        picker.status = if picker.resolving { "Resolving this proposal with LORE…" }
+        picker.resolving = matches!(&query, lore_picker::Query::Resolve(..) | lore_picker::Query::BeliefAction(..));
+        picker.belief_acting = matches!(&query, lore_picker::Query::BeliefAction(..));
+        picker.status = if picker.belief_acting { "Applying belief action with LORE…" }
+            else if picker.resolving { "Resolving this proposal with LORE…" }
             else { "Loading from LORE…" }.into();
         picker.pending = None;
         let python = std::env::var_os("DOXA_LORE_PYTHON")
@@ -3214,14 +3226,22 @@ impl App {
         };
         picker.pending = None;
         let was_resolving = picker.resolving;
+        let was_belief_acting = picker.belief_acting;
         picker.resolving = false;
+        picker.belief_acting = false;
         let mut urgent_resolution = false;
+        let mut refresh_after_action = false;
         match result {
             Ok(lore_picker::ResultPage::Beliefs(rows)) => {
                 picker.rows = rows;
                 picker.selected = 0;
                 picker.evidence = None;
-                picker.status = if picker.rows.is_empty() { "No active beliefs on this page" } else { "Active beliefs · newest first" }.into();
+                picker.belief_review = None;
+                picker.can_act_on_beliefs = false;
+                picker.belief_action = None;
+                picker.retract_armed = false;
+                picker.status = picker.result_status.take().unwrap_or_else(||
+                    if picker.rows.is_empty() { "No active beliefs on this page" } else { "Active beliefs · newest first" }.into());
             }
             Ok(lore_picker::ResultPage::Search(hit)) => {
                 picker.rows = hit.map(|hit| lore_picker::Belief {
@@ -3231,10 +3251,14 @@ impl App {
                 }).into_iter().collect();
                 picker.selected = 0;
                 picker.evidence = None;
+                picker.belief_review = None;
+                picker.can_act_on_beliefs = false;
+                picker.belief_action = None;
+                picker.retract_armed = false;
                 picker.status = if picker.rows.is_empty() { "No active belief matched" } else { "LORE search result · cite as a claim" }.into();
             }
             Ok(lore_picker::ResultPage::Evidence(id, rows)) => {
-                if picker.rows.iter().any(|row| row.id == id) {
+                if picker.rows.get(picker.selected).is_some_and(|row| row.id == id) {
                     picker.evidence = Some((id, rows));
                     picker.status = "Evidence trail · read only".into();
                 }
@@ -3273,16 +3297,67 @@ impl App {
                 };
                 picker.proposals.clear();
             }
+            Ok(lore_picker::ResultPage::BeliefReview(review, can_act)) => {
+                if !picker.proposal_mode && picker.rows.get(picker.selected).is_some_and(|row| row.id == review.id()) {
+                    picker.belief_review = Some(review);
+                    picker.review_scroll = 0;
+                    picker.review_seen = 0;
+                    picker.review_width = 0;
+                    picker.belief_action = None;
+                    picker.belief_note.clear();
+                    picker.retract_armed = false;
+                    picker.can_act_on_beliefs = can_act;
+                    picker.status = if can_act { "Read the complete belief, then choose C confirmed, X contradicted, S stale, or R retract" }
+                        else { "Read only · installed LORE lacks reviewed belief actions" }.into();
+                } else {
+                    picker.status = "Selection changed; reopen the exact belief review".into();
+                    picker.can_act_on_beliefs = false;
+                }
+            }
+            Ok(lore_picker::ResultPage::BeliefActed(result)) => {
+                use doxa_lore::BeliefStatus;
+                let status = match result.status {
+                    BeliefStatus::Active => "active",
+                    BeliefStatus::Dormant => "dormant",
+                    BeliefStatus::Retracted => "retracted",
+                };
+                picker.result_status = Some(format!("Belief action applied · {status} · {} confirmed, {} contradicted, {} stale",
+                    result.confirmed, result.contradicted, result.stale));
+                picker.belief_review = None;
+                picker.belief_action = None;
+                picker.belief_note.clear();
+                picker.retract_armed = false;
+                picker.can_act_on_beliefs = false;
+                refresh_after_action = true;
+            }
             Err(message) => {
-                picker.status = if was_resolving {
+                picker.status = if was_belief_acting {
+                    message.into()
+                } else if was_resolving {
                     urgent_resolution = true;
                     "Resolution outcome unknown; inspect LORE pending and archive before retrying".into()
                 } else { message.into() };
                 if picker.proposal_mode { picker.review = None; picker.armed_resolution = None; }
-                else { picker.rows.clear(); picker.evidence = None; }
+                else {
+                    picker.can_act_on_beliefs = false;
+                    picker.belief_action = None;
+                    picker.retract_armed = false;
+                    picker.evidence = None;
+                }
             }
         }
         if urgent_resolution { self.notice = picker.status.clone(); }
+        if was_belief_acting && !refresh_after_action { self.notice = picker.status.clone(); }
+        if refresh_after_action {
+            let offset = picker.offset;
+            self.notice = picker.result_status.clone().unwrap_or_default();
+            if let Some(id) = self.groups[self.active_group].active_id() {
+                self.memory_cache.remove(id);
+                self.session_telemetry.entry(id.to_owned()).or_default().lore = None;
+                self.pending_queue_commands.push(crate::bridge::WorkerCommand::Status(id.to_owned()));
+            }
+            self.load_lore(lore_picker::Query::Beliefs(offset));
+        }
         true
     }
 
@@ -3290,6 +3365,7 @@ impl App {
         let review_area = self.active_chooser_rect();
         let picker = self.lore_picker.as_mut().unwrap();
         if picker.resolving { return true; }
+        if picker.pending.is_some() { return true; }
         if picker.proposal_mode {
             if let Some(review) = &picker.review {
                 let Some(area) = review_area else { return true; };
@@ -3368,6 +3444,98 @@ impl App {
             }
             return true;
         }
+        if let Some(review) = &picker.belief_review {
+            if !picker.rows.get(picker.selected).is_some_and(|row| row.id == review.id()) {
+                picker.can_act_on_beliefs = false;
+                picker.belief_action = None;
+                picker.retract_armed = false;
+                picker.status = "Selection changed; reopen the exact belief review".into();
+                return true;
+            }
+            let Some(area) = review_area else { return true; };
+            let width = usize::from(area.width.saturating_sub(3)).max(1);
+            let visible = usize::from(area.height.saturating_sub(REVIEW_BODY_RESERVE));
+            let full = format!("Subject: {}\nClaim: {}", review.subject(), review.claim());
+            let total = raw_visual_rows(&full, width).len();
+            if picker.review_width != width {
+                picker.review_width = width;
+                picker.review_scroll = 0;
+                picker.review_seen = 0;
+                picker.belief_action = None;
+                picker.retract_armed = false;
+            }
+            if visible > 0 && picker.review_scroll <= picker.review_seen {
+                picker.review_seen = picker.review_seen.max(picker.review_scroll.saturating_add(visible)).min(total);
+            }
+            let max_scroll = total.saturating_sub(visible);
+            if let Some(action) = picker.belief_action {
+                match key.code {
+                    KeyCode::Esc => {
+                        picker.belief_action = None;
+                        picker.belief_note.clear();
+                        picker.retract_armed = false;
+                        picker.status = "Belief action cancelled".into();
+                    }
+                    KeyCode::Backspace => { picker.belief_note.pop(); picker.retract_armed = false; }
+                    KeyCode::Char('y' | 'Y') if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                        && action == doxa_lore::BeliefAction::Retract && picker.retract_armed
+                        && picker.can_act_on_beliefs && picker.rows.get(picker.selected).is_some_and(|row| row.id == review.id()) => {
+                        let (cwd, exact, note) = (picker.cwd.clone(), review.clone(), picker.belief_note.clone());
+                        picker.belief_action = None;
+                        picker.retract_armed = false;
+                        self.load_lore(lore_picker::Query::BeliefAction(cwd, exact, action, note));
+                    }
+                    KeyCode::Char(c) if !c.is_control()
+                        && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+                        if picker.belief_note.len() + c.len_utf8() <= 300 {
+                            picker.belief_note.push(c);
+                            picker.retract_armed = false;
+                        } else { picker.status = "Note is limited to 300 UTF-8 bytes".into(); }
+                    }
+                    KeyCode::Enter if picker.belief_note.trim().is_empty() => {
+                        picker.status = "Add a note before applying this belief action".into();
+                    }
+                    KeyCode::Enter if action == doxa_lore::BeliefAction::Retract && !picker.retract_armed => {
+                        picker.retract_armed = true;
+                        picker.status = "Confirm retract of this exact belief: press Y; Esc cancels".into();
+                    }
+                    KeyCode::Enter if action != doxa_lore::BeliefAction::Retract && picker.can_act_on_beliefs
+                        && picker.rows.get(picker.selected).is_some_and(|row| row.id == review.id()) => {
+                        let (cwd, exact, note) = (picker.cwd.clone(), review.clone(), picker.belief_note.clone());
+                        picker.belief_action = None;
+                        picker.retract_armed = false;
+                        self.load_lore(lore_picker::Query::BeliefAction(cwd, exact, action, note));
+                    }
+                    _ => {}
+                }
+                return true;
+            }
+            match key.code {
+                KeyCode::Esc => { picker.belief_review = None; picker.can_act_on_beliefs = false; }
+                KeyCode::Up => picker.review_scroll = picker.review_scroll.saturating_sub(1),
+                KeyCode::Down => picker.review_scroll = (picker.review_scroll + 1).min(max_scroll),
+                KeyCode::PageUp => picker.review_scroll = picker.review_scroll.saturating_sub(visible.saturating_sub(1).max(1)),
+                KeyCode::PageDown => picker.review_scroll = picker.review_scroll.saturating_add(visible.saturating_sub(1).max(1)).min(max_scroll),
+                KeyCode::Char(c) if picker.can_act_on_beliefs && visible > 0 && picker.review_seen == total => {
+                    picker.belief_action = match c.to_ascii_lowercase() {
+                        'c' => Some(doxa_lore::BeliefAction::Confirmed),
+                        'x' => Some(doxa_lore::BeliefAction::Contradicted),
+                        's' => Some(doxa_lore::BeliefAction::Stale),
+                        'r' => Some(doxa_lore::BeliefAction::Retract),
+                        _ => None,
+                    };
+                    if picker.belief_action.is_some() {
+                        picker.belief_note.clear();
+                        picker.retract_armed = false;
+                        picker.status = "Enter a note, then press Enter to apply".into();
+                    }
+                }
+                _ => {
+                    if picker.review_seen < total { picker.status = "Read the complete belief before choosing an action".into(); }
+                }
+            }
+            return true;
+        }
         match key.code {
             KeyCode::Esc => {
                 if picker.evidence.is_some() { picker.evidence = None; }
@@ -3378,6 +3546,12 @@ impl App {
             KeyCode::Right if picker.evidence.is_none() => {
                 if let Some(id) = picker.rows.get(picker.selected).map(|row| row.id) {
                     self.load_lore(lore_picker::Query::Evidence(id));
+                }
+            }
+            KeyCode::Enter if picker.evidence.is_none() && picker.query.is_empty() => {
+                if let Some(id) = picker.rows.get(picker.selected).map(|row| row.id) {
+                    let cwd = picker.cwd.clone();
+                    self.load_lore(lore_picker::Query::BeliefReview(cwd, id));
                 }
             }
             KeyCode::Backspace if picker.evidence.is_none() => { picker.query.pop(); },
@@ -3400,8 +3574,6 @@ impl App {
                 if !picker.query.trim().is_empty() {
                     let query = picker.query.clone();
                     self.load_lore(lore_picker::Query::Search(query));
-                } else if let Some(id) = picker.rows.get(picker.selected).map(|row| row.id) {
-                    self.load_lore(lore_picker::Query::Evidence(id));
                 }
             }
             KeyCode::PageDown if picker.evidence.is_none() && picker.query.is_empty() => {
@@ -4285,7 +4457,7 @@ impl App {
             (4 + picker.models.len() + usize::from(picker.catalog_pending || !picker.loading && picker.models.is_empty()))
                 .clamp(5, 13) as u16
         } else if let Some(picker) = &self.lore_picker {
-            if picker.review.is_some() {
+            if picker.review.is_some() || picker.belief_review.is_some() {
                 19
             } else if picker.proposal_mode {
                 (7 + picker.proposals.len()).clamp(5, 19) as u16
@@ -4696,6 +4868,60 @@ impl App {
                 }
                 _ => return false,
             }
+        }
+        if self.lore_picker.is_some() {
+            let Some(menu) = self.active_chooser_rect() else { return false; };
+            if !menu.contains(ratatui::layout::Position::new(mouse.column, mouse.row)) { return true; }
+            let picker = self.lore_picker.as_mut().unwrap();
+            if picker.pending.is_some() || picker.resolving { return true; }
+            if let Some(review) = &picker.belief_review {
+                let width = usize::from(menu.width.saturating_sub(3)).max(1);
+                let visible = usize::from(menu.height.saturating_sub(REVIEW_BODY_RESERVE));
+                let full = format!("Subject: {}\nClaim: {}", review.subject(), review.claim());
+                let total = raw_visual_rows(&full, width).len();
+                if picker.review_width != width {
+                    picker.review_width = width;
+                    picker.review_scroll = 0;
+                    picker.review_seen = 0;
+                    picker.belief_action = None;
+                    picker.retract_armed = false;
+                }
+                if visible > 0 && picker.review_scroll <= picker.review_seen {
+                    picker.review_seen = picker.review_seen.max(picker.review_scroll.saturating_add(visible)).min(total);
+                }
+                let max_scroll = total.saturating_sub(visible);
+                match mouse.kind {
+                    MouseEventKind::ScrollUp => picker.review_scroll = picker.review_scroll.saturating_sub(3),
+                    MouseEventKind::ScrollDown => picker.review_scroll = picker.review_scroll.saturating_add(3).min(max_scroll),
+                    _ => {}
+                }
+                if visible > 0 && picker.review_scroll <= picker.review_seen {
+                    picker.review_seen = picker.review_seen.max(picker.review_scroll.saturating_add(visible)).min(total);
+                }
+                return true;
+            }
+            if picker.proposal_mode || picker.evidence.is_some() { return true; }
+            match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    let compact = menu.height < 10;
+                    let first = menu.y.saturating_add(if compact { 3 } else { 6 });
+                    let visible = usize::from(menu.height.saturating_sub(if compact { 4 } else { 8 })).max(1);
+                    let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+                    if mouse.row >= first && mouse.row < first.saturating_add(visible as u16) {
+                        let index = start + usize::from(mouse.row - first);
+                        if let Some(id) = picker.rows.get(index).map(|row| row.id) {
+                            if picker.selected == index {
+                                let cwd = picker.cwd.clone();
+                                self.load_lore(lore_picker::Query::BeliefReview(cwd, id));
+                            } else { picker.selected = index; }
+                        }
+                    }
+                }
+                MouseEventKind::ScrollUp => picker.selected = picker.selected.saturating_sub(1),
+                MouseEventKind::ScrollDown => picker.selected = (picker.selected + 1).min(picker.rows.len().saturating_sub(1)),
+                _ => {}
+            }
+            return true;
         }
         if self.active_request_index().is_none()
             && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
@@ -5302,13 +5528,48 @@ impl App {
                 .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)).wrap(Wrap { trim: false }), area);
             return;
         }
+        if let Some(review) = &picker.belief_review {
+            let width = usize::from(area.width.saturating_sub(3)).max(1);
+            let mut lines = vec![Line::from(format!(" {}", clipped_title(&picker.status, width).0))];
+            lines.push(Line::from(format!(" Exact belief #{} · complete LORE review", review.id())));
+            lines.push(Line::from(clipped_title(if picker.can_act_on_beliefs {
+                " ↓/PgDn read all · C confirmed · X contradicted · S stale · R retract · Esc back"
+            } else { " Read only with this LORE version · Esc back" }, width).0));
+            if let Some(action) = picker.belief_action {
+                let label = match action {
+                    doxa_lore::BeliefAction::Confirmed => "confirmed",
+                    doxa_lore::BeliefAction::Contradicted => "contradicted",
+                    doxa_lore::BeliefAction::Stale => "stale",
+                    doxa_lore::BeliefAction::Retract => "retract",
+                };
+                lines.push(Line::from(format!(" {label} note: {}", safe_label(&picker.belief_note))));
+                lines.push(Line::from(if picker.retract_armed { " Press Y to confirm retract · Esc cancel" }
+                    else if action == doxa_lore::BeliefAction::Retract { " Enter to review retract confirmation · Esc cancel" }
+                    else { " Enter apply · Esc cancel" }));
+            } else {
+                lines.push(Line::from(" Select an outcome after reading the complete subject and claim"));
+                lines.push(Line::from(""));
+            }
+            let full = format!("Subject: {}\nClaim: {}", review.subject(), review.claim());
+            let visual_rows = raw_visual_rows(&full, width);
+            let visible = usize::from(area.height.saturating_sub(REVIEW_BODY_RESERVE));
+            for line in visual_rows.iter().skip(picker.review_scroll).take(visible) {
+                lines.push(Line::from(line.clone()));
+            }
+            frame.render_widget(Paragraph::new(lines)
+                .block(Block::default().title(" LORE belief review ").borders(Borders::ALL)
+                    .border_style(Style::default().fg(theme::ACCENT)))
+                .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED))
+                .wrap(Wrap { trim: false }), area);
+            return;
+        }
         let height = area.height;
         let modal = area;
         let compact = height < 10;
         let mut lines = vec![Line::from(format!(" Search: {}", safe_label(&picker.query)))];
         if !compact {
             lines.push(Line::from(format!(" {}", picker.status)));
-            lines.push(Line::from(" Read only · LORE owns claims and evidence · treat as citations"));
+            lines.push(Line::from(" Enter exact review · → evidence · actions require a note"));
             lines.push(Line::from(""));
         }
         if let Some((id, evidence)) = &picker.evidence {
@@ -5334,7 +5595,7 @@ impl App {
             }
         }
         frame.render_widget(Paragraph::new(lines)
-            .block(Block::default().title(" LORE beliefs · Enter search · → evidence · P proposals · PgUp/PgDn page · Esc close ")
+            .block(Block::default().title(" LORE beliefs · Enter review/search · → evidence · P proposals · PgUp/PgDn page · Esc close ")
             .borders(Borders::ALL).border_style(Style::default().fg(theme::ACCENT)))
             .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)).wrap(Wrap { trim: false }), modal);
     }
@@ -6289,6 +6550,46 @@ mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
     use serde_json::json;
+
+    #[cfg(unix)]
+    fn belief_review_fixture() -> doxa_lore::BeliefReview {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let sidecar = dir.path().join("sidecar");
+        std::fs::write(&sidecar, r##"#!/usr/bin/env python3
+import hashlib, json, sys
+print(json.dumps({'type':'hello','proto':1,'capabilities':['scrub','snapshot','belief_review_v1','belief_action_v1']}), flush=True)
+for line in sys.stdin:
+    req=json.loads(line)
+    assert req['op']=='belief_review_v1' and req['belief_id']==7
+    claim='A complete claim ' + 'x'*1200
+    value={'id':7,'uid':'fixture-7','subject':'Fixture subject','claim':claim,'claim_sha256':hashlib.sha256(claim.encode()).hexdigest()}
+    print(json.dumps({'type':'reply','id':req['id'],'ok':True,'value':value}), flush=True)
+"##).unwrap();
+        let mut permissions = std::fs::metadata(&sidecar).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&sidecar, permissions).unwrap();
+        let lore_picker::ResultPage::BeliefReview(review, true) = lore_picker::fetch(&sidecar,
+            lore_picker::Query::BeliefReview("/repo".into(), 7)).unwrap() else { panic!("review") };
+        review
+    }
+
+    #[cfg(unix)]
+    fn app_with_review() -> App {
+        let mut app = App::default();
+        app.size = Rect::new(0, 0, 100, 40);
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"s","cwd":"/repo"}));
+        app.open_lore_picker();
+        let picker = app.lore_picker.as_mut().unwrap();
+        picker.pending = None;
+        picker.rows = vec![lore_picker::Belief { id: 7, subject: "Fixture subject".into(),
+            claim: "clipped list text".into(), truncated: true, confidence: 0.8, evidence_count: Some(1) }];
+        let (tx, rx) = mpsc::sync_channel(1);
+        picker.pending = Some(rx);
+        tx.send(Ok(lore_picker::ResultPage::BeliefReview(belief_review_fixture(), true))).unwrap();
+        assert!(app.poll_lore());
+        app
+    }
 
     #[test]
     fn ctrl_c_does_not_detach_the_terminal() {
@@ -7520,7 +7821,10 @@ mod tests {
             offset: 0, status: "Ready".into(), evidence: None, pending: None,
             proposals: Vec::new(), proposal_mode: false, review: None, review_scroll: 0,
             review_seen: 0, review_width: 0, armed_resolution: None,
-            can_resolve: false, resolving: false, cwd: String::new() });
+            can_resolve: false, resolving: false, cwd: String::new(),
+            belief_review: None, can_act_on_beliefs: false, belief_action: None,
+            belief_note: String::new(), retract_armed: false, belief_acting: false,
+            result_status: None });
         let lore = app.active_chooser_rect().unwrap();
         assert_eq!(lore.bottom(), menu.bottom());
         assert!(lore.height < menu.height, "empty LORE list should stay compact");
@@ -8284,6 +8588,9 @@ mod tests {
             proposals: Vec::new(), proposal_mode: false, review: None, review_scroll: 0,
             review_seen: 0, review_width: 0, armed_resolution: None,
             can_resolve: false, resolving: false, cwd: String::new(),
+            belief_review: None, can_act_on_beliefs: false, belief_action: None,
+            belief_note: String::new(), retract_armed: false, belief_acting: false,
+            result_status: None,
         });
         let (tx, rx) = mpsc::sync_channel(1);
         app.lore_picker.as_mut().unwrap().pending = Some(rx);
@@ -8299,6 +8606,142 @@ mod tests {
         assert!(app.lore_picker.is_none());
         assert_eq!(app.input, "unsent draft");
         assert!(app.pending_prompts.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn belief_actions_require_full_exact_review_and_note_then_refresh_success() {
+        let mut app = app_with_review();
+        assert!(app.lore_picker.as_ref().unwrap().belief_review.as_ref().unwrap().claim().len() > 1200);
+        assert!(painted(&app).contains("Exact belief #7"));
+        app.lore_picker_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+        assert!(app.lore_picker.as_ref().unwrap().belief_action.is_none());
+        for _ in 0..100 {
+            app.lore_picker_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+            let picker = app.lore_picker.as_ref().unwrap();
+            let full = format!("Subject: {}\nClaim: {}", picker.belief_review.as_ref().unwrap().subject(),
+                picker.belief_review.as_ref().unwrap().claim());
+            if picker.review_seen == raw_visual_rows(&full, picker.review_width).len() { break; }
+        }
+        app.lore_picker_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+        assert_eq!(app.lore_picker.as_ref().unwrap().belief_action, Some(doxa_lore::BeliefAction::Confirmed));
+        app.lore_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.lore_picker.as_ref().unwrap().pending.is_none());
+        app.lore_picker_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+        app.lore_picker_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        app.lore_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.lore_picker.as_ref().unwrap().resolving);
+        assert!(app.lore_picker.as_ref().unwrap().pending.is_some());
+        let (tx, rx) = mpsc::sync_channel(1);
+        app.lore_picker.as_mut().unwrap().pending = Some(rx);
+        tx.send(Ok(lore_picker::ResultPage::BeliefActed(doxa_lore::BeliefActionResult {
+            status: doxa_lore::BeliefStatus::Active, retired: false,
+            confirmed: 1, contradicted: 0, stale: 0,
+        }))).unwrap();
+        assert!(app.poll_lore());
+        assert!(app.notice.contains("Belief action applied"));
+        assert!(app.pending_queue_commands.iter().any(|command|
+            matches!(command, crate::bridge::WorkerCommand::Status(id) if id == "s")));
+        assert!(app.lore_picker.as_ref().unwrap().belief_review.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retract_needs_separate_confirmation_and_changed_selection_disables_actions() {
+        let mut app = app_with_review();
+        for _ in 0..100 { app.lore_picker_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE)); }
+        app.lore_picker_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+        assert_eq!(app.lore_picker.as_ref().unwrap().belief_action, Some(doxa_lore::BeliefAction::Retract));
+        for c in "obsolete".chars() { app.lore_picker_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)); }
+        app.lore_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.lore_picker.as_ref().unwrap().retract_armed);
+        assert!(app.lore_picker.as_ref().unwrap().pending.is_none());
+        app.lore_picker_key(KeyEvent::new(KeyCode::Char('!'), KeyModifiers::NONE));
+        assert!(!app.lore_picker.as_ref().unwrap().retract_armed);
+        app.lore_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.lore_picker.as_ref().unwrap().retract_armed);
+        app.lore_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.lore_picker.as_ref().unwrap().pending.is_none());
+        app.lore_picker_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.lore_picker.as_ref().unwrap().belief_action.is_none());
+        app.lore_picker_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+        for c in "obsolete".chars() { app.lore_picker_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)); }
+        app.lore_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.lore_picker_key(KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::NONE));
+        assert!(app.lore_picker.as_ref().unwrap().pending.is_some());
+        app.lore_picker.as_mut().unwrap().pending = None;
+        app.lore_picker.as_mut().unwrap().resolving = false;
+        app.lore_picker.as_mut().unwrap().belief_acting = false;
+        app.lore_picker.as_mut().unwrap().rows.push(lore_picker::Belief { id: 8, subject: "other".into(),
+            claim: "other".into(), truncated: false, confidence: 0.7, evidence_count: Some(0) });
+        app.lore_picker.as_mut().unwrap().selected = 1;
+        app.lore_picker_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+        assert!(!app.lore_picker.as_ref().unwrap().can_act_on_beliefs);
+        assert!(app.lore_picker.as_ref().unwrap().belief_action.is_none());
+        assert!(app.lore_picker.as_ref().unwrap().status.contains("Selection changed"));
+    }
+
+    #[test]
+    fn belief_mouse_selection_only_requests_review_of_exact_clicked_row() {
+        let mut app = App::default();
+        app.size = Rect::new(0, 0, 100, 40);
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"s","cwd":"/repo"}));
+        app.open_lore_picker();
+        let picker = app.lore_picker.as_mut().unwrap();
+        picker.pending = None;
+        picker.rows = [7, 8].into_iter().map(|id| lore_picker::Belief { id,
+            subject: "fixture".into(), claim: "list text".into(), truncated: false,
+            confidence: 0.8, evidence_count: Some(0) }).collect();
+        let menu = app.active_chooser_rect().unwrap();
+        let first = menu.y + if menu.height < 10 { 3 } else { 6 };
+        let click = |row| MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: menu.x + 3, row, modifiers: KeyModifiers::NONE };
+        assert!(app.mouse(click(first + 1)));
+        assert_eq!(app.lore_picker.as_ref().unwrap().selected, 1);
+        assert!(app.lore_picker.as_ref().unwrap().pending.is_none());
+        assert!(app.mouse(click(first + 1)));
+        assert!(app.lore_picker.as_ref().unwrap().pending.is_some());
+        assert!(app.lore_picker.as_ref().unwrap().belief_review.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn belief_error_or_missing_capability_remains_read_only() {
+        let mut app = app_with_review();
+        app.lore_picker.as_mut().unwrap().can_act_on_beliefs = false;
+        for _ in 0..100 { app.lore_picker_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE)); }
+        app.lore_picker_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+        assert!(app.lore_picker.as_ref().unwrap().belief_action.is_none());
+        let (tx, rx) = mpsc::sync_channel(1);
+        let picker = app.lore_picker.as_mut().unwrap();
+        picker.pending = Some(rx);
+        picker.resolving = true;
+        picker.belief_acting = true;
+        tx.send(Err("Belief changed; reopen a fresh exact review")).unwrap();
+        assert!(app.poll_lore());
+        let picker = app.lore_picker.as_ref().unwrap();
+        assert!(!picker.can_act_on_beliefs);
+        assert!(picker.belief_review.is_some());
+        assert!(picker.status.contains("Belief changed"));
+        assert!(app.pending_queue_commands.is_empty());
+        assert!(!app.notice.contains("applied"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wheel_scroll_can_complete_exact_belief_review() {
+        let mut app = app_with_review();
+        let menu = app.active_chooser_rect().unwrap();
+        for _ in 0..100 {
+            app.mouse(MouseEvent { kind: MouseEventKind::ScrollDown,
+                column: menu.x + 3, row: menu.y + 6, modifiers: KeyModifiers::NONE });
+        }
+        let picker = app.lore_picker.as_ref().unwrap();
+        let review = picker.belief_review.as_ref().unwrap();
+        let full = format!("Subject: {}\nClaim: {}", review.subject(), review.claim());
+        assert_eq!(picker.review_seen, raw_visual_rows(&full, picker.review_width).len());
+        app.lore_picker_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+        assert_eq!(app.lore_picker.as_ref().unwrap().belief_action, Some(doxa_lore::BeliefAction::Stale));
     }
 
     #[cfg(unix)]
@@ -8331,6 +8774,9 @@ for line in sys.stdin:
             proposal_mode: true, review: Some(review), review_scroll: 0,
             review_seen: 0, review_width: 0, armed_resolution: None,
             can_resolve, resolving: false, cwd: "/repo".into(),
+            belief_review: None, can_act_on_beliefs: false, belief_action: None,
+            belief_note: String::new(), retract_armed: false, belief_acting: false,
+            result_status: None,
             evidence: None, status: String::new(), pending: None,
         });
         app.lore_picker_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));

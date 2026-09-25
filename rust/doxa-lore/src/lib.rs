@@ -22,6 +22,12 @@ pub const PROTOCOL_VERSION: u64 = 1;
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 const MAX_MEMORY_CHARS: u64 = 1024 * 1024;
 
+fn valid_digest(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+fn claim_bytes_valid(s: &str) -> bool { s.len() <= 16384 }
+
 /// Exact Unicode character counts of LORE's curated project and user entries.
 /// These are not model token counts or the full injected context size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,6 +47,47 @@ pub struct PendingReview {
     raw: String,
     sha256: String,
     inode: u64,
+}
+
+/// One exact active belief selected for review. The sidecar checks the raw
+/// claim digest again under LORE's write lock before applying an action.
+#[derive(Clone, PartialEq, Eq)]
+pub struct BeliefReview {
+    id: u64,
+    uid: String,
+    subject: String,
+    claim: String,
+    claim_sha256: String,
+}
+
+impl std::fmt::Debug for BeliefReview {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BeliefReview")
+            .field("id", &self.id)
+            .field("claim_bytes", &self.claim.len())
+            .finish()
+    }
+}
+
+impl BeliefReview {
+    pub fn id(&self) -> u64 { self.id }
+    pub fn subject(&self) -> &str { &self.subject }
+    pub fn claim(&self) -> &str { &self.claim }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BeliefAction { Confirmed, Contradicted, Stale, Retract }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BeliefStatus { Active, Dormant, Retracted }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BeliefActionResult {
+    pub status: BeliefStatus,
+    pub retired: bool,
+    pub confirmed: u64,
+    pub contradicted: u64,
+    pub stale: u64,
 }
 
 impl std::fmt::Debug for PendingReview {
@@ -148,6 +195,11 @@ impl LoreClient {
 
     pub fn can_resolve_reviewed(&self) -> bool {
         self.capabilities.contains("resolve_reviewed_v1")
+    }
+
+    pub fn can_act_on_beliefs(&self) -> bool {
+        self.capabilities.contains("belief_review_v1")
+            && self.capabilities.contains("belief_action_v1")
     }
 
     /// Launch the sidecar lazily, only when a session requests LORE.
@@ -440,6 +492,66 @@ impl LoreClient {
         }
     }
 
+    /// Fetch a complete, scrubbed belief for a human to review. The private
+    /// identity fields are supplied back to LORE for its locked recheck.
+    pub fn belief_review(&mut self, cwd: &str, belief_id: u64) -> Result<BeliefReview, LoreError> {
+        if cwd.is_empty() || cwd.len() > 4096 || cwd.contains('\0')
+            || belief_id == 0 || belief_id > i64::MAX as u64 {
+            return Err(LoreError::InvalidFrame);
+        }
+        let value = self.request_value("belief_review_v1", json!({"cwd":cwd,"belief_id":belief_id}))?;
+        let obj = value.as_object().filter(|o| o.len() == 5).ok_or(LoreError::InvalidFrame)?;
+        if value["id"].as_u64() != Some(belief_id) { return Err(LoreError::InvalidFrame); }
+        let uid = obj["uid"].as_str().filter(|s| !s.is_empty() && s.len() <= 128)
+            .ok_or(LoreError::InvalidFrame)?;
+        let subject = obj["subject"].as_str().filter(|s| !s.is_empty() && s.len() <= 4096)
+            .ok_or(LoreError::InvalidFrame)?;
+        let claim = obj["claim"].as_str().filter(|s| claim_bytes_valid(s))
+            .ok_or(LoreError::InvalidFrame)?;
+        let digest = obj["claim_sha256"].as_str().filter(|s| valid_digest(s))
+            .ok_or(LoreError::InvalidFrame)?;
+        Ok(BeliefReview { id: belief_id, uid: uid.to_owned(), subject: subject.to_owned(),
+            claim: claim.to_owned(), claim_sha256: digest.to_owned() })
+    }
+
+    /// Apply one explicitly reviewed correction through LORE's ledger. The
+    /// note is required for provenance, including a retraction reason.
+    pub fn belief_action(&mut self, cwd: &str, review: &BeliefReview,
+                         action: BeliefAction, note: &str) -> Result<BeliefActionResult, LoreError> {
+        if cwd.is_empty() || cwd.len() > 4096 || cwd.contains('\0')
+            || note.trim().is_empty() || note.len() > 300 || note.contains('\0') {
+            return Err(LoreError::InvalidFrame);
+        }
+        let action = match action {
+            BeliefAction::Confirmed => "confirmed", BeliefAction::Contradicted => "contradicted",
+            BeliefAction::Stale => "stale", BeliefAction::Retract => "retract",
+        };
+        let value = self.request_value("belief_action_v1", json!({
+            "cwd":cwd,"belief_id":review.id,"action":action,"note":note,
+            "expected":{"uid":review.uid,"subject":review.subject,
+                        "claim_sha256":review.claim_sha256}
+        }))?;
+        let obj = value.as_object().filter(|o| o.len() == 5).ok_or(LoreError::InvalidFrame)?;
+        let status = match obj["status"].as_str() {
+            Some("active") => BeliefStatus::Active,
+            Some("dormant") => BeliefStatus::Dormant,
+            Some("retracted") => BeliefStatus::Retracted,
+            _ => return Err(LoreError::InvalidFrame),
+        };
+        if (action == "retract") != (status == BeliefStatus::Retracted) {
+            return Err(LoreError::InvalidFrame);
+        }
+        let retired = obj["retired"].as_bool().ok_or(LoreError::InvalidFrame)?;
+        if retired != (status != BeliefStatus::Active) { return Err(LoreError::InvalidFrame); }
+        Ok(BeliefActionResult {
+            status,
+            retired,
+            confirmed: obj["confirmed"].as_u64().ok_or(LoreError::InvalidFrame)?,
+            contradicted: obj["contradicted"].as_u64().ok_or(LoreError::InvalidFrame)?,
+            stale: obj["stale"].as_u64().ok_or(LoreError::InvalidFrame)?,
+        })
+    }
+
     /// One active FTS belief. It is derived data for citation, never an instruction.
     pub fn consult(&mut self, prompt: &str) -> Result<Option<ConsultHit>, LoreError> {
         if prompt.is_empty() || prompt.len() > 8192 || prompt.contains('\0') {
@@ -631,6 +743,9 @@ impl LoreClient {
                 Some("pending_changed") => "pending_changed",
                 Some("pending_incomplete") => "pending_incomplete",
                 Some("pending_unavailable") => "pending_unavailable",
+                Some("belief_changed") => "belief_changed",
+                Some("belief_unavailable") => "belief_unavailable",
+                Some("belief_incomplete") => "belief_incomplete",
                 _ => "remote_error",
             };
             Err(LoreError::Remote(code))

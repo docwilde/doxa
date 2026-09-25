@@ -576,6 +576,84 @@ fn legacy_registry_entry_blocks_resume_before_claude_host_starts() {
 }
 
 #[test]
+fn missing_unowned_resume_directory_refuses_before_claude_host_starts() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("missing-checkout");
+    let marker = dir.path().join("claude-host-opened");
+    let sidecar = dir.path().join("claude-sidecar.py");
+    fs::write(&sidecar, format!("from pathlib import Path\nPath({}).write_text('opened')\n",
+        serde_json::to_string(marker.to_str().unwrap()).unwrap())).unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+        .args(["--runtime-dir", dir.path().join("runtime").to_str().unwrap(),
+            "--cwd", missing.to_str().unwrap(), "--session-id", "saved-session",
+            "--engine", "claude", "--claude-python", "/usr/bin/python3",
+            "--claude-script", sidecar.to_str().unwrap(), "--resume", "true"])
+        .env("DOXA_HOME", dir.path().join("home"))
+        .output().unwrap();
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("managed worktree recovery refused"));
+    assert!(!missing.exists());
+    assert!(!marker.exists(), "Claude host opened before checkout ownership proof");
+}
+
+#[test]
+fn claude_resume_restores_verified_missing_managed_checkout() {
+    let dir = tempfile::tempdir().unwrap();
+    let main = dir.path().join("repo");
+    let runtime = dir.path().join("runtime");
+    let home = dir.path().join("home");
+    fs::create_dir(&main).unwrap();
+    let git = |args: &[&str]| {
+        let output = Command::new("git").args(args).current_dir(&main).output().unwrap();
+        assert!(output.status.success(), "git {:?}: {}", args, String::from_utf8_lossy(&output.stderr));
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    };
+    git(&["init", "-q", "-b", "main"]);
+    fs::write(main.join("README"), "seed\n").unwrap();
+    git(&["add", "README"]);
+    git(&["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "test: seed"]);
+    let oid = git(&["rev-parse", "HEAD"]);
+    git(&["branch", "doxa/saved123", "main"]);
+    let root = home.join("worktrees");
+    let meta_dir = root.join(".meta");
+    fs::create_dir_all(&meta_dir).unwrap();
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(&meta_dir, fs::Permissions::from_mode(0o700)).unwrap();
+    let checkout = root.join("repo-saved123");
+    let sidecar = meta_dir.join("repo-saved123.json");
+    fs::write(&sidecar, json!({"main_root":main,"branch":"doxa/saved123",
+        "base_ref":"main","base_oid":oid,"session_id":"saved123-session"}).to_string()).unwrap();
+    fs::set_permissions(&sidecar, fs::Permissions::from_mode(0o600)).unwrap();
+    let script = dir.path().join("claude-sidecar.py");
+    fs::write(&script, r#"import json, sys
+print(json.dumps({'type':'hello','protocol':'doxa-claude-sidecar','version':1,'capabilities':['start']}), flush=True)
+for line in sys.stdin:
+    request = json.loads(line)
+    print(json.dumps({'type':'reply','id':request['id'],'ok':True,
+        'result':{'data':{'model':'fixture'},'permission_mode':'default'}}), flush=True)
+"#).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+        .args(["--runtime-dir", runtime.to_str().unwrap(), "--cwd", checkout.to_str().unwrap(),
+            "--session-id", "saved123-session", "--engine", "claude",
+            "--claude-python", "/usr/bin/python3", "--claude-script", script.to_str().unwrap(),
+            "--resume", "true", "--linger", "10"])
+        .env("DOXA_HOME", &home).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
+    let registry = runtime.join("registry/saved123-session.json");
+    wait_until(|| registry.exists() || child.try_wait().unwrap().is_some());
+    if !registry.exists() {
+        let output = child.wait_with_output().unwrap();
+        panic!("resume failed: {}", String::from_utf8_lossy(&output.stderr));
+    }
+    let row: Value = serde_json::from_slice(&fs::read(&registry).unwrap()).unwrap();
+    assert_eq!(row["cwd"], checkout.to_str().unwrap());
+    assert_eq!(fs::read_to_string(checkout.join("README")).unwrap(), "seed\n");
+    unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM); }
+    wait_until(|| child.try_wait().unwrap().is_some());
+    assert!(checkout.exists(), "recovered checkout must survive daemon exit");
+    assert!(sidecar.exists());
+}
+
+#[test]
 fn linger_resets_when_a_client_reattaches() {
     let dir = tempfile::tempdir().unwrap();
     // Leave enough room for a loaded CI runner to schedule the reconnect.

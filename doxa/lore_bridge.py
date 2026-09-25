@@ -26,6 +26,8 @@ _REVIEW_OP = "pending_review_v1"
 _RESOLVE_OP = "resolve_reviewed_v1"
 _INDEX_OP = "index_transcript_v1"
 _MEMORY_USAGE_OP = "memory_usage_v1"
+_BELIEF_REVIEW_OP = "belief_review_v1"
+_BELIEF_ACTION_OP = "belief_action_v1"
 _PENDING_ID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z", re.ASCII)
 _SESSION_ID = re.compile(r"[0-9A-Za-z][0-9A-Za-z-]{0,127}\Z", re.ASCII)
 _MAX_TRANSCRIPT_BYTES = 8 * 1024 * 1024
@@ -36,6 +38,11 @@ _MAX_MEMORY_SOURCE_BYTES = 1024 * 1024
 
 
 class PendingReviewError(Exception):
+    def __init__(self, code: str) -> None:
+        self.code = code
+
+
+class BeliefActionError(Exception):
     def __init__(self, code: str) -> None:
         self.code = code
 
@@ -127,6 +134,114 @@ def _read_ops() -> tuple[Any, Any] | None:
         return db_connect, fts_expr
     except Exception:  # noqa: BLE001 -- older LORE may not expose FTS
         return None
+
+
+def _belief_action_ops() -> tuple[Any, Any, Any, Any, Any] | None:
+    """LORE's canonical mutation paths, never a DOXA-authored store update."""
+    try:
+        from lore_core.config import project_slug
+        from lore_core.store import db_connect
+        from lore_core.beliefs import belief_retract, outcome_counts, record_outcome
+        if not all(callable(op) for op in (project_slug, db_connect, belief_retract,
+                                            outcome_counts, record_outcome)):
+            return None
+        return project_slug, db_connect, belief_retract, outcome_counts, record_outcome
+    except Exception:  # noqa: BLE001 -- old LORE versions are read only
+        return None
+
+
+def _belief_identity(req: dict[str, Any], ops: tuple[Any, Any, Any, Any, Any],
+                     *, require_expected: bool) -> tuple[int, str]:
+    cwd, bid = req.get("cwd"), req.get("belief_id")
+    if (not isinstance(cwd, str) or not cwd or len(cwd) > 4096 or "\x00" in cwd
+            or type(bid) is not int or not 0 < bid <= 2**63 - 1):
+        raise BeliefActionError("invalid_request")
+    slug = ops[0](cwd)
+    if not isinstance(slug, str) or not slug:
+        raise BeliefActionError("invalid_request")
+    if require_expected:
+        expected = req.get("expected")
+        if (type(expected) is not dict or set(expected) != {"uid", "subject", "claim_sha256"}
+                or not all(isinstance(expected[k], str) for k in expected)
+                or not expected["uid"] or len(expected["uid"]) > 128
+                or not expected["subject"] or len(expected["subject"]) > 4096
+                or re.fullmatch(r"[0-9a-f]{64}", expected["claim_sha256"]) is None):
+            raise BeliefActionError("invalid_request")
+    return bid, slug
+
+
+def _belief_checked_row(conn: Any, bid: int, slug: str) -> tuple[str, str, str, str]:
+    row = conn.execute(
+        "SELECT uid, subject, claim, status FROM beliefs WHERE id = ?", (bid,)
+    ).fetchone()
+    if row is None:
+        raise BeliefActionError("belief_unavailable")
+    uid, subject, claim, status = row
+    if (not isinstance(uid, str) or not uid or len(uid) > 128
+            or not isinstance(subject, str) or not isinstance(claim, str)):
+        raise BeliefActionError("belief_unavailable")
+    if subject not in ("user", "user-model", f"project:{slug}"):
+        raise BeliefActionError("belief_unavailable")
+    if status != "active":
+        raise BeliefActionError("belief_changed")
+    return uid, subject, claim, status
+
+
+def _belief_review(req: dict[str, Any], ops: tuple[Any, Any, Any, Any, Any],
+                   scrub: Any) -> dict[str, Any]:
+    bid, slug = _belief_identity(req, ops, require_expected=False)
+    conn = ops[1]()
+    try:
+        uid, subject, claim, _ = _belief_checked_row(conn, bid, slug)
+    finally:
+        conn.close()
+    safe_claim = scrub(claim)
+    # An action requires a complete human review. If scrubbing hid part of the
+    # claim, keep the secret hidden and refuse to authorize a mutation from an
+    # incomplete display.
+    if (not isinstance(safe_claim, str) or safe_claim != claim
+            or len(safe_claim.encode("utf-8")) > 16384):
+        raise BeliefActionError("belief_incomplete")
+    return {"id": bid, "uid": uid, "subject": subject, "claim": safe_claim,
+            "claim_sha256": hashlib.sha256(claim.encode("utf-8")).hexdigest()}
+
+
+def _belief_action(req: dict[str, Any], ops: tuple[Any, Any, Any, Any, Any]) -> dict[str, Any]:
+    bid, slug = _belief_identity(req, ops, require_expected=True)
+    action, note = req.get("action"), req.get("note", "")
+    if (action not in ("confirmed", "contradicted", "stale", "retract")
+            or not isinstance(note, str) or not note.strip()
+            or len(note.encode("utf-8")) > 300 or "\x00" in note):
+        raise BeliefActionError("invalid_request")
+    conn = ops[1]()
+    try:
+        # Lock before checking identity so another writer cannot change the row
+        # between the review comparison and LORE's canonical mutation call.
+        conn.execute("BEGIN IMMEDIATE")
+        uid, subject, claim, _ = _belief_checked_row(conn, bid, slug)
+        expected = req["expected"]
+        if (uid != expected["uid"] or subject != expected["subject"]
+                or hashlib.sha256(claim.encode("utf-8")).hexdigest() != expected["claim_sha256"]):
+            raise BeliefActionError("belief_changed")
+        if action == "retract":
+            if not ops[2](conn, bid, note):
+                raise BeliefActionError("belief_changed")
+        else:
+            ops[4](conn, bid, action, "user", note=note)
+        counts = ops[3](conn, bid)
+        status_row = conn.execute("SELECT status FROM beliefs WHERE id = ?", (bid,)).fetchone()
+        if (status_row is None or status_row[0] not in ("active", "dormant", "retracted")
+                or len(counts) != 3 or any(type(n) is not int or n < 0 for n in counts)):
+            raise BeliefActionError("belief_changed")
+        conn.commit()
+        return {"status": status_row[0], "retired": status_row[0] != "active",
+                "confirmed": counts[0],
+                "contradicted": counts[1], "stale": counts[2]}
+    except BaseException:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def _index_ops() -> tuple[Any, Any] | None:
@@ -426,6 +541,7 @@ def serve() -> None:
     ext = _extensions() if lore is not None else None
     memory_ops = _memory_usage_ops() if lore is not None else None
     read_ops = _read_ops() if lore is not None else None
+    belief_ops = _belief_action_ops() if lore is not None else None
     index_ops = _index_ops() if lore is not None and ext is not None else None
     review = _pending_review_reader() if lore is not None and ext is not None else None
     resolver = _pending_resolver() if review is not None else None
@@ -435,7 +551,8 @@ def serve() -> None:
                              + ([_INDEX_OP] if index_ops is not None else [])
                              + ([_MEMORY_USAGE_OP] if memory_ops is not None else [])
                              + ([_REVIEW_OP] if review is not None else [])
-                             + ([_RESOLVE_OP] if resolver is not None else [])) if lore is not None else []})
+                             + ([_RESOLVE_OP] if resolver is not None else [])
+                             + ([_BELIEF_REVIEW_OP, _BELIEF_ACTION_OP] if belief_ops is not None else [])) if lore is not None else []})
     while True:
         raw = sys.stdin.buffer.readline(MAX_FRAME_BYTES + 1)
         if not raw:
@@ -457,6 +574,14 @@ def serve() -> None:
             continue
         scrub, snapshot = lore
         try:
+            if op == _BELIEF_REVIEW_OP and belief_ops is not None:
+                result = _belief_review(req, belief_ops, scrub)
+                _write({"type": "reply", "id": rid, "ok": True, "value": result})
+                continue
+            if op == _BELIEF_ACTION_OP and belief_ops is not None:
+                result = _belief_action(req, belief_ops)
+                _write({"type": "reply", "id": rid, "ok": True, "value": result})
+                continue
             if op == _MEMORY_USAGE_OP and memory_ops is not None:
                 result = _memory_usage(req.get("cwd"), memory_ops)
                 _write({"type": "reply", "id": rid, "ok": True, "value": result})
@@ -531,6 +656,8 @@ def serve() -> None:
                 raise TypeError("invalid LORE result")
             _write({"type": "reply", "id": rid, "ok": True, "text": result})
         except PendingReviewError as exc:
+            _write({"type": "reply", "id": rid, "ok": False, "error": exc.code})
+        except BeliefActionError as exc:
             _write({"type": "reply", "id": rid, "ok": False, "error": exc.code})
         except Exception:  # noqa: BLE001 -- never print credentials from input or LORE
             _write({"type": "reply", "id": rid, "ok": False, "error": "operation_failed"})

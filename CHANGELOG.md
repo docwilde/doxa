@@ -5,6 +5,20 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.16 — 2026-09-25
+
+- Recover a deleted managed checkout when its owned sidecar, pinned base,
+  session branch, and Git registration agree. Archived Claude, Codex, and
+  vendor resume verifies saved history before recovery and project identity
+  afterward. Deleted uncommitted files cannot be restored.
+- Add exact LORE belief review and explicit confirm, contradict, stale, and
+  retract actions. A note is required; retract needs a second confirmation.
+  LORE rechecks scope and the original claim under its write lock before any
+  change. Claims that require redaction cannot authorize an action. Older LORE
+  installations remain read only.
+- Validate the pinned base when reopening an existing managed worktree and
+  keep private belief review contents out of Rust debug output.
+
 ## 2.0.0-alpha.15 — 2026-09-25
 
 - Distinguish user messages with an accent heading, highlighted body, and left

@@ -1,6 +1,6 @@
 #![cfg(unix)]
 
-use doxa_lore::{LoreClient, LoreError, MemoryUsage, PendingDecision, PendingResolution, MAX_FRAME_BYTES};
+use doxa_lore::{BeliefAction, BeliefStatus, LoreClient, LoreError, MemoryUsage, PendingDecision, PendingResolution, MAX_FRAME_BYTES};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -14,6 +14,51 @@ fn fake(dir: &Path, body: &str) -> std::path::PathBuf {
     perms.set_mode(0o700);
     fs::set_permissions(&path, perms).unwrap();
     path
+}
+
+#[test]
+fn belief_action_requires_review_capability_and_reports_retirement() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = fake(dir.path(), r#"
+import json, sys
+print(json.dumps({'type':'hello','proto':1,'capabilities':['scrub','snapshot','belief_review_v1','belief_action_v1']}), flush=True)
+for line in sys.stdin:
+    req = json.loads(line)
+    if req['op'] == 'belief_review_v1':
+        if req['belief_id'] == 8:
+            print(json.dumps({'type':'reply','id':req['id'],'ok':False,'error':'belief_incomplete'}), flush=True)
+            continue
+        value = {'id':req['belief_id'],'uid':'uid-1','subject':'project:repo','claim':'safe fact','claim_sha256':'a'*64}
+    else:
+        assert req['expected'] == {'uid':'uid-1','subject':'project:repo','claim_sha256':'a'*64}
+        if req['action'] == 'stale':
+            print(json.dumps({'type':'reply','id':req['id'],'ok':False,'error':'belief_changed'}), flush=True)
+            continue
+        value = {'status':'dormant','retired':True,'confirmed':0,'contradicted':2,'stale':0}
+    print(json.dumps({'type':'reply','id':req['id'],'ok':True,'value':value}), flush=True)
+"#);
+    let mut client = LoreClient::spawn(&path, Duration::from_secs(2)).unwrap();
+    assert!(client.can_act_on_beliefs());
+    let review = client.belief_review("/repo", 7).unwrap();
+    assert_eq!(review.id(), 7);
+    assert_eq!(review.claim(), "safe fact");
+    assert_eq!(review.subject(), "project:repo");
+    let debug = format!("{review:?}");
+    assert!(!debug.contains("safe fact"));
+    assert!(!debug.contains("uid-1"));
+    let result = client.belief_action("/repo", &review, BeliefAction::Contradicted, "failed check").unwrap();
+    assert_eq!(result.status, BeliefStatus::Dormant);
+    assert!(result.retired);
+    assert_eq!(result.contradicted, 2);
+    assert!(matches!(client.belief_action("/repo", &review, BeliefAction::Stale, ""), Err(LoreError::InvalidFrame)));
+    assert!(matches!(client.belief_action("/repo", &review, BeliefAction::Stale, "no longer applies"),
+        Err(LoreError::Remote("belief_changed"))));
+    assert!(matches!(client.belief_review("/repo", 8), Err(LoreError::Remote("belief_incomplete"))));
+
+    let old = fake(dir.path(), "print('{\"type\":\"hello\",\"proto\":1,\"capabilities\":[\"scrub\",\"snapshot\"]}', flush=True)");
+    let mut older = LoreClient::spawn(&old, Duration::from_secs(2)).unwrap();
+    assert!(!older.can_act_on_beliefs());
+    assert!(matches!(older.belief_review("/repo", 7), Err(LoreError::Unavailable)));
 }
 
 #[test]

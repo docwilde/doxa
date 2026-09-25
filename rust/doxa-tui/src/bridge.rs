@@ -34,6 +34,7 @@ pub enum WorkerCommand {
     Branch(String, Option<String>),
     QueueList(String),
     QueueCancel(String, String),
+    Status(String),
     Stop(String),
 }
 
@@ -248,7 +249,7 @@ pub fn connect_sessions(sessions: &[Session]) -> io::Result<MultiBridge> {
             let id = match &command {
                 WorkerCommand::Prompt(id, _) | WorkerCommand::Answer(id, _, _) | WorkerCommand::Peers(id)
                 | WorkerCommand::Models(id) | WorkerCommand::SetModel(id, _) | WorkerCommand::SetEffort(id, _)
-                | WorkerCommand::SetPermissionMode(id, _) | WorkerCommand::QueueList(id)
+                | WorkerCommand::SetPermissionMode(id, _) | WorkerCommand::QueueList(id) | WorkerCommand::Status(id)
                 | WorkerCommand::Branch(id, _)
                 | WorkerCommand::QueueCancel(id, _) => id,
                 WorkerCommand::Message(id, _, _) | WorkerCommand::Stop(id) => id,
@@ -306,6 +307,7 @@ fn rejected(command: WorkerCommand, message: &str) -> Value {
             "ok":false, "error":message}),
         WorkerCommand::QueueList(id) => json!({"type":"queue_list_reply", "session_id":id,
             "ok":false, "error":message}),
+        WorkerCommand::Status(id) => json!({"type":"telemetry_unavailable", "session_id":id}),
         WorkerCommand::QueueCancel(id, queue_id) => json!({"type":"queue_cancel_reply", "session_id":id,
             "queue_id":queue_id, "ok":false, "error":message}),
         WorkerCommand::Stop(id) => json!({"type":"stop_reply", "session_id":id,
@@ -421,6 +423,10 @@ fn worker_loop(
                         return;
                     }
                     if matches!(result, Err(TransportError::Closed)) { return; }
+                }
+                Ok(WorkerCommand::Status(id)) => {
+                    if id == session_id && !forward_status(&mut client, frames, &session_id) { return; }
+                    cursor.store(client.cursor, Ordering::Relaxed);
                 }
                 Ok(WorkerCommand::Launch(_, _, group)) => {
                     let _ = frames.send(json!({"type":"launch_reply", "ok":false,

@@ -209,8 +209,19 @@ pub fn spawn(options: &LaunchOptions) -> io::Result<Session> {
     if options.cwd.is_some() && options.resume.is_none() {
         return Err(invalid("explicit cwd is only supported for verified resume"));
     }
-    let cwd = fs::canonicalize(requested_cwd)?;
-    if !cwd.is_dir() { return Err(invalid("resume directory is not a directory")); }
+    let cwd = match fs::canonicalize(&requested_cwd) {
+        Ok(cwd) if cwd.is_dir() => cwd,
+        Ok(_) => return Err(invalid("resume directory is not a directory")),
+        Err(error) if options.resume.is_some()
+            && error.kind() == io::ErrorKind::NotFound
+            && requested_cwd.is_absolute()
+            && fs::symlink_metadata(&requested_cwd).is_err_and(|e| e.kind() == io::ErrorKind::NotFound) => {
+            // The daemon owns recovery after it claims the session ID. Keep
+            // the recorded absolute path so it can prove exact ownership.
+            requested_cwd
+        }
+        Err(error) => return Err(error),
+    };
     let branch = if let Some(requested) = options.branch.as_deref() {
         if !doxa_worktrees::enabled() {
             return Err(invalid("--branch needs worktree_per_session; turn it on or change your checkout explicitly with git"));
