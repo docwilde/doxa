@@ -100,6 +100,13 @@ and `doxa-rs fleet attach RUN_ID SLOT` attaches to one slot's live daemon.
 Python fleet harness in the sidecar environment. Its own parser enforces the
 capacity, spend budget, socket length, arm barrier, approval, and teardown
 rules. `--dry-run` shows assignments without starting sessions.
+`doxa-rs fleet preflight --sessions N --run-budget USD [--root PATH]` checks
+the memory estimate, explicit spend ceiling, and Unix socket path length in
+Rust without creating a run. Use `--allow-unbudgeted` to record an intentional
+absence of a ceiling and `--force` only to override the memory estimate.
+`--sessions` counts every daemon, including a supervisor when present.
+This preview does not verify provider pricing or approval behavior; the live
+start still uses the Python harness for those controls.
 `doxa-rs fleet stop RUN_ID` sends stop requests to the run's validated live
 slot sockets and waits up to 60 seconds for each daemon connection to close.
 It reports slots with missing sockets or unconfirmed shutdown separately; it

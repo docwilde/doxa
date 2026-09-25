@@ -1,4 +1,4 @@
-use doxa_tui::{bridge, discovery, fleet_view, launch, ui_state};
+use doxa_tui::{bridge, discovery, fleet_plan, fleet_view, launch, ui_state};
 use std::collections::HashSet;
 use std::io;
 use std::path::PathBuf;
@@ -103,6 +103,7 @@ fn run(args: &[String]) -> io::Result<()> {
     match command {
         Some("--help") => {
             println!("Usage: doxa-rs [new|attach [ID]|stop [ID]|list|doctor] [options]\n       doxa-rs fleet start PYTHON_FLEET_OPTIONS\n       doxa-rs fleet runs|status RUN_ID|stop RUN_ID|attach RUN_ID SLOT [--root ABSOLUTE_PATH]\n       doxa-rs --session ID\n       doxa-rs --socket PATH\n\nPlain doxa-rs restores live sessions in the current project, or starts a native Codex session.\nnew always starts a session. attach and stop accept a full ID or unique prefix.\nOptions for new sessions: --engine codex|claude|deepseek|glm|fixture, --model NAME, --linger SECONDS.\nCodex: --sandbox read-only|workspace-write|danger-full-access, --codex-bin PATH, --lore-python PATH.\nClaude: --claude-python PATH, --claude-script ABSOLUTE_PATH.\nDeepSeek/GLM: --lore-python PATH, --effort low|high|max (DeepSeek also none); API key in provider environment variable.\nClaude/DeepSeek/GLM: --resume FULL_SESSION_ID with new.\nDOXA_DAEMON_BIN selects an absolute native daemon path. Ctrl+Q detaches without stopping the daemon.");
+            println!("Fleet safety preview: doxa-rs fleet preflight --sessions N --run-budget USD [--root ABSOLUTE_PATH] [--run-id ID] [--force|--allow-unbudgeted]");
             Ok(())
         }
         Some("--version") => {
@@ -264,6 +265,12 @@ fn fleet(args: &[String]) -> io::Result<()> {
     if args.first().is_some_and(|arg| arg == "start") {
         return fleet_start_compat(&args[1..]);
     }
+    if args.first().is_some_and(|arg| arg == "preflight") {
+        let root = fleet_view::default_root().unwrap_or_default();
+        let plan = fleet_plan::parse(&args[1..], &root)?;
+        println!("{}", fleet_plan::check(&plan, fleet_plan::available_memory_mb())?);
+        return Ok(());
+    }
     let mut root = None;
     let mut words = Vec::new();
     let mut index = 0;
@@ -292,7 +299,7 @@ fn fleet(args: &[String]) -> io::Result<()> {
             let (socket, session_id) = fleet_view::slot_socket(&root, run, slot)?;
             return bridge::run_socket_expected(socket, Some(&session_id));
         }
-        _ => return Err(invalid("usage: doxa-rs fleet start PYTHON_FLEET_OPTIONS|runs|status RUN_ID|stop RUN_ID|attach RUN_ID SLOT [--root ABSOLUTE_PATH]")),
+        _ => return Err(invalid("usage: doxa-rs fleet start PYTHON_FLEET_OPTIONS|preflight --sessions N --run-budget USD [--root ABSOLUTE_PATH]|runs|status RUN_ID|stop RUN_ID|attach RUN_ID SLOT [--root ABSOLUTE_PATH]")),
     }
     Ok(())
 }
@@ -315,6 +322,7 @@ fn fleet_start_compat(args: &[String]) -> io::Result<()> {
         paths.extend(std::env::split_paths(&std::env::var_os("PYTHONPATH").unwrap_or_default()));
         command.env("PYTHONPATH", std::env::join_paths(paths).map_err(|_| invalid("invalid PYTHONPATH"))?);
     }
+    eprintln!("fleet start: running the Python fleet harness for capacity, budget, barrier and teardown controls");
     let status = command.status()?;
     if !status.success() {
         std::process::exit(status.code().unwrap_or(1));
