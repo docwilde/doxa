@@ -84,6 +84,11 @@ struct ModelPicker {
 struct LorePicker {
     query: String,
     rows: Vec<lore_picker::Belief>,
+    proposals: Vec<lore_picker::Proposal>,
+    proposal_mode: bool,
+    review: Option<doxa_lore::PendingReview>,
+    review_scroll: usize,
+    cwd: String,
     selected: usize,
     offset: u16,
     evidence: Option<(u64, Vec<lore_picker::Evidence>)>,
@@ -105,6 +110,14 @@ fn safe_label(value: &str) -> String {
         .chars()
         .take(200)
         .collect()
+}
+
+fn visible_raw_line(value: &str) -> String {
+    value.chars().flat_map(|ch| {
+        if ch.is_control() || matches!(ch, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}') {
+            ch.escape_debug().collect::<String>().chars().collect::<Vec<_>>()
+        } else { vec![ch] }
+    }).collect()
 }
 
 fn clipped_title(value: &str, width: usize) -> (String, bool) {
@@ -1961,8 +1974,15 @@ impl App {
     }
 
     fn open_lore_picker(&mut self) {
+        let cwd = self.groups[self.active_group].active_id()
+            .and_then(|id| self.session_cwds.get(id))
+            .map(|path| path.to_string_lossy().into_owned())
+            .or_else(|| std::env::current_dir().ok().map(|path| path.to_string_lossy().into_owned()))
+            .unwrap_or_default();
         self.lore_picker = Some(LorePicker {
             query: String::new(), rows: Vec::new(), selected: 0, offset: 0,
+            proposals: Vec::new(), proposal_mode: false, review: None,
+            review_scroll: 0, cwd,
             evidence: None, status: String::new(), pending: None,
         });
         self.load_lore(lore_picker::Query::Beliefs(0));
@@ -2013,10 +2033,24 @@ impl App {
                     picker.status = "Evidence trail · read only".into();
                 }
             }
+            Ok(lore_picker::ResultPage::Proposals(rows)) => {
+                picker.proposals = rows;
+                picker.selected = 0;
+                picker.review = None;
+                picker.status = if picker.proposals.is_empty() { "No staged proposals on this page" }
+                    else { "Staged proposals · select one to read its complete raw contents" }.into();
+            }
+            Ok(lore_picker::ResultPage::Review(review)) => {
+                if picker.proposal_mode && picker.proposals.iter().any(|row| row.pid == review.pid()) {
+                    picker.review = Some(review);
+                    picker.review_scroll = 0;
+                    picker.status = "Complete raw proposal · read only · approval unavailable".into();
+                }
+            }
             Err(message) => {
                 picker.status = message.into();
-                picker.rows.clear();
-                picker.evidence = None;
+                if picker.proposal_mode { picker.review = None; }
+                else { picker.rows.clear(); picker.evidence = None; }
             }
         }
         true
@@ -2024,6 +2058,46 @@ impl App {
 
     fn lore_picker_key(&mut self, key: KeyEvent) -> bool {
         let picker = self.lore_picker.as_mut().unwrap();
+        if picker.proposal_mode {
+            match key.code {
+                KeyCode::Esc if picker.review.is_some() => picker.review = None,
+                KeyCode::Esc => self.lore_picker = None,
+                KeyCode::Char('b') if picker.review.is_none() => {
+                    picker.proposal_mode = false;
+                    picker.offset = 0;
+                    picker.selected = 0;
+                    self.load_lore(lore_picker::Query::Beliefs(0));
+                }
+                KeyCode::Up if picker.review.is_some() => picker.review_scroll = picker.review_scroll.saturating_sub(1),
+                KeyCode::Down if picker.review.is_some() => picker.review_scroll = picker.review_scroll.saturating_add(1),
+                KeyCode::PageUp if picker.review.is_some() => picker.review_scroll = picker.review_scroll.saturating_sub(10),
+                KeyCode::PageDown if picker.review.is_some() => picker.review_scroll = picker.review_scroll.saturating_add(10),
+                KeyCode::Up => picker.selected = picker.selected.saturating_sub(1),
+                KeyCode::Down => picker.selected = (picker.selected + 1).min(picker.proposals.len().saturating_sub(1)),
+                KeyCode::Enter | KeyCode::Right => {
+                    if let Some(pid) = picker.proposals.get(picker.selected).map(|row| row.pid.clone()) {
+                        let cwd = picker.cwd.clone();
+                        self.load_lore(lore_picker::Query::Review(cwd, pid));
+                    }
+                }
+                KeyCode::PageDown => {
+                    picker.offset = picker.offset.saturating_add(lore_picker::PAGE_SIZE as u16).min(10000);
+                    let (cwd, offset) = (picker.cwd.clone(), picker.offset);
+                    self.load_lore(lore_picker::Query::Proposals(cwd, offset));
+                }
+                KeyCode::PageUp => {
+                    picker.offset = picker.offset.saturating_sub(lore_picker::PAGE_SIZE as u16);
+                    let (cwd, offset) = (picker.cwd.clone(), picker.offset);
+                    self.load_lore(lore_picker::Query::Proposals(cwd, offset));
+                }
+                KeyCode::F(5) => {
+                    let (cwd, offset) = (picker.cwd.clone(), picker.offset);
+                    self.load_lore(lore_picker::Query::Proposals(cwd, offset));
+                }
+                _ => return false,
+            }
+            return true;
+        }
         match key.code {
             KeyCode::Esc => {
                 if picker.evidence.is_some() { picker.evidence = None; }
@@ -2037,6 +2111,13 @@ impl App {
                 }
             }
             KeyCode::Backspace if picker.evidence.is_none() => { picker.query.pop(); },
+            KeyCode::Char('p' | 'P') if picker.evidence.is_none() && picker.query.is_empty() => {
+                picker.proposal_mode = true;
+                picker.offset = 0;
+                picker.selected = 0;
+                let cwd = picker.cwd.clone();
+                self.load_lore(lore_picker::Query::Proposals(cwd, 0));
+            }
             KeyCode::F(5) if picker.evidence.is_none() => {
                 picker.query.clear();
                 let offset = picker.offset;
@@ -2664,7 +2745,11 @@ impl App {
             (4 + picker.models.len() + usize::from(picker.catalog_pending || !picker.loading && picker.models.is_empty()))
                 .clamp(5, 13) as u16
         } else if let Some(picker) = &self.lore_picker {
-            if let Some((_, evidence)) = &picker.evidence {
+            if picker.review.is_some() {
+                19
+            } else if picker.proposal_mode {
+                (7 + picker.proposals.len()).clamp(5, 19) as u16
+            } else if let Some((_, evidence)) = &picker.evidence {
                 let rows = evidence.len().saturating_mul(2);
                 (if rows <= 4 { 4 + rows } else { 7 + rows }).clamp(5, 19) as u16
             } else {
@@ -3260,6 +3345,41 @@ impl App {
 
     fn draw_lore_picker(&self, frame: &mut Frame, area: Rect) {
         let Some(picker) = &self.lore_picker else { return; };
+        if picker.proposal_mode {
+            let mut lines = vec![Line::from(format!(" {}", picker.status))];
+            if let Some(review) = &picker.review {
+                lines.push(Line::from(format!(" {} · SHA-256 {} · inode {}", review.pid(), review.sha256(), review.inode())));
+                lines.push(Line::from(" Raw proposal · ↑/↓ scroll · Esc back"));
+                let visible = usize::from(area.height.saturating_sub(5));
+                let width = usize::from(area.width.saturating_sub(3)).max(1);
+                // Preserve all raw content across visual rows; terminal controls
+                // are shown with visible escapes, and no field is summarized.
+                let visual_rows: Vec<String> = review.raw().split('\n').flat_map(|line| {
+                    let clean: Vec<char> = visible_raw_line(line).chars().collect();
+                    if clean.is_empty() { vec![String::new()] }
+                    else { clean.chunks(width).map(|chunk| chunk.iter().collect()).collect() }
+                }).collect();
+                for line in visual_rows.iter().skip(picker.review_scroll).take(visible) {
+                    lines.push(Line::from(line.clone()));
+                }
+            } else {
+                lines.push(Line::from(" Read only · approval and rejection require an atomic LORE claim API"));
+                lines.push(Line::from(format!(" Page offset {} · {} rows", picker.offset, picker.proposals.len())));
+                let visible = usize::from(area.height.saturating_sub(6)).max(1);
+                let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+                for (index, row) in picker.proposals.iter().enumerate().skip(start).take(visible) {
+                    let label = format!(" {} {} · {}/{} · {} · {}", if index == picker.selected { '›' } else { ' ' },
+                        safe_label(&row.pid), safe_label(&row.kind), safe_label(&row.action),
+                        safe_label(&row.scope), safe_label(&row.summary));
+                    lines.push(Line::styled(label, Style::default().fg(if index == picker.selected { theme::ACCENT } else { theme::SECONDARY })));
+                }
+            }
+            frame.render_widget(Paragraph::new(lines)
+                .block(Block::default().title(" LORE proposals · Enter full review · PgUp/PgDn page · B beliefs · Esc close ")
+                    .borders(Borders::ALL).border_style(Style::default().fg(theme::ACCENT)))
+                .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)).wrap(Wrap { trim: false }), area);
+            return;
+        }
         let height = area.height;
         let modal = area;
         let compact = height < 10;
@@ -3292,7 +3412,7 @@ impl App {
             }
         }
         frame.render_widget(Paragraph::new(lines)
-            .block(Block::default().title(" LORE beliefs · Enter search · → evidence · PgUp/PgDn page · F5 reload · Esc close ")
+            .block(Block::default().title(" LORE beliefs · Enter search · → evidence · P proposals · PgUp/PgDn page · Esc close ")
             .borders(Borders::ALL).border_style(Style::default().fg(theme::ACCENT)))
             .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)).wrap(Wrap { trim: false }), modal);
     }
@@ -4849,7 +4969,8 @@ mod tests {
         assert_eq!(app.active_chooser_rect().unwrap().bottom(), menu.bottom());
         app.action_menu = false;
         app.lore_picker = Some(LorePicker { rows: vec![], selected: 0, query: String::new(),
-            offset: 0, status: "Ready".into(), evidence: None, pending: None });
+            offset: 0, status: "Ready".into(), evidence: None, pending: None,
+            proposals: Vec::new(), proposal_mode: false, review: None, review_scroll: 0, cwd: String::new() });
         let lore = app.active_chooser_rect().unwrap();
         assert_eq!(lore.bottom(), menu.bottom());
         assert!(lore.height < menu.height, "empty LORE list should stay compact");
@@ -5348,10 +5469,12 @@ mod tests {
 
     #[test]
     fn lore_picker_keeps_prompt_and_displays_only_read_results() {
+        assert_eq!(visible_raw_line("x\ty\u{0000}z"), "x\\ty\\0z");
         let mut app = App { input: "unsent draft".into(), ..Default::default() };
         app.lore_picker = Some(LorePicker {
             query: String::new(), rows: Vec::new(), selected: 0, offset: 0,
             evidence: None, status: String::new(), pending: None,
+            proposals: Vec::new(), proposal_mode: false, review: None, review_scroll: 0, cwd: String::new(),
         });
         let (tx, rx) = mpsc::sync_channel(1);
         app.lore_picker.as_mut().unwrap().pending = Some(rx);

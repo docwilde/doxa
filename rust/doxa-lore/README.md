@@ -28,6 +28,15 @@ sent only over the local pipe for a review screen and never logged. A request
 may include `expected: {sha256, inode}` to refuse a proposal changed since a
 previous review. Missing, oversized, malformed, or changed proposals fail
 without a partial response.
+
+The Rust TUI's LORE picker pages scrubbed pending previews for the active
+session's project (or the current directory when no session is selected).
+Press `P` from an empty belief search, then Enter to request the complete raw
+proposal through `pending_review_v1`. The review view exposes the digest and
+inode and scrolls the entire raw content, including signed sync operations.
+Opening a review does not mark an unverified sync operation as reviewed in
+LORE's ledger.
+
 Consult returns one active FTS belief labelled `cite_only`;
 belief and evidence pages contain at most 50 rows. Text is scrubbed before
 reply and truncated fields carry explicit markers. Pending rows
@@ -38,14 +47,17 @@ without the optional capabilities remain usable for scrubbing and snapshots.
 Requests and replies carry one numeric ID at a time. Frames are at most 1 MiB. Failure
 to scrub is an error that callers must handle before persistence or sending
 the text to another model. The paged `pending` response is a scrubbed preview,
-not approval evidence. `pending_review_v1` is read-only. Safe approval still
-needs a sidecar operation that atomically claims the pending file and verifies
-its current SHA-256 and inode against the exact proposal the UI displayed,
-with an explicit human review gate enforced at the UI/daemon boundary. A
-caller-supplied `reviewed` flag or pending ID alone cannot authorize a write.
-LORE's own approval path also requires special handling for unverified sync
-operations and durable archive-on-success. Until that end-to-end protocol
-exists, this crate has no approval mutation. Codex transcript indexing is
-connected to the native daemon; deriver review of Codex transcripts remains
-skipped, matching Python DOXA's declared limitation. Python remains a
-dependency only for this external LORE integration during the transition.
+not approval evidence. `pending_review_v1` is read-only. Safe approval and
+rejection need a LORE operation that atomically claims the pending file and
+verifies its SHA-256 and inode against the exact proposal the UI displayed.
+The installed LORE API currently offers `apply_item(snapshot=...)` and
+`archive(expected_snapshot=...)`, but these check the path separately from
+the later write/unlink, allowing a replacement between steps. An explicit
+human review gate at the UI/daemon boundary, LORE's unverified sync listing
+rule, and durable archive-on-success must also be part of the operation.
+A caller-supplied `reviewed` flag or pending ID alone cannot authorize a
+write. Until that end-to-end protocol exists, this crate has no approval or
+rejection mutation. Codex transcript indexing is connected to the native
+daemon; deriver review of Codex transcripts remains skipped, matching Python
+DOXA's declared limitation. Python remains a dependency only for this external
+LORE integration during the transition.
