@@ -27,7 +27,11 @@ fn safe_dir(path: &Path) -> bool {
 }
 
 fn safe_file(path: &Path) -> Option<File> {
-    let file = OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+    // A pathname can be replaced between directory scanning and open. In
+    // particular, opening a FIFO for read would wait indefinitely without
+    // O_NONBLOCK, before we have a chance to reject its file type.
+    let file = OpenOptions::new().read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
         .open(path).ok()?;
     let meta = file.metadata().ok()?;
     if !meta.is_file() || meta.nlink() != 1 || meta.uid() != unsafe { libc::geteuid() } {
@@ -182,5 +186,9 @@ mod tests {
         let link = day.join(format!("rollout-link-{thread}.jsonl"));
         std::os::unix::fs::symlink(&path, &link).unwrap();
         assert!(read_since_in(&link, thread, 0, &sessions).is_none());
+        let fifo = day.join(format!("rollout-fifo-{thread}.jsonl"));
+        let name = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        assert!(read_since_in(&fifo, thread, 0, &sessions).is_none());
     }
 }
