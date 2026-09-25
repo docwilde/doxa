@@ -5,6 +5,28 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.24 — 2026-09-26
+
+- Debounce live session search, discard stale results, and show grouped,
+  scrubbed LORE index excerpts for each matching session.
+- Align `/pane` and `/pane 2` with the existing pane groups: report the
+  current layout for bare `/pane` and refuse navigation to an absent group.
+- Add `doxa settings` to inspect and safely persist native linger and
+  per-session worktree preferences. `doxa setup` now points to provider CLI
+  sign-in commands without handling credentials.
+- Open those native preferences from the inline `/settings` menu, showing
+  effective sources and disabling edits hidden by environment overrides.
+- Open an inline `/branch` picker for a verified managed session, with keyboard
+  and mouse selection; keep existing idle, ownership, and dirty-state guards.
+- Bound cached archived search results and refresh the picker when an indexed
+  hit updates an already loaded session.
+- Reject excessive linger values before launch, and make `/clear` finalization
+  conditional on an authoritative idle and empty-queue check in the daemon.
+- Start Claude sessions with an older installed Python sidecar environment by
+  passing detailed-event options only when its engine constructor supports them.
+- Treat explicit `doxa --engine ...` or `doxa --model ...` as a new session
+  request, even when this project already has sessions to restore.
+
 ## 2.0.0-alpha.23 — 2026-09-25
 
 - Add a scrollable `/help` registry for all 42 Python 1.19 DOXA command

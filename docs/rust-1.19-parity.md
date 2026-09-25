@@ -2,7 +2,7 @@
 
 Baseline: the `v1.19.0` Python tag, especially `doxa/commands.py`, its session
 command handlers, and the 1.19 worktree and fleet contracts. This records the
-Rust branch's behavior at `v2.0.0-alpha.23`; it is a release gate, not a
+Rust branch's behavior at `v2.0.0-alpha.24`; it is a release gate, not a
 claim that all Python behavior has been ported.
 
 | Area | Rust state | Remaining 1.19 behavior |
@@ -13,7 +13,7 @@ claim that all Python behavior has been ported.
 | Worktrees and diffs | Managed per-session Git checkout, guarded clean finalization, `new --branch`, idle live base switching, orphan preview and explicit verified Rust-orphan cleanup CLI, guarded missing-checkout recovery, diff pane and tracked-hunk rejection with queued active-turn feedback and a reason; unpinned Python 1.19 sidecars cannot be adopted, switched, or deleted by Rust | Shared lifecycle lock before cleanup of legacy Python sidecars, plus recovery when ownership or pinned Git metadata cannot be verified |
 | LORE | Context/scrub via sidecar, scoped curated memory and up to 20 global beliefs in an inline chip menu, belief/evidence picker, exact belief review and confirm/contradict/stale/retract actions, full proposal review and exact-snapshot approve/reject with LORE 0.58.5 | Older LORE builds remain read only; broader 1.19 memory management screens |
 | Peers and fleets | Peer map and direct message; optional native inbound peer turns; Python fleet start/inspection/attach; validated slot stop; native read-only preflight including supervisor/approval checks, Claude reported-cost ceiling, and priced DeepSeek/GLM ceiling for known models with complete usage | Native Codex priced budget and durable budgeted resume, fleet supervisor/barrier/approval desk, live fleet tab and remote routing |
-| Operational UI | Native doctor and install launcher; read-only CLI `setup`, `auth status`, and Claude Code `plugins` inventory; CLI `update`; per-session usage/context detail panels | Interactive setup/settings/login/logout/plugin adoption and provider context component breakdown |
+| Operational UI | Native doctor and install launcher; CLI `setup`, `auth status`, Claude Code `plugins` inventory, and `settings` read/set/unset for native linger and worktree preferences; inline `/settings` for those preferences; CLI `update`; per-session usage/context detail panels | Broader interactive setup/login/logout/plugin adoption and provider context component breakdown |
 
 ## Slash command coverage
 
@@ -31,13 +31,13 @@ commands still pass to the active engine.
 | `/fleet` | Bridge or partial; native Claude and known-model vendor per-session spend ceilings | Native supervisor, approval desk, barrier, Codex priced budget, budgeted resume and fleet tab |
 | `/model`, `/engine`, `/mode`, `/effort` | Local picker for bare form; new-session vendor models refresh from account catalogs, with DeepSeek per-model effort and measured GLM fallback; live effort chip reports daemon state; known DeepSeek/GLM models accept idle live effort changes for the next turn | Supported argument forms for other engines and newer catalog-only vendor models |
 | `/beliefs`, `/pending` | Belief reading, exact reviewed confirm/contradict/stale/retract actions, and staged approve/reject after complete raw review | Broader 1.19 memory management screens |
-| `/sessions`, `/search`, `/resume`, `/attach` | LORE indexed session lookup with exact owned-file loading and bounded scan fallback, verified saved Claude/Codex/vendor resume with guarded missing-checkout recovery, CLI attach/Claude resume and live TUI attach picker with ID/title search | Live search popup, grouped snippets, and results from indexed external transcripts that DOXA cannot open |
+| `/sessions`, `/search`, `/resume`, `/attach` | Debounced live search with grouped, scrubbed LORE index excerpts, exact owned-file loading and bounded scan fallback, verified saved Claude/Codex/vendor resume with guarded missing-checkout recovery, CLI attach/Claude resume and live TUI attach picker with ID/title search | Python-style prompt-line search menu and results from indexed external transcripts that DOXA cannot open |
 | `/usage`, `/context`, `/queue` | Scrollable per-session usage/context panels and queued prompt list/cancel picker | Provider context component breakdown and more detailed usage history |
 | `/help`, `/about` | Scrollable registry of all 42 Python 1.19 command names with Rust forms and support notes; version | Full diagnostics and generated action palette |
 | `/compact` | Explicit Claude command waits for completed LORE review; older sidecars and Codex/vendor compaction are blocked | Review gate for automatic provider compaction and other supported engines |
 | `/movepane`, `/collection`, `/rename`, `/cd`, `/clear` | `/movepane [1|2]` moves an active tab between two groups while retaining a source tab, matching Python's final-tab refusal; named `/collection new|rename|delete|add|remove` orders the rail; `/rename` local; `/cd <path>` opens a verified new-session directory; `/clear` replaces an idle session only after a durable tabset swap | Fresh-session replacement when no writable complete tabset is available |
-| `/branch` | `new --branch`, idle live base switch, CLI branch listing | Full branch command argument forms |
-| `/login`, `/logout`, `/settings`, `/setup`, `/doctor`, `/update` | CLI doctor, update, read-only setup report and auth-status probes | Interactive operations and settings changes |
+| `/branch` | `new --branch`, guarded idle live base switch, branch listing, and inline local branch picker | Python selector filtering and further worktree controls |
+| `/login`, `/logout`, `/settings`, `/setup`, `/doctor`, `/update` | CLI doctor, update, setup report and auth-status probes; native CLI and inline `/settings` read/set/unset for linger and worktree preferences | Broader interactive setup, authentication and settings changes |
 | `/plugins`, `/reload-plugins` | Read-only CLI Claude Code plugin inventory | Plugin adoption policy and refresh |
 | `/img` | Missing | Terminal image capability/reporting if required for stable parity |
 

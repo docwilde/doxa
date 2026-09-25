@@ -79,6 +79,28 @@ fn config_precedence_and_parse_failure() {
 }
 
 #[test]
+fn checked_config_update_preserves_future_values_and_refuses_bad_source() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let path = dir.path().join("config.toml");
+    fs::write(&path, "future_date = 2026-09-25\n[projects]\n'/repo' = 'keep'\n").unwrap();
+    update_config(&path, |table| {
+        table.insert("linger_secs".into(), toml::Value::Float(42.0));
+        Ok(())
+    }).unwrap();
+    let config = load_config_checked(&path).unwrap();
+    assert_eq!(config["future_date"].as_datetime().unwrap().to_string(), "2026-09-25");
+    assert_eq!(config["projects"]["/repo"].as_str(), Some("keep"));
+    assert_eq!(config["linger_secs"].as_float(), Some(42.0));
+    assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+    assert_eq!(fs::metadata(dir.path().join(".config.toml.lock")).unwrap().permissions().mode() & 0o777, 0o600);
+
+    fs::write(&path, "broken = [").unwrap();
+    assert!(update_config(&path, |table| { table.clear(); Ok(()) }).is_err());
+    assert_eq!(fs::read_to_string(&path).unwrap(), "broken = [");
+}
+
+#[test]
 fn registry_filters_dead_and_malformed_entries() {
     let dir = tempfile::tempdir().unwrap();
     let now = time::OffsetDateTime::now_utc();

@@ -9,6 +9,10 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+/// A year is long enough for an intentionally retained daemon and keeps
+/// configured values within Duration and platform timer limits.
+pub const MAX_LINGER_SECS: f64 = 31_536_000.0;
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum Engine {
     #[default]
@@ -271,8 +275,8 @@ pub fn spawn(options: &LaunchOptions) -> io::Result<Session> {
                 })
         })
         .unwrap_or(120.0);
-    if !linger.is_finite() || linger < 0.0 {
-        return Err(invalid("linger must be a nonnegative finite number"));
+    if !linger.is_finite() || !(0.0..=MAX_LINGER_SECS).contains(&linger) {
+        return Err(invalid("linger must be a finite number between 0 and 31536000 seconds"));
     }
     if model
         .as_ref()

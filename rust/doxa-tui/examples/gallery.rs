@@ -43,7 +43,7 @@ fn fixture() -> App {
     event(&mut app,"demo-codex-01","turn_done",json!({"input_tokens":4821,"output_tokens":918,"usage_scope":"session","usage_source":"codex_cli_turn_completed","ctx_percentage":18.0,"session_cost_usd":0.0187}));
     event(&mut app,"demo-claude-02","text_delta",json!({"text":"## Test review\n\nThe new cases cover clipped input and reconnects. One edge case remains in the transport fixture."}));
     event(&mut app,"demo-claude-02","turn_done",json!({"ctx_percentage":9.0,"session_cost_usd":0.0062}));
-    app.notice = "Rust 2.0.0-alpha.23 · fixture session".into();
+    app.notice = "Rust 2.0.0-alpha.24 · fixture session".into();
     app
 }
 
@@ -128,10 +128,18 @@ fn scene(name: &str) -> App {
             event(&mut app,"demo-deepseek-03","text_delta",json!({"text":
                 "## Model options\n\nThe selected model supports reasoning effort controls.\n\n- This session reports high effort\n- Its next turn may use a different level\n- Model choices follow the selected engine"}));
             key(&mut app, KeyCode::Char('f'), KeyModifiers::ALT);
-            app.notice = "Rust 2.0.0-alpha.23 · effort fixture".into();
+            app.notice = "Rust 2.0.0-alpha.24 · effort fixture".into();
         }
         "history" => {
-            key(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL);
+            app.show_history_fixture("layout", vec![
+                history::OfflineSession { id: "saved-layout-01".into(), project: "doxa".into(),
+                    markdown: "**You:** Improve the split layout".into(),
+                    search_snippets: vec!["split layout responds to terminal resize".into(),
+                        "pane layout keeps each prompt independent".into()], cwd: None },
+                history::OfflineSession { id: "saved-layout-02".into(), project: "doxa".into(),
+                    markdown: "**You:** Check the rail layout".into(),
+                    search_snippets: vec!["rail layout preserves grouped sessions".into()], cwd: None },
+            ]);
         }
         "queue" => {
             app.groups[0].tabs = vec!["demo-codex-01".into()];

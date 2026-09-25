@@ -85,7 +85,8 @@ remote-tracking branch. It prefers a same-named local branch over
 with `--resume` fails before starting the session; the launch checkout is
 never switched. `doxa branch` lists local branch bases from this checkout.
 `doxa branch NAME --session ID` changes an idle managed session's base, as
-does `/branch` in its pane. The worktree must be clean, have no unique commits,
+does `/branch <name>` in its pane. Bare `/branch` opens a local base-branch
+picker above the pane's prompt. The worktree must be clean, have no unique commits,
 and still match its pinned base commit. An active or queued turn blocks the
 switch. `doxa branch NAME` without a session ID lists available bases.
 
@@ -112,7 +113,19 @@ installer against `main` and replaces an installed Rust launcher after a
 successful build. It uses the current install directory and honors
 `DOXA_RUST_REPO_URL` for fork installations. A source build uses `./task install`.
 `doxa setup` reports effective model and effort preferences, LORE store
-selection, and provider authentication status without changing settings.
+selection, and provider authentication status. It shows the provider CLI
+sign-in commands; DOXA does not handle credentials.
+`doxa settings` reports effective native `linger_secs` and
+`worktree_per_session` values and their sources. Use
+`doxa settings set linger_secs 45`,
+`doxa settings set worktree_per_session off`, or
+`doxa settings unset worktree_per_session` to change future sessions.
+`linger_secs` accepts 0 through 31,536,000 seconds (one year).
+Active environment overrides must be removed before changing their stored
+value. Other Python 1.19 settings are still outside this native CLI.
+In the TUI, `/settings` or Ctrl+, opens an inline editor for these two
+preferences. Rows shadowed by environment values are read-only. Changes
+affect newly started sessions.
 `doxa auth status [claude|codex]` observes only provider CLI exit status;
 `doxa plugins` lists Claude Code plugin names and enabled flags without
 reading plugin contents into the terminal.
@@ -192,7 +205,7 @@ the JSONL file retains the full history. Older daemons without snapshot
 metadata fall back to their 512-event replay ring. A turn still running at
 attach can have text that was streamed but not yet persisted, so its earlier
 in-flight deltas may be absent. `Ctrl+T` opens bounded tool activity cards.
-The binary version is `2.0.0-alpha.23`;
+The binary version is `2.0.0-alpha.24`;
 this is an alpha release.
 
 In the transcript, user messages have a highlighted body and a left rule;

@@ -22,6 +22,7 @@ def test_indexed_session_search_is_project_first_bounded_and_scrubbed():
     conn.executemany("INSERT INTO msg VALUES (?, ?, '', 'user', ?)", [
         ("other-1", "other", "rare token"),
         ("local-1", "project", "rare SECRET token"),
+        ("local-1", "project", "another rare token"),
     ])
     conn.execute("PRAGMA query_only=ON")
     hits = lore_bridge._session_search(
@@ -29,9 +30,9 @@ def test_indexed_session_search_is_project_first_bounded_and_scrubbed():
         (lambda cwd: "project", None, None, None),
         lambda text: text.replace("SECRET", "[redacted]"),
     )
-    assert [hit["session_id"] for hit in hits] == ["local-1"]
-    assert "SECRET" not in hits[0]["snippet"]
-    assert "[redacted]" in hits[0]["snippet"]
+    assert [hit["session_id"] for hit in hits] == ["local-1", "local-1"]
+    assert "SECRET" not in str(hits)
+    assert any("[redacted]" in hit["snippet"] for hit in hits)
     with pytest.raises(ValueError):
         lore_bridge._session_search("/repo", "x" * 201, (lambda: None, lambda q: q),
                                     (lambda cwd: "project", None, None, None), lambda x: x)

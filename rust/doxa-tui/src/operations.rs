@@ -128,10 +128,100 @@ pub fn setup_report() -> io::Result<String> {
         }
     };
     Ok(format!(
-        "auth state\n{}\n\nLORE store\n{lore}\n\nmodel & effort defaults (stored preferences)\nmodel: {}\neffort: {}\n\nUse the provider CLI to log in; use /settings in the Python UI to change stored preferences.",
+        "auth state\n{}\n\nSign in with the provider CLI: claude auth login or codex login. DOXA never asks for credentials.\n\nLORE store\n{lore}\n\nmodel & effort defaults (stored preferences)\nmodel: {}\neffort: {}\n\nUse `doxa settings` for native linger and worktree preferences; the Python UI manages its wider settings catalog.",
         auth_status(None)?, preference(&config, "model", "DOXA_MODEL"),
         preference(&config, "effort", "DOXA_EFFORT"),
     ))
+}
+
+fn setting_env(key: &str) -> Option<&'static str> {
+    match key {
+        "linger_secs" => Some("DOXA_LINGER_SECS"),
+        "worktree_per_session" => Some("DOXA_WORKTREE"),
+        _ => None,
+    }
+}
+
+fn effective_setting(config: &toml::Table, key: &str) -> String {
+    let env = setting_env(key).expect("validated setting");
+    let override_value = std::env::var(env).ok().filter(|value| !value.trim().is_empty());
+    let (source, value) = if let Some(value) = override_value {
+        ("environment", value)
+    } else if config.contains_key(key) {
+        let value = if key == "worktree_per_session" {
+            match config.get(key) {
+                Some(toml::Value::Boolean(true)) => "on".into(),
+                Some(toml::Value::Boolean(false)) => "off".into(),
+                Some(toml::Value::String(value)) if !value.trim().is_empty() => value.clone(),
+                _ => "on".into(),
+            }
+        } else { doxa_state::raw_setting(None, config, key) };
+        ("config.toml", value)
+    } else {
+        ("default", if key == "linger_secs" { "120".into() } else { "1".into() })
+    };
+    let display = if key == "worktree_per_session" {
+        if matches!(value.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off") { "off" }
+        else { "on" }
+    } else { value.trim() };
+    format!("{} ({source})", safe_report_value(display))
+}
+
+/// Values displayed by the in-app editor. Re-read on every open and after
+/// every write so the menu never presents stale config as the active value.
+pub fn native_settings() -> io::Result<[(String, bool); 2]> {
+    let config = doxa_state::load_config_checked(&doxa_home()?.join("config.toml"))?;
+    Ok(["linger_secs", "worktree_per_session"].map(|key| {
+        let env = setting_env(key).expect("native setting");
+        (effective_setting(&config, key),
+            std::env::var(env).ok().is_some_and(|value| !value.trim().is_empty()))
+    }))
+}
+
+pub fn settings_report() -> io::Result<String> {
+    let config = doxa_state::load_config_checked(&doxa_home()?.join("config.toml"))?;
+    Ok(format!("native settings · environment > config.toml > default (launch flags can override)\nlinger_secs: {}\nworktree_per_session: {}\n\nChange with `doxa settings set KEY VALUE`; remove with `doxa settings unset KEY`. These affect new sessions; running sessions keep their launch settings.",
+        effective_setting(&config, "linger_secs"),
+        effective_setting(&config, "worktree_per_session")))
+}
+
+fn edit_setting(path: &Path, key: &str, value: Option<&str>, env_override: Option<&str>) -> io::Result<()> {
+    let env = setting_env(key).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput,
+        "setting must be linger_secs or worktree_per_session"))?;
+    if env_override.is_some_and(|value| !value.trim().is_empty()) {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied,
+            format!("{env} overrides config.toml; unset it before changing {key}")));
+    }
+    let parsed = match (key, value) {
+        (_, None) => None,
+        ("linger_secs", Some(value)) => {
+            let seconds: f64 = value.parse().map_err(|_| io::Error::new(io::ErrorKind::InvalidInput,
+                "linger_secs must be a nonnegative finite number"))?;
+            if !seconds.is_finite() || !(0.0..=crate::launch::MAX_LINGER_SECS).contains(&seconds) {
+                return Err(io::Error::new(io::ErrorKind::InvalidInput,
+                    "linger_secs must be a finite number between 0 and 31536000 seconds"));
+            }
+            Some(toml::Value::Float(seconds))
+        }
+        ("worktree_per_session", Some("on" | "true" | "1")) => Some(toml::Value::Boolean(true)),
+        ("worktree_per_session", Some("off" | "false" | "0")) => Some(toml::Value::Boolean(false)),
+        _ => return Err(io::Error::new(io::ErrorKind::InvalidInput,
+            "worktree_per_session accepts on or off")),
+    };
+    doxa_state::update_config(path, |stored| {
+        if let Some(value) = parsed { stored.insert(key.into(), value); }
+        else { stored.remove(key); }
+        Ok(())
+    })
+}
+
+pub fn settings_change(key: &str, value: Option<&str>) -> io::Result<String> {
+    let env = setting_env(key).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput,
+        "setting must be linger_secs or worktree_per_session"))?;
+    edit_setting(&doxa_home()?.join("config.toml"), key, value,
+        std::env::var(env).ok().as_deref())?;
+    Ok(format!("{key}: {} for new sessions",
+        if value.is_some() { "stored" } else { "removed from config.toml" }))
 }
 
 fn read_claude_json(path: &Path) -> Option<serde_json::Value> {
@@ -220,6 +310,31 @@ mod tests {
         config.insert("model".into(), toml::Value::String("stored".into()));
         assert_eq!(preference(&config, "model", "DOXA_TEST_MISSING_PREFERENCE"), "stored (config.toml)");
         assert_eq!(preference(&config, "missing", "DOXA_TEST_MISSING_PREFERENCE"), "(CLI default)");
+    }
+
+    #[test]
+    fn native_settings_store_only_valid_active_preferences() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "future = 'keep'\n").unwrap();
+        edit_setting(&path, "linger_secs", Some("42.5"), None).unwrap();
+        edit_setting(&path, "worktree_per_session", Some("off"), None).unwrap();
+        let config = doxa_state::load_config_checked(&path).unwrap();
+        assert_eq!(config["linger_secs"].as_float(), Some(42.5));
+        assert_eq!(config["worktree_per_session"].as_bool(), Some(false));
+        assert_eq!(config["future"].as_str(), Some("keep"));
+        assert_eq!(effective_setting(&config, "worktree_per_session"), "off (config.toml)");
+        let mut malformed = config.clone();
+        malformed.insert("worktree_per_session".into(), toml::Value::Integer(0));
+        assert_eq!(effective_setting(&malformed, "worktree_per_session"), "on (config.toml)");
+        assert!(edit_setting(&path, "linger_secs", Some("NaN"), None).is_err());
+        assert!(edit_setting(&path, "linger_secs", Some("1e308"), None).is_err());
+        assert!(edit_setting(&path, "worktree_per_session", Some("maybe"), None).is_err());
+        assert!(edit_setting(&path, "linger_secs", Some("10"), Some("7")).is_err());
+        assert_eq!(doxa_state::load_config_checked(&path).unwrap(), config);
+        edit_setting(&path, "linger_secs", None, None).unwrap();
+        assert!(doxa_state::load_config_checked(&path).unwrap().get("linger_secs").is_none());
     }
 
     #[test]

@@ -5,6 +5,7 @@ use std::io::{self, IsTerminal, Stdout, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{
@@ -43,6 +44,8 @@ const MAX_INPUT_REQUESTS: usize = 32;
 const INPUT_BLINK_INTERVAL: Duration = Duration::from_millis(650);
 const SPINNER_INTERVAL: Duration = Duration::from_millis(120);
 const SPINNER_FRAMES: [&str; 4] = ["◐", "◓", "◑", "◒"];
+const SEARCH_DEBOUNCE: Duration = Duration::from_millis(130);
+const MAX_SEARCH_WORKERS: usize = 2;
 // JSON may expand one input byte to a six-byte Unicode escape.
 const MAX_INPUT_BYTES: usize = 10 * 1024;
 const MAX_TRANSCRIPT_BYTES: usize = 512 * 1024;
@@ -88,8 +91,8 @@ const COMMANDS: &[CommandHelp] = &[
     CommandHelp { name: "/img", form: "/img [path]", summary: "Image support", support: "unavailable in Rust" },
     CommandHelp { name: "/login", form: "/login [provider]", summary: "Provider login", support: "unavailable in Rust" },
     CommandHelp { name: "/logout", form: "/logout [provider]", summary: "Provider logout", support: "unavailable in Rust" },
-    CommandHelp { name: "/settings", form: "/settings", summary: "Settings", support: "unavailable in Rust" },
-    CommandHelp { name: "/setup", form: "/setup", summary: "Setup checks", support: "unavailable in Rust" },
+    CommandHelp { name: "/settings", form: "/settings", summary: "Native settings", support: "local · linger and worktree for new sessions" },
+    CommandHelp { name: "/setup", form: "/setup", summary: "Setup checks", support: "CLI only · doxa setup" },
     CommandHelp { name: "/doctor", form: "/doctor", summary: "Health checks", support: "unavailable in Rust" },
     CommandHelp { name: "/plugins", form: "/plugins", summary: "Plugin inventory", support: "unavailable in Rust" },
     CommandHelp { name: "/reload-plugins", form: "/reload-plugins", summary: "Refresh plugins", support: "unavailable in Rust" },
@@ -170,6 +173,14 @@ struct ModelPicker {
 struct AttachPicker {
     rows: Vec<crate::discovery::Session>,
     query: String,
+    selected: usize,
+}
+
+#[derive(Debug)]
+struct BranchPicker {
+    session_id: String,
+    branches: Vec<String>,
+    base: String,
     selected: usize,
 }
 
@@ -256,6 +267,13 @@ struct QueuePicker {
     selected: usize,
     loading: bool,
     cancelling: Option<String>,
+}
+
+#[derive(Debug)]
+struct SettingsMenu {
+    rows: [(String, bool); 2],
+    selected: usize,
+    linger_draft: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1123,6 +1141,7 @@ pub struct App {
     model_picker: Option<ModelPicker>,
     effort_picker: Option<EffortPicker>,
     attach_picker: Option<AttachPicker>,
+    branch_picker: Option<BranchPicker>,
     lore_picker: Option<LorePicker>,
     engine_picker: bool,
     engine_selected: usize,
@@ -1162,11 +1181,14 @@ pub struct App {
     history_selected: usize,
     history_pending: Option<Receiver<Vec<history::OfflineSession>>>,
     history_scan_query: Option<String>,
+    history_query_due: Option<Instant>,
+    history_search_inflight: Arc<AtomicUsize>,
     history_scanned_matches: HashMap<String, String>,
     history_entries: HashMap<String, history::OfflineSession>,
     resume_pending: Option<Receiver<(String, Result<launch::LaunchOptions, &'static str>)>>,
     offline_ids: HashSet<String>,
     queue_picker: Option<QueuePicker>,
+    settings_menu: Option<SettingsMenu>,
     pending_queue_commands: Vec<crate::bridge::WorkerCommand>,
     diff_modal: bool,
     diff_pane: bool,
@@ -1262,6 +1284,7 @@ impl Default for App {
             model_picker: None,
             effort_picker: None,
             attach_picker: None,
+            branch_picker: None,
             lore_picker: None,
             engine_picker: false,
             engine_selected: 0,
@@ -1301,11 +1324,14 @@ impl Default for App {
             history_selected: 0,
             history_pending: None,
             history_scan_query: None,
+            history_query_due: None,
+            history_search_inflight: Arc::new(AtomicUsize::new(0)),
             history_scanned_matches: HashMap::new(),
             history_entries: HashMap::new(),
             resume_pending: None,
             offline_ids: HashSet::new(),
             queue_picker: None,
+            settings_menu: None,
             pending_queue_commands: Vec::new(),
             diff_modal: false,
             diff_pane: false,
@@ -1377,18 +1403,34 @@ impl App {
         };
         match kind {
             "branch_reply" => {
+                let Some(id) = frame["session_id"].as_str() else { return false; };
                 if frame["ok"] == true && frame["message"].as_str().is_some() {
-                    if let Some(id) = frame["session_id"].as_str() { self.invalidate_repo(id); }
+                    self.invalidate_repo(id);
                 }
                 if frame["ok"] != true {
                     self.notice = format!("branch: {}", safe_label(frame["error"].as_str().unwrap_or("switch refused")));
                 } else if let Some(message) = frame["message"].as_str() {
                     self.notice = format!("branch: {}", safe_label(message));
                 } else {
-                    let base = safe_label(frame["base"].as_str().unwrap_or("(none)"));
-                    let rows = frame["branches"].as_array().into_iter().flatten()
-                        .filter_map(|v| v.as_str()).take(30).map(safe_label).collect::<Vec<_>>();
-                    self.notice = format!("branch: {base} · {} · /branch <name>", rows.join(", "));
+                    let Some(base) = frame["base"].as_str() else { return false; };
+                    if base.len() > 200 || base.chars().any(unsafe_input_char) { return false; }
+                    let Some(rows) = frame["branches"].as_array() else { return false; };
+                    if self.groups[self.active_group].active_id() != Some(id) { return false; }
+                    let branches: Vec<String> = rows.iter().filter_map(|row| row.as_str())
+                        .filter(|name| !name.is_empty() && name.len() <= 200
+                            && !name.chars().any(unsafe_input_char))
+                        .take(100).map(str::to_owned).collect();
+                    if branches.is_empty() {
+                        self.notice = "branch: no local base branches available".into();
+                    } else {
+                        let selected = branches.iter().position(|name| name == base).unwrap_or(0);
+                        self.branch_picker = Some(BranchPicker { session_id: id.into(),
+                            branches, base: base.into(), selected });
+                        if self.active_chooser_rect().is_none() {
+                            self.branch_picker = None;
+                            self.notice = "Enlarge active pane to choose a branch".into();
+                        }
+                    }
                 }
                 true
             }
@@ -2132,15 +2174,24 @@ impl App {
                 }
                 if self.history_modal && self.active_chooser_rect().is_none() {
                     self.history_modal = false;
+                    self.cancel_history_query();
                     self.notice = "Enlarge active pane to search sessions".into();
                 }
                 if self.attach_picker.is_some() && self.active_chooser_rect().is_none() {
                     self.attach_picker = None;
                     self.notice = "Enlarge active pane to choose a live session".into();
                 }
+                if self.branch_picker.is_some() && self.active_chooser_rect().is_none() {
+                    self.branch_picker = None;
+                    self.notice = "Enlarge active pane to choose a branch".into();
+                }
                 if self.queue_picker.is_some() && self.active_chooser_rect().is_none() {
                     self.queue_picker = None;
                     self.notice = "Enlarge active pane to inspect queued prompts".into();
+                }
+                if self.settings_menu.is_some() && self.active_chooser_rect().is_none() {
+                    self.settings_menu = None;
+                    self.notice = "Enlarge active pane to edit settings".into();
                 }
                 if self.lore_picker.is_some() && (w < 34 || h < 13) {
                     self.lore_picker = None;
@@ -2173,6 +2224,7 @@ impl App {
         };
         let after = (self.active_group, self.groups[self.active_group].active_id().unwrap_or("").to_owned());
         if before != after {
+            self.branch_picker = None;
             let moved_active_tab = std::mem::take(&mut self.moved_active_tab)
                 && !before.1.is_empty() && before.1 == after.1
                 && !self.groups[before.0].tabs.contains(&before.1)
@@ -2204,10 +2256,10 @@ impl App {
             return true;
         }
         if self.focus != Focus::Prompt || self.active_request_index().is_some()
-            || self.stop_confirmation.is_some() || self.lore_picker.is_some()
+            || self.stop_confirmation.is_some() || self.lore_picker.is_some() || self.settings_menu.is_some()
             || self.new_session.is_some() || self.model_picker.is_some() || self.effort_picker.is_some()
             || self.permission_picker.is_some() || self.engine_picker || self.action_menu
-            || self.history_modal || self.queue_picker.is_some() || self.attach_picker.is_some() || self.diff_modal || self.map_modal || self.tool_modal {
+            || self.history_modal || self.queue_picker.is_some() || self.attach_picker.is_some() || self.branch_picker.is_some() || self.diff_modal || self.map_modal || self.tool_modal {
             return false;
         }
         let mut clean = String::new();
@@ -2262,11 +2314,11 @@ impl App {
     fn slash_suggestions(&self) -> Vec<(&'static str, &'static str)> {
         if self.focus != Focus::Prompt || self.slash_dismissed
             || self.active_request_index().is_some() || self.stop_confirmation.is_some()
-            || self.chip_info.is_some() || self.lore_picker.is_some()
+            || self.chip_info.is_some() || self.lore_picker.is_some() || self.settings_menu.is_some()
             || self.new_session.is_some() || self.model_picker.is_some()
             || self.effort_picker.is_some() || self.permission_picker.is_some()
             || self.engine_picker || self.action_menu || self.history_modal
-            || self.queue_picker.is_some() || self.attach_picker.is_some()
+            || self.queue_picker.is_some() || self.attach_picker.is_some() || self.branch_picker.is_some()
             || self.diff_modal || self.map_modal || self.tool_modal {
             return Vec::new();
         }
@@ -2313,7 +2365,7 @@ impl App {
         let mut parts = input.split_whitespace();
         let Some(name) = parts.next() else { return false; };
         let args: Vec<&str> = parts.collect();
-        if !matches!(name, "/help" | "/about" | "/sessions" | "/model" | "/effort" | "/engine"
+        if !matches!(name, "/help" | "/about" | "/sessions" | "/settings" | "/model" | "/effort" | "/engine"
             | "/mode" | "/beliefs" | "/diff" | "/peers" | "/split"
             | "/vsplit" | "/pane" | "/sidebar" | "/detach" | "/dir") {
             return false;
@@ -2332,6 +2384,10 @@ impl App {
                 }
             }
         } else { None };
+        if pane_target == Some(1) && !self.pane_group_two_exists() {
+            self.notice = "There is only one pane group · /split or /vsplit makes a second".into();
+            return true;
+        }
         let sidebar = if name == "/sidebar" && !args.is_empty() {
             match args.as_slice() {
                 ["on"] => Some((true, None)),
@@ -2360,6 +2416,7 @@ impl App {
             }
             "/about" => self.notice = format!("DOXA Rust {}", env!("CARGO_PKG_VERSION")),
             "/sessions" => self.open_history(),
+            "/settings" => self.open_settings_menu(),
             "/model" => self.open_model_picker(),
             "/effort" => self.open_effort_picker(),
             "/engine" => self.open_engine_picker(),
@@ -2382,9 +2439,16 @@ impl App {
                 self.split_requested = true;
             }
             "/pane" => {
-                self.active_group = pane_target.unwrap_or(1 - self.active_group);
-                self.split_requested = true;
-                self.focus = Focus::Prompt;
+                if let Some(target) = pane_target {
+                    self.active_group = target;
+                    self.focus = Focus::Prompt;
+                } else {
+                    self.notice = if self.pane_group_two_exists() {
+                        "2 pane groups, numbered 1 and 2 · /pane <n> to focus one".into()
+                    } else {
+                        "One pane group · /split or /vsplit makes a second".into()
+                    };
+                }
             }
             "/sidebar" => {
                 if let Some((visible, width)) = sidebar {
@@ -2445,6 +2509,7 @@ impl App {
             }
             return false;
         }
+        if self.settings_menu.is_some() { return self.settings_menu_key(key); }
         if self.lore_picker.is_some() { return self.lore_picker_key(key); }
         if self.new_session.is_some() { return self.new_session_key(key); }
         if self.model_picker.is_some() { return self.model_picker_key(key); }
@@ -2459,6 +2524,7 @@ impl App {
         }
         if self.queue_picker.is_some() { return self.queue_key(key); }
         if self.attach_picker.is_some() { return self.attach_picker_key(key); }
+        if self.branch_picker.is_some() { return self.branch_picker_key(key); }
         if self.diff_modal {
             return self.diff_key(key);
         }
@@ -2489,6 +2555,10 @@ impl App {
                 }
                 _ => false,
             };
+        }
+        if key.code == KeyCode::Char(',') && ctrl {
+            self.open_settings_menu();
+            return true;
         }
         if key.code == KeyCode::Char('m') && ctrl {
             self.map_modal = true;
@@ -2871,8 +2941,16 @@ impl App {
                 }
                 true
             }
+            "/settings" if args.trim().is_empty() => {
+                self.input.clear();
+                self.input_cursor = 0;
+                self.open_settings_menu();
+                true
+            }
+            "/settings" => { self.notice = "Usage: /settings · edit native preferences in the menu".into(); true }
+            "/setup" => { self.notice = "Run `doxa setup` in a shell for auth and store checks".into(); true }
             "/fleet" | "/img" | "/login"
-            | "/logout" | "/settings" | "/setup" | "/doctor" | "/plugins"
+            | "/logout" | "/doctor" | "/plugins"
             | "/reload-plugins" | "/effort"
             | "/update" => {
                 self.notice = format!("Local command unavailable: {}", safe_label(command));
@@ -2975,6 +3053,34 @@ impl App {
             _ => return false,
         }
         true
+    }
+
+    fn branch_picker_key(&mut self, key: KeyEvent) -> bool {
+        let Some(picker) = self.branch_picker.as_mut() else { return false; };
+        match key.code {
+            KeyCode::Esc => self.branch_picker = None,
+            KeyCode::Up => picker.selected = picker.selected.saturating_sub(1),
+            KeyCode::Down => picker.selected = (picker.selected + 1).min(picker.branches.len().saturating_sub(1)),
+            KeyCode::Enter => self.choose_branch(),
+            _ => return false,
+        }
+        true
+    }
+
+    fn choose_branch(&mut self) {
+        let Some(picker) = self.branch_picker.take() else { return; };
+        if self.groups[self.active_group].active_id() != Some(picker.session_id.as_str()) {
+            self.notice = "Branch choice cancelled: active session changed".into();
+            return;
+        }
+        let Some(branch) = picker.branches.get(picker.selected) else { return; };
+        if branch == &picker.base {
+            self.notice = format!("branch: already based on {}", safe_label(branch));
+            return;
+        }
+        self.pending_queue_commands.push(crate::bridge::WorkerCommand::Branch(
+            picker.session_id, Some(branch.clone())));
+        self.notice = format!("Checking branch {}…", safe_label(branch));
     }
 
     fn open_selected_attach(&mut self) {
@@ -3602,6 +3708,32 @@ impl App {
         }).take(128).collect()
     }
 
+    fn history_snippets(&self, id: &str) -> &[String] {
+        if self.history_resume || self.history_scanned_matches.get(id)
+            != Some(&self.history_query.to_lowercase()) { return &[]; }
+        self.history_entries.get(id).map_or(&[], |entry| entry.search_snippets.as_slice())
+    }
+
+    /// One session header followed by at most two indexed excerpts. Row
+    /// positions are shared by paint and mouse hit testing.
+    fn history_rows(&self, visible: usize) -> Vec<(usize, bool, String)> {
+        let matches = self.history_matches();
+        let mut rows = Vec::new();
+        for (position, &index) in matches.iter().enumerate().skip(self.history_selected) {
+            if rows.len() >= visible { break; }
+            let session = &self.sessions[index];
+            let label = format!(" {} {} · {}{}", if position == self.history_selected { '›' } else { ' ' },
+                safe_label(&session.title), safe_label(&session.id),
+                if self.offline_ids.contains(&session.id) { " · archived" } else { "" });
+            rows.push((position, true, label));
+            for snippet in self.history_snippets(&session.id).iter().take(2) {
+                if rows.len() >= visible { break; }
+                rows.push((position, false, format!("    ↳ {}", safe_label(snippet))));
+            }
+        }
+        rows
+    }
+
     fn history_fits(&self) -> bool {
         let layout = self.layout(self.size);
         let pane = layout.panes.map_or(layout.body, |panes| panes[self.active_group]);
@@ -3613,10 +3745,12 @@ impl App {
             self.notice = "Enlarge active pane to search sessions".into();
             return;
         }
+        self.prune_unopened_history();
         self.history_modal = true;
         self.history_resume = false;
         self.history_explicit = false;
         self.history_scan_query = None;
+        self.history_query_due = None;
         self.history_query.clear();
         self.history_selected = 0;
         if self.active_chooser_rect().is_none() {
@@ -3642,17 +3776,67 @@ impl App {
         self.open_history();
         if self.history_modal {
             self.history_query = query.to_owned();
-            if !query.is_empty() {
-                let (tx, rx) = mpsc::sync_channel(1);
-                self.history_pending = Some(rx);
-                let query = query.to_owned();
-                let cwd = self.groups[self.active_group].active_id()
-                    .and_then(|id| self.session_cwds.get(id)).cloned()
-                    .or_else(|| std::env::current_dir().ok()).unwrap_or_default();
-                self.history_scan_query = Some(query.to_lowercase());
-                std::thread::spawn(move || { let _ = tx.send(history::discover_query(&query, &cwd)); });
-            }
+            self.schedule_history_query(Instant::now());
         }
+    }
+
+    fn schedule_history_query(&mut self, now: Instant) {
+        if self.history_resume { return; }
+        // Dropping the receiver cancels delivery from an older worker. Its
+        // bounded file/sidecar work may finish, but can no longer paint UI.
+        self.history_pending = None;
+        self.history_scan_query = None;
+        self.prune_unopened_history();
+        self.history_query_due = (!self.history_query.trim().is_empty()).then_some(now + SEARCH_DEBOUNCE);
+    }
+
+    fn prune_unopened_history(&mut self) {
+        // Search hits are display cache, not tabs. Keep a bounded recent
+        // inventory so reopening search can reuse results, while repeated
+        // distinct queries cannot retain unbounded transcript tails.
+        const MAX_CACHED_ARCHIVED: usize = 64;
+        let open: HashSet<String> = self.groups.iter()
+            .flat_map(|group| group.tabs.iter().cloned()).collect();
+        let unopened: Vec<_> = self.sessions.iter().filter(|session|
+            self.offline_ids.contains(&session.id) && !open.contains(&session.id))
+            .map(|session| session.id.clone()).collect();
+        let excess = unopened.len().saturating_sub(MAX_CACHED_ARCHIVED);
+        let evict: HashSet<_> = unopened.into_iter().take(excess).collect();
+        if evict.is_empty() { return; }
+        self.sessions.retain(|session| !evict.contains(&session.id));
+        self.offline_ids.retain(|id| !evict.contains(id));
+        self.history_entries.retain(|id, _| !evict.contains(id));
+        self.history_scanned_matches.retain(|id, _| !evict.contains(id));
+    }
+
+    fn cancel_history_query(&mut self) {
+        self.history_pending = None;
+        self.history_scan_query = None;
+        self.history_query_due = None;
+    }
+
+    fn start_due_history_query(&mut self, now: Instant) -> bool {
+        if !self.history_modal || self.history_resume || self.history_pending.is_some()
+            || !self.history_query_due.is_some_and(|due| now >= due)
+            || self.history_search_inflight.load(Ordering::Acquire) >= MAX_SEARCH_WORKERS {
+            return false;
+        }
+        self.history_query_due = None;
+        let query = self.history_query.clone();
+        let cwd = self.groups[self.active_group].active_id()
+            .and_then(|id| self.session_cwds.get(id)).cloned()
+            .or_else(|| std::env::current_dir().ok()).unwrap_or_default();
+        let (tx, rx) = mpsc::sync_channel(1);
+        self.history_pending = Some(rx);
+        self.history_scan_query = Some(query.to_lowercase());
+        let in_flight = self.history_search_inflight.clone();
+        in_flight.fetch_add(1, Ordering::AcqRel);
+        std::thread::spawn(move || {
+            let found = history::discover_query(&query, &cwd);
+            in_flight.fetch_sub(1, Ordering::AcqRel);
+            let _ = tx.send(found);
+        });
+        true
     }
 
     fn local_resume(&mut self, args: &str) {
@@ -3733,6 +3917,81 @@ impl App {
         picker.cancelling = Some(id.clone());
         self.pending_queue_commands.push(crate::bridge::WorkerCommand::QueueCancel(picker.session_id.clone(), id));
         self.notice = "Cancelling selected queued prompt…".into();
+    }
+
+    fn open_settings_menu(&mut self) {
+        match crate::operations::native_settings() {
+            Ok(rows) => {
+                self.settings_menu = Some(SettingsMenu { rows, selected: 0, linger_draft: None });
+                if self.active_chooser_rect().is_none() {
+                    self.settings_menu = None;
+                    self.notice = "Enlarge active pane to edit settings".into();
+                }
+            }
+            Err(error) => self.notice = format!("Settings unavailable: {}", safe_label(&error.to_string())),
+        }
+    }
+
+    fn settings_change(&mut self, key: &str, value: Option<&str>) {
+        match crate::operations::settings_change(key, value) {
+            Ok(message) => {
+                self.notice = message;
+                match crate::operations::native_settings() {
+                    Ok(rows) => if let Some(menu) = &mut self.settings_menu {
+                        menu.rows = rows;
+                        menu.linger_draft = None;
+                    },
+                    Err(error) => {
+                        self.settings_menu = None;
+                        self.notice = format!("Setting saved; refresh failed: {}", safe_label(&error.to_string()));
+                    }
+                }
+            }
+            Err(error) => self.notice = format!("Setting unchanged: {}", safe_label(&error.to_string())),
+        }
+    }
+
+    fn settings_menu_key(&mut self, key: KeyEvent) -> bool {
+        let Some(menu) = self.settings_menu.as_mut() else { return false; };
+        if let Some(draft) = &mut menu.linger_draft {
+            match key.code {
+                KeyCode::Esc => menu.linger_draft = None,
+                KeyCode::Backspace => { draft.pop(); },
+                KeyCode::Char(ch) if (ch.is_ascii_digit() || ch == '.') && draft.len() < 24 => draft.push(ch),
+                KeyCode::Enter => {
+                    let value = draft.clone();
+                    self.settings_change("linger_secs", Some(&value));
+                }
+                _ => {}
+            }
+            return true;
+        }
+        match key.code {
+            KeyCode::Esc => self.settings_menu = None,
+            KeyCode::Up | KeyCode::BackTab => menu.selected = menu.selected.saturating_sub(1),
+            KeyCode::Down | KeyCode::Tab => menu.selected = (menu.selected + 1).min(1),
+            KeyCode::Char('u') | KeyCode::Delete => {
+                let selected = menu.selected;
+                if menu.rows[selected].1 {
+                    self.notice = "Environment override is active; unset it before editing".into();
+                } else {
+                    self.settings_change(if selected == 0 { "linger_secs" } else { "worktree_per_session" }, None);
+                }
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                let selected = menu.selected;
+                if menu.rows[selected].1 {
+                    self.notice = "Environment override is active; unset it before editing".into();
+                } else if selected == 0 {
+                    menu.linger_draft = Some(menu.rows[0].0.split(' ').next().unwrap_or("120").to_owned());
+                } else {
+                    let on = menu.rows[1].0.starts_with("on ");
+                    self.settings_change("worktree_per_session", Some(if on { "off" } else { "on" }));
+                }
+            }
+            _ => {}
+        }
+        true
     }
 
     fn open_lore_picker(&mut self) {
@@ -3816,7 +4075,9 @@ impl App {
     }
 
     fn poll_memory(&mut self) -> bool {
-        let mut changed = false;
+        // A completed scan can change excerpts or the loading indicator even
+        // when every hit is already present in the session list.
+        let mut changed = true;
         if let Some((id, cwd, receiver)) = self.memory_pending.take() {
             match receiver.try_recv() {
                 Ok(result) => {
@@ -4312,14 +4573,18 @@ impl App {
     }
 
     fn poll_history(&mut self) -> bool {
+        let started = self.start_due_history_query(Instant::now());
         let Some(receiver) = &self.history_pending else { return false; };
         let found = match receiver.try_recv() {
             Ok(found) => found,
-            Err(TryRecvError::Empty) => return false,
+            Err(TryRecvError::Empty) => return started,
             Err(TryRecvError::Disconnected) => { self.history_pending = None; return false; }
         };
         self.history_pending = None;
         let scan_query = self.history_scan_query.take();
+        if scan_query.as_deref().is_some_and(|query| query != self.history_query.to_lowercase()) {
+            return true;
+        }
         let mut changed = false;
         for entry in found {
             if let Some(query) = &scan_query {
@@ -4333,6 +4598,7 @@ impl App {
                 status: "Archived · read-only".into() });
             changed = true;
         }
+        self.prune_unopened_history();
         if self.history_modal && self.history_resume && self.history_explicit {
             match self.history_matches().len() {
                 0 => {
@@ -4347,16 +4613,40 @@ impl App {
         changed
     }
 
+    /// Populate the deterministic screenshot renderer without scanning local
+    /// history or contacting a provider.
+    #[doc(hidden)]
+    pub fn show_history_fixture(&mut self, query: &str, entries: Vec<history::OfflineSession>) {
+        self.history_modal = true;
+        self.history_resume = false;
+        self.history_query = query.to_owned();
+        self.history_selected = 0;
+        self.cancel_history_query();
+        for entry in entries {
+            self.history_scanned_matches.insert(entry.id.clone(), query.to_lowercase());
+            self.history_entries.insert(entry.id.clone(), entry.clone());
+            if self.sessions.iter().any(|session| session.id == entry.id) { continue; }
+            self.offline_ids.insert(entry.id.clone());
+            self.sessions.push(Session { id: entry.id.clone(), title: entry.id,
+                collection: safe_label(&entry.project), transcript: transcript_tail(&entry.markdown).to_owned(),
+                status: "Archived · read-only".into() });
+        }
+    }
+
     fn history_key(&mut self, key: KeyEvent) -> bool {
         match key.code {
             KeyCode::Esc | KeyCode::Char('r') if key.code == KeyCode::Esc || key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.history_modal = false;
+                self.cancel_history_query();
+                self.prune_unopened_history();
             }
             KeyCode::Up => self.history_selected = self.history_selected.saturating_sub(1),
             KeyCode::Down => self.history_selected = (self.history_selected + 1).min(self.history_matches().len().saturating_sub(1)),
-            KeyCode::Backspace => { self.history_query.pop(); self.history_selected = 0; }
+            KeyCode::Backspace => { self.history_query.pop(); self.history_selected = 0;
+                self.schedule_history_query(Instant::now()); }
             KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
-                if self.history_query.len() + c.len_utf8() <= 200 { self.history_query.push(c); self.history_selected = 0; }
+                if self.history_query.len() + c.len_utf8() <= 200 { self.history_query.push(c); self.history_selected = 0;
+                    self.schedule_history_query(Instant::now()); }
             }
             KeyCode::Enter => {
                 self.open_selected_history();
@@ -4371,6 +4661,7 @@ impl App {
             let id = self.sessions[index].id.clone();
             if self.history_resume {
                 self.history_modal = false;
+                self.cancel_history_query();
                 self.history_resume = false;
                 if self.groups.iter().any(|group| group.tabs.iter().any(|tab| tab == &id)) {
                     for (group_index, group) in self.groups.iter_mut().enumerate() {
@@ -4404,6 +4695,7 @@ impl App {
             tabs.scroll = 0;
             self.focus = Focus::Transcript;
             self.history_modal = false;
+            self.cancel_history_query();
         }
     }
 
@@ -5134,6 +5426,10 @@ impl App {
         p.scroll = 0;
     }
 
+    fn pane_group_two_exists(&self) -> bool {
+        self.split_requested || self.active_group == 1 || !self.groups[1].tabs.is_empty()
+    }
+
     fn layout(&self, area: Rect) -> PaneLayout {
         let min_body = if self.split == Split::Vertical {
             MIN_PANE_WIDTH * 2
@@ -5219,6 +5515,8 @@ impl App {
                 usize::from(pane.width.saturating_sub(4)));
             wrapped_rows(&body, usize::from(pane.width.saturating_sub(2)))
                 .saturating_add(2).clamp(6, 18) as u16
+        } else if self.settings_menu.is_some() {
+            8
         } else if self.engine_picker {
             7
         } else if let Some(form) = &self.new_session {
@@ -5249,11 +5547,15 @@ impl App {
                 (info.lines.len() + 2).clamp(7, 19) as u16
             } else { 5 })
         } else if self.history_modal {
-            (self.history_matches().len() + 3).clamp(5, 15) as u16
+            let rows: usize = self.history_matches().iter().map(|&index|
+                1 + self.history_snippets(&self.sessions[index].id).len().min(2)).sum();
+            (rows + 3).clamp(5, 15) as u16
         } else if let Some(picker) = &self.queue_picker {
             (picker.rows.len() + 3).clamp(5, 15) as u16
         } else if self.attach_picker.is_some() {
             (self.attach_matches().len() + 3).clamp(5, 15) as u16
+        } else if let Some(picker) = &self.branch_picker {
+            (picker.branches.len() + 3).clamp(5, 15) as u16
         } else if !self.slash_suggestions().is_empty() {
             (self.slash_suggestions().len() + 2).clamp(5, 10) as u16
         } else {
@@ -5465,7 +5767,8 @@ impl App {
         self.active_chooser_rect().is_some() || self.active_request_index().is_some()
             || self.map_modal || self.diff_modal || self.tool_modal || self.action_menu
             || self.history_modal || self.queue_picker.is_some() || self.attach_picker.is_some()
-            || self.lore_picker.is_some() || self.model_picker.is_some()
+            || self.branch_picker.is_some() || self.lore_picker.is_some()
+            || self.settings_menu.is_some() || self.model_picker.is_some()
             || self.effort_picker.is_some() || self.permission_picker.is_some()
             || self.engine_picker || self.new_session.is_some()
             || self.chip_info.is_some() || self.stop_confirmation.is_some()
@@ -5619,6 +5922,26 @@ impl App {
                 return true;
             }
         }
+        if self.settings_menu.is_some() {
+            let menu = self.active_chooser_rect();
+            if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                if let Some(area) = menu.filter(|area| area.contains(
+                    ratatui::layout::Position::new(mouse.column, mouse.row))) {
+                    let index = usize::from(mouse.row.saturating_sub(area.y.saturating_add(3)));
+                    if (area.y + 3..area.y + 5).contains(&mouse.row) {
+                        let current = self.settings_menu.as_ref().unwrap().selected;
+                        self.settings_menu.as_mut().unwrap().selected = index;
+                        if current == index {
+                            return self.settings_menu_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+                        }
+                    }
+                } else {
+                    self.settings_menu = None;
+                }
+                return true;
+            }
+            return false;
+        }
         if self.chip_info.is_some() {
             let inside_menu = self.active_chooser_rect().is_some_and(|area| area.contains(
                 ratatui::layout::Position::new(mouse.column, mouse.row)));
@@ -5673,6 +5996,40 @@ impl App {
                 }
             }
         }
+        if self.branch_picker.is_some() {
+            let Some(menu) = self.active_chooser_rect() else { return false; };
+            match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if !menu.contains(ratatui::layout::Position::new(mouse.column, mouse.row)) {
+                        self.branch_picker = None;
+                    } else {
+                        let first_row = menu.y.saturating_add(2);
+                        if mouse.row >= first_row && mouse.row < menu.bottom().saturating_sub(1) {
+                            let visible = usize::from(menu.height.saturating_sub(3)).max(1);
+                            let picker = self.branch_picker.as_mut().unwrap();
+                            let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+                            let position = start + usize::from(mouse.row - first_row);
+                            if position < picker.branches.len() {
+                                picker.selected = position;
+                                self.choose_branch();
+                            }
+                        }
+                    }
+                    return true;
+                }
+                MouseEventKind::ScrollUp => {
+                    let picker = self.branch_picker.as_mut().unwrap();
+                    picker.selected = picker.selected.saturating_sub(1);
+                    return true;
+                }
+                MouseEventKind::ScrollDown => {
+                    let picker = self.branch_picker.as_mut().unwrap();
+                    picker.selected = (picker.selected + 1).min(picker.branches.len().saturating_sub(1));
+                    return true;
+                }
+                _ => return false,
+            }
+        }
         if self.attach_picker.is_some() {
             let Some(menu) = self.active_chooser_rect() else { return false; };
             match mouse.kind {
@@ -5716,16 +6073,16 @@ impl App {
                     if mouse.column < menu.x || mouse.column >= menu.right()
                         || mouse.row < menu.y || mouse.row >= menu.bottom() {
                         self.history_modal = false;
+                        self.cancel_history_query();
                         return true;
                     }
                     let first_row = menu.y.saturating_add(2);
                     if mouse.row >= first_row && mouse.row < menu.bottom().saturating_sub(1) {
                         let visible = usize::from(menu.height.saturating_sub(3)).max(1);
-                        let start = self.history_selected.saturating_sub(visible.saturating_sub(1));
-                        let position = start + usize::from(mouse.row - first_row);
-                        if position < self.history_matches().len() {
-                            self.history_selected = position;
-                            self.open_selected_history();
+                        if let Some((position, header, _)) = self.history_rows(visible)
+                            .get(usize::from(mouse.row - first_row)) {
+                            self.history_selected = *position;
+                            if *header { self.open_selected_history(); }
                         }
                     }
                     return true;
@@ -5900,6 +6257,7 @@ impl App {
             || self.history_modal
             || self.queue_picker.is_some()
             || self.attach_picker.is_some()
+            || self.branch_picker.is_some()
             || self.lore_picker.is_some()
             || self.diff_modal
             || self.model_picker.is_some()
@@ -6174,10 +6532,11 @@ impl App {
             if width >= 18 && height >= 3 {
                 let fallback = Rect::new(area.x + (area.width - width) / 2,
                     area.y + (area.height - height) / 2, width, height);
-                if self.action_menu || self.lore_picker.is_some() || self.engine_picker
+                if self.settings_menu.is_some() || self.action_menu || self.lore_picker.is_some() || self.engine_picker
                     || self.new_session.is_some() || self.model_picker.is_some() || self.effort_picker.is_some() || self.permission_picker.is_some() {
                     frame.render_widget(Clear, fallback);
-                    if self.action_menu { self.draw_actions(frame, fallback); }
+                    if self.settings_menu.is_some() { self.draw_settings_menu(frame, fallback); }
+                    else if self.action_menu { self.draw_actions(frame, fallback); }
                     else if self.lore_picker.is_some() { self.draw_lore_picker(frame, fallback); }
                     else { self.draw_chip_picker(frame, fallback); }
                 }
@@ -6335,6 +6694,37 @@ impl App {
             .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)), modal);
     }
 
+    fn draw_settings_menu(&self, frame: &mut Frame, area: Rect) {
+        let Some(menu) = &self.settings_menu else { return; };
+        let mut lines = vec![
+            Line::from(" env > config.toml > default"),
+            Line::from(""),
+        ];
+        for (index, key) in ["linger_secs", "worktree_per_session"].iter().enumerate() {
+            let (value, shadowed) = &menu.rows[index];
+            let shown = if index == 0 { menu.linger_draft.as_deref().unwrap_or(value) } else { value };
+            let suffix = if *shadowed {
+                if index == 0 { " · DOXA_LINGER_SECS overrides config" }
+                else { " · DOXA_WORKTREE overrides config" }
+            } else { "" };
+            lines.push(Line::styled(format!(" {} {}: {}{}", if menu.selected == index { '›' } else { ' ' },
+                key, safe_label(shown), suffix),
+                Style::default().fg(if menu.selected == index { theme::TEXT } else { theme::SECONDARY })
+                    .bg(if menu.selected == index { theme::HIGHLIGHT } else { theme::RAISED })));
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(if menu.linger_draft.is_some() {
+            " Enter save seconds · Esc cancel edit"
+        } else {
+            " Enter edit/toggle · U unset · Esc close"
+        }));
+        lines.push(Line::from(" Changes apply to new sessions; running sessions keep launch settings."));
+        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false })
+            .block(Block::default().title(" Native settings ").borders(Borders::ALL)
+                .border_style(Style::default().fg(theme::ACCENT)))
+            .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)), area);
+    }
+
     fn draw_chip_info(&self, frame: &mut Frame, area: Rect) {
         let Some(info) = &self.chip_info else { return; };
         if matches!(info.kind, "memory" | "usage" | "context" | "help") {
@@ -6372,16 +6762,12 @@ impl App {
         if !self.history_modal { return; }
         let matches = self.history_matches();
         let mut lines = vec![Line::from(format!(" Search: {}", safe_label(&self.history_query)))];
-        if matches.is_empty() { lines.push(Line::from(if self.history_pending.is_some() { " Finding saved transcripts…" } else { " No matching sessions" })); }
+        if matches.is_empty() { lines.push(Line::from(if self.history_pending.is_some() || self.history_query_due.is_some() { " Finding saved transcripts…" } else { " No matching sessions" })); }
         let visible = usize::from(area.height.saturating_sub(3)).max(1);
-        let start = self.history_selected.saturating_sub(visible.saturating_sub(1));
-        for (position, &index) in matches.iter().enumerate().skip(start).take(visible) {
-            let session = &self.sessions[index];
-            let label = format!(" {} {} · {}{}", if position == self.history_selected { '›' } else { ' ' },
-                safe_label(&session.title), safe_label(&session.id),
-                if self.offline_ids.contains(&session.id) { " · archived" } else { "" });
-            let style = if position == self.history_selected { Style::default().fg(theme::ACCENT).bg(theme::HIGHLIGHT).add_modifier(Modifier::BOLD) }
-                else { Style::default().fg(theme::SECONDARY) };
+        for (position, header, label) in self.history_rows(visible) {
+            let style = if header && position == self.history_selected { Style::default().fg(theme::ACCENT).bg(theme::HIGHLIGHT).add_modifier(Modifier::BOLD) }
+                else if header { Style::default().fg(theme::SECONDARY) }
+                else { Style::default().fg(theme::MUTED) };
             let label = clipped_title(&label, usize::from(area.width.saturating_sub(2))).0;
             let padded = format!("{label}{}", " ".repeat(usize::from(area.width.saturating_sub(2)).saturating_sub(label.width())));
             lines.push(Line::styled(padded, style));
@@ -6413,6 +6799,28 @@ impl App {
         }
         frame.render_widget(Paragraph::new(lines).block(Block::default()
             .title(" Attach live session · type to filter ")
+            .borders(Borders::ALL).border_style(Style::default().fg(theme::ACCENT))
+            .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED))), area);
+    }
+
+    fn draw_branch_picker(&self, frame: &mut Frame, area: Rect) {
+        let Some(picker) = &self.branch_picker else { return; };
+        let mut lines = vec![Line::from(format!(" Current base: {}", safe_label(&picker.base)))];
+        let visible = usize::from(area.height.saturating_sub(3)).max(1);
+        let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+        for (index, branch) in picker.branches.iter().enumerate().skip(start).take(visible) {
+            let current = if branch == &picker.base { " · current" } else { "" };
+            let label = format!(" {} {}{}", if index == picker.selected { '›' } else { ' ' },
+                safe_label(branch), current);
+            let label = clipped_title(&label, usize::from(area.width.saturating_sub(2))).0;
+            let padded = format!("{label}{}", " ".repeat(usize::from(area.width.saturating_sub(2)).saturating_sub(label.width())));
+            let style = if index == picker.selected {
+                Style::default().fg(theme::ACCENT).bg(theme::HIGHLIGHT).add_modifier(Modifier::BOLD)
+            } else { Style::default().fg(theme::SECONDARY) };
+            lines.push(Line::styled(padded, style));
+        }
+        frame.render_widget(Paragraph::new(lines).block(Block::default()
+            .title(" Base branch · Enter select · Esc close ")
             .borders(Borders::ALL).border_style(Style::default().fg(theme::ACCENT))
             .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED))), area);
     }
@@ -6956,6 +7364,8 @@ impl App {
         if active && chooser_height > 0 {
             if self.active_request_index().is_some_and(|index| self.input_requests[index].kind == "ask_user") {
                 self.draw_request(frame, inner[2], true);
+            } else if self.settings_menu.is_some() {
+                self.draw_settings_menu(frame, inner[2]);
             } else if self.engine_picker || self.new_session.is_some() || self.model_picker.is_some() || self.effort_picker.is_some() || self.permission_picker.is_some() {
                 self.draw_chip_picker(frame, inner[2]);
             } else if self.lore_picker.is_some() {
@@ -6970,6 +7380,8 @@ impl App {
                 self.draw_queue_picker(frame, inner[2]);
             } else if self.attach_picker.is_some() {
                 self.draw_attach_picker(frame, inner[2]);
+            } else if self.branch_picker.is_some() {
+                self.draw_branch_picker(frame, inner[2]);
             } else if !self.slash_suggestions().is_empty() {
                 self.draw_slash_suggestions(frame, inner[2]);
             }
@@ -7621,6 +8033,41 @@ mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
     use serde_json::json;
+
+    #[test]
+    fn settings_menu_protects_env_shadowed_rows_and_keeps_prompt() {
+        let mut app = App::default();
+        app.input = "draft prompt".into();
+        app.settings_menu = Some(SettingsMenu {
+            rows: [("90 (environment)".into(), true), ("on (default)".into(), false)],
+            selected: 0,
+            linger_draft: None,
+        });
+        app.settings_menu_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.settings_menu.as_ref().unwrap().linger_draft.is_none());
+        assert!(app.notice.contains("Environment override"));
+        app.settings_menu_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE));
+        assert!(app.settings_menu.is_some());
+        assert_eq!(app.input, "draft prompt");
+        app.settings_menu_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.settings_menu.is_none());
+    }
+
+    #[test]
+    fn settings_linger_editor_cancels_without_writing() {
+        let mut app = App::default();
+        app.settings_menu = Some(SettingsMenu {
+            rows: [("120 (default)".into(), false), ("on (default)".into(), false)],
+            selected: 0,
+            linger_draft: None,
+        });
+        app.settings_menu_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.settings_menu.as_ref().unwrap().linger_draft.as_deref(), Some("120"));
+        app.settings_menu_key(KeyEvent::new(KeyCode::Char('9'), KeyModifiers::NONE));
+        app.settings_menu_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.settings_menu.as_ref().unwrap().linger_draft.is_none());
+        assert_eq!(app.settings_menu.as_ref().unwrap().rows[0].0, "120 (default)");
+    }
 
     #[cfg(unix)]
     fn belief_review_fixture() -> doxa_lore::BeliefReview {
@@ -8960,9 +9407,14 @@ for line in sys.stdin:
 
         app.input = "/pane".into();
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
-        assert_eq!(app.active_group, 1);
+        assert_eq!(app.active_group, 0);
+        assert!(app.notice.contains("2 pane groups"));
+        assert!(app.layout(app.size).panes.is_some());
 
-        app.input = "/pane".into();
+        app.input = "/pane 2".into();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.active_group, 1);
+        app.input = "/pane 1".into();
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert_eq!(app.active_group, 0);
 
@@ -9015,6 +9467,20 @@ for line in sys.stdin:
         app.handle(Event::Resize(100, 28));
         app.groups[0].tabs.push("first".into());
         app.session_cwds.insert("first".into(), PathBuf::from("/repo/project"));
+
+        app.input = "/pane".into();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.active_group, 0);
+        assert!(app.layout(app.size).panes.is_none());
+        assert!(app.notice.contains("One pane group"));
+        app.input = "/pane 2".into();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.input, "/pane 2");
+        assert_eq!(app.active_group, 0);
+        assert!(app.layout(app.size).panes.is_none());
+        assert!(app.notice.contains("only one pane group"));
+        app.input = "/vsplit".into();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
 
         for (command, target) in [("/pane 2", 1), ("/pane 1", 0)] {
             app.input = command.into();
@@ -9449,7 +9915,7 @@ for line in sys.stdin:
         let (tx, rx) = mpsc::sync_channel(1);
         app.history_pending = Some(rx);
         tx.send(vec![history::OfflineSession { id: "saved-1".into(),
-            project: "project\u{1b}[31m".into(), markdown: "**You:** saved".into(), cwd: None }]).unwrap();
+            project: "project\u{1b}[31m".into(), markdown: "**You:** saved".into(), search_snippets: Vec::new(), cwd: None }]).unwrap();
         assert!(app.poll_history());
         assert!(app.offline_ids.contains("saved-1"));
         assert!(!app.sessions[0].collection.contains('\u{1b}'));
@@ -9465,6 +9931,34 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn repeated_history_results_keep_a_bounded_unopened_cache() {
+        let mut app = App::default();
+        for number in 0..80 {
+            let (tx, rx) = mpsc::sync_channel(1);
+            app.history_pending = Some(rx);
+            tx.send(vec![history::OfflineSession { id: format!("archive-{number}"),
+                project: "project".into(), markdown: "x".repeat(4096),
+                search_snippets: Vec::new(), cwd: None }]).unwrap();
+            assert!(app.poll_history());
+        }
+        assert_eq!(app.offline_ids.len(), 64);
+        assert_eq!(app.history_entries.len(), 64);
+        assert!(!app.offline_ids.contains("archive-0"));
+        assert!(app.offline_ids.contains("archive-79"));
+        app.groups[0].tabs.push("archive-79".into());
+        for number in 80..160 {
+            let (tx, rx) = mpsc::sync_channel(1);
+            app.history_pending = Some(rx);
+            tx.send(vec![history::OfflineSession { id: format!("archive-{number}"),
+                project: "project".into(), markdown: "saved".into(),
+                search_snippets: Vec::new(), cwd: None }]).unwrap();
+            assert!(app.poll_history());
+        }
+        assert!(app.offline_ids.contains("archive-79"));
+        assert!(app.offline_ids.len() <= 65);
+    }
+
+    #[test]
     fn resume_prefix_uses_nonmodal_picker_and_never_reaches_model_prompt() {
         let mut app = App::default();
         app.handle(Event::Resize(100, 28));
@@ -9475,7 +9969,7 @@ for line in sys.stdin:
         let (tx, rx) = mpsc::sync_channel(1);
         app.history_pending = Some(rx);
         tx.send(vec!["saved-1", "saved-2"].into_iter().map(|id| history::OfflineSession {
-            id: id.into(), project: "project".into(), markdown: "**You:** old turn".into(), cwd: None,
+            id: id.into(), project: "project".into(), markdown: "**You:** old turn".into(), search_snippets: Vec::new(), cwd: None,
         }).collect()).unwrap();
         assert!(app.poll_history());
         assert_eq!(app.history_matches().len(), 2);
@@ -9496,7 +9990,7 @@ for line in sys.stdin:
         let (tx, rx) = mpsc::sync_channel(1);
         app.history_pending = Some(rx);
         tx.send(vec![history::OfflineSession { id: "archive-1".into(), project: "project".into(),
-            markdown: "**You:** hidden needle".into(), cwd: None }]).unwrap();
+            markdown: "**You:** hidden needle".into(), search_snippets: Vec::new(), cwd: None }]).unwrap();
         app.poll_history();
         app.input = "/search needle".into();
         assert!(app.submit_local_command());
@@ -9512,12 +10006,53 @@ for line in sys.stdin:
         app.local_search("needle");
         let (tx, rx) = mpsc::sync_channel(1);
         app.history_pending = Some(rx);
+        app.history_scan_query = Some("needle".into());
         tx.send(vec![history::OfflineSession { id: "old-archive".into(), project: "project".into(),
-            markdown: "**You:** recent visible turn".into(), cwd: None }]).unwrap();
+            markdown: "**You:** recent visible turn".into(), search_snippets: Vec::new(), cwd: None }]).unwrap();
         assert!(app.poll_history());
         assert_eq!(app.history_matches().len(), 1, "raw JSONL scan found an older hidden turn");
         app.history_query = "different".into();
         assert!(app.history_matches().is_empty(), "scan hit must not satisfy a different query");
+    }
+
+    #[test]
+    fn live_search_debounces_and_discards_older_query_result() {
+        let mut app = App::default();
+        app.handle(Event::Resize(100, 28));
+        app.local_search("first");
+        let due = app.history_query_due.unwrap();
+        assert!(!app.start_due_history_query(due - Duration::from_millis(1)));
+        app.history_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert_eq!(app.history_query, "firstx");
+        let (tx, rx) = mpsc::sync_channel(1);
+        app.history_pending = Some(rx);
+        app.history_scan_query = Some("first".into());
+        tx.send(vec![history::OfflineSession { id: "stale-1".into(), project: "project".into(),
+            markdown: "old".into(), search_snippets: vec!["first".into()], cwd: None }]).unwrap();
+        assert!(app.poll_history());
+        assert!(!app.history_entries.contains_key("stale-1"));
+        assert!(app.history_query_due.is_some());
+    }
+
+    #[test]
+    fn indexed_excerpts_group_under_session_and_strip_terminal_controls() {
+        let mut app = App::default();
+        app.handle(Event::Resize(100, 28));
+        app.local_search("needle");
+        let (tx, rx) = mpsc::sync_channel(1);
+        app.history_pending = Some(rx);
+        app.history_scan_query = Some("needle".into());
+        tx.send(vec![history::OfflineSession { id: "saved-1".into(), project: "project".into(),
+            markdown: "recent visible turn".into(),
+            search_snippets: vec!["first [needle] \u{1b}[31m".into(), "second [needle]".into()], cwd: None }]).unwrap();
+        assert!(app.poll_history());
+        let rows = app.history_rows(8);
+        assert_eq!(rows.len(), 3);
+        assert!(rows[0].1);
+        assert!(!rows[1].1 && !rows[2].1);
+        assert!(rows[1].2.contains("first [needle]"));
+        assert!(!rows[1].2.contains('\u{1b}'));
+        assert!(painted(&app).contains("second [needle]"));
     }
 
     #[test]
@@ -10420,6 +10955,66 @@ for line in sys.stdin:
         app.apply_daemon_frame(&json!({"type":"branch_reply", "session_id":"session-1",
             "ok":false,"error":"session is busy"}));
         assert!(app.notice.contains("session is busy"));
+    }
+
+    #[test]
+    fn branch_listing_opens_bounded_picker_and_enter_targets_active_session() {
+        let mut app = App::default();
+        app.size = Rect::new(0, 0, 100, 35);
+        app.groups[0].tabs.push("session-1".into());
+        app.input = "/branch".into();
+        app.input_cursor = app.input.len();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(matches!(app.pending_queue_commands.pop(),
+            Some(crate::bridge::WorkerCommand::Branch(id, None)) if id == "session-1"));
+        assert!(app.apply_daemon_frame(&json!({"type":"branch_reply", "session_id":"session-1",
+            "ok":true,"base":"main","branches":["feature","main","bad\nname"]})));
+        assert_eq!(app.branch_picker.as_ref().unwrap().branches, ["feature", "main"]);
+        assert_eq!(app.branch_picker.as_ref().unwrap().selected, 1);
+        assert!(app.active_chooser_rect().is_some());
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(app.branch_picker.is_none());
+        assert!(matches!(app.pending_queue_commands.pop(),
+            Some(crate::bridge::WorkerCommand::Branch(id, Some(name)))
+                if id == "session-1" && name == "feature"));
+        assert!(app.pending_prompts.is_empty());
+    }
+
+    #[test]
+    fn branch_picker_cancel_and_stale_reply_do_not_switch_checkout() {
+        let mut app = App::default();
+        app.size = Rect::new(0, 0, 100, 35);
+        app.groups[0].tabs.push("session-1".into());
+        assert!(!app.apply_daemon_frame(&json!({"type":"branch_reply", "session_id":"other",
+            "ok":true,"base":"main","branches":["feature"]})));
+        assert!(app.branch_picker.is_none());
+        app.apply_daemon_frame(&json!({"type":"branch_reply", "session_id":"session-1",
+            "ok":true,"base":"main","branches":["feature","main"]}));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        assert!(app.branch_picker.is_none());
+        assert!(app.pending_queue_commands.is_empty());
+    }
+
+    #[test]
+    fn branch_picker_mouse_selects_row_and_click_outside_cancels() {
+        let mut app = App::default();
+        app.size = Rect::new(0, 0, 100, 35);
+        app.groups[0].tabs.push("session-1".into());
+        let list = json!({"type":"branch_reply", "session_id":"session-1",
+            "ok":true,"base":"main","branches":["feature","main"]});
+        app.apply_daemon_frame(&list);
+        let menu = app.active_chooser_rect().unwrap();
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: menu.x + 2, row: menu.y + 2, modifiers: KeyModifiers::NONE }));
+        assert!(matches!(app.pending_queue_commands.pop(),
+            Some(crate::bridge::WorkerCommand::Branch(id, Some(name)))
+                if id == "session-1" && name == "feature"));
+        app.apply_daemon_frame(&list);
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: menu.x, row: menu.y.saturating_sub(1), modifiers: KeyModifiers::NONE }));
+        assert!(app.branch_picker.is_none());
+        assert!(app.pending_queue_commands.is_empty());
     }
 
     #[test]

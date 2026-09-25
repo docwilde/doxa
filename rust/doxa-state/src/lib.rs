@@ -138,9 +138,19 @@ pub fn list_daemons(registry_dir: &Path, scope: Option<&str>, scrub: impl Fn(&st
 
 /// Python's config load failure policy: malformed or absent means empty.
 pub fn load_config(path: &Path) -> toml::Table {
-    read_bounded_regular(path, MAX_CONFIG_BYTES).ok()
-        .and_then(|raw| String::from_utf8(raw).ok())
-        .and_then(|s| s.parse::<toml::Table>().ok()).unwrap_or_default()
+    load_config_checked(path).unwrap_or_default()
+}
+
+/// Mutation callers must distinguish an absent file from malformed or unsafe
+/// existing state, rather than overwriting it with an empty table.
+pub fn load_config_checked(path: &Path) -> io::Result<toml::Table> {
+    let raw = match read_bounded_regular(path, MAX_CONFIG_BYTES) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(toml::Table::new()),
+        Err(error) => return Err(error),
+    };
+    let source = String::from_utf8(raw).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    source.parse::<toml::Table>().map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
 /// `doxa.config.raw` precedence for a key supplied by the caller's settings table.
@@ -158,6 +168,42 @@ pub fn raw_setting(env_value: Option<&str>, stored: &toml::Table, key: &str) -> 
 pub fn save_config(path: &Path, stored: &toml::Table) -> io::Result<()> {
     let body = toml::to_string_pretty(stored).map_err(io::Error::other)?;
     atomic_write(path, body.as_bytes())
+}
+
+/// Update under Python DOXA's adjacent `.config.toml.lock`, preserving future
+/// keys and using the same atomic replacement as `save_config`.
+pub fn update_config(path: &Path, edit: impl FnOnce(&mut toml::Table) -> io::Result<()>) -> io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    let parent = path.parent().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no config directory"))?;
+    if !parent.exists() {
+        let mut builder = fs::DirBuilder::new();
+        builder.recursive(true).mode(0o700).create(parent)?;
+    }
+    let dir = fs::OpenOptions::new().read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW).open(parent)?;
+    let meta = dir.metadata()?;
+    if !meta.is_dir() || meta.uid() != unsafe { libc::geteuid() }
+        || meta.permissions().mode() & 0o022 != 0 {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "config directory must be owned and not writable by others"));
+    }
+    let name = path.file_name().and_then(|name| name.to_str())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid config filename"))?;
+    let lock_path = parent.join(format!(".{name}.lock"));
+    let lock = fs::OpenOptions::new().read(true).write(true).create(true)
+        .mode(0o600).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(&lock_path)?;
+    let lock_meta = lock.metadata()?;
+    if !lock_meta.is_file() || lock_meta.nlink() != 1
+        || lock_meta.uid() != unsafe { libc::geteuid() } {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "unsafe config lock"));
+    }
+    lock.set_permissions(fs::Permissions::from_mode(0o600))?;
+    use std::os::fd::AsRawFd;
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut stored = load_config_checked(path)?;
+    edit(&mut stored)?;
+    save_config(path, &stored)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
