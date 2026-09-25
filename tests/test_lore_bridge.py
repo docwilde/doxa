@@ -15,13 +15,10 @@ import pytest
 from doxa import lore_bridge
 
 
-def test_reviewed_resolve_with_new_lore_source_rejects_one_exact_snapshot(tmp_path):
+def test_reviewed_resolve_with_pinned_lore_rejects_one_exact_snapshot(tmp_path):
     source = os.environ.get("DOXA_TEST_LORE_API_PATH")
-    if not source:
-        pytest.skip("set DOXA_TEST_LORE_API_PATH to a checkout with the reviewed resolution API")
-    lore_source = Path(source)
-    if not (lore_source / "lore_core" / "pending.py").is_file():
-        pytest.skip("local LORE API checkout unavailable")
+    if source and not (Path(source) / "lore_core" / "pending.py").is_file():
+        pytest.fail("DOXA_TEST_LORE_API_PATH does not contain LORE's pending API")
     root = tmp_path / "lore"
     pending = root / "pending"
     pending.mkdir(parents=True)
@@ -36,7 +33,14 @@ def test_reviewed_resolve_with_new_lore_source_rejects_one_exact_snapshot(tmp_pa
         {"id": 3, "op": "resolve_reviewed_v1", "cwd": str(tmp_path), "pid": "one",
          "decision": "reject", "expected": expected},
     ]
-    env = dict(os.environ, LORE_ROOT=str(root), DOXA_LORE_CORE_PATH=str(lore_source))
+    env = dict(os.environ, LORE_ROOT=str(root),
+               LORE_SKILLS_DIR=str(tmp_path / "skills"),
+               LORE_PROJECTS_DIR=str(tmp_path / "projects"))
+    if source:
+        env["DOXA_LORE_CORE_PATH"] = source
+    else:
+        env.pop("DOXA_LORE_CORE_PATH", None)
+        env["DOXA_LORE_SOURCE"] = "package"
     result = subprocess.run([sys.executable, "-m", "doxa.lore_bridge"],
                             input=b"".join(map(lore_bridge._frame, requests)),
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
