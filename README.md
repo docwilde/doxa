@@ -107,7 +107,8 @@ and their [manual](docs/manual.md) remain available for historical reference;
 the Python SDK and LORE sidecar modules remain internal runtime dependencies.
 
 Rust CI tests the frontend, native daemon, protocol, LORE bridge, installer,
-and compatibility paths.
+and compatibility paths. See the [Rust UI benchmark](docs/rust-ui-benchmark-2026-09-25.md)
+for rendering, event-loop, scrolling, and resize measurements.
 
 ## Non-goals
 
