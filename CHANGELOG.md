@@ -1,8 +1,120 @@
 # Changelog
 
 Newest first. Versions are annotated git tags on the commit that shipped
-them (`v0.1.0` … `v1.19.0`); the ranges below are derived from that history,
-not written from memory.
+them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
+history, not written from memory. Rust alpha tags identify preview snapshots;
+the stable 2.0 release has not been cut.
+
+## 2.0.0-alpha.9 — 2026-09-25
+
+- Lead the README with the Rust preview and add six reproducible screenshots
+  rendered by its Ratatui UI. Keep Python 1.x screenshots labeled separately.
+- Add cursor-aware multiline prompts and bounded bracketed paste; reserve
+  `Ctrl+C` for terminal copy.
+- Fail closed on native Codex transcript and thread-state write errors. Mark
+  interrupted or failed turns incomplete so unsafe thread resume is refused.
+- Report the native daemon's package version in its hello frame.
+
+## 2.0.0-alpha.8 — 2026-09-25
+
+- Bundle the Claude SDK sidecar with the Rust preview installer and restore
+  previous installed files after an ordinary interrupted install.
+- Add a read-only LORE belief and evidence picker, file and hunk navigation
+  in the worktree diff, and a confirmed active-session stop action.
+- Cancel a stop confirmation if the terminal becomes too small to show it.
+
+## 2.0.0-alpha.7 — 2026-09-25
+
+- Start a new session from the TUI with engine, model, and first prompt.
+- Show scoped context, token, cost, and LORE chips with explicit unknown values.
+- Add a persistent read-only diff pane and an opt-in, bounded workspace-read
+  tool for vendor sessions.
+
+## 2.0.0-alpha.6 — 2026-09-25
+
+- Index native Codex transcripts through LORE's verified-descriptor API. The
+  sidecar opens each path component without following links and passes the
+  opened file to LORE, closing the path-replacement gap in live indexing.
+- Search bounded archived session transcripts in the Rust history picker
+  without attaching them, and list untracked filenames in the read-only diff.
+- Add interactive engine and model chips. Claude models come from one bounded
+  startup CLI catalog probe; unavailable catalogs offer no guessed choices.
+- Add an interactive Claude permission mode chip with daemon capability checks.
+  Entering `dontAsk` requires an idle session and a second confirmation;
+  `bypassPermissions` remains unavailable without explicit launcher arming.
+- Harden the Rust preview's sidecar and TUI boundaries: preserve correlated
+  replies for oversized Claude frames, bound restored transcripts and input
+  requests, and keep archived history visible when a bounded tail is partial.
+- Keep daemon replay atomic when a client queue fills, and serialize Claude
+  prompt admission with shutdown and permission changes so an active turn
+  cannot be mistaken for an idle session.
+
+## 2.0.0-alpha.5 — 2026-09-25
+
+- Add live model and permission mode controls to native Claude sessions with
+  capability checks and current status broadcasts. Bypass mode remains
+  unavailable until the Rust launcher has an explicit arming flow.
+- Ask external LORE to index native Codex transcripts after turns and on
+  shutdown. Automatic Codex proposal review remains unavailable, as in DOXA
+  1.x.
+- Add an attached-session history picker and a bounded, read-only worktree
+  diff view to the Rust TUI. History search does not yet cover offline sessions,
+  and the diff omits untracked files.
+- Restore the Python DOXA palette in the Rust TUI. Each pane now has its own
+  prompt and draft, with engine and model chips from that session's daemon.
+- Keep status reads responsive while a Claude control request waits on its
+  sidecar, and serialize permission changes with prompt admission.
+
+## 2.0.0-alpha.4 — 2026-09-24
+
+- Add native Codex, Claude, DeepSeek, and GLM session launch and resume paths,
+  with bounded transcripts and vendor history replay.
+- Add a styled action menu and an interactive peer communication map in the
+  Rust TUI, including scoped local peer messages and a private inbox.
+- Keep partial peer frames across nonblocking polls so an idle local connection
+  cannot pause the daemon's UI and shutdown loop.
+- Clamp peer selection when switching scopes and account for each sender's
+  inbound message budget independently.
+- Add read-only LORE context, evidence, and pending proposal snapshots with
+  secret scrubbing and guarded file reads.
+- Extend the native CLI, session state migration, and Rust CI coverage for the
+  daemon's local peer and vendor paths.
+- Pause the Python CI workflow on the Rust development line until the 2.0
+  compatibility gate is restored before a stable cutover.
+
+## 2.0.0-alpha.3 — 2026-09-24
+
+- Keep offline archived tabs and their collection and layout metadata when the
+  Rust preview saves a shared tabset from a partial live roster.
+- Retry a briefly busy LORE interpreter during sidecar startup.
+- Keep AskUser selections available after refused or uncertain delivery, and
+  retry layout saves after temporary write or roster failures.
+- Preserve safe existing state directory permissions and shut down a Codex
+  child cleanly if the daemon registry heartbeat fails.
+- Reject malformed vendor tool-call arguments, allow failed Claude starts to
+  retry, and complete partial sidecar protocol writes.
+- Keep live peers during transient socket failures, recover queued turns after
+  a display-scrub panic, and signal a replay gap after a long disconnect.
+- Scrub nested pending values before returning them from the LORE sidecar.
+- Retain layout and collection metadata in empty tabsets, keep the full
+  transcript scrollable, use unique thread metadata temporary files,
+  and finalize the Claude sidecar after stdin closes.
+- Run the Python CI matrix on 3.12 while retaining both LORE loading paths.
+- Refuse pending replies with scrubbed key collisions, and avoid finalizing
+  Claude while a cancelled turn is still active.
+
+## 2.0.0-alpha.2 — Rust development line (unreleased)
+
+- Combined the native daemon and Codex host, bounded Claude and LORE sidecars,
+  vendor adapter, protocol, state, transcript, and peer foundations in one
+  integration branch.
+- Added multi-session TUI attachment, saved layouts, draggable dividers, and
+  a stable rail interaction test.
+- Added an opt-in `--rust` installer switch that compiles the preview and
+  installs it alongside the Python command.
+- Hardened the local vendor test endpoint so only an explicit loopback host
+  and port without URL credentials can receive a provider key.
+- The supported Python release remains 1.19.0. This alpha is not a 2.0 cutover.
 
 ## 1.19.0 — 2026-09-24
 

@@ -559,7 +559,18 @@ async def test_clicking_a_tab_row_switches_that_groups_active_tab(tmp_path):
             if line.row.kind == Row.SESSION
             and line.row.session_id == first._session_id
         )
-        await pilot.click(row)
+        # The rail can have its rows before Textual has painted their
+        # rectangles after opening it. Pilot.click uses the rectangle's
+        # centre, so wait for the target to be visible and laid out.
+        assert await _wait(
+            pilot,
+            lambda: row.is_mounted
+            and row.styles.display != "none"
+            and row.region.width > 0
+            and row.region.height > 0
+            and row.row.session_id == first._session_id,
+        )
+        assert await pilot.click(row)
         # The group SWITCHED -- not merely focused.
         assert await _wait(pilot, lambda: group.active_tab() is first.tab)
         assert await _wait(pilot, lambda: app.focused_pane() is first)

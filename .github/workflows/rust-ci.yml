@@ -1,0 +1,59 @@
+name: Rust 2.0 CI
+
+on:
+  pull_request:
+    paths:
+      - "rust/**"
+      - ".github/workflows/rust-ci.yml"
+  push:
+    branches: ["rust/2.0"]
+    paths:
+      - "rust/**"
+      - ".github/workflows/rust-ci.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select stable Rust
+        run: rustup toolchain install stable --profile minimal
+      - name: Test Rust frontend
+        run: cargo +stable test --locked --manifest-path rust/doxa-tui/Cargo.toml
+      - name: Test Codex event normalization
+        run: cargo +stable test --locked --manifest-path rust/doxa-engines/Cargo.toml
+      - name: Test external LORE bridge
+        run: cargo +stable test --locked --manifest-path rust/doxa-lore/Cargo.toml
+      - name: Test peer registry compatibility
+        run: cargo +stable test --locked --manifest-path rust/doxa-peers/Cargo.toml
+      - name: Test Rust protocol compatibility
+        run: cargo +stable test --locked --manifest-path rust/doxa-protocol/Cargo.toml
+      - name: Test Claude sidecar client
+        run: cargo +stable test --locked --manifest-path rust/doxa-claude/Cargo.toml
+      - name: Check Claude sidecar syntax
+        run: python3 -m py_compile rust/doxa-claude/claude_sidecar.py
+      - name: Test Claude sidecar identity checks
+        run: python3 -m unittest discover -s rust/doxa-claude/tests -p 'test_*.py'
+      - name: Test Python-compatible transcript store
+        run: cargo +stable test --locked --manifest-path rust/doxa-transcript/Cargo.toml
+      - name: Test Rust state compatibility
+        run: cargo +stable test --locked --manifest-path rust/doxa-state/Cargo.toml
+      - name: Install uv for Python client integration
+        uses: astral-sh/setup-uv@v10.0.1
+      - name: Sync Python client dependencies
+        run: uv sync --frozen --python 3.12
+      - name: Test native LORE sidecar boundary
+        run: uv run pytest tests/test_lore_bridge.py -q
+      - name: Test native daemon protocol
+        env:
+          DOXA_TEST_PYTHON: ${{ github.workspace }}/.venv/bin/python
+        run: cargo +stable test --locked --manifest-path rust/doxa-runtime/Cargo.toml
+      - name: Test native daemon hosts and peer RPC
+        run: cargo +stable test --locked --features local-test-server --manifest-path rust/doxa-daemon/Cargo.toml
+      - name: Build release binary
+        run: cargo +stable build --locked --release --manifest-path rust/doxa-tui/Cargo.toml
+      - name: Test vendor chat adapter
+        run: cargo +stable test --locked --features local-test-server --manifest-path rust/doxa-vendors/Cargo.toml
