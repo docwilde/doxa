@@ -10,7 +10,7 @@ use budget_host::BudgetHost;
 use codex_host::CodexHost;
 use doxa_engines::codex_driver::{DriverOptions, SandboxMode};
 use doxa_peers::delivery::Inbox;
-use doxa_runtime::{Daemon, Host, Session};
+use doxa_runtime::{Daemon, ExternalPrompt, Host, Session};
 use doxa_vendors::Vendor;
 use peer_host::PeerHost;
 use serde_json::{json, Value};
@@ -470,12 +470,14 @@ impl Drop for Registry {
 }
 fn run() -> io::Result<()> {
     let mut options = options()?;
-    // Python 1.19 can let an inbound peer message start a turn. Native
-    // handling cannot yet honor that fleet contract, so refuse it.
+    // Match Python 1.19's explicit-truthy switch. Claude keeps its own Python
+    // sidecar peer loop; starting a second native loop there would duplicate
+    // delivery, so only native hosts with a LORE scrubber accept this switch.
     let inbound = env::var("DOXA_PEER_INBOUND_TURNS").unwrap_or_default();
-    if !inbound.trim().is_empty()
-        && !matches!(inbound.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off") {
-        return Err(invalid("native peer inbound turn-starting is not implemented; use the Python fleet harness"));
+    let inbound_turns = !inbound.trim().is_empty()
+        && !matches!(inbound.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off");
+    if inbound_turns && matches!(options.engine, Engine::Fixture | Engine::Claude) {
+        return Err(invalid("native inbound peer turns require Codex or vendor engine with LORE scrub; Claude uses the Python sidecar peer loop"));
     }
     let ceiling = match env::var("DOXA_SESSION_BUDGET_USD") {
         Ok(raw) if !raw.trim().is_empty() => {
@@ -628,8 +630,23 @@ fn run() -> io::Result<()> {
             handle.publish(event);
         }
         if let Ok(Some(frame)) = inbox.poll_receive(&|s: &str| s.to_owned()) {
+            let broadcast = frame.kind.as_deref() == Some("broadcast");
             if let Ok(event) = peer_host.inbound_event(frame) {
-                handle.publish(event);
+                handle.publish(event.clone());
+                let accepted = if inbound_turns && !broadcast {
+                    match PeerHost::peer_prompt(&event) {
+                        Some((prompt, origin)) => match handle.enqueue_peer_prompt(prompt, &origin) {
+                            Ok(ExternalPrompt::Started | ExternalPrompt::Queued) => true,
+                            Ok(ExternalPrompt::Full) => false,
+                            Err(_) => false,
+                        },
+                        None => false,
+                    }
+                } else { false };
+                if !accepted && !peer_host.retain_pending(event) {
+                    handle.publish(json!({"type":"peer_pending_full","data":{
+                        "message":"Peer message was shown but could not be retained for a later turn"}}));
+                }
             }
         }
         if TERMINATE.load(Ordering::Acquire) || handle.is_stopping() {

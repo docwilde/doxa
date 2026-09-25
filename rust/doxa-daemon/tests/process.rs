@@ -60,7 +60,11 @@ impl Process {
         serde_json::from_slice(&fs::read(&self.registry).unwrap()).unwrap()
     }
     fn start_codex(runtime: &Path, codex: &Path, python: &Path) -> Self {
-        let child = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+        Self::start_codex_with_inbound(runtime, codex, python, false)
+    }
+    fn start_codex_with_inbound(runtime: &Path, codex: &Path, python: &Path, inbound: bool) -> Self {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"));
+        command
             .args([
                 "--runtime-dir",
                 runtime.to_str().unwrap(),
@@ -79,9 +83,9 @@ impl Process {
             ])
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
-            .env("DOXA_HOME", runtime.join("home"))
-            .spawn()
-            .unwrap();
+            .env("DOXA_HOME", runtime.join("home"));
+        if inbound { command.env("DOXA_PEER_INBOUND_TURNS", "yes"); }
+        let child = command.spawn().unwrap();
         let registry = runtime.join("registry/codex-session.json");
         wait_until(|| registry.exists());
         let entry: Value = serde_json::from_slice(&fs::read(&registry).unwrap()).unwrap();
@@ -548,14 +552,14 @@ fn rejects_traversal_and_existing_registry() {
 }
 
 #[test]
-fn rejects_unsupported_fleet_turn_starting_before_binding() {
+fn rejects_inbound_turn_starting_without_lore_before_binding() {
     let dir = tempfile::tempdir().unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
         .args(["--runtime-dir", dir.path().to_str().unwrap(), "--session-id", "fleet-slot"])
         .env("DOXA_PEER_INBOUND_TURNS", "yes")
         .output().unwrap();
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("inbound turn-starting is not implemented"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("inbound peer turns require Codex or vendor"));
     assert!(!dir.path().join("registry/fleet-slot.json").exists());
 }
 
@@ -2410,4 +2414,115 @@ fn native_inbox_emits_scrubbed_peer_message_and_cleans_socket() {
     assert_eq!(receive(&mut reader)["ok"], true);
     wait_until(|| process.exited());
     assert!(!peer_socket.exists());
+}
+
+#[test]
+fn inbound_direct_peer_starts_scrubbed_turn_but_broadcast_does_not() {
+    let dir = tempfile::tempdir().unwrap();
+    let codex = dir.path().join("codex-fixture");
+    let python = dir.path().join("lore-fixture");
+    let captured = dir.path().join("captured-prompt");
+    fake_scrubber(&python, false);
+    executable(&codex, &format!(r#"#!/bin/sh
+cat >> '{}'
+echo '{{"type":"thread.started","thread_id":"thread_1"}}'
+echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}}'
+"#, captured.display()));
+    let (_sender_listener, _) = registry_peer(dir.path(), "sender", dir.path().to_str().unwrap(), "sender");
+    let mut process = Process::start_codex_with_inbound(dir.path(), &codex, &python, true);
+    let peer_socket = PathBuf::from(process.entry()["socket_path"].as_str().unwrap());
+    let (mut reader, mut socket) = process.connect();
+    receive(&mut reader);
+    send(&mut socket, json!({"type":"attach","cursor":null}));
+    let frame = |kind, body: &str| doxa_peers::delivery::PeerFrame {
+        from_id: "sender".into(), from_title: "fixture-secret title".into(),
+        sent_at: peer_now(), body: body.into(),
+        from_repo: Some(dir.path().display().to_string()), kind,
+    };
+    doxa_peers::delivery::send(&peer_socket, &frame(Some("broadcast".into()), "broadcast note")).unwrap();
+    assert_eq!(receive(&mut reader)["event"]["type"], "peer_message");
+    send(&mut socket, json!({"type":"call","id":1,"method":"status","params":{}}));
+    let status = receive(&mut reader);
+    assert_eq!(status["status"]["running"], false);
+    assert_eq!(status["status"]["queued"], 0);
+    doxa_peers::delivery::send(&peer_socket, &frame(Some("direct".into()), "fixture-secret body")).unwrap();
+    assert_eq!(receive(&mut reader)["event"]["type"], "peer_message");
+    let mut started = false;
+    loop {
+        let event = receive(&mut reader);
+        assert!(event["turn"].as_str().unwrap_or("").starts_with("peer-"));
+        if event["event"]["type"] == "turn_started" {
+            started = true;
+            assert_eq!(event["event"]["data"]["peer_started"], true);
+            assert!(event["event"]["data"]["peer_origin"].as_str().unwrap().contains("sender"));
+            let prompt = event["event"]["data"]["prompt"].as_str().unwrap();
+            assert!(prompt.starts_with("[PEER-STARTED TURN]"));
+            assert!(prompt.contains("[PEER MESSAGES -- UNTRUSTED]"));
+            assert!(prompt.contains("[redacted] body"));
+            assert!(!prompt.contains("fixture-secret"));
+        }
+        if event["event"]["type"] == "turn_done" { break; }
+    }
+    assert!(started);
+    let provider_prompt = fs::read_to_string(captured).unwrap();
+    assert!(provider_prompt.contains("[PEER-STARTED TURN]"));
+    assert!(provider_prompt.contains("[redacted] body"));
+    assert!(provider_prompt.contains("broadcast note"));
+    assert!(!provider_prompt.contains("fixture-secret"));
+    send(&mut socket, json!({"type":"call","id":2,"method":"stop","params":{}}));
+    assert_eq!(receive(&mut reader)["ok"], true);
+    wait_until(|| process.exited());
+}
+
+#[test]
+fn inbound_peer_uses_typed_prompt_queue_while_turn_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    let codex = dir.path().join("codex-fixture");
+    let python = dir.path().join("lore-fixture");
+    let release = dir.path().join("release-first");
+    fake_scrubber(&python, false);
+    executable(&codex, &format!(r#"#!/bin/sh
+cat >/dev/null
+if [ ! -f '{}' ]; then
+  while [ ! -f '{}' ]; do sleep 0.01; done
+fi
+echo '{{"type":"thread.started","thread_id":"thread_1"}}'
+echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}}'
+"#, release.display(), release.display()));
+    let (_sender_listener, _) = registry_peer(dir.path(), "sender", dir.path().to_str().unwrap(), "sender");
+    let mut process = Process::start_codex_with_inbound(dir.path(), &codex, &python, true);
+    let peer_socket = PathBuf::from(process.entry()["socket_path"].as_str().unwrap());
+    let (mut reader, mut socket) = process.connect();
+    receive(&mut reader);
+    send(&mut socket, json!({"type":"attach","cursor":null}));
+    send(&mut socket, json!({"type":"prompt","id":1,"text":"first"}));
+    assert_eq!(receive(&mut reader)["ok"], true);
+    assert_eq!(receive(&mut reader)["event"]["type"], "turn_started");
+    doxa_peers::delivery::send(&peer_socket, &doxa_peers::delivery::PeerFrame {
+        from_id: "sender".into(), from_title: "sender".into(), sent_at: peer_now(),
+        body: "peer task".into(), from_repo: None, kind: Some("direct".into()),
+    }).unwrap();
+    assert_eq!(receive(&mut reader)["event"]["type"], "peer_message");
+    let queued = receive(&mut reader);
+    assert_eq!(queued["event"]["type"], "prompt_queued");
+    assert_eq!(queued["event"]["data"]["peer_started"], true);
+    assert_eq!(queued["event"]["data"]["position"], 1);
+    send(&mut socket, json!({"type":"call","id":2,"method":"status","params":{}}));
+    let status = receive(&mut reader);
+    assert_eq!(status["status"]["running"], true);
+    assert_eq!(status["status"]["queued"], 1);
+    fs::write(&release, b"go").unwrap();
+    let mut saw_dequeue = false;
+    let mut saw_peer = false;
+    for _ in 0..8 {
+        let frame = receive(&mut reader);
+        if frame["event"]["type"] == "prompt_dequeued" { saw_dequeue = true; }
+        if frame["event"]["type"] == "turn_started" &&
+            frame["turn"].as_str().unwrap_or("").starts_with("peer-") { saw_peer = true; }
+        if saw_peer && frame["event"]["type"] == "turn_done" { break; }
+    }
+    assert!(saw_dequeue && saw_peer);
+    send(&mut socket, json!({"type":"call","id":3,"method":"stop","params":{}}));
+    assert_eq!(receive(&mut reader)["ok"], true);
+    wait_until(|| process.exited());
 }

@@ -54,7 +54,14 @@ pub struct Session {
     pub doxa_version: String,
 }
 
-struct Prompt { text: String, queue_id: String }
+struct Prompt { text: String, queue_id: String, peer_origin: Option<String> }
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum ExternalPrompt {
+    Started,
+    Queued,
+    Full,
+}
 struct State {
     next_seq: u64,
     ring: VecDeque<(u64, Vec<u8>)>,
@@ -178,6 +185,38 @@ impl DaemonHandle {
     /// Publish an out-of-band event (`turn: null`) to the ring and clients.
     pub fn publish(&self, event: Value) { self.inner.publish(None, event); }
 
+    /// Admit a validated peer prompt through the same bounded FIFO as typed
+    /// prompts. The caller retains the original frame on `Full` or error.
+    pub fn enqueue_peer_prompt(&self, text: String, origin: &str) -> Result<ExternalPrompt, String> {
+        if text.trim().is_empty() { return Err("empty peer prompt".into()); }
+        let display = std::panic::catch_unwind(std::panic::AssertUnwindSafe(||
+            self.inner.host.public_prompt(&text)
+        )).map_err(|_| "peer prompt could not be scrubbed")?
+            .map_err(|_| "peer prompt could not be scrubbed")?;
+        let _control_guard = self.inner.controls.lock().unwrap();
+        let mut state = self.inner.state.lock().unwrap();
+        if self.inner.stopping.load(Ordering::Acquire) { return Err("daemon is stopping".into()); }
+        if state.busy {
+            if state.prompts.len() >= PROMPT_QUEUE_CAPACITY { return Ok(ExternalPrompt::Full); }
+            let queue_id = format!("q{}", state.next_queue_id);
+            state.next_queue_id += 1;
+            let position = state.prompts.len() + 1;
+            state.prompts.push_back(Prompt { text, queue_id: queue_id.clone(), peer_origin: Some(origin.to_owned()) });
+            drop(state);
+            self.inner.publish(None, json!({"type":"prompt_queued","data":{
+                "id":queue_id,"text":display,"position":position,
+                "peer_started":true,"peer_origin":origin}}));
+            Ok(ExternalPrompt::Queued)
+        } else {
+            let turn = format!("peer-r{:011}", state.next_turn_id);
+            state.busy = true;
+            state.next_turn_id += 1;
+            drop(state);
+            self.inner.start_turn(text, turn);
+            Ok(ExternalPrompt::Started)
+        }
+    }
+
     pub fn shutdown(&mut self) {
         self.inner.stopping.store(true, Ordering::Release);
         self.inner.state.lock().unwrap().clients.clear();
@@ -228,7 +267,7 @@ impl Inner {
             let next = {
                 let mut state = inner.state.lock().unwrap();
                 if let Some(prompt) = state.prompts.pop_front() {
-                    let turn = format!("r{:011}", state.next_turn_id);
+                    let turn = format!("{}r{:011}", if prompt.peer_origin.is_some() { "peer-" } else { "" }, state.next_turn_id);
                     state.next_turn_id += 1;
                     Some((prompt, turn))
                 } else { state.busy = false; None }
@@ -238,7 +277,8 @@ impl Inner {
                     inner.host.public_prompt(&prompt.text)
                 )).ok().and_then(Result::ok)
                     .unwrap_or_else(|| "[redacted: prompt unavailable]".to_owned());
-                inner.publish(None, json!({"type":"prompt_dequeued","data":{"id":prompt.queue_id,"text":display}}));
+                inner.publish(None, json!({"type":"prompt_dequeued","data":{"id":prompt.queue_id,"text":display,
+                    "peer_started":prompt.peer_origin.is_some(),"peer_origin":prompt.peer_origin}}));
                 inner.start_turn(prompt.text, turn);
             }
         });
@@ -363,7 +403,7 @@ fn handle_prompt(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, client_id: u64, f
         state.next_queue_id += 1;
         let position = state.prompts.len() + 1;
         if !send(tx, json!({"type":"reply","id":req_id,"ok":true,"queued":true,"position":position,"queue_id":queue_id})) { return; }
-        state.prompts.push_back(Prompt { text: text.to_owned(), queue_id: queue_id.clone() });
+        state.prompts.push_back(Prompt { text: text.to_owned(), queue_id: queue_id.clone(), peer_origin: None });
         drop(state);
         // Origin client receives its queue notification in the reply only.
         let event = json!({"type":"prompt_queued","data":{"id":queue_id,"text":display,"position":position}});
@@ -524,5 +564,21 @@ mod tests {
         drop(rx);
         assert!(!attach_client(&daemon.inner, 1, None, &tx));
         assert!(daemon.inner.state.lock().unwrap().clients.is_empty());
+    }
+
+    #[test]
+    fn external_peer_prompts_share_the_eight_slot_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut handle = Daemon::bind(dir.path(), Session {
+            session_id: "peer-queue-test".into(), cwd: "/tmp".into(), model: None,
+            engine: "test".into(), doxa_version: "test".into(),
+        }, Arc::new(NoopHost)).unwrap().start();
+        handle.inner.state.lock().unwrap().busy = true;
+        for _ in 0..PROMPT_QUEUE_CAPACITY {
+            assert_eq!(handle.enqueue_peer_prompt("peer task".into(), "sender").unwrap(), ExternalPrompt::Queued);
+        }
+        assert_eq!(handle.enqueue_peer_prompt("overflow".into(), "sender").unwrap(), ExternalPrompt::Full);
+        assert_eq!(handle.inner.state.lock().unwrap().prompts.len(), PROMPT_QUEUE_CAPACITY);
+        handle.shutdown();
     }
 }

@@ -1,5 +1,6 @@
 //! A session-start spend ceiling for hosts that report actual USD costs.
 use doxa_runtime::Host;
+use crate::peer_host::PEER_TURN_MARKER;
 use serde_json::{json, Value};
 use std::io;
 use std::path::PathBuf;
@@ -29,6 +30,10 @@ impl Host for BudgetHost {
         // observation and the next admission on one state boundary.
         let mut state = self.state.lock().unwrap_or_else(|poison| poison.into_inner());
         if state.unknown || state.spent >= self.ceiling {
+            let peer_started = text.starts_with(PEER_TURN_MARKER);
+            let peer_origin = if peer_started {
+                text.lines().find(|line| line.starts_with("--- peer message "))
+            } else { None };
             let message = if state.unknown {
                 "Session spend is unknown; further turns are withheld until cost accounting is available"
             } else {
@@ -36,7 +41,7 @@ impl Host for BudgetHost {
             };
             emit(json!({"type":"turn_refused","data":{
                 "reason":"budget","message":message,"spent_usd":if state.unknown { None } else { Some(state.spent) },
-                "ceiling_usd":self.ceiling,"peer_started":false,"peer_origin":null,"prompt":null
+                "ceiling_usd":self.ceiling,"peer_started":peer_started,"peer_origin":peer_origin,"prompt":null
             }}));
             return;
         }

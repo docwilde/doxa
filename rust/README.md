@@ -119,10 +119,13 @@ The native daemon captures `DOXA_SESSION_BUDGET_USD` at startup for Claude
 sessions and refuses the next turn once reported USD spend reaches the ceiling.
 If a completed budgeted turn has no valid cost, further turns are refused.
 Budgeted native Codex and vendor sessions are rejected at startup until their
-priced token accounting is implemented. A truthy
-`DOXA_PEER_INBOUND_TURNS` is also rejected: native peer messages currently
-render as events but do not start turns. Python fleet start remains the live
-path for inbound peer turns and full run supervision.
+priced token accounting is implemented. A truthy `DOXA_PEER_INBOUND_TURNS`
+lets validated direct peer messages start or queue a turn in native Codex and
+vendor sessions. They use the same eight-slot queue as typed prompts;
+broadcasts stay passive. Messages that cannot enter the queue are retained
+for a later turn up to eight pending frames, with an explicit overflow event.
+Claude continues to use its Python sidecar peer loop and rejects this native
+switch. Python fleet start remains the live path for full run supervision.
 `doxa-rs fleet stop RUN_ID` sends stop requests to the run's validated live
 slot sockets and waits up to 60 seconds for each daemon connection to close.
 It reports slots with missing sockets or unconfirmed shutdown separately; it
