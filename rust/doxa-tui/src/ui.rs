@@ -2332,6 +2332,10 @@ impl App {
                 }
             }
         } else { None };
+        if pane_target == Some(1) && !self.pane_group_two_exists() {
+            self.notice = "There is only one pane group · /split or /vsplit makes a second".into();
+            return true;
+        }
         let sidebar = if name == "/sidebar" && !args.is_empty() {
             match args.as_slice() {
                 ["on"] => Some((true, None)),
@@ -2382,9 +2386,16 @@ impl App {
                 self.split_requested = true;
             }
             "/pane" => {
-                self.active_group = pane_target.unwrap_or(1 - self.active_group);
-                self.split_requested = true;
-                self.focus = Focus::Prompt;
+                if let Some(target) = pane_target {
+                    self.active_group = target;
+                    self.focus = Focus::Prompt;
+                } else {
+                    self.notice = if self.pane_group_two_exists() {
+                        "2 pane groups, numbered 1 and 2 · /pane <n> to focus one".into()
+                    } else {
+                        "One pane group · /split or /vsplit makes a second".into()
+                    };
+                }
             }
             "/sidebar" => {
                 if let Some((visible, width)) = sidebar {
@@ -5132,6 +5143,10 @@ impl App {
         let p = &mut self.groups[self.active_group];
         p.active = (p.active + 1).min(p.tabs.len().saturating_sub(1));
         p.scroll = 0;
+    }
+
+    fn pane_group_two_exists(&self) -> bool {
+        self.split_requested || self.active_group == 1 || !self.groups[1].tabs.is_empty()
     }
 
     fn layout(&self, area: Rect) -> PaneLayout {
@@ -8960,9 +8975,14 @@ for line in sys.stdin:
 
         app.input = "/pane".into();
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
-        assert_eq!(app.active_group, 1);
+        assert_eq!(app.active_group, 0);
+        assert!(app.notice.contains("2 pane groups"));
+        assert!(app.layout(app.size).panes.is_some());
 
-        app.input = "/pane".into();
+        app.input = "/pane 2".into();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.active_group, 1);
+        app.input = "/pane 1".into();
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert_eq!(app.active_group, 0);
 
@@ -9015,6 +9035,20 @@ for line in sys.stdin:
         app.handle(Event::Resize(100, 28));
         app.groups[0].tabs.push("first".into());
         app.session_cwds.insert("first".into(), PathBuf::from("/repo/project"));
+
+        app.input = "/pane".into();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.active_group, 0);
+        assert!(app.layout(app.size).panes.is_none());
+        assert!(app.notice.contains("One pane group"));
+        app.input = "/pane 2".into();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.input, "/pane 2");
+        assert_eq!(app.active_group, 0);
+        assert!(app.layout(app.size).panes.is_none());
+        assert!(app.notice.contains("only one pane group"));
+        app.input = "/vsplit".into();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
 
         for (command, target) in [("/pane 2", 1), ("/pane 1", 0)] {
             app.input = command.into();
