@@ -5,6 +5,21 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.13 — 2026-09-25
+
+- Resume verified archived native Codex threads from the session picker. Require
+  a matching, owned, complete thread record and transcript; refuse ambiguous
+  engine state or a mismatched model.
+- Switch an idle managed session's base with `/branch` or
+  `doxa branch NAME --session ID`. Preserve dirty trees, unique commits, and
+  stale or changed worktree metadata.
+- Preview orphaned managed worktrees with `doxa worktrees` for manual review.
+  Preserve ignored files in cleanup and branch-switch checks. Automatic
+  orphan deletion remains disabled until legacy Python sessions share the
+  worktree lock.
+- Hit-test chip hover and clicks against the painted frame so resizing and
+  pane separators cannot activate the wrong chip.
+
 ## 2.0.0-alpha.12 — 2026-09-25
 
 - Add a root Cargo workspace and shared lockfile so `cargo build --locked`

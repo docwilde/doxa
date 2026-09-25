@@ -2,15 +2,15 @@
 
 Baseline: the `v1.19.0` Python tag, especially `doxa/commands.py`, its session
 command handlers, and the 1.19 worktree and fleet contracts. This records the
-Rust branch's behavior at `v2.0.0-alpha.12`; it is a release gate, not a
+Rust branch's behavior at `v2.0.0-alpha.13`; it is a release gate, not a
 claim that all Python behavior has been ported.
 
 | Area | Rust state | Remaining 1.19 behavior |
 | --- | --- | --- |
-| Core sessions | Native daemon, Codex and vendor hosts, Claude SDK sidecar; new, attach, stop, list and restore; TUI `/attach` for live sessions and `/resume` for verified saved Claude/vendor sessions | Archived Codex resume and full setup/auth flow |
+| Core sessions | Native daemon, Codex and vendor hosts, Claude SDK sidecar; new, attach, stop, list and restore; TUI `/attach` for live sessions and `/resume` for verified saved Claude/Codex/vendor sessions | Restore deleted managed worktrees for archived resume; full setup/auth flow |
 | Window and prompt | Two split panes, persistent named tabs, grouped rail, per-session drafts, mouse selection and resize, inline questions, Markdown and tool cards | More than two pane groups, moving a tab across groups and sidebar collections |
 | Commands | Local bare commands, `/msg`, `/mesh`, `/pane 1|2`, sidebar controls, `/dir`, `/attach` and `/rename` | Many argument forms and the full generated command palette; see table below |
-| Worktrees and diffs | Managed per-session Git checkout, guarded clean cleanup, `new --branch`, CLI branch-base listing, diff pane and tracked-hunk rejection with queued active-turn feedback and a reason | Live worktree base switching and complete orphan cleanup |
+| Worktrees and diffs | Managed per-session Git checkout, guarded clean finalization, `new --branch`, idle live base switching, read-only orphan preview CLI, diff pane and tracked-hunk rejection with queued active-turn feedback and a reason | Safe orphan deletion across Rust and legacy Python sessions, plus recovery for dirty or changed checkouts |
 | LORE | Context/scrub via sidecar, belief/evidence, full proposal review and exact-snapshot approve/reject with LORE 0.58.5 | Writable belief actions beyond pending resolution; older LORE builds remain read only |
 | Peers and fleets | Peer map and direct message; optional native inbound peer turns; Python fleet start/inspection/attach; validated slot stop; native read-only preflight and Claude spend ceiling | Native priced budget support for Codex/vendors, fleet supervisor/barrier/approval desk, live fleet tab and remote routing |
 | Operational UI | Native doctor and install launcher | 1.19 setup/settings/update/login/logout/plugin screens and detailed usage/context screens |
@@ -31,20 +31,21 @@ commands still pass to the active engine.
 | `/fleet` | Bridge or partial | Native supervisor, approval desk, barrier, budgets and fleet tab |
 | `/model`, `/engine`, `/mode` | Local picker for bare form | Supported argument forms and provider-specific capabilities |
 | `/beliefs`, `/pending` | Belief reading and staged approve/reject after complete raw review | Belief confirm/contradict/stale/retract controls |
-| `/sessions`, `/search`, `/resume`, `/attach` | Bounded archived transcript search, verified saved Claude/vendor resume, CLI attach/Claude resume and live TUI attach picker with ID/title search | Full indexed cross-session search and archived Codex resume |
+| `/sessions`, `/search`, `/resume`, `/attach` | Bounded archived transcript search, verified saved Claude/Codex/vendor resume when the recorded directory exists, CLI attach/Claude resume and live TUI attach picker with ID/title search | Full indexed cross-session search and deleted-worktree recovery |
 | `/usage`, `/context`, `/queue` | Summary chips and queued prompt list/cancel picker | Detailed usage and context screens |
 | `/help`, `/about` | Local action menu/version | Registry-wide help and full diagnostics |
 | `/compact` | Blocked locally | LORE review before provider compaction |
 | `/movepane`, `/collection`, `/rename`, `/cd`, `/clear` | `/rename` local; others missing | Tab/collection state and safe new-session directory controls |
-| `/branch`, `/effort` | `new --branch` and read-only CLI branch listing | Live base and effort controls |
+| `/branch`, `/effort` | `new --branch`, idle live base switch, CLI branch listing | Effort controls |
 | `/login`, `/logout`, `/settings`, `/setup`, `/doctor`, `/update` | CLI doctor only | Interactive operations and 1.19 setup checks |
 | `/plugins`, `/reload-plugins` | Missing | Plugin discovery, adoption policy and refresh |
 | `/img` | Missing | Terminal image capability/reporting if required for stable parity |
 
 ## Stable 2.0 gates
 
-1. Finish live worktree branch controls and orphan cleanup. Keep the LORE
-   0.58.5 atomic review boundary covered as later versions are adopted.
+1. Recover a deleted managed worktree before archived resume and share a
+   lifecycle lock with legacy Python before orphan deletion. Keep the LORE 0.58.5 atomic review
+   boundary covered as later versions are adopted.
 2. Port or explicitly scope every user-facing 1.19 command and window action;
    ensure DOXA commands never accidentally become model prompts.
 3. Add end-to-end startup, daemon, and terminal tests for the supported hosts,

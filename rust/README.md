@@ -71,6 +71,10 @@ it removes only a verified clean checkout whose recorded branch has no commits
 ahead of its base. Dirty trees, unique commits, branch switches, unreadable
 metadata, and failed Git checks are kept for manual review. `doxa doctor`
 lists verified managed worktrees with no live session and never deletes them.
+`doxa worktrees list` previews managed worktrees without an attachable session
+for manual review. A listed checkout may still belong to a legacy Python
+session. Automatic orphan deletion stays disabled until both runtimes share a
+worktree lock.
 Fixture sessions keep their supplied directory unless `DOXA_WORKTREE=1` is
 set explicitly for integration testing.
 `doxa new --branch NAME` starts the managed worktree from an existing local or
@@ -78,8 +82,10 @@ remote-tracking branch. It prefers a same-named local branch over
 `origin/NAME`. An unknown branch, disabled worktrees, or a request combined
 with `--resume` fails before starting the session; the launch checkout is
 never switched. `doxa branch` lists local branch bases from this checkout.
-`doxa branch NAME` refuses a live base switch and points to
-`doxa new --branch NAME`; live `/branch` controls remain to be ported.
+`doxa branch NAME --session ID` changes an idle managed session's base, as
+does `/branch` in its pane. The worktree must be clean, have no unique commits,
+and still match its pinned base commit. An active or queued turn blocks the
+switch. `doxa branch NAME` without a session ID lists available bases.
 
 Or compile and install the main line with the POSIX installer:
 
@@ -168,15 +174,16 @@ the JSONL file retains the full history. Older daemons without snapshot
 metadata fall back to their 512-event replay ring. A turn still running at
 attach can have text that was streamed but not yet persisted, so its earlier
 in-flight deltas may be absent. `Ctrl+T` opens bounded tool activity cards;
-clickable links are still 2.0 work. The binary version is `2.0.0-alpha.12`;
+clickable links are still 2.0 work. The binary version is `2.0.0-alpha.13`;
 this is an alpha release.
 
 `Ctrl+R` opens a searchable picker for attached and archived sessions with
 bounded transcript tails. Archived transcripts open read-only and never receive
 prompts. `/search TEXT` scans a bounded older archived tail. `/resume [ID or
-prefix]` opens a picker that can attach a live session or start a saved Claude
-or vendor session when its engine, model, and stored history can be verified.
-Archived Codex resume is not yet available in the TUI. `/queue` opens a picker
+prefix]` opens a picker that can attach a live session or start a saved Claude,
+Codex, or vendor session when its engine, model, and stored history can be
+verified. The recorded directory must still exist for archived resume;
+deleted managed worktrees cannot yet be reconstructed. `/queue` opens a picker
 above the active prompt for a live session. Its previews are scrubbed by LORE;
 press `X` to cancel the selected waiting prompt by its stable ID, `R` to
 refresh, or `Esc` to close it. `F2` (or `Alt+G`) opens a 256 KiB worktree diff in an
