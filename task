@@ -134,7 +134,7 @@ install_committed() {
   if ! git -C "$root" diff --quiet || ! git -C "$root" diff --cached --quiet; then
     info 'install uses committed HEAD; working-tree changes are not included'
   fi
-  DOXA_RUST_REPO_URL=$root sh "$root/scripts/install.sh" "$revision"
+  DOXA_RUST_REPO_URL="$root" sh "$root/scripts/install.sh" "$revision"
 }
 
 command=${1:-help}

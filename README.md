@@ -1,7 +1,7 @@
 <p align="center"><img src="assets/logo.png" width="560" alt="DOXA — belief earning knowledge"></p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Rust%202.0-alpha.9-f59f00" alt="Rust 2.0 alpha.9 is the leading development line">
+  <img src="https://img.shields.io/badge/Rust%202.0-alpha.10-f59f00" alt="Rust 2.0 alpha.10 is the main frontend">
   <a href="https://github.com/docwilde/doxa/releases"><img src="https://img.shields.io/github/v/release/docwilde/doxa?label=release&color=e8590c" alt="latest release"></a>
   <a href="https://github.com/docwilde/doxa/actions/workflows/rust-ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/docwilde/doxa/rust-ci.yml?branch=main&label=Rust%20CI" alt="Rust CI status"></a>
   <img src="https://img.shields.io/badge/TUI-Ratatui-2f9e44" alt="Rust TUI built with Ratatui">
@@ -42,7 +42,7 @@ ported.
 
 ## Gallery
 
-### Rust 2.0 alpha.9
+### Rust 2.0 alpha.10
 
 ![Two independent Rust session panes showing different engines, transcripts, prompts, and usage rows](assets/shots/rust-split-panes.png)
 
@@ -71,37 +71,41 @@ not a live provider run.
 
 ## Install
 
-### Rust 2.0 alpha (leading development line)
+### Rust 2.0 alpha
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/docwilde/doxa/rust/2.0/scripts/install.sh | sh -s -- --rust v2.0.0-alpha.9
+curl -fsSL https://raw.githubusercontent.com/docwilde/doxa/main/scripts/install.sh | sh
 ```
 
-This builds the tagged Rust preview with Git and Cargo and installs `doxa-rs`,
-`doxa-daemon-rs`, and the Claude sidecar in `~/.local/bin` (or
-`DOXA_RUST_BIN_DIR`). Use `--rust rust/2.0` to track the development branch.
-The current alpha still needs a Python environment with DOXA and LORE for its
-memory bridge, and the Claude Agent SDK for Claude sessions. Run
-`doxa-rs doctor --engine codex` to check your setup; see the
-[Rust guide](rust/README.md) for interpreter and provider setup. The Python
-`doxa` command is installed separately.
+The installer builds the Rust frontend and daemon from `main` and installs the
+Rust `doxa` command in `~/.local/bin` (or `DOXA_RUST_BIN_DIR`). Pass a tag such
+as `v2.0.0-alpha.10` after `sh -s --` to pin a release. It uses Git, Cargo,
+Python 3.11+, and `uv`; the Python environment it creates is private to the
+LORE and Claude sidecars. No Python frontend command is installed. See the
+[Rust guide](rust/README.md) for provider setup and current limits.
+
+From a checkout, use `./task build`, `./task run`, or `./task install`. Install
+builds committed `HEAD` with the same locked sidecars and launcher as the
+release installer.
 
 ## Quickstart
 
-For the Rust alpha, check the bridge and start or attach to a session:
+Check dependencies, start a session, and reattach later:
 
 ```sh
-doxa-rs doctor --engine codex
-doxa-rs new --engine codex --lore-python /absolute/path/to/python-with-doxa-and-lore
-doxa-rs list
+doxa doctor --engine codex
+doxa new --engine codex
+doxa list
 ```
 
 The [Rust guide](rust/README.md) covers Claude, DeepSeek, and GLM setup.
+
 ## Status
 
 Rust 2.0 alpha is the main line. The [Rust guide](rust/README.md) tracks
 what is implemented and what still needs porting. Existing Python 1.x releases
-and their [manual](docs/manual.md) remain available for historical reference.
+and their [manual](docs/manual.md) remain available for historical reference;
+the Python SDK and LORE sidecar modules remain internal runtime dependencies.
 
 Rust CI tests the frontend, native daemon, protocol, LORE bridge, installer,
 and compatibility paths.
@@ -112,9 +116,8 @@ and compatibility paths.
   not load-balance or fail over between providers.
 - **Replacing LORE:** DOXA uses the same core as the Claude Code and Codex
   plugins.
-- **Full Claude plugin compatibility:** `adopt_plugins` imports commands,
-  skills, and agents, but not hooks or MCP servers. DOXA's own
-  [plugin API](docs/plans/plugin-api.md) remains a design.
+- **Full Claude plugin compatibility:** the 2.0 alpha uses a Claude SDK
+  sidecar. DOXA's [plugin API](docs/plans/plugin-api.md) remains a design.
 
 ## License
 

@@ -1,8 +1,9 @@
-# DOXA Rust 2.0 line
+# DOXA Rust 2.0
 
-`doxa-tui` is the separate, tentative 2.0 frontend. The current Python DOXA
-1.x release remains the supported application. The Rust binary is named
-`doxa-rs` during development so installing it does not replace `doxa`.
+Rust 2.0 is the main DOXA frontend. The installer exposes it as `doxa`; the
+build artifact is still named `doxa-rs` for source builds. The Python 1.x
+frontend is retired from the current installer. Python remains in a private
+environment for the LORE and Claude SDK sidecars.
 
 The preview has a native daemon for Codex and vendor chat, plus a Python
 Claude SDK sidecar. Its Ratatui frontend attaches to native or Python v1
@@ -28,9 +29,10 @@ release build. `./task test` runs the TUI, daemon, and Claude sidecar tests;
 The script selects `.venv/bin/python` when present, then `python3`, for LORE
 and Claude. Set `DOXA_LORE_PYTHON=/absolute/path/to/python` or pass
 `--lore-python` / `--claude-python` to select another interpreter.
-`./task install` builds a release preview from this checkout and installs
-`doxa-rs`, `doxa-daemon-rs`, and `doxa-claude-sidecar.py` under
-`DOXA_RUST_BIN_DIR` (default `~/.local/bin`). It does not replace `doxa`.
+`./task install` builds committed `HEAD` and installs `doxa` with its Rust
+frontend, daemon, Claude sidecar, and locked Python sidecar environment under
+`DOXA_RUST_BIN_DIR` (default `~/.local/bin`). Working-tree edits must be
+committed before `install` will include them.
 
 `doxa-rs` now starts a native Codex session when no live sessions exist in the
 current project. `new` always starts one; `attach ID` reattaches, `stop ID`
@@ -46,19 +48,19 @@ The daemon executable is located beside `doxa-rs`, then on `PATH`; an absolute
 `linger_secs` config value. `--sandbox` sets the native Codex sandbox. Use
 `--engine fixture` only for local integration checks.
 
-Or compile and install the preview from a ref with the POSIX installer:
+Or compile and install the main line with the POSIX installer:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/docwilde/doxa/rust/2.0/scripts/install.sh | sh -s -- --rust
+curl -fsSL https://raw.githubusercontent.com/docwilde/doxa/main/scripts/install.sh | sh
 ```
 
-The default ref is `rust/2.0`; append a branch, tag, or commit SHA to select
-another. This needs Git and Cargo. It installs `doxa-rs` in `~/.local/bin`
-(override with `DOXA_RUST_BIN_DIR`) and installs `doxa-daemon-rs` there if
-the selected ref includes a native daemon. It does not replace the Python
-`doxa` command. The native daemon is still a preview; `doxa-rs` can also
-connect to an existing Python daemon. The installer places the Claude SDK
-sidecar beside `doxa-rs`, so an installed preview can find it automatically.
+The default ref is `main`; append a tag or commit SHA after `sh -s --` to pin
+another release. This needs Git, Cargo, Python 3.11+, and `uv`. It installs the
+Rust `doxa` launcher, `doxa-rs`, `doxa-daemon-rs`, and Claude sidecar in
+`~/.local/bin` (override with `DOXA_RUST_BIN_DIR`). It provisions a locked
+Python sidecar environment under `DOXA_HOME` and selects it automatically from
+any working directory. The native daemon can also attach to compatible Python
+1.x sessions.
 
 With one live daemon session, `doxa-rs` attaches to it directly. With multiple
 sessions, use `--list` and select one by full ID or unique ID prefix.
@@ -81,8 +83,8 @@ the JSONL file retains the full history. Older daemons without snapshot
 metadata fall back to their 512-event replay ring. A turn still running at
 attach can have text that was streamed but not yet persisted, so its earlier
 in-flight deltas may be absent. `Ctrl+T` opens bounded tool activity cards;
-clickable links are still 2.0 work. The binary version is `2.0.0-alpha.9` for this
-separate development line, not a DOXA 2.0 release.
+clickable links are still 2.0 work. The binary version is `2.0.0-alpha.10`;
+this is an alpha release.
 
 `Ctrl+R` opens a searchable picker for attached and archived sessions with
 bounded transcript tails. Archived transcripts open read-only and never receive
@@ -129,10 +131,9 @@ Alpha tags identify preview snapshots. A stable 2.0 release waits until the
 frontend reaches feature parity and passes end-to-end terminal and daemon
 tests.
 
-The Python CI workflow is paused on the Rust development line while native
-features are being built. It must be restored before a stable 2.0 cutover;
-focused Python sidecar and compatibility tests still run locally during this
-preview phase.
+Rust CI runs on `main`, including the Python sidecar and compatibility tests
+needed by the current Rust runtime. Broader parity and release tests remain
+before a stable 2.0 release.
 
 Start the native Claude host from an installed preview with
 `doxa-rs new --engine claude --claude-python /absolute/path/to/python`.
