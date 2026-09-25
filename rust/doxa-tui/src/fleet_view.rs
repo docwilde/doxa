@@ -4,6 +4,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read};
 use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 const MAX_RUNS: usize = 1024;
@@ -183,10 +184,109 @@ pub fn slot_socket(root: &Path, prefix: &str, index: usize) -> io::Result<(PathB
     Ok((socket, session_id.to_owned()))
 }
 
+pub struct StopReport {
+    pub text: String,
+    pub complete: bool,
+}
+
+fn stop_one(socket: PathBuf, expected_id: String) -> Result<&'static str, String> {
+    let mut client = crate::transport::DaemonClient::connect(&socket, None)
+        .map_err(|error| error.to_string())?;
+    if client.hello["session_id"] != expected_id {
+        return Err("daemon session identity differs from manifest".into());
+    }
+    let reply = client.call("stop", serde_json::Map::new())
+        .map_err(|error| format!("stop acknowledgement unavailable: {error}"))?;
+    if reply["ok"] != true {
+        return Err("daemon refused stop request".into());
+    }
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        if Instant::now() >= deadline {
+            return Err("stop accepted; daemon close not confirmed within 60 seconds".into());
+        }
+        match client.poll_frame(Duration::from_millis(250)) {
+            Ok(Some(_)) | Ok(None) => {}
+            Err(crate::transport::TransportError::Closed) => return Ok("daemon connection closed"),
+            Err(error) => return Err(format!("stop accepted; daemon close unconfirmed: {error}")),
+        }
+    }
+}
+
+/// Request stop on each live slot that still has a socket. All readable socket
+/// targets are validated before the first request; this never signals a PID.
+pub fn stop(root: &Path, prefix: &str) -> io::Result<StopReport> {
+    let run = resolve(root, prefix)?;
+    let value = manifest(&run)?;
+    if value["live"] != true {
+        return Err(invalid("fleet manifest is not live"));
+    }
+    let slots = value["slots"].as_array().ok_or_else(|| invalid("fleet manifest has no slots"))?;
+    if slots.is_empty() || slots.len() > 64 {
+        return Err(invalid("fleet slot count is out of bounds"));
+    }
+    let mut targets = Vec::new();
+    let mut missing = Vec::new();
+    let mut not_spawned = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for slot in slots {
+        let index = slot["index"].as_u64().and_then(|index| usize::try_from(index).ok())
+            .ok_or_else(|| invalid("fleet slot index is invalid"))?;
+        if !seen.insert(index) {
+            return Err(invalid("fleet slot index is duplicated"));
+        }
+        if slot["socket_path"].as_str().is_none_or(str::is_empty) {
+            if slot["pid"].is_null() && matches!(slot["phase"].as_str(), Some("pending" | "failed")) {
+                not_spawned.push(index);
+            } else {
+                missing.push(index);
+            }
+            continue;
+        }
+        match slot_socket(root, prefix, index) {
+            Ok((socket, id)) => targets.push((index, socket, id)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => missing.push(index),
+            Err(error) => return Err(error),
+        }
+    }
+    if targets.is_empty() {
+        return Err(invalid("fleet has no live slot sockets to stop"));
+    }
+    // Concurrent requests match v1.19 teardown's per-slot fanout and keep a
+    // single slow finalize from delaying the other stop requests.
+    let handles: Vec<_> = targets.into_iter().map(|(index, socket, id)| {
+        std::thread::spawn(move || (index, stop_one(socket, id)))
+    }).collect();
+    let mut lines = Vec::new();
+    let mut complete = missing.is_empty();
+    for index in missing {
+        lines.push((index, format!("slot {index}: no live socket recorded")));
+    }
+    for index in not_spawned {
+        lines.push((index, format!("slot {index}: was not spawned")));
+    }
+    for handle in handles {
+        match handle.join() {
+            Ok((index, Ok(state))) => lines.push((index, format!("slot {index}: {state}"))),
+            Ok((index, Err(error))) => {
+                complete = false;
+                lines.push((index, format!("slot {index}: {}", short(&error))));
+            }
+            Err(_) => {
+                complete = false;
+                lines.push((usize::MAX, "slot worker failed".into()));
+            }
+        }
+    }
+    lines.sort_by_key(|(index, _)| *index);
+    Ok(StopReport { text: format!("fleet {} stop requests\n{}", short(value["run_id"].as_str().unwrap_or(prefix)),
+        lines.into_iter().map(|(_, line)| line).collect::<Vec<_>>().join("\n")), complete })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
+    use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixListener;
 
     #[test]
@@ -228,5 +328,86 @@ mod tests {
         assert!(status(root, "20260925T100000").is_err());
         fs::set_permissions(&manifest_path, fs::Permissions::from_mode(0o644)).unwrap();
         assert!(status(root, "20260925T100000-abcd").is_err());
+    }
+
+    #[test]
+    fn stop_waits_for_daemon_close_after_acknowledgement() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("daemon.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            writeln!(socket, "{}", serde_json::json!({"type":"hello", "proto":1,
+                "session_id":"sess-123", "cwd":"/tmp", "engine":"fixture", "next_seq":0})).unwrap();
+            let mut reader = BufReader::new(socket.try_clone().unwrap());
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            assert!(line.contains("attach"));
+            line.clear();
+            reader.read_line(&mut line).unwrap();
+            let call: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(call["method"], "stop");
+            writeln!(socket, "{}", serde_json::json!({"type":"reply", "id":call["id"], "ok":true})).unwrap();
+        });
+        assert_eq!(stop_one(path, "sess-123".into()).unwrap(), "daemon connection closed");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn stop_preflights_all_targets_before_sending_any_request() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let run = root.join("20260925T100000-abcd");
+        let runtime = run.join("rt");
+        fs::create_dir_all(&runtime).unwrap();
+        fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
+        let first = runtime.join("daemon-first.sock");
+        let first_listener = UnixListener::bind(&first).unwrap();
+        first_listener.set_nonblocking(true).unwrap();
+        fs::set_permissions(&first, fs::Permissions::from_mode(0o600)).unwrap();
+        let second = runtime.join("daemon-second.sock");
+        let _second_listener = UnixListener::bind(&second).unwrap();
+        fs::set_permissions(&second, fs::Permissions::from_mode(0o666)).unwrap();
+        let manifest_path = run.join("manifest.json");
+        fs::write(&manifest_path, serde_json::json!({"run_id":"20260925T100000-abcd", "live":true,
+            "slots":[{"index":0,"session_id":"first","socket_path":first},
+                {"index":1,"session_id":"second","socket_path":second}]}).to_string()).unwrap();
+        fs::set_permissions(&manifest_path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(stop(root, "20260925T100000-abcd").is_err());
+        assert_eq!(first_listener.accept().unwrap_err().kind(), io::ErrorKind::WouldBlock);
+    }
+
+    #[test]
+    fn stop_requests_one_validated_fleet_slot() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let run = root.join("20260925T100000-abcd");
+        let runtime = run.join("rt");
+        fs::create_dir_all(&runtime).unwrap();
+        fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
+        let socket = runtime.join("daemon-first.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
+        let path = run.join("manifest.json");
+        fs::write(&path, serde_json::json!({"run_id":"20260925T100000-abcd", "live":true,
+            "slots":[{"index":0,"session_id":"sess-123","socket_path":socket}]}).to_string()).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            writeln!(stream, "{}", serde_json::json!({"type":"hello", "proto":1,
+                "session_id":"sess-123", "cwd":"/tmp", "engine":"fixture", "next_seq":0})).unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            line.clear();
+            reader.read_line(&mut line).unwrap();
+            let call: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(call["method"], "stop");
+            writeln!(stream, "{}", serde_json::json!({"type":"reply", "id":call["id"], "ok":true})).unwrap();
+        });
+        let report = stop(root, "20260925T100000").unwrap();
+        assert!(report.complete);
+        assert!(report.text.contains("slot 0: daemon connection closed"));
+        server.join().unwrap();
     }
 }

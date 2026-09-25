@@ -81,6 +81,15 @@ map; Up/Down selects a peer, R refreshes the live roster, and Esc closes it.
 For Python 1.19 fleet runs, `doxa-rs fleet runs` lists manifests under
 `$DOXA_HOME/fleet`, `doxa-rs fleet status RUN_ID` shows run and slot phases,
 and `doxa-rs fleet attach RUN_ID SLOT` attaches to one slot's live daemon.
+`doxa-rs fleet start <doxa-fleet options>` currently invokes the installed
+Python fleet harness in the sidecar environment. Its own parser enforces the
+capacity, spend budget, socket length, arm barrier, approval, and teardown
+rules. `--dry-run` shows assignments without starting sessions.
+`doxa-rs fleet stop RUN_ID` sends stop requests to the run's validated live
+slot sockets and waits up to 60 seconds for each daemon connection to close.
+It reports slots with missing sockets or unconfirmed shutdown separately; it
+does not signal processes or rewrite the Python supervisor's manifest. A
+Python supervisor may continue until its own run loop notices the closed slots.
 Use `--root ABSOLUTE_PATH` when the fleet was started under another root.
 Run IDs may be unique prefixes. Attachment requires an owner-private manifest
 and socket inside the run's private runtime directory.
