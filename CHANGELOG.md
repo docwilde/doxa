@@ -21,7 +21,10 @@ the stable 2.0 release has not been cut.
   pane separators cannot activate the wrong chip.
 - Show dollar costs only for API-billed sessions. For a verified Claude
   subscription, show its connected account's plan and same-account cached
-  quota; show unknowns when a provider does not report billing or quota.
+  quota; omit the subscription pill when both plan and quota are unknown.
+- Show DeepSeek API account balance from its optional official balance
+  endpoint, without blocking turns or querying Z.ai. Omit the balance chip
+  when no valid response is available.
 
 ## 2.0.0-alpha.12 — 2026-09-25
 

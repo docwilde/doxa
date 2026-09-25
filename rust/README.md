@@ -301,6 +301,10 @@ are disabled by default. Set `DOXA_VENDOR_TOOLS=workspace-read` when launching
 the session to allow the model to read UTF-8 files below the workspace. File
 contents are sent to the model provider after LORE scrubbing. This is a
 session-wide opt-in; there is no per-call approval in this preview.
+With a DeepSeek API key, an optional background request to DeepSeek's official
+balance endpoint can add a balance chip. USD and CNY balances are shown
+separately without conversion. An unavailable response leaves the chip hidden;
+GLM/Z.ai does not make a balance request.
 
 ## Native daemon
 
