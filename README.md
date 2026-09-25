@@ -23,7 +23,7 @@ shares user and repo memory across DOXA, Claude Code, and Codex, with
 evidence-backed beliefs and an informational source-engine label. See the
 [engine setup and capabilities](rust/README.md) guide.
 
-![Rust 2.0 alpha terminal with a session rail and two panes showing Codex and Claude fixture transcripts](assets/shots/rust-hero.png)
+![Rust 2.0 alpha terminal with a session rail and one wide Codex pane showing a fixture transcript and prompt](assets/shots/rust-hero.png)
 
 *The lead image and gallery below are rendered by the real Rust 2.0
 Ratatui frontend from deterministic fixture events. No provider calls or
@@ -44,23 +44,19 @@ ported.
 
 ### Rust 2.0 alpha.10
 
-![Two independent Rust session panes showing different engines, transcripts, prompts, and usage rows](assets/shots/rust-split-panes.png)
-
-*Split panes keep separate session transcripts and prompts.*
-
-![Rust transcript showing a collapsed tool-call section below the assistant reply](assets/shots/rust-tool-activity.png)
+![Single Rust session pane showing collapsed tool calls below the assistant reply](assets/shots/rust-tool-activity.png)
 
 *Tool calls stay collapsed in the transcript until expanded.*
 
-![Rust input request choices expanded above the active pane prompt while the transcript and other pane remain visible](assets/shots/rust-needs-input.png)
+![Rust input request choices expanded above the prompt in a single session pane](assets/shots/rust-needs-input.png)
 
 *A daemon input request expands above the active prompt.*
 
-![Rust Claude permission picker with the available modes and the current mode marked](assets/shots/rust-permissions.png)
+![Rust Claude permission picker above the prompt in a single session pane](assets/shots/rust-permissions.png)
 
 *The permission picker expands from the chip row above the active prompt.*
 
-![Rust session history picker listing attached fixture sessions](assets/shots/rust-history.png)
+![Rust session history picker above the prompt in a single session pane](assets/shots/rust-history.png)
 
 *Session history searches attached and archived transcripts.*
 

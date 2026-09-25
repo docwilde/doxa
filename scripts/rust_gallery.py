@@ -14,7 +14,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
 ROOT = Path(__file__).resolve().parents[1]
-SCENES = ("hero", "split-panes", "tool-activity", "needs-input", "permissions", "history")
+SCENES = ("hero", "tool-activity", "needs-input", "permissions", "history")
 FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
 CELL_W, CELL_H = 14, 26
 BOX_STROKES = {

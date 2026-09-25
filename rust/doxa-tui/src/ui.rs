@@ -606,6 +606,7 @@ pub struct App {
     pub active_group: usize,
     pub split: Split,
     pub split_percent: u16,
+    split_requested: bool,
     pub rail_visible: bool,
     pub rail_width: u16,
     pub rail_selected: usize,
@@ -691,6 +692,7 @@ impl Default for App {
             active_group: 0,
             split: Split::Vertical,
             split_percent: 50,
+            split_requested: false,
             rail_visible: true,
             rail_width: 25,
             rail_selected: 0,
@@ -1453,11 +1455,16 @@ impl App {
             return true;
         }
         if key.code == KeyCode::F(4) {
-            if !self.diff_pane && self.layout(self.size).panes.is_none() {
-                self.notice = "Enlarge terminal to open the diff pane".into();
+            if self.diff_pane {
+                self.diff_pane = false;
             } else {
-                self.diff_pane = !self.diff_pane;
-                if self.diff_pane { self.load_diff(); }
+                self.diff_pane = true;
+                if self.layout(self.size).panes.is_none() {
+                    self.diff_pane = false;
+                    self.notice = "Enlarge terminal to open the diff pane".into();
+                } else {
+                    self.load_diff();
+                }
             }
             return true;
         }
@@ -1480,6 +1487,7 @@ impl App {
             }
             KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => {
                 self.active_group = 1 - self.active_group;
+                self.split_requested = true;
                 self.focus = Focus::Prompt;
                 true
             }
@@ -1497,10 +1505,12 @@ impl App {
             }
             KeyCode::Char('h') if alt => {
                 self.split = Split::Horizontal;
+                self.split_requested = true;
                 true
             }
             KeyCode::Char('v') if alt => {
                 self.split = Split::Vertical;
+                self.split_requested = true;
                 true
             }
             KeyCode::Up if alt && self.focus == Focus::Prompt => {
@@ -2200,6 +2210,7 @@ impl App {
                     4 => self.next_tab(),
                     5 => {
                         self.active_group = 1 - self.active_group;
+                        self.split_requested = true;
                         self.focus = Focus::Prompt;
                     }
                     6 => self.open_history(),
@@ -2473,7 +2484,8 @@ impl App {
         } else {
             body.height >= MIN_PANE_HEIGHT * 2
         };
-        let panes = min_ok.then(|| {
+        let panes = (min_ok && (self.split_requested || self.active_group == 1
+            || !self.groups[1].tabs.is_empty() || self.diff_pane)).then(|| {
             let desired = self.pane_rects(body, self.split_percent);
             let minimum = if self.split == Split::Vertical {
                 MIN_PANE_WIDTH
@@ -4118,7 +4130,7 @@ mod tests {
         assert_eq!(chips[3].0, "context");
         assert!(chips[3].1.starts_with("Ctx "));
 
-        let pane = app.layout(app.size).panes.unwrap()[0];
+        let pane = app.layout(app.size).body;
         let chip_y = pane.bottom().saturating_sub(prompt_height("", pane.height) + 2);
         let click = |app: &mut App, x: u16| {
             app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
@@ -4412,6 +4424,39 @@ mod tests {
         assert_eq!(app.input, "a\n!b");
         app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT)));
         assert_eq!(app.input, "other");
+    }
+
+    #[test]
+    fn empty_second_group_uses_one_pane_until_split_is_requested() {
+        let mut app = App::default();
+        app.handle(Event::Resize(118, 31));
+        app.groups[0].tabs.push("first".into());
+        assert!(app.layout(app.size).panes.is_none());
+
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT)));
+        assert!(app.layout(app.size).panes.is_some());
+
+        let mut app = App::default();
+        app.handle(Event::Resize(118, 31));
+        app.groups[0].tabs.push("first".into());
+        app.groups[1].tabs.push("second".into());
+        assert!(app.layout(app.size).panes.is_some());
+
+        app.groups[1].tabs.clear();
+        assert!(app.layout(app.size).panes.is_none());
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT)));
+        assert_eq!(app.active_group, 1);
+        assert!(app.layout(app.size).panes.is_some());
+
+        let mut app = App::default();
+        app.handle(Event::Resize(118, 31));
+        assert!(app.layout(app.size).panes.is_none());
+        app.handle(Event::Key(KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE)));
+        assert!(app.diff_pane);
+        assert!(app.layout(app.size).panes.is_some());
+        app.handle(Event::Key(KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE)));
+        assert!(!app.diff_pane);
+        assert!(app.layout(app.size).panes.is_none());
     }
 
     #[test]

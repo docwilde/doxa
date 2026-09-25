@@ -14,12 +14,12 @@ fn event(app: &mut App, id: &str, kind: &str, data: Value) {
 
 fn fixture() -> App {
     let mut app = App::default();
-    app.handle(Event::Resize(148, 31));
+    app.handle(Event::Resize(126, 31));
+    app.rail_width = 23;
     app.apply_daemon_frame(&json!({"type":"hello","session_id":"demo-codex-01","engine":"codex","model":"gpt-6-sol","cwd":"/demo/project","lore_scrub":"ready"}));
     app.apply_daemon_frame(&json!({"type":"hello","session_id":"demo-claude-02","engine":"claude","model":"claude-sonnet-4","cwd":"/demo/project","permission_mode":"default","can_set_permission_mode":true,"lore_scrub":"ready"}));
     app.apply_daemon_frame(&json!({"type":"hello","session_id":"demo-deepseek-03","engine":"deepseek","model":"deepseek-chat","cwd":"/demo/project","lore_scrub":"ready"}));
     app.groups[0].active = 0;
-    app.groups[1].tabs.push("demo-claude-02".into());
     app.sessions.iter_mut().for_each(|s| s.title = match s.id.as_str() {
         "demo-codex-01" => "Refactor parser".into(),
         "demo-claude-02" => "Review tests".into(),
@@ -40,25 +40,20 @@ fn scene(name: &str) -> App {
             app.rail_visible = true;
             app.groups[0].tabs = vec!["demo-codex-01".into(), "demo-claude-02".into(), "demo-deepseek-03".into()];
         }
-        "split-panes" => { app.rail_visible = false; }
         "tool-activity" => {
-            app.groups[1].tabs.clear();
             event(&mut app,"demo-codex-01","tool_call",json!({"id":"tool-1","name":"Read","input":{"path":"src/parser.rs"}}));
             event(&mut app,"demo-codex-01","tool_result",json!({"id":"tool-1","name":"Read","result_summary":"File read successfully","duration_ms":42}));
             event(&mut app,"demo-codex-01","tool_call",json!({"id":"tool-2","name":"Edit","input":{"path":"src/parser.rs"}}));
             event(&mut app,"demo-codex-01","tool_result",json!({"id":"tool-2","name":"Edit","result_summary":"Updated 2 hunks","duration_ms":81}));
         }
         "needs-input" => {
-            app.groups[1].tabs.clear();
             event(&mut app,"demo-codex-01","needs_input",json!({"id":"req-1","kind":"ask_user","title":"Choose migration target","questions":[{"question":"Where should the migration run?","header":"Environment","options":[{"label":"Staging","description":"Validate before release"},{"label":"Production","description":"Apply to live data"}]}]}));
         }
         "permissions" => {
             app.groups[0].tabs = vec!["demo-claude-02".into()];
-            app.groups[1].tabs.clear();
             key(&mut app, KeyCode::Char('p'), KeyModifiers::ALT);
         }
         "history" => {
-            app.groups[1].tabs.clear();
             key(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL);
         }
         _ => panic!("unknown scene: {name}"),
@@ -79,9 +74,7 @@ fn rgb(color: Color) -> [u8; 3] {
 fn main() {
     let name = std::env::args().nth(1).expect("scene name");
     let (width,height) = match name.as_str() {
-        "hero" => (148,31), "split-panes" => (160,31),
-        "tool-activity" => (148,31), "needs-input" => (148,31),
-        "permissions" => (148,31), "history" => (148,31),
+        "hero" | "tool-activity" | "needs-input" | "permissions" | "history" => (126,31),
         _ => panic!("unknown scene"),
     };
     let app = scene(&name);
