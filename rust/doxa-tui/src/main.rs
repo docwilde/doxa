@@ -47,7 +47,8 @@ Commands:
   fleet ...            Inspect or start Python-backed fleet runs
 
 Run doxa without a command to restore this project's live sessions or start
-a native Codex session. Ctrl+Q detaches without stopping its daemon.
+a native Codex session. Pass --engine or --model to start a new session.
+Ctrl+Q detaches without stopping its daemon.
 
 New-session options: --engine codex|claude|deepseek|glm, --model NAME,
   --branch LOCAL_OR_REMOTE, --linger SECONDS, --resume FULL_SESSION_ID.
@@ -162,6 +163,7 @@ fn run(args: &[String]) -> io::Result<()> {
     let mut prefix: Option<&str> = None;
     let mut branch_target: Option<&str> = None;
     let mut options = launch::LaunchOptions::default();
+    let mut explicit_launch = false;
     let mut socket: Option<&str> = None;
     let mut index = 0;
     while index < args.len() {
@@ -188,6 +190,7 @@ fn run(args: &[String]) -> io::Result<()> {
                     }
                     "--socket" => socket = Some(value),
                     "--engine" => {
+                        explicit_launch = true;
                         match value.as_str() {
                             "codex" => options.engine = launch::Engine::Codex,
                             "claude" => options.engine = launch::Engine::Claude,
@@ -199,7 +202,10 @@ fn run(args: &[String]) -> io::Result<()> {
                             )),
                         }
                     }
-                    "--model" => options.model = Some(value.clone()),
+                    "--model" => {
+                        explicit_launch = true;
+                        options.model = Some(value.clone());
+                    }
                     "--effort" => options.effort = Some(value.clone()),
                     "--linger" => {
                         options.linger = Some(value.parse().map_err(|_| invalid("invalid linger"))?)
@@ -423,6 +429,11 @@ fn run(args: &[String]) -> io::Result<()> {
         None if prefix.is_some() => {
             let sessions = discovery::sessions()?;
             let session = discovery::select(&sessions, prefix)?;
+            bridge::run_socket(&session.socket)
+        }
+        None if explicit_launch => {
+            let session = launch::spawn(&options)?;
+            eprintln!("started native session {}", session.id);
             bridge::run_socket(&session.socket)
         }
         None => {
