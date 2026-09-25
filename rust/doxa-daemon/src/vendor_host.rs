@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
 
@@ -27,6 +27,8 @@ pub struct VendorHost {
     active: Mutex<Option<watch::Sender<bool>>>,
     turns: AtomicU64,
     closing: AtomicBool,
+    balance: Arc<Mutex<Option<String>>>,
+    balance_refreshing: Arc<AtomicBool>,
     #[cfg(feature = "local-test-server")]
     endpoint: Option<String>,
 }
@@ -102,7 +104,7 @@ impl VendorHost {
                 .scrub(content)
                 .map_err(|_| { "LORE scrub failed for saved vendor message" })?);
         }
-        Ok(Self {
+        let host = Self {
             vendor,
             model,
             effort,
@@ -117,9 +119,28 @@ impl VendorHost {
             active: Mutex::new(None),
             turns: AtomicU64::new(0),
             closing: AtomicBool::new(false),
+            balance: Arc::new(Mutex::new(None)),
+            balance_refreshing: Arc::new(AtomicBool::new(false)),
             #[cfg(feature = "local-test-server")]
             endpoint,
-        })
+        };
+        host.refresh_balance();
+        Ok(host)
+    }
+
+    fn refresh_balance(&self) {
+        if self.vendor != Vendor::DeepSeek { return; }
+        #[cfg(feature = "local-test-server")]
+        if self.endpoint.is_some() { return; }
+        if self.balance_refreshing.swap(true, Ordering::AcqRel) { return; }
+        let balance = Arc::clone(&self.balance);
+        let refreshing = Arc::clone(&self.balance_refreshing);
+        std::thread::spawn(move || {
+            let latest = tokio::runtime::Builder::new_current_thread().enable_all().build()
+                .ok().and_then(|runtime| runtime.block_on(doxa_vendors::deepseek_balance()));
+            if let Ok(mut stored) = balance.lock() { *stored = latest; }
+            refreshing.store(false, Ordering::Release);
+        });
     }
 
     fn scrub(&self, text: &str) -> Result<String, ()> {
@@ -144,6 +165,11 @@ impl VendorHost {
 }
 
 impl Host for VendorHost {
+    fn billing_snapshot(&self) -> Option<Value> {
+        if self.vendor != Vendor::DeepSeek { return None; }
+        self.balance.lock().ok().and_then(|value| value.as_ref()
+            .map(|label| json!({"mode":"api","balance":label})))
+    }
     fn lore_scrub_status(&self) -> Option<&'static str> {
         Some(if self.scrub_failed.load(Ordering::Acquire) { "unavailable" } else { "ready" })
     }
@@ -292,6 +318,7 @@ impl Host for VendorHost {
                         emit(json!({"type":"text_delta","data":{"text":text}}));
                     }
                     let turns = self.turns.fetch_add(1, Ordering::AcqRel) + 1;
+                    self.refresh_balance();
                     emit(json!({"type":"turn_done","data":{"is_error":false,
                         "duration_ms":started.elapsed().as_millis() as u64,
                         "num_turns":turns,"model":model,

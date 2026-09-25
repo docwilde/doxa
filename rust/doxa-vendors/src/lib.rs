@@ -18,6 +18,97 @@ pub const MAX_HISTORY_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_HISTORY_MESSAGES: usize = 512;
 pub const MAX_TOOL_RESULT_BYTES: usize = 1024 * 1024;
 pub const MAX_TURN_DURATION: Duration = Duration::from_secs(3600);
+const BALANCE_URL: &str = "https://api.deepseek.com/user/balance";
+const BALANCE_BODY_MAX: usize = 4096;
+
+/// Optional display-only account balance. The endpoint is fixed to DeepSeek's
+/// official API and never derived from a chat-completions endpoint override.
+pub async fn deepseek_balance() -> Option<String> {
+    let key = std::env::var("DEEPSEEK_API_KEY").ok().filter(|key| !key.is_empty())?;
+    deepseek_balance_at(BALANCE_URL, &key).await
+}
+
+async fn deepseek_balance_at(endpoint: &str, key: &str) -> Option<String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .redirect(reqwest::redirect::Policy::none())
+        .build().ok()?;
+    let response = client.get(endpoint).bearer_auth(key).send().await.ok()?;
+    if !response.status().is_success() { return None; }
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.ok()?;
+        if body.len().saturating_add(chunk.len()) > BALANCE_BODY_MAX { return None; }
+        body.extend_from_slice(&chunk);
+    }
+    let data: Value = serde_json::from_slice(&body).ok()?;
+    data["is_available"].as_bool()?;
+    let infos = data["balance_infos"].as_array()?;
+    let mut amounts = Vec::new();
+    for info in infos.iter().take(4) {
+        let currency = info["currency"].as_str()?;
+        let amount = info["total_balance"].as_str()?;
+        if !valid_balance_amount(amount) { return None; }
+        let prefix = match currency { "USD" => "$", "CNY" => "¥", _ => return None };
+        if amounts.iter().any(|(seen, _)| *seen == currency) { return None; }
+        amounts.push((currency, format!("{prefix}{amount}")));
+    }
+    if amounts.is_empty() { return None; }
+    amounts.sort_by_key(|(currency, _)| if *currency == "USD" { 0 } else { 1 });
+    Some(amounts.into_iter().map(|(_, label)| label).collect::<Vec<_>>().join(" · "))
+}
+
+fn valid_balance_amount(amount: &str) -> bool {
+    if amount.is_empty() || amount.len() > 24 { return false; }
+    let (whole, fraction) = amount.split_once('.').unwrap_or((amount, ""));
+    !whole.is_empty() && whole.bytes().all(|b| b.is_ascii_digit())
+        && (!amount.contains('.') || !fraction.is_empty() && fraction.len() <= 4 && fraction.bytes().all(|b| b.is_ascii_digit()))
+        && amount.bytes().filter(|b| *b == b'.').count() <= 1
+}
+
+#[cfg(test)]
+mod balance_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    async fn mock_balance(status: &str, body: &str) -> (String, tokio::task::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/user/balance", listener.local_addr().unwrap());
+        let reply = format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+        let worker = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 2048];
+            let count = stream.read(&mut request).await.unwrap();
+            stream.write_all(reply.as_bytes()).await.unwrap();
+            String::from_utf8_lossy(&request[..count]).into_owned()
+        });
+        (url, worker)
+    }
+
+    #[tokio::test]
+    async fn balance_reads_only_valid_official_shape_and_uses_bearer_key() {
+        let (url, worker) = mock_balance("200 OK", r#"{"is_available":true,"balance_infos":[{"currency":"CNY","total_balance":"25.50"},{"currency":"USD","total_balance":"3.25"}]}"#).await;
+        assert_eq!(deepseek_balance_at(&url, "secret-key").await.as_deref(), Some("$3.25 · ¥25.50"));
+        let request = worker.await.unwrap();
+        assert!(request.starts_with("GET /user/balance HTTP/1.1"));
+        assert!(request.to_ascii_lowercase().contains("authorization: bearer secret-key"));
+
+        for body in [
+            r#"{"is_available":true,"balance_infos":[{"currency":"USD","total_balance":"-1"}]}"#,
+            r#"{"is_available":true,"balance_infos":[{"currency":"USD","total_balance":"1e9"}]}"#,
+            r#"{"is_available":true,"balance_infos":[{"currency":"BAD","total_balance":"1.00"}]}"#,
+        ] {
+            let (url, worker) = mock_balance("200 OK", body).await;
+            assert!(deepseek_balance_at(&url, "secret-key").await.is_none());
+            worker.await.unwrap();
+        }
+        let (url, worker) = mock_balance("401 Unauthorized", "{}").await;
+        assert!(deepseek_balance_at(&url, "secret-key").await.is_none());
+        worker.await.unwrap();
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Vendor {

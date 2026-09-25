@@ -170,6 +170,7 @@ fn chip_hint(kind: &str) -> &'static str {
         "memory" => "Project/user memory: % of separate LORE caps",
         "beliefs" => "LORE beliefs · click to browse",
         "cost" => "Provider billing and quota information",
+        "balance" => "Current DeepSeek API account balance",
         "lore" => "LORE state and scrub health · click for details",
         "more" => "More chips · click to reveal hidden chips",
         _ => "",
@@ -415,6 +416,7 @@ struct SessionTelemetry {
     billing_mode: Option<String>,
     subscription_type: Option<String>,
     quota: Option<String>,
+    balance: Option<String>,
     lore: Option<String>,
 }
 
@@ -452,6 +454,9 @@ impl SessionTelemetry {
                 .map(safe_label);
             self.quota = billing["quota"].as_str()
                 .filter(|quota| !quota.is_empty() && quota.len() <= 120 && !quota.chars().any(char::is_control))
+                .map(safe_label);
+            self.balance = billing["balance"].as_str()
+                .filter(|balance| !balance.is_empty() && balance.len() <= 80 && !balance.chars().any(char::is_control))
                 .map(safe_label);
         }
         let context = status["ctx_percentage"].as_f64()
@@ -3859,6 +3864,11 @@ impl App {
             }) {
             chips.push(("cost", label));
         }
+        if engine == Some("deepseek") {
+            if let Some(balance) = telemetry.and_then(|value| value.balance.as_deref()) {
+                chips.push(("balance", format!("Balance {balance}")));
+            }
+        }
         chips.push(("lore", format!("LORE {}", telemetry.and_then(|value| value.lore.as_deref()).unwrap_or("?"))));
         chips
     }
@@ -6054,6 +6064,24 @@ mod tests {
         assert_eq!(app.session_activity.get("s").unwrap().0, false);
         assert_eq!(app.notice, notice);
         assert_eq!(app.session_telemetry.get("s").unwrap().lore.as_deref(), Some("scrub unavailable"));
+    }
+
+    #[test]
+    fn deepseek_balance_chip_requires_valid_available_balance() {
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"deep", "engine":"deepseek"}));
+        app.groups[0].tabs = vec!["deep".into()];
+        assert!(!app.chips(0).iter().any(|(kind, _)| *kind == "balance"));
+        app.apply_daemon_frame(&json!({"type":"telemetry_status", "session_id":"deep",
+            "status":{"session_id":"deep", "billing":{"mode":"api","balance":"$3.25 · ¥25.50"}}}));
+        assert!(app.chips(0).iter().any(|(kind, label)| *kind == "balance" && label == "Balance $3.25 · ¥25.50"));
+        app.apply_daemon_frame(&json!({"type":"telemetry_status", "session_id":"deep",
+            "status":{"session_id":"deep", "billing":null}}));
+        assert!(!app.chips(0).iter().any(|(kind, _)| *kind == "balance"));
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"glm", "engine":"glm",
+            "billing":{"mode":"api","balance":"$100.00"}}));
+        app.groups[0].tabs = vec!["glm".into()];
+        assert!(!app.chips(0).iter().any(|(kind, _)| *kind == "balance"));
     }
 
     fn painted(app: &App) -> String {

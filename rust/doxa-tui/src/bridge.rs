@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Map, Value};
 
@@ -388,6 +388,9 @@ fn worker_loop(
             return;
         }
     }
+    let deepseek = client.hello["engine"] == "deepseek";
+    let mut balance_checked = Instant::now();
+    if deepseek && !forward_status(&mut client, frames, &session_id) { return; }
     loop {
         // Bound prompt work so a burst cannot starve incoming daemon events.
         for _ in 0..32 {
@@ -691,6 +694,12 @@ fn worker_loop(
                     "message":message}));
                 return;
             }
+        }
+        // The vendor host reads balance in a bounded background task. Poll
+        // only its cached status so an idle session gains the chip too.
+        if deepseek && balance_checked.elapsed() >= Duration::from_secs(5) {
+            balance_checked = Instant::now();
+            if !forward_status(&mut client, frames, &session_id) { return; }
         }
         cursor.store(client.cursor, Ordering::Relaxed);
     }
