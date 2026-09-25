@@ -39,6 +39,8 @@ const MAX_QUEUED_REJECTIONS: usize = 8;
 const MAX_REJECT_REASON_BYTES: usize = 1024;
 const MAX_INPUT_REQUESTS: usize = 32;
 const INPUT_BLINK_INTERVAL: Duration = Duration::from_millis(650);
+const SPINNER_INTERVAL: Duration = Duration::from_millis(120);
+const SPINNER_FRAMES: [&str; 4] = ["⠋", "⠙", "⠹", "⠸"];
 // JSON may expand one input byte to a six-byte Unicode escape.
 const MAX_INPUT_BYTES: usize = 10 * 1024;
 const MAX_TRANSCRIPT_BYTES: usize = 512 * 1024;
@@ -403,6 +405,17 @@ fn append_transcript(session: &mut Session, text: &str) -> bool {
     }
     session.transcript.push_str(text);
     clipped
+}
+
+fn append_turn_heading(session: &mut Session, heading: &str) -> bool {
+    let separator = if session.transcript.is_empty() || session.transcript.ends_with("\n\n") {
+        ""
+    } else if session.transcript.ends_with('\n') {
+        "\n"
+    } else {
+        "\n\n"
+    };
+    append_transcript(session, &format!("{separator}**{heading}:**\n\n"))
 }
 
 fn structured_event(event_type: &str, data: &serde_json::Value) -> Option<String> {
@@ -839,6 +852,9 @@ pub struct App {
     permission_capabilities: HashMap<String, bool>,
     permission_modes: HashMap<String, String>,
     session_activity: HashMap<String, (bool, usize)>,
+    streaming_text: HashSet<String>,
+    spinner_at: Instant,
+    spinner_frame: usize,
     permission_picker: Option<(String, usize)>,
     permission_confirm_dont_ask: bool,
     pending_permission_changes: Vec<(String, String)>,
@@ -960,6 +976,9 @@ impl Default for App {
             permission_capabilities: HashMap::new(),
             permission_modes: HashMap::new(),
             session_activity: HashMap::new(),
+            streaming_text: HashSet::new(),
+            spinner_at: Instant::now(),
+            spinner_frame: 0,
             permission_picker: None,
             permission_confirm_dont_ask: false,
             pending_permission_changes: Vec::new(),
@@ -1292,7 +1311,11 @@ impl App {
                         let Some(text) = data.get("text").and_then(|v| v.as_str()) else {
                             return false;
                         };
+                        if text.is_empty() { return false; }
                         if let Some(session) = self.sessions.iter_mut().find(|s| s.id == id) {
+                            if self.streaming_text.insert(id.clone()) {
+                                append_turn_heading(session, "Assistant");
+                            }
                             if append_transcript(session, text) {
                                 self.notice = "Transcript tail limited to 512 KiB".into();
                             }
@@ -1302,6 +1325,14 @@ impl App {
                         }
                     }
                     "turn_started" => {
+                        self.streaming_text.remove(&id);
+                        if let Some(prompt) = data.get("prompt").and_then(|v| v.as_str()).filter(|v| !v.is_empty()) {
+                            if let Some(session) = self.sessions.iter_mut().find(|s| s.id == id) {
+                                let prompt = markdown::sanitize(prompt);
+                                append_turn_heading(session, "You");
+                                append_transcript(session, &prompt);
+                            }
+                        }
                         self.session_activity.entry(id.clone()).or_default().0 = true;
                         self.apply_update(DaemonUpdate::Status {
                             id,
@@ -1310,6 +1341,7 @@ impl App {
                         true
                     }
                     "turn_done" => {
+                        self.streaming_text.remove(&id);
                         self.session_telemetry.entry(id.clone()).or_default().update_turn(data);
                         self.session_activity.entry(id.clone()).or_default().0 = false;
                         let status = if data.get("is_error").and_then(|v| v.as_bool()) == Some(true)
@@ -1375,6 +1407,7 @@ impl App {
                         self.append_event(&id, event_type, data)
                     }
                     "session_done" => {
+                        self.streaming_text.remove(&id);
                         self.session_activity.remove(&id);
                         let before = self.diff_reject_queue.len();
                         self.diff_reject_queue.retain(|item| item.session_id != id);
@@ -1564,6 +1597,7 @@ impl App {
             "client_notice" => {
                 if let Some(id) = frame.get("session_id").and_then(|v| v.as_str()) {
                     self.session_activity.remove(id);
+                    self.streaming_text.remove(id);
                     self.apply_update(DaemonUpdate::Status {
                         id: id.into(),
                         text: "Disconnected".into(),
@@ -4349,6 +4383,25 @@ impl App {
         self.input_requests.iter().any(|request| request.session_id == id && !request.sending)
     }
 
+    fn activity_label(&self, id: &str) -> Option<&'static str> {
+        let (running, queued) = self.session_activity.get(id).copied().unwrap_or_default();
+        if running { Some("Processing") }
+        else if queued > 0 { Some("Queued") }
+        else { None }
+    }
+
+    fn tick_spinner(&mut self, now: Instant) -> bool {
+        if !self.groups.iter().filter_map(|group| group.active_id())
+            .any(|id| self.activity_label(id).is_some()) {
+            self.spinner_at = now;
+            return false;
+        }
+        if now.duration_since(self.spinner_at) < SPINNER_INTERVAL { return false; }
+        self.spinner_at = now;
+        self.spinner_frame = (self.spinner_frame + 1) % SPINNER_FRAMES.len();
+        true
+    }
+
     /// Called by the event loop at its normal poll cadence. Redraws only once
     /// per phase while a session actually has an unresolved request.
     fn tick_blink(&mut self, now: Instant) -> bool {
@@ -5590,13 +5643,16 @@ impl App {
         .block(
             Block::default()
                 .title(format!(
-                    " Pane {}{} ",
+                    " Pane {}{}{} ",
                     index + 1,
                     if self.active_group == index {
                         " ●"
                     } else {
                         ""
-                    }
+                    },
+                    group.active_id().and_then(|id| self.activity_label(id))
+                        .map(|label| format!(" · {} {label}", SPINNER_FRAMES[self.spinner_frame]))
+                        .unwrap_or_default(),
                 ))
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(if group.active_id().is_some_and(|id| self.waiting_for_input(id)) && self.blink_on {
@@ -5876,6 +5932,7 @@ fn run_loop(
         changed |= app.poll_memory_menu();
         changed |= app.poll_vendor_catalog();
         changed |= app.tick_blink(Instant::now());
+        changed |= app.tick_spinner(Instant::now());
         if prompt_sender.is_none() {
             if let Some(id) = app.pending_peer_refresh.take() {
                 changed |= app.peer_map.roster(&id, &serde_json::json!({"ok":false}));
@@ -8138,6 +8195,51 @@ mod tests {
         app.apply_daemon_frame(&json!({"type":"event", "session_id":"a",
             "event":{"type":"prompt_dequeued", "data":{"id":"q"}}}));
         assert_eq!(app.session_activity["a"].1, 0);
+    }
+
+    #[test]
+    fn streamed_chunks_stay_together_and_turns_have_separate_headings() {
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"s"}));
+        let event = |kind: &str, data: serde_json::Value| json!({"type":"event", "session_id":"s",
+            "event":{"type":kind, "data":data}});
+        app.apply_daemon_frame(&event("turn_started", json!({"prompt":"first\nquestion"})));
+        app.apply_daemon_frame(&event("text_delta", json!({"text":"answer"})));
+        app.apply_daemon_frame(&event("text_delta", json!({"text":" one"})));
+        app.apply_daemon_frame(&event("turn_done", json!({"is_error":false})));
+        app.apply_daemon_frame(&event("turn_started", json!({"prompt":"second"})));
+        app.apply_daemon_frame(&event("text_delta", json!({"text":"answer two"})));
+        assert_eq!(app.sessions[0].transcript,
+            "**You:**\n\nfirst\nquestion\n\n**Assistant:**\n\nanswer one\n\n**You:**\n\nsecond\n\n**Assistant:**\n\nanswer two");
+    }
+
+    #[test]
+    fn restored_running_turn_gets_an_answer_boundary_without_replayed_start() {
+        let mut app = App::default();
+        app.apply_update(DaemonUpdate::Upsert(Session { id: "s".into(), title: "s".into(),
+            collection: "repo".into(), transcript: "**You:**\n\nquestion\n\n".into(), status: "Running".into() }));
+        app.apply_daemon_frame(&json!({"type":"event", "session_id":"s",
+            "event":{"type":"text_delta", "data":{"text":"answer"}}}));
+        assert!(app.sessions[0].transcript.ends_with("\n\n**Assistant:**\n\nanswer"));
+    }
+
+    #[test]
+    fn processing_spinner_advances_only_for_visible_busy_sessions() {
+        let mut app = App::default();
+        app.handle(Event::Resize(100, 28));
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"s", "running":true}));
+        let start = app.spinner_at;
+        assert_eq!(app.activity_label("s"), Some("Processing"));
+        assert!(painted(&app).contains("⠋ Processing"));
+        assert!(!app.tick_spinner(start + Duration::from_millis(119)));
+        assert!(app.tick_spinner(start + SPINNER_INTERVAL));
+        assert!(painted(&app).contains("⠙ Processing"));
+        app.session_activity.insert("s".into(), (false, 1));
+        assert_eq!(app.activity_label("s"), Some("Queued"));
+        assert!(painted(&app).contains("Queued"));
+        app.session_activity.insert("s".into(), (false, 0));
+        assert!(!app.tick_spinner(start + SPINNER_INTERVAL * 2));
+        assert!(!painted(&app).contains("Processing"));
     }
 
     #[test]
