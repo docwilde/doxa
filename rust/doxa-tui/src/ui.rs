@@ -698,6 +698,10 @@ impl App {
                 }
                 self.notice = if frame["ok"] == true {
                     format!("Session started · {}", safe_label(frame["session_id"].as_str().unwrap_or("")))
+                } else if frame["started"] == true {
+                    let id = frame["session_id"].as_str().filter(|id| crate::discovery::valid_id(id))
+                        .unwrap_or("unknown");
+                    format!("Session started; UI attach failed · doxa-rs attach {id}")
                 } else {
                     format!("Session launch failed · {}", safe_label(frame["message"].as_str().unwrap_or("unknown error")))
                 };
@@ -926,6 +930,13 @@ impl App {
                     format!("Permission change failed · {}", safe_label(frame["error"].as_str().unwrap_or("unknown error")))
                 };
                 true
+            }
+            "telemetry_unavailable" => {
+                if let Some(id) = frame["session_id"].as_str() {
+                    self.session_telemetry.entry(id.to_owned()).or_default().lore = None;
+                    return true;
+                }
+                false
             }
             "reply" => {
                 // Both native and Python daemons broadcast prompt_queued after
@@ -3388,6 +3399,10 @@ mod tests {
             "message":"DEEPSEEK_API_KEY is required"}));
         assert!(app.notice.contains("DEEPSEEK_API_KEY"));
         assert_eq!(app.groups[0].active_id(), Some("new"));
+        app.launching = true;
+        app.apply_daemon_frame(&json!({"type":"launch_reply", "ok":false, "started":true,
+            "session_id":"surviving", "group":0, "message":"socket refused"}));
+        assert!(app.notice.contains("doxa-rs attach surviving"));
     }
 
     #[test]

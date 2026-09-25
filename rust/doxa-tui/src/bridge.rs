@@ -134,14 +134,13 @@ pub fn connect_sessions(sessions: &[Session]) -> io::Result<MultiBridge> {
     let router = thread::spawn(move || {
         let (launched_tx, launched_rx) = mpsc::channel::<(io::Result<Session>, Option<String>, usize)>();
         let mut added_workers: Vec<JoinHandle<()>> = Vec::new();
+        let mut launches_in_flight = 0usize;
         loop {
             while let Ok((result, prompt, group)) = launched_rx.try_recv() {
-                match result.and_then(|session| {
-                    if routes.len() >= 64 { return Err(io::Error::other("session limit reached")); }
-                    let (tx, connected, worker) = attach_worker(&session, &router_frames, &router_guard)?;
-                    Ok((session, tx, connected, worker))
-                }) {
-                    Ok((session, tx, connected, worker)) => {
+                launches_in_flight = launches_in_flight.saturating_sub(1);
+                match result {
+                    Ok(session) => match attach_worker(&session, &router_frames, &router_guard) {
+                    Ok((tx, connected, worker)) => {
                         let id = session.id.clone();
                         routes.insert(id.clone(), (tx.clone(), connected));
                         added_workers.push(worker);
@@ -151,6 +150,10 @@ pub fn connect_sessions(sessions: &[Session]) -> io::Result<MultiBridge> {
                             let _ = tx.send(WorkerCommand::Prompt(id, prompt));
                         }
                     }
+                    Err(error) => { let _ = router_frames.send(json!({"type":"launch_reply", "ok":false,
+                        "started":true, "session_id":session.id, "group":group,
+                        "message":format!("UI attach failed ({error}); use doxa-rs attach {}", session.id)})); }
+                    },
                     Err(error) => { let _ = router_frames.send(json!({"type":"launch_reply", "ok":false,
                         "message":error.to_string(), "group":group})); }
                 }
@@ -162,6 +165,12 @@ pub fn connect_sessions(sessions: &[Session]) -> io::Result<MultiBridge> {
             };
             let command = match command {
                 WorkerCommand::Launch(options, prompt, group) => {
+                    if routes.len().saturating_add(launches_in_flight) >= 64 {
+                        let _ = router_frames.send(json!({"type":"launch_reply", "ok":false,
+                            "message":"64 attached sessions is the limit", "group":group}));
+                        continue;
+                    }
+                    launches_in_flight += 1;
                     let reply = launched_tx.clone();
                     thread::spawn(move || { let _ = reply.send((launch::spawn(&options), prompt, group)); });
                     continue;
@@ -276,6 +285,7 @@ fn worker_loop(
         .as_str()
         .unwrap_or_default()
         .to_owned();
+    let live_from_seq = client.hello["next_seq"].as_u64().unwrap_or(u64::MAX);
     if frames.send(client.hello.clone()).is_err() {
         return;
     }
@@ -410,8 +420,12 @@ fn worker_loop(
                             } else {
                                 reply
                             };
+                            let rejected = frame["type"] == "prompt_rejected";
                             frame["session_id"] = Value::String(session_id.clone());
                             if frames.send(frame).is_err() {
+                                return;
+                            }
+                            if rejected && !forward_status(&mut client, frames, &session_id) {
                                 return;
                             }
                         }
@@ -452,10 +466,14 @@ fn worker_loop(
         }
         match client.poll_frame(Duration::from_millis(50)) {
             Ok(Some(mut frame)) => {
+                let terminal = frame["type"] == "event"
+                    && matches!(frame["event"]["type"].as_str(), Some("turn_done" | "turn_refused"))
+                    && frame["seq"].as_u64().is_some_and(|seq| seq >= live_from_seq);
                 frame["session_id"] = Value::String(session_id.clone());
                 if frames.send(frame).is_err() {
                     return;
                 }
+                if terminal && !forward_status(&mut client, frames, &session_id) { return; }
             }
             Ok(None) => {}
             Err(error) => {
@@ -471,6 +489,20 @@ fn worker_loop(
             }
         }
         cursor.store(client.cursor, Ordering::Relaxed);
+    }
+}
+
+fn forward_status(client: &mut DaemonClient, frames: &SyncSender<Value>, session_id: &str) -> bool {
+    match client.call("status", Map::new()) {
+        Ok(mut reply) if reply["ok"] == true && reply.get("status").is_some() => {
+            reply["session_id"] = Value::String(session_id.to_owned());
+            if let Some(status) = reply.get_mut("status").and_then(Value::as_object_mut) {
+                status.insert("session_id".into(), Value::String(session_id.to_owned()));
+            }
+            frames.send(reply).is_ok()
+        }
+        Err(TransportError::Closed) => false,
+        _ => frames.send(json!({"type":"telemetry_unavailable", "session_id":session_id})).is_ok(),
     }
 }
 
@@ -557,6 +589,39 @@ mod tests {
         let peers = frames.recv_timeout(Duration::from_secs(2)).unwrap();
         assert_eq!(peers["type"], "peer_roster");
         assert_eq!(peers["peers"][0]["session_id"], "peer-1");
+        drop(prompts);
+        worker.join().unwrap();
+        server.join().unwrap();
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn live_turn_completion_refreshes_lore_status() {
+        let path = std::env::temp_dir().join(format!("doxa-rust-status-{}-{}.sock",
+            std::process::id(), NEXT_SOCKET.fetch_add(1, Ordering::Relaxed)));
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            writeln!(socket, "{}", json!({"type":"hello", "proto":1,
+                "session_id":"session-1", "engine":"codex", "cwd":"/tmp",
+                "next_seq":1, "lore_scrub":"ready"})).unwrap();
+            let mut reader = BufReader::new(socket.try_clone().unwrap());
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap(); // attach
+            writeln!(socket, "{}", json!({"type":"event", "seq":1, "turn":"turn-1",
+                "event":{"type":"turn_done", "data":{"is_error":true}}})).unwrap();
+            line.clear();
+            reader.read_line(&mut line).unwrap();
+            let call: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(call["method"], "status");
+            writeln!(socket, "{}", json!({"type":"reply", "id":call["id"], "ok":true,
+                "status":{"session_id":"session-1", "lore_scrub":"unavailable"}})).unwrap();
+        });
+        let client = DaemonClient::connect(&path, None).unwrap();
+        let (frames, prompts, worker) = spawn_worker(client);
+        assert_eq!(frames.recv_timeout(Duration::from_secs(2)).unwrap()["lore_scrub"], "ready");
+        assert_eq!(frames.recv_timeout(Duration::from_secs(2)).unwrap()["event"]["type"], "turn_done");
+        assert_eq!(frames.recv_timeout(Duration::from_secs(2)).unwrap()["status"]["lore_scrub"], "unavailable");
         drop(prompts);
         worker.join().unwrap();
         server.join().unwrap();

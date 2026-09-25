@@ -224,6 +224,8 @@ fn telemetry_chips_keep_per_session_provenance_and_unknowns() {
     app.apply_daemon_frame(&json!({"type":"reply","ok":true,"status":{"session_id":"codex","lore_scrub":"unavailable"}}));
     let rendered = screen(&app, 160, 24);
     assert!(rendered.contains("LORE scrub unavailable"), "{rendered}");
+    app.apply_daemon_frame(&json!({"type":"telemetry_unavailable","session_id":"codex"}));
+    assert!(screen(&app, 160, 24).contains("LORE ?"));
     app.apply_daemon_frame(&json!({"type":"event","session_id":"vendor","event":{"type":"turn_done","data":{
         "ctx_percentage":null,"cost_usd":null,"session_cost_usd":null
     }}}));
