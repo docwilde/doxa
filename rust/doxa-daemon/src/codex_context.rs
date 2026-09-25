@@ -3,8 +3,11 @@
 //! This is a bounded, best-effort bridge until the host uses app-server.
 
 use std::collections::HashSet;
+use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
+use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -26,13 +29,30 @@ fn safe_dir(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir() && !meta.file_type().is_symlink())
 }
 
-fn safe_file(path: &Path) -> Option<File> {
-    // A pathname can be replaced between directory scanning and open. In
-    // particular, opening a FIFO for read would wait indefinitely without
-    // O_NONBLOCK, before we have a chance to reject its file type.
-    let file = OpenOptions::new().read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
-        .open(path).ok()?;
+fn open_child(parent: &File, name: &std::ffi::OsStr, flags: libc::c_int) -> Option<File> {
+    let name = CString::new(name.as_bytes()).ok()?;
+    let fd = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), flags) };
+    if fd < 0 { return None; }
+    Some(unsafe { File::from_raw_fd(fd) })
+}
+
+fn safe_file(path: &Path, sessions: &Path) -> Option<File> {
+    let relative = path.strip_prefix(sessions).ok()?;
+    let parts: Vec<_> = relative.components().collect();
+    if parts.len() != 4 || parts.iter().any(|part| !matches!(part, Component::Normal(_))) {
+        return None;
+    }
+    let mut dir = OpenOptions::new().read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(sessions).ok()?;
+    for part in &parts[..3] {
+        dir = open_child(&dir, part.as_os_str(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)?;
+    }
+    // Open relative to pinned directory handles so a replaced parent cannot
+    // redirect the read. O_NONBLOCK keeps a replacement FIFO from hanging us.
+    let file = open_child(&dir, parts[3].as_os_str(),
+        libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)?;
     let meta = file.metadata().ok()?;
     if !meta.is_file() || meta.nlink() != 1 || meta.uid() != unsafe { libc::geteuid() } {
         return None;
@@ -62,9 +82,7 @@ fn valid_path_in(path: &Path, thread_id: &str, sessions: &Path) -> bool {
     if !filename.starts_with("rollout-") || !filename.ends_with(&format!("-{thread_id}.jsonl")) {
         return false;
     }
-    safe_dir(&sessions) && safe_dir(&sessions.join(components[0].as_os_str()))
-        && safe_dir(&sessions.join(components[0].as_os_str()).join(components[1].as_os_str()))
-        && safe_dir(path.parent().unwrap_or(&sessions))
+    true
 }
 
 pub(crate) fn find(thread_id: &str, started: SystemTime) -> Option<PathBuf> {
@@ -89,7 +107,7 @@ pub(crate) fn find(thread_id: &str, started: SystemTime) -> Option<PathBuf> {
             let entry = entry.ok()?;
             let path = entry.path();
             if valid_path_in(&path, thread_id, &sessions)
-                && safe_file(&path).is_some_and(|mut file| matches_thread(&mut file, thread_id)) {
+                && safe_file(&path, &sessions).is_some_and(|mut file| matches_thread(&mut file, thread_id)) {
                 if found.is_some() { return None; }
                 found = Some(path);
             }
@@ -106,7 +124,7 @@ pub(crate) fn size(path: &Path, thread_id: &str) -> Option<u64> {
 
 fn size_in(path: &Path, thread_id: &str, sessions: &Path) -> Option<u64> {
     if !valid_path_in(path, thread_id, sessions) { return None; }
-    let mut file = safe_file(path)?;
+    let mut file = safe_file(path, sessions)?;
     if !matches_thread(&mut file, thread_id) { return None; }
     file.metadata().ok().map(|meta| meta.len())
 }
@@ -119,7 +137,7 @@ pub(crate) fn read_since(path: &Path, thread_id: &str, before: u64) -> Option<Va
 
 fn read_since_in(path: &Path, thread_id: &str, before: u64, sessions: &Path) -> Option<Value> {
     if !valid_path_in(path, thread_id, sessions) { return None; }
-    let mut file = safe_file(path)?;
+    let mut file = safe_file(path, sessions)?;
     if !matches_thread(&mut file, thread_id) { return None; }
     let after = file.metadata().ok()?.len();
     let appended = after.checked_sub(before)?;
@@ -131,6 +149,10 @@ fn read_since_in(path: &Path, thread_id: &str, before: u64, sessions: &Path) -> 
     let mut latest = None;
     for line in bytes.split(|byte| *byte == b'\n') {
         let Ok(frame) = serde_json::from_slice::<Value>(line) else { continue; };
+        if frame["type"] == "compacted" {
+            latest = None;
+            continue;
+        }
         if frame["type"] != "event_msg" || frame["payload"]["type"] != "token_count" { continue; }
         let info = &frame["payload"]["info"];
         let (Some(tokens), Some(limit)) = (info["last_token_usage"]["total_tokens"].as_u64(),
@@ -190,5 +212,40 @@ mod tests {
         let name = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
         assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
         assert!(read_since_in(&fifo, thread, 0, &sessions).is_none());
+    }
+
+    #[test]
+    fn compaction_invalidates_previous_context_until_new_count() {
+        use std::io::Write;
+        let root = tempfile::tempdir().unwrap();
+        let thread = "01a0da9a-ae05-77f2-8d51-9f3440bc6cfb";
+        let sessions = root.path().join("sessions");
+        let day = sessions.join("2026/09/26");
+        fs::create_dir_all(&day).unwrap();
+        let path = day.join(format!("rollout-2026-09-26T00-06-05-{thread}.jsonl"));
+        fs::write(&path, format!("{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{thread}\"}}}}\n")).unwrap();
+        let before = size_in(&path, thread, &sessions).unwrap();
+        let count = |tokens| json!({"type":"event_msg","payload":{"type":"token_count",
+            "info":{"last_token_usage":{"total_tokens":tokens},"model_context_window":258400}}});
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(file, "{}", count(216667)).unwrap();
+        writeln!(file, "{{\"type\":\"compacted\",\"payload\":{{}}}}").unwrap();
+        assert!(read_since_in(&path, thread, before, &sessions).is_none());
+        writeln!(file, "{}", count(11941)).unwrap();
+        assert_eq!(read_since_in(&path, thread, before, &sessions).unwrap()["ctx_tokens"], 0);
+    }
+
+    #[test]
+    fn symlinked_parent_cannot_redirect_rollout_read() {
+        let root = tempfile::tempdir().unwrap();
+        let thread = "01a0da9a-ae05-77f2-8d51-9f3440bc6cfb";
+        let sessions = root.path().join("sessions");
+        let outside = root.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::create_dir_all(sessions.join("2026/09")).unwrap();
+        let filename = format!("rollout-2026-09-26T00-06-05-{thread}.jsonl");
+        fs::write(outside.join(&filename), format!("{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{thread}\"}}}}\n")).unwrap();
+        std::os::unix::fs::symlink(&outside, sessions.join("2026/09/26")).unwrap();
+        assert!(size_in(&sessions.join("2026/09/26").join(filename), thread, &sessions).is_none());
     }
 }
