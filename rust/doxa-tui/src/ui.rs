@@ -157,6 +157,7 @@ struct NewSession {
     engine: launch::Engine,
     model: String,
     models: Vec<String>,
+    model_efforts: HashMap<String, Vec<String>>,
     catalog_note: String,
     catalog_pending: bool,
     effort: Option<String>,
@@ -813,6 +814,7 @@ pub struct App {
     input_drafts: HashMap<(usize, String), (String, usize)>,
     session_identity: HashMap<String, (Option<String>, Option<String>)>,
     session_efforts: HashMap<String, String>,
+    catalog_efforts: HashMap<(String, String), Vec<String>>,
     next_efforts: HashMap<String, String>,
     pub(crate) custom_names: HashMap<String, String>,
     session_telemetry: HashMap<String, SessionTelemetry>,
@@ -849,7 +851,7 @@ pub struct App {
     engine_picker: bool,
     engine_selected: usize,
     new_session: Option<NewSession>,
-    vendor_catalog_pending: Option<(launch::Engine, Receiver<Option<Vec<String>>>)>,
+    vendor_catalog_pending: Option<(launch::Engine, Receiver<Option<Vec<doxa_vendors::ModelCapability>>>)>,
     pending_launches: Vec<(launch::LaunchOptions, Option<String>, usize)>,
     pending_attaches: Vec<(String, usize)>,
     attaching_ids: HashSet<String>,
@@ -936,6 +938,7 @@ impl Default for App {
             input_drafts: HashMap::new(),
             session_identity: HashMap::new(),
             session_efforts: HashMap::new(),
+            catalog_efforts: HashMap::new(),
             next_efforts: HashMap::new(),
             custom_names: HashMap::new(),
             session_telemetry: HashMap::new(),
@@ -2476,9 +2479,10 @@ impl App {
             self.notice = "Effort capability is unknown for this session".into();
             return;
         };
-        let levels = effort_choices(engine, model).iter().map(|level| (*level).to_owned()).collect::<Vec<_>>();
+        let levels = self.catalog_efforts.get(&(engine.clone(), model.clone())).cloned()
+            .unwrap_or_else(|| effort_choices(engine, model).iter().map(|level| (*level).to_owned()).collect());
         if levels.is_empty() {
-            self.notice = "No verified effort choices for this engine and model".into();
+            self.notice = "No verified effort choices for this session model; check the new-session vendor catalog".into();
             return;
         }
         let selected = self.next_efforts.get(engine).or_else(|| self.session_efforts.get(&id))
@@ -2492,7 +2496,9 @@ impl App {
         let Some((Some(engine), Some(model))) = self.session_identity.get(&picker.session_id) else { return; };
         if engine != &picker.engine || model != &picker.model { return; }
         let Some(chosen) = picker.levels.get(picker.selected) else { return; };
-        if !effort_choices(engine, model).contains(&chosen.as_str()) { return; }
+        let allowed = self.catalog_efforts.get(&(engine.clone(), model.clone())).cloned()
+            .unwrap_or_else(|| effort_choices(engine, model).iter().map(|level| (*level).to_owned()).collect());
+        if !allowed.contains(chosen) { return; }
         self.next_efforts.insert(engine.clone(), chosen.clone());
         self.notice = format!("{engine} effort for new sessions: {chosen} · current session unchanged");
     }
@@ -2618,6 +2624,8 @@ impl App {
         let models = vendor_models(engine);
         let model = vendor_default_model(engine).to_owned();
         let engine_id = engine_name(engine);
+        let model_efforts = models.iter().map(|name| ((*name).to_owned(),
+            effort_choices(engine_id, name).iter().map(|level| (*level).to_owned()).collect())).collect::<HashMap<_, _>>();
         let effort = self.next_efforts.get(engine_id)
             .filter(|level| effort_choices(engine_id, &model).contains(&level.as_str()))
             .cloned().or_else(|| (!models.is_empty()).then(|| "high".to_owned()));
@@ -2641,6 +2649,7 @@ impl App {
         }
         self.new_session = Some(NewSession { engine, model,
             models: models.iter().map(|name| (*name).to_owned()).collect(),
+            model_efforts,
             catalog_note: if catalog_pending { "Checking vendor model catalog…".into() }
                 else { "Static fallback; vendor catalog unavailable".into() },
             catalog_pending, effort, prompt: String::new(), field: 0 });
@@ -2661,14 +2670,48 @@ impl App {
         form.catalog_pending = false;
         if let Some(live) = result {
             let vetted = vendor_models(engine);
-            form.models = live.into_iter().filter(|id| vetted.contains(&id.as_str())).collect();
-            form.catalog_note = "Live vendor catalog · vetted effort-capable models".into();
+            let mut model_efforts = HashMap::new();
+            let mut defaults = HashMap::new();
+            let mut metadata_count = 0;
+            for row in live {
+                let known = vetted.contains(&row.id.as_str());
+                let mut levels = if !row.effort_metadata_present && known {
+                    effort_choices(engine_name(engine), &row.id).iter().map(|level| (*level).to_owned()).collect::<Vec<_>>()
+                } else { row.efforts.clone() };
+                if row.effort_metadata_present && !row.efforts.is_empty() {
+                    metadata_count += 1;
+                    // The DeepSeek catalogue omits `none`, which disables thinking;
+                    // only the measured legacy models may offer it.
+                    if engine == launch::Engine::DeepSeek && known && !levels.iter().any(|level| level == "none") {
+                        levels.insert(0, "none".into());
+                    }
+                }
+                if !levels.is_empty() {
+                    if let Some(default) = row.default_effort { defaults.insert(row.id.clone(), default); }
+                    model_efforts.insert(row.id, levels);
+                }
+            }
+            form.models = model_efforts.keys().cloned().collect();
+            form.models.sort();
+            form.model_efforts = model_efforts;
+            self.catalog_efforts.retain(|(name, _), _| name != engine_name(engine));
+            self.catalog_efforts.extend(form.model_efforts.iter().map(|(model, levels)|
+                ((engine_name(engine).to_owned(), model.clone()), levels.clone())));
+            form.catalog_note = if form.models.is_empty() {
+                "Live catalog has no models with verified effort support; choose another engine or retry later".into()
+            } else if metadata_count > 0 {
+                "Live vendor catalog · per-model effort where available; known models use measured fallback".into()
+            } else {
+                "Live vendor catalog · measured effort fallback for known models".into()
+            };
             if !form.models.contains(&form.model) {
                 form.model = form.models.first().cloned().unwrap_or_default();
             }
-            if form.effort.as_deref().is_some_and(|level|
-                !effort_choices(engine_name(engine), &form.model).contains(&level)) {
-                form.effort = None;
+            let levels = form.model_efforts.get(&form.model).cloned().unwrap_or_default();
+            if form.effort.as_ref().is_none_or(|level| !levels.contains(level)) {
+                form.effort = defaults.get(&form.model).cloned()
+                    .or_else(|| levels.iter().find(|level| *level == "high").cloned())
+                    .or_else(|| levels.first().cloned());
             }
         } else {
             form.catalog_note = "Static fallback; vendor catalog unavailable".into();
@@ -2694,16 +2737,18 @@ impl App {
                         else { (current + choices.len() - 1) % choices.len() };
                     form.model = choices[next].clone();
                     // Discard an effort no longer supported by the new model.
-                    if form.effort.as_deref().is_some_and(|level| !effort_choices(engine_name(form.engine), &form.model).contains(&level)) {
-                        form.effort = None;
+                    let levels = form.model_efforts.get(&form.model).cloned().unwrap_or_default();
+                    if form.effort.as_ref().is_none_or(|level| !levels.contains(level)) {
+                        form.effort = levels.iter().find(|level| *level == "high").cloned()
+                            .or_else(|| levels.first().cloned());
                     }
                 } else {
-                    let levels = effort_choices(engine_name(form.engine), &form.model);
+                    let levels = form.model_efforts.get(&form.model).map(Vec::as_slice).unwrap_or(&[]);
                     if levels.is_empty() { form.effort = None; return true; }
                     let current = form.effort.as_deref().and_then(|level| levels.iter().position(|x| *x == level)).unwrap_or(0);
                     let next = if key.code == KeyCode::Right { (current + 1) % levels.len() }
                         else { (current + levels.len() - 1) % levels.len() };
-                    form.effort = Some(levels[next].into());
+                    form.effort = Some(levels[next].clone());
                 }
             }
             KeyCode::Backspace => {
@@ -2734,9 +2779,9 @@ impl App {
                 let mut options = launch::LaunchOptions { engine: form.engine, ..Default::default() };
                 if !form.model.trim().is_empty() { options.model = Some(form.model.trim().to_owned()); }
                 if vendor {
-                    let allowed = effort_choices(engine_name(form.engine), &form.model);
+                    let allowed = form.model_efforts.get(&form.model).map(Vec::as_slice).unwrap_or(&[]);
                     if !form.models.contains(&form.model) ||
-                        form.effort.as_deref().is_some_and(|level| !allowed.contains(&level)) {
+                        form.effort.as_ref().is_none_or(|level| !allowed.contains(level)) {
                         self.notice = "Model or effort capability changed; session was not started".into();
                         return true;
                     }
@@ -6664,36 +6709,61 @@ mod tests {
 
     #[test]
     fn live_vendor_catalog_refresh_filters_models_and_switch_discards_stale_rows() {
+        fn row(id: &str, efforts: &[&str], default: Option<&str>) -> doxa_vendors::ModelCapability {
+            doxa_vendors::ModelCapability { id: id.into(), efforts: efforts.iter().map(|x| (*x).into()).collect(),
+                default_effort: default.map(str::to_owned), effort_metadata_present: !efforts.is_empty() }
+        }
         let mut app = App::default();
         app.engine_selected = 2;
         app.select_new_engine();
         let (tx, rx) = mpsc::sync_channel(1);
         app.vendor_catalog_pending = Some((launch::Engine::DeepSeek, rx));
         app.new_session.as_mut().unwrap().catalog_pending = true;
-        tx.send(Some(vec!["glm-5.3-flash".into(), "deepseek-v4-pro".into()])).unwrap();
+        tx.send(Some(vec![row("deepseek-v4-pro", &["low", "high", "max"], Some("high")),
+            row("deepseek-next", &["low", "max"], Some("max"))])).unwrap();
         assert!(app.poll_vendor_catalog());
         let form = app.new_session.as_ref().unwrap();
-        assert_eq!(form.models, ["deepseek-v4-pro"]);
-        assert_eq!(form.model, "deepseek-v4-pro");
+        assert_eq!(form.models, ["deepseek-next", "deepseek-v4-pro"]);
+        assert_eq!(form.model_efforts["deepseek-next"], ["low", "max"]);
+        assert_eq!(form.model, "deepseek-next");
+        assert_eq!(form.effort.as_deref(), Some("max"));
         assert!(form.catalog_note.contains("Live vendor"));
+
+        // A present but unusable capability list is different from absent
+        // metadata: never resurrect the static levels for that live model.
+        let (tx, rx) = mpsc::sync_channel(1);
+        app.vendor_catalog_pending = Some((launch::Engine::DeepSeek, rx));
+        tx.send(Some(vec![doxa_vendors::ModelCapability { id: "deepseek-flash".into(),
+            efforts: Vec::new(), default_effort: None, effort_metadata_present: true }])).unwrap();
+        assert!(app.poll_vendor_catalog());
+        assert!(app.new_session.as_ref().unwrap().models.is_empty());
 
         let (stale_tx, stale_rx) = mpsc::sync_channel(1);
         app.vendor_catalog_pending = Some((launch::Engine::DeepSeek, stale_rx));
         app.engine_selected = 3;
         app.select_new_engine();
-        assert!(stale_tx.send(Some(vec!["deepseek-flash".into()])).is_err());
+        assert!(stale_tx.send(Some(vec![row("deepseek-flash", &[], None)])).is_err());
         assert_eq!(app.new_session.as_ref().unwrap().model, "glm-5.3-flash");
         let (tx, rx) = mpsc::sync_channel(1);
         app.vendor_catalog_pending = Some((launch::Engine::Glm, rx));
         app.new_session.as_mut().unwrap().catalog_pending = true;
-        tx.send(Some(vec!["unknown-glm".into()])).unwrap();
+        tx.send(Some(vec![row("unknown-glm", &[], None)])).unwrap();
         assert!(app.poll_vendor_catalog());
         assert!(app.new_session.as_ref().unwrap().models.is_empty());
         assert!(app.new_session.as_ref().unwrap().model.is_empty());
+        assert!(app.new_session.as_ref().unwrap().catalog_note.contains("choose another engine"));
         app.new_session.as_mut().unwrap().field = 2;
         app.new_session_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(app.pending_launches.is_empty());
         assert!(app.notice.contains("No verified models"));
+
+        app.engine_selected = 3;
+        app.select_new_engine();
+        let (tx, rx) = mpsc::sync_channel(1);
+        app.vendor_catalog_pending = Some((launch::Engine::Glm, rx));
+        tx.send(Some(vec![row("glm-5.3-flash", &[], None)])).unwrap();
+        assert!(app.poll_vendor_catalog());
+        assert!(app.new_session.as_ref().unwrap().catalog_note.contains("measured effort fallback"));
 
         app.engine_selected = 2;
         app.select_new_engine();

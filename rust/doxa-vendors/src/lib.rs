@@ -151,14 +151,24 @@ impl Vendor {
     }
 }
 
-/// Bounded account-scoped model catalogue. A missing credential, network
-/// failure, or malformed body returns None so callers can label a fallback.
-pub async fn catalog_models(vendor: Vendor) -> Option<Vec<String>> {
-    let key = std::env::var(vendor.env_var()).ok().filter(|key| !key.is_empty())?;
-    catalog_models_at(vendor.models_endpoint(), &key).await
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelCapability {
+    pub id: String,
+    /// Only levels the provider lists and this transport can encode.
+    pub efforts: Vec<String>,
+    pub default_effort: Option<String>,
+    /// An advertised list with no usable levels must not trigger a fallback.
+    pub effort_metadata_present: bool,
 }
 
-async fn catalog_models_at(endpoint: &str, key: &str) -> Option<Vec<String>> {
+/// Bounded account-scoped model catalogue. A missing credential, network
+/// failure, or malformed body returns None so callers can label a fallback.
+pub async fn catalog_models(vendor: Vendor) -> Option<Vec<ModelCapability>> {
+    let key = std::env::var(vendor.env_var()).ok().filter(|key| !key.is_empty())?;
+    catalog_models_at(vendor, vendor.models_endpoint(), &key).await
+}
+
+async fn catalog_models_at(vendor: Vendor, endpoint: &str, key: &str) -> Option<Vec<ModelCapability>> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(8))
         .redirect(reqwest::redirect::Policy::none()).build().ok()?;
@@ -176,12 +186,32 @@ async fn catalog_models_at(endpoint: &str, key: &str) -> Option<Vec<String>> {
     let mut models = Vec::new();
     for row in rows.iter().take(1000) {
         let Some(id) = row.get("id").and_then(Value::as_str) else { continue; };
-        if !id.is_empty() && id.len() <= 128 && !id.chars().any(char::is_control)
-            && !models.iter().any(|existing| existing == id) {
-            models.push(id.to_owned());
+        if !id.is_empty() && id.len() <= 128 && id.bytes().all(|byte|
+            byte.is_ascii_alphanumeric() || b"-._:/".contains(&byte))
+            && !models.iter().any(|existing: &ModelCapability| existing.id == id) {
+            let mut efforts = Vec::new();
+            // Only DeepSeek documents this per-model response field. GLM's
+            // catalogue IDs are useful, but capability-shaped data there is
+            // not a verified contract for effort selection.
+            let documented_levels = (vendor == Vendor::DeepSeek)
+                .then(|| row.pointer("/effort/supported_levels").and_then(Value::as_array)).flatten();
+            if let Some(levels) = documented_levels {
+                for level in levels.iter().take(32).filter_map(Value::as_str) {
+                    if vendor.valid_effort(level)
+                        && !efforts.iter().any(|seen| seen == level) {
+                        efforts.push(level.to_owned());
+                    }
+                }
+            }
+            let default_effort = row.pointer("/effort/default_level").and_then(Value::as_str)
+                .filter(|level| efforts.iter().any(|seen| seen == level)).map(str::to_owned);
+            models.push(ModelCapability { id: id.to_owned(), efforts, default_effort,
+                effort_metadata_present: documented_levels.is_some() });
         }
     }
-    (!models.is_empty()).then_some(models)
+    // A valid empty catalogue is authoritative; falling back to old static
+    // IDs here would offer models the account may no longer have.
+    Some(models)
 }
 
 #[cfg(test)]
@@ -206,19 +236,41 @@ mod catalog_tests {
 
     #[tokio::test]
     async fn model_catalog_is_bounded_and_does_not_follow_redirects() {
-        let (url, worker) = serve("200 OK", r#"{"data":[{"id":"deepseek-flash"},{"id":"deepseek-flash"},{"id":"glm-5.3-flash"}]}"#.into(), "").await;
-        assert_eq!(catalog_models_at(&url, "test-secret").await.unwrap(), ["deepseek-flash", "glm-5.3-flash"]);
+        let (url, worker) = serve("200 OK", r#"{"data":[{"id":"deepseek-flash","effort":{"supported_levels":["low","high","max"],"default_level":"high"}},{"id":"deepseek-flash"},{"id":"new-model","effort":{"supported_levels":["medium","max","high"],"default_level":"medium"}},{"id":"bad\u202e-id","effort":{"supported_levels":["high"]}},{"id":"has space","effort":{"supported_levels":["high"]}}]}"#.into(), "").await;
+        assert_eq!(catalog_models_at(Vendor::DeepSeek, &url, "test-secret").await.unwrap(), [
+            ModelCapability { id: "deepseek-flash".into(), efforts: vec!["low".into(), "high".into(), "max".into()], default_effort: Some("high".into()), effort_metadata_present: true },
+            ModelCapability { id: "new-model".into(), efforts: vec!["max".into(), "high".into()], default_effort: None, effort_metadata_present: true },
+        ]);
         let request = worker.await.unwrap();
         assert!(request.contains("Authorization: Bearer test-secret") || request.contains("authorization: Bearer test-secret"));
         let (url, worker) = serve("302 Found", String::new(), "Location: https://example.invalid/models\r\n").await;
-        assert!(catalog_models_at(&url, "test-secret").await.is_none());
+        assert!(catalog_models_at(Vendor::DeepSeek, &url, "test-secret").await.is_none());
         worker.await.unwrap();
         let rows = (0..1001).map(|i| format!("{{\"id\":\"model-{i}\"}}")).collect::<Vec<_>>().join(",");
         let (url, worker) = serve("200 OK", format!("{{\"data\":[{rows}]}}"), "").await;
-        assert_eq!(catalog_models_at(&url, "test-secret").await.unwrap().len(), 1000);
+        assert_eq!(catalog_models_at(Vendor::DeepSeek, &url, "test-secret").await.unwrap().len(), 1000);
+        worker.await.unwrap();
+        let (url, worker) = serve("200 OK", r#"{"data":[{"id":"bad\u202e-id"}]}"#.into(), "").await;
+        assert!(catalog_models_at(Vendor::DeepSeek, &url, "test-secret").await.unwrap().is_empty());
         worker.await.unwrap();
         let (url, worker) = serve("200 OK", format!("{{\"data\":[{{\"id\":\"{}\"}}]}}", "a".repeat(4 * 1024 * 1024)), "").await;
-        assert!(catalog_models_at(&url, "test-secret").await.is_none());
+        assert!(catalog_models_at(Vendor::DeepSeek, &url, "test-secret").await.is_none());
+        worker.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn only_documented_deepseek_effort_metadata_is_used() {
+        let body = r#"{"data":[{"id":"next-model","effort":{"supported_levels":["none","low","high"],"default_level":"none"}}]}"#;
+        let (url, worker) = serve("200 OK", body.into(), "").await;
+        let models = catalog_models_at(Vendor::DeepSeek, &url, "key").await.unwrap();
+        assert_eq!(models[0].efforts, ["none", "low", "high"]);
+        assert_eq!(models[0].default_effort.as_deref(), Some("none"));
+        worker.await.unwrap();
+        let (url, worker) = serve("200 OK", body.into(), "").await;
+        let models = catalog_models_at(Vendor::Glm, &url, "key").await.unwrap();
+        assert!(models[0].efforts.is_empty());
+        assert!(models[0].default_effort.is_none());
+        assert!(!models[0].effort_metadata_present);
         worker.await.unwrap();
     }
 }
