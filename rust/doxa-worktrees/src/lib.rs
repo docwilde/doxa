@@ -441,16 +441,27 @@ pub fn create_from(cwd: &Path, id: &str, requested_base: Option<&str>) -> Option
     let worktrees = ensure_owned_dir(&root()?)?;
     let path = worktrees.join(format!("{repo}-{short}"));
     if let Some(existing) = worktree_for_branch(&main, &branch) {
-        let (record, old_base, _, _) = read_record(&existing)?;
+        let (record, old_base, recorded_main, pinned) = read_record(&existing)?;
         if record.path != existing.canonicalize().ok()? || record.session_id != id || record.path != path
+            || recorded_main != main
             || requested_base.is_some() && old_base != base
             || branch == base && cwd.canonicalize().ok()? != record.path {
             return None;
         }
         let lock = lock_worktree(&record.path)?;
         // The metadata may have changed while we waited for the lock.
-        let (locked, _, _, _) = read_record(&record.path)?;
-        if locked.path != record.path || locked.session_id != id { return None; }
+        let (locked, locked_base, locked_main, locked_pin) = read_record(&record.path)?;
+        if locked.path != record.path || locked.session_id != id || locked.branch != branch
+            || locked_base != old_base || locked_main != main || locked_pin != pinned
+            || worktree_for_branch(&main, &branch).as_ref() != Some(&record.path)
+            || git_text(&record.path, &["symbolic-ref", "--quiet", "--short", "HEAD"]).as_deref() != Some(branch.as_str()) {
+            return None;
+        }
+        let head = git_text(&record.path, &["rev-parse", "--verify", "HEAD^{commit}"])
+            .filter(|oid| valid_commit_oid(oid))?;
+        if pinned.as_deref().is_some_and(|oid| !git(&main,
+            &["merge-base", "--is-ancestor", oid, &head], Duration::from_secs(10))
+                .is_some_and(|(ok, _)| ok)) { return None; }
         return Some(Managed { path: record.path, created: false, finished: false, lock: Some(lock) });
     }
     if branch == base { return None; }
@@ -1012,6 +1023,14 @@ mod tests {
         assert!(dirty_path.join("untracked.txt").exists());
         assert!(create_from(&main, "b1b2c3d4dirty", Some("feature")).is_none());
         assert_eq!(read_record(&dirty_path).unwrap().1, "main");
+        let original = git_text(&dirty_path, &["rev-parse", "HEAD"]).unwrap();
+        let tree = git_text(&main, &["rev-parse", "HEAD^{tree}"]).unwrap();
+        let unrelated = git_text(&main, &["-c", "user.name=Test", "-c", "user.email=test@example.com",
+            "commit-tree", &tree, "-m", "unrelated history"]).unwrap();
+        run_git(&main, &["update-ref", "refs/heads/doxa/b1b2c3d4", &unrelated]);
+        assert!(create(&dirty_path, "b1b2c3d4dirty").is_none());
+        run_git(&main, &["update-ref", "refs/heads/doxa/b1b2c3d4", &original]);
+        assert!(dirty_path.join("untracked.txt").exists());
 
         let mut switched = create(&main, "e1b2c3d4switched").unwrap();
         let switched_path = switched.path().to_path_buf();
