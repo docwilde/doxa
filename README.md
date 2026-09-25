@@ -85,7 +85,9 @@ would shadow its launcher.
 
 From a checkout, use `./task build`, `./task run`, or `./task install`. Install
 builds committed `HEAD` with the same locked sidecars and launcher as the
-release installer.
+release installer. If an existing local `main` predates the Rust files, run
+`git pull --ff-only` after checking it out; `git checkout main` alone does not
+fetch newer commits.
 
 ## Quickstart
 
