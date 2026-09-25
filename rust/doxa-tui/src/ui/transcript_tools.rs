@@ -61,7 +61,10 @@ pub(super) fn render(
     for paragraph in source.split("\n\n") {
         let paragraph = paragraph.trim_matches('\n');
         if paragraph.is_empty() { continue; }
-        if fence.is_none() && paragraph.starts_with("Tool: ") && !paragraph.contains('\n') {
+        let structured_tool = paragraph.starts_with("Tool: ")
+            && [" started", " finished", " failed"]
+                .iter().any(|status| paragraph.contains(status));
+        if fence.is_none() && structured_tool && !paragraph.contains('\n') {
             flush_prose(&mut prose, &mut lines);
             tools.push(paragraph);
         } else {
@@ -109,5 +112,12 @@ mod tests {
         let (lines, sections) = render("```\n\nTool: example\n\n```", 80, None, None);
         assert!(sections.is_empty());
         assert!(lines.iter().any(|line| line.to_string().contains("Tool: example")));
+    }
+
+    #[test]
+    fn plain_tool_label_in_prose_stays_visible() {
+        let (lines, sections) = render("Tool: hammer", 80, None, None);
+        assert!(sections.is_empty());
+        assert!(lines.iter().any(|line| line.to_string().contains("Tool: hammer")));
     }
 }

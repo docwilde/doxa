@@ -47,7 +47,6 @@ fn scene(name: &str) -> App {
             event(&mut app,"demo-codex-01","tool_result",json!({"id":"tool-1","name":"Read","result_summary":"File read successfully","duration_ms":42}));
             event(&mut app,"demo-codex-01","tool_call",json!({"id":"tool-2","name":"Edit","input":{"path":"src/parser.rs"}}));
             event(&mut app,"demo-codex-01","tool_result",json!({"id":"tool-2","name":"Edit","result_summary":"Updated 2 hunks","duration_ms":81}));
-            key(&mut app, KeyCode::Char('t'), KeyModifiers::CONTROL);
         }
         "needs-input" => {
             app.groups[1].tabs.clear();

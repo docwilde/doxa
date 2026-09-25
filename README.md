@@ -48,9 +48,9 @@ ported.
 
 *Split panes keep separate session transcripts and prompts.*
 
-![Rust tool activity modal showing completed Read and Edit calls with input and result details](assets/shots/rust-tool-activity.png)
+![Rust transcript showing a collapsed tool-call section below the assistant reply](assets/shots/rust-tool-activity.png)
 
-*Tool activity shows calls, inputs, and results.*
+*Tool calls stay collapsed in the transcript until expanded.*
 
 ![Rust input request choices expanded above the active pane prompt while the transcript and other pane remain visible](assets/shots/rust-needs-input.png)
 
