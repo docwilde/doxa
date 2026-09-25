@@ -5,6 +5,19 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.10 — 2026-09-25
+
+- Make Rust the main `doxa` frontend and installer path. Retire the Python
+  console entry points while keeping isolated LORE and Claude SDK sidecars.
+- Add `./task` for local build, run, doctor, test, and committed checkout
+  installation. Run Rust CI on `main` and exercise the installer there.
+- Put the engine, model, permissions, and beliefs chips on one line above each
+  pane prompt. Expand choice menus and AskUser questions above that row.
+- Remove the bottom hotkey footer and render continuous box borders in the
+  reproducible Rust screenshots.
+- Collapse transcript tool calls into expandable sections with keyboard and
+  mouse controls, keeping the stored transcript intact.
+
 ## 2.0.0-alpha.9 — 2026-09-25
 
 - Lead the README with the Rust preview and add six reproducible screenshots
