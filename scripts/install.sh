@@ -71,6 +71,8 @@ main() {
 
     tui_manifest="$rust_tmp/rust/doxa-tui/Cargo.toml"
     [ -f "$tui_manifest" ] || _fail "Rust ref '${rust_ref}' has no rust/doxa-tui/Cargo.toml"
+    claude_sidecar="$rust_tmp/rust/doxa-claude/claude_sidecar.py"
+    [ -f "$claude_sidecar" ] || _fail "Rust ref '${rust_ref}' has no Claude sidecar"
     _info "building release doxa-rs"
     CARGO_TARGET_DIR="$rust_tmp/target" cargo build --release --locked --target "$host_target" --manifest-path "$tui_manifest" --bin doxa-rs || _fail "Rust TUI build failed"
     tui_bin="$rust_tmp/target/$host_target/release/doxa-rs"
@@ -90,14 +92,18 @@ main() {
     mkdir -p "$rust_bin_dir" || _fail "could not create ${rust_bin_dir}"
     [ ! -d "$rust_bin_dir/doxa-rs" ] || _fail "${rust_bin_dir}/doxa-rs is a directory"
     [ ! -d "$rust_bin_dir/doxa-daemon-rs" ] || _fail "${rust_bin_dir}/doxa-daemon-rs is a directory"
+    [ ! -d "$rust_bin_dir/doxa-claude-sidecar.py" ] || _fail "${rust_bin_dir}/doxa-claude-sidecar.py is a directory"
     rust_stage=$(mktemp -d "$rust_bin_dir/.doxa-install.XXXXXXXX") || _fail "could not stage Rust binaries"
     cp "$tui_bin" "$rust_stage/doxa-rs" || _fail "could not stage doxa-rs"
     chmod 755 "$rust_stage/doxa-rs" || _fail "could not make doxa-rs executable"
+    cp "$claude_sidecar" "$rust_stage/doxa-claude-sidecar.py" || _fail "could not stage Claude sidecar"
+    chmod 644 "$rust_stage/doxa-claude-sidecar.py" || _fail "could not set Claude sidecar permissions"
     if [ -f "$daemon_manifest" ]; then
       cp "$daemon_bin" "$rust_stage/doxa-daemon-rs" || _fail "could not stage doxa-daemon-rs"
       chmod 755 "$rust_stage/doxa-daemon-rs" || _fail "could not make doxa-daemon-rs executable"
     fi
     mv -f "$rust_stage/doxa-rs" "$rust_bin_dir/doxa-rs" || _fail "could not install doxa-rs"
+    mv -f "$rust_stage/doxa-claude-sidecar.py" "$rust_bin_dir/doxa-claude-sidecar.py" || _fail "could not install Claude sidecar"
     if [ -f "$daemon_manifest" ]; then
       mv -f "$rust_stage/doxa-daemon-rs" "$rust_bin_dir/doxa-daemon-rs" || _fail "could not install doxa-daemon-rs"
     fi

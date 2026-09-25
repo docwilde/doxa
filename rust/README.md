@@ -44,7 +44,8 @@ another. This needs Git and Cargo. It installs `doxa-rs` in `~/.local/bin`
 (override with `DOXA_RUST_BIN_DIR`) and installs `doxa-daemon-rs` there if
 the selected ref includes a native daemon. It does not replace the Python
 `doxa` command. The native daemon is still a preview; `doxa-rs` can also
-connect to an existing Python daemon.
+connect to an existing Python daemon. The installer places the Claude SDK
+sidecar beside `doxa-rs`, so an installed preview can find it automatically.
 
 With one live daemon session, `doxa-rs` attaches to it directly. With multiple
 sessions, use `--list` and select one by full ID or unique ID prefix.
@@ -83,8 +84,9 @@ session. Its status rows show engine and model chips, plus context, token usage,
 cost, and LORE status when the daemon reports them. Unknown values display `?`;
 token scope and estimated cost are labeled. `Alt+E` opens an engine picker,
 then a model and first-prompt form that starts a new session in the selected
-pane. A blank model uses the configured default. To start Claude from this
-form, set `DOXA_CLAUDE_SCRIPT` to the absolute sidecar path. The active
+pane. A blank model uses the configured default. Claude uses the sidecar
+installed beside `doxa-rs`; `DOXA_CLAUDE_SCRIPT` can select another absolute
+path during development. The active
 session's engine cannot be switched. `Alt+M` opens the live model picker when the daemon
 advertises model control. Claude catalog choices come from a bounded startup
 CLI probe; an unavailable catalog offers no guessed models. The colors follow
@@ -102,9 +104,10 @@ features are being built. It must be restored before a stable 2.0 cutover;
 focused Python sidecar and compatibility tests still run locally during this
 preview phase.
 
-Start the native Claude host from the terminal frontend with
-`doxa-rs new --engine claude --claude-python /absolute/path/to/python
---claude-script /absolute/path/to/claude_sidecar.py`. The Python interpreter
+Start the native Claude host from an installed preview with
+`doxa-rs new --engine claude --claude-python /absolute/path/to/python`.
+For a source build, pass `--claude-script /absolute/path/to/claude_sidecar.py`
+or set `DOXA_CLAUDE_SCRIPT` to that absolute path. The Python interpreter
 must have DOXA, LORE, and the Claude Agent SDK installed. Add `--model NAME`
 to choose a model, or `--resume SESSION_ID` to resume that session's Claude
 conversation. `doxa-rs doctor --engine claude` checks the selected Python
