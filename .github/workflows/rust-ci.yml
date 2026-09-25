@@ -55,12 +55,13 @@ jobs:
       - name: Smoke installed Rust launcher and locked sidecars
         run: |
           smoke_dir=$(mktemp -d)
+          smoke_sha=$(git rev-parse HEAD)
           DOXA_RUST_REPO_URL="$GITHUB_WORKSPACE" \
             DOXA_HOME="$smoke_dir/home" \
             DOXA_RUST_BIN_DIR="$smoke_dir/bin" \
             sh scripts/install.sh HEAD
           (cd / && "$smoke_dir/bin/doxa" --version)
-          (cd / && "$smoke_dir/home/sidecars/$(git rev-parse HEAD)/bin/python" \
+          (cd / && "$smoke_dir/home/sidecars/$smoke_sha/bin/python" \
             -c 'import doxa.lore_bridge, doxa.engine, lore_core, claude_agent_sdk')
       - name: Test vendor chat adapter
         run: cargo +stable test --locked --features local-test-server --manifest-path rust/doxa-vendors/Cargo.toml
