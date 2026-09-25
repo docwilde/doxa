@@ -48,6 +48,10 @@ alpha. Native fleet supervision and remote control are still being ported.
 
 *Tool calls stay collapsed in the transcript until expanded.*
 
+![Rust session pane showing separate prompt and answer turns with a processing spinner](assets/shots/rust-processing.png)
+
+*Live turns keep prompt and answer boundaries; the pane shows processing while the next request runs.*
+
 ![Rust input request choices expanded above the prompt in a single session pane](assets/shots/rust-needs-input.png)
 
 *A daemon input request expands above the active prompt.*
