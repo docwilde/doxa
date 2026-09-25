@@ -69,6 +69,12 @@ without a connection. `Ctrl+P` opens the action menu; use Up/Down, Enter, and
 Esc to navigate the peer map, tool activity, session rail selection, tabs, and
 panes. `Ctrl+M` and `Ctrl+T` remain direct shortcuts. `Ctrl+Q` detaches the Rust UI
 without stopping its daemon; `Ctrl+C` is left available for terminal copy.
+Bare `/help`, `/about`, `/sessions`, `/model`, `/engine`, `/mode`, `/beliefs`,
+`/diff`, `/peers`, `/split`, `/vsplit`, `/pane`, `/sidebar`, and `/detach` are
+handled locally from the prompt. Forms with arguments remain in the draft with
+an explicit notice until their Rust behavior is implemented. Unknown slash
+commands, including `/compact` and plugin commands, still go to the active
+engine.
 `Ctrl+M` opens the read-only peer communications
 map; Up/Down selects a peer, R refreshes the live roster, and Esc closes it.
 The map uses `tui-nodes` 0.9 with the Rust frontend's Ratatui 0.29.

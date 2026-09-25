@@ -1365,6 +1365,68 @@ impl App {
         true
     }
 
+    /// Handle bare DOXA commands before a prompt can reach an agent. Unknown
+    /// slash commands still go to the provider (including `/compact` and
+    /// plugin commands). Known commands with arguments stay in the draft
+    /// until Rust has an explicit implementation for that form.
+    fn dispatch_prompt_command(&mut self) -> bool {
+        let input = self.input.trim();
+        if !input.starts_with('/') || input.contains('\n') {
+            return false;
+        }
+        let mut parts = input.split_whitespace();
+        let Some(name) = parts.next() else { return false; };
+        if !matches!(name, "/help" | "/about" | "/sessions" | "/model" | "/engine"
+            | "/mode" | "/beliefs" | "/diff" | "/peers" | "/split"
+            | "/vsplit" | "/pane" | "/sidebar" | "/detach") {
+            return false;
+        }
+        if parts.next().is_some() {
+            self.notice = format!("{name} arguments are not available in Rust yet");
+            return true;
+        }
+        let name = name.to_owned();
+        self.input.clear();
+        self.input_cursor = 0;
+        match name.as_str() {
+            "/help" => {
+                self.action_menu = true;
+                self.action_selected = 0;
+            }
+            "/about" => self.notice = format!("DOXA Rust {}", env!("CARGO_PKG_VERSION")),
+            "/sessions" => self.open_history(),
+            "/model" => self.open_model_picker(),
+            "/engine" => self.open_engine_picker(),
+            "/mode" => self.open_permission_picker(),
+            "/beliefs" => self.open_lore_picker(),
+            "/diff" => self.open_diff(),
+            "/peers" => {
+                self.map_modal = true;
+                self.peer_map.selected = 0;
+                self.pending_peer_refresh = Some(
+                    self.groups[self.active_group].active_id().unwrap_or("").to_owned(),
+                );
+            }
+            "/split" => {
+                self.split = Split::Horizontal;
+                self.split_requested = true;
+            }
+            "/vsplit" => {
+                self.split = Split::Vertical;
+                self.split_requested = true;
+            }
+            "/pane" => {
+                self.active_group = 1 - self.active_group;
+                self.split_requested = true;
+                self.focus = Focus::Prompt;
+            }
+            "/sidebar" => self.rail_visible = !self.rail_visible,
+            "/detach" => self.should_quit = true,
+            _ => unreachable!("recognized bare DOXA command"),
+        }
+        true
+    }
+
     fn key(&mut self, key: KeyEvent) -> bool {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
@@ -1622,6 +1684,7 @@ impl App {
             }
             KeyCode::Enter if self.focus == Focus::Prompt => {
                 if !self.input.is_empty() {
+                    if self.dispatch_prompt_command() { return true; }
                     if let Some(id) = self.groups[self.active_group].active_id() {
                         if self.offline_ids.contains(id) {
                             self.notice = "Archived transcript is read-only".into();
@@ -4392,6 +4455,55 @@ mod tests {
         assert_eq!(app.pending_prompts, [("s".into(), "first\n\nlast".into())]);
         assert!(app.input.is_empty());
         assert_eq!(app.input_cursor, 0);
+    }
+
+    #[test]
+    fn bare_doxa_commands_stay_local_and_provider_commands_pass_through() {
+        let mut app = App::default();
+        app.groups[0].tabs.push("s".into());
+        app.handle(Event::Resize(100, 28));
+
+        app.input = "/help".into();
+        app.input_cursor = app.input.len();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(app.action_menu);
+        assert!(app.input.is_empty());
+        assert!(app.pending_prompts.is_empty());
+        app.action_menu = false;
+
+        app.input = "/model opus".into();
+        app.input_cursor = app.input.len();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.input, "/model opus");
+        assert!(app.notice.contains("arguments are not available"));
+        assert!(app.pending_prompts.is_empty());
+
+        app.input = "/compact".into();
+        app.input_cursor = app.input.len();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.pending_prompts, [("s".into(), "/compact".into())]);
+    }
+
+    #[test]
+    fn bare_layout_commands_change_the_real_pane_state() {
+        let mut app = App::default();
+        app.handle(Event::Resize(100, 28));
+        app.groups[0].tabs.push("s".into());
+        assert!(app.layout(app.size).panes.is_none());
+
+        app.input = "/vsplit".into();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.split, Split::Vertical);
+        assert!(app.layout(app.size).panes.is_some());
+        assert!(app.pending_prompts.is_empty());
+
+        app.input = "/pane".into();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.active_group, 1);
+
+        app.input = "/detach".into();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(app.should_quit);
     }
 
     #[test]
