@@ -18,6 +18,21 @@ spec.loader.exec_module(sidecar)
 
 
 class IdentityTests(unittest.TestCase):
+    def test_session_engine_options_accepts_older_installed_engine(self):
+        class OlderEngine:
+            def __init__(self, cwd, session_id=None, resume=None, model=None):
+                pass
+
+        class CurrentEngine:
+            def __init__(self, cwd, detail_events=False):
+                pass
+
+        options = {"cwd": "/project", "session_id": "session"}
+        self.assertEqual(sidecar.session_engine_options(OlderEngine, options), options)
+        self.assertEqual(sidecar.session_engine_options(CurrentEngine, options),
+                         {**options, "detail_events": True})
+        self.assertEqual(options, {"cwd": "/project", "session_id": "session"})
+
     def test_compact_review_deadline_blocks_delayed_worker(self):
         class SlowEngine:
             async def review_before_compact(self):

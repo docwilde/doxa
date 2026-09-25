@@ -8,6 +8,7 @@ frames go to stdout; stderr diagnostics are suppressed by the Rust client.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import os
 import sys
@@ -56,6 +57,22 @@ def validate_identity(session_id: str | None, resume: str | None) -> tuple[str |
             raise ValueError("resume must match session id")
         session_id = resume
     return session_id, resume
+
+
+def session_engine_options(engine_type: type, options: dict) -> dict:
+    """Enable detailed events only when the installed Python engine supports them.
+
+    A locally built Rust frontend can use an older, still compatible private
+    sidecar environment. Passing an unknown constructor option would otherwise
+    reject every Claude session before its daemon registers.
+    """
+    parameters = inspect.signature(engine_type).parameters
+    if "detail_events" in parameters or any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    ):
+        return {**options, "detail_events": True}
+    return options
 
 
 def billing_snapshot(account: object) -> dict | None:
@@ -212,11 +229,10 @@ async def run() -> None:
                 model = params.get("model")
                 if model is not None and not isinstance(model, str):
                     raise ValueError("invalid start option")
-                options = {"cwd": cwd, "session_id": session_id, "resume": resume,
-                           "detail_events": True}
+                options = {"cwd": cwd, "session_id": session_id, "resume": resume}
                 if model is not None:
                     options["model"] = model
-                candidate = SessionEngine(**options)
+                candidate = SessionEngine(**session_engine_options(SessionEngine, options))
                 started = await candidate.start()
                 # Only the SDK account for this connected session can name
                 # its plan. A cached CLI account might belong to another auth
