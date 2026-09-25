@@ -13,11 +13,24 @@ the Rust process does not reimplement its store.
 Build the native frontend and daemon from this repository:
 
 ```sh
-cargo build --manifest-path rust/doxa-tui/Cargo.toml
-cargo build --manifest-path rust/doxa-daemon/Cargo.toml
-DOXA_DAEMON_BIN="$PWD/rust/doxa-daemon/target/debug/doxa-daemon" \
-  rust/doxa-tui/target/debug/doxa-rs new
+./task build
+./task doctor
+./task new
 ```
+
+`./task` is the repository-local launcher. `run` opens or creates a session,
+`new` always creates one, and `doctor` checks launcher dependencies. These
+commands build incrementally before running and accept the corresponding
+`doxa-rs` options, such as `./task new --engine claude --model NAME`.
+`./task build --release` and `DOXA_TASK_PROFILE=release ./task run` select a
+release build. `./task test` runs the TUI, daemon, and Claude sidecar tests;
+`./task clean` removes only its build directory (`target/rust-task` by default).
+The script selects `.venv/bin/python` when present, then `python3`, for LORE
+and Claude. Set `DOXA_LORE_PYTHON=/absolute/path/to/python` or pass
+`--lore-python` / `--claude-python` to select another interpreter.
+`./task install` builds a release preview from this checkout and installs
+`doxa-rs`, `doxa-daemon-rs`, and `doxa-claude-sidecar.py` under
+`DOXA_RUST_BIN_DIR` (default `~/.local/bin`). It does not replace `doxa`.
 
 `doxa-rs` now starts a native Codex session when no live sessions exist in the
 current project. `new` always starts one; `attach ID` reattaches, `stop ID`

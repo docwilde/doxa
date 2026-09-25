@@ -11,3 +11,4 @@ uv-lock.log
 pr-body.md
 out.txt
 /rust/**/target/
+/target/rust-task/
