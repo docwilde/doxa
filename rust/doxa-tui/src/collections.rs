@@ -30,7 +30,7 @@ pub fn from_json(value: Option<&Value>, keep: &HashSet<String>) -> Vec<Collectio
         let sessions: Vec<String> = members.iter().filter_map(Value::as_str)
             .map(str::trim).filter(|id| keep.contains(*id) && placed.insert((*id).to_owned()))
             .map(str::to_owned).collect();
-        if sessions.is_empty() && !members.is_empty() { continue; }
+        if sessions.is_empty() { continue; }
         names.insert(key(&name));
         out.push(Collection { name, sessions, collapsed: row.get("collapsed").and_then(Value::as_bool).unwrap_or(false) });
     }
@@ -42,7 +42,7 @@ pub fn to_json(items: &[Collection], keep: &HashSet<String>) -> Vec<Value> {
     items.iter().filter_map(|item| {
         let sessions: Vec<_> = item.sessions.iter()
             .filter(|id| keep.contains(*id) && placed.insert((*id).clone())).cloned().collect();
-        if sessions.is_empty() && !item.sessions.is_empty() { return None; }
+        if sessions.is_empty() { return None; }
         let mut row = json!({"name": item.name, "sessions": sessions});
         if item.collapsed { row["collapsed"] = Value::Bool(true); }
         Some(row)
@@ -128,11 +128,11 @@ mod tests {
     }
 
     #[test]
-    fn explicit_empty_survives_but_a_collection_that_lost_every_member_is_pruned() {
+    fn empty_and_pruned_collections_are_not_persisted_like_python() {
         let items = vec![
             Collection { name:"Empty".into(), sessions:vec![], collapsed:false },
             Collection { name:"Dead".into(), sessions:vec!["gone".into()], collapsed:false },
         ];
-        assert_eq!(to_json(&items, &HashSet::new()), vec![json!({"name":"Empty","sessions":[]})]);
+        assert!(to_json(&items, &HashSet::new()).is_empty());
     }
 }

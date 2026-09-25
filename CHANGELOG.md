@@ -13,7 +13,8 @@ the stable 2.0 release has not been cut.
 - Show per-session usage and context details in scrollable panels above the
   active prompt; unavailable provider telemetry remains explicitly unknown.
 - Add named session collections with ordering, foldable rail headings, and
-  local collection commands. Empty named collections survive a restart.
+  local collection commands. Empty collections stay in memory until populated,
+  matching Python 1.19 storage.
 
 ## 2.0.0-alpha.21 — 2026-09-25
 

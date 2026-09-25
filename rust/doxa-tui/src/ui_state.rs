@@ -248,7 +248,7 @@ impl UiStateStore {
                 }
             }
         }
-        if tabs.is_empty() && app.collections.is_empty() {
+        if tabs.is_empty() {
             return Ok(());
         }
         if tabs.len() != app.groups.iter().map(|g| g.tabs.len()).sum::<usize>() {
@@ -280,9 +280,7 @@ impl UiStateStore {
             .iter()
             .filter_map(|g| g.tabs.get(g.active).map(|id| leaf(&record, id)))
             .collect();
-        let group_tree = if groups.is_empty() {
-            json!({"kind":"group","active":0,"tabs":[]})
-        } else if groups.len() == 2 {
+        let group_tree = if groups.len() == 2 {
             json!({"kind":"split","orientation":orientation(app.split),"weights":[app.split_percent.clamp(20,80) as f64 / 100.0, 1.0 - app.split_percent.clamp(20,80) as f64 / 100.0],"children":groups})
         } else {
             groups[0].clone()
@@ -611,17 +609,13 @@ mod tests {
     }
 
     #[test]
-    fn empty_named_collection_survives_save_and_restart() {
+    fn empty_named_collection_is_only_in_memory_like_python() {
         let temp = tempfile::tempdir().unwrap();
         let mut store = UiStateStore::new(temp.path(), "/project", "machine").unwrap();
         let mut app = App::default();
         app.collections.push(Collection { name:"Later".into(), sessions:vec![], collapsed:true });
         store.save(&app).unwrap();
-        let saved: Value = serde_json::from_slice(&std::fs::read(store.path()).unwrap()).unwrap();
-        assert_eq!(saved["collections"], json!([{"name":"Later","sessions":[],"collapsed":true}]));
-        let restarted = UiStateStore::new(temp.path(), "/project", "machine").unwrap();
-        let mut restored = App::default();
-        assert!(!restarted.restore(&mut restored, &[]));
-        assert_eq!(restored.collections, app.collections);
+        assert!(!store.path().exists());
+        assert_eq!(app.collections[0].name, "Later");
     }
 }
