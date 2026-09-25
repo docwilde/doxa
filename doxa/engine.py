@@ -2246,12 +2246,78 @@ class SessionEngine:
             tmp.mkdir(parents=True, exist_ok=True)
             jobfile = tmp / f"review-{job['session_id']}.json"
             jobfile.write_text(json.dumps(job), encoding="utf-8")
-            lore_deriver.worker_run(jobfile)
+            self._review_worker(jobfile)
         except Exception:
             # A review failure must never take the session down with it --
             # same posture as cmd_review's hook path ("never block session
             # end"/"never block the prompt loop").
             pass
+
+    async def review_before_compact(self) -> bool:
+        """Finish a LORE review before an explicit provider compaction.
+
+        This is deliberately stricter than the best-effort PreCompact hook:
+        a disabled or failed reviewer must leave the provider transcript alone.
+        The worker runs in a separate process because its progress goes to
+        stdout, which is the Rust sidecar's JSON protocol channel.
+        """
+        if not self.lore or stage_disabled("review") or self._turn_running:
+            return False
+        async with self._review_lock:
+            if self._turn_running:
+                return False
+            return await asyncio.to_thread(self._review_before_compact_sync)
+
+    def _review_before_compact_sync(self) -> bool:
+        import tempfile
+        import stat
+
+        try:
+            # LORE's parser returns an empty transcript on open failure. A
+            # missing file must not be mistaken for its short-session rule.
+            with self.transcript_path.open("rb") as source:
+                before = os.fstat(source.fileno())
+                if not stat.S_ISREG(before.st_mode) or before.st_size == 0:
+                    return False
+            job = lore_deriver.build_review_job(
+                self.transcript_path, self.slug, cwd_hint=self.cwd, older=True,
+            )
+            after = self.transcript_path.stat()
+            if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
+                after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns
+            ):
+                return False
+            if job is None:
+                return True  # LORE's minimum-message rule: nothing to derive.
+            job["source_engine"] = "claude"
+            directory = lore_core.ROOT / "tmp"
+            directory.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", suffix=".json",
+                                             prefix="compact-review-", dir=directory,
+                                             delete=False) as file:
+                json.dump(job, file)
+                jobfile = Path(file.name)
+            try:
+                return self._review_worker(jobfile)
+            finally:
+                jobfile.unlink(missing_ok=True)
+        except Exception:
+            return False
+
+    @staticmethod
+    def _review_worker(jobfile: Path) -> bool:
+        import subprocess
+        import sys
+
+        result = subprocess.run(
+            [sys.executable, "-c",
+             "import sys; from pathlib import Path; "
+             "from lore_core.deriver import worker_run; "
+             "sys.exit(worker_run(Path(sys.argv[1])))", str(jobfile)],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, timeout=180, check=False,
+        )
+        return result.returncode == 0
 
     # -- streaming deriver -------------------------------------------
 

@@ -194,6 +194,10 @@ impl Host for VendorHost {
     }
 
     fn prompt(&self, text: &str, emit: &mut dyn FnMut(Value)) {
+        if text.trim_start().starts_with("/compact") {
+            emit(done("Reviewed compaction is unavailable for this provider"));
+            return;
+        }
         if self.storage_uncertain.load(Ordering::Acquire) {
             emit(done("Vendor storage state is uncertain; restart refused"));
             return;

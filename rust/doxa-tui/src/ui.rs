@@ -2128,8 +2128,8 @@ impl App {
     }
 
     /// Handle bare DOXA commands before a prompt can reach an agent. Unknown
-    /// slash commands still go to the provider (including `/compact` and
-    /// plugin commands). Known commands with arguments stay in the draft
+    /// slash commands still go to the provider (except reviewed `/compact`
+    /// and plugin commands). Known commands with arguments stay in the draft
     /// until Rust has an explicit implementation for that form.
     fn dispatch_prompt_command(&mut self) -> bool {
         let input = self.input.trim();
@@ -2639,6 +2639,20 @@ impl App {
             }
             "/rename" => { self.local_rename(args); true }
             "/cd" => { self.local_cd(args); true }
+            "/compact" => {
+                let engine = self.groups[self.active_group].active_id()
+                    .and_then(|id| self.session_identity.get(id))
+                    .and_then(|identity| identity.0.as_deref());
+                if args.trim().is_empty() && engine == Some("claude") {
+                    return false; // The Claude sidecar reviews synchronously before forwarding.
+                }
+                self.notice = if !args.trim().is_empty() {
+                    "Usage: /compact".into()
+                } else {
+                    "Reviewed compaction is available only for Claude sessions".into()
+                };
+                true
+            }
             "/mesh" if !args.trim().is_empty() => {
                 self.notice = "Local command unavailable: /mesh arguments".into(); true
             }
@@ -2660,7 +2674,7 @@ impl App {
             | "/logout" | "/settings" | "/setup" | "/doctor" | "/plugins"
             | "/reload-plugins" | "/effort" | "/usage"
             | "/context" | "/clear"
-            | "/compact" | "/update" => {
+            | "/update" => {
                 self.notice = format!("Local command unavailable: {}", safe_label(command));
                 true
             }
@@ -8215,7 +8229,20 @@ for line in sys.stdin:
         app.input = "/compact".into();
         app.input_cursor = app.input.len();
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
-        assert!(app.notice.contains("Local command unavailable"));
+        assert!(app.notice.contains("only for Claude"));
+        assert!(app.pending_prompts.is_empty());
+
+        app.session_identity.insert("s".into(), (Some("claude".into()), None));
+        app.input = "/compact".into();
+        app.input_cursor = app.input.len();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.pending_prompts, [("s".into(), "/compact".into())]);
+        app.pending_prompts.clear();
+
+        app.input = "/compact extra".into();
+        app.input_cursor = app.input.len();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(app.notice.contains("Usage: /compact"));
         assert!(app.pending_prompts.is_empty());
 
         app.input = "/provider-command".into();

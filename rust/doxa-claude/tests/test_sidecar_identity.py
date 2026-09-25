@@ -18,6 +18,33 @@ spec.loader.exec_module(sidecar)
 
 
 class IdentityTests(unittest.TestCase):
+    def test_compact_review_deadline_blocks_delayed_worker(self):
+        class SlowEngine:
+            async def review_before_compact(self):
+                await asyncio.sleep(0.05)
+                return True
+
+        self.assertFalse(asyncio.run(sidecar.reviewed_compact_ready(
+            SlowEngine(), "/compact", timeout=0.001)))
+
+    def test_compact_review_requires_success_and_exact_command(self):
+        class Engine:
+            def __init__(self, result):
+                self.result = result
+                self.calls = 0
+
+            async def review_before_compact(self):
+                self.calls += 1
+                return self.result
+
+        good = Engine(True)
+        self.assertTrue(asyncio.run(sidecar.reviewed_compact_ready(good, "/compact", timeout=1)))
+        self.assertEqual(good.calls, 1)
+        bad = Engine(False)
+        self.assertFalse(asyncio.run(sidecar.reviewed_compact_ready(bad, "/compact", timeout=1)))
+        self.assertFalse(asyncio.run(sidecar.reviewed_compact_ready(good, "/compact now", timeout=1)))
+        self.assertEqual(good.calls, 1)
+
     def test_billing_snapshot_uses_matching_local_tier_and_marks_stale_quota(self):
         from doxa import identity
 

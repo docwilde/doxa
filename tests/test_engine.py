@@ -49,6 +49,37 @@ def _repo(tmp_path, name="repo", branch="trunk"):
     return repo
 
 
+@pytest.mark.asyncio
+async def test_explicit_compact_requires_completed_lore_review(monkeypatch, tmp_path):
+    from doxa import engine as engine_mod
+
+    engine = SessionEngine(cwd=str(tmp_path))
+    monkeypatch.delenv("LORE_DISABLE_REVIEW", raising=False)
+    calls = []
+    monkeypatch.setattr(engine_mod.lore_deriver, "build_review_job",
+                        lambda *args, **kwargs: {"session_id": engine.session_id,
+                                                 "project": engine.slug, "prompt": "review"})
+
+    def worker(argv, **kwargs):
+        calls.append((argv, kwargs))
+        assert kwargs["stdout"] == subprocess.DEVNULL
+        assert kwargs["stderr"] == subprocess.DEVNULL
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(subprocess, "run", worker)
+    assert not await engine.review_before_compact()  # missing is not "short"
+    engine.transcript_path.write_text('{"type":"user"}\n', encoding="utf-8")
+    assert await engine.review_before_compact()
+    assert len(calls) == 1
+    assert not os.path.exists(calls[0][0][-1])
+
+    monkeypatch.setattr(subprocess, "run", lambda argv, **kwargs: subprocess.CompletedProcess(argv, 1))
+    assert not await engine.review_before_compact()
+    monkeypatch.setenv("LORE_DISABLE_REVIEW", "1")
+    assert not await engine.review_before_compact()
+    assert len(calls) == 1
+
+
 def _script_one_turn_with_tool_call() -> list:
     return [
         StreamEvent(
