@@ -114,8 +114,39 @@ fn run_interactions(samples: &mut Samples) -> Result<()> {
     Ok(())
 }
 
+fn run_busy_transcript(samples: &mut Samples) -> Result<()> {
+    let (mut app, mut term) = fixture()?;
+    let mut transcript = String::from("**You:**\n\nInspect this project.\n\n**Assistant:**\n\n");
+    for i in 0..4_000 {
+        if i % 200 == 0 {
+            transcript.push_str(&format!("Tool: Read started · file-{i}.rs\n\nTool: Read finished · ok\n\n"));
+        } else {
+            transcript.push_str(&format!("paragraph {i:04}: **result** from [the docs](https://example.org/page) and {}\n\n",
+                "streamed transcript text ".repeat(2)));
+        }
+    }
+    for id in ["bench-3", "bench-6"] {
+        assert!(app.apply_daemon_frame(&json!({"type":"event", "session_id":id,
+            "event":{"type":"text_delta", "data":{"text":transcript,"snapshot":true}}})));
+    }
+    assert!(app.apply_daemon_frame(&json!({"type":"event", "session_id":"bench-6",
+        "event":{"type":"turn_started", "data":{"prompt":"continue"}}})));
+    draw(&app, &mut term)?;
+    for _ in 0..20 {
+        let start = Instant::now();
+        draw(&app, &mut term)?;
+        samples.busy_redraw.push(start.elapsed().as_secs_f64() * 1000.0);
+    }
+    for i in 0..20 {
+        let frame = json!({"type":"event", "session_id":"bench-6",
+            "event":{"type":"text_delta", "data":{"text":format!("stream {i}\n")}}});
+        timed(&mut app, &mut term, &mut samples.busy_stream, |app| app.apply_daemon_frame(&frame))?;
+    }
+    Ok(())
+}
+
 #[derive(Default)]
-struct Samples { startup: Vec<f64>, resize: Vec<f64>, split: Vec<f64>, append: Vec<f64>, scroll: Vec<f64> }
+struct Samples { startup: Vec<f64>, resize: Vec<f64>, split: Vec<f64>, append: Vec<f64>, scroll: Vec<f64>, busy_redraw: Vec<f64>, busy_stream: Vec<f64> }
 
 fn stats(values: &[f64]) -> Value {
     let mut sorted = values.to_vec();
@@ -136,6 +167,7 @@ fn main() -> Result<()> {
     if runs == 0 { return Err("--runs must be positive".into()); }
     for _ in 0..warmups {
         run_interactions(&mut Samples::default())?;
+        run_busy_transcript(&mut Samples::default())?;
     }
     let mut samples = Samples::default();
     for _ in 0..runs {
@@ -143,6 +175,7 @@ fn main() -> Result<()> {
         first_frame()?;
         samples.startup.push(started.elapsed().as_secs_f64() * 1000.0);
         run_interactions(&mut samples)?;
+        run_busy_transcript(&mut samples)?;
     }
     println!("{}", serde_json::to_string_pretty(&json!({
         "source":"Rust 2.0 App reducer + Markdown presenter + Ratatui TestBackend draw",
@@ -150,7 +183,9 @@ fn main() -> Result<()> {
         "sidebar_widths":[22,41], "warmups":warmups, "runs":runs,
         "results":{"startup":stats(&samples.startup), "resize":stats(&samples.resize),
             "split":stats(&samples.split), "append":stats(&samples.append),
-            "scroll":stats(&samples.scroll)}
+            "scroll":stats(&samples.scroll),
+            "busy_redraw":stats(&samples.busy_redraw),
+            "busy_stream":stats(&samples.busy_stream)}
     }))?);
     Ok(())
 }

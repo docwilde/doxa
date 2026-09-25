@@ -378,7 +378,14 @@ const MAX_VIEW_BYTES: usize = 480 * 1024;
 const MAX_RESTORED_DETAIL_BYTES: usize = 256 * 1024;
 
 #[derive(Default)]
-struct Turn { prompt: String, answer: String, tools: Vec<String>, tool_names: std::collections::HashMap<String, String> }
+struct Turn {
+    prompt: String,
+    answer: String,
+    tools: Vec<String>,
+    tool_names: std::collections::HashMap<String, String>,
+    codex_results: std::collections::HashMap<String, usize>,
+    codex_details: std::collections::HashMap<String, String>,
+}
 
 fn tool_detail(value: &Value) -> String {
     if value.is_null() { return String::new(); }
@@ -421,6 +428,56 @@ pub fn render(snapshot: &TranscriptSnapshot) -> String {
         let Ok(record) = serde_json::from_slice::<Value>(line) else { continue };
         let kind = record["type"].as_str().unwrap_or("");
         let content = &record["message"]["content"];
+        if matches!(kind, "tool_call" | "tool_result" | "tool_result_detail")
+            && record["engine"] == "codex" {
+            let data = &record["data"];
+            let Some(id) = data["id"].as_str().filter(|id| !id.is_empty() && id.len() <= 200
+                && !id.chars().any(char::is_control)) else { continue };
+            if turns.is_empty() { turns.push(Turn::default()); }
+            let turn = turns.last_mut().unwrap();
+            match kind {
+                "tool_call" => {
+                    let name = tool_detail(&data["name"]);
+                    let name = if name.is_empty() { "Tool".to_owned() } else { name };
+                    turn.tool_names.insert(id.to_owned(), name.clone());
+                    let detail = tool_detail(&data["input"]);
+                    turn.tools.push(format!("Tool: {name} started{}{}",
+                        if detail.is_empty() { String::new() } else { format!(" · {detail}") },
+                        restored_detail_marker("input", &data["input"])));
+                }
+                "tool_result" => {
+                    let name = turn.tool_names.get(id).map(String::as_str)
+                        .or_else(|| data["name"].as_str()).unwrap_or("Tool");
+                    let outcome = if data["is_error"] == true { "failed" } else { "finished" };
+                    let summary = tool_detail(&data["result_summary"]);
+                    let row = format!("Tool: {name} {outcome}{}",
+                        if summary.is_empty() { String::new() } else { format!(" · {summary}") });
+                    if let Some(index) = turn.codex_results.get(id).copied() {
+                        turn.tools[index] = row;
+                        turn.codex_details.remove(id);
+                    } else {
+                        turn.codex_results.insert(id.to_owned(), turn.tools.len());
+                        turn.tools.push(row);
+                    }
+                }
+                "tool_result_detail" => {
+                    if turn.codex_results.contains_key(id) {
+                        if let Some(chunk) = data["text"].as_str() {
+                            let detail = turn.codex_details.entry(id.to_owned()).or_default();
+                            let remaining = MAX_RESTORED_DETAIL_BYTES.saturating_sub(detail.len());
+                            let mut end = chunk.len().min(remaining);
+                            while !chunk.is_char_boundary(end) { end -= 1; }
+                            detail.push_str(&chunk[..end]);
+                            if end < chunk.len() && !detail.ends_with("[Tool detail display limit reached]") {
+                                detail.push_str("\n[Tool detail display limit reached]");
+                            }
+                        }
+                    }
+                }
+                _ => unreachable!(),
+            }
+            continue;
+        }
         if kind == "user" {
             let mut prompt = String::new();
             if let Some(text) = content.as_str() {
@@ -473,7 +530,12 @@ pub fn render(snapshot: &TranscriptSnapshot) -> String {
     if snapshot.earlier_bytes_omitted || omitted_turns > 0 {
         out.push_str("[Earlier transcript omitted from this view; the session JSONL retains it.]\n\n");
     }
-    for turn in turns.into_iter().skip(omitted_turns) {
+    for mut turn in turns.into_iter().skip(omitted_turns) {
+        for (id, index) in &turn.codex_results {
+            if let Some(detail) = turn.codex_details.get(id) {
+                turn.tools[*index].push_str(&restored_detail_marker("result", &Value::String(detail.clone())));
+            }
+        }
         if !turn.prompt.is_empty() {
             out.push_str("**You:**\n\n");
             out.push_str(&turn.prompt);
@@ -561,6 +623,26 @@ for line in sys.stdin:
         assert!(rendered.contains(crate::ui::transcript_tools::RESTORED_TOOL_PREFIX));
         assert!(rendered.contains(&input));
         assert!(rendered.contains('…')); // collapsed row remains concise
+    }
+
+    #[test]
+    fn restores_codex_tool_events_and_keeps_legacy_blocks_compatible() {
+        let records = [
+            serde_json::json!({"type":"user","message":{"content":"inspect"}}),
+            serde_json::json!({"type":"tool_call","engine":"codex","data":{"id":"c1","name":"command_execution","input":{"command":"rg needle"}}}),
+            serde_json::json!({"type":"tool_result","engine":"codex","data":{"id":"c1","name":"command_execution","result_summary":"short","is_error":false}}),
+            serde_json::json!({"type":"tool_result_detail","engine":"codex","data":{"id":"c1","text":"full result\n"}}),
+            serde_json::json!({"type":"tool_result_detail","engine":"codex","data":{"id":"c1","text":"second line"}}),
+            serde_json::json!({"type":"assistant","message":{"content":[{"type":"text","text":"done"}]}}),
+        ];
+        let bytes = records.iter().map(Value::to_string).collect::<Vec<_>>().join("\n").into_bytes();
+        let rendered = render(&TranscriptSnapshot { bytes, earlier_bytes_omitted: false });
+        assert!(rendered.contains("Tool: command\\_execution started"));
+        assert!(rendered.contains("Tool: command\\_execution finished · short"));
+        assert!(rendered.contains("full result\\nsecond line"));
+        assert!(rendered.contains("done"));
+        assert_eq!(rendered.matches("**You:**").count(), 1);
+        assert_eq!(rendered.matches("**Assistant:**").count(), 1);
     }
 
     #[test]

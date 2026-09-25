@@ -1,4 +1,5 @@
 use doxa_state::{legacy_tabset_path, save_tabset, Tab, TabSet};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use doxa_tui::ui::{App, Split};
 use doxa_tui::ui_state::UiStateStore;
 use serde_json::{json, Value};
@@ -280,4 +281,24 @@ fn stale_first_pane_collapses_to_live_second_pane() {
     assert_eq!(app.groups[0].tabs, ["live"]);
     assert!(app.groups[1].tabs.is_empty());
     assert_eq!(app.active_group, 0);
+}
+
+#[test]
+fn moved_tab_layout_saves_and_restores_active_group() {
+    let (dir, mut store) = seeded(json!({"tabs":[{"session_id":"a"},{"session_id":"b"},{"session_id":"c"}],
+        "active_session_id":"a"}));
+    let mut app = App::default();
+    assert!(store.restore(&mut app, &live(&["a", "b", "c"])));
+    app.input = "/movepane 2".into();
+    app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+    assert_eq!(app.groups[0].tabs, ["b", "c"]);
+    assert_eq!(app.groups[1].tabs, ["a"]);
+    store.save(&app).unwrap();
+    let again_store = UiStateStore::new(dir.path(), "/repo", "machine").unwrap();
+    let mut again = App::default();
+    assert!(again_store.restore(&mut again, &live(&["a", "b", "c"])));
+    assert_eq!(again.groups[0].tabs, ["b", "c"]);
+    assert_eq!(again.groups[1].tabs, ["a"]);
+    assert_eq!(again.active_group, 1);
+    assert_eq!(again.groups[1].active, 0);
 }

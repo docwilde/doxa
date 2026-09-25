@@ -333,6 +333,30 @@ mod tests {
     }
 
     #[test]
+    fn restored_codex_events_expand_input_and_full_result() {
+        let records = [
+            json!({"type":"user","message":{"content":"inspect"}}),
+            json!({"type":"tool_call","engine":"codex","data":{"id":"c1","name":"Read","input":{"path":"src/main.rs"}}}),
+            json!({"type":"tool_result","engine":"codex","data":{"id":"c1","name":"Read","result_summary":"short"}}),
+            json!({"type":"tool_result_detail","engine":"codex","data":{"id":"c1","text":"first line\n"}}),
+            json!({"type":"tool_result_detail","engine":"codex","data":{"id":"c1","text":"second line"}}),
+        ];
+        let source = crate::history::render(&crate::transport::TranscriptSnapshot {
+            bytes: records.iter().map(serde_json::Value::to_string).collect::<Vec<_>>().join("\n").into_bytes(),
+            earlier_bytes_omitted: false,
+        });
+        let (collapsed, sections) = render(&source, 80, None, None);
+        assert_eq!(sections.len(), 1);
+        assert!(!shown(&collapsed).contains("second line"));
+        let (expanded, _) = render(&source, 80, Some(&HashSet::from([0])), None);
+        let visible = shown(&expanded);
+        assert!(visible.contains("src/main.rs"));
+        assert!(visible.contains("first line"));
+        assert!(visible.contains("second line"));
+        assert!(!visible.contains("finished · short"));
+    }
+
+    #[test]
     fn speakers_stay_distinct_around_a_collapsed_tool_section() {
         let source = "**You:**\n\nCheck **this**.\n\n**Assistant:**\n\nWorking.\n\nTool: Read started · hidden-path\n\nDone.";
         let (lines, sections) = render(source, 40, None, None);

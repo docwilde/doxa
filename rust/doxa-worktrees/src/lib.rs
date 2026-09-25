@@ -201,6 +201,9 @@ pub fn branch_status(cwd: &Path) -> Option<BranchStatus> {
 pub fn switch_base(path: &Path, requested: &str) -> Result<String, String> {
     let (record, old_base, main, base_oid) = read_record(path).ok_or_else(||
         "no verified doxa worktree here; switching the actual checkout is refused".to_owned())?;
+    if base_oid.is_none() {
+        return Err("legacy worktree owner cannot be verified; switch refused".into());
+    }
     let keep = || format!("kept {} — merge when ready", record.branch);
     if worktree_for_branch(&main, &record.branch).as_ref() != Some(&record.path)
         || git_text(&record.path, &["symbolic-ref", "--quiet", "--short", "HEAD"])
@@ -442,6 +445,10 @@ pub fn create_from(cwd: &Path, id: &str, requested_base: Option<&str>) -> Option
     let path = worktrees.join(format!("{repo}-{short}"));
     if let Some(existing) = worktree_for_branch(&main, &branch) {
         let (record, old_base, recorded_main, pinned) = read_record(&existing)?;
+        // Python 1.19 never writes a base pin and does not participate in
+        // this advisory lock. A matching session ID is not proof that its
+        // owner has stopped; do not adopt that checkout as a Rust session.
+        let pinned_oid = pinned.as_deref()?;
         if record.path != existing.canonicalize().ok()? || record.session_id != id || record.path != path
             || recorded_main != main
             || requested_base.is_some() && old_base != base
@@ -459,9 +466,8 @@ pub fn create_from(cwd: &Path, id: &str, requested_base: Option<&str>) -> Option
         }
         let head = git_text(&record.path, &["rev-parse", "--verify", "HEAD^{commit}"])
             .filter(|oid| valid_commit_oid(oid))?;
-        if pinned.as_deref().is_some_and(|oid| !git(&main,
-            &["merge-base", "--is-ancestor", oid, &head], Duration::from_secs(10))
-                .is_some_and(|(ok, _)| ok)) { return None; }
+        if !git(&main, &["merge-base", "--is-ancestor", pinned_oid, &head], Duration::from_secs(10))
+            .is_some_and(|(ok, _)| ok) { return None; }
         return Some(Managed { path: record.path, created: false, finished: false, lock: Some(lock) });
     }
     if branch == base { return None; }
@@ -603,16 +609,20 @@ fn finalize_locked(path: &Path) -> String {
     let Some((record, base, main, base_oid)) = read_record(path) else {
         return "worktree ownership could not be verified; kept it".into();
     };
+    // The Rust lock cannot coordinate with Python 1.19: its lifecycle never
+    // takes that lock. Legacy sidecars have no base_oid, so even a clean tree
+    // and a matching session ID cannot authorize its removal here.
+    let Some(base_oid) = base_oid else {
+        return "legacy worktree owner cannot be verified; kept it".into();
+    };
     let keep = || format!("kept {} at {} — merge when ready", record.branch, record.path.display());
     if worktree_for_branch(&main, &record.branch).as_ref() != Some(&record.path) { return keep(); }
     // A user may have checked out another branch or detached HEAD. Its
     // clean checkout is still theirs; never remove it on this sidecar's say.
     if git_text(&record.path, &["symbolic-ref", "--quiet", "--short", "HEAD"])
         .as_deref() != Some(record.branch.as_str()) { return keep(); }
-    if !base_oid.as_deref().is_none_or(|oid| {
-        git(&main, &["merge-base", "--is-ancestor", oid, &record.branch], Duration::from_secs(10))
-            .is_some_and(|(ok, _)| ok)
-    }) { return keep(); }
+    if !git(&main, &["merge-base", "--is-ancestor", &base_oid, &record.branch], Duration::from_secs(10))
+        .is_some_and(|(ok, _)| ok) { return keep(); }
     // Git considers ignored files disposable during `worktree remove`, even
     // without --force. They may still be valuable user data.
     let Some(status) = git_text(&record.path, &["status", "--porcelain", "--ignored", "--untracked-files=all"]) else { return keep(); };
@@ -793,6 +803,47 @@ mod tests {
         let mut created = create(&main, "lock0001session").unwrap();
         assert_eq!(created.path(), path);
         assert!(created.finish().is_empty());
+    }
+
+    #[test]
+    fn legacy_sidecar_cannot_be_adopted_or_finalized_even_when_clean() {
+        let _serial = TEST_ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        env::set_var("DOXA_HOME", dir.path().join("home"));
+        env::set_var("DOXA_WORKTREE", "1");
+        let main = dir.path().join("repo");
+        fs::create_dir(&main).unwrap();
+        run_git(&main, &["init", "-q", "-b", "main"]);
+        fs::write(main.join("file"), "base\n").unwrap();
+        run_git(&main, &["add", "file"]);
+        run_git(&main, &["-c", "user.name=Test", "-c", "user.email=test@example.com",
+            "commit", "-qm", "test: base"]);
+
+        let mut managed = create(&main, "legacy01session").unwrap();
+        let path = managed.path().to_path_buf();
+        let sidecar = meta_path(&path).unwrap();
+        let mut data: serde_json::Value = serde_json::from_slice(&fs::read(&sidecar).unwrap()).unwrap();
+        data.as_object_mut().unwrap().remove("base_oid");
+        fs::write(&sidecar, serde_json::to_vec(&data).unwrap()).unwrap();
+
+        // A Python 1.19 sidecar can be clean and its Rust lock can be free;
+        // neither fact proves the uncoordinated Python owner has exited.
+        assert!(finalize(&path).contains("lock unavailable"));
+        assert!(managed.finish().contains("legacy worktree owner cannot be verified"));
+        assert!(path.exists());
+        assert!(create(&main, "legacy01session").is_none());
+        assert!(switch_base(&path, "main").unwrap_err().contains("legacy worktree owner"));
+        assert!(finalize(&path).contains("legacy worktree owner cannot be verified"));
+        assert!(path.exists());
+        assert!(sidecar.exists());
+        assert!(git_text(&main, &["show-ref", "--verify", "refs/heads/doxa/legacy01"]).is_some());
+
+        let preview = preview_orphans(&HashSet::new()).into_iter()
+            .find(|row| row.record.path == path).unwrap();
+        assert_eq!(preview.state, OrphanState::Uncertain);
+        assert!(matches!(cleanup_orphan(&preview, || Some(HashSet::new())), CleanupResult::Kept(_)));
+        env::remove_var("DOXA_HOME");
+        env::remove_var("DOXA_WORKTREE");
     }
     #[test]
     fn recovers_deleted_checkout_from_pinned_sidecar_and_keeps_unique_commits() {
