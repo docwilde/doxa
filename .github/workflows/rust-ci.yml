@@ -2,14 +2,8 @@ name: Rust 2.0 CI
 
 on:
   pull_request:
-    paths:
-      - "rust/**"
-      - ".github/workflows/rust-ci.yml"
   push:
-    branches: ["rust/2.0"]
-    paths:
-      - "rust/**"
-      - ".github/workflows/rust-ci.yml"
+    branches: ["main", "rust/2.0"]
 
 permissions:
   contents: read
