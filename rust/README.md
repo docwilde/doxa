@@ -78,6 +78,12 @@ commands, including `/compact` and plugin commands, still go to the active
 engine.
 `Ctrl+M` opens the read-only peer communications
 map; Up/Down selects a peer, R refreshes the live roster, and Esc closes it.
+For Python 1.19 fleet runs, `doxa-rs fleet runs` lists manifests under
+`$DOXA_HOME/fleet`, `doxa-rs fleet status RUN_ID` shows run and slot phases,
+and `doxa-rs fleet attach RUN_ID SLOT` attaches to one slot's live daemon.
+Use `--root ABSOLUTE_PATH` when the fleet was started under another root.
+Run IDs may be unique prefixes. Attachment requires an owner-private manifest
+and socket inside the run's private runtime directory.
 The map uses `tui-nodes` 0.9 with the Rust frontend's Ratatui 0.29.
 Lines show observed traffic and the detail row names sent and received counts.
 Type `/peers` or `/mesh` in a session prompt to open the same map. Type

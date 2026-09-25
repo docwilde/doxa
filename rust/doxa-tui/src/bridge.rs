@@ -258,12 +258,19 @@ pub fn run_sessions(sessions: &[Session], store: Option<crate::ui_state::UiState
 
 /// Attach to one daemon socket with the same dynamic routing used by a restored roster.
 pub fn run_socket(path: impl AsRef<Path>) -> io::Result<()> {
+    run_socket_expected(path, None)
+}
+
+pub fn run_socket_expected(path: impl AsRef<Path>, expected: Option<&str>) -> io::Result<()> {
     let path = path.as_ref();
     let client = DaemonClient::connect(path, None).map_err(as_io_error)?;
     let id = client.hello["session_id"].as_str()
         .filter(|id| crate::discovery::valid_id(id))
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid session ID"))?
         .to_owned();
+    if expected.is_some_and(|expected| expected != id) {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "fleet slot session identity changed"));
+    }
     drop(client);
     run_sessions(&[Session { id, socket: path.to_path_buf(), scope_key: String::new(),
         clients: None, started_at: String::new() }], None)

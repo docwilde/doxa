@@ -1,4 +1,4 @@
-use doxa_tui::{bridge, discovery, launch, ui_state};
+use doxa_tui::{bridge, discovery, fleet_view, launch, ui_state};
 use std::io;
 use std::path::PathBuf;
 
@@ -16,6 +16,9 @@ fn main() -> io::Result<()> {
 }
 
 fn run(args: &[String]) -> io::Result<()> {
+    if args.first().is_some_and(|arg| arg == "fleet") {
+        return fleet(&args[1..]);
+    }
     let mut command: Option<&str> = None;
     let mut prefix: Option<&str> = None;
     let mut options = launch::LaunchOptions::default();
@@ -96,7 +99,7 @@ fn run(args: &[String]) -> io::Result<()> {
     }
     match command {
         Some("--help") => {
-            println!("Usage: doxa-rs [new|attach [ID]|stop [ID]|list|doctor] [options]\n       doxa-rs --session ID\n       doxa-rs --socket PATH\n\nPlain doxa-rs restores live sessions in the current project, or starts a native Codex session.\nnew always starts a session. attach and stop accept a full ID or unique prefix.\nOptions for new sessions: --engine codex|claude|deepseek|glm|fixture, --model NAME, --linger SECONDS.\nCodex: --sandbox read-only|workspace-write|danger-full-access, --codex-bin PATH, --lore-python PATH.\nClaude: --claude-python PATH, --claude-script ABSOLUTE_PATH.\nDeepSeek/GLM: --lore-python PATH, --effort low|high|max (DeepSeek also none); API key in provider environment variable.\nClaude/DeepSeek/GLM: --resume FULL_SESSION_ID with new.\nDOXA_DAEMON_BIN selects an absolute native daemon path. Ctrl+Q detaches without stopping the daemon.");
+            println!("Usage: doxa-rs [new|attach [ID]|stop [ID]|list|doctor] [options]\n       doxa-rs fleet runs|status RUN_ID|attach RUN_ID SLOT [--root ABSOLUTE_PATH]\n       doxa-rs --session ID\n       doxa-rs --socket PATH\n\nPlain doxa-rs restores live sessions in the current project, or starts a native Codex session.\nnew always starts a session. attach and stop accept a full ID or unique prefix.\nOptions for new sessions: --engine codex|claude|deepseek|glm|fixture, --model NAME, --linger SECONDS.\nCodex: --sandbox read-only|workspace-write|danger-full-access, --codex-bin PATH, --lore-python PATH.\nClaude: --claude-python PATH, --claude-script ABSOLUTE_PATH.\nDeepSeek/GLM: --lore-python PATH, --effort low|high|max (DeepSeek also none); API key in provider environment variable.\nClaude/DeepSeek/GLM: --resume FULL_SESSION_ID with new.\nDOXA_DAEMON_BIN selects an absolute native daemon path. Ctrl+Q detaches without stopping the daemon.");
             Ok(())
         }
         Some("--version") => {
@@ -246,4 +249,31 @@ fn run(args: &[String]) -> io::Result<()> {
         }
         _ => Err(invalid("invalid command")),
     }
+}
+
+fn fleet(args: &[String]) -> io::Result<()> {
+    let mut root = None;
+    let mut words = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        if args[index] == "--root" {
+            index += 1;
+            root = Some(PathBuf::from(args.get(index).ok_or_else(|| invalid("missing fleet root"))?));
+        } else {
+            words.push(args[index].as_str());
+        }
+        index += 1;
+    }
+    let root = match root { Some(root) => root, None => fleet_view::default_root()? };
+    match words.as_slice() {
+        ["runs"] => println!("{}", fleet_view::runs(&root)?),
+        ["status", run] => println!("{}", fleet_view::status(&root, run)?),
+        ["attach", run, slot] => {
+            let slot: usize = slot.parse().map_err(|_| invalid("fleet slot must be a number"))?;
+            let (socket, session_id) = fleet_view::slot_socket(&root, run, slot)?;
+            return bridge::run_socket_expected(socket, Some(&session_id));
+        }
+        _ => return Err(invalid("usage: doxa-rs fleet runs|status RUN_ID|attach RUN_ID SLOT [--root ABSOLUTE_PATH]")),
+    }
+    Ok(())
 }
