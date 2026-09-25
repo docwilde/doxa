@@ -3,6 +3,8 @@
 
 pub mod codex;
 #[cfg(unix)]
+pub mod codex_appserver;
+#[cfg(unix)]
 pub mod codex_driver;
 
 use serde::{Deserialize, Serialize};
