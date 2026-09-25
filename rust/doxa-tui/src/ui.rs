@@ -106,8 +106,8 @@ fn safe_label(value: &str) -> String {
         .collect()
 }
 
-fn clipped_title(value: &str, width: usize) -> String {
-    let label = safe_label(value);
+fn clipped_title(value: &str, width: usize) -> (String, bool) {
+    let label = markdown::sanitize(value).replace('\n', " ");
     let mut out = String::new();
     let mut used = 0;
     for ch in label.chars() {
@@ -120,12 +120,12 @@ fn clipped_title(value: &str, width: usize) -> String {
                 }
                 out.push('…');
             }
-            return out;
+            return (out, false);
         }
         out.push(ch);
         used += cells;
     }
-    out
+    (out, true)
 }
 
 fn unsafe_input_char(ch: char) -> bool {
@@ -551,8 +551,9 @@ impl InputRequest {
     }
 }
 
-fn input_request_body(request: &InputRequest) -> String {
+fn input_request_body(request: &InputRequest, title_width: usize) -> (String, Option<usize>) {
     let mut body = String::new();
+    let mut selected_row = None;
     if request.kind == "ask_user" {
         if let Some(question) = request.questions.get(request.step) {
             if !question.header.is_empty() {
@@ -560,10 +561,13 @@ fn input_request_body(request: &InputRequest) -> String {
                 body.push_str(&markdown::sanitize(&question.header));
                 body.push('\n');
             }
-            body.push_str("Question: ");
-            body.push_str(&markdown::sanitize(&question.question));
-            body.push_str("\n\n");
+            if !clipped_title(&question.question, title_width).1 {
+                body.push_str("Question: ");
+                body.push_str(&markdown::sanitize(&question.question));
+                body.push_str("\n\n");
+            }
             for (i, option) in question.options.iter().enumerate() {
+                if i + 1 == request.selected { selected_row = Some(body.lines().count()); }
                 body.push_str(&format!(
                     "{} {}. {}\n",
                     if i + 1 == request.selected { "▸" } else { " " },
@@ -591,7 +595,7 @@ fn input_request_body(request: &InputRequest) -> String {
     if request.sending {
         body.push_str("\nSending answer…");
     }
-    body
+    (body, selected_row)
 }
 
 #[derive(Debug)]
@@ -2499,7 +2503,8 @@ impl App {
     /// prompt. Reserving this space keeps the transcript and prompt visible.
     fn chooser_rect(&self, pane: Rect) -> Option<Rect> {
         let wanted = if let Some(index) = self.active_request_index().filter(|&index| self.input_requests[index].kind == "ask_user") {
-            let body = input_request_body(&self.input_requests[index]);
+            let (body, _) = input_request_body(&self.input_requests[index],
+                usize::from(pane.width.saturating_sub(4)));
             wrapped_rows(&body, usize::from(pane.width.saturating_sub(2)))
                 .saturating_add(2).clamp(6, 18) as u16
         } else if self.engine_picker {
@@ -3194,15 +3199,9 @@ impl App {
             width,
             height,
         ) };
-        let body = input_request_body(request);
+        let (body, selected_row) = input_request_body(request,
+            usize::from(modal.width.saturating_sub(4)));
         let question = request.questions.get(request.step);
-        let selected_row = question.and_then(|question| {
-            question.options.get(request.selected.checked_sub(1)?).map(|_| {
-                let preceding = question.options.iter().take(request.selected - 1)
-                    .map(|option| 1 + usize::from(!option.description.is_empty())).sum::<usize>();
-                usize::from(!question.header.is_empty()) + 2 + preceding
-            })
-        });
         let lines: Vec<Line> = body.lines().enumerate().map(|(index, text)| {
             if Some(index) == selected_row {
                 let padding = usize::from(modal.width.saturating_sub(2)).saturating_sub(text.width());
@@ -3212,7 +3211,7 @@ impl App {
         }).collect();
         let title = if request.kind == "ask_user" {
             question.map(|question| format!(" {} ", clipped_title(&question.question,
-                usize::from(modal.width.saturating_sub(4)))))
+                usize::from(modal.width.saturating_sub(4))).0))
                 .unwrap_or_else(|| " Choose an answer ".into())
         } else { format!(" Input required · {} ", request.kind) };
         if !inline { frame.render_widget(Clear, modal); }
@@ -4324,13 +4323,14 @@ mod tests {
         let screen = painted(&app);
         let rows: Vec<_> = screen.lines().collect();
         assert!(rows[usize::from(menu.y)].contains("Where?"));
-        assert!(rows[usize::from(menu.y + 3)].contains("Staging"));
+        assert!(!screen.contains("Question: Where?"));
+        assert!(rows[usize::from(menu.y + 1)].contains("Staging"));
         assert!(rows[usize::from(menu.bottom() + 1)].contains("Prompt"));
-        assert!(menu.height <= 11, "short question should use only its content rows");
+        assert!(menu.height <= 9, "short question should use only its content rows");
         let mut terminal = Terminal::new(TestBackend::new(100, 28)).unwrap();
         terminal.draw(|frame| app.draw(frame)).unwrap();
-        assert_eq!(terminal.backend().buffer()[(menu.x + 2, menu.y + 3)].bg, theme::HIGHLIGHT);
-        assert_eq!(terminal.backend().buffer()[(menu.right() - 3, menu.y + 3)].bg, theme::HIGHLIGHT);
+        assert_eq!(terminal.backend().buffer()[(menu.x + 2, menu.y + 1)].bg, theme::HIGHLIGHT);
+        assert_eq!(terminal.backend().buffer()[(menu.right() - 3, menu.y + 1)].bg, theme::HIGHLIGHT);
         app.input_requests.clear();
 
         let pane = app.layout(app.size).panes.unwrap()[1];
