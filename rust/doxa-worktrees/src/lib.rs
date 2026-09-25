@@ -163,7 +163,7 @@ pub fn branch_status(cwd: &Path) -> Option<BranchStatus> {
 /// Change only a verified session-owned worktree. The caller must serialize
 /// this with prompt admission and reject active or queued turns first.
 pub fn switch_base(path: &Path, requested: &str) -> Result<String, String> {
-    let (record, old_base, main) = read_record(path).ok_or_else(||
+    let (record, old_base, main, base_oid) = read_record(path).ok_or_else(||
         "no verified doxa worktree here; switching the actual checkout is refused".to_owned())?;
     let keep = || format!("kept {} — merge when ready", record.branch);
     if worktree_for_branch(&main, &record.branch).as_ref() != Some(&record.path)
@@ -186,6 +186,9 @@ pub fn switch_base(path: &Path, requested: &str) -> Result<String, String> {
     let before = git_text(&record.path, &["rev-parse", "--verify", "HEAD^{commit}"])
         .filter(|oid| valid_commit_oid(oid))
         .ok_or_else(|| "could not verify worktree HEAD; switch refused".to_owned())?;
+    if base_oid.as_deref() != Some(before.as_str()) {
+        return Err("pinned base commit differs from worktree HEAD; switch refused".into());
+    }
     let target_oid = git_text(&record.path, &["rev-parse", "--verify", &format!("{target}^{{commit}}")])
         .filter(|oid| valid_commit_oid(oid))
         .ok_or_else(|| "could not verify target commit; switch refused".to_owned())?;
@@ -620,6 +623,14 @@ mod tests {
         let path = tree.path().to_path_buf();
         assert!(switch_base(&path, "doxa/switch00").unwrap_err().contains("own branch"));
         assert!(switch_base(&path, "missing").unwrap_err().contains("no such"));
+        let metadata_path = meta_path(&path).unwrap();
+        let mut stale: serde_json::Value = serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
+        stale["base_oid"] = serde_json::json!(feature_oid);
+        fs::write(&metadata_path, serde_json::to_vec(&stale).unwrap()).unwrap();
+        assert!(switch_base(&path, "feature").unwrap_err().contains("pinned base"));
+        assert_eq!(git_text(&path, &["rev-parse", "HEAD"]).as_deref(), Some(main_oid.as_str()));
+        stale["base_oid"] = serde_json::json!(main_oid);
+        fs::write(&metadata_path, serde_json::to_vec(&stale).unwrap()).unwrap();
         assert!(switch_base(&path, "feature").unwrap().contains("now based"));
         assert_eq!(git_text(&path, &["rev-parse", "HEAD"]).as_deref(), Some(feature_oid.as_str()));
         assert_eq!(git_text(&main, &["rev-parse", "HEAD"]).as_deref(), Some(main_oid.as_str()));
