@@ -1955,7 +1955,7 @@ impl App {
     }
 
     fn stop_confirmation_fits(&self) -> bool {
-        self.size.width == 0 || (self.size.width >= 40 && self.size.height >= 12)
+        self.size.width >= 40 && self.size.height >= 12
     }
 
     fn open_stop_confirmation(&mut self) {
