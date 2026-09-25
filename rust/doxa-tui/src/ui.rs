@@ -1043,7 +1043,7 @@ pub struct App {
     pub pending_answers: Vec<(String, String, serde_json::Value)>,
     pub rejected_drafts: HashMap<String, Vec<String>>,
     tool_cards: ToolCards,
-    tool_cards_revision: u64,
+    tool_cards_revision: HashMap<String, u64>,
     rendered_transcripts: RefCell<Vec<RenderedTranscript>>,
     tool_modal: bool,
     tool_selected: usize,
@@ -1176,7 +1176,7 @@ impl Default for App {
             pending_answers: Vec::new(),
             rejected_drafts: HashMap::new(),
             tool_cards: ToolCards::default(),
-            tool_cards_revision: 0,
+            tool_cards_revision: HashMap::new(),
             rendered_transcripts: RefCell::new(Vec::new()),
             tool_modal: false,
             tool_selected: 0,
@@ -1447,7 +1447,10 @@ impl App {
                 let mut tool_updated = false;
                 if self.sessions.iter().any(|session| session.id == id) {
                     tool_updated = self.tool_cards.record(&id, event_type, data);
-                    if tool_updated { self.tool_cards_revision = self.tool_cards_revision.wrapping_add(1); }
+                    if tool_updated {
+                        let revision = self.tool_cards_revision.entry(id.clone()).or_default();
+                        *revision = revision.wrapping_add(1);
+                    }
                     self.peer_map.event(&id, event_type, data);
                 }
                 match event_type {
@@ -6354,6 +6357,7 @@ impl App {
             .map(|s| s.transcript.as_str())
             .unwrap_or("No session open. Select one in the rail and press Enter.");
         let id = group.active_id().unwrap_or("");
+        let cards_revision = self.tool_cards_revision.get(id).copied().unwrap_or(0);
         let activity_line = if self.activity_label(id) == Some("Processing") {
             Some(Line::styled(
                 format!(" {} Processing…", SPINNER_FRAMES[self.spinner_frame]),
@@ -6372,14 +6376,14 @@ impl App {
                     inner[1].width.saturating_sub(2), self.expanded_tool_sections.get(id),
                     (active && self.focus == Focus::Transcript)
                         .then(|| self.selected_tool_sections.get(id).copied()).flatten(),
-                    self.tool_cards_revision, self.tool_cards.for_session(id)));
+                    cards_revision, self.tool_cards.for_session(id)));
                 cache.len() - 1
             };
             cache[position].update(content, inner[1].width.saturating_sub(2),
                 self.expanded_tool_sections.get(id),
                 (active && self.focus == Focus::Transcript)
                     .then(|| self.selected_tool_sections.get(id).copied()).flatten(),
-                self.tool_cards_revision, self.tool_cards.for_session(id));
+                cards_revision, self.tool_cards.for_session(id));
             let (window, top) = transcript_window(&cache[position].lines,
                 inner[1].height, group.scroll, activity_line);
             (window, cache[position].sections.clone(), top)
@@ -9251,6 +9255,13 @@ for line in sys.stdin:
         assert!(cache.iter().find(|entry| entry.pane == 0).unwrap().source.contains("Background update"));
         let right = cache.iter().find(|entry| entry.pane == 1).unwrap();
         assert_eq!(right.source, right_source);
+        assert_eq!(right.lines.as_ptr(), right_lines);
+        drop(cache);
+        assert!(app.apply_daemon_frame(&json!({"type":"event","session_id":"left",
+            "event":{"type":"tool_call","data":{"id":"call-1","name":"Read","input":"file.rs"}}})));
+        painted_at(&app, 140, 32);
+        let cache = app.rendered_transcripts.borrow();
+        let right = cache.iter().find(|entry| entry.pane == 1).unwrap();
         assert_eq!(right.lines.as_ptr(), right_lines);
     }
 

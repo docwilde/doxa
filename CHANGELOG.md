@@ -16,6 +16,10 @@ the stable 2.0 release has not been cut.
   sidecars remain survey-only.
 - Allow the other pane's prompt to receive input while one session has an
   unanswered request.
+- Cache up to two styled transcripts and paint only visible rows. On the
+  160×48 two-transcript benchmark, median busy redraw fell from about 301 ms
+  to 5 ms; the processing spinner and incoming requests no longer wait for
+  a full Markdown reparse on each frame.
 
 ## 2.0.0-alpha.19 — 2026-09-25
 
