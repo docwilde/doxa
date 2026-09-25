@@ -17,10 +17,13 @@ Implemented in this slice:
 - Bounded 64 KiB line-JSON input and output; slow clients have bounded output
   queues and are dropped instead of slowing other clients.
 - Prompt dispatch with a bounded eight-item FIFO, a reply before turn events,
-  and queue notifications to other clients. A missing terminal turn event is
-  synthesized so clients cannot wait forever on a returned or panicked host.
-  Host calls and a built-in minimal `status` call have protocol v1 reply
-  envelopes.
+  and queue notifications to other clients. The `queue` RPC lists scrubbed
+  previews. `cancel_queued` requires an exact queued ID; a supplied 1-based
+  position is checked against that ID before removal, so a stale position
+  cannot cancel the next prompt after a dequeue. A missing terminal turn
+  event is synthesized so clients cannot wait forever on a returned or
+  panicked host. Host calls and a built-in minimal `status` call have
+  protocol v1 reply envelopes.
 - Multiple clients, explicit handle shutdown, and a host-approved `stop` call.
 
 This is **not yet a replacement for the Python daemon**. The Python engine,

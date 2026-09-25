@@ -352,7 +352,7 @@ fn queue_rpc_lists_scrubbed_fifo_and_cancels_exactly_once() {
         {"id":"q1","text":"second [redacted]"},
         {"id":"q2","text":"third [redacted]"}
     ]));
-    send(&mut aw, json!({"type":"call","id":5,"method":"cancel_queued","params":{"position":1}}));
+    send(&mut aw, json!({"type":"call","id":5,"method":"cancel_queued","params":{"id":"q1","position":1}}));
     assert_eq!(recv(&mut a)["ok"], true);
     let cancelled = recv(&mut a);
     assert_eq!(cancelled["event"]["type"], "prompt_cancelled");
@@ -365,8 +365,12 @@ fn queue_rpc_lists_scrubbed_fifo_and_cancels_exactly_once() {
     assert_eq!(recv(&mut a)["ok"], false);
     send(&mut aw, json!({"type":"call","id":8,"method":"cancel_queued","params":{"id":"q"}}));
     assert_eq!(recv(&mut a)["ok"], false, "prefix must not cancel an unintended prompt");
-    send(&mut aw, json!({"type":"call","id":9,"method":"cancel_queued","params":{"position":0}}));
+    send(&mut aw, json!({"type":"call","id":9,"method":"cancel_queued","params":{"id":"q2","position":0}}));
     assert_eq!(recv(&mut a)["ok"], false);
+    send(&mut aw, json!({"type":"call","id":12,"method":"cancel_queued","params":{"position":1}}));
+    let positional = recv(&mut a);
+    assert_eq!(positional["ok"], false);
+    assert!(positional["error"].as_str().unwrap().contains("exact queued prompt id"));
     host.release_one();
     let mut dequeued = false;
     for _ in 0..3 {
@@ -387,6 +391,44 @@ fn queue_rpc_lists_scrubbed_fifo_and_cancels_exactly_once() {
         if recv(&mut a)["event"]["type"] == "turn_done" { break; }
     }
     assert_eq!(*host.prompts.lock().unwrap(), vec!["first secret", "third secret"]);
+}
+
+#[test]
+fn stale_position_cannot_cancel_next_item_after_dequeue() {
+    let dir = tempfile::tempdir().unwrap();
+    let host = Arc::new(QueueFixture::new());
+    let handle = Daemon::bind(dir.path(), session(), host.clone()).unwrap().start();
+    let (mut reader, mut writer) = connect(handle.socket_path());
+    recv(&mut reader);
+    send(&mut writer, json!({"type":"attach","cursor":null}));
+    for (request, text) in [(1, "running"), (2, "queued one"), (3, "queued two")] {
+        send(&mut writer, json!({"type":"prompt","id":request,"text":text}));
+        assert_eq!(recv(&mut reader)["ok"], true);
+    }
+    send(&mut writer, json!({"type":"call","id":4,"method":"queue"}));
+    assert_eq!(recv(&mut reader)["queue"], json!([
+        {"id":"q1","text":"queued one"}, {"id":"q2","text":"queued two"}
+    ]));
+    host.release_one();
+    let mut dequeued = false;
+    for _ in 0..3 {
+        if recv(&mut reader)["event"]["type"] == "prompt_dequeued" { dequeued = true; break; }
+    }
+    assert!(dequeued);
+    // Position 1 now names q2. The old listing's q1 must not cancel q2.
+    send(&mut writer, json!({"type":"call","id":5,"method":"cancel_queued",
+        "params":{"id":"q1","position":1}}));
+    let stale = recv(&mut reader);
+    assert_eq!(stale["ok"], false);
+    assert!(stale["error"].as_str().unwrap().contains("queue changed"));
+    send(&mut writer, json!({"type":"call","id":6,"method":"queue"}));
+    assert_eq!(recv(&mut reader)["queue"], json!([{"id":"q2","text":"queued two"}]));
+    send(&mut writer, json!({"type":"call","id":7,"method":"cancel_queued","params":{"id":"q2"}}));
+    assert_eq!(recv(&mut reader)["ok"], true);
+    assert_eq!(recv(&mut reader)["event"]["data"]["id"], "q2");
+    host.release_one();
+    assert_eq!(recv(&mut reader)["event"]["type"], "turn_done");
+    assert_eq!(*host.prompts.lock().unwrap(), vec!["running", "queued one"]);
 }
 
 struct PanicOnDequeue { fixture: Fixture, public_calls: AtomicUsize }
