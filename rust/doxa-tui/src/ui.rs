@@ -552,8 +552,10 @@ pub struct App {
     diff_modal: bool,
     diff_pane: bool,
     diff_target: Option<String>,
-    diff_scroll: u16,
+    diff_scroll: usize,
     diff_text: String,
+    diff_files: Vec<usize>,
+    diff_hunks: Vec<usize>,
     diff_pending: Option<Receiver<(String, diff_view::DiffSnapshot)>>,
     session_cwds: HashMap<String, PathBuf>,
     pending_peer_refresh: Option<String>,
@@ -629,6 +631,8 @@ impl Default for App {
             diff_target: None,
             diff_scroll: 0,
             diff_text: String::new(),
+            diff_files: Vec::new(),
+            diff_hunks: Vec::new(),
             diff_pending: None,
             session_cwds: HashMap::new(),
             pending_peer_refresh: None,
@@ -1272,6 +1276,10 @@ impl App {
                 KeyCode::F(5) => { self.load_diff(); return true; }
                 KeyCode::PageUp if alt => { self.diff_scroll = self.diff_scroll.saturating_sub(10); return true; }
                 KeyCode::PageDown if alt => { self.diff_scroll = self.diff_scroll.saturating_add(10); return true; }
+                KeyCode::Char('n' | 'N') if alt => { self.jump_diff(true, true); return true; }
+                KeyCode::Char('b' | 'B') if alt => { self.jump_diff(true, false); return true; }
+                KeyCode::Char('j' | 'J') if alt => { self.jump_diff(false, true); return true; }
+                KeyCode::Char('k' | 'K') if alt => { self.jump_diff(false, false); return true; }
                 _ => {}
             }
         }
@@ -1652,6 +1660,8 @@ impl App {
 
     fn load_diff(&mut self) {
         self.diff_scroll = 0;
+        self.diff_files.clear();
+        self.diff_hunks.clear();
         self.diff_pending = None;
         let Some(id) = self.groups[self.active_group].active_id().map(str::to_owned) else {
             self.diff_target = None;
@@ -1680,6 +1690,8 @@ impl App {
                 self.diff_pending = None;
                 if self.groups[self.active_group].active_id() == Some(id.as_str()) {
                     self.diff_text = markdown::sanitize(&snapshot.text);
+                    self.diff_files = snapshot.files;
+                    self.diff_hunks = snapshot.hunks;
                     self.diff_scroll = 0;
                     return true;
                 }
@@ -1701,9 +1713,29 @@ impl App {
             KeyCode::Down => self.diff_scroll = self.diff_scroll.saturating_add(1),
             KeyCode::PageUp => self.diff_scroll = self.diff_scroll.saturating_sub(10),
             KeyCode::PageDown => self.diff_scroll = self.diff_scroll.saturating_add(10),
+            KeyCode::Char('n' | 'N') => self.jump_diff(true, true),
+            KeyCode::Char('p' | 'P') => self.jump_diff(true, false),
+            KeyCode::Char('j' | 'J') => self.jump_diff(false, true),
+            KeyCode::Char('k' | 'K') => self.jump_diff(false, false),
             _ => return false,
         }
         true
+    }
+
+    fn jump_diff(&mut self, file: bool, forward: bool) {
+        let marks = if file { &self.diff_files } else { &self.diff_hunks };
+        let current = self.diff_scroll;
+        let target = if forward {
+            marks.iter().copied().find(|&row| row > current)
+        } else {
+            marks.iter().copied().rev().find(|&row| row < current)
+        };
+        if let Some(row) = target {
+            self.diff_scroll = row;
+        } else {
+            self.notice = format!("No {} {} in this diff", if forward { "next" } else { "previous" },
+                if file { "file" } else { "hunk" });
+        }
     }
 
     fn active_tool_cards(&self) -> &[tool_cards::ToolCard] {
@@ -2509,7 +2541,7 @@ impl App {
         let modal = Rect::new(area.x + (area.width - width) / 2, area.y + (area.height - height) / 2, width, height);
         frame.render_widget(Clear, modal);
         let rows: Vec<Line> = self.diff_text.lines()
-            .skip(usize::from(self.diff_scroll))
+            .skip(self.diff_scroll)
             .take(usize::from(height.saturating_sub(2)))
             .map(|line| {
             let color = if line.starts_with('+') && !line.starts_with("+++") { theme::SUCCESS }
@@ -2518,14 +2550,14 @@ impl App {
             Line::styled(line.to_owned(), Style::default().fg(color))
         }).collect();
         frame.render_widget(Paragraph::new(rows)
-            .block(Block::default().title(" Worktree diff · ↑/↓ scroll · R refresh · F2/Esc close ")
+            .block(Block::default().title(" Worktree diff · N/P files · J/K hunks · R refresh · F2/Esc close ")
                 .borders(Borders::ALL).border_style(Style::default().fg(theme::BORDER))
             .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED))), modal);
     }
 
     fn draw_diff_pane(&self, frame: &mut Frame, area: Rect) {
         let rows: Vec<Line> = self.diff_text.lines()
-            .skip(usize::from(self.diff_scroll))
+            .skip(self.diff_scroll)
             .take(usize::from(area.height.saturating_sub(2)))
             .map(|line| {
                 let color = if line.starts_with('+') && !line.starts_with("+++") { theme::SUCCESS }
@@ -2534,7 +2566,7 @@ impl App {
                 Line::styled(line.to_owned(), Style::default().fg(color))
             }).collect();
         frame.render_widget(Paragraph::new(rows)
-            .block(Block::default().title(" Worktree diff · F5 refresh · Alt+PgUp/PgDn scroll · F4 close ")
+            .block(Block::default().title(" Worktree diff · Alt+N/B files · Alt+J/K hunks · F5 refresh · F4 close ")
                 .borders(Borders::ALL).border_style(Style::default().fg(theme::BORDER)))
             .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)), area);
     }
@@ -3766,6 +3798,46 @@ mod tests {
         app.handle(Event::Key(KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE)));
         assert!(!app.diff_pane);
         assert!(painted(&app).contains("hidden transcript"));
+    }
+
+    #[test]
+    fn diff_navigation_jumps_files_and_hunks_without_editing_prompt() {
+        let mut app = App::default();
+        app.handle(Event::Resize(100, 28));
+        app.diff_pane = true;
+        app.diff_text = "Base: HEAD\ndiff --git a/one b/one\n@@ first\n line\n@@ second\ndiff --git a/two b/two\n@@ third".into();
+        app.diff_files = vec![1, 5];
+        app.diff_hunks = vec![2, 4, 6];
+        app.input = "draft".into();
+        let alt = KeyModifiers::ALT;
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('j'), alt)));
+        assert_eq!(app.diff_scroll, 2);
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('j'), alt)));
+        assert_eq!(app.diff_scroll, 4);
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('n'), alt)));
+        assert_eq!(app.diff_scroll, 5);
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('k'), alt)));
+        assert_eq!(app.diff_scroll, 4);
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('b'), alt)));
+        assert_eq!(app.diff_scroll, 1);
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('b'), alt)));
+        assert_eq!(app.diff_scroll, 1);
+        assert!(app.notice.contains("No previous file"));
+        assert_eq!(app.input, "draft");
+
+        app.diff_modal = true;
+        app.diff_scroll = 0;
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE)));
+        assert_eq!(app.diff_scroll, 1);
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)));
+        assert_eq!(app.diff_scroll, 2);
+        app.diff_hunks.push(70_000);
+        app.diff_scroll = 6;
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)));
+        assert_eq!(app.diff_scroll, 70_000);
+        app.load_diff();
+        assert!(app.diff_files.is_empty());
+        assert!(app.diff_hunks.is_empty());
     }
 
     #[test]
