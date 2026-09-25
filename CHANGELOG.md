@@ -19,6 +19,8 @@ the stable 2.0 release has not been cut.
   worktree lock.
 - Hit-test chip hover and clicks against the painted frame so resizing and
   pane separators cannot activate the wrong chip.
+- Remove the redundant LORE scrub status chip while retaining secret scrub
+  checks and fail-closed handling.
 - Show dollar costs only for API-billed sessions. For a verified Claude
   subscription, show its connected account's plan and same-account cached
   quota; omit the subscription pill when both plan and quota are unknown.

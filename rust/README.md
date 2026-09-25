@@ -206,8 +206,8 @@ index. Duplicate queued hunks are refused. Pending
 rejections block closing the diff or leaving the UI until they finish, and are
 cancelled if the session ends. The diff pane requires enough
 terminal space for two panes. Each split pane has its own prompt and keeps a draft for its active
-session. Its status rows show engine and model chips, plus context, billing, and
-LORE status. Dollar cost appears only for API-billed sessions. A connected
+session. Its chip row shows engine, model, context, curated memory, beliefs,
+and available billing data. Dollar cost appears only for API-billed sessions. A connected
 Claude subscription shows its reported plan and cached quota when the local
 CLI cache belongs to the same account; `~` marks stale cached usage. Codex
 plan and quota remain unknown until its daemon has a verified provider source,

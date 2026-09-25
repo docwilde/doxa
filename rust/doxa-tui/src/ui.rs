@@ -171,7 +171,6 @@ fn chip_hint(kind: &str) -> &'static str {
         "beliefs" => "LORE beliefs · click to browse",
         "cost" => "Provider billing and quota information",
         "balance" => "Current DeepSeek API account balance",
-        "lore" => "LORE state and scrub health · click for details",
         "more" => "More chips · click to reveal hidden chips",
         _ => "",
     }
@@ -3869,7 +3868,6 @@ impl App {
                 chips.push(("balance", format!("Balance {balance}")));
             }
         }
-        chips.push(("lore", format!("LORE {}", telemetry.and_then(|value| value.lore.as_deref()).unwrap_or("?"))));
         chips
     }
 

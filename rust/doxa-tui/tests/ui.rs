@@ -260,7 +260,7 @@ fn telemetry_chips_keep_per_session_provenance_and_unknowns() {
     app.groups[1].tabs.push("vendor".into());
     let unknown = screen(&app, 300, 24);
     assert!(!unknown.contains("Plan ?") && !unknown.contains("quota ?"), "{unknown}");
-    assert!(unknown.contains("Beliefs ▾   $?   LORE ?"), "{unknown}");
+    assert!(unknown.contains("Beliefs ▾   $?"), "{unknown}");
     app.apply_daemon_frame(&json!({"type":"event","session_id":"codex","event":{"type":"turn_done","data":{
         "input_tokens":120,"output_tokens":30,"usage_scope":"session","usage_source":"codex_cli_turn_completed",
         "ctx_percentage":null,"session_cost_usd":null
@@ -278,13 +278,13 @@ fn telemetry_chips_keep_per_session_provenance_and_unknowns() {
     assert!(!rendered.contains("Plan ?") && !rendered.contains("quota ?"), "{rendered}");
     app.apply_daemon_frame(&json!({"type":"reply","ok":true,"status":{"session_id":"codex","lore_scrub":"unavailable"}}));
     let rendered = screen(&app, 300, 24);
-    assert!(rendered.contains("LORE scrub unavailable"), "{rendered}");
+    assert!(!rendered.contains("LORE scrub"), "{rendered}");
     app.apply_daemon_frame(&json!({"type":"telemetry_unavailable","session_id":"codex"}));
-    assert!(screen(&app, 300, 24).contains("LORE ?"));
+    assert!(!screen(&app, 300, 24).contains("LORE ?"));
     app.apply_daemon_frame(&json!({"type":"event","session_id":"vendor","event":{"type":"turn_done","data":{
         "ctx_percentage":null,"cost_usd":null,"session_cost_usd":null
     }}}));
-    assert!(screen(&app, 300, 24).contains("Ctx ?   p 0%/u 40%   Beliefs ▾   $?   LORE ?"));
+    assert!(screen(&app, 300, 24).contains("Ctx ?   p 0%/u 40%   Beliefs ▾   $?"));
 }
 
 #[test]
@@ -302,7 +302,7 @@ fn telemetry_status_restores_reported_values_without_inventing_zero_usage() {
     assert!(!rendered.contains("Tokens "), "{rendered}");
     assert!(rendered.contains("$0.0123 est"), "{rendered}");
     assert!(!rendered.contains("Cost ") && !rendered.contains("$0.0123 session"), "{rendered}");
-    assert!(rendered.contains("LORE 9 beliefs"), "{rendered}");
+    assert!(rendered.contains("9 beliefs ▾"), "{rendered}");
     app.apply_daemon_frame(&json!({"type":"reply","ok":true,"status":{
         "session_id":"one","usage":{"num_turns":0,"input_tokens":0,"output_tokens":0}
     }}));
