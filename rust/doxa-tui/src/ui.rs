@@ -858,6 +858,7 @@ pub struct App {
     launching: bool,
     pending_model_queries: Vec<String>,
     pending_model_changes: Vec<(String, String)>,
+    pending_effort_changes: Vec<(String, String)>,
     pub pending_prompts: Vec<(String, String)>,
     pending_peer_messages: Vec<(String, String, String)>,
     pub input_requests: Vec<InputRequest>,
@@ -978,6 +979,7 @@ impl Default for App {
             launching: false,
             pending_model_queries: Vec::new(),
             pending_model_changes: Vec::new(),
+            pending_effort_changes: Vec::new(),
             pending_prompts: Vec::new(),
             pending_peer_messages: Vec::new(),
             input_requests: Vec::new(),
@@ -1274,6 +1276,12 @@ impl App {
                         }
                         true
                     }
+                    "effort_changed" => {
+                        if let Some(effort) = data["effort"].as_str().filter(|effort| !effort.is_empty()) {
+                            self.session_efforts.insert(id, safe_label(effort));
+                        }
+                        true
+                    }
                     "permission_mode_changed" => {
                         if let Some(mode) = data["mode"].as_str().filter(|mode| permission_index(mode).is_some()) {
                             self.permission_modes.insert(id, mode.to_owned());
@@ -1457,6 +1465,16 @@ impl App {
                     format!("Model selected · {}", safe_label(frame["model"].as_str().unwrap_or("awaiting event")))
                 } else {
                     format!("Model change failed · {}", safe_label(frame["error"].as_str().unwrap_or("unknown error")))
+                };
+                true
+            }
+            "set_effort_reply" => {
+                self.notice = if frame["ok"] == true {
+                    format!("Effort accepted · {} · awaiting session event",
+                        safe_label(frame["effort"].as_str().unwrap_or("unknown")))
+                } else {
+                    format!("Effort change failed · {}",
+                        safe_label(frame["error"].as_str().unwrap_or("unknown error")))
                 };
                 true
             }
@@ -2479,13 +2497,15 @@ impl App {
             self.notice = "Effort capability is unknown for this session".into();
             return;
         };
-        let levels = self.catalog_efforts.get(&(engine.clone(), model.clone())).cloned()
-            .unwrap_or_else(|| effort_choices(engine, model).iter().map(|level| (*level).to_owned()).collect());
+        let known = effort_choices(engine, model);
+        let levels = self.catalog_efforts.get(&(engine.clone(), model.clone()))
+            .map(|levels| levels.iter().filter(|level| known.contains(&level.as_str())).cloned().collect())
+            .unwrap_or_else(|| known.iter().map(|level| (*level).to_owned()).collect::<Vec<_>>());
         if levels.is_empty() {
-            self.notice = "No verified effort choices for this session model; check the new-session vendor catalog".into();
+            self.notice = "Live effort change is unavailable for this session model".into();
             return;
         }
-        let selected = self.next_efforts.get(engine).or_else(|| self.session_efforts.get(&id))
+        let selected = self.session_efforts.get(&id)
             .and_then(|current| levels.iter().position(|level| level == current)).unwrap_or(0);
         self.effort_picker = Some(EffortPicker { session_id: id, engine: engine.clone(), model: model.clone(),
             levels, selected });
@@ -2496,11 +2516,13 @@ impl App {
         let Some((Some(engine), Some(model))) = self.session_identity.get(&picker.session_id) else { return; };
         if engine != &picker.engine || model != &picker.model { return; }
         let Some(chosen) = picker.levels.get(picker.selected) else { return; };
-        let allowed = self.catalog_efforts.get(&(engine.clone(), model.clone())).cloned()
-            .unwrap_or_else(|| effort_choices(engine, model).iter().map(|level| (*level).to_owned()).collect());
+        let known = effort_choices(engine, model);
+        let allowed = self.catalog_efforts.get(&(engine.clone(), model.clone()))
+            .map(|levels| levels.iter().filter(|level| known.contains(&level.as_str())).cloned().collect())
+            .unwrap_or_else(|| known.iter().map(|level| (*level).to_owned()).collect::<Vec<_>>());
         if !allowed.contains(chosen) { return; }
-        self.next_efforts.insert(engine.clone(), chosen.clone());
-        self.notice = format!("{engine} effort for new sessions: {chosen} · current session unchanged");
+        self.pending_effort_changes.push((picker.session_id, chosen.clone()));
+        self.notice = format!("Requesting {engine} effort {chosen} for this session…");
     }
 
     fn effort_picker_key(&mut self, key: KeyEvent) -> bool {
@@ -5052,9 +5074,9 @@ impl App {
                     Style::default().fg(if index == *selected { theme::ACCENT } else { theme::SECONDARY })));
             }
         } else if let Some(picker) = &self.effort_picker {
-            title = " Effort · new sessions only · Enter select · Esc close ";
+            title = " Effort · this session · Enter select · Esc close ";
             let current = self.session_efforts.get(&picker.session_id).map(String::as_str).unwrap_or("unknown");
-            lines.push(Line::from(format!(" Current session keeps {current}; {}/{}", picker.engine, picker.model)));
+            lines.push(Line::from(format!(" Current: {current} · {}/{} · idle session required", picker.engine, picker.model)));
             lines.push(Line::from(""));
             let visible = usize::from(height.saturating_sub(4)).max(1);
             let start = picker.selected.saturating_sub(visible.saturating_sub(1));
@@ -6126,6 +6148,22 @@ fn dispatch_model_controls(app: &mut App, sender: &SyncSender<crate::bridge::Wor
             Err(_) => unreachable!(),
         }
     }
+    let mut efforts = std::mem::take(&mut app.pending_effort_changes).into_iter();
+    while let Some((id, effort)) = efforts.next() {
+        match sender.try_send(crate::bridge::WorkerCommand::SetEffort(id, effort)) {
+            Ok(()) => {}
+            Err(TrySendError::Full(crate::bridge::WorkerCommand::SetEffort(id, effort))) => {
+                app.pending_effort_changes.push((id, effort));
+                app.pending_effort_changes.extend(efforts);
+                break;
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                app.notice = "Daemon unavailable for effort change".into();
+                return true;
+            }
+            Err(_) => unreachable!(),
+        }
+    }
     let mut permissions = std::mem::take(&mut app.pending_permission_changes).into_iter();
     while let Some((id, mode)) = permissions.next() {
         match sender.try_send(crate::bridge::WorkerCommand::SetPermissionMode(id, mode)) {
@@ -6636,7 +6674,7 @@ mod tests {
     }
 
     #[test]
-    fn effort_chip_picker_is_per_session_and_sets_only_new_session_default() {
+    fn effort_chip_picker_requests_current_session_change_and_waits_for_event() {
         let mut app = App::default();
         app.handle(Event::Resize(220, 32));
         app.rail_visible = false;
@@ -6650,11 +6688,16 @@ mod tests {
         app.handle(Event::Key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::ALT)));
         assert_eq!(app.effort_picker.as_ref().unwrap().levels, ["none", "low", "high", "max"]);
         assert_eq!(app.effort_picker.as_ref().unwrap().selected, 2);
-        assert!(painted(&app).contains("new sessions only"));
+        assert!(painted(&app).contains("this session"));
         app.handle(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
-        assert_eq!(app.next_efforts["deepseek"], "max");
+        assert_eq!(app.pending_effort_changes, vec![("deep-1".into(), "max".into())]);
         assert_eq!(app.session_efforts["deep-1"], "high");
+        app.apply_daemon_frame(&json!({"type":"set_effort_reply","session_id":"deep-1","ok":true,"effort":"max"}));
+        assert_eq!(app.session_efforts["deep-1"], "high");
+        app.apply_daemon_frame(&json!({"type":"event","session_id":"deep-1",
+            "event":{"type":"effort_changed","data":{"effort":"max"}}}));
+        assert_eq!(app.session_efforts["deep-1"], "max");
 
         // The closed picker moves the chip strip back up before the next
         // pointer event; use the freshly painted hit area.
@@ -6670,7 +6713,7 @@ mod tests {
         let menu = app.active_chooser_rect().unwrap();
         app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
             column: menu.x + 2, row: menu.y + 3, modifiers: KeyModifiers::NONE }));
-        assert_eq!(app.next_efforts["deepseek"], "none");
+        assert_eq!(app.pending_effort_changes.last(), Some(&("deep-1".into(), "none".into())));
         assert!(app.effort_picker.is_none());
         app.apply_daemon_frame(&json!({"type":"hello","session_id":"glm-2",
             "engine":"glm","model":"glm-5.3-flash","effort":"low"}));
@@ -6680,7 +6723,7 @@ mod tests {
         app.open_effort_picker();
         assert_eq!(app.effort_picker.as_ref().unwrap().levels, ["low", "high", "max"]);
         assert!(!app.effort_picker.as_ref().unwrap().levels.contains(&"none".to_owned()));
-        assert_eq!(app.next_efforts["deepseek"], "none");
+        assert_eq!(app.pending_effort_changes.last(), Some(&("deep-1".into(), "none".into())));
         app.apply_daemon_frame(&json!({"type":"event","session_id":"glm-2",
             "event":{"type":"model_changed","data":{"model":"unknown-new-model"}}}));
         assert!(app.effort_picker.is_none());
@@ -6700,7 +6743,7 @@ mod tests {
         app.groups[0].tabs = vec!["unknown".into()];
         app.open_effort_picker();
         assert!(app.effort_picker.is_none());
-        assert!(app.notice.contains("No verified effort"));
+        assert!(app.notice.contains("Live effort change is unavailable"));
 
         app.engine_selected = 2;
         app.select_new_engine();
@@ -6952,7 +6995,7 @@ mod tests {
                 "permission" => assert!(app.permission_picker.is_some()),
                 "engine" => assert!(app.engine_picker),
                 "model" => assert!(app.model_picker.is_some()),
-                "effort" => assert!(app.notice.contains("No verified effort")),
+                "effort" => assert!(app.notice.contains("Live effort change is unavailable")),
                 "beliefs" => assert!(app.lore_picker.is_some()),
                 _ => {
                     assert_eq!(app.chip_info.as_ref().map(|info| info.kind), Some(kind));

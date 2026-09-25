@@ -58,7 +58,7 @@ alpha. Native fleet supervision and remote control are still being ported.
 
 ![Rust reasoning effort picker above the prompt for a DeepSeek session](assets/shots/rust-effort.png)
 
-*The effort chip reports the current session; picker choices apply to new sessions.*
+*The effort chip reports the current session; on supported vendor models, picker choices apply before its next turn when idle.*
 
 ![Rust session history picker above the prompt in a single session pane](assets/shots/rust-history.png)
 

@@ -29,7 +29,7 @@ commands still pass to the active engine.
 | `/peers`, `/mesh`, `/msg` | Local or partial | Rich peer details, browser mesh and remote peers |
 | `/diff` | Partial | Full 1.19 diff command options and worktree controls |
 | `/fleet` | Bridge or partial | Native supervisor, approval desk, barrier, budgets and fleet tab |
-| `/model`, `/engine`, `/mode`, `/effort` | Local picker for bare form; new-session vendor models refresh from account catalogs, with DeepSeek per-model effort and measured GLM fallback; live effort chip reports daemon state | Supported argument forms and live effort changes where the native host allows them |
+| `/model`, `/engine`, `/mode`, `/effort` | Local picker for bare form; new-session vendor models refresh from account catalogs, with DeepSeek per-model effort and measured GLM fallback; live effort chip reports daemon state; known DeepSeek/GLM models accept idle live effort changes for the next turn | Supported argument forms for other engines and newer catalog-only vendor models |
 | `/beliefs`, `/pending` | Belief reading and staged approve/reject after complete raw review | Belief confirm/contradict/stale/retract controls |
 | `/sessions`, `/search`, `/resume`, `/attach` | Bounded archived transcript search, verified saved Claude/Codex/vendor resume when the recorded directory exists, CLI attach/Claude resume and live TUI attach picker with ID/title search | Full indexed cross-session search and deleted-worktree recovery |
 | `/usage`, `/context`, `/queue` | Summary chips and queued prompt list/cancel picker | Detailed usage and context screens |

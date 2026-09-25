@@ -15,7 +15,7 @@ use tokio::sync::watch;
 pub struct VendorHost {
     vendor: Vendor,
     model: String,
-    effort: String,
+    effort: Mutex<String>,
     lore: Mutex<LoreClient>,
     scrub_failed: AtomicBool,
     history: Mutex<Vec<Value>>,
@@ -107,7 +107,7 @@ impl VendorHost {
         let host = Self {
             vendor,
             model,
-            effort,
+            effort: Mutex::new(effort),
             lore: Mutex::new(lore),
             scrub_failed: AtomicBool::new(false),
             history: Mutex::new(history),
@@ -165,7 +165,7 @@ impl VendorHost {
 }
 
 impl Host for VendorHost {
-    fn initial_effort(&self) -> Option<String> { Some(self.effort.clone()) }
+    fn initial_effort(&self) -> Option<String> { Some(self.effort.lock().unwrap().clone()) }
     fn billing_snapshot(&self) -> Option<Value> {
         if self.vendor != Vendor::DeepSeek { return None; }
         self.balance.lock().ok().and_then(|value| value.as_ref()
@@ -201,6 +201,7 @@ impl Host for VendorHost {
             self.cancel();
         }
         let started = Instant::now();
+        let effort = self.effort.lock().unwrap().clone();
         emit(json!({"type":"turn_started","data":{"prompt":prompt,
             "vendor_tools":if self.workspace_read { "workspace-read" } else { "none" }}}));
         let mut history = self.history.lock().unwrap().clone();
@@ -219,7 +220,7 @@ impl Host for VendorHost {
                         self.vendor,
                         endpoint,
                         &self.model,
-                        &self.effort,
+                        &effort,
                         &mut history,
                         &prompt,
                         gate,
@@ -231,7 +232,7 @@ impl Host for VendorHost {
                     runtime.block_on(doxa_vendors::run_turn(
                         self.vendor,
                         &self.model,
-                        &self.effort,
+                        &effort,
                         &mut history,
                         &prompt,
                         gate,
@@ -244,7 +245,7 @@ impl Host for VendorHost {
                 runtime.block_on(doxa_vendors::run_turn(
                     self.vendor,
                     &self.model,
-                    &self.effort,
+                    &effort,
                     &mut history,
                     &prompt,
                     gate,
@@ -344,8 +345,19 @@ impl Host for VendorHost {
         }
     }
 
-    fn call(&self, method: &str, _: &Value) -> Result<Value, String> {
+    fn call(&self, method: &str, params: &Value) -> Result<Value, String> {
         match method {
+            "set_effort" => {
+                let effort = params.get("effort").and_then(Value::as_str)
+                    .ok_or("set_effort requires an effort string")?;
+                if !self.vendor.effort_choices(&self.model).contains(&effort) {
+                    return Err("unsupported effort for this vendor model".into());
+                }
+                doxa_vendors::request_body(self.vendor, &self.model, &[], effort)
+                    .map_err(|_| "unsupported effort for this vendor model")?;
+                *self.effort.lock().unwrap() = effort.to_owned();
+                Ok(json!({"effort":effort}))
+            }
             "interrupt" => {
                 self.cancel();
                 Ok(json!({}))

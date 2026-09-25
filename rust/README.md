@@ -250,8 +250,12 @@ pair leaves launch disabled with an explanation. A blank model for other
 engines uses the configured default. The effort chip immediately follows the
 model chip and displays the active daemon's reported value, or `?` when it
 has no verified value. `Alt+F` and bare `/effort` open an inline picker for a
-new-session default where supported. Selecting there does not change the
-active session. Claude uses the sidecar
+the current DeepSeek or GLM session for known models. The daemon accepts a
+change only while the session is idle with no queued prompts; a successful
+change applies to the next admitted turn and updates the chip after its
+event. Newer models discovered only from a live catalog remain available
+in the new-session form, but live effort control is unavailable until their
+model capability is built into the native host. Claude uses the sidecar
 installed beside `doxa-rs`; `DOXA_CLAUDE_SCRIPT` can select another absolute
 path during development. The active
 session's engine cannot be switched. `Alt+M` opens the live model picker when the daemon
@@ -413,7 +417,8 @@ scrubbing and snapshots but cannot advertise transcript indexing. Automatic Code
 review remains unavailable, matching the Python Codex host; MCP registration
 is still open. The registry reports the selected engine. `status`, `interrupt`,
 and `stop` are supported; Claude also supports `answer_needs_input`,
-`set_model`, and `set_permission_mode`. `peers` returns a
+`set_model`, and `set_permission_mode`; native vendor hosts also support
+`set_effort` while idle. `peers` returns a
 read-only, same-project roster of live peer IDs and LORE-scrubbed titles (up
 to 32). It fails closed when the LORE scrubber is unavailable. Other calls
 return an explicit error. The

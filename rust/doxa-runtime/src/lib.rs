@@ -26,13 +26,13 @@ const MAX_CONNECTIONS: usize = 64;
 /// If the host returns without `turn_done` or `turn_refused`, the daemon emits
 /// one `turn_done`; it also emits an error terminal if the host panics.
 /// Methods are called from worker threads and must be safe for concurrent calls.
-/// Successful `set_model` and `set_permission_mode` calls must return an
-/// object containing a selected `model` or `mode` string, respectively.
+/// Successful `set_model`, `set_effort`, and `set_permission_mode` calls must
+/// return an object containing the selected `model`, `effort`, or `mode`.
 pub trait Host: Send + Sync + 'static {
     fn prompt(&self, text: &str, emit: &mut dyn FnMut(Value));
     fn call(&self, method: &str, params: &Value) -> Result<Value, String>;
     fn initial_model(&self) -> Option<String> { None }
-    /// Effort asserted for this session at connect time; None is unknown.
+    /// Initial effort asserted for this session; None is unknown.
     fn initial_effort(&self) -> Option<String> { None }
     fn initial_permission_mode(&self) -> String { "default".to_owned() }
     fn can_set_model(&self) -> bool { false }
@@ -79,6 +79,7 @@ struct State {
     next_turn_id: u64,
     model: Option<String>,
     permission_mode: String,
+    effort: Option<String>,
 }
 
 struct Inner {
@@ -120,6 +121,7 @@ impl Daemon {
         }
         let model = host.initial_model().or_else(|| session.model.clone());
         let permission_mode = host.initial_permission_mode();
+        let effort = host.initial_effort();
         let hello = json!({"type":"hello","proto":1,"doxa":session.doxa_version,
             "session_id":session.session_id,"model":model,"engine":session.engine,
             "permission_mode":permission_mode,"bypass_armed":false,
@@ -147,7 +149,7 @@ impl Daemon {
             inner: Arc::new(Inner { state: Mutex::new(State {
                 next_seq: 0, ring: VecDeque::new(), clients: HashMap::new(), busy: false,
                 prompts: VecDeque::new(), next_queue_id: 1, next_turn_id: 1,
-                model, permission_mode,
+                model, permission_mode, effort,
             }), controls: Mutex::new(()), host, session, stopping: AtomicBool::new(false), next_client_id: AtomicU64::new(1),
                 active_connections: AtomicUsize::new(0) }),
             listener, socket_path, socket_ino,
@@ -306,7 +308,6 @@ fn handle_client(inner: Arc<Inner>, stream: UnixStream) {
         Err(_) => return,
     };
     let can_set_model = inner.host.can_set_model();
-    let effort = inner.host.initial_effort();
     let can_set_permission_mode = inner.host.can_set_permission_mode();
     let lore_scrub = inner.host.lore_scrub_status();
     let billing = inner.host.billing_snapshot();
@@ -315,7 +316,7 @@ fn handle_client(inner: Arc<Inner>, stream: UnixStream) {
         json!({"type":"hello", "proto":1, "doxa":inner.session.doxa_version,
             "session_id":inner.session.session_id, "model":state.model,
             "permission_mode":state.permission_mode, "bypass_armed":false,
-            "engine":inner.session.engine, "effort":effort, "cwd":inner.session.cwd, "next_seq":state.next_seq,
+            "engine":inner.session.engine, "effort":state.effort, "cwd":inner.session.cwd, "next_seq":state.next_seq,
             "transcript_path":transcript.as_ref().map(|(path, _)| path.to_string_lossy().into_owned()),
             "transcript_bytes":transcript.as_ref().map(|(_, size)| *size),
             "running":state.busy,"queued":state.prompts.len(),
@@ -442,7 +443,7 @@ fn handle_call(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame: &Value) {
     let Some(req_id) = frame["id"].as_u64() else { return; };
     let Some(method) = frame["method"].as_str() else { return; };
     let params = frame.get("params").filter(|v| v.is_object()).cloned().unwrap_or_else(|| json!({}));
-    let _control_guard = matches!(method, "set_model" | "set_permission_mode" | "switch_branch")
+    let _control_guard = matches!(method, "set_model" | "set_effort" | "set_permission_mode" | "switch_branch")
         .then(|| inner.controls.lock().unwrap());
     let (result, changed) = if method == "queue" {
         let state = inner.state.lock().unwrap();
@@ -474,14 +475,13 @@ fn handle_call(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame: &Value) {
         }
     } else if method == "status" {
         let can_set_model = inner.host.can_set_model();
-        let effort = inner.host.initial_effort();
         let can_set_permission_mode = inner.host.can_set_permission_mode();
         let lore_scrub = inner.host.lore_scrub_status();
         let billing = inner.host.billing_snapshot();
         let state = inner.state.lock().unwrap();
         (Ok(json!({"status":{"session_id":inner.session.session_id,"cwd":inner.session.cwd,
             "model":state.model,"permission_mode":state.permission_mode,
-            "engine":inner.session.engine,"effort":effort,"running":state.busy,"queued":state.prompts.len(),
+            "engine":inner.session.engine,"effort":state.effort,"running":state.busy,"queued":state.prompts.len(),
             "can_set_model":can_set_model,
             "can_set_permission_mode":can_set_permission_mode,
             "lore_scrub":lore_scrub,"billing":billing}})), None)
@@ -499,6 +499,29 @@ fn handle_call(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame: &Value) {
             let event = result.as_ref().ok().and_then(|value| value["base"].as_str())
                 .map(|base| json!({"type":"branch_changed","data":{"base":base}}));
             (result, event)
+        }
+    } else if method == "set_effort" {
+        // Admission and control share the state mutex. A prompt cannot be
+        // admitted between the idle check and the host's effort update.
+        let mut state = inner.state.lock().unwrap();
+        if state.busy || !state.prompts.is_empty() || inner.stopping.load(Ordering::Acquire) {
+            (Err("effort change requires an idle session with no queued prompts".into()), None)
+        } else {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(||
+                inner.host.call(method, &params)
+            )).unwrap_or_else(|_| Err("effort host panicked".into())).and_then(|extra| {
+                let requested = params.get("effort").and_then(Value::as_str);
+                let selected = extra.get("effort").and_then(Value::as_str);
+                if selected.is_some_and(|value| Some(value) == requested && !value.is_empty()
+                    && !value.chars().any(char::is_control)) { Ok(extra) }
+                else { Err("host returned invalid effort reply".into()) }
+            });
+            let changed = result.as_ref().ok().and_then(|extra| extra["effort"].as_str())
+                .map(|effort| {
+                    state.effort = Some(effort.to_owned());
+                    json!({"type":"effort_changed","data":{"effort":effort}})
+                });
+            (result, changed)
         }
     } else if matches!(method, "set_model" | "set_permission_mode") {
         // Control calls may wait on a sidecar. Hold the control lock across
