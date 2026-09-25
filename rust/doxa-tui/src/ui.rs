@@ -18,10 +18,11 @@ use crossterm::{
     execute,
 };
 use ratatui::backend::CrosstermBackend;
+use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Tabs, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Tabs, Widget, Wrap};
 use ratatui::{Frame, Terminal};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -186,6 +187,7 @@ struct BranchPicker {
 
 #[derive(Debug)]
 struct RepoPicker {
+    current_dir: PathBuf,
     paths: Vec<PathBuf>,
     selected: usize,
 }
@@ -420,6 +422,40 @@ fn clipped_title(value: &str, width: usize) -> (String, bool) {
 fn unsafe_input_char(ch: char) -> bool {
     ch.is_control()
         || matches!(ch, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+}
+
+fn safe_repo_directory(path: &Path) -> Option<PathBuf> {
+    let path = std::fs::canonicalize(path).ok()?;
+    let label = path.to_str()?;
+    (path.is_dir() && label.len() <= 4096 && !label.chars().any(unsafe_input_char))
+        .then_some(path)
+}
+
+fn repo_directory_entries(current: &Path) -> Vec<PathBuf> {
+    // Directory enumeration is bounded so a huge worktree never stalls the UI.
+    let mut paths = vec![current.to_path_buf()];
+    if let Some(parent) = current.parent().and_then(safe_repo_directory) {
+        if parent != current { paths.push(parent); }
+    }
+    let mut children: Vec<_> = std::fs::read_dir(current).into_iter().flatten()
+        .take(128).filter_map(Result::ok)
+        .filter_map(|entry| safe_repo_directory(&entry.path()))
+        .filter(|path| path != current && !paths.contains(path))
+        .collect();
+    children.sort();
+    children.dedup();
+    paths.extend(children);
+    paths
+}
+
+fn repo_path_label(path: &Path) -> String {
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        if let Ok(relative) = path.strip_prefix(&home) {
+            return if relative.as_os_str().is_empty() { "~".into() }
+                else { format!("~/{}", relative.display()) };
+        }
+    }
+    path.display().to_string()
 }
 
 fn prompt_height(draft: &str, pane_height: u16) -> u16 {
@@ -952,9 +988,10 @@ impl InputRequest {
     }
 }
 
-fn input_request_body(request: &InputRequest, title_width: usize) -> (String, Option<usize>) {
+fn input_request_body(request: &InputRequest, title_width: usize) -> (String, Option<usize>, Vec<usize>) {
     let mut body = String::new();
     let mut selected_row = None;
+    let mut option_rows = Vec::new();
     if request.kind == "ask_user" {
         if let Some(question) = request.questions.get(request.step) {
             if !question.header.is_empty() {
@@ -966,6 +1003,7 @@ fn input_request_body(request: &InputRequest, title_width: usize) -> (String, Op
                 body.push_str("\n\n");
             }
             for (i, option) in question.options.iter().enumerate() {
+                option_rows.push(body.lines().count());
                 if i + 1 == request.selected { selected_row = Some(body.lines().count()); }
                 body.push_str(&format!(
                     "{} {}. {}\n",
@@ -993,7 +1031,31 @@ fn input_request_body(request: &InputRequest, title_width: usize) -> (String, Op
     if request.sending {
         body.push_str("\nSending answer…");
     }
-    (body, selected_row)
+    (body, selected_row, option_rows)
+}
+
+fn ask_user_option_at(request: &InputRequest, menu: Rect, row: u16) -> Option<usize> {
+    if request.kind != "ask_user" || row <= menu.y || row >= menu.bottom().saturating_sub(1) {
+        return None;
+    }
+    let (body, _, option_rows) = input_request_body(request, usize::from(menu.width.saturating_sub(4)));
+    // Render the same wrapping and scroll as the visible dialog into a small
+    // scratch buffer. Each option uses an invisible color marker, so a click
+    // on a wrapped description cannot accidentally choose the next option.
+    let lines: Vec<Line> = body.lines().enumerate().map(|(line_index, text)| {
+        if let Some(option) = option_rows.iter().rposition(|&start| start <= line_index) {
+            Line::styled(text.to_owned(), Style::default().bg(Color::Rgb(0, 0, (option + 1) as u8)))
+        } else { Line::from(text.to_owned()) }
+    }).collect();
+    let area = Rect::new(0, 0, menu.width, menu.height);
+    let mut buffer = Buffer::empty(area);
+    Paragraph::new(lines).wrap(Wrap { trim: false }).scroll((request.scroll, 0))
+        .block(Block::default().borders(Borders::ALL)).render(area, &mut buffer);
+    let local_row = row - menu.y;
+    (1..menu.width.saturating_sub(1)).find_map(|x| match buffer[(x, local_row)].bg {
+        Color::Rgb(0, 0, option) if option > 0 => Some(usize::from(option)),
+        _ => None,
+    })
 }
 
 #[derive(Debug)]
@@ -2534,7 +2596,6 @@ impl App {
         }
         if self.settings_menu.is_some() { return self.settings_menu_key(key); }
         if self.repo_picker.is_some() { return self.repo_picker_key(key); }
-        if self.settings_menu.is_some() { return self.settings_menu_key(key); }
         if self.lore_picker.is_some() { return self.lore_picker_key(key); }
         if self.new_session.is_some() { return self.new_session_key(key); }
         if self.model_picker.is_some() { return self.model_picker_key(key); }
@@ -3317,32 +3378,18 @@ impl App {
             self.notice = "Choose a session first".into();
             return;
         };
-        let current = self.session_cwds.get(id).cloned();
-        let mut sources = Vec::new();
-        if let Some(path) = &current {
-            sources.push(path.clone());
-            if let Some(parent) = path.parent() { sources.push(parent.to_path_buf()); }
-        }
-        for session in &self.sessions {
-            if let Some(path) = self.session_cwds.get(&session.id) {
-                sources.push(path.clone());
-            }
-        }
-        let mut paths = Vec::new();
-        for source in sources.into_iter().take(32) {
-            let Ok(path) = std::fs::canonicalize(source) else { continue; };
-            let Some(display) = path.to_str() else { continue; };
-            if path.is_dir() && display.len() <= 4096
-                && !display.chars().any(unsafe_input_char) && !paths.contains(&path) {
-                paths.push(path);
-            }
-        }
-        if paths.is_empty() {
+        let source = self.session_cwds.get(id).cloned();
+        let current = source.as_deref().and_then(safe_repo_directory)
+            .or_else(|| source.as_deref().and_then(Path::parent).and_then(safe_repo_directory))
+            .or_else(|| self.sessions.iter().filter_map(|session|
+                self.session_cwds.get(&session.id).and_then(|path| safe_repo_directory(path))).next());
+        let Some(current_dir) = current else {
             self.notice = "No known directories are available".into();
             return;
-        }
+        };
         self.chip_info = None;
-        self.repo_picker = Some(RepoPicker { paths, selected: 0 });
+        let paths = repo_directory_entries(&current_dir);
+        self.repo_picker = Some(RepoPicker { current_dir, paths, selected: 0 });
         if self.active_chooser_rect().is_none() {
             self.repo_picker = None;
             self.notice = "Enlarge active pane to choose a directory".into();
@@ -3356,9 +3403,18 @@ impl App {
             KeyCode::Up => picker.selected = picker.selected.saturating_sub(1),
             KeyCode::Down => picker.selected = (picker.selected + 1).min(picker.paths.len() - 1),
             KeyCode::Enter => {
+                let launch_current = picker.selected == 0;
                 let path = picker.paths[picker.selected].clone();
-                self.repo_picker = None;
-                if let Some(path) = path.to_str() { self.local_cd(path); }
+                if launch_current {
+                    self.repo_picker = None;
+                    if let Some(path) = path.to_str() { self.local_cd(path); }
+                } else if let Some(current_dir) = safe_repo_directory(&path) {
+                    picker.paths = repo_directory_entries(&current_dir);
+                    picker.current_dir = current_dir;
+                    picker.selected = 0;
+                } else {
+                    self.notice = "Directory no longer available".into();
+                }
             }
             _ => return false,
         }
@@ -5590,7 +5646,7 @@ impl App {
     /// prompt. Reserving this space keeps the transcript and prompt visible.
     fn chooser_rect(&self, pane: Rect) -> Option<Rect> {
         let wanted = if let Some(index) = self.active_request_index().filter(|&index| self.input_requests[index].kind == "ask_user") {
-            let (body, _) = input_request_body(&self.input_requests[index],
+            let (body, _, _) = input_request_body(&self.input_requests[index],
                 usize::from(pane.width.saturating_sub(4)));
             wrapped_rows(&body, usize::from(pane.width.saturating_sub(2)))
                 .saturating_add(2).clamp(6, 18) as u16
@@ -5988,9 +6044,31 @@ impl App {
         let Some(menu) = self.active_chooser_rect() else { return false; };
         if column <= menu.x || column >= menu.right().saturating_sub(1)
             || row <= menu.y || row >= menu.bottom().saturating_sub(1) { return false; }
+        if let Some(index) = self.active_request_index() {
+            if self.input_requests[index].kind != "ask_user" || self.input_requests[index].sending {
+                return false;
+            }
+            if let Some(option) = ask_user_option_at(&self.input_requests[index], menu, row) {
+                if self.input_requests[index].selected != option {
+                    self.input_requests[index].selected = option;
+                    return true;
+                }
+            }
+            return false;
+        }
         let visible = usize::from(menu.height.saturating_sub(3)).max(1);
         let attach_len = self.attach_picker.as_ref().map(|_| self.attach_matches().len());
-        if let Some(picker) = self.repo_picker.as_mut() {
+        if let Some(settings) = self.settings_menu.as_mut() {
+            if (menu.y + 3..menu.y + 5).contains(&row) {
+                let index = usize::from(row - menu.y - 3);
+                if settings.selected != index { settings.selected = index; return true; }
+            }
+        } else if let Some(picker) = self.branch_picker.as_mut() {
+            if row < menu.y + 2 { return false; }
+            let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+            let index = start + usize::from(row - menu.y - 2);
+            if index < picker.branches.len() && picker.selected != index { picker.selected = index; return true; }
+        } else if let Some(picker) = self.repo_picker.as_mut() {
             if row < menu.y + 2 { return false; }
             let start = picker.selected.saturating_sub(visible.saturating_sub(1));
             let index = start + usize::from(row - menu.y - 2);
@@ -6100,11 +6178,23 @@ impl App {
             return changed;
         }
         if mouse.kind == MouseEventKind::Down(MouseButton::Left)
-            && self.active_request_index().is_none()
             && self.active_chooser_rect().is_some_and(|area|
                 mouse.row == area.y && mouse.column >= area.x && mouse.column < area.right()) {
             self.drag = Some(DragTarget::Chooser);
             return true;
+        }
+        if let Some(index) = self.active_request_index() {
+            if self.input_requests[index].kind == "ask_user"
+                && mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                if let Some(menu) = self.active_chooser_rect() {
+                    if mouse.column > menu.x && mouse.column < menu.right().saturating_sub(1) {
+                        if let Some(option) = ask_user_option_at(&self.input_requests[index], menu, mouse.row) {
+                            self.input_requests[index].selected = option;
+                            return self.request_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+                        }
+                    }
+                }
+            }
         }
         if self.repo_picker.is_some() {
             let Some(menu) = self.active_chooser_rect() else { return false; };
@@ -7053,14 +7143,16 @@ impl App {
 
     fn draw_repo_picker(&self, frame: &mut Frame, area: Rect) {
         let Some(picker) = &self.repo_picker else { return; };
-        let mut lines = vec![Line::from(" Known session directories · Enter opens new tab")];
+        let mut lines = vec![Line::from(" Select a folder · Enter browse · current opens new tab")];
         let visible = usize::from(area.height.saturating_sub(3)).max(1);
         let start = picker.selected.saturating_sub(visible.saturating_sub(1));
         let width = usize::from(area.width.saturating_sub(2));
         for (index, path) in picker.paths.iter().enumerate().skip(start).take(visible) {
-            let marker = if index == 0 { "current" } else { "known" };
+            let marker = if index == 0 { "current" }
+                else if picker.current_dir.parent() == Some(path.as_path()) { "up" }
+                else { "folder" };
             let label = format!(" {} {} · {}", if index == picker.selected { '›' } else { ' ' },
-                marker, safe_label(&path.display().to_string()));
+                marker, safe_label(&repo_path_label(path)));
             let label = clipped_title(&label, width).0;
             let padded = format!("{label}{}", " ".repeat(width.saturating_sub(label.width())));
             let style = if index == picker.selected {
@@ -7069,7 +7161,7 @@ impl App {
             lines.push(Line::styled(padded, style));
         }
         frame.render_widget(Paragraph::new(lines).block(Block::default()
-            .title(" Directory · ↑↓ select · Enter open · Esc close ")
+            .title(" Directory · ↑↓ select · Enter browse/open · Esc close ")
             .borders(Borders::ALL).border_style(Style::default().fg(theme::ACCENT)))
             .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)), area);
     }
@@ -7412,7 +7504,7 @@ impl App {
             width,
             height,
         ) };
-        let (body, selected_row) = input_request_body(request,
+        let (body, selected_row, _) = input_request_body(request,
             usize::from(modal.width.saturating_sub(4)));
         let question = request.questions.get(request.step);
         let lines: Vec<Line> = body.lines().enumerate().map(|(index, text)| {
@@ -9228,7 +9320,7 @@ for line in sys.stdin:
     }
 
     #[test]
-    fn repo_chip_picker_hovers_and_opens_verified_directory_in_new_tab() {
+    fn repo_chip_picker_hovers_browses_and_opens_verified_directory_in_new_tab() {
         let root = tempfile::tempdir().unwrap();
         let child = root.path().join("child");
         std::fs::create_dir(&child).unwrap();
@@ -9254,6 +9346,9 @@ for line in sys.stdin:
         let mut terminal = Terminal::new(TestBackend::new(100, 28)).unwrap();
         terminal.draw(|frame| app.draw(frame)).unwrap();
         assert_eq!(terminal.backend().buffer()[(menu.x + 2, menu.y + 3)].bg, theme::HIGHLIGHT);
+        app.repo_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.repo_picker.as_ref().unwrap().current_dir, root.path());
+        assert!(app.pending_launches.is_empty());
         app.repo_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(app.repo_picker.is_none());
         assert_eq!(app.pending_launches[0].0.cwd.as_deref(), Some(root.path()));
@@ -9281,10 +9376,123 @@ for line in sys.stdin:
         assert_eq!(app.repo_picker.as_ref().unwrap().selected, 1);
         assert!(app.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
             column: menu.x + 2, row: menu.y + 3, modifiers: KeyModifiers::NONE }));
-        assert_eq!(app.pending_launches[0].0.cwd.as_deref(), Some(root.path()));
+        assert_eq!(app.repo_picker.as_ref().unwrap().current_dir, root.path());
+        assert!(app.pending_launches.is_empty());
         app.session_cwds.insert("session".into(), unsafe_child);
         app.open_repo_picker(0);
-        assert_eq!(app.repo_picker.as_ref().unwrap().paths, vec![root.path().to_path_buf()]);
+        assert_eq!(app.repo_picker.as_ref().unwrap().current_dir, root.path());
+        assert!(!app.repo_picker.as_ref().unwrap().paths.iter().any(|path|
+            path.to_string_lossy().contains("unsafe\nname")));
+    }
+
+    #[test]
+    fn repo_picker_browses_child_directories_and_returns_to_parent() {
+        let root = tempfile::tempdir().unwrap();
+        let child = root.path().join("child");
+        let grandchild = child.join("grandchild");
+        std::fs::create_dir_all(&grandchild).unwrap();
+        let mut app = App::default();
+        app.rail_visible = false;
+        app.handle(Event::Resize(100, 28));
+        app.groups[0].tabs.push("session".into());
+        app.session_identity.insert("session".into(), (Some("codex".into()), None));
+        app.session_cwds.insert("session".into(), root.path().to_path_buf());
+        app.open_repo_picker(0);
+        let child_index = app.repo_picker.as_ref().unwrap().paths.iter()
+            .position(|path| path == &child).unwrap();
+        app.repo_picker.as_mut().unwrap().selected = child_index;
+        app.repo_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.repo_picker.as_ref().unwrap().current_dir, child);
+        let grandchild_index = app.repo_picker.as_ref().unwrap().paths.iter()
+            .position(|path| path == &grandchild).unwrap();
+        app.repo_picker.as_mut().unwrap().selected = grandchild_index;
+        app.repo_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.repo_picker.as_ref().unwrap().current_dir, grandchild);
+        app.repo_picker.as_mut().unwrap().selected = 1;
+        app.repo_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.repo_picker.as_ref().unwrap().current_dir, child);
+        assert!(app.pending_launches.is_empty());
+    }
+
+    #[test]
+    fn repo_picker_shows_home_relative_paths_without_changing_targets() {
+        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else { return; };
+        let target = home.join("example").join("project");
+        assert_eq!(repo_path_label(&target), "~/example/project");
+    }
+
+    #[test]
+    fn branch_and_settings_rows_select_on_hover() {
+        let mut app = App::default();
+        app.rail_visible = false;
+        app.handle(Event::Resize(100, 28));
+        app.groups[0].tabs.push("session".into());
+        app.branch_picker = Some(BranchPicker { session_id: "session".into(),
+            base: "main".into(), branches: vec!["main".into(), "feature".into()], selected: 0 });
+        let menu = app.active_chooser_rect().unwrap();
+        assert!(app.mouse(MouseEvent { kind: MouseEventKind::Moved,
+            column: menu.x + 2, row: menu.y + 3, modifiers: KeyModifiers::NONE }));
+        assert_eq!(app.branch_picker.as_ref().unwrap().selected, 1);
+        app.branch_picker = None;
+        app.settings_menu = Some(SettingsMenu { rows: [("120".into(), false), ("false".into(), false)],
+            selected: 0, linger_draft: None });
+        let menu = app.active_chooser_rect().unwrap();
+        assert!(app.mouse(MouseEvent { kind: MouseEventKind::Moved,
+            column: menu.x + 2, row: menu.y + 4, modifiers: KeyModifiers::NONE }));
+        assert_eq!(app.settings_menu.as_ref().unwrap().selected, 1);
+    }
+
+    #[test]
+    fn ask_user_hover_click_and_border_drag_use_inline_menu() {
+        let mut app = App::default();
+        app.rail_visible = false;
+        app.handle(Event::Resize(100, 28));
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"session", "engine":"codex"}));
+        app.groups[0].tabs.push("session".into());
+        app.apply_daemon_frame(&json!({"type":"event", "session_id":"session",
+            "event":{"type":"needs_input", "data":{"id":"question", "kind":"ask_user",
+                "questions":[{"question":"Choose?", "options":[
+                    {"label":"First", "description":"One"}, {"label":"Second", "description":"Two"}]}]}}}));
+        let before = app.active_chooser_rect().unwrap();
+        assert!(app.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: before.x + 2, row: before.y, modifiers: KeyModifiers::NONE }));
+        assert!(app.mouse(MouseEvent { kind: MouseEventKind::Drag(MouseButton::Left),
+            column: before.x + 2, row: before.y.saturating_sub(2), modifiers: KeyModifiers::NONE }));
+        let menu = app.active_chooser_rect().unwrap();
+        assert!(menu.height > before.height);
+        app.mouse(MouseEvent { kind: MouseEventKind::Up(MouseButton::Left),
+            column: menu.x + 2, row: menu.y, modifiers: KeyModifiers::NONE });
+        let request = &app.input_requests[0];
+        let second = (menu.y + 1..menu.bottom() - 1)
+            .find(|&row| ask_user_option_at(request, menu, row) == Some(2)).unwrap();
+        assert!(app.mouse(MouseEvent { kind: MouseEventKind::Moved,
+            column: menu.x + 2, row: second, modifiers: KeyModifiers::NONE }));
+        assert_eq!(app.input_requests[0].selected, 2);
+        assert!(app.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: menu.x + 2, row: second, modifiers: KeyModifiers::NONE }));
+        assert_eq!(app.pending_answers.len(), 1);
+        assert_eq!(app.pending_answers[0].2["answers"]["Choose?"], "Second");
+    }
+
+    #[test]
+    fn ask_user_mouse_mapping_matches_wrapped_visible_option() {
+        let mut app = App::default();
+        app.input_requests.push(InputRequest::from_event("session", &json!({
+            "id":"question", "kind":"ask_user", "questions":[{"question":"Choose?",
+                "options":[
+                    {"label":"First option with several long words that wrap into more than one row",
+                     "description":"A description that also wraps across the menu"},
+                    {"label":"Second", "description":"Short"}]}]
+        })).unwrap());
+        app.groups[0].tabs.push("session".into());
+        let menu = Rect::new(0, 0, 34, 16);
+        let mut terminal = Terminal::new(TestBackend::new(menu.width, menu.height)).unwrap();
+        terminal.draw(|frame| app.draw_request(frame, menu, true)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let second_row = (1..menu.height - 1).find(|&row|
+            (1..menu.width - 1).map(|x| buffer[(x, row)].symbol()).collect::<String>().contains("Second"))
+            .unwrap();
+        assert_eq!(ask_user_option_at(&app.input_requests[0], menu, second_row), Some(2));
     }
 
     #[test]
@@ -10259,7 +10467,7 @@ for line in sys.stdin:
         let rows: Vec<_> = painted(&app).lines().map(str::to_owned).collect();
         assert!(rows[usize::from(menu.y)].contains('…'));
         assert!(rows[usize::from(menu.y + 1)].contains("Which deployment"));
-        let (body, _) = input_request_body(&app.input_requests[0], usize::from(menu.width.saturating_sub(4)));
+        let (body, _, _) = input_request_body(&app.input_requests[0], usize::from(menu.width.saturating_sub(4)));
         assert!(body.contains(&question));
         assert!(!body.contains("Question:"));
         app.handle(Event::Key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE)));
