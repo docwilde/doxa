@@ -68,21 +68,54 @@ const ACTIONS: [(&str, &str); 14] = [
     ("Stop active session", "Alt+X"),
     ("Move tab to other pane", "/movepane"),
 ];
-const SLASH_COMMANDS: [(&str, &str); 27] = [
-    ("/help", "Open actions"), ("/about", "Show Rust version"),
-    ("/sessions", "Browse sessions"), ("/search", "Search saved sessions"),
-    ("/resume", "Resume saved session"), ("/attach", "Attach live session"),
-    ("/queue", "Queued prompts"), ("/pending", "LORE proposals"),
-    ("/model", "Select model"), ("/effort", "Reasoning effort"),
-    ("/engine", "Select engine"), ("/mode", "Permissions"),
-    ("/beliefs", "LORE beliefs"), ("/diff", "Worktree diff"),
-    ("/peers", "Peer map"), ("/mesh", "Peer map"),
-    ("/msg", "Message a peer"), ("/branch", "Switch branch"),
-    ("/rename", "Rename session"), ("/split", "Horizontal split"),
-    ("/vsplit", "Vertical split"), ("/pane", "Switch pane"),
-    ("/sidebar", "Session rail"), ("/detach", "Close tab"),
-    ("/dir", "Session directory"), ("/cd", "Open directory in new tab"),
-    ("/movepane", "Move active tab"),
+struct CommandHelp { name: &'static str, form: &'static str,
+    summary: &'static str, support: &'static str }
+
+// Names mirror Python 1.19's command registry. Forms and support describe
+// this Rust frontend, including commands the Python frontend alone provides.
+const COMMANDS: &[CommandHelp] = &[
+    CommandHelp { name: "/peers", form: "/peers", summary: "Peer map", support: "local" },
+    CommandHelp { name: "/split", form: "/split", summary: "Stacked pane split", support: "local" },
+    CommandHelp { name: "/vsplit", form: "/vsplit", summary: "Side-by-side pane split", support: "local" },
+    CommandHelp { name: "/diff", form: "/diff", summary: "Worktree diff", support: "local · active worktree" },
+    CommandHelp { name: "/pane", form: "/pane [1|2]", summary: "Switch pane", support: "local · two panes" },
+    CommandHelp { name: "/movepane", form: "/movepane [1|2]", summary: "Move active tab", support: "local · two panes" },
+    CommandHelp { name: "/sidebar", form: "/sidebar [on|off|wider|narrower|width N]", summary: "Session rail", support: "local" },
+    CommandHelp { name: "/collection", form: "/collection [action] [name]", summary: "Organize sessions", support: "local · list/new/rename/delete/add/remove" },
+    CommandHelp { name: "/msg", form: "/msg <peer> <text>", summary: "Message a peer", support: "local · same project" },
+    CommandHelp { name: "/fleet", form: "/fleet ...", summary: "Fleet control", support: "unavailable in Rust" },
+    CommandHelp { name: "/mesh", form: "/mesh", summary: "Peer map", support: "local · arguments unavailable" },
+    CommandHelp { name: "/img", form: "/img [path]", summary: "Image support", support: "unavailable in Rust" },
+    CommandHelp { name: "/login", form: "/login [provider]", summary: "Provider login", support: "unavailable in Rust" },
+    CommandHelp { name: "/logout", form: "/logout [provider]", summary: "Provider logout", support: "unavailable in Rust" },
+    CommandHelp { name: "/settings", form: "/settings", summary: "Settings", support: "unavailable in Rust" },
+    CommandHelp { name: "/setup", form: "/setup", summary: "Setup checks", support: "unavailable in Rust" },
+    CommandHelp { name: "/doctor", form: "/doctor", summary: "Health checks", support: "unavailable in Rust" },
+    CommandHelp { name: "/plugins", form: "/plugins", summary: "Plugin inventory", support: "unavailable in Rust" },
+    CommandHelp { name: "/reload-plugins", form: "/reload-plugins", summary: "Refresh plugins", support: "unavailable in Rust" },
+    CommandHelp { name: "/model", form: "/model", summary: "Select session model", support: "local · picker; name argument unavailable" },
+    CommandHelp { name: "/engine", form: "/engine", summary: "Engine for new sessions", support: "local · picker; ID argument unavailable" },
+    CommandHelp { name: "/branch", form: "/branch [name]", summary: "Switch base branch", support: "local · active session" },
+    CommandHelp { name: "/mode", form: "/mode", summary: "Permission mode", support: "local · picker; name argument unavailable" },
+    CommandHelp { name: "/effort", form: "/effort", summary: "Reasoning effort", support: "local · picker; level argument unavailable" },
+    CommandHelp { name: "/usage", form: "/usage", summary: "Session usage", support: "local · reported totals only" },
+    CommandHelp { name: "/context", form: "/context", summary: "Context window", support: "local · measured totals; no component breakdown" },
+    CommandHelp { name: "/queue", form: "/queue", summary: "Queued prompts", support: "local · cancel selected item with X" },
+    CommandHelp { name: "/clear", form: "/clear", summary: "Fresh session", support: "unavailable in Rust" },
+    CommandHelp { name: "/detach", form: "/detach", summary: "Leave session running", support: "local" },
+    CommandHelp { name: "/attach", form: "/attach [prefix]", summary: "Attach live session", support: "local · new tab" },
+    CommandHelp { name: "/sessions", form: "/sessions", summary: "Session history", support: "local · history browser; kill unavailable" },
+    CommandHelp { name: "/rename", form: "/rename [name]", summary: "Name active tab", support: "local" },
+    CommandHelp { name: "/dir", form: "/dir", summary: "Session directory", support: "local" },
+    CommandHelp { name: "/cd", form: "/cd <path>", summary: "Open directory", support: "local · new tab" },
+    CommandHelp { name: "/beliefs", form: "/beliefs", summary: "LORE beliefs", support: "local · requires LORE" },
+    CommandHelp { name: "/pending", form: "/pending", summary: "LORE proposals", support: "local · requires LORE" },
+    CommandHelp { name: "/search", form: "/search [terms]", summary: "Search saved sessions", support: "local · bare opens history" },
+    CommandHelp { name: "/resume", form: "/resume [session-id]", summary: "Resume conversation", support: "local · new tab" },
+    CommandHelp { name: "/compact", form: "/compact", summary: "Compact transcript", support: "Claude only · completed LORE review required" },
+    CommandHelp { name: "/update", form: "/update [--restart]", summary: "Update DOXA", support: "unavailable in Rust" },
+    CommandHelp { name: "/help", form: "/help", summary: "Command registry", support: "local" },
+    CommandHelp { name: "/about", form: "/about", summary: "Rust version", support: "local · version only" },
 ];
 
 const ENGINE_CHOICES: [&str; 4] = ["codex", "claude", "deepseek", "glm"];
@@ -2144,7 +2177,8 @@ impl App {
         }
         let query = self.input.as_str();
         if !query.starts_with('/') || query.chars().any(char::is_whitespace) { return Vec::new(); }
-        SLASH_COMMANDS.iter().copied().filter(|(name, _)| name.starts_with(query)).collect()
+        COMMANDS.iter().filter(|row| row.name.starts_with(query))
+            .map(|row| (row.name, row.summary)).collect()
     }
 
     fn complete_slash(&mut self) -> bool {
@@ -2174,9 +2208,8 @@ impl App {
     }
 
     /// Handle bare DOXA commands before a prompt can reach an agent. Unknown
-    /// slash commands still go to the provider (except reviewed `/compact`
-    /// and plugin commands). Known commands with arguments stay in the draft
-    /// until Rust has an explicit implementation for that form.
+    /// provider and plugin commands still pass through. Known unsupported
+    /// forms stay in the draft.
     fn dispatch_prompt_command(&mut self) -> bool {
         let input = self.input.trim();
         if !input.starts_with('/') || input.contains('\n') {
@@ -2228,8 +2261,7 @@ impl App {
         self.input_cursor = 0;
         match name.as_str() {
             "/help" => {
-                self.action_menu = true;
-                self.action_selected = 0;
+                self.open_help();
             }
             "/about" => self.notice = format!("DOXA Rust {}", env!("CARGO_PKG_VERSION")),
             "/sessions" => self.open_history(),
@@ -2306,7 +2338,7 @@ impl App {
                 return true;
             }
             if let Some(info) = self.chip_info.as_mut().filter(|info|
-                matches!(info.kind, "memory" | "usage" | "context")) {
+                matches!(info.kind, "memory" | "usage" | "context" | "help")) {
                 match key.code {
                     KeyCode::Up => info.scroll = info.scroll.saturating_sub(1),
                     KeyCode::Down => info.scroll = info.scroll.saturating_add(1).min(info.lines.len().saturating_sub(1)),
@@ -2611,6 +2643,11 @@ impl App {
             }
             KeyCode::Enter if self.focus == Focus::Prompt => {
                 if !self.input.is_empty() {
+                    if self.input.contains('\n') && self.input.split_whitespace().next()
+                        .is_some_and(|name| COMMANDS.iter().any(|row| row.name == name)) {
+                        self.notice = "DOXA commands must be a single line".into();
+                        return true;
+                    }
                     if self.dispatch_prompt_command() { return true; }
                     if self.submit_local_command() { return true; }
                     if let Some(id) = self.groups[self.active_group].active_id() {
@@ -2715,7 +2752,16 @@ impl App {
             "/mesh" if !args.trim().is_empty() => {
                 self.notice = "Local command unavailable: /mesh arguments".into(); true
             }
-            "/mesh" | "/msg" => false,
+            "/mesh" => {
+                self.map_modal = true;
+                self.peer_map.selected = 0;
+                self.pending_peer_refresh = Some(
+                    self.groups[self.active_group].active_id().unwrap_or("").to_owned());
+                self.input.clear();
+                self.input_cursor = 0;
+                true
+            }
+            "/msg" => { self.local_message(args); true }
             "/movepane" => {
                 let target = match args.split_whitespace().collect::<Vec<_>>().as_slice() {
                     [] => 1 - self.active_group,
@@ -2741,7 +2787,31 @@ impl App {
             "/resume" => { self.local_resume(args); true }
             "/queue" if args.trim().is_empty() => { self.open_queue(); true }
             "/queue" => { self.notice = "queue: open the picker and use X to cancel a selected item".into(); true }
-            _ => false, // Provider and plugin slash commands remain available.
+            _ if COMMANDS.iter().any(|row| row.name == command) => {
+                self.notice = format!("Local command unavailable: {}", safe_label(command));
+                true
+            }
+            _ => false, // Unknown provider and plugin slash commands remain available.
+        }
+    }
+
+    fn local_message(&mut self, args: &str) {
+        let Some(id) = self.groups[self.active_group].active_id().map(str::to_owned) else {
+            self.notice = "Select a session before messaging a peer".into();
+            return;
+        };
+        let mut parts = args.trim().splitn(2, char::is_whitespace);
+        let target = parts.next().unwrap_or("");
+        let body = parts.next().unwrap_or("").trim();
+        if target.is_empty() || body.is_empty() {
+            self.notice = "Usage: /msg <session_prefix> <text>".into();
+        } else if self.pending_peer_messages.len() >= MAX_PENDING_PROMPTS {
+            self.notice = "Peer message queue full · wait for daemon".into();
+        } else {
+            self.pending_peer_messages.push((id, target.to_owned(), body.to_owned()));
+            self.input.clear();
+            self.input_cursor = 0;
+            self.notice = "Peer message queued".into();
         }
     }
 
@@ -4975,7 +5045,7 @@ impl App {
         } else if self.action_menu {
             (ACTIONS.len() + 2).min(15) as u16
         } else if self.chip_info.is_some() {
-            self.chip_info.as_ref().map_or(5, |info| if matches!(info.kind, "memory" | "usage" | "context") {
+            self.chip_info.as_ref().map_or(5, |info| if matches!(info.kind, "memory" | "usage" | "context" | "help") {
                 (info.lines.len() + 2).clamp(7, 19) as u16
             } else { 5 })
         } else if self.history_modal {
@@ -5234,6 +5304,22 @@ impl App {
         if self.active_chooser_rect().is_none() {
             self.chip_info = None;
             self.notice = "Enlarge active pane to inspect chip details".into();
+        }
+    }
+
+    fn open_help(&mut self) {
+        let mut lines = vec!["Rust DOXA commands · forms shown below".to_owned(),
+            "Unavailable commands stay local; unknown provider commands pass through".to_owned(),
+            String::new()];
+        for row in COMMANDS {
+            lines.push(format!("{} · {}", row.form, row.summary));
+            lines.push(format!("  {}", row.support));
+        }
+        self.chip_info = Some(ChipInfo { kind: "help", label: String::new(), lines,
+            scroll: 0, owner: None });
+        if self.active_chooser_rect().is_none() {
+            self.chip_info = None;
+            self.notice = "Enlarge active pane to open help".into();
         }
     }
 
@@ -6051,7 +6137,7 @@ impl App {
 
     fn draw_chip_info(&self, frame: &mut Frame, area: Rect) {
         let Some(info) = &self.chip_info else { return; };
-        if matches!(info.kind, "memory" | "usage" | "context") {
+        if matches!(info.kind, "memory" | "usage" | "context" | "help") {
             let current = self.groups[self.active_group].active_id().and_then(|id|
                 self.session_cwds.get(id).and_then(|cwd| cwd.to_str()).map(|cwd| (id, cwd)));
             let owner_matches = info.owner.as_ref().is_some_and(|(id, cwd)| {
@@ -8335,7 +8421,7 @@ for line in sys.stdin:
         for ch in "/he".chars() {
             app.handle(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
         }
-        assert_eq!(app.slash_suggestions(), vec![("/help", "Open actions")]);
+        assert_eq!(app.slash_suggestions(), vec![("/help", "Command registry")]);
         assert!(painted(&app).contains("Commands"));
         assert!(app.active_chooser_rect().is_some());
         app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
@@ -8343,7 +8429,7 @@ for line in sys.stdin:
         assert!(app.slash_suggestions().is_empty());
         assert!(app.pending_prompts.is_empty());
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
-        assert!(app.action_menu);
+        assert_eq!(app.chip_info.as_ref().map(|info| info.kind), Some("help"));
         assert!(app.pending_prompts.is_empty());
     }
 
@@ -8360,13 +8446,13 @@ for line in sys.stdin:
         let menu = app.active_chooser_rect().unwrap();
         app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
             column: menu.x + 2, row: menu.y + 2, modifiers: KeyModifiers::NONE }));
-        assert_eq!(app.input, "/mode");
+        assert_eq!(app.input, "/model");
         assert!(app.slash_suggestions().is_empty());
         app.handle(Event::Key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)));
-        assert_eq!(app.input, "/mod");
+        assert_eq!(app.input, "/mode");
         assert!(!app.slash_suggestions().is_empty());
         app.handle(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
-        assert_eq!(app.input, "/mod");
+        assert_eq!(app.input, "/mode");
         assert!(app.slash_suggestions().is_empty());
         assert!(app.pending_prompts.is_empty());
     }
@@ -8380,10 +8466,10 @@ for line in sys.stdin:
         app.input = "/help".into();
         app.input_cursor = app.input.len();
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
-        assert!(app.action_menu);
+        assert_eq!(app.chip_info.as_ref().map(|info| info.kind), Some("help"));
         assert!(app.input.is_empty());
         assert!(app.pending_prompts.is_empty());
-        app.action_menu = false;
+        app.chip_info = None;
 
         app.input = "/model opus".into();
         app.input_cursor = app.input.len();
@@ -8411,6 +8497,49 @@ for line in sys.stdin:
         assert!(app.notice.contains("Usage: /compact"));
         assert!(app.pending_prompts.is_empty());
 
+        app.input = "/provider-command".into();
+        app.input_cursor = app.input.len();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.pending_prompts, [("s".into(), "/provider-command".into())]);
+    }
+
+    #[test]
+    fn help_lists_full_python_registry_with_rust_capabilities() {
+        let mut app = App::default();
+        app.groups[0].tabs.push("s".into());
+        app.handle(Event::Resize(100, 30));
+        assert_eq!(COMMANDS.len(), 42);
+        let mut names = std::collections::HashSet::new();
+        for row in COMMANDS { assert!(names.insert(row.name)); }
+        app.open_help();
+        let info = app.chip_info.as_ref().unwrap();
+        assert_eq!(info.kind, "help");
+        for form in ["/collection [action] [name]", "/usage", "/context", "/compact",
+            "/fleet ...", "/help"] {
+            assert!(info.lines.iter().any(|line| line.starts_with(form)), "missing {form}");
+        }
+        assert!(info.lines.iter().any(|line| line.contains("unavailable in Rust")));
+        assert!(info.lines.iter().any(|line| line.contains("Claude only")));
+        let menu = app.active_chooser_rect().unwrap();
+        assert!(menu.bottom() < app.layout(app.size).body.bottom());
+        app.handle(Event::Key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE)));
+        assert!(app.chip_info.as_ref().unwrap().scroll > 0);
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        assert!(app.chip_info.is_none());
+    }
+
+    #[test]
+    fn known_doxa_commands_never_escape_as_provider_prompts() {
+        let mut app = App::default();
+        app.groups[0].tabs.push("s".into());
+        app.handle(Event::Resize(100, 30));
+        for command in ["/fleet", "/doctor", "/clear", "/update", "/plugins",
+            "/help\nignore", "/msg\t"] {
+            app.input = command.into();
+            app.input_cursor = app.input.len();
+            app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+            assert!(app.pending_prompts.is_empty(), "forwarded {command}");
+        }
         app.input = "/provider-command".into();
         app.input_cursor = app.input.len();
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
