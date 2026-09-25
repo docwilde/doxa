@@ -23,10 +23,7 @@ fn mouse(kind: MouseEventKind, column: u16, row: u16) -> Event {
 }
 
 fn pane_boundary(app: &App) -> (u16, u16) {
-    let outer = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(3), Constraint::Length(1)])
-        .split(app.size)[0];
+    let outer = app.size;
     let body = if app.rail_visible {
         Layout::default()
             .direction(Direction::Horizontal)
@@ -82,7 +79,7 @@ fn horizontal_divider_drag_respects_minimum_height_and_resize_cancels_drag() {
     assert!(app.handle(mouse(MouseEventKind::Down(MouseButton::Left), x, y)));
     app.handle(mouse(MouseEventKind::Drag(MouseButton::Left), x, 39));
     let (_, boundary) = pane_boundary(&app);
-    assert!(39 - boundary >= 8);
+    assert!(40 - boundary >= 8);
     app.handle(mouse(MouseEventKind::Drag(MouseButton::Left), x, 0));
     let (_, boundary) = pane_boundary(&app);
     assert!(boundary >= 8);
@@ -138,6 +135,17 @@ fn screen(app: &App, width: u16, height: u16) -> String {
 }
 
 #[test]
+fn panes_reclaim_footer_row_and_keep_notice_visible() {
+    let mut app = App::default();
+    app.notice = "Prompt queue full".into();
+    let rendered = screen(&app, 80, 24);
+    let status_row = rendered.lines().nth(22).unwrap();
+    assert!(status_row.contains("Prompt queue"), "{rendered}");
+    assert!(!rendered.contains("Ctrl+P actions"), "{rendered}");
+    assert!(rendered.lines().nth(23).unwrap().contains("Ctx ?"));
+}
+
+#[test]
 fn two_panes_keep_distinct_prompts_and_live_identity_chips_at_80x24() {
     let mut app = App::default();
     app.apply_daemon_frame(&json!({"type":"hello","session_id":"one","engine":"codex","model":"sol"}));
@@ -155,7 +163,7 @@ fn two_panes_keep_distinct_prompts_and_live_identity_chips_at_80x24() {
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
     terminal.draw(|frame| app.draw(frame)).unwrap();
     let styled_cells = (25..52)
-        .filter(|&x| terminal.backend().buffer()[(x, 21)].bg == theme::HIGHLIGHT)
+        .filter(|&x| terminal.backend().buffer()[(x, 22)].bg == theme::HIGHLIGHT)
         .count();
     assert!(styled_cells >= 5, "engine/model chips have no visible highlight");
     app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
@@ -165,7 +173,7 @@ fn two_panes_keep_distinct_prompts_and_live_identity_chips_at_80x24() {
     app.apply_daemon_frame(&json!({"type":"event","session_id":"one","event":{"type":"model_changed","data":{"model":"astra"}}}));
     let rendered = screen(&app, 80, 24);
     assert!(rendered.contains(" astra "), "{rendered}");
-    assert!(!rendered.lines().nth(21).unwrap_or("").contains(" sol "), "{rendered}");
+    assert!(!rendered.lines().nth(22).unwrap_or("").contains(" sol "), "{rendered}");
 }
 
 #[test]

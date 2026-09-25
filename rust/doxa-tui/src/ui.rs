@@ -2288,19 +2288,15 @@ impl App {
     }
 
     fn layout(&self, area: Rect) -> PaneLayout {
-        let outer = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(3), Constraint::Length(1)])
-            .split(area);
         let min_body = if self.split == Split::Vertical {
             MIN_PANE_WIDTH * 2
         } else {
             MIN_PANE_WIDTH
         };
-        let rail_width = if self.rail_visible && outer[0].width >= 70 {
+        let rail_width = if self.rail_visible && area.width >= 70 {
             self.rail_width.clamp(
                 MIN_RAIL_WIDTH,
-                outer[0].width.saturating_sub(min_body).max(MIN_RAIL_WIDTH),
+                area.width.saturating_sub(min_body).max(MIN_RAIL_WIDTH),
             )
         } else {
             0
@@ -2309,10 +2305,10 @@ impl App {
             let chunks = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Length(rail_width), Constraint::Min(1)])
-                .split(outer[0]);
+                .split(area);
             (Some(chunks[0]), chunks[1])
         } else {
-            (None, outer[0])
+            (None, area)
         };
         let min_ok = if self.split == Split::Vertical {
             body.width >= MIN_PANE_WIDTH * 2
@@ -2344,7 +2340,7 @@ impl App {
             }
         });
         PaneLayout {
-            outer: outer[0],
+            outer: area,
             rail,
             body,
             panes,
@@ -2640,13 +2636,6 @@ impl App {
         } else {
             self.draw_group(frame, layout.body, self.active_group);
         }
-        frame.render_widget(
-            Paragraph::new(format!(
-                "{}  |  Ctrl+P actions · Alt+X stop · Alt+L LORE · Alt+E engine · Alt+M model · Alt+P permissions · Ctrl+R history · F2 diff · F4 diff pane · F3 rail · Shift+Tab pane · Ctrl+T tools · Ctrl+M peers · Alt+H/V split · Alt+arrows/drag resize · Ctrl+Q quit",
-                self.notice
-            )).style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)),
-            Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
-        );
         self.draw_tool_cards(frame, area);
         if self.map_modal {
             self.peer_map.render(
@@ -3106,7 +3095,7 @@ impl App {
     }
 
     fn draw_group(&self, frame: &mut Frame, area: Rect, index: usize) {
-        if area.width < 4 || area.height < 3 {
+        if area.width < 4 || area.height < 6 {
             return;
         }
         let group = &self.groups[index];
@@ -3232,6 +3221,12 @@ impl App {
             status_spans.push(Span::raw(" "));
             status_spans.push(Span::styled(format!(" {} ▾", mode),
                 Style::default().fg(theme::TEXT).bg(theme::HIGHLIGHT)));
+        }
+        if active && !self.notice.is_empty() {
+            status_spans.push(Span::styled(
+                format!(" · {}", self.notice),
+                Style::default().fg(theme::SECONDARY),
+            ));
         }
         frame.render_widget(
             Paragraph::new(Line::from(status_spans)).style(Style::default().bg(theme::RAISED)),

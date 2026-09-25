@@ -17,6 +17,25 @@ ROOT = Path(__file__).resolve().parents[1]
 SCENES = ("hero", "split-panes", "tool-activity", "needs-input", "permissions", "history")
 FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
 CELL_W, CELL_H = 14, 26
+BOX_STROKES = {
+    "─": "lr", "│": "ud", "┌": "rd", "┐": "ld", "└": "ur", "┘": "ul",
+    "├": "urd", "┤": "uld", "┬": "lrd", "┴": "lru", "┼": "lrud",
+}
+
+
+def draw_box_stroke(draw: ImageDraw.ImageDraw, symbol: str, left: int, top: int,
+                    color: tuple[int, int, int]) -> None:
+    """Join box edges at cell boundaries instead of using a narrow font glyph."""
+    edges = BOX_STROKES[symbol]
+    center_x, center_y = left + CELL_W // 2, top + CELL_H // 2
+    if "l" in edges:
+        draw.line((left, center_y, center_x, center_y), fill=color, width=2)
+    if "r" in edges:
+        draw.line((center_x, center_y, left + CELL_W, center_y), fill=color, width=2)
+    if "u" in edges:
+        draw.line((center_x, top, center_x, center_y), fill=color, width=2)
+    if "d" in edges:
+        draw.line((center_x, center_y, center_x, top + CELL_H), fill=color, width=2)
 
 
 def capture(name: str) -> None:
@@ -33,7 +52,9 @@ def capture(name: str) -> None:
         x, y = i % width, i // width
         left, top = x * CELL_W, y * CELL_H
         draw.rectangle((left, top, left + CELL_W - 1, top + CELL_H - 1), fill=tuple(bg))
-        if symbol.strip():
+        if symbol in BOX_STROKES:
+            draw_box_stroke(draw, symbol, left, top, tuple(fg))
+        elif symbol.strip():
             draw.text((left, top + 1), symbol, font=font, fill=tuple(fg), stroke_width=0)
     dest = ROOT / "assets" / "shots" / f"rust-{name}.png"
     image.save(dest, optimize=True)
