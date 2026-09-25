@@ -24,13 +24,14 @@ fn run(args: &[String]) -> io::Result<()> {
     }
     let mut command: Option<&str> = None;
     let mut prefix: Option<&str> = None;
+    let mut branch_target: Option<&str> = None;
     let mut options = launch::LaunchOptions::default();
     let mut socket: Option<&str> = None;
     let mut index = 0;
     while index < args.len() {
         let arg = args[index].as_str();
         match arg {
-            "new" | "attach" | "stop" | "list" | "doctor" | "--list" | "--demo" | "--version"
+            "new" | "attach" | "stop" | "list" | "doctor" | "branch" | "--list" | "--demo" | "--version"
             | "--help"
                 if command.is_none() =>
             {
@@ -84,6 +85,9 @@ fn run(args: &[String]) -> io::Result<()> {
             {
                 prefix = Some(arg)
             }
+            _ if !arg.starts_with('-') && command == Some("branch") && branch_target.is_none() => {
+                branch_target = Some(arg)
+            }
             _ => return Err(invalid(format!("unexpected argument: {arg}"))),
         }
         index += 1;
@@ -104,9 +108,12 @@ fn run(args: &[String]) -> io::Result<()> {
     if options.branch.is_some() && command != Some("new") {
         return Err(invalid("--branch requires new"));
     }
+    if command == Some("branch") && prefix.is_some() {
+        return Err(invalid("branch reads the current checkout; --session is not supported"));
+    }
     match command {
         Some("--help") => {
-            println!("Usage: doxa-rs [new|attach [ID]|stop [ID]|list|doctor] [options]\n       doxa-rs fleet start PYTHON_FLEET_OPTIONS\n       doxa-rs fleet runs|status RUN_ID|stop RUN_ID|attach RUN_ID SLOT [--root ABSOLUTE_PATH]\n       doxa-rs --session ID\n       doxa-rs --socket PATH\n\nPlain doxa-rs restores live sessions in the current project, or starts a native Codex session.\nnew always starts a session. attach and stop accept a full ID or unique prefix.\nOptions for new sessions: --engine codex|claude|deepseek|glm|fixture, --model NAME, --linger SECONDS, --branch LOCAL_OR_REMOTE.\nCodex: --sandbox read-only|workspace-write|danger-full-access, --codex-bin PATH, --lore-python PATH.\nClaude: --claude-python PATH, --claude-script ABSOLUTE_PATH.\nDeepSeek/GLM: --lore-python PATH, --effort low|high|max (DeepSeek also none); API key in provider environment variable.\nClaude/DeepSeek/GLM: --resume FULL_SESSION_ID with new.\nDOXA_DAEMON_BIN selects an absolute native daemon path. Ctrl+Q detaches without stopping the daemon.");
+            println!("Usage: doxa-rs [new|attach [ID]|stop [ID]|list|doctor|branch [NAME]] [options]\n       doxa-rs fleet start PYTHON_FLEET_OPTIONS\n       doxa-rs fleet runs|status RUN_ID|stop RUN_ID|attach RUN_ID SLOT [--root ABSOLUTE_PATH]\n       doxa-rs --session ID\n       doxa-rs --socket PATH\n\nPlain doxa-rs restores live sessions in the current project, or starts a native Codex session.\nnew always starts a session. attach and stop accept a full ID or unique prefix.\nbranch lists local bases in the current checkout; live base switching is unavailable.\nOptions for new sessions: --engine codex|claude|deepseek|glm|fixture, --model NAME, --linger SECONDS, --branch LOCAL_OR_REMOTE.\nCodex: --sandbox read-only|workspace-write|danger-full-access, --codex-bin PATH, --lore-python PATH.\nClaude: --claude-python PATH, --claude-script ABSOLUTE_PATH.\nDeepSeek/GLM: --lore-python PATH, --effort low|high|max (DeepSeek also none); API key in provider environment variable.\nClaude/DeepSeek/GLM: --resume FULL_SESSION_ID with new.\nDOXA_DAEMON_BIN selects an absolute native daemon path. Ctrl+Q detaches without stopping the daemon.");
             println!("Fleet safety preview: doxa-rs fleet preflight --sessions N --run-budget USD [--root ABSOLUTE_PATH] [--run-id ID] [--force|--allow-unbudgeted]");
             Ok(())
         }
@@ -115,6 +122,22 @@ fn run(args: &[String]) -> io::Result<()> {
             Ok(())
         }
         Some("--demo") => doxa_tui::ui::run(),
+        Some("branch") => {
+            if branch_target.is_some() {
+                return Err(invalid(doxa_worktrees::live_switch_refusal()));
+            }
+            let cwd = std::env::current_dir()?;
+            let status = doxa_worktrees::branch_status(&cwd)
+                .ok_or_else(|| invalid("branch: no supported Git checkout here"))?;
+            println!("branch: {}", status.base.as_deref().unwrap_or("(none)"));
+            println!();
+            for name in status.branches {
+                let mark = if Some(name.as_str()) == status.base.as_deref() { "▸" } else { " " };
+                println!(" {mark} {name}");
+            }
+            println!("\nstart an isolated session: doxa-rs new --branch NAME");
+            Ok(())
+        }
         Some("list" | "--list") => {
             for session in discovery::sessions()? {
                 println!(
