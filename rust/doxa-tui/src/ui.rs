@@ -101,7 +101,7 @@ const COMMANDS: &[CommandHelp] = &[
     CommandHelp { name: "/usage", form: "/usage", summary: "Session usage", support: "local · reported totals only" },
     CommandHelp { name: "/context", form: "/context", summary: "Context window", support: "local · measured totals; no component breakdown" },
     CommandHelp { name: "/queue", form: "/queue", summary: "Queued prompts", support: "local · cancel selected item with X" },
-    CommandHelp { name: "/clear", form: "/clear", summary: "Fresh session", support: "unavailable in Rust" },
+    CommandHelp { name: "/clear", form: "/clear", summary: "Fresh session in this tab", support: "local · idle session and writable tabset required" },
     CommandHelp { name: "/detach", form: "/detach", summary: "Leave session running", support: "local" },
     CommandHelp { name: "/attach", form: "/attach [prefix]", summary: "Attach live session", support: "local · new tab" },
     CommandHelp { name: "/sessions", form: "/sessions", summary: "Session history", support: "local · history browser; kill unavailable" },
@@ -110,7 +110,7 @@ const COMMANDS: &[CommandHelp] = &[
     CommandHelp { name: "/cd", form: "/cd <path>", summary: "Open directory", support: "local · new tab" },
     CommandHelp { name: "/beliefs", form: "/beliefs", summary: "LORE beliefs", support: "local · requires LORE" },
     CommandHelp { name: "/pending", form: "/pending", summary: "LORE proposals", support: "local · requires LORE" },
-    CommandHelp { name: "/search", form: "/search [terms]", summary: "Search saved sessions", support: "local · bare opens history" },
+    CommandHelp { name: "/search", form: "/search [terms]", summary: "Search saved sessions", support: "local · LORE index then bounded transcript scan" },
     CommandHelp { name: "/resume", form: "/resume [session-id]", summary: "Resume conversation", support: "local · new tab" },
     CommandHelp { name: "/compact", form: "/compact", summary: "Compact transcript", support: "Claude only · completed LORE review required" },
     CommandHelp { name: "/update", form: "/update [--restart]", summary: "Update DOXA", support: "unavailable in Rust" },
@@ -3099,7 +3099,11 @@ impl App {
             self.notice = "clear: session directory is unavailable".into();
             return;
         };
-        let mut options = launch::LaunchOptions { engine, cwd: Some(cwd), ..Default::default() };
+        // A managed session's cwd is its private worktree. A fresh session
+        // starts from the shared checkout, as the Python session factory
+        // does, instead of branching from the old session's branch.
+        let launch_cwd = crate::discovery::repo_root_for(&cwd).unwrap_or(cwd);
+        let mut options = launch::LaunchOptions { engine, cwd: Some(launch_cwd), ..Default::default() };
         if engine == launch::Engine::Claude {
             options.claude_script = std::env::var_os("DOXA_CLAUDE_SCRIPT").map(PathBuf::from);
         }
@@ -8386,6 +8390,29 @@ for line in sys.stdin:
         assert_eq!(app.groups[0].tabs, ["old"]);
         assert!(app.clear_stop_after_save.is_empty());
         assert_eq!(app.pending_clear_finalizes, ["fresh"]);
+    }
+
+    #[test]
+    fn clear_restarts_from_shared_checkout_when_old_session_is_in_a_worktree() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("main");
+        let old_tree = dir.path().join("old-tree");
+        std::fs::create_dir(&main).unwrap();
+        let git = |args: &[&str]| assert!(std::process::Command::new("git").args(args)
+            .current_dir(&main).status().unwrap().success());
+        git(&["init", "-q"]);
+        std::fs::write(main.join("tracked.txt"), "base\n").unwrap();
+        git(&["add", "tracked.txt"]);
+        git(&["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "test: base"]);
+        git(&["worktree", "add", "--detach", "-q", old_tree.to_str().unwrap()]);
+        let mut app = App::default();
+        app.clear_preflight_error = None;
+        app.groups[0].tabs.push("old".into());
+        app.session_identity.insert("old".into(), (Some("codex".into()), None));
+        app.session_cwds.insert("old".into(), old_tree);
+        app.input = "/clear".into();
+        assert!(app.submit_local_command());
+        assert_eq!(app.pending_launches[0].0.cwd.as_deref(), Some(main.as_path()));
     }
 
     #[test]
