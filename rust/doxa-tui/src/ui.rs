@@ -1840,12 +1840,9 @@ impl App {
                 if unsafe_input_char(c) { false } else { self.insert_input(c) }
             }
             KeyCode::Enter if self.focus == Focus::Prompt => {
-                if self.input.trim_start().starts_with('/') {
-                    self.submit_local_command();
-                    return true;
-                }
                 if !self.input.is_empty() {
                     if self.dispatch_prompt_command() { return true; }
+                    if self.submit_local_command() { return true; }
                     if let Some(id) = self.groups[self.active_group].active_id() {
                         if self.offline_ids.contains(id) {
                             self.notice = "Archived transcript is read-only".into();
@@ -1888,7 +1885,10 @@ impl App {
         }
     }
 
-    fn submit_local_command(&mut self) {
+    fn submit_local_command(&mut self) -> bool {
+        if !self.input.trim_start().starts_with('/') || self.input.contains('\n') {
+            return false;
+        }
         let line = self.input.trim().to_owned();
         let (command, args) = line.split_once(char::is_whitespace).unwrap_or((line.as_str(), ""));
         match command {
@@ -1896,10 +1896,24 @@ impl App {
                 self.input.clear();
                 self.input_cursor = 0;
                 self.open_pending_picker();
+                true
             }
-            "/attach" => self.local_attach(args),
-            "/rename" => self.local_rename(args),
-            _ => self.notice = format!("Local command unavailable: {}", safe_label(command)),
+            "/pending" => { self.notice = "Local command unavailable: /pending arguments".into(); true }
+            "/attach" => { self.local_attach(args); true }
+            "/rename" => { self.local_rename(args); true }
+            "/mesh" if !args.trim().is_empty() => {
+                self.notice = "Local command unavailable: /mesh arguments".into(); true
+            }
+            "/mesh" | "/msg" => false,
+            "/movepane" | "/collection" | "/fleet" | "/img" | "/login"
+            | "/logout" | "/settings" | "/setup" | "/doctor" | "/plugins"
+            | "/reload-plugins" | "/branch" | "/effort" | "/usage"
+            | "/context" | "/queue" | "/clear" | "/cd" | "/search"
+            | "/resume" | "/compact" | "/update" => {
+                self.notice = format!("Local command unavailable: {}", safe_label(command));
+                true
+            }
+            _ => false, // Provider and plugin slash commands remain available.
         }
     }
 
@@ -5159,7 +5173,7 @@ mod tests {
     }
 
     #[test]
-    fn bare_doxa_commands_stay_local_and_provider_commands_pass_through() {
+    fn bare_doxa_commands_stay_local_and_unknown_provider_commands_pass_through() {
         let mut app = App::default();
         app.groups[0].tabs.push("s".into());
         app.handle(Event::Resize(100, 28));
@@ -5182,7 +5196,13 @@ mod tests {
         app.input = "/compact".into();
         app.input_cursor = app.input.len();
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
-        assert_eq!(app.pending_prompts, [("s".into(), "/compact".into())]);
+        assert!(app.notice.contains("Local command unavailable"));
+        assert!(app.pending_prompts.is_empty());
+
+        app.input = "/provider-command".into();
+        app.input_cursor = app.input.len();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.pending_prompts, [("s".into(), "/provider-command".into())]);
     }
 
     #[test]
@@ -6149,7 +6169,7 @@ for line in sys.stdin:
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert!(app.custom_names.is_empty());
         assert_eq!(app.sessions[0].title, "new");
-        for command in ["/attach bad/id", "/detach", "/pending unsupported"] {
+        for command in ["/attach bad/id", "/doctor", "/pending unsupported"] {
             app.input = command.into();
             app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
             assert!(app.notice.contains("attach:") || app.notice.contains("unavailable"));

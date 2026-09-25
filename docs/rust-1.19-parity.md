@@ -34,7 +34,7 @@ commands still pass to the active engine.
 | `/sessions`, `/search`, `/resume`, `/attach` | History search and CLI attach/Claude resume | Full cross-session search, live TUI attach and resume in a new tab |
 | `/usage`, `/context`, `/queue` | Summary chips/queued prompt transport | Detailed screens and queue cancellation |
 | `/help`, `/about` | Local action menu/version | Registry-wide help and full diagnostics |
-| `/compact` | Provider pass-through | LORE review before provider compaction |
+| `/compact` | Blocked locally | LORE review before provider compaction |
 | `/movepane`, `/collection`, `/rename`, `/cd`, `/clear` | Missing | Tab/collection state and safe new-session directory controls |
 | `/branch`, `/effort` | Missing | New-session base and effort controls |
 | `/login`, `/logout`, `/settings`, `/setup`, `/doctor`, `/update` | CLI doctor only | Interactive operations and 1.19 setup checks |
