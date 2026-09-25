@@ -213,12 +213,12 @@ retried automatically. The local `/pending` command opens the proposal picker
 without sending a prompt to the model. `Alt+X` asks for confirmation before
 stopping the active session; the session stays visible as read-only after a
 successful stop.
-The local `/attach ID-PREFIX` command selects an unambiguous live daemon from
-the trusted registry, rechecks it before connecting, and opens it in a new tab.
-If that session is already open, the command focuses its tab. Bare `/attach`
-attaches the sole detached session; when several are detached, it lists short
-IDs and asks for a longer prefix. It currently matches IDs, not titles, and
-does not offer Python's bare attach picker. `/rename NAME` pins the active
+The local `/attach QUERY` command searches live daemon IDs and titles, then
+rechecks the selected ID before connecting and opening it in a new tab. An
+exact ID takes precedence over an ID prefix, then a title match. If that
+session is already open, the command focuses its tab. Bare `/attach` opens a
+filtered picker above the active prompt when several detached sessions are
+available; keyboard and mouse selection keep the prompt visible. `/rename NAME` pins the active
 tab's label in the shared tabset; bare `/rename` restores its automatic label.
 Unimplemented slash commands remain in the draft with a visible error and
 are never submitted as model prompts.

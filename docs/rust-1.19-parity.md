@@ -7,8 +7,8 @@ claim that all Python behavior has been ported.
 
 | Area | Rust state | Remaining 1.19 behavior |
 | --- | --- | --- |
-| Core sessions | Native daemon, Codex and vendor hosts, Claude SDK sidecar; new, attach, stop, list and restore; TUI `/attach` by live ID prefix | Full setup/auth flow and a title-searchable TUI attach picker for multiple detached sessions |
-| Window and prompt | Two split panes, tabs, grouped rail, per-session drafts, mouse selection and resize, inline questions, Markdown and tool cards | More than two pane groups, moving a tab across groups, pinned tab names and sidebar collections |
+| Core sessions | Native daemon, Codex and vendor hosts, Claude SDK sidecar; new, attach, stop, list and restore; TUI `/attach` picker with live ID and title search | Full setup/auth flow and resume into a new TUI tab |
+| Window and prompt | Two split panes, persistent named tabs, grouped rail, per-session drafts, mouse selection and resize, inline questions, Markdown and tool cards | More than two pane groups, moving a tab across groups and sidebar collections |
 | Commands | Local bare commands, `/msg`, `/mesh`, `/pane 1|2`, sidebar controls, `/dir`, `/attach` and `/rename` | Many argument forms and the full generated command palette; see table below |
 | Worktrees and diffs | Managed per-session Git checkout, guarded clean cleanup, `new --branch`, diff pane and tracked-hunk rejection with queued active-turn feedback and a reason | Live worktree base switching and complete orphan cleanup |
 | LORE | Context/scrub via sidecar, belief/evidence, full proposal review and exact-snapshot approve/reject with LORE 0.58.5 | Writable belief actions beyond pending resolution; older LORE builds remain read only |
@@ -31,7 +31,7 @@ commands still pass to the active engine.
 | `/fleet` | Bridge or partial | Native supervisor, approval desk, barrier, budgets and fleet tab |
 | `/model`, `/engine`, `/mode` | Local picker for bare form | Supported argument forms and provider-specific capabilities |
 | `/beliefs`, `/pending` | Belief reading and staged approve/reject after complete raw review | Belief confirm/contradict/stale/retract controls |
-| `/sessions`, `/search`, `/resume`, `/attach` | History search, CLI attach/Claude resume and TUI attach by live ID | Full cross-session search, multi-result TUI attach picker and resume in a new tab |
+| `/sessions`, `/search`, `/resume`, `/attach` | History search, CLI attach/Claude resume and live TUI attach picker with ID/title search | Full cross-session search and resume in a new tab |
 | `/usage`, `/context`, `/queue` | Summary chips/queued prompt transport | Detailed screens and queue cancellation |
 | `/help`, `/about` | Local action menu/version | Registry-wide help and full diagnostics |
 | `/compact` | Blocked locally | LORE review before provider compaction |
