@@ -158,6 +158,26 @@ def test_shortcut_uses_installed_path_with_spaces_and_updates_on_reinstall(tmp_p
     assert expected_exec in desktop.read_text()
 
 
+def test_upgrade_replaces_sidecar_symlink_to_directory(tmp_path):
+    repo = _source_repo(tmp_path)
+    first, home, _ = _run(tmp_path, repo)
+    assert first.returncode == 0, first.stderr
+    old_sha = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+    pointer = home / ".local/bin/.doxa-sidecar-current"
+    assert os.readlink(pointer) == str(home / ".doxa/sidecars" / old_sha / "bin")
+
+    (repo / "doxa/engine.py").write_text("# updated fixture engine\n")
+    subprocess.run(["git", "-C", str(repo), "add", "doxa/engine.py"], check=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.name=Test",
+                    "-c", "user.email=test@example.com", "commit", "-qm",
+                    "test: update sidecar fixture"], check=True)
+    new_sha = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+    second, _, _ = _run(tmp_path, repo)
+    assert second.returncode == 0, second.stderr
+    assert os.readlink(pointer) == str(home / ".doxa/sidecars" / new_sha / "bin")
+    assert not (home / ".doxa/sidecars" / old_sha / "bin/.doxa-sidecar-current").exists()
+
+
 def test_shortcut_rejects_unrepresentable_launcher_path(tmp_path):
     repo = _source_repo(tmp_path)
     custom_bin = tmp_path / "bin\nInjected=true"
