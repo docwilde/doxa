@@ -25,9 +25,15 @@ print(json.dumps({'type':'hello','proto':1,'capabilities':['scrub','snapshot','b
 for line in sys.stdin:
     req = json.loads(line)
     if req['op'] == 'belief_review_v1':
+        if req['belief_id'] == 8:
+            print(json.dumps({'type':'reply','id':req['id'],'ok':False,'error':'belief_incomplete'}), flush=True)
+            continue
         value = {'id':req['belief_id'],'uid':'uid-1','subject':'project:repo','claim':'safe fact','claim_sha256':'a'*64}
     else:
         assert req['expected'] == {'uid':'uid-1','subject':'project:repo','claim_sha256':'a'*64}
+        if req['action'] == 'stale':
+            print(json.dumps({'type':'reply','id':req['id'],'ok':False,'error':'belief_changed'}), flush=True)
+            continue
         value = {'status':'dormant','retired':True,'confirmed':0,'contradicted':2,'stale':0}
     print(json.dumps({'type':'reply','id':req['id'],'ok':True,'value':value}), flush=True)
 "#);
@@ -42,6 +48,9 @@ for line in sys.stdin:
     assert!(result.retired);
     assert_eq!(result.contradicted, 2);
     assert!(matches!(client.belief_action("/repo", &review, BeliefAction::Stale, ""), Err(LoreError::InvalidFrame)));
+    assert!(matches!(client.belief_action("/repo", &review, BeliefAction::Stale, "no longer applies"),
+        Err(LoreError::Remote("belief_changed"))));
+    assert!(matches!(client.belief_review("/repo", 8), Err(LoreError::Remote("belief_incomplete"))));
 
     let old = fake(dir.path(), "print('{\"type\":\"hello\",\"proto\":1,\"capabilities\":[\"scrub\",\"snapshot\"]}', flush=True)");
     let mut older = LoreClient::spawn(&old, Duration::from_secs(2)).unwrap();

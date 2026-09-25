@@ -734,6 +734,9 @@ impl LoreClient {
                 Some("pending_changed") => "pending_changed",
                 Some("pending_incomplete") => "pending_incomplete",
                 Some("pending_unavailable") => "pending_unavailable",
+                Some("belief_changed") => "belief_changed",
+                Some("belief_unavailable") => "belief_unavailable",
+                Some("belief_incomplete") => "belief_incomplete",
                 _ => "remote_error",
             };
             Err(LoreError::Remote(code))
