@@ -1289,6 +1289,18 @@ fn explicit_codex_resume_requires_matching_thread_metadata() {
         assert!(!project.join("should-not-start").exists());
         assert!(!dir.path().join("registry/codex-session.json").exists());
     }
+    fs::write(&thread, json!({"thread_id":"thread_1","session_id":"codex-session",
+        "cwd":dir.path(),"model":null,"turn_incomplete":false}).to_string()).unwrap();
+    let mut resumed = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+        .args(["--runtime-dir", dir.path().to_str().unwrap(),
+            "--cwd", dir.path().to_str().unwrap(), "--session-id", "codex-session",
+            "--engine", "codex", "--codex-bin", codex.to_str().unwrap(),
+            "--lore-python", python.to_str().unwrap(), "--resume", "true"])
+        .stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+    wait_until(|| dir.path().join("registry/codex-session.json").exists());
+    resumed.kill().unwrap();
+    resumed.wait().unwrap();
+    assert!(!dir.path().join("should-not-start").exists(), "provider must wait for a prompt");
 }
 
 #[test]
