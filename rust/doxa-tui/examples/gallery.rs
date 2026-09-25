@@ -43,7 +43,7 @@ fn fixture() -> App {
     event(&mut app,"demo-codex-01","turn_done",json!({"input_tokens":4821,"output_tokens":918,"usage_scope":"session","usage_source":"codex_cli_turn_completed","ctx_percentage":18.0,"session_cost_usd":0.0187}));
     event(&mut app,"demo-claude-02","text_delta",json!({"text":"## Test review\n\nThe new cases cover clipped input and reconnects. One edge case remains in the transport fixture."}));
     event(&mut app,"demo-claude-02","turn_done",json!({"ctx_percentage":9.0,"session_cost_usd":0.0062}));
-    app.notice = "Rust 2.0.0-alpha.22 · fixture session".into();
+    app.notice = "Rust 2.0.0-alpha.23 · fixture session".into();
     app
 }
 
@@ -106,6 +106,11 @@ fn scene(name: &str) -> App {
             app.groups[0].tabs = vec!["demo-codex-01".into()];
             for ch in "/mo".chars() { key(&mut app, KeyCode::Char(ch), KeyModifiers::NONE); }
         }
+        "help" => {
+            app.groups[0].tabs = vec!["demo-codex-01".into()];
+            app.input = "/help".into();
+            key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        }
         "needs-input" => {
             event(&mut app,"demo-codex-01","needs_input",json!({"id":"req-1","kind":"ask_user","title":"Choose migration target","questions":[{"question":"Where should the migration run?","header":"Environment","options":[{"label":"Staging","description":"Validate before release"},{"label":"Production","description":"Apply to live data"}]}]}));
         }
@@ -123,7 +128,7 @@ fn scene(name: &str) -> App {
             event(&mut app,"demo-deepseek-03","text_delta",json!({"text":
                 "## Model options\n\nThe selected model supports reasoning effort controls.\n\n- This session reports high effort\n- Its next turn may use a different level\n- Model choices follow the selected engine"}));
             key(&mut app, KeyCode::Char('f'), KeyModifiers::ALT);
-            app.notice = "Rust 2.0.0-alpha.22 · effort fixture".into();
+            app.notice = "Rust 2.0.0-alpha.23 · effort fixture".into();
         }
         "history" => {
             key(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL);
@@ -163,7 +168,7 @@ fn rgb(color: Color) -> [u8; 3] {
 fn main() {
     let name = std::env::args().nth(1).expect("scene name");
     let (width,height) = match name.as_str() {
-        "hero" | "tool-activity" | "tool-expanded" | "restored-tool" | "processing" | "reasoning" | "commands" | "needs-input" | "permissions" | "effort" | "history" | "queue" | "memory" => (126,31),
+        "hero" | "tool-activity" | "tool-expanded" | "restored-tool" | "processing" | "reasoning" | "commands" | "help" | "needs-input" | "permissions" | "effort" | "history" | "queue" | "memory" => (126,31),
         _ => panic!("unknown scene"),
     };
     let app = scene(&name);
