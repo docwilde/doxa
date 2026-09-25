@@ -1938,9 +1938,19 @@ mod vendor_process {
             assert!(requests.iter().all(|body| body.get("tools").is_none()));
             assert_eq!(requests[1]["messages"][1]["content"], "[redacted] answer");
             assert!(!requests[1].to_string().contains("fixture-secret"));
+            // The published entry is removed at shutdown. Its private claim
+            // inode remains so a later daemon cannot bypass an active flock by
+            // racing a lockfile unlink/recreation.
+            assert!(!process.registry.exists());
+            let remaining: Vec<_> = fs::read_dir(dir.path().join("registry"))
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                .collect();
+            assert_eq!(remaining, ["vendor-session.lock"]);
             assert_eq!(
-                fs::read_dir(dir.path().join("registry")).unwrap().count(),
-                0
+                fs::metadata(dir.path().join("registry/vendor-session.lock"))
+                    .unwrap().permissions().mode() & 0o777,
+                0o600
             );
         }
     }
