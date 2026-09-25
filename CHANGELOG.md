@@ -5,6 +5,23 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.18 — 2026-09-25
+
+- Add `doxa worktrees cleanup FULL_SESSION_ID --confirm` for one verified clean
+  Rust orphan. Cleanup rechecks the live registry, ownership, pinned base,
+  branch and status under the session lock. Dirty or uniquely committed trees
+  and legacy Python sidecars stay untouched.
+- Acquire the Rust session worktree lock before creating its branch or sidecar,
+  closing the brief window in which cleanup could observe an unlocked checkout.
+- Move the processing spinner into the transcript window. Fold reasoning into
+  an expandable `Reasoning/Thinking` row with a live approximate token count
+  for DeepSeek and GLM SSE streams and Claude thinking deltas. Only final
+  scrubbed text is shown when expanded. Codex reasoning summaries also fold
+  into this row.
+- Stream scrubbed Codex and Claude tool results into expandable tool detail
+  instead of showing only the 280-character summary. Mark the 256 KiB detail
+  display limit explicitly when reached.
+
 ## 2.0.0-alpha.17 — 2026-09-25
 
 - Show the newest Rust preview in the README release badge and link directly

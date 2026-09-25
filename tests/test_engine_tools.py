@@ -21,8 +21,21 @@ from claude_agent_sdk import (
 
 from doxa import operators as ops
 from doxa import transcript as transcript_mod
-from doxa.engine import SessionEngine
+from doxa.engine import SessionEngine, _tool_detail_events
 from tests.fakes import factory_with_script
+
+
+def test_tool_detail_events_reassemble_utf8_and_mark_display_limit():
+    text = "é" * 40_000
+    events = list(_tool_detail_events("call-1", text))
+    assert all(event.type == "tool_result_detail" and event.data["id"] == "call-1" for event in events)
+    assert "".join(event.data["text"] for event in events) == text
+    assert all(len(json.dumps(event.data).encode()) < 64 * 1024 for event in events)
+
+    large = "x" * (256 * 1024 + 1)
+    events = list(_tool_detail_events("call-2", large))
+    assert "".join(event.data["text"] for event in events[:-1]) == large[:256 * 1024]
+    assert events[-1].data["text"] == "\n[Tool detail display limit reached]"
 
 
 @pytest.mark.asyncio
@@ -145,7 +158,7 @@ async def test_server_tool_call_and_result_both_reach_the_ui(tmp_path):
         ),
     ]
     factory, _created = factory_with_script(script)
-    engine = SessionEngine(cwd=str(tmp_path), client_factory=factory)
+    engine = SessionEngine(cwd=str(tmp_path), client_factory=factory, detail_events=True)
     await engine.start()
     events = [ev async for ev in engine.send("who owns billing?")]
 
@@ -158,6 +171,8 @@ async def test_server_tool_call_and_result_both_reach_the_ui(tmp_path):
     assert results[0].data["name"] == "advisor"
     assert results[0].data["is_error"] is False
     assert "payments team" in results[0].data["result_summary"]
+    details = [e.data["text"] for e in events if e.type == "tool_result_detail"]
+    assert "payments team" in "".join(details)
     await engine.finalize()
 
 

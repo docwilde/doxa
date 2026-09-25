@@ -45,6 +45,7 @@ const SPINNER_FRAMES: [&str; 4] = ["◐", "◓", "◑", "◒"];
 // JSON may expand one input byte to a six-byte Unicode escape.
 const MAX_INPUT_BYTES: usize = 10 * 1024;
 const MAX_TRANSCRIPT_BYTES: usize = 512 * 1024;
+const MAX_REASONING_DISPLAY_CHARS: usize = 48 * 1024;
 const MAX_ANSWER_BYTES: usize = 10 * 1024;
 // Reserve metadata wrapping even in a narrow review modal. This is also the
 // number used by the read-through gate, so it never credits hidden raw rows.
@@ -426,10 +427,44 @@ fn append_turn_heading(session: &mut Session, heading: &str) -> bool {
     append_transcript(session, &format!("{separator}**{heading}:**\n\n"))
 }
 
+#[derive(Default)]
+struct ReasoningStream {
+    text: String,
+    tokens: u64,
+    visible: bool,
+    streaming: bool,
+}
+impl std::fmt::Debug for ReasoningStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReasoningStream")
+            .field("text_chars", &self.text.chars().count())
+            .field("tokens", &self.tokens)
+            .field("visible", &self.visible)
+            .field("streaming", &self.streaming)
+            .finish()
+    }
+}
+
+fn set_reasoning_marker(session: &mut Session, stream: &ReasoningStream) {
+    let marker = format!("{}{}", transcript_tools::REASONING_PREFIX,
+        serde_json::json!({"text":stream.text,"tokens":stream.tokens,"streaming":stream.streaming}));
+    if stream.visible {
+        if let Some(start) = session.transcript.rfind(transcript_tools::REASONING_PREFIX) {
+            let end = session.transcript[start..].find("\n\n")
+                .map(|offset| start + offset).unwrap_or(session.transcript.len());
+            session.transcript.replace_range(start..end, &marker);
+            if session.transcript.len() > MAX_TRANSCRIPT_BYTES {
+                session.transcript = transcript_tail(&session.transcript).to_owned();
+            }
+            return;
+        }
+    }
+    append_transcript(session, &format!("\n\n{marker}\n\n"));
+}
+
 fn structured_event(event_type: &str, data: &serde_json::Value) -> Option<String> {
     let field = |key| event_string(data, key).unwrap_or_default();
     let row = match event_type {
-        "reasoning_delta" => format!("Reasoning: {}", field("text")),
         "tool_call" => {
             let name = field("name");
             let input = data
@@ -488,7 +523,14 @@ fn structured_event(event_type: &str, data: &serde_json::Value) -> Option<String
         }
         _ => return None,
     };
-    Some(format!("\n\n{row}\n\n"))
+    let identity = if matches!(event_type, "tool_call" | "tool_result") {
+        data.get("id").and_then(|value| value.as_str())
+            .filter(|id| !id.is_empty() && id.len() <= 200 && !id.chars().any(char::is_control))
+            .map(|id| format!("{}{}", transcript_tools::TOOL_ID_PREFIX,
+                serde_json::to_string(id).unwrap_or_default()))
+            .unwrap_or_default()
+    } else { String::new() };
+    Some(format!("\n\n{row}{identity}\n\n"))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -861,6 +903,7 @@ pub struct App {
     permission_modes: HashMap<String, String>,
     session_activity: HashMap<String, (bool, usize)>,
     streaming_text: HashSet<String>,
+    reasoning_streams: HashMap<String, ReasoningStream>,
     spinner_at: Instant,
     spinner_frame: usize,
     permission_picker: Option<(String, usize)>,
@@ -985,6 +1028,7 @@ impl Default for App {
             permission_modes: HashMap::new(),
             session_activity: HashMap::new(),
             streaming_text: HashSet::new(),
+            reasoning_streams: HashMap::new(),
             spinner_at: Instant::now(),
             spinner_frame: 0,
             permission_picker: None,
@@ -1277,11 +1321,13 @@ impl App {
                 let Some(id) = frame.get("session_id").and_then(|v| v.as_str()).map(str::to_owned) else {
                     return false;
                 };
+                let mut tool_updated = false;
                 if self.sessions.iter().any(|session| session.id == id) {
-                    self.tool_cards.record(&id, event_type, data);
+                    tool_updated = self.tool_cards.record(&id, event_type, data);
                     self.peer_map.event(&id, event_type, data);
                 }
                 match event_type {
+                    "tool_result_detail" => tool_updated,
                     "branch_changed" => {
                         self.invalidate_repo(&id);
                         true
@@ -1332,8 +1378,11 @@ impl App {
                             false
                         }
                     }
+                    "reasoning_progress" => self.append_reasoning(&id, data, true),
+                    "reasoning_delta" => self.append_reasoning(&id, data, false),
                     "turn_started" => {
                         self.streaming_text.remove(&id);
+                        self.reasoning_streams.remove(&id);
                         if let Some(prompt) = data.get("prompt").and_then(|v| v.as_str()).filter(|v| !v.is_empty()) {
                             if let Some(session) = self.sessions.iter_mut().find(|s| s.id == id) {
                                 let prompt = markdown::sanitize(prompt);
@@ -1350,6 +1399,12 @@ impl App {
                     }
                     "turn_done" => {
                         self.streaming_text.remove(&id);
+                        if let Some(stream) = self.reasoning_streams.get_mut(&id) {
+                            stream.streaming = false;
+                            if let Some(session) = self.sessions.iter_mut().find(|session| session.id == id) {
+                                set_reasoning_marker(session, stream);
+                            }
+                        }
                         self.session_telemetry.entry(id.clone()).or_default().update_turn(data);
                         self.session_activity.entry(id.clone()).or_default().0 = false;
                         let status = if data.get("is_error").and_then(|v| v.as_bool()) == Some(true)
@@ -1721,7 +1776,7 @@ impl App {
         let Some(row) = structured_event(event_type, data) else {
             return false;
         };
-        let heading_needed = matches!(event_type, "reasoning_delta" | "tool_call" | "tool_result")
+        let heading_needed = matches!(event_type, "tool_call" | "tool_result")
             && self.streaming_text.insert(id.to_owned());
         let Some(session) = self.sessions.iter_mut().find(|s| s.id == id) else {
             return false;
@@ -1730,6 +1785,33 @@ impl App {
         if append_transcript(session, &row) {
             self.notice = "Transcript tail limited to 512 KiB".into();
         }
+        true
+    }
+
+    fn append_reasoning(&mut self, id: &str, data: &serde_json::Value, progress: bool) -> bool {
+        let stream = self.reasoning_streams.entry(id.to_owned()).or_default();
+        if let Some(tokens) = data.get("approx_tokens").and_then(|value| value.as_u64()) {
+            stream.tokens = stream.tokens.max(tokens);
+        }
+        if progress {
+            stream.streaming = true;
+        } else {
+            let Some(text) = data.get("text").and_then(|value| value.as_str()) else { return false; };
+            let clean = markdown::sanitize(text);
+            let remaining = MAX_REASONING_DISPLAY_CHARS.saturating_sub(stream.text.chars().count());
+            stream.text.extend(clean.chars().take(remaining));
+            if clean.chars().count() > remaining && !stream.text.ends_with("[Reasoning display limit reached]") {
+                stream.text.push_str("\n[Reasoning display limit reached]");
+            }
+            stream.tokens = stream.tokens.max(stream.text.chars().count().div_ceil(4) as u64);
+            stream.streaming = data.get("final").and_then(|value| value.as_bool()) == Some(false);
+        }
+        let first = !stream.visible;
+        let heading_needed = first && self.streaming_text.insert(id.to_owned());
+        let Some(session) = self.sessions.iter_mut().find(|session| session.id == id) else { return false; };
+        if heading_needed { append_turn_heading(session, "Assistant"); }
+        set_reasoning_marker(session, stream);
+        stream.visible = true;
         true
     }
 
@@ -5907,16 +5989,13 @@ impl App {
         .block(
             Block::default()
                 .title(format!(
-                    " Pane {}{}{} ",
+                    " Pane {}{} ",
                     index + 1,
                     if self.active_group == index {
                         " ●"
                     } else {
                         ""
                     },
-                    group.active_id().and_then(|id| self.activity_label(id))
-                        .map(|label| format!(" · {} {label}", SPINNER_FRAMES[self.spinner_frame]))
-                        .unwrap_or_default(),
                 ))
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(if group.active_id().is_some_and(|id| self.waiting_for_input(id)) && self.blink_on {
@@ -5928,14 +6007,23 @@ impl App {
             .map(|s| s.transcript.as_str())
             .unwrap_or("No session open. Select one in the rail and press Enter.");
         let id = group.active_id().unwrap_or("");
-        let (lines, sections) = transcript_tools::render(
+        let (mut lines, sections) = transcript_tools::render_with_cards(
             content,
             inner[1].width.saturating_sub(2),
             self.expanded_tool_sections.get(id),
             (active && self.focus == Focus::Transcript)
                 .then(|| self.selected_tool_sections.get(id).copied())
                 .flatten(),
+            self.tool_cards.for_session(id),
         );
+        if self.activity_label(id) == Some("Processing") {
+            lines.push(Line::styled(
+                format!(" {} Processing…", SPINNER_FRAMES[self.spinner_frame]),
+                Style::default().fg(theme::ACCENT),
+            ));
+        } else if self.activity_label(id) == Some("Queued") {
+            lines.push(Line::styled(" Queued", Style::default().fg(theme::SECONDARY)));
+        }
         let top = lines.len().saturating_sub(usize::from(inner[1].height))
             .saturating_sub(group.scroll.min(lines.len().saturating_sub(usize::from(inner[1].height))));
         for section in sections {
@@ -8575,6 +8663,38 @@ for line in sys.stdin:
         app.session_activity.insert("s".into(), (false, 0));
         assert!(!app.tick_spinner(start + SPINNER_INTERVAL * 2));
         assert!(!painted(&app).contains("Processing"));
+    }
+
+    #[test]
+    fn streamed_reasoning_counts_live_then_reveals_only_on_expand() {
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"s"}));
+        let event = |kind: &str, data: serde_json::Value| json!({"type":"event", "session_id":"s",
+            "event":{"type":kind,"data":data}});
+        app.apply_daemon_frame(&event("turn_started", json!({"prompt":"check"})));
+        app.apply_daemon_frame(&event("reasoning_progress", json!({"approx_tokens":37})));
+        let transcript = &app.sessions[0].transcript;
+        let (live, sections) = transcript_tools::render(transcript, 80, None, None);
+        assert_eq!(sections.len(), 1);
+        assert!(live.iter().any(|line| line.to_string().contains("~37 tokens · receiving")));
+        app.apply_daemon_frame(&event("reasoning_delta", json!({"text":"scrubbed thought","approx_tokens":42,"final":true})));
+        app.apply_daemon_frame(&event("text_delta", json!({"text":"Answer"})));
+        app.apply_daemon_frame(&event("turn_done", json!({"is_error":false})));
+        let transcript = &app.sessions[0].transcript;
+        let (collapsed, _) = transcript_tools::render(transcript, 80, None, None);
+        assert!(!collapsed.iter().any(|line| line.to_string().contains("scrubbed thought")));
+        assert!(collapsed.iter().any(|line| line.to_string().contains("~42 tokens")));
+        let (expanded, _) = transcript_tools::render(transcript, 80, Some(&HashSet::from([0])), None);
+        assert!(expanded.iter().any(|line| line.to_string().contains("scrubbed thought")));
+        assert!(expanded.iter().any(|line| line.to_string().contains("Answer")));
+        app.handle(Event::Resize(100, 28));
+        painted(&app);
+        let hit = app.visible_tool_sections.borrow().iter()
+            .find(|(_, _, session, section)| session == "s" && *section == 0)
+            .map(|(rect, _, _, _)| *rect).unwrap();
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: hit.x + 1, row: hit.y, modifiers: KeyModifiers::NONE }));
+        assert!(app.expanded_tool_sections["s"].contains(&0));
     }
 
     #[test]

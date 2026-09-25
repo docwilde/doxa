@@ -100,6 +100,36 @@ async def test_thinking_delta_becomes_reasoning_delta(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_rust_sidecar_counts_live_then_scrubs_joined_reasoning(tmp_path):
+    script = [
+        StreamEvent(uuid="s1", session_id="s", event={
+            "type": "content_block_delta",
+            "delta": {"type": "thinking_delta", "thinking": "checking AKIAABCDEF"},
+        }),
+        StreamEvent(uuid="s2", session_id="s", event={
+            "type": "content_block_delta",
+            "delta": {"type": "thinking_delta", "thinking": "GHIJKLMNOP now"},
+        }),
+        ResultMessage(subtype="success", duration_ms=10, duration_api_ms=9,
+                      is_error=False, num_turns=1, session_id="s", total_cost_usd=0.0),
+    ]
+    factory, _created = factory_with_script(script)
+    engine = SessionEngine(cwd=str(tmp_path), client_factory=factory, detail_events=True)
+    await engine.start()
+    events = [ev async for ev in engine.send("check")]
+
+    progress = [e for e in events if e.type == "reasoning_progress"]
+    detail = [e for e in events if e.type == "reasoning_delta"]
+    assert progress and detail
+    assert events.index(progress[0]) < events.index(detail[0])
+    assert progress[-1].data["approx_tokens"] == (len("checking " + FAKE_AWS_KEY + " now") + 3) // 4
+    assert FAKE_AWS_KEY not in "".join(e.data["text"] for e in detail)
+    assert "[REDACTED" in "".join(e.data["text"] for e in detail)
+    assert detail[-1].data["final"] is True
+    await engine.finalize()
+
+
+@pytest.mark.asyncio
 async def test_subagent_reasoning_is_scrubbed_and_tagged_with_parent_id(tmp_path):
     """Parity with text_delta's own subagent-trace convention
     (test_trace.py): a thinking delta carrying parent_tool_use_id is

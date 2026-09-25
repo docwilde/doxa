@@ -1293,6 +1293,21 @@ def _tool_result_text(content: Any) -> str:
     return ""
 
 
+def _tool_detail_events(tool_id: str, scrubbed_text: str):
+    """Send bounded, frame-safe detail beside the collapsed tool summary."""
+    limit = 256 * 1024
+    raw = scrubbed_text.encode("utf-8")
+    visible = raw[:limit].decode("utf-8", "ignore")
+    for offset in range(0, len(visible), 8192):
+        yield EngineEvent("tool_result_detail", {
+            "id": tool_id, "text": visible[offset:offset + 8192],
+        })
+    if len(raw) > limit:
+        yield EngineEvent("tool_result_detail", {
+            "id": tool_id, "text": "\n[Tool detail display limit reached]",
+        })
+
+
 def _server_tool_result_text(content: Any) -> "tuple[str, bool]":
     """``(readable text, is_error)`` for a ``ServerToolResultBlock``.
 
@@ -1469,7 +1484,9 @@ class SessionEngine:
         spawn_depth: int = 0,
         parent_session_id: str | None = None,
         lore: "bool | None" = None,
+        detail_events: bool = False,
     ) -> None:
+        self.detail_events = detail_events
         self.cwd = cwd
         self.model = model
         # Checked, not just minted: this id becomes `<id>.jsonl` below and
@@ -3353,6 +3370,10 @@ class SessionEngine:
         await self._client.query(outbound, session_id=self.session_id)
 
         pending_assistant_blocks: list[dict] = []
+        reasoning_fragments: list[str] = []
+        reasoning_chars = 0
+        reasoning_kept = 0
+        last_reasoning_progress = 0.0
 
         async for message in self._client.receive_response():
             if isinstance(message, StreamEvent):
@@ -3386,10 +3407,27 @@ class SessionEngine:
                         # thinking delta, only `delta.get("thinking")` is.
                         thinking_text = delta.get("thinking") or ""
                         if thinking_text:
-                            data = {"text": thinking_text}
-                            if parent:
-                                data = {"text": _scrub_text(thinking_text), "parent_id": parent}
-                            yield EngineEvent("reasoning_delta", data)
+                            if self.detail_events:
+                                # A secret can straddle SSE fragments. Only
+                                # counts cross the sidecar boundary live;
+                                # scrub the joined stream before revealing it.
+                                reasoning_chars += len(thinking_text)
+                                remaining = max(0, 48 * 1024 - reasoning_kept)
+                                fragment = thinking_text[:remaining]
+                                if fragment:
+                                    reasoning_fragments.append(fragment)
+                                    reasoning_kept += len(fragment)
+                                now = time.monotonic()
+                                if last_reasoning_progress == 0 or now - last_reasoning_progress >= 0.1:
+                                    yield EngineEvent("reasoning_progress", {
+                                        "approx_tokens": (reasoning_chars + 3) // 4,
+                                    })
+                                    last_reasoning_progress = now
+                            else:
+                                data = {"text": thinking_text}
+                                if parent:
+                                    data = {"text": _scrub_text(thinking_text), "parent_id": parent}
+                                yield EngineEvent("reasoning_delta", data)
                     else:
                         text = delta.get("text") or ""
                         if text:
@@ -3482,6 +3520,9 @@ class SessionEngine:
                         if parent:
                             event_data["parent_id"] = parent
                         yield EngineEvent("tool_result", event_data)
+                        if self.detail_events:
+                            for detail in _tool_detail_events(block.tool_use_id, result_text):
+                                yield detail
                 if pending_assistant_blocks:
                     self._persist_assistant_blocks(pending_assistant_blocks)
                     pending_assistant_blocks = []
@@ -3517,6 +3558,9 @@ class SessionEngine:
                             # the parent id keeps replay consumers honest
                             event_data["parent_id"] = parent
                         yield EngineEvent("tool_result", event_data)
+                        if self.detail_events:
+                            for detail in _tool_detail_events(block.tool_use_id, result_text):
+                                yield detail
                 if tool_result_blocks:
                     self._persist_tool_results(tool_result_blocks)
 
@@ -3539,6 +3583,20 @@ class SessionEngine:
                 continue
 
             elif isinstance(message, ResultMessage):
+                if self.detail_events and reasoning_chars:
+                    yield EngineEvent("reasoning_progress", {
+                        "approx_tokens": (reasoning_chars + 3) // 4,
+                    })
+                    scrubbed = _scrub_text("".join(reasoning_fragments))
+                    if reasoning_kept < reasoning_chars:
+                        scrubbed += "\n[Reasoning display limit reached]"
+                    for offset in range(0, len(scrubbed), 8192):
+                        end = min(offset + 8192, len(scrubbed))
+                        yield EngineEvent("reasoning_delta", {
+                            "text": scrubbed[offset:end],
+                            "approx_tokens": (reasoning_chars + 3) // 4,
+                            "final": end == len(scrubbed),
+                        })
                 if message.total_cost_usd:
                     self.total_cost_usd += message.total_cost_usd
                 self.num_turns += 1

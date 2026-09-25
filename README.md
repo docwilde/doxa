@@ -1,8 +1,8 @@
 <p align="center"><img src="assets/logo.png" width="560" alt="DOXA — belief earning knowledge"></p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Rust%202.0-alpha.17-f59f00" alt="Rust 2.0 alpha.17 is the main frontend">
-  <a href="https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.17"><img src="https://img.shields.io/github/v/release/docwilde/doxa?include_prereleases&amp;sort=semver&amp;label=Rust%20preview&amp;color=e8590c" alt="latest Rust preview release"></a>
+  <img src="https://img.shields.io/badge/Rust%202.0-alpha.18-f59f00" alt="Rust 2.0 alpha.18 is the main frontend">
+  <a href="https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.18"><img src="https://img.shields.io/github/v/release/docwilde/doxa?include_prereleases&amp;sort=semver&amp;label=Rust%20preview&amp;color=e8590c" alt="latest Rust preview release"></a>
   <a href="https://github.com/docwilde/doxa/actions/workflows/rust-ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/docwilde/doxa/rust-ci.yml?branch=main&label=Rust%20CI" alt="Rust CI status"></a>
   <img src="https://img.shields.io/badge/TUI-Ratatui-2f9e44" alt="Rust TUI built with Ratatui">
   <img src="https://img.shields.io/badge/auth-provider%20CLI%20or%20API%20key-2f9e44" alt="authentication follows the selected engine">
@@ -14,7 +14,7 @@
 > can edit files and run commands with your privileges. Read
 > [Non-goals](#non-goals) before using it on important work.
 
-The current Rust preview is [v2.0.0-alpha.17](https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.17).
+The current Rust preview is [v2.0.0-alpha.18](https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.18).
 GitHub labels 1.19 as the latest stable release while Rust 2.0 remains a prerelease.
 
 **DOXA** is a terminal for coding agents. Development now leads with the
@@ -40,13 +40,16 @@ across grouped tabs and two-pane splits with separate prompts, inspect bounded
 worktree diffs and tool cards, change supported models and permissions, and
 browse LORE beliefs and peer activity. The [Rust guide](rust/README.md)
 describes its current capabilities and limits. Managed worktrees, diff hunk
-rejection, guarded session checkout recovery, reviewed LORE belief actions,
+rejection, explicit clean Rust-orphan cleanup, guarded session checkout recovery,
+reviewed LORE belief actions,
 LORE proposal review, and Python-backed fleet operation are in the
 alpha. Native fleet supervision and remote control are still being ported.
+Processing appears inside each transcript; reasoning is folded behind a live
+token counter, and expanded tool activity shows scrubbed result detail.
 
 ## Gallery
 
-### Rust 2.0 alpha.17
+### Rust 2.0 alpha.18
 
 ![Single Rust session pane showing collapsed tool calls below the assistant reply](assets/shots/rust-tool-activity.png)
 
@@ -59,6 +62,10 @@ alpha. Native fleet supervision and remote control are still being ported.
 ![Rust session pane showing separate prompt and answer turns with a processing spinner](assets/shots/rust-processing.png)
 
 *User messages have a warm highlight, agent replies keep the normal surface, and the pane shows processing while the next request runs.*
+
+![Rust session pane with a live Reasoning/Thinking token count above the prompt](assets/shots/rust-reasoning.png)
+
+*Streamed reasoning stays folded while its approximate token count updates.*
 
 ![Rust input request choices expanded above the prompt in a single session pane](assets/shots/rust-needs-input.png)
 
@@ -99,7 +106,7 @@ curl -fsSL https://raw.githubusercontent.com/docwilde/doxa/main/scripts/install.
 
 The installer builds the Rust frontend and daemon from `main` and installs the
 Rust `doxa` command in `~/.local/bin` (or `DOXA_RUST_BIN_DIR`). Pass a tag such
-as `v2.0.0-alpha.17` after `sh -s --` to pin a release. It uses Git, Cargo,
+as `v2.0.0-alpha.18` after `sh -s --` to pin a release. It uses Git, Cargo,
 Python 3.11+, and `uv`; the Python environment it creates is private to the
 LORE and Claude sidecars. No Python frontend command is installed. See the
 [Rust guide](rust/README.md) for provider setup and current limits.

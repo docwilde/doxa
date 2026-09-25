@@ -194,7 +194,8 @@ async def run() -> None:
                 model = params.get("model")
                 if model is not None and not isinstance(model, str):
                     raise ValueError("invalid start option")
-                options = {"cwd": cwd, "session_id": session_id, "resume": resume}
+                options = {"cwd": cwd, "session_id": session_id, "resume": resume,
+                           "detail_events": True}
                 if model is not None:
                     options["model"] = model
                 candidate = SessionEngine(**options)

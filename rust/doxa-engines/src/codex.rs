@@ -13,6 +13,8 @@ use crate::EngineEvent;
 
 pub const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
 const RESULT_SUMMARY_CHARS: usize = 280;
+const TOOL_DETAIL_CHUNK_BYTES: usize = 8 * 1024;
+const MAX_TOOL_DETAIL_BYTES: usize = 256 * 1024;
 const BAD_SAMPLE_CHARS: usize = 120;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -179,10 +181,26 @@ impl CodexJsonlNormalizer {
             self.started.insert(id.clone(), Instant::now());
             return vec![EngineEvent::new("tool_call", json!({"id":display_id,"name":display_name,"input":self.tool_input(&item_kind,item)}))];
         }
-        let (summary, is_error) = self.tool_result(&item_kind, item);
+        let (detail, is_error) = self.tool_result(&item_kind, item);
+        let summary = truncate(&detail, RESULT_SUMMARY_CHARS);
         let duration_ms = self.started.get(&id).map(|start| start.elapsed().as_millis() as u64);
         if event_kind == "item.completed" { self.started.remove(&id); }
-        vec![EngineEvent::new("tool_result", json!({"id":display_id,"name":display_name,"result_summary":summary,"is_error":is_error,"duration_ms":duration_ms}))]
+        let mut events = vec![EngineEvent::new("tool_result", json!({"id":display_id,"name":display_name,"result_summary":summary,"is_error":is_error,"duration_ms":duration_ms}))];
+        let limit = detail.len().min(MAX_TOOL_DETAIL_BYTES);
+        let mut displayed = 0;
+        while displayed < limit {
+            let mut end = (displayed + TOOL_DETAIL_CHUNK_BYTES).min(limit);
+            while !detail.is_char_boundary(end) { end -= 1; }
+            if end == displayed { break; }
+            let text = &detail[displayed..end];
+            events.push(EngineEvent::new("tool_result_detail", json!({"id":display_id,"text":text})));
+            displayed = end;
+        }
+        if detail.len() > displayed {
+            events.push(EngineEvent::new("tool_result_detail", json!({"id":display_id,
+                "text":"\n[Tool detail display limit reached]"})));
+        }
+        events
     }
 
     fn tool_input(&self, kind: &str, item: &Map<String, Value>) -> Value {
@@ -211,28 +229,28 @@ impl CodexJsonlNormalizer {
 
     fn tool_result(&self, kind: &str, item: &Map<String, Value>) -> (String, bool) {
         if let Some(message) = item.get("error").and_then(Value::as_object).and_then(|v| v.get("message")) {
-            if !message.is_null() { return (truncate(&(self.scrub)(&value_string(message)), RESULT_SUMMARY_CHARS), true); }
+            if !message.is_null() { return ((self.scrub)(&value_string(message)), true); }
         }
         let mut failed = matches!(string(item.get("status")).as_str(), "failed" | "error");
         let summary = match kind {
             "command_execution" => {
                 let code = item.get("exit_code").and_then(Value::as_i64);
                 failed |= code.is_some_and(|n| n != 0);
-                let out = truncate(&(self.scrub)(&string(item.get("aggregated_output"))), RESULT_SUMMARY_CHARS);
+                let out = (self.scrub)(&string(item.get("aggregated_output")));
                 if out.is_empty() { format!("exit {}", code.map_or("None".to_owned(), |n| n.to_string())) } else { out }
             }
             "file_change" => format!("{} file(s) changed", item.get("changes").and_then(Value::as_array).map_or(0, Vec::len)),
             "mcp_tool_call" => {
                 let texts: Vec<String> = item.get("result").and_then(|v| v.get("content")).and_then(Value::as_array)
                     .into_iter().flatten().filter_map(Value::as_object).map(|row| string(row.get("text"))).collect();
-                truncate(&(self.scrub)(&texts.join("\n")), RESULT_SUMMARY_CHARS)
+                (self.scrub)(&texts.join("\n"))
             }
             "todo_list" => {
                 let rows = item.get("items").and_then(Value::as_array);
                 let done = rows.into_iter().flatten().filter(|row| row.get("completed").and_then(Value::as_bool) == Some(true)).count();
                 format!("{done}/{} done", rows.map_or(0, Vec::len))
             }
-            _ => truncate(&(self.scrub)(&Value::Object(item.clone()).to_string()), RESULT_SUMMARY_CHARS),
+            _ => (self.scrub)(&Value::Object(item.clone()).to_string()),
         };
         (summary, failed)
     }

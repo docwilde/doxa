@@ -465,6 +465,11 @@ pub fn create_from(cwd: &Path, id: &str, requested_base: Option<&str>) -> Option
         return Some(Managed { path: record.path, created: false, finished: false, lock: Some(lock) });
     }
     if branch == base { return None; }
+    // Hold the same lock used by orphan cleanup before the checkout or its
+    // pinned sidecar exists. Otherwise cleanup could observe the sidecar in
+    // the gap between write_record and the daemon's lock acquisition.
+    ensure_owned_dir(&worktrees.join(".meta"))?;
+    let lock = lock_worktree(&path)?;
     if fs::symlink_metadata(&path).is_ok() || meta_path(&path).is_some_and(|p| fs::symlink_metadata(p).is_ok()) {
         return None;
     }
@@ -483,7 +488,6 @@ pub fn create_from(cwd: &Path, id: &str, requested_base: Option<&str>) -> Option
         // Preserve it for inspection, but never run a session in it.
         return None;
     }
-    let lock = lock_worktree(&path)?;
     Some(Managed { path, created: true, finished: false, lock: Some(lock) })
 }
 
@@ -764,6 +768,31 @@ mod tests {
     fn run_git(cwd: &Path, args: &[&str]) {
         let result = Command::new("git").args(args).current_dir(cwd).output().unwrap();
         assert!(result.status.success(), "git {:?}: {}", args, String::from_utf8_lossy(&result.stderr));
+    }
+    #[test]
+    fn creation_requires_lifecycle_lock_before_creating_a_branch_or_sidecar() {
+        let _serial = TEST_ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        env::set_var("DOXA_HOME", dir.path().join("home"));
+        env::set_var("DOXA_WORKTREE", "1");
+        let main = dir.path().join("repo");
+        fs::create_dir(&main).unwrap();
+        run_git(&main, &["init", "-q", "-b", "main"]);
+        fs::write(main.join("file"), "base\n").unwrap();
+        run_git(&main, &["add", "file"]);
+        run_git(&main, &["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "test: base"]);
+        let worktrees = ensure_owned_dir(&root().unwrap()).unwrap();
+        ensure_owned_dir(&worktrees.join(".meta")).unwrap();
+        let path = worktrees.join("repo-lock0001");
+        let held = lock_worktree(&path).unwrap();
+        assert!(create(&main, "lock0001session").is_none());
+        assert!(!path.exists());
+        assert!(meta_path(&path).is_some_and(|meta| !meta.exists()));
+        assert!(git_text(&main, &["show-ref", "--verify", "refs/heads/doxa/lock0001"]).is_none());
+        drop(held);
+        let mut created = create(&main, "lock0001session").unwrap();
+        assert_eq!(created.path(), path);
+        assert!(created.finish().is_empty());
     }
     #[test]
     fn recovers_deleted_checkout_from_pinned_sidecar_and_keeps_unique_commits() {

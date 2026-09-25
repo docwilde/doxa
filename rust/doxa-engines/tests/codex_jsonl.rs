@@ -20,13 +20,14 @@ fn fixture_normalizes_chunked_turn_and_usage() {
     assert_eq!(parser.usage().reasoning_output_tokens, 5);
     assert!(parser.flush_eof().is_empty());
     assert_eq!(events.iter().map(|e| e.kind.as_str()).collect::<Vec<_>>(), [
-        "tool_call", "tool_result", "tool_call", "tool_result", "tool_result", "reasoning_delta", "text_delta"
+        "tool_call", "tool_result", "tool_result_detail", "tool_call", "tool_result",
+        "tool_result_detail", "tool_result", "tool_result_detail", "reasoning_delta", "text_delta"
     ]);
     assert_eq!(events[0], EngineEvent::new("tool_call", json!({"id":"cmd-1","name":"command_execution","input":{"command":"printf hello"}})));
-    assert_eq!(events[3].data["result_summary"], "1/2 done");
-    assert_eq!(events[4].data["result_summary"], "2/2 done");
-    assert_eq!(events[5].data, json!({"text":"I checked the result."}));
-    assert_eq!(events[6].data, json!({"text":"Done."}));
+    assert_eq!(events[4].data["result_summary"], "1/2 done");
+    assert_eq!(events[6].data["result_summary"], "2/2 done");
+    assert_eq!(events[8].data, json!({"text":"I checked the result."}));
+    assert_eq!(events[9].data, json!({"text":"Done."}));
     let terminal = parser.finish_turn(Some(123), None);
     assert_eq!(terminal.len(), 1);
     assert_eq!(terminal[0].kind, "turn_done");
@@ -66,10 +67,31 @@ fn tool_kinds_keep_codex_names_and_scrub_output() {
     assert_eq!(events[0].data["name"], "doxa/lookup");
     assert_eq!(events[0].data["input"], json!({"arguments":{"q":"x","nested":[{"token":"[redacted]"}]}}));
     assert_eq!(events[1].data["result_summary"], "[redacted]");
-    assert_eq!(events[2].data["input"], json!({"paths":["[redacted]/a.txt"]}));
-    assert_eq!(events[3].data["result_summary"], "1 file(s) changed");
-    assert_eq!(events[4].data["input"]["query"], "[redacted]");
-    assert_eq!(events[5].data["is_error"], true);
+    assert_eq!(events[1].kind, "tool_result");
+    assert_eq!(events[2].data["text"], "[redacted]");
+    assert_eq!(events[3].data["input"], json!({"paths":["[redacted]/a.txt"]}));
+    assert_eq!(events[4].data["result_summary"], "1 file(s) changed");
+    assert_eq!(events[6].data["input"]["query"], "[redacted]");
+    assert_eq!(events[7].data["is_error"], true);
+}
+
+#[test]
+fn long_tool_output_is_chunked_for_expandable_detail() {
+    let mut parser = parser();
+    parser.begin_turn();
+    let output = format!("{}fixture-secret END", "é".repeat(20_000));
+    let frame = json!({"type":"item.completed","item":{"id":"tool-1",
+        "type":"command_execution","exit_code":0,"aggregated_output":output}});
+    let events = parser.push_bytes(format!("{frame}\n").as_bytes()).unwrap();
+    assert_eq!(events[0].kind, "tool_result");
+    assert_eq!(events[0].data["result_summary"].as_str().unwrap().chars().count(), 280);
+    let detail: String = events.iter().skip(1).map(|event| {
+        assert_eq!(event.kind, "tool_result_detail");
+        event.data["text"].as_str().unwrap()
+    }).collect();
+    assert!(detail.ends_with("[redacted] END"));
+    assert!(!detail.contains("fixture-secret"));
+    assert!(detail.starts_with('é'));
 }
 
 #[test]
