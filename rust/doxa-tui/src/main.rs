@@ -33,7 +33,7 @@ Commands:
   stop [ID]            Stop a live session
   list                 List live sessions
   branch [NAME]        List branches; use NAME --session ID to switch an idle session
-  worktrees            List orphaned managed worktrees; clean FULL_ID explicitly
+  worktrees            List orphaned managed worktrees for manual review
   doctor               Check provider and launcher dependencies
   fleet ...            Inspect or start Python-backed fleet runs
 
@@ -411,42 +411,23 @@ fn run(args: &[String]) -> io::Result<()> {
 }
 
 fn worktrees(args: &[String]) -> io::Result<()> {
-    let clean_id = match args {
-        [] => None,
-        [action] if action == "list" => None,
-        [action, id] if action == "clean" && discovery::valid_id(id) => Some(id.as_str()),
-        _ => return Err(invalid("usage: doxa worktrees [list|clean FULL_SESSION_ID]")),
-    };
+    if !(args.is_empty() || matches!(args, [action] if action == "list")) {
+        return Err(invalid("usage: doxa worktrees [list]"));
+    }
     let live: HashSet<String> = discovery::sessions()?.into_iter().map(|session| session.id).collect();
     let previews = doxa_worktrees::preview_orphans(&live);
-    if let Some(id) = clean_id {
-        let mut matches = previews.iter().filter(|preview| preview.record.session_id == id);
-        let preview = matches.next().ok_or_else(|| invalid("no verified orphan with that full session ID"))?;
-        if matches.next().is_some() { return Err(invalid("session ID matches multiple worktrees; cleanup refused")); }
-        match doxa_worktrees::cleanup_orphan(preview, || {
-            discovery::sessions().ok().map(|sessions| sessions.into_iter().map(|session| session.id).collect())
-        }) {
-            doxa_worktrees::CleanupResult::Removed => {
-                println!("cleaned orphan {} at {:?}", id, preview.record.path);
-                Ok(())
-            }
-            doxa_worktrees::CleanupResult::Kept(reason) => Err(invalid(format!("orphan kept: {reason}"))),
-        }
-    } else {
-        println!("managed worktrees without a live session: {}", previews.len());
-        for preview in previews {
-            let state = match preview.state {
-                doxa_worktrees::OrphanState::Ready { .. } => "clean",
-                doxa_worktrees::OrphanState::Dirty => "dirty; kept",
-                doxa_worktrees::OrphanState::UniqueCommits => "unique commits; kept",
-                doxa_worktrees::OrphanState::Uncertain => "uncertain; kept",
-            };
-            println!("  {}  {state}  branch:{:?}  path:{:?}",
-                preview.record.session_id, preview.record.branch, preview.record.path);
-        }
-        println!("To remove a clean orphan: doxa worktrees clean FULL_SESSION_ID");
-        Ok(())
+    println!("managed worktrees without an attachable session: {}", previews.len());
+    for preview in previews {
+        let state = match preview.state {
+            doxa_worktrees::OrphanState::Ready { .. } => "clean; review manually",
+            doxa_worktrees::OrphanState::Dirty => "dirty; kept",
+            doxa_worktrees::OrphanState::UniqueCommits => "unique commits; kept",
+            doxa_worktrees::OrphanState::Uncertain => "uncertain; kept",
+        };
+        println!("  {}  {state}  branch:{:?}  path:{:?}",
+            preview.record.session_id, preview.record.branch, preview.record.path);
     }
+    Ok(())
 }
 
 fn fleet(args: &[String]) -> io::Result<()> {
