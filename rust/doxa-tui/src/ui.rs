@@ -429,7 +429,7 @@ pub struct App {
     engine_picker: bool,
     engine_selected: usize,
     new_session: Option<NewSession>,
-    pending_launches: Vec<(launch::LaunchOptions, Option<String>)>,
+    pending_launches: Vec<(launch::LaunchOptions, Option<String>, usize)>,
     launching: bool,
     pending_model_queries: Vec<String>,
     pending_model_changes: Vec<(String, String)>,
@@ -578,10 +578,13 @@ impl App {
         };
         match kind {
             "launch_reply" => {
+                if !self.launching { return false; }
                 self.launching = false;
                 if frame["ok"] == true {
                     if let Some(id) = frame["session_id"].as_str().filter(|id| crate::discovery::valid_id(id)) {
-                        let group = &mut self.groups[self.active_group];
+                        let target = frame["group"].as_u64().filter(|group| *group < 2)
+                            .map(|group| group as usize).unwrap_or(self.active_group);
+                        let group = &mut self.groups[target];
                         if !group.tabs.iter().any(|tab| tab == id) { group.tabs.push(id.to_owned()); }
                         group.active = group.tabs.iter().position(|tab| tab == id).unwrap_or(group.active);
                     }
@@ -1406,7 +1409,7 @@ impl App {
                     options.claude_script = std::env::var_os("DOXA_CLAUDE_SCRIPT").map(PathBuf::from);
                 }
                 let prompt = if form.prompt.trim().is_empty() { None } else { Some(form.prompt) };
-                self.pending_launches.push((options, prompt));
+                self.pending_launches.push((options, prompt, self.active_group));
                 self.launching = true;
                 self.notice = format!("Starting {} session…", ENGINE_CHOICES[self.engine_selected]);
             }
@@ -2878,11 +2881,11 @@ fn run_loop(
 
 fn dispatch_launches(app: &mut App, sender: &SyncSender<crate::bridge::WorkerCommand>) -> bool {
     let mut launches = std::mem::take(&mut app.pending_launches).into_iter();
-    while let Some((options, prompt)) = launches.next() {
-        match sender.try_send(crate::bridge::WorkerCommand::Launch(options, prompt)) {
+    while let Some((options, prompt, group)) = launches.next() {
+        match sender.try_send(crate::bridge::WorkerCommand::Launch(options, prompt, group)) {
             Ok(()) => {}
-            Err(TrySendError::Full(crate::bridge::WorkerCommand::Launch(options, prompt))) => {
-                app.pending_launches.extend(std::iter::once((options, prompt)).chain(launches));
+            Err(TrySendError::Full(crate::bridge::WorkerCommand::Launch(options, prompt, group))) => {
+                app.pending_launches.extend(std::iter::once((options, prompt, group)).chain(launches));
                 return false;
             }
             Err(TrySendError::Disconnected(_)) => {
@@ -3246,10 +3249,11 @@ mod tests {
             app.handle(Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)));
         }
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
-        let (options, prompt) = app.pending_launches.pop().unwrap();
+        let (options, prompt, group) = app.pending_launches.pop().unwrap();
         assert_eq!(options.engine, launch::Engine::DeepSeek);
         assert_eq!(options.model.as_deref(), Some("deepseek-test"));
         assert_eq!(prompt.as_deref(), Some("Explain this"));
+        assert_eq!(group, 0);
         assert!(app.launching);
         assert!(app.new_session.is_none());
     }
@@ -3259,7 +3263,7 @@ mod tests {
         let mut app = App::default();
         app.apply_daemon_frame(&json!({"type":"hello", "session_id":"old", "model":"old"}));
         app.launching = true;
-        app.apply_daemon_frame(&json!({"type":"launch_reply", "ok":true, "session_id":"new"}));
+        app.apply_daemon_frame(&json!({"type":"launch_reply", "ok":true, "session_id":"new", "group":0}));
         assert_eq!(app.groups[0].active_id(), Some("new"));
         assert!(!app.launching);
         app.launching = true;
@@ -3267,6 +3271,20 @@ mod tests {
             "message":"DEEPSEEK_API_KEY is required"}));
         assert!(app.notice.contains("DEEPSEEK_API_KEY"));
         assert_eq!(app.groups[0].active_id(), Some("new"));
+    }
+
+    #[test]
+    fn launch_reply_keeps_the_group_chosen_when_launch_started() {
+        let mut app = App::default();
+        app.launching = true;
+        app.active_group = 1;
+        app.apply_daemon_frame(&json!({"type":"launch_reply", "ok":true,
+            "session_id":"new", "group":0}));
+        assert_eq!(app.groups[0].active_id(), Some("new"));
+        assert_eq!(app.groups[1].active_id(), None);
+        assert_eq!(app.active_group, 1);
+        assert!(!app.apply_daemon_frame(&json!({"type":"launch_reply", "ok":true,
+            "session_id":"unrequested", "group":1})));
     }
 
     fn painted(app: &App) -> String {

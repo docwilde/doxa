@@ -19,7 +19,7 @@ use crate::discovery::Session;
 use crate::launch::{self, LaunchOptions};
 
 pub enum WorkerCommand {
-    Launch(LaunchOptions, Option<String>),
+    Launch(LaunchOptions, Option<String>, usize),
     Prompt(String, String),
     Answer(String, String, Value),
     Peers(String),
@@ -132,10 +132,10 @@ pub fn connect_sessions(sessions: &[Session]) -> io::Result<MultiBridge> {
     let router_frames = frame_tx.clone();
     let router_guard = Arc::clone(&complete);
     let router = thread::spawn(move || {
-        let (launched_tx, launched_rx) = mpsc::channel::<(io::Result<Session>, Option<String>)>();
+        let (launched_tx, launched_rx) = mpsc::channel::<(io::Result<Session>, Option<String>, usize)>();
         let mut added_workers: Vec<JoinHandle<()>> = Vec::new();
         loop {
-            while let Ok((result, prompt)) = launched_rx.try_recv() {
+            while let Ok((result, prompt, group)) = launched_rx.try_recv() {
                 match result.and_then(|session| {
                     if routes.len() >= 64 { return Err(io::Error::other("session limit reached")); }
                     let (tx, connected, worker) = attach_worker(&session, &router_frames, &router_guard)?;
@@ -145,13 +145,14 @@ pub fn connect_sessions(sessions: &[Session]) -> io::Result<MultiBridge> {
                         let id = session.id.clone();
                         routes.insert(id.clone(), (tx.clone(), connected));
                         added_workers.push(worker);
-                        let _ = router_frames.send(json!({"type":"launch_reply", "ok":true, "session_id":id}));
+                        let _ = router_frames.send(json!({"type":"launch_reply", "ok":true,
+                            "session_id":id, "group":group}));
                         if let Some(prompt) = prompt {
                             let _ = tx.send(WorkerCommand::Prompt(id, prompt));
                         }
                     }
                     Err(error) => { let _ = router_frames.send(json!({"type":"launch_reply", "ok":false,
-                        "message":error.to_string()})); }
+                        "message":error.to_string(), "group":group})); }
                 }
             }
             let command = match command_rx.recv_timeout(Duration::from_millis(50)) {
@@ -160,9 +161,9 @@ pub fn connect_sessions(sessions: &[Session]) -> io::Result<MultiBridge> {
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             };
             let command = match command {
-                WorkerCommand::Launch(options, prompt) => {
+                WorkerCommand::Launch(options, prompt, group) => {
                     let reply = launched_tx.clone();
-                    thread::spawn(move || { let _ = reply.send((launch::spawn(&options), prompt)); });
+                    thread::spawn(move || { let _ = reply.send((launch::spawn(&options), prompt, group)); });
                     continue;
                 }
                 other => other,
@@ -171,7 +172,7 @@ pub fn connect_sessions(sessions: &[Session]) -> io::Result<MultiBridge> {
                 WorkerCommand::Prompt(id, _) | WorkerCommand::Answer(id, _, _) | WorkerCommand::Peers(id)
                 | WorkerCommand::Models(id) | WorkerCommand::SetModel(id, _)
                 | WorkerCommand::SetPermissionMode(id, _) => id,
-                WorkerCommand::Launch(_, _) => unreachable!(),
+                WorkerCommand::Launch(_, _, _) => unreachable!(),
             };
             let Some((route, connected)) = routes.get(id) else {
                 let _ = router_frames.send(rejected(command, "Session is not attached"));
@@ -200,7 +201,8 @@ pub fn connect_sessions(sessions: &[Session]) -> io::Result<MultiBridge> {
 
 fn rejected(command: WorkerCommand, message: &str) -> Value {
     match command {
-        WorkerCommand::Launch(_, _) => json!({"type":"launch_reply", "ok":false, "message":message}),
+        WorkerCommand::Launch(_, _, group) => json!({"type":"launch_reply", "ok":false,
+            "message":message, "group":group}),
         WorkerCommand::Prompt(id, text) => json!({"type":"prompt_rejected", "session_id":id,
             "text":text, "message":message}),
         WorkerCommand::Answer(session, request, _) => json!({"type":"answer_reply", "session_id":session,
@@ -288,9 +290,9 @@ fn worker_loop(
         // Bound prompt work so a burst cannot starve incoming daemon events.
         for _ in 0..32 {
             match prompts.try_recv() {
-                Ok(WorkerCommand::Launch(_, _)) => {
+                Ok(WorkerCommand::Launch(_, _, group)) => {
                     let _ = frames.send(json!({"type":"launch_reply", "ok":false,
-                        "message":"Session launch is unavailable on this connection"}));
+                        "message":"Session launch is unavailable on this connection", "group":group}));
                 }
                 Ok(WorkerCommand::Models(id)) => {
                     let result = if id == session_id { client.call("list_models", Map::new()) }
