@@ -163,7 +163,7 @@ fn two_panes_keep_distinct_prompts_and_live_identity_chips_at_80x24() {
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
     terminal.draw(|frame| app.draw(frame)).unwrap();
     let styled_cells = (25..52)
-        .filter(|&x| terminal.backend().buffer()[(x, 22)].bg == theme::HIGHLIGHT)
+        .filter(|&x| terminal.backend().buffer()[(x, 18)].bg == theme::HIGHLIGHT)
         .count();
     assert!(styled_cells >= 5, "engine/model chips have no visible highlight");
     app.handle(key(KeyCode::Enter, KeyModifiers::NONE));

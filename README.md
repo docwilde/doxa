@@ -52,13 +52,13 @@ ported.
 
 *Tool activity shows calls, inputs, and results.*
 
-![Rust input request dialog asking which environment should receive a migration](assets/shots/rust-needs-input.png)
+![Rust input request choices expanded above the active pane prompt while the transcript and other pane remain visible](assets/shots/rust-needs-input.png)
 
-*A daemon input request opens a choice dialog.*
+*A daemon input request expands above the active prompt.*
 
 ![Rust Claude permission picker with the available modes and the current mode marked](assets/shots/rust-permissions.png)
 
-*Claude sessions can change their permission mode when the daemon supports it.*
+*The permission picker expands from the chip row above the active prompt.*
 
 ![Rust session history picker listing attached fixture sessions](assets/shots/rust-history.png)
 

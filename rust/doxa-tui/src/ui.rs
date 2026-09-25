@@ -2363,15 +2363,63 @@ impl App {
         [chunks[0], chunks[1]]
     }
 
+    /// Space for a chooser inside the active pane, immediately above its
+    /// prompt. Reserving this space keeps the transcript and prompt visible.
+    fn chooser_rect(&self, pane: Rect) -> Option<Rect> {
+        let wanted = if self.active_request_index().is_some_and(|index| self.input_requests[index].kind == "ask_user") {
+            17
+        } else if self.engine_picker || self.new_session.is_some()
+            || self.model_picker.is_some() || self.permission_picker.is_some() {
+            13
+        } else if self.lore_picker.is_some() {
+            19
+        } else if self.action_menu {
+            15
+        } else {
+            return None;
+        };
+        let group = &self.groups[self.active_group];
+        let draft = group.active_id().map_or("", |_| self.input.as_str());
+        let prompt = prompt_height(draft, pane.height);
+        let available = pane.height.saturating_sub(2 + prompt + 2 + 1 + 1);
+        let height = wanted.min(available);
+        if height < 5 || pane.width < 18 { return None; }
+        Some(Rect::new(pane.x, pane.bottom().saturating_sub(prompt + 2 + 1 + height), pane.width, height))
+    }
+
+    fn active_chooser_rect(&self) -> Option<Rect> {
+        let layout = self.layout(self.size);
+        let pane = layout.panes.map_or(layout.body, |panes| panes[self.active_group]);
+        self.chooser_rect(pane)
+    }
+
+    fn chips(&self, index: usize) -> Vec<(&'static str, String)> {
+        let id = self.groups[index].active_id();
+        let identity = id.and_then(|id| self.session_identity.get(id));
+        let mut chips = Vec::new();
+        if let Some(engine) = identity.and_then(|pair| pair.0.as_deref()) {
+            chips.push(("engine", engine.to_owned()));
+        }
+        if let Some(model) = identity.and_then(|pair| pair.1.as_deref()) {
+            chips.push(("model", model.to_owned()));
+        }
+        if let Some(mode) = id.and_then(|id| self.permission_modes.get(id)) {
+            chips.push(("permission", mode.clone()));
+        }
+        let beliefs = id.and_then(|id| self.session_telemetry.get(id))
+            .and_then(|telemetry| telemetry.lore.as_deref())
+            .filter(|label| label.ends_with(" beliefs"))
+            .unwrap_or("Beliefs");
+        chips.push(("beliefs", beliefs.to_owned()));
+        chips
+    }
+
     fn mouse(&mut self, mouse: MouseEvent) -> bool {
         if self.active_request_index().is_none()
             && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
             && (self.engine_picker || self.new_session.is_some() || self.model_picker.is_some() || self.permission_picker.is_some()) {
-            let width = self.size.width.saturating_sub(4).min(74);
-            let height = self.size.height.saturating_sub(4).min(19);
-            if width < 25 || height < 7 { return false; }
-            let x = self.size.x + (self.size.width - width) / 2;
-            let y = self.size.y + (self.size.height - height) / 2;
+            let Some(menu) = self.active_chooser_rect() else { return false; };
+            let (x, y, width, height) = (menu.x, menu.y, menu.width, menu.height);
             if mouse.column < x || mouse.column >= x + width || mouse.row < y || mouse.row >= y + height {
                 self.engine_picker = false;
                 self.new_session = None;
@@ -2381,8 +2429,11 @@ impl App {
                 return true;
             }
             if self.engine_picker {
-                if mouse.row < y + 4 { return true; }
-                let row = usize::from(mouse.row.saturating_sub(y + 4));
+                let offset = if height >= 10 { 4 } else { 2 };
+                if mouse.row < y + offset { return true; }
+                let visible = usize::from(height.saturating_sub(offset + 1)).max(1);
+                let start = self.engine_selected.saturating_sub(visible.saturating_sub(1));
+                let row = start + usize::from(mouse.row.saturating_sub(y + offset));
                 if row < ENGINE_CHOICES.len() {
                     self.engine_selected = row;
                     self.select_new_engine();
@@ -2391,8 +2442,11 @@ impl App {
             }
             if self.new_session.is_some() { return true; }
             if let Some((_, selected)) = &mut self.permission_picker {
-                if mouse.row >= y + 4 {
-                    let row = usize::from(mouse.row - (y + 4));
+                let offset = if height >= 10 { 4 } else { 2 };
+                if mouse.row >= y + offset {
+                    let visible = usize::from(height.saturating_sub(offset + 1)).max(1);
+                    let start = selected.saturating_sub(visible.saturating_sub(1));
+                    let row = start + usize::from(mouse.row - (y + offset));
                     if row < PERMISSION_CHOICES.len() {
                         *selected = row;
                         self.permission_confirm_dont_ask = false;
@@ -2406,7 +2460,7 @@ impl App {
                 return true;
             }
             let picker = self.model_picker.as_mut().unwrap();
-            let visible = usize::from(height.saturating_sub(5));
+            let visible = usize::from(height.saturating_sub(4)).max(1);
             let start = picker.selected.saturating_sub(visible.saturating_sub(1));
             let row = start + usize::from(mouse.row.saturating_sub(y + 3));
             if mouse.row >= y + 3 && row < picker.models.len() && !picker.loading {
@@ -2484,45 +2538,31 @@ impl App {
                         for (index, pane) in pane_hits.iter().copied() {
                             if mouse.column >= pane.x && mouse.column < pane.right()
                                 && mouse.row >= pane.y && mouse.row < pane.bottom() {
-                                if mouse.row == pane.bottom().saturating_sub(1) {
-                                    self.active_group = index;
-                                    let status_width = self.groups[index].active_id()
-                                        .and_then(|id| self.sessions.iter().find(|session| session.id == id))
-                                        .map(|session| session.status.width() + 3).unwrap_or(13);
-                                    let engine_width = self.groups[index].active_id()
-                                        .and_then(|id| self.session_identity.get(id))
-                                        .and_then(|identity| identity.0.as_deref())
-                                        .map(|engine| engine.width() + 3).unwrap_or(0);
-                                    let model_width = self.groups[index].active_id()
-                                        .and_then(|id| self.session_identity.get(id))
-                                        .and_then(|identity| identity.1.as_deref())
-                                        .map(|model| model.width() + 3).unwrap_or(0);
-                                    let permission_width = self.groups[index].active_id()
-                                        .and_then(|id| self.permission_modes.get(id))
-                                        .map(|mode| mode.width() + 3).unwrap_or(0);
-                                    let relative = usize::from(mouse.column.saturating_sub(pane.x));
-                                    if relative >= status_width && relative < status_width + engine_width {
-                                        self.open_engine_picker();
-                                        return true;
-                                    }
-                                    if model_width > 0 && relative >= status_width + engine_width + 1
-                                        && relative < status_width + engine_width + 1 + model_width {
-                                        self.open_model_picker();
-                                        return true;
-                                    }
-                                    let permission_start = status_width + engine_width + 1 + model_width + 1;
-                                    if permission_width > 0 && relative >= permission_start
-                                        && relative < permission_start + permission_width {
-                                        self.open_permission_picker();
-                                        return true;
-                                    }
-                                }
                                 let draft = self.groups[index].active_id().map(|id| {
                                     if self.active_group == index { self.input.as_str() }
                                     else { self.input_drafts.get(&(index, id.to_owned()))
                                         .map(|(text, _)| text.as_str()).unwrap_or("") }
                                 }).unwrap_or("");
                                 let prompt_top = pane.bottom().saturating_sub(prompt_height(draft, pane.height) + 2);
+                                if mouse.row == prompt_top.saturating_sub(1) {
+                                    self.active_group = index;
+                                    let relative = usize::from(mouse.column.saturating_sub(pane.x));
+                                    let mut start = 0;
+                                    for (kind, label) in self.chips(index) {
+                                        let end = start + label.width() + 4;
+                                        if relative >= start && relative < end {
+                                            match kind {
+                                                "engine" => self.open_engine_picker(),
+                                                "model" => self.open_model_picker(),
+                                                "permission" => self.open_permission_picker(),
+                                                "beliefs" => self.open_lore_picker(),
+                                                _ => unreachable!(),
+                                            }
+                                            return true;
+                                        }
+                                        start = end + 1;
+                                    }
+                                }
                                 self.active_group = index;
                                 self.focus = if mouse.row >= prompt_top {
                                     Focus::Prompt
@@ -2636,6 +2676,21 @@ impl App {
         } else {
             self.draw_group(frame, layout.body, self.active_group);
         }
+        if self.active_chooser_rect().is_none() && !self.active_request_index().is_some_and(|index| self.input_requests[index].kind == "ask_user") {
+            let width = area.width.saturating_sub(2).min(74);
+            let height = area.height.saturating_sub(2).min(19);
+            if width >= 18 && height >= 3 {
+                let fallback = Rect::new(area.x + (area.width - width) / 2,
+                    area.y + (area.height - height) / 2, width, height);
+                if self.action_menu || self.lore_picker.is_some() || self.engine_picker
+                    || self.new_session.is_some() || self.model_picker.is_some() || self.permission_picker.is_some() {
+                    frame.render_widget(Clear, fallback);
+                    if self.action_menu { self.draw_actions(frame, fallback); }
+                    else if self.lore_picker.is_some() { self.draw_lore_picker(frame, fallback); }
+                    else { self.draw_chip_picker(frame, fallback); }
+                }
+            }
+        }
         self.draw_tool_cards(frame, area);
         if self.map_modal {
             self.peer_map.render(
@@ -2644,13 +2699,13 @@ impl App {
                 self.groups[self.active_group].active_id().unwrap_or(""),
             );
         }
-        self.draw_actions(frame, area);
         self.draw_history(frame, area);
-        self.draw_lore_picker(frame, area);
         self.draw_diff(frame, area);
-        self.draw_chip_picker(frame, area);
         self.draw_stop_confirmation(frame, area);
-        self.draw_request(frame, area);
+        if !self.active_request_index().is_some_and(|index| self.input_requests[index].kind == "ask_user")
+            || self.active_chooser_rect().is_none() {
+            self.draw_request(frame, area, false);
+        }
     }
 
     fn draw_stop_confirmation(&self, frame: &mut Frame, area: Rect) {
@@ -2673,19 +2728,21 @@ impl App {
 
     fn draw_chip_picker(&self, frame: &mut Frame, area: Rect) {
         if !self.engine_picker && self.new_session.is_none() && self.model_picker.is_none() && self.permission_picker.is_none() { return; }
-        let width = area.width.saturating_sub(4).min(74);
-        let height = area.height.saturating_sub(4).min(19);
-        if width < 25 || height < 7 { return; }
-        let modal = Rect::new(area.x + (area.width - width) / 2,
-            area.y + (area.height - height) / 2, width, height);
+        let height = area.height;
+        let modal = area;
         let mut lines = Vec::new();
         let title;
         if self.engine_picker {
             title = " New session · choose engine · Enter continue · Esc close ";
-            lines.push(Line::from(" Select an engine for a new session:"));
-            lines.push(Line::from(" Model and first prompt follow."));
-            lines.push(Line::from(""));
-            for (index, engine) in ENGINE_CHOICES.iter().enumerate() {
+            if height >= 10 {
+                lines.push(Line::from(" Select an engine for a new session:"));
+                lines.push(Line::from(" Model and first prompt follow."));
+                lines.push(Line::from(""));
+            } else { lines.push(Line::from(" Choose engine:")); }
+            let offset = if height >= 10 { 4 } else { 2 };
+            let visible = usize::from(height.saturating_sub(offset + 1)).max(1);
+            let start = self.engine_selected.saturating_sub(visible.saturating_sub(1));
+            for (index, engine) in ENGINE_CHOICES.iter().enumerate().skip(start).take(visible) {
                 lines.push(Line::styled(format!(" {} {}", if index == self.engine_selected { '›' } else { ' ' }, engine),
                     Style::default().fg(if index == self.engine_selected { theme::ACCENT } else { theme::SECONDARY })));
             }
@@ -2694,8 +2751,10 @@ impl App {
             let name = match form.engine { launch::Engine::Codex => "codex", launch::Engine::Claude => "claude",
                 launch::Engine::DeepSeek => "deepseek", launch::Engine::Glm => "glm", launch::Engine::Fixture => "fixture" };
             lines.push(Line::from(format!(" Engine: {name}")));
-            lines.push(Line::from(" Blank model uses configured engine default."));
-            lines.push(Line::from(""));
+            if height >= 8 {
+                lines.push(Line::from(" Blank model uses configured engine default."));
+                lines.push(Line::from(""));
+            }
             lines.push(Line::styled(format!(" {} Model: {}", if form.field == 0 { '›' } else { ' ' }, safe_label(&form.model)),
                 Style::default().fg(if form.field == 0 { theme::ACCENT } else { theme::SECONDARY })));
             lines.push(Line::styled(format!(" {} First prompt: {}", if form.field == 1 { '›' } else { ' ' }, safe_label(&form.prompt)),
@@ -2705,14 +2764,19 @@ impl App {
             }
         } else if let Some((id, selected)) = &self.permission_picker {
             title = " Claude permissions · this session · Enter select · Esc close ";
-            lines.push(Line::from(" Changes how Claude handles tool permission requests."));
-            lines.push(Line::from(if self.permission_confirm_dont_ask {
-                " dontAsk silently denies unapproved calls. Enter again to confirm."
-            } else {
-                " Current mode marked with ●; dontAsk requires confirmation."
-            }));
-            lines.push(Line::from(""));
-            for (index, (mode, description)) in PERMISSION_CHOICES.iter().enumerate() {
+            if height >= 10 {
+                lines.push(Line::from(" Changes how Claude handles tool permission requests."));
+                lines.push(Line::from(if self.permission_confirm_dont_ask {
+                    " dontAsk silently denies unapproved calls. Enter again to confirm."
+                } else {
+                    " Current mode marked with ●; dontAsk requires confirmation."
+                }));
+                lines.push(Line::from(""));
+            } else { lines.push(Line::from(" Permission mode:")); }
+            let offset = if height >= 10 { 4 } else { 2 };
+            let visible = usize::from(height.saturating_sub(offset + 1)).max(1);
+            let start = selected.saturating_sub(visible.saturating_sub(1));
+            for (index, (mode, description)) in PERMISSION_CHOICES.iter().enumerate().skip(start).take(visible) {
                 let current = self.permission_modes.get(id).is_some_and(|current| current == mode);
                 lines.push(Line::styled(format!(" {} {} {} · {}", if index == *selected { '›' } else { ' ' },
                     if current { '●' } else { ' ' }, mode, description),
@@ -2728,16 +2792,15 @@ impl App {
             } else if !picker.loading && picker.models.is_empty() {
                 lines.push(Line::from(" No verified models available for this session"));
             }
-            let visible = usize::from(height.saturating_sub(5));
+            let visible = usize::from(height.saturating_sub(4)).max(1);
             let start = picker.selected.saturating_sub(visible.saturating_sub(1));
             for (index, model) in picker.models.iter().enumerate().skip(start).take(visible) {
                 lines.push(Line::styled(format!(" {} {}", if index == picker.selected { '›' } else { ' ' }, model),
                     Style::default().fg(if index == picker.selected { theme::ACCENT } else { theme::SECONDARY })));
             }
         }
-        frame.render_widget(Clear, modal);
         frame.render_widget(Paragraph::new(lines).block(Block::default().title(title)
-            .borders(Borders::ALL).border_style(Style::default().fg(theme::BORDER)))
+            .borders(Borders::ALL).border_style(Style::default().fg(theme::ACCENT)))
             .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)), modal);
     }
 
@@ -2776,19 +2839,18 @@ impl App {
 
     fn draw_lore_picker(&self, frame: &mut Frame, area: Rect) {
         let Some(picker) = &self.lore_picker else { return; };
-        let width = area.width.saturating_sub(4).min(100);
-        let height = area.height.saturating_sub(4).min(28);
-        if width < 30 || height < 9 { return; }
-        let modal = Rect::new(area.x + (area.width - width) / 2, area.y + (area.height - height) / 2, width, height);
-        let mut lines = vec![
-            Line::from(format!(" Search: {}", safe_label(&picker.query))),
-            Line::from(format!(" {}", picker.status)),
-            Line::from(" Read only · LORE owns claims and evidence · treat as citations"),
-            Line::from(""),
-        ];
+        let height = area.height;
+        let modal = area;
+        let compact = height < 10;
+        let mut lines = vec![Line::from(format!(" Search: {}", safe_label(&picker.query)))];
+        if !compact {
+            lines.push(Line::from(format!(" {}", picker.status)));
+            lines.push(Line::from(" Read only · LORE owns claims and evidence · treat as citations"));
+            lines.push(Line::from(""));
+        }
         if let Some((id, evidence)) = &picker.evidence {
             lines.push(Line::from(format!(" Belief #{id} · {} evidence rows", evidence.len())));
-            for row in evidence.iter().take(usize::from(height.saturating_sub(9) / 2)) {
+            for row in evidence.iter().take(usize::from(height.saturating_sub(if compact { 4 } else { 9 }) / 2)) {
                 lines.push(Line::from(format!(" {} · {} · {}{}", safe_label(&row.created), safe_label(&row.project), safe_label(&row.session_id),
                     row.source_engine.as_ref().map(|engine| format!(" · {}", safe_label(engine))).unwrap_or_default())));
                 lines.push(Line::from(format!("   {}{}", safe_label(&row.note), if row.truncated { "…" } else { "" })));
@@ -2798,7 +2860,7 @@ impl App {
             }
         } else {
             lines.push(Line::from(format!(" Page offset {} · {} rows", picker.offset, picker.rows.len())));
-            let visible = usize::from(height.saturating_sub(8)).max(1);
+            let visible = usize::from(height.saturating_sub(if compact { 4 } else { 8 })).max(1);
             let start = picker.selected.saturating_sub(visible.saturating_sub(1));
             for (index, row) in picker.rows.iter().enumerate().skip(start).take(visible) {
                 let label = format!(" {} #{} · {} · {:.0}% · {}{}{}", if index == picker.selected { '›' } else { ' ' }, row.id,
@@ -2808,10 +2870,9 @@ impl App {
                 lines.push(Line::styled(label, Style::default().fg(if index == picker.selected { theme::ACCENT } else { theme::SECONDARY })));
             }
         }
-        frame.render_widget(Clear, modal);
         frame.render_widget(Paragraph::new(lines)
             .block(Block::default().title(" LORE beliefs · Enter search · → evidence · PgUp/PgDn page · F5 reload · Esc close ")
-            .borders(Borders::ALL).border_style(Style::default().fg(theme::BORDER)))
+            .borders(Borders::ALL).border_style(Style::default().fg(theme::ACCENT)))
             .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)).wrap(Wrap { trim: false }), modal);
     }
 
@@ -2857,17 +2918,8 @@ impl App {
         if !self.action_menu {
             return;
         }
-        let width = area.width.saturating_sub(2).min(58);
-        let height = area.height.saturating_sub(2).min(10);
-        if width < 18 || height < 3 {
-            return;
-        }
-        let modal = Rect::new(
-            area.x + (area.width - width) / 2,
-            area.y + (area.height - height) / 2,
-            width,
-            height,
-        );
+        let height = area.height;
+        let modal = area;
         let visible = usize::from(height.saturating_sub(2));
         let start = self
             .action_selected
@@ -2899,13 +2951,12 @@ impl App {
                 .style(style)
             })
             .collect();
-        frame.render_widget(Clear, modal);
         frame.render_widget(
             Paragraph::new(rows).block(
                 Block::default()
                     .title(" Actions · ↑/↓ choose · Enter open · Esc close ")
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(theme::BORDER))
+                    .border_style(Style::default().fg(theme::ACCENT))
                     .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)),
             ),
             modal,
@@ -2970,22 +3021,22 @@ impl App {
         );
     }
 
-    fn draw_request(&self, frame: &mut Frame, area: Rect) {
+    fn draw_request(&self, frame: &mut Frame, area: Rect, inline: bool) {
         let Some(index) = self.active_request_index() else {
             return;
         };
         let request = &self.input_requests[index];
-        let width = area.width.saturating_sub(4).min(90);
-        let height = area.height.saturating_sub(4).min(22);
+        let width = if inline { area.width } else { area.width.saturating_sub(4).min(90) };
+        let height = if inline { area.height } else { area.height.saturating_sub(4).min(22) };
         if width < 20 || height < 5 {
             return;
         }
-        let modal = Rect::new(
+        let modal = if inline { area } else { Rect::new(
             area.x + (area.width - width) / 2,
             area.y + (area.height - height) / 2,
             width,
             height,
-        );
+        ) };
         let mut body = String::new();
         if request.kind == "ask_user" {
             if let Some(question) = request.questions.get(request.step) {
@@ -3029,7 +3080,7 @@ impl App {
         if request.sending {
             body.push_str("\nSending answer…");
         }
-        frame.render_widget(Clear, modal);
+        if !inline { frame.render_widget(Clear, modal); }
         frame.render_widget(
             Paragraph::new(body)
                 .wrap(Wrap { trim: false })
@@ -3109,11 +3160,14 @@ impl App {
                 .map(|(text, cursor)| (text.as_str(), *cursor)).unwrap_or(("", 0)) }
         }).unwrap_or(("", 0));
         let prompt_height = prompt_height(draft, area.height);
+        let chooser_height = if active { self.chooser_rect(area).map_or(0, |rect| rect.height) } else { 0 };
         let inner = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(2),
                 Constraint::Min(1),
+                Constraint::Length(chooser_height),
+                Constraint::Length(1),
                 Constraint::Length(prompt_height),
                 Constraint::Length(2),
             ])
@@ -3172,6 +3226,26 @@ impl App {
                     .border_style(Style::default().fg(theme::BORDER))),
             inner[1],
         );
+        if active && chooser_height > 0 {
+            if self.active_request_index().is_some_and(|index| self.input_requests[index].kind == "ask_user") {
+                self.draw_request(frame, inner[2], true);
+            } else if self.engine_picker || self.new_session.is_some() || self.model_picker.is_some() || self.permission_picker.is_some() {
+                self.draw_chip_picker(frame, inner[2]);
+            } else if self.lore_picker.is_some() {
+                self.draw_lore_picker(frame, inner[2]);
+            } else if self.action_menu {
+                self.draw_actions(frame, inner[2]);
+            }
+        }
+        let mut chip_spans = Vec::new();
+        for (kind, label) in self.chips(index) {
+            if !chip_spans.is_empty() { chip_spans.push(Span::raw(" ")); }
+            chip_spans.push(Span::styled(format!(" {label} ▾ "),
+                Style::default().fg(if kind == "engine" { theme::ACCENT } else { theme::TEXT })
+                    .bg(theme::HIGHLIGHT)));
+        }
+        frame.render_widget(Paragraph::new(Line::from(chip_spans))
+            .style(Style::default().bg(theme::RAISED)), inner[3]);
         let cursor = cursor.min(draft.len());
         let cursor_line = draft[..cursor].bytes().filter(|b| *b == b'\n').count();
         let cursor_column = UnicodeWidthStr::width(draft[..cursor].rsplit('\n').next().unwrap_or("")) + 2;
@@ -3182,9 +3256,9 @@ impl App {
             let offset = draft[..cursor].rsplit('\n').next().unwrap_or("").len() + 2;
             rows[cursor_line].insert(offset, '▏');
         }
-        let visible = usize::from(inner[2].height.saturating_sub(2)).max(1);
+        let visible = usize::from(inner[4].height.saturating_sub(2)).max(1);
         let scroll_y = cursor_line.saturating_sub(visible.saturating_sub(1));
-        let width = usize::from(inner[2].width.saturating_sub(2)).max(1);
+        let width = usize::from(inner[4].width.saturating_sub(2)).max(1);
         let scroll_x = cursor_column.saturating_sub(width.saturating_sub(1));
         frame.render_widget(
             Paragraph::new(rows.join("\n"))
@@ -3194,50 +3268,22 @@ impl App {
                     .title(if active && self.focus == Focus::Prompt { " Prompt ● " } else { " Prompt " })
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(if active && self.focus == Focus::Prompt { theme::ACCENT } else { theme::BORDER }))),
-            inner[2],
+            inner[4],
         );
         let status = session.map(|s| s.status.as_str()).unwrap_or("No session");
-        let identity = group.active_id().and_then(|id| self.session_identity.get(id));
-        let engine = identity.and_then(|pair| pair.0.as_deref());
-        let model = identity.and_then(|pair| pair.1.as_deref());
-        let mut status_spans = vec![Span::styled(
-            format!(" {}  ", status),
-            Style::default().fg(theme::SECONDARY),
-        )];
-        if let Some(engine) = engine {
-            status_spans.push(Span::styled(
-                format!(" {} ▾", engine),
-                Style::default().fg(theme::ACCENT).bg(theme::HIGHLIGHT),
-            ));
-        }
-        if let Some(model) = model {
-            status_spans.push(Span::raw(" "));
-            status_spans.push(Span::styled(
-                format!(" {} ▾", model),
-                Style::default().fg(theme::TEXT).bg(theme::HIGHLIGHT),
-            ));
-        }
-        if let Some(mode) = group.active_id().and_then(|id| self.permission_modes.get(id)) {
-            status_spans.push(Span::raw(" "));
-            status_spans.push(Span::styled(format!(" {} ▾", mode),
-                Style::default().fg(theme::TEXT).bg(theme::HIGHLIGHT)));
-        }
-        if active && !self.notice.is_empty() {
-            status_spans.push(Span::styled(
-                format!(" · {}", self.notice),
-                Style::default().fg(theme::SECONDARY),
-            ));
-        }
+        let status_line = if active && !self.notice.is_empty() {
+            format!(" {status} · {}", self.notice)
+        } else { format!(" {status}") };
         frame.render_widget(
-            Paragraph::new(Line::from(status_spans)).style(Style::default().bg(theme::RAISED)),
-            Rect { height: 1, ..inner[3] },
+            Paragraph::new(status_line).style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)),
+            Rect { height: 1, ..inner[5] },
         );
         let telemetry = group.active_id().and_then(|id| self.session_telemetry.get(id));
         let telemetry_line = telemetry.map(SessionTelemetry::line)
             .unwrap_or_else(|| SessionTelemetry::default().line());
         frame.render_widget(
             Paragraph::new(telemetry_line).style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)),
-            Rect { y: inner[3].y.saturating_add(1), height: 1, ..inner[3] },
+            Rect { y: inner[5].y.saturating_add(1), height: 1, ..inner[5] },
         );
     }
 }
@@ -3816,8 +3862,9 @@ mod tests {
             "can_set_permission_mode":true}));
         app.groups[0].tabs = vec!["s".into()];
         app.open_permission_picker();
+        let menu = app.active_chooser_rect().unwrap();
         app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
-            column: 8, row: 8, modifiers: KeyModifiers::NONE }));
+            column: menu.x + 2, row: menu.y + 6, modifiers: KeyModifiers::NONE }));
         assert_eq!(app.pending_permission_changes, vec![("s".into(), "plan".into())]);
         app.open_permission_picker();
         app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
@@ -4062,10 +4109,77 @@ mod tests {
         let mut app = App::default();
         app.size = Rect::new(0, 0, 80, 24);
         app.open_engine_picker();
+        let menu = app.active_chooser_rect().unwrap();
         app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
-            column: 10, row: 3, modifiers: KeyModifiers::NONE }));
+            column: menu.x + 2, row: menu.y + 1, modifiers: KeyModifiers::NONE }));
         assert!(app.engine_picker);
         assert!(!app.notice.contains("doxa-rs new"));
+    }
+
+    #[test]
+    fn choosers_reserve_space_above_active_prompt_without_covering_other_pane() {
+        let mut app = App::default();
+        app.handle(Event::Resize(100, 28));
+        app.rail_visible = false;
+        app.groups[0].tabs.push("a".into());
+        app.groups[1].tabs.push("b".into());
+        let before = painted(&app);
+        app.open_engine_picker();
+        let menu = app.active_chooser_rect().unwrap();
+        let pane = app.layout(app.size).panes.unwrap()[0];
+        assert_eq!(menu.x, pane.x);
+        assert_eq!(menu.width, pane.width);
+        assert!(menu.y > pane.y + 2);
+        let after = painted(&app);
+        let lines: Vec<_> = after.lines().collect();
+        assert!(lines[usize::from(menu.y)].contains("New session"));
+        assert!(lines[usize::from(menu.bottom())].contains("Beliefs"));
+        assert!(lines[usize::from(menu.bottom() + 1)].contains("Prompt"));
+        let old_lines: Vec<_> = before.lines().collect();
+        for y in pane.y..pane.bottom() {
+            assert_eq!(lines[usize::from(y)].chars().skip(50).collect::<String>(),
+                old_lines[usize::from(y)].chars().skip(50).collect::<String>());
+        }
+        app.engine_picker = false;
+        app.action_menu = true;
+        assert_eq!(app.active_chooser_rect().unwrap().bottom(), menu.bottom());
+        app.action_menu = false;
+        app.lore_picker = Some(LorePicker { rows: vec![], selected: 0, query: String::new(),
+            offset: 0, status: "Ready".into(), evidence: None, pending: None });
+        let lore = app.active_chooser_rect().unwrap();
+        assert_eq!(lore.bottom(), menu.bottom());
+        assert!(lore.height > menu.height);
+    }
+
+    #[test]
+    fn ask_user_choices_expand_above_prompt_and_beliefs_chip_uses_clicked_pane() {
+        let mut app = App::default();
+        app.handle(Event::Resize(100, 28));
+        app.rail_visible = false;
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"a", "engine":"codex"}));
+        app.groups[0].tabs = vec!["a".into()];
+        app.groups[1].tabs = vec!["b".into()];
+        app.apply_daemon_frame(&json!({"type":"event", "session_id":"a",
+            "event":{"type":"needs_input", "data":{"id":"req-1", "kind":"ask_user",
+                "title":"Choose target", "questions":[{"question":"Where?", "options":[
+                    {"label":"Staging", "description":"Validate first"},
+                    {"label":"Production", "description":"Release now"}]}]}}}));
+        assert!(app.active_request_index().is_some());
+        let menu = app.active_chooser_rect().unwrap();
+        let screen = painted(&app);
+        let rows: Vec<_> = screen.lines().collect();
+        assert!(rows[usize::from(menu.y)].contains("Input required"));
+        assert!(rows[usize::from(menu.y + 3)].contains("Staging"));
+        assert!(rows[usize::from(menu.bottom() + 1)].contains("Prompt"));
+        app.input_requests.clear();
+
+        let pane = app.layout(app.size).panes.unwrap()[1];
+        let chip_y = pane.bottom().saturating_sub(prompt_height("", pane.height) + 3);
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: pane.x + 2, row: chip_y, modifiers: KeyModifiers::NONE }));
+        assert_eq!(app.active_group, 1);
+        assert!(app.lore_picker.is_some());
+        assert_eq!(app.active_chooser_rect().unwrap().x, pane.x);
     }
 
     #[test]
