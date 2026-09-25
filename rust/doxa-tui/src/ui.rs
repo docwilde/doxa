@@ -1150,10 +1150,14 @@ impl App {
                         self.session_cwds.insert(id.to_owned(), path);
                     } else {
                         self.session_cwds.remove(id);
+                        self.memory_cache.remove(id);
+                        self.memory_repo.remove(id);
                         self.invalidate_repo(id);
                     }
                 } else {
                     self.session_cwds.remove(id);
+                    self.memory_cache.remove(id);
+                    self.memory_repo.remove(id);
                     self.invalidate_repo(id);
                 }
                 let transcript = self
@@ -6390,7 +6394,7 @@ mod tests {
         assert_eq!(app.repo_detail(0).as_deref(), Some("base main · HEAD doxa/a · managed worktree doxa/a"));
         let rendered = painted_at(&app, 220, 32);
         assert!(rendered.contains("project ⎇ main @1234567"));
-        assert!(rendered.contains("p ?/u ?"));
+        assert!(rendered.contains("u ? · scope ?"));
         assert!(app.chips(1).contains(&("repo", "other ⎇ feature @abcdef0".into())));
         app.groups[0].active = 1;
         assert!(app.chips(0).contains(&("directory", "dir scratch".into())));
