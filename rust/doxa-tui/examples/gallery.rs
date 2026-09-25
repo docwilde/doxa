@@ -1,6 +1,7 @@
 //! Deterministic gallery frames rendered through the production Ratatui App.
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use doxa_tui::ui::App;
+use doxa_worktrees::RepoStatus;
 use ratatui::{backend::TestBackend, style::Color, Terminal};
 use serde_json::{json, Value};
 
@@ -42,6 +43,11 @@ fn scene(name: &str) -> App {
         "hero" => {
             app.rail_visible = true;
             app.groups[0].tabs = vec!["demo-codex-01".into(), "demo-claude-02".into(), "demo-deepseek-03".into()];
+            app.set_repo_status("demo-codex-01", RepoStatus::Repository {
+                repo: "project".into(), base: Some("main".into()),
+                checked_out: Some("doxa/demo-cod".into()), sha: Some("a1b2c3d".into()),
+                worktree: Some("doxa/demo-cod".into()),
+            });
         }
         "tool-activity" => {
             event(&mut app,"demo-codex-01","tool_call",json!({"id":"tool-1","name":"Read","input":{"path":"src/parser.rs"}}));

@@ -185,11 +185,20 @@ fn repo_chip(status: &doxa_worktrees::RepoStatus) -> (&'static str, String) {
     match status {
         doxa_worktrees::RepoStatus::Directory { name } =>
             ("directory", format!("dir {}", safe_label(name))),
-        doxa_worktrees::RepoStatus::Repository { repo, base, checked_out, sha, .. } => {
+        doxa_worktrees::RepoStatus::Repository { repo, base, checked_out, sha, worktree } => {
             let mut label = safe_label(repo);
             if let Some(branch) = base.as_deref().or(checked_out.as_deref()) {
                 label.push_str(" ⎇ ");
                 label.push_str(&safe_label(branch));
+            }
+            if let Some(worktree) = worktree {
+                if worktree == "linked worktree" {
+                    label.push_str(" [wt]");
+                } else {
+                    label.push_str(" [wt ");
+                    label.push_str(&safe_label(checked_out.as_deref().unwrap_or("detached")));
+                    label.push(']');
+                }
             }
             if let Some(sha) = sha.as_ref().filter(|sha| !base.as_deref().or(checked_out.as_deref())
                 .is_some_and(|branch| branch.starts_with(sha.as_str()))) {
@@ -2734,6 +2743,12 @@ impl App {
         let usage = doxa_lore::MemoryUsage { project_chars, project_cap_chars, user_chars, user_cap_chars };
         self.memory_cache.insert(id.to_owned(), (Some(usage), Instant::now()));
         self.memory_repo.insert(id.to_owned(), true);
+    }
+
+    /// Inject a deterministic repository snapshot for gallery fixtures. Live
+    /// sessions receive this state from the background Git probe instead.
+    pub fn set_repo_status(&mut self, id: &str, status: doxa_worktrees::RepoStatus) {
+        self.repo_cache.insert(id.to_owned(), (Some(status), Instant::now()));
     }
 
     fn poll_memory(&mut self) -> bool {
@@ -6379,21 +6394,21 @@ mod tests {
         app.apply_daemon_frame(&json!({"type":"hello","session_id":"a","cwd":"/tmp/a"}));
         app.apply_daemon_frame(&json!({"type":"hello","session_id":"b","cwd":"/tmp/b"}));
         app.apply_daemon_frame(&json!({"type":"hello","session_id":"c","cwd":"/tmp/c"}));
-        app.repo_cache.insert("a".into(), (Some(RepoStatus::Repository {
+        app.set_repo_status("a", RepoStatus::Repository {
             repo: "project".into(), base: Some("main".into()),
             checked_out: Some("doxa/a".into()), sha: Some("1234567".into()),
             worktree: Some("doxa/a".into()),
-        }), Instant::now()));
-        app.repo_cache.insert("b".into(), (Some(RepoStatus::Directory { name: "scratch".into() }), Instant::now()));
-        app.repo_cache.insert("c".into(), (Some(RepoStatus::Repository {
+        });
+        app.set_repo_status("b", RepoStatus::Directory { name: "scratch".into() });
+        app.set_repo_status("c", RepoStatus::Repository {
             repo: "other".into(), base: Some("feature".into()),
             checked_out: Some("feature".into()), sha: Some("abcdef0".into()),
             worktree: None,
-        }), Instant::now()));
-        assert!(app.chips(0).contains(&("repo", "project ⎇ main @1234567".into())));
+        });
+        assert!(app.chips(0).contains(&("repo", "project ⎇ main [wt doxa/a] @1234567".into())));
         assert_eq!(app.repo_detail(0).as_deref(), Some("base main · HEAD doxa/a · managed worktree doxa/a"));
         let rendered = painted_at(&app, 220, 32);
-        assert!(rendered.contains("project ⎇ main @1234567"));
+        assert!(rendered.contains("project ⎇ main [wt doxa/a] @1234567"));
         assert!(rendered.contains("u ? · scope ?"));
         assert!(app.chips(1).contains(&("repo", "other ⎇ feature @abcdef0".into())));
         app.groups[0].active = 1;
