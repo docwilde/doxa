@@ -1008,6 +1008,7 @@ impl RenderedTranscript {
 #[derive(Debug)]
 pub struct App {
     pub sessions: Vec<Session>,
+    pub collections: Vec<crate::collections::Collection>,
     pub groups: [PaneGroup; 2],
     pub active_group: usize,
     pub split: Split,
@@ -1134,6 +1135,7 @@ impl Default for App {
     fn default() -> Self {
         Self {
             sessions: Vec::new(),
+            collections: Vec::new(),
             groups: [
                 PaneGroup {
                     tabs: vec![],
@@ -2687,6 +2689,7 @@ impl App {
                 }
                 true
             }
+            "/collection" => { self.local_collection(args); true }
             "/cd" => { self.local_cd(args); true }
             "/compact" => {
                 let engine = self.groups[self.active_group].active_id()
@@ -2719,7 +2722,7 @@ impl App {
                 }
                 true
             }
-            "/collection" | "/fleet" | "/img" | "/login"
+            "/fleet" | "/img" | "/login"
             | "/logout" | "/settings" | "/setup" | "/doctor" | "/plugins"
             | "/reload-plugins" | "/effort"
             | "/clear"
@@ -2901,6 +2904,21 @@ impl App {
         self.input.clear();
         self.input_cursor = 0;
         self.notice = format!("Opening a new tab at {} · current session stays here", safe_label(&cwd.display().to_string()));
+    }
+
+    fn local_collection(&mut self, args: &str) {
+        let (verb, rest) = args.trim().split_once(char::is_whitespace)
+            .map_or((args.trim(), ""), |(verb, rest)| (verb, rest.trim()));
+        if verb.is_empty() || matches!(verb, "list" | "ls") {
+            self.notice = if self.collections.is_empty() { "No collections yet · /collection add <name>".into() }
+                else { self.collections.iter().map(|item| format!("{} ({} sessions)", item.name, item.sessions.len())).collect::<Vec<_>>().join(" · ") };
+            self.input.clear();
+            self.input_cursor = 0;
+            return;
+        }
+        let active = self.groups[self.active_group].active_id().map(str::to_owned);
+        let result = crate::collections::edit(&mut self.collections, verb, rest, active.as_deref());
+        self.notice = match result { Ok(note) => { self.input.clear(); self.input_cursor = 0; note }, Err(error) => error };
     }
 
     fn local_rename(&mut self, args: &str) {
@@ -4709,13 +4727,16 @@ impl App {
     }
 
     fn rail_order(&self) -> Vec<usize> {
-        let mut order: Vec<usize> = (0..self.sessions.len()).collect();
-        order.sort_by(|&a, &b| {
-            self.sessions[a]
-                .collection
-                .cmp(&self.sessions[b].collection)
-                .then_with(|| self.sessions[a].title.cmp(&self.sessions[b].title))
-        });
+        let mut order = Vec::new();
+        let mut seen = HashSet::new();
+        for item in &self.collections {
+            for id in &item.sessions {
+                if let Some(index) = self.sessions.iter().position(|session| &session.id == id) {
+                    if seen.insert(index) { order.push(index); }
+                }
+            }
+        }
+        order.extend((0..self.sessions.len()).filter(|index| seen.insert(*index)));
         order
     }
 
@@ -6444,8 +6465,10 @@ impl App {
         let mut last_collection = "";
         for (position, index) in self.rail_order().into_iter().enumerate() {
             let session = &self.sessions[index];
-            if session.collection != last_collection {
-                last_collection = &session.collection;
+            let heading = self.collections.iter().find(|item| item.sessions.iter().any(|id| id == &session.id))
+                .map_or("Sessions", |item| item.name.as_str());
+            if heading != last_collection {
+                last_collection = heading;
                 lines.push(Line::styled(
                     format!(
                         "  {}",
@@ -8818,6 +8841,10 @@ for line in sys.stdin:
                 transcript: String::new(), status: "Ready".into(),
             }));
         }
+        app.collections = vec![
+            crate::collections::Collection { name:"A".into(), sessions:vec!["first".into(), "second".into()], collapsed:false },
+            crate::collections::Collection { name:"B".into(), sessions:vec!["third".into()], collapsed:false },
+        ];
         app.apply_daemon_frame(&json!({"type":"event", "session_id":"third",
             "event":{"type":"needs_input", "data":{"id":"req", "kind":"ask_user",
                 "title":"Choose", "questions":[]}}}));
@@ -8841,6 +8868,30 @@ for line in sys.stdin:
         app.apply_daemon_frame(&json!({"type":"event", "session_id":"third",
             "event":{"type":"needs_input_resolved", "data":{"id":"req"}}}));
         assert_eq!(draw(&app), (theme::RAIL, theme::RAIL));
+    }
+
+    #[test]
+    fn collection_commands_move_active_session_and_order_rail() {
+        let mut app = App::default();
+        for id in ["one", "two"] {
+            app.apply_update(DaemonUpdate::Upsert(Session {
+                id:id.into(), title:id.into(), collection:"repo".into(),
+                transcript:String::new(), status:"Ready".into(),
+            }));
+        }
+        app.groups[0].tabs = vec!["one".into(), "two".into()];
+        app.groups[0].active = 1;
+        let before = crate::ui_state::LayoutSignature::capture(&app);
+        app.input = "/collection add Work".into();
+        assert!(app.submit_local_command());
+        assert_ne!(before, crate::ui_state::LayoutSignature::capture(&app));
+        assert!(app.input.is_empty());
+        assert_eq!(app.collections[0].sessions, ["two"]);
+        assert_eq!(app.rail_order(), [1, 0]);
+        app.input = "/collection remove".into();
+        assert!(app.submit_local_command());
+        assert!(app.collections[0].sessions.is_empty());
+        assert!(app.take_prompts().is_empty());
     }
 
     #[test]

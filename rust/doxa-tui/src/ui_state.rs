@@ -14,6 +14,7 @@ use doxa_state::{
 use serde_json::{json, Value};
 
 use crate::ui::{App, PaneGroup, Split};
+use crate::collections::{self, Collection};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LayoutSignature {
@@ -24,6 +25,7 @@ pub struct LayoutSignature {
     split_percent: u16,
     rail_visible: bool,
     rail_width: u16,
+    collections: Vec<Collection>,
 }
 impl LayoutSignature {
     pub fn capture(app: &App) -> Self {
@@ -39,6 +41,7 @@ impl LayoutSignature {
             split_percent: app.split_percent,
             rail_visible: app.rail_visible,
             rail_width: app.rail_width,
+            collections: app.collections.clone(),
         }
     }
 }
@@ -120,6 +123,7 @@ impl UiStateStore {
             return false;
         }
         let ids: Vec<String> = tabs.iter().map(|t| t.session_id.clone()).collect();
+        app.collections = collections::from_json(record.raw.get("collections"), &ids.iter().cloned().collect());
         let active = record
             .active_session_id
             .as_deref()
@@ -291,18 +295,19 @@ impl UiStateStore {
             "rust_ui".into(),
             json!({"rail_visible":app.rail_visible,"rail_width":app.rail_width.clamp(12,44)}),
         );
-        // Remove dangling collection membership before changing the flat list.
-        if let Some(rows) = record
-            .raw
-            .get_mut("collections")
-            .and_then(Value::as_array_mut)
-        {
-            for row in rows {
-                if let Some(members) = row.get_mut("sessions").and_then(Value::as_array_mut) {
-                    members.retain(|id| id.as_str().is_some_and(|id| seen.contains(id)));
-                }
-            }
-        }
+        let keep: HashSet<String> = record.tabs.iter().map(|tab| tab.session_id.clone()).collect();
+        let collections = collections::to_json(&app.collections, &keep);
+        // A legacy empty tabset can carry an empty collection row as inert
+        // metadata. If no restore or edit loaded collections, leave that
+        // untouched instead of erasing it during an unrelated new-tab save.
+        let untouched_empty_record = self.record.as_ref().is_some_and(|old| old.tabs.is_empty())
+            && app.collections.is_empty()
+            && record.raw.get("collections").and_then(Value::as_array)
+                .is_some_and(|rows| rows.iter().all(|row| row.get("sessions").and_then(Value::as_array)
+                    .is_some_and(Vec::is_empty)));
+        if untouched_empty_record { /* retain the original row */ }
+        else if collections.is_empty() { record.raw.remove("collections"); }
+        else { record.raw.insert("collections".into(), Value::Array(collections)); }
         // save_tabset checks old IDs against structure. We have rebuilt both
         // structures above, so set its reference list to the new safe list.
         record.raw.insert("tabs".into(), Value::Array(record.tabs.iter().map(|t| json!({"session_id":t.session_id,"pinned_name":t.pinned_name,"cwd":t.cwd})).collect()));
@@ -558,5 +563,48 @@ mod tests {
         let saved: Value = serde_json::from_slice(&std::fs::read(store.path()).unwrap()).unwrap();
         assert!(saved["tabs"][0]["pinned_name"].is_null());
         assert!(saved["layout"]["groups"]["tabs"][0].get("pinned_name").is_none());
+    }
+
+    #[test]
+    fn python_collections_restore_order_and_prune_dead_members_on_save() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = tabset_path(temp.path(), "/project", "machine");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::set_permissions(path.parent().unwrap(), std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+        std::fs::write(&path, serde_json::to_vec(&json!({
+            "scope_key":"/project", "tabs":[{"session_id":"one"},{"session_id":"two"}],
+            "layout":{"kind":"tabs","tabs":[{"session_id":"one"},{"session_id":"two"}]},
+            "collections":[
+                {"name":"First","sessions":["two","dead","one"],"collapsed":true},
+                {"name":"Second","sessions":["one"]}
+            ]
+        })).unwrap()).unwrap();
+        let mut store = UiStateStore::new(temp.path(), "/project", "machine").unwrap();
+        let mut app = App::default();
+        assert!(store.restore(&mut app, &["one".into(), "two".into()]));
+        assert_eq!(app.collections.len(), 1);
+        assert_eq!(app.collections[0].sessions, ["two", "one"]);
+        store.save(&app).unwrap();
+        let saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["collections"], json!([{"name":"First","sessions":["two","one"],"collapsed":true}]));
+    }
+
+    #[test]
+    fn collection_edit_refuses_to_overwrite_unsupported_layout() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = tabset_path(temp.path(), "/project", "machine");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::set_permissions(path.parent().unwrap(), std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+        let original = json!({"tabs":[{"session_id":"one"}],
+            "layout":{"kind":"tabs","groups":{"kind":"split","children":[]}},
+            "collections":[{"name":"Keep","sessions":["one"]}]});
+        std::fs::write(&path, serde_json::to_vec(&original).unwrap()).unwrap();
+        let mut store = UiStateStore::new(temp.path(), "/project", "machine").unwrap();
+        let mut app = App::default();
+        app.groups[0].tabs.push("one".into());
+        app.collections.push(Collection { name:"Changed".into(), sessions:vec!["one".into()], collapsed:false });
+        assert_eq!(store.save(&app).unwrap_err().kind(), io::ErrorKind::Unsupported);
+        let saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved, original);
     }
 }
