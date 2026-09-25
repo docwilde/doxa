@@ -6,6 +6,7 @@ use std::collections::HashSet;
 use ratatui::{style::{Modifier, Style}, text::Line};
 
 use crate::{markdown, theme};
+use super::transcript_roles::{self, Speaker};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Section {
@@ -15,6 +16,7 @@ pub(super) struct Section {
 
 enum Block<'a> {
     Prose(&'a str),
+    Heading(&'a str),
     Tools(Vec<&'a str>),
 }
 
@@ -38,17 +40,29 @@ fn render_turn(blocks: &mut Vec<Block<'_>>, lines: &mut Vec<Line<'static>>,
                sections: &mut Vec<Section>, width: u16,
                expanded: Option<&HashSet<usize>>, selected: Option<usize>) {
     let mut prose = String::new();
+    let mut speaker = None;
+    let flush_prose = |prose: &mut String, lines: &mut Vec<Line<'static>>, speaker| {
+        if !prose.is_empty() {
+            lines.extend(transcript_roles::render(prose, width, speaker));
+            prose.clear();
+        }
+    };
     for block in blocks.drain(..) {
         match block {
+            Block::Heading(paragraph) => {
+                flush_prose(&mut prose, lines, speaker);
+                let (next_speaker, heading) = transcript_roles::heading(paragraph)
+                    .expect("heading blocks contain a recognized role");
+                lines.push(heading);
+                speaker = Some(next_speaker);
+            }
             Block::Prose(paragraph) => {
                 if !prose.is_empty() { prose.push_str("\n\n"); }
                 prose.push_str(paragraph);
             }
             Block::Tools(tools) => {
-                if !prose.is_empty() {
-                    lines.extend(markdown::render(&prose, width));
-                    prose.clear();
-                }
+                flush_prose(&mut prose, lines, speaker);
+                speaker = Some(Speaker::Assistant);
                 let index = sections.len();
                 sections.push(Section { index, line: lines.len() });
                 let calls = tools.iter().filter(|row| row.contains(" started") || row.starts_with("[Tool: ")).count();
@@ -68,7 +82,7 @@ fn render_turn(blocks: &mut Vec<Block<'_>>, lines: &mut Vec<Line<'static>>,
             }
         }
     }
-    if !prose.is_empty() { lines.extend(markdown::render(&prose, width)); }
+    flush_prose(&mut prose, lines, speaker);
 }
 
 pub(super) fn render(
@@ -80,17 +94,23 @@ pub(super) fn render(
     let mut lines = Vec::new();
     let mut sections = Vec::new();
     let mut blocks = Vec::new();
+    let mut tool_index: Option<usize> = None;
     let mut fence: Option<&str> = None;
     for paragraph in source.split("\n\n") {
         let paragraph = paragraph.trim_matches('\n');
         if paragraph.is_empty() { continue; }
-        if fence.is_none() && paragraph.starts_with("**You:**") {
-            render_turn(&mut blocks, &mut lines, &mut sections, width, expanded, selected);
-        }
-        if fence.is_none() && is_tool_row(paragraph) {
-            if let Some(Block::Tools(tools)) = blocks.iter_mut().find(|block| matches!(block, Block::Tools(_))) {
+        if fence.is_none() && matches!(paragraph, "**You:**" | "**Assistant:**") {
+            if paragraph == "**You:**" {
+                render_turn(&mut blocks, &mut lines, &mut sections, width, expanded, selected);
+                tool_index = None;
+            }
+            blocks.push(Block::Heading(paragraph));
+        } else if fence.is_none() && is_tool_row(paragraph) {
+            if let Some(index) = tool_index {
+                let Block::Tools(tools) = &mut blocks[index] else { unreachable!() };
                 tools.push(paragraph);
             } else {
+                tool_index = Some(blocks.len());
                 blocks.push(Block::Tools(vec![paragraph]));
             }
         } else {
@@ -134,6 +154,20 @@ mod tests {
     }
 
     #[test]
+    fn speakers_stay_distinct_around_a_collapsed_tool_section() {
+        let source = "**You:**\n\nCheck **this**.\n\n**Assistant:**\n\nWorking.\n\nTool: Read started · hidden-path\n\nDone.";
+        let (lines, sections) = render(source, 40, None, None);
+        assert_eq!(sections.len(), 1);
+        assert_eq!(lines[0].to_string(), "❯ You");
+        assert!(lines.iter().any(|line| line.to_string().starts_with("│ Check this.")
+            && line.style.bg == Some(theme::HIGHLIGHT)));
+        assert!(lines.iter().any(|line| line.to_string() == "● Assistant"));
+        assert!(shown(&lines).contains("1 tool call"));
+        assert!(!shown(&lines).contains("hidden-path"));
+        assert!(shown(&lines).contains("Done."));
+    }
+
+    #[test]
     fn restored_tool_labels_fold_and_expand() {
         let source = "**You:**\n\nQuestion\n\n[Tool: Search]\n\n[Tool: Read]\n\n**Assistant:**\n\nAnswer";
         let (lines, sections) = render(source, 80, None, None);
@@ -149,6 +183,16 @@ mod tests {
         let (lines, sections) = render("```\n\nTool: Read started\n\n```", 80, None, None);
         assert!(sections.is_empty());
         assert!(shown(&lines).contains("Tool: Read started"));
+    }
+
+    #[test]
+    fn code_fence_role_label_is_not_a_message_heading() {
+        let (lines, sections) = render("**Assistant:**\n\n```text\n\n**You:**\n\n```\n\nDone.", 80, None, None);
+        assert!(sections.is_empty());
+        assert_eq!(shown(&lines).matches("● Assistant").count(), 1);
+        assert!(!shown(&lines).contains("❯ You"));
+        assert!(shown(&lines).contains("**You:**"));
+        assert!(shown(&lines).contains("Done."));
     }
 
     #[test]

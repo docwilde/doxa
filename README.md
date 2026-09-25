@@ -48,9 +48,13 @@ alpha. Native fleet supervision and remote control are still being ported.
 
 *Tool calls stay collapsed in the transcript until expanded.*
 
+![Rust session pane with the tool activity section expanded to show call inputs and results](assets/shots/rust-tool-expanded.png)
+
+*Select a tool section and press Enter, or click it, to inspect the bounded details.*
+
 ![Rust session pane showing separate prompt and answer turns with a processing spinner](assets/shots/rust-processing.png)
 
-*Live turns keep prompt and answer boundaries; the pane shows processing while the next request runs.*
+*User messages have a warm highlight, agent replies keep the normal surface, and the pane shows processing while the next request runs.*
 
 ![Rust input request choices expanded above the prompt in a single session pane](assets/shots/rust-needs-input.png)
 

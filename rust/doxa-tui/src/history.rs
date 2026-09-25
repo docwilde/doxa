@@ -418,8 +418,10 @@ pub fn render(snapshot: &TranscriptSnapshot) -> String {
             out.push_str(&turn.prompt);
             out.push_str("\n\n");
         }
-        if !turn.answer.is_empty() {
+        if !turn.answer.is_empty() || !turn.tools.is_empty() {
             out.push_str("**Assistant:**\n\n");
+        }
+        if !turn.answer.is_empty() {
             let shortened: String = turn.answer.chars().take(MAX_TEXT_CHARS).collect();
             out.push_str(&shortened);
             if shortened.len() < turn.answer.len() { out.push_str("\n[Assistant text shortened in this view]"); }
