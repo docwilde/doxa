@@ -169,7 +169,7 @@ fn chip_hint(kind: &str) -> &'static str {
         "context" => "Current session context usage · click for details",
         "memory" => "Project/user memory: % of separate LORE caps",
         "beliefs" => "LORE beliefs · click to browse",
-        "cost" => "Reported session cost · click for details",
+        "cost" => "Provider billing and quota information",
         "lore" => "LORE state and scrub health · click for details",
         "more" => "More chips · click to reveal hidden chips",
         _ => "",
@@ -412,6 +412,9 @@ pub struct Session {
 struct SessionTelemetry {
     context: Option<String>,
     cost: Option<String>,
+    billing_mode: Option<String>,
+    subscription_type: Option<String>,
+    quota: Option<String>,
     lore: Option<String>,
 }
 
@@ -428,7 +431,7 @@ impl SessionTelemetry {
         }
         if let Some(cost) = data["session_cost_usd"].as_f64()
             .filter(|value| value.is_finite() && *value >= 0.0) {
-            self.cost = Some(format!("${cost:.4} session"));
+            self.cost = Some(format!("${cost:.4}"));
         } else if let Some(cost) = data["cost_usd"].as_f64()
             .filter(|value| value.is_finite() && *value >= 0.0) {
             self.cost = Some(format!("${cost:.4} turn"));
@@ -438,6 +441,19 @@ impl SessionTelemetry {
     }
 
     fn update_status(&mut self, status: &serde_json::Value) {
+        if let Some(billing) = status.get("billing") {
+            self.billing_mode = match billing["mode"].as_str() {
+                Some("api") => Some("api".into()),
+                Some("subscription") => Some("subscription".into()),
+                _ => None,
+            };
+            self.subscription_type = billing["type"].as_str()
+                .filter(|name| !name.is_empty() && name.len() <= 64 && !name.chars().any(char::is_control))
+                .map(safe_label);
+            self.quota = billing["quota"].as_str()
+                .filter(|quota| !quota.is_empty() && quota.len() <= 120 && !quota.chars().any(char::is_control))
+                .map(safe_label);
+        }
         let context = status["ctx_percentage"].as_f64()
             .filter(|value| value.is_finite() && (0.0..=100.0).contains(value))
             .map(|value| format!("{value:.0}%"));
@@ -453,8 +469,8 @@ impl SessionTelemetry {
                 if status["usage"]["unpriced_models"].as_array().is_some_and(|models| !models.is_empty()) {
                     "est partial"
                 } else { "est" }
-            } else { "session" };
-            self.cost = Some(format!("${cost:.4} {label}"));
+            } else { "" };
+            self.cost = Some(format!("${cost:.4} {label}").trim_end().to_owned());
         } else if status.get("total_cost_usd").is_some() {
             self.cost = None;
         }
@@ -466,6 +482,20 @@ impl SessionTelemetry {
                 Some("unavailable") => Some("scrub unavailable".into()),
                 _ => None,
             };
+        }
+    }
+
+    fn billing_label(&self, engine: Option<&str>) -> Option<String> {
+        match engine {
+            Some("deepseek" | "glm") => Some(self.cost.clone().unwrap_or_else(|| "$?".into())),
+            Some("codex" | "claude") => match self.billing_mode.as_deref() {
+                Some("api") => Some(self.cost.clone().unwrap_or_else(|| "$?".into())),
+                Some("subscription") => Some(format!("Sub {} · {}",
+                    self.subscription_type.as_deref().filter(|tier| *tier != "subscription").unwrap_or("unknown"),
+                    self.quota.as_deref().unwrap_or("quota unknown"))),
+                _ => Some("Plan unknown · quota unknown".into()),
+            },
+            _ => None,
         }
     }
 
@@ -3818,7 +3848,15 @@ impl App {
             .filter(|label| label.ends_with(" beliefs"))
             .unwrap_or("Beliefs");
         chips.push(("beliefs", beliefs.to_owned()));
-        chips.push(("cost", format!("Cost {}", telemetry.and_then(|value| value.cost.as_deref()).unwrap_or("?"))));
+        let engine = identity.and_then(|pair| pair.0.as_deref());
+        if let Some(label) = telemetry.and_then(|value| value.billing_label(engine))
+            .or_else(|| match engine {
+                Some("deepseek" | "glm") => Some("$?".into()),
+                Some("codex" | "claude") => Some("Plan unknown · quota unknown".into()),
+                _ => None,
+            }) {
+            chips.push(("cost", label));
+        }
         chips.push(("lore", format!("LORE {}", telemetry.and_then(|value| value.lore.as_deref()).unwrap_or("?"))));
         chips
     }

@@ -175,10 +175,33 @@ async def run() -> None:
                     options["model"] = model
                 candidate = SessionEngine(**options)
                 started = await candidate.start()
+                # Only the SDK account for this connected session can name
+                # its plan. A cached CLI account might belong to another auth
+                # mode, so it is never enough to classify billing here.
+                billing = None
+                try:
+                    from doxa import identity as identity_mod
+                    account = getattr(candidate, "account", None) or {}
+                    subscription = account.get("subscriptionType") if isinstance(account, dict) else None
+                    tier = (identity_mod.tier_short(subscription) if isinstance(subscription, str)
+                            else None)
+                    local = identity_mod.local_account() if tier else {}
+                    sdk_email = account.get("email") if isinstance(account, dict) else None
+                    local_email = local.get("emailAddress") if isinstance(local, dict) else None
+                    same_account = (isinstance(sdk_email, str) and isinstance(local_email, str)
+                                    and sdk_email.strip().casefold() == local_email.strip().casefold()
+                                    and bool(sdk_email.strip()))
+                    usage = identity_mod.usage() if tier and same_account else None
+                    if tier:
+                        billing = {"mode": "subscription", "type": tier,
+                                   "quota": usage.chip() if usage else None}
+                except Exception:
+                    pass  # optional account data cannot prevent a session
                 try:
                     complete = emit({"type": "reply", "id": request_id, "ok": True,
                                      "result": {"event": started.type, "data": started.data,
-                                                "permission_mode": getattr(candidate, "permission_mode", "default")}})
+                                                "permission_mode": getattr(candidate, "permission_mode", "default"),
+                                                "billing": billing}})
                 except Exception:
                     try:
                         await asyncio.wait_for(candidate.finalize(), timeout=EOF_FINALIZE_TIMEOUT)

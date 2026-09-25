@@ -47,6 +47,7 @@ pub struct ClaudeHost {
     permission_control: bool,
     initial_model: Option<String>,
     initial_permission_mode: String,
+    billing: Option<Value>,
 }
 
 impl ClaudeHost {
@@ -94,6 +95,11 @@ impl ClaudeHost {
             return Err("Claude sidecar reported an unavailable initial permission mode".into());
         }
         let initial_permission_mode = initial_permission_mode.to_owned();
+        let billing = start.get("billing").filter(|value| value["mode"] == "subscription"
+            && value["type"].as_str().is_some_and(|tier| !tier.is_empty() && tier.len() <= 64
+                && !tier.chars().any(char::is_control))
+            && value["quota"].as_str().is_none_or(|quota| quota.len() <= 120
+                && !quota.chars().any(char::is_control))).cloned();
         let (tx, rx) = mpsc::channel();
         let turn_running = Arc::new(AtomicBool::new(false));
         let broker_turn_running = Arc::clone(&turn_running);
@@ -109,6 +115,7 @@ impl ClaudeHost {
             permission_control,
             initial_model,
             initial_permission_mode,
+            billing,
         })
     }
 
@@ -155,6 +162,7 @@ impl Host for ClaudeHost {
     fn can_set_permission_mode(&self) -> bool { self.permission_control }
     fn initial_model(&self) -> Option<String> { self.initial_model.clone() }
     fn initial_permission_mode(&self) -> String { self.initial_permission_mode.clone() }
+    fn billing_snapshot(&self) -> Option<Value> { self.billing.clone() }
     fn prompt(&self, text: &str, emit: &mut dyn FnMut(Value)) {
         let (events_tx, events_rx) = mpsc::sync_channel(EVENT_QUEUE);
         let (reply_tx, reply_rx) = mpsc::channel();

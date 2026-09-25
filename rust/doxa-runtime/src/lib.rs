@@ -35,6 +35,8 @@ pub trait Host: Send + Sync + 'static {
     fn initial_permission_mode(&self) -> String { "default".to_owned() }
     fn can_set_model(&self) -> bool { false }
     fn can_set_permission_mode(&self) -> bool { false }
+    /// Provider-verified billing snapshot; None means unknown.
+    fn billing_snapshot(&self) -> Option<Value> { None }
     /// Only the scrub preflight and sticky runtime scrub failure are known.
     /// This does not claim that memory indexing or snapshotting succeeded.
     fn lore_scrub_status(&self) -> Option<&'static str> { None }
@@ -119,7 +121,7 @@ impl Daemon {
         let hello = json!({"type":"hello","proto":1,"doxa":session.doxa_version,
             "session_id":session.session_id,"model":model,"engine":session.engine,
             "permission_mode":permission_mode,"bypass_armed":false,
-            "cwd":session.cwd,"next_seq":0});
+            "cwd":session.cwd,"next_seq":0,"billing":host.billing_snapshot()});
         if serde_json::to_vec(&hello).map_err(io::Error::other)?.len() + 1 > MAX_FRAME_BYTES {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "hello frame too large"));
         }
@@ -304,6 +306,7 @@ fn handle_client(inner: Arc<Inner>, stream: UnixStream) {
     let can_set_model = inner.host.can_set_model();
     let can_set_permission_mode = inner.host.can_set_permission_mode();
     let lore_scrub = inner.host.lore_scrub_status();
+    let billing = inner.host.billing_snapshot();
     let hello = {
         let state = inner.state.lock().unwrap();
         json!({"type":"hello", "proto":1, "doxa":inner.session.doxa_version,
@@ -315,7 +318,7 @@ fn handle_client(inner: Arc<Inner>, stream: UnixStream) {
             "running":state.busy,"queued":state.prompts.len(),
             "can_set_model":can_set_model,
             "can_set_permission_mode":can_set_permission_mode,
-            "lore_scrub":lore_scrub})
+            "lore_scrub":lore_scrub,"billing":billing})
     };
     if writer.set_write_timeout(Some(Duration::from_secs(2))).is_err() ||
         writer.write_all(&encode_reply(&hello)).is_err() { return; }
@@ -470,13 +473,14 @@ fn handle_call(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame: &Value) {
         let can_set_model = inner.host.can_set_model();
         let can_set_permission_mode = inner.host.can_set_permission_mode();
         let lore_scrub = inner.host.lore_scrub_status();
+        let billing = inner.host.billing_snapshot();
         let state = inner.state.lock().unwrap();
         (Ok(json!({"status":{"session_id":inner.session.session_id,"cwd":inner.session.cwd,
             "model":state.model,"permission_mode":state.permission_mode,
             "engine":inner.session.engine,"running":state.busy,"queued":state.prompts.len(),
             "can_set_model":can_set_model,
             "can_set_permission_mode":can_set_permission_mode,
-            "lore_scrub":lore_scrub}})), None)
+            "lore_scrub":lore_scrub,"billing":billing}})), None)
     } else if method == "switch_branch" {
         let idle = {
             let state = inner.state.lock().unwrap();
