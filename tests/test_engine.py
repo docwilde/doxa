@@ -60,20 +60,18 @@ async def test_explicit_compact_requires_completed_lore_review(monkeypatch, tmp_
                         lambda *args, **kwargs: {"session_id": engine.session_id,
                                                  "project": engine.slug, "prompt": "review"})
 
-    def worker(argv, **kwargs):
-        calls.append((argv, kwargs))
-        assert kwargs["stdout"] == subprocess.DEVNULL
-        assert kwargs["stderr"] == subprocess.DEVNULL
-        return subprocess.CompletedProcess(argv, 0)
+    def worker(jobfile):
+        calls.append(jobfile)
+        return True
 
-    monkeypatch.setattr(subprocess, "run", worker)
+    monkeypatch.setattr(SessionEngine, "_review_worker", staticmethod(worker))
     assert not await engine.review_before_compact()  # missing is not "short"
     engine.transcript_path.write_text('{"type":"user"}\n', encoding="utf-8")
     assert await engine.review_before_compact()
     assert len(calls) == 1
-    assert not os.path.exists(calls[0][0][-1])
+    assert not calls[0].exists()
 
-    monkeypatch.setattr(subprocess, "run", lambda argv, **kwargs: subprocess.CompletedProcess(argv, 1))
+    monkeypatch.setattr(SessionEngine, "_review_worker", staticmethod(lambda jobfile: False))
     assert not await engine.review_before_compact()
     monkeypatch.setenv("LORE_DISABLE_REVIEW", "1")
     assert not await engine.review_before_compact()

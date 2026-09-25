@@ -2307,17 +2307,33 @@ class SessionEngine:
     @staticmethod
     def _review_worker(jobfile: Path) -> bool:
         import subprocess
+        import signal
         import sys
 
-        result = subprocess.run(
+        # The parent may have selected a Claude plugin checkout over the
+        # installed wheel. A fresh interpreter must use that same source.
+        lore_parent = str(Path(lore_core.__file__).resolve().parent.parent)
+        process = subprocess.Popen(
             [sys.executable, "-c",
              "import sys; from pathlib import Path; "
+             "sys.path.insert(0, sys.argv[2]); "
              "from lore_core.deriver import worker_run; "
-             "sys.exit(worker_run(Path(sys.argv[1])))", str(jobfile)],
+             "sys.exit(worker_run(Path(sys.argv[1])))", str(jobfile), lore_parent],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL, timeout=180, check=False,
+            stderr=subprocess.DEVNULL, start_new_session=True,
         )
-        return result.returncode == 0
+        try:
+            return process.wait(timeout=180) == 0
+        except subprocess.TimeoutExpired:
+            # LORE's worker may itself be waiting on a provider CLI. Kill
+            # the whole process group so a refused compact leaves no paid
+            # reviewer running in the background.
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait()
+            return False
 
     # -- streaming deriver -------------------------------------------
 
