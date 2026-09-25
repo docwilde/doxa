@@ -42,6 +42,8 @@ impl Engine {
 #[derive(Debug, Default, Clone)]
 pub struct LaunchOptions {
     pub engine: Engine,
+    /// Recorded project directory for a verified historical resume.
+    pub cwd: Option<PathBuf>,
     pub branch: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
@@ -203,7 +205,12 @@ fn random_id() -> io::Result<String> {
 }
 
 pub fn spawn(options: &LaunchOptions) -> io::Result<Session> {
-    let cwd = fs::canonicalize(env::current_dir()?)?;
+    let requested_cwd = options.cwd.clone().unwrap_or(env::current_dir()?);
+    if options.cwd.is_some() && options.resume.is_none() {
+        return Err(invalid("explicit cwd is only supported for verified resume"));
+    }
+    let cwd = fs::canonicalize(requested_cwd)?;
+    if !cwd.is_dir() { return Err(invalid("resume directory is not a directory")); }
     let branch = if let Some(requested) = options.branch.as_deref() {
         if !doxa_worktrees::enabled() {
             return Err(invalid("--branch needs worktree_per_session; turn it on or change your checkout explicitly with git"));
@@ -285,6 +292,13 @@ pub fn spawn(options: &LaunchOptions) -> io::Result<Session> {
     } else {
         random_id()?
     };
+    if options.resume.is_some() {
+        // A second daemon with the same conversation ID would create two
+        // writers. The UI checks earlier; this is the final pre-spawn gate.
+        if discovery::sessions()?.iter().any(|session| session.id == id) {
+            return Err(invalid("session is already running; attach to it instead"));
+        }
+    }
     let mut command = Command::new(daemon);
     command.args([
         "--runtime-dir",

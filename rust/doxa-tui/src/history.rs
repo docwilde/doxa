@@ -11,6 +11,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
+use crate::launch::{Engine, LaunchOptions};
+use std::time::Duration;
 
 const MAX_PROJECTS: usize = 128;
 const MAX_FILES: usize = 2048;
@@ -22,6 +24,8 @@ pub struct OfflineSession {
     pub id: String,
     pub project: String,
     pub markdown: String,
+    /// Cwd from the first DOXA user record. It is a hint until resume preflight.
+    pub cwd: Option<PathBuf>,
 }
 
 fn projects_dir() -> Option<PathBuf> {
@@ -112,14 +116,52 @@ fn read_offline(mut file: File, uid: u32) -> Option<String> {
     Some(render(&TranscriptSnapshot { bytes, earlier_bytes_omitted: start > 0 }))
 }
 
+fn recorded_cwd(file: &mut File) -> Option<PathBuf> {
+    file.seek(SeekFrom::Start(0)).ok()?;
+    let mut head = Vec::new();
+    file.take(64 * 1024).read_to_end(&mut head).ok()?;
+    for line in head.split(|byte| *byte == b'\n').take(128) {
+        let Ok(record) = serde_json::from_slice::<Value>(line) else { continue };
+        if record["type"] != "user" { continue; }
+        let Some(cwd) = record["cwd"].as_str() else { continue; };
+        if cwd.len() <= 4096 && !cwd.contains('\0') && Path::new(cwd).is_absolute() {
+            return Some(PathBuf::from(cwd));
+        }
+    }
+    None
+}
+
 /// Scan only LORE transcript filenames and load bounded tails of the newest files.
 /// Call on a worker thread; this reads no paths supplied by the history UI.
 pub fn discover() -> Vec<OfflineSession> {
     let Some(root) = projects_dir() else { return Vec::new(); };
-    discover_in(&root)
+    discover_in(&root, None, None)
 }
 
-fn discover_in(root: &Path) -> Vec<OfflineSession> {
+pub fn discover_prefix(prefix: &str) -> Vec<OfflineSession> {
+    if !crate::discovery::valid_id(prefix) { return Vec::new(); }
+    let Some(root) = projects_dir() else { return Vec::new(); };
+    discover_in(&root, Some(prefix), None)
+}
+
+/// Search bounded tails across the complete scanned inventory, including
+/// archives older than the 64 recents. LORE's full-text index remains broader.
+pub fn discover_query(query: &str) -> Vec<OfflineSession> {
+    let query = query.trim();
+    if query.is_empty() || query.len() > 200 || query.chars().any(char::is_control) { return Vec::new(); }
+    let Some(root) = projects_dir() else { return Vec::new(); };
+    discover_in(&root, None, Some(query))
+}
+
+fn tail_matches(file: &mut File, query: &str) -> bool {
+    let Ok(len) = file.metadata().map(|meta| meta.len()) else { return false; };
+    if file.seek(SeekFrom::Start(len.saturating_sub(16 * 1024))).is_err() { return false; }
+    let mut tail = Vec::new();
+    if file.take(16 * 1024).read_to_end(&mut tail).is_err() { return false; }
+    String::from_utf8_lossy(&tail).to_lowercase().contains(&query.to_lowercase())
+}
+
+fn discover_in(root: &Path, prefix: Option<&str>, query: Option<&str>) -> Vec<OfflineSession> {
     let uid = unsafe { libc::geteuid() };
     let Ok(root) = OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC).open(root) else { return Vec::new(); };
     if !owned_dir(&root, uid) { return Vec::new(); }
@@ -134,9 +176,13 @@ fn discover_in(root: &Path) -> Vec<OfflineSession> {
             visited += 1;
             let path = Path::new(&name);
             let id = path.file_stem().and_then(|stem| stem.to_str()).unwrap();
-            let Some(open_file) = open_at(&dir, &name, libc::O_RDONLY | libc::O_NONBLOCK) else { continue; };
+            if prefix.is_some_and(|prefix| !id.starts_with(prefix)) { continue; }
+            let Some(mut open_file) = open_at(&dir, &name, libc::O_RDONLY | libc::O_NONBLOCK) else { continue; };
             let Ok(meta) = open_file.metadata() else { continue; };
             if !meta.is_file() || meta.uid() != uid { continue; }
+            if query.is_some_and(|query| !id.to_lowercase().contains(&query.to_lowercase()) && !tail_matches(&mut open_file, query)) {
+                continue;
+            }
             let stamp = meta.modified().ok();
             candidates.push((stamp, id.to_owned(), project.to_string_lossy().into_owned(), open_file));
             if candidates.len() > MAX_OFFLINE {
@@ -147,10 +193,98 @@ fn discover_in(root: &Path) -> Vec<OfflineSession> {
         if visited == MAX_FILES { break; }
     }
     candidates.sort_by(candidate_order);
-    candidates.into_iter().filter_map(|(_, id, project, file)| {
+    candidates.into_iter().filter_map(|(_, id, project, mut file)| {
+        let cwd = recorded_cwd(&mut file);
         let markdown = read_offline(file, uid)?;
-        Some(OfflineSession { id, project, markdown })
+        Some(OfflineSession { id, project, markdown, cwd })
     }).collect()
+}
+
+/// Verify the session's recorded cwd maps back to this transcript directory,
+/// then require the original engine's replay artefact. Codex archives remain
+/// readable until the native Codex launcher supports thread resume.
+pub fn resume_plan(entry: &OfflineSession, python: &Path) -> Result<LaunchOptions, &'static str> {
+    let root = projects_dir().ok_or("transcript root unavailable")?;
+    let claude = claude_store_root().ok_or("DOXA home unavailable")?;
+    resume_plan_in(entry, python, &root, &claude)
+}
+
+fn claude_store_root() -> Option<PathBuf> {
+    let home = std::env::var_os("DOXA_HOME").filter(|value| !value.is_empty())
+        .map(PathBuf::from).or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".doxa")));
+    home.filter(|home| home.is_absolute()).map(|home| home.join("claude-cli/projects"))
+}
+
+fn claude_history_present(root: &Path, id: &str, uid: u32) -> bool {
+    let Ok(root) = OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW).open(root) else { return false; };
+    if !owned_dir(&root, uid) { return false; }
+    let name = format!("{id}.jsonl");
+    for project in names_in(&root, MAX_PROJECTS, |_| true) {
+        let Some(dir) = open_at(&root, &project, libc::O_RDONLY | libc::O_DIRECTORY) else { continue; };
+        if !owned_dir(&dir, uid) { continue; }
+        let Some(file) = open_at(&dir, OsStr::new(&name), libc::O_RDONLY | libc::O_NONBLOCK) else { continue; };
+        if file.metadata().is_ok_and(|meta| meta.is_file() && meta.uid() == uid && meta.len() > 0) { return true; }
+    }
+    false
+}
+
+fn resume_plan_in(entry: &OfflineSession, python: &Path, expected_root: &Path, claude_root: &Path) -> Result<LaunchOptions, &'static str> {
+    if !crate::discovery::valid_id(&entry.id) { return Err("invalid session ID"); }
+    let cwd = entry.cwd.as_ref().ok_or("session directory was not recorded")?;
+    let cwd = cwd.canonicalize().map_err(|_| "session directory is gone")?;
+    if !cwd.is_dir() { return Err("session directory is gone"); }
+    let mut lore = doxa_lore::LoreClient::spawn(python, Duration::from_secs(3))
+        .map_err(|_| "LORE unavailable for resume verification")?;
+    let (root, slug) = lore.transcript_identity(&cwd.to_string_lossy())
+        .map_err(|_| "cannot verify session project")?;
+    if root != expected_root || slug != entry.project {
+        return Err("session directory does not match transcript project");
+    }
+    let uid = unsafe { libc::geteuid() };
+    let root = OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW).open(&root)
+        .map_err(|_| "transcript root unavailable")?;
+    if !owned_dir(&root, uid) { return Err("unsafe transcript root"); }
+    let dir = open_at(&root, OsStr::new(&entry.project), libc::O_RDONLY | libc::O_DIRECTORY)
+        .ok_or("project history unavailable")?;
+    if !owned_dir(&dir, uid) { return Err("unsafe project history"); }
+    let transcript_name = format!("{}.jsonl", entry.id);
+    let transcript = open_at(&dir, OsStr::new(&transcript_name), libc::O_RDONLY | libc::O_NONBLOCK)
+        .ok_or("session transcript is no longer available")?;
+    if !transcript.metadata().is_ok_and(|meta| meta.is_file() && meta.uid() == uid && meta.len() > 0) {
+        return Err("session transcript is unsafe or empty");
+    }
+    let name = format!("{}.messages.json", entry.id);
+    let Some(mut saved) = open_at(&dir, OsStr::new(&name), libc::O_RDONLY | libc::O_NONBLOCK) else {
+        let codex = format!("{}.codex.json", entry.id);
+        if open_at(&dir, OsStr::new(&codex), libc::O_RDONLY | libc::O_NONBLOCK).is_some() {
+            return Err("native Codex thread resume is not available");
+        }
+        if claude_history_present(claude_root, &entry.id, uid) {
+            return Ok(LaunchOptions { engine: Engine::Claude, cwd: Some(cwd),
+                resume: Some(entry.id.clone()), ..LaunchOptions::default() });
+        }
+        return Err("no Claude CLI or vendor replay state for this session");
+    };
+    let meta = saved.metadata().map_err(|_| "unreadable replay state")?;
+    if !meta.is_file() || meta.uid() != uid || meta.len() > 8 * 1024 * 1024 {
+        return Err("unsafe replay state");
+    }
+    let mut bytes = Vec::new();
+    saved.read_to_end(&mut bytes).map_err(|_| "unreadable replay state")?;
+    let state: Value = serde_json::from_slice(&bytes).map_err(|_| "invalid replay state")?;
+    let engine = match state["engine"].as_str() {
+        Some("deepseek") => Engine::DeepSeek,
+        Some("glm") => Engine::Glm,
+        _ => return Err("unsupported or unknown saved engine"),
+    };
+    if state.get("session_id").is_some_and(|id| id.as_str() != Some(&entry.id)) {
+        return Err("replay state belongs to another session");
+    }
+    let model = state["model"].as_str().filter(|m| !m.is_empty() && m.len() <= 128 && !m.chars().any(char::is_control))
+        .ok_or("saved vendor model is unknown")?;
+    if !state["messages"].is_array() { return Err("invalid replay state"); }
+    Ok(LaunchOptions { engine, cwd: Some(cwd), model: Some(model.to_owned()),
+        resume: Some(entry.id.clone()), ..LaunchOptions::default() })
 }
 
 const MAX_TURNS: usize = 40;
@@ -236,7 +370,22 @@ pub fn render(snapshot: &TranscriptSnapshot) -> String {
 mod tests {
     use super::*;
     use std::fs;
-    use std::os::unix::fs::symlink;
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    fn fake_lore(dir: &Path, root: &Path) -> PathBuf {
+        let script = dir.join("fake-lore");
+        fs::write(&script, format!(r#"#!/usr/bin/env python3
+import json, sys
+print(json.dumps({{'type':'hello','proto':1,'capabilities':['scrub','snapshot','transcript_identity']}}), flush=True)
+for line in sys.stdin:
+    req = json.loads(line)
+    print(json.dumps({{'type':'reply','id':req['id'],'ok':True,'value':{{'projects_dir':{},'slug':'project'}}}}), flush=True)
+"#, serde_json::to_string(&root.to_string_lossy()).unwrap())).unwrap();
+        let mut perms = fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o700);
+        fs::set_permissions(&script, perms).unwrap();
+        script
+    }
 
     #[test]
     fn transcript_root_matches_lore_projects_configuration() {
@@ -317,10 +466,86 @@ mod tests {
         let valid = project.join("offline-1.jsonl");
         fs::write(&valid, b"{\"type\":\"user\",\"message\":{\"content\":\"saved question\"}}\n").unwrap();
         symlink(&valid, project.join("offline-2.jsonl")).unwrap();
-        let found = discover_in(&root);
+        let found = discover_in(&root, None, None);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].id, "offline-1");
         assert!(found[0].markdown.contains("saved question"));
+    }
+
+    #[test]
+    fn vendor_resume_requires_matching_project_and_owned_replay_envelope() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("projects");
+        fs::create_dir_all(root.join("project")).unwrap();
+        let cwd = temp.path().join("checkout");
+        fs::create_dir(&cwd).unwrap();
+        let script = fake_lore(temp.path(), &root);
+        let entry = OfflineSession { id: "saved-1".into(), project: "project".into(),
+            markdown: String::new(), cwd: Some(cwd.clone()) };
+        fs::write(root.join("project/saved-1.jsonl"), b"saved transcript\n").unwrap();
+        let replay = root.join("project/saved-1.messages.json");
+        fs::write(&replay, br#"{"engine":"deepseek","session_id":"saved-1","model":"deepseek-chat","messages":[]}"#).unwrap();
+        let plan = resume_plan_in(&entry, &script, &root, &temp.path().join("cli-projects")).unwrap();
+        assert_eq!(plan.engine, Engine::DeepSeek);
+        assert_eq!(plan.cwd, Some(cwd));
+        assert_eq!(plan.resume.as_deref(), Some("saved-1"));
+        let mut wrong = entry.clone();
+        wrong.project = "another-project".into();
+        assert!(resume_plan_in(&wrong, &script, &root, &temp.path().join("cli-projects")).is_err());
+        fs::remove_file(&replay).unwrap();
+        symlink(temp.path().join("outside"), &replay).unwrap();
+        assert!(resume_plan_in(&entry, &script, &root, &temp.path().join("cli-projects")).is_err());
+    }
+
+    #[test]
+    fn claude_resume_requires_isolated_cli_history_and_codex_is_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("projects");
+        fs::create_dir_all(root.join("project")).unwrap();
+        let cwd = temp.path().join("checkout");
+        fs::create_dir(&cwd).unwrap();
+        let cli = temp.path().join("cli-projects");
+        fs::create_dir_all(cli.join("encoded-cwd")).unwrap();
+        let script = fake_lore(temp.path(), &root);
+        let entry = OfflineSession { id: "saved-1".into(), project: "project".into(),
+            markdown: String::new(), cwd: Some(cwd) };
+        fs::write(root.join("project/saved-1.jsonl"), b"saved transcript\n").unwrap();
+        assert!(resume_plan_in(&entry, &script, &root, &cli).is_err());
+        fs::write(cli.join("encoded-cwd/saved-1.jsonl"), b"saved CLI history\n").unwrap();
+        let plan = resume_plan_in(&entry, &script, &root, &cli).unwrap();
+        assert_eq!(plan.engine, Engine::Claude);
+        fs::write(root.join("project/saved-1.codex.json"), b"{}").unwrap();
+        assert!(resume_plan_in(&entry, &script, &root, &cli).unwrap_err().contains("Codex"));
+    }
+
+    #[test]
+    fn history_records_original_cwd_for_resume() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("projects");
+        fs::create_dir_all(root.join("project")).unwrap();
+        fs::write(root.join("project/saved-1.jsonl"),
+            b"{\"type\":\"user\",\"cwd\":\"/tmp/original\",\"message\":{\"content\":\"needle\"}}\n").unwrap();
+        let found = discover_in(&root, Some("saved"), None);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].cwd.as_deref(), Some(Path::new("/tmp/original")));
+        assert!(discover_in(&root, Some("different"), None).is_empty());
+    }
+
+    #[test]
+    fn search_reaches_archives_outside_recent_window() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("projects");
+        fs::create_dir_all(root.join("project")).unwrap();
+        fs::write(root.join("project/z-archive.jsonl"),
+            b"{\"type\":\"user\",\"message\":{\"content\":\"rare needle\"}}\n").unwrap();
+        for index in 0..70 {
+            fs::write(root.join(format!("project/recent-{index:02}.jsonl")),
+                b"{\"type\":\"user\",\"message\":{\"content\":\"ordinary\"}}\n").unwrap();
+        }
+        assert!(!discover_in(&root, None, None).iter().any(|entry| entry.id == "z-archive"));
+        let hits = discover_in(&root, None, Some("needle"));
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, "z-archive");
     }
 
     #[test]

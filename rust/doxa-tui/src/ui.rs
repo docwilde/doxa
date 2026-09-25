@@ -727,9 +727,13 @@ pub struct App {
     action_menu: bool,
     action_selected: usize,
     history_modal: bool,
+    history_resume: bool,
+    history_explicit: bool,
     history_query: String,
     history_selected: usize,
     history_pending: Option<Receiver<Vec<history::OfflineSession>>>,
+    history_entries: HashMap<String, history::OfflineSession>,
+    resume_pending: Option<Receiver<(String, Result<launch::LaunchOptions, &'static str>)>>,
     offline_ids: HashSet<String>,
     diff_modal: bool,
     diff_pane: bool,
@@ -824,9 +828,13 @@ impl Default for App {
             action_menu: false,
             action_selected: 0,
             history_modal: false,
+            history_resume: false,
+            history_explicit: false,
             history_query: String::new(),
             history_selected: 0,
             history_pending: None,
+            history_entries: HashMap::new(),
+            resume_pending: None,
             offline_ids: HashSet::new(),
             diff_modal: false,
             diff_pane: false,
@@ -920,6 +928,7 @@ impl App {
                 self.launching = false;
                 if frame["ok"] == true {
                     if let Some(id) = frame["session_id"].as_str().filter(|id| crate::discovery::valid_id(id)) {
+                        self.offline_ids.remove(id);
                         let target = frame["group"].as_u64().filter(|group| *group < 2)
                             .map(|group| group as usize).unwrap_or(self.active_group);
                         // A newly attached daemon may send hello before this reply.
@@ -1986,11 +1995,13 @@ impl App {
             "/movepane" | "/collection" | "/fleet" | "/img" | "/login"
             | "/logout" | "/settings" | "/setup" | "/doctor" | "/plugins"
             | "/reload-plugins" | "/branch" | "/effort" | "/usage"
-            | "/context" | "/queue" | "/clear" | "/cd" | "/search"
-            | "/resume" | "/compact" | "/update" => {
+            | "/context" | "/queue" | "/clear" | "/cd"
+            | "/compact" | "/update" => {
                 self.notice = format!("Local command unavailable: {}", safe_label(command));
                 true
             }
+            "/search" => { self.local_search(args); true }
+            "/resume" => { self.local_resume(args); true }
             _ => false, // Provider and plugin slash commands remain available.
         }
     }
@@ -2296,6 +2307,9 @@ impl App {
     fn history_matches(&self) -> Vec<usize> {
         let query = self.history_query.to_lowercase();
         self.sessions.iter().enumerate().filter_map(|(index, session)| {
+            if self.history_resume {
+                return (query.is_empty() || session.id.to_lowercase().starts_with(&query)).then_some(index);
+            }
             let mut start = session.transcript.len().saturating_sub(16 * 1024);
             while !session.transcript.is_char_boundary(start) { start += 1; }
             if query.is_empty() || session.title.to_lowercase().contains(&query)
@@ -2318,6 +2332,8 @@ impl App {
             return;
         }
         self.history_modal = true;
+        self.history_resume = false;
+        self.history_explicit = false;
         self.history_query.clear();
         self.history_selected = 0;
         if self.active_chooser_rect().is_none() {
@@ -2329,6 +2345,55 @@ impl App {
             let (tx, rx) = mpsc::sync_channel(1);
             self.history_pending = Some(rx);
             std::thread::spawn(move || { let _ = tx.send(history::discover()); });
+        }
+    }
+
+    fn local_search(&mut self, args: &str) {
+        let query = args.trim();
+        if query.len() > 200 || query.chars().any(unsafe_input_char) {
+            self.notice = "search: query must be at most 200 bytes without control characters".into();
+            return;
+        }
+        self.input.clear();
+        self.input_cursor = 0;
+        self.open_history();
+        if self.history_modal {
+            self.history_query = query.to_owned();
+            if !query.is_empty() {
+                let (tx, rx) = mpsc::sync_channel(1);
+                self.history_pending = Some(rx);
+                let query = query.to_owned();
+                std::thread::spawn(move || { let _ = tx.send(history::discover_query(&query)); });
+            }
+        }
+    }
+
+    fn local_resume(&mut self, args: &str) {
+        let query = args.trim();
+        if !query.is_empty() && !crate::discovery::valid_id(query) {
+            self.notice = "resume: enter a valid session ID or prefix".into();
+            return;
+        }
+        self.input.clear();
+        self.input_cursor = 0;
+        // A full ID naming a live daemon is immediately attachable even if
+        // that daemon has not yet been indexed into transcript history.
+        if !query.is_empty() && crate::discovery::sessions().is_ok_and(|rows| rows.iter().any(|row| row.id == query)) {
+            self.attach_selected(query);
+            return;
+        }
+        self.open_history();
+        if !self.history_modal { return; }
+        self.history_resume = true;
+        self.history_explicit = !query.is_empty();
+        self.history_query = query.to_owned();
+        // Explicit IDs search the full bounded transcript inventory rather
+        // than only the recent-history window.
+        if !query.is_empty() {
+            let (tx, rx) = mpsc::sync_channel(1);
+            self.history_pending = Some(rx);
+            let prefix = query.to_owned();
+            std::thread::spawn(move || { let _ = tx.send(history::discover_prefix(&prefix)); });
         }
     }
 
@@ -2598,11 +2663,23 @@ impl App {
         self.history_pending = None;
         let mut changed = false;
         for entry in found {
+            self.history_entries.insert(entry.id.clone(), entry.clone());
             if self.sessions.iter().any(|session| session.id == entry.id) { continue; }
             self.offline_ids.insert(entry.id.clone());
             self.sessions.push(Session { id: entry.id.clone(), title: entry.id,
                 collection: safe_label(&entry.project), transcript: transcript_tail(&entry.markdown).to_owned(),
                 status: "Archived · read-only".into() });
+            changed = true;
+        }
+        if self.history_modal && self.history_resume && self.history_explicit {
+            match self.history_matches().len() {
+                0 => {
+                    self.history_modal = false;
+                    self.notice = format!("Resume: no saved session matches {}", safe_label(&self.history_query));
+                }
+                1 => self.open_selected_history(),
+                _ => {}
+            }
             changed = true;
         }
         changed
@@ -2630,6 +2707,35 @@ impl App {
     fn open_selected_history(&mut self) {
         if let Some(&index) = self.history_matches().get(self.history_selected) {
             let id = self.sessions[index].id.clone();
+            if self.history_resume {
+                self.history_modal = false;
+                self.history_resume = false;
+                if self.groups.iter().any(|group| group.tabs.iter().any(|tab| tab == &id)) {
+                    for (group_index, group) in self.groups.iter_mut().enumerate() {
+                        if let Some(index) = group.tabs.iter().position(|tab| tab == &id) {
+                            group.active = index;
+                            self.active_group = group_index;
+                            self.notice = format!("Session already open · {}", safe_label(&id));
+                            return;
+                        }
+                    }
+                }
+                if crate::discovery::sessions().is_ok_and(|rows| rows.iter().any(|row| row.id == id)) {
+                    self.attach_selected(&id);
+                    return;
+                }
+                let Some(entry) = self.history_entries.get(&id).cloned() else {
+                    self.notice = "Resume unavailable: no saved transcript for this session".into();
+                    return;
+                };
+                let python = std::env::var_os("DOXA_LORE_PYTHON")
+                    .map(PathBuf::from).unwrap_or_else(|| PathBuf::from("python3"));
+                let (tx, rx) = mpsc::sync_channel(1);
+                self.resume_pending = Some(rx);
+                std::thread::spawn(move || { let result = history::resume_plan(&entry, &python); let _ = tx.send((id, result)); });
+                self.notice = "Checking saved conversation…".into();
+                return;
+            }
             let tabs = &mut self.groups[self.active_group];
             if let Some(index) = tabs.tabs.iter().position(|tab| tab == &id) { tabs.active = index; }
             else { tabs.tabs.push(id); tabs.active = tabs.tabs.len() - 1; }
@@ -2637,6 +2743,33 @@ impl App {
             self.focus = Focus::Transcript;
             self.history_modal = false;
         }
+    }
+
+    fn poll_resume(&mut self) -> bool {
+        let Some(receiver) = &self.resume_pending else { return false; };
+        let result = match receiver.try_recv() {
+            Ok(result) => result,
+            Err(TryRecvError::Empty) => return false,
+            Err(TryRecvError::Disconnected) => { self.resume_pending = None; return false; }
+        };
+        self.resume_pending = None;
+        let (id, plan) = result;
+        match plan {
+            Ok(options) if !self.launching => {
+                // Recheck live registry immediately before dispatch. The daemon
+                // also owns the final uniqueness check on this session ID.
+                if crate::discovery::sessions().is_ok_and(|rows| rows.iter().any(|row| row.id == id)) {
+                    self.attach_selected(&id);
+                } else {
+                    self.pending_launches.push((options, None, self.active_group));
+                    self.launching = true;
+                    self.notice = format!("Resuming · {}", safe_label(&id));
+                }
+            }
+            Ok(_) => self.notice = "Wait for the current session launch before resuming".into(),
+            Err(reason) => self.notice = format!("Resume unavailable · {reason}; transcript remains readable"),
+        }
+        true
     }
 
     fn open_diff(&mut self) {
@@ -4011,7 +4144,8 @@ impl App {
             lines.push(Line::styled(padded, style));
         }
         frame.render_widget(Paragraph::new(lines).block(Block::default()
-            .title(" Session history · type to filter ")
+            .title(if self.history_resume { " Resume session · Enter to open · Esc close " }
+                else { " Session history · type to filter " })
             .borders(Borders::ALL).border_style(Style::default().fg(theme::ACCENT))
             .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED))), area);
     }
@@ -4697,6 +4831,7 @@ fn run_loop(
         }
         changed |= app.poll_diff();
         changed |= app.poll_history();
+        changed |= app.poll_resume();
         changed |= app.poll_lore();
         changed |= app.tick_blink(Instant::now());
         if prompt_sender.is_none() {
@@ -5940,7 +6075,7 @@ mod tests {
         let (tx, rx) = mpsc::sync_channel(1);
         app.history_pending = Some(rx);
         tx.send(vec![history::OfflineSession { id: "saved-1".into(),
-            project: "project\u{1b}[31m".into(), markdown: "**You:** saved".into() }]).unwrap();
+            project: "project\u{1b}[31m".into(), markdown: "**You:** saved".into(), cwd: None }]).unwrap();
         assert!(app.poll_history());
         assert!(app.offline_ids.contains("saved-1"));
         assert!(!app.sessions[0].collection.contains('\u{1b}'));
@@ -5953,6 +6088,47 @@ mod tests {
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert!(app.pending_prompts.is_empty());
         assert_eq!(app.notice, "Archived transcript is read-only");
+    }
+
+    #[test]
+    fn resume_prefix_uses_nonmodal_picker_and_never_reaches_model_prompt() {
+        let mut app = App::default();
+        app.handle(Event::Resize(100, 28));
+        app.input = "/resume saved".into();
+        assert!(app.submit_local_command());
+        assert!(app.input.is_empty());
+        assert!(app.history_modal && app.history_resume);
+        let (tx, rx) = mpsc::sync_channel(1);
+        app.history_pending = Some(rx);
+        tx.send(vec!["saved-1", "saved-2"].into_iter().map(|id| history::OfflineSession {
+            id: id.into(), project: "project".into(), markdown: "**You:** old turn".into(), cwd: None,
+        }).collect()).unwrap();
+        assert!(app.poll_history());
+        assert_eq!(app.history_matches().len(), 2);
+        assert!(painted(&app).contains("Resume session"));
+        assert!(app.pending_prompts.is_empty());
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        assert!(!app.history_modal);
+        app.input = "/resume ../unsafe".into();
+        assert!(app.submit_local_command());
+        assert!(app.notice.contains("valid session ID"));
+        assert!(app.pending_prompts.is_empty());
+    }
+
+    #[test]
+    fn local_search_filters_saved_transcript_content() {
+        let mut app = App::default();
+        app.handle(Event::Resize(100, 28));
+        let (tx, rx) = mpsc::sync_channel(1);
+        app.history_pending = Some(rx);
+        tx.send(vec![history::OfflineSession { id: "archive-1".into(), project: "project".into(),
+            markdown: "**You:** hidden needle".into(), cwd: None }]).unwrap();
+        app.poll_history();
+        app.input = "/search needle".into();
+        assert!(app.submit_local_command());
+        assert!(app.history_modal && !app.history_resume);
+        assert_eq!(app.history_matches().len(), 1);
+        assert!(app.pending_prompts.is_empty());
     }
 
     #[test]
