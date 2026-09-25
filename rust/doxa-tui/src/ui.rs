@@ -166,6 +166,8 @@ fn chip_hint(kind: &str) -> &'static str {
         "permission" => "Permission mode for this session · click to choose",
         "engine" => "Engine for new sessions · click to choose",
         "model" => "Model for this session · click to choose",
+        "repo" => "This session's repository and base branch · click for worktree details",
+        "directory" => "This session's directory; no Git repository is active",
         "context" => "Current session context usage · click for details",
         "memory" => "Project/user memory: % of separate LORE caps",
         "beliefs" => "LORE beliefs · click to browse",
@@ -173,6 +175,26 @@ fn chip_hint(kind: &str) -> &'static str {
         "balance" => "Current DeepSeek API account balance",
         "more" => "More chips · click to reveal hidden chips",
         _ => "",
+    }
+}
+
+fn repo_chip(status: &doxa_worktrees::RepoStatus) -> (&'static str, String) {
+    match status {
+        doxa_worktrees::RepoStatus::Directory { name } =>
+            ("directory", format!("dir {}", safe_label(name))),
+        doxa_worktrees::RepoStatus::Repository { repo, base, checked_out, sha, .. } => {
+            let mut label = safe_label(repo);
+            if let Some(branch) = base.as_deref().or(checked_out.as_deref()) {
+                label.push_str(" ⎇ ");
+                label.push_str(&safe_label(branch));
+            }
+            if let Some(sha) = sha.as_ref().filter(|sha| !base.as_deref().or(checked_out.as_deref())
+                .is_some_and(|branch| branch.starts_with(sha.as_str()))) {
+                label.push_str(" @");
+                label.push_str(sha);
+            }
+            ("repo", label)
+        }
     }
 }
 
@@ -748,6 +770,9 @@ pub struct App {
     // the draw path; an unavailable sidecar leaves the chip unknown.
     memory_cache: HashMap<String, (Option<doxa_lore::MemoryUsage>, Instant)>,
     memory_pending: Option<(String, String, Receiver<Option<doxa_lore::MemoryUsage>>)>,
+    repo_cache: HashMap<String, (Option<doxa_worktrees::RepoStatus>, Instant)>,
+    repo_pending: Option<(String, PathBuf, u64, Receiver<Option<doxa_worktrees::RepoStatus>>)>,
+    repo_epoch: HashMap<String, u64>,
     chip_offsets: [usize; 2],
     chip_hover: Option<ChipHit>,
     chip_info: Option<ChipInfo>,
@@ -860,6 +885,9 @@ impl Default for App {
             session_telemetry: HashMap::new(),
             memory_cache: HashMap::new(),
             memory_pending: None,
+            repo_cache: HashMap::new(),
+            repo_pending: None,
+            repo_epoch: HashMap::new(),
             chip_offsets: [0, 0],
             chip_hover: None,
             chip_info: None,
@@ -941,6 +969,12 @@ impl Default for App {
 }
 
 impl App {
+    fn invalidate_repo(&mut self, id: &str) {
+        self.repo_cache.remove(id);
+        let epoch = self.repo_epoch.entry(id.to_owned()).or_default();
+        *epoch = epoch.wrapping_add(1);
+    }
+
     pub fn apply_update(&mut self, update: DaemonUpdate) {
         match update {
             DaemonUpdate::Upsert(mut session) => {
@@ -980,6 +1014,9 @@ impl App {
         };
         match kind {
             "branch_reply" => {
+                if frame["ok"] == true && frame["message"].as_str().is_some() {
+                    if let Some(id) = frame["session_id"].as_str() { self.invalidate_repo(id); }
+                }
                 if frame["ok"] != true {
                     self.notice = format!("branch: {}", safe_label(frame["error"].as_str().unwrap_or("switch refused")));
                 } else if let Some(message) = frame["message"].as_str() {
@@ -1100,9 +1137,16 @@ impl App {
                     if path.is_absolute() && raw.len() <= 4096 {
                         if self.session_cwds.get(id) != Some(&path) {
                             self.memory_cache.remove(id);
+                            self.invalidate_repo(id);
                         }
                         self.session_cwds.insert(id.to_owned(), path);
+                    } else {
+                        self.session_cwds.remove(id);
+                        self.invalidate_repo(id);
                     }
+                } else {
+                    self.session_cwds.remove(id);
+                    self.invalidate_repo(id);
                 }
                 let transcript = self
                     .sessions
@@ -1138,6 +1182,10 @@ impl App {
                     self.peer_map.event(&id, event_type, data);
                 }
                 match event_type {
+                    "branch_changed" => {
+                        self.invalidate_repo(&id);
+                        true
+                    }
                     "model_changed" => {
                         let old_model = self.session_identity.get(&id).and_then(|identity| identity.1.clone());
                         let new_model = data.get("model").and_then(|v| v.as_str()).map(safe_label).filter(|s| !s.is_empty());
@@ -2704,6 +2752,44 @@ impl App {
         changed
     }
 
+    fn poll_repo(&mut self) -> bool {
+        let mut changed = false;
+        if let Some((id, cwd, epoch, receiver)) = self.repo_pending.take() {
+            match receiver.try_recv() {
+                Ok(status) => {
+                    if self.session_cwds.get(&id) == Some(&cwd)
+                        && self.repo_epoch.get(&id).copied().unwrap_or_default() == epoch {
+                        changed = self.repo_cache.get(&id).is_none_or(|(old, _)| *old != status);
+                        self.repo_cache.insert(id, (status, Instant::now()));
+                    }
+                }
+                Err(TryRecvError::Disconnected) => {
+                    if self.session_cwds.get(&id) == Some(&cwd)
+                        && self.repo_epoch.get(&id).copied().unwrap_or_default() == epoch {
+                        changed = self.repo_cache.get(&id).is_some_and(|(old, _)| old.is_some());
+                        self.repo_cache.insert(id, (None, Instant::now()));
+                    }
+                }
+                Err(TryRecvError::Empty) => self.repo_pending = Some((id, cwd, epoch, receiver)),
+            }
+        }
+        if self.repo_pending.is_some() { return changed; }
+        for group in [self.active_group, 1 - self.active_group] {
+            let Some(id) = self.groups[group].active_id().map(str::to_owned) else { continue; };
+            if self.offline_ids.contains(&id) { continue; }
+            let Some(cwd) = self.session_cwds.get(&id).cloned() else { continue; };
+            if self.repo_cache.get(&id).is_some_and(|(_, checked)| checked.elapsed() < Duration::from_secs(5)) {
+                continue;
+            }
+            let epoch = self.repo_epoch.get(&id).copied().unwrap_or_default();
+            let (tx, rx) = mpsc::sync_channel(1);
+            self.repo_pending = Some((id, cwd.clone(), epoch, rx));
+            std::thread::spawn(move || { let _ = tx.send(doxa_worktrees::repo_status(&cwd)); });
+            break;
+        }
+        changed
+    }
+
     fn poll_lore(&mut self) -> bool {
         let Some(picker) = &mut self.lore_picker else { return false; };
         let Some(receiver) = &picker.pending else { return false; };
@@ -3844,6 +3930,10 @@ impl App {
         } else {
             chips.push(("model", "Model".to_owned()));
         }
+        if let Some(status) = id.and_then(|id| self.repo_cache.get(id))
+            .and_then(|(status, _)| status.as_ref()) {
+            chips.push(repo_chip(status));
+        }
         chips.push(("context", format!("Ctx {}", telemetry.and_then(|value| value.context.as_deref()).unwrap_or("?"))));
         let memory = self.memory_cache.get(id.unwrap_or("")).and_then(|(usage, _)| *usage)
             .map(|usage| format!("p {}%/u {}%",
@@ -3977,9 +4067,29 @@ impl App {
         None
     }
 
+    fn repo_detail(&self, group: usize) -> Option<String> {
+        let id = self.groups[group].active_id()?;
+        let (Some(doxa_worktrees::RepoStatus::Repository { base, checked_out, worktree, .. }), _) = self.repo_cache.get(id)? else {
+            return None;
+        };
+        let state = if let Some(worktree) = worktree {
+            if worktree == "linked worktree" { "linked worktree".to_owned() }
+            else { format!("managed worktree {}", safe_label(worktree)) }
+        } else { "main checkout".to_owned() };
+        Some(format!("base {} · HEAD {} · {state}",
+            safe_label(base.as_deref().unwrap_or("?")),
+            safe_label(checked_out.as_deref().unwrap_or("detached"))))
+    }
+
     fn open_chip_info(&mut self, kind: &'static str, group: usize) {
-        let label = self.chips(group).into_iter().find(|(candidate, _)| *candidate == kind)
+        let mut label = self.chips(group).into_iter().find(|(candidate, _)| *candidate == kind)
             .map(|(_, label)| label).unwrap_or_default();
+        if kind == "repo" {
+            if let Some(detail) = self.repo_detail(group) {
+                label.push_str(" · ");
+                label.push_str(&detail);
+            }
+        }
         self.active_group = group;
         self.chip_info = Some(ChipInfo { kind, label });
         if self.active_chooser_rect().is_none() {
@@ -4427,7 +4537,9 @@ impl App {
         if self.chip_info.is_some() || self.active_chooser_rect().is_some()
             || self.active_request_index().is_some() || self.map_modal || self.diff_modal
             || self.tool_modal || self.stop_confirmation.is_some() { return; }
-        let hint = chip_hint(hit.kind);
+        let hint = if hit.kind == "repo" {
+            self.repo_detail(hit.group).unwrap_or_else(|| chip_hint(hit.kind).to_owned())
+        } else { chip_hint(hit.kind).to_owned() };
         if hint.is_empty() || hit.rect.y <= hit.pane.y.saturating_add(3) { return; }
         let width = (hint.width() + 2).min(usize::from(hit.pane.width)) as u16;
         let x = hit.rect.x.min(hit.pane.right().saturating_sub(width));
@@ -5280,6 +5392,7 @@ fn run_loop(
         changed |= app.poll_resume();
         changed |= app.poll_lore();
         changed |= app.poll_memory();
+        changed |= app.poll_repo();
         changed |= app.tick_blink(Instant::now());
         if prompt_sender.is_none() {
             if let Some(id) = app.pending_peer_refresh.take() {
@@ -6088,6 +6201,53 @@ mod tests {
         let buffer = terminal.backend().buffer();
         (0..28).map(|y| (0..100).map(|x| buffer[(x, y)].symbol()).collect::<String>())
             .collect::<Vec<_>>().join("\n")
+    }
+
+    #[test]
+    fn repository_chip_tracks_each_panes_actual_session_and_invalidates_stale_work() {
+        use doxa_worktrees::RepoStatus;
+        let mut app = App::default();
+        app.rail_visible = false;
+        app.handle(Event::Resize(220, 32));
+        app.groups[0].tabs = vec!["a".into(), "b".into()];
+        app.groups[1].tabs = vec!["c".into()];
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"a","cwd":"/tmp/a"}));
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"b","cwd":"/tmp/b"}));
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"c","cwd":"/tmp/c"}));
+        app.repo_cache.insert("a".into(), (Some(RepoStatus::Repository {
+            repo: "project".into(), base: Some("main".into()),
+            checked_out: Some("doxa/a".into()), sha: Some("1234567".into()),
+            worktree: Some("doxa/a".into()),
+        }), Instant::now()));
+        app.repo_cache.insert("b".into(), (Some(RepoStatus::Directory { name: "scratch".into() }), Instant::now()));
+        app.repo_cache.insert("c".into(), (Some(RepoStatus::Repository {
+            repo: "other".into(), base: Some("feature".into()),
+            checked_out: Some("feature".into()), sha: Some("abcdef0".into()),
+            worktree: None,
+        }), Instant::now()));
+        assert!(app.chips(0).contains(&("repo", "project ⎇ main @1234567".into())));
+        assert_eq!(app.repo_detail(0).as_deref(), Some("base main · HEAD doxa/a · managed worktree doxa/a"));
+        let rendered = painted_at(&app, 220, 32);
+        assert!(rendered.contains("project ⎇ main @1234567"));
+        assert!(rendered.contains("p ?/u ?"));
+        assert!(app.chips(1).contains(&("repo", "other ⎇ feature @abcdef0".into())));
+        app.groups[0].active = 1;
+        assert!(app.chips(0).contains(&("directory", "dir scratch".into())));
+        assert!(!app.chips(0).iter().any(|(kind, _)| *kind == "repo"));
+        app.handle(Event::Resize(100, 28));
+        assert!(app.chips(0).contains(&("directory", "dir scratch".into())));
+        app.apply_daemon_frame(&json!({"type":"event","session_id":"c",
+            "event":{"type":"branch_changed","data":{"base":"main"}}}));
+        assert!(!app.chips(1).iter().any(|(kind, _)| *kind == "repo"));
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"b","cwd":"/tmp/new"}));
+        assert!(!app.chips(0).iter().any(|(kind, _)| *kind == "directory"));
+        let (tx, rx) = mpsc::sync_channel(1);
+        let old_epoch = app.repo_epoch.get("b").copied().unwrap_or_default();
+        app.repo_pending = Some(("b".into(), PathBuf::from("/tmp/new"), old_epoch, rx));
+        app.invalidate_repo("b");
+        tx.send(Some(RepoStatus::Directory { name: "stale".into() })).unwrap();
+        app.poll_repo();
+        assert!(!app.chips(0).iter().any(|(kind, _)| *kind == "directory"));
     }
 
     fn painted_at(app: &App, width: u16, height: u16) -> String {

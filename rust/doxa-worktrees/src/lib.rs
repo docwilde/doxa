@@ -28,6 +28,41 @@ pub struct BranchStatus {
     pub checked_out: Option<String>,
 }
 
+/// Read-only location of one session's actual checkout. A recorded base is
+/// used only when its managed sidecar passes the full ownership check.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RepoStatus {
+    Repository { repo: String, base: Option<String>, checked_out: Option<String>,
+        sha: Option<String>, worktree: Option<String> },
+    Directory { name: String },
+}
+
+pub fn repo_status(cwd: &Path) -> Option<RepoStatus> {
+    let cwd = cwd.canonicalize().ok()?;
+    if !cwd.is_dir() { return None; }
+    let top = git_text(&cwd, &["rev-parse", "--show-toplevel"])
+        .and_then(|top| PathBuf::from(top).canonicalize().ok());
+    let Some(checkout) = top else {
+        let name = cwd.file_name().and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty()).unwrap_or("/").to_owned();
+        return Some(RepoStatus::Directory { name });
+    };
+    let main = main_root(&checkout).unwrap_or_else(|| checkout.clone());
+    let repo = main.file_name()?.to_str()?.to_owned();
+    let checked_out = git_text(&checkout, &["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .filter(|branch| safe_ref(branch));
+    let sha = git_text(&checkout, &["rev-parse", "--verify", "HEAD^{commit}"])
+        .filter(|oid| valid_commit_oid(oid)).map(|oid| oid[..7].to_owned());
+    let managed = read_record(&checkout);
+    let base = managed.as_ref().map(|(_, base, _, _)| base.clone()).or_else(|| checked_out.clone());
+    let worktree = if let Some((record, _, _, _)) = managed {
+        Some(record.branch)
+    } else if checkout != main {
+        Some("linked worktree".into())
+    } else { None };
+    Some(RepoStatus::Repository { repo, base, checked_out, sha, worktree })
+}
+
 pub struct Managed {
     path: PathBuf,
     created: bool,
@@ -638,9 +673,18 @@ mod tests {
         let feature_oid = git_text(&main, &["rev-parse", "HEAD"]).unwrap();
         run_git(&main, &["checkout", "-q", "main"]);
         let main_oid = git_text(&main, &["rev-parse", "HEAD"]).unwrap();
+        assert_eq!(repo_status(dir.path()), Some(RepoStatus::Directory { name: dir.path().file_name().unwrap().to_string_lossy().into_owned() }));
+        assert_eq!(repo_status(&main), Some(RepoStatus::Repository {
+            repo: "repo".into(), base: Some("main".into()), checked_out: Some("main".into()),
+            sha: Some(main_oid[..7].into()), worktree: None,
+        }));
         assert!(switch_base(&main, "feature").unwrap_err().contains("no verified"));
         let mut tree = create(&main, "switch001").unwrap();
         let path = tree.path().to_path_buf();
+        assert_eq!(repo_status(&path), Some(RepoStatus::Repository {
+            repo: "repo".into(), base: Some("main".into()), checked_out: Some("doxa/switch00".into()),
+            sha: Some(main_oid[..7].into()), worktree: Some("doxa/switch00".into()),
+        }));
         assert!(switch_base(&path, "doxa/switch00").unwrap_err().contains("own branch"));
         assert!(switch_base(&path, "missing").unwrap_err().contains("no such"));
         let metadata_path = meta_path(&path).unwrap();
@@ -652,6 +696,10 @@ mod tests {
         stale["base_oid"] = serde_json::json!(main_oid);
         fs::write(&metadata_path, serde_json::to_vec(&stale).unwrap()).unwrap();
         assert!(switch_base(&path, "feature").unwrap().contains("now based"));
+        assert_eq!(repo_status(&path), Some(RepoStatus::Repository {
+            repo: "repo".into(), base: Some("feature".into()), checked_out: Some("doxa/switch00".into()),
+            sha: Some(feature_oid[..7].into()), worktree: Some("doxa/switch00".into()),
+        }));
         assert_eq!(git_text(&path, &["rev-parse", "HEAD"]).as_deref(), Some(feature_oid.as_str()));
         assert_eq!(git_text(&main, &["rev-parse", "HEAD"]).as_deref(), Some(main_oid.as_str()));
         let data: serde_json::Value = serde_json::from_slice(&fs::read(meta_path(&path).unwrap()).unwrap()).unwrap();
