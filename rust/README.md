@@ -177,13 +177,18 @@ Python DOXA's warm dark palette.
 `Alt+P` opens the Claude permission mode picker when supported by the session.
 Entering `dontAsk` requires a second Enter confirmation because unapproved
 calls are silently denied.
-`Alt+L` opens a read-only LORE picker when the external LORE bridge is
-available. It shows bounded recent beliefs, a search hit, and evidence for the
-selected belief. Press `P` with an empty search to page staged proposals, then
-Enter to scroll a complete raw proposal snapshot. Approval and rejection are
-disabled until LORE can atomically bind a mutation to the reviewed bytes and
-inode. `Alt+X` asks for confirmation before stopping the active
-session; the session stays visible as read-only after a successful stop.
+`Alt+L` opens the LORE picker when the external bridge is available. It shows
+bounded recent beliefs, a search hit, and evidence for the selected belief.
+Press `P` with an empty search to page staged proposals, then Enter to scroll
+the complete raw proposal. After reading to the end, `A` or `R` arms one
+approval or rejection; Enter confirms it. The sidecar rechecks the displayed
+SHA-256 and inode before asking LORE to claim that one proposal. Older LORE
+builds without the atomic API keep proposal review read only. An approval that
+lands but fails to archive is reported as a partial completion and is never
+retried automatically. The local `/pending` command opens the proposal picker
+without sending a prompt to the model. `Alt+X` asks for confirmation before
+stopping the active session; the session stays visible as read-only after a
+successful stop.
 The diff view supports file and hunk navigation with `N`/`P` and `J`/`K`
 in its modal, or `Alt+N`/`Alt+B` and `Alt+J`/`Alt+K` in the persistent pane.
 

@@ -5,11 +5,88 @@ import hashlib
 import json
 import os
 import sqlite3
+import subprocess
+import sys
 import types
+from pathlib import Path
 
 import pytest
 
 from doxa import lore_bridge
+
+
+def test_reviewed_resolve_with_new_lore_source_rejects_one_exact_snapshot(tmp_path):
+    source = os.environ.get("DOXA_TEST_LORE_API_PATH")
+    if not source:
+        pytest.skip("set DOXA_TEST_LORE_API_PATH to a checkout with the reviewed resolution API")
+    lore_source = Path(source)
+    if not (lore_source / "lore_core" / "pending.py").is_file():
+        pytest.skip("local LORE API checkout unavailable")
+    root = tmp_path / "lore"
+    pending = root / "pending"
+    pending.mkdir(parents=True)
+    proposal = pending / "one.json"
+    raw = b'{"kind":"memory","scope":"user","text":"reviewed"}\n'
+    proposal.write_bytes(raw)
+    expected = {"sha256": hashlib.sha256(raw).hexdigest(), "inode": proposal.stat().st_ino}
+    requests = [
+        {"id": 1, "op": "pending_review_v1", "cwd": str(tmp_path), "pid": "one"},
+        {"id": 2, "op": "resolve_reviewed_v1", "cwd": str(tmp_path), "pid": "one",
+         "decision": "approve", "expected": {**expected, "sha256": "0" * 64}},
+        {"id": 3, "op": "resolve_reviewed_v1", "cwd": str(tmp_path), "pid": "one",
+         "decision": "reject", "expected": expected},
+    ]
+    env = dict(os.environ, LORE_ROOT=str(root), DOXA_LORE_CORE_PATH=str(lore_source))
+    result = subprocess.run([sys.executable, "-m", "doxa.lore_bridge"],
+                            input=b"".join(map(lore_bridge._frame, requests)),
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            cwd=Path(__file__).resolve().parent.parent, env=env,
+                            timeout=10, check=True)
+    frames = [json.loads(line) for line in result.stdout.splitlines()]
+    assert "resolve_reviewed_v1" in frames[0]["capabilities"]
+    assert frames[1]["value"]["sha256"] == expected["sha256"]
+    assert frames[2]["error"] == "pending_changed"
+    assert frames[3]["value"] == {"status": "rejected"}
+    assert not proposal.exists()
+    assert len(list((pending / "archive").glob("*.json"))) == 1
+
+
+def test_old_lore_review_stays_read_only_without_atomic_resolver(monkeypatch):
+    monkeypatch.setattr(lore_bridge, "_lore", lambda: (lambda text: text, lambda cwd, scope: ""))
+    monkeypatch.setattr(lore_bridge, "_extensions", lambda: (
+        lambda cwd: "project", lambda: None, lambda: [], (lambda text: text, lambda: None)))
+    monkeypatch.setattr(lore_bridge, "_pending_review_reader", lambda: (Path("/unused"), lambda pid: None))
+    monkeypatch.setattr(lore_bridge, "_pending_resolver", lambda: None)
+    output = io.BytesIO()
+    monkeypatch.setattr(lore_bridge.sys, "stdin", types.SimpleNamespace(buffer=io.BytesIO()))
+    monkeypatch.setattr(lore_bridge.sys, "stdout", types.SimpleNamespace(buffer=output))
+    lore_bridge.serve()
+    capabilities = json.loads(output.getvalue())["capabilities"]
+    assert "pending_review_v1" in capabilities
+    assert "resolve_reviewed_v1" not in capabilities
+
+
+def test_partial_archive_failure_is_returned_without_retry_or_item_text(monkeypatch):
+    checked = {"pid": "one", "raw": '{"secret":"not for status"}',
+               "sha256": "a" * 64, "inode": 7, "complete": True}
+    monkeypatch.setattr(lore_bridge, "_pending_review", lambda *args: checked)
+    calls = []
+
+    class ResolutionError(Exception):
+        code = "archive_failed"
+        applied = True
+
+    def resolve(*args):
+        calls.append(("resolve", args))
+        raise ResolutionError()
+
+    result = lore_bridge._resolve_reviewed(
+        {"cwd": "/repo", "pid": "one", "decision": "approve",
+         "expected": {"sha256": "a" * 64, "inode": 7}}, (), (),
+        (lambda *args: calls.append(("record", args)), resolve, ResolutionError))
+    assert result == {"status": "refused", "error": "archive_failed", "applied": True}
+    assert [name for name, _ in calls] == ["record", "resolve"]
+    assert "not for status" not in str(result)
 
 
 @pytest.fixture(autouse=True)

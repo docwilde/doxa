@@ -23,6 +23,7 @@ PROTOCOL_VERSION = 1
 _OPS = ("scrub", "snapshot", "pending", "sync_state", "refresh_interval", "transcript_identity")
 _READ_OPS = ("consult", "beliefs", "evidence")
 _REVIEW_OP = "pending_review_v1"
+_RESOLVE_OP = "resolve_reviewed_v1"
 _INDEX_OP = "index_transcript_v1"
 _PENDING_ID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z", re.ASCII)
 _SESSION_ID = re.compile(r"[0-9A-Za-z][0-9A-Za-z-]{0,127}\Z", re.ASCII)
@@ -171,6 +172,17 @@ def _pending_review_reader() -> tuple[Any, Any] | None:
         return None
 
 
+def _pending_resolver() -> tuple[Any, Any, Any] | None:
+    """Only new LORE builds own the claim, provenance, and archive transaction."""
+    try:
+        from lore_core.pending import PendingResolutionError, record_full_review, resolve_reviewed
+        if not all(callable(op) for op in (record_full_review, resolve_reviewed)):
+            return None
+        return record_full_review, resolve_reviewed, PendingResolutionError
+    except Exception:  # noqa: BLE001 -- older builds remain read only
+        return None
+
+
 def _pending_review(cwd: str, pid: str, ext: tuple[Any, Any, Any, Any],
                     reader: tuple[Any, Any], expected: Any = None) -> dict[str, Any]:
     if not isinstance(cwd, str) or not cwd or len(cwd) > 4096 or "\x00" in cwd:
@@ -222,6 +234,24 @@ def _pending_review(cwd: str, pid: str, ext: tuple[Any, Any, Any, Any],
         if expected["sha256"] != digest or expected["inode"] != inode:
             raise PendingReviewError("pending_changed")
     return {"pid": pid, "raw": raw, "sha256": digest, "inode": inode, "complete": True}
+
+
+def _resolve_reviewed(req: dict[str, Any], ext: tuple[Any, Any, Any, Any],
+                      reader: tuple[Any, Any], resolver: tuple[Any, Any, Any]) -> dict[str, Any]:
+    decision = req.get("decision")
+    if decision not in ("approve", "reject") or type(req.get("expected")) is not dict:
+        raise PendingReviewError("invalid_request")
+    expected = req["expected"]
+    # This read checks project visibility and the exact already displayed
+    # digest/inode; LORE then atomically claims and checks again before apply.
+    review = _pending_review(req.get("cwd"), req.get("pid"), ext, reader, expected)
+    try:
+        if decision == "approve":
+            resolver[0](review["pid"], review["sha256"], review["inode"])
+        resolver[1](review["pid"], review["sha256"], review["inode"], decision)
+    except resolver[2] as exc:
+        return {"status": "refused", "error": exc.code, "applied": exc.applied}
+    return {"status": "approved" if decision == "approve" else "rejected"}
 
 
 def _valid_page(req: dict[str, Any], maximum: int) -> tuple[int, int]:
@@ -359,11 +389,13 @@ def serve() -> None:
     read_ops = _read_ops() if lore is not None else None
     index_ops = _index_ops() if lore is not None and ext is not None else None
     review = _pending_review_reader() if lore is not None and ext is not None else None
+    resolver = _pending_resolver() if review is not None else None
     _write({"type": "hello", "proto": PROTOCOL_VERSION,
             "capabilities": (list(_OPS if ext is not None else _OPS[:2])
                              + (list(_READ_OPS) if read_ops is not None else [])
                              + ([_INDEX_OP] if index_ops is not None else [])
-                             + ([_REVIEW_OP] if review is not None else [])) if lore is not None else []})
+                             + ([_REVIEW_OP] if review is not None else [])
+                             + ([_RESOLVE_OP] if resolver is not None else [])) if lore is not None else []})
     while True:
         raw = sys.stdin.buffer.readline(MAX_FRAME_BYTES + 1)
         if not raw:
@@ -392,6 +424,10 @@ def serve() -> None:
             if op == _REVIEW_OP and ext is not None and review is not None:
                 result = _pending_review(req.get("cwd"), req.get("pid"), ext, review,
                                          req.get("expected"))
+                _write({"type": "reply", "id": rid, "ok": True, "value": result})
+                continue
+            if op == _RESOLVE_OP and ext is not None and review is not None and resolver is not None:
+                result = _resolve_reviewed(req, ext, review, resolver)
                 _write({"type": "reply", "id": rid, "ok": True, "value": result})
                 continue
             if op == "scrub" and isinstance(req.get("text"), str):

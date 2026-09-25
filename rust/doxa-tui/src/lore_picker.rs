@@ -1,7 +1,7 @@
 //! Read-only, bounded LORE picker data. The external sidecar owns search,
 //! storage, and secret scrubbing; this module never opens LORE's store.
 
-use doxa_lore::{ConsultHit, LoreClient, PendingReview};
+use doxa_lore::{ConsultHit, LoreClient, PendingDecision, PendingResolution, PendingReview};
 use serde_json::Value;
 use std::path::Path;
 use std::time::Duration;
@@ -45,7 +45,8 @@ pub enum ResultPage {
     Search(Option<ConsultHit>),
     Evidence(u64, Vec<Evidence>),
     Proposals(Vec<Proposal>),
-    Review(PendingReview),
+    Review(PendingReview, bool),
+    Resolved(PendingResolution),
 }
 
 #[derive(Clone, Debug)]
@@ -55,6 +56,7 @@ pub enum Query {
     Evidence(u64),
     Proposals(String, u16),
     Review(String, String),
+    Resolve(String, PendingReview, PendingDecision),
 }
 
 fn short(value: &Value, key: &str, max: usize) -> Option<String> {
@@ -126,8 +128,14 @@ pub fn fetch(python: &Path, query: Query) -> Result<ResultPage, &'static str> {
         Query::Proposals(cwd, offset) => client.pending(&cwd, offset, PAGE_SIZE)
             .map_err(|_| "Proposal list unavailable")
             .and_then(|rows| parse_proposals(rows).map(ResultPage::Proposals).map_err(|_| "Invalid LORE proposal reply")),
-        Query::Review(cwd, pid) => client.pending_review(&cwd, &pid)
-            .map(ResultPage::Review).map_err(|_| "Complete proposal review unavailable"),
+        Query::Review(cwd, pid) => {
+            let writable = client.can_resolve_reviewed();
+            client.pending_review(&cwd, &pid)
+                .map(|review| ResultPage::Review(review, writable))
+                .map_err(|_| "Complete proposal review unavailable")
+        }
+        Query::Resolve(cwd, review, decision) => client.resolve_reviewed(&cwd, &review, decision)
+            .map(ResultPage::Resolved).map_err(|_| "Proposal resolution unavailable"),
     }
 }
 
@@ -214,7 +222,8 @@ for line in sys.stdin:
         fs::set_permissions(&path, perms).unwrap();
         let ResultPage::Proposals(rows) = fetch(&path, Query::Proposals("/repo".into(), 0)).unwrap() else { panic!("proposals") };
         assert_eq!(rows[0].summary, "[redacted]");
-        let ResultPage::Review(review) = fetch(&path, Query::Review("/repo".into(), rows[0].pid.clone())).unwrap() else { panic!("review") };
+        let ResultPage::Review(review, writable) = fetch(&path, Query::Review("/repo".into(), rows[0].pid.clone())).unwrap() else { panic!("review") };
         assert!(review.raw().contains("entire bytes"));
+        assert!(!writable);
     }
 }

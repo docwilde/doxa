@@ -41,6 +41,9 @@ const INPUT_BLINK_INTERVAL: Duration = Duration::from_millis(650);
 const MAX_INPUT_BYTES: usize = 10 * 1024;
 const MAX_TRANSCRIPT_BYTES: usize = 512 * 1024;
 const MAX_ANSWER_BYTES: usize = 10 * 1024;
+// Reserve metadata wrapping even in a narrow review modal. This is also the
+// number used by the read-through gate, so it never credits hidden raw rows.
+const REVIEW_BODY_RESERVE: u16 = 10;
 const ACTIONS: [(&str, &str); 13] = [
     ("Peer map", "Ctrl+M"),
     ("Tool activity", "Ctrl+T"),
@@ -88,6 +91,11 @@ struct LorePicker {
     proposal_mode: bool,
     review: Option<doxa_lore::PendingReview>,
     review_scroll: usize,
+    review_seen: usize,
+    review_width: usize,
+    armed_resolution: Option<doxa_lore::PendingDecision>,
+    can_resolve: bool,
+    resolving: bool,
     cwd: String,
     selected: usize,
     offset: u16,
@@ -118,6 +126,25 @@ fn visible_raw_line(value: &str) -> String {
             ch.escape_debug().collect::<String>().chars().collect::<Vec<_>>()
         } else { vec![ch] }
     }).collect()
+}
+
+fn raw_visual_rows(raw: &str, width: usize) -> Vec<String> {
+    let mut rows = Vec::new();
+    for line in raw.split('\n') {
+        let mut row = String::new();
+        let mut cells = 0;
+        for ch in visible_raw_line(line).chars() {
+            let next = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if cells + next > width.max(1) && !row.is_empty() {
+                rows.push(std::mem::take(&mut row));
+                cells = 0;
+            }
+            row.push(ch);
+            cells += next;
+        }
+        rows.push(row);
+    }
+    rows
 }
 
 fn clipped_title(value: &str, width: usize) -> (String, bool) {
@@ -1782,6 +1809,12 @@ impl App {
                 if unsafe_input_char(c) { false } else { self.insert_input(c) }
             }
             KeyCode::Enter if self.focus == Focus::Prompt => {
+                if self.input.trim() == "/pending" {
+                    self.input.clear();
+                    self.input_cursor = 0;
+                    self.open_pending_picker();
+                    return true;
+                }
                 if !self.input.is_empty() {
                     if self.dispatch_prompt_command() { return true; }
                     if let Some(id) = self.groups[self.active_group].active_id() {
@@ -2031,6 +2064,14 @@ impl App {
     }
 
     fn open_lore_picker(&mut self) {
+        self.open_lore_picker_mode(false);
+    }
+
+    fn open_pending_picker(&mut self) {
+        self.open_lore_picker_mode(true);
+    }
+
+    fn open_lore_picker_mode(&mut self, proposal_mode: bool) {
         let cwd = self.groups[self.active_group].active_id()
             .and_then(|id| self.session_cwds.get(id))
             .map(|path| path.to_string_lossy().into_owned())
@@ -2038,16 +2079,20 @@ impl App {
             .unwrap_or_default();
         self.lore_picker = Some(LorePicker {
             query: String::new(), rows: Vec::new(), selected: 0, offset: 0,
-            proposals: Vec::new(), proposal_mode: false, review: None,
-            review_scroll: 0, cwd,
+            proposals: Vec::new(), proposal_mode, review: None,
+            review_scroll: 0, review_seen: 0, review_width: 0,
+            armed_resolution: None, can_resolve: false, resolving: false, cwd: cwd.clone(),
             evidence: None, status: String::new(), pending: None,
         });
-        self.load_lore(lore_picker::Query::Beliefs(0));
+        if proposal_mode { self.load_lore(lore_picker::Query::Proposals(cwd, 0)); }
+        else { self.load_lore(lore_picker::Query::Beliefs(0)); }
     }
 
     fn load_lore(&mut self, query: lore_picker::Query) {
         let Some(picker) = &mut self.lore_picker else { return; };
-        picker.status = "Loading from LORE…".into();
+        picker.resolving = matches!(&query, lore_picker::Query::Resolve(..));
+        picker.status = if picker.resolving { "Resolving this proposal with LORE…" }
+            else { "Loading from LORE…" }.into();
         picker.pending = None;
         let python = std::env::var_os("DOXA_LORE_PYTHON")
             .map(PathBuf::from).unwrap_or_else(|| PathBuf::from("python3"));
@@ -2067,6 +2112,9 @@ impl App {
             Err(TryRecvError::Disconnected) => Err("LORE worker unavailable"),
         };
         picker.pending = None;
+        let was_resolving = picker.resolving;
+        picker.resolving = false;
+        let mut urgent_resolution = false;
         match result {
             Ok(lore_picker::ResultPage::Beliefs(rows)) => {
                 picker.rows = rows;
@@ -2094,30 +2142,98 @@ impl App {
                 picker.proposals = rows;
                 picker.selected = 0;
                 picker.review = None;
+                picker.armed_resolution = None;
                 picker.status = if picker.proposals.is_empty() { "No staged proposals on this page" }
                     else { "Staged proposals · select one to read its complete raw contents" }.into();
             }
-            Ok(lore_picker::ResultPage::Review(review)) => {
+            Ok(lore_picker::ResultPage::Review(review, can_resolve)) => {
                 if picker.proposal_mode && picker.proposals.iter().any(|row| row.pid == review.pid()) {
                     picker.review = Some(review);
                     picker.review_scroll = 0;
-                    picker.status = "Complete raw proposal · read only · approval unavailable".into();
+                    picker.review_seen = 0;
+                    picker.review_width = 0;
+                    picker.armed_resolution = None;
+                    picker.can_resolve = can_resolve;
+                    picker.status = if can_resolve {
+                        "Read the complete raw proposal; A approve or R reject after reaching the end"
+                    } else { "Read only · installed LORE lacks atomic reviewed resolution" }.into();
                 }
             }
+            Ok(lore_picker::ResultPage::Resolved(resolution)) => {
+                picker.review = None;
+                picker.armed_resolution = None;
+                picker.status = match resolution {
+                    doxa_lore::PendingResolution::Approved => "Proposal approved and archived".into(),
+                    doxa_lore::PendingResolution::Rejected => "Proposal rejected and archived".into(),
+                    doxa_lore::PendingResolution::Refused { code, applied: true } =>
+                        { urgent_resolution = true; format!("Applied, but archive failed ({code}); do not retry automatically") },
+                    doxa_lore::PendingResolution::Refused { code, applied: false } =>
+                        format!("Resolution refused: {code}"),
+                };
+                picker.proposals.clear();
+            }
             Err(message) => {
-                picker.status = message.into();
-                if picker.proposal_mode { picker.review = None; }
+                picker.status = if was_resolving {
+                    urgent_resolution = true;
+                    "Resolution outcome unknown; inspect LORE pending and archive before retrying".into()
+                } else { message.into() };
+                if picker.proposal_mode { picker.review = None; picker.armed_resolution = None; }
                 else { picker.rows.clear(); picker.evidence = None; }
             }
         }
+        if urgent_resolution { self.notice = picker.status.clone(); }
         true
     }
 
     fn lore_picker_key(&mut self, key: KeyEvent) -> bool {
+        let review_area = self.active_chooser_rect();
         let picker = self.lore_picker.as_mut().unwrap();
+        if picker.resolving { return true; }
         if picker.proposal_mode {
+            if let Some(review) = &picker.review {
+                let Some(area) = review_area else { return true; };
+                let width = usize::from(area.width.saturating_sub(3)).max(1);
+                let visible = usize::from(area.height.saturating_sub(REVIEW_BODY_RESERVE));
+                let total = raw_visual_rows(review.raw(), width).len();
+                if picker.review_width != width {
+                    picker.review_width = width;
+                    picker.review_scroll = 0;
+                    picker.review_seen = 0;
+                    picker.armed_resolution = None;
+                }
+                if visible > 0 && picker.review_scroll <= picker.review_seen {
+                    picker.review_seen = picker.review_seen.max(picker.review_scroll.saturating_add(visible)).min(total);
+                }
+                let max_scroll = total.saturating_sub(visible);
+                match key.code {
+                    KeyCode::Esc => { picker.review = None; picker.armed_resolution = None; }
+                    KeyCode::Up => { picker.review_scroll = picker.review_scroll.saturating_sub(1); picker.armed_resolution = None; }
+                    KeyCode::Down => { picker.review_scroll = (picker.review_scroll + 1).min(max_scroll); picker.armed_resolution = None; }
+                    KeyCode::PageUp => { picker.review_scroll = picker.review_scroll.saturating_sub(visible.saturating_sub(1).max(1)); picker.armed_resolution = None; }
+                    KeyCode::PageDown => { picker.review_scroll = picker.review_scroll.saturating_add(visible.saturating_sub(1).max(1)).min(max_scroll); picker.armed_resolution = None; }
+                    KeyCode::Char('a' | 'A') if picker.can_resolve && visible > 0 && picker.review_seen == total && picker.pending.is_none() => {
+                        picker.armed_resolution = Some(doxa_lore::PendingDecision::Approve);
+                        picker.status = "Approve this exact proposal? Press Enter to confirm, Esc to cancel".into();
+                    }
+                    KeyCode::Char('r' | 'R') if picker.can_resolve && visible > 0 && picker.review_seen == total && picker.pending.is_none() => {
+                        picker.armed_resolution = Some(doxa_lore::PendingDecision::Reject);
+                        picker.status = "Reject this exact proposal? Press Enter to confirm, Esc to cancel".into();
+                    }
+                    KeyCode::Enter if picker.armed_resolution.is_some() && picker.pending.is_none() => {
+                        let decision = picker.armed_resolution.take().unwrap();
+                        let cwd = picker.cwd.clone();
+                        let review = review.clone();
+                        self.load_lore(lore_picker::Query::Resolve(cwd, review, decision));
+                    }
+                    _ => {
+                        if picker.review_seen < total {
+                            picker.status = "Read through the end before choosing approve or reject".into();
+                        }
+                    }
+                }
+                return true;
+            }
             match key.code {
-                KeyCode::Esc if picker.review.is_some() => picker.review = None,
                 KeyCode::Esc => self.lore_picker = None,
                 KeyCode::Char('b') if picker.review.is_none() => {
                     picker.proposal_mode = false;
@@ -2125,10 +2241,6 @@ impl App {
                     picker.selected = 0;
                     self.load_lore(lore_picker::Query::Beliefs(0));
                 }
-                KeyCode::Up if picker.review.is_some() => picker.review_scroll = picker.review_scroll.saturating_sub(1),
-                KeyCode::Down if picker.review.is_some() => picker.review_scroll = picker.review_scroll.saturating_add(1),
-                KeyCode::PageUp if picker.review.is_some() => picker.review_scroll = picker.review_scroll.saturating_sub(10),
-                KeyCode::PageDown if picker.review.is_some() => picker.review_scroll = picker.review_scroll.saturating_add(10),
                 KeyCode::Up => picker.selected = picker.selected.saturating_sub(1),
                 KeyCode::Down => picker.selected = (picker.selected + 1).min(picker.proposals.len().saturating_sub(1)),
                 KeyCode::Enter | KeyCode::Right => {
@@ -3528,24 +3640,24 @@ impl App {
     fn draw_lore_picker(&self, frame: &mut Frame, area: Rect) {
         let Some(picker) = &self.lore_picker else { return; };
         if picker.proposal_mode {
-            let mut lines = vec![Line::from(format!(" {}", picker.status))];
+            let label_width = usize::from(area.width.saturating_sub(3));
+            let mut lines = vec![Line::from(format!(" {}", clipped_title(&picker.status, label_width).0))];
             if let Some(review) = &picker.review {
-                lines.push(Line::from(format!(" {} · SHA-256 {} · inode {}", review.pid(), review.sha256(), review.inode())));
-                lines.push(Line::from(" Raw proposal · ↑/↓ scroll · Esc back"));
-                let visible = usize::from(area.height.saturating_sub(5));
+                lines.push(Line::from(format!(" {}", clipped_title(&format!("{} · inode {}", review.pid(), review.inode()), label_width).0)));
+                lines.push(Line::from(format!(" SHA-256 {}", review.sha256())));
+                lines.push(Line::from(clipped_title(if picker.can_resolve {
+                    " Raw proposal · ↓/PgDn read all · A approve · R reject · Esc back"
+                } else { " Raw proposal · read only with this LORE version · Esc back" }, label_width).0));
+                let visible = usize::from(area.height.saturating_sub(REVIEW_BODY_RESERVE));
                 let width = usize::from(area.width.saturating_sub(3)).max(1);
                 // Preserve all raw content across visual rows; terminal controls
                 // are shown with visible escapes, and no field is summarized.
-                let visual_rows: Vec<String> = review.raw().split('\n').flat_map(|line| {
-                    let clean: Vec<char> = visible_raw_line(line).chars().collect();
-                    if clean.is_empty() { vec![String::new()] }
-                    else { clean.chunks(width).map(|chunk| chunk.iter().collect()).collect() }
-                }).collect();
+                let visual_rows = raw_visual_rows(review.raw(), width);
                 for line in visual_rows.iter().skip(picker.review_scroll).take(visible) {
                     lines.push(Line::from(line.clone()));
                 }
             } else {
-                lines.push(Line::from(" Read only · approval and rejection require an atomic LORE claim API"));
+                lines.push(Line::from(" Select one proposal to review its complete raw contents"));
                 lines.push(Line::from(format!(" Page offset {} · {} rows", picker.offset, picker.proposals.len())));
                 let visible = usize::from(area.height.saturating_sub(6)).max(1);
                 let start = picker.selected.saturating_sub(visible.saturating_sub(1));
@@ -5224,7 +5336,9 @@ mod tests {
         app.action_menu = false;
         app.lore_picker = Some(LorePicker { rows: vec![], selected: 0, query: String::new(),
             offset: 0, status: "Ready".into(), evidence: None, pending: None,
-            proposals: Vec::new(), proposal_mode: false, review: None, review_scroll: 0, cwd: String::new() });
+            proposals: Vec::new(), proposal_mode: false, review: None, review_scroll: 0,
+            review_seen: 0, review_width: 0, armed_resolution: None,
+            can_resolve: false, resolving: false, cwd: String::new() });
         let lore = app.active_chooser_rect().unwrap();
         assert_eq!(lore.bottom(), menu.bottom());
         assert!(lore.height < menu.height, "empty LORE list should stay compact");
@@ -5762,11 +5876,14 @@ mod tests {
     #[test]
     fn lore_picker_keeps_prompt_and_displays_only_read_results() {
         assert_eq!(visible_raw_line("x\ty\u{0000}z"), "x\\ty\\0z");
+        assert_eq!(raw_visual_rows("界界", 3), vec!["界", "界"]);
         let mut app = App { input: "unsent draft".into(), ..Default::default() };
         app.lore_picker = Some(LorePicker {
             query: String::new(), rows: Vec::new(), selected: 0, offset: 0,
             evidence: None, status: String::new(), pending: None,
-            proposals: Vec::new(), proposal_mode: false, review: None, review_scroll: 0, cwd: String::new(),
+            proposals: Vec::new(), proposal_mode: false, review: None, review_scroll: 0,
+            review_seen: 0, review_width: 0, armed_resolution: None,
+            can_resolve: false, resolving: false, cwd: String::new(),
         });
         let (tx, rx) = mpsc::sync_channel(1);
         app.lore_picker.as_mut().unwrap().pending = Some(rx);
@@ -5782,5 +5899,83 @@ mod tests {
         assert!(app.lore_picker.is_none());
         assert_eq!(app.input, "unsent draft");
         assert!(app.pending_prompts.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn proposal_action_requires_reading_to_end_then_explicit_arm() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let sidecar = dir.path().join("sidecar");
+        std::fs::write(&sidecar, r#"#!/usr/bin/env python3
+import hashlib, json, sys
+print(json.dumps({'type':'hello','proto':1,'capabilities':['scrub','snapshot','pending_review_v1','resolve_reviewed_v1']}), flush=True)
+for line in sys.stdin:
+    req = json.loads(line)
+    raw = json.dumps({'kind':'memory','text':'x'*4000})
+    value = {'pid':req['pid'],'raw':raw,'sha256':hashlib.sha256(raw.encode()).hexdigest(),'inode':11,'complete':True}
+    print(json.dumps({'type':'reply','id':req['id'],'ok':True,'value':value}), flush=True)
+"#).unwrap();
+        let mut permissions = std::fs::metadata(&sidecar).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&sidecar, permissions).unwrap();
+        let lore_picker::ResultPage::Review(review, can_resolve) = lore_picker::fetch(&sidecar,
+            lore_picker::Query::Review("/repo".into(), "one".into())).unwrap() else { panic!("review") };
+        assert!(can_resolve);
+        let mut app = App::default();
+        app.size = Rect::new(0, 0, 100, 40);
+        app.lore_picker = Some(LorePicker {
+            query: String::new(), rows: Vec::new(), selected: 0, offset: 0,
+            proposals: vec![lore_picker::Proposal { pid: "one".into(), kind: "memory".into(),
+                action: "add".into(), scope: "user".into(), summary: String::new() }],
+            proposal_mode: true, review: Some(review), review_scroll: 0,
+            review_seen: 0, review_width: 0, armed_resolution: None,
+            can_resolve, resolving: false, cwd: "/repo".into(),
+            evidence: None, status: String::new(), pending: None,
+        });
+        app.lore_picker_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert!(app.lore_picker.as_ref().unwrap().armed_resolution.is_none());
+        for _ in 0..200 {
+            if app.lore_picker.as_ref().unwrap().review_seen ==
+                raw_visual_rows(app.lore_picker.as_ref().unwrap().review.as_ref().unwrap().raw(),
+                    app.lore_picker.as_ref().unwrap().review_width).len() { break; }
+            app.lore_picker_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        }
+        app.lore_picker_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert_eq!(app.lore_picker.as_ref().unwrap().armed_resolution, Some(doxa_lore::PendingDecision::Approve));
+        assert!(app.lore_picker.as_ref().unwrap().pending.is_none());
+        app.lore_picker.as_mut().unwrap().armed_resolution = None;
+        app.lore_picker.as_mut().unwrap().can_resolve = false;
+        app.lore_picker_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+        assert!(app.lore_picker.as_ref().unwrap().armed_resolution.is_none());
+    }
+
+    #[test]
+    fn pending_local_command_opens_proposals_without_sending_prompt() {
+        let mut app = App::default();
+        app.size = Rect::new(0, 0, 100, 40);
+        app.groups[0].tabs.push("session-1".into());
+        app.input = " /pending ".into();
+        app.input_cursor = app.input.len();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(app.lore_picker.as_ref().unwrap().proposal_mode);
+        assert!(app.input.is_empty());
+        assert!(app.pending_prompts.is_empty());
+    }
+
+    #[test]
+    fn partial_lore_archive_failure_stays_visible_and_never_retries() {
+        let mut app = App::default();
+        app.open_pending_picker();
+        let (tx, rx) = mpsc::sync_channel(1);
+        let picker = app.lore_picker.as_mut().unwrap();
+        picker.pending = Some(rx);
+        picker.resolving = true;
+        tx.send(Ok(lore_picker::ResultPage::Resolved(
+            doxa_lore::PendingResolution::Refused { code: "archive_failed".into(), applied: true }))).unwrap();
+        assert!(app.poll_lore());
+        assert!(app.notice.contains("do not retry automatically"));
+        assert!(app.lore_picker.as_ref().unwrap().pending.is_none());
+        assert!(!app.lore_picker.as_ref().unwrap().resolving);
     }
 }

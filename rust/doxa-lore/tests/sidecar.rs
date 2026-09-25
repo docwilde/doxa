@@ -1,6 +1,6 @@
 #![cfg(unix)]
 
-use doxa_lore::{LoreClient, LoreError, MAX_FRAME_BYTES};
+use doxa_lore::{LoreClient, LoreError, PendingDecision, PendingResolution, MAX_FRAME_BYTES};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -249,6 +249,34 @@ for line in sys.stdin:
             "{pid}"
         );
     }
+}
+
+#[test]
+fn reviewed_resolution_is_one_snapshot_and_reports_partial_archive() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = fake(dir.path(), r#"
+import hashlib, json, sys
+print(json.dumps({'type':'hello','proto':1,'capabilities':['scrub','snapshot','pending_review_v1','resolve_reviewed_v1']}), flush=True)
+raw = '{"kind":"memory","text":"reviewed"}\n'
+for line in sys.stdin:
+    req = json.loads(line)
+    if req['op'] == 'pending_review_v1':
+        value = {'pid':req['pid'],'raw':raw,'sha256':hashlib.sha256(raw.encode()).hexdigest(),'inode':17,'complete':True}
+    else:
+        assert req['op'] == 'resolve_reviewed_v1'
+        assert req['cwd'] == '/repo' and req['pid'] == 'one'
+        assert req['expected'] == {'sha256':hashlib.sha256(raw.encode()).hexdigest(),'inode':17}
+        if req['decision'] == 'approve':
+            value = {'status':'refused','error':'archive_failed','applied':True}
+        else:
+            value = {'status':'rejected'}
+    print(json.dumps({'type':'reply','id':req['id'],'ok':True,'value':value}), flush=True)
+"#);
+    let mut client = LoreClient::spawn(&path, Duration::from_secs(2)).unwrap();
+    let review = client.pending_review("/repo", "one").unwrap();
+    assert_eq!(client.resolve_reviewed("/repo", &review, PendingDecision::Reject).unwrap(), PendingResolution::Rejected);
+    assert_eq!(client.resolve_reviewed("/repo", &review, PendingDecision::Approve).unwrap(),
+        PendingResolution::Refused { code: "archive_failed".into(), applied: true });
 }
 
 #[test]
