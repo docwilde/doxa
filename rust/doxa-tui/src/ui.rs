@@ -205,7 +205,7 @@ fn chip_hint(kind: &str) -> &'static str {
         "model" => "Model for this session · click to choose",
         "repo" => "This session's repository and base branch · click for worktree details",
         "directory" => "This session's directory; no Git repository is active",
-        "effort" => "Daemon-reported effort · Alt+F sets a new-session default where supported",
+        "effort" => "Effort · daemon-reported for this session; Alt+F sets a new-session default where supported",
         "context" => "Current session context usage · click for details",
         "memory" => "User and scoped LORE memory · click to view entries",
         "beliefs" => "LORE beliefs · click to browse",
@@ -326,7 +326,7 @@ fn wrapped_rows(text: &str, width: usize) -> usize {
 fn chip_text(kind: &str, label: &str) -> String {
     if kind == "more" {
         format!(" {label} › ")
-    } else if kind == "effort" && label == "Effort ?" {
+    } else if kind == "effort" && label == "?" {
         format!(" {label} ")
     } else if matches!(kind, "engine" | "model" | "effort" | "permission" | "beliefs") {
         format!(" {label} ▾ ")
@@ -4290,7 +4290,7 @@ impl App {
             chips.push(("model", "Model".to_owned()));
         }
         let effort = id.and_then(|id| self.session_efforts.get(id)).map(String::as_str).unwrap_or("?");
-        chips.push(("effort", format!("Effort {effort}")));
+        chips.push(("effort", effort.to_owned()));
         if let Some(status) = id.and_then(|id| self.repo_cache.get(id))
             .and_then(|(status, _)| status.as_ref()) {
             chips.push(repo_chip(status));
@@ -6376,7 +6376,7 @@ mod tests {
         assert_eq!(chips[0], ("permission", "Permissions auto".into()));
         assert_eq!(chips[1], ("engine", "claude".into()));
         assert_eq!(chips[2], ("model", "sonnet".into()));
-        assert_eq!(chips[3], ("effort", "Effort ?".into()));
+        assert_eq!(chips[3], ("effort", "?".into()));
         assert_eq!(chips[4].0, "context");
         assert!(chips[4].1.starts_with("Ctx "));
 
@@ -6493,7 +6493,7 @@ mod tests {
         assert_eq!(visible[0].1, "Permissions default");
         assert_eq!(visible[1].1, "claude");
         assert_eq!(visible[2].1, "claude-sonnet-4");
-        assert_eq!(visible[3].1, "Effort ?");
+        assert_eq!(visible[3].1, "?");
         let occupied = visible.iter().map(|(kind, label)| chip_text(kind, label).width()).sum::<usize>()
             + visible.len().saturating_sub(1);
         assert!(occupied <= usize::from(pane.width));
@@ -6644,7 +6644,9 @@ mod tests {
             "engine":"deepseek","model":"deepseek-flash","effort":"high"}));
         app.groups[0].tabs = vec!["deep-1".into()];
         let effort_index = app.chips(0).iter().position(|(kind, _)| *kind == "effort").unwrap();
-        assert_eq!(app.chips(0)[effort_index], ("effort", "Effort high".into()));
+        assert_eq!(app.chips(0)[effort_index], ("effort", "high".into()));
+        assert_eq!(chip_text("effort", "high"), " high ▾ ");
+        assert_eq!(chip_text("effort", "?"), " ? ");
         app.handle(Event::Key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::ALT)));
         assert_eq!(app.effort_picker.as_ref().unwrap().levels, ["none", "low", "high", "max"]);
         assert_eq!(app.effort_picker.as_ref().unwrap().selected, 2);
@@ -6654,8 +6656,14 @@ mod tests {
         assert_eq!(app.next_efforts["deepseek"], "max");
         assert_eq!(app.session_efforts["deep-1"], "high");
 
+        // The closed picker moves the chip strip back up before the next
+        // pointer event; use the freshly painted hit area.
+        let _ = painted_at(&app, 220, 32);
         let effort_hit = app.rendered_chip_hits.borrow().as_ref().unwrap().iter()
             .find(|hit| hit.kind == "effort").unwrap().clone();
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Moved,
+            column: effort_hit.rect.x + 1, row: effort_hit.rect.y, modifiers: KeyModifiers::NONE }));
+        assert!(painted_at(&app, 220, 32).contains("Effort · daemon-reported"));
         app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
             column: effort_hit.rect.x + 1, row: effort_hit.rect.y, modifiers: KeyModifiers::NONE }));
         assert!(app.effort_picker.is_some());
@@ -6668,7 +6676,7 @@ mod tests {
             "engine":"glm","model":"glm-5.3-flash","effort":"low"}));
         app.groups[0].tabs.push("glm-2".into());
         app.groups[0].active = 1;
-        assert_eq!(app.chips(0).iter().find(|(kind, _)| *kind == "effort").unwrap().1, "Effort low");
+        assert_eq!(app.chips(0).iter().find(|(kind, _)| *kind == "effort").unwrap().1, "low");
         app.open_effort_picker();
         assert_eq!(app.effort_picker.as_ref().unwrap().levels, ["low", "high", "max"]);
         assert!(!app.effort_picker.as_ref().unwrap().levels.contains(&"none".to_owned()));
