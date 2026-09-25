@@ -91,7 +91,7 @@ const COMMANDS: &[CommandHelp] = &[
     CommandHelp { name: "/img", form: "/img [path]", summary: "Image support", support: "unavailable in Rust" },
     CommandHelp { name: "/login", form: "/login [provider]", summary: "Provider login", support: "unavailable in Rust" },
     CommandHelp { name: "/logout", form: "/logout [provider]", summary: "Provider logout", support: "unavailable in Rust" },
-    CommandHelp { name: "/settings", form: "/settings", summary: "Settings", support: "CLI only · doxa settings" },
+    CommandHelp { name: "/settings", form: "/settings", summary: "Native settings", support: "local · linger and worktree for new sessions" },
     CommandHelp { name: "/setup", form: "/setup", summary: "Setup checks", support: "CLI only · doxa setup" },
     CommandHelp { name: "/doctor", form: "/doctor", summary: "Health checks", support: "unavailable in Rust" },
     CommandHelp { name: "/plugins", form: "/plugins", summary: "Plugin inventory", support: "unavailable in Rust" },
@@ -259,6 +259,13 @@ struct QueuePicker {
     selected: usize,
     loading: bool,
     cancelling: Option<String>,
+}
+
+#[derive(Debug)]
+struct SettingsMenu {
+    rows: [(String, bool); 2],
+    selected: usize,
+    linger_draft: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1172,6 +1179,7 @@ pub struct App {
     resume_pending: Option<Receiver<(String, Result<launch::LaunchOptions, &'static str>)>>,
     offline_ids: HashSet<String>,
     queue_picker: Option<QueuePicker>,
+    settings_menu: Option<SettingsMenu>,
     pending_queue_commands: Vec<crate::bridge::WorkerCommand>,
     diff_modal: bool,
     diff_pane: bool,
@@ -1313,6 +1321,7 @@ impl Default for App {
             resume_pending: None,
             offline_ids: HashSet::new(),
             queue_picker: None,
+            settings_menu: None,
             pending_queue_commands: Vec::new(),
             diff_modal: false,
             diff_pane: false,
@@ -2150,6 +2159,10 @@ impl App {
                     self.queue_picker = None;
                     self.notice = "Enlarge active pane to inspect queued prompts".into();
                 }
+                if self.settings_menu.is_some() && self.active_chooser_rect().is_none() {
+                    self.settings_menu = None;
+                    self.notice = "Enlarge active pane to edit settings".into();
+                }
                 if self.lore_picker.is_some() && (w < 34 || h < 13) {
                     self.lore_picker = None;
                     self.notice = "Enlarge terminal to open LORE beliefs".into();
@@ -2212,7 +2225,7 @@ impl App {
             return true;
         }
         if self.focus != Focus::Prompt || self.active_request_index().is_some()
-            || self.stop_confirmation.is_some() || self.lore_picker.is_some()
+            || self.stop_confirmation.is_some() || self.lore_picker.is_some() || self.settings_menu.is_some()
             || self.new_session.is_some() || self.model_picker.is_some() || self.effort_picker.is_some()
             || self.permission_picker.is_some() || self.engine_picker || self.action_menu
             || self.history_modal || self.queue_picker.is_some() || self.attach_picker.is_some() || self.diff_modal || self.map_modal || self.tool_modal {
@@ -2270,7 +2283,7 @@ impl App {
     fn slash_suggestions(&self) -> Vec<(&'static str, &'static str)> {
         if self.focus != Focus::Prompt || self.slash_dismissed
             || self.active_request_index().is_some() || self.stop_confirmation.is_some()
-            || self.chip_info.is_some() || self.lore_picker.is_some()
+            || self.chip_info.is_some() || self.lore_picker.is_some() || self.settings_menu.is_some()
             || self.new_session.is_some() || self.model_picker.is_some()
             || self.effort_picker.is_some() || self.permission_picker.is_some()
             || self.engine_picker || self.action_menu || self.history_modal
@@ -2321,7 +2334,7 @@ impl App {
         let mut parts = input.split_whitespace();
         let Some(name) = parts.next() else { return false; };
         let args: Vec<&str> = parts.collect();
-        if !matches!(name, "/help" | "/about" | "/sessions" | "/model" | "/effort" | "/engine"
+        if !matches!(name, "/help" | "/about" | "/sessions" | "/settings" | "/model" | "/effort" | "/engine"
             | "/mode" | "/beliefs" | "/diff" | "/peers" | "/split"
             | "/vsplit" | "/pane" | "/sidebar" | "/detach" | "/dir") {
             return false;
@@ -2372,6 +2385,7 @@ impl App {
             }
             "/about" => self.notice = format!("DOXA Rust {}", env!("CARGO_PKG_VERSION")),
             "/sessions" => self.open_history(),
+            "/settings" => self.open_settings_menu(),
             "/model" => self.open_model_picker(),
             "/effort" => self.open_effort_picker(),
             "/engine" => self.open_engine_picker(),
@@ -2464,6 +2478,7 @@ impl App {
             }
             return false;
         }
+        if self.settings_menu.is_some() { return self.settings_menu_key(key); }
         if self.lore_picker.is_some() { return self.lore_picker_key(key); }
         if self.new_session.is_some() { return self.new_session_key(key); }
         if self.model_picker.is_some() { return self.model_picker_key(key); }
@@ -2508,6 +2523,10 @@ impl App {
                 }
                 _ => false,
             };
+        }
+        if key.code == KeyCode::Char(',') && ctrl {
+            self.open_settings_menu();
+            return true;
         }
         if key.code == KeyCode::Char('m') && ctrl {
             self.map_modal = true;
@@ -2890,7 +2909,13 @@ impl App {
                 }
                 true
             }
-            "/settings" => { self.notice = "Run `doxa settings` in a shell to inspect or change native preferences".into(); true }
+            "/settings" if args.trim().is_empty() => {
+                self.input.clear();
+                self.input_cursor = 0;
+                self.open_settings_menu();
+                true
+            }
+            "/settings" => { self.notice = "Usage: /settings · edit native preferences in the menu".into(); true }
             "/setup" => { self.notice = "Run `doxa setup` in a shell for auth and store checks".into(); true }
             "/fleet" | "/img" | "/login"
             | "/logout" | "/doctor" | "/plugins"
@@ -3832,6 +3857,81 @@ impl App {
         picker.cancelling = Some(id.clone());
         self.pending_queue_commands.push(crate::bridge::WorkerCommand::QueueCancel(picker.session_id.clone(), id));
         self.notice = "Cancelling selected queued prompt…".into();
+    }
+
+    fn open_settings_menu(&mut self) {
+        match crate::operations::native_settings() {
+            Ok(rows) => {
+                self.settings_menu = Some(SettingsMenu { rows, selected: 0, linger_draft: None });
+                if self.active_chooser_rect().is_none() {
+                    self.settings_menu = None;
+                    self.notice = "Enlarge active pane to edit settings".into();
+                }
+            }
+            Err(error) => self.notice = format!("Settings unavailable: {}", safe_label(&error.to_string())),
+        }
+    }
+
+    fn settings_change(&mut self, key: &str, value: Option<&str>) {
+        match crate::operations::settings_change(key, value) {
+            Ok(message) => {
+                self.notice = message;
+                match crate::operations::native_settings() {
+                    Ok(rows) => if let Some(menu) = &mut self.settings_menu {
+                        menu.rows = rows;
+                        menu.linger_draft = None;
+                    },
+                    Err(error) => {
+                        self.settings_menu = None;
+                        self.notice = format!("Setting saved; refresh failed: {}", safe_label(&error.to_string()));
+                    }
+                }
+            }
+            Err(error) => self.notice = format!("Setting unchanged: {}", safe_label(&error.to_string())),
+        }
+    }
+
+    fn settings_menu_key(&mut self, key: KeyEvent) -> bool {
+        let Some(menu) = self.settings_menu.as_mut() else { return false; };
+        if let Some(draft) = &mut menu.linger_draft {
+            match key.code {
+                KeyCode::Esc => menu.linger_draft = None,
+                KeyCode::Backspace => { draft.pop(); },
+                KeyCode::Char(ch) if (ch.is_ascii_digit() || ch == '.') && draft.len() < 24 => draft.push(ch),
+                KeyCode::Enter => {
+                    let value = draft.clone();
+                    self.settings_change("linger_secs", Some(&value));
+                }
+                _ => {}
+            }
+            return true;
+        }
+        match key.code {
+            KeyCode::Esc => self.settings_menu = None,
+            KeyCode::Up | KeyCode::BackTab => menu.selected = menu.selected.saturating_sub(1),
+            KeyCode::Down | KeyCode::Tab => menu.selected = (menu.selected + 1).min(1),
+            KeyCode::Char('u') | KeyCode::Delete => {
+                let selected = menu.selected;
+                if menu.rows[selected].1 {
+                    self.notice = "Environment override is active; unset it before editing".into();
+                } else {
+                    self.settings_change(if selected == 0 { "linger_secs" } else { "worktree_per_session" }, None);
+                }
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                let selected = menu.selected;
+                if menu.rows[selected].1 {
+                    self.notice = "Environment override is active; unset it before editing".into();
+                } else if selected == 0 {
+                    menu.linger_draft = Some(menu.rows[0].0.split(' ').next().unwrap_or("120").to_owned());
+                } else {
+                    let on = menu.rows[1].0.starts_with("on ");
+                    self.settings_change("worktree_per_session", Some(if on { "off" } else { "on" }));
+                }
+            }
+            _ => {}
+        }
+        true
     }
 
     fn open_lore_picker(&mut self) {
@@ -5355,6 +5455,8 @@ impl App {
                 usize::from(pane.width.saturating_sub(4)));
             wrapped_rows(&body, usize::from(pane.width.saturating_sub(2)))
                 .saturating_add(2).clamp(6, 18) as u16
+        } else if self.settings_menu.is_some() {
+            8
         } else if self.engine_picker {
             7
         } else if let Some(form) = &self.new_session {
@@ -5603,7 +5705,7 @@ impl App {
         self.active_chooser_rect().is_some() || self.active_request_index().is_some()
             || self.map_modal || self.diff_modal || self.tool_modal || self.action_menu
             || self.history_modal || self.queue_picker.is_some() || self.attach_picker.is_some()
-            || self.lore_picker.is_some() || self.model_picker.is_some()
+            || self.lore_picker.is_some() || self.settings_menu.is_some() || self.model_picker.is_some()
             || self.effort_picker.is_some() || self.permission_picker.is_some()
             || self.engine_picker || self.new_session.is_some()
             || self.chip_info.is_some() || self.stop_confirmation.is_some()
@@ -5756,6 +5858,26 @@ impl App {
                 self.pending_open_urls.push(url);
                 return true;
             }
+        }
+        if self.settings_menu.is_some() {
+            let menu = self.active_chooser_rect();
+            if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                if let Some(area) = menu.filter(|area| area.contains(
+                    ratatui::layout::Position::new(mouse.column, mouse.row))) {
+                    let index = usize::from(mouse.row.saturating_sub(area.y.saturating_add(3)));
+                    if (area.y + 3..area.y + 5).contains(&mouse.row) {
+                        let current = self.settings_menu.as_ref().unwrap().selected;
+                        self.settings_menu.as_mut().unwrap().selected = index;
+                        if current == index {
+                            return self.settings_menu_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+                        }
+                    }
+                } else {
+                    self.settings_menu = None;
+                }
+                return true;
+            }
+            return false;
         }
         if self.chip_info.is_some() {
             let inside_menu = self.active_chooser_rect().is_some_and(|area| area.contains(
@@ -6312,10 +6434,11 @@ impl App {
             if width >= 18 && height >= 3 {
                 let fallback = Rect::new(area.x + (area.width - width) / 2,
                     area.y + (area.height - height) / 2, width, height);
-                if self.action_menu || self.lore_picker.is_some() || self.engine_picker
+                if self.settings_menu.is_some() || self.action_menu || self.lore_picker.is_some() || self.engine_picker
                     || self.new_session.is_some() || self.model_picker.is_some() || self.effort_picker.is_some() || self.permission_picker.is_some() {
                     frame.render_widget(Clear, fallback);
-                    if self.action_menu { self.draw_actions(frame, fallback); }
+                    if self.settings_menu.is_some() { self.draw_settings_menu(frame, fallback); }
+                    else if self.action_menu { self.draw_actions(frame, fallback); }
                     else if self.lore_picker.is_some() { self.draw_lore_picker(frame, fallback); }
                     else { self.draw_chip_picker(frame, fallback); }
                 }
@@ -6471,6 +6594,37 @@ impl App {
         frame.render_widget(Paragraph::new(lines).block(Block::default().title(title)
             .borders(Borders::ALL).border_style(Style::default().fg(theme::ACCENT)))
             .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)), modal);
+    }
+
+    fn draw_settings_menu(&self, frame: &mut Frame, area: Rect) {
+        let Some(menu) = &self.settings_menu else { return; };
+        let mut lines = vec![
+            Line::from(" env > config.toml > default"),
+            Line::from(""),
+        ];
+        for (index, key) in ["linger_secs", "worktree_per_session"].iter().enumerate() {
+            let (value, shadowed) = &menu.rows[index];
+            let shown = if index == 0 { menu.linger_draft.as_deref().unwrap_or(value) } else { value };
+            let suffix = if *shadowed {
+                if index == 0 { " · DOXA_LINGER_SECS overrides config" }
+                else { " · DOXA_WORKTREE overrides config" }
+            } else { "" };
+            lines.push(Line::styled(format!(" {} {}: {}{}", if menu.selected == index { '›' } else { ' ' },
+                key, safe_label(shown), suffix),
+                Style::default().fg(if menu.selected == index { theme::TEXT } else { theme::SECONDARY })
+                    .bg(if menu.selected == index { theme::HIGHLIGHT } else { theme::RAISED })));
+        }
+        lines.push(Line::from(""));
+        lines.push(Line::from(if menu.linger_draft.is_some() {
+            " Enter save seconds · Esc cancel edit"
+        } else {
+            " Enter edit/toggle · U unset · Esc close"
+        }));
+        lines.push(Line::from(" Changes apply to new sessions; running sessions keep launch settings."));
+        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false })
+            .block(Block::default().title(" Native settings ").borders(Borders::ALL)
+                .border_style(Style::default().fg(theme::ACCENT)))
+            .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)), area);
     }
 
     fn draw_chip_info(&self, frame: &mut Frame, area: Rect) {
@@ -7090,6 +7244,8 @@ impl App {
         if active && chooser_height > 0 {
             if self.active_request_index().is_some_and(|index| self.input_requests[index].kind == "ask_user") {
                 self.draw_request(frame, inner[2], true);
+            } else if self.settings_menu.is_some() {
+                self.draw_settings_menu(frame, inner[2]);
             } else if self.engine_picker || self.new_session.is_some() || self.model_picker.is_some() || self.effort_picker.is_some() || self.permission_picker.is_some() {
                 self.draw_chip_picker(frame, inner[2]);
             } else if self.lore_picker.is_some() {
@@ -7755,6 +7911,41 @@ mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
     use serde_json::json;
+
+    #[test]
+    fn settings_menu_protects_env_shadowed_rows_and_keeps_prompt() {
+        let mut app = App::default();
+        app.input = "draft prompt".into();
+        app.settings_menu = Some(SettingsMenu {
+            rows: [("90 (environment)".into(), true), ("on (default)".into(), false)],
+            selected: 0,
+            linger_draft: None,
+        });
+        app.settings_menu_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.settings_menu.as_ref().unwrap().linger_draft.is_none());
+        assert!(app.notice.contains("Environment override"));
+        app.settings_menu_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE));
+        assert!(app.settings_menu.is_some());
+        assert_eq!(app.input, "draft prompt");
+        app.settings_menu_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.settings_menu.is_none());
+    }
+
+    #[test]
+    fn settings_linger_editor_cancels_without_writing() {
+        let mut app = App::default();
+        app.settings_menu = Some(SettingsMenu {
+            rows: [("120 (default)".into(), false), ("on (default)".into(), false)],
+            selected: 0,
+            linger_draft: None,
+        });
+        app.settings_menu_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.settings_menu.as_ref().unwrap().linger_draft.as_deref(), Some("120"));
+        app.settings_menu_key(KeyEvent::new(KeyCode::Char('9'), KeyModifiers::NONE));
+        app.settings_menu_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.settings_menu.as_ref().unwrap().linger_draft.is_none());
+        assert_eq!(app.settings_menu.as_ref().unwrap().rows[0].0, "120 (default)");
+    }
 
     #[cfg(unix)]
     fn belief_review_fixture() -> doxa_lore::BeliefReview {

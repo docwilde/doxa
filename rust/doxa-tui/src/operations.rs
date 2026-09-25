@@ -167,6 +167,17 @@ fn effective_setting(config: &toml::Table, key: &str) -> String {
     format!("{} ({source})", safe_report_value(display))
 }
 
+/// Values displayed by the in-app editor. Re-read on every open and after
+/// every write so the menu never presents stale config as the active value.
+pub fn native_settings() -> io::Result<[(String, bool); 2]> {
+    let config = doxa_state::load_config_checked(&doxa_home()?.join("config.toml"))?;
+    Ok(["linger_secs", "worktree_per_session"].map(|key| {
+        let env = setting_env(key).expect("native setting");
+        (effective_setting(&config, key),
+            std::env::var(env).ok().is_some_and(|value| !value.trim().is_empty()))
+    }))
+}
+
 pub fn settings_report() -> io::Result<String> {
     let config = doxa_state::load_config_checked(&doxa_home()?.join("config.toml"))?;
     Ok(format!("native settings · environment > config.toml > default (launch flags can override)\nlinger_secs: {}\nworktree_per_session: {}\n\nChange with `doxa settings set KEY VALUE`; remove with `doxa settings unset KEY`. These affect new sessions; running sessions keep their launch settings.",

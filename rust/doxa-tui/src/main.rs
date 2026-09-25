@@ -1,11 +1,10 @@
-use doxa_tui::{bridge, discovery, fleet_plan, fleet_view, launch, ui_state};
+use doxa_tui::{bridge, discovery, fleet_plan, fleet_view, launch, operations, ui_state};
 use std::collections::HashSet;
 use std::io::{self, Write};
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::process::Stdio;
-mod operations;
 
 fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message.into())
