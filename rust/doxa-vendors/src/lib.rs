@@ -193,6 +193,7 @@ async fn catalog_models_at(vendor: Vendor, endpoint: &str, key: &str) -> Option<
             // Only DeepSeek documents this per-model response field. GLM's
             // catalogue IDs are useful, but capability-shaped data there is
             // not a verified contract for effort selection.
+            let effort_metadata_present = vendor == Vendor::DeepSeek && row.get("effort").is_some();
             let documented_levels = (vendor == Vendor::DeepSeek)
                 .then(|| row.pointer("/effort/supported_levels").and_then(Value::as_array)).flatten();
             if let Some(levels) = documented_levels {
@@ -206,7 +207,7 @@ async fn catalog_models_at(vendor: Vendor, endpoint: &str, key: &str) -> Option<
             let default_effort = row.pointer("/effort/default_level").and_then(Value::as_str)
                 .filter(|level| efforts.iter().any(|seen| seen == level)).map(str::to_owned);
             models.push(ModelCapability { id: id.to_owned(), efforts, default_effort,
-                effort_metadata_present: documented_levels.is_some() });
+                effort_metadata_present });
         }
     }
     // A valid empty catalogue is authoritative; falling back to old static
@@ -252,6 +253,11 @@ mod catalog_tests {
         worker.await.unwrap();
         let (url, worker) = serve("200 OK", r#"{"data":[{"id":"bad\u202e-id"}]}"#.into(), "").await;
         assert!(catalog_models_at(Vendor::DeepSeek, &url, "test-secret").await.unwrap().is_empty());
+        worker.await.unwrap();
+        let (url, worker) = serve("200 OK", r#"{"data":[{"id":"deepseek-flash","effort":{"supported_levels":"high"}}]}"#.into(), "").await;
+        assert_eq!(catalog_models_at(Vendor::DeepSeek, &url, "test-secret").await.unwrap(),
+            [ModelCapability { id: "deepseek-flash".into(), efforts: Vec::new(),
+                default_effort: None, effort_metadata_present: true }]);
         worker.await.unwrap();
         let (url, worker) = serve("200 OK", format!("{{\"data\":[{{\"id\":\"{}\"}}]}}", "a".repeat(4 * 1024 * 1024)), "").await;
         assert!(catalog_models_at(Vendor::DeepSeek, &url, "test-secret").await.is_none());

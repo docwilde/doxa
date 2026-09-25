@@ -2624,6 +2624,9 @@ impl App {
         let models = vendor_models(engine);
         let model = vendor_default_model(engine).to_owned();
         let engine_id = engine_name(engine);
+        // A previous account-scoped catalog must not survive a vendor
+        // re-selection when a later lookup fails or the credential changes.
+        self.catalog_efforts.retain(|(name, _), _| name != engine_id);
         let model_efforts = models.iter().map(|name| ((*name).to_owned(),
             effort_choices(engine_id, name).iter().map(|level| (*level).to_owned()).collect())).collect::<HashMap<_, _>>();
         let effort = self.next_efforts.get(engine_id)
@@ -6774,6 +6777,10 @@ mod tests {
         assert!(app.poll_vendor_catalog());
         assert_eq!(app.new_session.as_ref().unwrap().models, ["deepseek-flash", "deepseek-v4-pro"]);
         assert!(app.new_session.as_ref().unwrap().catalog_note.contains("Static fallback"));
+        app.catalog_efforts.insert(("deepseek".into(), "deepseek-flash".into()), vec!["low".into()]);
+        app.engine_selected = 2;
+        app.select_new_engine();
+        assert!(!app.catalog_efforts.contains_key(&("deepseek".into(), "deepseek-flash".into())));
     }
 
     #[test]
