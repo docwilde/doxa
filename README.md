@@ -83,6 +83,9 @@ as `v2.0.0-alpha.10` after `sh -s --` to pin a release. It uses Git, Cargo,
 Python 3.11+, and `uv`; the Python environment it creates is private to the
 LORE and Claude sidecars. No Python frontend command is installed. See the
 [Rust guide](rust/README.md) for provider setup and current limits.
+If an older `uv tool` install owns `doxa`, run `uv tool uninstall doxa`
+before installing Rust; the installer reports when another `doxa` on `PATH`
+would shadow its launcher.
 
 From a checkout, use `./task build`, `./task run`, or `./task install`. Install
 builds committed `HEAD` with the same locked sidecars and launcher as the
