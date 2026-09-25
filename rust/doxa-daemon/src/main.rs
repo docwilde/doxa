@@ -378,6 +378,16 @@ impl SessionClaim {
             }
             return Err(error);
         }
+        // An older daemon may already own this ID without participating in
+        // the new claim protocol. Refuse before opening its saved host state.
+        // Any entry, including a dangling symlink, also preserves the old
+        // fail-closed behavior for stale or unsafe registry paths.
+        match fs::symlink_metadata(dir.join(format!("{session_id}.json"))) {
+            Ok(_) => return Err(io::Error::new(io::ErrorKind::AlreadyExists,
+                "session registry entry already exists")),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {},
+            Err(error) => return Err(error),
+        }
         Ok(Self { _file: file })
     }
 }

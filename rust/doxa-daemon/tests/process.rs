@@ -543,6 +543,39 @@ fn concurrent_process_cannot_claim_same_session_and_lock_survives_restart() {
 }
 
 #[test]
+fn legacy_registry_entry_blocks_resume_before_claude_host_starts() {
+    let dir = tempfile::tempdir().unwrap();
+    let registry = dir.path().join("runtime/registry");
+    fs::create_dir_all(&registry).unwrap();
+    let entry = registry.join("legacy-session.json");
+    let marker = dir.path().join("claude-host-opened");
+    let sidecar = dir.path().join("claude-sidecar.py");
+    fs::write(&sidecar, format!("from pathlib import Path\nPath({}).write_text('opened')\n",
+        serde_json::to_string(marker.to_str().unwrap()).unwrap())).unwrap();
+    let run_resume = || Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+        .args(["--runtime-dir", dir.path().join("runtime").to_str().unwrap(),
+            "--cwd", dir.path().to_str().unwrap(), "--session-id", "legacy-session",
+            "--engine", "claude", "--claude-python", "/usr/bin/python3",
+            "--claude-script", sidecar.to_str().unwrap(), "--resume", "true"])
+        .env("DOXA_HOME", dir.path().join("home"))
+        .output().unwrap();
+
+    fs::write(&entry, b"{\"session_id\":\"legacy-session\"}\n").unwrap();
+    let result = run_resume();
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("session registry entry already exists"));
+    assert!(!marker.exists(), "legacy session state was opened before collision check");
+    assert!(registry.join("legacy-session.lock").exists());
+
+    fs::remove_file(&entry).unwrap();
+    std::os::unix::fs::symlink(dir.path().join("missing-entry"), &entry).unwrap();
+    let result = run_resume();
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("session registry entry already exists"));
+    assert!(!marker.exists(), "unsafe registry symlink was followed before host startup");
+}
+
+#[test]
 fn linger_resets_when_a_client_reattaches() {
     let dir = tempfile::tempdir().unwrap();
     // Leave enough room for a loaded CI runner to schedule the reconnect.
