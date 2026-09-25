@@ -309,6 +309,7 @@ def test_sidecar_scrub_snapshot_and_generic_error(monkeypatch):
 
     monkeypatch.setattr(lore_bridge, "_lore", lambda: (lambda text: text.replace("SECRET", "[redacted]"), snapshot))
     monkeypatch.setattr(lore_bridge, "_extensions", lambda: None)
+    monkeypatch.setattr(lore_bridge, "_memory_usage_ops", lambda: None)
     requests = [
         {"id": 1, "op": "scrub", "text": "SECRET"},
         {"id": 2, "op": "snapshot", "cwd": "/repo", "scope": "project"},
@@ -327,6 +328,43 @@ def test_sidecar_scrub_snapshot_and_generic_error(monkeypatch):
     assert frames[3] == {"type": "reply", "id": 3, "ok": False, "error": "operation_failed"}
     assert frames[4] == {"type": "reply", "id": 4, "ok": False, "error": "invalid_request"}
     assert b"SECRET IN ERROR" not in output.getvalue()
+
+
+def test_memory_usage_sidecar_counts_only_curated_entries_for_each_scope(tmp_path):
+    from lore_core.config import project_slug
+
+    root = tmp_path / "lore"
+    first = tmp_path / "project-one"
+    second = tmp_path / "project-two"
+    first.mkdir()
+    second.mkdir()
+    first_memory = root / "projects" / project_slug(str(first)) / "MEMORY.md"
+    second_memory = root / "projects" / project_slug(str(second)) / "MEMORY.md"
+    first_memory.parent.mkdir(parents=True)
+    second_memory.parent.mkdir(parents=True)
+    first_memory.write_text("- café 😊\n- second\n\nignored note\n", encoding="utf-8")
+    second_memory.write_text("- βeta\n", encoding="utf-8")
+    root.mkdir(exist_ok=True)
+    (root / "USER.md").write_text("- user 🌍\n", encoding="utf-8")
+    requests = [
+        {"id": 1, "op": "memory_usage_v1", "cwd": str(first)},
+        {"id": 2, "op": "memory_usage_v1", "cwd": str(second)},
+        {"id": 3, "op": "memory_usage_v1", "cwd": ""},
+    ]
+    env = dict(os.environ, LORE_ROOT=str(root), DOXA_LORE_SOURCE="package")
+    result = subprocess.run([sys.executable, "-m", "doxa.lore_bridge"],
+                            input=b"".join(map(lore_bridge._frame, requests)),
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            cwd=Path(__file__).resolve().parent.parent, env=env,
+                            timeout=10, check=True)
+    frames = [json.loads(line) for line in result.stdout.splitlines()]
+    assert "memory_usage_v1" in frames[0]["capabilities"]
+    assert frames[1]["value"] == {"project_chars": len("- café 😊\n- second\n"),
+                                  "user_chars": len("- user 🌍\n")}
+    assert frames[2]["value"] == {"project_chars": len("- βeta\n"),
+                                  "user_chars": len("- user 🌍\n")}
+    assert frames[3] == {"type": "reply", "id": 3, "ok": False, "error": "operation_failed"}
+    assert "café".encode() not in result.stdout and "🌍".encode() not in result.stdout
 
 
 def test_oversize_request_closes_without_echo(monkeypatch):
@@ -406,6 +444,7 @@ def test_pending_sync_and_refresh_are_bounded_and_scoped(monkeypatch):
     monkeypatch.setattr(lore_bridge, "_extensions", lambda: (
         lambda cwd: "this", lambda: 30, lambda: rows,
         (lambda text: text.replace("SECRET", "[redacted]"), lambda: state)))
+    monkeypatch.setattr(lore_bridge, "_memory_usage_ops", lambda: None)
     requests = [
         {"id": 1, "op": "pending", "cwd": "/repo", "limit": 1},
         {"id": 2, "op": "pending", "cwd": "/repo", "offset": 1, "limit": 1},
@@ -508,6 +547,7 @@ def test_consult_beliefs_and_evidence_are_bounded_scrubbed_and_cite_only(monkeyp
     conn.close()
     monkeypatch.setattr(lore_bridge, "_lore", lambda: (lambda text: text.replace("SECRET", "[redacted]"), lambda cwd, scope: ""))
     monkeypatch.setattr(lore_bridge, "_extensions", lambda: None)
+    monkeypatch.setattr(lore_bridge, "_memory_usage_ops", lambda: None)
     monkeypatch.setattr(lore_bridge, "_read_ops", lambda: (lambda: sqlite3.connect(db_path), lambda text, op: text))
     requests = [
         {"id": 1, "op": "consult", "prompt": "fact"},
