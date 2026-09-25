@@ -1,5 +1,6 @@
 //! Terminal shell for the Rust frontend. Daemon adapters can feed [`App::apply_update`].
 use std::collections::{HashMap, HashSet};
+use std::cell::RefCell;
 use std::io::{self, IsTerminal, Stdout};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
@@ -27,6 +28,7 @@ use crate::{diff_view, history, launch, lore_picker, markdown, peer_map::PeerMap
 use crate::theme;
 
 mod tool_cards;
+mod transcript_tools;
 use tool_cards::ToolCards;
 
 const MIN_PANE_WIDTH: u16 = 28;
@@ -634,6 +636,9 @@ pub struct App {
     tool_modal: bool,
     tool_selected: usize,
     tool_scroll: u16,
+    expanded_tool_sections: HashMap<String, HashSet<usize>>,
+    selected_tool_sections: HashMap<String, usize>,
+    visible_tool_sections: RefCell<Vec<(Rect, usize, String, usize)>>,
     peer_map: PeerMap,
     map_modal: bool,
     action_menu: bool,
@@ -713,6 +718,9 @@ impl Default for App {
             tool_modal: false,
             tool_selected: 0,
             tool_scroll: 0,
+            expanded_tool_sections: HashMap::new(),
+            selected_tool_sections: HashMap::new(),
+            visible_tool_sections: RefCell::new(Vec::new()),
             peer_map: PeerMap::default(),
             map_modal: false,
             action_menu: false,
@@ -1516,6 +1524,9 @@ impl App {
                 self.open_selected();
                 true
             }
+            KeyCode::Char('[') if self.focus == Focus::Transcript => self.select_tool_section(false),
+            KeyCode::Char(']') if self.focus == Focus::Transcript => self.select_tool_section(true),
+            KeyCode::Enter if self.focus == Focus::Transcript => self.toggle_selected_tool_section(),
             KeyCode::PageUp if self.focus == Focus::Transcript => {
                 let p = &mut self.groups[self.active_group];
                 p.scroll = p.scroll.saturating_add(5);
@@ -2051,6 +2062,57 @@ impl App {
             .active_id()
             .map(|id| self.tool_cards.for_session(id))
             .unwrap_or(&[])
+    }
+
+    fn tool_sections_for_active(&self) -> Option<(String, usize)> {
+        let id = self.groups[self.active_group].active_id()?.to_owned();
+        let transcript = &self.sessions.iter().find(|s| s.id == id)?.transcript;
+        let (_, sections) = transcript_tools::render(transcript, 80, None, None);
+        Some((id, sections.len()))
+    }
+
+    fn select_tool_section(&mut self, forward: bool) -> bool {
+        let Some((id, _)) = self.tool_sections_for_active() else { return false; };
+        let visible: Vec<usize> = self.visible_tool_sections.borrow().iter()
+            .filter(|(_, group, session, _)| *group == self.active_group && *session == id)
+            .map(|(_, _, _, section)| *section).collect();
+        if visible.is_empty() { return false; }
+        let current = self.selected_tool_sections.get(&id).copied();
+        let position = current.and_then(|value| visible.iter().position(|index| *index == value))
+            .unwrap_or(if forward { 0 } else { visible.len() - 1 });
+        let next = if forward { (position + 1).min(visible.len() - 1) } else { position.saturating_sub(1) };
+        self.selected_tool_sections.insert(id, visible[next]);
+        true
+    }
+
+    fn toggle_selected_tool_section(&mut self) -> bool {
+        let Some((id, count)) = self.tool_sections_for_active() else { return false; };
+        if count == 0 { return false; }
+        let visible: Vec<usize> = self.visible_tool_sections.borrow().iter()
+            .filter(|(_, group, session, _)| *group == self.active_group && *session == id)
+            .map(|(_, _, _, section)| *section).collect();
+        let selected = self.selected_tool_sections.get(&id).copied()
+            .filter(|section| visible.contains(section))
+            .or_else(|| visible.last().copied())
+            .unwrap_or(count - 1);
+        self.selected_tool_sections.insert(id.clone(), selected);
+        self.toggle_tool_section(id, selected);
+        true
+    }
+
+    fn toggle_tool_section(&mut self, id: String, selected: usize) {
+        if !self.expanded_tool_sections.contains_key(&id) && self.expanded_tool_sections.len() >= 64 {
+            if let Some(oldest) = self.expanded_tool_sections.keys().next().cloned() {
+                self.expanded_tool_sections.remove(&oldest);
+            }
+        }
+        let expanded = self.expanded_tool_sections.entry(id).or_default();
+        if !expanded.remove(&selected) {
+            if expanded.len() >= 64 {
+                if let Some(oldest) = expanded.iter().copied().min() { expanded.remove(&oldest); }
+            }
+            expanded.insert(selected);
+        }
     }
 
     fn tool_key(&mut self, key: KeyEvent) -> bool {
@@ -2591,6 +2653,16 @@ impl App {
                 if self.size.width < 20 || self.size.height < 5 {
                     return false;
                 }
+                let section_hit = self.visible_tool_sections.borrow().iter()
+                    .find(|(rect, _, _, _)| rect.contains(ratatui::layout::Position::new(mouse.column, mouse.row)))
+                    .cloned();
+                if let Some((_, group, id, section)) = section_hit {
+                    self.active_group = group;
+                    self.focus = Focus::Transcript;
+                    self.selected_tool_sections.insert(id.clone(), section);
+                    self.toggle_tool_section(id, section);
+                    return true;
+                }
                 let layout = self.layout(self.size);
                 let in_outer = mouse.row >= layout.outer.y && mouse.row < layout.outer.bottom();
                 if in_outer
@@ -2740,6 +2812,7 @@ impl App {
 
     pub fn draw(&self, frame: &mut Frame) {
         let area = frame.area();
+        self.visible_tool_sections.borrow_mut().clear();
         frame.render_widget(Block::default().style(Style::default().bg(theme::BASE).fg(theme::TEXT)), area);
         if area.width < 20 || area.height < 5 {
             frame.render_widget(Paragraph::new("DOXA · enlarge terminal"), area);
@@ -3276,7 +3349,27 @@ impl App {
         let content = session
             .map(|s| s.transcript.as_str())
             .unwrap_or("No session open. Select one in the rail and press Enter.");
-        let lines = markdown::render(content, inner[1].width.saturating_sub(2));
+        let id = group.active_id().unwrap_or("");
+        let (lines, sections) = transcript_tools::render(
+            content,
+            inner[1].width.saturating_sub(2),
+            self.expanded_tool_sections.get(id),
+            (active && self.focus == Focus::Transcript)
+                .then(|| self.selected_tool_sections.get(id).copied())
+                .flatten(),
+        );
+        let top = lines.len().saturating_sub(usize::from(inner[1].height))
+            .saturating_sub(group.scroll.min(lines.len().saturating_sub(usize::from(inner[1].height))));
+        for section in sections {
+            if section.line >= top && section.line < top + usize::from(inner[1].height) {
+                self.visible_tool_sections.borrow_mut().push((
+                    Rect::new(inner[1].x.saturating_add(1),
+                        inner[1].y.saturating_add((section.line - top) as u16),
+                        inner[1].width.saturating_sub(2), 1),
+                    index, id.to_owned(), section.index,
+                ));
+            }
+        }
         let (lines, scroll_from_top) =
             transcript_window(lines, inner[1].height, inner[1].y, group.scroll);
         frame.render_widget(
