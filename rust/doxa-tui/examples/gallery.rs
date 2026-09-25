@@ -29,7 +29,7 @@ fn fixture() -> App {
     event(&mut app,"demo-codex-01","turn_done",json!({"input_tokens":4821,"output_tokens":918,"usage_scope":"session","usage_source":"codex_cli_turn_completed","ctx_percentage":18.0,"session_cost_usd":0.0187}));
     event(&mut app,"demo-claude-02","text_delta",json!({"text":"## Test review\n\nThe new cases cover clipped input and reconnects. One edge case remains in the transport fixture."}));
     event(&mut app,"demo-claude-02","turn_done",json!({"ctx_percentage":9.0,"session_cost_usd":0.0062}));
-    app.notice = "Rust 2.0.0-alpha.9 · fixture session".into();
+    app.notice = "Rust 2.0.0-alpha.10 · fixture session".into();
     app
 }
 
