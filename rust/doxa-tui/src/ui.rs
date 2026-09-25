@@ -29,7 +29,7 @@ use crate::theme;
 
 mod tool_cards;
 mod transcript_roles;
-mod transcript_tools;
+pub(crate) mod transcript_tools;
 use tool_cards::ToolCards;
 
 const MIN_PANE_WIDTH: u16 = 28;

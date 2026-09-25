@@ -375,6 +375,7 @@ fn resume_plan_in(entry: &OfflineSession, python: &Path, expected_root: &Path, c
 const MAX_TURNS: usize = 40;
 const MAX_TEXT_CHARS: usize = 20_000;
 const MAX_VIEW_BYTES: usize = 480 * 1024;
+const MAX_RESTORED_DETAIL_BYTES: usize = 256 * 1024;
 
 #[derive(Default)]
 struct Turn { prompt: String, answer: String, tools: Vec<String>, tool_names: std::collections::HashMap<String, String> }
@@ -394,6 +395,18 @@ fn tool_detail(value: &Value) -> String {
     }
     if chars.next().is_some() { escaped.push('…'); }
     escaped
+}
+
+fn restored_detail_marker(kind: &str, value: &Value) -> String {
+    if value.is_null() { return String::new(); }
+    let raw = value.as_str().map(str::to_owned).unwrap_or_else(|| value.to_string());
+    let clean = crate::markdown::sanitize(&raw);
+    let mut end = clean.len().min(MAX_RESTORED_DETAIL_BYTES);
+    while !clean.is_char_boundary(end) { end -= 1; }
+    let mut visible = clean[..end].to_owned();
+    if end < clean.len() { visible.push_str("\n[Tool detail display limit reached]"); }
+    format!("{}{}", crate::ui::transcript_tools::RESTORED_TOOL_PREFIX,
+        serde_json::json!({"kind":kind,"text":visible}))
 }
 
 fn append_text(target: &mut String, text: &str) {
@@ -427,7 +440,9 @@ pub fn render(snapshot: &TranscriptSnapshot) -> String {
                         let name = turn.tool_names.get(id).map(String::as_str).unwrap_or("Tool");
                         let outcome = if block["is_error"] == true { "failed" } else { "finished" };
                         let detail = tool_detail(&block["content"]);
-                        turn.tools.push(format!("Tool: {name} {outcome}{}", if detail.is_empty() { String::new() } else { format!(" · {detail}") }));
+                        turn.tools.push(format!("Tool: {name} {outcome}{}{}",
+                            if detail.is_empty() { String::new() } else { format!(" · {detail}") },
+                            restored_detail_marker("result", &block["content"])));
                     }
                 }
             }
@@ -445,7 +460,9 @@ pub fn render(snapshot: &TranscriptSnapshot) -> String {
                     let name = if name.is_empty() { "Tool".to_owned() } else { name };
                     if let Some(id) = block["id"].as_str() { turn.tool_names.insert(id.to_owned(), name.clone()); }
                     let detail = tool_detail(&block["input"]);
-                    turn.tools.push(format!("Tool: {name} started{}", if detail.is_empty() { String::new() } else { format!(" · {detail}") }));
+                    turn.tools.push(format!("Tool: {name} started{}{}",
+                        if detail.is_empty() { String::new() } else { format!(" · {detail}") },
+                        restored_detail_marker("input", &block["input"])));
                 }
                 _ => {}
             }
@@ -479,6 +496,9 @@ pub fn render(snapshot: &TranscriptSnapshot) -> String {
     if out.len() > MAX_VIEW_BYTES {
         let mut start = out.len() - MAX_VIEW_BYTES;
         while !out.is_char_boundary(start) { start += 1; }
+        // Keep a complete paragraph: internal restored-detail JSON must
+        // never be exposed as a partial prose fragment after tail clipping.
+        start = out[start..].find("\n\n").map_or(out.len(), |offset| start + offset + 2);
         out = format!("[Earlier transcript omitted from this view; the session JSONL retains it.]\n\n{}", &out[start..]);
     }
     out
@@ -538,8 +558,20 @@ for line in sys.stdin:
         let rendered = render(&TranscriptSnapshot { bytes: lines.into_bytes(), earlier_bytes_omitted: false });
         assert!(rendered.contains("Tool: Read started ·"));
         assert!(rendered.contains("Tool: Read finished · found"));
-        assert!(!rendered.contains(&input));
-        assert!(rendered.contains('…'));
+        assert!(rendered.contains(crate::ui::transcript_tools::RESTORED_TOOL_PREFIX));
+        assert!(rendered.contains(&input));
+        assert!(rendered.contains('…')); // collapsed row remains concise
+    }
+
+    #[test]
+    fn restored_detail_limit_is_explicit_and_utf8_safe() {
+        let marker = restored_detail_marker("result", &Value::String("é".repeat(150_000)));
+        let encoded = marker.strip_prefix(crate::ui::transcript_tools::RESTORED_TOOL_PREFIX).unwrap();
+        let detail: Value = serde_json::from_str(encoded).unwrap();
+        let text = detail["text"].as_str().unwrap();
+        assert!(text.ends_with("[Tool detail display limit reached]"));
+        assert!(text.starts_with("éé"));
+        assert!(text.len() <= MAX_RESTORED_DETAIL_BYTES + 40);
     }
 
     #[test]
