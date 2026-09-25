@@ -38,7 +38,7 @@ const MAX_INPUT_REQUESTS: usize = 32;
 const MAX_INPUT_BYTES: usize = 10 * 1024;
 const MAX_TRANSCRIPT_BYTES: usize = 512 * 1024;
 const MAX_ANSWER_BYTES: usize = 10 * 1024;
-const ACTIONS: [(&str, &str); 11] = [
+const ACTIONS: [(&str, &str); 12] = [
     ("Peer map", "Ctrl+M"),
     ("Tool activity", "Ctrl+T"),
     ("Open selected session", "rail selection"),
@@ -50,6 +50,7 @@ const ACTIONS: [(&str, &str); 11] = [
     ("Engine for new session", "Alt+E"),
     ("Session model", "Alt+M"),
     ("Claude permissions", "Alt+P"),
+    ("Stop active session", "Alt+X"),
 ];
 
 const ENGINE_CHOICES: [&str; 4] = ["codex", "claude", "deepseek", "glm"];
@@ -521,6 +522,8 @@ pub struct App {
     permission_picker: Option<(String, usize)>,
     permission_confirm_dont_ask: bool,
     pending_permission_changes: Vec<(String, String)>,
+    stop_confirmation: Option<String>,
+    pending_stops: Vec<String>,
     model_picker: Option<ModelPicker>,
     engine_picker: bool,
     engine_selected: usize,
@@ -594,6 +597,8 @@ impl Default for App {
             permission_picker: None,
             permission_confirm_dont_ask: false,
             pending_permission_changes: Vec::new(),
+            stop_confirmation: None,
+            pending_stops: Vec::new(),
             model_picker: None,
             engine_picker: false,
             engine_selected: 0,
@@ -832,6 +837,7 @@ impl App {
                                 self.permission_picker = None;
                                 self.permission_confirm_dont_ask = false;
                                 self.engine_picker = false;
+                                self.stop_confirmation = None;
                                 if self.input_requests.len() < MAX_INPUT_REQUESTS {
                                     self.input_requests.push(request);
                                 } else {
@@ -929,6 +935,18 @@ impl App {
                 } else {
                     format!("Permission change failed · {}", safe_label(frame["error"].as_str().unwrap_or("unknown error")))
                 };
+                true
+            }
+            "stop_reply" => {
+                let Some(id) = frame["session_id"].as_str().filter(|id| self.sessions.iter().any(|s| s.id == *id)) else { return false; };
+                if frame["ok"] == true {
+                    self.offline_ids.insert(id.to_owned());
+                    self.input_requests.retain(|request| request.session_id != id);
+                    self.apply_update(DaemonUpdate::Status { id: id.to_owned(), text: "Stopping".into() });
+                    self.notice = format!("Stop accepted · {}", safe_label(id));
+                } else {
+                    self.notice = format!("Stop failed · {}", safe_label(frame["error"].as_str().unwrap_or("unknown error")));
+                }
                 true
             }
             "telemetry_unavailable" => {
@@ -1163,6 +1181,7 @@ impl App {
         if self.active_request_index().is_some() {
             return self.request_key(key);
         }
+        if self.stop_confirmation.is_some() { return self.stop_confirmation_key(key); }
         if self.new_session.is_some() { return self.new_session_key(key); }
         if self.model_picker.is_some() { return self.model_picker_key(key); }
         if self.permission_picker.is_some() { return self.permission_picker_key(key); }
@@ -1234,6 +1253,7 @@ impl App {
         if key.code == KeyCode::Char('m') && alt { self.open_model_picker(); return true; }
         if key.code == KeyCode::Char('p') && alt { self.open_permission_picker(); return true; }
         if key.code == KeyCode::Char('e') && alt { self.open_engine_picker(); return true; }
+        if key.code == KeyCode::Char('x') && alt { self.open_stop_confirmation(); return true; }
         if key.code == KeyCode::F(2) || (key.code == KeyCode::Char('g') && alt) {
             self.open_diff();
             return true;
@@ -1759,10 +1779,41 @@ impl App {
                     8 => self.open_engine_picker(),
                     9 => self.open_model_picker(),
                     10 => self.open_permission_picker(),
+                    11 => self.open_stop_confirmation(),
                     _ => unreachable!("fixed action list"),
                 }
             }
             _ => {}
+        }
+        true
+    }
+
+    fn open_stop_confirmation(&mut self) {
+        if self.size.width > 0 && (self.size.width < 40 || self.size.height < 12) {
+            self.notice = "Enlarge terminal to confirm session stop".into();
+            return;
+        }
+        let Some(id) = self.groups[self.active_group].active_id() else {
+            self.notice = "Select a session to stop".into();
+            return;
+        };
+        if self.offline_ids.contains(id) {
+            self.notice = "This session is already stopped or archived".into();
+            return;
+        }
+        self.stop_confirmation = Some(id.to_owned());
+        self.drag = None;
+    }
+
+    fn stop_confirmation_key(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('n' | 'N') => self.stop_confirmation = None,
+            KeyCode::Char('y' | 'Y') if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT => {
+                let id = self.stop_confirmation.take().unwrap();
+                self.pending_stops.push(id.clone());
+                self.notice = format!("Requesting stop · {}", safe_label(&id));
+            }
+            _ => return false,
         }
         true
     }
@@ -2102,6 +2153,7 @@ impl App {
             || self.model_picker.is_some()
             || self.permission_picker.is_some()
             || self.engine_picker
+            || self.stop_confirmation.is_some()
             || self.new_session.is_some()
         {
             self.drag = None;
@@ -2307,7 +2359,7 @@ impl App {
         }
         frame.render_widget(
             Paragraph::new(format!(
-                "{}  |  Ctrl+P actions · Alt+E engine · Alt+M model · Alt+P permissions · Ctrl+R history · F2 diff · F4 diff pane · F3 rail · Shift+Tab pane · Ctrl+T tools · Ctrl+M peers · Alt+H/V split · Alt+arrows/drag resize · Ctrl+Q quit",
+                "{}  |  Ctrl+P actions · Alt+X stop · Alt+E engine · Alt+M model · Alt+P permissions · Ctrl+R history · F2 diff · F4 diff pane · F3 rail · Shift+Tab pane · Ctrl+T tools · Ctrl+M peers · Alt+H/V split · Alt+arrows/drag resize · Ctrl+Q quit",
                 self.notice
             )).style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)),
             Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
@@ -2324,7 +2376,26 @@ impl App {
         self.draw_history(frame, area);
         self.draw_diff(frame, area);
         self.draw_chip_picker(frame, area);
+        self.draw_stop_confirmation(frame, area);
         self.draw_request(frame, area);
+    }
+
+    fn draw_stop_confirmation(&self, frame: &mut Frame, area: Rect) {
+        let Some(id) = &self.stop_confirmation else { return; };
+        let width = area.width.saturating_sub(4).min(78);
+        let height = area.height.saturating_sub(4).min(12);
+        if width < 36 || height < 8 { return; }
+        let modal = Rect::new(area.x + (area.width - width) / 2,
+            area.y + (area.height - height) / 2, width, height);
+        let lines = vec![Line::from(" Stop and finalize this session?"),
+            Line::from(""), Line::from(format!(" Session ID: {id}")), Line::from(""),
+            Line::from(" The daemon will finish its shutdown work. This tab and draft remain visible."),
+            Line::from(""), Line::from(" Press Y to stop · Esc or N to cancel")];
+        frame.render_widget(Clear, modal);
+        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false })
+            .block(Block::default().title(" Stop active session ").borders(Borders::ALL)
+                .border_style(Style::default().fg(theme::ERROR)))
+            .style(Style::default().fg(theme::TEXT).bg(theme::RAISED)), modal);
     }
 
     fn draw_chip_picker(&self, frame: &mut Frame, area: Rect) {
@@ -2985,6 +3056,11 @@ fn run_loop(
                 app.notice = "Session launch unavailable · daemon connection closed".into();
                 changed = true;
             }
+            if !app.pending_stops.is_empty() {
+                app.pending_stops.clear();
+                app.notice = "Session stop unavailable · daemon connection closed".into();
+                changed = true;
+            }
         }
         if let Some(sender) = &prompt_sender {
             let disconnected = dispatch_launches(&mut app, sender);
@@ -2992,6 +3068,7 @@ fn run_loop(
             let disconnected = dispatch_answers(&mut app, sender) || disconnected;
             let disconnected = dispatch_peer_refresh(&mut app, sender) || disconnected;
             let disconnected = dispatch_model_controls(&mut app, sender) || disconnected;
+            let disconnected = dispatch_stops(&mut app, sender) || disconnected;
             if disconnected {
                 prompt_sender = None;
                 changed = true;
@@ -3025,6 +3102,26 @@ fn dispatch_launches(app: &mut App, sender: &SyncSender<crate::bridge::WorkerCom
             Err(TrySendError::Disconnected(_)) => {
                 app.launching = false;
                 app.notice = "Session launch unavailable".into();
+                return true;
+            }
+            Err(_) => unreachable!(),
+        }
+    }
+    false
+}
+
+fn dispatch_stops(app: &mut App, sender: &SyncSender<crate::bridge::WorkerCommand>) -> bool {
+    let mut stops = std::mem::take(&mut app.pending_stops).into_iter();
+    while let Some(id) = stops.next() {
+        match sender.try_send(crate::bridge::WorkerCommand::Stop(id)) {
+            Ok(()) => {}
+            Err(TrySendError::Full(crate::bridge::WorkerCommand::Stop(id))) => {
+                app.pending_stops.extend(std::iter::once(id).chain(stops));
+                app.notice = "Daemon writer busy · stop request retained".into();
+                return false;
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                app.notice = "Session stop unavailable · daemon connection closed".into();
                 return true;
             }
             Err(_) => unreachable!(),
@@ -3201,6 +3298,43 @@ mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
     use serde_json::json;
+
+    #[test]
+    fn stop_requires_confirmation_and_preserves_the_target_and_draft() {
+        let mut app = App::default();
+        app.size = Rect::new(0, 0, 100, 28);
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"first", "model":"one"}));
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"second", "model":"two"}));
+        app.groups[0].tabs = vec!["first".into(), "second".into()];
+        app.groups[0].active = 0;
+        app.input = "unsent draft".into();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT)));
+        assert_eq!(app.stop_confirmation.as_deref(), Some("first"));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        assert!(app.pending_stops.is_empty());
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT)));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)));
+        assert_eq!(app.pending_stops, vec!["first"]);
+        assert_eq!(app.input, "unsent draft");
+        app.apply_daemon_frame(&json!({"type":"stop_reply", "session_id":"first", "ok":true}));
+        assert!(app.offline_ids.contains("first"));
+        assert_eq!(app.groups[0].active_id(), Some("first"));
+        assert_eq!(app.input, "unsent draft");
+        app.open_stop_confirmation();
+        assert!(app.stop_confirmation.is_none());
+    }
+
+    #[test]
+    fn refused_stop_keeps_session_live_and_draft_intact() {
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"first"}));
+        app.input = "keep this".into();
+        app.apply_daemon_frame(&json!({"type":"stop_reply", "session_id":"first", "ok":false,
+            "error":"busy"}));
+        assert!(!app.offline_ids.contains("first"));
+        assert_eq!(app.input, "keep this");
+        assert!(app.notice.contains("busy"));
+    }
 
     #[test]
     fn model_picker_is_capability_gated_and_uses_only_daemon_catalog() {
