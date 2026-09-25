@@ -32,6 +32,8 @@ pub trait Host: Send + Sync + 'static {
     fn prompt(&self, text: &str, emit: &mut dyn FnMut(Value));
     fn call(&self, method: &str, params: &Value) -> Result<Value, String>;
     fn initial_model(&self) -> Option<String> { None }
+    /// Effort asserted for this session at connect time; None is unknown.
+    fn initial_effort(&self) -> Option<String> { None }
     fn initial_permission_mode(&self) -> String { "default".to_owned() }
     fn can_set_model(&self) -> bool { false }
     fn can_set_permission_mode(&self) -> bool { false }
@@ -304,6 +306,7 @@ fn handle_client(inner: Arc<Inner>, stream: UnixStream) {
         Err(_) => return,
     };
     let can_set_model = inner.host.can_set_model();
+    let effort = inner.host.initial_effort();
     let can_set_permission_mode = inner.host.can_set_permission_mode();
     let lore_scrub = inner.host.lore_scrub_status();
     let billing = inner.host.billing_snapshot();
@@ -312,7 +315,7 @@ fn handle_client(inner: Arc<Inner>, stream: UnixStream) {
         json!({"type":"hello", "proto":1, "doxa":inner.session.doxa_version,
             "session_id":inner.session.session_id, "model":state.model,
             "permission_mode":state.permission_mode, "bypass_armed":false,
-            "engine":inner.session.engine, "cwd":inner.session.cwd, "next_seq":state.next_seq,
+            "engine":inner.session.engine, "effort":effort, "cwd":inner.session.cwd, "next_seq":state.next_seq,
             "transcript_path":transcript.as_ref().map(|(path, _)| path.to_string_lossy().into_owned()),
             "transcript_bytes":transcript.as_ref().map(|(_, size)| *size),
             "running":state.busy,"queued":state.prompts.len(),
@@ -471,13 +474,14 @@ fn handle_call(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame: &Value) {
         }
     } else if method == "status" {
         let can_set_model = inner.host.can_set_model();
+        let effort = inner.host.initial_effort();
         let can_set_permission_mode = inner.host.can_set_permission_mode();
         let lore_scrub = inner.host.lore_scrub_status();
         let billing = inner.host.billing_snapshot();
         let state = inner.state.lock().unwrap();
         (Ok(json!({"status":{"session_id":inner.session.session_id,"cwd":inner.session.cwd,
             "model":state.model,"permission_mode":state.permission_mode,
-            "engine":inner.session.engine,"running":state.busy,"queued":state.prompts.len(),
+            "engine":inner.session.engine,"effort":effort,"running":state.busy,"queued":state.prompts.len(),
             "can_set_model":can_set_model,
             "can_set_permission_mode":can_set_permission_mode,
             "lore_scrub":lore_scrub,"billing":billing}})), None)

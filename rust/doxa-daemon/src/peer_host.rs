@@ -329,6 +329,7 @@ impl PeerHost {
 
 impl Host for PeerHost {
     fn initial_model(&self) -> Option<String> { self.inner.initial_model() }
+    fn initial_effort(&self) -> Option<String> { self.inner.initial_effort() }
     fn initial_permission_mode(&self) -> String { self.inner.initial_permission_mode() }
     fn can_set_model(&self) -> bool { self.inner.can_set_model() }
     fn can_set_permission_mode(&self) -> bool { self.inner.can_set_permission_mode() }

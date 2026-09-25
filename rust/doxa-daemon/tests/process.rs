@@ -1969,8 +1969,10 @@ mod vendor_process {
             let mut process = start_vendor(dir.path(), vendor, &endpoint, &lore);
             assert_eq!(process.entry()["engine"], vendor);
             let (mut reader, mut socket) = process.connect();
+            let hello = receive(&mut reader);
+            assert_eq!(hello["effort"], "high");
             assert_eq!(
-                receive(&mut reader)["model"],
+                hello["model"],
                 if vendor == "glm" {
                     "glm-5.3-flash"
                 } else {

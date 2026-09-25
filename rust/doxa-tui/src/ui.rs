@@ -63,6 +63,31 @@ const ACTIONS: [(&str, &str); 13] = [
 ];
 
 const ENGINE_CHOICES: [&str; 4] = ["codex", "claude", "deepseek", "glm"];
+// Fallback model IDs measured from the vendors' catalogues in Python 1.19.
+// Unknown models get no effort choices until a verified capability arrives.
+const DEEPSEEK_MODELS: [&str; 2] = ["deepseek-flash", "deepseek-v4-pro"];
+const GLM_MODELS: [&str; 10] = ["glm-4.5", "glm-4.5-air", "glm-4.6", "glm-4.7",
+    "glm-5", "glm-5-turbo", "glm-5.1", "glm-5.2", "glm-5.3", "glm-5.3-flash"];
+const DEEPSEEK_EFFORTS: [&str; 4] = ["none", "low", "high", "max"];
+const GLM_EFFORTS: [&str; 3] = ["low", "high", "max"];
+
+fn vendor_models(engine: launch::Engine) -> &'static [&'static str] {
+    match engine { launch::Engine::DeepSeek => &DEEPSEEK_MODELS, launch::Engine::Glm => &GLM_MODELS, _ => &[] }
+}
+fn vendor_default_model(engine: launch::Engine) -> &'static str {
+    match engine { launch::Engine::DeepSeek => "deepseek-flash", launch::Engine::Glm => "glm-5.3-flash", _ => "" }
+}
+fn effort_choices(engine: &str, model: &str) -> &'static [&'static str] {
+    match engine {
+        "deepseek" if DEEPSEEK_MODELS.contains(&model) => &DEEPSEEK_EFFORTS,
+        "glm" if GLM_MODELS.contains(&model) => &GLM_EFFORTS,
+        _ => &[],
+    }
+}
+fn engine_name(engine: launch::Engine) -> &'static str {
+    match engine { launch::Engine::Codex => "codex", launch::Engine::Claude => "claude",
+        launch::Engine::DeepSeek => "deepseek", launch::Engine::Glm => "glm", launch::Engine::Fixture => "fixture" }
+}
 const PERMISSION_CHOICES: [(&str, &str); 5] = [
     ("default", "Ask before dangerous calls"),
     ("acceptEdits", "Allow file edits; ask for other calls"),
@@ -131,9 +156,14 @@ struct LorePicker {
 struct NewSession {
     engine: launch::Engine,
     model: String,
+    effort: Option<String>,
     prompt: String,
     field: usize,
 }
+
+#[derive(Debug)]
+struct EffortPicker { session_id: String, engine: String, model: String,
+    levels: Vec<String>, selected: usize }
 
 #[derive(Debug, Clone)]
 struct QueueRow { id: String, preview: String }
@@ -171,6 +201,7 @@ fn chip_hint(kind: &str) -> &'static str {
         "model" => "Model for this session · click to choose",
         "repo" => "This session's repository and base branch · click for worktree details",
         "directory" => "This session's directory; no Git repository is active",
+        "effort" => "This session's reasoning effort · click or Alt+F to set a default for new sessions",
         "context" => "Current session context usage · click for details",
         "memory" => "User and scoped LORE memory · click to view entries",
         "beliefs" => "LORE beliefs · click to browse",
@@ -291,7 +322,7 @@ fn wrapped_rows(text: &str, width: usize) -> usize {
 fn chip_text(kind: &str, label: &str) -> String {
     if kind == "more" {
         format!(" {label} › ")
-    } else if matches!(kind, "engine" | "model" | "permission" | "beliefs") {
+    } else if matches!(kind, "engine" | "model" | "effort" | "permission" | "beliefs") {
         format!(" {label} ▾ ")
     } else {
         format!(" {label} ")
@@ -776,6 +807,8 @@ pub struct App {
     input_cursor: usize,
     input_drafts: HashMap<(usize, String), (String, usize)>,
     session_identity: HashMap<String, (Option<String>, Option<String>)>,
+    session_efforts: HashMap<String, String>,
+    next_efforts: HashMap<String, String>,
     pub(crate) custom_names: HashMap<String, String>,
     session_telemetry: HashMap<String, SessionTelemetry>,
     // LORE owns these counts. A bounded background query keeps store I/O off
@@ -805,6 +838,7 @@ pub struct App {
     stop_confirmation: Option<String>,
     pending_stops: Vec<String>,
     model_picker: Option<ModelPicker>,
+    effort_picker: Option<EffortPicker>,
     attach_picker: Option<AttachPicker>,
     lore_picker: Option<LorePicker>,
     engine_picker: bool,
@@ -895,6 +929,8 @@ impl Default for App {
             input_cursor: 0,
             input_drafts: HashMap::new(),
             session_identity: HashMap::new(),
+            session_efforts: HashMap::new(),
+            next_efforts: HashMap::new(),
             custom_names: HashMap::new(),
             session_telemetry: HashMap::new(),
             memory_cache: HashMap::new(),
@@ -920,6 +956,7 @@ impl Default for App {
             stop_confirmation: None,
             pending_stops: Vec::new(),
             model_picker: None,
+            effort_picker: None,
             attach_picker: None,
             lore_picker: None,
             engine_picker: false,
@@ -1139,6 +1176,9 @@ impl App {
                 let model = frame.get("model").and_then(|v| v.as_str()).map(safe_label).filter(|s| !s.is_empty());
                 let engine = frame.get("engine").and_then(|v| v.as_str()).map(safe_label).filter(|s| !s.is_empty());
                 self.session_identity.insert(id.to_owned(), (engine, model.clone()));
+                if let Some(effort) = frame["effort"].as_str().filter(|effort| !effort.is_empty()) {
+                    self.session_efforts.insert(id.to_owned(), safe_label(effort));
+                } else { self.session_efforts.remove(id); }
                 self.session_telemetry.entry(id.to_owned()).or_default().update_status(frame);
                 self.model_capabilities.insert(id.to_owned(), frame["can_set_model"] == true);
                 self.permission_capabilities.insert(id.to_owned(), frame["can_set_permission_mode"] == true);
@@ -1208,6 +1248,9 @@ impl App {
                         true
                     }
                     "model_changed" => {
+                        if self.effort_picker.as_ref().is_some_and(|picker| picker.session_id == id) {
+                            self.effort_picker = None;
+                        }
                         let old_model = self.session_identity.get(&id).and_then(|identity| identity.1.clone());
                         let new_model = data.get("model").and_then(|v| v.as_str()).map(safe_label).filter(|s| !s.is_empty());
                         if let Some(identity) = self.session_identity.get_mut(&id) {
@@ -1274,6 +1317,7 @@ impl App {
                                 self.drag = None;
                                 self.tool_modal = false;
                                 self.model_picker = None;
+                                self.effort_picker = None;
                                 self.permission_picker = None;
                                 self.permission_confirm_dont_ask = false;
                                 self.engine_picker = false;
@@ -1453,6 +1497,11 @@ impl App {
                         }
                         if status.get("model").is_some() {
                             identity.1 = status.get("model").and_then(|v| v.as_str()).map(safe_label).filter(|s| !s.is_empty());
+                        }
+                        if status.get("effort").is_some() {
+                            if let Some(effort) = status["effort"].as_str().filter(|effort| !effort.is_empty()) {
+                                self.session_efforts.insert(id.to_owned(), safe_label(effort));
+                            } else { self.session_efforts.remove(id); }
                         }
                         if let Some(can_set) = status.get("can_set_model").and_then(|v| v.as_bool()) {
                             self.model_capabilities.insert(id.to_owned(), can_set);
@@ -1643,9 +1692,10 @@ impl App {
                     self.stop_confirmation = None;
                     self.notice = "Session stop cancelled · enlarge terminal to confirm".into();
                 }
-                if ((self.model_picker.is_some() || self.engine_picker || self.new_session.is_some()) && (w < 29 || h < 11))
+                if ((self.model_picker.is_some() || self.effort_picker.is_some() || self.engine_picker || self.new_session.is_some()) && (w < 29 || h < 11))
                     || (self.permission_picker.is_some() && (w < 60 || h < 15)) {
                     self.model_picker = None;
+                    self.effort_picker = None;
                     self.engine_picker = false;
                     self.new_session = None;
                     self.permission_picker = None;
@@ -1684,7 +1734,7 @@ impl App {
         }
         if self.focus != Focus::Prompt || self.active_request_index().is_some()
             || self.stop_confirmation.is_some() || self.lore_picker.is_some()
-            || self.new_session.is_some() || self.model_picker.is_some()
+            || self.new_session.is_some() || self.model_picker.is_some() || self.effort_picker.is_some()
             || self.permission_picker.is_some() || self.engine_picker || self.action_menu
             || self.history_modal || self.queue_picker.is_some() || self.attach_picker.is_some() || self.diff_modal || self.map_modal || self.tool_modal {
             return false;
@@ -1763,7 +1813,7 @@ impl App {
         let mut parts = input.split_whitespace();
         let Some(name) = parts.next() else { return false; };
         let args: Vec<&str> = parts.collect();
-        if !matches!(name, "/help" | "/about" | "/sessions" | "/model" | "/engine"
+        if !matches!(name, "/help" | "/about" | "/sessions" | "/model" | "/effort" | "/engine"
             | "/mode" | "/beliefs" | "/diff" | "/peers" | "/split"
             | "/vsplit" | "/pane" | "/sidebar" | "/detach" | "/dir") {
             return false;
@@ -1812,6 +1862,7 @@ impl App {
             "/about" => self.notice = format!("DOXA Rust {}", env!("CARGO_PKG_VERSION")),
             "/sessions" => self.open_history(),
             "/model" => self.open_model_picker(),
+            "/effort" => self.open_effort_picker(),
             "/engine" => self.open_engine_picker(),
             "/mode" => self.open_permission_picker(),
             "/beliefs" => self.open_lore_picker(),
@@ -1897,6 +1948,7 @@ impl App {
         if self.lore_picker.is_some() { return self.lore_picker_key(key); }
         if self.new_session.is_some() { return self.new_session_key(key); }
         if self.model_picker.is_some() { return self.model_picker_key(key); }
+        if self.effort_picker.is_some() { return self.effort_picker_key(key); }
         if self.permission_picker.is_some() { return self.permission_picker_key(key); }
         if self.engine_picker { return self.engine_picker_key(key); }
         if self.action_menu {
@@ -1970,6 +2022,7 @@ impl App {
         }
         if key.code == KeyCode::Char('l') && alt { self.open_lore_picker(); return true; }
         if key.code == KeyCode::Char('m') && alt { self.open_model_picker(); return true; }
+        if key.code == KeyCode::Char('f') && alt { self.open_effort_picker(); return true; }
         if key.code == KeyCode::Char('p') && alt { self.open_permission_picker(); return true; }
         if key.code == KeyCode::Char('e') && alt { self.open_engine_picker(); return true; }
         if key.code == KeyCode::Char('x') && alt { self.open_stop_confirmation(); return true; }
@@ -2403,6 +2456,52 @@ impl App {
         self.pending_model_queries.push(id);
     }
 
+    fn open_effort_picker(&mut self) {
+        if self.size.width > 0 && (self.size.width < 29 || self.size.height < 11) {
+            self.notice = "Enlarge terminal to open effort picker".into();
+            return;
+        }
+        let Some(id) = self.groups[self.active_group].active_id().map(str::to_owned) else {
+            self.notice = "Select a session to inspect its effort".into();
+            return;
+        };
+        let Some((Some(engine), Some(model))) = self.session_identity.get(&id) else {
+            self.notice = "Effort capability is unknown for this session".into();
+            return;
+        };
+        let levels = effort_choices(engine, model).iter().map(|level| (*level).to_owned()).collect::<Vec<_>>();
+        if levels.is_empty() {
+            self.notice = "No verified effort choices for this engine and model".into();
+            return;
+        }
+        let selected = self.next_efforts.get(engine).or_else(|| self.session_efforts.get(&id))
+            .and_then(|current| levels.iter().position(|level| level == current)).unwrap_or(0);
+        self.effort_picker = Some(EffortPicker { session_id: id, engine: engine.clone(), model: model.clone(),
+            levels, selected });
+    }
+
+    fn select_effort(&mut self) {
+        let Some(picker) = self.effort_picker.take() else { return; };
+        let Some((Some(engine), Some(model))) = self.session_identity.get(&picker.session_id) else { return; };
+        if engine != &picker.engine || model != &picker.model { return; }
+        let Some(chosen) = picker.levels.get(picker.selected) else { return; };
+        if !effort_choices(engine, model).contains(&chosen.as_str()) { return; }
+        self.next_efforts.insert(engine.clone(), chosen.clone());
+        self.notice = format!("{engine} effort for new sessions: {chosen} · current session unchanged");
+    }
+
+    fn effort_picker_key(&mut self, key: KeyEvent) -> bool {
+        let Some(picker) = self.effort_picker.as_mut() else { return false; };
+        match key.code {
+            KeyCode::Esc => self.effort_picker = None,
+            KeyCode::Up => picker.selected = picker.selected.saturating_sub(1),
+            KeyCode::Down => picker.selected = (picker.selected + 1).min(picker.levels.len().saturating_sub(1)),
+            KeyCode::Enter => self.select_effort(),
+            _ => return false,
+        }
+        true
+    }
+
     fn open_permission_picker(&mut self) {
         if self.size.width > 0 && (self.size.width < 60 || self.size.height < 15) {
             self.notice = "Enlarge terminal to open permission picker".into();
@@ -2509,25 +2608,55 @@ impl App {
             _ => launch::Engine::Glm,
         };
         self.engine_picker = false;
-        self.new_session = Some(NewSession { engine, model: String::new(), prompt: String::new(), field: 0 });
+        let models = vendor_models(engine);
+        let model = vendor_default_model(engine).to_owned();
+        let engine_id = engine_name(engine);
+        let effort = self.next_efforts.get(engine_id)
+            .filter(|level| effort_choices(engine_id, &model).contains(&level.as_str()))
+            .cloned().or_else(|| (!models.is_empty()).then(|| "high".to_owned()));
+        self.new_session = Some(NewSession { engine, model, effort, prompt: String::new(), field: 0 });
     }
 
     fn new_session_key(&mut self, key: KeyEvent) -> bool {
         let form = self.new_session.as_mut().unwrap();
+        let vendor = !vendor_models(form.engine).is_empty();
+        let fields = if vendor { 3 } else { 2 };
+        let prompt_field = fields - 1;
         match key.code {
             KeyCode::Esc => self.new_session = None,
-            KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % 2,
-            KeyCode::BackTab | KeyCode::Up => form.field = (form.field + 1) % 2,
+            KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % fields,
+            KeyCode::BackTab | KeyCode::Up => form.field = (form.field + fields - 1) % fields,
+            KeyCode::Left | KeyCode::Right if vendor && form.field <= 1 => {
+                if form.field == 0 {
+                    let choices = vendor_models(form.engine);
+                    let current = choices.iter().position(|model| *model == form.model).unwrap_or(0);
+                    let next = if key.code == KeyCode::Right { (current + 1) % choices.len() }
+                        else { (current + choices.len() - 1) % choices.len() };
+                    form.model = choices[next].into();
+                    // Discard an effort no longer supported by the new model.
+                    if form.effort.as_deref().is_some_and(|level| !effort_choices(engine_name(form.engine), &form.model).contains(&level)) {
+                        form.effort = None;
+                    }
+                } else {
+                    let levels = effort_choices(engine_name(form.engine), &form.model);
+                    if levels.is_empty() { form.effort = None; return true; }
+                    let current = form.effort.as_deref().and_then(|level| levels.iter().position(|x| *x == level)).unwrap_or(0);
+                    let next = if key.code == KeyCode::Right { (current + 1) % levels.len() }
+                        else { (current + levels.len() - 1) % levels.len() };
+                    form.effort = Some(levels[next].into());
+                }
+            }
             KeyCode::Backspace => {
-                if form.field == 0 { form.model.pop(); } else { form.prompt.pop(); }
+                if form.field == prompt_field { form.prompt.pop(); }
+                else if !vendor && form.field == 0 { form.model.pop(); }
             }
             KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
                 && !c.is_control() => {
-                let target = if form.field == 0 { &mut form.model } else { &mut form.prompt };
-                let limit = if form.field == 0 { 128 } else { MAX_INPUT_BYTES };
-                if target.len() + c.len_utf8() <= limit { target.push(c); }
+                if form.field == prompt_field {
+                    if form.prompt.len() + c.len_utf8() <= MAX_INPUT_BYTES { form.prompt.push(c); }
+                } else if !vendor && form.field == 0 && form.model.len() + c.len_utf8() <= 128 { form.model.push(c); }
             }
-            KeyCode::Enter if form.field == 0 => form.field = 1,
+            KeyCode::Enter if form.field < prompt_field => form.field += 1,
             KeyCode::Enter => {
                 if self.launching {
                     self.notice = "Session launch already in progress".into();
@@ -2536,6 +2665,15 @@ impl App {
                 let form = self.new_session.take().unwrap();
                 let mut options = launch::LaunchOptions { engine: form.engine, ..Default::default() };
                 if !form.model.trim().is_empty() { options.model = Some(form.model.trim().to_owned()); }
+                if vendor {
+                    let allowed = effort_choices(engine_name(form.engine), &form.model);
+                    if !vendor_models(form.engine).contains(&form.model.as_str()) ||
+                        form.effort.as_deref().is_some_and(|level| !allowed.contains(&level)) {
+                        self.notice = "Model or effort capability changed; session was not started".into();
+                        return true;
+                    }
+                    options.effort = form.effort;
+                }
                 if form.engine == launch::Engine::Claude {
                     options.claude_script = std::env::var_os("DOXA_CLAUDE_SCRIPT").map(PathBuf::from);
                 }
@@ -3963,7 +4101,9 @@ impl App {
         } else if self.engine_picker {
             7
         } else if let Some(form) = &self.new_session {
-            if form.engine == launch::Engine::Claude { 8 } else { 7 }
+            if form.engine == launch::Engine::Claude || !vendor_models(form.engine).is_empty() { 8 } else { 7 }
+        } else if let Some(picker) = &self.effort_picker {
+            (4 + picker.levels.len()).clamp(5, 10) as u16
         } else if self.permission_picker.is_some() {
             10
         } else if let Some(picker) = &self.model_picker {
@@ -4033,6 +4173,8 @@ impl App {
         } else {
             chips.push(("model", "Model".to_owned()));
         }
+        let effort = id.and_then(|id| self.session_efforts.get(id)).map(String::as_str).unwrap_or("?");
+        chips.push(("effort", format!("Effort {effort}")));
         if let Some(status) = id.and_then(|id| self.repo_cache.get(id))
             .and_then(|(status, _)| status.as_ref()) {
             chips.push(repo_chip(status));
@@ -4363,13 +4505,14 @@ impl App {
         }
         if self.active_request_index().is_none()
             && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
-            && (self.engine_picker || self.new_session.is_some() || self.model_picker.is_some() || self.permission_picker.is_some()) {
+            && (self.engine_picker || self.new_session.is_some() || self.model_picker.is_some() || self.effort_picker.is_some() || self.permission_picker.is_some()) {
             let Some(menu) = self.active_chooser_rect() else { return false; };
             let (x, y, width, height) = (menu.x, menu.y, menu.width, menu.height);
             if mouse.column < x || mouse.column >= x + width || mouse.row < y || mouse.row >= y + height {
                 self.engine_picker = false;
                 self.new_session = None;
                 self.model_picker = None;
+                self.effort_picker = None;
                 self.permission_picker = None;
                 self.permission_confirm_dont_ask = false;
                 return true;
@@ -4387,6 +4530,16 @@ impl App {
                 return true;
             }
             if self.new_session.is_some() { return true; }
+            if let Some(picker) = &mut self.effort_picker {
+                let visible = usize::from(height.saturating_sub(4)).max(1);
+                let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+                let row = start + usize::from(mouse.row.saturating_sub(y + 3));
+                if mouse.row >= y + 3 && row < picker.levels.len() {
+                    picker.selected = row;
+                    self.select_effort();
+                }
+                return true;
+            }
             if let Some((_, selected)) = &mut self.permission_picker {
                 let offset = if height >= 10 { 4 } else { 2 };
                 if mouse.row >= y + offset {
@@ -4426,6 +4579,7 @@ impl App {
             || self.lore_picker.is_some()
             || self.diff_modal
             || self.model_picker.is_some()
+            || self.effort_picker.is_some()
             || self.permission_picker.is_some()
             || self.engine_picker
             || self.stop_confirmation.is_some()
@@ -4442,6 +4596,7 @@ impl App {
                     "permission" => self.open_permission_picker(),
                     "engine" => self.open_engine_picker(),
                     "model" => self.open_model_picker(),
+                    "effort" => self.open_effort_picker(),
                     "beliefs" => self.open_lore_picker(),
                     "memory" => self.open_memory_menu(hit.group),
                     "more" => {
@@ -4653,7 +4808,7 @@ impl App {
                 let fallback = Rect::new(area.x + (area.width - width) / 2,
                     area.y + (area.height - height) / 2, width, height);
                 if self.action_menu || self.lore_picker.is_some() || self.engine_picker
-                    || self.new_session.is_some() || self.model_picker.is_some() || self.permission_picker.is_some() {
+                    || self.new_session.is_some() || self.model_picker.is_some() || self.effort_picker.is_some() || self.permission_picker.is_some() {
                     frame.render_widget(Clear, fallback);
                     if self.action_menu { self.draw_actions(frame, fallback); }
                     else if self.lore_picker.is_some() { self.draw_lore_picker(frame, fallback); }
@@ -4714,7 +4869,7 @@ impl App {
     }
 
     fn draw_chip_picker(&self, frame: &mut Frame, area: Rect) {
-        if !self.engine_picker && self.new_session.is_none() && self.model_picker.is_none() && self.permission_picker.is_none() { return; }
+        if !self.engine_picker && self.new_session.is_none() && self.model_picker.is_none() && self.effort_picker.is_none() && self.permission_picker.is_none() { return; }
         let height = area.height;
         let modal = area;
         let mut lines = Vec::new();
@@ -4739,13 +4894,21 @@ impl App {
                 launch::Engine::DeepSeek => "deepseek", launch::Engine::Glm => "glm", launch::Engine::Fixture => "fixture" };
             lines.push(Line::from(format!(" Engine: {name}")));
             if height >= 8 {
-                lines.push(Line::from(" Blank model uses configured engine default."));
+                lines.push(Line::from(if vendor_models(form.engine).is_empty() {
+                    " Blank model uses configured engine default."
+                } else { " Left/Right choose catalog fallback model and effort." }));
                 lines.push(Line::from(""));
             }
             lines.push(Line::styled(format!(" {} Model: {}", if form.field == 0 { '›' } else { ' ' }, safe_label(&form.model)),
                 Style::default().fg(if form.field == 0 { theme::ACCENT } else { theme::SECONDARY })));
-            lines.push(Line::styled(format!(" {} First prompt: {}", if form.field == 1 { '›' } else { ' ' }, safe_label(&form.prompt)),
-                Style::default().fg(if form.field == 1 { theme::ACCENT } else { theme::SECONDARY })));
+            let prompt_field = if vendor_models(form.engine).is_empty() { 1 } else { 2 };
+            if prompt_field == 2 {
+                lines.push(Line::styled(format!(" {} Effort: {}", if form.field == 1 { '›' } else { ' ' },
+                    form.effort.as_deref().unwrap_or("unknown")),
+                    Style::default().fg(if form.field == 1 { theme::ACCENT } else { theme::SECONDARY })));
+            }
+            lines.push(Line::styled(format!(" {} First prompt: {}", if form.field == prompt_field { '›' } else { ' ' }, safe_label(&form.prompt)),
+                Style::default().fg(if form.field == prompt_field { theme::ACCENT } else { theme::SECONDARY })));
             if form.engine == launch::Engine::Claude {
                 lines.push(Line::from(" Claude sidecar is bundled by the preview installer."));
             }
@@ -4768,6 +4931,17 @@ impl App {
                 lines.push(Line::styled(format!(" {} {} {} · {}", if index == *selected { '›' } else { ' ' },
                     if current { '●' } else { ' ' }, mode, description),
                     Style::default().fg(if index == *selected { theme::ACCENT } else { theme::SECONDARY })));
+            }
+        } else if let Some(picker) = &self.effort_picker {
+            title = " Effort · new sessions only · Enter select · Esc close ";
+            let current = self.session_efforts.get(&picker.session_id).map(String::as_str).unwrap_or("unknown");
+            lines.push(Line::from(format!(" Current session keeps {current}; {}/{}", picker.engine, picker.model)));
+            lines.push(Line::from(""));
+            let visible = usize::from(height.saturating_sub(4)).max(1);
+            let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+            for (index, level) in picker.levels.iter().enumerate().skip(start).take(visible) {
+                lines.push(Line::styled(format!(" {} {}", if index == picker.selected { '›' } else { ' ' }, level),
+                    Style::default().fg(if index == picker.selected { theme::ACCENT } else { theme::SECONDARY })));
             }
         } else {
             title = " Model · this session · R retry · Enter select · Esc close ";
@@ -5329,7 +5503,7 @@ impl App {
         if active && chooser_height > 0 {
             if self.active_request_index().is_some_and(|index| self.input_requests[index].kind == "ask_user") {
                 self.draw_request(frame, inner[2], true);
-            } else if self.engine_picker || self.new_session.is_some() || self.model_picker.is_some() || self.permission_picker.is_some() {
+            } else if self.engine_picker || self.new_session.is_some() || self.model_picker.is_some() || self.effort_picker.is_some() || self.permission_picker.is_some() {
                 self.draw_chip_picker(frame, inner[2]);
             } else if self.lore_picker.is_some() {
                 self.draw_lore_picker(frame, inner[2]);
@@ -6082,8 +6256,9 @@ mod tests {
         assert_eq!(chips[0], ("permission", "Permissions auto".into()));
         assert_eq!(chips[1], ("engine", "claude".into()));
         assert_eq!(chips[2], ("model", "sonnet".into()));
-        assert_eq!(chips[3].0, "context");
-        assert!(chips[3].1.starts_with("Ctx "));
+        assert_eq!(chips[3], ("effort", "Effort ?".into()));
+        assert_eq!(chips[4].0, "context");
+        assert!(chips[4].1.starts_with("Ctx "));
 
         let pane = app.layout(app.size).body;
         let chip_y = pane.bottom().saturating_sub(prompt_height("", pane.height) + 2);
@@ -6194,11 +6369,11 @@ mod tests {
         let pane = layout.panes.map_or(layout.body, |panes| panes[0]);
         let visible = app.chip_window(0, usize::from(pane.width));
         assert_eq!(visible.iter().take(4).map(|(kind, _)| *kind).collect::<Vec<_>>(),
-            vec!["permission", "engine", "model", "context"]);
+            vec!["permission", "engine", "model", "effort"]);
         assert_eq!(visible[0].1, "Permissions default");
         assert_eq!(visible[1].1, "claude");
         assert_eq!(visible[2].1, "claude-sonnet-4");
-        assert!(visible[3].1.starts_with("Ctx "));
+        assert_eq!(visible[3].1, "Effort ?");
         let occupied = visible.iter().map(|(kind, label)| chip_text(kind, label).width()).sum::<usize>()
             + visible.len().saturating_sub(1);
         assert!(occupied <= usize::from(pane.width));
@@ -6322,9 +6497,9 @@ mod tests {
         app.handle(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
         app.handle(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
-        for c in "deepseek-test".chars() {
-            app.handle(Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)));
-        }
+        assert_eq!(app.new_session.as_ref().unwrap().model, "deepseek-flash");
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.new_session.as_ref().unwrap().effort.as_deref(), Some("high"));
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         for c in "Explain this".chars() {
             app.handle(Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)));
@@ -6332,11 +6507,87 @@ mod tests {
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         let (options, prompt, group) = app.pending_launches.pop().unwrap();
         assert_eq!(options.engine, launch::Engine::DeepSeek);
-        assert_eq!(options.model.as_deref(), Some("deepseek-test"));
+        assert_eq!(options.model.as_deref(), Some("deepseek-flash"));
+        assert_eq!(options.effort.as_deref(), Some("high"));
         assert_eq!(prompt.as_deref(), Some("Explain this"));
         assert_eq!(group, 0);
         assert!(app.launching);
         assert!(app.new_session.is_none());
+    }
+
+    #[test]
+    fn effort_chip_picker_is_per_session_and_sets_only_new_session_default() {
+        let mut app = App::default();
+        app.handle(Event::Resize(220, 32));
+        app.rail_visible = false;
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"deep-1",
+            "engine":"deepseek","model":"deepseek-flash","effort":"high"}));
+        app.groups[0].tabs = vec!["deep-1".into()];
+        let effort_index = app.chips(0).iter().position(|(kind, _)| *kind == "effort").unwrap();
+        assert_eq!(app.chips(0)[effort_index], ("effort", "Effort high".into()));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::ALT)));
+        assert_eq!(app.effort_picker.as_ref().unwrap().levels, ["none", "low", "high", "max"]);
+        assert_eq!(app.effort_picker.as_ref().unwrap().selected, 2);
+        assert!(painted(&app).contains("new sessions only"));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.next_efforts["deepseek"], "max");
+        assert_eq!(app.session_efforts["deep-1"], "high");
+
+        let effort_hit = app.rendered_chip_hits.borrow().as_ref().unwrap().iter()
+            .find(|hit| hit.kind == "effort").unwrap().clone();
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: effort_hit.rect.x + 1, row: effort_hit.rect.y, modifiers: KeyModifiers::NONE }));
+        assert!(app.effort_picker.is_some());
+        let menu = app.active_chooser_rect().unwrap();
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: menu.x + 2, row: menu.y + 3, modifiers: KeyModifiers::NONE }));
+        assert_eq!(app.next_efforts["deepseek"], "none");
+        assert!(app.effort_picker.is_none());
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"glm-2",
+            "engine":"glm","model":"glm-5.3-flash","effort":"low"}));
+        app.groups[0].tabs.push("glm-2".into());
+        app.groups[0].active = 1;
+        assert_eq!(app.chips(0).iter().find(|(kind, _)| *kind == "effort").unwrap().1, "Effort low");
+        app.open_effort_picker();
+        assert_eq!(app.effort_picker.as_ref().unwrap().levels, ["low", "high", "max"]);
+        assert!(!app.effort_picker.as_ref().unwrap().levels.contains(&"none".to_owned()));
+        assert_eq!(app.next_efforts["deepseek"], "none");
+        app.apply_daemon_frame(&json!({"type":"event","session_id":"glm-2",
+            "event":{"type":"model_changed","data":{"model":"unknown-new-model"}}}));
+        assert!(app.effort_picker.is_none());
+        app.open_effort_picker();
+        assert!(app.effort_picker.is_none());
+    }
+
+    #[test]
+    fn effort_capability_and_vendor_model_choices_fail_closed() {
+        assert_eq!(effort_choices("glm", "glm-5.3-flash"), ["low", "high", "max"]);
+        assert!(effort_choices("glm", "glm-unverified").is_empty());
+        assert!(effort_choices("deepseek", "glm-5.3-flash").is_empty());
+        assert!(effort_choices("codex", "gpt-6").is_empty());
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"unknown",
+            "engine":"codex","model":"gpt-6","effort":"high"}));
+        app.groups[0].tabs = vec!["unknown".into()];
+        app.open_effort_picker();
+        assert!(app.effort_picker.is_none());
+        assert!(app.notice.contains("No verified effort"));
+
+        app.engine_selected = 2;
+        app.select_new_engine();
+        assert_eq!(app.new_session.as_ref().unwrap().model, "deepseek-flash");
+        assert_eq!(app.new_session.as_ref().unwrap().effort.as_deref(), Some("high"));
+        app.new_session.as_mut().unwrap().field = 0;
+        app.new_session_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(app.new_session.as_ref().unwrap().model, "deepseek-v4-pro");
+        app.engine_selected = 3;
+        app.select_new_engine();
+        assert_eq!(app.new_session.as_ref().unwrap().model, "glm-5.3-flash");
+        assert_eq!(app.new_session.as_ref().unwrap().effort.as_deref(), Some("high"));
+        let form = app.new_session.as_ref().unwrap();
+        assert!(!vendor_models(form.engine).contains(&"deepseek-v4-pro"));
+        assert!(!effort_choices(engine_name(form.engine), &form.model).contains(&"none"));
     }
 
     #[test]
@@ -6500,6 +6751,7 @@ mod tests {
                 "permission" => assert!(app.permission_picker.is_some()),
                 "engine" => assert!(app.engine_picker),
                 "model" => assert!(app.model_picker.is_some()),
+                "effort" => assert!(app.notice.contains("No verified effort")),
                 "beliefs" => assert!(app.lore_picker.is_some()),
                 _ => {
                     assert_eq!(app.chip_info.as_ref().map(|info| info.kind), Some(kind));

@@ -25,6 +25,7 @@ impl Host for CapabilityProbe {
         Ok(None)
     }
     fn can_set_model(&self) -> bool { self.check(); true }
+    fn initial_effort(&self) -> Option<String> { self.check(); Some("high".into()) }
     fn can_set_permission_mode(&self) -> bool { self.check(); true }
     fn lore_scrub_status(&self) -> Option<&'static str> { self.check(); Some("ready") }
 }
@@ -44,11 +45,13 @@ fn hello_and_status_capabilities_can_access_session_state() {
     let (mut reader, mut writer) = connect(handle.socket_path());
     let hello = recv(&mut reader);
     assert_eq!(hello["type"], "hello");
+    assert_eq!(hello["effort"], "high");
     assert_eq!(hello["lore_scrub"], "ready");
     send(&mut writer, json!({"type":"attach","cursor":null}));
     send(&mut writer, json!({"type":"call","id":1,"method":"status","params":{}}));
     let status = recv(&mut reader)["status"].clone();
     assert_eq!(status["can_set_model"], true);
+    assert_eq!(status["effort"], "high");
     assert_eq!(status["lore_scrub"], "ready");
     *host.0.lock().unwrap() = None;
 }

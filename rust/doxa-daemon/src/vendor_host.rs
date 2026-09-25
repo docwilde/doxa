@@ -165,6 +165,7 @@ impl VendorHost {
 }
 
 impl Host for VendorHost {
+    fn initial_effort(&self) -> Option<String> { Some(self.effort.clone()) }
     fn billing_snapshot(&self) -> Option<Value> {
         if self.vendor != Vendor::DeepSeek { return None; }
         self.balance.lock().ok().and_then(|value| value.as_ref()

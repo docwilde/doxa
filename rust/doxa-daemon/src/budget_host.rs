@@ -25,6 +25,7 @@ impl BudgetHost {
 }
 
 impl Host for BudgetHost {
+    fn initial_effort(&self) -> Option<String> { self.inner.initial_effort() }
     fn prompt(&self, text: &str, emit: &mut dyn FnMut(Value)) {
         // The runtime serializes prompt execution, but this mutex also keeps
         // observation and the next admission on one state boundary.
