@@ -584,7 +584,7 @@ def test_belief_actions_use_exact_review_and_canonical_lore_mutators(tmp_path):
     db = tmp_path / "beliefs.db"
     conn = sqlite3.connect(db)
     conn.execute("CREATE TABLE beliefs(id INTEGER PRIMARY KEY, uid TEXT, subject TEXT, claim TEXT, status TEXT)")
-    conn.execute("INSERT INTO beliefs VALUES(1,'uid-one','project:my-project','SECRET fact','active')")
+    conn.execute("INSERT INTO beliefs VALUES(1,'uid-one','project:my-project','Safe fact','active')")
     conn.commit()
     conn.close()
     calls = []
@@ -603,8 +603,8 @@ def test_belief_actions_use_exact_review_and_canonical_lore_mutators(tmp_path):
            lambda conn, bid: (0, 1, 0), outcome)
     review = lore_bridge._belief_review({"cwd": "/repo", "belief_id": 1}, ops,
                                         lambda text: text.replace("SECRET", "[redacted]"))
-    assert review["claim"] == "[redacted] fact"
-    assert review["claim_sha256"] == hashlib.sha256(b"SECRET fact").hexdigest()
+    assert review["claim"] == "Safe fact"
+    assert review["claim_sha256"] == hashlib.sha256(b"Safe fact").hexdigest()
     expected = {key: review[key] for key in ("uid", "subject", "claim_sha256")}
     request = {"cwd": "/repo", "belief_id": 1, "expected": expected,
                "action": "contradicted", "note": "Observed failure"}
@@ -616,6 +616,22 @@ def test_belief_actions_use_exact_review_and_canonical_lore_mutators(tmp_path):
         lore_bridge._belief_action(request, ops)
     assert changed.value.code == "belief_changed"
     assert len(calls) == 1
+
+
+def test_belief_review_refuses_claim_if_scrub_hides_content(tmp_path):
+    db = tmp_path / "beliefs.db"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE beliefs(id INTEGER PRIMARY KEY, uid TEXT, subject TEXT, claim TEXT, status TEXT)")
+    conn.execute("INSERT INTO beliefs VALUES(1,'uid-one','user','SECRET fact','active')")
+    conn.commit()
+    conn.close()
+    ops = (lambda cwd: "my-project", lambda: sqlite3.connect(db),
+           lambda *args: None, lambda conn, bid: (0, 0, 0),
+           lambda *args, **kwargs: None)
+    with pytest.raises(lore_bridge.BeliefActionError) as error:
+        lore_bridge._belief_review({"cwd": "/repo", "belief_id": 1}, ops,
+                                   lambda text: text.replace("SECRET", "[redacted]"))
+    assert error.value.code == "belief_incomplete"
 
 
 def test_belief_review_and_action_refuse_foreign_missing_and_changed_rows(tmp_path):

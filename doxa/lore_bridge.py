@@ -196,7 +196,11 @@ def _belief_review(req: dict[str, Any], ops: tuple[Any, Any, Any, Any, Any],
     finally:
         conn.close()
     safe_claim = scrub(claim)
-    if not isinstance(safe_claim, str) or len(safe_claim.encode("utf-8")) > 16384:
+    # An action requires a complete human review. If scrubbing hid part of the
+    # claim, keep the secret hidden and refuse to authorize a mutation from an
+    # incomplete display.
+    if (not isinstance(safe_claim, str) or safe_claim != claim
+            or len(safe_claim.encode("utf-8")) > 16384):
         raise BeliefActionError("belief_incomplete")
     return {"id": bid, "uid": uid, "subject": subject, "claim": safe_claim,
             "claim_sha256": hashlib.sha256(claim.encode("utf-8")).hexdigest()}

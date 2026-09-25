@@ -51,13 +51,22 @@ pub struct PendingReview {
 
 /// One exact active belief selected for review. The sidecar checks the raw
 /// claim digest again under LORE's write lock before applying an action.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct BeliefReview {
     id: u64,
     uid: String,
     subject: String,
     claim: String,
     claim_sha256: String,
+}
+
+impl std::fmt::Debug for BeliefReview {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BeliefReview")
+            .field("id", &self.id)
+            .field("claim_bytes", &self.claim.len())
+            .finish()
+    }
 }
 
 impl BeliefReview {

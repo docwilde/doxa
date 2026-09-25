@@ -43,6 +43,9 @@ for line in sys.stdin:
     assert_eq!(review.id(), 7);
     assert_eq!(review.claim(), "safe fact");
     assert_eq!(review.subject(), "project:repo");
+    let debug = format!("{review:?}");
+    assert!(!debug.contains("safe fact"));
+    assert!(!debug.contains("uid-1"));
     let result = client.belief_action("/repo", &review, BeliefAction::Contradicted, "failed check").unwrap();
     assert_eq!(result.status, BeliefStatus::Dormant);
     assert!(result.retired);
