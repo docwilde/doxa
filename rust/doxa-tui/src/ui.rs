@@ -147,6 +147,35 @@ struct QueuePicker {
     cancelling: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ChipHit {
+    group: usize,
+    kind: &'static str,
+    rect: Rect,
+    pane: Rect,
+}
+
+#[derive(Clone, Debug)]
+struct ChipInfo {
+    kind: &'static str,
+    label: String,
+}
+
+fn chip_hint(kind: &str) -> &'static str {
+    match kind {
+        "permission" => "Permission mode for this session · click to choose",
+        "engine" => "Engine for new sessions · click to choose",
+        "model" => "Model for this session · click to choose",
+        "context" => "Current session context usage · click for details",
+        "memory" => "Project/user memory: % of separate LORE caps",
+        "beliefs" => "LORE beliefs · click to browse",
+        "cost" => "Reported session cost · click for details",
+        "lore" => "LORE state and scrub health · click for details",
+        "more" => "More chips · click to reveal hidden chips",
+        _ => "",
+    }
+}
+
 fn safe_label(value: &str) -> String {
     markdown::sanitize(value)
         .replace('\n', " ")
@@ -685,6 +714,8 @@ pub struct App {
     memory_cache: HashMap<String, (Option<(u64, u64)>, Instant)>,
     memory_pending: Option<(String, String, Receiver<Option<(u64, u64)>>)>,
     chip_offsets: [usize; 2],
+    chip_hover: Option<ChipHit>,
+    chip_info: Option<ChipInfo>,
     blink_on: bool,
     blink_at: Instant,
     model_capabilities: HashMap<String, bool>,
@@ -792,6 +823,8 @@ impl Default for App {
             memory_cache: HashMap::new(),
             memory_pending: None,
             chip_offsets: [0, 0],
+            chip_hover: None,
+            chip_info: None,
             blink_on: true,
             blink_at: Instant::now(),
             model_capabilities: HashMap::new(),
@@ -1464,6 +1497,10 @@ impl App {
             Event::Resize(w, h) => {
                 self.size = Rect::new(0, 0, w, h);
                 self.drag = None;
+                self.chip_hover = None;
+                if self.chip_info.is_some() && self.active_chooser_rect().is_none() {
+                    self.chip_info = None;
+                }
                 if self.history_modal && self.active_chooser_rect().is_none() {
                     self.history_modal = false;
                     self.notice = "Enlarge active pane to search sessions".into();
@@ -1717,6 +1754,10 @@ impl App {
             return self.request_key(key);
         }
         if self.stop_confirmation.is_some() { return self.stop_confirmation_key(key); }
+        if self.chip_info.is_some() {
+            if key.code == KeyCode::Esc { self.chip_info = None; return true; }
+            return false;
+        }
         if self.lore_picker.is_some() { return self.lore_picker_key(key); }
         if self.new_session.is_some() { return self.new_session_key(key); }
         if self.model_picker.is_some() { return self.model_picker_key(key); }
@@ -3687,6 +3728,8 @@ impl App {
             }
         } else if self.action_menu {
             (ACTIONS.len() + 2).min(15) as u16
+        } else if self.chip_info.is_some() {
+            5
         } else if self.history_modal {
             (self.history_matches().len() + 3).clamp(5, 15) as u16
         } else if let Some(picker) = &self.queue_picker {
@@ -3808,7 +3851,74 @@ impl App {
         shown
     }
 
+    fn pane_regions(&self, index: usize, area: Rect) -> [Rect; 6] {
+        let group = &self.groups[index];
+        let draft = group.active_id().map(|id| {
+            if self.active_group == index { self.input.as_str() }
+            else { self.input_drafts.get(&(index, id.to_owned()))
+                .map(|(text, _)| text.as_str()).unwrap_or("") }
+        }).unwrap_or("");
+        let chooser_height = if self.active_group == index {
+            self.chooser_rect(area).map_or(0, |rect| rect.height)
+        } else { 0 };
+        let regions = Layout::default().direction(Direction::Vertical).constraints([
+            Constraint::Length(3), Constraint::Min(1), Constraint::Length(chooser_height),
+            Constraint::Length(1), Constraint::Length(prompt_height(draft, area.height)),
+            Constraint::Length(1),
+        ]).split(area);
+        std::array::from_fn(|index| regions[index])
+    }
+
+    fn chip_hit_at(&self, column: u16, row: u16) -> Option<ChipHit> {
+        let layout = self.layout(self.size);
+        let panes = layout.panes.map(|panes| vec![(0, panes[0]), (1, panes[1])])
+            .unwrap_or_else(|| vec![(self.active_group, layout.body)]);
+        for (group, pane) in panes {
+            if self.diff_pane && group != self.active_group { continue; }
+            let strip = self.pane_regions(group, pane)[3];
+            if row != strip.y || column < strip.x || column >= strip.right() { continue; }
+            let mut x = strip.x;
+            for (kind, label) in self.chip_window(group, usize::from(strip.width)) {
+                let width = chip_text(kind, &label).width() as u16;
+                let end = x.saturating_add(width).min(strip.right());
+                if column >= x && column < end {
+                    return Some(ChipHit { group, kind, rect: Rect::new(x, strip.y, end - x, 1), pane });
+                }
+                x = end.saturating_add(1);
+            }
+        }
+        None
+    }
+
+    fn open_chip_info(&mut self, kind: &'static str, group: usize) {
+        let label = self.chips(group).into_iter().find(|(candidate, _)| *candidate == kind)
+            .map(|(_, label)| label).unwrap_or_default();
+        self.active_group = group;
+        self.chip_info = Some(ChipInfo { kind, label });
+        if self.active_chooser_rect().is_none() {
+            self.chip_info = None;
+            self.notice = "Enlarge active pane to inspect chip details".into();
+        }
+    }
+
     fn mouse(&mut self, mouse: MouseEvent) -> bool {
+        if mouse.kind == MouseEventKind::Moved {
+            let next = if self.active_chooser_rect().is_some() || self.active_request_index().is_some()
+                || self.map_modal || self.diff_modal || self.tool_modal || self.stop_confirmation.is_some() {
+                None
+            } else { self.chip_hit_at(mouse.column, mouse.row) };
+            if self.chip_hover == next { return false; }
+            self.chip_hover = next;
+            return true;
+        }
+        if self.chip_info.is_some() {
+            if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                let inside = self.active_chooser_rect().is_some_and(|area| area.contains(
+                    ratatui::layout::Position::new(mouse.column, mouse.row)));
+                self.chip_info = None;
+                if inside { return true; }
+            } else { return false; }
+        }
         if self.attach_picker.is_some() {
             let Some(menu) = self.active_chooser_rect() else { return false; };
             match mouse.kind {
@@ -3982,6 +4092,25 @@ impl App {
             self.drag = None;
             return false;
         }
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+            if let Some(hit) = self.chip_hit_at(mouse.column, mouse.row) {
+                self.chip_hover = None;
+                self.active_group = hit.group;
+                match hit.kind {
+                    "permission" => self.open_permission_picker(),
+                    "engine" => self.open_engine_picker(),
+                    "model" => self.open_model_picker(),
+                    "beliefs" => self.open_lore_picker(),
+                    "more" => {
+                        let visible = self.chip_window(hit.group, usize::from(self.pane_regions(hit.group, hit.pane)[3].width));
+                        let count = visible.len().saturating_sub(1).max(1);
+                        self.chip_offsets[hit.group] = (self.chip_offsets[hit.group] + count) % self.chips(hit.group).len();
+                    }
+                    kind => self.open_chip_info(kind, hit.group),
+                }
+                return true;
+            }
+        }
         if self.diff_pane {
             if let Some(panes) = self.layout(self.size).panes {
                 let pane = panes[1 - self.active_group];
@@ -4059,30 +4188,6 @@ impl App {
                                         .map(|(text, _)| text.as_str()).unwrap_or("") }
                                 }).unwrap_or("");
                                 let prompt_top = pane.bottom().saturating_sub(prompt_height(draft, pane.height) + 1);
-                                if mouse.row == prompt_top.saturating_sub(1) {
-                                    self.active_group = index;
-                                    let relative = usize::from(mouse.column.saturating_sub(pane.x));
-                                    let mut start = 0;
-                                    let visible = self.chip_window(index, usize::from(pane.width));
-                                    for (kind, label) in &visible {
-                                        let end = start + chip_text(kind, label).width();
-                                        if relative >= start && relative < end {
-                                            match *kind {
-                                                "engine" => self.open_engine_picker(),
-                                                "model" => self.open_model_picker(),
-                                                "permission" => self.open_permission_picker(),
-                                                "beliefs" => self.open_lore_picker(),
-                                                "more" => {
-                                                    let count = visible.len().saturating_sub(1).max(1);
-                                                    self.chip_offsets[index] = (self.chip_offsets[index] + count) % self.chips(index).len();
-                                                }
-                                                _ => {}
-                                            }
-                                            return true;
-                                        }
-                                        start = end + 1;
-                                    }
-                                }
                                 self.active_group = index;
                                 self.focus = if mouse.row >= prompt_top {
                                     Focus::Prompt
@@ -4226,6 +4331,22 @@ impl App {
             || self.active_chooser_rect().is_none() {
             self.draw_request(frame, area, false);
         }
+        self.draw_chip_tooltip(frame);
+    }
+
+    fn draw_chip_tooltip(&self, frame: &mut Frame) {
+        let Some(hit) = &self.chip_hover else { return; };
+        if self.chip_info.is_some() || self.active_chooser_rect().is_some()
+            || self.active_request_index().is_some() || self.map_modal || self.diff_modal
+            || self.tool_modal || self.stop_confirmation.is_some() { return; }
+        let hint = chip_hint(hit.kind);
+        if hint.is_empty() || hit.rect.y <= hit.pane.y.saturating_add(3) { return; }
+        let width = (hint.width() + 2).min(usize::from(hit.pane.width)) as u16;
+        let x = hit.rect.x.min(hit.pane.right().saturating_sub(width));
+        let area = Rect::new(x, hit.rect.y - 1, width, 1);
+        let text = clipped_title(&format!(" {hint} "), usize::from(width)).0;
+        frame.render_widget(Paragraph::new(text).style(Style::default()
+            .fg(theme::ACCENT).bg(theme::HIGHLIGHT)), area);
     }
 
     fn draw_stop_confirmation(&self, frame: &mut Frame, area: Rect) {
@@ -4322,6 +4443,16 @@ impl App {
         frame.render_widget(Paragraph::new(lines).block(Block::default().title(title)
             .borders(Borders::ALL).border_style(Style::default().fg(theme::ACCENT)))
             .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)), modal);
+    }
+
+    fn draw_chip_info(&self, frame: &mut Frame, area: Rect) {
+        let Some(info) = &self.chip_info else { return; };
+        let title = format!(" {} · Esc close ", safe_label(info.kind));
+        let body = format!(" {}\n {}", safe_label(&info.label), chip_hint(info.kind));
+        frame.render_widget(Paragraph::new(body).wrap(Wrap { trim: false })
+            .block(Block::default().title(title).borders(Borders::ALL)
+                .border_style(Style::default().fg(theme::ACCENT)))
+            .style(Style::default().fg(theme::TEXT).bg(theme::RAISED)), area);
     }
 
     fn draw_history(&self, frame: &mut Frame, area: Rect) {
@@ -4749,19 +4880,8 @@ impl App {
             else { self.input_drafts.get(&(index, id.to_owned()))
                 .map(|(text, cursor)| (text.as_str(), *cursor)).unwrap_or(("", 0)) }
         }).unwrap_or(("", 0));
-        let prompt_height = prompt_height(draft, area.height);
-        let chooser_height = if active { self.chooser_rect(area).map_or(0, |rect| rect.height) } else { 0 };
-        let inner = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(3),
-                Constraint::Min(1),
-                Constraint::Length(chooser_height),
-                Constraint::Length(1),
-                Constraint::Length(prompt_height),
-                Constraint::Length(1),
-            ])
-            .split(area);
+        let inner = self.pane_regions(index, area);
+        let chooser_height = inner[2].height;
         let titles: Vec<Line> = group
             .tabs
             .iter()
@@ -4850,6 +4970,8 @@ impl App {
                 self.draw_lore_picker(frame, inner[2]);
             } else if self.action_menu {
                 self.draw_actions(frame, inner[2]);
+            } else if self.chip_info.is_some() {
+                self.draw_chip_info(frame, inner[2]);
             } else if self.history_modal {
                 self.draw_history(frame, inner[2]);
             } else if self.queue_picker.is_some() {
@@ -5846,6 +5968,112 @@ mod tests {
         let buffer = terminal.backend().buffer();
         (0..28).map(|y| (0..100).map(|x| buffer[(x, y)].symbol()).collect::<String>())
             .collect::<Vec<_>>().join("\n")
+    }
+
+    fn painted_at(app: &App, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..height).map(|y| (0..width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>().join("\n")
+    }
+
+    #[test]
+    fn every_chip_hover_and_click_uses_rendered_strip_geometry() {
+        let mut app = App::default();
+        app.rail_visible = false;
+        app.handle(Event::Resize(220, 32));
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"s","engine":"claude",
+            "model":"sonnet","cwd":"/repo","permission_mode":"auto",
+            "can_set_permission_mode":true,"can_set_model":true,"lore_scrub":"ready"}));
+        app.groups[0].tabs = vec!["s".into()];
+        app.set_lore_memory_usage("s", 200, 80);
+        let pane = app.layout(app.size).body;
+        let strip = app.pane_regions(0, pane)[3];
+        let mut x = strip.x;
+        let visible = app.chip_window(0, usize::from(strip.width));
+        assert_eq!(visible.len(), app.chips(0).len());
+        for (kind, label) in visible {
+            let inside = x + 1;
+            assert!(app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Moved,
+                column: inside, row: strip.y, modifiers: KeyModifiers::NONE })));
+            assert_eq!(app.chip_hover.as_ref().map(|hit| hit.kind), Some(kind));
+            let rendered = painted_at(&app, 220, 32);
+            assert!(rendered.contains(chip_hint(kind)), "hover hint for {kind}");
+            assert!(app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+                column: inside, row: strip.y, modifiers: KeyModifiers::NONE })));
+            match kind {
+                "permission" => assert!(app.permission_picker.is_some()),
+                "engine" => assert!(app.engine_picker),
+                "model" => assert!(app.model_picker.is_some()),
+                "beliefs" => assert!(app.lore_picker.is_some()),
+                _ => {
+                    assert_eq!(app.chip_info.as_ref().map(|info| info.kind), Some(kind));
+                    if kind == "memory" { assert!(painted_at(&app, 220, 32).contains("separate LORE caps")); }
+                }
+            }
+            app.handle(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+            x += chip_text(kind, &label).width() as u16 + 1;
+        }
+    }
+
+    #[test]
+    fn narrow_and_split_panes_hit_visible_chips_without_disturbing_drafts() {
+        for split in [Split::Vertical, Split::Horizontal] {
+        for width in [76, 100, 140] {
+            let mut app = App::default();
+            app.rail_visible = false;
+            app.handle(Event::Resize(width, 32));
+            app.apply_daemon_frame(&json!({"type":"hello","session_id":"left","engine":"codex","model":"gpt-6-sol"}));
+            app.apply_daemon_frame(&json!({"type":"hello","session_id":"right","engine":"claude","model":"sonnet"}));
+            app.groups[0].tabs = vec!["left".into()];
+            app.groups[1].tabs = vec!["right".into()];
+            app.split = split;
+            app.split_requested = true;
+            app.input = "left draft".into();
+            app.input_cursor = app.input.len();
+            app.input_drafts.insert((1, "right".into()), ("right draft\ncontinued".into(), 21));
+            let panes = app.layout(app.size).panes.unwrap();
+            let strip = app.pane_regions(1, panes[1])[3];
+            let visible = app.chip_window(1, usize::from(strip.width));
+            assert!(!visible.is_empty());
+            let (kind, _) = &visible[0];
+            let x = strip.x + 1;
+            app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Moved,
+                column: x, row: strip.y, modifiers: KeyModifiers::NONE }));
+            assert_eq!(app.chip_hover.as_ref().map(|hit| hit.kind), Some(*kind));
+            app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+                column: x, row: strip.y, modifiers: KeyModifiers::NONE }));
+            assert_eq!(app.active_group, 1);
+            assert_eq!(app.input, "right draft\ncontinued");
+            assert_eq!(app.input_drafts.get(&(0, "left".into())).unwrap().0, "left draft");
+        }
+        }
+        assert!(chip_hint("memory").contains("% of separate LORE caps"));
+    }
+
+    #[test]
+    fn overflow_chip_has_hover_hint_and_cycles_clickable_items() {
+        let mut app = App::default();
+        app.rail_visible = false;
+        app.handle(Event::Resize(60, 28));
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"s","engine":"claude",
+            "model":"sonnet","permission_mode":"auto","can_set_permission_mode":true}));
+        app.groups[0].tabs = vec!["s".into()];
+        let pane = app.layout(app.size).body;
+        let strip = app.pane_regions(0, pane)[3];
+        let visible = app.chip_window(0, usize::from(strip.width));
+        assert_eq!(visible.last().map(|row| row.0), Some("more"));
+        let preceding = visible[..visible.len() - 1].iter()
+            .map(|(kind, label)| chip_text(kind, label).width() + 1).sum::<usize>();
+        let x = strip.x + preceding as u16 + 1;
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Moved,
+            column: x, row: strip.y, modifiers: KeyModifiers::NONE }));
+        assert_eq!(app.chip_hover.as_ref().map(|hit| hit.kind), Some("more"));
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: x, row: strip.y, modifiers: KeyModifiers::NONE }));
+        assert_ne!(app.chip_offsets[0], 0);
+        assert!(app.chip_window(0, usize::from(strip.width)).iter().any(|(kind, _)| *kind == "memory"));
     }
 
     #[test]
