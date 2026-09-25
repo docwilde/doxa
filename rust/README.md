@@ -82,7 +82,14 @@ closes. The diff pane is read-only and requires enough terminal space for two
 panes. Each split pane has its own prompt and keeps a draft for its active
 session. Its status rows show engine and model chips, plus context, token usage,
 cost, and LORE status when the daemon reports them. Unknown values display `?`;
-token scope and estimated cost are labeled. `Alt+E` opens an engine picker,
+token scope and estimated cost are labeled. In a prompt, `Enter` submits, while
+`Shift+Enter` or `Alt+Enter` inserts a newline (`Ctrl+J` also works when
+reported distinctly by the terminal). Arrow keys move the cursor across
+lines; `Home`, `End`, `Backspace`, and `Delete` edit at the cursor. Bracketed
+paste preserves line breaks, removes terminal control characters, and never
+submits. Prompts are capped at 10 KiB; an oversized paste is truncated with a
+notice. Drafts and cursor positions stay with each session pane.
+`Alt+E` opens an engine picker,
 then a model and first-prompt form that starts a new session in the selected
 pane. A blank model uses the configured default. Claude uses the sidecar
 installed beside `doxa-rs`; `DOXA_CLAUDE_SCRIPT` can select another absolute

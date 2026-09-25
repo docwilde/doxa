@@ -7,8 +7,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crossterm::event::{
-    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
-    MouseEventKind,
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::{
@@ -102,6 +102,16 @@ fn safe_label(value: &str) -> String {
         .chars()
         .take(200)
         .collect()
+}
+
+fn unsafe_input_char(ch: char) -> bool {
+    ch.is_control()
+        || matches!(ch, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+}
+
+fn prompt_height(draft: &str, pane_height: u16) -> u16 {
+    (draft.bytes().filter(|b| *b == b'\n').count().min(5) as u16 + 3)
+        .clamp(3, 8).min(pane_height.saturating_sub(5).max(3))
 }
 
 const MAX_EVENT_FIELD_CHARS: usize = 320;
@@ -524,7 +534,8 @@ pub struct App {
     pub rail_selected: usize,
     pub focus: Focus,
     pub input: String,
-    input_drafts: HashMap<(usize, String), String>,
+    input_cursor: usize,
+    input_drafts: HashMap<(usize, String), (String, usize)>,
     session_identity: HashMap<String, (Option<String>, Option<String>)>,
     session_telemetry: HashMap<String, SessionTelemetry>,
     model_capabilities: HashMap<String, bool>,
@@ -602,6 +613,7 @@ impl Default for App {
             rail_selected: 0,
             focus: Focus::Prompt,
             input: String::new(),
+            input_cursor: 0,
             input_drafts: HashMap::new(),
             session_identity: HashMap::new(),
             session_telemetry: HashMap::new(),
@@ -1090,6 +1102,7 @@ impl App {
                 let active = self.groups[self.active_group].active_id().unwrap_or("");
                 if self.input.is_empty() && target == active {
                     self.input = text.to_owned();
+                    self.input_cursor = self.input.len();
                 } else {
                     self.rejected_drafts
                         .entry(target.into())
@@ -1185,16 +1198,76 @@ impl App {
             {
                 self.key(key)
             }
+            Event::Paste(text) => self.paste(&text),
             Event::Mouse(mouse) => self.mouse(mouse),
             _ => false,
         };
         let after = (self.active_group, self.groups[self.active_group].active_id().unwrap_or("").to_owned());
         if before != after {
             self.input_drafts
-                .insert(before, std::mem::take(&mut self.input));
-            self.input = self.input_drafts.remove(&after).unwrap_or_default();
+                .insert(before, (std::mem::take(&mut self.input), self.input_cursor));
+            (self.input, self.input_cursor) = self.input_drafts.remove(&after).unwrap_or_default();
         }
         changed
+    }
+
+    fn paste(&mut self, text: &str) -> bool {
+        if self.focus != Focus::Prompt || self.active_request_index().is_some()
+            || self.stop_confirmation.is_some() || self.lore_picker.is_some()
+            || self.new_session.is_some() || self.model_picker.is_some()
+            || self.permission_picker.is_some() || self.engine_picker || self.action_menu
+            || self.history_modal || self.diff_modal || self.map_modal || self.tool_modal {
+            return false;
+        }
+        let mut clean = String::new();
+        let available = MAX_INPUT_BYTES.saturating_sub(self.input.len());
+        let mut chars = text.chars().peekable();
+        let mut truncated = false;
+        while let Some(ch) = chars.next() {
+            let ch = if ch == '\r' {
+                if chars.peek() == Some(&'\n') { chars.next(); }
+                '\n'
+            } else if ch == '\t' { ' ' } else { ch };
+            if unsafe_input_char(ch) && ch != '\n' { continue; }
+            if clean.len() + ch.len_utf8() > available {
+                truncated = true;
+                break;
+            }
+            clean.push(ch);
+        }
+        if !clean.is_empty() {
+            self.input.insert_str(self.input_cursor, &clean);
+            self.input_cursor += clean.len();
+        }
+        if truncated { self.notice = "Prompt input limit reached · paste truncated".into(); }
+        !clean.is_empty() || truncated
+    }
+
+    fn insert_input(&mut self, ch: char) -> bool {
+        if self.input.len() + ch.len_utf8() > MAX_INPUT_BYTES {
+            self.notice = "Prompt input limit reached".into();
+        } else {
+            self.input.insert(self.input_cursor, ch);
+            self.input_cursor += ch.len_utf8();
+        }
+        true
+    }
+
+    fn move_input_vertical(&mut self, down: bool) -> bool {
+        let before = &self.input[..self.input_cursor];
+        let column = before.rsplit('\n').next().unwrap_or("").chars().count();
+        let line_start = before.rfind('\n').map_or(0, |i| i + 1);
+        let target_start = if down {
+            let Some(end) = self.input[self.input_cursor..].find('\n') else { return false; };
+            self.input_cursor + end + 1
+        } else {
+            if line_start == 0 { return false; }
+            self.input[..line_start - 1].rfind('\n').map_or(0, |i| i + 1)
+        };
+        let target_end = self.input[target_start..].find('\n').map_or(self.input.len(), |i| target_start + i);
+        self.input_cursor = target_start + self.input[target_start..target_end]
+            .char_indices().nth(column).map_or(target_end - target_start, |(i, _)| i);
+        true
     }
 
     fn key(&mut self, key: KeyEvent) -> bool {
@@ -1344,6 +1417,7 @@ impl App {
                     .to_owned();
                 if let Some(draft) = self.rejected_drafts.get_mut(&target).and_then(Vec::pop) {
                     let current = std::mem::replace(&mut self.input, draft);
+                    self.input_cursor = self.input.len();
                     if !current.is_empty() {
                         self.rejected_drafts
                             .entry(target)
@@ -1400,15 +1474,45 @@ impl App {
                 self.next_tab();
                 true
             }
-            KeyCode::Backspace if self.focus == Focus::Prompt => self.input.pop().is_some(),
+            KeyCode::Left if self.focus == Focus::Prompt => {
+                if let Some((index, _)) = self.input[..self.input_cursor].char_indices().next_back() {
+                    self.input_cursor = index;
+                    true
+                } else { false }
+            }
+            KeyCode::Right if self.focus == Focus::Prompt => {
+                if let Some(ch) = self.input[self.input_cursor..].chars().next() {
+                    self.input_cursor += ch.len_utf8();
+                    true
+                } else { false }
+            }
+            KeyCode::Home if self.focus == Focus::Prompt => {
+                self.input_cursor = self.input[..self.input_cursor].rfind('\n').map_or(0, |i| i + 1);
+                true
+            }
+            KeyCode::End if self.focus == Focus::Prompt => {
+                self.input_cursor = self.input[self.input_cursor..].find('\n').map_or(self.input.len(), |i| self.input_cursor + i);
+                true
+            }
+            KeyCode::Up if self.focus == Focus::Prompt => self.move_input_vertical(false),
+            KeyCode::Down if self.focus == Focus::Prompt => self.move_input_vertical(true),
+            KeyCode::Backspace if self.focus == Focus::Prompt => {
+                if let Some((index, _)) = self.input[..self.input_cursor].char_indices().next_back() {
+                    self.input.drain(index..self.input_cursor);
+                    self.input_cursor = index;
+                    true
+                } else { false }
+            }
+            KeyCode::Delete if self.focus == Focus::Prompt => {
+                if let Some(ch) = self.input[self.input_cursor..].chars().next() {
+                    self.input.drain(self.input_cursor..self.input_cursor + ch.len_utf8());
+                    true
+                } else { false }
+            }
+            KeyCode::Enter if self.focus == Focus::Prompt && (key.modifiers.contains(KeyModifiers::SHIFT) || alt) => self.insert_input('\n'),
+            KeyCode::Char('j') if self.focus == Focus::Prompt && ctrl => self.insert_input('\n'),
             KeyCode::Char(c) if self.focus == Focus::Prompt && !ctrl && !alt => {
-                if self.input.len() + c.len_utf8() <= MAX_INPUT_BYTES {
-                    self.input.push(c);
-                    true
-                } else {
-                    self.notice = "Prompt input limit reached".into();
-                    true
-                }
+                if unsafe_input_char(c) { false } else { self.insert_input(c) }
             }
             KeyCode::Enter if self.focus == Focus::Prompt => {
                 if !self.input.is_empty() {
@@ -1418,6 +1522,7 @@ impl App {
                         } else if self.pending_prompts.len() < MAX_PENDING_PROMPTS {
                             self.pending_prompts
                                 .push((id.to_owned(), std::mem::take(&mut self.input)));
+                            self.input_cursor = 0;
                             self.notice = "Prompt queued".into();
                         } else {
                             self.notice = "Prompt queue full · wait for daemon".into();
@@ -2416,8 +2521,14 @@ impl App {
                                         return true;
                                     }
                                 }
+                                let draft = self.groups[index].active_id().map(|id| {
+                                    if self.active_group == index { self.input.as_str() }
+                                    else { self.input_drafts.get(&(index, id.to_owned()))
+                                        .map(|(text, _)| text.as_str()).unwrap_or("") }
+                                }).unwrap_or("");
+                                let prompt_top = pane.bottom().saturating_sub(prompt_height(draft, pane.height) + 2);
                                 self.active_group = index;
-                                self.focus = if mouse.row >= pane.bottom().saturating_sub(4) {
+                                self.focus = if mouse.row >= prompt_top {
                                     Focus::Prompt
                                 } else {
                                     Focus::Transcript
@@ -3002,12 +3113,19 @@ impl App {
         let session = group
             .active_id()
             .and_then(|id| self.sessions.iter().find(|s| s.id == id));
+        let active = self.active_group == index;
+        let (draft, cursor) = group.active_id().map(|id| {
+            if active { (self.input.as_str(), self.input_cursor) }
+            else { self.input_drafts.get(&(index, id.to_owned()))
+                .map(|(text, cursor)| (text.as_str(), *cursor)).unwrap_or(("", 0)) }
+        }).unwrap_or(("", 0));
+        let prompt_height = prompt_height(draft, area.height);
         let inner = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(2),
                 Constraint::Min(1),
-                Constraint::Length(3),
+                Constraint::Length(prompt_height),
                 Constraint::Length(2),
             ])
             .split(area);
@@ -3065,12 +3183,23 @@ impl App {
                     .border_style(Style::default().fg(theme::BORDER))),
             inner[1],
         );
-        let active = self.active_group == index;
-        let draft = group.active_id().map(|id| {
-            if active { self.input.as_str() } else { self.input_drafts.get(&(index, id.to_owned())).map(String::as_str).unwrap_or("") }
-        }).unwrap_or("");
+        let cursor = cursor.min(draft.len());
+        let cursor_line = draft[..cursor].bytes().filter(|b| *b == b'\n').count();
+        let cursor_column = UnicodeWidthStr::width(draft[..cursor].rsplit('\n').next().unwrap_or("")) + 2;
+        let mut rows: Vec<String> = draft.split('\n').enumerate().map(|(line, text)| {
+            format!("{}{}", if line == 0 { "> " } else { "  " }, text)
+        }).collect();
+        if active && self.focus == Focus::Prompt {
+            let offset = draft[..cursor].rsplit('\n').next().unwrap_or("").len() + 2;
+            rows[cursor_line].insert(offset, '▏');
+        }
+        let visible = usize::from(inner[2].height.saturating_sub(2)).max(1);
+        let scroll_y = cursor_line.saturating_sub(visible.saturating_sub(1));
+        let width = usize::from(inner[2].width.saturating_sub(2)).max(1);
+        let scroll_x = cursor_column.saturating_sub(width.saturating_sub(1));
         frame.render_widget(
-            Paragraph::new(format!("> {draft}"))
+            Paragraph::new(rows.join("\n"))
+                .scroll((scroll_y as u16, scroll_x as u16))
                 .style(Style::default().fg(theme::TEXT).bg(theme::RAISED))
                 .block(Block::default()
                     .title(if active && self.focus == Focus::Prompt { " Prompt ● " } else { " Prompt " })
@@ -3145,6 +3274,7 @@ struct TerminalGuard {
     raw: bool,
     alternate: bool,
     mouse: bool,
+    paste: bool,
 }
 impl TerminalGuard {
     fn enter() -> io::Result<Self> {
@@ -3153,6 +3283,7 @@ impl TerminalGuard {
             raw: false,
             alternate: false,
             mouse: false,
+            paste: false,
         };
         terminal::enable_raw_mode()?;
         guard.raw = true;
@@ -3160,11 +3291,16 @@ impl TerminalGuard {
         guard.alternate = true;
         execute!(guard.out, EnableMouseCapture)?;
         guard.mouse = true;
+        execute!(guard.out, EnableBracketedPaste)?;
+        guard.paste = true;
         Ok(guard)
     }
 }
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
+        if self.paste {
+            let _ = execute!(self.out, DisableBracketedPaste);
+        }
         if self.mouse {
             let _ = execute!(self.out, DisableMouseCapture);
         }
@@ -3812,6 +3948,61 @@ mod tests {
         let buffer = terminal.backend().buffer();
         (0..28).map(|y| (0..100).map(|x| buffer[(x, y)].symbol()).collect::<String>())
             .collect::<Vec<_>>().join("\n")
+    }
+
+    #[test]
+    fn multiline_prompt_edits_at_cursor_and_enter_submits() {
+        let mut app = App::default();
+        app.groups[0].tabs.push("s".into());
+        app.handle(Event::Resize(100, 28));
+        for ch in "firstlast".chars() {
+            app.handle(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)));
+        }
+        for _ in 0..4 { app.handle(Event::Key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))); }
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT)));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT)));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL)));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)));
+        assert_eq!(app.input, "first\n\nlast");
+        assert!(painted(&app).contains("first"));
+        assert!(painted(&app).contains("last"));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.pending_prompts, [("s".into(), "first\n\nlast".into())]);
+        assert!(app.input.is_empty());
+        assert_eq!(app.input_cursor, 0);
+    }
+
+    #[test]
+    fn bracketed_paste_preserves_lines_sanitizes_controls_and_caps_bytes() {
+        let mut app = App::default();
+        app.groups[0].tabs.push("s".into());
+        app.handle(Event::Paste("one\r\ntwo\rthree\u{1b}[31m\u{7}é".into()));
+        assert_eq!(app.input, "one\ntwo\nthree[31mé");
+        assert!(app.pending_prompts.is_empty());
+        app.handle(Event::Paste("x".repeat(MAX_INPUT_BYTES).into()));
+        assert_eq!(app.input.len(), MAX_INPUT_BYTES);
+        assert!(app.notice.contains("truncated"));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.pending_prompts[0].1.len(), MAX_INPUT_BYTES);
+    }
+
+    #[test]
+    fn pane_drafts_keep_multiline_cursor_and_modal_ignores_paste() {
+        let mut app = App::default();
+        app.groups[0].tabs.push("a".into());
+        app.groups[1].tabs.push("b".into());
+        app.handle(Event::Paste("a\nb".into()));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT)));
+        app.handle(Event::Paste("other".into()));
+        app.action_menu = true;
+        assert!(!app.handle(Event::Paste("ignored".into())));
+        app.action_menu = false;
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT)));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('!'), KeyModifiers::NONE)));
+        assert_eq!(app.input, "a\n!b");
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT)));
+        assert_eq!(app.input, "other");
     }
 
     #[test]
