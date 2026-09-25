@@ -557,12 +557,10 @@ fn input_request_body(request: &InputRequest, title_width: usize) -> (String, Op
     if request.kind == "ask_user" {
         if let Some(question) = request.questions.get(request.step) {
             if !question.header.is_empty() {
-                body.push_str("Header: ");
                 body.push_str(&markdown::sanitize(&question.header));
                 body.push('\n');
             }
             if !clipped_title(&question.question, title_width).1 {
-                body.push_str("Question: ");
                 body.push_str(&markdown::sanitize(&question.question));
                 body.push_str("\n\n");
             }
@@ -4315,7 +4313,7 @@ mod tests {
         app.groups[1].tabs = vec!["b".into()];
         app.apply_daemon_frame(&json!({"type":"event", "session_id":"a",
             "event":{"type":"needs_input", "data":{"id":"req-1", "kind":"ask_user",
-                "title":"Choose target", "questions":[{"question":"Where?", "options":[
+                "title":"Choose target", "questions":[{"header":"Environment", "question":"Where?", "options":[
                     {"label":"Staging", "description":"Validate first"},
                     {"label":"Production", "description":"Release now"}]}]}}}));
         assert!(app.active_request_index().is_some());
@@ -4323,14 +4321,16 @@ mod tests {
         let screen = painted(&app);
         let rows: Vec<_> = screen.lines().collect();
         assert!(rows[usize::from(menu.y)].contains("Where?"));
-        assert!(!screen.contains("Question: Where?"));
-        assert!(rows[usize::from(menu.y + 1)].contains("Staging"));
+        assert!(rows[usize::from(menu.y + 1)].contains("Environment"));
+        assert!(!screen.contains("Header:"));
+        assert!(!screen.contains("Question:"));
+        assert!(rows[usize::from(menu.y + 2)].contains("Staging"));
         assert!(rows[usize::from(menu.bottom() + 1)].contains("Prompt"));
-        assert!(menu.height <= 9, "short question should use only its content rows");
+        assert!(menu.height <= 10, "short question should use only its content rows");
         let mut terminal = Terminal::new(TestBackend::new(100, 28)).unwrap();
         terminal.draw(|frame| app.draw(frame)).unwrap();
-        assert_eq!(terminal.backend().buffer()[(menu.x + 2, menu.y + 1)].bg, theme::HIGHLIGHT);
-        assert_eq!(terminal.backend().buffer()[(menu.right() - 3, menu.y + 1)].bg, theme::HIGHLIGHT);
+        assert_eq!(terminal.backend().buffer()[(menu.x + 2, menu.y + 2)].bg, theme::HIGHLIGHT);
+        assert_eq!(terminal.backend().buffer()[(menu.right() - 3, menu.y + 2)].bg, theme::HIGHLIGHT);
         app.input_requests.clear();
 
         let pane = app.layout(app.size).panes.unwrap()[1];
@@ -4352,12 +4352,15 @@ mod tests {
         let question = "Which deployment target should receive the migration? ".repeat(30);
         app.apply_daemon_frame(&json!({"type":"event", "session_id":"a",
             "event":{"type":"needs_input", "data":{"id":"req-long", "kind":"ask_user",
-                "questions":[{"question":question, "options":[{"label":"Staging"}]}]}}}));
+                "questions":[{"question":question.clone(), "options":[{"label":"Staging"}]}]}}}));
         let menu = app.active_chooser_rect().unwrap();
         assert_eq!(menu.height, 18);
         let rows: Vec<_> = painted(&app).lines().map(str::to_owned).collect();
         assert!(rows[usize::from(menu.y)].contains('…'));
-        assert!(rows[usize::from(menu.y + 1)].contains("Question: Which deployment"));
+        assert!(rows[usize::from(menu.y + 1)].contains("Which deployment"));
+        let (body, _) = input_request_body(&app.input_requests[0], usize::from(menu.width.saturating_sub(4)));
+        assert!(body.contains(&question));
+        assert!(!body.contains("Question:"));
         app.handle(Event::Key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE)));
         assert!(app.input_requests[0].scroll > 0);
         assert!(painted(&app).contains("Prompt"));
