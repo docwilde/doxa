@@ -56,6 +56,10 @@ alpha. Native fleet supervision and remote control are still being ported.
 
 *The permission picker expands from the chip row above the active prompt.*
 
+![Rust reasoning effort picker above the prompt for a DeepSeek session](assets/shots/rust-effort.png)
+
+*The effort chip reports the current session; picker choices apply to new sessions.*
+
 ![Rust session history picker above the prompt in a single session pane](assets/shots/rust-history.png)
 
 *Session history searches attached and archived transcripts.*

@@ -62,6 +62,18 @@ fn scene(name: &str) -> App {
             app.groups[0].tabs = vec!["demo-claude-02".into()];
             key(&mut app, KeyCode::Char('p'), KeyModifiers::ALT);
         }
+        "effort" => {
+            app.groups[0].tabs = vec!["demo-deepseek-03".into()];
+            app.apply_daemon_frame(&json!({"type":"hello","session_id":"demo-deepseek-03",
+                "engine":"deepseek","model":"deepseek-flash","effort":"high","cwd":"/demo/project"}));
+            if let Some(session) = app.sessions.iter_mut().find(|session| session.id == "demo-deepseek-03") {
+                session.title = "Compare models".into();
+            }
+            event(&mut app,"demo-deepseek-03","text_delta",json!({"text":
+                "## Model options\n\nThe selected model supports reasoning effort controls.\n\n- This session reports high effort\n- The next session may use a different level\n- Model choices follow the selected engine"}));
+            key(&mut app, KeyCode::Char('f'), KeyModifiers::ALT);
+            app.notice = "Rust 2.0.0-alpha.13 · effort fixture".into();
+        }
         "history" => {
             key(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL);
         }
@@ -100,7 +112,7 @@ fn rgb(color: Color) -> [u8; 3] {
 fn main() {
     let name = std::env::args().nth(1).expect("scene name");
     let (width,height) = match name.as_str() {
-        "hero" | "tool-activity" | "needs-input" | "permissions" | "history" | "queue" | "memory" => (126,31),
+        "hero" | "tool-activity" | "needs-input" | "permissions" | "effort" | "history" | "queue" | "memory" => (126,31),
         _ => panic!("unknown scene"),
     };
     let app = scene(&name);
