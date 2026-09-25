@@ -91,8 +91,8 @@ const COMMANDS: &[CommandHelp] = &[
     CommandHelp { name: "/img", form: "/img [path]", summary: "Image support", support: "unavailable in Rust" },
     CommandHelp { name: "/login", form: "/login [provider]", summary: "Provider login", support: "unavailable in Rust" },
     CommandHelp { name: "/logout", form: "/logout [provider]", summary: "Provider logout", support: "unavailable in Rust" },
-    CommandHelp { name: "/settings", form: "/settings", summary: "Settings", support: "unavailable in Rust" },
-    CommandHelp { name: "/setup", form: "/setup", summary: "Setup checks", support: "unavailable in Rust" },
+    CommandHelp { name: "/settings", form: "/settings", summary: "Settings", support: "CLI only · doxa settings" },
+    CommandHelp { name: "/setup", form: "/setup", summary: "Setup checks", support: "CLI only · doxa setup" },
     CommandHelp { name: "/doctor", form: "/doctor", summary: "Health checks", support: "unavailable in Rust" },
     CommandHelp { name: "/plugins", form: "/plugins", summary: "Plugin inventory", support: "unavailable in Rust" },
     CommandHelp { name: "/reload-plugins", form: "/reload-plugins", summary: "Refresh plugins", support: "unavailable in Rust" },
@@ -2890,8 +2890,10 @@ impl App {
                 }
                 true
             }
+            "/settings" => { self.notice = "Run `doxa settings` in a shell to inspect or change native preferences".into(); true }
+            "/setup" => { self.notice = "Run `doxa setup` in a shell for auth and store checks".into(); true }
             "/fleet" | "/img" | "/login"
-            | "/logout" | "/settings" | "/setup" | "/doctor" | "/plugins"
+            | "/logout" | "/doctor" | "/plugins"
             | "/reload-plugins" | "/effort"
             | "/update" => {
                 self.notice = format!("Local command unavailable: {}", safe_label(command));

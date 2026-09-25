@@ -39,6 +39,9 @@ Commands:
                        Remove one verified clean Rust orphan
   doctor               Check provider and launcher dependencies
   setup                Inspect authentication, LORE store, and stored preferences
+  settings             Show native settings and their effective sources
+  settings set KEY VALUE | unset KEY
+                       Persist linger_secs or worktree_per_session for new sessions
   auth status [NAME]   Check Claude or Codex CLI authentication without showing CLI output
   plugins              List names and enabled flags from Claude Code's plugin registry
   fleet ...            Inspect or start Python-backed fleet runs
@@ -119,6 +122,17 @@ fn run(args: &[String]) -> io::Result<()> {
             "setup" => {
                 if args.len() != 1 { return Err(invalid("setup takes no arguments")); }
                 println!("{}", operations::setup_report()?);
+                return Ok(());
+            }
+            "settings" => {
+                match args {
+                    [_] => println!("{}", operations::settings_report()?),
+                    [_, action, key, value] if action == "set" =>
+                        println!("{}", operations::settings_change(key, Some(value))?),
+                    [_, action, key] if action == "unset" =>
+                        println!("{}", operations::settings_change(key, None)?),
+                    _ => return Err(invalid("usage: doxa settings [set KEY VALUE | unset KEY]")),
+                }
                 return Ok(());
             }
             "auth" => {
