@@ -33,7 +33,7 @@ pub struct RejectableHunk {
 }
 
 impl RejectableHunk {
-    pub fn message(&self) -> String {
+    pub fn message(&self, reason: &str) -> String {
         let mut quoted = Vec::new();
         let mut in_hunk = false;
         for line in self.patch.split(|byte| *byte == b'\n') {
@@ -48,15 +48,24 @@ impl RejectableHunk {
         quoted.truncate(12);
         let path = self.path.chars().take(300).collect::<String>();
         let header = self.header.chars().take(300).collect::<String>();
-        format!("I rejected one of your edits to `{}` and reverted it on disk. Do not re-apply it.\n\nThe hunk was {}:\n\n```diff\n{}\n```{}\n\nI did not give a reason. Ask me before redoing that part. Re-read the file before your next edit.",
+        let reason = reason.trim();
+        let why = if reason.is_empty() {
+            "I did not give a reason. Ask me before redoing that part.".to_owned()
+        } else { format!("Why: {reason}") };
+        format!("I rejected one of your edits to `{}` and reverted it on disk. Do not re-apply it.\n\nThe hunk was {}:\n\n```diff\n{}\n```{}\n\n{} Re-read the file before your next edit.",
             path, header, quoted.join("\n"),
-            if more == 0 { String::new() } else { format!("\n… and {more} more changed lines") })
+            if more == 0 { String::new() } else { format!("\n… and {more} more changed lines") }, why)
     }
 }
 
 impl DiffSnapshot {
     fn message(text: String) -> Self {
         Self { text, files: Vec::new(), hunks: Vec::new(), rejectable: Vec::new(), cwd: None, base: String::new() }
+    }
+    pub fn same_hunk(&self, index: usize, other: &Self, other_index: usize) -> bool {
+        self.cwd == other.cwd && self.base == other.base
+            && self.rejectable.get(index).zip(other.rejectable.get(other_index))
+                .is_some_and(|(a, b)| a.patch == b.patch)
     }
 }
 

@@ -163,14 +163,16 @@ without reading their contents. `F4` keeps that diff visible beside the active
 session while its prompt stays usable; `F5` refreshes it and `Alt+PageUp` /
 `Alt+PageDown` scroll it. The other session pane reappears when the diff pane
 closes. In the modal, `X` selects a regular tracked text hunk at the scroll position for rejection;
-in the side pane use `Alt+R`. `Y` confirms and `N` cancels. Rejection is
-available only when the session is idle. The frontend checks that the same
-patch still exists, reverse-applies just that hunk, then sends feedback through
+in the side pane use `Alt+R`. Type an optional reason (up to 1024 bytes),
+then press `Enter` to confirm or `Esc` to cancel. A rejection chosen during an
+active turn is visibly queued and does not touch the worktree until the session
+is idle. The frontend checks that the same patch still exists, reverse-applies just that hunk, then sends feedback through
 the session's normal prompt path. Hunks with rename, copy, creation, deletion,
 or mode metadata are excluded because reversing them can change the whole file.
 If the hunk has changed, it leaves the file
-alone and asks for a refresh. Rejections during active turns and user-entered
-reasons still need porting from Python 1.19.0. The diff pane requires enough
+alone and asks for a refresh. Duplicate queued hunks are refused. Pending
+rejections block closing the diff or leaving the UI until they finish, and are
+cancelled if the session ends. The diff pane requires enough
 terminal space for two panes. Each split pane has its own prompt and keeps a draft for its active
 session. Its status rows show engine and model chips, plus context, token usage,
 cost, and LORE status when the daemon reports them. Unknown values display `?`;

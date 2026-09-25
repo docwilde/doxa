@@ -1,5 +1,5 @@
 //! Terminal shell for the Rust frontend. Daemon adapters can feed [`App::apply_update`].
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::cell::RefCell;
 use std::io::{self, IsTerminal, Stdout};
 use std::path::PathBuf;
@@ -35,6 +35,8 @@ const MIN_PANE_WIDTH: u16 = 28;
 const MIN_PANE_HEIGHT: u16 = 8;
 const MIN_RAIL_WIDTH: u16 = 12;
 const MAX_PENDING_PROMPTS: usize = 32;
+const MAX_QUEUED_REJECTIONS: usize = 8;
+const MAX_REJECT_REASON_BYTES: usize = 1024;
 const MAX_INPUT_REQUESTS: usize = 32;
 const INPUT_BLINK_INTERVAL: Duration = Duration::from_millis(650);
 // JSON may expand one input byte to a six-byte Unicode escape.
@@ -81,6 +83,20 @@ struct ModelPicker {
     note: String,
     loading: bool,
     catalog_pending: bool,
+}
+
+#[derive(Clone, Debug)]
+struct RejectDraft {
+    index: usize,
+    reason: String,
+}
+
+#[derive(Debug)]
+struct PendingRejection {
+    session_id: String,
+    snapshot: diff_view::DiffSnapshot,
+    index: usize,
+    reason: String,
 }
 
 #[derive(Debug)]
@@ -710,7 +726,10 @@ pub struct App {
     diff_hunks: Vec<usize>,
     diff_pending: Option<Receiver<(String, diff_view::DiffSnapshot)>>,
     diff_snapshot: Option<diff_view::DiffSnapshot>,
-    diff_reject_confirm: Option<usize>,
+    diff_reject_confirm: Option<RejectDraft>,
+    diff_reject_queue: VecDeque<PendingRejection>,
+    diff_reject_active: Option<PendingRejection>,
+    diff_reject_feedback: Option<(String, String)>,
     diff_reject_pending: Option<Receiver<(String, Result<String, String>, String)>>,
     session_cwds: HashMap<String, PathBuf>,
     pending_peer_refresh: Option<String>,
@@ -804,6 +823,9 @@ impl Default for App {
             diff_pending: None,
             diff_snapshot: None,
             diff_reject_confirm: None,
+            diff_reject_queue: VecDeque::new(),
+            diff_reject_active: None,
+            diff_reject_feedback: None,
             diff_reject_pending: None,
             session_cwds: HashMap::new(),
             pending_peer_refresh: None,
@@ -1073,6 +1095,12 @@ impl App {
                         self.append_event(&id, event_type, data)
                     }
                     "session_done" => {
+                        self.session_activity.remove(&id);
+                        let before = self.diff_reject_queue.len();
+                        self.diff_reject_queue.retain(|item| item.session_id != id);
+                        if self.diff_reject_queue.len() != before {
+                            self.notice = "Queued hunk rejections cancelled because the session ended".into();
+                        }
                         self.apply_update(DaemonUpdate::Status {
                             id: id.clone(),
                             text: "Ended".into(),
@@ -1240,6 +1268,7 @@ impl App {
             }
             "client_notice" => {
                 if let Some(id) = frame.get("session_id").and_then(|v| v.as_str()) {
+                    self.session_activity.remove(id);
                     self.apply_update(DaemonUpdate::Status {
                         id: id.into(),
                         text: "Disconnected".into(),
@@ -1413,6 +1442,15 @@ impl App {
     }
 
     fn paste(&mut self, text: &str) -> bool {
+        if self.diff_reject_confirm.is_some() {
+            for ch in text.chars() {
+                self.append_reject_reason(if ch.is_whitespace() { ' ' } else { ch });
+                if self.diff_reject_confirm.as_ref().is_some_and(|draft| draft.reason.len() >= MAX_REJECT_REASON_BYTES) {
+                    break;
+                }
+            }
+            return true;
+        }
         if self.focus != Focus::Prompt || self.active_request_index().is_some()
             || self.stop_confirmation.is_some() || self.lore_picker.is_some()
             || self.new_session.is_some() || self.model_picker.is_some()
@@ -1442,6 +1480,17 @@ impl App {
         }
         if truncated { self.notice = "Prompt input limit reached · paste truncated".into(); }
         !clean.is_empty() || truncated
+    }
+
+    fn append_reject_reason(&mut self, ch: char) {
+        if ch.is_control() { return; }
+        if let Some(draft) = &mut self.diff_reject_confirm {
+            if draft.reason.len() + ch.len_utf8() <= MAX_REJECT_REASON_BYTES {
+                draft.reason.push(ch);
+            } else {
+                self.notice = "Rejection reason limited to 1024 bytes".into();
+            }
+        }
     }
 
     fn insert_input(&mut self, ch: char) -> bool {
@@ -1580,6 +1629,11 @@ impl App {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         if key.code == KeyCode::Char('q') && ctrl {
+            if !self.diff_reject_queue.is_empty() || self.diff_reject_active.is_some()
+                || self.diff_reject_feedback.is_some() {
+                self.notice = "Wait for queued hunk rejections before leaving".into();
+                return true;
+            }
             self.should_quit = true;
             return true;
         }
@@ -1674,6 +1728,10 @@ impl App {
         }
         if key.code == KeyCode::F(4) {
             if self.diff_pane {
+                if self.rejections_for_target() > 0 {
+                    self.notice = "Wait for queued hunk rejections before closing this diff".into();
+                    return true;
+                }
                 self.diff_pane = false;
             } else {
                 self.diff_pane = true;
@@ -2509,9 +2567,34 @@ impl App {
     }
 
     fn open_diff(&mut self) {
-        if self.diff_modal { self.diff_modal = false; return; }
+        if self.diff_modal {
+            if self.rejections_for_target() > 0 {
+                self.notice = "Wait for queued hunk rejections before closing this diff".into();
+            } else { self.diff_modal = false; }
+            return;
+        }
         self.diff_modal = true;
         self.load_diff();
+    }
+
+    fn rejections_for_target(&self) -> usize {
+        let Some(id) = self.diff_target.as_deref() else { return 0; };
+        self.diff_reject_queue.iter().filter(|item| item.session_id == id).count()
+            + usize::from(self.diff_reject_active.as_ref().is_some_and(|item| item.session_id == id))
+    }
+
+    fn queued_diff_rows(&self) -> HashSet<usize> {
+        let mut rows = HashSet::new();
+        let (Some(id), Some(current)) = (self.diff_target.as_deref(), self.diff_snapshot.as_ref()) else { return rows; };
+        for (index, hunk) in current.rejectable.iter().enumerate() {
+            if self.diff_reject_queue.iter().any(|item| item.session_id == id
+                && current.same_hunk(index, &item.snapshot, item.index))
+                || self.diff_reject_active.as_ref().is_some_and(|item| item.session_id == id
+                    && current.same_hunk(index, &item.snapshot, item.index)) {
+                rows.insert(hunk.row);
+            }
+        }
+        rows
     }
 
     fn load_diff(&mut self) {
@@ -2538,17 +2621,24 @@ impl App {
     }
 
     fn poll_diff(&mut self) -> bool {
+        if self.diff_reject_feedback.is_some() && self.pending_prompts.len() < MAX_PENDING_PROMPTS {
+            self.pending_prompts.push(self.diff_reject_feedback.take().expect("retained feedback"));
+            self.notice = "Notifying the session about the reverted hunk".into();
+            return true;
+        }
         if let Some(receiver) = &self.diff_reject_pending {
             match receiver.try_recv() {
                 Ok((id, result, message)) => {
                     self.diff_reject_pending = None;
+                    self.diff_reject_active = None;
                     match result {
                         Ok(note) => {
                             if self.pending_prompts.len() < MAX_PENDING_PROMPTS {
                                 self.pending_prompts.push((id, message));
                                 self.notice = format!("{note} · notifying the session");
                             } else {
-                                self.notice = format!("{note} · prompt queue full; tell the session manually");
+                                self.diff_reject_feedback = Some((id, message));
+                                self.notice = format!("{note} · feedback retained until the prompt queue has room");
                             }
                             self.load_diff();
                         }
@@ -2558,12 +2648,14 @@ impl App {
                 }
                 Err(TryRecvError::Disconnected) => {
                     self.diff_reject_pending = None;
+                    self.diff_reject_active = None;
                     self.notice = "Hunk rejection worker stopped unexpectedly; inspect the worktree.".into();
                     return true;
                 }
                 Err(TryRecvError::Empty) => {}
             }
         }
+        if self.start_next_rejection() { return true; }
         if self.diff_pane && self.diff_target.as_deref() != self.groups[self.active_group].active_id() {
             self.load_diff();
             return true;
@@ -2592,18 +2684,24 @@ impl App {
     fn diff_key(&mut self, key: KeyEvent) -> bool {
         if self.diff_reject_confirm.is_some() {
             match key.code {
-                KeyCode::Char('y' | 'Y') => self.confirm_diff_reject(),
-                KeyCode::Char('n' | 'N') | KeyCode::Esc => {
+                KeyCode::Enter => self.confirm_diff_reject(),
+                KeyCode::Esc => {
                     self.diff_reject_confirm = None;
                     self.notice = "Hunk rejection cancelled".into();
+                }
+                KeyCode::Backspace => {
+                    if let Some(draft) = &mut self.diff_reject_confirm { draft.reason.pop(); }
+                }
+                KeyCode::Char(ch) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+                    self.append_reject_reason(ch);
                 }
                 _ => return true,
             }
             return true;
         }
         match key.code {
-            KeyCode::Esc | KeyCode::F(2) => self.diff_modal = false,
-            KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::ALT) => self.diff_modal = false,
+            KeyCode::Esc | KeyCode::F(2) => self.open_diff(),
+            KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::ALT) => self.open_diff(),
             KeyCode::Char('r' | 'R') => { self.diff_modal = false; self.open_diff(); },
             KeyCode::Up => self.diff_scroll = self.diff_scroll.saturating_sub(1),
             KeyCode::Down => self.diff_scroll = self.diff_scroll.saturating_add(1),
@@ -2620,8 +2718,8 @@ impl App {
     }
 
     fn begin_diff_reject(&mut self) {
-        if self.diff_reject_pending.is_some() {
-            self.notice = "A hunk rejection is already in progress".into();
+        if self.diff_reject_queue.len() + usize::from(self.diff_reject_active.is_some()) >= MAX_QUEUED_REJECTIONS {
+            self.notice = "Too many queued hunk rejections".into();
             return;
         }
         let Some(id) = self.diff_target.as_ref() else { self.notice = "Select a session first".into(); return; };
@@ -2629,8 +2727,8 @@ impl App {
             self.notice = "Active session changed; refresh the diff before rejecting".into();
             return;
         }
-        if self.session_activity.get(id).copied() != Some((false, 0)) {
-            self.notice = "Wait for this session to finish before rejecting an edit".into();
+        if !self.session_activity.contains_key(id) {
+            self.notice = "Session activity is unknown; wait for a status update".into();
             return;
         }
         let Some(snapshot) = self.diff_snapshot.as_ref() else { self.notice = "Load the diff before rejecting an edit".into(); return; };
@@ -2644,32 +2742,63 @@ impl App {
             return;
         };
         self.diff_scroll = snapshot.rejectable[index].row;
-        self.diff_reject_confirm = Some(index);
-        self.notice = format!("Reject {} in {}? Y confirm · N cancel",
+        self.diff_reject_confirm = Some(RejectDraft { index, reason: String::new() });
+        self.notice = format!("Reject {} in {}? Type optional reason · Enter confirm · Esc cancel",
             snapshot.rejectable[index].header, snapshot.rejectable[index].path);
     }
 
     fn confirm_diff_reject(&mut self) {
-        let Some(index) = self.diff_reject_confirm.take() else { return; };
+        let Some(draft) = self.diff_reject_confirm.take() else { return; };
         let Some(id) = self.diff_target.clone() else { return; };
         if self.groups[self.active_group].active_id() != Some(id.as_str()) {
             self.notice = "Active session changed; rejection cancelled".into();
             return;
         }
-        if self.session_activity.get(&id).copied() != Some((false, 0)) {
-            self.notice = "Session resumed editing; rejection cancelled".into();
+        if !self.session_activity.contains_key(&id) {
+            self.notice = "Session activity is unknown; rejection cancelled".into();
             return;
         }
         let Some(snapshot) = self.diff_snapshot.clone() else { return; };
-        let Some(hunk) = snapshot.rejectable.get(index) else { return; };
-        let message = hunk.message();
+        if snapshot.rejectable.get(draft.index).is_none() { return; }
+        if self.diff_reject_queue.iter().any(|queued| queued.session_id == id
+            && snapshot.same_hunk(draft.index, &queued.snapshot, queued.index))
+            || self.diff_reject_active.as_ref().is_some_and(|active| active.session_id == id
+                && snapshot.same_hunk(draft.index, &active.snapshot, active.index)) {
+            self.notice = "This hunk is already queued for rejection".into();
+            return;
+        }
+        if self.diff_reject_queue.len() + usize::from(self.diff_reject_active.is_some()) >= MAX_QUEUED_REJECTIONS {
+            self.notice = "Too many queued hunk rejections".into();
+            return;
+        }
+        self.diff_reject_queue.push_back(PendingRejection {
+            session_id: id, snapshot, index: draft.index, reason: draft.reason,
+        });
+        if self.start_next_rejection() { return; }
+        self.notice = format!("Hunk rejection queued until session is idle · {} pending", self.diff_reject_queue.len());
+    }
+
+    fn start_next_rejection(&mut self) -> bool {
+        if self.diff_reject_pending.is_some() || self.diff_reject_feedback.is_some()
+            || self.pending_prompts.len() >= MAX_PENDING_PROMPTS { return false; }
+        let Some(position) = self.diff_reject_queue.iter().position(|item| {
+            self.session_activity.get(&item.session_id).copied() == Some((false, 0))
+        }) else { return false; };
+        let job = self.diff_reject_queue.remove(position).expect("queued rejection");
+        let Some(hunk) = job.snapshot.rejectable.get(job.index) else { return false; };
+        let message = hunk.message(&job.reason);
+        let id = job.session_id.clone();
+        let snapshot = job.snapshot.clone();
+        let index = job.index;
         let (tx, rx) = mpsc::sync_channel(1);
         self.diff_reject_pending = Some(rx);
+        self.diff_reject_active = Some(job);
         self.notice = "Checking and reverting the selected hunk…".into();
         std::thread::spawn(move || {
             let outcome = diff_view::reject(&snapshot, index);
             let _ = tx.send((id, outcome, message));
         });
+        true
     }
 
     fn jump_diff(&mut self, file: bool, forward: bool) {
@@ -3856,33 +3985,55 @@ impl App {
         if width < 24 || height < 8 { return; }
         let modal = Rect::new(area.x + (area.width - width) / 2, area.y + (area.height - height) / 2, width, height);
         frame.render_widget(Clear, modal);
-        let rows: Vec<Line> = self.diff_text.lines()
+        let queued_rows = self.queued_diff_rows();
+        let mut rows: Vec<Line> = self.diff_text.lines().enumerate()
             .skip(self.diff_scroll)
-            .take(usize::from(height.saturating_sub(2)))
-            .map(|line| {
+            .take(usize::from(height.saturating_sub(if self.diff_reject_confirm.is_some() { 3 } else { 2 })))
+            .map(|(row, line)| {
+            if queued_rows.contains(&row) {
+                return Line::styled(format!("⏳ {line}"), Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD));
+            }
             let color = if line.starts_with('+') && !line.starts_with("+++") { theme::SUCCESS }
                 else if line.starts_with('-') && !line.starts_with("---") { theme::ERROR }
                 else if line.starts_with("@@") { theme::ACCENT } else { theme::SECONDARY };
             Line::styled(line.to_owned(), Style::default().fg(color))
         }).collect();
+        if let Some(draft) = &self.diff_reject_confirm {
+            rows.push(Line::styled(format!(" Reason (optional): {}_ · Enter confirm · Esc cancel", draft.reason),
+                Style::default().fg(theme::ACCENT)));
+        }
+        let pending = self.rejections_for_target();
+        let title = format!(" Worktree diff{} · N/P files · J/K hunks · X reject · R refresh · F2/Esc close ",
+            if pending == 0 { String::new() } else { format!(" · {pending} queued") });
         frame.render_widget(Paragraph::new(rows)
-            .block(Block::default().title(" Worktree diff · N/P files · J/K hunks · X reject · R refresh · F2/Esc close ")
+            .block(Block::default().title(title)
                 .borders(Borders::ALL).border_style(Style::default().fg(theme::BORDER))
             .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED))), modal);
     }
 
     fn draw_diff_pane(&self, frame: &mut Frame, area: Rect) {
-        let rows: Vec<Line> = self.diff_text.lines()
+        let queued_rows = self.queued_diff_rows();
+        let mut rows: Vec<Line> = self.diff_text.lines().enumerate()
             .skip(self.diff_scroll)
-            .take(usize::from(area.height.saturating_sub(2)))
-            .map(|line| {
+            .take(usize::from(area.height.saturating_sub(if self.diff_reject_confirm.is_some() { 3 } else { 2 })))
+            .map(|(row, line)| {
+                if queued_rows.contains(&row) {
+                    return Line::styled(format!("⏳ {line}"), Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD));
+                }
                 let color = if line.starts_with('+') && !line.starts_with("+++") { theme::SUCCESS }
                     else if line.starts_with('-') && !line.starts_with("---") { theme::ERROR }
                     else if line.starts_with("@@") { theme::ACCENT } else { theme::SECONDARY };
                 Line::styled(line.to_owned(), Style::default().fg(color))
             }).collect();
+        if let Some(draft) = &self.diff_reject_confirm {
+            rows.push(Line::styled(format!(" Reason (optional): {}_ · Enter confirm · Esc cancel", draft.reason),
+                Style::default().fg(theme::ACCENT)));
+        }
+        let pending = self.rejections_for_target();
+        let title = format!(" Worktree diff{} · Alt+N/B files · Alt+J/K hunks · Alt+R reject · F5 refresh · F4 close ",
+            if pending == 0 { String::new() } else { format!(" · {pending} queued") });
         frame.render_widget(Paragraph::new(rows)
-            .block(Block::default().title(" Worktree diff · Alt+N/B files · Alt+J/K hunks · Alt+R reject · F5 refresh · F4 close ")
+            .block(Block::default().title(title)
                 .borders(Borders::ALL).border_style(Style::default().fg(theme::BORDER)))
             .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)), area);
     }
@@ -4450,6 +4601,7 @@ fn run_loop(
             let disconnected = dispatch_stops(&mut app, sender) || disconnected;
             if disconnected {
                 prompt_sender = None;
+                app.session_activity.clear();
                 changed = true;
             }
         }
@@ -5739,7 +5891,7 @@ mod tests {
     }
 
     #[test]
-    fn diff_reject_requires_idle_session_and_sends_feedback_after_reverting() {
+    fn diff_reject_waits_for_idle_turn_and_sends_bounded_reason_after_reverting() {
         let dir = tempfile::tempdir().unwrap();
         let git = |args: &[&str]| assert!(std::process::Command::new("git").args(args)
             .current_dir(dir.path()).status().unwrap().success());
@@ -5756,21 +5908,78 @@ mod tests {
         app.diff_snapshot = Some(snapshot);
         app.session_activity.insert("session".into(), (true, 0));
         app.begin_diff_reject();
+        assert_eq!(app.diff_reject_confirm.as_ref().map(|draft| draft.index), Some(0));
+        app.diff_modal = true;
+        app.handle(Event::Paste("Please keep the old behavior\n".into()));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert!(app.diff_reject_confirm.is_none());
+        assert_eq!(app.diff_reject_queue.len(), 1);
+        assert!(app.diff_reject_pending.is_none());
         assert_eq!(std::fs::read_to_string(dir.path().join("tracked.txt")).unwrap(), "new\n");
-        app.session_activity.insert("session".into(), (false, 0));
+        assert!(painted(&app).contains("queued"));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE)));
+        assert!(app.diff_modal);
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)));
+        assert!(!app.should_quit);
         app.begin_diff_reject();
-        assert_eq!(app.diff_reject_confirm, Some(0));
         app.confirm_diff_reject();
+        assert_eq!(app.diff_reject_queue.len(), 1);
+        assert!(app.notice.contains("already queued"));
+        app.session_activity.insert("session".into(), (false, 0));
+        assert!(app.poll_diff());
+        assert!(app.diff_reject_pending.is_some());
+        app.pending_prompts = vec![("other".into(), "waiting".into()); MAX_PENDING_PROMPTS];
         for _ in 0..100 {
-            if app.poll_diff() && app.diff_reject_pending.is_none() { break; }
+            app.poll_diff();
+            if app.diff_reject_pending.is_none() && app.diff_reject_feedback.is_some() { break; }
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(app.diff_reject_pending.is_none());
+        assert!(app.diff_reject_feedback.is_some());
+        assert_eq!(app.pending_prompts.len(), MAX_PENDING_PROMPTS);
+        app.pending_prompts.clear();
+        assert!(app.poll_diff());
+        assert!(app.diff_reject_feedback.is_none());
         assert_eq!(std::fs::read_to_string(dir.path().join("tracked.txt")).unwrap(), "old\n");
         assert_eq!(app.pending_prompts.len(), 1);
         assert_eq!(app.pending_prompts[0].0, "session");
         assert!(app.pending_prompts[0].1.contains("Do not re-apply"));
+        assert!(app.pending_prompts[0].1.contains("Why: Please keep the old behavior"));
+    }
+
+    #[test]
+    fn queued_diff_rejection_refuses_stale_patch_without_sending_feedback() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| assert!(std::process::Command::new("git").args(args)
+            .current_dir(dir.path()).status().unwrap().success());
+        git(&["init", "-q"]);
+        std::fs::write(dir.path().join("tracked.txt"), "old\n").unwrap();
+        git(&["add", "tracked.txt"]);
+        git(&["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "test: baseline"]);
+        std::fs::write(dir.path().join("tracked.txt"), "new\n").unwrap();
+        let snapshot = diff_view::read(dir.path());
+        let mut app = App::default();
+        app.groups[0].tabs.push("session".into());
+        app.diff_target = Some("session".into());
+        app.diff_scroll = snapshot.rejectable[0].row;
+        app.diff_snapshot = Some(snapshot);
+        app.session_activity.insert("session".into(), (true, 0));
+        app.begin_diff_reject();
+        app.handle(Event::Paste(format!("{}\n\u{1b}", "x".repeat(2000))));
+        assert_eq!(app.diff_reject_confirm.as_ref().unwrap().reason.len(), MAX_REJECT_REASON_BYTES);
+        app.confirm_diff_reject();
+        assert_eq!(app.diff_reject_queue.len(), 1);
+        std::fs::write(dir.path().join("tracked.txt"), "agent changed again\n").unwrap();
+        app.session_activity.insert("session".into(), (false, 0));
+        for _ in 0..100 {
+            app.poll_diff();
+            if app.diff_reject_pending.is_none() && app.diff_reject_queue.is_empty()
+                && app.notice.contains("changed") { break; }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(std::fs::read_to_string(dir.path().join("tracked.txt")).unwrap(), "agent changed again\n");
+        assert!(app.pending_prompts.is_empty());
+        assert!(app.notice.contains("changed"));
     }
 
     #[test]
@@ -5799,7 +6008,7 @@ mod tests {
         assert_eq!(app.input, "x");
         app.handle(Event::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::ALT)));
         assert!(app.stop_confirmation.is_none());
-        assert!(app.notice.contains("Wait for this session") || app.notice.contains("Load the diff"));
+        assert!(app.notice.contains("activity is unknown") || app.notice.contains("Load the diff"));
         app.handle(Event::Key(KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE)));
         assert!(!app.diff_pane);
         assert!(painted(&app).contains("hidden transcript"));
