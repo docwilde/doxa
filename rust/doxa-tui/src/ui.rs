@@ -2,7 +2,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::cell::RefCell;
 use std::io::{self, IsTerminal, Stdout};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -159,6 +159,9 @@ struct ChipHit {
 struct ChipInfo {
     kind: &'static str,
     label: String,
+    lines: Vec<String>,
+    scroll: usize,
+    owner: Option<(String, String)>,
 }
 
 fn chip_hint(kind: &str) -> &'static str {
@@ -169,7 +172,7 @@ fn chip_hint(kind: &str) -> &'static str {
         "repo" => "This session's repository and base branch · click for worktree details",
         "directory" => "This session's directory; no Git repository is active",
         "context" => "Current session context usage · click for details",
-        "memory" => "Project/user memory: % of separate LORE caps",
+        "memory" => "User and scoped LORE memory · click to view entries",
         "beliefs" => "LORE beliefs · click to browse",
         "cost" => "Provider billing and quota information",
         "balance" => "Current DeepSeek API account balance",
@@ -769,7 +772,9 @@ pub struct App {
     // LORE owns these counts. A bounded background query keeps store I/O off
     // the draw path; an unavailable sidecar leaves the chip unknown.
     memory_cache: HashMap<String, (Option<doxa_lore::MemoryUsage>, Instant)>,
-    memory_pending: Option<(String, String, Receiver<Option<doxa_lore::MemoryUsage>>)>,
+    memory_pending: Option<(String, String, Receiver<Option<(doxa_lore::MemoryUsage, bool)>>)>,
+    memory_repo: HashMap<String, bool>,
+    memory_menu_pending: Option<(String, String, Receiver<Result<Vec<String>, &'static str>>)>,
     repo_cache: HashMap<String, (Option<doxa_worktrees::RepoStatus>, Instant)>,
     repo_pending: Option<(String, PathBuf, u64, Receiver<Option<doxa_worktrees::RepoStatus>>)>,
     repo_epoch: HashMap<String, u64>,
@@ -885,6 +890,8 @@ impl Default for App {
             session_telemetry: HashMap::new(),
             memory_cache: HashMap::new(),
             memory_pending: None,
+            memory_repo: HashMap::new(),
+            memory_menu_pending: None,
             repo_cache: HashMap::new(),
             repo_pending: None,
             repo_epoch: HashMap::new(),
@@ -1137,6 +1144,7 @@ impl App {
                     if path.is_absolute() && raw.len() <= 4096 {
                         if self.session_cwds.get(id) != Some(&path) {
                             self.memory_cache.remove(id);
+                            self.memory_repo.remove(id);
                             self.invalidate_repo(id);
                         }
                         self.session_cwds.insert(id.to_owned(), path);
@@ -1856,7 +1864,21 @@ impl App {
         }
         if self.stop_confirmation.is_some() { return self.stop_confirmation_key(key); }
         if self.chip_info.is_some() {
-            if key.code == KeyCode::Esc { self.chip_info = None; return true; }
+            if key.code == KeyCode::Esc {
+                self.chip_info = None;
+                self.memory_menu_pending = None;
+                return true;
+            }
+            if let Some(info) = self.chip_info.as_mut().filter(|info| info.kind == "memory") {
+                match key.code {
+                    KeyCode::Up => info.scroll = info.scroll.saturating_sub(1),
+                    KeyCode::Down => info.scroll = info.scroll.saturating_add(1).min(info.lines.len().saturating_sub(1)),
+                    KeyCode::PageUp => info.scroll = info.scroll.saturating_sub(8),
+                    KeyCode::PageDown => info.scroll = info.scroll.saturating_add(8).min(info.lines.len().saturating_sub(1)),
+                    _ => return false,
+                }
+                return true;
+            }
             return false;
         }
         if self.lore_picker.is_some() { return self.lore_picker_key(key); }
@@ -2707,14 +2729,19 @@ impl App {
                                  user_chars: u64, user_cap_chars: u64) {
         let usage = doxa_lore::MemoryUsage { project_chars, project_cap_chars, user_chars, user_cap_chars };
         self.memory_cache.insert(id.to_owned(), (Some(usage), Instant::now()));
+        self.memory_repo.insert(id.to_owned(), true);
     }
 
     fn poll_memory(&mut self) -> bool {
         let mut changed = false;
         if let Some((id, cwd, receiver)) = self.memory_pending.take() {
             match receiver.try_recv() {
-                Ok(usage) => {
+                Ok(result) => {
                     if self.session_cwds.get(&id).and_then(|path| path.to_str()) == Some(cwd.as_str()) {
+                        let usage = result.map(|(usage, repo)| {
+                            self.memory_repo.insert(id.clone(), repo);
+                            usage
+                        });
                         changed = self.memory_cache.get(&id).is_none_or(|(old, _)| *old != usage);
                         self.memory_cache.insert(id, (usage, Instant::now()));
                     }
@@ -2743,8 +2770,10 @@ impl App {
             let (tx, rx) = mpsc::sync_channel(1);
             self.memory_pending = Some((id, cwd.clone(), rx));
             std::thread::spawn(move || {
-                let usage = doxa_lore::LoreClient::spawn(&python, Duration::from_secs(2))
-                    .and_then(|mut lore| lore.memory_usage(&cwd)).ok();
+                let (scope, repo) = crate::memory_menu::scope_path(Path::new(&cwd));
+                let usage = scope.to_str().and_then(|scope| doxa_lore::LoreClient::spawn(&python, Duration::from_secs(2))
+                    .and_then(|mut lore| lore.memory_usage(scope)).ok())
+                    .map(|usage| (usage, repo));
                 let _ = tx.send(usage);
             });
             break;
@@ -2788,6 +2817,39 @@ impl App {
             break;
         }
         changed
+    }
+
+    fn poll_memory_menu(&mut self) -> bool {
+        let Some((id, cwd, receiver)) = self.memory_menu_pending.take() else { return false; };
+        match receiver.try_recv() {
+            Ok(result) => {
+                if self.groups[self.active_group].active_id() != Some(id.as_str())
+                    || self.session_cwds.get(&id).and_then(|path| path.to_str()) != Some(cwd.as_str()) {
+                    return false;
+                }
+                if let Some(info) = self.chip_info.as_mut().filter(|info| info.kind == "memory") {
+                    info.lines = match result {
+                        Ok(lines) => lines,
+                        Err(message) => vec![message.to_owned()],
+                    };
+                    info.scroll = 0;
+                    return true;
+                }
+                false
+            }
+            Err(TryRecvError::Empty) => {
+                self.memory_menu_pending = Some((id, cwd, receiver));
+                false
+            }
+            Err(TryRecvError::Disconnected) => {
+                if let Some(info) = self.chip_info.as_mut().filter(|info| info.kind == "memory") {
+                    info.lines = vec!["LORE unavailable".to_owned()];
+                    info.scroll = 0;
+                    return true;
+                }
+                false
+            },
+        }
     }
 
     fn poll_lore(&mut self) -> bool {
@@ -3883,7 +3945,9 @@ impl App {
         } else if self.action_menu {
             (ACTIONS.len() + 2).min(15) as u16
         } else if self.chip_info.is_some() {
-            5
+            self.chip_info.as_ref().map_or(5, |info| if info.kind == "memory" {
+                (info.lines.len() + 2).clamp(7, 19) as u16
+            } else { 5 })
         } else if self.history_modal {
             (self.history_matches().len() + 3).clamp(5, 15) as u16
         } else if let Some(picker) = &self.queue_picker {
@@ -3936,10 +4000,11 @@ impl App {
         }
         chips.push(("context", format!("Ctx {}", telemetry.and_then(|value| value.context.as_deref()).unwrap_or("?"))));
         let memory = self.memory_cache.get(id.unwrap_or("")).and_then(|(usage, _)| *usage)
-            .map(|usage| format!("p {}%/u {}%",
+            .map(|usage| format!("{} {}%/u {}%",
+                if self.memory_repo.get(id.unwrap_or("")).copied().unwrap_or(false) { "p" } else { "f" },
                 memory_fill_percent(usage.project_chars, usage.project_cap_chars),
                 memory_fill_percent(usage.user_chars, usage.user_cap_chars)))
-            .unwrap_or_else(|| "p ?/u ?".to_owned());
+            .unwrap_or_else(|| "u ? · scope ?".to_owned());
         chips.push(("memory", memory));
         let beliefs = telemetry.and_then(|value| value.lore.as_deref())
             .filter(|label| label.ends_with(" beliefs"))
@@ -4091,11 +4156,34 @@ impl App {
             }
         }
         self.active_group = group;
-        self.chip_info = Some(ChipInfo { kind, label });
+        self.chip_info = Some(ChipInfo { kind, label, lines: Vec::new(), scroll: 0, owner: None });
         if self.active_chooser_rect().is_none() {
             self.chip_info = None;
             self.notice = "Enlarge active pane to inspect chip details".into();
         }
+    }
+
+    fn open_memory_menu(&mut self, group: usize) {
+        self.open_chip_info("memory", group);
+        let Some(info) = self.chip_info.as_mut() else { return; };
+        info.lines = vec!["Loading LORE memory…".into()];
+        let Some(id) = self.groups[group].active_id().map(str::to_owned) else {
+            info.lines = vec!["No active session".into()];
+            return;
+        };
+        let Some(cwd) = self.session_cwds.get(&id).and_then(|path| path.to_str()).map(str::to_owned) else {
+            info.lines = vec!["Session directory unavailable".into()];
+            return;
+        };
+        info.owner = Some((id.clone(), cwd.clone()));
+        let python = std::env::var_os("DOXA_LORE_PYTHON")
+            .map(PathBuf::from).unwrap_or_else(|| PathBuf::from("python3"));
+        let (tx, rx) = mpsc::sync_channel(1);
+        self.memory_menu_pending = Some((id, cwd.clone(), rx));
+        std::thread::spawn(move || {
+            let result = crate::memory_menu::fetch(&python, Path::new(&cwd));
+            let _ = tx.send(result);
+        });
     }
 
     fn mouse(&mut self, mouse: MouseEvent) -> bool {
@@ -4109,10 +4197,28 @@ impl App {
             return true;
         }
         if self.chip_info.is_some() {
+            let inside_menu = self.active_chooser_rect().is_some_and(|area| area.contains(
+                ratatui::layout::Position::new(mouse.column, mouse.row)));
+            if let Some(info) = self.chip_info.as_mut().filter(|info| info.kind == "memory") {
+                if inside_menu {
+                    match mouse.kind {
+                        MouseEventKind::ScrollUp => {
+                            info.scroll = info.scroll.saturating_sub(3);
+                            return true;
+                        }
+                        MouseEventKind::ScrollDown => {
+                            info.scroll = info.scroll.saturating_add(3).min(info.lines.len().saturating_sub(1));
+                            return true;
+                        }
+                        _ => {}
+                    }
+                }
+            }
             if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
                 let inside = self.active_chooser_rect().is_some_and(|area| area.contains(
                     ratatui::layout::Position::new(mouse.column, mouse.row)));
                 self.chip_info = None;
+                self.memory_menu_pending = None;
                 if inside { return true; }
             } else { return false; }
         }
@@ -4298,6 +4404,7 @@ impl App {
                     "engine" => self.open_engine_picker(),
                     "model" => self.open_model_picker(),
                     "beliefs" => self.open_lore_picker(),
+                    "memory" => self.open_memory_menu(hit.group),
                     "more" => {
                         let visible = self.chip_window(hit.group, usize::from(self.pane_regions(hit.group, hit.pane)[3].width));
                         let count = visible.len().saturating_sub(1).max(1);
@@ -4647,6 +4754,25 @@ impl App {
 
     fn draw_chip_info(&self, frame: &mut Frame, area: Rect) {
         let Some(info) = &self.chip_info else { return; };
+        if info.kind == "memory" {
+            let current = self.groups[self.active_group].active_id().and_then(|id|
+                self.session_cwds.get(id).and_then(|cwd| cwd.to_str()).map(|cwd| (id, cwd)));
+            let owner_matches = info.owner.as_ref().is_some_and(|(id, cwd)| current == Some((id.as_str(), cwd.as_str())));
+            let message;
+            let source = if info.owner.is_some() && !owner_matches {
+                message = vec!["Session changed; reopen memory".to_owned()];
+                &message
+            } else { &info.lines };
+            let visible = usize::from(area.height.saturating_sub(2)).max(1);
+            let start = info.scroll.min(source.len().saturating_sub(visible));
+            let lines: Vec<String> = source.iter().skip(start).take(visible)
+                .map(|line| clipped_title(line, usize::from(area.width.saturating_sub(2))).0).collect();
+            frame.render_widget(Paragraph::new(lines.join("\n"))
+                .block(Block::default().title(" LORE memory · ↑↓ scroll · Esc close ").borders(Borders::ALL)
+                    .border_style(Style::default().fg(theme::ACCENT)))
+                .style(Style::default().fg(theme::TEXT).bg(theme::RAISED)), area);
+            return;
+        }
         let title = format!(" {} · Esc close ", safe_label(info.kind));
         let body = format!(" {}\n {}", safe_label(&info.label), chip_hint(info.kind));
         frame.render_widget(Paragraph::new(body).wrap(Wrap { trim: false })
@@ -5393,6 +5519,7 @@ fn run_loop(
         changed |= app.poll_lore();
         changed |= app.poll_memory();
         changed |= app.poll_repo();
+        changed |= app.poll_memory_menu();
         changed |= app.tick_blink(Instant::now());
         if prompt_sender.is_none() {
             if let Some(id) = app.pending_peer_refresh.take() {
@@ -5957,14 +6084,48 @@ mod tests {
         app.memory_pending = Some(("s".into(), "/repo/old".into(), rx));
         app.apply_daemon_frame(&json!({"type":"hello", "session_id":"s", "cwd":"/repo/new"}));
         app.offline_ids.insert("s".into());
-        tx.send(Some(doxa_lore::MemoryUsage {
+        tx.send(Some((doxa_lore::MemoryUsage {
             project_chars: 400, project_cap_chars: 1000,
             user_chars: 200, user_cap_chars: 500,
-        })).unwrap();
+        }, true))).unwrap();
         app.poll_memory();
         assert!(!app.memory_cache.contains_key("s"));
         assert_eq!(app.chips(0).iter().find(|(kind, _)| *kind == "memory").unwrap().1,
-            "p ?/u ?");
+            "u ? · scope ?");
+    }
+
+    #[test]
+    fn memory_chip_opens_inline_entries_for_active_pane_and_rejects_stale_scope() {
+        let mut app = App::default();
+        app.rail_visible = false;
+        app.handle(Event::Resize(160, 32));
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"left","cwd":"/tmp/left"}));
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"right","cwd":"/tmp/right"}));
+        app.groups[1].tabs.push("right".into());
+        app.active_group = 1;
+        app.open_memory_menu(1);
+        assert_eq!(app.chip_info.as_ref().unwrap().kind, "memory");
+        let menu = app.active_chooser_rect().unwrap();
+        let pane = app.layout(app.size).panes.unwrap()[1];
+        assert_eq!(menu.x, pane.x);
+        assert!(menu.bottom() < pane.bottom());
+        let (tx, rx) = mpsc::sync_channel(1);
+        app.memory_menu_pending = Some(("right".into(), "/tmp/right".into(), rx));
+        tx.send(Ok(vec!["## User memory".into(), "- verified user fact".into(),
+            "## Folder memory".into(), "- verified folder fact".into()])).unwrap();
+        assert!(app.poll_memory_menu());
+        let rendered = painted_at(&app, 160, 32);
+        assert!(rendered.contains("verified user fact"), "{rendered}");
+        assert!(rendered.contains("verified folder fact"), "{rendered}");
+        let (tx, rx) = mpsc::sync_channel(1);
+        app.memory_menu_pending = Some(("right".into(), "/tmp/right".into(), rx));
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"right","cwd":"/tmp/moved"}));
+        tx.send(Ok(vec!["- stale secret".into()])).unwrap();
+        assert!(!app.poll_memory_menu());
+        assert!(!painted_at(&app, 160, 32).contains("stale secret"));
+        let rendered = painted_at(&app, 160, 32);
+        assert!(rendered.contains("Session changed; reopen memory"));
+        assert!(!rendered.contains("verified folder fact"));
     }
 
     #[test]
@@ -6289,7 +6450,7 @@ mod tests {
                 "beliefs" => assert!(app.lore_picker.is_some()),
                 _ => {
                     assert_eq!(app.chip_info.as_ref().map(|info| info.kind), Some(kind));
-                    if kind == "memory" { assert!(painted_at(&app, 220, 32).contains("separate LORE caps")); }
+                    if kind == "memory" { assert!(painted_at(&app, 220, 32).contains("Loading LORE memory")); }
                 }
             }
             app.handle(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
@@ -6329,7 +6490,7 @@ mod tests {
             assert_eq!(app.input_drafts.get(&(0, "left".into())).unwrap().0, "left draft");
         }
         }
-        assert!(chip_hint("memory").contains("% of separate LORE caps"));
+        assert!(chip_hint("memory").contains("click to view entries"));
     }
 
     #[test]

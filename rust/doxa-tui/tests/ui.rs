@@ -298,7 +298,7 @@ fn telemetry_status_restores_reported_values_without_inventing_zero_usage() {
     }}));
     let rendered = screen(&app, 300, 24);
     assert!(rendered.contains("Ctx 42%"), "{rendered}");
-    assert!(rendered.contains("p ?/u ?"), "{rendered}");
+    assert!(rendered.contains("u ? · scope ?"), "{rendered}");
     assert!(!rendered.contains("Tokens "), "{rendered}");
     assert!(rendered.contains("$0.0123 est"), "{rendered}");
     assert!(!rendered.contains("Cost ") && !rendered.contains("$0.0123 session"), "{rendered}");
@@ -306,7 +306,7 @@ fn telemetry_status_restores_reported_values_without_inventing_zero_usage() {
     app.apply_daemon_frame(&json!({"type":"reply","ok":true,"status":{
         "session_id":"one","usage":{"num_turns":0,"input_tokens":0,"output_tokens":0}
     }}));
-    assert!(screen(&app, 300, 24).contains("p ?/u ?"));
+    assert!(screen(&app, 300, 24).contains("u ? · scope ?"));
 }
 
 #[test]
