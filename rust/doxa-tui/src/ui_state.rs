@@ -218,6 +218,7 @@ impl UiStateStore {
                 !app.groups
                     .iter()
                     .any(|group| group.tabs.contains(&tab.session_id))
+                    && !app.clear_stop_after_save.contains(&tab.session_id)
             })
         }) {
             return Err(io::Error::new(
@@ -617,5 +618,23 @@ mod tests {
         store.save(&app).unwrap();
         assert!(!store.path().exists());
         assert_eq!(app.collections[0].name, "Later");
+    }
+
+    #[test]
+    fn clear_replacement_is_the_only_authorized_missing_saved_tab() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = UiStateStore::new(temp.path(), "/project", "machine").unwrap();
+        let mut app = App::default();
+        app.groups[0].tabs.push("old".into());
+        store.save(&app).unwrap();
+        let before = std::fs::read(store.path()).unwrap();
+        app.groups[0].tabs[0] = "fresh".into();
+        assert_eq!(store.save(&app).unwrap_err().kind(), io::ErrorKind::Unsupported);
+        assert_eq!(std::fs::read(store.path()).unwrap(), before);
+        app.clear_stop_after_save.push("old".into());
+        store.save(&app).unwrap();
+        let saved: Value = serde_json::from_slice(&std::fs::read(store.path()).unwrap()).unwrap();
+        assert_eq!(saved["tabs"][0]["session_id"], "fresh");
+        assert_eq!(saved["layout"]["groups"]["tabs"][0]["session_id"], "fresh");
     }
 }

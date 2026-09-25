@@ -229,6 +229,12 @@ struct NewSession {
 }
 
 #[derive(Debug)]
+struct ClearPending {
+    old_id: String,
+    group: usize,
+}
+
+#[derive(Debug)]
 struct EffortPicker { session_id: String, engine: String, model: String,
     levels: Vec<String>, selected: usize }
 
@@ -1101,6 +1107,9 @@ pub struct App {
     pending_permission_changes: Vec<(String, String)>,
     stop_confirmation: Option<String>,
     pending_stops: Vec<String>,
+    pending_clear_finalizes: Vec<String>,
+    pub(crate) clear_stop_after_save: Vec<String>,
+    clear_pending: Option<ClearPending>,
     model_picker: Option<ModelPicker>,
     effort_picker: Option<EffortPicker>,
     attach_picker: Option<AttachPicker>,
@@ -1235,6 +1244,9 @@ impl Default for App {
             pending_permission_changes: Vec::new(),
             stop_confirmation: None,
             pending_stops: Vec::new(),
+            pending_clear_finalizes: Vec::new(),
+            clear_stop_after_save: Vec::new(),
+            clear_pending: None,
             model_picker: None,
             effort_picker: None,
             attach_picker: None,
@@ -1424,6 +1436,41 @@ impl App {
             "launch_reply" => {
                 if !self.launching { return false; }
                 self.launching = false;
+                if let Some(clear) = self.clear_pending.take() {
+                    if frame["ok"] == true {
+                        if let Some(id) = frame["session_id"].as_str().filter(|id| crate::discovery::valid_id(id)) {
+                            if let Some(position) = self.groups[clear.group].tabs.iter().position(|tab| tab == &clear.old_id) {
+                                // A hello can arrive before this reply and provisionally
+                                // insert the new session into the first pane.
+                                for group in &mut self.groups {
+                                    if let Some(provisional) = group.tabs.iter().position(|tab| tab == id) {
+                                        group.tabs.remove(provisional);
+                                        group.active = group.active.min(group.tabs.len().saturating_sub(1));
+                                    }
+                                }
+                                let group = &mut self.groups[clear.group];
+                                let position = group.tabs.iter().position(|tab| tab == &clear.old_id).unwrap_or(position);
+                                group.tabs[position] = id.to_owned();
+                                group.active = position;
+                                group.scroll = 0;
+                                self.active_group = clear.group;
+                                for collection in &mut self.collections {
+                                    if let Some(member) = collection.sessions.iter_mut().find(|member| member.as_str() == clear.old_id) {
+                                        *member = id.to_owned();
+                                    }
+                                }
+                                self.clear_stop_after_save.push(clear.old_id);
+                                self.notice = format!("Fresh session ready · {}", safe_label(id));
+                                return true;
+                            }
+                        }
+                    } else {
+                        self.notice = format!("Clear failed; previous session preserved · {}",
+                            safe_label(frame["message"].as_str().unwrap_or("unknown error")));
+                        return true;
+                    }
+                    self.notice = "Clear target changed; new session kept as a separate tab".into();
+                }
                 if frame["ok"] == true {
                     if let Some(id) = frame["session_id"].as_str().filter(|id| crate::discovery::valid_id(id)) {
                         self.offline_ids.remove(id);
@@ -1798,6 +1845,40 @@ impl App {
                     self.notice = format!("Stop accepted · {}", safe_label(id));
                 } else {
                     self.notice = format!("Stop failed · {}", safe_label(frame["error"].as_str().unwrap_or("unknown error")));
+                }
+                true
+            }
+            "clear_finalize_reply" => {
+                let Some(id) = frame["session_id"].as_str() else { return false; };
+                if frame["ok"] == true {
+                    self.sessions.retain(|session| session.id != id);
+                    self.session_activity.remove(id);
+                    self.session_identity.remove(id);
+                    self.session_cwds.remove(id);
+                    self.session_efforts.remove(id);
+                    self.next_efforts.remove(id);
+                    self.session_telemetry.remove(id);
+                    self.memory_cache.remove(id);
+                    self.memory_repo.remove(id);
+                    self.repo_cache.remove(id);
+                    self.repo_epoch.remove(id);
+                    self.model_capabilities.remove(id);
+                    self.permission_capabilities.remove(id);
+                    self.permission_modes.remove(id);
+                    self.streaming_text.remove(id);
+                    self.reasoning_streams.remove(id);
+                    self.custom_names.remove(id);
+                    self.input_drafts.retain(|(_, session), _| session != id);
+                    self.rejected_drafts.remove(id);
+                    self.expanded_tool_sections.remove(id);
+                    self.selected_tool_sections.remove(id);
+                    self.tool_cards_revision.remove(id);
+                    self.input_requests.retain(|request| request.session_id != id);
+                    self.rail_selected = self.rail_selected.min(self.rail_order().len().saturating_sub(1));
+                    self.notice = "Previous session finalized".into();
+                } else {
+                    self.notice = format!("Previous session remains live · {}",
+                        safe_label(frame["error"].as_str().unwrap_or("finalization refused")));
                 }
                 true
             }
@@ -2722,6 +2803,7 @@ impl App {
                 true
             }
             "/rename" => { self.local_rename(args); true }
+            "/clear" => { self.local_clear(args); true }
             "/usage" | "/context" => {
                 if !args.trim().is_empty() {
                     self.notice = format!("Usage: {command}");
@@ -2778,7 +2860,6 @@ impl App {
             "/fleet" | "/img" | "/login"
             | "/logout" | "/settings" | "/setup" | "/doctor" | "/plugins"
             | "/reload-plugins" | "/effort"
-            | "/clear"
             | "/update" => {
                 self.notice = format!("Local command unavailable: {}", safe_label(command));
                 true
@@ -2916,6 +2997,57 @@ impl App {
         self.input.clear();
         self.input_cursor = 0;
         self.notice = format!("Attaching · {}", safe_label(id));
+    }
+
+    fn local_clear(&mut self, args: &str) {
+        if !args.trim().is_empty() {
+            self.notice = "Usage: /clear".into();
+            return;
+        }
+        if self.launching {
+            self.notice = "clear: wait for the current session launch".into();
+            return;
+        }
+        let group = self.active_group;
+        let Some(id) = self.groups[group].active_id().map(str::to_owned) else {
+            self.notice = "clear: select a session first".into();
+            return;
+        };
+        if self.offline_ids.contains(&id) {
+            self.notice = "clear: archived sessions cannot be replaced".into();
+            return;
+        }
+        if self.session_activity.get(&id).is_some_and(|(running, queued)| *running || *queued > 0)
+            || self.input_requests.iter().any(|request| request.session_id == id)
+            || self.pending_prompts.iter().any(|(session, _)| session == &id) {
+            self.notice = "clear: wait for the current turn and queued prompts to finish".into();
+            return;
+        }
+        let Some(engine) = self.session_identity.get(&id).and_then(|identity| identity.0.as_deref()) else {
+            self.notice = "clear: session engine is unavailable".into();
+            return;
+        };
+        let engine = match engine {
+            "codex" => launch::Engine::Codex,
+            "claude" => launch::Engine::Claude,
+            "deepseek" => launch::Engine::DeepSeek,
+            "glm" => launch::Engine::Glm,
+            _ => { self.notice = "clear: session engine cannot be relaunched".into(); return; }
+        };
+        let Some(cwd) = self.session_cwds.get(&id).cloned().filter(|path| path.is_absolute()) else {
+            self.notice = "clear: session directory is unavailable".into();
+            return;
+        };
+        let mut options = launch::LaunchOptions { engine, cwd: Some(cwd), ..Default::default() };
+        if engine == launch::Engine::Claude {
+            options.claude_script = std::env::var_os("DOXA_CLAUDE_SCRIPT").map(PathBuf::from);
+        }
+        self.clear_pending = Some(ClearPending { old_id: id, group });
+        self.pending_launches.push((options, None, group));
+        self.launching = true;
+        self.input.clear();
+        self.input_cursor = 0;
+        self.notice = "Starting a fresh session in this tab…".into();
     }
 
     fn local_cd(&mut self, args: &str) {
@@ -7037,6 +7169,7 @@ fn run_loop(
             if !app.pending_launches.is_empty() {
                 app.pending_launches.clear();
                 app.launching = false;
+                app.clear_pending = None;
                 app.notice = "Session launch unavailable · daemon connection closed".into();
                 changed = true;
             }
@@ -7049,6 +7182,16 @@ fn run_loop(
             if !app.pending_stops.is_empty() {
                 app.pending_stops.clear();
                 app.notice = "Session stop unavailable · daemon connection closed".into();
+                changed = true;
+            }
+            if !app.clear_stop_after_save.is_empty() {
+                app.clear_stop_after_save.clear();
+                app.notice = "Previous session could not be finalized · daemon connection closed".into();
+                changed = true;
+            }
+            if !app.pending_clear_finalizes.is_empty() {
+                app.pending_clear_finalizes.clear();
+                app.notice = "Previous session could not be finalized · daemon connection closed".into();
                 changed = true;
             }
             if !app.pending_queue_commands.is_empty() {
@@ -7074,7 +7217,6 @@ fn run_loop(
             let disconnected = dispatch_peer_messages(&mut app, sender) || disconnected;
             let disconnected = dispatch_model_controls(&mut app, sender) || disconnected;
             let disconnected = dispatch_queue_commands(&mut app, sender) || disconnected;
-            let disconnected = dispatch_stops(&mut app, sender) || disconnected;
             if disconnected {
                 prompt_sender = None;
                 app.session_activity.clear();
@@ -7087,6 +7229,18 @@ fn run_loop(
             changed |= save_layout_if_changed(&mut app, store, complete, &mut saved_layout);
         } else {
             saved_layout = crate::ui_state::LayoutSignature::capture(&app);
+        }
+        if let Some(sender) = &prompt_sender {
+            if !app.clear_stop_after_save.is_empty()
+                && saved_layout == crate::ui_state::LayoutSignature::capture(&app) {
+                app.pending_clear_finalizes.append(&mut app.clear_stop_after_save);
+                app.notice = "Fresh session ready · finalizing previous session".into();
+                changed = true;
+            }
+            if dispatch_stops(&mut app, sender) || dispatch_clear_finalizes(&mut app, sender) {
+                prompt_sender = None;
+                changed = true;
+            }
         }
         if changed {
             terminal.draw(|frame| app.draw(frame))?;
@@ -7109,6 +7263,7 @@ fn dispatch_launches(app: &mut App, sender: &SyncSender<crate::bridge::WorkerCom
             Err(TrySendError::Disconnected(_)) => {
                 app.attaching_ids.clear();
                 app.launching = false;
+                app.clear_pending = None;
                 app.notice = "Session launch unavailable".into();
                 return true;
             }
@@ -7149,6 +7304,25 @@ fn dispatch_stops(app: &mut App, sender: &SyncSender<crate::bridge::WorkerComman
             }
             Err(TrySendError::Disconnected(_)) => {
                 app.notice = "Session stop unavailable · daemon connection closed".into();
+                return true;
+            }
+            Err(_) => unreachable!(),
+        }
+    }
+    false
+}
+
+fn dispatch_clear_finalizes(app: &mut App, sender: &SyncSender<crate::bridge::WorkerCommand>) -> bool {
+    let mut pending = std::mem::take(&mut app.pending_clear_finalizes).into_iter();
+    while let Some(id) = pending.next() {
+        match sender.try_send(crate::bridge::WorkerCommand::FinalizeForClear(id)) {
+            Ok(()) => {}
+            Err(TrySendError::Full(crate::bridge::WorkerCommand::FinalizeForClear(id))) => {
+                app.pending_clear_finalizes.extend(std::iter::once(id).chain(pending));
+                return false;
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                app.notice = "Previous session could not be finalized · daemon connection closed".into();
                 return true;
             }
             Err(_) => unreachable!(),
@@ -8078,6 +8252,54 @@ for line in sys.stdin:
         app.apply_daemon_frame(&json!({"type":"launch_reply", "ok":false, "started":true,
             "session_id":"surviving", "group":0, "message":"socket refused"}));
         assert!(app.notice.contains("doxa-rs attach surviving"));
+    }
+
+    #[test]
+    fn clear_replaces_only_active_tab_after_launch_and_defers_finalization() {
+        let mut app = App::default();
+        app.groups[0].tabs = vec!["other".into(), "old".into()];
+        app.groups[0].active = 1;
+        app.session_identity.insert("old".into(), (Some("codex".into()), Some("old-model".into())));
+        app.session_cwds.insert("old".into(), PathBuf::from("/repo"));
+        app.session_activity.insert("old".into(), (false, 0));
+        app.collections.push(crate::collections::Collection { name:"Work".into(), sessions:vec!["old".into()], collapsed:false });
+        app.input = "/clear".into();
+        assert!(app.submit_local_command());
+        assert_eq!(app.pending_launches.len(), 1);
+        assert_eq!(app.pending_launches[0].0.engine, launch::Engine::Codex);
+        assert_eq!(app.pending_launches[0].0.cwd.as_deref(), Some(Path::new("/repo")));
+        assert!(app.pending_stops.is_empty());
+        app.apply_daemon_frame(&json!({"type":"launch_reply","ok":true,"session_id":"fresh","group":0}));
+        assert_eq!(app.groups[0].tabs, ["other", "fresh"]);
+        assert_eq!(app.groups[0].active_id(), Some("fresh"));
+        assert_eq!(app.collections[0].sessions, ["fresh"]);
+        assert_eq!(app.clear_stop_after_save, ["old"]);
+        assert!(app.pending_stops.is_empty());
+    }
+
+    #[test]
+    fn clear_failure_and_unsupported_forms_preserve_the_old_session() {
+        let mut app = App::default();
+        app.groups[0].tabs = vec!["old".into()];
+        app.session_identity.insert("old".into(), (Some("codex".into()), None));
+        app.session_cwds.insert("old".into(), PathBuf::from("/repo"));
+        app.input = "/clear now".into();
+        assert!(app.submit_local_command());
+        assert_eq!(app.notice, "Usage: /clear");
+        assert!(app.pending_launches.is_empty());
+        app.input = "/clear".into();
+        assert!(app.submit_local_command());
+        app.pending_launches.clear(); // the bridge accepted the launch
+        app.apply_daemon_frame(&json!({"type":"launch_reply","ok":false,"message":"spawn failed"}));
+        assert_eq!(app.groups[0].tabs, ["old"]);
+        assert!(app.clear_stop_after_save.is_empty());
+        assert!(app.pending_stops.is_empty());
+        assert!(app.pending_prompts.is_empty());
+        app.session_activity.insert("old".into(), (true, 1));
+        app.input = "/clear".into();
+        assert!(app.submit_local_command());
+        assert!(app.notice.contains("wait for the current turn"));
+        assert!(app.pending_launches.is_empty());
     }
 
     #[test]
