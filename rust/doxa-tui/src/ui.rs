@@ -2560,17 +2560,26 @@ impl App {
         let identity = id.and_then(|id| self.session_identity.get(id));
         let telemetry = id.and_then(|id| self.session_telemetry.get(id));
         let mut chips = Vec::new();
+        // Permission mode (including the classifier-backed `auto` mode) is
+        // independent of the provider running this session. Keep their roles
+        // visible even when a narrow pane shows only the first few chips.
+        if let Some(mode) = id.and_then(|id| self.permission_modes.get(id)) {
+            chips.push(("permission", format!("Permissions {mode}")));
+        } else if id.is_some_and(|id| self.permission_capabilities.get(id).copied().unwrap_or(false)) {
+            chips.push(("permission", "Permissions ?".to_owned()));
+        }
         if let Some(engine) = identity.and_then(|pair| pair.0.as_deref()) {
-            chips.push(("engine", engine.to_owned()));
+            chips.push(("engine", format!("Vendor {engine}")));
+        } else {
+            chips.push(("engine", "Vendor ?".to_owned()));
+        }
+        if let Some(model) = identity.and_then(|pair| pair.1.as_deref()) {
+            chips.push(("model", format!("Model {model}")));
+        } else {
+            chips.push(("model", "Model ?".to_owned()));
         }
         chips.push(("context", format!("Ctx {}", telemetry.and_then(|value| value.context.as_deref()).unwrap_or("?"))));
-        if let Some(model) = identity.and_then(|pair| pair.1.as_deref()) {
-            chips.push(("model", model.to_owned()));
-        }
         chips.push(("usage", format!("Tokens {}", telemetry.and_then(|value| value.usage.as_deref()).unwrap_or("?"))));
-        if let Some(mode) = id.and_then(|id| self.permission_modes.get(id)) {
-            chips.push(("permission", mode.clone()));
-        }
         let beliefs = telemetry.and_then(|value| value.lore.as_deref())
             .filter(|label| label.ends_with(" beliefs"))
             .unwrap_or("Beliefs");
@@ -4056,6 +4065,47 @@ mod tests {
     }
 
     #[test]
+    fn chip_strip_keeps_permission_classifier_vendor_model_and_context_distinct() {
+        let mut app = App::default();
+        app.handle(Event::Resize(220, 30));
+        app.rail_visible = false;
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"claude-1",
+            "engine":"claude", "model":"sonnet", "permission_mode":"auto",
+            "can_set_permission_mode":true, "can_set_model":true}));
+        app.groups[0].tabs = vec!["claude-1".into()];
+
+        let chips = app.chips(0);
+        assert_eq!(chips[0], ("permission", "Permissions auto".into()));
+        assert_eq!(chips[1], ("engine", "Vendor claude".into()));
+        assert_eq!(chips[2], ("model", "Model sonnet".into()));
+        assert_eq!(chips[3].0, "context");
+        assert!(chips[3].1.starts_with("Ctx "));
+
+        let pane = app.layout(app.size).panes.unwrap()[0];
+        let chip_y = pane.bottom().saturating_sub(prompt_height("", pane.height) + 2);
+        let click = |app: &mut App, x: u16| {
+            app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+                column: x, row: chip_y, modifiers: KeyModifiers::NONE }));
+        };
+        click(&mut app, pane.x + 2);
+        assert_eq!(app.permission_picker.as_ref().unwrap().1, permission_index("auto").unwrap());
+        app.permission_picker = None;
+
+        let vendor_x = pane.x + chip_text(chips[0].0, &chips[0].1).width() as u16 + 3;
+        click(&mut app, vendor_x);
+        assert!(app.engine_picker);
+        assert_eq!(app.engine_selected, 1);
+        assert!(app.new_session.is_none());
+        assert_eq!(app.permission_modes["claude-1"], "auto");
+        app.engine_picker = false;
+
+        let model_x = vendor_x + chip_text(chips[1].0, &chips[1].1).width() as u16 + 1;
+        click(&mut app, model_x);
+        assert_eq!(app.model_picker.as_ref().unwrap().session_id, "claude-1");
+        assert_eq!(app.pending_model_queries, vec!["claude-1"]);
+    }
+
+    #[test]
     fn dont_ask_requires_idle_and_empty_queue() {
         let mut app = App::default();
         app.size = Rect::new(0, 0, 80, 24);
@@ -4382,7 +4432,7 @@ mod tests {
         let after = painted(&app);
         let lines: Vec<_> = after.lines().collect();
         assert!(lines[usize::from(menu.y)].contains("New session"));
-        assert!(lines[usize::from(menu.bottom())].contains("Beliefs"));
+        assert!(lines[usize::from(menu.bottom())].contains("Vendor ?"));
         assert!(lines[usize::from(menu.bottom() + 1)].contains("Prompt"));
         let old_lines: Vec<_> = before.lines().collect();
         for y in pane.y..pane.bottom() {
@@ -4432,6 +4482,8 @@ mod tests {
         app.input_requests.clear();
 
         let pane = app.layout(app.size).panes.unwrap()[1];
+        app.chip_offsets[1] = app.chips(1).iter().position(|(kind, _)| *kind == "beliefs").unwrap();
+        assert!(app.chip_window(1, usize::from(pane.width)).iter().any(|(kind, _)| *kind == "beliefs"));
         let mut belief_x = pane.x;
         for (kind, label) in app.chip_window(1, usize::from(pane.width)) {
             if kind == "beliefs" { break; }

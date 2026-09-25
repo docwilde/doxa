@@ -142,7 +142,7 @@ fn panes_reclaim_footer_row_and_keep_notice_visible() {
     let status_row = rendered.lines().nth(23).unwrap();
     assert!(status_row.contains("Prompt queue"), "{rendered}");
     assert!(!rendered.contains("Ctrl+P actions"), "{rendered}");
-    assert!(rendered.lines().nth(19).unwrap().contains("Ctx ?"));
+    assert!(rendered.lines().nth(19).unwrap().contains("Vendor ?"));
 }
 
 #[test]
@@ -257,7 +257,7 @@ fn telemetry_chips_keep_per_session_provenance_and_unknowns() {
     app.apply_daemon_frame(&json!({"type":"hello","session_id":"codex","engine":"codex","lore_scrub":"ready"}));
     app.apply_daemon_frame(&json!({"type":"hello","session_id":"vendor","engine":"glm"}));
     app.groups[1].tabs.push("vendor".into());
-    let unknown = screen(&app, 160, 24);
+    let unknown = screen(&app, 300, 24);
     assert!(unknown.contains("Ctx ?   Tokens ?   Beliefs ▾   Cost ?   LORE scrub ready"), "{unknown}");
     assert!(unknown.contains("Ctx ?   Tokens ?   Beliefs ▾   Cost ?   LORE ?"), "{unknown}");
     app.apply_daemon_frame(&json!({"type":"event","session_id":"codex","event":{"type":"turn_done","data":{
@@ -267,20 +267,20 @@ fn telemetry_chips_keep_per_session_provenance_and_unknowns() {
     app.apply_daemon_frame(&json!({"type":"event","session_id":"vendor","event":{"type":"turn_done","data":{
         "prompt_tokens":7,"completion_tokens":3,"usage_scope":"turn","usage_source":"vendor_response"
     }}}));
-    let rendered = screen(&app, 160, 24);
+    let rendered = screen(&app, 300, 24);
     assert!(rendered.contains("Tokens 120/30 session"), "{rendered}");
     assert!(rendered.contains("Tokens 7/3 turn"), "{rendered}");
     assert!(rendered.contains("Ctx ?"), "{rendered}");
     assert!(rendered.contains("Cost ?"), "{rendered}");
     app.apply_daemon_frame(&json!({"type":"reply","ok":true,"status":{"session_id":"codex","lore_scrub":"unavailable"}}));
-    let rendered = screen(&app, 240, 24);
+    let rendered = screen(&app, 300, 24);
     assert!(rendered.contains("LORE scrub unavailable"), "{rendered}");
     app.apply_daemon_frame(&json!({"type":"telemetry_unavailable","session_id":"codex"}));
-    assert!(screen(&app, 240, 24).contains("LORE ?"));
+    assert!(screen(&app, 300, 24).contains("LORE ?"));
     app.apply_daemon_frame(&json!({"type":"event","session_id":"vendor","event":{"type":"turn_done","data":{
         "ctx_percentage":null,"cost_usd":null,"session_cost_usd":null
     }}}));
-    assert!(screen(&app, 160, 24).contains("Ctx ?   Tokens ?   Beliefs ▾   Cost ?   LORE ?"));
+    assert!(screen(&app, 300, 24).contains("Ctx ?   Tokens ?   Beliefs ▾   Cost ?   LORE ?"));
 }
 
 #[test]
@@ -292,7 +292,7 @@ fn telemetry_status_restores_reported_values_without_inventing_zero_usage() {
         "belief_count":9,"usage":{"num_turns":2,"input_tokens":1000,"output_tokens":50,
             "cost_basis":"published_rates","unpriced_models":[]}
     }}));
-    let rendered = screen(&app, 240, 24);
+    let rendered = screen(&app, 300, 24);
     assert!(rendered.contains("Ctx 42%"), "{rendered}");
     assert!(rendered.contains("Tokens 1000/50 session"), "{rendered}");
     assert!(rendered.contains("Cost $0.0123 est"), "{rendered}");
@@ -300,7 +300,7 @@ fn telemetry_status_restores_reported_values_without_inventing_zero_usage() {
     app.apply_daemon_frame(&json!({"type":"reply","ok":true,"status":{
         "session_id":"one","usage":{"num_turns":0,"input_tokens":0,"output_tokens":0}
     }}));
-    assert!(screen(&app, 240, 24).contains("Tokens ?"));
+    assert!(screen(&app, 300, 24).contains("Tokens ?"));
 }
 
 #[test]
