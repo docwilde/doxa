@@ -167,7 +167,13 @@ this is an alpha release.
 
 `Ctrl+R` opens a searchable picker for attached and archived sessions with
 bounded transcript tails. Archived transcripts open read-only and never receive
-prompts. `F2` (or `Alt+G`) opens a 256 KiB worktree diff in an
+prompts. `/search TEXT` scans a bounded older archived tail. `/resume [ID or
+prefix]` opens a picker that can attach a live session or start a saved Claude
+or vendor session when its engine, model, and stored history can be verified.
+Archived Codex resume is not yet available in the TUI. `/queue` opens a picker
+above the active prompt for a live session. Its previews are scrubbed by LORE;
+press `X` to cancel the selected waiting prompt by its stable ID, `R` to
+refresh, or `Esc` to close it. `F2` (or `Alt+G`) opens a 256 KiB worktree diff in an
 asynchronous modal. It compares tracked changes with the recorded worktree
 base when one exists, or with `HEAD`, and lists bounded untracked filenames
 without reading their contents. `F4` keeps that diff visible beside the active

@@ -60,6 +60,10 @@ alpha. Native fleet supervision and remote control are still being ported.
 
 *Session history searches attached and archived transcripts.*
 
+![Rust queued prompt picker expanded above the prompt, showing scrubbed previews and a selected row](assets/shots/rust-queue.png)
+
+*The queue picker shows waiting prompts and cancels the selected item by its ID.*
+
 These images come from `python3 scripts/rust_gallery.py`, which renders the
 production `doxa_tui::ui::App` through Ratatui's test backend. The sessions,
 events, and usage numbers are fixtures; they are examples of UI behavior,
