@@ -83,7 +83,9 @@ If an older `uv tool` install owns `doxa`, run `uv tool uninstall doxa`
 before installing Rust; the installer reports when another `doxa` on `PATH`
 would shadow its launcher.
 
-From a checkout, use `./task build`, `./task run`, or `./task install`. Install
+From a checkout, `cargo build --locked` builds the Rust frontend and daemon;
+`./task build`, `./task run`, and `./task install` provide the matching local
+launcher workflow. Install
 builds committed `HEAD` with the same locked sidecars and launcher as the
 release installer. If an existing local `main` predates the Rust files, run
 `git pull --ff-only` after checking it out; `git checkout main` alone does not

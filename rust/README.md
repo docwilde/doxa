@@ -17,10 +17,15 @@ the Rust process does not reimplement its store.
 Build the native frontend and daemon from this repository:
 
 ```sh
+cargo build --locked
 ./task build
 ./task doctor
 ./task new
 ```
+
+Run `cargo build --locked` at the repository root. It uses the shared root
+`Cargo.lock` and writes binaries to `target/debug`; `./task` uses
+`target/rust-task` so its launcher builds stay separate.
 
 `./task` is the repository-local launcher. `run` opens or creates a session,
 `new` always creates one, and `doctor` checks launcher dependencies. These
