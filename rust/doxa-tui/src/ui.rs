@@ -135,6 +135,18 @@ struct NewSession {
     field: usize,
 }
 
+#[derive(Debug, Clone)]
+struct QueueRow { id: String, preview: String }
+
+#[derive(Debug)]
+struct QueuePicker {
+    session_id: String,
+    rows: Vec<QueueRow>,
+    selected: usize,
+    loading: bool,
+    cancelling: Option<String>,
+}
+
 fn safe_label(value: &str) -> String {
     markdown::sanitize(value)
         .replace('\n', " ")
@@ -732,9 +744,13 @@ pub struct App {
     history_query: String,
     history_selected: usize,
     history_pending: Option<Receiver<Vec<history::OfflineSession>>>,
+    history_scan_query: Option<String>,
+    history_scanned_matches: HashMap<String, String>,
     history_entries: HashMap<String, history::OfflineSession>,
     resume_pending: Option<Receiver<(String, Result<launch::LaunchOptions, &'static str>)>>,
     offline_ids: HashSet<String>,
+    queue_picker: Option<QueuePicker>,
+    pending_queue_commands: Vec<crate::bridge::WorkerCommand>,
     diff_modal: bool,
     diff_pane: bool,
     diff_target: Option<String>,
@@ -833,9 +849,13 @@ impl Default for App {
             history_query: String::new(),
             history_selected: 0,
             history_pending: None,
+            history_scan_query: None,
+            history_scanned_matches: HashMap::new(),
             history_entries: HashMap::new(),
             resume_pending: None,
             offline_ids: HashSet::new(),
+            queue_picker: None,
+            pending_queue_commands: Vec::new(),
             diff_modal: false,
             diff_pane: false,
             diff_target: None,
@@ -899,6 +919,35 @@ impl App {
             return false;
         };
         match kind {
+            "queue_list_reply" => {
+                let Some(id) = frame["session_id"].as_str() else { return false; };
+                let Some(picker) = self.queue_picker.as_mut().filter(|picker| picker.session_id == id) else { return false; };
+                picker.loading = false;
+                if frame["ok"] != true {
+                    self.notice = format!("Queue unavailable · {}", safe_label(frame["error"].as_str().unwrap_or("daemon refused")));
+                    return true;
+                }
+                let rows = frame["rows"].as_array().into_iter().flatten().take(32).filter_map(|row| {
+                    let id = row["id"].as_str()?;
+                    if id.is_empty() || id.len() > 128 || !id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-') { return None; }
+                    let preview = row["preview"].as_str().filter(|text| text.len() <= 1024)?;
+                    Some(QueueRow { id: id.to_owned(), preview: safe_label(preview) })
+                }).collect();
+                picker.rows = rows;
+                picker.selected = picker.selected.min(picker.rows.len().saturating_sub(1));
+                true
+            }
+            "queue_cancel_reply" => {
+                let Some(id) = frame["session_id"].as_str() else { return false; };
+                let Some(picker) = self.queue_picker.as_mut().filter(|picker| picker.session_id == id) else { return false; };
+                if picker.cancelling.as_deref() != frame["queue_id"].as_str() { return false; }
+                picker.cancelling = None;
+                self.notice = if frame["ok"] == true { "Queued prompt cancelled".into() }
+                    else { format!("Queue cancellation failed · {}", safe_label(frame["error"].as_str().unwrap_or("item already started"))) };
+                picker.loading = true;
+                self.pending_queue_commands.push(crate::bridge::WorkerCommand::QueueList(id.to_owned()));
+                true
+            }
             "attach_reply" => {
                 let Some(reply_id) = frame["session_id"].as_str() else { return false; };
                 if !self.attaching_ids.remove(reply_id) { return false; }
@@ -1432,6 +1481,10 @@ impl App {
                     self.attach_picker = None;
                     self.notice = "Enlarge active pane to choose a live session".into();
                 }
+                if self.queue_picker.is_some() && self.active_chooser_rect().is_none() {
+                    self.queue_picker = None;
+                    self.notice = "Enlarge active pane to inspect queued prompts".into();
+                }
                 if self.lore_picker.is_some() && (w < 34 || h < 13) {
                     self.lore_picker = None;
                     self.notice = "Enlarge terminal to open LORE beliefs".into();
@@ -1483,7 +1536,7 @@ impl App {
             || self.stop_confirmation.is_some() || self.lore_picker.is_some()
             || self.new_session.is_some() || self.model_picker.is_some()
             || self.permission_picker.is_some() || self.engine_picker || self.action_menu
-            || self.history_modal || self.attach_picker.is_some() || self.diff_modal || self.map_modal || self.tool_modal {
+            || self.history_modal || self.queue_picker.is_some() || self.attach_picker.is_some() || self.diff_modal || self.map_modal || self.tool_modal {
             return false;
         }
         let mut clean = String::new();
@@ -1684,6 +1737,7 @@ impl App {
         if self.history_modal {
             return self.history_key(key);
         }
+        if self.queue_picker.is_some() { return self.queue_key(key); }
         if self.attach_picker.is_some() { return self.attach_picker_key(key); }
         if self.diff_modal {
             return self.diff_key(key);
@@ -1995,13 +2049,15 @@ impl App {
             "/movepane" | "/collection" | "/fleet" | "/img" | "/login"
             | "/logout" | "/settings" | "/setup" | "/doctor" | "/plugins"
             | "/reload-plugins" | "/branch" | "/effort" | "/usage"
-            | "/context" | "/queue" | "/clear" | "/cd"
+            | "/context" | "/clear" | "/cd"
             | "/compact" | "/update" => {
                 self.notice = format!("Local command unavailable: {}", safe_label(command));
                 true
             }
             "/search" => { self.local_search(args); true }
             "/resume" => { self.local_resume(args); true }
+            "/queue" if args.trim().is_empty() => { self.open_queue(); true }
+            "/queue" => { self.notice = "queue: open the picker and use X to cancel a selected item".into(); true }
             _ => false, // Provider and plugin slash commands remain available.
         }
     }
@@ -2314,6 +2370,7 @@ impl App {
             while !session.transcript.is_char_boundary(start) { start += 1; }
             if query.is_empty() || session.title.to_lowercase().contains(&query)
                 || session.id.to_lowercase().contains(&query)
+                || self.history_scanned_matches.get(&session.id).is_some_and(|scanned| scanned == &query)
                 || session.transcript[start..].to_lowercase().contains(&query) {
                 Some(index)
             } else { None }
@@ -2334,6 +2391,7 @@ impl App {
         self.history_modal = true;
         self.history_resume = false;
         self.history_explicit = false;
+        self.history_scan_query = None;
         self.history_query.clear();
         self.history_selected = 0;
         if self.active_chooser_rect().is_none() {
@@ -2363,6 +2421,7 @@ impl App {
                 let (tx, rx) = mpsc::sync_channel(1);
                 self.history_pending = Some(rx);
                 let query = query.to_owned();
+                self.history_scan_query = Some(query.to_lowercase());
                 std::thread::spawn(move || { let _ = tx.send(history::discover_query(&query)); });
             }
         }
@@ -2395,6 +2454,57 @@ impl App {
             let prefix = query.to_owned();
             std::thread::spawn(move || { let _ = tx.send(history::discover_prefix(&prefix)); });
         }
+    }
+
+    fn open_queue(&mut self) {
+        let Some(id) = self.groups[self.active_group].active_id().map(str::to_owned) else {
+            self.notice = "Select a live session to inspect its queue".into();
+            return;
+        };
+        if self.offline_ids.contains(&id) {
+            self.notice = "Archived sessions have no live prompt queue".into();
+            return;
+        }
+        self.input.clear();
+        self.input_cursor = 0;
+        self.queue_picker = Some(QueuePicker { session_id: id.clone(), rows: Vec::new(),
+            selected: 0, loading: true, cancelling: None });
+        if self.active_chooser_rect().is_none() {
+            self.queue_picker = None;
+            self.notice = "Enlarge active pane to inspect queued prompts".into();
+            return;
+        }
+        self.pending_queue_commands.push(crate::bridge::WorkerCommand::QueueList(id));
+    }
+
+    fn queue_key(&mut self, key: KeyEvent) -> bool {
+        let Some(picker) = self.queue_picker.as_mut() else { return false; };
+        match key.code {
+            KeyCode::Esc => self.queue_picker = None,
+            KeyCode::Up => picker.selected = picker.selected.saturating_sub(1),
+            KeyCode::Down => picker.selected = (picker.selected + 1).min(picker.rows.len().saturating_sub(1)),
+            KeyCode::Char('r') | KeyCode::Char('R') => {
+                picker.loading = true;
+                self.pending_queue_commands.push(crate::bridge::WorkerCommand::QueueList(picker.session_id.clone()));
+            }
+            KeyCode::Char('x') | KeyCode::Char('X') | KeyCode::Delete => self.cancel_selected_queue(),
+            _ => return false,
+        }
+        true
+    }
+
+    fn cancel_selected_queue(&mut self) {
+        let Some(picker) = self.queue_picker.as_mut() else { return; };
+        if picker.loading || picker.cancelling.is_some() { return; }
+        let Some(row) = picker.rows.get(picker.selected) else { return; };
+        let id = row.id.clone();
+        if picker.rows.iter().filter(|row| row.id == id).count() != 1 {
+            self.notice = "Duplicate queue ID; cancellation is unsafe".into();
+            return;
+        }
+        picker.cancelling = Some(id.clone());
+        self.pending_queue_commands.push(crate::bridge::WorkerCommand::QueueCancel(picker.session_id.clone(), id));
+        self.notice = "Cancelling selected queued prompt…".into();
     }
 
     fn open_lore_picker(&mut self) {
@@ -2661,8 +2771,12 @@ impl App {
             Err(TryRecvError::Disconnected) => { self.history_pending = None; return false; }
         };
         self.history_pending = None;
+        let scan_query = self.history_scan_query.take();
         let mut changed = false;
         for entry in found {
+            if let Some(query) = &scan_query {
+                self.history_scanned_matches.insert(entry.id.clone(), query.clone());
+            }
             self.history_entries.insert(entry.id.clone(), entry.clone());
             if self.sessions.iter().any(|session| session.id == entry.id) { continue; }
             self.offline_ids.insert(entry.id.clone());
@@ -3527,6 +3641,8 @@ impl App {
             (ACTIONS.len() + 2).min(15) as u16
         } else if self.history_modal {
             (self.history_matches().len() + 3).clamp(5, 15) as u16
+        } else if let Some(picker) = &self.queue_picker {
+            (picker.rows.len() + 3).clamp(5, 15) as u16
         } else if self.attach_picker.is_some() {
             (self.attach_matches().len() + 3).clamp(5, 15) as u16
         } else {
@@ -3711,6 +3827,37 @@ impl App {
                 _ => return false,
             }
         }
+        if self.queue_picker.is_some() {
+            let Some(menu) = self.active_chooser_rect() else { return false; };
+            match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if mouse.column < menu.x || mouse.column >= menu.right()
+                        || mouse.row < menu.y || mouse.row >= menu.bottom() {
+                        self.queue_picker = None;
+                    } else {
+                        let first = menu.y.saturating_add(2);
+                        if mouse.row >= first && mouse.row < menu.bottom().saturating_sub(1) {
+                            let picker = self.queue_picker.as_mut().unwrap();
+                            let visible = usize::from(menu.height.saturating_sub(3)).max(1);
+                            let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+                            picker.selected = (start + usize::from(mouse.row - first)).min(picker.rows.len().saturating_sub(1));
+                        }
+                    }
+                    return true;
+                }
+                MouseEventKind::ScrollUp => {
+                    let picker = self.queue_picker.as_mut().unwrap();
+                    picker.selected = picker.selected.saturating_sub(1);
+                    return true;
+                }
+                MouseEventKind::ScrollDown => {
+                    let picker = self.queue_picker.as_mut().unwrap();
+                    picker.selected = (picker.selected + 1).min(picker.rows.len().saturating_sub(1));
+                    return true;
+                }
+                _ => return false,
+            }
+        }
         if self.active_request_index().is_none()
             && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
             && (self.engine_picker || self.new_session.is_some() || self.model_picker.is_some() || self.permission_picker.is_some()) {
@@ -3771,6 +3918,7 @@ impl App {
             || self.map_modal
             || self.action_menu
             || self.history_modal
+            || self.queue_picker.is_some()
             || self.attach_picker.is_some()
             || self.lore_picker.is_some()
             || self.diff_modal
@@ -4170,6 +4318,31 @@ impl App {
         }
         frame.render_widget(Paragraph::new(lines).block(Block::default()
             .title(" Attach live session · type to filter ")
+            .borders(Borders::ALL).border_style(Style::default().fg(theme::ACCENT))
+            .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED))), area);
+    }
+
+    fn draw_queue_picker(&self, frame: &mut Frame, area: Rect) {
+        let Some(picker) = &self.queue_picker else { return; };
+        let mut lines = vec![Line::from(if picker.loading { " Refreshing queue…" }
+            else if picker.rows.is_empty() { " No queued prompts" }
+            else if picker.cancelling.is_some() { " Cancelling selected prompt…" }
+            else { " X cancel selected · R refresh · Esc close" })];
+        let visible = usize::from(area.height.saturating_sub(3)).max(1);
+        let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+        for (index, row) in picker.rows.iter().enumerate().skip(start).take(visible) {
+            let ambiguous = picker.rows.iter().filter(|item| item.id == row.id).count() > 1;
+            let label = format!(" {} {} · {}{}", if index == picker.selected { '›' } else { ' ' },
+                safe_label(&row.id), if ambiguous { "[ambiguous ID] " } else { "" }, safe_label(&row.preview));
+            let label = clipped_title(&label, usize::from(area.width.saturating_sub(2))).0;
+            let padded = format!("{label}{}", " ".repeat(usize::from(area.width.saturating_sub(2)).saturating_sub(label.width())));
+            let style = if index == picker.selected {
+                Style::default().fg(theme::ACCENT).bg(theme::HIGHLIGHT).add_modifier(Modifier::BOLD)
+            } else { Style::default().fg(theme::SECONDARY) };
+            lines.push(Line::styled(padded, style));
+        }
+        frame.render_widget(Paragraph::new(lines).block(Block::default()
+            .title(" Prompt queue · stable IDs ")
             .borders(Borders::ALL).border_style(Style::default().fg(theme::ACCENT))
             .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED))), area);
     }
@@ -4628,6 +4801,8 @@ impl App {
                 self.draw_actions(frame, inner[2]);
             } else if self.history_modal {
                 self.draw_history(frame, inner[2]);
+            } else if self.queue_picker.is_some() {
+                self.draw_queue_picker(frame, inner[2]);
             } else if self.attach_picker.is_some() {
                 self.draw_attach_picker(frame, inner[2]);
             }
@@ -4855,6 +5030,12 @@ fn run_loop(
                 app.notice = "Session stop unavailable · daemon connection closed".into();
                 changed = true;
             }
+            if !app.pending_queue_commands.is_empty() {
+                app.pending_queue_commands.clear();
+                app.queue_picker = None;
+                app.notice = "Queue unavailable · daemon connection closed".into();
+                changed = true;
+            }
             if !app.pending_peer_messages.is_empty() {
                 for (id, target, text) in app.pending_peer_messages.drain(..) {
                     app.rejected_drafts.entry(id).or_default().push(format!("/msg {target} {text}"));
@@ -4871,6 +5052,7 @@ fn run_loop(
             let disconnected = dispatch_peer_refresh(&mut app, sender) || disconnected;
             let disconnected = dispatch_peer_messages(&mut app, sender) || disconnected;
             let disconnected = dispatch_model_controls(&mut app, sender) || disconnected;
+            let disconnected = dispatch_queue_commands(&mut app, sender) || disconnected;
             let disconnected = dispatch_stops(&mut app, sender) || disconnected;
             if disconnected {
                 prompt_sender = None;
@@ -4949,6 +5131,25 @@ fn dispatch_stops(app: &mut App, sender: &SyncSender<crate::bridge::WorkerComman
                 return true;
             }
             Err(_) => unreachable!(),
+        }
+    }
+    false
+}
+
+fn dispatch_queue_commands(app: &mut App, sender: &SyncSender<crate::bridge::WorkerCommand>) -> bool {
+    let mut commands = std::mem::take(&mut app.pending_queue_commands).into_iter();
+    while let Some(command) = commands.next() {
+        match sender.try_send(command) {
+            Ok(()) => {}
+            Err(TrySendError::Full(command)) => {
+                app.pending_queue_commands.extend(std::iter::once(command).chain(commands));
+                return false;
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                app.queue_picker = None;
+                app.notice = "Queue unavailable · daemon connection closed".into();
+                return true;
+            }
         }
     }
     false
@@ -6128,6 +6329,52 @@ mod tests {
         assert!(app.submit_local_command());
         assert!(app.history_modal && !app.history_resume);
         assert_eq!(app.history_matches().len(), 1);
+        assert!(app.pending_prompts.is_empty());
+    }
+
+    #[test]
+    fn archive_raw_search_hit_survives_truncated_render_only_for_its_query() {
+        let mut app = App::default();
+        app.handle(Event::Resize(100, 28));
+        app.local_search("needle");
+        let (tx, rx) = mpsc::sync_channel(1);
+        app.history_pending = Some(rx);
+        tx.send(vec![history::OfflineSession { id: "old-archive".into(), project: "project".into(),
+            markdown: "**You:** recent visible turn".into(), cwd: None }]).unwrap();
+        assert!(app.poll_history());
+        assert_eq!(app.history_matches().len(), 1, "raw JSONL scan found an older hidden turn");
+        app.history_query = "different".into();
+        assert!(app.history_matches().is_empty(), "scan hit must not satisfy a different query");
+    }
+
+    #[test]
+    fn queue_picker_cancels_exact_selected_id_and_refuses_duplicate_ids() {
+        let mut app = App::default();
+        app.handle(Event::Resize(100, 28));
+        app.apply_update(DaemonUpdate::Upsert(Session { id: "session-1".into(), title: "Live".into(),
+            collection: "repo".into(), transcript: String::new(), status: "Ready".into() }));
+        app.groups[0].tabs.push("session-1".into());
+        app.input = "/queue".into();
+        assert!(app.submit_local_command());
+        assert!(app.queue_picker.is_some());
+        assert!(app.active_chooser_rect().is_some());
+        assert!(matches!(app.pending_queue_commands.pop(), Some(crate::bridge::WorkerCommand::QueueList(id)) if id == "session-1"));
+        app.apply_daemon_frame(&json!({"type":"queue_list_reply","session_id":"session-1","ok":true,
+            "rows":[{"id":"q3","preview":"first scrubbed"},{"id":"q9","preview":"second scrubbed"}]}));
+        assert!(painted(&app).contains("Prompt queue"));
+        app.queue_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.queue_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(matches!(app.pending_queue_commands.pop(), Some(crate::bridge::WorkerCommand::QueueCancel(session, id))
+            if session == "session-1" && id == "q9"));
+        assert!(!app.apply_daemon_frame(&json!({"type":"queue_cancel_reply","session_id":"session-1","queue_id":"q3","ok":true})));
+        assert_eq!(app.queue_picker.as_ref().unwrap().cancelling.as_deref(), Some("q9"));
+        app.apply_daemon_frame(&json!({"type":"queue_cancel_reply","session_id":"session-1","queue_id":"q9","ok":true}));
+        assert!(matches!(app.pending_queue_commands.pop(), Some(crate::bridge::WorkerCommand::QueueList(id)) if id == "session-1"));
+        app.apply_daemon_frame(&json!({"type":"queue_list_reply","session_id":"session-1","ok":true,
+            "rows":[{"id":"q3","preview":"a"},{"id":"q3","preview":"b"}]}));
+        app.queue_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(app.pending_queue_commands.is_empty());
+        assert!(app.notice.contains("Duplicate queue ID"));
         assert!(app.pending_prompts.is_empty());
     }
 

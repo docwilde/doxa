@@ -56,6 +56,16 @@ fn scene(name: &str) -> App {
         "history" => {
             key(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL);
         }
+        "queue" => {
+            app.groups[0].tabs = vec!["demo-codex-01".into()];
+            app.input = "/queue".into();
+            key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+            app.apply_daemon_frame(&json!({"type":"queue_list_reply","session_id":"demo-codex-01",
+                "ok":true,"rows":[
+                    {"id":"q4","preview":"Review the parser error path after this turn"},
+                    {"id":"q7","preview":"Summarize the test failures and proposed fix"}
+                ]}));
+        }
         _ => panic!("unknown scene: {name}"),
     }
     app
@@ -74,7 +84,7 @@ fn rgb(color: Color) -> [u8; 3] {
 fn main() {
     let name = std::env::args().nth(1).expect("scene name");
     let (width,height) = match name.as_str() {
-        "hero" | "tool-activity" | "needs-input" | "permissions" | "history" => (126,31),
+        "hero" | "tool-activity" | "needs-input" | "permissions" | "history" | "queue" => (126,31),
         _ => panic!("unknown scene"),
     };
     let app = scene(&name);
