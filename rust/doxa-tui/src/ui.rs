@@ -184,6 +184,12 @@ struct BranchPicker {
     selected: usize,
 }
 
+#[derive(Debug)]
+struct RepoPicker {
+    paths: Vec<PathBuf>,
+    selected: usize,
+}
+
 #[derive(Clone, Debug)]
 struct RejectDraft {
     index: usize,
@@ -298,8 +304,8 @@ fn chip_hint(kind: &str) -> &'static str {
         "permission" => "Permission mode for this session · click to choose",
         "engine" => "Engine for new sessions · click to choose",
         "model" => "Model for this session · click to choose",
-        "repo" => "This session's repository and base branch · click for worktree details",
-        "directory" => "This session's directory; no Git repository is active",
+        "repo" => "Choose a known directory for a new session tab",
+        "directory" => "Choose a known directory for a new session tab",
         "effort" => "Effort · current session; Alt+F selects the next turn when idle",
         "context" => "Current session context usage · click for details",
         "memory" => "User and scoped LORE memory · click to view entries",
@@ -308,6 +314,14 @@ fn chip_hint(kind: &str) -> &'static str {
         "balance" => "Current DeepSeek API account balance",
         "more" => "More chips · click to reveal hidden chips",
         _ => "",
+    }
+}
+
+fn chooser_row_style(selected: bool) -> Style {
+    if selected {
+        Style::default().fg(theme::ACCENT).bg(theme::HIGHLIGHT).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme::SECONDARY)
     }
 }
 
@@ -808,6 +822,7 @@ pub enum Split {
 enum DragTarget {
     Rail,
     Pane(Split),
+    Chooser,
 }
 
 #[derive(Clone, Copy)]
@@ -1142,6 +1157,8 @@ pub struct App {
     effort_picker: Option<EffortPicker>,
     attach_picker: Option<AttachPicker>,
     branch_picker: Option<BranchPicker>,
+    repo_picker: Option<RepoPicker>,
+    chooser_height_override: Option<u16>,
     lore_picker: Option<LorePicker>,
     engine_picker: bool,
     engine_selected: usize,
@@ -1285,6 +1302,8 @@ impl Default for App {
             effort_picker: None,
             attach_picker: None,
             branch_picker: None,
+            repo_picker: None,
+            chooser_height_override: None,
             lore_picker: None,
             engine_picker: false,
             engine_selected: 0,
@@ -2185,6 +2204,10 @@ impl App {
                     self.branch_picker = None;
                     self.notice = "Enlarge active pane to choose a branch".into();
                 }
+                if self.repo_picker.is_some() && self.active_chooser_rect().is_none() {
+                    self.repo_picker = None;
+                    self.notice = "Enlarge active pane to choose a directory".into();
+                }
                 if self.queue_picker.is_some() && self.active_chooser_rect().is_none() {
                     self.queue_picker = None;
                     self.notice = "Enlarge active pane to inspect queued prompts".into();
@@ -2257,7 +2280,7 @@ impl App {
         }
         if self.focus != Focus::Prompt || self.active_request_index().is_some()
             || self.stop_confirmation.is_some() || self.lore_picker.is_some() || self.settings_menu.is_some()
-            || self.new_session.is_some() || self.model_picker.is_some() || self.effort_picker.is_some()
+            || self.new_session.is_some() || self.repo_picker.is_some() || self.model_picker.is_some() || self.effort_picker.is_some()
             || self.permission_picker.is_some() || self.engine_picker || self.action_menu
             || self.history_modal || self.queue_picker.is_some() || self.attach_picker.is_some() || self.branch_picker.is_some() || self.diff_modal || self.map_modal || self.tool_modal {
             return false;
@@ -2315,7 +2338,7 @@ impl App {
         if self.focus != Focus::Prompt || self.slash_dismissed
             || self.active_request_index().is_some() || self.stop_confirmation.is_some()
             || self.chip_info.is_some() || self.lore_picker.is_some() || self.settings_menu.is_some()
-            || self.new_session.is_some() || self.model_picker.is_some()
+            || self.new_session.is_some() || self.repo_picker.is_some() || self.model_picker.is_some()
             || self.effort_picker.is_some() || self.permission_picker.is_some()
             || self.engine_picker || self.action_menu || self.history_modal
             || self.queue_picker.is_some() || self.attach_picker.is_some() || self.branch_picker.is_some()
@@ -2509,6 +2532,8 @@ impl App {
             }
             return false;
         }
+        if self.settings_menu.is_some() { return self.settings_menu_key(key); }
+        if self.repo_picker.is_some() { return self.repo_picker_key(key); }
         if self.settings_menu.is_some() { return self.settings_menu_key(key); }
         if self.lore_picker.is_some() { return self.lore_picker_key(key); }
         if self.new_session.is_some() { return self.new_session_key(key); }
@@ -3284,6 +3309,60 @@ impl App {
         self.input.clear();
         self.input_cursor = 0;
         self.notice = format!("Opening a new tab at {} · current session stays here", safe_label(&cwd.display().to_string()));
+    }
+
+    fn open_repo_picker(&mut self, group: usize) {
+        self.active_group = group;
+        let Some(id) = self.groups[group].active_id() else {
+            self.notice = "Choose a session first".into();
+            return;
+        };
+        let current = self.session_cwds.get(id).cloned();
+        let mut sources = Vec::new();
+        if let Some(path) = &current {
+            sources.push(path.clone());
+            if let Some(parent) = path.parent() { sources.push(parent.to_path_buf()); }
+        }
+        for session in &self.sessions {
+            if let Some(path) = self.session_cwds.get(&session.id) {
+                sources.push(path.clone());
+            }
+        }
+        let mut paths = Vec::new();
+        for source in sources.into_iter().take(32) {
+            let Ok(path) = std::fs::canonicalize(source) else { continue; };
+            let Some(display) = path.to_str() else { continue; };
+            if path.is_dir() && display.len() <= 4096
+                && !display.chars().any(unsafe_input_char) && !paths.contains(&path) {
+                paths.push(path);
+            }
+        }
+        if paths.is_empty() {
+            self.notice = "No known directories are available".into();
+            return;
+        }
+        self.chip_info = None;
+        self.repo_picker = Some(RepoPicker { paths, selected: 0 });
+        if self.active_chooser_rect().is_none() {
+            self.repo_picker = None;
+            self.notice = "Enlarge active pane to choose a directory".into();
+        }
+    }
+
+    fn repo_picker_key(&mut self, key: KeyEvent) -> bool {
+        let picker = self.repo_picker.as_mut().unwrap();
+        match key.code {
+            KeyCode::Esc => self.repo_picker = None,
+            KeyCode::Up => picker.selected = picker.selected.saturating_sub(1),
+            KeyCode::Down => picker.selected = (picker.selected + 1).min(picker.paths.len() - 1),
+            KeyCode::Enter => {
+                let path = picker.paths[picker.selected].clone();
+                self.repo_picker = None;
+                if let Some(path) = path.to_str() { self.local_cd(path); }
+            }
+            _ => return false,
+        }
+        true
     }
 
     fn local_collection(&mut self, args: &str) {
@@ -5528,6 +5607,8 @@ impl App {
         } else if let Some(picker) = &self.model_picker {
             (4 + picker.models.len() + usize::from(picker.catalog_pending || !picker.loading && picker.models.is_empty()))
                 .clamp(5, 13) as u16
+        } else if let Some(picker) = &self.repo_picker {
+            (picker.paths.len() + 3).clamp(5, 15) as u16
         } else if let Some(picker) = &self.lore_picker {
             if picker.review.is_some() || picker.belief_review.is_some() {
                 19
@@ -5565,7 +5646,7 @@ impl App {
         let draft = group.active_id().map_or("", |_| self.input.as_str());
         let prompt = prompt_height(draft, pane.height);
         let available = pane.height.saturating_sub(3 + prompt + 1 + 1 + 1);
-        let height = wanted.min(available);
+        let height = self.chooser_height_override.unwrap_or(wanted).min(available);
         if height < 5 || pane.width < 18 { return None; }
         Some(Rect::new(pane.x, pane.bottom().saturating_sub(prompt + 1 + 1 + height), pane.width, height))
     }
@@ -5770,7 +5851,7 @@ impl App {
             || self.branch_picker.is_some() || self.lore_picker.is_some()
             || self.settings_menu.is_some() || self.model_picker.is_some()
             || self.effort_picker.is_some() || self.permission_picker.is_some()
-            || self.engine_picker || self.new_session.is_some()
+            || self.engine_picker || self.new_session.is_some() || self.repo_picker.is_some()
             || self.chip_info.is_some() || self.stop_confirmation.is_some()
     }
 
@@ -5903,8 +5984,113 @@ impl App {
         });
     }
 
+    fn hover_chooser(&mut self, column: u16, row: u16) -> bool {
+        let Some(menu) = self.active_chooser_rect() else { return false; };
+        if column <= menu.x || column >= menu.right().saturating_sub(1)
+            || row <= menu.y || row >= menu.bottom().saturating_sub(1) { return false; }
+        let visible = usize::from(menu.height.saturating_sub(3)).max(1);
+        let attach_len = self.attach_picker.as_ref().map(|_| self.attach_matches().len());
+        if let Some(picker) = self.repo_picker.as_mut() {
+            if row < menu.y + 2 { return false; }
+            let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+            let index = start + usize::from(row - menu.y - 2);
+            if index < picker.paths.len() && picker.selected != index { picker.selected = index; return true; }
+        } else if self.engine_picker {
+            let offset = if menu.height >= 10 { 4 } else { 2 };
+            if row < menu.y + offset { return false; }
+            let visible = usize::from(menu.height.saturating_sub(offset + 1)).max(1);
+            let start = self.engine_selected.saturating_sub(visible.saturating_sub(1));
+            let index = start + usize::from(row - menu.y - offset);
+            if index < ENGINE_CHOICES.len() && self.engine_selected != index { self.engine_selected = index; return true; }
+        } else if let Some(form) = self.new_session.as_mut() {
+            let first = menu.y + if menu.height >= 8 { 4 } else { 2 };
+            let fields = if vendor_models(form.engine).is_empty() { 2 } else { 3 };
+            if row >= first && usize::from(row - first) < fields {
+                let index = usize::from(row - first);
+                if form.field != index { form.field = index; return true; }
+            }
+        } else if let Some((_, selected)) = self.permission_picker.as_mut() {
+            let offset = if menu.height >= 10 { 4 } else { 2 };
+            if row < menu.y + offset { return false; }
+            let visible = usize::from(menu.height.saturating_sub(offset + 1)).max(1);
+            let start = selected.saturating_sub(visible.saturating_sub(1));
+            let index = start + usize::from(row - menu.y - offset);
+            if index < PERMISSION_CHOICES.len() && *selected != index { *selected = index; return true; }
+        } else if let Some(picker) = self.effort_picker.as_mut() {
+            if row < menu.y + 3 { return false; }
+            let visible = usize::from(menu.height.saturating_sub(4)).max(1);
+            let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+            let index = start + usize::from(row - menu.y - 3);
+            if index < picker.levels.len() && picker.selected != index { picker.selected = index; return true; }
+        } else if let Some(picker) = self.model_picker.as_mut() {
+            if row < menu.y + 3 { return false; }
+            let visible = usize::from(menu.height.saturating_sub(4)).max(1);
+            let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+            let index = start + usize::from(row - menu.y - 3);
+            if index < picker.models.len() && picker.selected != index { picker.selected = index; return true; }
+        } else if let Some(picker) = self.attach_picker.as_mut() {
+            if row < menu.y + 2 { return false; }
+            let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+            let index = start + usize::from(row - menu.y - 2);
+            if index < attach_len.unwrap_or(0) && picker.selected != index { picker.selected = index; return true; }
+        } else if let Some(picker) = self.queue_picker.as_mut() {
+            if row < menu.y + 2 { return false; }
+            let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+            let index = start + usize::from(row - menu.y - 2);
+            if index < picker.rows.len() && picker.selected != index { picker.selected = index; return true; }
+        } else if self.history_modal {
+            if row < menu.y + 2 { return false; }
+            if let Some((index, header, _)) = self.history_rows(visible).get(usize::from(row - menu.y - 2)) {
+                if *header && self.history_selected != *index { self.history_selected = *index; return true; }
+            }
+        } else if let Some(picker) = self.lore_picker.as_mut() {
+            if picker.review.is_some() || picker.belief_review.is_some() || picker.evidence.is_some()
+                || picker.pending.is_some() { return false; }
+            let compact = menu.height < 10;
+            let first = if picker.proposal_mode { menu.y + 4 } else { menu.y + if compact { 3 } else { 6 } };
+            if row < first { return false; }
+            let visible = usize::from(menu.height.saturating_sub(if compact { 4 } else { 8 })).max(1);
+            let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+            let index = start + usize::from(row - first);
+            let count = if picker.proposal_mode { picker.proposals.len() } else { picker.rows.len() };
+            if index < count && picker.selected != index { picker.selected = index; return true; }
+        } else if self.action_menu {
+            let visible = usize::from(menu.height.saturating_sub(2)).max(1);
+            let start = self.action_selected.saturating_sub(visible.saturating_sub(1));
+            let index = start + usize::from(row - menu.y - 1);
+            if index < ACTIONS.len() && self.action_selected != index { self.action_selected = index; return true; }
+        } else if !self.slash_suggestions().is_empty() {
+            let visible = usize::from(menu.height.saturating_sub(2)).max(1);
+            let start = self.slash_selected.saturating_sub(visible.saturating_sub(1));
+            let index = start + usize::from(row - menu.y - 1);
+            if index < self.slash_suggestions().len() && self.slash_selected != index { self.slash_selected = index; return true; }
+        }
+        false
+    }
+
     fn mouse(&mut self, mouse: MouseEvent) -> bool {
+        if self.drag == Some(DragTarget::Chooser) {
+            match mouse.kind {
+                MouseEventKind::Drag(MouseButton::Left) => {
+                    let layout = self.layout(self.size);
+                    let pane = layout.panes.map_or(layout.body, |panes| panes[self.active_group]);
+                    let draft = self.groups[self.active_group].active_id().map_or("", |_| self.input.as_str());
+                    let prompt = prompt_height(draft, pane.height);
+                    let max = pane.height.saturating_sub(3 + prompt + 1 + 1 + 1);
+                    let bottom = pane.bottom().saturating_sub(prompt + 2);
+                    self.chooser_height_override = Some(bottom.saturating_sub(mouse.row).clamp(5, max.max(5)));
+                    return true;
+                }
+                MouseEventKind::Up(MouseButton::Left) => { self.drag = None; return true; }
+                _ => {}
+            }
+        }
         if mouse.kind == MouseEventKind::Moved {
+            if self.hover_chooser(mouse.column, mouse.row) {
+                self.chip_hover = None;
+                self.link_hover = None;
+                return true;
+            }
             let overlay = self.link_interaction_blocked();
             let chip = (!overlay).then(|| self.chip_hit_at(mouse.column, mouse.row)).flatten();
             let link = (!overlay).then(|| self.link_at(mouse.column, mouse.row)).flatten();
@@ -5912,6 +6098,44 @@ impl App {
             self.chip_hover = chip;
             self.link_hover = link;
             return changed;
+        }
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left)
+            && self.active_request_index().is_none()
+            && self.active_chooser_rect().is_some_and(|area|
+                mouse.row == area.y && mouse.column >= area.x && mouse.column < area.right()) {
+            self.drag = Some(DragTarget::Chooser);
+            return true;
+        }
+        if self.repo_picker.is_some() {
+            let Some(menu) = self.active_chooser_rect() else { return false; };
+            let inside = menu.contains(ratatui::layout::Position::new(mouse.column, mouse.row));
+            return match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if !inside { self.repo_picker = None; return true; }
+                    if mouse.row >= menu.y + 2 && mouse.row < menu.bottom().saturating_sub(1) {
+                        let picker = self.repo_picker.as_mut().unwrap();
+                        let visible = usize::from(menu.height.saturating_sub(3)).max(1);
+                        let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+                        let index = start + usize::from(mouse.row - menu.y - 2);
+                        if index < picker.paths.len() {
+                            picker.selected = index;
+                            return self.repo_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+                        }
+                    }
+                    true
+                }
+                MouseEventKind::ScrollUp if inside => {
+                    let picker = self.repo_picker.as_mut().unwrap();
+                    picker.selected = picker.selected.saturating_sub(1);
+                    true
+                }
+                MouseEventKind::ScrollDown if inside => {
+                    let picker = self.repo_picker.as_mut().unwrap();
+                    picker.selected = (picker.selected + 1).min(picker.paths.len() - 1);
+                    true
+                }
+                _ => false,
+            }
         }
         if mouse.kind == MouseEventKind::Down(MouseButton::Left)
             && mouse.modifiers.contains(KeyModifiers::CONTROL)
@@ -6265,7 +6489,7 @@ impl App {
             || self.permission_picker.is_some()
             || self.engine_picker
             || self.stop_confirmation.is_some()
-            || self.new_session.is_some()
+            || self.new_session.is_some() || self.repo_picker.is_some()
         {
             // A request belongs to its session, not the whole terminal. Let
             // the user focus the other pane and keep working while this one
@@ -6301,6 +6525,7 @@ impl App {
                     "model" => self.open_model_picker(),
                     "effort" => self.open_effort_picker(),
                     "beliefs" => self.open_lore_picker(),
+                    "repo" | "directory" => self.open_repo_picker(hit.group),
                     "memory" => self.open_memory_menu(hit.group),
                     "more" => {
                         let visible = self.chip_window(hit.group, usize::from(self.pane_regions(hit.group, hit.pane)[3].width));
@@ -6532,11 +6757,12 @@ impl App {
             if width >= 18 && height >= 3 {
                 let fallback = Rect::new(area.x + (area.width - width) / 2,
                     area.y + (area.height - height) / 2, width, height);
-                if self.settings_menu.is_some() || self.action_menu || self.lore_picker.is_some() || self.engine_picker
+                if self.settings_menu.is_some() || self.action_menu || self.lore_picker.is_some() || self.repo_picker.is_some() || self.engine_picker
                     || self.new_session.is_some() || self.model_picker.is_some() || self.effort_picker.is_some() || self.permission_picker.is_some() {
                     frame.render_widget(Clear, fallback);
                     if self.settings_menu.is_some() { self.draw_settings_menu(frame, fallback); }
                     else if self.action_menu { self.draw_actions(frame, fallback); }
+                    else if self.repo_picker.is_some() { self.draw_repo_picker(frame, fallback); }
                     else if self.lore_picker.is_some() { self.draw_lore_picker(frame, fallback); }
                     else { self.draw_chip_picker(frame, fallback); }
                 }
@@ -6612,7 +6838,7 @@ impl App {
             let start = self.engine_selected.saturating_sub(visible.saturating_sub(1));
             for (index, engine) in ENGINE_CHOICES.iter().enumerate().skip(start).take(visible) {
                 lines.push(Line::styled(format!(" {} {}", if index == self.engine_selected { '›' } else { ' ' }, engine),
-                    Style::default().fg(if index == self.engine_selected { theme::ACCENT } else { theme::SECONDARY })));
+                    chooser_row_style(index == self.engine_selected)));
             }
         } else if let Some(form) = &self.new_session {
             title = " New session · Tab field · Enter continue/start · Esc close ";
@@ -6629,15 +6855,15 @@ impl App {
             }
             lines.push(Line::styled(format!(" {} Model: {}", if form.field == 0 { '›' } else { ' ' },
                 safe_label(&form.model)),
-                Style::default().fg(if form.field == 0 { theme::ACCENT } else { theme::SECONDARY })));
+                chooser_row_style(form.field == 0)));
             let prompt_field = if vendor_models(form.engine).is_empty() { 1 } else { 2 };
             if prompt_field == 2 {
                 lines.push(Line::styled(format!(" {} Effort: {}", if form.field == 1 { '›' } else { ' ' },
                     form.effort.as_deref().unwrap_or("unknown")),
-                    Style::default().fg(if form.field == 1 { theme::ACCENT } else { theme::SECONDARY })));
+                    chooser_row_style(form.field == 1)));
             }
             lines.push(Line::styled(format!(" {} First prompt: {}", if form.field == prompt_field { '›' } else { ' ' }, safe_label(&form.prompt)),
-                Style::default().fg(if form.field == prompt_field { theme::ACCENT } else { theme::SECONDARY })));
+                chooser_row_style(form.field == prompt_field)));
             if form.engine == launch::Engine::Claude {
                 lines.push(Line::from(" Claude sidecar is bundled by the preview installer."));
             }
@@ -6659,7 +6885,7 @@ impl App {
                 let current = self.permission_modes.get(id).is_some_and(|current| current == mode);
                 lines.push(Line::styled(format!(" {} {} {} · {}", if index == *selected { '›' } else { ' ' },
                     if current { '●' } else { ' ' }, mode, description),
-                    Style::default().fg(if index == *selected { theme::ACCENT } else { theme::SECONDARY })));
+                    chooser_row_style(index == *selected)));
             }
         } else if let Some(picker) = &self.effort_picker {
             title = " Effort · this session · Enter select · Esc close ";
@@ -6670,7 +6896,7 @@ impl App {
             let start = picker.selected.saturating_sub(visible.saturating_sub(1));
             for (index, level) in picker.levels.iter().enumerate().skip(start).take(visible) {
                 lines.push(Line::styled(format!(" {} {}", if index == picker.selected { '›' } else { ' ' }, level),
-                    Style::default().fg(if index == picker.selected { theme::ACCENT } else { theme::SECONDARY })));
+                    chooser_row_style(index == picker.selected)));
             }
         } else {
             title = " Model · this session · R retry · Enter select · Esc close ";
@@ -6686,7 +6912,7 @@ impl App {
             let start = picker.selected.saturating_sub(visible.saturating_sub(1));
             for (index, model) in picker.models.iter().enumerate().skip(start).take(visible) {
                 lines.push(Line::styled(format!(" {} {}", if index == picker.selected { '›' } else { ' ' }, model),
-                    Style::default().fg(if index == picker.selected { theme::ACCENT } else { theme::SECONDARY })));
+                    chooser_row_style(index == picker.selected)));
             }
         }
         frame.render_widget(Paragraph::new(lines).block(Block::default().title(title)
@@ -6825,6 +7051,29 @@ impl App {
             .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED))), area);
     }
 
+    fn draw_repo_picker(&self, frame: &mut Frame, area: Rect) {
+        let Some(picker) = &self.repo_picker else { return; };
+        let mut lines = vec![Line::from(" Known session directories · Enter opens new tab")];
+        let visible = usize::from(area.height.saturating_sub(3)).max(1);
+        let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+        let width = usize::from(area.width.saturating_sub(2));
+        for (index, path) in picker.paths.iter().enumerate().skip(start).take(visible) {
+            let marker = if index == 0 { "current" } else { "known" };
+            let label = format!(" {} {} · {}", if index == picker.selected { '›' } else { ' ' },
+                marker, safe_label(&path.display().to_string()));
+            let label = clipped_title(&label, width).0;
+            let padded = format!("{label}{}", " ".repeat(width.saturating_sub(label.width())));
+            let style = if index == picker.selected {
+                Style::default().fg(theme::ACCENT).bg(theme::HIGHLIGHT).add_modifier(Modifier::BOLD)
+            } else { Style::default().fg(theme::SECONDARY) };
+            lines.push(Line::styled(padded, style));
+        }
+        frame.render_widget(Paragraph::new(lines).block(Block::default()
+            .title(" Directory · ↑↓ select · Enter open · Esc close ")
+            .borders(Borders::ALL).border_style(Style::default().fg(theme::ACCENT)))
+            .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)), area);
+    }
+
     fn draw_slash_suggestions(&self, frame: &mut Frame, area: Rect) {
         let matches = self.slash_suggestions();
         if matches.is_empty() { return; }
@@ -6899,7 +7148,7 @@ impl App {
                     let label = format!(" {} {} · {}/{} · {} · {}", if index == picker.selected { '›' } else { ' ' },
                         safe_label(&row.pid), safe_label(&row.kind), safe_label(&row.action),
                         safe_label(&row.scope), safe_label(&row.summary));
-                    lines.push(Line::styled(label, Style::default().fg(if index == picker.selected { theme::ACCENT } else { theme::SECONDARY })));
+                    lines.push(Line::styled(label, chooser_row_style(index == picker.selected)));
                 }
             }
             frame.render_widget(Paragraph::new(lines)
@@ -6971,7 +7220,7 @@ impl App {
                     safe_label(&row.subject), row.confidence * 100.0, safe_label(&row.claim),
                     row.evidence_count.map(|count| format!(" · {count} evidence")).unwrap_or_default(),
                     if row.truncated { " · claim clipped" } else { "" });
-                lines.push(Line::styled(label, Style::default().fg(if index == picker.selected { theme::ACCENT } else { theme::SECONDARY })));
+                lines.push(Line::styled(label, chooser_row_style(index == picker.selected)));
             }
         }
         frame.render_widget(Paragraph::new(lines)
@@ -7368,6 +7617,8 @@ impl App {
                 self.draw_settings_menu(frame, inner[2]);
             } else if self.engine_picker || self.new_session.is_some() || self.model_picker.is_some() || self.effort_picker.is_some() || self.permission_picker.is_some() {
                 self.draw_chip_picker(frame, inner[2]);
+            } else if self.repo_picker.is_some() {
+                self.draw_repo_picker(frame, inner[2]);
             } else if self.lore_picker.is_some() {
                 self.draw_lore_picker(frame, inner[2]);
             } else if self.action_menu {
@@ -8974,6 +9225,113 @@ for line in sys.stdin:
         let buffer = terminal.backend().buffer();
         (0..height).map(|y| (0..width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
             .collect::<Vec<_>>().join("\n")
+    }
+
+    #[test]
+    fn repo_chip_picker_hovers_and_opens_verified_directory_in_new_tab() {
+        let root = tempfile::tempdir().unwrap();
+        let child = root.path().join("child");
+        std::fs::create_dir(&child).unwrap();
+        let mut app = App::default();
+        app.rail_visible = false;
+        app.handle(Event::Resize(100, 28));
+        app.groups[0].tabs.push("session".into());
+        app.session_identity.insert("session".into(), (Some("codex".into()), None));
+        app.session_cwds.insert("session".into(), child.clone());
+        app.repo_cache.insert("session".into(),
+            (Some(doxa_worktrees::RepoStatus::Directory { name: "child".into() }), Instant::now()));
+        let mut initial = Terminal::new(TestBackend::new(100, 28)).unwrap();
+        initial.draw(|frame| app.draw(frame)).unwrap();
+        let hit = app.rendered_chip_hits.borrow().as_ref().unwrap().iter()
+            .find(|hit| hit.kind == "directory").unwrap().clone();
+        assert!(app.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: hit.rect.x, row: hit.rect.y, modifiers: KeyModifiers::NONE }));
+        let menu = app.active_chooser_rect().unwrap();
+        assert_eq!(app.repo_picker.as_ref().unwrap().paths, vec![child, root.path().to_path_buf()]);
+        assert!(app.mouse(MouseEvent { kind: MouseEventKind::Moved,
+            column: menu.x + 2, row: menu.y + 3, modifiers: KeyModifiers::NONE }));
+        assert_eq!(app.repo_picker.as_ref().unwrap().selected, 1);
+        let mut terminal = Terminal::new(TestBackend::new(100, 28)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert_eq!(terminal.backend().buffer()[(menu.x + 2, menu.y + 3)].bg, theme::HIGHLIGHT);
+        app.repo_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.repo_picker.is_none());
+        assert_eq!(app.pending_launches[0].0.cwd.as_deref(), Some(root.path()));
+        assert_eq!(app.groups[0].active_id(), Some("session"));
+    }
+
+    #[test]
+    fn repo_picker_mouse_scroll_click_and_unsafe_path_filter() {
+        let root = tempfile::tempdir().unwrap();
+        let child = root.path().join("child");
+        let unsafe_child = root.path().join("unsafe\nname");
+        std::fs::create_dir(&child).unwrap();
+        std::fs::create_dir(&unsafe_child).unwrap();
+        let mut app = App::default();
+        app.rail_visible = false;
+        app.handle(Event::Resize(100, 28));
+        app.groups[0].tabs.push("session".into());
+        app.session_identity.insert("session".into(), (Some("codex".into()), None));
+        app.session_cwds.insert("session".into(), child);
+        app.open_repo_picker(0);
+        assert_eq!(app.repo_picker.as_ref().unwrap().paths.len(), 2);
+        let menu = app.active_chooser_rect().unwrap();
+        assert!(app.mouse(MouseEvent { kind: MouseEventKind::ScrollDown,
+            column: menu.x + 2, row: menu.y + 2, modifiers: KeyModifiers::NONE }));
+        assert_eq!(app.repo_picker.as_ref().unwrap().selected, 1);
+        assert!(app.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: menu.x + 2, row: menu.y + 3, modifiers: KeyModifiers::NONE }));
+        assert_eq!(app.pending_launches[0].0.cwd.as_deref(), Some(root.path()));
+        app.session_cwds.insert("session".into(), unsafe_child);
+        app.open_repo_picker(0);
+        assert_eq!(app.repo_picker.as_ref().unwrap().paths, vec![root.path().to_path_buf()]);
+    }
+
+    #[test]
+    fn inline_chooser_upper_border_drag_resizes_and_hover_tracks_selected_row() {
+        let mut app = App::default();
+        app.rail_visible = false;
+        app.handle(Event::Resize(100, 30));
+        app.groups[0].tabs.push("session".into());
+        app.engine_picker = true;
+        let before = app.active_chooser_rect().unwrap();
+        assert!(app.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: before.x + 3, row: before.y, modifiers: KeyModifiers::NONE }));
+        assert!(app.mouse(MouseEvent { kind: MouseEventKind::Drag(MouseButton::Left),
+            column: before.x + 3, row: before.y.saturating_sub(3), modifiers: KeyModifiers::NONE }));
+        let after = app.active_chooser_rect().unwrap();
+        assert!(after.height > before.height);
+        assert_eq!(after.bottom(), before.bottom());
+        assert!(app.mouse(MouseEvent { kind: MouseEventKind::Up(MouseButton::Left),
+            column: before.x + 3, row: after.y, modifiers: KeyModifiers::NONE }));
+        let row = after.y + if after.height >= 10 { 5 } else { 3 };
+        assert!(app.mouse(MouseEvent { kind: MouseEventKind::Moved,
+            column: after.x + 2, row, modifiers: KeyModifiers::NONE }));
+        assert_eq!(app.engine_selected, 1);
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert_eq!(terminal.backend().buffer()[(after.x + 2, row)].bg, theme::HIGHLIGHT);
+    }
+
+    #[test]
+    fn model_picker_hover_highlights_and_enter_activates_hovered_model() {
+        let mut app = App::default();
+        app.rail_visible = false;
+        app.handle(Event::Resize(100, 28));
+        app.groups[0].tabs.push("session".into());
+        app.model_picker = Some(ModelPicker { session_id: "session".into(),
+            models: vec!["first".into(), "second".into()], selected: 0,
+            note: "Verified models".into(), loading: false, catalog_pending: false });
+        let menu = app.active_chooser_rect().unwrap();
+        let row = menu.y + 4;
+        assert!(app.mouse(MouseEvent { kind: MouseEventKind::Moved,
+            column: menu.x + 2, row, modifiers: KeyModifiers::NONE }));
+        assert_eq!(app.model_picker.as_ref().unwrap().selected, 1);
+        let mut terminal = Terminal::new(TestBackend::new(100, 28)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert_eq!(terminal.backend().buffer()[(menu.x + 2, row)].bg, theme::HIGHLIGHT);
+        app.model_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.pending_model_changes, vec![("session".into(), "second".into())]);
     }
 
     #[test]
