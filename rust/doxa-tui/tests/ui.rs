@@ -770,6 +770,9 @@ fn structured_event_fields_are_escaped_and_bounded() {
 fn test_backend_renders_groups_transcript_prompt_and_small_terminal() {
     let mut app = App::default();
     app.apply_update(doxa_tui::ui::DaemonUpdate::Upsert(session("one", "Work")));
+    app.collections.push(doxa_tui::collections::Collection {
+        name: "Work".into(), sessions: vec!["one".into()], collapsed: false,
+    });
     app.groups[1].tabs.push("one".into());
     app.input = "draft".into();
     let rendered = screen(&app, 100, 25);

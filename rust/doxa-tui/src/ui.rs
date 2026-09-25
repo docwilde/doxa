@@ -564,6 +564,15 @@ pub struct Session {
 #[derive(Clone, Debug, Default)]
 struct SessionTelemetry {
     context: Option<String>,
+    context_percent: Option<f64>,
+    context_tokens: Option<u64>,
+    context_limit: Option<u64>,
+    turns: Option<u64>,
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    cache_read_tokens: Option<u64>,
+    cache_write_tokens: Option<u64>,
+    session_cost: Option<String>,
     cost: Option<String>,
     billing_mode: Option<String>,
     subscription_type: Option<String>,
@@ -582,6 +591,16 @@ impl SessionTelemetry {
             .map(|(used, limit)| format!("{used}/{limit}"));
         if data.get("ctx_percentage").is_some() || data.get("ctx_tokens").is_some() {
             self.context = context.or(absolute);
+            self.context_percent = data["ctx_percentage"].as_f64()
+                .filter(|value| value.is_finite() && (0.0..=100.0).contains(value));
+            self.context_tokens = data["ctx_tokens"].as_u64();
+            self.context_limit = data["ctx_max_tokens"].as_u64().filter(|limit| *limit > 0);
+        }
+        if data["usage_scope"] == "session" {
+            self.turns = data["num_turns"].as_u64().or(self.turns);
+            self.input_tokens = data["input_tokens"].as_u64().or(self.input_tokens);
+            self.output_tokens = data["output_tokens"].as_u64().or(self.output_tokens);
+            self.cache_read_tokens = data["cache_read_input_tokens"].as_u64().or(self.cache_read_tokens);
         }
         if let Some(cost) = data["session_cost_usd"].as_f64()
             .filter(|value| value.is_finite() && *value >= 0.0) {
@@ -591,6 +610,11 @@ impl SessionTelemetry {
             self.cost = Some(format!("${cost:.4} turn"));
         } else if data.get("session_cost_usd").is_some() || data.get("cost_usd").is_some() {
             self.cost = None;
+        }
+        if data.get("session_cost_usd").is_some() {
+            self.session_cost = data["session_cost_usd"].as_f64()
+                .filter(|value| value.is_finite() && *value >= 0.0)
+                .map(|cost| format!("${cost:.4}"));
         }
     }
 
@@ -619,6 +643,17 @@ impl SessionTelemetry {
             .map(|(used, limit)| format!("{used}/{limit}"));
         if status.get("ctx_percentage").is_some() || status.get("ctx_tokens").is_some() {
             self.context = context.or(absolute);
+            self.context_percent = status["ctx_percentage"].as_f64()
+                .filter(|value| value.is_finite() && (0.0..=100.0).contains(value));
+            self.context_tokens = status["ctx_tokens"].as_u64();
+            self.context_limit = status["ctx_max_tokens"].as_u64().filter(|limit| *limit > 0);
+        }
+        if let Some(usage) = status.get("usage") {
+            self.turns = usage["num_turns"].as_u64();
+            self.input_tokens = usage["input_tokens"].as_u64();
+            self.output_tokens = usage["output_tokens"].as_u64();
+            self.cache_read_tokens = usage["cache_read_input_tokens"].as_u64();
+            self.cache_write_tokens = usage["cache_creation_input_tokens"].as_u64();
         }
         if let Some(cost) = status["total_cost_usd"].as_f64()
             .filter(|value| value.is_finite() && *value >= 0.0) {
@@ -628,8 +663,10 @@ impl SessionTelemetry {
                 } else { "est" }
             } else { "" };
             self.cost = Some(format!("${cost:.4} {label}").trim_end().to_owned());
+            self.session_cost = self.cost.clone();
         } else if status.get("total_cost_usd").is_some() {
             self.cost = None;
+            self.session_cost = None;
         }
         if let Some(count) = status["belief_count"].as_u64() {
             self.lore = Some(format!("{count} beliefs"));
@@ -969,8 +1006,16 @@ impl RenderedTranscript {
 }
 
 #[derive(Debug)]
+enum RailRow {
+    Heading(usize),
+    Session(usize),
+    LooseHeading,
+}
+
+#[derive(Debug)]
 pub struct App {
     pub sessions: Vec<Session>,
+    pub collections: Vec<crate::collections::Collection>,
     pub groups: [PaneGroup; 2],
     pub active_group: usize,
     pub split: Split,
@@ -1097,6 +1142,7 @@ impl Default for App {
     fn default() -> Self {
         Self {
             sessions: Vec::new(),
+            collections: Vec::new(),
             groups: [
                 PaneGroup {
                     tabs: vec![],
@@ -1263,7 +1309,7 @@ impl App {
         }
         self.rail_selected = self
             .rail_selected
-            .min(self.sessions.len().saturating_sub(1));
+            .min(self.rail_order().len().saturating_sub(1));
     }
 
     /// Apply one versioned daemon frame after transport decoding. Returns whether
@@ -2259,7 +2305,8 @@ impl App {
                 self.memory_menu_pending = None;
                 return true;
             }
-            if let Some(info) = self.chip_info.as_mut().filter(|info| info.kind == "memory") {
+            if let Some(info) = self.chip_info.as_mut().filter(|info|
+                matches!(info.kind, "memory" | "usage" | "context")) {
                 match key.code {
                     KeyCode::Up => info.scroll = info.scroll.saturating_sub(1),
                     KeyCode::Down => info.scroll = info.scroll.saturating_add(1).min(info.lines.len().saturating_sub(1)),
@@ -2474,7 +2521,7 @@ impl App {
             }
             KeyCode::Down if self.focus == Focus::Rail => {
                 self.rail_selected =
-                    (self.rail_selected + 1).min(self.sessions.len().saturating_sub(1));
+                    (self.rail_selected + 1).min(self.rail_order().len().saturating_sub(1));
                 true
             }
             KeyCode::Enter if self.focus == Focus::Rail => {
@@ -2638,6 +2685,18 @@ impl App {
                 true
             }
             "/rename" => { self.local_rename(args); true }
+            "/usage" | "/context" => {
+                if !args.trim().is_empty() {
+                    self.notice = format!("Usage: {command}");
+                } else {
+                    let kind = if command == "/usage" { "usage" } else { "context" };
+                    self.input.clear();
+                    self.input_cursor = 0;
+                    self.open_diagnostic(kind);
+                }
+                true
+            }
+            "/collection" => { self.local_collection(args); true }
             "/cd" => { self.local_cd(args); true }
             "/compact" => {
                 let engine = self.groups[self.active_group].active_id()
@@ -2670,10 +2729,10 @@ impl App {
                 }
                 true
             }
-            "/collection" | "/fleet" | "/img" | "/login"
+            "/fleet" | "/img" | "/login"
             | "/logout" | "/settings" | "/setup" | "/doctor" | "/plugins"
-            | "/reload-plugins" | "/effort" | "/usage"
-            | "/context" | "/clear"
+            | "/reload-plugins" | "/effort"
+            | "/clear"
             | "/update" => {
                 self.notice = format!("Local command unavailable: {}", safe_label(command));
                 true
@@ -2852,6 +2911,21 @@ impl App {
         self.input.clear();
         self.input_cursor = 0;
         self.notice = format!("Opening a new tab at {} · current session stays here", safe_label(&cwd.display().to_string()));
+    }
+
+    fn local_collection(&mut self, args: &str) {
+        let (verb, rest) = args.trim().split_once(char::is_whitespace)
+            .map_or((args.trim(), ""), |(verb, rest)| (verb, rest.trim()));
+        if verb.is_empty() || matches!(verb, "list" | "ls") {
+            self.notice = if self.collections.is_empty() { "No collections yet · /collection add <name>".into() }
+                else { self.collections.iter().map(|item| format!("{} ({} sessions)", item.name, item.sessions.len())).collect::<Vec<_>>().join(" · ") };
+            self.input.clear();
+            self.input_cursor = 0;
+            return;
+        }
+        let active = self.groups[self.active_group].active_id().map(str::to_owned);
+        let result = crate::collections::edit(&mut self.collections, verb, rest, active.as_deref());
+        self.notice = match result { Ok(note) => { self.input.clear(); self.input_cursor = 0; note }, Err(error) => error };
     }
 
     fn local_rename(&mut self, args: &str) {
@@ -4659,15 +4733,30 @@ impl App {
         true
     }
 
+    fn rail_rows(&self) -> Vec<RailRow> {
+        let mut rows = Vec::new();
+        let mut seen = HashSet::new();
+        for (heading, item) in self.collections.iter().enumerate() {
+            rows.push(RailRow::Heading(heading));
+            for id in &item.sessions {
+                if let Some(index) = self.sessions.iter().position(|session| &session.id == id) {
+                    if seen.insert(index) && !item.collapsed { rows.push(RailRow::Session(index)); }
+                }
+            }
+        }
+        let loose: Vec<_> = (0..self.sessions.len()).filter(|index| seen.insert(*index)).collect();
+        if !loose.is_empty() {
+            rows.push(RailRow::LooseHeading);
+            rows.extend(loose.into_iter().map(RailRow::Session));
+        }
+        rows
+    }
+
     fn rail_order(&self) -> Vec<usize> {
-        let mut order: Vec<usize> = (0..self.sessions.len()).collect();
-        order.sort_by(|&a, &b| {
-            self.sessions[a]
-                .collection
-                .cmp(&self.sessions[b].collection)
-                .then_with(|| self.sessions[a].title.cmp(&self.sessions[b].title))
-        });
-        order
+        self.rail_rows().into_iter().filter_map(|row| match row {
+            RailRow::Session(index) => Some(index),
+            _ => None,
+        }).collect()
     }
 
     /// A transport loop drains this queue and sends each prompt to its session.
@@ -4886,7 +4975,7 @@ impl App {
         } else if self.action_menu {
             (ACTIONS.len() + 2).min(15) as u16
         } else if self.chip_info.is_some() {
-            self.chip_info.as_ref().map_or(5, |info| if info.kind == "memory" {
+            self.chip_info.as_ref().map_or(5, |info| if matches!(info.kind, "memory" | "usage" | "context") {
                 (info.lines.len() + 2).clamp(7, 19) as u16
             } else { 5 })
         } else if self.history_modal {
@@ -5127,6 +5216,11 @@ impl App {
     }
 
     fn open_chip_info(&mut self, kind: &'static str, group: usize) {
+        if matches!(kind, "context" | "cost") {
+            self.active_group = group;
+            self.open_diagnostic(if kind == "cost" { "usage" } else { "context" });
+            return;
+        }
         let mut label = self.chips(group).into_iter().find(|(candidate, _)| *candidate == kind)
             .map(|(_, label)| label).unwrap_or_default();
         if kind == "repo" {
@@ -5140,6 +5234,60 @@ impl App {
         if self.active_chooser_rect().is_none() {
             self.chip_info = None;
             self.notice = "Enlarge active pane to inspect chip details".into();
+        }
+    }
+
+    fn open_diagnostic(&mut self, kind: &'static str) {
+        let Some(id) = self.groups[self.active_group].active_id().map(str::to_owned) else {
+            self.notice = "Select a session first".into();
+            return;
+        };
+        let telemetry = self.session_telemetry.get(&id);
+        let model = self.session_identity.get(&id).and_then(|identity| identity.1.as_deref())
+            .unwrap_or("not reported");
+        let mut lines = vec![format!("session  {}", safe_label(&id.chars().take(8).collect::<String>())),
+            format!("model    {}", safe_label(model))];
+        if kind == "usage" {
+            let number = |field: Option<u64>| field.map(|value| value.to_string())
+                .unwrap_or_else(|| "not reported".into());
+            lines.push(format!("turns    {}", number(telemetry.and_then(|value| value.turns))));
+            for (label, field) in [
+                ("tokens in", telemetry.and_then(|value| value.input_tokens)),
+                ("tokens out", telemetry.and_then(|value| value.output_tokens)),
+                ("cache read", telemetry.and_then(|value| value.cache_read_tokens)),
+                ("cache write", telemetry.and_then(|value| value.cache_write_tokens)),
+            ] {
+                lines.push(format!("{label:<11}{}", number(field)));
+            }
+            lines.push(format!("cost     {}", telemetry.and_then(|value| value.session_cost.as_deref())
+                .unwrap_or("not reported by this engine")));
+            if let Some(quota) = telemetry.and_then(|value| value.quota.as_deref()) {
+                lines.push(format!("quota    {}", safe_label(quota)));
+            }
+        }
+        let used = telemetry.and_then(|value| value.context_tokens);
+        let limit = telemetry.and_then(|value| value.context_limit);
+        let percent = telemetry.and_then(|value| value.context_percent);
+        let window = match (used, limit) {
+            (Some(used), Some(limit)) => format!("{used} / {limit} tokens"),
+            (Some(used), None) => format!("{used} tokens · window size not reported"),
+            (None, Some(limit)) => format!("? / {limit} tokens"),
+            (None, None) => "not reported by this engine".into(),
+        };
+        lines.push(format!("context  {window}"));
+        if let Some(percent) = percent {
+            lines.push(format!("in use   {percent:.1}%"));
+        }
+        if kind == "context" {
+            lines.push(String::new());
+            lines.push("Component breakdown unavailable in this view".into());
+            lines.push("No token counts are estimated here".into());
+        }
+        self.chip_info = Some(ChipInfo { kind, label: String::new(), lines, scroll: 0,
+            owner: Some((id, String::new())) });
+        if self.active_chooser_rect().is_none() {
+            self.chip_info = None;
+            self.notice = "Enlarge active pane to inspect session details".into();
         }
     }
 
@@ -5552,6 +5700,27 @@ impl App {
                     return true;
                 }
                 let layout = self.layout(self.size);
+                if let Some(rail) = layout.rail {
+                    if mouse.column > rail.x && mouse.column < rail.right().saturating_sub(1)
+                        && mouse.row > rail.y && mouse.row < rail.bottom().saturating_sub(1) {
+                        let row = usize::from(mouse.row - rail.y - 1);
+                        match self.rail_rows().get(row) {
+                            Some(RailRow::Heading(index)) => {
+                                self.collections[*index].collapsed = !self.collections[*index].collapsed;
+                                self.rail_selected = self.rail_selected.min(self.rail_order().len().saturating_sub(1));
+                                self.focus = Focus::Rail;
+                                return true;
+                            }
+                            Some(RailRow::Session(index)) => {
+                                self.rail_selected = self.rail_order().iter().position(|visible| visible == index).unwrap_or(0);
+                                self.open_selected();
+                                return true;
+                            }
+                            Some(RailRow::LooseHeading) => { self.focus = Focus::Rail; return true; }
+                            None => {}
+                        }
+                    }
+                }
                 let in_outer = mouse.row >= layout.outer.y && mouse.row < layout.outer.bottom();
                 if in_outer
                     && layout.rail.is_some_and(|rail| {
@@ -5882,13 +6051,16 @@ impl App {
 
     fn draw_chip_info(&self, frame: &mut Frame, area: Rect) {
         let Some(info) = &self.chip_info else { return; };
-        if info.kind == "memory" {
+        if matches!(info.kind, "memory" | "usage" | "context") {
             let current = self.groups[self.active_group].active_id().and_then(|id|
                 self.session_cwds.get(id).and_then(|cwd| cwd.to_str()).map(|cwd| (id, cwd)));
-            let owner_matches = info.owner.as_ref().is_some_and(|(id, cwd)| current == Some((id.as_str(), cwd.as_str())));
+            let owner_matches = info.owner.as_ref().is_some_and(|(id, cwd)| {
+                if info.kind == "memory" { current == Some((id.as_str(), cwd.as_str())) }
+                else { self.groups[self.active_group].active_id() == Some(id.as_str()) }
+            });
             let message;
             let source = if info.owner.is_some() && !owner_matches {
-                message = vec!["Session changed; reopen memory".to_owned()];
+                message = vec![format!("Session changed; reopen {}", info.kind)];
                 &message
             } else { &info.lines };
             let visible = usize::from(area.height.saturating_sub(2)).max(1);
@@ -5896,7 +6068,8 @@ impl App {
             let lines: Vec<String> = source.iter().skip(start).take(visible)
                 .map(|line| clipped_title(line, usize::from(area.width.saturating_sub(2))).0).collect();
             frame.render_widget(Paragraph::new(lines.join("\n"))
-                .block(Block::default().title(" LORE memory · ↑↓ scroll · Esc close ").borders(Borders::ALL)
+                .block(Block::default().title(format!(" {} · ↑↓ scroll · Esc close ",
+                    if info.kind == "memory" { "LORE memory" } else { info.kind })).borders(Borders::ALL)
                     .border_style(Style::default().fg(theme::ACCENT)))
                 .style(Style::default().fg(theme::TEXT).bg(theme::RAISED)), area);
             return;
@@ -6329,34 +6502,27 @@ impl App {
 
     fn draw_rail(&self, frame: &mut Frame, area: Rect) {
         let mut lines = Vec::new();
-        let mut last_collection = "";
-        for (position, index) in self.rail_order().into_iter().enumerate() {
-            let session = &self.sessions[index];
-            if session.collection != last_collection {
-                last_collection = &session.collection;
-                lines.push(Line::styled(
-                    format!(
-                        "  {}",
-                        if last_collection.is_empty() {
-                            "Sessions"
-                        } else {
-                            last_collection
-                        }
-                    ),
-                    Style::default()
-                        .fg(theme::ACCENT)
-                        .add_modifier(Modifier::BOLD),
-                ));
+        let mut position = 0;
+        for row in self.rail_rows() {
+            match row {
+                RailRow::Heading(index) => {
+                    let item = &self.collections[index];
+                    let mark = if item.collapsed { "▸" } else { "▾" };
+                    lines.push(Line::styled(format!(" {mark} {}", item.name),
+                        Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)));
+                }
+                RailRow::LooseHeading => lines.push(Line::styled("  Sessions",
+                    Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD))),
+                RailRow::Session(index) => {
+                    let session = &self.sessions[index];
+                    let mark = if position == self.rail_selected { "▸" } else { " " };
+                    let style = if self.waiting_for_input(&session.id) && self.blink_on {
+                        Style::default().fg(theme::TEXT).bg(theme::ERROR).add_modifier(Modifier::BOLD)
+                    } else { Style::default() };
+                    lines.push(Line::styled(format!("{mark} {}", session.title), style));
+                    position += 1;
+                }
             }
-            let mark = if position == self.rail_selected {
-                "▸"
-            } else {
-                " "
-            };
-            let style = if self.waiting_for_input(&session.id) && self.blink_on {
-                Style::default().fg(theme::TEXT).bg(theme::ERROR).add_modifier(Modifier::BOLD)
-            } else { Style::default() };
-            lines.push(Line::styled(format!("{mark} {}", session.title), style));
         }
         if lines.is_empty() {
             lines.push(Line::from("  No sessions"));
@@ -8252,6 +8418,67 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn usage_and_context_open_inline_with_only_measured_session_values() {
+        let mut app = App::default();
+        app.rail_visible = false;
+        app.handle(Event::Resize(100, 32));
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"first-session",
+            "engine":"claude","model":"sonnet","ctx_percentage":25.0,
+            "ctx_tokens":250,"ctx_max_tokens":1000,
+            "total_cost_usd":0.25,
+            "usage":{"num_turns":2,"input_tokens":100,"output_tokens":20,
+                "cache_read_input_tokens":7,"cache_creation_input_tokens":3}}));
+        app.groups[0].tabs = vec!["first-session".into(), "second-session".into()];
+        app.groups[0].active = 0;
+        app.input = "/usage".into();
+        app.input_cursor = app.input.len();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        let info = app.chip_info.as_ref().unwrap();
+        assert_eq!(info.kind, "usage");
+        assert!(info.lines.iter().any(|line| line.contains("tokens in") && line.contains("100")));
+        assert!(info.lines.iter().any(|line| line.contains("cost") && line.contains("$0.2500")));
+        let menu = app.active_chooser_rect().unwrap();
+        assert!(menu.bottom() < app.layout(app.size).body.bottom());
+        assert!(app.input.is_empty());
+        assert!(app.pending_prompts.is_empty());
+
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        app.groups[0].active = 1;
+        app.input = "/context".into();
+        app.input_cursor = app.input.len();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        let info = app.chip_info.as_ref().unwrap();
+        assert_eq!(info.kind, "context");
+        assert!(info.lines.iter().any(|line| line.contains("not reported by this engine")));
+        assert!(!info.lines.iter().any(|line| line.contains("250") || line.contains("25.0%")));
+
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        app.groups[0].active = 0;
+        app.open_chip_info("context", 0);
+        let info = app.chip_info.as_ref().unwrap();
+        assert!(info.lines.iter().any(|line| line.contains("250 / 1000 tokens")));
+        assert!(info.lines.iter().any(|line| line.contains("25.0%")));
+    }
+
+    #[test]
+    fn usage_does_not_promote_turn_cost_or_partial_tokens_to_session_totals() {
+        let mut telemetry = SessionTelemetry::default();
+        telemetry.update_turn(&json!({"usage_scope":"turn", "num_turns":1,
+            "input_tokens":5,"output_tokens":2,"cost_usd":0.01,
+            "ctx_percentage":null,"ctx_tokens":null,"ctx_max_tokens":null}));
+        assert_eq!(telemetry.turns, None);
+        assert_eq!(telemetry.input_tokens, None);
+        assert_eq!(telemetry.session_cost, None);
+        assert_eq!(telemetry.context, None);
+        telemetry.update_status(&json!({"usage":{"num_turns":0,"input_tokens":0},
+            "total_cost_usd":null}));
+        assert_eq!(telemetry.turns, Some(0));
+        assert_eq!(telemetry.input_tokens, Some(0));
+        assert_eq!(telemetry.output_tokens, None);
+        assert_eq!(telemetry.session_cost, None);
+    }
+
+    #[test]
     fn bare_layout_commands_change_the_real_pane_state() {
         let mut app = App::default();
         app.handle(Event::Resize(100, 28));
@@ -8645,6 +8872,10 @@ for line in sys.stdin:
                 transcript: String::new(), status: "Ready".into(),
             }));
         }
+        app.collections = vec![
+            crate::collections::Collection { name:"A".into(), sessions:vec!["first".into(), "second".into()], collapsed:false },
+            crate::collections::Collection { name:"B".into(), sessions:vec!["third".into()], collapsed:false },
+        ];
         app.apply_daemon_frame(&json!({"type":"event", "session_id":"third",
             "event":{"type":"needs_input", "data":{"id":"req", "kind":"ask_user",
                 "title":"Choose", "questions":[]}}}));
@@ -8668,6 +8899,57 @@ for line in sys.stdin:
         app.apply_daemon_frame(&json!({"type":"event", "session_id":"third",
             "event":{"type":"needs_input_resolved", "data":{"id":"req"}}}));
         assert_eq!(draw(&app), (theme::RAIL, theme::RAIL));
+    }
+
+    #[test]
+    fn collection_commands_move_active_session_and_order_rail() {
+        let mut app = App::default();
+        for id in ["one", "two"] {
+            app.apply_update(DaemonUpdate::Upsert(Session {
+                id:id.into(), title:id.into(), collection:"repo".into(),
+                transcript:String::new(), status:"Ready".into(),
+            }));
+        }
+        app.groups[0].tabs = vec!["one".into(), "two".into()];
+        app.groups[0].active = 1;
+        let before = crate::ui_state::LayoutSignature::capture(&app);
+        app.input = "/collection add Work".into();
+        assert!(app.submit_local_command());
+        assert_ne!(before, crate::ui_state::LayoutSignature::capture(&app));
+        assert!(app.input.is_empty());
+        assert_eq!(app.collections[0].sessions, ["two"]);
+        assert_eq!(app.rail_order(), [1, 0]);
+        app.input = "/collection remove".into();
+        assert!(app.submit_local_command());
+        assert!(app.collections[0].sessions.is_empty());
+        assert!(app.take_prompts().is_empty());
+    }
+
+    #[test]
+    fn folded_collection_hides_members_and_rail_clicks_follow_visible_rows() {
+        let mut app = App::default();
+        app.handle(Event::Resize(100, 28));
+        for id in ["held", "loose"] {
+            app.apply_update(DaemonUpdate::Upsert(Session { id:id.into(), title:id.into(),
+                collection:String::new(), transcript:String::new(), status:"Ready".into() }));
+        }
+        app.collections.push(crate::collections::Collection {
+            name:"Work".into(), sessions:vec!["held".into()], collapsed:false,
+        });
+        assert_eq!(app.rail_order(), [0, 1]);
+        let click = |row| MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column:3, row, modifiers:KeyModifiers::NONE };
+        assert!(app.mouse(click(1))); // Work heading
+        assert!(app.collections[0].collapsed);
+        assert_eq!(app.rail_order(), [1]);
+        let before = app.groups[0].tabs.clone();
+        assert!(app.mouse(click(2))); // Sessions heading, no session selected
+        assert_eq!(app.groups[0].tabs, before);
+        assert!(app.mouse(click(3))); // loose session
+        assert_eq!(app.groups[0].active_id(), Some("loose"));
+        assert!(app.mouse(click(1)));
+        assert!(!app.collections[0].collapsed);
+        assert_eq!(app.rail_order(), [0, 1]);
     }
 
     #[test]

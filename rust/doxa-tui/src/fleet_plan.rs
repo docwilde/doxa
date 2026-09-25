@@ -1,5 +1,5 @@
-//! Native, read-only fleet launch preflight. Live orchestration remains in
-//! Python until the Rust daemon enforces spend and inbound peer turns.
+//! Native, read-only fleet launch preflight. The Python fleet harness still
+//! owns the live barrier, approval desk, budget enforcement and teardown.
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -12,16 +12,29 @@ const DEFAULT_RUN_ID_SHAPE: &str = "00000000T000000-0000";
 
 #[derive(Debug, Clone)]
 pub struct Preflight {
+    /// Worker count; a supervisor, when selected, adds one more session.
     pub sessions: u64,
+    pub supervisor: Option<String>,
     pub root: PathBuf,
     pub run_id: String,
     pub run_budget_usd: Option<f64>,
     pub allow_unbudgeted: bool,
     pub force: bool,
+    pub approve: String,
+    pub approval_grace_s: f64,
 }
 
 fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message.into())
+}
+
+fn valid_supervisor(value: &str) -> bool {
+    if value.contains(',') || value.chars().any(char::is_control) { return false; }
+    let (body, weight) = value.split_once('@').unwrap_or((value, "1"));
+    let engine = body.split_once(':').map_or(body, |(engine, _)| engine);
+    let weight = if weight.trim().is_empty() { "1" } else { weight.trim() };
+    !engine.trim().is_empty() && weight.parse::<f64>()
+        .is_ok_and(|weight| weight.is_finite() && weight > 0.0)
 }
 
 pub fn available_memory_mb() -> Option<u64> {
@@ -39,15 +52,29 @@ pub fn check(spec: &Preflight, available_mb: Option<u64>) -> io::Result<String> 
     if !spec.root.is_absolute() || !doxa_state::valid_session_id(&spec.run_id) {
         return Err(invalid("fleet root must be absolute and run ID must be filename safe"));
     }
+    if !matches!(spec.approve.as_str(), "none" | "peer" | "all") {
+        return Err(invalid("fleet approval policy must be none, peer, or all"));
+    }
+    if !spec.approval_grace_s.is_finite() || spec.approval_grace_s < 0.0 {
+        return Err(invalid("fleet approval grace must be finite and nonnegative"));
+    }
+    if spec.supervisor.as_deref().is_some_and(|name| !valid_supervisor(name)) {
+        return Err(invalid("fleet supervisor must name one engine[:model]"));
+    }
+    let count = spec.sessions.checked_add(u64::from(spec.supervisor.is_some()))
+        .ok_or_else(|| invalid("fleet session count overflow"))?;
     let runtime = spec.root.join(&spec.run_id).join("rt");
     let used = runtime.as_os_str().as_encoded_bytes().len() + 1 + SOCKET_NAME_BUDGET;
     if used > SOCKET_PATH_MAX {
         return Err(invalid(format!("fleet run directory exceeds AF_UNIX socket path budget ({used}/{SOCKET_PATH_MAX} bytes)")));
     }
-    let need = spec.sessions.checked_mul(SESSION_RESIDENT_MB)
+    let need = count.checked_mul(SESSION_RESIDENT_MB)
         .ok_or_else(|| invalid("fleet memory arithmetic overflow"))?;
-    let mut lines = vec![format!("N={} x ~{} MB/session = ~{:.1} GB resident", spec.sessions,
+    let mut lines = vec![format!("N={count} x ~{} MB/session = ~{:.1} GB resident",
         SESSION_RESIDENT_MB, need as f64 / 1024.0)];
+    if let Some(supervisor) = &spec.supervisor {
+        lines.push(format!("supervisor {supervisor} at slot 0, plus {} workers", spec.sessions));
+    }
     if let Some(have) = available_mb {
         lines[0].push_str(&format!(", against ~{:.1} GB available (reserving {:.1} GB headroom)",
             have as f64 / 1024.0, MEMORY_HEADROOM_MB as f64 / 1024.0));
@@ -63,26 +90,33 @@ pub fn check(spec: &Preflight, available_mb: Option<u64>) -> io::Result<String> 
     let budget = spec.run_budget_usd.filter(|value| *value > 0.0);
     match budget {
         Some(budget) if budget.is_finite() && budget > 0.0 => {
-            lines.push(format!("run budget ${budget:.4} across N={} = ${:.4} per session",
-                spec.sessions, budget / spec.sessions as f64));
+            lines.push(format!("run budget ${budget:.4} across N={count} = ${:.4} per session",
+                budget / count as f64));
         }
         Some(_) => return Err(invalid("run budget must be finite")),
         None if spec.allow_unbudgeted => lines.push("no run budget; explicitly accepted by --allow-unbudgeted".into()),
         None => return Err(invalid("inbound peer turns require --run-budget or --allow-unbudgeted")),
     }
     lines.push(format!("socket path budget {used}/{SOCKET_PATH_MAX} bytes · runtime {}", runtime.display()));
-    lines.push("preflight only; provider price enforcement and live fleet approval are checked by the Python fleet harness".into());
+    let policy = match spec.approve.as_str() {
+        "all" => "every CLI tool permission ask; questions and spawns still require a human",
+        "peer" => "only this run's peer tools",
+        _ => "nothing",
+    };
+    lines.push(format!("approval posture: --approve {} auto-approves {policy}; unanswered asks are refused after {:.0}s",
+        spec.approve, spec.approval_grace_s));
+    lines.push("preflight only; provider price enforcement, live approvals, dispatch barrier and teardown remain in the Python fleet harness".into());
     Ok(lines.join("\n"))
 }
 
 pub fn parse(args: &[String], default_root: &Path) -> io::Result<Preflight> {
-    let mut spec = Preflight { sessions: 4, root: default_root.to_path_buf(),
+    let mut spec = Preflight { sessions: 4, supervisor: None, root: default_root.to_path_buf(),
         run_id: DEFAULT_RUN_ID_SHAPE.into(), run_budget_usd: None,
-        allow_unbudgeted: false, force: false };
+        allow_unbudgeted: false, force: false, approve: "none".into(), approval_grace_s: 300.0 };
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
-            "--sessions" | "--root" | "--run-id" | "--run-budget" => {
+            "--sessions" | "--root" | "--run-id" | "--run-budget" | "--supervisor" | "--approve" | "--approval-grace" => {
                 let option = args[index].as_str();
                 index += 1;
                 let value = args.get(index).ok_or_else(|| invalid(format!("missing value for {option}")))?;
@@ -91,6 +125,9 @@ pub fn parse(args: &[String], default_root: &Path) -> io::Result<Preflight> {
                     "--root" => spec.root = PathBuf::from(value),
                     "--run-id" => spec.run_id = value.clone(),
                     "--run-budget" => spec.run_budget_usd = Some(value.parse().map_err(|_| invalid("invalid run budget"))?),
+                    "--supervisor" => spec.supervisor = Some(value.clone()),
+                    "--approve" => spec.approve = value.clone(),
+                    "--approval-grace" => spec.approval_grace_s = value.parse().map_err(|_| invalid("invalid approval grace"))?,
                     _ => unreachable!(),
                 }
             }
@@ -108,9 +145,9 @@ mod tests {
     use super::*;
 
     fn plan() -> Preflight {
-        Preflight { sessions: 4, root: PathBuf::from("/tmp/dx"),
+        Preflight { sessions: 4, supervisor: None, root: PathBuf::from("/tmp/dx"),
             run_id: "20260925T100000-abcd".into(), run_budget_usd: Some(5.0),
-            allow_unbudgeted: false, force: false }
+            allow_unbudgeted: false, force: false, approve: "none".into(), approval_grace_s: 300.0 }
     }
 
     #[test]
@@ -134,10 +171,51 @@ mod tests {
     fn preflight_parses_without_creating_any_run_state() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("fleet");
-        let args = vec!["--sessions".into(), "3".into(), "--run-budget".into(), "6".into()];
+        let args = vec!["--sessions".into(), "3".into(), "--run-budget".into(), "6".into(),
+            "--supervisor".into(), "claude:opus".into(), "--approve".into(), "peer".into(),
+            "--approval-grace".into(), "15".into()];
         let spec = parse(&args, &root).unwrap();
-        assert!(check(&spec, Some(10_000)).unwrap().contains("$2.0000 per session"));
+        let note = check(&spec, Some(10_000)).unwrap();
+        assert!(note.contains("$1.5000 per session"));
+        assert!(note.contains("--approve peer"));
         assert!(!root.exists());
-        assert!(parse(&["--approve".into(), "all".into()], &root).is_err());
+        assert!(parse(&["--approve".into(), "all".into()], &root).is_ok());
+        assert!(parse(&["--unknown".into()], &root).is_err());
+    }
+
+    #[test]
+    fn supervisor_counts_for_capacity_and_budget_without_waiving_safety() {
+        let mut spec = plan();
+        spec.supervisor = Some("claude:opus".into());
+        let exact = 5 * SESSION_RESIDENT_MB + MEMORY_HEADROOM_MB;
+        let note = check(&spec, Some(exact)).unwrap();
+        assert!(note.contains("N=5"));
+        assert!(note.contains("$1.0000 per session"));
+        assert!(note.contains("supervisor claude:opus at slot 0, plus 4 workers"));
+        assert!(check(&spec, Some(exact - 1)).is_err());
+        spec.run_budget_usd = None;
+        assert!(check(&spec, Some(exact)).is_err());
+    }
+
+    #[test]
+    fn approval_posture_is_validated_and_reports_its_scope() {
+        let mut spec = plan();
+        spec.approve = "peer".into();
+        spec.approval_grace_s = 0.0;
+        let note = check(&spec, Some(10_000)).unwrap();
+        assert!(note.contains("--approve peer auto-approves only this run's peer tools"));
+        assert!(note.contains("refused after 0s"));
+        spec.approve = "peeer".into();
+        assert!(check(&spec, Some(10_000)).is_err());
+        spec.approve = "all".into();
+        spec.approval_grace_s = f64::INFINITY;
+        assert!(check(&spec, Some(10_000)).is_err());
+        spec.approval_grace_s = -1.0;
+        assert!(check(&spec, Some(10_000)).is_err());
+        spec.approval_grace_s = 0.0;
+        spec.supervisor = Some("claude:opus,glm:glm-5".into());
+        assert!(check(&spec, Some(10_000)).is_err());
+        spec.supervisor = Some("claude:opus@0".into());
+        assert!(check(&spec, Some(10_000)).is_err());
     }
 }

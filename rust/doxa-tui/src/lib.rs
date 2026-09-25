@@ -11,6 +11,7 @@ pub mod transport;
 pub mod ui;
 
 pub mod ui_state;
+pub mod collections;
 
 pub mod launch;
 
