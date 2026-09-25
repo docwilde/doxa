@@ -46,6 +46,7 @@ const SPINNER_FRAMES: [&str; 4] = ["◐", "◓", "◑", "◒"];
 // JSON may expand one input byte to a six-byte Unicode escape.
 const MAX_INPUT_BYTES: usize = 10 * 1024;
 const MAX_TRANSCRIPT_BYTES: usize = 512 * 1024;
+const MAX_RENDERED_TRANSCRIPTS: usize = 2;
 const MAX_REASONING_DISPLAY_CHARS: usize = 48 * 1024;
 const MAX_ANSWER_BYTES: usize = 10 * 1024;
 // Reserve metadata wrapping even in a narrow review modal. This is also the
@@ -878,6 +879,95 @@ fn input_request_body(request: &InputRequest, title_width: usize) -> (String, Op
 }
 
 #[derive(Debug)]
+struct RenderedTranscript {
+    pane: usize,
+    id: String,
+    source: String,
+    width: u16,
+    expanded: Option<HashSet<usize>>,
+    selected: Option<usize>,
+    cards_revision: u64,
+    lines: Vec<Line<'static>>,
+    sections: Vec<transcript_tools::Section>,
+    turn_start: Option<usize>,
+    prefix_lines: usize,
+}
+
+/// Locate the final role heading outside fenced code. Repainting a streamed
+/// turn can then parse only that turn while retaining the earlier styled lines.
+fn streamed_turn_start(source: &str) -> Option<usize> {
+    let mut fence = None;
+    let mut start = 0;
+    let mut found = None;
+    for paragraph in source.split("\n\n") {
+        if fence.is_none() && matches!(paragraph.trim_matches('\n'), "**You:**" | "**Assistant:**") {
+            found = Some(start);
+        } else {
+            for line in paragraph.lines() {
+                let line = line.trim_start();
+                if line.starts_with("```") {
+                    if fence == Some("```") { fence = None; }
+                    else if fence.is_none() { fence = Some("```"); }
+                } else if line.starts_with("~~~") {
+                    if fence == Some("~~~") { fence = None; }
+                    else if fence.is_none() { fence = Some("~~~"); }
+                }
+            }
+        }
+        start += paragraph.len() + 2;
+    }
+    found.filter(|start| *start > 0)
+}
+
+impl RenderedTranscript {
+    fn render(pane: usize, id: &str, source: &str, width: u16, expanded: Option<&HashSet<usize>>,
+              selected: Option<usize>, cards_revision: u64, cards: &[tool_cards::ToolCard]) -> Self {
+        let (lines, sections) = transcript_tools::render_with_cards(source, width, expanded, selected, cards);
+        let mut turn_start = None;
+        let mut prefix_lines = 0;
+        if let Some(start) = streamed_turn_start(source) {
+            let tail = &source[start..];
+            if !tail.contains("Tool: ") && !tail.contains(transcript_tools::REASONING_PREFIX) {
+                let (tail_lines, tail_sections) = transcript_tools::render(tail, width, None, None);
+                if tail_sections.is_empty() && lines.len() > tail_lines.len() {
+                    prefix_lines = lines.len() - tail_lines.len() - 1;
+                    turn_start = Some(start);
+                }
+            }
+        }
+        Self { pane, id: id.to_owned(), source: source.to_owned(), width,
+            expanded: expanded.cloned(), selected, cards_revision,
+            lines, sections, turn_start, prefix_lines }
+    }
+
+    fn update(&mut self, source: &str, width: u16, expanded: Option<&HashSet<usize>>,
+              selected: Option<usize>, cards_revision: u64, cards: &[tool_cards::ToolCard]) {
+        if self.width == width && self.expanded.as_ref() == expanded
+            && self.selected == selected && self.cards_revision == cards_revision {
+            if self.source == source { return; }
+            if let Some(start) = self.turn_start.filter(|_| source.starts_with(&self.source)) {
+                if streamed_turn_start(source) == Some(start) {
+                    let tail = &source[start..];
+                    if !tail.contains("Tool: ") && !tail.contains(transcript_tools::REASONING_PREFIX) {
+                        let (tail_lines, tail_sections) = transcript_tools::render(tail, width, None, None);
+                        if tail_sections.is_empty() {
+                            self.lines.truncate(self.prefix_lines);
+                            self.lines.push(Line::default());
+                            self.lines.extend(tail_lines);
+                            self.sections.retain(|section| section.line < self.prefix_lines);
+                            self.source.clear();
+                            self.source.push_str(source);
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+        *self = Self::render(self.pane, &self.id, source, width, expanded, selected, cards_revision, cards);
+    }
+}
+
+#[derive(Debug)]
 pub struct App {
     pub sessions: Vec<Session>,
     pub groups: [PaneGroup; 2],
@@ -953,6 +1043,8 @@ pub struct App {
     pub pending_answers: Vec<(String, String, serde_json::Value)>,
     pub rejected_drafts: HashMap<String, Vec<String>>,
     tool_cards: ToolCards,
+    tool_cards_revision: u64,
+    rendered_transcripts: RefCell<Vec<RenderedTranscript>>,
     tool_modal: bool,
     tool_selected: usize,
     tool_scroll: u16,
@@ -1084,6 +1176,8 @@ impl Default for App {
             pending_answers: Vec::new(),
             rejected_drafts: HashMap::new(),
             tool_cards: ToolCards::default(),
+            tool_cards_revision: 0,
+            rendered_transcripts: RefCell::new(Vec::new()),
             tool_modal: false,
             tool_selected: 0,
             tool_scroll: 0,
@@ -1353,6 +1447,7 @@ impl App {
                 let mut tool_updated = false;
                 if self.sessions.iter().any(|session| session.id == id) {
                     tool_updated = self.tool_cards.record(&id, event_type, data);
+                    if tool_updated { self.tool_cards_revision = self.tool_cards_revision.wrapping_add(1); }
                     self.peer_map.event(&id, event_type, data);
                 }
                 match event_type {
@@ -6259,25 +6354,36 @@ impl App {
             .map(|s| s.transcript.as_str())
             .unwrap_or("No session open. Select one in the rail and press Enter.");
         let id = group.active_id().unwrap_or("");
-        let (mut lines, sections) = transcript_tools::render_with_cards(
-            content,
-            inner[1].width.saturating_sub(2),
-            self.expanded_tool_sections.get(id),
-            (active && self.focus == Focus::Transcript)
-                .then(|| self.selected_tool_sections.get(id).copied())
-                .flatten(),
-            self.tool_cards.for_session(id),
-        );
-        if self.activity_label(id) == Some("Processing") {
-            lines.push(Line::styled(
+        let activity_line = if self.activity_label(id) == Some("Processing") {
+            Some(Line::styled(
                 format!(" {} Processing…", SPINNER_FRAMES[self.spinner_frame]),
                 Style::default().fg(theme::ACCENT),
-            ));
+            ))
         } else if self.activity_label(id) == Some("Queued") {
-            lines.push(Line::styled(" Queued", Style::default().fg(theme::SECONDARY)));
-        }
-        let top = lines.len().saturating_sub(usize::from(inner[1].height))
-            .saturating_sub(group.scroll.min(lines.len().saturating_sub(usize::from(inner[1].height))));
+            Some(Line::styled(" Queued", Style::default().fg(theme::SECONDARY)))
+        } else { None };
+        let (lines, sections, top) = {
+            let mut cache = self.rendered_transcripts.borrow_mut();
+            let position = cache.iter().position(|entry| entry.pane == index && entry.id == id);
+            let position = if let Some(position) = position { position } else {
+                if let Some(old) = cache.iter().position(|entry| entry.pane == index) { cache.remove(old); }
+                if cache.len() == MAX_RENDERED_TRANSCRIPTS { cache.remove(0); }
+                cache.push(RenderedTranscript::render(index, id, content,
+                    inner[1].width.saturating_sub(2), self.expanded_tool_sections.get(id),
+                    (active && self.focus == Focus::Transcript)
+                        .then(|| self.selected_tool_sections.get(id).copied()).flatten(),
+                    self.tool_cards_revision, self.tool_cards.for_session(id)));
+                cache.len() - 1
+            };
+            cache[position].update(content, inner[1].width.saturating_sub(2),
+                self.expanded_tool_sections.get(id),
+                (active && self.focus == Focus::Transcript)
+                    .then(|| self.selected_tool_sections.get(id).copied()).flatten(),
+                self.tool_cards_revision, self.tool_cards.for_session(id));
+            let (window, top) = transcript_window(&cache[position].lines,
+                inner[1].height, group.scroll, activity_line);
+            (window, cache[position].sections.clone(), top)
+        };
         for section in sections {
             if section.line >= top && section.line < top + usize::from(inner[1].height) {
                 self.visible_tool_sections.borrow_mut().push((
@@ -6289,9 +6395,8 @@ impl App {
             }
         }
         let content_width = usize::from(inner[1].width.saturating_sub(2));
-        let visible_end = (top + usize::from(inner[1].height)).min(lines.len());
         let mut visible_links = self.visible_links.borrow_mut();
-        for hit in links::hits(&lines[top..visible_end], content_width) {
+        for hit in links::hits(&lines, content_width) {
             if hit.end > hit.start {
                 visible_links.push((
                     Rect::new(inner[1].x.saturating_add(1).saturating_add(hit.start as u16),
@@ -6301,12 +6406,9 @@ impl App {
                 ));
             }
         }
-        let (lines, scroll_from_top) =
-            transcript_window(lines, inner[1].height, inner[1].y, group.scroll);
         frame.render_widget(
             Paragraph::new(lines)
                 .style(Style::default().fg(theme::TEXT).bg(theme::BASE))
-                .scroll((scroll_from_top, 0))
                 .wrap(Wrap { trim: false })
                 .block(Block::default().borders(Borders::LEFT | Borders::RIGHT)
                     .border_style(Style::default().fg(if group.active_id().is_some_and(|id| self.waiting_for_input(id)) && self.blink_on {
@@ -6390,24 +6492,24 @@ impl App {
 }
 
 fn transcript_window(
-    lines: Vec<Line<'static>>,
+    lines: &[Line<'static>],
     viewport: u16,
-    origin_y: u16,
     scroll: usize,
-) -> (Vec<Line<'static>>, u16) {
-    // Paragraph's internal `area.height + scroll.y` and its buffer row
-    // `area.top() + y` are u16. Reserve the actual height and screen origin
-    // so both calculations fit while moving a bounded window through lines.
+    extra: Option<Line<'static>>,
+) -> (Vec<Line<'static>>, usize) {
+    // Markdown has already wrapped lines to the pane's content width. Give
+    // Paragraph only visible rows: handing it the whole transcript makes
+    // every spinner frame rewrap thousands of off-screen lines.
     let viewport = usize::from(viewport);
-    let max_scroll = lines.len().saturating_sub(viewport);
+    let total = lines.len() + usize::from(extra.is_some());
+    let max_scroll = total.saturating_sub(viewport);
     let top = max_scroll.saturating_sub(scroll.min(max_scroll));
-    let max_local_scroll = usize::from(u16::MAX)
-        .saturating_sub(viewport)
-        .saturating_sub(usize::from(origin_y));
-    let start = top.saturating_sub(max_local_scroll);
-    let keep = max_local_scroll.saturating_add(viewport);
-    let window = lines.into_iter().skip(start).take(keep).collect();
-    (window, (top - start) as u16)
+    let end = (top + viewport).min(total);
+    let mut window = lines[top.min(lines.len())..end.min(lines.len())].to_vec();
+    if end > lines.len() {
+        if let Some(extra) = extra { window.push(extra); }
+    }
+    (window, top)
 }
 
 /// Owns terminal modes so every return path, including I/O errors, restores the screen.
@@ -8809,12 +8911,12 @@ for line in sys.stdin:
     #[test]
     fn long_transcript_window_reaches_both_ends() {
         let lines: Vec<Line<'static>> = (0..70_000).map(|i| Line::from(i.to_string())).collect();
-        let (window, at_bottom) = transcript_window(lines.clone(), 8, 0, 0);
-        assert_eq!(window.len(), u16::MAX as usize);
-        assert_eq!(at_bottom, u16::MAX - 8);
-        assert_eq!(window[usize::from(at_bottom) + 7].to_string(), "69999");
-        let (window, at_top) = transcript_window(lines, 8, 0, 69_992);
-        assert_eq!(at_top, 0);
+        let (window, top) = transcript_window(&lines, 8, 0, None);
+        assert_eq!(window.len(), 8);
+        assert_eq!(top, 69_992);
+        assert_eq!(window[7].to_string(), "69999");
+        let (window, top) = transcript_window(&lines, 8, 69_992, None);
+        assert_eq!(top, 0);
         assert_eq!(window[0].to_string(), "0");
         assert_eq!(window[7].to_string(), "7");
     }
@@ -8823,12 +8925,9 @@ for line in sys.stdin:
     fn transcript_scroll_crosses_u16_boundary_without_losing_lines() {
         let lines: Vec<Line<'static>> = (0..70_000).map(|i| Line::from(i.to_string())).collect();
         for scroll in [0, 1, 4_457, 65_535, 65_536, 69_991, 69_992] {
-            let (window, offset) = transcript_window(lines.clone(), 8, 0, scroll);
-            assert!(window.len() <= u16::MAX as usize);
-            assert_eq!(
-                window[usize::from(offset)].to_string(),
-                (69_992 - scroll).to_string()
-            );
+            let (window, _) = transcript_window(&lines, 8, scroll, None);
+            assert_eq!(window.len(), 8);
+            assert_eq!(window[0].to_string(), (69_992 - scroll).to_string());
         }
         let mut app = App {
             focus: Focus::Transcript,
@@ -9076,6 +9175,83 @@ for line in sys.stdin:
         app.session_activity.insert("s".into(), (false, 0));
         assert!(!app.tick_spinner(start + SPINNER_INTERVAL * 2));
         assert!(!painted(&app).contains("Processing"));
+    }
+
+    #[test]
+    fn streamed_turn_cache_matches_full_render_after_each_append() {
+        let mut source = "**You:**\n\nFirst\n\n**Assistant:**\n\nEarlier answer\n\n**You:**\n\nNext\n\n**Assistant:**\n\n".to_owned();
+        let mut cached = RenderedTranscript::render(0, "s", &source, 38, None, None, 0, &[]);
+        assert!(cached.turn_start.is_some());
+        for chunk in ["A line", " with more text", "\n\nA second paragraph", "\n\n```rust\nfn main() {}\n```", "\n\nDone"] {
+            source.push_str(chunk);
+            cached.update(&source, 38, None, None, 0, &[]);
+            let (expected, sections) = transcript_tools::render(&source, 38, None, None);
+            assert_eq!(cached.lines, expected);
+            assert_eq!(cached.sections, sections);
+        }
+    }
+
+    #[test]
+    fn streamed_turn_cache_preserves_prior_tool_sections() {
+        let mut source = "**You:**\n\nInspect\n\n**Assistant:**\n\nTool: Read started · file.rs\n\nTool: Read finished · ok\n\n**You:**\n\nSummarize\n\n**Assistant:**\n\n".to_owned();
+        let expanded = HashSet::from([0]);
+        let mut cached = RenderedTranscript::render(0, "s", &source, 50, Some(&expanded), Some(0), 0, &[]);
+        for chunk in ["Summary", " with more detail", "\n\nFinal paragraph"] {
+            source.push_str(chunk);
+            cached.update(&source, 50, Some(&expanded), Some(0), 0, &[]);
+            let (expected, sections) = transcript_tools::render(&source, 50, Some(&expanded), Some(0));
+            assert_eq!(cached.lines, expected);
+            assert_eq!(cached.sections, sections);
+        }
+    }
+
+    #[test]
+    fn rendered_transcript_invalidates_on_width_and_expansion() {
+        let source = "**Assistant:**\n\nTool: Read started · file.rs\n\nTool: Read finished · ok";
+        let mut cached = RenderedTranscript::render(0, "s", source, 60, None, None, 0, &[]);
+        let expanded = HashSet::from([0]);
+        cached.update(source, 24, Some(&expanded), Some(0), 0, &[]);
+        let (expected, sections) = transcript_tools::render(source, 24, Some(&expanded), Some(0));
+        assert_eq!(cached.lines, expected);
+        assert_eq!(cached.sections, sections);
+        assert_eq!(cached.width, 24);
+        assert_eq!(cached.expanded.as_ref(), Some(&expanded));
+        let mut cards = ToolCards::default();
+        cards.record("s", "tool_call", &json!({"id":"one","name":"Read","input":"file.rs"}));
+        cards.record("s", "tool_result", &json!({"id":"one","name":"Read","result_summary":"updated"}));
+        let identified = "**Assistant:**\n\nTool: Read started\u{001f}DOXA_TOOL_ID:\"one\"\n\nTool: Read finished\u{001f}DOXA_TOOL_ID:\"one\"";
+        cached.update(identified, 24, Some(&expanded), Some(0), 1, cards.for_session("s"));
+        let (expected, sections) = transcript_tools::render_with_cards(
+            identified, 24, Some(&expanded), Some(0), cards.for_session("s"));
+        assert_eq!(cached.lines, expected);
+        assert_eq!(cached.sections, sections);
+    }
+
+    #[test]
+    fn background_pane_update_keeps_other_panes_render_cache() {
+        let mut app = App::default();
+        app.handle(Event::Resize(140, 32));
+        for id in ["left", "right"] {
+            app.apply_daemon_frame(&json!({"type":"hello","session_id":id}));
+        }
+        app.groups[0].tabs = vec!["left".into()];
+        app.groups[1].tabs = vec!["right".into()];
+        app.active_group = 1;
+        painted_at(&app, 140, 32);
+        let (right_source, right_lines) = {
+            let cache = app.rendered_transcripts.borrow();
+            assert_eq!(cache.len(), 2);
+            let right = cache.iter().find(|entry| entry.pane == 1).unwrap();
+            (right.source.clone(), right.lines.as_ptr())
+        };
+        assert!(app.apply_daemon_frame(&json!({"type":"event","session_id":"left",
+            "event":{"type":"text_delta","data":{"text":"Background update"}}})));
+        painted_at(&app, 140, 32);
+        let cache = app.rendered_transcripts.borrow();
+        assert!(cache.iter().find(|entry| entry.pane == 0).unwrap().source.contains("Background update"));
+        let right = cache.iter().find(|entry| entry.pane == 1).unwrap();
+        assert_eq!(right.source, right_source);
+        assert_eq!(right.lines.as_ptr(), right_lines);
     }
 
     #[test]
