@@ -387,7 +387,7 @@ fn worker_loop(
     if let Some(snapshot) = snapshot {
         let markdown = history::render(&snapshot);
         if !markdown.is_empty() && frames.send(json!({"type":"event", "session_id":session_id,
-            "event":{"type":"text_delta", "data":{"text":markdown}}})).is_err() {
+            "event":{"type":"text_delta", "data":{"text":markdown,"snapshot":true}}})).is_err() {
             return;
         }
     }

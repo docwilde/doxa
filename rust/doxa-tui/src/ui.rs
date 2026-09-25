@@ -40,7 +40,7 @@ const MAX_REJECT_REASON_BYTES: usize = 1024;
 const MAX_INPUT_REQUESTS: usize = 32;
 const INPUT_BLINK_INTERVAL: Duration = Duration::from_millis(650);
 const SPINNER_INTERVAL: Duration = Duration::from_millis(120);
-const SPINNER_FRAMES: [&str; 4] = ["⠋", "⠙", "⠹", "⠸"];
+const SPINNER_FRAMES: [&str; 4] = ["◐", "◓", "◑", "◒"];
 // JSON may expand one input byte to a six-byte Unicode escape.
 const MAX_INPUT_BYTES: usize = 10 * 1024;
 const MAX_TRANSCRIPT_BYTES: usize = 512 * 1024;
@@ -1313,7 +1313,7 @@ impl App {
                         };
                         if text.is_empty() { return false; }
                         if let Some(session) = self.sessions.iter_mut().find(|s| s.id == id) {
-                            if self.streaming_text.insert(id.clone()) {
+                            if data["snapshot"] != true && self.streaming_text.insert(id.clone()) {
                                 append_turn_heading(session, "Assistant");
                             }
                             if append_transcript(session, text) {
@@ -1597,7 +1597,6 @@ impl App {
             "client_notice" => {
                 if let Some(id) = frame.get("session_id").and_then(|v| v.as_str()) {
                     self.session_activity.remove(id);
-                    self.streaming_text.remove(id);
                     self.apply_update(DaemonUpdate::Status {
                         id: id.into(),
                         text: "Disconnected".into(),
@@ -8224,16 +8223,29 @@ mod tests {
     }
 
     #[test]
+    fn restored_snapshot_keeps_its_existing_turn_headings() {
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"s"}));
+        app.apply_daemon_frame(&json!({"type":"event", "session_id":"s",
+            "event":{"type":"text_delta", "data":{"text":"**You:**\n\nprior\n\n**Assistant:**\n\nreply\n\n",
+                "snapshot":true}}}));
+        assert_eq!(app.sessions[0].transcript, "**You:**\n\nprior\n\n**Assistant:**\n\nreply\n\n");
+        app.apply_daemon_frame(&json!({"type":"event", "session_id":"s",
+            "event":{"type":"text_delta", "data":{"text":"continued"}}}));
+        assert!(app.sessions[0].transcript.ends_with("**Assistant:**\n\ncontinued"));
+    }
+
+    #[test]
     fn processing_spinner_advances_only_for_visible_busy_sessions() {
         let mut app = App::default();
         app.handle(Event::Resize(100, 28));
         app.apply_daemon_frame(&json!({"type":"hello", "session_id":"s", "running":true}));
         let start = app.spinner_at;
         assert_eq!(app.activity_label("s"), Some("Processing"));
-        assert!(painted(&app).contains("⠋ Processing"));
+        assert!(painted(&app).contains("◐ Processing"));
         assert!(!app.tick_spinner(start + Duration::from_millis(119)));
         assert!(app.tick_spinner(start + SPINNER_INTERVAL));
-        assert!(painted(&app).contains("⠙ Processing"));
+        assert!(painted(&app).contains("◓ Processing"));
         app.session_activity.insert("s".into(), (false, 1));
         assert_eq!(app.activity_label("s"), Some("Queued"));
         assert!(painted(&app).contains("Queued"));
