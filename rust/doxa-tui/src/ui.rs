@@ -23,7 +23,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Tabs, Wrap};
 use ratatui::{Frame, Terminal};
 use unicode_width::UnicodeWidthStr;
 
-use crate::{diff_view, history, markdown, peer_map::PeerMap};
+use crate::{diff_view, history, launch, markdown, peer_map::PeerMap};
 use crate::theme;
 
 mod tool_cards;
@@ -73,6 +73,14 @@ struct ModelPicker {
     note: String,
     loading: bool,
     catalog_pending: bool,
+}
+
+#[derive(Debug)]
+struct NewSession {
+    engine: launch::Engine,
+    model: String,
+    prompt: String,
+    field: usize,
 }
 
 fn safe_label(value: &str) -> String {
@@ -420,6 +428,9 @@ pub struct App {
     model_picker: Option<ModelPicker>,
     engine_picker: bool,
     engine_selected: usize,
+    new_session: Option<NewSession>,
+    pending_launches: Vec<(launch::LaunchOptions, Option<String>)>,
+    launching: bool,
     pending_model_queries: Vec<String>,
     pending_model_changes: Vec<(String, String)>,
     pub pending_prompts: Vec<(String, String)>,
@@ -489,6 +500,9 @@ impl Default for App {
             model_picker: None,
             engine_picker: false,
             engine_selected: 0,
+            new_session: None,
+            pending_launches: Vec::new(),
+            launching: false,
             pending_model_queries: Vec::new(),
             pending_model_changes: Vec::new(),
             pending_prompts: Vec::new(),
@@ -563,6 +577,22 @@ impl App {
             return false;
         };
         match kind {
+            "launch_reply" => {
+                self.launching = false;
+                if frame["ok"] == true {
+                    if let Some(id) = frame["session_id"].as_str().filter(|id| crate::discovery::valid_id(id)) {
+                        let group = &mut self.groups[self.active_group];
+                        if !group.tabs.iter().any(|tab| tab == id) { group.tabs.push(id.to_owned()); }
+                        group.active = group.tabs.iter().position(|tab| tab == id).unwrap_or(group.active);
+                    }
+                }
+                self.notice = if frame["ok"] == true {
+                    format!("Session started · {}", safe_label(frame["session_id"].as_str().unwrap_or("")))
+                } else {
+                    format!("Session launch failed · {}", safe_label(frame["message"].as_str().unwrap_or("unknown error")))
+                };
+                true
+            }
             "hello" => {
                 let Some(id) = frame.get("session_id").and_then(|v| v.as_str()) else {
                     return false;
@@ -965,10 +995,11 @@ impl App {
                     self.history_modal = false;
                     self.notice = "Enlarge terminal to open session history".into();
                 }
-                if ((self.model_picker.is_some() || self.engine_picker) && (w < 29 || h < 11))
+                if ((self.model_picker.is_some() || self.engine_picker || self.new_session.is_some()) && (w < 29 || h < 11))
                     || (self.permission_picker.is_some() && (w < 60 || h < 15)) {
                     self.model_picker = None;
                     self.engine_picker = false;
+                    self.new_session = None;
                     self.permission_picker = None;
                     self.permission_confirm_dont_ask = false;
                     self.notice = "Enlarge terminal to open chip picker".into();
@@ -1002,6 +1033,7 @@ impl App {
         if self.active_request_index().is_some() {
             return self.request_key(key);
         }
+        if self.new_session.is_some() { return self.new_session_key(key); }
         if self.model_picker.is_some() { return self.model_picker_key(key); }
         if self.permission_picker.is_some() { return self.permission_picker_key(key); }
         if self.engine_picker { return self.engine_picker_key(key); }
@@ -1328,8 +1360,55 @@ impl App {
             KeyCode::Up => self.engine_selected = self.engine_selected.saturating_sub(1),
             KeyCode::Down => self.engine_selected = (self.engine_selected + 1).min(ENGINE_CHOICES.len() - 1),
             KeyCode::Enter => {
-                self.notice = format!("Run separately for a new session: doxa-rs new --engine {}", ENGINE_CHOICES[self.engine_selected]);
-                self.engine_picker = false;
+                self.select_new_engine();
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    fn select_new_engine(&mut self) {
+        let engine = match self.engine_selected {
+            0 => launch::Engine::Codex,
+            1 => launch::Engine::Claude,
+            2 => launch::Engine::DeepSeek,
+            _ => launch::Engine::Glm,
+        };
+        self.engine_picker = false;
+        self.new_session = Some(NewSession { engine, model: String::new(), prompt: String::new(), field: 0 });
+    }
+
+    fn new_session_key(&mut self, key: KeyEvent) -> bool {
+        let form = self.new_session.as_mut().unwrap();
+        match key.code {
+            KeyCode::Esc => self.new_session = None,
+            KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % 2,
+            KeyCode::BackTab | KeyCode::Up => form.field = (form.field + 1) % 2,
+            KeyCode::Backspace => {
+                if form.field == 0 { form.model.pop(); } else { form.prompt.pop(); }
+            }
+            KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                && !c.is_control() => {
+                let target = if form.field == 0 { &mut form.model } else { &mut form.prompt };
+                let limit = if form.field == 0 { 128 } else { MAX_INPUT_BYTES };
+                if target.len() + c.len_utf8() <= limit { target.push(c); }
+            }
+            KeyCode::Enter if form.field == 0 => form.field = 1,
+            KeyCode::Enter => {
+                if self.launching {
+                    self.notice = "Session launch already in progress".into();
+                    return true;
+                }
+                let form = self.new_session.take().unwrap();
+                let mut options = launch::LaunchOptions { engine: form.engine, ..Default::default() };
+                if !form.model.trim().is_empty() { options.model = Some(form.model.trim().to_owned()); }
+                if form.engine == launch::Engine::Claude {
+                    options.claude_script = std::env::var_os("DOXA_CLAUDE_SCRIPT").map(PathBuf::from);
+                }
+                let prompt = if form.prompt.trim().is_empty() { None } else { Some(form.prompt) };
+                self.pending_launches.push((options, prompt));
+                self.launching = true;
+                self.notice = format!("Starting {} session…", ENGINE_CHOICES[self.engine_selected]);
             }
             _ => return false,
         }
@@ -1834,7 +1913,7 @@ impl App {
     fn mouse(&mut self, mouse: MouseEvent) -> bool {
         if self.active_request_index().is_none()
             && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
-            && (self.engine_picker || self.model_picker.is_some() || self.permission_picker.is_some()) {
+            && (self.engine_picker || self.new_session.is_some() || self.model_picker.is_some() || self.permission_picker.is_some()) {
             let width = self.size.width.saturating_sub(4).min(74);
             let height = self.size.height.saturating_sub(4).min(19);
             if width < 25 || height < 7 { return false; }
@@ -1842,6 +1921,7 @@ impl App {
             let y = self.size.y + (self.size.height - height) / 2;
             if mouse.column < x || mouse.column >= x + width || mouse.row < y || mouse.row >= y + height {
                 self.engine_picker = false;
+                self.new_session = None;
                 self.model_picker = None;
                 self.permission_picker = None;
                 self.permission_confirm_dont_ask = false;
@@ -1852,11 +1932,11 @@ impl App {
                 let row = usize::from(mouse.row.saturating_sub(y + 4));
                 if row < ENGINE_CHOICES.len() {
                     self.engine_selected = row;
-                    self.notice = format!("Run separately for a new session: doxa-rs new --engine {}", ENGINE_CHOICES[row]);
-                    self.engine_picker = false;
+                    self.select_new_engine();
                 }
                 return true;
             }
+            if self.new_session.is_some() { return true; }
             if let Some((_, selected)) = &mut self.permission_picker {
                 if mouse.row >= y + 4 {
                     let row = usize::from(mouse.row - (y + 4));
@@ -1892,6 +1972,7 @@ impl App {
             || self.model_picker.is_some()
             || self.permission_picker.is_some()
             || self.engine_picker
+            || self.new_session.is_some()
         {
             self.drag = None;
             return false;
@@ -2117,7 +2198,7 @@ impl App {
     }
 
     fn draw_chip_picker(&self, frame: &mut Frame, area: Rect) {
-        if !self.engine_picker && self.model_picker.is_none() && self.permission_picker.is_none() { return; }
+        if !self.engine_picker && self.new_session.is_none() && self.model_picker.is_none() && self.permission_picker.is_none() { return; }
         let width = area.width.saturating_sub(4).min(74);
         let height = area.height.saturating_sub(4).min(19);
         if width < 25 || height < 7 { return; }
@@ -2126,13 +2207,27 @@ impl App {
         let mut lines = Vec::new();
         let title;
         if self.engine_picker {
-            title = " Engine · new sessions only · Esc close ";
-            lines.push(Line::from(" This picker does not launch or switch a session."));
-            lines.push(Line::from(" Select a row to show a new-session command:"));
+            title = " New session · choose engine · Enter continue · Esc close ";
+            lines.push(Line::from(" Select an engine for a new session:"));
+            lines.push(Line::from(" Model and first prompt follow."));
             lines.push(Line::from(""));
             for (index, engine) in ENGINE_CHOICES.iter().enumerate() {
                 lines.push(Line::styled(format!(" {} {}", if index == self.engine_selected { '›' } else { ' ' }, engine),
                     Style::default().fg(if index == self.engine_selected { theme::ACCENT } else { theme::SECONDARY })));
+            }
+        } else if let Some(form) = &self.new_session {
+            title = " New session · Tab field · Enter continue/start · Esc close ";
+            let name = match form.engine { launch::Engine::Codex => "codex", launch::Engine::Claude => "claude",
+                launch::Engine::DeepSeek => "deepseek", launch::Engine::Glm => "glm", launch::Engine::Fixture => "fixture" };
+            lines.push(Line::from(format!(" Engine: {name}")));
+            lines.push(Line::from(" Blank model uses configured engine default."));
+            lines.push(Line::from(""));
+            lines.push(Line::styled(format!(" {} Model: {}", if form.field == 0 { '›' } else { ' ' }, safe_label(&form.model)),
+                Style::default().fg(if form.field == 0 { theme::ACCENT } else { theme::SECONDARY })));
+            lines.push(Line::styled(format!(" {} First prompt: {}", if form.field == 1 { '›' } else { ' ' }, safe_label(&form.prompt)),
+                Style::default().fg(if form.field == 1 { theme::ACCENT } else { theme::SECONDARY })));
+            if form.engine == launch::Engine::Claude {
+                lines.push(Line::from(" Claude requires DOXA_CLAUDE_SCRIPT absolute path."));
             }
         } else if let Some((id, selected)) = &self.permission_picker {
             title = " Claude permissions · this session · Enter select · Esc close ";
@@ -2747,9 +2842,16 @@ fn run_loop(
             if let Some(id) = app.pending_peer_refresh.take() {
                 changed |= app.peer_map.roster(&id, &serde_json::json!({"ok":false}));
             }
+            if !app.pending_launches.is_empty() {
+                app.pending_launches.clear();
+                app.launching = false;
+                app.notice = "Session launch unavailable · daemon connection closed".into();
+                changed = true;
+            }
         }
         if let Some(sender) = &prompt_sender {
-            let disconnected = dispatch_prompts(&mut app, sender);
+            let disconnected = dispatch_launches(&mut app, sender);
+            let disconnected = dispatch_prompts(&mut app, sender) || disconnected;
             let disconnected = dispatch_answers(&mut app, sender) || disconnected;
             let disconnected = dispatch_peer_refresh(&mut app, sender) || disconnected;
             let disconnected = dispatch_model_controls(&mut app, sender) || disconnected;
@@ -2772,6 +2874,26 @@ fn run_loop(
     drop(terminal);
     drop(guard);
     Ok(())
+}
+
+fn dispatch_launches(app: &mut App, sender: &SyncSender<crate::bridge::WorkerCommand>) -> bool {
+    let mut launches = std::mem::take(&mut app.pending_launches).into_iter();
+    while let Some((options, prompt)) = launches.next() {
+        match sender.try_send(crate::bridge::WorkerCommand::Launch(options, prompt)) {
+            Ok(()) => {}
+            Err(TrySendError::Full(crate::bridge::WorkerCommand::Launch(options, prompt))) => {
+                app.pending_launches.extend(std::iter::once((options, prompt)).chain(launches));
+                return false;
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                app.launching = false;
+                app.notice = "Session launch unavailable".into();
+                return true;
+            }
+            Err(_) => unreachable!(),
+        }
+    }
+    false
 }
 
 fn save_layout_if_changed(
@@ -3104,8 +3226,47 @@ mod tests {
         app.open_engine_picker();
         app.handle(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
-        assert_eq!(app.notice, "Run separately for a new session: doxa-rs new --engine claude");
         assert!(!app.engine_picker);
+        assert_eq!(app.new_session.as_ref().unwrap().engine, launch::Engine::Claude);
+    }
+
+    #[test]
+    fn new_session_form_queues_engine_model_and_first_prompt() {
+        let mut app = App::default();
+        app.handle(Event::Resize(100, 28));
+        app.open_engine_picker();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        for c in "deepseek-test".chars() {
+            app.handle(Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)));
+        }
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        for c in "Explain this".chars() {
+            app.handle(Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)));
+        }
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        let (options, prompt) = app.pending_launches.pop().unwrap();
+        assert_eq!(options.engine, launch::Engine::DeepSeek);
+        assert_eq!(options.model.as_deref(), Some("deepseek-test"));
+        assert_eq!(prompt.as_deref(), Some("Explain this"));
+        assert!(app.launching);
+        assert!(app.new_session.is_none());
+    }
+
+    #[test]
+    fn launched_session_opens_in_active_pane_and_failure_is_visible() {
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"old", "model":"old"}));
+        app.launching = true;
+        app.apply_daemon_frame(&json!({"type":"launch_reply", "ok":true, "session_id":"new"}));
+        assert_eq!(app.groups[0].active_id(), Some("new"));
+        assert!(!app.launching);
+        app.launching = true;
+        app.apply_daemon_frame(&json!({"type":"launch_reply", "ok":false,
+            "message":"DEEPSEEK_API_KEY is required"}));
+        assert!(app.notice.contains("DEEPSEEK_API_KEY"));
+        assert_eq!(app.groups[0].active_id(), Some("new"));
     }
 
     fn painted(app: &App) -> String {

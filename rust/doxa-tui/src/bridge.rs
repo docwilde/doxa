@@ -16,14 +16,58 @@ use crate::transport::{DaemonClient, TransportError};
 use crate::history;
 use crate::ui;
 use crate::discovery::Session;
+use crate::launch::{self, LaunchOptions};
 
 pub enum WorkerCommand {
+    Launch(LaunchOptions, Option<String>),
     Prompt(String, String),
     Answer(String, String, Value),
     Peers(String),
     Models(String),
     SetModel(String, String),
     SetPermissionMode(String, String),
+}
+
+fn attach_worker(session: &Session, frames: &SyncSender<Value>, guard: &Arc<Mutex<bool>>)
+    -> io::Result<(SyncSender<WorkerCommand>, Arc<AtomicBool>, JoinHandle<()>)> {
+    let (client, snapshot) = DaemonClient::connect_for_restore(&session.socket).map_err(io::Error::other)?;
+    if client.hello["session_id"] != session.id {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "session identity changed during attach"));
+    }
+    let (tx, rx) = mpsc::sync_channel(32);
+    let connected = Arc::new(AtomicBool::new(true));
+    let connected_worker = Arc::clone(&connected);
+    let path = session.socket.clone();
+    let id = session.id.clone();
+    let frames = frames.clone();
+    let guard = Arc::clone(guard);
+    let worker = thread::spawn(move || {
+        let cursor = AtomicU64::new(client.cursor);
+        let mut current = (client, snapshot);
+        loop {
+            worker_loop(current.0, current.1, &frames, &rx, &cursor, Some(&guard));
+            connected_worker.store(false, Ordering::Release);
+            revoke(&guard);
+            if frames.send(json!({"type":"client_notice", "session_id":id,
+                "message":"Daemon disconnected; reconnecting"})).is_err() { return; }
+            loop {
+                match rx.recv_timeout(Duration::from_millis(250)) {
+                    Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                    Ok(command) => { let _ = frames.send(rejected(command, "Daemon reconnecting")); }
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                }
+                match DaemonClient::connect(&path, Some(cursor.load(Ordering::Relaxed))) {
+                    Ok(client) if client.hello["session_id"] == id => {
+                        connected_worker.store(true, Ordering::Release);
+                        current = (client, None);
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    });
+    Ok((tx, connected, worker))
 }
 
 fn revoke(guard: &Mutex<bool>) {
@@ -66,8 +110,8 @@ pub fn connect_sessions(sessions: &[Session]) -> io::Result<MultiBridge> {
     let mut workers = Vec::new();
     let mut live_ids = Vec::new();
     for session in sessions {
-        let (client, snapshot) = match DaemonClient::connect_for_restore(&session.socket) {
-            Ok(pair) if pair.0.hello["session_id"] == session.id => pair,
+        let (tx, connected, worker) = match attach_worker(session, &frame_tx, &complete) {
+            Ok(pair) => pair,
             _ => {
                 revoke(&complete);
                 let _ = frame_tx.send(json!({"type":"client_notice", "session_id":session.id,
@@ -75,40 +119,9 @@ pub fn connect_sessions(sessions: &[Session]) -> io::Result<MultiBridge> {
                 continue;
             }
         };
-        let (tx, rx) = mpsc::sync_channel(32);
-        let connected = Arc::new(AtomicBool::new(true));
         routes.insert(session.id.clone(), (tx, Arc::clone(&connected)));
         live_ids.push(session.id.clone());
-        let path = session.socket.clone();
-        let id = session.id.clone();
-        let frames = frame_tx.clone();
-        let guard = Arc::clone(&complete);
-        workers.push(thread::spawn(move || {
-            let cursor = AtomicU64::new(client.cursor);
-            let mut current = (client, snapshot);
-            loop {
-                worker_loop(current.0, current.1, &frames, &rx, &cursor, Some(&guard));
-                connected.store(false, Ordering::Release);
-                revoke(&guard);
-                if frames.send(json!({"type":"client_notice", "session_id":id,
-                    "message":"Daemon disconnected; reconnecting"})).is_err() { return; }
-                loop {
-                    match rx.recv_timeout(Duration::from_millis(250)) {
-                        Err(mpsc::RecvTimeoutError::Disconnected) => return,
-                        Ok(command) => { let _ = frames.send(rejected(command, "Daemon reconnecting")); }
-                        Err(mpsc::RecvTimeoutError::Timeout) => {}
-                    }
-                    match DaemonClient::connect(&path, Some(cursor.load(Ordering::Relaxed))) {
-                        Ok(client) if client.hello["session_id"] == id => {
-                            connected.store(true, Ordering::Release);
-                            current = (client, None);
-                            break;
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }));
+        workers.push(worker);
     }
     if live_ids.is_empty() {
         drop(command_rx);
@@ -117,12 +130,48 @@ pub fn connect_sessions(sessions: &[Session]) -> io::Result<MultiBridge> {
         return Err(io::Error::new(io::ErrorKind::NotConnected, "no daemon in roster accepted an attach"));
     }
     let router_frames = frame_tx.clone();
+    let router_guard = Arc::clone(&complete);
     let router = thread::spawn(move || {
-        while let Ok(command) = command_rx.recv() {
+        let (launched_tx, launched_rx) = mpsc::channel::<(io::Result<Session>, Option<String>)>();
+        let mut added_workers: Vec<JoinHandle<()>> = Vec::new();
+        loop {
+            while let Ok((result, prompt)) = launched_rx.try_recv() {
+                match result.and_then(|session| {
+                    if routes.len() >= 64 { return Err(io::Error::other("session limit reached")); }
+                    let (tx, connected, worker) = attach_worker(&session, &router_frames, &router_guard)?;
+                    Ok((session, tx, connected, worker))
+                }) {
+                    Ok((session, tx, connected, worker)) => {
+                        let id = session.id.clone();
+                        routes.insert(id.clone(), (tx.clone(), connected));
+                        added_workers.push(worker);
+                        let _ = router_frames.send(json!({"type":"launch_reply", "ok":true, "session_id":id}));
+                        if let Some(prompt) = prompt {
+                            let _ = tx.send(WorkerCommand::Prompt(id, prompt));
+                        }
+                    }
+                    Err(error) => { let _ = router_frames.send(json!({"type":"launch_reply", "ok":false,
+                        "message":error.to_string()})); }
+                }
+            }
+            let command = match command_rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(command) => command,
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            };
+            let command = match command {
+                WorkerCommand::Launch(options, prompt) => {
+                    let reply = launched_tx.clone();
+                    thread::spawn(move || { let _ = reply.send((launch::spawn(&options), prompt)); });
+                    continue;
+                }
+                other => other,
+            };
             let id = match &command {
                 WorkerCommand::Prompt(id, _) | WorkerCommand::Answer(id, _, _) | WorkerCommand::Peers(id)
                 | WorkerCommand::Models(id) | WorkerCommand::SetModel(id, _)
                 | WorkerCommand::SetPermissionMode(id, _) => id,
+                WorkerCommand::Launch(_, _) => unreachable!(),
             };
             let Some((route, connected)) = routes.get(id) else {
                 let _ = router_frames.send(rejected(command, "Session is not attached"));
@@ -142,6 +191,8 @@ pub fn connect_sessions(sessions: &[Session]) -> io::Result<MultiBridge> {
                 }
             }
         }
+        drop(routes);
+        for worker in added_workers { let _ = worker.join(); }
     });
     drop(frame_tx);
     Ok(MultiBridge { frames: frame_rx, commands: command_tx, live_ids, complete, router, workers })
@@ -149,6 +200,7 @@ pub fn connect_sessions(sessions: &[Session]) -> io::Result<MultiBridge> {
 
 fn rejected(command: WorkerCommand, message: &str) -> Value {
     match command {
+        WorkerCommand::Launch(_, _) => json!({"type":"launch_reply", "ok":false, "message":message}),
         WorkerCommand::Prompt(id, text) => json!({"type":"prompt_rejected", "session_id":id,
             "text":text, "message":message}),
         WorkerCommand::Answer(session, request, _) => json!({"type":"answer_reply", "session_id":session,
@@ -177,16 +229,17 @@ pub fn run_sessions(sessions: &[Session], store: Option<crate::ui_state::UiState
     result
 }
 
-/// Attach to a running Python DOXA daemon. The Rust TUI currently hosts one
-/// session per process; additional session discovery belongs to later 2.0 work.
+/// Attach to one daemon socket with the same dynamic routing used by a restored roster.
 pub fn run_socket(path: impl AsRef<Path>) -> io::Result<()> {
-    let (client, snapshot) = DaemonClient::connect_for_restore(path).map_err(as_io_error)?;
-    let (frames, prompts, worker) = spawn_worker_with_snapshot(client, snapshot);
-    let result = ui::run_with_channels(frames, prompts);
-    // Dropping the UI's channel sender on return tells the reader thread to
-    // stop after its current bounded socket poll or prompt acknowledgement.
-    let _ = worker.join();
-    result
+    let path = path.as_ref();
+    let client = DaemonClient::connect(path, None).map_err(as_io_error)?;
+    let id = client.hello["session_id"].as_str()
+        .filter(|id| crate::discovery::valid_id(id))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid session ID"))?
+        .to_owned();
+    drop(client);
+    run_sessions(&[Session { id, socket: path.to_path_buf(), scope_key: String::new(),
+        clients: None, started_at: String::new() }], None)
 }
 
 fn as_io_error(error: TransportError) -> io::Error {
@@ -198,6 +251,7 @@ fn spawn_worker(client: DaemonClient) -> (Receiver<Value>, SyncSender<WorkerComm
     spawn_worker_with_snapshot(client, None)
 }
 
+#[cfg(test)]
 fn spawn_worker_with_snapshot(client: DaemonClient, snapshot: Option<crate::transport::TranscriptSnapshot>) -> (Receiver<Value>, SyncSender<WorkerCommand>, JoinHandle<()>) {
     let (frame_tx, frame_rx) = mpsc::sync_channel(128);
     let (prompt_tx, prompt_rx) = mpsc::sync_channel(32);
@@ -234,6 +288,10 @@ fn worker_loop(
         // Bound prompt work so a burst cannot starve incoming daemon events.
         for _ in 0..32 {
             match prompts.try_recv() {
+                Ok(WorkerCommand::Launch(_, _)) => {
+                    let _ = frames.send(json!({"type":"launch_reply", "ok":false,
+                        "message":"Session launch is unavailable on this connection"}));
+                }
                 Ok(WorkerCommand::Models(id)) => {
                     let result = if id == session_id { client.call("list_models", Map::new()) }
                         else { Err(TransportError::Malformed("model target is not attached")) };
