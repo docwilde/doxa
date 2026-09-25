@@ -25,6 +25,10 @@ def _source_repo(tmp_path: Path) -> Path:
     script.write_text("# Claude sidecar fixture\n")
     (repo / "pyproject.toml").write_text("[project]\nname = 'doxa'\nversion = '2.0.0'\n")
     (repo / "uv.lock").write_text("# locked fixture\n")
+    assets = repo / "assets"
+    assets.mkdir()
+    (assets / "icon.png").write_bytes(b"fixture png")
+    (assets / "icon.svg").write_text("<svg/>")
     package = repo / "doxa"
     package.mkdir()
     for name in ("__init__", "lore_bridge", "engine"):
@@ -42,7 +46,7 @@ def _source_repo(tmp_path: Path) -> Path:
     return repo
 
 
-def _run(tmp_path: Path, repo: Path, *args: str, fail_install_name: str | None = None, cargo: bool = True):
+def _run(tmp_path: Path, repo: Path, *args: str, fail_install_name: str | None = None, cargo: bool = True, env_overrides: dict[str, str] | None = None):
     home = tmp_path / "home"
     home.mkdir(exist_ok=True)
     fakebin = tmp_path / "fakebin"
@@ -86,7 +90,7 @@ def _run(tmp_path: Path, repo: Path, *args: str, fail_install_name: str | None =
     uv.write_text(
         "#!/bin/sh\n"
         "case $1 in\n"
-        "  venv) python3 -m venv \"$4\" ;;\n"
+        "  venv) python3 -m venv --without-pip \"$4\" ;;\n"
         "  sync)\n"
         "    site=$($VIRTUAL_ENV/bin/python -c 'import site; print(site.getsitepackages()[0])')\n"
         "    cp -R \"$7/doxa\" \"$7/lore_core\" \"$7/claude_agent_sdk\" \"$site/\" ;;\n"
@@ -109,6 +113,8 @@ def _run(tmp_path: Path, repo: Path, *args: str, fail_install_name: str | None =
         "TMPDIR": str(tmp_path),
         "DOXA_RUST_REPO_URL": str(repo),
         "DOXA_TEST_LOG": str(log),
+        "XDG_DATA_HOME": str(home / ".local/share"),
+        **(env_overrides or {}),
     }
     proc = subprocess.run(["sh", str(INSTALL_SH), *args], cwd=tmp_path, env=env, text=True, capture_output=True, timeout=40)
     return proc, home, log
@@ -128,6 +134,35 @@ def test_default_installs_rust_doxa_and_importable_sidecars(tmp_path):
     run = subprocess.run([str(bin_dir / "doxa"), "list"], cwd="/", env={**os.environ, "PATH": "/usr/bin:/bin"}, capture_output=True, text=True)
     assert run.returncode == 0, run.stderr
     assert "rust frontend" in run.stdout
+    desktop = home / ".local/share/applications/doxa.desktop"
+    entry = desktop.read_text()
+    assert f"Exec={bin_dir / 'doxa'}\n" in entry
+    assert "Terminal=true\n" in entry
+    assert "X-DOXA-Version=0.1.0\n" in entry
+    assert (home / ".local/share/icons/hicolor/512x512/apps/doxa.png").read_bytes() == b"fixture png"
+    assert (home / ".local/share/icons/hicolor/scalable/apps/doxa.svg").read_text() == "<svg/>"
+
+
+def test_shortcut_uses_installed_path_with_spaces_and_updates_on_reinstall(tmp_path):
+    repo = _source_repo(tmp_path)
+    custom_bin = tmp_path / "bin dir $draft"
+    options = {"DOXA_RUST_BIN_DIR": str(custom_bin)}
+    first, home, _ = _run(tmp_path, repo, env_overrides=options)
+    assert first.returncode == 0, first.stderr
+    desktop = home / ".local/share/applications/doxa.desktop"
+    expected_exec = f'Exec="{custom_bin / "doxa"}"\n'.replace("$", r"\$")
+    assert expected_exec in desktop.read_text()
+    desktop.write_text("stale entry\n")
+    second, _, _ = _run(tmp_path, repo, env_overrides=options)
+    assert second.returncode == 0, second.stderr
+    assert expected_exec in desktop.read_text()
+
+
+def test_shortcut_opt_out(tmp_path):
+    repo = _source_repo(tmp_path)
+    proc, home, _ = _run(tmp_path, repo, env_overrides={"DOXA_NO_LAUNCHER": "1"})
+    assert proc.returncode == 0, proc.stderr
+    assert not (home / ".local/share/applications/doxa.desktop").exists()
 
 
 def test_install_replaces_old_python_launcher_and_rolls_back_on_failure(tmp_path):
@@ -143,6 +178,7 @@ def test_install_replaces_old_python_launcher_and_rolls_back_on_failure(tmp_path
     assert (bin_dir / "doxa-rs").read_text() == "old Rust launcher\n"
     assert os.readlink(bin_dir / ".doxa-sidecar-current") == "old-env"
     assert not list(bin_dir.glob(".doxa-install.*"))
+    assert not (tmp_path / "home/.local/share/applications/doxa.desktop").exists()
 
 
 @pytest.mark.parametrize("ref", ["--upload-pack=evil", "../../etc", "rust/2.0;evil", "@{upstream}"])

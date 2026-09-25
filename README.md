@@ -91,6 +91,9 @@ as `v2.0.0-alpha.14` after `sh -s --` to pin a release. It uses Git, Cargo,
 Python 3.11+, and `uv`; the Python environment it creates is private to the
 LORE and Claude sidecars. No Python frontend command is installed. See the
 [Rust guide](rust/README.md) for provider setup and current limits.
+On Linux, it also installs a per-user application menu entry and icons under
+`$XDG_DATA_HOME` (default `~/.local/share`). The entry launches the installed
+Rust `doxa` by absolute path. Set `DOXA_NO_LAUNCHER=1` to skip it.
 If an older `uv tool` install owns `doxa`, run `uv tool uninstall doxa`
 before installing Rust; the installer reports when another `doxa` on `PATH`
 would shadow its launcher.

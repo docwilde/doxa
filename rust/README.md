@@ -100,6 +100,10 @@ Rust `doxa` launcher, `doxa-rs`, `doxa-daemon-rs`, and Claude sidecar in
 Python sidecar environment under `DOXA_HOME` and selects it automatically from
 any working directory. The native daemon can also attach to compatible Python
 1.x sessions.
+On Linux, it writes `doxa.desktop` and PNG/SVG icons under `$XDG_DATA_HOME`
+(default `~/.local/share`) so DOXA appears in application menus. The shortcut
+points to the installed Rust launcher by absolute path and is updated on
+reinstall. Set `DOXA_NO_LAUNCHER=1` to skip this step.
 
 Use `doxa help` for CLI commands and options. `doxa update` runs the bundled
 installer against `main` and replaces an installed Rust launcher after a

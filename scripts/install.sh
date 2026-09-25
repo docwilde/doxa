@@ -115,7 +115,7 @@ main() {
 
   mkdir -p "$bin_dir" || exit 1
   for name in doxa doxa-rs doxa-daemon-rs doxa-claude-sidecar.py .doxa-sidecar-current; do
-    [ ! -d "$bin_dir/$name" ] || { printf 'doxa-install: %s is a directory\n' "$bin_dir/$name" >&2; exit 1; }
+    [ ! -d "$bin_dir/$name" ] || [ -L "$bin_dir/$name" ] || { printf 'doxa-install: %s is a directory\n' "$bin_dir/$name" >&2; exit 1; }
   done
   stage=$(mktemp -d "$bin_dir/.doxa-install.XXXXXXXX") || exit 1
   cp "$tui_bin" "$stage/doxa-rs" || exit 1
@@ -152,6 +152,69 @@ SH
   if [ "$resolved_doxa" != "$bin_dir/doxa" ]; then
     printf 'doxa-install: PATH resolves doxa to %s; add %s before older installs or run %s/doxa directly\n' \
       "${resolved_doxa:-nothing}" "$bin_dir" "$bin_dir" >&2
+  fi
+  # A desktop session may have a different PATH from this shell. Pin the
+  # shortcut to the launcher just installed, as the Python installer did.
+  # A missing desktop environment needs no special handling: XDG launchers
+  # discover these per-user files when one is available.
+  if [ "${DOXA_NO_LAUNCHER:-0}" != 1 ]; then
+    python3 - "$bin_dir/doxa" "$checkout" <<'PY' || printf 'doxa-install: could not install desktop shortcut\n' >&2
+import os
+import pathlib
+import shutil
+import subprocess
+import sys
+import tomllib
+
+if sys.platform == "linux":
+    command = pathlib.Path(sys.argv[1])
+    source = pathlib.Path(sys.argv[2])
+    data_home = pathlib.Path(os.environ.get("XDG_DATA_HOME") or pathlib.Path.home() / ".local/share")
+    if not data_home.is_absolute():
+        raise ValueError("XDG_DATA_HOME must be absolute")
+
+    # The Desktop Entry Specification requires quoting reserved characters,
+    # then escaping these four characters inside the quoted Exec argument.
+    exec_word = str(command)
+    if any(char in exec_word for char in " \t\n\"'\\><~|&;$*?#()`"):
+        for char in ("\\", '"', "`", "$"):
+            exec_word = exec_word.replace(char, "\\" + char)
+        exec_word = '"' + exec_word + '"'
+
+    with (source / "rust/doxa-tui/Cargo.toml").open("rb") as manifest:
+        version = tomllib.load(manifest)["package"]["version"]
+    desktop = data_home / "applications/doxa.desktop"
+    desktop.parent.mkdir(parents=True, exist_ok=True)
+    desktop.write_text(
+        "[Desktop Entry]\n"
+        "Type=Application\n"
+        "Name=DOXA\n"
+        "GenericName=Agent terminal\n"
+        f"Comment=Terminal for Claude agents -- where belief earns knowledge (v{version})\n"
+        f"Exec={exec_word}\n"
+        "Icon=doxa\n"
+        "Terminal=true\n"
+        "Categories=Development;Utility;\n"
+        "Keywords=claude;agent;terminal;lore;memory;\n"
+        f"X-DOXA-Version={version}\n",
+        encoding="utf-8",
+    )
+    for filename, folder in (("icon.png", "512x512"), ("icon.svg", "scalable")):
+        icon = data_home / "icons/hicolor" / folder / "apps/doxa"
+        icon = icon.with_suffix(pathlib.Path(filename).suffix)
+        icon.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source / "assets" / filename, icon)
+    for argv in (
+        ("update-desktop-database", str(desktop.parent)),
+        ("gtk-update-icon-cache", "-q", str(data_home / "icons/hicolor")),
+    ):
+        if shutil.which(argv[0]):
+            try:
+                subprocess.run(argv, check=False, capture_output=True)
+            except OSError:
+                pass
+    print(f"doxa-install: installed desktop shortcut at {desktop} (Exec={command})")
+PY
   fi
   "$bin_dir/doxa" doctor --engine codex || true
 }
