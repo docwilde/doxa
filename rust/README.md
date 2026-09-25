@@ -249,8 +249,9 @@ labels its static fallback. A live catalog with no supported model/effort
 pair leaves launch disabled with an explanation. A blank model for other
 engines uses the configured default. The effort chip immediately follows the
 model chip and displays the active daemon's reported value, or `?` when it
-has no verified value. `Alt+F` and bare `/effort` open an inline picker for a
-the current DeepSeek or GLM session for known models. The daemon accepts a
+has no verified value. Its tooltip identifies the level as effort. `Alt+F`
+and bare `/effort` open an inline picker for the current DeepSeek or GLM
+session for known models. The daemon accepts a
 change only while the session is idle with no queued prompts; a successful
 change applies to the next admitted turn and updates the chip after its
 event. Newer models discovered only from a live catalog remain available

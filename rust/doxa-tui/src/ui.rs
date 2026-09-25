@@ -205,7 +205,7 @@ fn chip_hint(kind: &str) -> &'static str {
         "model" => "Model for this session · click to choose",
         "repo" => "This session's repository and base branch · click for worktree details",
         "directory" => "This session's directory; no Git repository is active",
-        "effort" => "Effort · daemon-reported for this session; Alt+F sets a new-session default where supported",
+        "effort" => "Effort · current session; Alt+F selects the next turn when idle",
         "context" => "Current session context usage · click for details",
         "memory" => "User and scoped LORE memory · click to view entries",
         "beliefs" => "LORE beliefs · click to browse",
@@ -6706,7 +6706,7 @@ mod tests {
             .find(|hit| hit.kind == "effort").unwrap().clone();
         app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Moved,
             column: effort_hit.rect.x + 1, row: effort_hit.rect.y, modifiers: KeyModifiers::NONE }));
-        assert!(painted_at(&app, 220, 32).contains("Effort · daemon-reported"));
+        assert!(painted_at(&app, 220, 32).contains("Effort · current session"));
         app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
             column: effort_hit.rect.x + 1, row: effort_hit.rect.y, modifiers: KeyModifiers::NONE }));
         assert!(app.effort_picker.is_some());

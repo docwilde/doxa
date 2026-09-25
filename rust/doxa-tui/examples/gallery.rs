@@ -70,7 +70,7 @@ fn scene(name: &str) -> App {
                 session.title = "Compare models".into();
             }
             event(&mut app,"demo-deepseek-03","text_delta",json!({"text":
-                "## Model options\n\nThe selected model supports reasoning effort controls.\n\n- This session reports high effort\n- The next session may use a different level\n- Model choices follow the selected engine"}));
+                "## Model options\n\nThe selected model supports reasoning effort controls.\n\n- This session reports high effort\n- Its next turn may use a different level\n- Model choices follow the selected engine"}));
             key(&mut app, KeyCode::Char('f'), KeyModifiers::ALT);
             app.notice = "Rust 2.0.0-alpha.14 · effort fixture".into();
         }
