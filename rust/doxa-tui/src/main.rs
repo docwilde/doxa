@@ -5,6 +5,7 @@ use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::process::Stdio;
+mod operations;
 
 fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message.into())
@@ -37,6 +38,9 @@ Commands:
   worktrees cleanup FULL_ID --confirm
                        Remove one verified clean Rust orphan
   doctor               Check provider and launcher dependencies
+  setup                Inspect authentication, LORE store, and stored preferences
+  auth status [NAME]   Check Claude or Codex CLI authentication without showing CLI output
+  plugins              List names and enabled flags from Claude Code's plugin registry
   fleet ...            Inspect or start Python-backed fleet runs
 
 Run doxa without a command to restore this project's live sessions or start
@@ -111,6 +115,25 @@ fn run(args: &[String]) -> io::Result<()> {
             "update" => {
                 if args.len() != 1 { return Err(invalid("update takes no arguments")); }
                 return update();
+            }
+            "setup" => {
+                if args.len() != 1 { return Err(invalid("setup takes no arguments")); }
+                println!("{}", operations::setup_report()?);
+                return Ok(());
+            }
+            "auth" => {
+                let name = match args {
+                    [_, status] if status == "status" => None,
+                    [_, status, name] if status == "status" => Some(name.as_str()),
+                    _ => return Err(invalid("usage: doxa auth status [claude|codex]")),
+                };
+                println!("{}", operations::auth_status(name)?);
+                return Ok(());
+            }
+            "plugins" => {
+                if args.len() != 1 { return Err(invalid("plugins takes no arguments")); }
+                println!("{}", operations::plugins_report()?);
+                return Ok(());
             }
             _ => {}
         }
