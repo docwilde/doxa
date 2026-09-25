@@ -20,6 +20,8 @@ the stable 2.0 release has not been cut.
   conditional on an authoritative idle and empty-queue check in the daemon.
 - Start Claude sessions with an older installed Python sidecar environment by
   passing detailed-event options only when its engine constructor supports them.
+- Treat explicit `doxa --engine ...` or `doxa --model ...` as a new session
+  request, even when this project already has sessions to restore.
 
 ## 2.0.0-alpha.23 — 2026-09-25
 
