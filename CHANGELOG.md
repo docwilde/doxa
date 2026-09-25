@@ -5,7 +5,7 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
-## 2.0.0-alpha.24 — 2026-09-25
+## 2.0.0-alpha.24 — 2026-09-26
 
 - Debounce live session search, discard stale results, and show grouped,
   scrubbed LORE index excerpts for each matching session.
@@ -14,6 +14,10 @@ the stable 2.0 release has not been cut.
 - Add `doxa settings` to inspect and safely persist native linger and
   per-session worktree preferences. `doxa setup` now points to provider CLI
   sign-in commands without handling credentials.
+- Open those native preferences from the inline `/settings` menu, showing
+  effective sources and disabling edits hidden by environment overrides.
+- Open an inline `/branch` picker for a verified managed session, with keyboard
+  and mouse selection; keep existing idle, ownership, and dirty-state guards.
 - Bound cached archived search results and refresh the picker when an indexed
   hit updates an already loaded session.
 - Reject excessive linger values before launch, and make `/clear` finalization

@@ -50,7 +50,9 @@ Claude `/compact` waits for a successful LORE review. Known DeepSeek and GLM
 models can use dated-price native spend ceilings when every request reports
 complete token usage. `doxa setup`, `doxa auth status`, and `doxa plugins`
 offer setup diagnostics; `doxa settings` shows and changes native linger and
-worktree preferences for future sessions.
+worktree preferences for future sessions. `/settings` opens those same
+preferences above the active prompt, including their effective sources.
+`/branch` opens a local branch picker for a managed session.
 `/usage` and `/context` open per-session detail panels, and `/collection`
 organizes the session rail. Native fleet preflight reports supervisor capacity
 and approval policy before handing execution to the Python bridge.

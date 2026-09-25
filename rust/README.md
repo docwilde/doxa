@@ -123,6 +123,9 @@ sign-in commands; DOXA does not handle credentials.
 `linger_secs` accepts 0 through 31,536,000 seconds (one year).
 Active environment overrides must be removed before changing their stored
 value. Other Python 1.19 settings are still outside this native CLI.
+In the TUI, `/settings` or Ctrl+, opens an inline editor for these two
+preferences. Rows shadowed by environment values are read-only. Changes
+affect newly started sessions.
 `doxa auth status [claude|codex]` observes only provider CLI exit status;
 `doxa plugins` lists Claude Code plugin names and enabled flags without
 reading plugin contents into the terminal.
