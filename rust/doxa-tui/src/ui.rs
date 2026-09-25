@@ -3402,10 +3402,10 @@ impl App {
             } else {
                 " "
             };
-            lines.push(Line::from(vec![Span::raw(format!(
-                "{mark} {}",
-                session.title
-            ))]));
+            let style = if self.waiting_for_input(&session.id) && self.blink_on {
+                Style::default().fg(theme::TEXT).bg(theme::ERROR).add_modifier(Modifier::BOLD)
+            } else { Style::default() };
+            lines.push(Line::styled(format!("{mark} {}", session.title), style));
         }
         if lines.is_empty() {
             lines.push(Line::from("  No sessions"));
@@ -4671,6 +4671,44 @@ mod tests {
         assert!(app.blink_on);
         app.input_requests.clear();
         assert!(!app.tick_blink(start + Duration::from_millis(702)));
+    }
+
+    #[test]
+    fn grouped_rail_blinks_only_waiting_session_and_clears_on_resolution() {
+        let mut app = App::default();
+        for (id, title, collection) in [
+            ("first", "First", "A"),
+            ("second", "Second", "A"),
+            ("third", "Third session with long title", "B"),
+        ] {
+            app.apply_update(DaemonUpdate::Upsert(Session {
+                id: id.into(), title: title.into(), collection: collection.into(),
+                transcript: String::new(), status: "Ready".into(),
+            }));
+        }
+        app.apply_daemon_frame(&json!({"type":"event", "session_id":"third",
+            "event":{"type":"needs_input", "data":{"id":"req", "kind":"ask_user",
+                "title":"Choose", "questions":[]}}}));
+        // Two collection headings precede the third session's row. Keep the
+        // rail narrow enough to clip titles while retaining the attention cue.
+        let mut terminal = Terminal::new(TestBackend::new(12, 9)).unwrap();
+        let mut draw = |app: &App| {
+            terminal.draw(|frame| app.draw_rail(frame, Rect::new(0, 0, 12, 9))).unwrap();
+            let buffer = terminal.backend().buffer();
+            (buffer[(3, 3)].bg, buffer[(3, 5)].bg)
+        };
+        assert_eq!(draw(&app), (theme::RAIL, theme::ERROR));
+        assert!(app.tick_blink(app.blink_at + INPUT_BLINK_INTERVAL));
+        assert_eq!(draw(&app), (theme::RAIL, theme::RAIL));
+        assert!(app.tick_blink(app.blink_at + INPUT_BLINK_INTERVAL));
+        assert_eq!(draw(&app), (theme::RAIL, theme::ERROR));
+        app.input_requests[0].sending = true;
+        assert_eq!(draw(&app), (theme::RAIL, theme::RAIL));
+        app.input_requests[0].sending = false;
+        assert_eq!(draw(&app), (theme::RAIL, theme::ERROR));
+        app.apply_daemon_frame(&json!({"type":"event", "session_id":"third",
+            "event":{"type":"needs_input_resolved", "data":{"id":"req"}}}));
+        assert_eq!(draw(&app), (theme::RAIL, theme::RAIL));
     }
 
     #[test]
