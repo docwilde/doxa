@@ -122,10 +122,10 @@ panes. `Shift+Tab` switches panes, including when the terminal reports it as
 without stopping its daemon; `Ctrl+W` detaches only the active tab and leaves
 its session running. `Ctrl+C` is left available for terminal copy.
 Bare `/help`, `/about`, `/sessions`, `/model`, `/engine`, `/mode`, `/beliefs`,
-`/diff`, `/peers`, `/split`, `/vsplit`, `/pane`, `/sidebar`, `/dir`, and `/detach` are
+`/diff`, `/peers`, `/split`, `/vsplit`, `/pane`, `/movepane`, `/sidebar`, `/dir`, and `/detach` are
 handled locally from the prompt. Forms with arguments remain in the draft with
-an explicit notice until their Rust behavior is implemented, except `/pane 1|2`
-and `/sidebar on|off|wider|narrower|width N`, which are available. Known DOXA
+an explicit notice until their Rust behavior is implemented, except `/pane 1|2`,
+`/movepane [1|2]`, and `/sidebar on|off|wider|narrower|width N`, which are available. Known DOXA
 commands that need more porting, including `/compact`, stay in the draft with a
 notice. Unknown provider and plugin slash commands go to the active engine.
 `Ctrl+M` opens the read-only peer communications
@@ -179,8 +179,8 @@ and the UI's 512 KiB transcript buffer. It marks omitted earlier content;
 the JSONL file retains the full history. Older daemons without snapshot
 metadata fall back to their 512-event replay ring. A turn still running at
 attach can have text that was streamed but not yet persisted, so its earlier
-in-flight deltas may be absent. `Ctrl+T` opens bounded tool activity cards;
-The binary version is `2.0.0-alpha.19`;
+in-flight deltas may be absent. `Ctrl+T` opens bounded tool activity cards.
+The binary version is `2.0.0-alpha.20`;
 this is an alpha release.
 
 In the transcript, user messages have a highlighted body and a left rule;
@@ -192,10 +192,9 @@ starts collapsed into one section. Focus the transcript with `Tab`, select a
 section with `[` or `]`, and press `Enter` to expand it, or click the section.
 Codex and Claude tool results carry scrubbed detail in chunks; the short row
 remains a summary, while the expanded section shows up to 256 KiB per result
-and marks larger results explicitly. Restored Claude transcript tool records
-retain that expandable detail within the bounded transcript snapshot. Codex
-tool detail is available live; its persisted transcript currently keeps the
-assistant answer rather than tool results. During DeepSeek and GLM SSE responses and
+and marks larger results explicitly. Restored Claude and newly persisted Codex
+tool records retain expandable detail within the bounded transcript snapshot.
+Older Codex transcripts retain only the assistant answer. During DeepSeek and GLM SSE responses and
 Claude thinking streams, `Reasoning/Thinking` shows an approximate live token
 count. Its text becomes available only after the completed stream is scrubbed;
 Codex reasoning summaries fold into the same row. Select the row

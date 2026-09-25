@@ -5,6 +5,18 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.20 — 2026-09-25
+
+- Persist scrubbed, bounded Codex tool input and result records so newly
+  restored sessions can expand their details. Older transcripts remain readable.
+- Add `/movepane [1|2]` and an action-menu entry to move a tab between pane
+  groups while preserving its draft and saved layout.
+- Refuse Rust adoption, switching, and finalization of unpinned Python 1.19
+  worktrees. Python 1.19 does not hold the Rust lifecycle lock, so historical
+  sidecars remain survey-only.
+- Allow the other pane's prompt to receive input while one session has an
+  unanswered request.
+
 ## 2.0.0-alpha.19 — 2026-09-25
 
 - Keep scrubbed Claude tool input and result detail in the expandable fold
