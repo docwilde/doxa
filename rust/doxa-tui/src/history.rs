@@ -276,13 +276,22 @@ fn resume_plan_in(entry: &OfflineSession, python: &Path, expected_root: &Path, c
             && fs::symlink_metadata(cwd).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) => (cwd.clone(), true),
         _ => return Err("session directory is gone"),
     };
-    let mut lore = doxa_lore::LoreClient::spawn(python, Duration::from_secs(3))
-        .map_err(|_| "LORE unavailable for resume verification")?;
-    let (root, slug) = lore.transcript_identity(&cwd.to_string_lossy())
-        .map_err(|_| "cannot verify session project")?;
-    if root != expected_root || slug != entry.project {
-        return Err("session directory does not match transcript project");
-    }
+    // LORE derives a managed checkout's project identity through Git. With
+    // the checkout absent, that lookup can only identify the missing path
+    // itself. Verify the owned saved files under the expected root first;
+    // ready_resume_cwd repeats LORE identity after recovery.
+    let root = if missing {
+        expected_root.to_path_buf()
+    } else {
+        let mut lore = doxa_lore::LoreClient::spawn(python, Duration::from_secs(3))
+            .map_err(|_| "LORE unavailable for resume verification")?;
+        let (root, slug) = lore.transcript_identity(&cwd.to_string_lossy())
+            .map_err(|_| "cannot verify session project")?;
+        if root != expected_root || slug != entry.project {
+            return Err("session directory does not match transcript project");
+        }
+        root
+    };
     let uid = unsafe { libc::geteuid() };
     let root = OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW).open(&root)
         .map_err(|_| "transcript root unavailable")?;
@@ -480,6 +489,7 @@ mod tests {
     use super::*;
     use std::fs;
     use std::os::unix::fs::{symlink, PermissionsExt};
+    use std::process::Command;
 
     fn fake_lore(dir: &Path, root: &Path) -> PathBuf {
         let script = dir.join("fake-lore");
@@ -688,6 +698,74 @@ for line in sys.stdin:
         assert_eq!(resume_plan_in(&entry, &script, &root, &temp.path().join("cli-projects"))
             .unwrap_err(), "Codex thread record does not match this session");
         assert!(!cwd.exists());
+    }
+
+    #[test]
+    fn missing_managed_checkout_recovers_after_replay_verification() {
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "history::tests::missing_managed_checkout_recovery_child", "--nocapture"])
+            .env("DOXA_RECOVERY_TEST_CHILD", "1").output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+    }
+
+    #[test]
+    fn missing_managed_checkout_recovery_child() {
+        if std::env::var("DOXA_RECOVERY_TEST_CHILD").as_deref() != Ok("1") { return; }
+        let temp = tempfile::tempdir().unwrap();
+        let main = temp.path().join("repo");
+        let home = temp.path().join("home");
+        let root = temp.path().join("projects");
+        fs::create_dir(&main).unwrap();
+        fs::create_dir_all(root.join("project")).unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git").args(args).current_dir(&main).output().unwrap();
+            assert!(output.status.success(), "git {:?}: {}", args, String::from_utf8_lossy(&output.stderr));
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        };
+        git(&["init", "-q", "-b", "main"]);
+        fs::write(main.join("README"), "seed\n").unwrap();
+        git(&["add", "README"]);
+        git(&["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "test: seed"]);
+        let oid = git(&["rev-parse", "HEAD"]);
+        git(&["branch", "doxa/saved123", "main"]);
+        let worktrees = home.join("worktrees");
+        let meta = worktrees.join(".meta");
+        fs::create_dir_all(&meta).unwrap();
+        fs::set_permissions(&worktrees, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&meta, fs::Permissions::from_mode(0o700)).unwrap();
+        let cwd = worktrees.join("repo-saved123");
+        let sidecar = meta.join("repo-saved123.json");
+        fs::write(&sidecar, serde_json::json!({"main_root":main,"branch":"doxa/saved123",
+            "base_ref":"main","base_oid":oid,"session_id":"saved123-session"}).to_string()).unwrap();
+        fs::set_permissions(&sidecar, fs::Permissions::from_mode(0o600)).unwrap();
+        std::env::set_var("DOXA_HOME", &home);
+        let script = temp.path().join("fake-lore");
+        fs::write(&script, format!(r#"#!/usr/bin/env python3
+import json, pathlib, sys
+print(json.dumps({{'type':'hello','proto':1,'capabilities':['scrub','snapshot','transcript_identity']}}), flush=True)
+for line in sys.stdin:
+    req = json.loads(line)
+    slug = 'project' if pathlib.Path(req['cwd']).is_dir() else 'wrong-missing-slug'
+    print(json.dumps({{'type':'reply','id':req['id'],'ok':True,
+        'value':{{'projects_dir':{},'slug':slug}}}}), flush=True)
+"#, serde_json::to_string(&root.to_string_lossy()).unwrap())).unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
+        let transcript = root.join("project/saved123-session.jsonl");
+        let record = root.join("project/saved123-session.codex.json");
+        fs::write(&transcript, b"saved transcript\n").unwrap();
+        let entry = OfflineSession { id: "saved123-session".into(), project: "project".into(),
+            markdown: String::new(), cwd: Some(cwd.clone()) };
+        fs::write(&record, serde_json::json!({"thread_id":"thread-123",
+            "session_id":"other", "cwd":cwd, "turn_incomplete":false}).to_string()).unwrap();
+        assert!(resume_plan_in(&entry, &script, &root, &temp.path().join("claude"))
+            .unwrap_err().contains("thread record does not match"));
+        assert!(!cwd.exists(), "invalid replay state reconstructed the checkout");
+        fs::write(&record, serde_json::json!({"thread_id":"thread-123",
+            "session_id":"saved123-session", "cwd":cwd, "turn_incomplete":false}).to_string()).unwrap();
+        let plan = resume_plan_in(&entry, &script, &root, &temp.path().join("claude")).unwrap();
+        assert_eq!(plan.cwd.as_deref(), Some(cwd.as_path()));
+        assert_eq!(plan.engine, Engine::Codex);
+        assert_eq!(fs::read_to_string(cwd.join("README")).unwrap(), "seed\n");
     }
 
     #[test]
