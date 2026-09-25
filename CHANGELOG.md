@@ -27,6 +27,12 @@ the stable 2.0 release has not been cut.
 - Show DeepSeek API account balance from its optional official balance
   endpoint, without blocking turns or querying Z.ai. Omit the balance chip
   when no valid response is available.
+- Show each session's repository, base, checked-out worktree branch, and
+  commit in a chip, with full Git details on hover or click. Plain folders
+  show their directory name instead.
+- Open the user/project memory chip into an inline, read-only LORE view. It
+  lists the scoped curated entries and up to 20 current global beliefs;
+  worktree sessions resolve project memory through the main repository.
 
 ## 2.0.0-alpha.12 — 2026-09-25
 

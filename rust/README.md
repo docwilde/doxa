@@ -206,16 +206,23 @@ index. Duplicate queued hunks are refused. Pending
 rejections block closing the diff or leaving the UI until they finish, and are
 cancelled if the session ends. The diff pane requires enough
 terminal space for two panes. Each split pane has its own prompt and keeps a draft for its active
-session. Its chip row shows engine, model, context, curated memory, beliefs,
+session. Its chip row shows engine, model, repository, context, curated memory, beliefs,
 and available billing data. Dollar cost appears only for API-billed sessions. A connected
 Claude subscription shows its reported plan and cached quota when the local
 CLI cache belongs to the same account; `~` marks stale cached usage. Codex
 plan and quota remain unknown until its daemon has a verified provider source,
 so no subscription pill is shown for it yet.
 The `p X%/u Y%` chip shows curated project and user memory fill
-against each scope's cap. Both counts and caps come from LORE; `?` means LORE
-could not report usage. Hover over a chip for its meaning, or click a read-only
-chip to see details above the prompt. Estimated cost is labeled. In a prompt, `Enter` submits, while
+against each scope's cap. A folder outside Git uses `f` in place of `p`.
+Both counts and caps come from LORE; `?` means LORE could not report usage.
+Click the memory chip to inspect the scoped curated entries and up to 20
+current global beliefs in a scrollable menu above the prompt. The beliefs are
+global, while project memory follows the main repository when the session runs
+in a worktree. The separate beliefs picker can page beyond the first 20.
+The repository chip shows the base branch, checked-out worktree branch, and
+commit for the active session. A plain folder shows `dir NAME`. Hover over a
+chip for its meaning, or click a read-only chip to see details above the
+prompt. Estimated cost is labeled. In a prompt, `Enter` submits, while
 `Shift+Enter` or `Alt+Enter` inserts a newline (`Ctrl+J` also works when
 reported distinctly by the terminal). An ambiguous `Ctrl+Enter` report never
 submits a prompt; use `Alt+Enter` for a newline. `Alt+Up` restores a rejected
