@@ -1273,7 +1273,7 @@ impl App {
     fn key(&mut self, key: KeyEvent) -> bool {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
-        if matches!(key.code, KeyCode::Char('c' | 'q')) && ctrl {
+        if key.code == KeyCode::Char('q') && ctrl {
             self.should_quit = true;
             return true;
         }
@@ -3649,6 +3649,15 @@ mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
     use serde_json::json;
+
+    #[test]
+    fn ctrl_c_does_not_detach_the_terminal() {
+        let mut app = App::default();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)));
+        assert!(!app.should_quit);
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)));
+        assert!(app.should_quit);
+    }
 
     #[test]
     fn stop_requires_confirmation_and_preserves_the_target_and_draft() {
