@@ -85,6 +85,13 @@ struct ModelPicker {
     catalog_pending: bool,
 }
 
+#[derive(Debug)]
+struct AttachPicker {
+    rows: Vec<crate::discovery::Session>,
+    query: String,
+    selected: usize,
+}
+
 #[derive(Clone, Debug)]
 struct RejectDraft {
     index: usize,
@@ -134,6 +141,12 @@ fn safe_label(value: &str) -> String {
         .chars()
         .take(200)
         .collect()
+}
+
+fn attach_matches(session: &crate::discovery::Session, query: &str) -> bool {
+    let query = query.to_lowercase();
+    query.is_empty() || session.id.to_lowercase().starts_with(&query)
+        || session.title.to_lowercase().contains(&query)
 }
 
 fn visible_raw_line(value: &str) -> String {
@@ -686,6 +699,7 @@ pub struct App {
     stop_confirmation: Option<String>,
     pending_stops: Vec<String>,
     model_picker: Option<ModelPicker>,
+    attach_picker: Option<AttachPicker>,
     lore_picker: Option<LorePicker>,
     engine_picker: bool,
     engine_selected: usize,
@@ -782,6 +796,7 @@ impl Default for App {
             stop_confirmation: None,
             pending_stops: Vec::new(),
             model_picker: None,
+            attach_picker: None,
             lore_picker: None,
             engine_picker: false,
             engine_selected: 0,
@@ -1404,6 +1419,10 @@ impl App {
                     self.history_modal = false;
                     self.notice = "Enlarge active pane to search sessions".into();
                 }
+                if self.attach_picker.is_some() && self.active_chooser_rect().is_none() {
+                    self.attach_picker = None;
+                    self.notice = "Enlarge active pane to choose a live session".into();
+                }
                 if self.lore_picker.is_some() && (w < 34 || h < 13) {
                     self.lore_picker = None;
                     self.notice = "Enlarge terminal to open LORE beliefs".into();
@@ -1455,7 +1474,7 @@ impl App {
             || self.stop_confirmation.is_some() || self.lore_picker.is_some()
             || self.new_session.is_some() || self.model_picker.is_some()
             || self.permission_picker.is_some() || self.engine_picker || self.action_menu
-            || self.history_modal || self.diff_modal || self.map_modal || self.tool_modal {
+            || self.history_modal || self.attach_picker.is_some() || self.diff_modal || self.map_modal || self.tool_modal {
             return false;
         }
         let mut clean = String::new();
@@ -1656,6 +1675,7 @@ impl App {
         if self.history_modal {
             return self.history_key(key);
         }
+        if self.attach_picker.is_some() { return self.attach_picker_key(key); }
         if self.diff_modal {
             return self.diff_key(key);
         }
@@ -1976,31 +1996,84 @@ impl App {
     }
 
     fn local_attach(&mut self, args: &str) {
-        let prefix = args.trim();
-        if !prefix.is_empty() && !crate::discovery::valid_id(prefix) {
-            self.notice = "attach: use one session ID prefix".into();
+        let query = args.trim();
+        if query.len() > 200 || query.chars().any(unsafe_input_char) {
+            self.notice = "attach: query must be at most 200 bytes without control characters".into();
             return;
         }
         let live = match crate::discovery::sessions() {
             Ok(rows) => rows,
             Err(error) => { self.notice = format!("attach: discovery failed · {}", safe_label(&error.to_string())); return; }
         };
-        let candidates: Vec<_> = live.iter().filter(|session| {
-            (prefix.is_empty() && !self.groups.iter().any(|group| group.tabs.contains(&session.id)))
-                || (!prefix.is_empty() && session.id.starts_with(prefix))
-        }).collect();
-        let session = match candidates.as_slice() {
-            [] => { self.notice = if prefix.is_empty() { "attach: no detached live sessions".into() }
-                else { format!("attach: no live session matches {}", safe_label(prefix)) }; return; }
-            [one] => *one,
-            many => {
-                let ids = many.iter().take(5).map(|s| s.id.chars().take(8).collect::<String>())
-                    .collect::<Vec<_>>().join(", ");
-                self.notice = format!("attach: {} sessions match · {} · enter a longer ID", many.len(), ids);
-                return;
+        let candidates: Vec<_> = if query.is_empty() {
+            live.into_iter().filter(|session| !self.groups.iter().any(|group| group.tabs.contains(&session.id))).collect()
+        } else {
+            // ID matches win over titles, so a familiar ID prefix never
+            // silently attaches a different session named after that prefix.
+            let exact: Vec<_> = live.iter().filter(|session| session.id == query).cloned().collect();
+            if !exact.is_empty() { exact } else {
+                let prefixes: Vec<_> = live.iter().filter(|session| session.id.starts_with(query)).cloned().collect();
+                if !prefixes.is_empty() { prefixes } else {
+                    let query = query.to_lowercase();
+                    live.into_iter().filter(|session| session.title.to_lowercase().contains(&query)).collect()
+                }
             }
         };
-        self.attach_selected(&session.id);
+        match candidates.as_slice() {
+            [] => { self.notice = if query.is_empty() { "attach: no detached live sessions".into() }
+                else { format!("attach: no live session matches {}", safe_label(query)) }; }
+            [one] => self.attach_selected(&one.id),
+            _ => {
+                self.attach_picker = Some(AttachPicker { rows: candidates, query: String::new(), selected: 0 });
+                if self.active_chooser_rect().is_none() {
+                    self.attach_picker = None;
+                    self.notice = "Enlarge active pane to choose a live session".into();
+                } else {
+                    self.input.clear();
+                    self.input_cursor = 0;
+                }
+            }
+        }
+    }
+
+    fn attach_matches(&self) -> Vec<usize> {
+        let Some(picker) = &self.attach_picker else { return Vec::new(); };
+        picker.rows.iter().enumerate().filter_map(|(index, session)|
+            attach_matches(session, &picker.query).then_some(index)).collect()
+    }
+
+    fn attach_picker_key(&mut self, key: KeyEvent) -> bool {
+        let len = self.attach_matches().len();
+        let Some(picker) = self.attach_picker.as_mut() else { return false; };
+        match key.code {
+            KeyCode::Esc => self.attach_picker = None,
+            KeyCode::Up => picker.selected = picker.selected.saturating_sub(1),
+            KeyCode::Down => picker.selected = (picker.selected + 1).min(len.saturating_sub(1)),
+            KeyCode::Backspace => { picker.query.pop(); picker.selected = 0; }
+            KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+                if !unsafe_input_char(c) && picker.query.len() + c.len_utf8() <= 200 {
+                    picker.query.push(c);
+                    picker.selected = 0;
+                }
+            }
+            KeyCode::Enter => self.open_selected_attach(),
+            _ => return false,
+        }
+        true
+    }
+
+    fn open_selected_attach(&mut self) {
+        let Some(picker) = &self.attach_picker else { return; };
+        let Some(&index) = self.attach_matches().get(picker.selected) else { return; };
+        let id = picker.rows[index].id.clone();
+        self.attach_picker = None;
+        // Registry entries are hints: a row may have gone stale while the
+        // picker was open. The bridge performs one more identity check.
+        match crate::discovery::sessions() {
+            Ok(live) if live.iter().any(|session| session.id == id) => self.attach_selected(&id),
+            Ok(_) => self.notice = format!("attach: session is no longer live · {}", safe_label(&id)),
+            Err(error) => self.notice = format!("attach: discovery failed · {}", safe_label(&error.to_string())),
+        }
     }
 
     fn attach_selected(&mut self, id: &str) {
@@ -3321,6 +3394,8 @@ impl App {
             (ACTIONS.len() + 2).min(15) as u16
         } else if self.history_modal {
             (self.history_matches().len() + 3).clamp(5, 15) as u16
+        } else if self.attach_picker.is_some() {
+            (self.attach_matches().len() + 3).clamp(5, 15) as u16
         } else {
             return None;
         };
@@ -3434,6 +3509,42 @@ impl App {
     }
 
     fn mouse(&mut self, mouse: MouseEvent) -> bool {
+        if self.attach_picker.is_some() {
+            let Some(menu) = self.active_chooser_rect() else { return false; };
+            match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if mouse.column < menu.x || mouse.column >= menu.right()
+                        || mouse.row < menu.y || mouse.row >= menu.bottom() {
+                        self.attach_picker = None;
+                        return true;
+                    }
+                    let first_row = menu.y.saturating_add(2);
+                    if mouse.row >= first_row && mouse.row < menu.bottom().saturating_sub(1) {
+                        let visible = usize::from(menu.height.saturating_sub(3)).max(1);
+                        let selected = self.attach_picker.as_ref().unwrap().selected;
+                        let start = selected.saturating_sub(visible.saturating_sub(1));
+                        let position = start + usize::from(mouse.row - first_row);
+                        if position < self.attach_matches().len() {
+                            self.attach_picker.as_mut().unwrap().selected = position;
+                            self.open_selected_attach();
+                        }
+                    }
+                    return true;
+                }
+                MouseEventKind::ScrollUp => {
+                    let picker = self.attach_picker.as_mut().unwrap();
+                    picker.selected = picker.selected.saturating_sub(1);
+                    return true;
+                }
+                MouseEventKind::ScrollDown => {
+                    let max = self.attach_matches().len().saturating_sub(1);
+                    let picker = self.attach_picker.as_mut().unwrap();
+                    picker.selected = (picker.selected + 1).min(max);
+                    return true;
+                }
+                _ => return false,
+            }
+        }
         if self.history_modal {
             let Some(menu) = self.active_chooser_rect() else { return false; };
             match mouse.kind {
@@ -3527,6 +3638,7 @@ impl App {
             || self.map_modal
             || self.action_menu
             || self.history_modal
+            || self.attach_picker.is_some()
             || self.lore_picker.is_some()
             || self.diff_modal
             || self.model_picker.is_some()
@@ -3900,6 +4012,30 @@ impl App {
         }
         frame.render_widget(Paragraph::new(lines).block(Block::default()
             .title(" Session history · type to filter ")
+            .borders(Borders::ALL).border_style(Style::default().fg(theme::ACCENT))
+            .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED))), area);
+    }
+
+    fn draw_attach_picker(&self, frame: &mut Frame, area: Rect) {
+        let Some(picker) = &self.attach_picker else { return; };
+        let matches = self.attach_matches();
+        let mut lines = vec![Line::from(format!(" Search: {}", safe_label(&picker.query)))];
+        if matches.is_empty() { lines.push(Line::from(" No matching live sessions")); }
+        let visible = usize::from(area.height.saturating_sub(3)).max(1);
+        let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+        for (position, &index) in matches.iter().enumerate().skip(start).take(visible) {
+            let session = &picker.rows[index];
+            let title = if session.title.trim().is_empty() { "Untitled session" } else { &session.title };
+            let label = format!(" {} {} · {}", if position == picker.selected { '›' } else { ' ' },
+                safe_label(title), safe_label(&session.id));
+            let style = if position == picker.selected { Style::default().fg(theme::ACCENT).bg(theme::HIGHLIGHT).add_modifier(Modifier::BOLD) }
+                else { Style::default().fg(theme::SECONDARY) };
+            let label = clipped_title(&label, usize::from(area.width.saturating_sub(2))).0;
+            let padded = format!("{label}{}", " ".repeat(usize::from(area.width.saturating_sub(2)).saturating_sub(label.width())));
+            lines.push(Line::styled(padded, style));
+        }
+        frame.render_widget(Paragraph::new(lines).block(Block::default()
+            .title(" Attach live session · type to filter ")
             .borders(Borders::ALL).border_style(Style::default().fg(theme::ACCENT))
             .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED))), area);
     }
@@ -4358,6 +4494,8 @@ impl App {
                 self.draw_actions(frame, inner[2]);
             } else if self.history_modal {
                 self.draw_history(frame, inner[2]);
+            } else if self.attach_picker.is_some() {
+                self.draw_attach_picker(frame, inner[2]);
             }
         }
         let mut chip_spans = Vec::new();
@@ -6361,6 +6499,36 @@ for line in sys.stdin:
         app.attach_selected("detached");
         assert_eq!(app.groups[0].active_id(), Some("detached"));
         assert_eq!(app.groups[0].tabs.len(), 2);
+    }
+
+    #[test]
+    fn attach_picker_filters_titles_and_ids_without_sending_a_prompt() {
+        let row = |id: &str, title: &str| crate::discovery::Session {
+            id: id.into(), title: title.into(), socket: PathBuf::new(),
+            scope_key: String::new(), clients: None, started_at: String::new(),
+        };
+        let mut app = App::default();
+        app.size = Rect::new(0, 0, 100, 30);
+        app.attach_picker = Some(AttachPicker { rows: vec![row("abc123", "Alpha work"),
+            row("def456", "Beta work")], query: String::new(), selected: 0 });
+        assert!(app.active_chooser_rect().is_some());
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE)));
+        assert_eq!(app.attach_matches(), [1]);
+        assert!(app.pending_prompts.is_empty());
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
+        assert_eq!(app.attach_picker.as_ref().unwrap().selected, 1);
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        assert!(app.attach_picker.is_none());
+        assert!(app.pending_attaches.is_empty());
+        assert!(attach_matches(&row("id123", "Release planning"), "plan"));
+        assert!(attach_matches(&row("id123", "Release planning"), "ID1"));
+        app.attach_picker = Some(AttachPicker { rows: vec![row("definitely-not-live-attach-test", "Gone")],
+            query: String::new(), selected: 0 });
+        app.open_selected_attach();
+        assert!(app.attach_picker.is_none());
+        assert!(app.pending_attaches.is_empty());
+        assert!(app.notice.starts_with("attach:"));
     }
 
     #[test]

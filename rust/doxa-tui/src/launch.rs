@@ -514,6 +514,7 @@ mod tests {
         });
         let session = Session {
             id: "session-1".into(),
+            title: String::new(),
             socket,
             scope_key: "/tmp".into(),
             clients: Some(0),

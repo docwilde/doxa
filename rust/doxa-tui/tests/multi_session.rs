@@ -35,7 +35,7 @@ fn until(frames: &mpsc::Receiver<Value>, pred: impl Fn(&Value) -> bool) -> Value
 }
 
 fn session(id: &str, socket: std::path::PathBuf) -> Session {
-    Session { id: id.into(), socket, scope_key: "/tmp".into(), clients: None, started_at: String::new() }
+    Session { id: id.into(), title: String::new(), socket, scope_key: "/tmp".into(), clients: None, started_at: String::new() }
 }
 
 #[test]

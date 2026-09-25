@@ -304,7 +304,7 @@ pub fn run_socket_expected(path: impl AsRef<Path>, expected: Option<&str>) -> io
         return Err(io::Error::new(io::ErrorKind::InvalidData, "fleet slot session identity changed"));
     }
     drop(client);
-    run_sessions(&[Session { id, socket: path.to_path_buf(), scope_key: String::new(),
+    run_sessions(&[Session { id, title: String::new(), socket: path.to_path_buf(), scope_key: String::new(),
         clients: None, started_at: String::new() }], None)
 }
 
