@@ -440,6 +440,8 @@ pub struct App {
     history_pending: Option<Receiver<Vec<history::OfflineSession>>>,
     offline_ids: HashSet<String>,
     diff_modal: bool,
+    diff_pane: bool,
+    diff_target: Option<String>,
     diff_scroll: u16,
     diff_text: String,
     diff_pending: Option<Receiver<(String, diff_view::DiffSnapshot)>>,
@@ -507,6 +509,8 @@ impl Default for App {
             history_pending: None,
             offline_ids: HashSet::new(),
             diff_modal: false,
+            diff_pane: false,
+            diff_target: None,
             diff_scroll: 0,
             diff_text: String::new(),
             diff_pending: None,
@@ -1072,6 +1076,23 @@ impl App {
             self.open_diff();
             return true;
         }
+        if key.code == KeyCode::F(4) {
+            if !self.diff_pane && self.layout(self.size).panes.is_none() {
+                self.notice = "Enlarge terminal to open the diff pane".into();
+            } else {
+                self.diff_pane = !self.diff_pane;
+                if self.diff_pane { self.load_diff(); }
+            }
+            return true;
+        }
+        if self.diff_pane {
+            match key.code {
+                KeyCode::F(5) => { self.load_diff(); return true; }
+                KeyCode::PageUp if alt => { self.diff_scroll = self.diff_scroll.saturating_sub(10); return true; }
+                KeyCode::PageDown if alt => { self.diff_scroll = self.diff_scroll.saturating_add(10); return true; }
+                _ => {}
+            }
+        }
         match key.code {
             KeyCode::F(3) => {
                 self.rail_visible = !self.rail_visible;
@@ -1397,12 +1418,18 @@ impl App {
     fn open_diff(&mut self) {
         if self.diff_modal { self.diff_modal = false; return; }
         self.diff_modal = true;
+        self.load_diff();
+    }
+
+    fn load_diff(&mut self) {
         self.diff_scroll = 0;
         self.diff_pending = None;
         let Some(id) = self.groups[self.active_group].active_id().map(str::to_owned) else {
+            self.diff_target = None;
             self.diff_text = "Select a session to inspect its worktree.".into();
             return;
         };
+        self.diff_target = Some(id.clone());
         let Some(cwd) = self.session_cwds.get(&id).cloned() else {
             self.diff_text = "This session did not provide a worktree directory.".into();
             return;
@@ -1414,6 +1441,10 @@ impl App {
     }
 
     fn poll_diff(&mut self) -> bool {
+        if self.diff_pane && self.diff_target.as_deref() != self.groups[self.active_group].active_id() {
+            self.load_diff();
+            return true;
+        }
         let Some(receiver) = &self.diff_pending else { return false; };
         match receiver.try_recv() {
             Ok((id, snapshot)) => {
@@ -1865,6 +1896,21 @@ impl App {
             self.drag = None;
             return false;
         }
+        if self.diff_pane {
+            if let Some(panes) = self.layout(self.size).panes {
+                let pane = panes[1 - self.active_group];
+                if mouse.column > pane.x && mouse.column < pane.right().saturating_sub(1)
+                    && mouse.row > pane.y && mouse.row < pane.bottom().saturating_sub(1) {
+                    match mouse.kind {
+                        MouseEventKind::ScrollUp => self.diff_scroll = self.diff_scroll.saturating_sub(3),
+                        MouseEventKind::ScrollDown => self.diff_scroll = self.diff_scroll.saturating_add(3),
+                        MouseEventKind::Down(MouseButton::Left) => {},
+                        _ => return false,
+                    }
+                    return true;
+                }
+            }
+        }
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 self.drag = None;
@@ -2038,14 +2084,19 @@ impl App {
             self.draw_rail(frame, rail);
         }
         if let Some(panes) = layout.panes {
-            self.draw_group(frame, panes[0], 0);
-            self.draw_group(frame, panes[1], 1);
+            if self.diff_pane {
+                self.draw_group(frame, panes[self.active_group], self.active_group);
+                self.draw_diff_pane(frame, panes[1 - self.active_group]);
+            } else {
+                self.draw_group(frame, panes[0], 0);
+                self.draw_group(frame, panes[1], 1);
+            }
         } else {
             self.draw_group(frame, layout.body, self.active_group);
         }
         frame.render_widget(
             Paragraph::new(format!(
-                "{}  |  Ctrl+P actions · Alt+E engine · Alt+M model · Alt+P permissions · Ctrl+R history · F2 diff · F3 rail · Shift+Tab pane · Ctrl+T tools · Ctrl+M peers · Alt+H/V split · Alt+arrows/drag resize · Ctrl+Q quit",
+                "{}  |  Ctrl+P actions · Alt+E engine · Alt+M model · Alt+P permissions · Ctrl+R history · F2 diff · F4 diff pane · F3 rail · Shift+Tab pane · Ctrl+T tools · Ctrl+M peers · Alt+H/V split · Alt+arrows/drag resize · Ctrl+Q quit",
                 self.notice
             )).style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)),
             Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
@@ -2174,6 +2225,22 @@ impl App {
             .block(Block::default().title(" Worktree diff · ↑/↓ scroll · R refresh · F2/Esc close ")
                 .borders(Borders::ALL).border_style(Style::default().fg(theme::BORDER))
             .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED))), modal);
+    }
+
+    fn draw_diff_pane(&self, frame: &mut Frame, area: Rect) {
+        let rows: Vec<Line> = self.diff_text.lines()
+            .skip(usize::from(self.diff_scroll))
+            .take(usize::from(area.height.saturating_sub(2)))
+            .map(|line| {
+                let color = if line.starts_with('+') && !line.starts_with("+++") { theme::SUCCESS }
+                    else if line.starts_with('-') && !line.starts_with("---") { theme::ERROR }
+                    else if line.starts_with("@@") { theme::ACCENT } else { theme::SECONDARY };
+                Line::styled(line.to_owned(), Style::default().fg(color))
+            }).collect();
+        frame.render_widget(Paragraph::new(rows)
+            .block(Block::default().title(" Worktree diff · F5 refresh · Alt+PgUp/PgDn scroll · F4 close ")
+                .borders(Borders::ALL).border_style(Style::default().fg(theme::BORDER)))
+            .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)), area);
     }
 
     fn draw_actions(&self, frame: &mut Frame, area: Rect) {
@@ -3200,6 +3267,35 @@ mod tests {
         assert!(view.contains("+new"));
         app.handle(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
         assert!(!app.diff_modal);
+    }
+
+    #[test]
+    fn diff_pane_keeps_the_active_prompt_and_restores_the_other_session() {
+        let mut app = App::default();
+        app.apply_update(DaemonUpdate::Upsert(Session { id: "first".into(), title: "First".into(),
+            collection: "repo".into(), transcript: "active transcript".into(), status: "Ready".into() }));
+        app.apply_update(DaemonUpdate::Upsert(Session { id: "second".into(), title: "Second".into(),
+            collection: "repo".into(), transcript: "hidden transcript".into(), status: "Ready".into() }));
+        app.groups[1].tabs.push("second".into());
+        app.handle(Event::Resize(100, 28));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE)));
+        assert!(app.diff_pane);
+        app.diff_text = "Base: HEAD\n@@ -1 +1 @@\n-old\n+new".into();
+        let view = painted(&app);
+        assert!(view.contains("active transcript"));
+        assert!(view.contains("Worktree diff"));
+        assert!(view.contains("+new"));
+        assert!(!view.contains("hidden transcript"));
+        let diff_area = app.layout(app.size).panes.unwrap()[1];
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::ScrollDown,
+            column: diff_area.x + 2, row: diff_area.y + 2, modifiers: KeyModifiers::NONE }));
+        assert_eq!(app.active_group, 0);
+        assert_eq!(app.diff_scroll, 3);
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)));
+        assert_eq!(app.input, "x");
+        app.handle(Event::Key(KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE)));
+        assert!(!app.diff_pane);
+        assert!(painted(&app).contains("hidden transcript"));
     }
 
     #[test]

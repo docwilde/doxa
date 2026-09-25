@@ -74,7 +74,11 @@ bounded transcript tails. Archived transcripts open read-only and never receive
 prompts. `F2` (or `Alt+G`) opens a read-only, 256 KiB worktree diff in an
 asynchronous modal. It compares tracked changes with the recorded worktree
 base when one exists, or with `HEAD`, and lists bounded untracked filenames
-without reading their contents. A persistent diff pane remains future work.
+without reading their contents. `F4` keeps that diff visible beside the active
+session while its prompt stays usable; `F5` refreshes it and `Alt+PageUp` /
+`Alt+PageDown` scroll it. The other session pane reappears when the diff pane
+closes. The diff pane is read-only and requires enough terminal space for two
+panes.
 Each split pane has its own prompt and keeps a draft for its active session.
 Its status row shows engine and model chips from that session's daemon hello,
 status, and model change events. `Alt+E` opens an engine picker for the next
