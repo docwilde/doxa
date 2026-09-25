@@ -14,6 +14,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
+#[path = "codex_context.rs"]
+mod codex_context;
+
 const SCRUB_FAILURE: &str = "[redacted: LORE scrub unavailable]";
 const MAX_CONTEXT_BYTES: usize = 64 * 1024;
 const MAX_STORED_TOOL_INPUT_BYTES: usize = 256 * 1024;
@@ -50,6 +53,7 @@ pub struct CodexHost {
     session_id: String,
     cwd: String,
     model: Option<String>,
+    rollout_path: Mutex<Option<PathBuf>>,
     closing: AtomicBool,
 }
 
@@ -89,6 +93,7 @@ impl CodexHost {
         let thread_record = store
             .read_thread()
             .map_err(|_| "Codex thread record unreadable; session was not started".to_owned())?;
+        let mut rollout_path = None;
         let previous = if let Some(value) = thread_record {
             if value.get("turn_incomplete") != Some(&Value::Bool(false)) {
                 return Err("Codex transcript is incomplete; refusing to resume the thread".to_owned());
@@ -113,6 +118,8 @@ impl CodexHost {
             let thread = value["thread_id"].as_str()
                 .filter(|id| doxa_engines::codex_driver::valid_thread_id(id))
                 .ok_or("existing session has no valid Codex thread ID")?;
+            rollout_path = value["rollout_path"].as_str().map(PathBuf::from)
+                .filter(|path| codex_context::size(path, thread).is_some());
             Some(thread.to_owned())
         } else {
             if resume || transcript.is_some() {
@@ -173,6 +180,7 @@ impl CodexHost {
             session_id: session_id.to_owned(),
             cwd,
             model,
+            rollout_path: Mutex::new(rollout_path),
             closing: AtomicBool::new(false),
         })
     }
@@ -192,6 +200,13 @@ impl CodexHost {
     }
 
     fn persist_thread(&self, thread_id: &str, turn_incomplete: bool) -> io::Result<()> {
+        let mut rollout = self.rollout_path.lock().unwrap();
+        if rollout.as_ref().is_some_and(|path| codex_context::size(path, thread_id).is_none()) {
+            *rollout = None;
+        }
+        if rollout.is_none() {
+            *rollout = codex_context::find(thread_id, std::time::SystemTime::now());
+        }
         let mut fields = Map::new();
         fields.insert("thread_id".into(), json!(thread_id));
         fields.insert("turn_incomplete".into(), json!(turn_incomplete));
@@ -199,6 +214,10 @@ impl CodexHost {
         fields.insert("model".into(), json!(self.model));
         fields.insert("cwd".into(), json!(self.cwd));
         fields.insert("recorded".into(), json!(crate::iso_now()));
+        if let Some(path) = rollout.as_ref() {
+            fields.insert("rollout_path".into(), json!(path.to_string_lossy()));
+        }
+        drop(rollout);
         let result = self.store.try_write_thread(fields, |text| {
             self.lore.lock().unwrap().scrub(text).map_err(|_| {
                 self.scrub_failed.store(true, Ordering::Release);
@@ -350,6 +369,12 @@ impl Host for CodexHost {
             }
         }
         let mut assistant_text = String::new();
+        let (rollout_before, new_thread) = {
+            let driver = self.driver.lock().unwrap();
+            let id = driver.thread_id();
+            (id.and_then(|id| self.rollout_path.lock().unwrap().as_ref()
+                .and_then(|path| codex_context::size(path, id))), id.is_none())
+        };
         let thread_write_failed = Cell::new(false);
         let mut terminal_event = None;
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -449,7 +474,18 @@ impl Host for CodexHost {
         *self.active.lock().unwrap() = None;
         match result {
             Ok(_) => {
-                if let Some(event) = terminal_event {
+                if let Some(mut event) = terminal_event {
+                    let before = if new_thread { Some(0) } else { rollout_before };
+                    if let (Some(before), Some(id), Some(path)) = (before,
+                        self.driver.lock().unwrap().thread_id().map(str::to_owned),
+                        self.rollout_path.lock().unwrap().clone()) {
+                        if let Some(context) = codex_context::read_since(&path, &id, before) {
+                            if let (Some(data), Some(fields)) =
+                                (event.get_mut("data").and_then(Value::as_object_mut), context.as_object()) {
+                                data.extend(fields.clone());
+                            }
+                        }
+                    }
                     emit(event);
                 }
             }
