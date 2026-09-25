@@ -23,8 +23,8 @@ Usage: ./task COMMAND [arguments]
 
   build [--release]     Build the Rust frontend and daemon (debug by default)
   install               Build and install committed HEAD as the Rust doxa launcher
-  run [doxa-rs args]    Build and run the frontend in the current directory
-  new [doxa-rs args]    Build and start a new session in the current directory
+  run [doxa args]       Build and run the frontend in the current directory
+  new [doxa args]       Build and start a new session in the current directory
   doctor [args]         Build and check the native launch dependencies
   test                  Run all Rust crate and Claude sidecar tests
   clean                 Remove the task's local Rust build directory

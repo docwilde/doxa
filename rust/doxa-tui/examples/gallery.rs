@@ -19,6 +19,9 @@ fn fixture() -> App {
     app.apply_daemon_frame(&json!({"type":"hello","session_id":"demo-codex-01","engine":"codex","model":"gpt-6-sol","cwd":"/demo/project","lore_scrub":"ready"}));
     app.apply_daemon_frame(&json!({"type":"hello","session_id":"demo-claude-02","engine":"claude","model":"claude-sonnet-4","cwd":"/demo/project","permission_mode":"default","can_set_permission_mode":true,"lore_scrub":"ready"}));
     app.apply_daemon_frame(&json!({"type":"hello","session_id":"demo-deepseek-03","engine":"deepseek","model":"deepseek-chat","cwd":"/demo/project","lore_scrub":"ready"}));
+    for id in ["demo-codex-01", "demo-claude-02", "demo-deepseek-03"] {
+        app.set_lore_memory_usage(id, 3471, 8800, 2824, 4500);
+    }
     app.groups[0].active = 0;
     app.sessions.iter_mut().for_each(|s| s.title = match s.id.as_str() {
         "demo-codex-01" => "Refactor parser".into(),
@@ -29,7 +32,7 @@ fn fixture() -> App {
     event(&mut app,"demo-codex-01","turn_done",json!({"input_tokens":4821,"output_tokens":918,"usage_scope":"session","usage_source":"codex_cli_turn_completed","ctx_percentage":18.0,"session_cost_usd":0.0187}));
     event(&mut app,"demo-claude-02","text_delta",json!({"text":"## Test review\n\nThe new cases cover clipped input and reconnects. One edge case remains in the transport fixture."}));
     event(&mut app,"demo-claude-02","turn_done",json!({"ctx_percentage":9.0,"session_cost_usd":0.0062}));
-    app.notice = "Rust 2.0.0-alpha.11 · fixture session".into();
+    app.notice = "Rust 2.0.0-alpha.12 · fixture session".into();
     app
 }
 
@@ -56,6 +59,16 @@ fn scene(name: &str) -> App {
         "history" => {
             key(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL);
         }
+        "queue" => {
+            app.groups[0].tabs = vec!["demo-codex-01".into()];
+            app.input = "/queue".into();
+            key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+            app.apply_daemon_frame(&json!({"type":"queue_list_reply","session_id":"demo-codex-01",
+                "ok":true,"rows":[
+                    {"id":"q4","preview":"Review the parser error path after this turn"},
+                    {"id":"q7","preview":"Summarize the test failures and proposed fix"}
+                ]}));
+        }
         _ => panic!("unknown scene: {name}"),
     }
     app
@@ -74,7 +87,7 @@ fn rgb(color: Color) -> [u8; 3] {
 fn main() {
     let name = std::env::args().nth(1).expect("scene name");
     let (width,height) = match name.as_str() {
-        "hero" | "tool-activity" | "needs-input" | "permissions" | "history" => (126,31),
+        "hero" | "tool-activity" | "needs-input" | "permissions" | "history" | "queue" => (126,31),
         _ => panic!("unknown scene"),
     };
     let app = scene(&name);

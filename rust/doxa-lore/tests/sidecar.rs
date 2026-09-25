@@ -1,6 +1,6 @@
 #![cfg(unix)]
 
-use doxa_lore::{LoreClient, LoreError, PendingDecision, PendingResolution, MAX_FRAME_BYTES};
+use doxa_lore::{LoreClient, LoreError, MemoryUsage, PendingDecision, PendingResolution, MAX_FRAME_BYTES};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -63,6 +63,38 @@ for line in sys.stdin:
         client.snapshot("/repo", "invalid"),
         Err(LoreError::InvalidFrame)
     ));
+}
+
+#[test]
+fn memory_usage_requires_capability_and_valid_bounded_counts() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = fake(dir.path(), r#"
+import json, sys
+print(json.dumps({'type':'hello','proto':1,'capabilities':['scrub','snapshot','memory_usage_v1']}), flush=True)
+for line in sys.stdin:
+    req = json.loads(line)
+    values = {
+        '/repo': {'project_chars': 7, 'user_chars': 12, 'project_cap_chars': 8800, 'user_cap_chars': 9000},
+        '/missing': {'project_chars': 1},
+        '/negative': {'project_chars': -1, 'user_chars': 12, 'project_cap_chars': 8800, 'user_cap_chars': 9000},
+        '/boolean': {'project_chars': True, 'user_chars': 12, 'project_cap_chars': 8800, 'user_cap_chars': 9000},
+        '/large': {'project_chars': 1048577, 'user_chars': 12, 'project_cap_chars': 8800, 'user_cap_chars': 9000},
+        '/zero-cap': {'project_chars': 7, 'user_chars': 12, 'project_cap_chars': 0, 'user_cap_chars': 9000},
+        '/bad-cap': {'project_chars': 7, 'user_chars': 12, 'project_cap_chars': True, 'user_cap_chars': 9000},
+        '/large-cap': {'project_chars': 7, 'user_chars': 12, 'project_cap_chars': 8800, 'user_cap_chars': 1048577},
+    }
+    print(json.dumps({'type':'reply','id':req['id'],'ok':True,'value':values[req['cwd']]}), flush=True)
+"#);
+    let mut client = LoreClient::spawn(&path, Duration::from_secs(2)).unwrap();
+    assert_eq!(client.memory_usage("/repo").unwrap(), MemoryUsage {
+        project_chars: 7, user_chars: 12, project_cap_chars: 8800, user_cap_chars: 9000,
+    });
+    for cwd in ["/missing", "/negative", "/boolean", "/large", "/zero-cap", "/bad-cap", "/large-cap", ""] {
+        assert!(matches!(client.memory_usage(cwd), Err(LoreError::InvalidFrame)), "{cwd}");
+    }
+    let old = fake(dir.path(), "print('{\"type\":\"hello\",\"proto\":1,\"capabilities\":[\"scrub\",\"snapshot\"]}', flush=True)");
+    let mut older = LoreClient::spawn(&old, Duration::from_secs(2)).unwrap();
+    assert!(matches!(older.memory_usage("/repo"), Err(LoreError::Unavailable)));
 }
 
 #[test]

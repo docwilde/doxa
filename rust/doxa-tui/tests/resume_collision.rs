@@ -5,7 +5,7 @@ use std::os::unix::net::UnixListener;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-fn assert_resume_ignores_existing_same_id_daemon(vendor: bool) {
+fn assert_resume_refuses_existing_same_id_daemon(vendor: bool) {
     let dir = tempfile::tempdir().unwrap();
     let runtime = dir.path().join("runtime");
     let registry = runtime.join("registry");
@@ -70,10 +70,7 @@ fn assert_resume_ignores_existing_same_id_daemon(vendor: bool) {
         .unwrap();
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("native daemon exited before startup"),
-        "{stderr}"
-    );
+    assert!(stderr.contains("session is already running; attach to it instead"), "{stderr}");
     assert!(!stderr.contains("started native session"));
     assert!(
         !old_socket.join().unwrap(),
@@ -83,10 +80,10 @@ fn assert_resume_ignores_existing_same_id_daemon(vendor: bool) {
 
 #[test]
 fn resume_ignores_existing_same_id_daemon_from_another_pid() {
-    assert_resume_ignores_existing_same_id_daemon(false);
+    assert_resume_refuses_existing_same_id_daemon(false);
 }
 
 #[test]
 fn vendor_resume_ignores_existing_same_id_daemon_from_another_pid() {
-    assert_resume_ignores_existing_same_id_daemon(true);
+    assert_resume_refuses_existing_same_id_daemon(true);
 }

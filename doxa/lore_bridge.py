@@ -25,12 +25,14 @@ _READ_OPS = ("consult", "beliefs", "evidence")
 _REVIEW_OP = "pending_review_v1"
 _RESOLVE_OP = "resolve_reviewed_v1"
 _INDEX_OP = "index_transcript_v1"
+_MEMORY_USAGE_OP = "memory_usage_v1"
 _PENDING_ID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z", re.ASCII)
 _SESSION_ID = re.compile(r"[0-9A-Za-z][0-9A-Za-z-]{0,127}\Z", re.ASCII)
 _MAX_TRANSCRIPT_BYTES = 8 * 1024 * 1024
 # A raw ASCII control byte can expand to six JSON bytes (\\u00XX). Reserve
 # reply metadata too; review must return the exact bytes for SHA/inode checks.
 _MAX_REVIEW_RAW_BYTES = (MAX_FRAME_BYTES - 512) // 6
+_MAX_MEMORY_SOURCE_BYTES = 1024 * 1024
 
 
 class PendingReviewError(Exception):
@@ -80,6 +82,42 @@ def _extensions() -> tuple[Any, Any, Any, Any] | None:
         return project_slug, refresh_interval, load_pending, (scrub_secrets, read_state)
     except Exception:  # noqa: BLE001 -- older plugin builds may lack an API
         return None
+
+
+def _memory_usage_ops() -> tuple[Any, Any, Any, Any, Any] | None:
+    """LORE owns project identity, memory paths, and canonical entry rendering."""
+    try:
+        from . import _lore_bootstrap  # noqa: F401 -- choose LORE and root first
+        from lore_core.config import project_slug
+        from lore_core.memory import memory_cap, memory_path, read_entries, render_entries
+        return project_slug, memory_path, read_entries, render_entries, memory_cap
+    except Exception:  # noqa: BLE001 -- optional on older LORE builds
+        return None
+
+
+def _memory_usage(cwd: str, ops: tuple[Any, Any, Any, Any, Any]) -> dict[str, int]:
+    """Exact Unicode chars and LORE caps for curated entries, no content."""
+    if not isinstance(cwd, str) or not cwd or len(cwd) > 4096 or "\x00" in cwd:
+        raise ValueError("invalid memory usage input")
+    slug = ops[0](cwd)
+    result = {}
+    for scope in ("project", "user"):
+        cap = ops[4](scope)
+        if type(cap) is not int or not 0 < cap <= _MAX_MEMORY_SOURCE_BYTES:
+            raise ValueError("invalid memory cap")
+        path = ops[1](scope, slug)
+        try:
+            size = path.stat().st_size
+        except FileNotFoundError:
+            size = 0
+        if size < 0 or size > _MAX_MEMORY_SOURCE_BYTES:
+            raise ValueError("memory source too large")
+        chars = len(ops[3](ops[2](path)))
+        if chars > _MAX_MEMORY_SOURCE_BYTES:
+            raise ValueError("memory content too large")
+        result[f"{scope}_chars"] = chars
+        result[f"{scope}_cap_chars"] = cap
+    return result
 
 
 def _read_ops() -> tuple[Any, Any] | None:
@@ -386,6 +424,7 @@ def _transcript_identity(cwd: str, ext: tuple[Any, Any, Any, Any]) -> dict[str, 
 def serve() -> None:
     lore = _lore()
     ext = _extensions() if lore is not None else None
+    memory_ops = _memory_usage_ops() if lore is not None else None
     read_ops = _read_ops() if lore is not None else None
     index_ops = _index_ops() if lore is not None and ext is not None else None
     review = _pending_review_reader() if lore is not None and ext is not None else None
@@ -394,6 +433,7 @@ def serve() -> None:
             "capabilities": (list(_OPS if ext is not None else _OPS[:2])
                              + (list(_READ_OPS) if read_ops is not None else [])
                              + ([_INDEX_OP] if index_ops is not None else [])
+                             + ([_MEMORY_USAGE_OP] if memory_ops is not None else [])
                              + ([_REVIEW_OP] if review is not None else [])
                              + ([_RESOLVE_OP] if resolver is not None else [])) if lore is not None else []})
     while True:
@@ -417,6 +457,10 @@ def serve() -> None:
             continue
         scrub, snapshot = lore
         try:
+            if op == _MEMORY_USAGE_OP and memory_ops is not None:
+                result = _memory_usage(req.get("cwd"), memory_ops)
+                _write({"type": "reply", "id": rid, "ok": True, "value": result})
+                continue
             if op == _INDEX_OP and ext is not None and index_ops is not None:
                 result = _index_transcript(req.get("cwd"), req.get("session_id"), ext, index_ops)
                 _write({"type": "reply", "id": rid, "ok": True, "value": result})

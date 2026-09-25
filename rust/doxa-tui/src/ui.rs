@@ -135,6 +135,47 @@ struct NewSession {
     field: usize,
 }
 
+#[derive(Debug, Clone)]
+struct QueueRow { id: String, preview: String }
+
+#[derive(Debug)]
+struct QueuePicker {
+    session_id: String,
+    rows: Vec<QueueRow>,
+    selected: usize,
+    loading: bool,
+    cancelling: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ChipHit {
+    group: usize,
+    kind: &'static str,
+    rect: Rect,
+    pane: Rect,
+}
+
+#[derive(Clone, Debug)]
+struct ChipInfo {
+    kind: &'static str,
+    label: String,
+}
+
+fn chip_hint(kind: &str) -> &'static str {
+    match kind {
+        "permission" => "Permission mode for this session · click to choose",
+        "engine" => "Engine for new sessions · click to choose",
+        "model" => "Model for this session · click to choose",
+        "context" => "Current session context usage · click for details",
+        "memory" => "Project/user memory: % of separate LORE caps",
+        "beliefs" => "LORE beliefs · click to browse",
+        "cost" => "Reported session cost · click for details",
+        "lore" => "LORE state and scrub health · click for details",
+        "more" => "More chips · click to reveal hidden chips",
+        _ => "",
+    }
+}
+
 fn safe_label(value: &str) -> String {
     markdown::sanitize(value)
         .replace('\n', " ")
@@ -370,7 +411,6 @@ pub struct Session {
 #[derive(Clone, Debug, Default)]
 struct SessionTelemetry {
     context: Option<String>,
-    usage: Option<String>,
     cost: Option<String>,
     lore: Option<String>,
 }
@@ -385,22 +425,6 @@ impl SessionTelemetry {
             .map(|(used, limit)| format!("{used}/{limit}"));
         if data.get("ctx_percentage").is_some() || data.get("ctx_tokens").is_some() {
             self.context = context.or(absolute);
-        }
-        let scope = data["usage_scope"].as_str();
-        let source = data["usage_source"].as_str();
-        let tokens = match (scope, source) {
-            (Some("session"), Some("codex_cli_turn_completed")) =>
-                data["input_tokens"].as_u64().zip(data["output_tokens"].as_u64())
-                    .map(|(input, output)| (input, output, "session")),
-            (Some("turn"), Some("vendor_response")) =>
-                data["prompt_tokens"].as_u64().zip(data["completion_tokens"].as_u64())
-                    .map(|(input, output)| (input, output, "turn")),
-            _ => None,
-        };
-        if let Some((input, output, scope)) = tokens {
-            self.usage = Some(format!("{input}/{output} {scope}"));
-        } else if self.usage.as_deref().is_some_and(|usage| usage.ends_with(" turn")) {
-            self.usage = None;
         }
         if let Some(cost) = data["session_cost_usd"].as_f64()
             .filter(|value| value.is_finite() && *value >= 0.0) {
@@ -434,14 +458,6 @@ impl SessionTelemetry {
         } else if status.get("total_cost_usd").is_some() {
             self.cost = None;
         }
-        let usage = &status["usage"];
-        if usage["num_turns"].as_u64().is_some_and(|turns| turns > 0) {
-            if let Some((input, output)) = usage["input_tokens"].as_u64().zip(usage["output_tokens"].as_u64()) {
-                self.usage = Some(format!("{input}/{output} session"));
-            }
-        } else if usage["num_turns"].as_u64() == Some(0) {
-            self.usage = None;
-        }
         if let Some(count) = status["belief_count"].as_u64() {
             self.lore = Some(format!("{count} beliefs"));
         } else if status.get("lore_scrub").is_some() {
@@ -453,6 +469,11 @@ impl SessionTelemetry {
         }
     }
 
+}
+
+// LORE owns both curated-memory lengths and their separate scope caps.
+fn memory_fill_percent(chars: u64, cap_chars: u64) -> u64 {
+    chars.saturating_mul(100).saturating_add(cap_chars / 2) / cap_chars
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -686,7 +707,13 @@ pub struct App {
     session_identity: HashMap<String, (Option<String>, Option<String>)>,
     pub(crate) custom_names: HashMap<String, String>,
     session_telemetry: HashMap<String, SessionTelemetry>,
+    // LORE owns these counts. A bounded background query keeps store I/O off
+    // the draw path; an unavailable sidecar leaves the chip unknown.
+    memory_cache: HashMap<String, (Option<doxa_lore::MemoryUsage>, Instant)>,
+    memory_pending: Option<(String, String, Receiver<Option<doxa_lore::MemoryUsage>>)>,
     chip_offsets: [usize; 2],
+    chip_hover: Option<ChipHit>,
+    chip_info: Option<ChipInfo>,
     blink_on: bool,
     blink_at: Instant,
     model_capabilities: HashMap<String, bool>,
@@ -727,10 +754,18 @@ pub struct App {
     action_menu: bool,
     action_selected: usize,
     history_modal: bool,
+    history_resume: bool,
+    history_explicit: bool,
     history_query: String,
     history_selected: usize,
     history_pending: Option<Receiver<Vec<history::OfflineSession>>>,
+    history_scan_query: Option<String>,
+    history_scanned_matches: HashMap<String, String>,
+    history_entries: HashMap<String, history::OfflineSession>,
+    resume_pending: Option<Receiver<(String, Result<launch::LaunchOptions, &'static str>)>>,
     offline_ids: HashSet<String>,
+    queue_picker: Option<QueuePicker>,
+    pending_queue_commands: Vec<crate::bridge::WorkerCommand>,
     diff_modal: bool,
     diff_pane: bool,
     diff_target: Option<String>,
@@ -783,7 +818,11 @@ impl Default for App {
             session_identity: HashMap::new(),
             custom_names: HashMap::new(),
             session_telemetry: HashMap::new(),
+            memory_cache: HashMap::new(),
+            memory_pending: None,
             chip_offsets: [0, 0],
+            chip_hover: None,
+            chip_info: None,
             blink_on: true,
             blink_at: Instant::now(),
             model_capabilities: HashMap::new(),
@@ -824,10 +863,18 @@ impl Default for App {
             action_menu: false,
             action_selected: 0,
             history_modal: false,
+            history_resume: false,
+            history_explicit: false,
             history_query: String::new(),
             history_selected: 0,
             history_pending: None,
+            history_scan_query: None,
+            history_scanned_matches: HashMap::new(),
+            history_entries: HashMap::new(),
+            resume_pending: None,
             offline_ids: HashSet::new(),
+            queue_picker: None,
+            pending_queue_commands: Vec::new(),
             diff_modal: false,
             diff_pane: false,
             diff_target: None,
@@ -891,6 +938,35 @@ impl App {
             return false;
         };
         match kind {
+            "queue_list_reply" => {
+                let Some(id) = frame["session_id"].as_str() else { return false; };
+                let Some(picker) = self.queue_picker.as_mut().filter(|picker| picker.session_id == id) else { return false; };
+                picker.loading = false;
+                if frame["ok"] != true {
+                    self.notice = format!("Queue unavailable · {}", safe_label(frame["error"].as_str().unwrap_or("daemon refused")));
+                    return true;
+                }
+                let rows = frame["rows"].as_array().into_iter().flatten().take(32).filter_map(|row| {
+                    let id = row["id"].as_str()?;
+                    if id.is_empty() || id.len() > 128 || !id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-') { return None; }
+                    let preview = row["preview"].as_str().filter(|text| text.len() <= 1024)?;
+                    Some(QueueRow { id: id.to_owned(), preview: safe_label(preview) })
+                }).collect();
+                picker.rows = rows;
+                picker.selected = picker.selected.min(picker.rows.len().saturating_sub(1));
+                true
+            }
+            "queue_cancel_reply" => {
+                let Some(id) = frame["session_id"].as_str() else { return false; };
+                let Some(picker) = self.queue_picker.as_mut().filter(|picker| picker.session_id == id) else { return false; };
+                if picker.cancelling.as_deref() != frame["queue_id"].as_str() { return false; }
+                picker.cancelling = None;
+                self.notice = if frame["ok"] == true { "Queued prompt cancelled".into() }
+                    else { format!("Queue cancellation failed · {}", safe_label(frame["error"].as_str().unwrap_or("item already started"))) };
+                picker.loading = true;
+                self.pending_queue_commands.push(crate::bridge::WorkerCommand::QueueList(id.to_owned()));
+                true
+            }
             "attach_reply" => {
                 let Some(reply_id) = frame["session_id"].as_str() else { return false; };
                 if !self.attaching_ids.remove(reply_id) { return false; }
@@ -920,6 +996,7 @@ impl App {
                 self.launching = false;
                 if frame["ok"] == true {
                     if let Some(id) = frame["session_id"].as_str().filter(|id| crate::discovery::valid_id(id)) {
+                        self.offline_ids.remove(id);
                         let target = frame["group"].as_u64().filter(|group| *group < 2)
                             .map(|group| group as usize).unwrap_or(self.active_group);
                         // A newly attached daemon may send hello before this reply.
@@ -967,6 +1044,9 @@ impl App {
                 if let Some(raw) = frame.get("cwd").and_then(|v| v.as_str()) {
                     let path = PathBuf::from(raw);
                     if path.is_absolute() && raw.len() <= 4096 {
+                        if self.session_cwds.get(id) != Some(&path) {
+                            self.memory_cache.remove(id);
+                        }
                         self.session_cwds.insert(id.to_owned(), path);
                     }
                 }
@@ -1415,6 +1495,10 @@ impl App {
             Event::Resize(w, h) => {
                 self.size = Rect::new(0, 0, w, h);
                 self.drag = None;
+                self.chip_hover = None;
+                if self.chip_info.is_some() && self.active_chooser_rect().is_none() {
+                    self.chip_info = None;
+                }
                 if self.history_modal && self.active_chooser_rect().is_none() {
                     self.history_modal = false;
                     self.notice = "Enlarge active pane to search sessions".into();
@@ -1422,6 +1506,10 @@ impl App {
                 if self.attach_picker.is_some() && self.active_chooser_rect().is_none() {
                     self.attach_picker = None;
                     self.notice = "Enlarge active pane to choose a live session".into();
+                }
+                if self.queue_picker.is_some() && self.active_chooser_rect().is_none() {
+                    self.queue_picker = None;
+                    self.notice = "Enlarge active pane to inspect queued prompts".into();
                 }
                 if self.lore_picker.is_some() && (w < 34 || h < 13) {
                     self.lore_picker = None;
@@ -1474,7 +1562,7 @@ impl App {
             || self.stop_confirmation.is_some() || self.lore_picker.is_some()
             || self.new_session.is_some() || self.model_picker.is_some()
             || self.permission_picker.is_some() || self.engine_picker || self.action_menu
-            || self.history_modal || self.attach_picker.is_some() || self.diff_modal || self.map_modal || self.tool_modal {
+            || self.history_modal || self.queue_picker.is_some() || self.attach_picker.is_some() || self.diff_modal || self.map_modal || self.tool_modal {
             return false;
         }
         let mut clean = String::new();
@@ -1664,6 +1752,10 @@ impl App {
             return self.request_key(key);
         }
         if self.stop_confirmation.is_some() { return self.stop_confirmation_key(key); }
+        if self.chip_info.is_some() {
+            if key.code == KeyCode::Esc { self.chip_info = None; return true; }
+            return false;
+        }
         if self.lore_picker.is_some() { return self.lore_picker_key(key); }
         if self.new_session.is_some() { return self.new_session_key(key); }
         if self.model_picker.is_some() { return self.model_picker_key(key); }
@@ -1675,6 +1767,7 @@ impl App {
         if self.history_modal {
             return self.history_key(key);
         }
+        if self.queue_picker.is_some() { return self.queue_key(key); }
         if self.attach_picker.is_some() { return self.attach_picker_key(key); }
         if self.diff_modal {
             return self.diff_key(key);
@@ -1782,7 +1875,8 @@ impl App {
                 self.rail_visible = !self.rail_visible;
                 true
             }
-            KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => {
+            KeyCode::BackTab | KeyCode::Tab if key.code == KeyCode::BackTab
+                || key.modifiers.contains(KeyModifiers::SHIFT) => {
                 self.active_group = 1 - self.active_group;
                 self.split_requested = true;
                 self.focus = Focus::Prompt;
@@ -1826,7 +1920,7 @@ impl App {
                     }
                     true
                 } else {
-                    false
+                    self.adjust_split(-5)
                 }
             }
             KeyCode::Left if alt => self.adjust_split(-5),
@@ -1913,6 +2007,12 @@ impl App {
                 } else { false }
             }
             KeyCode::Enter if self.focus == Focus::Prompt && (key.modifiers.contains(KeyModifiers::SHIFT) || alt) => self.insert_input('\n'),
+            KeyCode::Enter if self.focus == Focus::Prompt && ctrl => {
+                // Ctrl+Enter and a terminal-normalized control newline can
+                // share this code. Neither may submit a prompt by accident.
+                self.notice = "Ctrl+Enter is ambiguous here · use Alt+Enter for a newline".into();
+                true
+            }
             KeyCode::Char('j') if self.focus == Focus::Prompt && ctrl => self.insert_input('\n'),
             KeyCode::Char(c) if self.focus == Focus::Prompt && !ctrl && !alt => {
                 if unsafe_input_char(c) { false } else { self.insert_input(c) }
@@ -1986,11 +2086,15 @@ impl App {
             "/movepane" | "/collection" | "/fleet" | "/img" | "/login"
             | "/logout" | "/settings" | "/setup" | "/doctor" | "/plugins"
             | "/reload-plugins" | "/branch" | "/effort" | "/usage"
-            | "/context" | "/queue" | "/clear" | "/cd" | "/search"
-            | "/resume" | "/compact" | "/update" => {
+            | "/context" | "/clear" | "/cd"
+            | "/compact" | "/update" => {
                 self.notice = format!("Local command unavailable: {}", safe_label(command));
                 true
             }
+            "/search" => { self.local_search(args); true }
+            "/resume" => { self.local_resume(args); true }
+            "/queue" if args.trim().is_empty() => { self.open_queue(); true }
+            "/queue" => { self.notice = "queue: open the picker and use X to cancel a selected item".into(); true }
             _ => false, // Provider and plugin slash commands remain available.
         }
     }
@@ -2296,10 +2400,14 @@ impl App {
     fn history_matches(&self) -> Vec<usize> {
         let query = self.history_query.to_lowercase();
         self.sessions.iter().enumerate().filter_map(|(index, session)| {
+            if self.history_resume {
+                return (query.is_empty() || session.id.to_lowercase().starts_with(&query)).then_some(index);
+            }
             let mut start = session.transcript.len().saturating_sub(16 * 1024);
             while !session.transcript.is_char_boundary(start) { start += 1; }
             if query.is_empty() || session.title.to_lowercase().contains(&query)
                 || session.id.to_lowercase().contains(&query)
+                || self.history_scanned_matches.get(&session.id).is_some_and(|scanned| scanned == &query)
                 || session.transcript[start..].to_lowercase().contains(&query) {
                 Some(index)
             } else { None }
@@ -2318,6 +2426,9 @@ impl App {
             return;
         }
         self.history_modal = true;
+        self.history_resume = false;
+        self.history_explicit = false;
+        self.history_scan_query = None;
         self.history_query.clear();
         self.history_selected = 0;
         if self.active_chooser_rect().is_none() {
@@ -2330,6 +2441,107 @@ impl App {
             self.history_pending = Some(rx);
             std::thread::spawn(move || { let _ = tx.send(history::discover()); });
         }
+    }
+
+    fn local_search(&mut self, args: &str) {
+        let query = args.trim();
+        if query.len() > 200 || query.chars().any(unsafe_input_char) {
+            self.notice = "search: query must be at most 200 bytes without control characters".into();
+            return;
+        }
+        self.input.clear();
+        self.input_cursor = 0;
+        self.open_history();
+        if self.history_modal {
+            self.history_query = query.to_owned();
+            if !query.is_empty() {
+                let (tx, rx) = mpsc::sync_channel(1);
+                self.history_pending = Some(rx);
+                let query = query.to_owned();
+                self.history_scan_query = Some(query.to_lowercase());
+                std::thread::spawn(move || { let _ = tx.send(history::discover_query(&query)); });
+            }
+        }
+    }
+
+    fn local_resume(&mut self, args: &str) {
+        let query = args.trim();
+        if !query.is_empty() && !crate::discovery::valid_id(query) {
+            self.notice = "resume: enter a valid session ID or prefix".into();
+            return;
+        }
+        self.input.clear();
+        self.input_cursor = 0;
+        // A full ID naming a live daemon is immediately attachable even if
+        // that daemon has not yet been indexed into transcript history.
+        if !query.is_empty() && crate::discovery::sessions().is_ok_and(|rows| rows.iter().any(|row| row.id == query)) {
+            self.attach_selected(query);
+            return;
+        }
+        self.open_history();
+        if !self.history_modal { return; }
+        self.history_resume = true;
+        self.history_explicit = !query.is_empty();
+        self.history_query = query.to_owned();
+        // Explicit IDs search the full bounded transcript inventory rather
+        // than only the recent-history window.
+        if !query.is_empty() {
+            let (tx, rx) = mpsc::sync_channel(1);
+            self.history_pending = Some(rx);
+            let prefix = query.to_owned();
+            std::thread::spawn(move || { let _ = tx.send(history::discover_prefix(&prefix)); });
+        }
+    }
+
+    fn open_queue(&mut self) {
+        let Some(id) = self.groups[self.active_group].active_id().map(str::to_owned) else {
+            self.notice = "Select a live session to inspect its queue".into();
+            return;
+        };
+        if self.offline_ids.contains(&id) {
+            self.notice = "Archived sessions have no live prompt queue".into();
+            return;
+        }
+        self.input.clear();
+        self.input_cursor = 0;
+        self.queue_picker = Some(QueuePicker { session_id: id.clone(), rows: Vec::new(),
+            selected: 0, loading: true, cancelling: None });
+        if self.active_chooser_rect().is_none() {
+            self.queue_picker = None;
+            self.notice = "Enlarge active pane to inspect queued prompts".into();
+            return;
+        }
+        self.pending_queue_commands.push(crate::bridge::WorkerCommand::QueueList(id));
+    }
+
+    fn queue_key(&mut self, key: KeyEvent) -> bool {
+        let Some(picker) = self.queue_picker.as_mut() else { return false; };
+        match key.code {
+            KeyCode::Esc => self.queue_picker = None,
+            KeyCode::Up => picker.selected = picker.selected.saturating_sub(1),
+            KeyCode::Down => picker.selected = (picker.selected + 1).min(picker.rows.len().saturating_sub(1)),
+            KeyCode::Char('r') | KeyCode::Char('R') => {
+                picker.loading = true;
+                self.pending_queue_commands.push(crate::bridge::WorkerCommand::QueueList(picker.session_id.clone()));
+            }
+            KeyCode::Char('x') | KeyCode::Char('X') | KeyCode::Delete => self.cancel_selected_queue(),
+            _ => return false,
+        }
+        true
+    }
+
+    fn cancel_selected_queue(&mut self) {
+        let Some(picker) = self.queue_picker.as_mut() else { return; };
+        if picker.loading || picker.cancelling.is_some() { return; }
+        let Some(row) = picker.rows.get(picker.selected) else { return; };
+        let id = row.id.clone();
+        if picker.rows.iter().filter(|row| row.id == id).count() != 1 {
+            self.notice = "Duplicate queue ID; cancellation is unsafe".into();
+            return;
+        }
+        picker.cancelling = Some(id.clone());
+        self.pending_queue_commands.push(crate::bridge::WorkerCommand::QueueCancel(picker.session_id.clone(), id));
+        self.notice = "Cancelling selected queued prompt…".into();
     }
 
     fn open_lore_picker(&mut self) {
@@ -2370,6 +2582,57 @@ impl App {
         std::thread::spawn(move || {
             let _ = tx.send(lore_picker::fetch(&python, query));
         });
+    }
+
+    /// The gallery uses this same state path with deterministic counts. Live
+    /// values arrive only through the read-only LORE sidecar query below.
+    pub fn set_lore_memory_usage(&mut self, id: &str, project_chars: u64, project_cap_chars: u64,
+                                 user_chars: u64, user_cap_chars: u64) {
+        let usage = doxa_lore::MemoryUsage { project_chars, project_cap_chars, user_chars, user_cap_chars };
+        self.memory_cache.insert(id.to_owned(), (Some(usage), Instant::now()));
+    }
+
+    fn poll_memory(&mut self) -> bool {
+        let mut changed = false;
+        if let Some((id, cwd, receiver)) = self.memory_pending.take() {
+            match receiver.try_recv() {
+                Ok(usage) => {
+                    if self.session_cwds.get(&id).and_then(|path| path.to_str()) == Some(cwd.as_str()) {
+                        changed = self.memory_cache.get(&id).is_none_or(|(old, _)| *old != usage);
+                        self.memory_cache.insert(id, (usage, Instant::now()));
+                    }
+                }
+                Err(TryRecvError::Disconnected) => {
+                    if self.session_cwds.get(&id).and_then(|path| path.to_str()) == Some(cwd.as_str()) {
+                        changed = self.memory_cache.get(&id).is_none_or(|(old, _)| old.is_some());
+                        self.memory_cache.insert(id, (None, Instant::now()));
+                    }
+                }
+                Err(TryRecvError::Empty) => self.memory_pending = Some((id, cwd, receiver)),
+            }
+        }
+        if self.memory_pending.is_some() { return changed; }
+        // Query the active pane first. The other pane is refreshed once the
+        // first query completes; neither query blocks input or redraw.
+        for group in [self.active_group, 1 - self.active_group] {
+            let Some(id) = self.groups[group].active_id().map(str::to_owned) else { continue; };
+            if self.offline_ids.contains(&id) { continue; }
+            let Some(cwd) = self.session_cwds.get(&id).and_then(|path| path.to_str()).map(str::to_owned) else { continue; };
+            if self.memory_cache.get(&id).is_some_and(|(_, checked)| checked.elapsed() < Duration::from_secs(60)) {
+                continue;
+            }
+            let python = std::env::var_os("DOXA_LORE_PYTHON")
+                .map(PathBuf::from).unwrap_or_else(|| PathBuf::from("python3"));
+            let (tx, rx) = mpsc::sync_channel(1);
+            self.memory_pending = Some((id, cwd.clone(), rx));
+            std::thread::spawn(move || {
+                let usage = doxa_lore::LoreClient::spawn(&python, Duration::from_secs(2))
+                    .and_then(|mut lore| lore.memory_usage(&cwd)).ok();
+                let _ = tx.send(usage);
+            });
+            break;
+        }
+        changed
     }
 
     fn poll_lore(&mut self) -> bool {
@@ -2596,13 +2859,29 @@ impl App {
             Err(TryRecvError::Disconnected) => { self.history_pending = None; return false; }
         };
         self.history_pending = None;
+        let scan_query = self.history_scan_query.take();
         let mut changed = false;
         for entry in found {
+            if let Some(query) = &scan_query {
+                self.history_scanned_matches.insert(entry.id.clone(), query.clone());
+            }
+            self.history_entries.insert(entry.id.clone(), entry.clone());
             if self.sessions.iter().any(|session| session.id == entry.id) { continue; }
             self.offline_ids.insert(entry.id.clone());
             self.sessions.push(Session { id: entry.id.clone(), title: entry.id,
                 collection: safe_label(&entry.project), transcript: transcript_tail(&entry.markdown).to_owned(),
                 status: "Archived · read-only".into() });
+            changed = true;
+        }
+        if self.history_modal && self.history_resume && self.history_explicit {
+            match self.history_matches().len() {
+                0 => {
+                    self.history_modal = false;
+                    self.notice = format!("Resume: no saved session matches {}", safe_label(&self.history_query));
+                }
+                1 => self.open_selected_history(),
+                _ => {}
+            }
             changed = true;
         }
         changed
@@ -2630,6 +2909,35 @@ impl App {
     fn open_selected_history(&mut self) {
         if let Some(&index) = self.history_matches().get(self.history_selected) {
             let id = self.sessions[index].id.clone();
+            if self.history_resume {
+                self.history_modal = false;
+                self.history_resume = false;
+                if self.groups.iter().any(|group| group.tabs.iter().any(|tab| tab == &id)) {
+                    for (group_index, group) in self.groups.iter_mut().enumerate() {
+                        if let Some(index) = group.tabs.iter().position(|tab| tab == &id) {
+                            group.active = index;
+                            self.active_group = group_index;
+                            self.notice = format!("Session already open · {}", safe_label(&id));
+                            return;
+                        }
+                    }
+                }
+                if crate::discovery::sessions().is_ok_and(|rows| rows.iter().any(|row| row.id == id)) {
+                    self.attach_selected(&id);
+                    return;
+                }
+                let Some(entry) = self.history_entries.get(&id).cloned() else {
+                    self.notice = "Resume unavailable: no saved transcript for this session".into();
+                    return;
+                };
+                let python = std::env::var_os("DOXA_LORE_PYTHON")
+                    .map(PathBuf::from).unwrap_or_else(|| PathBuf::from("python3"));
+                let (tx, rx) = mpsc::sync_channel(1);
+                self.resume_pending = Some(rx);
+                std::thread::spawn(move || { let result = history::resume_plan(&entry, &python); let _ = tx.send((id, result)); });
+                self.notice = "Checking saved conversation…".into();
+                return;
+            }
             let tabs = &mut self.groups[self.active_group];
             if let Some(index) = tabs.tabs.iter().position(|tab| tab == &id) { tabs.active = index; }
             else { tabs.tabs.push(id); tabs.active = tabs.tabs.len() - 1; }
@@ -2637,6 +2945,33 @@ impl App {
             self.focus = Focus::Transcript;
             self.history_modal = false;
         }
+    }
+
+    fn poll_resume(&mut self) -> bool {
+        let Some(receiver) = &self.resume_pending else { return false; };
+        let result = match receiver.try_recv() {
+            Ok(result) => result,
+            Err(TryRecvError::Empty) => return false,
+            Err(TryRecvError::Disconnected) => { self.resume_pending = None; return false; }
+        };
+        self.resume_pending = None;
+        let (id, plan) = result;
+        match plan {
+            Ok(options) if !self.launching => {
+                // Recheck live registry immediately before dispatch. The daemon
+                // also owns the final uniqueness check on this session ID.
+                if crate::discovery::sessions().is_ok_and(|rows| rows.iter().any(|row| row.id == id)) {
+                    self.attach_selected(&id);
+                } else {
+                    self.pending_launches.push((options, None, self.active_group));
+                    self.launching = true;
+                    self.notice = format!("Resuming · {}", safe_label(&id));
+                }
+            }
+            Ok(_) => self.notice = "Wait for the current session launch before resuming".into(),
+            Err(reason) => self.notice = format!("Resume unavailable · {reason}; transcript remains readable"),
+        }
+        true
     }
 
     fn open_diff(&mut self) {
@@ -3392,8 +3727,12 @@ impl App {
             }
         } else if self.action_menu {
             (ACTIONS.len() + 2).min(15) as u16
+        } else if self.chip_info.is_some() {
+            5
         } else if self.history_modal {
             (self.history_matches().len() + 3).clamp(5, 15) as u16
+        } else if let Some(picker) = &self.queue_picker {
+            (picker.rows.len() + 3).clamp(5, 15) as u16
         } else if self.attach_picker.is_some() {
             (self.attach_matches().len() + 3).clamp(5, 15) as u16
         } else {
@@ -3437,7 +3776,12 @@ impl App {
             chips.push(("model", "Model".to_owned()));
         }
         chips.push(("context", format!("Ctx {}", telemetry.and_then(|value| value.context.as_deref()).unwrap_or("?"))));
-        chips.push(("usage", format!("Tokens {}", telemetry.and_then(|value| value.usage.as_deref()).unwrap_or("?"))));
+        let memory = self.memory_cache.get(id.unwrap_or("")).and_then(|(usage, _)| *usage)
+            .map(|usage| format!("p {}%/u {}%",
+                memory_fill_percent(usage.project_chars, usage.project_cap_chars),
+                memory_fill_percent(usage.user_chars, usage.user_cap_chars)))
+            .unwrap_or_else(|| "p ?/u ?".to_owned());
+        chips.push(("memory", memory));
         let beliefs = telemetry.and_then(|value| value.lore.as_deref())
             .filter(|label| label.ends_with(" beliefs"))
             .unwrap_or("Beliefs");
@@ -3508,7 +3852,74 @@ impl App {
         shown
     }
 
+    fn pane_regions(&self, index: usize, area: Rect) -> [Rect; 6] {
+        let group = &self.groups[index];
+        let draft = group.active_id().map(|id| {
+            if self.active_group == index { self.input.as_str() }
+            else { self.input_drafts.get(&(index, id.to_owned()))
+                .map(|(text, _)| text.as_str()).unwrap_or("") }
+        }).unwrap_or("");
+        let chooser_height = if self.active_group == index {
+            self.chooser_rect(area).map_or(0, |rect| rect.height)
+        } else { 0 };
+        let regions = Layout::default().direction(Direction::Vertical).constraints([
+            Constraint::Length(3), Constraint::Min(1), Constraint::Length(chooser_height),
+            Constraint::Length(1), Constraint::Length(prompt_height(draft, area.height)),
+            Constraint::Length(1),
+        ]).split(area);
+        std::array::from_fn(|index| regions[index])
+    }
+
+    fn chip_hit_at(&self, column: u16, row: u16) -> Option<ChipHit> {
+        let layout = self.layout(self.size);
+        let panes = layout.panes.map(|panes| vec![(0, panes[0]), (1, panes[1])])
+            .unwrap_or_else(|| vec![(self.active_group, layout.body)]);
+        for (group, pane) in panes {
+            if self.diff_pane && group != self.active_group { continue; }
+            let strip = self.pane_regions(group, pane)[3];
+            if row != strip.y || column < strip.x || column >= strip.right() { continue; }
+            let mut x = strip.x;
+            for (kind, label) in self.chip_window(group, usize::from(strip.width)) {
+                let width = chip_text(kind, &label).width() as u16;
+                let end = x.saturating_add(width).min(strip.right());
+                if column >= x && column < end {
+                    return Some(ChipHit { group, kind, rect: Rect::new(x, strip.y, end - x, 1), pane });
+                }
+                x = end.saturating_add(1);
+            }
+        }
+        None
+    }
+
+    fn open_chip_info(&mut self, kind: &'static str, group: usize) {
+        let label = self.chips(group).into_iter().find(|(candidate, _)| *candidate == kind)
+            .map(|(_, label)| label).unwrap_or_default();
+        self.active_group = group;
+        self.chip_info = Some(ChipInfo { kind, label });
+        if self.active_chooser_rect().is_none() {
+            self.chip_info = None;
+            self.notice = "Enlarge active pane to inspect chip details".into();
+        }
+    }
+
     fn mouse(&mut self, mouse: MouseEvent) -> bool {
+        if mouse.kind == MouseEventKind::Moved {
+            let next = if self.active_chooser_rect().is_some() || self.active_request_index().is_some()
+                || self.map_modal || self.diff_modal || self.tool_modal || self.stop_confirmation.is_some() {
+                None
+            } else { self.chip_hit_at(mouse.column, mouse.row) };
+            if self.chip_hover == next { return false; }
+            self.chip_hover = next;
+            return true;
+        }
+        if self.chip_info.is_some() {
+            if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                let inside = self.active_chooser_rect().is_some_and(|area| area.contains(
+                    ratatui::layout::Position::new(mouse.column, mouse.row)));
+                self.chip_info = None;
+                if inside { return true; }
+            } else { return false; }
+        }
         if self.attach_picker.is_some() {
             let Some(menu) = self.active_chooser_rect() else { return false; };
             match mouse.kind {
@@ -3578,6 +3989,37 @@ impl App {
                 _ => return false,
             }
         }
+        if self.queue_picker.is_some() {
+            let Some(menu) = self.active_chooser_rect() else { return false; };
+            match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if mouse.column < menu.x || mouse.column >= menu.right()
+                        || mouse.row < menu.y || mouse.row >= menu.bottom() {
+                        self.queue_picker = None;
+                    } else {
+                        let first = menu.y.saturating_add(2);
+                        if mouse.row >= first && mouse.row < menu.bottom().saturating_sub(1) {
+                            let picker = self.queue_picker.as_mut().unwrap();
+                            let visible = usize::from(menu.height.saturating_sub(3)).max(1);
+                            let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+                            picker.selected = (start + usize::from(mouse.row - first)).min(picker.rows.len().saturating_sub(1));
+                        }
+                    }
+                    return true;
+                }
+                MouseEventKind::ScrollUp => {
+                    let picker = self.queue_picker.as_mut().unwrap();
+                    picker.selected = picker.selected.saturating_sub(1);
+                    return true;
+                }
+                MouseEventKind::ScrollDown => {
+                    let picker = self.queue_picker.as_mut().unwrap();
+                    picker.selected = (picker.selected + 1).min(picker.rows.len().saturating_sub(1));
+                    return true;
+                }
+                _ => return false,
+            }
+        }
         if self.active_request_index().is_none()
             && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
             && (self.engine_picker || self.new_session.is_some() || self.model_picker.is_some() || self.permission_picker.is_some()) {
@@ -3638,6 +4080,7 @@ impl App {
             || self.map_modal
             || self.action_menu
             || self.history_modal
+            || self.queue_picker.is_some()
             || self.attach_picker.is_some()
             || self.lore_picker.is_some()
             || self.diff_modal
@@ -3649,6 +4092,25 @@ impl App {
         {
             self.drag = None;
             return false;
+        }
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+            if let Some(hit) = self.chip_hit_at(mouse.column, mouse.row) {
+                self.chip_hover = None;
+                self.active_group = hit.group;
+                match hit.kind {
+                    "permission" => self.open_permission_picker(),
+                    "engine" => self.open_engine_picker(),
+                    "model" => self.open_model_picker(),
+                    "beliefs" => self.open_lore_picker(),
+                    "more" => {
+                        let visible = self.chip_window(hit.group, usize::from(self.pane_regions(hit.group, hit.pane)[3].width));
+                        let count = visible.len().saturating_sub(1).max(1);
+                        self.chip_offsets[hit.group] = (self.chip_offsets[hit.group] + count) % self.chips(hit.group).len();
+                    }
+                    kind => self.open_chip_info(kind, hit.group),
+                }
+                return true;
+            }
         }
         if self.diff_pane {
             if let Some(panes) = self.layout(self.size).panes {
@@ -3727,30 +4189,6 @@ impl App {
                                         .map(|(text, _)| text.as_str()).unwrap_or("") }
                                 }).unwrap_or("");
                                 let prompt_top = pane.bottom().saturating_sub(prompt_height(draft, pane.height) + 1);
-                                if mouse.row == prompt_top.saturating_sub(1) {
-                                    self.active_group = index;
-                                    let relative = usize::from(mouse.column.saturating_sub(pane.x));
-                                    let mut start = 0;
-                                    let visible = self.chip_window(index, usize::from(pane.width));
-                                    for (kind, label) in &visible {
-                                        let end = start + chip_text(kind, label).width();
-                                        if relative >= start && relative < end {
-                                            match *kind {
-                                                "engine" => self.open_engine_picker(),
-                                                "model" => self.open_model_picker(),
-                                                "permission" => self.open_permission_picker(),
-                                                "beliefs" => self.open_lore_picker(),
-                                                "more" => {
-                                                    let count = visible.len().saturating_sub(1).max(1);
-                                                    self.chip_offsets[index] = (self.chip_offsets[index] + count) % self.chips(index).len();
-                                                }
-                                                _ => {}
-                                            }
-                                            return true;
-                                        }
-                                        start = end + 1;
-                                    }
-                                }
                                 self.active_group = index;
                                 self.focus = if mouse.row >= prompt_top {
                                     Focus::Prompt
@@ -3894,6 +4332,22 @@ impl App {
             || self.active_chooser_rect().is_none() {
             self.draw_request(frame, area, false);
         }
+        self.draw_chip_tooltip(frame);
+    }
+
+    fn draw_chip_tooltip(&self, frame: &mut Frame) {
+        let Some(hit) = &self.chip_hover else { return; };
+        if self.chip_info.is_some() || self.active_chooser_rect().is_some()
+            || self.active_request_index().is_some() || self.map_modal || self.diff_modal
+            || self.tool_modal || self.stop_confirmation.is_some() { return; }
+        let hint = chip_hint(hit.kind);
+        if hint.is_empty() || hit.rect.y <= hit.pane.y.saturating_add(3) { return; }
+        let width = (hint.width() + 2).min(usize::from(hit.pane.width)) as u16;
+        let x = hit.rect.x.min(hit.pane.right().saturating_sub(width));
+        let area = Rect::new(x, hit.rect.y - 1, width, 1);
+        let text = clipped_title(&format!(" {hint} "), usize::from(width)).0;
+        frame.render_widget(Paragraph::new(text).style(Style::default()
+            .fg(theme::ACCENT).bg(theme::HIGHLIGHT)), area);
     }
 
     fn draw_stop_confirmation(&self, frame: &mut Frame, area: Rect) {
@@ -3992,6 +4446,16 @@ impl App {
             .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)), modal);
     }
 
+    fn draw_chip_info(&self, frame: &mut Frame, area: Rect) {
+        let Some(info) = &self.chip_info else { return; };
+        let title = format!(" {} · Esc close ", safe_label(info.kind));
+        let body = format!(" {}\n {}", safe_label(&info.label), chip_hint(info.kind));
+        frame.render_widget(Paragraph::new(body).wrap(Wrap { trim: false })
+            .block(Block::default().title(title).borders(Borders::ALL)
+                .border_style(Style::default().fg(theme::ACCENT)))
+            .style(Style::default().fg(theme::TEXT).bg(theme::RAISED)), area);
+    }
+
     fn draw_history(&self, frame: &mut Frame, area: Rect) {
         if !self.history_modal { return; }
         let matches = self.history_matches();
@@ -4011,7 +4475,8 @@ impl App {
             lines.push(Line::styled(padded, style));
         }
         frame.render_widget(Paragraph::new(lines).block(Block::default()
-            .title(" Session history · type to filter ")
+            .title(if self.history_resume { " Resume session · Enter to open · Esc close " }
+                else { " Session history · type to filter " })
             .borders(Borders::ALL).border_style(Style::default().fg(theme::ACCENT))
             .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED))), area);
     }
@@ -4036,6 +4501,31 @@ impl App {
         }
         frame.render_widget(Paragraph::new(lines).block(Block::default()
             .title(" Attach live session · type to filter ")
+            .borders(Borders::ALL).border_style(Style::default().fg(theme::ACCENT))
+            .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED))), area);
+    }
+
+    fn draw_queue_picker(&self, frame: &mut Frame, area: Rect) {
+        let Some(picker) = &self.queue_picker else { return; };
+        let mut lines = vec![Line::from(if picker.loading { " Refreshing queue…" }
+            else if picker.rows.is_empty() { " No queued prompts" }
+            else if picker.cancelling.is_some() { " Cancelling selected prompt…" }
+            else { " X cancel selected · R refresh · Esc close" })];
+        let visible = usize::from(area.height.saturating_sub(3)).max(1);
+        let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+        for (index, row) in picker.rows.iter().enumerate().skip(start).take(visible) {
+            let ambiguous = picker.rows.iter().filter(|item| item.id == row.id).count() > 1;
+            let label = format!(" {} {} · {}{}", if index == picker.selected { '›' } else { ' ' },
+                safe_label(&row.id), if ambiguous { "[ambiguous ID] " } else { "" }, safe_label(&row.preview));
+            let label = clipped_title(&label, usize::from(area.width.saturating_sub(2))).0;
+            let padded = format!("{label}{}", " ".repeat(usize::from(area.width.saturating_sub(2)).saturating_sub(label.width())));
+            let style = if index == picker.selected {
+                Style::default().fg(theme::ACCENT).bg(theme::HIGHLIGHT).add_modifier(Modifier::BOLD)
+            } else { Style::default().fg(theme::SECONDARY) };
+            lines.push(Line::styled(padded, style));
+        }
+        frame.render_widget(Paragraph::new(lines).block(Block::default()
+            .title(" Prompt queue · stable IDs ")
             .borders(Borders::ALL).border_style(Style::default().fg(theme::ACCENT))
             .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED))), area);
     }
@@ -4391,19 +4881,8 @@ impl App {
             else { self.input_drafts.get(&(index, id.to_owned()))
                 .map(|(text, cursor)| (text.as_str(), *cursor)).unwrap_or(("", 0)) }
         }).unwrap_or(("", 0));
-        let prompt_height = prompt_height(draft, area.height);
-        let chooser_height = if active { self.chooser_rect(area).map_or(0, |rect| rect.height) } else { 0 };
-        let inner = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(3),
-                Constraint::Min(1),
-                Constraint::Length(chooser_height),
-                Constraint::Length(1),
-                Constraint::Length(prompt_height),
-                Constraint::Length(1),
-            ])
-            .split(area);
+        let inner = self.pane_regions(index, area);
+        let chooser_height = inner[2].height;
         let titles: Vec<Line> = group
             .tabs
             .iter()
@@ -4492,8 +4971,12 @@ impl App {
                 self.draw_lore_picker(frame, inner[2]);
             } else if self.action_menu {
                 self.draw_actions(frame, inner[2]);
+            } else if self.chip_info.is_some() {
+                self.draw_chip_info(frame, inner[2]);
             } else if self.history_modal {
                 self.draw_history(frame, inner[2]);
+            } else if self.queue_picker.is_some() {
+                self.draw_queue_picker(frame, inner[2]);
             } else if self.attach_picker.is_some() {
                 self.draw_attach_picker(frame, inner[2]);
             }
@@ -4697,7 +5180,9 @@ fn run_loop(
         }
         changed |= app.poll_diff();
         changed |= app.poll_history();
+        changed |= app.poll_resume();
         changed |= app.poll_lore();
+        changed |= app.poll_memory();
         changed |= app.tick_blink(Instant::now());
         if prompt_sender.is_none() {
             if let Some(id) = app.pending_peer_refresh.take() {
@@ -4720,6 +5205,12 @@ fn run_loop(
                 app.notice = "Session stop unavailable · daemon connection closed".into();
                 changed = true;
             }
+            if !app.pending_queue_commands.is_empty() {
+                app.pending_queue_commands.clear();
+                app.queue_picker = None;
+                app.notice = "Queue unavailable · daemon connection closed".into();
+                changed = true;
+            }
             if !app.pending_peer_messages.is_empty() {
                 for (id, target, text) in app.pending_peer_messages.drain(..) {
                     app.rejected_drafts.entry(id).or_default().push(format!("/msg {target} {text}"));
@@ -4736,6 +5227,7 @@ fn run_loop(
             let disconnected = dispatch_peer_refresh(&mut app, sender) || disconnected;
             let disconnected = dispatch_peer_messages(&mut app, sender) || disconnected;
             let disconnected = dispatch_model_controls(&mut app, sender) || disconnected;
+            let disconnected = dispatch_queue_commands(&mut app, sender) || disconnected;
             let disconnected = dispatch_stops(&mut app, sender) || disconnected;
             if disconnected {
                 prompt_sender = None;
@@ -4814,6 +5306,25 @@ fn dispatch_stops(app: &mut App, sender: &SyncSender<crate::bridge::WorkerComman
                 return true;
             }
             Err(_) => unreachable!(),
+        }
+    }
+    false
+}
+
+fn dispatch_queue_commands(app: &mut App, sender: &SyncSender<crate::bridge::WorkerCommand>) -> bool {
+    let mut commands = std::mem::take(&mut app.pending_queue_commands).into_iter();
+    while let Some(command) = commands.next() {
+        match sender.try_send(command) {
+            Ok(()) => {}
+            Err(TrySendError::Full(command)) => {
+                app.pending_queue_commands.extend(std::iter::once(command).chain(commands));
+                return false;
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                app.queue_picker = None;
+                app.notice = "Queue unavailable · daemon connection closed".into();
+                return true;
+            }
         }
     }
     false
@@ -5223,6 +5734,30 @@ mod tests {
     }
 
     #[test]
+    fn memory_chip_uses_lore_counts_and_ignores_old_project_reply() {
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"s", "cwd":"/repo/old"}));
+        app.set_lore_memory_usage("s", 401, 1000, 80, 200);
+        assert_eq!(app.chips(0).iter().find(|(kind, _)| *kind == "memory").unwrap().1,
+            "p 40%/u 40%");
+        assert_eq!(memory_fill_percent(0, 1000), 0);
+        assert_eq!(memory_fill_percent(4, 1000), 0);
+        assert_eq!(memory_fill_percent(5, 1000), 1);
+        let (tx, rx) = mpsc::sync_channel(1);
+        app.memory_pending = Some(("s".into(), "/repo/old".into(), rx));
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"s", "cwd":"/repo/new"}));
+        app.offline_ids.insert("s".into());
+        tx.send(Some(doxa_lore::MemoryUsage {
+            project_chars: 400, project_cap_chars: 1000,
+            user_chars: 200, user_cap_chars: 500,
+        })).unwrap();
+        app.poll_memory();
+        assert!(!app.memory_cache.contains_key("s"));
+        assert_eq!(app.chips(0).iter().find(|(kind, _)| *kind == "memory").unwrap().1,
+            "p ?/u ?");
+    }
+
+    #[test]
     fn single_pane_keeps_four_primary_chips_visible_without_prefixes() {
         let mut app = App::default();
         app.handle(Event::Resize(148, 31));
@@ -5438,6 +5973,112 @@ mod tests {
         let buffer = terminal.backend().buffer();
         (0..28).map(|y| (0..100).map(|x| buffer[(x, y)].symbol()).collect::<String>())
             .collect::<Vec<_>>().join("\n")
+    }
+
+    fn painted_at(app: &App, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..height).map(|y| (0..width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>().join("\n")
+    }
+
+    #[test]
+    fn every_chip_hover_and_click_uses_rendered_strip_geometry() {
+        let mut app = App::default();
+        app.rail_visible = false;
+        app.handle(Event::Resize(220, 32));
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"s","engine":"claude",
+            "model":"sonnet","cwd":"/repo","permission_mode":"auto",
+            "can_set_permission_mode":true,"can_set_model":true,"lore_scrub":"ready"}));
+        app.groups[0].tabs = vec!["s".into()];
+        app.set_lore_memory_usage("s", 200, 1000, 80, 200);
+        let pane = app.layout(app.size).body;
+        let strip = app.pane_regions(0, pane)[3];
+        let mut x = strip.x;
+        let visible = app.chip_window(0, usize::from(strip.width));
+        assert_eq!(visible.len(), app.chips(0).len());
+        for (kind, label) in visible {
+            let inside = x + 1;
+            assert!(app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Moved,
+                column: inside, row: strip.y, modifiers: KeyModifiers::NONE })));
+            assert_eq!(app.chip_hover.as_ref().map(|hit| hit.kind), Some(kind));
+            let rendered = painted_at(&app, 220, 32);
+            assert!(rendered.contains(chip_hint(kind)), "hover hint for {kind}");
+            assert!(app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+                column: inside, row: strip.y, modifiers: KeyModifiers::NONE })));
+            match kind {
+                "permission" => assert!(app.permission_picker.is_some()),
+                "engine" => assert!(app.engine_picker),
+                "model" => assert!(app.model_picker.is_some()),
+                "beliefs" => assert!(app.lore_picker.is_some()),
+                _ => {
+                    assert_eq!(app.chip_info.as_ref().map(|info| info.kind), Some(kind));
+                    if kind == "memory" { assert!(painted_at(&app, 220, 32).contains("separate LORE caps")); }
+                }
+            }
+            app.handle(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+            x += chip_text(kind, &label).width() as u16 + 1;
+        }
+    }
+
+    #[test]
+    fn narrow_and_split_panes_hit_visible_chips_without_disturbing_drafts() {
+        for split in [Split::Vertical, Split::Horizontal] {
+        for width in [76, 100, 140] {
+            let mut app = App::default();
+            app.rail_visible = false;
+            app.handle(Event::Resize(width, 32));
+            app.apply_daemon_frame(&json!({"type":"hello","session_id":"left","engine":"codex","model":"gpt-6-sol"}));
+            app.apply_daemon_frame(&json!({"type":"hello","session_id":"right","engine":"claude","model":"sonnet"}));
+            app.groups[0].tabs = vec!["left".into()];
+            app.groups[1].tabs = vec!["right".into()];
+            app.split = split;
+            app.split_requested = true;
+            app.input = "left draft".into();
+            app.input_cursor = app.input.len();
+            app.input_drafts.insert((1, "right".into()), ("right draft\ncontinued".into(), 21));
+            let panes = app.layout(app.size).panes.unwrap();
+            let strip = app.pane_regions(1, panes[1])[3];
+            let visible = app.chip_window(1, usize::from(strip.width));
+            assert!(!visible.is_empty());
+            let (kind, _) = &visible[0];
+            let x = strip.x + 1;
+            app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Moved,
+                column: x, row: strip.y, modifiers: KeyModifiers::NONE }));
+            assert_eq!(app.chip_hover.as_ref().map(|hit| hit.kind), Some(*kind));
+            app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+                column: x, row: strip.y, modifiers: KeyModifiers::NONE }));
+            assert_eq!(app.active_group, 1);
+            assert_eq!(app.input, "right draft\ncontinued");
+            assert_eq!(app.input_drafts.get(&(0, "left".into())).unwrap().0, "left draft");
+        }
+        }
+        assert!(chip_hint("memory").contains("% of separate LORE caps"));
+    }
+
+    #[test]
+    fn overflow_chip_has_hover_hint_and_cycles_clickable_items() {
+        let mut app = App::default();
+        app.rail_visible = false;
+        app.handle(Event::Resize(60, 28));
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"s","engine":"claude",
+            "model":"sonnet","permission_mode":"auto","can_set_permission_mode":true}));
+        app.groups[0].tabs = vec!["s".into()];
+        let pane = app.layout(app.size).body;
+        let strip = app.pane_regions(0, pane)[3];
+        let visible = app.chip_window(0, usize::from(strip.width));
+        assert_eq!(visible.last().map(|row| row.0), Some("more"));
+        let preceding = visible[..visible.len() - 1].iter()
+            .map(|(kind, label)| chip_text(kind, label).width() + 1).sum::<usize>();
+        let x = strip.x + preceding as u16 + 1;
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Moved,
+            column: x, row: strip.y, modifiers: KeyModifiers::NONE }));
+        assert_eq!(app.chip_hover.as_ref().map(|hit| hit.kind), Some("more"));
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: x, row: strip.y, modifiers: KeyModifiers::NONE }));
+        assert_ne!(app.chip_offsets[0], 0);
+        assert!(app.chip_window(0, usize::from(strip.width)).iter().any(|(kind, _)| *kind == "memory"));
     }
 
     #[test]
@@ -5940,7 +6581,7 @@ mod tests {
         let (tx, rx) = mpsc::sync_channel(1);
         app.history_pending = Some(rx);
         tx.send(vec![history::OfflineSession { id: "saved-1".into(),
-            project: "project\u{1b}[31m".into(), markdown: "**You:** saved".into() }]).unwrap();
+            project: "project\u{1b}[31m".into(), markdown: "**You:** saved".into(), cwd: None }]).unwrap();
         assert!(app.poll_history());
         assert!(app.offline_ids.contains("saved-1"));
         assert!(!app.sessions[0].collection.contains('\u{1b}'));
@@ -5953,6 +6594,93 @@ mod tests {
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert!(app.pending_prompts.is_empty());
         assert_eq!(app.notice, "Archived transcript is read-only");
+    }
+
+    #[test]
+    fn resume_prefix_uses_nonmodal_picker_and_never_reaches_model_prompt() {
+        let mut app = App::default();
+        app.handle(Event::Resize(100, 28));
+        app.input = "/resume saved".into();
+        assert!(app.submit_local_command());
+        assert!(app.input.is_empty());
+        assert!(app.history_modal && app.history_resume);
+        let (tx, rx) = mpsc::sync_channel(1);
+        app.history_pending = Some(rx);
+        tx.send(vec!["saved-1", "saved-2"].into_iter().map(|id| history::OfflineSession {
+            id: id.into(), project: "project".into(), markdown: "**You:** old turn".into(), cwd: None,
+        }).collect()).unwrap();
+        assert!(app.poll_history());
+        assert_eq!(app.history_matches().len(), 2);
+        assert!(painted(&app).contains("Resume session"));
+        assert!(app.pending_prompts.is_empty());
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        assert!(!app.history_modal);
+        app.input = "/resume ../unsafe".into();
+        assert!(app.submit_local_command());
+        assert!(app.notice.contains("valid session ID"));
+        assert!(app.pending_prompts.is_empty());
+    }
+
+    #[test]
+    fn local_search_filters_saved_transcript_content() {
+        let mut app = App::default();
+        app.handle(Event::Resize(100, 28));
+        let (tx, rx) = mpsc::sync_channel(1);
+        app.history_pending = Some(rx);
+        tx.send(vec![history::OfflineSession { id: "archive-1".into(), project: "project".into(),
+            markdown: "**You:** hidden needle".into(), cwd: None }]).unwrap();
+        app.poll_history();
+        app.input = "/search needle".into();
+        assert!(app.submit_local_command());
+        assert!(app.history_modal && !app.history_resume);
+        assert_eq!(app.history_matches().len(), 1);
+        assert!(app.pending_prompts.is_empty());
+    }
+
+    #[test]
+    fn archive_raw_search_hit_survives_truncated_render_only_for_its_query() {
+        let mut app = App::default();
+        app.handle(Event::Resize(100, 28));
+        app.local_search("needle");
+        let (tx, rx) = mpsc::sync_channel(1);
+        app.history_pending = Some(rx);
+        tx.send(vec![history::OfflineSession { id: "old-archive".into(), project: "project".into(),
+            markdown: "**You:** recent visible turn".into(), cwd: None }]).unwrap();
+        assert!(app.poll_history());
+        assert_eq!(app.history_matches().len(), 1, "raw JSONL scan found an older hidden turn");
+        app.history_query = "different".into();
+        assert!(app.history_matches().is_empty(), "scan hit must not satisfy a different query");
+    }
+
+    #[test]
+    fn queue_picker_cancels_exact_selected_id_and_refuses_duplicate_ids() {
+        let mut app = App::default();
+        app.handle(Event::Resize(100, 28));
+        app.apply_update(DaemonUpdate::Upsert(Session { id: "session-1".into(), title: "Live".into(),
+            collection: "repo".into(), transcript: String::new(), status: "Ready".into() }));
+        app.groups[0].tabs.push("session-1".into());
+        app.input = "/queue".into();
+        assert!(app.submit_local_command());
+        assert!(app.queue_picker.is_some());
+        assert!(app.active_chooser_rect().is_some());
+        assert!(matches!(app.pending_queue_commands.pop(), Some(crate::bridge::WorkerCommand::QueueList(id)) if id == "session-1"));
+        app.apply_daemon_frame(&json!({"type":"queue_list_reply","session_id":"session-1","ok":true,
+            "rows":[{"id":"q3","preview":"first scrubbed"},{"id":"q9","preview":"second scrubbed"}]}));
+        assert!(painted(&app).contains("Prompt queue"));
+        app.queue_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.queue_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(matches!(app.pending_queue_commands.pop(), Some(crate::bridge::WorkerCommand::QueueCancel(session, id))
+            if session == "session-1" && id == "q9"));
+        assert!(!app.apply_daemon_frame(&json!({"type":"queue_cancel_reply","session_id":"session-1","queue_id":"q3","ok":true})));
+        assert_eq!(app.queue_picker.as_ref().unwrap().cancelling.as_deref(), Some("q9"));
+        app.apply_daemon_frame(&json!({"type":"queue_cancel_reply","session_id":"session-1","queue_id":"q9","ok":true}));
+        assert!(matches!(app.pending_queue_commands.pop(), Some(crate::bridge::WorkerCommand::QueueList(id)) if id == "session-1"));
+        app.apply_daemon_frame(&json!({"type":"queue_list_reply","session_id":"session-1","ok":true,
+            "rows":[{"id":"q3","preview":"a"},{"id":"q3","preview":"b"}]}));
+        app.queue_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(app.pending_queue_commands.is_empty());
+        assert!(app.notice.contains("Duplicate queue ID"));
+        assert!(app.pending_prompts.is_empty());
     }
 
     #[test]

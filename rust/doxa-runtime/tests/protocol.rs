@@ -306,6 +306,131 @@ fn prompt_reply_precedes_events_and_queue_notifies_only_other_client() {
     assert_eq!(*host.prompts.lock().unwrap(), vec!["first", "second"]);
 }
 
+struct QueueFixture { permits: (Mutex<usize>, Condvar), prompts: Mutex<Vec<String>> }
+impl QueueFixture {
+    fn new() -> Self { Self { permits: (Mutex::new(0), Condvar::new()), prompts: Mutex::new(Vec::new()) } }
+    fn release_one(&self) { *self.permits.0.lock().unwrap() += 1; self.permits.1.notify_all(); }
+}
+impl Host for QueueFixture {
+    fn prompt(&self, text: &str, emit: &mut dyn FnMut(Value)) {
+        self.prompts.lock().unwrap().push(text.to_owned());
+        let mut permits = self.permits.0.lock().unwrap();
+        while *permits == 0 { permits = self.permits.1.wait(permits).unwrap(); }
+        *permits -= 1;
+        emit(json!({"type":"turn_done","data":{}}));
+    }
+    fn call(&self, _: &str, _: &Value) -> Result<Value, String> { Err("unknown method".into()) }
+    fn public_prompt(&self, text: &str) -> Result<String, String> {
+        Ok(text.replace("secret", "[redacted]"))
+    }
+}
+
+#[test]
+fn queue_rpc_lists_scrubbed_fifo_and_cancels_exactly_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let host = Arc::new(QueueFixture::new());
+    let handle = Daemon::bind(dir.path(), session(), host.clone()).unwrap().start();
+    let (mut a, mut aw) = connect(handle.socket_path());
+    let (mut b, mut bw) = connect(handle.socket_path());
+    recv(&mut a); recv(&mut b);
+    send(&mut aw, json!({"type":"attach","cursor":null}));
+    send(&mut bw, json!({"type":"attach","cursor":null}));
+    send(&mut bw, json!({"type":"call","id":1,"method":"status"}));
+    assert_eq!(recv(&mut b)["id"], 1);
+    send(&mut aw, json!({"type":"prompt","id":1,"text":"first secret"}));
+    assert_eq!(recv(&mut a)["ok"], true);
+    for (request, id, text) in [(2, "q1", "second secret"), (3, "q2", "third secret")] {
+        send(&mut aw, json!({"type":"prompt","id":request,"text":text}));
+        assert_eq!(recv(&mut a)["queue_id"], id);
+        let broadcast = recv(&mut b);
+        assert_eq!(broadcast["event"]["type"], "prompt_queued");
+        assert!(!broadcast.to_string().contains("secret"));
+    }
+    send(&mut aw, json!({"type":"call","id":4,"method":"queue"}));
+    let listed = recv(&mut a);
+    assert_eq!(listed["queue"], json!([
+        {"id":"q1","text":"second [redacted]"},
+        {"id":"q2","text":"third [redacted]"}
+    ]));
+    send(&mut aw, json!({"type":"call","id":5,"method":"cancel_queued","params":{"id":"q1","position":1}}));
+    assert_eq!(recv(&mut a)["ok"], true);
+    let cancelled = recv(&mut a);
+    assert_eq!(cancelled["event"]["type"], "prompt_cancelled");
+    assert_eq!(cancelled["event"]["data"]["id"], "q1");
+    assert!(!cancelled.to_string().contains("secret"));
+    assert_eq!(recv(&mut b)["event"]["data"]["id"], "q1");
+    send(&mut aw, json!({"type":"call","id":6,"method":"queue"}));
+    assert_eq!(recv(&mut a)["queue"], json!([{"id":"q2","text":"third [redacted]"}]));
+    send(&mut aw, json!({"type":"call","id":7,"method":"cancel_queued","params":{"id":"q1"}}));
+    assert_eq!(recv(&mut a)["ok"], false);
+    send(&mut aw, json!({"type":"call","id":8,"method":"cancel_queued","params":{"id":"q"}}));
+    assert_eq!(recv(&mut a)["ok"], false, "prefix must not cancel an unintended prompt");
+    send(&mut aw, json!({"type":"call","id":9,"method":"cancel_queued","params":{"id":"q2","position":0}}));
+    assert_eq!(recv(&mut a)["ok"], false);
+    send(&mut aw, json!({"type":"call","id":12,"method":"cancel_queued","params":{"position":1}}));
+    let positional = recv(&mut a);
+    assert_eq!(positional["ok"], false);
+    assert!(positional["error"].as_str().unwrap().contains("exact queued prompt id"));
+    host.release_one();
+    let mut dequeued = false;
+    for _ in 0..3 {
+        let frame = recv(&mut a);
+        if frame["event"]["type"] == "prompt_dequeued" {
+            assert_eq!(frame["event"]["data"]["id"], "q2");
+            dequeued = true;
+            break;
+        }
+    }
+    assert!(dequeued);
+    send(&mut aw, json!({"type":"call","id":10,"method":"queue"}));
+    assert_eq!(recv(&mut a)["queue"], json!([]));
+    send(&mut aw, json!({"type":"call","id":11,"method":"cancel_queued","params":{"id":"q2"}}));
+    assert_eq!(recv(&mut a)["ok"], false, "already-dequeued prompt cannot be cancelled");
+    host.release_one();
+    for _ in 0..3 {
+        if recv(&mut a)["event"]["type"] == "turn_done" { break; }
+    }
+    assert_eq!(*host.prompts.lock().unwrap(), vec!["first secret", "third secret"]);
+}
+
+#[test]
+fn stale_position_cannot_cancel_next_item_after_dequeue() {
+    let dir = tempfile::tempdir().unwrap();
+    let host = Arc::new(QueueFixture::new());
+    let handle = Daemon::bind(dir.path(), session(), host.clone()).unwrap().start();
+    let (mut reader, mut writer) = connect(handle.socket_path());
+    recv(&mut reader);
+    send(&mut writer, json!({"type":"attach","cursor":null}));
+    for (request, text) in [(1, "running"), (2, "queued one"), (3, "queued two")] {
+        send(&mut writer, json!({"type":"prompt","id":request,"text":text}));
+        assert_eq!(recv(&mut reader)["ok"], true);
+    }
+    send(&mut writer, json!({"type":"call","id":4,"method":"queue"}));
+    assert_eq!(recv(&mut reader)["queue"], json!([
+        {"id":"q1","text":"queued one"}, {"id":"q2","text":"queued two"}
+    ]));
+    host.release_one();
+    let mut dequeued = false;
+    for _ in 0..3 {
+        if recv(&mut reader)["event"]["type"] == "prompt_dequeued" { dequeued = true; break; }
+    }
+    assert!(dequeued);
+    // Position 1 now names q2. The old listing's q1 must not cancel q2.
+    send(&mut writer, json!({"type":"call","id":5,"method":"cancel_queued",
+        "params":{"id":"q1","position":1}}));
+    let stale = recv(&mut reader);
+    assert_eq!(stale["ok"], false);
+    assert!(stale["error"].as_str().unwrap().contains("queue changed"));
+    send(&mut writer, json!({"type":"call","id":6,"method":"queue"}));
+    assert_eq!(recv(&mut reader)["queue"], json!([{"id":"q2","text":"queued two"}]));
+    send(&mut writer, json!({"type":"call","id":7,"method":"cancel_queued","params":{"id":"q2"}}));
+    assert_eq!(recv(&mut reader)["ok"], true);
+    assert_eq!(recv(&mut reader)["event"]["data"]["id"], "q2");
+    host.release_one();
+    assert_eq!(recv(&mut reader)["event"]["type"], "turn_done");
+    assert_eq!(*host.prompts.lock().unwrap(), vec!["running", "queued one"]);
+}
+
 struct PanicOnDequeue { fixture: Fixture, public_calls: AtomicUsize }
 impl Host for PanicOnDequeue {
     fn prompt(&self, text: &str, emit: &mut dyn FnMut(Value)) { self.fixture.prompt(text, emit); }

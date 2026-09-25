@@ -18,6 +18,7 @@ pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 const RING_CAPACITY: usize = 512;
 const CLIENT_QUEUE_CAPACITY: usize = 1024;
 const PROMPT_QUEUE_CAPACITY: usize = 8;
+const QUEUE_PREVIEW_CHARS: usize = 120;
 const MAX_CONNECTIONS: usize = 64;
 
 /// The engine seam. `prompt` may emit zero or more protocol event objects.
@@ -54,7 +55,9 @@ pub struct Session {
     pub doxa_version: String,
 }
 
-struct Prompt { text: String, queue_id: String, peer_origin: Option<String> }
+struct Prompt { text: String, public_text: String, queue_id: String, peer_origin: Option<String> }
+
+fn queue_preview(text: &str) -> String { text.chars().take(QUEUE_PREVIEW_CHARS).collect() }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ExternalPrompt {
@@ -201,7 +204,7 @@ impl DaemonHandle {
             let queue_id = format!("q{}", state.next_queue_id);
             state.next_queue_id += 1;
             let position = state.prompts.len() + 1;
-            state.prompts.push_back(Prompt { text, queue_id: queue_id.clone(), peer_origin: Some(origin.to_owned()) });
+            state.prompts.push_back(Prompt { text, public_text: queue_preview(&display), queue_id: queue_id.clone(), peer_origin: Some(origin.to_owned()) });
             drop(state);
             self.inner.publish(None, json!({"type":"prompt_queued","data":{
                 "id":queue_id,"text":display,"position":position,
@@ -403,7 +406,7 @@ fn handle_prompt(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, client_id: u64, f
         state.next_queue_id += 1;
         let position = state.prompts.len() + 1;
         if !send(tx, json!({"type":"reply","id":req_id,"ok":true,"queued":true,"position":position,"queue_id":queue_id})) { return; }
-        state.prompts.push_back(Prompt { text: text.to_owned(), queue_id: queue_id.clone(), peer_origin: None });
+        state.prompts.push_back(Prompt { text: text.to_owned(), public_text: queue_preview(&display), queue_id: queue_id.clone(), peer_origin: None });
         drop(state);
         // Origin client receives its queue notification in the reply only.
         let event = json!({"type":"prompt_queued","data":{"id":queue_id,"text":display,"position":position}});
@@ -435,7 +438,35 @@ fn handle_call(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame: &Value) {
     let params = frame.get("params").filter(|v| v.is_object()).cloned().unwrap_or_else(|| json!({}));
     let _control_guard = matches!(method, "set_model" | "set_permission_mode")
         .then(|| inner.controls.lock().unwrap());
-    let (result, changed) = if method == "status" {
+    let (result, changed) = if method == "queue" {
+        let state = inner.state.lock().unwrap();
+        let queue: Vec<_> = state.prompts.iter().map(|item| json!({
+            "id":item.queue_id,"text":item.public_text
+        })).collect();
+        (Ok(json!({"queue":queue})), None)
+    } else if method == "cancel_queued" {
+        let id = params.get("id").and_then(Value::as_str);
+        let position = params.get("position").and_then(Value::as_u64);
+        if id.is_none_or(str::is_empty) {
+            (Err("cancel_queued requires an exact queued prompt id; resolve positions from a fresh queue listing".into()), None)
+        } else if params.get("position").is_some_and(|v| !v.is_u64()) || position == Some(0) {
+            (Err("position must be a positive 1-based number".into()), None)
+        } else {
+            let mut state = inner.state.lock().unwrap();
+            let id = id.expect("validated exact id");
+            let index = state.prompts.iter().position(|item| item.queue_id == id);
+            let expected_index = position.and_then(|position| usize::try_from(position).ok())
+                .and_then(|position| position.checked_sub(1));
+            if position.is_some() && index != expected_index {
+                (Err("queue changed; refresh the queue and retry with its exact prompt id".into()), None)
+            } else { match index.and_then(|index| state.prompts.remove(index)) {
+                Some(item) => (Ok(json!({})), Some(json!({"type":"prompt_cancelled","data":{
+                    "id":item.queue_id,"text":item.public_text
+                }}))),
+                None => (Err("no such queued prompt (already started, cancelled, or discarded)".into()), None),
+            } }
+        }
+    } else if method == "status" {
         let can_set_model = inner.host.can_set_model();
         let can_set_permission_mode = inner.host.can_set_permission_mode();
         let lore_scrub = inner.host.lore_scrub_status();

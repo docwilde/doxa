@@ -509,6 +509,73 @@ fn registry_wire_prompt_and_stop() {
 }
 
 #[test]
+fn concurrent_process_cannot_claim_same_session_and_lock_survives_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut first = Process::start(dir.path(), "10");
+    let owner = first.entry();
+    let second = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+        .args(["--runtime-dir", dir.path().to_str().unwrap(), "--cwd", "/tmp",
+            "--session-id", "fixture-session", "--linger", "10"])
+        .env("DOXA_HOME", dir.path().join("home"))
+        .output().unwrap();
+    assert!(!second.status.success());
+    assert!(String::from_utf8_lossy(&second.stderr).contains("session is already active"),
+        "{}", String::from_utf8_lossy(&second.stderr));
+    assert!(!first.exited());
+    assert_eq!(first.entry()["pid"], owner["pid"]);
+
+    let (mut reader, mut socket) = first.connect();
+    receive(&mut reader);
+    send(&mut socket, json!({"type":"attach","cursor":null}));
+    send(&mut socket, json!({"type":"call","id":1,"method":"stop","params":{}}));
+    assert_eq!(receive(&mut reader)["ok"], true);
+    wait_until(|| first.exited());
+    wait_until(|| !first.registry.exists());
+    assert!(dir.path().join("registry/fixture-session.lock").exists());
+    let mut restarted = Process::start(dir.path(), "10");
+    assert_ne!(restarted.entry()["pid"], owner["pid"]);
+    let (mut reader, mut socket) = restarted.connect();
+    receive(&mut reader);
+    send(&mut socket, json!({"type":"attach","cursor":null}));
+    send(&mut socket, json!({"type":"call","id":1,"method":"stop","params":{}}));
+    assert_eq!(receive(&mut reader)["ok"], true);
+    wait_until(|| restarted.exited());
+}
+
+#[test]
+fn legacy_registry_entry_blocks_resume_before_claude_host_starts() {
+    let dir = tempfile::tempdir().unwrap();
+    let registry = dir.path().join("runtime/registry");
+    fs::create_dir_all(&registry).unwrap();
+    let entry = registry.join("legacy-session.json");
+    let marker = dir.path().join("claude-host-opened");
+    let sidecar = dir.path().join("claude-sidecar.py");
+    fs::write(&sidecar, format!("from pathlib import Path\nPath({}).write_text('opened')\n",
+        serde_json::to_string(marker.to_str().unwrap()).unwrap())).unwrap();
+    let run_resume = || Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+        .args(["--runtime-dir", dir.path().join("runtime").to_str().unwrap(),
+            "--cwd", dir.path().to_str().unwrap(), "--session-id", "legacy-session",
+            "--engine", "claude", "--claude-python", "/usr/bin/python3",
+            "--claude-script", sidecar.to_str().unwrap(), "--resume", "true"])
+        .env("DOXA_HOME", dir.path().join("home"))
+        .output().unwrap();
+
+    fs::write(&entry, b"{\"session_id\":\"legacy-session\"}\n").unwrap();
+    let result = run_resume();
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("session registry entry already exists"));
+    assert!(!marker.exists(), "legacy session state was opened before collision check");
+    assert!(registry.join("legacy-session.lock").exists());
+
+    fs::remove_file(&entry).unwrap();
+    std::os::unix::fs::symlink(dir.path().join("missing-entry"), &entry).unwrap();
+    let result = run_resume();
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("session registry entry already exists"));
+    assert!(!marker.exists(), "unsafe registry symlink was followed before host startup");
+}
+
+#[test]
 fn linger_resets_when_a_client_reattaches() {
     let dir = tempfile::tempdir().unwrap();
     // Leave enough room for a loaded CI runner to schedule the reconnect.
@@ -1904,9 +1971,19 @@ mod vendor_process {
             assert!(requests.iter().all(|body| body.get("tools").is_none()));
             assert_eq!(requests[1]["messages"][1]["content"], "[redacted] answer");
             assert!(!requests[1].to_string().contains("fixture-secret"));
+            // The published entry is removed at shutdown. Its private claim
+            // inode remains so a later daemon cannot bypass an active flock by
+            // racing a lockfile unlink/recreation.
+            assert!(!process.registry.exists());
+            let remaining: Vec<_> = fs::read_dir(dir.path().join("registry"))
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                .collect();
+            assert_eq!(remaining, ["vendor-session.lock"]);
             assert_eq!(
-                fs::read_dir(dir.path().join("registry")).unwrap().count(),
-                0
+                fs::metadata(dir.path().join("registry/vendor-session.lock"))
+                    .unwrap().permissions().mode() & 0o777,
+                0o600
             );
         }
     }
@@ -2575,6 +2652,51 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}
     }
     assert!(saw_dequeue && saw_peer);
     send(&mut socket, json!({"type":"call","id":3,"method":"stop","params":{}}));
+    assert_eq!(receive(&mut reader)["ok"], true);
+    wait_until(|| process.exited());
+}
+
+#[test]
+fn native_daemon_queue_rpc_scrubs_and_cancels_before_turn_starts() {
+    let dir = tempfile::tempdir().unwrap();
+    let codex = dir.path().join("codex-fixture");
+    let python = dir.path().join("lore-fixture");
+    let ready = dir.path().join("provider-ready");
+    let release = dir.path().join("provider-release");
+    fake_scrubber(&python, false);
+    executable(&codex, &format!(r#"#!/bin/sh
+cat >/dev/null
+touch '{}'
+while [ ! -f '{}' ]; do sleep 0.01; done
+echo '{{"type":"thread.started","thread_id":"thread_1"}}'
+echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}}'
+"#, ready.display(), release.display()));
+    let mut process = Process::start_codex(dir.path(), &codex, &python);
+    let (mut reader, mut socket) = process.connect();
+    receive(&mut reader);
+    send(&mut socket, json!({"type":"attach","cursor":null}));
+    send(&mut socket, json!({"type":"prompt","id":1,"text":"first"}));
+    assert_eq!(receive(&mut reader)["ok"], true);
+    assert_eq!(receive(&mut reader)["event"]["type"], "turn_started");
+    wait_until(|| ready.exists());
+    send(&mut socket, json!({"type":"prompt","id":2,"text":"fixture-secret queued"}));
+    assert_eq!(receive(&mut reader)["queue_id"], "q1");
+    send(&mut socket, json!({"type":"call","id":3,"method":"queue","params":{}}));
+    let queued = receive(&mut reader);
+    assert_eq!(queued["queue"], json!([{"id":"q1","text":"[redacted] queued"}]));
+    assert!(!queued.to_string().contains("fixture-secret"));
+    send(&mut socket, json!({"type":"call","id":4,"method":"cancel_queued","params":{"id":"q1"}}));
+    assert_eq!(receive(&mut reader)["ok"], true);
+    let cancelled = receive(&mut reader);
+    assert_eq!(cancelled["event"]["type"], "prompt_cancelled");
+    assert_eq!(cancelled["event"]["data"]["text"], "[redacted] queued");
+    send(&mut socket, json!({"type":"call","id":5,"method":"queue","params":{}}));
+    assert_eq!(receive(&mut reader)["queue"], json!([]));
+    fs::write(&release, "go").unwrap();
+    loop {
+        if receive(&mut reader)["event"]["type"] == "turn_done" { break; }
+    }
+    send(&mut socket, json!({"type":"call","id":6,"method":"stop","params":{}}));
     assert_eq!(receive(&mut reader)["ok"], true);
     wait_until(|| process.exited());
 }

@@ -1,7 +1,7 @@
 use doxa_tui::{bridge, discovery, fleet_plan, fleet_view, launch, ui_state};
 use std::collections::HashSet;
-use std::io;
-use std::path::PathBuf;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::process::Stdio;
 
@@ -9,29 +9,121 @@ fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message.into())
 }
 
-fn main() -> io::Result<()> {
+fn main() -> std::process::ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let result = run(&args);
-    if let Err(error) = &result {
-        eprintln!("doxa-rs: {error}");
+    match run(&args) {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("doxa: {error}");
+            std::process::ExitCode::FAILURE
+        }
     }
-    result
+}
+
+const HELP: &str = r#"DOXA Rust 2.0 alpha
+
+Usage: doxa [COMMAND] [options]
+
+Commands:
+  help                 Show this help
+  update               Build and install the latest Rust main build
+  new                  Start an isolated session
+  attach [ID]          Reattach a live session by full ID or unique prefix
+  stop [ID]            Stop a live session
+  list                 List live sessions
+  branch [NAME]        List local base branches; NAME explains safe creation
+  doctor               Check provider and launcher dependencies
+  fleet ...            Inspect or start Python-backed fleet runs
+
+Run doxa without a command to restore this project's live sessions or start
+a native Codex session. Ctrl+Q detaches without stopping its daemon.
+
+New-session options: --engine codex|claude|deepseek|glm, --model NAME,
+  --branch LOCAL_OR_REMOTE, --linger SECONDS, --resume FULL_SESSION_ID.
+Codex: --sandbox read-only|workspace-write|danger-full-access, --codex-bin PATH.
+Claude: --claude-python PATH, --claude-script ABSOLUTE_PATH.
+DeepSeek/GLM: --effort low|high|max (DeepSeek also none).
+Use --lore-python PATH for the LORE sidecar; API keys come from provider env vars.
+
+Fleet: doxa fleet preflight --sessions N --run-budget USD [--root PATH]
+       doxa fleet start [Python fleet options]
+       doxa fleet runs | status RUN_ID | stop RUN_ID | attach RUN_ID SLOT
+
+Run doxa doctor --engine NAME to check a provider; doxa --version shows the build.
+Update requires an installed Rust launcher. From a checkout, use ./task install.
+DOXA_RUST_REPO_URL can select a different update source.
+"#;
+
+fn installed_bin_dir_for(executable: &Path) -> io::Result<PathBuf> {
+    let bin_dir = executable.parent().ok_or_else(|| invalid("cannot locate installed launcher"))?;
+    if executable.file_name().is_none_or(|name| name != "doxa-rs")
+        || !bin_dir.join("doxa").is_file()
+        || !bin_dir.join("doxa-daemon-rs").is_file()
+        || !std::fs::symlink_metadata(bin_dir.join(".doxa-sidecar-current"))
+            .is_ok_and(|meta| meta.file_type().is_symlink())
+    {
+        return Err(invalid("update requires an installed Rust doxa launcher; from a source checkout run ./task install"));
+    }
+    Ok(bin_dir.to_path_buf())
+}
+
+fn installed_bin_dir() -> io::Result<PathBuf> {
+    installed_bin_dir_for(&std::env::current_exe()?)
+}
+
+fn run_update_installer(bin_dir: &Path, shell: &Path) -> io::Result<()> {
+    let mut child = Command::new(shell)
+        .args(["-s", "--", "main"])
+        .env("DOXA_RUST_BIN_DIR", bin_dir)
+        .stdin(Stdio::piped())
+        .spawn()?;
+    let mut stdin = child.stdin.take().ok_or_else(|| io::Error::other("installer input unavailable"))?;
+    let write = stdin.write_all(include_bytes!("../../../scripts/install.sh"));
+    drop(stdin);
+    let status = child.wait()?;
+    write?;
+    if !status.success() {
+        return Err(io::Error::other(format!("update failed with installer status {status}")));
+    }
+    Ok(())
+}
+
+fn update() -> io::Result<()> {
+    let bin_dir = installed_bin_dir()?;
+    let repo = std::env::var("DOXA_RUST_REPO_URL")
+        .unwrap_or_else(|_| "https://github.com/docwilde/doxa".to_owned());
+    eprintln!("Updating DOXA Rust from {repo} main into {}", bin_dir.display());
+    run_update_installer(&bin_dir, Path::new("/bin/sh"))
 }
 
 fn run(args: &[String]) -> io::Result<()> {
+    if let Some(command) = args.first().map(String::as_str) {
+        match command {
+            "help" | "--help" | "-help" | "-h" => {
+                if args.len() != 1 { return Err(invalid("help takes no arguments")); }
+                print!("{HELP}");
+                return Ok(());
+            }
+            "update" => {
+                if args.len() != 1 { return Err(invalid("update takes no arguments")); }
+                return update();
+            }
+            _ => {}
+        }
+    }
     if args.first().is_some_and(|arg| arg == "fleet") {
         return fleet(&args[1..]);
     }
     let mut command: Option<&str> = None;
     let mut prefix: Option<&str> = None;
+    let mut branch_target: Option<&str> = None;
     let mut options = launch::LaunchOptions::default();
     let mut socket: Option<&str> = None;
     let mut index = 0;
     while index < args.len() {
         let arg = args[index].as_str();
         match arg {
-            "new" | "attach" | "stop" | "list" | "doctor" | "--list" | "--demo" | "--version"
-            | "--help"
+            "new" | "attach" | "stop" | "list" | "doctor" | "branch" | "--list" | "--demo" | "--version"
                 if command.is_none() =>
             {
                 command = Some(arg)
@@ -84,6 +176,9 @@ fn run(args: &[String]) -> io::Result<()> {
             {
                 prefix = Some(arg)
             }
+            _ if !arg.starts_with('-') && command == Some("branch") && branch_target.is_none() => {
+                branch_target = Some(arg)
+            }
             _ => return Err(invalid(format!("unexpected argument: {arg}"))),
         }
         index += 1;
@@ -104,17 +199,31 @@ fn run(args: &[String]) -> io::Result<()> {
     if options.branch.is_some() && command != Some("new") {
         return Err(invalid("--branch requires new"));
     }
+    if command == Some("branch") && prefix.is_some() {
+        return Err(invalid("branch reads the current checkout; --session is not supported"));
+    }
     match command {
-        Some("--help") => {
-            println!("Usage: doxa-rs [new|attach [ID]|stop [ID]|list|doctor] [options]\n       doxa-rs fleet start PYTHON_FLEET_OPTIONS\n       doxa-rs fleet runs|status RUN_ID|stop RUN_ID|attach RUN_ID SLOT [--root ABSOLUTE_PATH]\n       doxa-rs --session ID\n       doxa-rs --socket PATH\n\nPlain doxa-rs restores live sessions in the current project, or starts a native Codex session.\nnew always starts a session. attach and stop accept a full ID or unique prefix.\nOptions for new sessions: --engine codex|claude|deepseek|glm|fixture, --model NAME, --linger SECONDS, --branch LOCAL_OR_REMOTE.\nCodex: --sandbox read-only|workspace-write|danger-full-access, --codex-bin PATH, --lore-python PATH.\nClaude: --claude-python PATH, --claude-script ABSOLUTE_PATH.\nDeepSeek/GLM: --lore-python PATH, --effort low|high|max (DeepSeek also none); API key in provider environment variable.\nClaude/DeepSeek/GLM: --resume FULL_SESSION_ID with new.\nDOXA_DAEMON_BIN selects an absolute native daemon path. Ctrl+Q detaches without stopping the daemon.");
-            println!("Fleet safety preview: doxa-rs fleet preflight --sessions N --run-budget USD [--root ABSOLUTE_PATH] [--run-id ID] [--force|--allow-unbudgeted]");
-            Ok(())
-        }
         Some("--version") => {
-            println!("doxa-rs {}", env!("CARGO_PKG_VERSION"));
+            println!("doxa {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
         Some("--demo") => doxa_tui::ui::run(),
+        Some("branch") => {
+            if branch_target.is_some() {
+                return Err(invalid(doxa_worktrees::live_switch_refusal()));
+            }
+            let cwd = std::env::current_dir()?;
+            let status = doxa_worktrees::branch_status(&cwd)
+                .ok_or_else(|| invalid("branch: no supported Git checkout here"))?;
+            println!("branch: {}", status.base.as_deref().unwrap_or("(none)"));
+            println!();
+            for name in status.branches {
+                let mark = if Some(name.as_str()) == status.base.as_deref() { "▸" } else { " " };
+                println!(" {mark} {name}");
+            }
+            println!("\nstart an isolated session: doxa new --branch NAME");
+            Ok(())
+        }
         Some("list" | "--list") => {
             for session in discovery::sessions()? {
                 println!(
@@ -303,7 +412,7 @@ fn fleet(args: &[String]) -> io::Result<()> {
             let (socket, session_id) = fleet_view::slot_socket(&root, run, slot)?;
             return bridge::run_socket_expected(socket, Some(&session_id));
         }
-        _ => return Err(invalid("usage: doxa-rs fleet start PYTHON_FLEET_OPTIONS|preflight --sessions N --run-budget USD [--root ABSOLUTE_PATH]|runs|status RUN_ID|stop RUN_ID|attach RUN_ID SLOT [--root ABSOLUTE_PATH]")),
+        _ => return Err(invalid("usage: doxa fleet start PYTHON_FLEET_OPTIONS|preflight --sessions N --run-budget USD [--root ABSOLUTE_PATH]|runs|status RUN_ID|stop RUN_ID|attach RUN_ID SLOT [--root ABSOLUTE_PATH]")),
     }
     Ok(())
 }
@@ -332,4 +441,34 @@ fn fleet_start_compat(args: &[String]) -> io::Result<()> {
         std::process::exit(status.code().unwrap_or(1));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    #[test]
+    fn update_runs_embedded_installer_for_verified_bin_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        for name in ["doxa-rs", "doxa", "doxa-daemon-rs"] {
+            fs::write(bin.join(name), "fixture").unwrap();
+        }
+        let executable = bin.join("doxa-rs");
+        assert!(installed_bin_dir_for(&executable).is_err());
+        symlink("unused-sidecar", bin.join(".doxa-sidecar-current")).unwrap();
+        assert_eq!(installed_bin_dir_for(&executable).unwrap(), bin);
+
+        let shell = dir.path().join("fake-sh");
+        fs::write(&shell, "#!/bin/sh\n[ \"$1\" = -s ] && [ \"$2\" = -- ] && [ \"$3\" = main ] || exit 21\nprintf '%s' \"$DOXA_RUST_BIN_DIR\" > \"$(dirname \"$0\")/bin-dir\"\ncat > \"$(dirname \"$0\")/installer\"\n").unwrap();
+        fs::set_permissions(&shell, fs::Permissions::from_mode(0o700)).unwrap();
+        run_update_installer(&bin, &shell).unwrap();
+        assert_eq!(fs::read_to_string(dir.path().join("bin-dir")).unwrap(), bin.to_string_lossy());
+        let script = fs::read_to_string(dir.path().join("installer")).unwrap();
+        assert!(script.starts_with("#!/bin/sh\n"));
+        assert!(script.contains("main \"$@\""));
+    }
 }

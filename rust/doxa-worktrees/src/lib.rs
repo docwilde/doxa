@@ -20,6 +20,14 @@ pub struct Record {
     pub session_id: String,
 }
 
+/// Read-only branch choices for the checkout containing `cwd`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BranchStatus {
+    pub branches: Vec<String>,
+    pub base: Option<String>,
+    pub checked_out: Option<String>,
+}
+
 pub struct Managed {
     path: PathBuf,
     created: bool,
@@ -127,6 +135,31 @@ pub fn resolve_base(cwd: &Path, requested: &str) -> Option<String> {
         return Some(requested.into());
     }
     None
+}
+
+/// List local branches without changing either the shared checkout or a
+/// session worktree. A managed session's identity branch is not a base choice.
+pub fn branch_status(cwd: &Path) -> Option<BranchStatus> {
+    let main = main_root(cwd)?;
+    let checkout = PathBuf::from(git_text(cwd, &["rev-parse", "--show-toplevel"])?);
+    let checked_out = base_ref(&checkout);
+    let managed = read_record(&checkout);
+    let own = managed.as_ref().map(|(record, _, _)| record.branch.as_str());
+    let text = git_text(&main, &["branch", "--format=%(refname:short)"])?;
+    let branches = text.lines().map(str::trim)
+        .filter(|name| safe_ref(name) && Some(*name) != own)
+        .map(str::to_owned).collect();
+    Some(BranchStatus {
+        branches,
+        base: managed.map(|(_, base, _)| base).or_else(|| checked_out.clone()),
+        checked_out,
+    })
+}
+
+/// Live rebasing is not yet supported by the native daemon. Keep this refusal
+/// in the worktree API so callers cannot mistake `resolve_base` for a switch.
+pub fn live_switch_refusal() -> &'static str {
+    "live base switching is unavailable in Rust; use `doxa-rs new --branch NAME` to start an isolated session, or finish the current session and switch your checkout explicitly with git"
 }
 fn short_id(id: &str) -> String {
     let short: String = id.chars().filter(char::is_ascii_alphanumeric).take(8).collect();
@@ -362,13 +395,34 @@ mod tests {
         run_git(&main, &["update-ref", "refs/remotes/origin/feature", "HEAD"]);
         run_git(&main, &["update-ref", "refs/remotes/origin/remote-only", "HEAD"]);
         run_git(&main, &["checkout", "-q", "main"]);
+        let shared_head = git_text(&main, &["rev-parse", "HEAD"]).unwrap();
+        let shared_status = git_text(&main, &["status", "--porcelain"]).unwrap();
+        let status = branch_status(&main).unwrap();
+        assert_eq!(status.base.as_deref(), Some("main"));
+        assert_eq!(status.checked_out.as_deref(), Some("main"));
+        assert_eq!(status.branches, vec!["feature", "main"]);
+        assert_eq!(git_text(&main, &["rev-parse", "HEAD"]).unwrap(), shared_head);
+        assert_eq!(git_text(&main, &["status", "--porcelain"]).unwrap(), shared_status);
         assert_eq!(resolve_base(&main, "origin/feature").as_deref(), Some("feature"));
         assert_eq!(resolve_base(&main, "origin/remote-only").as_deref(), Some("origin/remote-only"));
         assert!(resolve_base(&main, "--output=/tmp/unsafe").is_none());
+        assert!(resolve_base(&main, "feature^{}").is_none());
+        assert!(resolve_base(&main, "feature/unknown").is_none());
+        assert!(resolve_base(&main, "refs/heads/main").is_none());
         assert!(resolve_base(&main, "missing").is_none());
+        run_git(&main, &["branch", "origin/feature"]);
+        assert_eq!(resolve_base(&main, "origin/feature").as_deref(), Some("origin/feature"));
+        run_git(&main, &["branch", "-D", "origin/feature"]);
         let mut chosen = create_from(&main, "g1b2c3d4chosen", Some("origin/feature")).unwrap();
         assert_eq!(fs::read_to_string(chosen.path().join("file.txt")).unwrap(), "feature\n");
         assert_eq!(read_record(chosen.path()).unwrap().1, "feature");
+        let status = branch_status(chosen.path()).unwrap();
+        assert_eq!(status.base.as_deref(), Some("feature"));
+        assert_eq!(status.checked_out.as_deref(), Some("doxa/g1b2c3d4"));
+        assert!(status.branches.contains(&"feature".into()));
+        assert!(!status.branches.contains(&"doxa/g1b2c3d4".into()));
+        assert_eq!(git_text(&main, &["rev-parse", "HEAD"]).unwrap(), shared_head);
+        assert_eq!(git_text(&main, &["status", "--porcelain"]).unwrap(), shared_status);
         assert!(chosen.finish().is_empty());
 
         let mut clean = create(&main, "a1b2c3d4clean").unwrap();

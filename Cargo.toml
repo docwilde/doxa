@@ -1,0 +1,5 @@
+[workspace]
+members = ["rust/*"]
+default-members = ["rust/doxa-tui", "rust/doxa-daemon"]
+exclude = ["scripts/rust_ui_bench"]
+resolver = "2"

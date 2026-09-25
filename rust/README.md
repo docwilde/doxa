@@ -17,10 +17,16 @@ the Rust process does not reimplement its store.
 Build the native frontend and daemon from this repository:
 
 ```sh
+cargo build --locked
 ./task build
 ./task doctor
 ./task new
 ```
+
+Run `cargo build --locked` at the repository root. It uses the shared root
+`Cargo.lock` and writes binaries to `target/debug`; `./task` uses
+`target/rust-task` so its launcher builds stay separate.
+Plain `cargo build` works there too; `--locked` checks the committed lockfile.
 
 `./task` is the repository-local launcher. `run` opens or creates a session,
 `new` always creates one, and `doctor` checks launcher dependencies. These
@@ -37,7 +43,7 @@ frontend, daemon, Claude sidecar, and locked Python sidecar environment under
 `DOXA_RUST_BIN_DIR` (default `~/.local/bin`). Working-tree edits must be
 committed before `install` will include them.
 
-`doxa-rs` now starts a native Codex session when no live sessions exist in the
+`doxa` now starts a native Codex session when no live sessions exist in the
 current project. `new` always starts one; `attach ID` reattaches, `stop ID`
 finalizes a running session, `list` shows all live sessions, and `doctor`
 checks executable resolution and registry access. `--session ID` and `--socket`
@@ -71,7 +77,9 @@ set explicitly for integration testing.
 remote-tracking branch. It prefers a same-named local branch over
 `origin/NAME`. An unknown branch, disabled worktrees, or a request combined
 with `--resume` fails before starting the session; the launch checkout is
-never switched. Live `/branch` listing and base switching remain to be ported.
+never switched. `doxa branch` lists local branch bases from this checkout.
+`doxa branch NAME` refuses a live base switch and points to
+`doxa new --branch NAME`; live `/branch` controls remain to be ported.
 
 Or compile and install the main line with the POSIX installer:
 
@@ -87,12 +95,18 @@ Python sidecar environment under `DOXA_HOME` and selects it automatically from
 any working directory. The native daemon can also attach to compatible Python
 1.x sessions.
 
-With one live daemon session, `doxa-rs` attaches to it directly. With multiple
+Use `doxa help` for CLI commands and options. `doxa update` runs the bundled
+installer against `main` and replaces an installed Rust launcher after a
+successful build. It uses the current install directory and honors
+`DOXA_RUST_REPO_URL` for fork installations. A source build uses `./task install`.
+
+With one live daemon session, `doxa` attaches to it directly. With multiple
 sessions, use `--list` and select one by full ID or unique ID prefix.
 `--socket` remains available for an explicit path. `--demo` opens the shell
 without a connection. `Ctrl+P` opens the action menu; use Up/Down, Enter, and
 Esc to navigate the peer map, tool activity, session rail selection, tabs, and
-panes. `Ctrl+M` and `Ctrl+T` remain direct shortcuts. `Ctrl+Q` detaches the Rust UI
+panes. `Shift+Tab` switches panes, including when the terminal reports it as
+`BackTab`. `Ctrl+M` and `Ctrl+T` remain direct shortcuts. `Ctrl+Q` detaches the Rust UI
 without stopping its daemon; `Ctrl+W` detaches only the active tab and leaves
 its session running. `Ctrl+C` is left available for terminal copy.
 Bare `/help`, `/about`, `/sessions`, `/model`, `/engine`, `/mode`, `/beliefs`,
@@ -104,14 +118,14 @@ commands that need more porting, including `/compact`, stay in the draft with a
 notice. Unknown provider and plugin slash commands go to the active engine.
 `Ctrl+M` opens the read-only peer communications
 map; Up/Down selects a peer, R refreshes the live roster, and Esc closes it.
-For Python 1.19 fleet runs, `doxa-rs fleet runs` lists manifests under
-`$DOXA_HOME/fleet`, `doxa-rs fleet status RUN_ID` shows run and slot phases,
-and `doxa-rs fleet attach RUN_ID SLOT` attaches to one slot's live daemon.
-`doxa-rs fleet start <doxa-fleet options>` currently invokes the installed
+For Python 1.19 fleet runs, `doxa fleet runs` lists manifests under
+`$DOXA_HOME/fleet`, `doxa fleet status RUN_ID` shows run and slot phases,
+and `doxa fleet attach RUN_ID SLOT` attaches to one slot's live daemon.
+`doxa fleet start <doxa-fleet options>` currently invokes the installed
 Python fleet harness in the sidecar environment. Its own parser enforces the
 capacity, spend budget, socket length, arm barrier, approval, and teardown
 rules. `--dry-run` shows assignments without starting sessions.
-`doxa-rs fleet preflight --sessions N --run-budget USD [--root PATH]` checks
+`doxa fleet preflight --sessions N --run-budget USD [--root PATH]` checks
 the memory estimate, explicit spend ceiling, and Unix socket path length in
 Rust without creating a run. Use `--allow-unbudgeted` to record an intentional
 absence of a ceiling and `--force` only to override the memory estimate.
@@ -129,7 +143,7 @@ broadcasts stay passive. Messages that cannot enter the queue are retained
 for a later turn up to eight pending frames, with an explicit overflow event.
 Claude continues to use its Python sidecar peer loop and rejects this native
 switch. Python fleet start remains the live path for full run supervision.
-`doxa-rs fleet stop RUN_ID` sends stop requests to the run's validated live
+`doxa fleet stop RUN_ID` sends stop requests to the run's validated live
 slot sockets and waits up to 60 seconds for each daemon connection to close.
 It reports slots with missing sockets or unconfirmed shutdown separately; it
 does not signal processes or rewrite the Python supervisor's manifest. A
@@ -154,12 +168,18 @@ the JSONL file retains the full history. Older daemons without snapshot
 metadata fall back to their 512-event replay ring. A turn still running at
 attach can have text that was streamed but not yet persisted, so its earlier
 in-flight deltas may be absent. `Ctrl+T` opens bounded tool activity cards;
-clickable links are still 2.0 work. The binary version is `2.0.0-alpha.11`;
+clickable links are still 2.0 work. The binary version is `2.0.0-alpha.12`;
 this is an alpha release.
 
 `Ctrl+R` opens a searchable picker for attached and archived sessions with
 bounded transcript tails. Archived transcripts open read-only and never receive
-prompts. `F2` (or `Alt+G`) opens a 256 KiB worktree diff in an
+prompts. `/search TEXT` scans a bounded older archived tail. `/resume [ID or
+prefix]` opens a picker that can attach a live session or start a saved Claude
+or vendor session when its engine, model, and stored history can be verified.
+Archived Codex resume is not yet available in the TUI. `/queue` opens a picker
+above the active prompt for a live session. Its previews are scrubbed by LORE;
+press `X` to cancel the selected waiting prompt by its stable ID, `R` to
+refresh, or `Esc` to close it. `F2` (or `Alt+G`) opens a 256 KiB worktree diff in an
 asynchronous modal. It compares tracked changes with the recorded worktree
 base when one exists, or with `HEAD`, and lists bounded untracked filenames
 without reading their contents. `F4` keeps that diff visible beside the active
@@ -179,11 +199,15 @@ index. Duplicate queued hunks are refused. Pending
 rejections block closing the diff or leaving the UI until they finish, and are
 cancelled if the session ends. The diff pane requires enough
 terminal space for two panes. Each split pane has its own prompt and keeps a draft for its active
-session. Its status rows show engine and model chips, plus context, token usage,
-cost, and LORE status when the daemon reports them. Unknown values display `?`;
-token scope and estimated cost are labeled. In a prompt, `Enter` submits, while
+session. Its status rows show engine and model chips, plus context, cost, and
+LORE status. The `p X%/u Y%` chip shows curated project and user memory fill
+against each scope's cap. Both counts and caps come from LORE; `?` means LORE
+could not report usage. Hover over a chip for its meaning, or click a read-only
+chip to see details above the prompt. Estimated cost is labeled. In a prompt, `Enter` submits, while
 `Shift+Enter` or `Alt+Enter` inserts a newline (`Ctrl+J` also works when
-reported distinctly by the terminal). Arrow keys move the cursor across
+reported distinctly by the terminal). An ambiguous `Ctrl+Enter` report never
+submits a prompt; use `Alt+Enter` for a newline. `Alt+Up` restores a rejected
+draft when one exists, and otherwise resizes the split. Arrow keys move the cursor across
 lines; `Home`, `End`, `Backspace`, and `Delete` edit at the cursor. Bracketed
 paste preserves line breaks, removes terminal control characters, and never
 submits. Prompts are capped at 10 KiB; an oversized paste is truncated with a
@@ -236,12 +260,12 @@ needed by the current Rust runtime. Broader parity and release tests remain
 before a stable 2.0 release.
 
 Start the native Claude host from an installed preview with
-`doxa-rs new --engine claude --claude-python /absolute/path/to/python`.
+`doxa new --engine claude --claude-python /absolute/path/to/python`.
 For a source build, pass `--claude-script /absolute/path/to/claude_sidecar.py`
 or set `DOXA_CLAUDE_SCRIPT` to that absolute path. The Python interpreter
 must have DOXA, LORE, and the Claude Agent SDK installed. Add `--model NAME`
 to choose a model, or `--resume SESSION_ID` to resume that session's Claude
-conversation. `doxa-rs doctor --engine claude` checks the selected Python
+conversation. `doxa doctor --engine claude` checks the selected Python
 interpreter, sidecar script, daemon, and runtime path.
 Native Claude sessions can change their model and permission mode through
 capability-gated live controls. The daemon reports the selected values to
@@ -249,16 +273,16 @@ attached clients. The Rust launcher has no explicit bypass arming flow yet,
 so `bypassPermissions` is refused. Entering `dontAsk` requires an idle session
 with no queued prompts.
 
-Start native DeepSeek or GLM plain chat with `doxa-rs new --engine deepseek`
-or `doxa-rs new --engine glm`. Set `DEEPSEEK_API_KEY` or `ZAI_API_KEY` in the
+Start native DeepSeek or GLM plain chat with `doxa new --engine deepseek`
+or `doxa new --engine glm`. Set `DEEPSEEK_API_KEY` or `ZAI_API_KEY` in the
 environment, respectively. `--lore-python` selects the Python interpreter
 used for LORE scrubbing (default `python3`); it must have DOXA and LORE
 installed. `--model` overrides the matching `deepseek` or `glm` entry under
 `[models]` in `$DOXA_HOME/config.toml`. The Codex-only `DOXA_MODEL` setting
 does not select a vendor model. `--effort low|high|max` is optional; DeepSeek
-also accepts `none`. `doxa-rs doctor --engine deepseek|glm` checks the daemon,
+also accepts `none`. `doxa doctor --engine deepseek|glm` checks the daemon,
 LORE interpreter, provider key presence, and effort value without printing the
-key. Use `doxa-rs new --engine deepseek|glm --resume SESSION_ID` to resume an
+key. Use `doxa new --engine deepseek|glm --resume SESSION_ID` to resume an
 existing vendor session with saved messages. Pass the exact full session ID;
 the vendor and resolved model must match the saved state. Native vendor tools
 are disabled by default. Set `DOXA_VENDOR_TOOLS=workspace-read` when launching

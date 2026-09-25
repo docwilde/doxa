@@ -20,6 +20,17 @@ use std::time::{Duration, Instant};
 
 pub const PROTOCOL_VERSION: u64 = 1;
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
+const MAX_MEMORY_CHARS: u64 = 1024 * 1024;
+
+/// Exact Unicode character counts of LORE's curated project and user entries.
+/// These are not model token counts or the full injected context size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemoryUsage {
+    pub project_chars: u64,
+    pub user_chars: u64,
+    pub project_cap_chars: u64,
+    pub user_cap_chars: u64,
+}
 
 /// A complete, immutable pending-file snapshot for a human review screen.
 /// The raw JSON is the exact UTF-8 byte sequence whose digest LORE reports.
@@ -242,6 +253,25 @@ impl LoreClient {
             return Err(LoreError::InvalidFrame);
         }
         self.request_text(json!({"op":"snapshot","cwd":cwd,"scope":scope}))
+    }
+
+    /// Read curated memory sizes using LORE's own project mapping and entry
+    /// renderer. Older sidecars without this capability return Unavailable.
+    pub fn memory_usage(&mut self, cwd: &str) -> Result<MemoryUsage, LoreError> {
+        if cwd.is_empty() || cwd.len() > 4096 || cwd.contains('\0') {
+            return Err(LoreError::InvalidFrame);
+        }
+        let value = self.request_value("memory_usage_v1", json!({"cwd":cwd}))?;
+        let project_chars = value["project_chars"].as_u64().ok_or(LoreError::InvalidFrame)?;
+        let user_chars = value["user_chars"].as_u64().ok_or(LoreError::InvalidFrame)?;
+        let project_cap_chars = value["project_cap_chars"].as_u64().ok_or(LoreError::InvalidFrame)?;
+        let user_cap_chars = value["user_cap_chars"].as_u64().ok_or(LoreError::InvalidFrame)?;
+        if project_chars > MAX_MEMORY_CHARS || user_chars > MAX_MEMORY_CHARS
+            || !(1..=MAX_MEMORY_CHARS).contains(&project_cap_chars)
+            || !(1..=MAX_MEMORY_CHARS).contains(&user_cap_chars) {
+            return Err(LoreError::InvalidFrame);
+        }
+        Ok(MemoryUsage { project_chars, user_chars, project_cap_chars, user_cap_chars })
     }
 
     /// Ask LORE for its actual Python 1.x transcript location. Reimplementing

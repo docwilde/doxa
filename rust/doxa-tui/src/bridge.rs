@@ -17,7 +17,9 @@ use crate::history;
 use crate::ui;
 use crate::discovery::Session;
 use crate::launch::{self, LaunchOptions};
+use std::path::PathBuf;
 
+#[derive(Debug)]
 pub enum WorkerCommand {
     Launch(LaunchOptions, Option<String>, usize),
     Attach(String, usize),
@@ -28,7 +30,31 @@ pub enum WorkerCommand {
     Models(String),
     SetModel(String, String),
     SetPermissionMode(String, String),
+    QueueList(String),
+    QueueCancel(String, String),
     Stop(String),
+}
+
+fn safe_queue_rows(reply: &Value) -> Vec<Value> {
+    let python = std::env::var_os("DOXA_LORE_PYTHON").map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("python3"));
+    safe_queue_rows_with_python(reply, &python)
+}
+
+fn safe_queue_rows_with_python(reply: &Value, python: &Path) -> Vec<Value> {
+    let Some(rows) = reply["queue"].as_array() else { return Vec::new(); };
+    let mut lore = doxa_lore::LoreClient::spawn(&python, Duration::from_secs(2)).ok();
+    rows.iter().take(64).filter_map(|row| {
+        let id = row["id"].as_str()?;
+        if id.is_empty() || id.len() > 128 || !id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-') {
+            return None;
+        }
+        let preview = row["text"].as_str().filter(|text| text.len() <= 64 * 1024)
+            .and_then(|text| lore.as_mut()?.scrub(text).ok())
+            .map(|text| text.chars().take(160).collect::<String>())
+            .unwrap_or_else(|| "[preview unavailable]".into());
+        Some(json!({"id":id,"preview":preview}))
+    }).collect()
 }
 
 fn attach_worker(session: &Session, frames: &SyncSender<Value>, guard: &Arc<Mutex<bool>>)
@@ -220,7 +246,8 @@ pub fn connect_sessions(sessions: &[Session]) -> io::Result<MultiBridge> {
             let id = match &command {
                 WorkerCommand::Prompt(id, _) | WorkerCommand::Answer(id, _, _) | WorkerCommand::Peers(id)
                 | WorkerCommand::Models(id) | WorkerCommand::SetModel(id, _)
-                | WorkerCommand::SetPermissionMode(id, _) => id,
+                | WorkerCommand::SetPermissionMode(id, _) | WorkerCommand::QueueList(id)
+                | WorkerCommand::QueueCancel(id, _) => id,
                 WorkerCommand::Message(id, _, _) | WorkerCommand::Stop(id) => id,
                 WorkerCommand::Launch(_, _, _) | WorkerCommand::Attach(_, _) => unreachable!(),
             };
@@ -270,6 +297,10 @@ fn rejected(command: WorkerCommand, message: &str) -> Value {
             "ok":false, "error":message}),
         WorkerCommand::SetPermissionMode(id, _) => json!({"type":"set_permission_mode_reply", "session_id":id,
             "ok":false, "error":message}),
+        WorkerCommand::QueueList(id) => json!({"type":"queue_list_reply", "session_id":id,
+            "ok":false, "error":message}),
+        WorkerCommand::QueueCancel(id, queue_id) => json!({"type":"queue_cancel_reply", "session_id":id,
+            "queue_id":queue_id, "ok":false, "error":message}),
         WorkerCommand::Stop(id) => json!({"type":"stop_reply", "session_id":id,
             "ok":false, "error":message}),
     }
@@ -434,6 +465,44 @@ fn worker_loop(
                             "ok":false, "error":error.to_string()}),
                     };
                     if frames.send(reply).is_err() { return; }
+                }
+                Ok(WorkerCommand::QueueList(id)) => {
+                    let result = if id == session_id { client.call("queue", Map::new()) }
+                        else { Err(TransportError::Malformed("queue target is not attached")) };
+                    cursor.store(client.cursor, Ordering::Relaxed);
+                    if matches!(result, Err(TransportError::Closed)) {
+                        if let Some(guard) = roster_guard { revoke(guard); }
+                    }
+                    let frame = match &result {
+                        Ok(reply) if reply["ok"] == true => json!({"type":"queue_list_reply",
+                            "session_id":id,"ok":true,"rows":safe_queue_rows(reply)}),
+                        Ok(reply) => json!({"type":"queue_list_reply","session_id":id,
+                            "ok":false,"error":reply["error"].as_str().unwrap_or("Queue unavailable")}),
+                        Err(error) => json!({"type":"queue_list_reply","session_id":id,
+                            "ok":false,"error":error.to_string()}),
+                    };
+                    if frames.send(frame).is_err() { return; }
+                    if matches!(result, Err(TransportError::Closed)) { return; }
+                }
+                Ok(WorkerCommand::QueueCancel(id, queue_id)) => {
+                    let result = if id == session_id {
+                        let mut params = Map::new();
+                        params.insert("id".into(), Value::String(queue_id.clone()));
+                        client.call("cancel_queued", params)
+                    } else { Err(TransportError::Malformed("queue target is not attached")) };
+                    cursor.store(client.cursor, Ordering::Relaxed);
+                    if matches!(result, Err(TransportError::Closed)) {
+                        if let Some(guard) = roster_guard { revoke(guard); }
+                    }
+                    let frame = match &result {
+                        Ok(reply) => json!({"type":"queue_cancel_reply","session_id":id,
+                            "queue_id":queue_id,"ok":reply["ok"] == true,
+                            "error":reply.get("error")}),
+                        Err(error) => json!({"type":"queue_cancel_reply","session_id":id,
+                            "queue_id":queue_id,"ok":false,"error":error.to_string()}),
+                    };
+                    if frames.send(frame).is_err() { return; }
+                    if matches!(result, Err(TransportError::Closed)) { return; }
                 }
                 Ok(WorkerCommand::Answer(session, id, answer)) => {
                     if session != session_id || !answer.is_object() {
@@ -632,6 +701,34 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static NEXT_SOCKET: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn queue_rows_scrub_raw_python_prompts_before_ui_delivery() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("fake-lore");
+        std::fs::write(&script, r#"#!/usr/bin/env python3
+import json, sys
+print(json.dumps({'type':'hello','proto':1,'capabilities':['scrub','snapshot']}), flush=True)
+for line in sys.stdin:
+    req = json.loads(line)
+    text = req.get('text', '').replace('SECRET', '[redacted]')
+    print(json.dumps({'type':'reply','id':req['id'],'ok':True,'text':text}), flush=True)
+"#).unwrap();
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o700);
+        std::fs::set_permissions(&script, perms).unwrap();
+        let rows = safe_queue_rows_with_python(&json!({"queue":[
+            {"id":"q7","text":"my SECRET token"}, {"id":"../unsafe","text":"SECRET"}
+        ]}), &script);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["id"], "q7");
+        assert_eq!(rows[0]["preview"], "my [redacted] token");
+        assert!(!serde_json::to_string(&rows).unwrap().contains("SECRET"));
+        let unavailable = safe_queue_rows_with_python(&json!({"queue":[{"id":"q8","text":"SECRET"}]}),
+            &dir.path().join("missing-interpreter"));
+        assert_eq!(unavailable[0]["preview"], "[preview unavailable]");
+    }
 
     #[test]
     fn live_daemon_frames_and_prompts_cross_the_ui_bridge() {

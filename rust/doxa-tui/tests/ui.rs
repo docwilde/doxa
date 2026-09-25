@@ -259,8 +259,8 @@ fn telemetry_chips_keep_per_session_provenance_and_unknowns() {
     app.apply_daemon_frame(&json!({"type":"hello","session_id":"vendor","engine":"glm"}));
     app.groups[1].tabs.push("vendor".into());
     let unknown = screen(&app, 300, 24);
-    assert!(unknown.contains("Ctx ?   Tokens ?   Beliefs ▾   Cost ?   LORE scrub ready"), "{unknown}");
-    assert!(unknown.contains("Ctx ?   Tokens ?   Beliefs ▾   Cost ?   LORE ?"), "{unknown}");
+    assert!(unknown.contains("Ctx ?   p ?/u ?   Beliefs ▾   Cost ?   LORE scrub ready"), "{unknown}");
+    assert!(unknown.contains("Ctx ?   p ?/u ?   Beliefs ▾   Cost ?   LORE ?"), "{unknown}");
     app.apply_daemon_frame(&json!({"type":"event","session_id":"codex","event":{"type":"turn_done","data":{
         "input_tokens":120,"output_tokens":30,"usage_scope":"session","usage_source":"codex_cli_turn_completed",
         "ctx_percentage":null,"session_cost_usd":null
@@ -268,9 +268,12 @@ fn telemetry_chips_keep_per_session_provenance_and_unknowns() {
     app.apply_daemon_frame(&json!({"type":"event","session_id":"vendor","event":{"type":"turn_done","data":{
         "prompt_tokens":7,"completion_tokens":3,"usage_scope":"turn","usage_source":"vendor_response"
     }}}));
+    app.set_lore_memory_usage("codex", 401, 1000, 80, 200);
+    app.set_lore_memory_usage("vendor", 0, 1000, 200, 500);
     let rendered = screen(&app, 300, 24);
-    assert!(rendered.contains("Tokens 120/30 session"), "{rendered}");
-    assert!(rendered.contains("Tokens 7/3 turn"), "{rendered}");
+    assert!(rendered.contains("p 40%/u 40%"), "{rendered}");
+    assert!(rendered.contains("p 0%/u 40%"), "{rendered}");
+    assert!(!rendered.contains("Tokens "), "{rendered}");
     assert!(rendered.contains("Ctx ?"), "{rendered}");
     assert!(rendered.contains("Cost ?"), "{rendered}");
     app.apply_daemon_frame(&json!({"type":"reply","ok":true,"status":{"session_id":"codex","lore_scrub":"unavailable"}}));
@@ -281,7 +284,7 @@ fn telemetry_chips_keep_per_session_provenance_and_unknowns() {
     app.apply_daemon_frame(&json!({"type":"event","session_id":"vendor","event":{"type":"turn_done","data":{
         "ctx_percentage":null,"cost_usd":null,"session_cost_usd":null
     }}}));
-    assert!(screen(&app, 300, 24).contains("Ctx ?   Tokens ?   Beliefs ▾   Cost ?   LORE ?"));
+    assert!(screen(&app, 300, 24).contains("Ctx ?   p 0%/u 40%   Beliefs ▾   Cost ?   LORE ?"));
 }
 
 #[test]
@@ -295,13 +298,14 @@ fn telemetry_status_restores_reported_values_without_inventing_zero_usage() {
     }}));
     let rendered = screen(&app, 300, 24);
     assert!(rendered.contains("Ctx 42%"), "{rendered}");
-    assert!(rendered.contains("Tokens 1000/50 session"), "{rendered}");
+    assert!(rendered.contains("p ?/u ?"), "{rendered}");
+    assert!(!rendered.contains("Tokens "), "{rendered}");
     assert!(rendered.contains("Cost $0.0123 est"), "{rendered}");
     assert!(rendered.contains("LORE 9 beliefs"), "{rendered}");
     app.apply_daemon_frame(&json!({"type":"reply","ok":true,"status":{
         "session_id":"one","usage":{"num_turns":0,"input_tokens":0,"output_tokens":0}
     }}));
-    assert!(screen(&app, 300, 24).contains("Tokens ?"));
+    assert!(screen(&app, 300, 24).contains("p ?/u ?"));
 }
 
 #[test]
@@ -413,6 +417,40 @@ fn action_menu_opens_views_and_navigates_sessions_without_leaking_keys_to_prompt
     app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
     assert_eq!(app.groups[0].active, 1);
     assert!(app.pending_prompts.is_empty());
+}
+
+#[test]
+fn terminal_backtab_switches_panes_and_plain_tab_keeps_focus_navigation() {
+    let mut app = App::default();
+    app.apply_update(doxa_tui::ui::DaemonUpdate::Upsert(session("one", "Work")));
+    app.apply_update(doxa_tui::ui::DaemonUpdate::Upsert(session("two", "Work")));
+    assert!(app.handle(key(KeyCode::BackTab, KeyModifiers::NONE)));
+    assert_eq!(app.active_group, 1);
+    assert_eq!(app.focus, Focus::Prompt);
+    assert!(app.handle(key(KeyCode::Tab, KeyModifiers::NONE)));
+    assert_eq!(app.focus, Focus::Transcript);
+    assert!(app.handle(key(KeyCode::Tab, KeyModifiers::SHIFT)));
+    assert_eq!(app.active_group, 0);
+    assert_eq!(app.focus, Focus::Prompt);
+}
+
+#[test]
+fn alt_up_resizes_without_rejected_draft_and_control_enter_cannot_submit() {
+    let mut app = App::default();
+    app.apply_update(doxa_tui::ui::DaemonUpdate::Upsert(session("one", "Work")));
+    app.handle(key(KeyCode::Char('h'), KeyModifiers::ALT));
+    assert_eq!(app.split_percent, 50);
+    assert!(app.handle(key(KeyCode::Up, KeyModifiers::ALT)));
+    assert_eq!(app.split_percent, 45);
+    app.handle(Event::Paste("draft".into()));
+    assert!(app.handle(key(KeyCode::Enter, KeyModifiers::CONTROL)));
+    assert_eq!(app.input, "draft");
+    assert!(app.pending_prompts.is_empty());
+    assert!(app.notice.contains("Alt+Enter"));
+    assert!(app.handle(key(KeyCode::Char('j'), KeyModifiers::CONTROL)));
+    assert_eq!(app.input, "draft\n");
+    assert!(app.handle(key(KeyCode::Enter, KeyModifiers::ALT)));
+    assert_eq!(app.input, "draft\n\n");
 }
 
 #[test]
