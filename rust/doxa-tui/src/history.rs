@@ -333,7 +333,24 @@ const MAX_TEXT_CHARS: usize = 20_000;
 const MAX_VIEW_BYTES: usize = 480 * 1024;
 
 #[derive(Default)]
-struct Turn { prompt: String, answer: String, tools: Vec<String> }
+struct Turn { prompt: String, answer: String, tools: Vec<String>, tool_names: std::collections::HashMap<String, String> }
+
+fn tool_detail(value: &Value) -> String {
+    if value.is_null() { return String::new(); }
+    let raw = value.as_str().map(str::to_owned).unwrap_or_else(|| value.to_string());
+    let clean = crate::markdown::sanitize(&raw).replace(['\n', '\r'], " ");
+    let mut chars = clean.chars();
+    let detail: String = chars.by_ref().take(400).collect();
+    let mut escaped = String::with_capacity(detail.len());
+    for ch in detail.chars() {
+        if matches!(ch, '\\' | '`' | '*' | '_' | '{' | '}' | '[' | ']' | '(' | ')' | '#' | '+' | '-' | '.' | '!' | '>' | '|' | '~') {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    if chars.next().is_some() { escaped.push('…'); }
+    escaped
+}
 
 fn append_text(target: &mut String, text: &str) {
     if text.is_empty() { return; }
@@ -359,6 +376,17 @@ pub fn render(snapshot: &TranscriptSnapshot) -> String {
                 }
             }
             if !prompt.is_empty() { turns.push(Turn { prompt, ..Turn::default() }); }
+            else if let Some(blocks) = content.as_array() {
+                if let Some(turn) = turns.last_mut() {
+                    for block in blocks.iter().filter(|block| block["type"] == "tool_result") {
+                        let id = block["tool_use_id"].as_str().unwrap_or("");
+                        let name = turn.tool_names.get(id).map(String::as_str).unwrap_or("Tool");
+                        let outcome = if block["is_error"] == true { "failed" } else { "finished" };
+                        let detail = tool_detail(&block["content"]);
+                        turn.tools.push(format!("Tool: {name} {outcome}{}", if detail.is_empty() { String::new() } else { format!(" · {detail}") }));
+                    }
+                }
+            }
             continue;
         }
         if kind != "assistant" { continue; }
@@ -369,8 +397,11 @@ pub fn render(snapshot: &TranscriptSnapshot) -> String {
             match block["type"].as_str() {
                 Some("text") => append_text(&mut turn.answer, block["text"].as_str().unwrap_or("")),
                 Some("tool_use") => {
-                    let name = block["name"].as_str().unwrap_or("tool");
-                    turn.tools.push(format!("Tool: {}", name.replace('\n', " ")));
+                    let name = tool_detail(&block["name"]);
+                    let name = if name.is_empty() { "Tool".to_owned() } else { name };
+                    if let Some(id) = block["id"].as_str() { turn.tool_names.insert(id.to_owned(), name.clone()); }
+                    let detail = tool_detail(&block["input"]);
+                    turn.tools.push(format!("Tool: {name} started{}", if detail.is_empty() { String::new() } else { format!(" · {detail}") }));
                 }
                 _ => {}
             }
@@ -394,10 +425,10 @@ pub fn render(snapshot: &TranscriptSnapshot) -> String {
             if shortened.len() < turn.answer.len() { out.push_str("\n[Assistant text shortened in this view]"); }
             out.push_str("\n\n");
         }
-        for tool in turn.tools.iter().take(30) {
-            out.push_str(&format!("[{tool}]\n\n"));
+        for tool in turn.tools.iter().take(60) {
+            out.push_str(&format!("{tool}\n\n"));
         }
-        if turn.tools.len() > 30 { out.push_str("[Additional tools omitted from this view]\n\n"); }
+        if turn.tools.len() > 60 { out.push_str("[Additional tools omitted from this view]\n\n"); }
     }
     if out.len() > MAX_VIEW_BYTES {
         let mut start = out.len() - MAX_VIEW_BYTES;
@@ -447,9 +478,21 @@ for line in sys.stdin:
         let rendered = render(&TranscriptSnapshot { bytes: lines.as_bytes().to_vec(), earlier_bytes_omitted: false });
         assert!(rendered.contains("first?"));
         assert!(rendered.contains("yes\n\nindeed"));
-        assert!(rendered.contains("[Tool: Search]"));
+        assert!(rendered.contains("Tool: Search started"));
+        assert!(rendered.contains("Tool: Tool finished · found"));
         assert!(rendered.contains("second?\n\nmore detail"));
-        assert!(!rendered.contains("found"));
+        assert_eq!(rendered.matches("**You:**").count(), 2);
+    }
+
+    #[test]
+    fn restored_tool_call_and_result_keep_bounded_matching_details() {
+        let input = "x".repeat(1000);
+        let lines = format!("{{\"type\":\"user\",\"message\":{{\"content\":\"question\"}}}}\n{{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"tool_use\",\"id\":\"call-1\",\"name\":\"Read\",\"input\":{{\"path\":\"{input}\"}}}}]}}}}\n{{\"type\":\"user\",\"message\":{{\"content\":[{{\"type\":\"tool_result\",\"tool_use_id\":\"call-1\",\"content\":\"found\"}}]}}}}\n");
+        let rendered = render(&TranscriptSnapshot { bytes: lines.into_bytes(), earlier_bytes_omitted: false });
+        assert!(rendered.contains("Tool: Read started ·"));
+        assert!(rendered.contains("Tool: Read finished · found"));
+        assert!(!rendered.contains(&input));
+        assert!(rendered.contains('…'));
     }
 
     #[test]
