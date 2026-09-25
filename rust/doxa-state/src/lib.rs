@@ -191,22 +191,19 @@ pub fn legacy_tabset_path(home: &Path, scope_key: &str) -> PathBuf {
 }
 
 fn ensure_private_directory(path: &Path) -> io::Result<fs::File> {
-    use std::os::unix::fs::PermissionsExt;
-    let created = match fs::symlink_metadata(path) {
-        Ok(_) => false,
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    match fs::symlink_metadata(path) {
+        Ok(_) => {},
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            fs::create_dir_all(path)?;
-            true
+            let mut builder = fs::DirBuilder::new();
+            builder.recursive(true).mode(0o700).create(path)?;
         }
         Err(error) => return Err(error),
-    };
+    }
     let dir = fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(path)?;
-    if created {
-        dir.set_permissions(fs::Permissions::from_mode(0o700))?;
-    }
     let meta = dir.metadata()?;
     if !meta.is_dir()
         || meta.uid() != unsafe { libc::geteuid() }
@@ -377,19 +374,18 @@ pub fn save_tabset(path: &Path, record: &TabSet) -> io::Result<()> {
 }
 
 fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
     let parent = path.parent().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no parent directory"))?;
-    let created = match fs::symlink_metadata(parent) {
-        Ok(_) => false,
+    match fs::symlink_metadata(parent) {
+        Ok(_) => {},
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            fs::create_dir_all(parent)?;
-            true
+            let mut builder = fs::DirBuilder::new();
+            builder.recursive(true).mode(0o700).create(parent)?;
         }
         Err(error) => return Err(error),
-    };
+    }
     let dir = fs::OpenOptions::new().read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW).open(parent)?;
-    if created { dir.set_permissions(fs::Permissions::from_mode(0o700))?; }
     let meta = dir.metadata()?;
     if !meta.is_dir() || meta.uid() != unsafe { libc::geteuid() }
         || meta.permissions().mode() & 0o022 != 0 {
