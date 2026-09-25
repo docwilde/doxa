@@ -268,11 +268,11 @@ fn telemetry_chips_keep_per_session_provenance_and_unknowns() {
     app.apply_daemon_frame(&json!({"type":"event","session_id":"vendor","event":{"type":"turn_done","data":{
         "prompt_tokens":7,"completion_tokens":3,"usage_scope":"turn","usage_source":"vendor_response"
     }}}));
-    app.set_lore_memory_usage("codex", 401, 80);
-    app.set_lore_memory_usage("vendor", 0, 200);
+    app.set_lore_memory_usage("codex", 401, 1000, 80, 200);
+    app.set_lore_memory_usage("vendor", 0, 1000, 200, 500);
     let rendered = screen(&app, 300, 24);
-    assert!(rendered.contains("p≈101/u≈20"), "{rendered}");
-    assert!(rendered.contains("p≈0/u≈50"), "{rendered}");
+    assert!(rendered.contains("p 40%/u 40%"), "{rendered}");
+    assert!(rendered.contains("p 0%/u 40%"), "{rendered}");
     assert!(!rendered.contains("Tokens "), "{rendered}");
     assert!(rendered.contains("Ctx ?"), "{rendered}");
     assert!(rendered.contains("Cost ?"), "{rendered}");
@@ -284,7 +284,7 @@ fn telemetry_chips_keep_per_session_provenance_and_unknowns() {
     app.apply_daemon_frame(&json!({"type":"event","session_id":"vendor","event":{"type":"turn_done","data":{
         "ctx_percentage":null,"cost_usd":null,"session_cost_usd":null
     }}}));
-    assert!(screen(&app, 300, 24).contains("Ctx ?   p≈0/u≈50   Beliefs ▾   Cost ?   LORE ?"));
+    assert!(screen(&app, 300, 24).contains("Ctx ?   p 0%/u 40%   Beliefs ▾   Cost ?   LORE ?"));
 }
 
 #[test]

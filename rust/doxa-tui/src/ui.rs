@@ -471,11 +471,9 @@ impl SessionTelemetry {
 
 }
 
-// LORE exposes exact curated-memory characters, not provider tokenizer counts.
-// Its own context budget uses four characters per approximate token; keep the
-// approximation visible in the chip instead of presenting it as exact usage.
-fn estimated_memory_tokens(chars: u64) -> u64 {
-    chars.saturating_add(3) / 4
+// LORE owns both curated-memory lengths and their separate scope caps.
+fn memory_fill_percent(chars: u64, cap_chars: u64) -> u64 {
+    chars.saturating_mul(100).saturating_add(cap_chars / 2) / cap_chars
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -711,8 +709,8 @@ pub struct App {
     session_telemetry: HashMap<String, SessionTelemetry>,
     // LORE owns these counts. A bounded background query keeps store I/O off
     // the draw path; an unavailable sidecar leaves the chip unknown.
-    memory_cache: HashMap<String, (Option<(u64, u64)>, Instant)>,
-    memory_pending: Option<(String, String, Receiver<Option<(u64, u64)>>)>,
+    memory_cache: HashMap<String, (Option<doxa_lore::MemoryUsage>, Instant)>,
+    memory_pending: Option<(String, String, Receiver<Option<doxa_lore::MemoryUsage>>)>,
     chip_offsets: [usize; 2],
     chip_hover: Option<ChipHit>,
     chip_info: Option<ChipInfo>,
@@ -2588,8 +2586,10 @@ impl App {
 
     /// The gallery uses this same state path with deterministic counts. Live
     /// values arrive only through the read-only LORE sidecar query below.
-    pub fn set_lore_memory_usage(&mut self, id: &str, project_chars: u64, user_chars: u64) {
-        self.memory_cache.insert(id.to_owned(), (Some((project_chars, user_chars)), Instant::now()));
+    pub fn set_lore_memory_usage(&mut self, id: &str, project_chars: u64, project_cap_chars: u64,
+                                 user_chars: u64, user_cap_chars: u64) {
+        let usage = doxa_lore::MemoryUsage { project_chars, project_cap_chars, user_chars, user_cap_chars };
+        self.memory_cache.insert(id.to_owned(), (Some(usage), Instant::now()));
     }
 
     fn poll_memory(&mut self) -> bool {
@@ -2627,8 +2627,7 @@ impl App {
             self.memory_pending = Some((id, cwd.clone(), rx));
             std::thread::spawn(move || {
                 let usage = doxa_lore::LoreClient::spawn(&python, Duration::from_secs(2))
-                    .and_then(|mut lore| lore.memory_usage(&cwd)).ok()
-                    .map(|usage| (usage.project_chars, usage.user_chars));
+                    .and_then(|mut lore| lore.memory_usage(&cwd)).ok();
                 let _ = tx.send(usage);
             });
             break;
@@ -3778,7 +3777,9 @@ impl App {
         }
         chips.push(("context", format!("Ctx {}", telemetry.and_then(|value| value.context.as_deref()).unwrap_or("?"))));
         let memory = self.memory_cache.get(id.unwrap_or("")).and_then(|(usage, _)| *usage)
-            .map(|(project, user)| format!("p≈{}/u≈{}", estimated_memory_tokens(project), estimated_memory_tokens(user)))
+            .map(|usage| format!("p {}%/u {}%",
+                memory_fill_percent(usage.project_chars, usage.project_cap_chars),
+                memory_fill_percent(usage.user_chars, usage.user_cap_chars)))
             .unwrap_or_else(|| "p ?/u ?".to_owned());
         chips.push(("memory", memory));
         let beliefs = telemetry.and_then(|value| value.lore.as_deref())
@@ -5736,16 +5737,20 @@ mod tests {
     fn memory_chip_uses_lore_counts_and_ignores_old_project_reply() {
         let mut app = App::default();
         app.apply_daemon_frame(&json!({"type":"hello", "session_id":"s", "cwd":"/repo/old"}));
-        app.set_lore_memory_usage("s", 401, 80);
+        app.set_lore_memory_usage("s", 401, 1000, 80, 200);
         assert_eq!(app.chips(0).iter().find(|(kind, _)| *kind == "memory").unwrap().1,
-            "p≈101/u≈20");
-        assert_eq!(estimated_memory_tokens(0), 0);
-        assert_eq!(estimated_memory_tokens(4), 1);
+            "p 40%/u 40%");
+        assert_eq!(memory_fill_percent(0, 1000), 0);
+        assert_eq!(memory_fill_percent(4, 1000), 0);
+        assert_eq!(memory_fill_percent(5, 1000), 1);
         let (tx, rx) = mpsc::sync_channel(1);
         app.memory_pending = Some(("s".into(), "/repo/old".into(), rx));
         app.apply_daemon_frame(&json!({"type":"hello", "session_id":"s", "cwd":"/repo/new"}));
         app.offline_ids.insert("s".into());
-        tx.send(Some((400, 200))).unwrap();
+        tx.send(Some(doxa_lore::MemoryUsage {
+            project_chars: 400, project_cap_chars: 1000,
+            user_chars: 200, user_cap_chars: 500,
+        })).unwrap();
         app.poll_memory();
         assert!(!app.memory_cache.contains_key("s"));
         assert_eq!(app.chips(0).iter().find(|(kind, _)| *kind == "memory").unwrap().1,
@@ -5987,7 +5992,7 @@ mod tests {
             "model":"sonnet","cwd":"/repo","permission_mode":"auto",
             "can_set_permission_mode":true,"can_set_model":true,"lore_scrub":"ready"}));
         app.groups[0].tabs = vec!["s".into()];
-        app.set_lore_memory_usage("s", 200, 80);
+        app.set_lore_memory_usage("s", 200, 1000, 80, 200);
         let pane = app.layout(app.size).body;
         let strip = app.pane_regions(0, pane)[3];
         let mut x = strip.x;
