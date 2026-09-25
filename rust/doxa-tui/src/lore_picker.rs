@@ -1,7 +1,7 @@
-//! Read-only, bounded LORE picker data. The external sidecar owns search,
+//! Bounded LORE picker data. The external sidecar owns search,
 //! storage, and secret scrubbing; this module never opens LORE's store.
 
-use doxa_lore::{ConsultHit, LoreClient, PendingDecision, PendingResolution, PendingReview};
+use doxa_lore::{BeliefAction, BeliefActionResult, BeliefReview, ConsultHit, LoreClient, LoreError, PendingDecision, PendingResolution, PendingReview};
 use serde_json::Value;
 use std::path::Path;
 use std::time::Duration;
@@ -47,6 +47,8 @@ pub enum ResultPage {
     Proposals(Vec<Proposal>),
     Review(PendingReview, bool),
     Resolved(PendingResolution),
+    BeliefReview(BeliefReview, bool),
+    BeliefActed(BeliefActionResult),
 }
 
 #[derive(Clone, Debug)]
@@ -57,6 +59,17 @@ pub enum Query {
     Proposals(String, u16),
     Review(String, String),
     Resolve(String, PendingReview, PendingDecision),
+    BeliefReview(String, u64),
+    BeliefAction(String, BeliefReview, BeliefAction, String),
+}
+
+fn belief_error(error: LoreError) -> &'static str {
+    match error {
+        LoreError::Remote("belief_changed") => "Belief changed; reopen a fresh exact review",
+        LoreError::Remote("belief_unavailable") => "Belief unavailable; refresh the list",
+        LoreError::Remote("belief_incomplete") => "Complete belief review unavailable; actions disabled",
+        _ => "LORE belief action outcome unknown; inspect LORE before retrying",
+    }
 }
 
 fn short(value: &Value, key: &str, max: usize) -> Option<String> {
@@ -136,6 +149,17 @@ pub fn fetch(python: &Path, query: Query) -> Result<ResultPage, &'static str> {
         }
         Query::Resolve(cwd, review, decision) => client.resolve_reviewed(&cwd, &review, decision)
             .map(ResultPage::Resolved).map_err(|_| "Proposal resolution unavailable"),
+        Query::BeliefReview(cwd, id) => {
+            let writable = client.can_act_on_beliefs();
+            client.belief_review(&cwd, id)
+                .map(|review| ResultPage::BeliefReview(review, writable))
+                .map_err(|error| match error {
+                    LoreError::Remote("belief_unavailable") => "Belief unavailable; refresh the list",
+                    _ => "Complete belief review unavailable; actions disabled",
+                })
+        }
+        Query::BeliefAction(cwd, review, action, note) => client.belief_action(&cwd, &review, action, &note)
+            .map(ResultPage::BeliefActed).map_err(belief_error),
     }
 }
 
