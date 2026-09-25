@@ -1,4 +1,5 @@
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 
 #[test]
@@ -24,4 +25,22 @@ fn branch_option_requires_new_and_refuses_disabled_or_missing_base() {
         assert!(String::from_utf8_lossy(&result.stderr).contains(expected),
             "{}", String::from_utf8_lossy(&result.stderr));
     }
+}
+
+#[test]
+fn daemon_worktree_failure_reaches_launcher_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let daemon = dir.path().join("fake-daemon");
+    fs::write(&daemon, "#!/bin/sh\necho 'doxa-daemon: managed worktree unavailable; inspect conflicting doxa/ branches' >&2\nexit 1\n").unwrap();
+    fs::set_permissions(&daemon, fs::Permissions::from_mode(0o700)).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_doxa-rs"))
+        .args(["new", "--engine", "fixture"])
+        .current_dir(dir.path())
+        .env("DOXA_DAEMON_BIN", &daemon)
+        .env("DOXA_RUNTIME_DIR", dir.path().join("runtime"))
+        .output().unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("managed worktree unavailable"), "{stderr}");
+    assert!(stderr.contains("inspect conflicting doxa/ branches"), "{stderr}");
 }

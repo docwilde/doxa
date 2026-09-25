@@ -502,11 +502,14 @@ fn run() -> io::Result<()> {
         doxa_worktrees::create_from(&options.cwd, &options.session_id, options.base_branch.as_deref())
     } else { None };
     if options.base_branch.is_some() && managed.is_none() {
-        return Err(invalid("requested branch could not be opened in a managed worktree; original checkout was not changed"));
+        return Err(invalid("requested branch could not be opened in a managed worktree; inspect conflicting doxa/ branches and worktree metadata; original checkout was not changed"));
     }
     if use_worktrees && managed.is_none() && doxa_worktrees::enabled()
         && doxa_worktrees::is_supported_checkout(&options.cwd) {
-        eprintln!("doxa-daemon: managed worktree unavailable; using launch directory {}", options.cwd.display());
+        return Err(invalid(&format!(
+            "managed worktree unavailable for {}; inspect conflicting doxa/ branches and DOXA_HOME/worktrees, or explicitly set DOXA_WORKTREE=0 to use this checkout",
+            options.cwd.display()
+        )));
     }
     if let Some(tree) = &managed { options.cwd = tree.path().to_path_buf(); }
     let mut codex_host = None;

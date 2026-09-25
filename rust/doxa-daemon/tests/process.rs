@@ -297,6 +297,58 @@ fn requested_base_branch_is_honored_and_invalid_requests_never_fall_back() {
     assert!(!disabled.status.success());
     assert!(!runtime.join("registry/badbranch.json").exists());
 }
+#[test]
+fn managed_worktree_conflict_refuses_to_start_in_original_checkout() {
+    let dir = tempfile::tempdir().unwrap();
+    let main = dir.path().join("repo");
+    let runtime = dir.path().join("runtime");
+    let home = dir.path().join("home");
+    fs::create_dir(&main).unwrap();
+    let git = |args: &[&str]| {
+        let output = Command::new("git").args(args).current_dir(&main).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    };
+    git(&["init", "-q", "-b", "main"]);
+    fs::write(main.join("README"), "seed\n").unwrap();
+    git(&["add", "README"]);
+    git(&["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "test: seed"]);
+    git(&["branch", "doxa/conflict"]);
+
+    let args = ["--runtime-dir", runtime.to_str().unwrap(), "--cwd", main.to_str().unwrap(),
+        "--session-id", "conflict123", "--linger", "10"];
+    let rejected = Command::new(env!("CARGO_BIN_EXE_doxa-daemon")).args(args)
+        .env("DOXA_HOME", &home).env("DOXA_WORKTREE", "1").output().unwrap();
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("managed worktree unavailable"));
+    assert!(!runtime.join("registry/conflict123.json").exists());
+    assert_eq!(fs::read_to_string(main.join("README")).unwrap(), "seed\n");
+
+    // Explicitly disabling managed worktrees still permits the launch directory.
+    let mut allowed = Command::new(env!("CARGO_BIN_EXE_doxa-daemon")).args(args)
+        .env("DOXA_HOME", &home).env("DOXA_WORKTREE", "0")
+        .stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
+    let registry = runtime.join("registry/conflict123.json");
+    wait_until(|| registry.exists());
+    let row: Value = serde_json::from_slice(&fs::read(&registry).unwrap()).unwrap();
+    assert_eq!(row["cwd"], main.to_str().unwrap());
+    unsafe { libc::kill(allowed.id() as libc::pid_t, libc::SIGTERM); }
+    wait_until(|| allowed.try_wait().unwrap().is_some());
+
+    // A plain directory has no Git checkout to isolate, so it remains usable.
+    let plain = dir.path().join("plain");
+    fs::create_dir(&plain).unwrap();
+    let mut non_git = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+        .args(["--runtime-dir", runtime.to_str().unwrap(), "--cwd", plain.to_str().unwrap(),
+            "--session-id", "nogit123", "--linger", "10"])
+        .env("DOXA_HOME", &home).env("DOXA_WORKTREE", "1")
+        .stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
+    let registry = runtime.join("registry/nogit123.json");
+    wait_until(|| registry.exists());
+    let row: Value = serde_json::from_slice(&fs::read(&registry).unwrap()).unwrap();
+    assert_eq!(row["cwd"], plain.to_str().unwrap());
+    unsafe { libc::kill(non_git.id() as libc::pid_t, libc::SIGTERM); }
+    wait_until(|| non_git.try_wait().unwrap().is_some());
+}
 fn executable(path: &Path, body: &str) {
     fs::write(path, body).unwrap();
     let mut perms = fs::metadata(path).unwrap().permissions();

@@ -231,7 +231,8 @@ fn delete_if_unchanged(main: &Path, branch: &str, expected_oid: &str) -> bool {
         .is_some_and(|(ok, _)| ok)
 }
 
-/// Create a linked checkout for a session. None means run in the original cwd.
+/// Create a linked checkout for a session. None means no managed checkout was
+/// opened; the caller must decide whether the original cwd is permissible.
 /// Existing worktrees are reused only with an exact matching sidecar, and
 /// are not automatically finalized by the new daemon instance.
 pub fn create(cwd: &Path, id: &str) -> Option<Managed> {
@@ -275,8 +276,9 @@ pub fn create_from(cwd: &Path, id: &str, requested_base: Option<&str>) -> Option
         .filter(|oid| valid_commit_oid(oid));
     if base_oid.as_deref().and_then(|oid| write_record(&path, &main, &branch, &base, oid, id)).is_none() {
         eprintln!("doxa-daemon: worktree metadata unavailable; keeping {}", path.display());
-        if requested_base.is_some() { return None; }
-        return Some(Managed { path, created: false, finished: false });
+        // This checkout cannot be proven ours for cleanup or safe reuse.
+        // Preserve it for inspection, but never run a session in it.
+        return None;
     }
     Some(Managed { path, created: true, finished: false })
 }
