@@ -143,8 +143,17 @@ SH
 
   installing=1
   for name in doxa-rs doxa-daemon-rs doxa-claude-sidecar.py .doxa-sidecar-current doxa; do
+    # mv can treat a symlink to a directory as the destination directory,
+    # leaving the old launcher pointer in place and writing inside its target.
+    if [ -L "$bin_dir/$name" ]; then
+      rm -f "$bin_dir/$name" || exit 1
+    fi
     mv -f "$stage/$name" "$bin_dir/$name" || exit 1
   done
+  [ "$(readlink "$bin_dir/.doxa-sidecar-current")" = "$sidecar_env/bin" ] || {
+    printf 'doxa-install: installed sidecar pointer does not match this build\n' >&2
+    exit 1
+  }
   installing=0
   new_sidecar=""
   printf 'doxa-install: installed Rust doxa at %s/doxa\n' "$bin_dir"
