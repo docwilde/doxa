@@ -33,7 +33,20 @@ fn fixture_normalizes_chunked_turn_and_usage() {
     assert_eq!(terminal[0].data["is_error"], false);
     assert_eq!(terminal[0].data["cost_usd"], serde_json::Value::Null);
     assert_eq!(terminal[0].data["ctx_percentage"], serde_json::Value::Null);
+    assert_eq!(terminal[0].data["input_tokens"], 100);
+    assert_eq!(terminal[0].data["output_tokens"], 30);
+    assert_eq!(terminal[0].data["usage_scope"], "session");
+    assert_eq!(terminal[0].data["usage_source"], "codex_cli_turn_completed");
     assert!(parser.finish_turn(None, None).is_empty());
+}
+
+#[test]
+fn missing_provider_usage_is_unknown_even_when_counters_start_at_zero() {
+    let mut parser = parser();
+    parser.begin_turn();
+    let terminal = parser.finish_turn(None, None);
+    assert!(terminal[0].data.get("input_tokens").is_none());
+    assert!(terminal[0].data.get("usage_scope").is_none());
 }
 
 #[test]

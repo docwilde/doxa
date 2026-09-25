@@ -155,7 +155,7 @@ fn two_panes_keep_distinct_prompts_and_live_identity_chips_at_80x24() {
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
     terminal.draw(|frame| app.draw(frame)).unwrap();
     let styled_cells = (25..52)
-        .filter(|&x| terminal.backend().buffer()[(x, 22)].bg == theme::HIGHLIGHT)
+        .filter(|&x| terminal.backend().buffer()[(x, 21)].bg == theme::HIGHLIGHT)
         .count();
     assert!(styled_cells >= 5, "engine/model chips have no visible highlight");
     app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
@@ -165,7 +165,7 @@ fn two_panes_keep_distinct_prompts_and_live_identity_chips_at_80x24() {
     app.apply_daemon_frame(&json!({"type":"event","session_id":"one","event":{"type":"model_changed","data":{"model":"astra"}}}));
     let rendered = screen(&app, 80, 24);
     assert!(rendered.contains(" astra "), "{rendered}");
-    assert!(!rendered.lines().nth(22).unwrap_or("").contains(" sol "), "{rendered}");
+    assert!(!rendered.lines().nth(21).unwrap_or("").contains(" sol "), "{rendered}");
 }
 
 #[test]
@@ -198,6 +198,55 @@ fn identity_chips_follow_status_and_sanitize_daemon_values() {
     let rendered = screen(&app, 80, 24);
     assert!(rendered.contains(" claude "), "{rendered}");
     assert!(!rendered.contains(" opus "));
+}
+
+#[test]
+fn telemetry_chips_keep_per_session_provenance_and_unknowns() {
+    let mut app = App::default();
+    app.apply_daemon_frame(&json!({"type":"hello","session_id":"codex","engine":"codex","lore_scrub":"ready"}));
+    app.apply_daemon_frame(&json!({"type":"hello","session_id":"vendor","engine":"glm"}));
+    app.groups[1].tabs.push("vendor".into());
+    let unknown = screen(&app, 160, 24);
+    assert!(unknown.contains("Ctx ?  Tokens ?  Cost ?  LORE scrub ready"), "{unknown}");
+    assert!(unknown.contains("Ctx ?  Tokens ?  Cost ?  LORE ?"), "{unknown}");
+    app.apply_daemon_frame(&json!({"type":"event","session_id":"codex","event":{"type":"turn_done","data":{
+        "input_tokens":120,"output_tokens":30,"usage_scope":"session","usage_source":"codex_cli_turn_completed",
+        "ctx_percentage":null,"session_cost_usd":null
+    }}}));
+    app.apply_daemon_frame(&json!({"type":"event","session_id":"vendor","event":{"type":"turn_done","data":{
+        "prompt_tokens":7,"completion_tokens":3,"usage_scope":"turn","usage_source":"vendor_response"
+    }}}));
+    let rendered = screen(&app, 160, 24);
+    assert!(rendered.contains("Tokens 120/30 session"), "{rendered}");
+    assert!(rendered.contains("Tokens 7/3 turn"), "{rendered}");
+    assert!(rendered.contains("Ctx ?"), "{rendered}");
+    assert!(rendered.contains("Cost ?"), "{rendered}");
+    app.apply_daemon_frame(&json!({"type":"reply","ok":true,"status":{"session_id":"codex","lore_scrub":"unavailable"}}));
+    let rendered = screen(&app, 160, 24);
+    assert!(rendered.contains("LORE scrub unavailable"), "{rendered}");
+    app.apply_daemon_frame(&json!({"type":"telemetry_unavailable","session_id":"codex"}));
+    assert!(screen(&app, 160, 24).contains("LORE ?"));
+    app.apply_daemon_frame(&json!({"type":"event","session_id":"vendor","event":{"type":"turn_done","data":{
+        "ctx_percentage":null,"cost_usd":null,"session_cost_usd":null
+    }}}));
+    assert!(screen(&app, 160, 24).contains("Ctx ?  Tokens ?  Cost ?  LORE ?"));
+}
+
+#[test]
+fn telemetry_status_restores_reported_values_without_inventing_zero_usage() {
+    let mut app = App::default();
+    app.apply_daemon_frame(&json!({"type":"hello","session_id":"one","engine":"codex"}));
+    app.apply_daemon_frame(&json!({"type":"reply","ok":true,"status":{
+        "session_id":"one","ctx_percentage":42.5,"total_cost_usd":0.0123,
+        "belief_count":9,"usage":{"num_turns":2,"input_tokens":1000,"output_tokens":50,
+            "cost_basis":"published_rates","unpriced_models":[]}
+    }}));
+    let rendered = screen(&app, 180, 24);
+    assert!(rendered.contains("Ctx 42%  Tokens 1000/50 session  Cost $0.0123 est  LORE 9 beliefs"), "{rendered}");
+    app.apply_daemon_frame(&json!({"type":"reply","ok":true,"status":{
+        "session_id":"one","usage":{"num_turns":0,"input_tokens":0,"output_tokens":0}
+    }}));
+    assert!(screen(&app, 180, 24).contains("Tokens ?"));
 }
 
 #[test]

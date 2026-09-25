@@ -137,7 +137,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-claude"
-version = "2.0.0-alpha.6"
+version = "2.0.0-alpha.7"
 dependencies = [
  "libc",
  "serde_json",
@@ -145,7 +145,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-daemon"
-version = "2.0.0-alpha.6"
+version = "2.0.0-alpha.7"
 dependencies = [
  "doxa-claude",
  "doxa-engines",
@@ -154,6 +154,7 @@ dependencies = [
  "doxa-runtime",
  "doxa-transcript",
  "doxa-vendors",
+ "futures-util",
  "libc",
  "serde_json",
  "tempfile",
@@ -163,7 +164,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-engines"
-version = "2.0.0-alpha.6"
+version = "2.0.0-alpha.7"
 dependencies = [
  "libc",
  "serde",
@@ -174,7 +175,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-lore"
-version = "2.0.0-alpha.6"
+version = "2.0.0-alpha.7"
 dependencies = [
  "libc",
  "serde_json",
@@ -183,7 +184,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-peers"
-version = "2.0.0-alpha.6"
+version = "2.0.0-alpha.7"
 dependencies = [
  "libc",
  "serde",
@@ -195,7 +196,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-runtime"
-version = "2.0.0-alpha.6"
+version = "2.0.0-alpha.7"
 dependencies = [
  "libc",
  "serde_json",
@@ -203,7 +204,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-transcript"
-version = "2.0.0-alpha.6"
+version = "2.0.0-alpha.7"
 dependencies = [
  "libc",
  "serde_json",
@@ -212,7 +213,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-vendors"
-version = "2.0.0-alpha.6"
+version = "2.0.0-alpha.7"
 dependencies = [
  "futures-util",
  "reqwest",

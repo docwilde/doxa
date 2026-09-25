@@ -66,7 +66,7 @@ the JSONL file retains the full history. Older daemons without snapshot
 metadata fall back to their 512-event replay ring. A turn still running at
 attach can have text that was streamed but not yet persisted, so its earlier
 in-flight deltas may be absent. `Ctrl+T` opens bounded tool activity cards;
-clickable links are still 2.0 work. The binary version is `2.0.0-alpha.6` for this
+clickable links are still 2.0 work. The binary version is `2.0.0-alpha.7` for this
 separate development line, not a DOXA 2.0 release.
 
 `Ctrl+R` opens a searchable picker for attached and archived sessions with
@@ -74,12 +74,18 @@ bounded transcript tails. Archived transcripts open read-only and never receive
 prompts. `F2` (or `Alt+G`) opens a read-only, 256 KiB worktree diff in an
 asynchronous modal. It compares tracked changes with the recorded worktree
 base when one exists, or with `HEAD`, and lists bounded untracked filenames
-without reading their contents. A persistent diff pane remains future work.
-Each split pane has its own prompt and keeps a draft for its active session.
-Its status row shows engine and model chips from that session's daemon hello,
-status, and model change events. `Alt+E` opens an engine picker for the next
-session and shows the exact command to launch it; the active session's engine
-cannot be switched. `Alt+M` opens the live model picker when the daemon
+without reading their contents. `F4` keeps that diff visible beside the active
+session while its prompt stays usable; `F5` refreshes it and `Alt+PageUp` /
+`Alt+PageDown` scroll it. The other session pane reappears when the diff pane
+closes. The diff pane is read-only and requires enough terminal space for two
+panes. Each split pane has its own prompt and keeps a draft for its active
+session. Its status rows show engine and model chips, plus context, token usage,
+cost, and LORE status when the daemon reports them. Unknown values display `?`;
+token scope and estimated cost are labeled. `Alt+E` opens an engine picker,
+then a model and first-prompt form that starts a new session in the selected
+pane. A blank model uses the configured default. To start Claude from this
+form, set `DOXA_CLAUDE_SCRIPT` to the absolute sidecar path. The active
+session's engine cannot be switched. `Alt+M` opens the live model picker when the daemon
 advertises model control. Claude catalog choices come from a bounded startup
 CLI probe; an unavailable catalog offers no guessed models. The colors follow
 Python DOXA's warm dark palette.
@@ -120,8 +126,11 @@ also accepts `none`. `doxa-rs doctor --engine deepseek|glm` checks the daemon,
 LORE interpreter, provider key presence, and effort value without printing the
 key. Use `doxa-rs new --engine deepseek|glm --resume SESSION_ID` to resume an
 existing vendor session with saved messages. Pass the exact full session ID;
-the vendor and resolved model must match the saved state. Vendor chat has no
-tools in this alpha.
+the vendor and resolved model must match the saved state. Native vendor tools
+are disabled by default. Set `DOXA_VENDOR_TOOLS=workspace-read` when launching
+the session to allow the model to read UTF-8 files below the workspace. File
+contents are sent to the model provider after LORE scrubbing. This is a
+session-wide opt-in; there is no per-call approval in this preview.
 
 ## Native daemon
 
@@ -161,7 +170,14 @@ with `--lore-python /absolute/path/to/python`; the interpreter must have DOXA
 and LORE installed. Keys come only from `DEEPSEEK_API_KEY` or `ZAI_API_KEY` in
 the environment. `--model` and `--effort low|high|max` are optional; DeepSeek
 also accepts `--effort none`. Provider endpoints are fixed in production.
-The host advertises no tools and rejects any provider tool call. It persists
+By default the host advertises no tools and rejects provider tool calls. With
+`DOXA_VENDOR_TOOLS=workspace-read`, it advertises one read-only tool. It accepts
+relative paths only, rejects hidden path components and symlinks, and reads at
+most 64 KiB from a regular UTF-8 file. It cannot write files, run commands, or
+call LORE and peer operators. Tool exchanges are kept only in the active turn;
+saved history and transcripts contain the prompt and final response. The tool
+does not provide file access controls within the workspace, so enable it only
+when workspace files may be sent to the vendor. The host persists
 bounded plain-chat history beside the Python transcript as
 `<session-id>.messages.json`. Restart with the same `--session-id ID --resume
 true`; missing, corrupt, wrong-engine, or wrong-model state refuses resume.

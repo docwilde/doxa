@@ -23,7 +23,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Tabs, Wrap};
 use ratatui::{Frame, Terminal};
 use unicode_width::UnicodeWidthStr;
 
-use crate::{diff_view, history, markdown, peer_map::PeerMap};
+use crate::{diff_view, history, launch, markdown, peer_map::PeerMap};
 use crate::theme;
 
 mod tool_cards;
@@ -73,6 +73,14 @@ struct ModelPicker {
     note: String,
     loading: bool,
     catalog_pending: bool,
+}
+
+#[derive(Debug)]
+struct NewSession {
+    engine: launch::Engine,
+    model: String,
+    prompt: String,
+    field: usize,
 }
 
 fn safe_label(value: &str) -> String {
@@ -225,6 +233,101 @@ pub struct Session {
     pub collection: String,
     pub transcript: String,
     pub status: String,
+}
+
+#[derive(Clone, Debug, Default)]
+struct SessionTelemetry {
+    context: Option<String>,
+    usage: Option<String>,
+    cost: Option<String>,
+    lore: Option<String>,
+}
+
+impl SessionTelemetry {
+    fn update_turn(&mut self, data: &serde_json::Value) {
+        let context = data["ctx_percentage"].as_f64()
+            .filter(|value| value.is_finite() && (0.0..=100.0).contains(value))
+            .map(|value| format!("{value:.0}%"));
+        let absolute = data["ctx_tokens"].as_u64().zip(data["ctx_max_tokens"].as_u64())
+            .filter(|(used, limit)| *limit > 0 && used <= limit)
+            .map(|(used, limit)| format!("{used}/{limit}"));
+        if data.get("ctx_percentage").is_some() || data.get("ctx_tokens").is_some() {
+            self.context = context.or(absolute);
+        }
+        let scope = data["usage_scope"].as_str();
+        let source = data["usage_source"].as_str();
+        let tokens = match (scope, source) {
+            (Some("session"), Some("codex_cli_turn_completed")) =>
+                data["input_tokens"].as_u64().zip(data["output_tokens"].as_u64())
+                    .map(|(input, output)| (input, output, "session")),
+            (Some("turn"), Some("vendor_response")) =>
+                data["prompt_tokens"].as_u64().zip(data["completion_tokens"].as_u64())
+                    .map(|(input, output)| (input, output, "turn")),
+            _ => None,
+        };
+        if let Some((input, output, scope)) = tokens {
+            self.usage = Some(format!("{input}/{output} {scope}"));
+        } else if self.usage.as_deref().is_some_and(|usage| usage.ends_with(" turn")) {
+            self.usage = None;
+        }
+        if let Some(cost) = data["session_cost_usd"].as_f64()
+            .filter(|value| value.is_finite() && *value >= 0.0) {
+            self.cost = Some(format!("${cost:.4} session"));
+        } else if let Some(cost) = data["cost_usd"].as_f64()
+            .filter(|value| value.is_finite() && *value >= 0.0) {
+            self.cost = Some(format!("${cost:.4} turn"));
+        } else if data.get("session_cost_usd").is_some() || data.get("cost_usd").is_some() {
+            self.cost = None;
+        }
+    }
+
+    fn update_status(&mut self, status: &serde_json::Value) {
+        let context = status["ctx_percentage"].as_f64()
+            .filter(|value| value.is_finite() && (0.0..=100.0).contains(value))
+            .map(|value| format!("{value:.0}%"));
+        let absolute = status["ctx_tokens"].as_u64().zip(status["ctx_max_tokens"].as_u64())
+            .filter(|(used, limit)| *limit > 0 && used <= limit)
+            .map(|(used, limit)| format!("{used}/{limit}"));
+        if status.get("ctx_percentage").is_some() || status.get("ctx_tokens").is_some() {
+            self.context = context.or(absolute);
+        }
+        if let Some(cost) = status["total_cost_usd"].as_f64()
+            .filter(|value| value.is_finite() && *value >= 0.0) {
+            let label = if status["usage"]["cost_basis"].as_str().is_some() {
+                if status["usage"]["unpriced_models"].as_array().is_some_and(|models| !models.is_empty()) {
+                    "est partial"
+                } else { "est" }
+            } else { "session" };
+            self.cost = Some(format!("${cost:.4} {label}"));
+        } else if status.get("total_cost_usd").is_some() {
+            self.cost = None;
+        }
+        let usage = &status["usage"];
+        if usage["num_turns"].as_u64().is_some_and(|turns| turns > 0) {
+            if let Some((input, output)) = usage["input_tokens"].as_u64().zip(usage["output_tokens"].as_u64()) {
+                self.usage = Some(format!("{input}/{output} session"));
+            }
+        } else if usage["num_turns"].as_u64() == Some(0) {
+            self.usage = None;
+        }
+        if let Some(count) = status["belief_count"].as_u64() {
+            self.lore = Some(format!("{count} beliefs"));
+        } else if status.get("lore_scrub").is_some() {
+            self.lore = match status["lore_scrub"].as_str() {
+                Some("ready") => Some("scrub ready".into()),
+                Some("unavailable") => Some("scrub unavailable".into()),
+                _ => None,
+            };
+        }
+    }
+
+    fn line(&self) -> String {
+        format!(" Ctx {}  Tokens {}  Cost {}  LORE {}",
+            self.context.as_deref().unwrap_or("?"),
+            self.usage.as_deref().unwrap_or("?"),
+            self.cost.as_deref().unwrap_or("?"),
+            self.lore.as_deref().unwrap_or("?"))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -410,6 +513,7 @@ pub struct App {
     pub input: String,
     input_drafts: HashMap<(usize, String), String>,
     session_identity: HashMap<String, (Option<String>, Option<String>)>,
+    session_telemetry: HashMap<String, SessionTelemetry>,
     model_capabilities: HashMap<String, bool>,
     permission_capabilities: HashMap<String, bool>,
     permission_modes: HashMap<String, String>,
@@ -420,6 +524,9 @@ pub struct App {
     model_picker: Option<ModelPicker>,
     engine_picker: bool,
     engine_selected: usize,
+    new_session: Option<NewSession>,
+    pending_launches: Vec<(launch::LaunchOptions, Option<String>, usize)>,
+    launching: bool,
     pending_model_queries: Vec<String>,
     pending_model_changes: Vec<(String, String)>,
     pub pending_prompts: Vec<(String, String)>,
@@ -440,6 +547,8 @@ pub struct App {
     history_pending: Option<Receiver<Vec<history::OfflineSession>>>,
     offline_ids: HashSet<String>,
     diff_modal: bool,
+    diff_pane: bool,
+    diff_target: Option<String>,
     diff_scroll: u16,
     diff_text: String,
     diff_pending: Option<Receiver<(String, diff_view::DiffSnapshot)>>,
@@ -477,6 +586,7 @@ impl Default for App {
             input: String::new(),
             input_drafts: HashMap::new(),
             session_identity: HashMap::new(),
+            session_telemetry: HashMap::new(),
             model_capabilities: HashMap::new(),
             permission_capabilities: HashMap::new(),
             permission_modes: HashMap::new(),
@@ -487,6 +597,9 @@ impl Default for App {
             model_picker: None,
             engine_picker: false,
             engine_selected: 0,
+            new_session: None,
+            pending_launches: Vec::new(),
+            launching: false,
             pending_model_queries: Vec::new(),
             pending_model_changes: Vec::new(),
             pending_prompts: Vec::new(),
@@ -507,6 +620,8 @@ impl Default for App {
             history_pending: None,
             offline_ids: HashSet::new(),
             diff_modal: false,
+            diff_pane: false,
+            diff_target: None,
             diff_scroll: 0,
             diff_text: String::new(),
             diff_pending: None,
@@ -559,6 +674,39 @@ impl App {
             return false;
         };
         match kind {
+            "launch_reply" => {
+                if !self.launching { return false; }
+                self.launching = false;
+                if frame["ok"] == true {
+                    if let Some(id) = frame["session_id"].as_str().filter(|id| crate::discovery::valid_id(id)) {
+                        let target = frame["group"].as_u64().filter(|group| *group < 2)
+                            .map(|group| group as usize).unwrap_or(self.active_group);
+                        // A newly attached daemon may send hello before this reply.
+                        // Upsert places the first observed session in group zero;
+                        // move that provisional tab to the requested pane.
+                        if target != 0 {
+                            let first = &mut self.groups[0];
+                            if let Some(index) = first.tabs.iter().position(|tab| tab == id) {
+                                first.tabs.remove(index);
+                                first.active = first.active.min(first.tabs.len().saturating_sub(1));
+                            }
+                        }
+                        let group = &mut self.groups[target];
+                        if !group.tabs.iter().any(|tab| tab == id) { group.tabs.push(id.to_owned()); }
+                        group.active = group.tabs.iter().position(|tab| tab == id).unwrap_or(group.active);
+                    }
+                }
+                self.notice = if frame["ok"] == true {
+                    format!("Session started · {}", safe_label(frame["session_id"].as_str().unwrap_or("")))
+                } else if frame["started"] == true {
+                    let id = frame["session_id"].as_str().filter(|id| crate::discovery::valid_id(id))
+                        .unwrap_or("unknown");
+                    format!("Session started; UI attach failed · doxa-rs attach {id}")
+                } else {
+                    format!("Session launch failed · {}", safe_label(frame["message"].as_str().unwrap_or("unknown error")))
+                };
+                true
+            }
             "hello" => {
                 let Some(id) = frame.get("session_id").and_then(|v| v.as_str()) else {
                     return false;
@@ -566,6 +714,7 @@ impl App {
                 let model = frame.get("model").and_then(|v| v.as_str()).map(safe_label).filter(|s| !s.is_empty());
                 let engine = frame.get("engine").and_then(|v| v.as_str()).map(safe_label).filter(|s| !s.is_empty());
                 self.session_identity.insert(id.to_owned(), (engine, model.clone()));
+                self.session_telemetry.entry(id.to_owned()).or_default().update_status(frame);
                 self.model_capabilities.insert(id.to_owned(), frame["can_set_model"] == true);
                 self.permission_capabilities.insert(id.to_owned(), frame["can_set_permission_mode"] == true);
                 if let Some(mode) = frame["permission_mode"].as_str().filter(|mode| permission_index(mode).is_some()) {
@@ -655,6 +804,7 @@ impl App {
                         true
                     }
                     "turn_done" => {
+                        self.session_telemetry.entry(id.clone()).or_default().update_turn(data);
                         self.session_activity.entry(id.clone()).or_default().0 = false;
                         let status = if data.get("is_error").and_then(|v| v.as_bool()) == Some(true)
                         {
@@ -781,6 +931,19 @@ impl App {
                 };
                 true
             }
+            "telemetry_unavailable" => {
+                if let Some(id) = frame["session_id"].as_str() {
+                    self.session_telemetry.entry(id.to_owned()).or_default().lore = None;
+                    return true;
+                }
+                false
+            }
+            "telemetry_status" => {
+                let Some(id) = frame["session_id"].as_str() else { return false; };
+                let Some(status) = frame.get("status") else { return false; };
+                self.session_telemetry.entry(id.to_owned()).or_default().update_status(status);
+                true
+            }
             "reply" => {
                 // Both native and Python daemons broadcast prompt_queued after
                 // the enqueue reply. Count that event once, not this reply.
@@ -788,6 +951,7 @@ impl App {
                     let id = status.get("session_id").and_then(|v| v.as_str())
                         .or_else(|| frame.get("session_id").and_then(|v| v.as_str()));
                     if let Some(id) = id {
+                        self.session_telemetry.entry(id.to_owned()).or_default().update_status(status);
                         let identity = self.session_identity.entry(id.to_owned()).or_default();
                         if status.get("engine").is_some() {
                             identity.0 = status.get("engine").and_then(|v| v.as_str()).map(safe_label).filter(|s| !s.is_empty());
@@ -961,10 +1125,11 @@ impl App {
                     self.history_modal = false;
                     self.notice = "Enlarge terminal to open session history".into();
                 }
-                if ((self.model_picker.is_some() || self.engine_picker) && (w < 29 || h < 11))
+                if ((self.model_picker.is_some() || self.engine_picker || self.new_session.is_some()) && (w < 29 || h < 11))
                     || (self.permission_picker.is_some() && (w < 60 || h < 15)) {
                     self.model_picker = None;
                     self.engine_picker = false;
+                    self.new_session = None;
                     self.permission_picker = None;
                     self.permission_confirm_dont_ask = false;
                     self.notice = "Enlarge terminal to open chip picker".into();
@@ -998,6 +1163,7 @@ impl App {
         if self.active_request_index().is_some() {
             return self.request_key(key);
         }
+        if self.new_session.is_some() { return self.new_session_key(key); }
         if self.model_picker.is_some() { return self.model_picker_key(key); }
         if self.permission_picker.is_some() { return self.permission_picker_key(key); }
         if self.engine_picker { return self.engine_picker_key(key); }
@@ -1071,6 +1237,23 @@ impl App {
         if key.code == KeyCode::F(2) || (key.code == KeyCode::Char('g') && alt) {
             self.open_diff();
             return true;
+        }
+        if key.code == KeyCode::F(4) {
+            if !self.diff_pane && self.layout(self.size).panes.is_none() {
+                self.notice = "Enlarge terminal to open the diff pane".into();
+            } else {
+                self.diff_pane = !self.diff_pane;
+                if self.diff_pane { self.load_diff(); }
+            }
+            return true;
+        }
+        if self.diff_pane {
+            match key.code {
+                KeyCode::F(5) => { self.load_diff(); return true; }
+                KeyCode::PageUp if alt => { self.diff_scroll = self.diff_scroll.saturating_sub(10); return true; }
+                KeyCode::PageDown if alt => { self.diff_scroll = self.diff_scroll.saturating_add(10); return true; }
+                _ => {}
+            }
         }
         match key.code {
             KeyCode::F(3) => {
@@ -1307,8 +1490,55 @@ impl App {
             KeyCode::Up => self.engine_selected = self.engine_selected.saturating_sub(1),
             KeyCode::Down => self.engine_selected = (self.engine_selected + 1).min(ENGINE_CHOICES.len() - 1),
             KeyCode::Enter => {
-                self.notice = format!("Run separately for a new session: doxa-rs new --engine {}", ENGINE_CHOICES[self.engine_selected]);
-                self.engine_picker = false;
+                self.select_new_engine();
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    fn select_new_engine(&mut self) {
+        let engine = match self.engine_selected {
+            0 => launch::Engine::Codex,
+            1 => launch::Engine::Claude,
+            2 => launch::Engine::DeepSeek,
+            _ => launch::Engine::Glm,
+        };
+        self.engine_picker = false;
+        self.new_session = Some(NewSession { engine, model: String::new(), prompt: String::new(), field: 0 });
+    }
+
+    fn new_session_key(&mut self, key: KeyEvent) -> bool {
+        let form = self.new_session.as_mut().unwrap();
+        match key.code {
+            KeyCode::Esc => self.new_session = None,
+            KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % 2,
+            KeyCode::BackTab | KeyCode::Up => form.field = (form.field + 1) % 2,
+            KeyCode::Backspace => {
+                if form.field == 0 { form.model.pop(); } else { form.prompt.pop(); }
+            }
+            KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                && !c.is_control() => {
+                let target = if form.field == 0 { &mut form.model } else { &mut form.prompt };
+                let limit = if form.field == 0 { 128 } else { MAX_INPUT_BYTES };
+                if target.len() + c.len_utf8() <= limit { target.push(c); }
+            }
+            KeyCode::Enter if form.field == 0 => form.field = 1,
+            KeyCode::Enter => {
+                if self.launching {
+                    self.notice = "Session launch already in progress".into();
+                    return true;
+                }
+                let form = self.new_session.take().unwrap();
+                let mut options = launch::LaunchOptions { engine: form.engine, ..Default::default() };
+                if !form.model.trim().is_empty() { options.model = Some(form.model.trim().to_owned()); }
+                if form.engine == launch::Engine::Claude {
+                    options.claude_script = std::env::var_os("DOXA_CLAUDE_SCRIPT").map(PathBuf::from);
+                }
+                let prompt = if form.prompt.trim().is_empty() { None } else { Some(form.prompt) };
+                self.pending_launches.push((options, prompt, self.active_group));
+                self.launching = true;
+                self.notice = format!("Starting {} session…", ENGINE_CHOICES[self.engine_selected]);
             }
             _ => return false,
         }
@@ -1397,12 +1627,18 @@ impl App {
     fn open_diff(&mut self) {
         if self.diff_modal { self.diff_modal = false; return; }
         self.diff_modal = true;
+        self.load_diff();
+    }
+
+    fn load_diff(&mut self) {
         self.diff_scroll = 0;
         self.diff_pending = None;
         let Some(id) = self.groups[self.active_group].active_id().map(str::to_owned) else {
+            self.diff_target = None;
             self.diff_text = "Select a session to inspect its worktree.".into();
             return;
         };
+        self.diff_target = Some(id.clone());
         let Some(cwd) = self.session_cwds.get(&id).cloned() else {
             self.diff_text = "This session did not provide a worktree directory.".into();
             return;
@@ -1414,6 +1650,10 @@ impl App {
     }
 
     fn poll_diff(&mut self) -> bool {
+        if self.diff_pane && self.diff_target.as_deref() != self.groups[self.active_group].active_id() {
+            self.load_diff();
+            return true;
+        }
         let Some(receiver) = &self.diff_pending else { return false; };
         match receiver.try_recv() {
             Ok((id, snapshot)) => {
@@ -1803,7 +2043,7 @@ impl App {
     fn mouse(&mut self, mouse: MouseEvent) -> bool {
         if self.active_request_index().is_none()
             && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
-            && (self.engine_picker || self.model_picker.is_some() || self.permission_picker.is_some()) {
+            && (self.engine_picker || self.new_session.is_some() || self.model_picker.is_some() || self.permission_picker.is_some()) {
             let width = self.size.width.saturating_sub(4).min(74);
             let height = self.size.height.saturating_sub(4).min(19);
             if width < 25 || height < 7 { return false; }
@@ -1811,6 +2051,7 @@ impl App {
             let y = self.size.y + (self.size.height - height) / 2;
             if mouse.column < x || mouse.column >= x + width || mouse.row < y || mouse.row >= y + height {
                 self.engine_picker = false;
+                self.new_session = None;
                 self.model_picker = None;
                 self.permission_picker = None;
                 self.permission_confirm_dont_ask = false;
@@ -1821,11 +2062,11 @@ impl App {
                 let row = usize::from(mouse.row.saturating_sub(y + 4));
                 if row < ENGINE_CHOICES.len() {
                     self.engine_selected = row;
-                    self.notice = format!("Run separately for a new session: doxa-rs new --engine {}", ENGINE_CHOICES[row]);
-                    self.engine_picker = false;
+                    self.select_new_engine();
                 }
                 return true;
             }
+            if self.new_session.is_some() { return true; }
             if let Some((_, selected)) = &mut self.permission_picker {
                 if mouse.row >= y + 4 {
                     let row = usize::from(mouse.row - (y + 4));
@@ -1861,9 +2102,25 @@ impl App {
             || self.model_picker.is_some()
             || self.permission_picker.is_some()
             || self.engine_picker
+            || self.new_session.is_some()
         {
             self.drag = None;
             return false;
+        }
+        if self.diff_pane {
+            if let Some(panes) = self.layout(self.size).panes {
+                let pane = panes[1 - self.active_group];
+                if mouse.column > pane.x && mouse.column < pane.right().saturating_sub(1)
+                    && mouse.row > pane.y && mouse.row < pane.bottom().saturating_sub(1) {
+                    match mouse.kind {
+                        MouseEventKind::ScrollUp => self.diff_scroll = self.diff_scroll.saturating_sub(3),
+                        MouseEventKind::ScrollDown => self.diff_scroll = self.diff_scroll.saturating_add(3),
+                        MouseEventKind::Down(MouseButton::Left) => {},
+                        _ => return false,
+                    }
+                    return true;
+                }
+            }
         }
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
@@ -2038,14 +2295,19 @@ impl App {
             self.draw_rail(frame, rail);
         }
         if let Some(panes) = layout.panes {
-            self.draw_group(frame, panes[0], 0);
-            self.draw_group(frame, panes[1], 1);
+            if self.diff_pane {
+                self.draw_group(frame, panes[self.active_group], self.active_group);
+                self.draw_diff_pane(frame, panes[1 - self.active_group]);
+            } else {
+                self.draw_group(frame, panes[0], 0);
+                self.draw_group(frame, panes[1], 1);
+            }
         } else {
             self.draw_group(frame, layout.body, self.active_group);
         }
         frame.render_widget(
             Paragraph::new(format!(
-                "{}  |  Ctrl+P actions · Alt+E engine · Alt+M model · Alt+P permissions · Ctrl+R history · F2 diff · F3 rail · Shift+Tab pane · Ctrl+T tools · Ctrl+M peers · Alt+H/V split · Alt+arrows/drag resize · Ctrl+Q quit",
+                "{}  |  Ctrl+P actions · Alt+E engine · Alt+M model · Alt+P permissions · Ctrl+R history · F2 diff · F4 diff pane · F3 rail · Shift+Tab pane · Ctrl+T tools · Ctrl+M peers · Alt+H/V split · Alt+arrows/drag resize · Ctrl+Q quit",
                 self.notice
             )).style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)),
             Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
@@ -2066,7 +2328,7 @@ impl App {
     }
 
     fn draw_chip_picker(&self, frame: &mut Frame, area: Rect) {
-        if !self.engine_picker && self.model_picker.is_none() && self.permission_picker.is_none() { return; }
+        if !self.engine_picker && self.new_session.is_none() && self.model_picker.is_none() && self.permission_picker.is_none() { return; }
         let width = area.width.saturating_sub(4).min(74);
         let height = area.height.saturating_sub(4).min(19);
         if width < 25 || height < 7 { return; }
@@ -2075,13 +2337,27 @@ impl App {
         let mut lines = Vec::new();
         let title;
         if self.engine_picker {
-            title = " Engine · new sessions only · Esc close ";
-            lines.push(Line::from(" This picker does not launch or switch a session."));
-            lines.push(Line::from(" Select a row to show a new-session command:"));
+            title = " New session · choose engine · Enter continue · Esc close ";
+            lines.push(Line::from(" Select an engine for a new session:"));
+            lines.push(Line::from(" Model and first prompt follow."));
             lines.push(Line::from(""));
             for (index, engine) in ENGINE_CHOICES.iter().enumerate() {
                 lines.push(Line::styled(format!(" {} {}", if index == self.engine_selected { '›' } else { ' ' }, engine),
                     Style::default().fg(if index == self.engine_selected { theme::ACCENT } else { theme::SECONDARY })));
+            }
+        } else if let Some(form) = &self.new_session {
+            title = " New session · Tab field · Enter continue/start · Esc close ";
+            let name = match form.engine { launch::Engine::Codex => "codex", launch::Engine::Claude => "claude",
+                launch::Engine::DeepSeek => "deepseek", launch::Engine::Glm => "glm", launch::Engine::Fixture => "fixture" };
+            lines.push(Line::from(format!(" Engine: {name}")));
+            lines.push(Line::from(" Blank model uses configured engine default."));
+            lines.push(Line::from(""));
+            lines.push(Line::styled(format!(" {} Model: {}", if form.field == 0 { '›' } else { ' ' }, safe_label(&form.model)),
+                Style::default().fg(if form.field == 0 { theme::ACCENT } else { theme::SECONDARY })));
+            lines.push(Line::styled(format!(" {} First prompt: {}", if form.field == 1 { '›' } else { ' ' }, safe_label(&form.prompt)),
+                Style::default().fg(if form.field == 1 { theme::ACCENT } else { theme::SECONDARY })));
+            if form.engine == launch::Engine::Claude {
+                lines.push(Line::from(" Claude requires DOXA_CLAUDE_SCRIPT absolute path."));
             }
         } else if let Some((id, selected)) = &self.permission_picker {
             title = " Claude permissions · this session · Enter select · Esc close ";
@@ -2174,6 +2450,22 @@ impl App {
             .block(Block::default().title(" Worktree diff · ↑/↓ scroll · R refresh · F2/Esc close ")
                 .borders(Borders::ALL).border_style(Style::default().fg(theme::BORDER))
             .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED))), modal);
+    }
+
+    fn draw_diff_pane(&self, frame: &mut Frame, area: Rect) {
+        let rows: Vec<Line> = self.diff_text.lines()
+            .skip(usize::from(self.diff_scroll))
+            .take(usize::from(area.height.saturating_sub(2)))
+            .map(|line| {
+                let color = if line.starts_with('+') && !line.starts_with("+++") { theme::SUCCESS }
+                    else if line.starts_with('-') && !line.starts_with("---") { theme::ERROR }
+                    else if line.starts_with("@@") { theme::ACCENT } else { theme::SECONDARY };
+                Line::styled(line.to_owned(), Style::default().fg(color))
+            }).collect();
+        frame.render_widget(Paragraph::new(rows)
+            .block(Block::default().title(" Worktree diff · F5 refresh · Alt+PgUp/PgDn scroll · F4 close ")
+                .borders(Borders::ALL).border_style(Style::default().fg(theme::BORDER)))
+            .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)), area);
     }
 
     fn draw_actions(&self, frame: &mut Frame, area: Rect) {
@@ -2431,7 +2723,7 @@ impl App {
                 Constraint::Length(2),
                 Constraint::Min(1),
                 Constraint::Length(3),
-                Constraint::Length(1),
+                Constraint::Length(2),
             ])
             .split(area);
         let titles: Vec<Line> = group
@@ -2529,7 +2821,14 @@ impl App {
         }
         frame.render_widget(
             Paragraph::new(Line::from(status_spans)).style(Style::default().bg(theme::RAISED)),
-            inner[3],
+            Rect { height: 1, ..inner[3] },
+        );
+        let telemetry = group.active_id().and_then(|id| self.session_telemetry.get(id));
+        let telemetry_line = telemetry.map(SessionTelemetry::line)
+            .unwrap_or_else(|| SessionTelemetry::default().line());
+        frame.render_widget(
+            Paragraph::new(telemetry_line).style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)),
+            Rect { y: inner[3].y.saturating_add(1), height: 1, ..inner[3] },
         );
     }
 }
@@ -2680,9 +2979,16 @@ fn run_loop(
             if let Some(id) = app.pending_peer_refresh.take() {
                 changed |= app.peer_map.roster(&id, &serde_json::json!({"ok":false}));
             }
+            if !app.pending_launches.is_empty() {
+                app.pending_launches.clear();
+                app.launching = false;
+                app.notice = "Session launch unavailable · daemon connection closed".into();
+                changed = true;
+            }
         }
         if let Some(sender) = &prompt_sender {
-            let disconnected = dispatch_prompts(&mut app, sender);
+            let disconnected = dispatch_launches(&mut app, sender);
+            let disconnected = dispatch_prompts(&mut app, sender) || disconnected;
             let disconnected = dispatch_answers(&mut app, sender) || disconnected;
             let disconnected = dispatch_peer_refresh(&mut app, sender) || disconnected;
             let disconnected = dispatch_model_controls(&mut app, sender) || disconnected;
@@ -2705,6 +3011,26 @@ fn run_loop(
     drop(terminal);
     drop(guard);
     Ok(())
+}
+
+fn dispatch_launches(app: &mut App, sender: &SyncSender<crate::bridge::WorkerCommand>) -> bool {
+    let mut launches = std::mem::take(&mut app.pending_launches).into_iter();
+    while let Some((options, prompt, group)) = launches.next() {
+        match sender.try_send(crate::bridge::WorkerCommand::Launch(options, prompt, group)) {
+            Ok(()) => {}
+            Err(TrySendError::Full(crate::bridge::WorkerCommand::Launch(options, prompt, group))) => {
+                app.pending_launches.extend(std::iter::once((options, prompt, group)).chain(launches));
+                return false;
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                app.launching = false;
+                app.notice = "Session launch unavailable".into();
+                return true;
+            }
+            Err(_) => unreachable!(),
+        }
+    }
+    false
 }
 
 fn save_layout_if_changed(
@@ -3037,8 +3363,85 @@ mod tests {
         app.open_engine_picker();
         app.handle(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
-        assert_eq!(app.notice, "Run separately for a new session: doxa-rs new --engine claude");
         assert!(!app.engine_picker);
+        assert_eq!(app.new_session.as_ref().unwrap().engine, launch::Engine::Claude);
+    }
+
+    #[test]
+    fn new_session_form_queues_engine_model_and_first_prompt() {
+        let mut app = App::default();
+        app.handle(Event::Resize(100, 28));
+        app.open_engine_picker();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        for c in "deepseek-test".chars() {
+            app.handle(Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)));
+        }
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        for c in "Explain this".chars() {
+            app.handle(Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)));
+        }
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        let (options, prompt, group) = app.pending_launches.pop().unwrap();
+        assert_eq!(options.engine, launch::Engine::DeepSeek);
+        assert_eq!(options.model.as_deref(), Some("deepseek-test"));
+        assert_eq!(prompt.as_deref(), Some("Explain this"));
+        assert_eq!(group, 0);
+        assert!(app.launching);
+        assert!(app.new_session.is_none());
+    }
+
+    #[test]
+    fn launched_session_opens_in_active_pane_and_failure_is_visible() {
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"old", "model":"old"}));
+        app.launching = true;
+        app.apply_daemon_frame(&json!({"type":"launch_reply", "ok":true, "session_id":"new", "group":0}));
+        assert_eq!(app.groups[0].active_id(), Some("new"));
+        assert!(!app.launching);
+        app.launching = true;
+        app.apply_daemon_frame(&json!({"type":"launch_reply", "ok":false,
+            "message":"DEEPSEEK_API_KEY is required"}));
+        assert!(app.notice.contains("DEEPSEEK_API_KEY"));
+        assert_eq!(app.groups[0].active_id(), Some("new"));
+        app.launching = true;
+        app.apply_daemon_frame(&json!({"type":"launch_reply", "ok":false, "started":true,
+            "session_id":"surviving", "group":0, "message":"socket refused"}));
+        assert!(app.notice.contains("doxa-rs attach surviving"));
+    }
+
+    #[test]
+    fn launch_reply_keeps_the_group_chosen_when_launch_started() {
+        let mut app = App::default();
+        app.launching = true;
+        app.active_group = 1;
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"new", "engine":"codex"}));
+        assert_eq!(app.groups[0].active_id(), Some("new"));
+        app.active_group = 0;
+        app.apply_daemon_frame(&json!({"type":"launch_reply", "ok":true,
+            "session_id":"new", "group":1}));
+        assert_eq!(app.groups[0].active_id(), None);
+        assert_eq!(app.groups[1].active_id(), Some("new"));
+        assert_eq!(app.active_group, 0);
+        assert!(!app.apply_daemon_frame(&json!({"type":"launch_reply", "ok":true,
+            "session_id":"unrequested", "group":1})));
+    }
+
+    #[test]
+    fn internal_telemetry_refresh_cannot_restore_running_after_turn_done() {
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"s", "engine":"codex",
+            "running":true, "lore_scrub":"ready"}));
+        app.apply_daemon_frame(&json!({"type":"event", "session_id":"s",
+            "event":{"type":"turn_done", "data":{"is_error":false}}}));
+        assert_eq!(app.session_activity.get("s").unwrap().0, false);
+        let notice = app.notice.clone();
+        app.apply_daemon_frame(&json!({"type":"telemetry_status", "session_id":"s",
+            "status":{"session_id":"s", "running":true, "lore_scrub":"unavailable"}}));
+        assert_eq!(app.session_activity.get("s").unwrap().0, false);
+        assert_eq!(app.notice, notice);
+        assert_eq!(app.session_telemetry.get("s").unwrap().lore.as_deref(), Some("scrub unavailable"));
     }
 
     fn painted(app: &App) -> String {
@@ -3200,6 +3603,35 @@ mod tests {
         assert!(view.contains("+new"));
         app.handle(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
         assert!(!app.diff_modal);
+    }
+
+    #[test]
+    fn diff_pane_keeps_the_active_prompt_and_restores_the_other_session() {
+        let mut app = App::default();
+        app.apply_update(DaemonUpdate::Upsert(Session { id: "first".into(), title: "First".into(),
+            collection: "repo".into(), transcript: "active transcript".into(), status: "Ready".into() }));
+        app.apply_update(DaemonUpdate::Upsert(Session { id: "second".into(), title: "Second".into(),
+            collection: "repo".into(), transcript: "hidden transcript".into(), status: "Ready".into() }));
+        app.groups[1].tabs.push("second".into());
+        app.handle(Event::Resize(100, 28));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE)));
+        assert!(app.diff_pane);
+        app.diff_text = "Base: HEAD\n@@ -1 +1 @@\n-old\n+new".into();
+        let view = painted(&app);
+        assert!(view.contains("active transcript"));
+        assert!(view.contains("Worktree diff"));
+        assert!(view.contains("+new"));
+        assert!(!view.contains("hidden transcript"));
+        let diff_area = app.layout(app.size).panes.unwrap()[1];
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::ScrollDown,
+            column: diff_area.x + 2, row: diff_area.y + 2, modifiers: KeyModifiers::NONE }));
+        assert_eq!(app.active_group, 0);
+        assert_eq!(app.diff_scroll, 3);
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)));
+        assert_eq!(app.input, "x");
+        app.handle(Event::Key(KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE)));
+        assert!(!app.diff_pane);
+        assert!(painted(&app).contains("hidden transcript"));
     }
 
     #[test]

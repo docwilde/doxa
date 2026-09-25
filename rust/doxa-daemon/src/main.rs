@@ -3,6 +3,7 @@ mod claude_host;
 mod codex_host;
 mod peer_host;
 mod vendor_host;
+mod vendor_tools;
 use claude_host::ClaudeHost;
 use codex_host::CodexHost;
 use doxa_engines::codex_driver::{DriverOptions, SandboxMode};
