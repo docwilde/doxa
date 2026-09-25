@@ -193,9 +193,11 @@ index. Duplicate queued hunks are refused. Pending
 rejections block closing the diff or leaving the UI until they finish, and are
 cancelled if the session ends. The diff pane requires enough
 terminal space for two panes. Each split pane has its own prompt and keeps a draft for its active
-session. Its status rows show engine and model chips, plus context, token usage,
-cost, and LORE status when the daemon reports them. Unknown values display `?`;
-token scope and estimated cost are labeled. In a prompt, `Enter` submits, while
+session. Its status rows show engine and model chips, plus context, cost, and
+LORE status. The `p≈X/u≈Y` chip shows approximate tokens in curated project
+and user memory, based on exact character counts from LORE's canonical entries
+at four characters per token. Provider tokenizers may count differently; `?`
+means LORE could not report a scope. Estimated cost is labeled. In a prompt, `Enter` submits, while
 `Shift+Enter` or `Alt+Enter` inserts a newline (`Ctrl+J` also works when
 reported distinctly by the terminal). Arrow keys move the cursor across
 lines; `Home`, `End`, `Backspace`, and `Delete` edit at the cursor. Bracketed

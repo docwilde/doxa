@@ -17,6 +17,9 @@ the stable 2.0 release has not been cut.
   to `new --branch` rather than switching a live checkout's base.
 - List queued prompts and cancel by stable ID. Reject stale positions rather
   than cancelling a different prompt when the queue changes.
+- Replace the model token-usage chip with `p≈X/u≈Y` for project and user
+  curated memory. LORE supplies exact entry character counts; the displayed
+  token counts are estimates and refresh outside the draw loop.
 - Claim each session before opening saved state, preventing two daemons from
   resuming the same session at once. Reject a live legacy registry before host
   startup; keep a private reusable claim file across shutdown and test the
