@@ -5,7 +5,7 @@ use std::io::{self, IsTerminal, Stdout};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{
     self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
@@ -36,6 +36,7 @@ const MIN_PANE_HEIGHT: u16 = 8;
 const MIN_RAIL_WIDTH: u16 = 12;
 const MAX_PENDING_PROMPTS: usize = 32;
 const MAX_INPUT_REQUESTS: usize = 32;
+const INPUT_BLINK_INTERVAL: Duration = Duration::from_millis(650);
 // JSON may expand one input byte to a six-byte Unicode escape.
 const MAX_INPUT_BYTES: usize = 10 * 1024;
 const MAX_TRANSCRIPT_BYTES: usize = 512 * 1024;
@@ -141,6 +142,16 @@ fn prompt_height(draft: &str, pane_height: u16) -> u16 {
 fn wrapped_rows(text: &str, width: usize) -> usize {
     let width = width.max(1);
     text.lines().map(|line| line.width().max(1).div_ceil(width)).sum::<usize>().max(1)
+}
+
+fn chip_text(kind: &str, label: &str) -> String {
+    if kind == "more" {
+        format!(" {label} › ")
+    } else if matches!(kind, "engine" | "model" | "permission" | "beliefs") {
+        format!(" {label} ▾ ")
+    } else {
+        format!(" {label} ")
+    }
 }
 
 const MAX_EVENT_FIELD_CHARS: usize = 320;
@@ -373,13 +384,6 @@ impl SessionTelemetry {
         }
     }
 
-    fn line(&self) -> String {
-        format!(" Ctx {}  Tokens {}  Cost {}  LORE {}",
-            self.context.as_deref().unwrap_or("?"),
-            self.usage.as_deref().unwrap_or("?"),
-            self.cost.as_deref().unwrap_or("?"),
-            self.lore.as_deref().unwrap_or("?"))
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -581,7 +585,6 @@ fn input_request_body(request: &InputRequest, title_width: usize) -> (String, Op
         } else {
             body.push_str("Question unavailable\n");
         }
-        body.push_str("\n1–9 choose · ↑/↓ then Enter · PgUp/PgDn scroll · Esc decline");
     } else {
         body.push_str(&markdown::sanitize(&request.heading));
         body.push_str("\n\n");
@@ -612,6 +615,9 @@ pub struct App {
     input_drafts: HashMap<(usize, String), (String, usize)>,
     session_identity: HashMap<String, (Option<String>, Option<String>)>,
     session_telemetry: HashMap<String, SessionTelemetry>,
+    chip_offsets: [usize; 2],
+    blink_on: bool,
+    blink_at: Instant,
     model_capabilities: HashMap<String, bool>,
     permission_capabilities: HashMap<String, bool>,
     permission_modes: HashMap<String, String>,
@@ -694,6 +700,9 @@ impl Default for App {
             input_drafts: HashMap::new(),
             session_identity: HashMap::new(),
             session_telemetry: HashMap::new(),
+            chip_offsets: [0, 0],
+            blink_on: true,
+            blink_at: Instant::now(),
             model_capabilities: HashMap::new(),
             permission_capabilities: HashMap::new(),
             permission_modes: HashMap::new(),
@@ -949,6 +958,10 @@ impl App {
                                 self.engine_picker = false;
                                 self.stop_confirmation = None;
                                 if self.input_requests.len() < MAX_INPUT_REQUESTS {
+                                    if self.input_requests.is_empty() {
+                                        self.blink_on = true;
+                                        self.blink_at = Instant::now();
+                                    }
                                     self.input_requests.push(request);
                                 } else {
                                     self.notice = "Too many input requests · inspect the session directly".into();
@@ -2530,10 +2543,10 @@ impl App {
         let group = &self.groups[self.active_group];
         let draft = group.active_id().map_or("", |_| self.input.as_str());
         let prompt = prompt_height(draft, pane.height);
-        let available = pane.height.saturating_sub(2 + prompt + 2 + 1 + 1);
+        let available = pane.height.saturating_sub(3 + prompt + 1 + 1 + 1);
         let height = wanted.min(available);
         if height < 5 || pane.width < 18 { return None; }
-        Some(Rect::new(pane.x, pane.bottom().saturating_sub(prompt + 2 + 1 + height), pane.width, height))
+        Some(Rect::new(pane.x, pane.bottom().saturating_sub(prompt + 1 + 1 + height), pane.width, height))
     }
 
     fn active_chooser_rect(&self) -> Option<Rect> {
@@ -2545,22 +2558,87 @@ impl App {
     fn chips(&self, index: usize) -> Vec<(&'static str, String)> {
         let id = self.groups[index].active_id();
         let identity = id.and_then(|id| self.session_identity.get(id));
+        let telemetry = id.and_then(|id| self.session_telemetry.get(id));
         let mut chips = Vec::new();
         if let Some(engine) = identity.and_then(|pair| pair.0.as_deref()) {
             chips.push(("engine", engine.to_owned()));
         }
+        chips.push(("context", format!("Ctx {}", telemetry.and_then(|value| value.context.as_deref()).unwrap_or("?"))));
         if let Some(model) = identity.and_then(|pair| pair.1.as_deref()) {
             chips.push(("model", model.to_owned()));
         }
+        chips.push(("usage", format!("Tokens {}", telemetry.and_then(|value| value.usage.as_deref()).unwrap_or("?"))));
         if let Some(mode) = id.and_then(|id| self.permission_modes.get(id)) {
             chips.push(("permission", mode.clone()));
         }
-        let beliefs = id.and_then(|id| self.session_telemetry.get(id))
-            .and_then(|telemetry| telemetry.lore.as_deref())
+        let beliefs = telemetry.and_then(|value| value.lore.as_deref())
             .filter(|label| label.ends_with(" beliefs"))
             .unwrap_or("Beliefs");
         chips.push(("beliefs", beliefs.to_owned()));
+        chips.push(("cost", format!("Cost {}", telemetry.and_then(|value| value.cost.as_deref()).unwrap_or("?"))));
+        chips.push(("lore", format!("LORE {}", telemetry.and_then(|value| value.lore.as_deref()).unwrap_or("?"))));
         chips
+    }
+
+    fn waiting_for_input(&self, id: &str) -> bool {
+        self.input_requests.iter().any(|request| request.session_id == id && !request.sending)
+    }
+
+    /// Called by the event loop at its normal poll cadence. Redraws only once
+    /// per phase while a session actually has an unresolved request.
+    fn tick_blink(&mut self, now: Instant) -> bool {
+        if !self.input_requests.iter().any(|request| !request.sending) {
+            self.blink_at = now;
+            return std::mem::replace(&mut self.blink_on, true) == false;
+        }
+        if now.duration_since(self.blink_at) < INPUT_BLINK_INTERVAL { return false; }
+        self.blink_at = now;
+        self.blink_on = !self.blink_on;
+        true
+    }
+
+    fn tab_at(&self, index: usize, pane: Rect, column: u16) -> Option<usize> {
+        let mut x = pane.x.saturating_add(2); // border and left tab padding
+        for (position, id) in self.groups[index].tabs.iter().enumerate() {
+            let title = self.sessions.iter().find(|session| &session.id == id)
+                .map(|session| session.title.as_str()).unwrap_or(id);
+            let end = x.saturating_add(title.width() as u16);
+            if column >= x.saturating_sub(1) && column <= end { return Some(position); }
+            x = end.saturating_add(3); // right padding, divider, left padding
+            if x >= pane.right() { break; }
+        }
+        None
+    }
+
+    fn chip_window(&self, index: usize, width: usize) -> Vec<(&'static str, String)> {
+        let all = self.chips(index);
+        let full_width = all.iter().map(|(kind, label)| chip_text(kind, label).width()).sum::<usize>()
+            + all.len().saturating_sub(1);
+        if full_width <= width { return all; }
+        let budget = width.saturating_sub(chip_text("more", "+8").width() + 1);
+        let mut shown = Vec::new();
+        let mut used = 0;
+        let start = self.chip_offsets[index] % all.len();
+        for step in 0..all.len() {
+            let (kind, label) = &all[(start + step) % all.len()];
+            let gap = usize::from(!shown.is_empty());
+            let room = budget.saturating_sub(used + gap);
+            if room < 3 { break; }
+            let text_width = chip_text(kind, label).width();
+            if text_width > room {
+                if shown.is_empty() {
+                    let decoration = chip_text(kind, "").width();
+                    let clipped = clipped_title(label, room.saturating_sub(decoration)).0;
+                    shown.push((*kind, clipped));
+                }
+                break;
+            }
+            used += gap + text_width;
+            shown.push((*kind, label.clone()));
+        }
+        let hidden = all.len().saturating_sub(shown.len());
+        if hidden > 0 { shown.push(("more", format!("+{hidden}"))); }
+        shown
     }
 
     fn mouse(&mut self, mouse: MouseEvent) -> bool {
@@ -2697,25 +2775,39 @@ impl App {
                         for (index, pane) in pane_hits.iter().copied() {
                             if mouse.column >= pane.x && mouse.column < pane.right()
                                 && mouse.row >= pane.y && mouse.row < pane.bottom() {
+                                if mouse.row == pane.y.saturating_add(1) {
+                                    if let Some(tab) = self.tab_at(index, pane, mouse.column) {
+                                        self.active_group = index;
+                                        self.groups[index].active = tab;
+                                        self.groups[index].scroll = 0;
+                                        self.focus = Focus::Transcript;
+                                        return true;
+                                    }
+                                }
                                 let draft = self.groups[index].active_id().map(|id| {
                                     if self.active_group == index { self.input.as_str() }
                                     else { self.input_drafts.get(&(index, id.to_owned()))
                                         .map(|(text, _)| text.as_str()).unwrap_or("") }
                                 }).unwrap_or("");
-                                let prompt_top = pane.bottom().saturating_sub(prompt_height(draft, pane.height) + 2);
+                                let prompt_top = pane.bottom().saturating_sub(prompt_height(draft, pane.height) + 1);
                                 if mouse.row == prompt_top.saturating_sub(1) {
                                     self.active_group = index;
                                     let relative = usize::from(mouse.column.saturating_sub(pane.x));
                                     let mut start = 0;
-                                    for (kind, label) in self.chips(index) {
-                                        let end = start + label.width() + 4;
+                                    let visible = self.chip_window(index, usize::from(pane.width));
+                                    for (kind, label) in &visible {
+                                        let end = start + chip_text(kind, label).width();
                                         if relative >= start && relative < end {
-                                            match kind {
+                                            match *kind {
                                                 "engine" => self.open_engine_picker(),
                                                 "model" => self.open_model_picker(),
                                                 "permission" => self.open_permission_picker(),
                                                 "beliefs" => self.open_lore_picker(),
-                                                _ => unreachable!(),
+                                                "more" => {
+                                                    let count = visible.len().saturating_sub(1).max(1);
+                                                    self.chip_offsets[index] = (self.chip_offsets[index] + count) % self.chips(index).len();
+                                                }
+                                                _ => {}
                                             }
                                             return true;
                                         }
@@ -3296,12 +3388,12 @@ impl App {
         let inner = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(2),
+                Constraint::Length(3),
                 Constraint::Min(1),
                 Constraint::Length(chooser_height),
                 Constraint::Length(1),
                 Constraint::Length(prompt_height),
-                Constraint::Length(2),
+                Constraint::Length(1),
             ])
             .split(area);
         let titles: Vec<Line> = group
@@ -3314,7 +3406,10 @@ impl App {
                     .find(|s| &s.id == id)
                     .map(|s| s.title.as_str())
                     .unwrap_or(id);
-                Line::from(name.to_owned())
+                let style = if self.waiting_for_input(id) && self.blink_on {
+                    Style::default().fg(theme::TEXT).bg(theme::ERROR).add_modifier(Modifier::BOLD)
+                } else { Style::default() };
+                Line::styled(name.to_owned(), style)
             })
             .collect();
         let tabs = Tabs::new(if titles.is_empty() {
@@ -3323,11 +3418,9 @@ impl App {
             titles
         })
         .select(group.active.min(group.tabs.len().saturating_sub(1)))
-        .highlight_style(
-            Style::default()
-                .fg(theme::ACCENT)
-                .add_modifier(Modifier::BOLD),
-        )
+        .highlight_style(if group.active_id().is_some_and(|id| self.waiting_for_input(id)) && self.blink_on {
+            Style::default().fg(theme::TEXT).bg(theme::ERROR).add_modifier(Modifier::BOLD)
+        } else { Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD) })
         .block(
             Block::default()
                 .title(format!(
@@ -3340,7 +3433,9 @@ impl App {
                     }
                 ))
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme::BORDER)),
+                .border_style(Style::default().fg(if group.active_id().is_some_and(|id| self.waiting_for_input(id)) && self.blink_on {
+                    theme::ERROR
+                } else { theme::BORDER })),
         );
         frame.render_widget(tabs.style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)), inner[0]);
         let content = session
@@ -3375,7 +3470,9 @@ impl App {
                 .scroll((scroll_from_top, 0))
                 .wrap(Wrap { trim: false })
                 .block(Block::default().borders(Borders::LEFT | Borders::RIGHT)
-                    .border_style(Style::default().fg(theme::BORDER))),
+                    .border_style(Style::default().fg(if group.active_id().is_some_and(|id| self.waiting_for_input(id)) && self.blink_on {
+                        theme::ERROR
+                    } else { theme::BORDER }))),
             inner[1],
         );
         if active && chooser_height > 0 {
@@ -3390,10 +3487,10 @@ impl App {
             }
         }
         let mut chip_spans = Vec::new();
-        for (kind, label) in self.chips(index) {
+        for (kind, label) in self.chip_window(index, usize::from(inner[3].width)) {
             if !chip_spans.is_empty() { chip_spans.push(Span::raw(" ")); }
-            chip_spans.push(Span::styled(format!(" {label} ▾ "),
-                Style::default().fg(if kind == "engine" { theme::ACCENT } else { theme::TEXT })
+            chip_spans.push(Span::styled(chip_text(kind, &label),
+                Style::default().fg(if matches!(kind, "engine" | "more") { theme::ACCENT } else { theme::TEXT })
                     .bg(theme::HIGHLIGHT)));
         }
         frame.render_widget(Paragraph::new(Line::from(chip_spans))
@@ -3424,18 +3521,11 @@ impl App {
         );
         let status = session.map(|s| s.status.as_str()).unwrap_or("No session");
         let status_line = if active && !self.notice.is_empty() {
-            format!(" {status} · {}", self.notice)
+            format!(" {} · {status}", self.notice)
         } else { format!(" {status}") };
         frame.render_widget(
             Paragraph::new(status_line).style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)),
             Rect { height: 1, ..inner[5] },
-        );
-        let telemetry = group.active_id().and_then(|id| self.session_telemetry.get(id));
-        let telemetry_line = telemetry.map(SessionTelemetry::line)
-            .unwrap_or_else(|| SessionTelemetry::default().line());
-        frame.render_widget(
-            Paragraph::new(telemetry_line).style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)),
-            Rect { y: inner[5].y.saturating_add(1), height: 1, ..inner[5] },
         );
     }
 }
@@ -3590,6 +3680,7 @@ fn run_loop(
         changed |= app.poll_diff();
         changed |= app.poll_history();
         changed |= app.poll_lore();
+        changed |= app.tick_blink(Instant::now());
         if prompt_sender.is_none() {
             if let Some(id) = app.pending_peer_refresh.take() {
                 changed |= app.peer_map.roster(&id, &serde_json::json!({"ok":false}));
@@ -4324,6 +4415,7 @@ mod tests {
         assert!(rows[usize::from(menu.y + 1)].contains("Environment"));
         assert!(!screen.contains("Header:"));
         assert!(!screen.contains("Question:"));
+        assert!(!screen.contains("PgUp/PgDn scroll"));
         assert!(rows[usize::from(menu.y + 2)].contains("Staging"));
         assert!(rows[usize::from(menu.bottom() + 1)].contains("Prompt"));
         assert!(menu.height <= 10, "short question should use only its content rows");
@@ -4334,12 +4426,37 @@ mod tests {
         app.input_requests.clear();
 
         let pane = app.layout(app.size).panes.unwrap()[1];
-        let chip_y = pane.bottom().saturating_sub(prompt_height("", pane.height) + 3);
+        let mut belief_x = pane.x;
+        for (kind, label) in app.chip_window(1, usize::from(pane.width)) {
+            if kind == "beliefs" { break; }
+            belief_x += chip_text(kind, &label).width() as u16 + 1;
+        }
+        let chip_y = pane.bottom().saturating_sub(prompt_height("", pane.height) + 2);
         app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
-            column: pane.x + 2, row: chip_y, modifiers: KeyModifiers::NONE }));
+            column: belief_x + 2, row: chip_y, modifiers: KeyModifiers::NONE }));
         assert_eq!(app.active_group, 1);
         assert!(app.lore_picker.is_some());
         assert_eq!(app.active_chooser_rect().unwrap().x, pane.x);
+    }
+
+    #[test]
+    fn input_blink_ticks_at_bounded_interval_and_resets_when_resolved() {
+        let mut app = App::default();
+        let start = Instant::now();
+        app.blink_at = start;
+        assert!(!app.tick_blink(start));
+        app.input_requests.push(InputRequest::from_event("a", &json!({
+            "id":"req", "kind":"permission", "title":"Approve?"
+        })).unwrap());
+        assert!(!app.tick_blink(start + Duration::from_millis(649)));
+        assert!(app.tick_blink(start + Duration::from_millis(650)));
+        assert!(!app.blink_on);
+        assert!(!app.tick_blink(start + Duration::from_millis(700)));
+        app.input_requests[0].sending = true;
+        assert!(app.tick_blink(start + Duration::from_millis(701)));
+        assert!(app.blink_on);
+        app.input_requests.clear();
+        assert!(!app.tick_blink(start + Duration::from_millis(702)));
     }
 
     #[test]

@@ -139,10 +139,10 @@ fn panes_reclaim_footer_row_and_keep_notice_visible() {
     let mut app = App::default();
     app.notice = "Prompt queue full".into();
     let rendered = screen(&app, 80, 24);
-    let status_row = rendered.lines().nth(22).unwrap();
+    let status_row = rendered.lines().nth(23).unwrap();
     assert!(status_row.contains("Prompt queue"), "{rendered}");
     assert!(!rendered.contains("Ctrl+P actions"), "{rendered}");
-    assert!(rendered.lines().nth(23).unwrap().contains("Ctx ?"));
+    assert!(rendered.lines().nth(19).unwrap().contains("Ctx ?"));
 }
 
 #[test]
@@ -158,12 +158,12 @@ fn two_panes_keep_distinct_prompts_and_live_identity_chips_at_80x24() {
     assert!(rendered.contains("> first draft"), "{rendered}");
     assert!(rendered.contains("> second draft"), "{rendered}");
     assert!(rendered.contains(" codex "), "{rendered}");
-    assert!(rendered.contains(" sol "), "{rendered}");
+    assert!(rendered.contains("+"), "{rendered}");
     assert!(rendered.contains(" claude "), "{rendered}");
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
     terminal.draw(|frame| app.draw(frame)).unwrap();
     let styled_cells = (25..52)
-        .filter(|&x| terminal.backend().buffer()[(x, 18)].bg == theme::HIGHLIGHT)
+        .filter(|&x| terminal.backend().buffer()[(x, 19)].bg == theme::HIGHLIGHT)
         .count();
     assert!(styled_cells >= 5, "engine/model chips have no visible highlight");
     app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
@@ -171,9 +171,9 @@ fn two_panes_keep_distinct_prompts_and_live_identity_chips_at_80x24() {
     app.handle(key(KeyCode::Tab, KeyModifiers::SHIFT));
     assert_eq!(app.input, "first draft");
     app.apply_daemon_frame(&json!({"type":"event","session_id":"one","event":{"type":"model_changed","data":{"model":"astra"}}}));
-    let rendered = screen(&app, 80, 24);
+    let rendered = screen(&app, 160, 24);
     assert!(rendered.contains(" astra "), "{rendered}");
-    assert!(!rendered.lines().nth(22).unwrap_or("").contains(" sol "), "{rendered}");
+    assert!(!rendered.lines().nth(19).unwrap_or("").contains(" sol "), "{rendered}");
 }
 
 #[test]
@@ -192,6 +192,49 @@ fn same_session_in_two_panes_keeps_independent_drafts() {
 }
 
 #[test]
+fn visible_tab_labels_switch_sessions_and_restore_drafts_by_mouse() {
+    let mut app = App::default();
+    app.handle(Event::Resize(100, 24));
+    app.apply_update(doxa_tui::ui::DaemonUpdate::Upsert(session("one", "Work")));
+    app.apply_update(doxa_tui::ui::DaemonUpdate::Upsert(session("two", "Work")));
+    app.groups[0].tabs = vec!["one".into(), "two".into()];
+    for c in "first".chars() { app.handle(key(KeyCode::Char(c), KeyModifiers::NONE)); }
+    assert!(screen(&app, 100, 24).lines().nth(1).unwrap().contains("Session two"));
+    // The second label starts after the first label, its padding and divider.
+    assert!(app.handle(mouse(MouseEventKind::Down(MouseButton::Left), 43, 1)));
+    assert_eq!(app.groups[0].active, 1);
+    app.focus = Focus::Prompt;
+    for c in "second".chars() { app.handle(key(KeyCode::Char(c), KeyModifiers::NONE)); }
+    assert!(app.handle(mouse(MouseEventKind::Down(MouseButton::Left), 29, 1)));
+    assert_eq!(app.groups[0].active, 0);
+    assert_eq!(app.input, "first");
+    assert!(screen(&app, 100, 24).contains("Session one"));
+    assert!(app.handle(mouse(MouseEventKind::Down(MouseButton::Left), 43, 1)));
+    assert_eq!(app.input, "second");
+}
+
+#[test]
+fn waiting_request_blinks_in_inactive_tab_and_pane_then_stops() {
+    let mut app = App::default();
+    app.apply_update(doxa_tui::ui::DaemonUpdate::Upsert(session("one", "Work")));
+    app.apply_update(doxa_tui::ui::DaemonUpdate::Upsert(session("two", "Work")));
+    app.groups[0].tabs = vec!["one".into(), "two".into()];
+    app.groups[1].tabs = vec!["two".into()];
+    app.apply_daemon_frame(&json!({"type":"event","session_id":"two","event":{"type":"needs_input","data":{
+        "id":"req", "kind":"permission", "title":"Approve?"}}}));
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+    let buffer = terminal.backend().buffer();
+    // Inactive tab title and inactive pane border both show the alert phase.
+    assert_eq!(buffer[(43, 1)].bg, theme::ERROR);
+    assert_eq!(buffer[(63, 0)].fg, theme::ERROR);
+    app.apply_daemon_frame(&json!({"type":"event","session_id":"two","event":{"type":"needs_input_resolved","data":{"id":"req"}}}));
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+    assert_ne!(terminal.backend().buffer()[(43, 1)].bg, theme::ERROR);
+    assert_eq!(terminal.backend().buffer()[(63, 0)].fg, theme::BORDER);
+}
+
+#[test]
 fn identity_chips_follow_status_and_sanitize_daemon_values() {
     let mut app = App::default();
     app.apply_daemon_frame(&json!({"type":"hello","session_id":"one","engine":"bad\u{1b}[31m","model":null}));
@@ -199,11 +242,11 @@ fn identity_chips_follow_status_and_sanitize_daemon_values() {
     assert!(!rendered.contains('\u{1b}'));
     assert!(!rendered.contains("[session]"));
     app.apply_daemon_frame(&json!({"type":"reply","ok":true,"status":{"session_id":"one","engine":"claude","model":"opus"}}));
-    let rendered = screen(&app, 80, 24);
+    let rendered = screen(&app, 160, 24);
     assert!(rendered.contains(" claude "), "{rendered}");
     assert!(rendered.contains(" opus "), "{rendered}");
     app.apply_daemon_frame(&json!({"type":"event","session_id":"one","event":{"type":"model_changed","data":{"model":null}}}));
-    let rendered = screen(&app, 80, 24);
+    let rendered = screen(&app, 160, 24);
     assert!(rendered.contains(" claude "), "{rendered}");
     assert!(!rendered.contains(" opus "));
 }
@@ -215,8 +258,8 @@ fn telemetry_chips_keep_per_session_provenance_and_unknowns() {
     app.apply_daemon_frame(&json!({"type":"hello","session_id":"vendor","engine":"glm"}));
     app.groups[1].tabs.push("vendor".into());
     let unknown = screen(&app, 160, 24);
-    assert!(unknown.contains("Ctx ?  Tokens ?  Cost ?  LORE scrub ready"), "{unknown}");
-    assert!(unknown.contains("Ctx ?  Tokens ?  Cost ?  LORE ?"), "{unknown}");
+    assert!(unknown.contains("Ctx ?   Tokens ?   Beliefs ▾   Cost ?   LORE scrub ready"), "{unknown}");
+    assert!(unknown.contains("Ctx ?   Tokens ?   Beliefs ▾   Cost ?   LORE ?"), "{unknown}");
     app.apply_daemon_frame(&json!({"type":"event","session_id":"codex","event":{"type":"turn_done","data":{
         "input_tokens":120,"output_tokens":30,"usage_scope":"session","usage_source":"codex_cli_turn_completed",
         "ctx_percentage":null,"session_cost_usd":null
@@ -230,14 +273,14 @@ fn telemetry_chips_keep_per_session_provenance_and_unknowns() {
     assert!(rendered.contains("Ctx ?"), "{rendered}");
     assert!(rendered.contains("Cost ?"), "{rendered}");
     app.apply_daemon_frame(&json!({"type":"reply","ok":true,"status":{"session_id":"codex","lore_scrub":"unavailable"}}));
-    let rendered = screen(&app, 160, 24);
+    let rendered = screen(&app, 240, 24);
     assert!(rendered.contains("LORE scrub unavailable"), "{rendered}");
     app.apply_daemon_frame(&json!({"type":"telemetry_unavailable","session_id":"codex"}));
-    assert!(screen(&app, 160, 24).contains("LORE ?"));
+    assert!(screen(&app, 240, 24).contains("LORE ?"));
     app.apply_daemon_frame(&json!({"type":"event","session_id":"vendor","event":{"type":"turn_done","data":{
         "ctx_percentage":null,"cost_usd":null,"session_cost_usd":null
     }}}));
-    assert!(screen(&app, 160, 24).contains("Ctx ?  Tokens ?  Cost ?  LORE ?"));
+    assert!(screen(&app, 160, 24).contains("Ctx ?   Tokens ?   Beliefs ▾   Cost ?   LORE ?"));
 }
 
 #[test]
@@ -249,12 +292,15 @@ fn telemetry_status_restores_reported_values_without_inventing_zero_usage() {
         "belief_count":9,"usage":{"num_turns":2,"input_tokens":1000,"output_tokens":50,
             "cost_basis":"published_rates","unpriced_models":[]}
     }}));
-    let rendered = screen(&app, 180, 24);
-    assert!(rendered.contains("Ctx 42%  Tokens 1000/50 session  Cost $0.0123 est  LORE 9 beliefs"), "{rendered}");
+    let rendered = screen(&app, 240, 24);
+    assert!(rendered.contains("Ctx 42%"), "{rendered}");
+    assert!(rendered.contains("Tokens 1000/50 session"), "{rendered}");
+    assert!(rendered.contains("Cost $0.0123 est"), "{rendered}");
+    assert!(rendered.contains("LORE 9 beliefs"), "{rendered}");
     app.apply_daemon_frame(&json!({"type":"reply","ok":true,"status":{
         "session_id":"one","usage":{"num_turns":0,"input_tokens":0,"output_tokens":0}
     }}));
-    assert!(screen(&app, 180, 24).contains("Tokens ?"));
+    assert!(screen(&app, 240, 24).contains("Tokens ?"));
 }
 
 #[test]

@@ -14,6 +14,6 @@ fn old_doxa_surfaces_fit_compact_and_split_terminals() {
         assert_eq!(buffer[(27, height - 1)].bg, theme::RAISED, "pane reaches bottom at {width}x{height}");
         assert_eq!(buffer[(27, 1)].bg, theme::RAISED, "tab at {width}x{height}");
         assert_eq!(buffer[(27, 7)].bg, theme::BASE, "transcript at {width}x{height}");
-        assert_eq!(buffer[(25, height - 5)].fg, theme::ACCENT, "active pane prompt border at {width}x{height}");
+        assert_eq!(buffer[(25, height - 4)].fg, theme::ACCENT, "active pane prompt border at {width}x{height}");
     }
 }
