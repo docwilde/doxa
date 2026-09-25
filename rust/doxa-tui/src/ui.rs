@@ -1424,15 +1424,45 @@ impl App {
         }
         let mut parts = input.split_whitespace();
         let Some(name) = parts.next() else { return false; };
+        let args: Vec<&str> = parts.collect();
         if !matches!(name, "/help" | "/about" | "/sessions" | "/model" | "/engine"
             | "/mode" | "/beliefs" | "/diff" | "/peers" | "/split"
-            | "/vsplit" | "/pane" | "/sidebar" | "/detach") {
+            | "/vsplit" | "/pane" | "/sidebar" | "/detach" | "/dir") {
             return false;
         }
-        if parts.next().is_some() {
+        if !args.is_empty() && !matches!(name, "/pane" | "/sidebar") {
             self.notice = format!("{name} arguments are not available in Rust yet");
             return true;
         }
+        let pane_target = if name == "/pane" && !args.is_empty() {
+            match args.as_slice() {
+                ["1"] => Some(0),
+                ["2"] => Some(1),
+                _ => {
+                    self.notice = "Usage: /pane [1|2]".into();
+                    return true;
+                }
+            }
+        } else { None };
+        let sidebar = if name == "/sidebar" && !args.is_empty() {
+            match args.as_slice() {
+                ["on"] => Some((true, None)),
+                ["off"] => Some((false, None)),
+                ["wider"] => Some((true, Some(self.rail_width.saturating_add(4).min(80)))),
+                ["narrower"] => Some((true, Some(self.rail_width.saturating_sub(4).max(MIN_RAIL_WIDTH)))),
+                ["width", width] => match width.parse::<u16>() {
+                    Ok(width) if (MIN_RAIL_WIDTH..=80).contains(&width) => Some((true, Some(width))),
+                    _ => {
+                        self.notice = "Sidebar width must be 12–80 cells".into();
+                        return true;
+                    }
+                },
+                _ => {
+                    self.notice = "Usage: /sidebar [on|off|wider|narrower|width N]".into();
+                    return true;
+                }
+            }
+        } else { None };
         let name = name.to_owned();
         self.input.clear();
         self.input_cursor = 0;
@@ -1464,12 +1494,25 @@ impl App {
                 self.split_requested = true;
             }
             "/pane" => {
-                self.active_group = 1 - self.active_group;
+                self.active_group = pane_target.unwrap_or(1 - self.active_group);
                 self.split_requested = true;
                 self.focus = Focus::Prompt;
             }
-            "/sidebar" => self.rail_visible = !self.rail_visible,
+            "/sidebar" => {
+                if let Some((visible, width)) = sidebar {
+                    self.rail_visible = visible;
+                    if let Some(width) = width { self.rail_width = width; }
+                } else {
+                    self.rail_visible = !self.rail_visible;
+                }
+            }
             "/detach" => self.detach_active_tab(),
+            "/dir" => {
+                self.notice = self.groups[self.active_group].active_id()
+                    .and_then(|id| self.session_cwds.get(id))
+                    .map(|cwd| format!("Session directory · {}", safe_label(&cwd.to_string_lossy())))
+                    .unwrap_or_else(|| "Session directory unavailable".into());
+            }
             _ => unreachable!("recognized bare DOXA command"),
         }
         true
@@ -4941,6 +4984,36 @@ mod tests {
         assert_eq!(app.input, "other draft");
         assert!(!app.should_quit);
         assert!(!app.split_requested);
+    }
+
+    #[test]
+    fn pane_sidebar_and_directory_command_forms_stay_local() {
+        let mut app = App::default();
+        app.handle(Event::Resize(100, 28));
+        app.groups[0].tabs.push("first".into());
+        app.session_cwds.insert("first".into(), PathBuf::from("/repo/project"));
+
+        for (command, target) in [("/pane 2", 1), ("/pane 1", 0)] {
+            app.input = command.into();
+            app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+            assert_eq!(app.active_group, target);
+        }
+        app.input = "/sidebar width 32".into();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.rail_width, 32);
+        assert!(app.rail_visible);
+        app.input = "/sidebar off".into();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(!app.rail_visible);
+        app.input = "/dir".into();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(app.notice.contains("/repo/project"));
+        assert!(app.pending_prompts.is_empty());
+
+        app.input = "/pane 3".into();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.input, "/pane 3");
+        assert!(app.notice.contains("Usage: /pane"));
     }
 
     #[test]

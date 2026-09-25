@@ -71,9 +71,10 @@ panes. `Ctrl+M` and `Ctrl+T` remain direct shortcuts. `Ctrl+Q` detaches the Rust
 without stopping its daemon; `Ctrl+W` detaches only the active tab and leaves
 its session running. `Ctrl+C` is left available for terminal copy.
 Bare `/help`, `/about`, `/sessions`, `/model`, `/engine`, `/mode`, `/beliefs`,
-`/diff`, `/peers`, `/split`, `/vsplit`, `/pane`, `/sidebar`, and `/detach` are
+`/diff`, `/peers`, `/split`, `/vsplit`, `/pane`, `/sidebar`, `/dir`, and `/detach` are
 handled locally from the prompt. Forms with arguments remain in the draft with
-an explicit notice until their Rust behavior is implemented. Unknown slash
+an explicit notice until their Rust behavior is implemented, except `/pane 1|2`
+and `/sidebar on|off|wider|narrower|width N`, which are available. Unknown slash
 commands, including `/compact` and plugin commands, still go to the active
 engine.
 `Ctrl+M` opens the read-only peer communications
