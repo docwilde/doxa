@@ -82,8 +82,8 @@ fn two_sockets_route_events_prompts_and_reconnect_from_each_cursor() {
         let frame = bridge.frames.recv_timeout(Duration::from_secs(5)).unwrap();
         app.apply_daemon_frame(&frame);
     }
-    assert_eq!(app.sessions.iter().find(|s| s.id == "session-a").unwrap().transcript, "A1");
-    assert_eq!(app.sessions.iter().find(|s| s.id == "session-b").unwrap().transcript, "B1");
+    assert_eq!(app.sessions.iter().find(|s| s.id == "session-a").unwrap().transcript, "**Assistant:**\n\nA1");
+    assert_eq!(app.sessions.iter().find(|s| s.id == "session-b").unwrap().transcript, "**Assistant:**\n\nB1");
     bridge.commands.send(WorkerCommand::Prompt("session-a".into(), "prompt a".into())).unwrap();
     bridge.commands.send(WorkerCommand::Prompt("session-b".into(), "prompt b".into())).unwrap();
     let mut replies = std::collections::HashSet::new();
@@ -99,14 +99,14 @@ fn two_sockets_route_events_prompts_and_reconnect_from_each_cursor() {
     app.apply_daemon_frame(&hello);
     let event = until(&bridge.frames, |f| f["type"] == "event" && f["session_id"] == "session-a" && f["seq"] == 2);
     app.apply_daemon_frame(&event);
-    assert_eq!(app.sessions.iter().find(|s| s.id == "session-a").unwrap().transcript, "A1A2");
+    assert_eq!(app.sessions.iter().find(|s| s.id == "session-a").unwrap().transcript, "**Assistant:**\n\nA1A2");
     done_b.send(()).unwrap();
     until(&bridge.frames, |f| f["type"] == "client_notice" && f["session_id"] == "session-b");
     let hello = until(&bridge.frames, |f| f["type"] == "hello" && f["session_id"] == "session-b");
     app.apply_daemon_frame(&hello);
     let event = until(&bridge.frames, |f| f["type"] == "event" && f["session_id"] == "session-b" && f["seq"] == 2);
     app.apply_daemon_frame(&event);
-    assert_eq!(app.sessions.iter().find(|s| s.id == "session-b").unwrap().transcript, "B1B2");
+    assert_eq!(app.sessions.iter().find(|s| s.id == "session-b").unwrap().transcript, "**Assistant:**\n\nB1B2");
     bridge.shutdown();
     server_a.join().unwrap();
     server_b.join().unwrap();

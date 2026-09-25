@@ -5,6 +5,18 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.14 — 2026-09-25
+
+- Show only the reasoning level in the effort chip and identify it in the
+  hover tooltip. Known DeepSeek and GLM models can change effort for the next
+  turn of an idle session; the chip updates after the daemon confirms it.
+- Separate live prompt and assistant turns in the transcript, preserving
+  streaming chunks and restored history headings. Show a processing or queued
+  spinner in the active pane while work is pending.
+- Install a Linux application-menu shortcut and icons with the Rust launcher,
+  pointing to its absolute installed path. Refresh the shortcut on reinstall;
+  `DOXA_NO_LAUNCHER=1` skips it.
+
 ## 2.0.0-alpha.13 — 2026-09-25
 
 - Resume verified archived native Codex threads from the session picker. Require

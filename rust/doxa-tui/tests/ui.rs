@@ -381,7 +381,7 @@ fn daemon_frames_update_visible_session() {
     assert!(
         app.apply_daemon_frame(&json!({"type":"event", "session_id":"abc", "event":{"type":"turn_done", "data":{}}}))
     );
-    assert_eq!(app.sessions[0].transcript, "hello");
+    assert_eq!(app.sessions[0].transcript, "**Assistant:**\n\nhello");
     assert_eq!(app.sessions[0].status, "Ready");
     assert!(app.apply_daemon_frame(&json!({"type":"reply", "ok":false, "error":"busy"})));
     assert!(app.notice.contains("busy"));

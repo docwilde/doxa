@@ -29,6 +29,7 @@ pub enum WorkerCommand {
     Message(String, String, String),
     Models(String),
     SetModel(String, String),
+    SetEffort(String, String),
     SetPermissionMode(String, String),
     Branch(String, Option<String>),
     QueueList(String),
@@ -246,7 +247,7 @@ pub fn connect_sessions(sessions: &[Session]) -> io::Result<MultiBridge> {
             };
             let id = match &command {
                 WorkerCommand::Prompt(id, _) | WorkerCommand::Answer(id, _, _) | WorkerCommand::Peers(id)
-                | WorkerCommand::Models(id) | WorkerCommand::SetModel(id, _)
+                | WorkerCommand::Models(id) | WorkerCommand::SetModel(id, _) | WorkerCommand::SetEffort(id, _)
                 | WorkerCommand::SetPermissionMode(id, _) | WorkerCommand::QueueList(id)
                 | WorkerCommand::Branch(id, _)
                 | WorkerCommand::QueueCancel(id, _) => id,
@@ -296,6 +297,8 @@ fn rejected(command: WorkerCommand, message: &str) -> Value {
         WorkerCommand::Models(id) => json!({"type":"models_reply", "session_id":id,
             "ok":false, "error":message}),
         WorkerCommand::SetModel(id, _) => json!({"type":"set_model_reply", "session_id":id,
+            "ok":false, "error":message}),
+        WorkerCommand::SetEffort(id, _) => json!({"type":"set_effort_reply", "session_id":id,
             "ok":false, "error":message}),
         WorkerCommand::SetPermissionMode(id, _) => json!({"type":"set_permission_mode_reply", "session_id":id,
             "ok":false, "error":message}),
@@ -384,7 +387,7 @@ fn worker_loop(
     if let Some(snapshot) = snapshot {
         let markdown = history::render(&snapshot);
         if !markdown.is_empty() && frames.send(json!({"type":"event", "session_id":session_id,
-            "event":{"type":"text_delta", "data":{"text":markdown}}})).is_err() {
+            "event":{"type":"text_delta", "data":{"text":markdown,"snapshot":true}}})).is_err() {
             return;
         }
     }
@@ -453,6 +456,22 @@ fn worker_loop(
                             "ok":reply["ok"] == true, "model":reply.get("model"),
                             "error":reply.get("error")}),
                         Err(error) => json!({"type":"set_model_reply", "session_id":id,
+                            "ok":false, "error":error.to_string()}),
+                    };
+                    if frames.send(reply).is_err() { return; }
+                }
+                Ok(WorkerCommand::SetEffort(id, effort)) => {
+                    let result = if id == session_id {
+                        let mut params = Map::new();
+                        params.insert("effort".into(), Value::String(effort));
+                        client.call("set_effort", params)
+                    } else { Err(TransportError::Malformed("effort target is not attached")) };
+                    cursor.store(client.cursor, Ordering::Relaxed);
+                    let reply = match result {
+                        Ok(reply) => json!({"type":"set_effort_reply", "session_id":id,
+                            "ok":reply["ok"] == true, "effort":reply.get("effort"),
+                            "error":reply.get("error")}),
+                        Err(error) => json!({"type":"set_effort_reply", "session_id":id,
                             "ok":false, "error":error.to_string()}),
                     };
                     if frames.send(reply).is_err() { return; }

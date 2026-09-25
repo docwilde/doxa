@@ -57,6 +57,74 @@ fn hello_and_status_capabilities_can_access_session_state() {
 }
 
 struct PanicControl(AtomicUsize);
+struct EffortControl(Mutex<String>);
+impl Host for EffortControl {
+    fn initial_effort(&self) -> Option<String> { Some(self.0.lock().unwrap().clone()) }
+    fn prompt(&self, _: &str, emit: &mut dyn FnMut(Value)) {
+        emit(json!({"type":"turn_done","data":{}}));
+    }
+    fn call(&self, method: &str, params: &Value) -> Result<Value, String> {
+        if method != "set_effort" { return Err("unknown method".into()); }
+        let effort = params["effort"].as_str().ok_or("missing effort")?;
+        if !matches!(effort, "low" | "high") { return Err("unsupported effort".into()); }
+        *self.0.lock().unwrap() = effort.into();
+        Ok(json!({"effort":effort}))
+    }
+}
+
+#[test]
+fn effort_change_is_acknowledged_and_reflected_in_status_and_event() {
+    let dir = tempfile::tempdir().unwrap();
+    let handle = Daemon::bind(dir.path(), session(), Arc::new(EffortControl(Mutex::new("high".into())))).unwrap().start();
+    let (mut reader, mut writer) = connect(handle.socket_path());
+    assert_eq!(recv(&mut reader)["effort"], "high");
+    send(&mut writer, json!({"type":"attach","cursor":null}));
+    send(&mut writer, json!({"type":"call","id":1,"method":"set_effort","params":{"effort":"bad"}}));
+    assert_eq!(recv(&mut reader)["ok"], false);
+    send(&mut writer, json!({"type":"call","id":2,"method":"set_effort","params":{"effort":"low"}}));
+    assert_eq!(recv(&mut reader)["effort"], "low");
+    let event = recv(&mut reader);
+    assert_eq!(event["event"]["type"], "effort_changed");
+    assert_eq!(event["event"]["data"]["effort"], "low");
+    send(&mut writer, json!({"type":"call","id":3,"method":"status","params":{}}));
+    assert_eq!(recv(&mut reader)["status"]["effort"], "low");
+}
+
+#[test]
+fn effort_change_refuses_running_or_queued_turns() {
+    struct GatedEffort { ready: (Mutex<bool>, Condvar), calls: AtomicUsize }
+    impl Host for GatedEffort {
+        fn prompt(&self, _: &str, emit: &mut dyn FnMut(Value)) {
+            let mut ready = self.ready.0.lock().unwrap();
+            while !*ready { ready = self.ready.1.wait(ready).unwrap(); }
+            emit(json!({"type":"turn_done","data":{}}));
+        }
+        fn call(&self, method: &str, _: &Value) -> Result<Value, String> {
+            if method != "set_effort" { return Err("unknown method".into()); }
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(json!({"effort":"low"}))
+        }
+    }
+    let host = Arc::new(GatedEffort { ready: (Mutex::new(false), Condvar::new()),
+        calls: AtomicUsize::new(0) });
+    let dir = tempfile::tempdir().unwrap();
+    let handle = Daemon::bind(dir.path(), session(), host.clone()).unwrap().start();
+    let (mut reader, mut writer) = connect(handle.socket_path());
+    recv(&mut reader);
+    send(&mut writer, json!({"type":"attach","cursor":null}));
+    send(&mut writer, json!({"type":"prompt","id":1,"text":"running"}));
+    while recv(&mut reader)["id"] != 1 {}
+    send(&mut writer, json!({"type":"prompt","id":2,"text":"queued"}));
+    while recv(&mut reader)["id"] != 2 {}
+    send(&mut writer, json!({"type":"call","id":3,"method":"set_effort","params":{"effort":"low"}}));
+    let reply = loop { let frame = recv(&mut reader); if frame["id"] == 3 { break frame; } };
+    assert_eq!(reply["ok"], false);
+    assert!(reply["error"].as_str().unwrap().contains("idle"));
+    assert_eq!(host.calls.load(Ordering::SeqCst), 0);
+    *host.ready.0.lock().unwrap() = true;
+    host.ready.1.notify_all();
+}
+
 impl Host for PanicControl {
     fn prompt(&self, _: &str, _: &mut dyn FnMut(Value)) {}
     fn call(&self, method: &str, _: &Value) -> Result<Value, String> {

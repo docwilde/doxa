@@ -2037,6 +2037,40 @@ mod vendor_process {
     }
 
     #[test]
+    fn vendor_effort_control_changes_the_next_turn_request() {
+        for vendor in ["deepseek", "glm"] {
+            let dir = tempfile::tempdir().unwrap();
+            let lore = dir.path().join("lore-fixture");
+            fake_scrubber(&lore, false);
+            let (endpoint, server) = fake_vendor(2, "answer");
+            let mut process = start_vendor(dir.path(), vendor, &endpoint, &lore);
+            let (mut reader, mut socket) = process.connect();
+            assert_eq!(receive(&mut reader)["effort"], "high");
+            send(&mut socket, json!({"type":"attach","cursor":null}));
+            for id in 1..=2 {
+                if id == 2 {
+                    send(&mut socket, json!({"type":"call","id":10,"method":"set_effort",
+                        "params":{"effort":"low"}}));
+                    assert_eq!(receive(&mut reader)["effort"], "low");
+                    assert_eq!(receive(&mut reader)["event"]["type"], "effort_changed");
+                }
+                send(&mut socket, json!({"type":"prompt","id":id,"text":"hello"}));
+                assert_eq!(receive(&mut reader)["ok"], true);
+                for _ in 0..3 { receive(&mut reader); }
+            }
+            send(&mut socket, json!({"type":"call","id":11,"method":"stop","params":{}}));
+            assert_eq!(receive(&mut reader)["ok"], true);
+            wait_until(|| process.exited());
+            let requests = server.join().unwrap();
+            let effort = |body: &Value| if vendor == "deepseek" {
+                body["thinking"]["reasoning_effort"].as_str().unwrap().to_owned()
+            } else { body["reasoning_effort"].as_str().unwrap().to_owned() };
+            assert_eq!(effort(&requests[0]), "high");
+            assert_eq!(effort(&requests[1]), "low");
+        }
+    }
+
+    #[test]
     fn vendor_workspace_read_is_opt_in_scrubbed_and_turn_local() {
         let dir = tempfile::tempdir().unwrap();
         let lore = dir.path().join("lore-fixture");

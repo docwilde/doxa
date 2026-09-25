@@ -39,6 +39,8 @@ const MAX_QUEUED_REJECTIONS: usize = 8;
 const MAX_REJECT_REASON_BYTES: usize = 1024;
 const MAX_INPUT_REQUESTS: usize = 32;
 const INPUT_BLINK_INTERVAL: Duration = Duration::from_millis(650);
+const SPINNER_INTERVAL: Duration = Duration::from_millis(120);
+const SPINNER_FRAMES: [&str; 4] = ["◐", "◓", "◑", "◒"];
 // JSON may expand one input byte to a six-byte Unicode escape.
 const MAX_INPUT_BYTES: usize = 10 * 1024;
 const MAX_TRANSCRIPT_BYTES: usize = 512 * 1024;
@@ -205,7 +207,7 @@ fn chip_hint(kind: &str) -> &'static str {
         "model" => "Model for this session · click to choose",
         "repo" => "This session's repository and base branch · click for worktree details",
         "directory" => "This session's directory; no Git repository is active",
-        "effort" => "Daemon-reported effort · Alt+F sets a new-session default where supported",
+        "effort" => "Effort · current session; Alt+F selects the next turn when idle",
         "context" => "Current session context usage · click for details",
         "memory" => "User and scoped LORE memory · click to view entries",
         "beliefs" => "LORE beliefs · click to browse",
@@ -326,7 +328,7 @@ fn wrapped_rows(text: &str, width: usize) -> usize {
 fn chip_text(kind: &str, label: &str) -> String {
     if kind == "more" {
         format!(" {label} › ")
-    } else if kind == "effort" && label == "Effort ?" {
+    } else if kind == "effort" && label == "?" {
         format!(" {label} ")
     } else if matches!(kind, "engine" | "model" | "effort" | "permission" | "beliefs") {
         format!(" {label} ▾ ")
@@ -403,6 +405,17 @@ fn append_transcript(session: &mut Session, text: &str) -> bool {
     }
     session.transcript.push_str(text);
     clipped
+}
+
+fn append_turn_heading(session: &mut Session, heading: &str) -> bool {
+    let separator = if session.transcript.is_empty() || session.transcript.ends_with("\n\n") {
+        ""
+    } else if session.transcript.ends_with('\n') {
+        "\n"
+    } else {
+        "\n\n"
+    };
+    append_transcript(session, &format!("{separator}**{heading}:**\n\n"))
 }
 
 fn structured_event(event_type: &str, data: &serde_json::Value) -> Option<String> {
@@ -839,6 +852,9 @@ pub struct App {
     permission_capabilities: HashMap<String, bool>,
     permission_modes: HashMap<String, String>,
     session_activity: HashMap<String, (bool, usize)>,
+    streaming_text: HashSet<String>,
+    spinner_at: Instant,
+    spinner_frame: usize,
     permission_picker: Option<(String, usize)>,
     permission_confirm_dont_ask: bool,
     pending_permission_changes: Vec<(String, String)>,
@@ -858,6 +874,7 @@ pub struct App {
     launching: bool,
     pending_model_queries: Vec<String>,
     pending_model_changes: Vec<(String, String)>,
+    pending_effort_changes: Vec<(String, String)>,
     pub pending_prompts: Vec<(String, String)>,
     pending_peer_messages: Vec<(String, String, String)>,
     pub input_requests: Vec<InputRequest>,
@@ -959,6 +976,9 @@ impl Default for App {
             permission_capabilities: HashMap::new(),
             permission_modes: HashMap::new(),
             session_activity: HashMap::new(),
+            streaming_text: HashSet::new(),
+            spinner_at: Instant::now(),
+            spinner_frame: 0,
             permission_picker: None,
             permission_confirm_dont_ask: false,
             pending_permission_changes: Vec::new(),
@@ -978,6 +998,7 @@ impl Default for App {
             launching: false,
             pending_model_queries: Vec::new(),
             pending_model_changes: Vec::new(),
+            pending_effort_changes: Vec::new(),
             pending_prompts: Vec::new(),
             pending_peer_messages: Vec::new(),
             input_requests: Vec::new(),
@@ -1274,6 +1295,12 @@ impl App {
                         }
                         true
                     }
+                    "effort_changed" => {
+                        if let Some(effort) = data["effort"].as_str().filter(|effort| !effort.is_empty()) {
+                            self.session_efforts.insert(id, safe_label(effort));
+                        }
+                        true
+                    }
                     "permission_mode_changed" => {
                         if let Some(mode) = data["mode"].as_str().filter(|mode| permission_index(mode).is_some()) {
                             self.permission_modes.insert(id, mode.to_owned());
@@ -1284,7 +1311,11 @@ impl App {
                         let Some(text) = data.get("text").and_then(|v| v.as_str()) else {
                             return false;
                         };
+                        if text.is_empty() { return false; }
                         if let Some(session) = self.sessions.iter_mut().find(|s| s.id == id) {
+                            if data["snapshot"] != true && self.streaming_text.insert(id.clone()) {
+                                append_turn_heading(session, "Assistant");
+                            }
                             if append_transcript(session, text) {
                                 self.notice = "Transcript tail limited to 512 KiB".into();
                             }
@@ -1294,6 +1325,14 @@ impl App {
                         }
                     }
                     "turn_started" => {
+                        self.streaming_text.remove(&id);
+                        if let Some(prompt) = data.get("prompt").and_then(|v| v.as_str()).filter(|v| !v.is_empty()) {
+                            if let Some(session) = self.sessions.iter_mut().find(|s| s.id == id) {
+                                let prompt = markdown::sanitize(prompt);
+                                append_turn_heading(session, "You");
+                                append_transcript(session, &prompt);
+                            }
+                        }
                         self.session_activity.entry(id.clone()).or_default().0 = true;
                         self.apply_update(DaemonUpdate::Status {
                             id,
@@ -1302,6 +1341,7 @@ impl App {
                         true
                     }
                     "turn_done" => {
+                        self.streaming_text.remove(&id);
                         self.session_telemetry.entry(id.clone()).or_default().update_turn(data);
                         self.session_activity.entry(id.clone()).or_default().0 = false;
                         let status = if data.get("is_error").and_then(|v| v.as_bool()) == Some(true)
@@ -1367,6 +1407,7 @@ impl App {
                         self.append_event(&id, event_type, data)
                     }
                     "session_done" => {
+                        self.streaming_text.remove(&id);
                         self.session_activity.remove(&id);
                         let before = self.diff_reject_queue.len();
                         self.diff_reject_queue.retain(|item| item.session_id != id);
@@ -1457,6 +1498,16 @@ impl App {
                     format!("Model selected · {}", safe_label(frame["model"].as_str().unwrap_or("awaiting event")))
                 } else {
                     format!("Model change failed · {}", safe_label(frame["error"].as_str().unwrap_or("unknown error")))
+                };
+                true
+            }
+            "set_effort_reply" => {
+                self.notice = if frame["ok"] == true {
+                    format!("Effort accepted · {} · awaiting session event",
+                        safe_label(frame["effort"].as_str().unwrap_or("unknown")))
+                } else {
+                    format!("Effort change failed · {}",
+                        safe_label(frame["error"].as_str().unwrap_or("unknown error")))
                 };
                 true
             }
@@ -2479,13 +2530,15 @@ impl App {
             self.notice = "Effort capability is unknown for this session".into();
             return;
         };
-        let levels = self.catalog_efforts.get(&(engine.clone(), model.clone())).cloned()
-            .unwrap_or_else(|| effort_choices(engine, model).iter().map(|level| (*level).to_owned()).collect());
+        let known = effort_choices(engine, model);
+        let levels = self.catalog_efforts.get(&(engine.clone(), model.clone()))
+            .map(|levels| levels.iter().filter(|level| known.contains(&level.as_str())).cloned().collect())
+            .unwrap_or_else(|| known.iter().map(|level| (*level).to_owned()).collect::<Vec<_>>());
         if levels.is_empty() {
-            self.notice = "No verified effort choices for this session model; check the new-session vendor catalog".into();
+            self.notice = "Live effort change is unavailable for this session model".into();
             return;
         }
-        let selected = self.next_efforts.get(engine).or_else(|| self.session_efforts.get(&id))
+        let selected = self.session_efforts.get(&id)
             .and_then(|current| levels.iter().position(|level| level == current)).unwrap_or(0);
         self.effort_picker = Some(EffortPicker { session_id: id, engine: engine.clone(), model: model.clone(),
             levels, selected });
@@ -2496,11 +2549,13 @@ impl App {
         let Some((Some(engine), Some(model))) = self.session_identity.get(&picker.session_id) else { return; };
         if engine != &picker.engine || model != &picker.model { return; }
         let Some(chosen) = picker.levels.get(picker.selected) else { return; };
-        let allowed = self.catalog_efforts.get(&(engine.clone(), model.clone())).cloned()
-            .unwrap_or_else(|| effort_choices(engine, model).iter().map(|level| (*level).to_owned()).collect());
+        let known = effort_choices(engine, model);
+        let allowed = self.catalog_efforts.get(&(engine.clone(), model.clone()))
+            .map(|levels| levels.iter().filter(|level| known.contains(&level.as_str())).cloned().collect())
+            .unwrap_or_else(|| known.iter().map(|level| (*level).to_owned()).collect::<Vec<_>>());
         if !allowed.contains(chosen) { return; }
-        self.next_efforts.insert(engine.clone(), chosen.clone());
-        self.notice = format!("{engine} effort for new sessions: {chosen} · current session unchanged");
+        self.pending_effort_changes.push((picker.session_id, chosen.clone()));
+        self.notice = format!("Requesting {engine} effort {chosen} for this session…");
     }
 
     fn effort_picker_key(&mut self, key: KeyEvent) -> bool {
@@ -4290,7 +4345,7 @@ impl App {
             chips.push(("model", "Model".to_owned()));
         }
         let effort = id.and_then(|id| self.session_efforts.get(id)).map(String::as_str).unwrap_or("?");
-        chips.push(("effort", format!("Effort {effort}")));
+        chips.push(("effort", effort.to_owned()));
         if let Some(status) = id.and_then(|id| self.repo_cache.get(id))
             .and_then(|(status, _)| status.as_ref()) {
             chips.push(repo_chip(status));
@@ -4325,6 +4380,25 @@ impl App {
 
     fn waiting_for_input(&self, id: &str) -> bool {
         self.input_requests.iter().any(|request| request.session_id == id && !request.sending)
+    }
+
+    fn activity_label(&self, id: &str) -> Option<&'static str> {
+        let (running, queued) = self.session_activity.get(id).copied().unwrap_or_default();
+        if running { Some("Processing") }
+        else if queued > 0 { Some("Queued") }
+        else { None }
+    }
+
+    fn tick_spinner(&mut self, now: Instant) -> bool {
+        if !self.groups.iter().filter_map(|group| group.active_id())
+            .any(|id| self.activity_label(id).is_some()) {
+            self.spinner_at = now;
+            return false;
+        }
+        if now.duration_since(self.spinner_at) < SPINNER_INTERVAL { return false; }
+        self.spinner_at = now;
+        self.spinner_frame = (self.spinner_frame + 1) % SPINNER_FRAMES.len();
+        true
     }
 
     /// Called by the event loop at its normal poll cadence. Redraws only once
@@ -5052,9 +5126,9 @@ impl App {
                     Style::default().fg(if index == *selected { theme::ACCENT } else { theme::SECONDARY })));
             }
         } else if let Some(picker) = &self.effort_picker {
-            title = " Effort · new sessions only · Enter select · Esc close ";
+            title = " Effort · this session · Enter select · Esc close ";
             let current = self.session_efforts.get(&picker.session_id).map(String::as_str).unwrap_or("unknown");
-            lines.push(Line::from(format!(" Current session keeps {current}; {}/{}", picker.engine, picker.model)));
+            lines.push(Line::from(format!(" Current: {current} · {}/{} · idle session required", picker.engine, picker.model)));
             lines.push(Line::from(""));
             let visible = usize::from(height.saturating_sub(4)).max(1);
             let start = picker.selected.saturating_sub(visible.saturating_sub(1));
@@ -5568,13 +5642,16 @@ impl App {
         .block(
             Block::default()
                 .title(format!(
-                    " Pane {}{} ",
+                    " Pane {}{}{} ",
                     index + 1,
                     if self.active_group == index {
                         " ●"
                     } else {
                         ""
-                    }
+                    },
+                    group.active_id().and_then(|id| self.activity_label(id))
+                        .map(|label| format!(" · {} {label}", SPINNER_FRAMES[self.spinner_frame]))
+                        .unwrap_or_default(),
                 ))
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(if group.active_id().is_some_and(|id| self.waiting_for_input(id)) && self.blink_on {
@@ -5854,6 +5931,7 @@ fn run_loop(
         changed |= app.poll_memory_menu();
         changed |= app.poll_vendor_catalog();
         changed |= app.tick_blink(Instant::now());
+        changed |= app.tick_spinner(Instant::now());
         if prompt_sender.is_none() {
             if let Some(id) = app.pending_peer_refresh.take() {
                 changed |= app.peer_map.roster(&id, &serde_json::json!({"ok":false}));
@@ -6126,6 +6204,22 @@ fn dispatch_model_controls(app: &mut App, sender: &SyncSender<crate::bridge::Wor
             Err(_) => unreachable!(),
         }
     }
+    let mut efforts = std::mem::take(&mut app.pending_effort_changes).into_iter();
+    while let Some((id, effort)) = efforts.next() {
+        match sender.try_send(crate::bridge::WorkerCommand::SetEffort(id, effort)) {
+            Ok(()) => {}
+            Err(TrySendError::Full(crate::bridge::WorkerCommand::SetEffort(id, effort))) => {
+                app.pending_effort_changes.push((id, effort));
+                app.pending_effort_changes.extend(efforts);
+                break;
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                app.notice = "Daemon unavailable for effort change".into();
+                return true;
+            }
+            Err(_) => unreachable!(),
+        }
+    }
     let mut permissions = std::mem::take(&mut app.pending_permission_changes).into_iter();
     while let Some((id, mode)) = permissions.next() {
         match sender.try_send(crate::bridge::WorkerCommand::SetPermissionMode(id, mode)) {
@@ -6376,7 +6470,7 @@ mod tests {
         assert_eq!(chips[0], ("permission", "Permissions auto".into()));
         assert_eq!(chips[1], ("engine", "claude".into()));
         assert_eq!(chips[2], ("model", "sonnet".into()));
-        assert_eq!(chips[3], ("effort", "Effort ?".into()));
+        assert_eq!(chips[3], ("effort", "?".into()));
         assert_eq!(chips[4].0, "context");
         assert!(chips[4].1.starts_with("Ctx "));
 
@@ -6493,7 +6587,7 @@ mod tests {
         assert_eq!(visible[0].1, "Permissions default");
         assert_eq!(visible[1].1, "claude");
         assert_eq!(visible[2].1, "claude-sonnet-4");
-        assert_eq!(visible[3].1, "Effort ?");
+        assert_eq!(visible[3].1, "?");
         let occupied = visible.iter().map(|(kind, label)| chip_text(kind, label).width()).sum::<usize>()
             + visible.len().saturating_sub(1);
         assert!(occupied <= usize::from(pane.width));
@@ -6636,7 +6730,7 @@ mod tests {
     }
 
     #[test]
-    fn effort_chip_picker_is_per_session_and_sets_only_new_session_default() {
+    fn effort_chip_picker_requests_current_session_change_and_waits_for_event() {
         let mut app = App::default();
         app.handle(Event::Resize(220, 32));
         app.rail_visible = false;
@@ -6644,35 +6738,48 @@ mod tests {
             "engine":"deepseek","model":"deepseek-flash","effort":"high"}));
         app.groups[0].tabs = vec!["deep-1".into()];
         let effort_index = app.chips(0).iter().position(|(kind, _)| *kind == "effort").unwrap();
-        assert_eq!(app.chips(0)[effort_index], ("effort", "Effort high".into()));
+        assert_eq!(app.chips(0)[effort_index], ("effort", "high".into()));
+        assert_eq!(chip_text("effort", "high"), " high ▾ ");
+        assert_eq!(chip_text("effort", "?"), " ? ");
         app.handle(Event::Key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::ALT)));
         assert_eq!(app.effort_picker.as_ref().unwrap().levels, ["none", "low", "high", "max"]);
         assert_eq!(app.effort_picker.as_ref().unwrap().selected, 2);
-        assert!(painted(&app).contains("new sessions only"));
+        assert!(painted(&app).contains("this session"));
         app.handle(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
-        assert_eq!(app.next_efforts["deepseek"], "max");
+        assert_eq!(app.pending_effort_changes, vec![("deep-1".into(), "max".into())]);
         assert_eq!(app.session_efforts["deep-1"], "high");
+        app.apply_daemon_frame(&json!({"type":"set_effort_reply","session_id":"deep-1","ok":true,"effort":"max"}));
+        assert_eq!(app.session_efforts["deep-1"], "high");
+        app.apply_daemon_frame(&json!({"type":"event","session_id":"deep-1",
+            "event":{"type":"effort_changed","data":{"effort":"max"}}}));
+        assert_eq!(app.session_efforts["deep-1"], "max");
 
+        // The closed picker moves the chip strip back up before the next
+        // pointer event; use the freshly painted hit area.
+        let _ = painted_at(&app, 220, 32);
         let effort_hit = app.rendered_chip_hits.borrow().as_ref().unwrap().iter()
             .find(|hit| hit.kind == "effort").unwrap().clone();
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Moved,
+            column: effort_hit.rect.x + 1, row: effort_hit.rect.y, modifiers: KeyModifiers::NONE }));
+        assert!(painted_at(&app, 220, 32).contains("Effort · current session"));
         app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
             column: effort_hit.rect.x + 1, row: effort_hit.rect.y, modifiers: KeyModifiers::NONE }));
         assert!(app.effort_picker.is_some());
         let menu = app.active_chooser_rect().unwrap();
         app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
             column: menu.x + 2, row: menu.y + 3, modifiers: KeyModifiers::NONE }));
-        assert_eq!(app.next_efforts["deepseek"], "none");
+        assert_eq!(app.pending_effort_changes.last(), Some(&("deep-1".into(), "none".into())));
         assert!(app.effort_picker.is_none());
         app.apply_daemon_frame(&json!({"type":"hello","session_id":"glm-2",
             "engine":"glm","model":"glm-5.3-flash","effort":"low"}));
         app.groups[0].tabs.push("glm-2".into());
         app.groups[0].active = 1;
-        assert_eq!(app.chips(0).iter().find(|(kind, _)| *kind == "effort").unwrap().1, "Effort low");
+        assert_eq!(app.chips(0).iter().find(|(kind, _)| *kind == "effort").unwrap().1, "low");
         app.open_effort_picker();
         assert_eq!(app.effort_picker.as_ref().unwrap().levels, ["low", "high", "max"]);
         assert!(!app.effort_picker.as_ref().unwrap().levels.contains(&"none".to_owned()));
-        assert_eq!(app.next_efforts["deepseek"], "none");
+        assert_eq!(app.pending_effort_changes.last(), Some(&("deep-1".into(), "none".into())));
         app.apply_daemon_frame(&json!({"type":"event","session_id":"glm-2",
             "event":{"type":"model_changed","data":{"model":"unknown-new-model"}}}));
         assert!(app.effort_picker.is_none());
@@ -6692,7 +6799,7 @@ mod tests {
         app.groups[0].tabs = vec!["unknown".into()];
         app.open_effort_picker();
         assert!(app.effort_picker.is_none());
-        assert!(app.notice.contains("No verified effort"));
+        assert!(app.notice.contains("Live effort change is unavailable"));
 
         app.engine_selected = 2;
         app.select_new_engine();
@@ -6944,7 +7051,7 @@ mod tests {
                 "permission" => assert!(app.permission_picker.is_some()),
                 "engine" => assert!(app.engine_picker),
                 "model" => assert!(app.model_picker.is_some()),
-                "effort" => assert!(app.notice.contains("No verified effort")),
+                "effort" => assert!(app.notice.contains("Live effort change is unavailable")),
                 "beliefs" => assert!(app.lore_picker.is_some()),
                 _ => {
                     assert_eq!(app.chip_info.as_ref().map(|info| info.kind), Some(kind));
@@ -8087,6 +8194,64 @@ mod tests {
         app.apply_daemon_frame(&json!({"type":"event", "session_id":"a",
             "event":{"type":"prompt_dequeued", "data":{"id":"q"}}}));
         assert_eq!(app.session_activity["a"].1, 0);
+    }
+
+    #[test]
+    fn streamed_chunks_stay_together_and_turns_have_separate_headings() {
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"s"}));
+        let event = |kind: &str, data: serde_json::Value| json!({"type":"event", "session_id":"s",
+            "event":{"type":kind, "data":data}});
+        app.apply_daemon_frame(&event("turn_started", json!({"prompt":"first\nquestion"})));
+        app.apply_daemon_frame(&event("text_delta", json!({"text":"answer"})));
+        app.apply_daemon_frame(&event("text_delta", json!({"text":" one"})));
+        app.apply_daemon_frame(&event("turn_done", json!({"is_error":false})));
+        app.apply_daemon_frame(&event("turn_started", json!({"prompt":"second"})));
+        app.apply_daemon_frame(&event("text_delta", json!({"text":"answer two"})));
+        assert_eq!(app.sessions[0].transcript,
+            "**You:**\n\nfirst\nquestion\n\n**Assistant:**\n\nanswer one\n\n**You:**\n\nsecond\n\n**Assistant:**\n\nanswer two");
+    }
+
+    #[test]
+    fn restored_running_turn_gets_an_answer_boundary_without_replayed_start() {
+        let mut app = App::default();
+        app.apply_update(DaemonUpdate::Upsert(Session { id: "s".into(), title: "s".into(),
+            collection: "repo".into(), transcript: "**You:**\n\nquestion\n\n".into(), status: "Running".into() }));
+        app.apply_daemon_frame(&json!({"type":"event", "session_id":"s",
+            "event":{"type":"text_delta", "data":{"text":"answer"}}}));
+        assert!(app.sessions[0].transcript.ends_with("\n\n**Assistant:**\n\nanswer"));
+    }
+
+    #[test]
+    fn restored_snapshot_keeps_its_existing_turn_headings() {
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"s"}));
+        app.apply_daemon_frame(&json!({"type":"event", "session_id":"s",
+            "event":{"type":"text_delta", "data":{"text":"**You:**\n\nprior\n\n**Assistant:**\n\nreply\n\n",
+                "snapshot":true}}}));
+        assert_eq!(app.sessions[0].transcript, "**You:**\n\nprior\n\n**Assistant:**\n\nreply\n\n");
+        app.apply_daemon_frame(&json!({"type":"event", "session_id":"s",
+            "event":{"type":"text_delta", "data":{"text":"continued"}}}));
+        assert!(app.sessions[0].transcript.ends_with("**Assistant:**\n\ncontinued"));
+    }
+
+    #[test]
+    fn processing_spinner_advances_only_for_visible_busy_sessions() {
+        let mut app = App::default();
+        app.handle(Event::Resize(100, 28));
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"s", "running":true}));
+        let start = app.spinner_at;
+        assert_eq!(app.activity_label("s"), Some("Processing"));
+        assert!(painted(&app).contains("◐ Processing"));
+        assert!(!app.tick_spinner(start + Duration::from_millis(119)));
+        assert!(app.tick_spinner(start + SPINNER_INTERVAL));
+        assert!(painted(&app).contains("◓ Processing"));
+        app.session_activity.insert("s".into(), (false, 1));
+        assert_eq!(app.activity_label("s"), Some("Queued"));
+        assert!(painted(&app).contains("Queued"));
+        app.session_activity.insert("s".into(), (false, 0));
+        assert!(!app.tick_spinner(start + SPINNER_INTERVAL * 2));
+        assert!(!painted(&app).contains("Processing"));
     }
 
     #[test]

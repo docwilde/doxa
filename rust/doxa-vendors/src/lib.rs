@@ -116,6 +116,17 @@ pub enum Vendor {
     Glm,
 }
 impl Vendor {
+    /// Fallback effort choices for models whose capability is known locally.
+    pub fn effort_choices(self, model: &str) -> &'static [&'static str] {
+        match self {
+            Self::DeepSeek if matches!(model, "deepseek-flash" | "deepseek-v4-pro") => &[
+                "none", "low", "high", "max"],
+            Self::Glm if matches!(model, "glm-4.5" | "glm-4.5-air" | "glm-4.6" | "glm-4.7"
+                | "glm-5" | "glm-5-turbo" | "glm-5.1" | "glm-5.2" | "glm-5.3"
+                | "glm-5.3-flash") => &["low", "high", "max"],
+            _ => &[],
+        }
+    }
     pub fn engine_id(self) -> &'static str {
         match self {
             Self::DeepSeek => "deepseek",
