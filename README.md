@@ -1,7 +1,7 @@
 <p align="center"><img src="assets/logo.png" width="560" alt="DOXA — belief earning knowledge"></p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Rust%202.0-alpha.14-f59f00" alt="Rust 2.0 alpha.14 is the main frontend">
+  <img src="https://img.shields.io/badge/Rust%202.0-alpha.15-f59f00" alt="Rust 2.0 alpha.15 is the main frontend">
   <a href="https://github.com/docwilde/doxa/releases"><img src="https://img.shields.io/github/v/release/docwilde/doxa?label=release&color=e8590c" alt="latest release"></a>
   <a href="https://github.com/docwilde/doxa/actions/workflows/rust-ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/docwilde/doxa/rust-ci.yml?branch=main&label=Rust%20CI" alt="Rust CI status"></a>
   <img src="https://img.shields.io/badge/TUI-Ratatui-2f9e44" alt="Rust TUI built with Ratatui">
@@ -42,15 +42,19 @@ alpha. Native fleet supervision and remote control are still being ported.
 
 ## Gallery
 
-### Rust 2.0 alpha.14
+### Rust 2.0 alpha.15
 
 ![Single Rust session pane showing collapsed tool calls below the assistant reply](assets/shots/rust-tool-activity.png)
 
 *Tool calls stay collapsed in the transcript until expanded.*
 
+![Rust session pane with the tool activity section expanded to show call inputs and results](assets/shots/rust-tool-expanded.png)
+
+*Select a tool section and press Enter, or click it, to inspect the bounded details.*
+
 ![Rust session pane showing separate prompt and answer turns with a processing spinner](assets/shots/rust-processing.png)
 
-*Live turns keep prompt and answer boundaries; the pane shows processing while the next request runs.*
+*User messages have a warm highlight, agent replies keep the normal surface, and the pane shows processing while the next request runs.*
 
 ![Rust input request choices expanded above the prompt in a single session pane](assets/shots/rust-needs-input.png)
 
@@ -91,7 +95,7 @@ curl -fsSL https://raw.githubusercontent.com/docwilde/doxa/main/scripts/install.
 
 The installer builds the Rust frontend and daemon from `main` and installs the
 Rust `doxa` command in `~/.local/bin` (or `DOXA_RUST_BIN_DIR`). Pass a tag such
-as `v2.0.0-alpha.14` after `sh -s --` to pin a release. It uses Git, Cargo,
+as `v2.0.0-alpha.15` after `sh -s --` to pin a release. It uses Git, Cargo,
 Python 3.11+, and `uv`; the Python environment it creates is private to the
 LORE and Claude sidecars. No Python frontend command is installed. See the
 [Rust guide](rust/README.md) for provider setup and current limits.

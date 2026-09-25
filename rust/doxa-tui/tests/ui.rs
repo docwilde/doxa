@@ -649,6 +649,32 @@ fn tool_activity_folds_in_transcript_and_expands_by_keyboard_or_mouse() {
 }
 
 #[test]
+fn restored_tool_activity_folds_and_expands_by_keyboard_and_mouse() {
+    let mut app = App::default();
+    app.handle(Event::Resize(110, 30));
+    let mut restored = session("restored", "Restored");
+    restored.transcript = "**You:**\n\nQuestion\n\n**Assistant:**\n\nLet me check\n\nTool: Read started · restored-input\n\nTool: Read finished · restored-result\n\nAnswer".into();
+    app.apply_update(doxa_tui::ui::DaemonUpdate::Upsert(restored));
+    let collapsed = screen(&app, 110, 30);
+    assert!(collapsed.contains("1 tool call"), "{collapsed}");
+    assert!(!collapsed.contains("restored-input"));
+    assert!(!collapsed.contains("restored-result"));
+
+    app.handle(key(KeyCode::Tab, KeyModifiers::NONE));
+    assert!(app.handle(key(KeyCode::Enter, KeyModifiers::NONE)));
+    let expanded = screen(&app, 110, 30);
+    assert!(expanded.contains("restored-input"), "{expanded}");
+    assert!(expanded.contains("restored-result"), "{expanded}");
+    assert!(app.handle(key(KeyCode::Enter, KeyModifiers::NONE)));
+    let collapsed = screen(&app, 110, 30);
+    let (row, column) = collapsed.lines().enumerate()
+        .find_map(|(row, line)| line.find("1 tool call").map(|column| (row, line[..column].chars().count())))
+        .expect("visible restored tool summary");
+    assert!(app.handle(mouse(MouseEventKind::Down(MouseButton::Left), column as u16, row as u16)));
+    assert!(screen(&app, 110, 30).contains("restored-result"));
+}
+
+#[test]
 fn structured_event_fields_are_escaped_and_bounded() {
     let mut app = App::default();
     app.apply_daemon_frame(&json!({"type":"hello", "session_id":"one", "model":"test"}));

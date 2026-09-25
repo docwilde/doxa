@@ -178,8 +178,16 @@ the JSONL file retains the full history. Older daemons without snapshot
 metadata fall back to their 512-event replay ring. A turn still running at
 attach can have text that was streamed but not yet persisted, so its earlier
 in-flight deltas may be absent. `Ctrl+T` opens bounded tool activity cards;
-clickable links are still 2.0 work. The binary version is `2.0.0-alpha.14`;
+clickable links are still 2.0 work. The binary version is `2.0.0-alpha.15`;
 this is an alpha release.
+
+In the transcript, user messages have an accent heading and highlighted body;
+assistant replies keep the normal Markdown surface. Each turn's tool activity
+starts collapsed into one section. Focus the transcript with `Tab`, select a
+section with `[` or `]`, and press `Enter` to expand it, or click the section.
+Expanded sections show bounded tool inputs and results from the recorded
+transcript. `Ctrl+T`
+remains the separate tool activity card view.
 
 `Ctrl+R` opens a searchable picker for attached and archived sessions with
 bounded transcript tails. Archived transcripts open read-only and never receive

@@ -13,6 +13,13 @@ fn event(app: &mut App, id: &str, kind: &str, data: Value) {
     app.apply_daemon_frame(&json!({"type":"event","session_id":id,"event":{"type":kind,"data":data}}));
 }
 
+fn tool_activity(app: &mut App) {
+    event(app,"demo-codex-01","tool_call",json!({"id":"tool-1","name":"Read","input":{"path":"src/parser.rs"}}));
+    event(app,"demo-codex-01","tool_result",json!({"id":"tool-1","name":"Read","result_summary":"File read successfully","duration_ms":42}));
+    event(app,"demo-codex-01","tool_call",json!({"id":"tool-2","name":"Edit","input":{"path":"src/parser.rs"}}));
+    event(app,"demo-codex-01","tool_result",json!({"id":"tool-2","name":"Edit","result_summary":"Updated 2 hunks","duration_ms":81}));
+}
+
 fn fixture() -> App {
     let mut app = App::default();
     app.handle(Event::Resize(126, 31));
@@ -33,7 +40,7 @@ fn fixture() -> App {
     event(&mut app,"demo-codex-01","turn_done",json!({"input_tokens":4821,"output_tokens":918,"usage_scope":"session","usage_source":"codex_cli_turn_completed","ctx_percentage":18.0,"session_cost_usd":0.0187}));
     event(&mut app,"demo-claude-02","text_delta",json!({"text":"## Test review\n\nThe new cases cover clipped input and reconnects. One edge case remains in the transport fixture."}));
     event(&mut app,"demo-claude-02","turn_done",json!({"ctx_percentage":9.0,"session_cost_usd":0.0062}));
-    app.notice = "Rust 2.0.0-alpha.14 · fixture session".into();
+    app.notice = "Rust 2.0.0-alpha.15 · fixture session".into();
     app
 }
 
@@ -50,10 +57,12 @@ fn scene(name: &str) -> App {
             });
         }
         "tool-activity" => {
-            event(&mut app,"demo-codex-01","tool_call",json!({"id":"tool-1","name":"Read","input":{"path":"src/parser.rs"}}));
-            event(&mut app,"demo-codex-01","tool_result",json!({"id":"tool-1","name":"Read","result_summary":"File read successfully","duration_ms":42}));
-            event(&mut app,"demo-codex-01","tool_call",json!({"id":"tool-2","name":"Edit","input":{"path":"src/parser.rs"}}));
-            event(&mut app,"demo-codex-01","tool_result",json!({"id":"tool-2","name":"Edit","result_summary":"Updated 2 hunks","duration_ms":81}));
+            tool_activity(&mut app);
+        }
+        "tool-expanded" => {
+            tool_activity(&mut app);
+            key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+            key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         }
         "processing" => {
             app.groups[0].tabs = vec!["demo-codex-01".into()];
@@ -82,7 +91,7 @@ fn scene(name: &str) -> App {
             event(&mut app,"demo-deepseek-03","text_delta",json!({"text":
                 "## Model options\n\nThe selected model supports reasoning effort controls.\n\n- This session reports high effort\n- Its next turn may use a different level\n- Model choices follow the selected engine"}));
             key(&mut app, KeyCode::Char('f'), KeyModifiers::ALT);
-            app.notice = "Rust 2.0.0-alpha.14 · effort fixture".into();
+            app.notice = "Rust 2.0.0-alpha.15 · effort fixture".into();
         }
         "history" => {
             key(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL);
@@ -122,7 +131,7 @@ fn rgb(color: Color) -> [u8; 3] {
 fn main() {
     let name = std::env::args().nth(1).expect("scene name");
     let (width,height) = match name.as_str() {
-        "hero" | "tool-activity" | "processing" | "needs-input" | "permissions" | "effort" | "history" | "queue" | "memory" => (126,31),
+        "hero" | "tool-activity" | "tool-expanded" | "processing" | "needs-input" | "permissions" | "effort" | "history" | "queue" | "memory" => (126,31),
         _ => panic!("unknown scene"),
     };
     let app = scene(&name);

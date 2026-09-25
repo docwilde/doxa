@@ -5,6 +5,17 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.15 — 2026-09-25
+
+- Distinguish user messages with an accent heading, highlighted body, and left
+  rule while assistant replies retain normal Markdown styling. Preserve this
+  distinction in live turns and restored transcripts.
+- Group each turn's tool calls into one collapsed section, including calls
+  separated by assistant prose. Expand it by click or transcript-focus Enter
+  to inspect bounded inputs and results; keep role and tool labels
+  inside fenced code as ordinary text.
+- Refresh the Rust gallery with collapsed and expanded tool views.
+
 ## 2.0.0-alpha.14 — 2026-09-25
 
 - Show only the reasoning level in the effort chip and identify it in the

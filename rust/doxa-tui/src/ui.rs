@@ -28,6 +28,7 @@ use crate::{diff_view, history, launch, lore_picker, markdown, peer_map::PeerMap
 use crate::theme;
 
 mod tool_cards;
+mod transcript_roles;
 mod transcript_tools;
 use tool_cards::ToolCards;
 
@@ -1713,9 +1714,12 @@ impl App {
         let Some(row) = structured_event(event_type, data) else {
             return false;
         };
+        let heading_needed = matches!(event_type, "reasoning_delta" | "tool_call" | "tool_result")
+            && self.streaming_text.insert(id.to_owned());
         let Some(session) = self.sessions.iter_mut().find(|s| s.id == id) else {
             return false;
         };
+        if heading_needed { append_turn_heading(session, "Assistant"); }
         if append_transcript(session, &row) {
             self.notice = "Transcript tail limited to 512 KiB".into();
         }
@@ -8210,6 +8214,21 @@ mod tests {
         app.apply_daemon_frame(&event("text_delta", json!({"text":"answer two"})));
         assert_eq!(app.sessions[0].transcript,
             "**You:**\n\nfirst\nquestion\n\n**Assistant:**\n\nanswer one\n\n**You:**\n\nsecond\n\n**Assistant:**\n\nanswer two");
+    }
+
+    #[test]
+    fn tool_first_turn_gets_one_assistant_heading() {
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"s"}));
+        let event = |kind: &str, data: serde_json::Value| json!({"type":"event", "session_id":"s",
+            "event":{"type":kind, "data":data}});
+        app.apply_daemon_frame(&event("turn_started", json!({"prompt":"inspect"})));
+        app.apply_daemon_frame(&event("tool_call", json!({"name":"Read", "input":{"path":"file.rs"}})));
+        app.apply_daemon_frame(&event("text_delta", json!({"text":"Found it."})));
+        let transcript = &app.sessions[0].transcript;
+        assert_eq!(transcript.matches("**Assistant:**").count(), 1);
+        assert!(transcript.contains("Tool: Read started"));
+        assert!(transcript.ends_with("Found it."));
     }
 
     #[test]
