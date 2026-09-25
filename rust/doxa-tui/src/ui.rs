@@ -21,7 +21,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Tabs, Wrap};
 use ratatui::{Frame, Terminal};
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{diff_view, history, launch, lore_picker, markdown, peer_map::PeerMap};
 use crate::theme;
@@ -104,6 +104,28 @@ fn safe_label(value: &str) -> String {
         .collect()
 }
 
+fn clipped_title(value: &str, width: usize) -> String {
+    let label = safe_label(value);
+    let mut out = String::new();
+    let mut used = 0;
+    for ch in label.chars() {
+        let cells = ch.width().unwrap_or(0);
+        if used + cells > width {
+            if width > 0 {
+                while used + 1 > width {
+                    if let Some(last) = out.pop() { used -= last.width().unwrap_or(0); }
+                    else { break; }
+                }
+                out.push('…');
+            }
+            return out;
+        }
+        out.push(ch);
+        used += cells;
+    }
+    out
+}
+
 fn unsafe_input_char(ch: char) -> bool {
     ch.is_control()
         || matches!(ch, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
@@ -112,6 +134,11 @@ fn unsafe_input_char(ch: char) -> bool {
 fn prompt_height(draft: &str, pane_height: u16) -> u16 {
     (draft.bytes().filter(|b| *b == b'\n').count().min(5) as u16 + 3)
         .clamp(3, 8).min(pane_height.saturating_sub(5).max(3))
+}
+
+fn wrapped_rows(text: &str, width: usize) -> usize {
+    let width = width.max(1);
+    text.lines().map(|line| line.width().max(1).div_ceil(width)).sum::<usize>().max(1)
 }
 
 const MAX_EVENT_FIELD_CHARS: usize = 320;
@@ -520,6 +547,49 @@ impl InputRequest {
             .map(|q| q.options.len())
             .unwrap_or(0)
     }
+}
+
+fn input_request_body(request: &InputRequest) -> String {
+    let mut body = String::new();
+    if request.kind == "ask_user" {
+        if let Some(question) = request.questions.get(request.step) {
+            if !question.header.is_empty() {
+                body.push_str("Header: ");
+                body.push_str(&markdown::sanitize(&question.header));
+                body.push('\n');
+            }
+            body.push_str("Question: ");
+            body.push_str(&markdown::sanitize(&question.question));
+            body.push_str("\n\n");
+            for (i, option) in question.options.iter().enumerate() {
+                body.push_str(&format!(
+                    "{} {}. {}\n",
+                    if i + 1 == request.selected { "▸" } else { " " },
+                    i + 1,
+                    markdown::sanitize(&option.label)
+                ));
+                if !option.description.is_empty() {
+                    body.push_str("   Description: ");
+                    body.push_str(&markdown::sanitize(&option.description));
+                    body.push('\n');
+                }
+            }
+        } else {
+            body.push_str("Question unavailable\n");
+        }
+        body.push_str("\n1–9 choose · ↑/↓ then Enter · PgUp/PgDn scroll · Esc decline");
+    } else {
+        body.push_str(&markdown::sanitize(&request.heading));
+        body.push_str("\n\n");
+        body.push_str("D deny · Esc deny · ↑/↓ scroll\nShift+A then Shift+Y to allow");
+        if request.allow_armed {
+            body.push_str("\nApproval armed · press Shift+Y now");
+        }
+    }
+    if request.sending {
+        body.push_str("\nSending answer…");
+    }
+    body
 }
 
 #[derive(Debug)]
@@ -2366,15 +2436,29 @@ impl App {
     /// Space for a chooser inside the active pane, immediately above its
     /// prompt. Reserving this space keeps the transcript and prompt visible.
     fn chooser_rect(&self, pane: Rect) -> Option<Rect> {
-        let wanted = if self.active_request_index().is_some_and(|index| self.input_requests[index].kind == "ask_user") {
-            17
-        } else if self.engine_picker || self.new_session.is_some()
-            || self.model_picker.is_some() || self.permission_picker.is_some() {
-            13
-        } else if self.lore_picker.is_some() {
-            19
+        let wanted = if let Some(index) = self.active_request_index().filter(|&index| self.input_requests[index].kind == "ask_user") {
+            let body = input_request_body(&self.input_requests[index]);
+            wrapped_rows(&body, usize::from(pane.width.saturating_sub(2)))
+                .saturating_add(2).clamp(6, 18) as u16
+        } else if self.engine_picker {
+            7
+        } else if let Some(form) = &self.new_session {
+            if form.engine == launch::Engine::Claude { 8 } else { 7 }
+        } else if self.permission_picker.is_some() {
+            10
+        } else if let Some(picker) = &self.model_picker {
+            (4 + picker.models.len() + usize::from(picker.catalog_pending || !picker.loading && picker.models.is_empty()))
+                .clamp(5, 13) as u16
+        } else if let Some(picker) = &self.lore_picker {
+            if let Some((_, evidence)) = &picker.evidence {
+                let rows = evidence.len().saturating_mul(2);
+                (if rows <= 4 { 4 + rows } else { 7 + rows }).clamp(5, 19) as u16
+            } else {
+                let rows = picker.rows.len();
+                (if rows <= 2 { 4 + rows } else { 7 + rows }).clamp(5, 19) as u16
+            }
         } else if self.action_menu {
-            15
+            (ACTIONS.len() + 2).min(15) as u16
         } else {
             return None;
         };
@@ -3037,57 +3121,35 @@ impl App {
             width,
             height,
         ) };
-        let mut body = String::new();
-        if request.kind == "ask_user" {
-            if let Some(question) = request.questions.get(request.step) {
-                if !question.header.is_empty() {
-                    body.push_str("Header: ");
-                    body.push_str(&markdown::sanitize(&question.header));
-                    body.push('\n');
-                }
-                body.push_str("Question: ");
-                body.push_str(&markdown::sanitize(&question.question));
-                body.push_str("\n\n");
-                for (i, option) in question.options.iter().enumerate() {
-                    body.push_str(&format!(
-                        "{} {}. {}\n",
-                        if i + 1 == request.selected {
-                            "▸"
-                        } else {
-                            " "
-                        },
-                        i + 1,
-                        markdown::sanitize(&option.label)
-                    ));
-                    if !option.description.is_empty() {
-                        body.push_str("   Description: ");
-                        body.push_str(&markdown::sanitize(&option.description));
-                        body.push('\n');
-                    }
-                }
-            } else {
-                body.push_str("Question unavailable\n");
-            }
-            body.push_str("\n1–9 choose · ↑/↓ then Enter · PgUp/PgDn scroll · Esc decline");
-        } else {
-            body.push_str(&markdown::sanitize(&request.heading));
-            body.push_str("\n\n");
-            body.push_str("D deny · Esc deny · ↑/↓ scroll\nShift+A then Shift+Y to allow");
-            if request.allow_armed {
-                body.push_str("\nApproval armed · press Shift+Y now");
-            }
-        }
-        if request.sending {
-            body.push_str("\nSending answer…");
-        }
+        let body = input_request_body(request);
+        let question = request.questions.get(request.step);
+        let selected_row = question.and_then(|question| {
+            question.options.get(request.selected.checked_sub(1)?).map(|_| {
+                let preceding = question.options.iter().take(request.selected - 1)
+                    .map(|option| 1 + usize::from(!option.description.is_empty())).sum::<usize>();
+                usize::from(!question.header.is_empty()) + 2 + preceding
+            })
+        });
+        let lines: Vec<Line> = body.lines().enumerate().map(|(index, text)| {
+            if Some(index) == selected_row {
+                let padding = usize::from(modal.width.saturating_sub(2)).saturating_sub(text.width());
+                Line::styled(format!("{text}{}", " ".repeat(padding)), Style::default().fg(theme::ACCENT)
+                    .bg(theme::HIGHLIGHT).add_modifier(Modifier::BOLD))
+            } else { Line::from(text.to_owned()) }
+        }).collect();
+        let title = if request.kind == "ask_user" {
+            question.map(|question| format!(" {} ", clipped_title(&question.question,
+                usize::from(modal.width.saturating_sub(4)))))
+                .unwrap_or_else(|| " Choose an answer ".into())
+        } else { format!(" Input required · {} ", request.kind) };
         if !inline { frame.render_widget(Clear, modal); }
         frame.render_widget(
-            Paragraph::new(body)
+            Paragraph::new(lines)
                 .wrap(Wrap { trim: false })
                 .scroll((request.scroll, 0))
                 .block(
                     Block::default()
-                        .title(format!(" Input required · {} ", request.kind))
+                        .title(title)
                         .borders(Borders::ALL)
                         .border_style(Style::default().fg(theme::ACCENT))
                         .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)),
@@ -4148,7 +4210,7 @@ mod tests {
             offset: 0, status: "Ready".into(), evidence: None, pending: None });
         let lore = app.active_chooser_rect().unwrap();
         assert_eq!(lore.bottom(), menu.bottom());
-        assert!(lore.height > menu.height);
+        assert!(lore.height < menu.height, "empty LORE list should stay compact");
     }
 
     #[test]
@@ -4168,9 +4230,14 @@ mod tests {
         let menu = app.active_chooser_rect().unwrap();
         let screen = painted(&app);
         let rows: Vec<_> = screen.lines().collect();
-        assert!(rows[usize::from(menu.y)].contains("Input required"));
+        assert!(rows[usize::from(menu.y)].contains("Where?"));
         assert!(rows[usize::from(menu.y + 3)].contains("Staging"));
         assert!(rows[usize::from(menu.bottom() + 1)].contains("Prompt"));
+        assert!(menu.height <= 11, "short question should use only its content rows");
+        let mut terminal = Terminal::new(TestBackend::new(100, 28)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert_eq!(terminal.backend().buffer()[(menu.x + 2, menu.y + 3)].bg, theme::HIGHLIGHT);
+        assert_eq!(terminal.backend().buffer()[(menu.right() - 3, menu.y + 3)].bg, theme::HIGHLIGHT);
         app.input_requests.clear();
 
         let pane = app.layout(app.size).panes.unwrap()[1];
@@ -4180,6 +4247,27 @@ mod tests {
         assert_eq!(app.active_group, 1);
         assert!(app.lore_picker.is_some());
         assert_eq!(app.active_chooser_rect().unwrap().x, pane.x);
+    }
+
+    #[test]
+    fn long_question_title_is_clipped_and_body_keeps_scrollable_text() {
+        let mut app = App::default();
+        app.handle(Event::Resize(100, 28));
+        app.rail_visible = false;
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"a", "engine":"codex"}));
+        app.groups[0].tabs = vec!["a".into()];
+        let question = "Which deployment target should receive the migration? ".repeat(30);
+        app.apply_daemon_frame(&json!({"type":"event", "session_id":"a",
+            "event":{"type":"needs_input", "data":{"id":"req-long", "kind":"ask_user",
+                "questions":[{"question":question, "options":[{"label":"Staging"}]}]}}}));
+        let menu = app.active_chooser_rect().unwrap();
+        assert_eq!(menu.height, 18);
+        let rows: Vec<_> = painted(&app).lines().map(str::to_owned).collect();
+        assert!(rows[usize::from(menu.y)].contains('…'));
+        assert!(rows[usize::from(menu.y + 1)].contains("Question: Which deployment"));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE)));
+        assert!(app.input_requests[0].scroll > 0);
+        assert!(painted(&app).contains("Prompt"));
     }
 
     #[test]
