@@ -26,6 +26,7 @@ cargo build --locked
 Run `cargo build --locked` at the repository root. It uses the shared root
 `Cargo.lock` and writes binaries to `target/debug`; `./task` uses
 `target/rust-task` so its launcher builds stay separate.
+Plain `cargo build` works there too; `--locked` checks the committed lockfile.
 
 `./task` is the repository-local launcher. `run` opens or creates a session,
 `new` always creates one, and `doctor` checks launcher dependencies. These
@@ -76,7 +77,9 @@ set explicitly for integration testing.
 remote-tracking branch. It prefers a same-named local branch over
 `origin/NAME`. An unknown branch, disabled worktrees, or a request combined
 with `--resume` fails before starting the session; the launch checkout is
-never switched. Live `/branch` listing and base switching remain to be ported.
+never switched. `doxa-rs branch` lists local branch bases from this checkout.
+`doxa-rs branch NAME` refuses a live base switch and points to
+`doxa-rs new --branch NAME`; live `/branch` controls remain to be ported.
 
 Or compile and install the main line with the POSIX installer:
 
@@ -159,7 +162,7 @@ the JSONL file retains the full history. Older daemons without snapshot
 metadata fall back to their 512-event replay ring. A turn still running at
 attach can have text that was streamed but not yet persisted, so its earlier
 in-flight deltas may be absent. `Ctrl+T` opens bounded tool activity cards;
-clickable links are still 2.0 work. The binary version is `2.0.0-alpha.11`;
+clickable links are still 2.0 work. The binary version is `2.0.0-alpha.12`;
 this is an alpha release.
 
 `Ctrl+R` opens a searchable picker for attached and archived sessions with
