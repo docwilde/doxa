@@ -19,6 +19,9 @@ fn fixture() -> App {
     app.apply_daemon_frame(&json!({"type":"hello","session_id":"demo-codex-01","engine":"codex","model":"gpt-6-sol","cwd":"/demo/project","lore_scrub":"ready"}));
     app.apply_daemon_frame(&json!({"type":"hello","session_id":"demo-claude-02","engine":"claude","model":"claude-sonnet-4","cwd":"/demo/project","permission_mode":"default","can_set_permission_mode":true,"lore_scrub":"ready"}));
     app.apply_daemon_frame(&json!({"type":"hello","session_id":"demo-deepseek-03","engine":"deepseek","model":"deepseek-chat","cwd":"/demo/project","lore_scrub":"ready"}));
+    for id in ["demo-codex-01", "demo-claude-02", "demo-deepseek-03"] {
+        app.set_lore_memory_usage(id, 3471, 2824);
+    }
     app.groups[0].active = 0;
     app.sessions.iter_mut().for_each(|s| s.title = match s.id.as_str() {
         "demo-codex-01" => "Refactor parser".into(),

@@ -382,7 +382,6 @@ pub struct Session {
 #[derive(Clone, Debug, Default)]
 struct SessionTelemetry {
     context: Option<String>,
-    usage: Option<String>,
     cost: Option<String>,
     lore: Option<String>,
 }
@@ -397,22 +396,6 @@ impl SessionTelemetry {
             .map(|(used, limit)| format!("{used}/{limit}"));
         if data.get("ctx_percentage").is_some() || data.get("ctx_tokens").is_some() {
             self.context = context.or(absolute);
-        }
-        let scope = data["usage_scope"].as_str();
-        let source = data["usage_source"].as_str();
-        let tokens = match (scope, source) {
-            (Some("session"), Some("codex_cli_turn_completed")) =>
-                data["input_tokens"].as_u64().zip(data["output_tokens"].as_u64())
-                    .map(|(input, output)| (input, output, "session")),
-            (Some("turn"), Some("vendor_response")) =>
-                data["prompt_tokens"].as_u64().zip(data["completion_tokens"].as_u64())
-                    .map(|(input, output)| (input, output, "turn")),
-            _ => None,
-        };
-        if let Some((input, output, scope)) = tokens {
-            self.usage = Some(format!("{input}/{output} {scope}"));
-        } else if self.usage.as_deref().is_some_and(|usage| usage.ends_with(" turn")) {
-            self.usage = None;
         }
         if let Some(cost) = data["session_cost_usd"].as_f64()
             .filter(|value| value.is_finite() && *value >= 0.0) {
@@ -446,14 +429,6 @@ impl SessionTelemetry {
         } else if status.get("total_cost_usd").is_some() {
             self.cost = None;
         }
-        let usage = &status["usage"];
-        if usage["num_turns"].as_u64().is_some_and(|turns| turns > 0) {
-            if let Some((input, output)) = usage["input_tokens"].as_u64().zip(usage["output_tokens"].as_u64()) {
-                self.usage = Some(format!("{input}/{output} session"));
-            }
-        } else if usage["num_turns"].as_u64() == Some(0) {
-            self.usage = None;
-        }
         if let Some(count) = status["belief_count"].as_u64() {
             self.lore = Some(format!("{count} beliefs"));
         } else if status.get("lore_scrub").is_some() {
@@ -465,6 +440,13 @@ impl SessionTelemetry {
         }
     }
 
+}
+
+// LORE exposes exact curated-memory characters, not provider tokenizer counts.
+// Its own context budget uses four characters per approximate token; keep the
+// approximation visible in the chip instead of presenting it as exact usage.
+fn estimated_memory_tokens(chars: u64) -> u64 {
+    chars.saturating_add(3) / 4
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -698,6 +680,10 @@ pub struct App {
     session_identity: HashMap<String, (Option<String>, Option<String>)>,
     pub(crate) custom_names: HashMap<String, String>,
     session_telemetry: HashMap<String, SessionTelemetry>,
+    // LORE owns these counts. A bounded background query keeps store I/O off
+    // the draw path; an unavailable sidecar leaves the chip unknown.
+    memory_cache: HashMap<String, (Option<(u64, u64)>, Instant)>,
+    memory_pending: Option<(String, Receiver<Option<(u64, u64)>>)>,
     chip_offsets: [usize; 2],
     blink_on: bool,
     blink_at: Instant,
@@ -803,6 +789,8 @@ impl Default for App {
             session_identity: HashMap::new(),
             custom_names: HashMap::new(),
             session_telemetry: HashMap::new(),
+            memory_cache: HashMap::new(),
+            memory_pending: None,
             chip_offsets: [0, 0],
             blink_on: true,
             blink_at: Instant::now(),
@@ -1025,6 +1013,9 @@ impl App {
                 if let Some(raw) = frame.get("cwd").and_then(|v| v.as_str()) {
                     let path = PathBuf::from(raw);
                     if path.is_absolute() && raw.len() <= 4096 {
+                        if self.session_cwds.get(id) != Some(&path) {
+                            self.memory_cache.remove(id);
+                        }
                         self.session_cwds.insert(id.to_owned(), path);
                     }
                 }
@@ -2547,6 +2538,52 @@ impl App {
         });
     }
 
+    /// The gallery uses this same state path with deterministic counts. Live
+    /// values arrive only through the read-only LORE sidecar query below.
+    pub fn set_lore_memory_usage(&mut self, id: &str, project_chars: u64, user_chars: u64) {
+        self.memory_cache.insert(id.to_owned(), (Some((project_chars, user_chars)), Instant::now()));
+    }
+
+    fn poll_memory(&mut self) -> bool {
+        let mut changed = false;
+        if let Some((id, receiver)) = self.memory_pending.take() {
+            match receiver.try_recv() {
+                Ok(usage) => {
+                    changed = self.memory_cache.get(&id).is_none_or(|(old, _)| *old != usage);
+                    self.memory_cache.insert(id, (usage, Instant::now()));
+                }
+                Err(TryRecvError::Disconnected) => {
+                    changed = self.memory_cache.get(&id).is_none_or(|(old, _)| old.is_some());
+                    self.memory_cache.insert(id, (None, Instant::now()));
+                }
+                Err(TryRecvError::Empty) => self.memory_pending = Some((id, receiver)),
+            }
+        }
+        if self.memory_pending.is_some() { return changed; }
+        // Query the active pane first. The other pane is refreshed once the
+        // first query completes; neither query blocks input or redraw.
+        for group in [self.active_group, 1 - self.active_group] {
+            let Some(id) = self.groups[group].active_id().map(str::to_owned) else { continue; };
+            if self.offline_ids.contains(&id) { continue; }
+            let Some(cwd) = self.session_cwds.get(&id).and_then(|path| path.to_str()).map(str::to_owned) else { continue; };
+            if self.memory_cache.get(&id).is_some_and(|(_, checked)| checked.elapsed() < Duration::from_secs(60)) {
+                continue;
+            }
+            let python = std::env::var_os("DOXA_LORE_PYTHON")
+                .map(PathBuf::from).unwrap_or_else(|| PathBuf::from("python3"));
+            let (tx, rx) = mpsc::sync_channel(1);
+            self.memory_pending = Some((id, rx));
+            std::thread::spawn(move || {
+                let usage = doxa_lore::LoreClient::spawn(&python, Duration::from_secs(2))
+                    .and_then(|mut lore| lore.memory_usage(&cwd)).ok()
+                    .map(|usage| (usage.project_chars, usage.user_chars));
+                let _ = tx.send(usage);
+            });
+            break;
+        }
+        changed
+    }
+
     fn poll_lore(&mut self) -> bool {
         let Some(picker) = &mut self.lore_picker else { return false; };
         let Some(receiver) = &picker.pending else { return false; };
@@ -3686,7 +3723,10 @@ impl App {
             chips.push(("model", "Model".to_owned()));
         }
         chips.push(("context", format!("Ctx {}", telemetry.and_then(|value| value.context.as_deref()).unwrap_or("?"))));
-        chips.push(("usage", format!("Tokens {}", telemetry.and_then(|value| value.usage.as_deref()).unwrap_or("?"))));
+        let memory = self.memory_cache.get(id.unwrap_or("")).and_then(|(usage, _)| *usage)
+            .map(|(project, user)| format!("p≈{}/u≈{}", estimated_memory_tokens(project), estimated_memory_tokens(user)))
+            .unwrap_or_else(|| "p ?/u ?".to_owned());
+        chips.push(("memory", memory));
         let beliefs = telemetry.and_then(|value| value.lore.as_deref())
             .filter(|label| label.ends_with(" beliefs"))
             .unwrap_or("Beliefs");
@@ -5008,6 +5048,7 @@ fn run_loop(
         changed |= app.poll_history();
         changed |= app.poll_resume();
         changed |= app.poll_lore();
+        changed |= app.poll_memory();
         changed |= app.tick_blink(Instant::now());
         if prompt_sender.is_none() {
             if let Some(id) = app.pending_peer_refresh.take() {
