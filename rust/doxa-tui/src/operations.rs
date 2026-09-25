@@ -4,6 +4,7 @@
 use std::io;
 use std::io::Read;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -31,7 +32,8 @@ const PROVIDERS: &[Provider] = &[
 
 fn probe(binary: &Path, args: &[&str], timeout: Duration) -> AuthState {
     let Ok(mut child) = Command::new(binary).args(args)
-        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()
+        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
+        .process_group(0).spawn()
     else { return AuthState::Unauthenticated };
     let deadline = Instant::now() + timeout;
     loop {
@@ -39,11 +41,19 @@ fn probe(binary: &Path, args: &[&str], timeout: Duration) -> AuthState {
             Ok(Some(status)) => return if status.success() { AuthState::Authenticated } else { AuthState::Unauthenticated },
             Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(25)),
             Ok(None) => {
+                if let Ok(pid) = i32::try_from(child.id()) {
+                    // Provider CLIs can spawn helpers. Reap the isolated group
+                    // so a timed-out status probe leaves none running.
+                    unsafe { libc::kill(-pid, libc::SIGKILL) };
+                }
                 let _ = child.kill();
                 let _ = child.wait();
                 return AuthState::TimedOut;
             }
             Err(_) => {
+                if let Ok(pid) = i32::try_from(child.id()) {
+                    unsafe { libc::kill(-pid, libc::SIGKILL) };
+                }
                 let _ = child.kill();
                 let _ = child.wait();
                 return AuthState::Unauthenticated;
@@ -186,8 +196,11 @@ mod tests {
         let script = dir.path().join("probe");
         fs::write(&script, "#!/bin/sh\nprintf 'secret credential\\n'\nprintf 'secret error\\n' >&2\n[ \"$1\" = ok ]\n").unwrap();
         fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
-        assert_eq!(probe(&script, &["ok"], Duration::from_secs(1)), AuthState::Authenticated);
-        assert_eq!(probe(&script, &["fail"], Duration::from_secs(1)), AuthState::Unauthenticated);
+        // CI may mount its temporary directory noexec. The probe contract is
+        // exit status and output isolation, not executing a temporary file.
+        let script = script.to_str().unwrap();
+        assert_eq!(probe(Path::new("/bin/sh"), &[script, "ok"], Duration::from_secs(5)), AuthState::Authenticated);
+        assert_eq!(probe(Path::new("/bin/sh"), &[script, "fail"], Duration::from_secs(5)), AuthState::Unauthenticated);
     }
 
     #[test]
@@ -197,7 +210,7 @@ mod tests {
         fs::write(&script, "#!/bin/sh\nsleep 5\n").unwrap();
         fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
         let start = Instant::now();
-        assert_eq!(probe(&script, &[], Duration::from_millis(10)), AuthState::TimedOut);
+        assert_eq!(probe(Path::new("/bin/sh"), &[script.to_str().unwrap()], Duration::from_millis(10)), AuthState::TimedOut);
         assert!(start.elapsed() < Duration::from_secs(1));
     }
 
