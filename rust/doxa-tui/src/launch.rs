@@ -206,12 +206,9 @@ fn random_id() -> io::Result<String> {
 
 pub fn spawn(options: &LaunchOptions) -> io::Result<Session> {
     let requested_cwd = options.cwd.clone().unwrap_or(env::current_dir()?);
-    if options.cwd.is_some() && options.resume.is_none() {
-        return Err(invalid("explicit cwd is only supported for verified resume"));
-    }
     let cwd = match fs::canonicalize(&requested_cwd) {
         Ok(cwd) if cwd.is_dir() => cwd,
-        Ok(_) => return Err(invalid("resume directory is not a directory")),
+        Ok(_) => return Err(invalid("session directory is not a directory")),
         Err(error) if options.resume.is_some()
             && error.kind() == io::ErrorKind::NotFound
             && requested_cwd.is_absolute()
