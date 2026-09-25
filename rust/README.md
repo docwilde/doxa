@@ -67,7 +67,7 @@ the JSONL file retains the full history. Older daemons without snapshot
 metadata fall back to their 512-event replay ring. A turn still running at
 attach can have text that was streamed but not yet persisted, so its earlier
 in-flight deltas may be absent. `Ctrl+T` opens bounded tool activity cards;
-clickable links are still 2.0 work. The binary version is `2.0.0-alpha.7` for this
+clickable links are still 2.0 work. The binary version is `2.0.0-alpha.8` for this
 separate development line, not a DOXA 2.0 release.
 
 `Ctrl+R` opens a searchable picker for attached and archived sessions with
@@ -94,6 +94,12 @@ Python DOXA's warm dark palette.
 `Alt+P` opens the Claude permission mode picker when supported by the session.
 Entering `dontAsk` requires a second Enter confirmation because unapproved
 calls are silently denied.
+`Alt+L` opens a read-only LORE belief picker when the external LORE bridge is
+available. It shows bounded recent beliefs, a search hit, and evidence for the
+selected belief. `Alt+X` asks for confirmation before stopping the active
+session; the session stays visible as read-only after a successful stop.
+The diff view supports file and hunk navigation with `N`/`P` and `J`/`K`
+in its modal, or `Alt+N`/`Alt+B` and `Alt+J`/`Alt+K` in the persistent pane.
 
 Alpha tags identify preview snapshots. A stable 2.0 release waits until the
 frontend reaches feature parity and passes end-to-end terminal and daemon
