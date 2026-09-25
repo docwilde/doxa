@@ -681,6 +681,16 @@ impl App {
                     if let Some(id) = frame["session_id"].as_str().filter(|id| crate::discovery::valid_id(id)) {
                         let target = frame["group"].as_u64().filter(|group| *group < 2)
                             .map(|group| group as usize).unwrap_or(self.active_group);
+                        // A newly attached daemon may send hello before this reply.
+                        // Upsert places the first observed session in group zero;
+                        // move that provisional tab to the requested pane.
+                        if target != 0 {
+                            let first = &mut self.groups[0];
+                            if let Some(index) = first.tabs.iter().position(|tab| tab == id) {
+                                first.tabs.remove(index);
+                                first.active = first.active.min(first.tabs.len().saturating_sub(1));
+                            }
+                        }
                         let group = &mut self.groups[target];
                         if !group.tabs.iter().any(|tab| tab == id) { group.tabs.push(id.to_owned()); }
                         group.active = group.tabs.iter().position(|tab| tab == id).unwrap_or(group.active);
@@ -3385,11 +3395,14 @@ mod tests {
         let mut app = App::default();
         app.launching = true;
         app.active_group = 1;
-        app.apply_daemon_frame(&json!({"type":"launch_reply", "ok":true,
-            "session_id":"new", "group":0}));
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"new", "engine":"codex"}));
         assert_eq!(app.groups[0].active_id(), Some("new"));
-        assert_eq!(app.groups[1].active_id(), None);
-        assert_eq!(app.active_group, 1);
+        app.active_group = 0;
+        app.apply_daemon_frame(&json!({"type":"launch_reply", "ok":true,
+            "session_id":"new", "group":1}));
+        assert_eq!(app.groups[0].active_id(), None);
+        assert_eq!(app.groups[1].active_id(), Some("new"));
+        assert_eq!(app.active_group, 0);
         assert!(!app.apply_daemon_frame(&json!({"type":"launch_reply", "ok":true,
             "session_id":"unrequested", "group":1})));
     }
