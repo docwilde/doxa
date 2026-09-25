@@ -236,6 +236,7 @@ pub fn spawn(options: &LaunchOptions) -> io::Result<Session> {
         .model
         .clone()
         .or_else(|| {
+            if options.engine == Engine::Codex && options.resume.is_some() { return None; }
             if options.engine.vendor_key().is_none() {
                 configured_string("model", "DOXA_MODEL", None)
             } else {
@@ -243,6 +244,7 @@ pub fn spawn(options: &LaunchOptions) -> io::Result<Session> {
             }
         })
         .or_else(|| {
+            if options.engine == Engine::Codex && options.resume.is_some() { return None; }
             cfg.as_ref()
                 .and_then(|c| c.get("models"))
                 .and_then(|m| m.get(options.engine.model_key()))
@@ -281,7 +283,7 @@ pub fn spawn(options: &LaunchOptions) -> io::Result<Session> {
     let id = if let Some(id) = &options.resume {
         if !matches!(
             options.engine,
-            Engine::Claude | Engine::DeepSeek | Engine::Glm
+            Engine::Codex | Engine::Claude | Engine::DeepSeek | Engine::Glm
         ) || !discovery::valid_id(id)
         {
             return Err(invalid(
@@ -333,7 +335,6 @@ pub fn spawn(options: &LaunchOptions) -> io::Result<Session> {
         Engine::Codex => {
             if options.claude_python.is_some()
                 || options.claude_script.is_some()
-                || options.resume.is_some()
                 || options.effort.is_some()
             {
                 return Err(invalid("Claude options require --engine claude"));
@@ -351,6 +352,9 @@ pub fn spawn(options: &LaunchOptions) -> io::Result<Session> {
                 .arg("--lore-python")
                 .arg(python)
                 .args(["--sandbox", sandbox]);
+            if options.resume.is_some() {
+                command.args(["--resume", "true"]);
+            }
             if let Some(model) = &model {
                 command.arg("--model").arg(model);
             }

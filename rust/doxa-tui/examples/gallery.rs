@@ -1,6 +1,7 @@
 //! Deterministic gallery frames rendered through the production Ratatui App.
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use doxa_tui::ui::App;
+use doxa_worktrees::RepoStatus;
 use ratatui::{backend::TestBackend, style::Color, Terminal};
 use serde_json::{json, Value};
 
@@ -32,7 +33,7 @@ fn fixture() -> App {
     event(&mut app,"demo-codex-01","turn_done",json!({"input_tokens":4821,"output_tokens":918,"usage_scope":"session","usage_source":"codex_cli_turn_completed","ctx_percentage":18.0,"session_cost_usd":0.0187}));
     event(&mut app,"demo-claude-02","text_delta",json!({"text":"## Test review\n\nThe new cases cover clipped input and reconnects. One edge case remains in the transport fixture."}));
     event(&mut app,"demo-claude-02","turn_done",json!({"ctx_percentage":9.0,"session_cost_usd":0.0062}));
-    app.notice = "Rust 2.0.0-alpha.12 · fixture session".into();
+    app.notice = "Rust 2.0.0-alpha.13 · fixture session".into();
     app
 }
 
@@ -42,6 +43,11 @@ fn scene(name: &str) -> App {
         "hero" => {
             app.rail_visible = true;
             app.groups[0].tabs = vec!["demo-codex-01".into(), "demo-claude-02".into(), "demo-deepseek-03".into()];
+            app.set_repo_status("demo-codex-01", RepoStatus::Repository {
+                repo: "project".into(), base: Some("main".into()),
+                checked_out: Some("feat".into()), sha: Some("a1b2c3d".into()),
+                worktree: Some("feat".into()),
+            });
         }
         "tool-activity" => {
             event(&mut app,"demo-codex-01","tool_call",json!({"id":"tool-1","name":"Read","input":{"path":"src/parser.rs"}}));
@@ -56,6 +62,18 @@ fn scene(name: &str) -> App {
             app.groups[0].tabs = vec!["demo-claude-02".into()];
             key(&mut app, KeyCode::Char('p'), KeyModifiers::ALT);
         }
+        "effort" => {
+            app.groups[0].tabs = vec!["demo-deepseek-03".into()];
+            app.apply_daemon_frame(&json!({"type":"hello","session_id":"demo-deepseek-03",
+                "engine":"deepseek","model":"deepseek-flash","effort":"high","cwd":"/demo/project"}));
+            if let Some(session) = app.sessions.iter_mut().find(|session| session.id == "demo-deepseek-03") {
+                session.title = "Compare models".into();
+            }
+            event(&mut app,"demo-deepseek-03","text_delta",json!({"text":
+                "## Model options\n\nThe selected model supports reasoning effort controls.\n\n- This session reports high effort\n- The next session may use a different level\n- Model choices follow the selected engine"}));
+            key(&mut app, KeyCode::Char('f'), KeyModifiers::ALT);
+            app.notice = "Rust 2.0.0-alpha.13 · effort fixture".into();
+        }
         "history" => {
             key(&mut app, KeyCode::Char('r'), KeyModifiers::CONTROL);
         }
@@ -68,6 +86,13 @@ fn scene(name: &str) -> App {
                     {"id":"q4","preview":"Review the parser error path after this turn"},
                     {"id":"q7","preview":"Summarize the test failures and proposed fix"}
                 ]}));
+        }
+        "memory" => {
+            app.groups[0].tabs = vec!["demo-codex-01".into()];
+            app.show_memory_menu_fixture(0,
+                &["- Prefer concise explanations [source: codex]", "- Keep test evidence in reports"],
+                &["- Run parser checks before release", "- Keep reconnect behavior stable"],
+                &["- testing: Reconnect must preserve the transcript", "- release: Cite checks before publishing"]);
         }
         _ => panic!("unknown scene: {name}"),
     }
@@ -87,7 +112,7 @@ fn rgb(color: Color) -> [u8; 3] {
 fn main() {
     let name = std::env::args().nth(1).expect("scene name");
     let (width,height) = match name.as_str() {
-        "hero" | "tool-activity" | "needs-input" | "permissions" | "history" | "queue" => (126,31),
+        "hero" | "tool-activity" | "needs-input" | "permissions" | "effort" | "history" | "queue" | "memory" => (126,31),
         _ => panic!("unknown scene"),
     };
     let app = scene(&name);

@@ -1,7 +1,7 @@
 <p align="center"><img src="assets/logo.png" width="560" alt="DOXA — belief earning knowledge"></p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Rust%202.0-alpha.12-f59f00" alt="Rust 2.0 alpha.12 is the main frontend">
+  <img src="https://img.shields.io/badge/Rust%202.0-alpha.13-f59f00" alt="Rust 2.0 alpha.13 is the main frontend">
   <a href="https://github.com/docwilde/doxa/releases"><img src="https://img.shields.io/github/v/release/docwilde/doxa?label=release&color=e8590c" alt="latest release"></a>
   <a href="https://github.com/docwilde/doxa/actions/workflows/rust-ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/docwilde/doxa/rust-ci.yml?branch=main&label=Rust%20CI" alt="Rust CI status"></a>
   <img src="https://img.shields.io/badge/TUI-Ratatui-2f9e44" alt="Rust TUI built with Ratatui">
@@ -42,7 +42,7 @@ alpha. Native fleet supervision and remote control are still being ported.
 
 ## Gallery
 
-### Rust 2.0 alpha.12
+### Rust 2.0 alpha.13
 
 ![Single Rust session pane showing collapsed tool calls below the assistant reply](assets/shots/rust-tool-activity.png)
 
@@ -56,6 +56,10 @@ alpha. Native fleet supervision and remote control are still being ported.
 
 *The permission picker expands from the chip row above the active prompt.*
 
+![Rust reasoning effort picker above the prompt for a DeepSeek session](assets/shots/rust-effort.png)
+
+*The effort chip reports the current session; picker choices apply to new sessions.*
+
 ![Rust session history picker above the prompt in a single session pane](assets/shots/rust-history.png)
 
 *Session history searches attached and archived transcripts.*
@@ -63,6 +67,10 @@ alpha. Native fleet supervision and remote control are still being ported.
 ![Rust queued prompt picker expanded above the prompt, showing scrubbed previews and a selected row](assets/shots/rust-queue.png)
 
 *The queue picker shows waiting prompts and cancels the selected item by its ID.*
+
+![Rust LORE memory submenu above the prompt showing curated user and project entries plus global beliefs](assets/shots/rust-memory.png)
+
+*The memory chip opens scoped curated entries and a separate list of global beliefs.*
 
 These images come from `python3 scripts/rust_gallery.py`, which renders the
 production `doxa_tui::ui::App` through Ratatui's test backend. The sessions,
@@ -79,7 +87,7 @@ curl -fsSL https://raw.githubusercontent.com/docwilde/doxa/main/scripts/install.
 
 The installer builds the Rust frontend and daemon from `main` and installs the
 Rust `doxa` command in `~/.local/bin` (or `DOXA_RUST_BIN_DIR`). Pass a tag such
-as `v2.0.0-alpha.12` after `sh -s --` to pin a release. It uses Git, Cargo,
+as `v2.0.0-alpha.13` after `sh -s --` to pin a release. It uses Git, Cargo,
 Python 3.11+, and `uv`; the Python environment it creates is private to the
 LORE and Claude sidecars. No Python frontend command is installed. See the
 [Rust guide](rust/README.md) for provider setup and current limits.

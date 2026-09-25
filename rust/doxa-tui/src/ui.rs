@@ -2,7 +2,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::cell::RefCell;
 use std::io::{self, IsTerminal, Stdout};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -63,6 +63,31 @@ const ACTIONS: [(&str, &str); 13] = [
 ];
 
 const ENGINE_CHOICES: [&str; 4] = ["codex", "claude", "deepseek", "glm"];
+// Fallback model IDs measured from the vendors' catalogues in Python 1.19.
+// Unknown models get no effort choices until a verified capability arrives.
+const DEEPSEEK_MODELS: [&str; 2] = ["deepseek-flash", "deepseek-v4-pro"];
+const GLM_MODELS: [&str; 10] = ["glm-4.5", "glm-4.5-air", "glm-4.6", "glm-4.7",
+    "glm-5", "glm-5-turbo", "glm-5.1", "glm-5.2", "glm-5.3", "glm-5.3-flash"];
+const DEEPSEEK_EFFORTS: [&str; 4] = ["none", "low", "high", "max"];
+const GLM_EFFORTS: [&str; 3] = ["low", "high", "max"];
+
+fn vendor_models(engine: launch::Engine) -> &'static [&'static str] {
+    match engine { launch::Engine::DeepSeek => &DEEPSEEK_MODELS, launch::Engine::Glm => &GLM_MODELS, _ => &[] }
+}
+fn vendor_default_model(engine: launch::Engine) -> &'static str {
+    match engine { launch::Engine::DeepSeek => "deepseek-flash", launch::Engine::Glm => "glm-5.3-flash", _ => "" }
+}
+fn effort_choices(engine: &str, model: &str) -> &'static [&'static str] {
+    match engine {
+        "deepseek" if DEEPSEEK_MODELS.contains(&model) => &DEEPSEEK_EFFORTS,
+        "glm" if GLM_MODELS.contains(&model) => &GLM_EFFORTS,
+        _ => &[],
+    }
+}
+fn engine_name(engine: launch::Engine) -> &'static str {
+    match engine { launch::Engine::Codex => "codex", launch::Engine::Claude => "claude",
+        launch::Engine::DeepSeek => "deepseek", launch::Engine::Glm => "glm", launch::Engine::Fixture => "fixture" }
+}
 const PERMISSION_CHOICES: [(&str, &str); 5] = [
     ("default", "Ask before dangerous calls"),
     ("acceptEdits", "Allow file edits; ask for other calls"),
@@ -131,9 +156,18 @@ struct LorePicker {
 struct NewSession {
     engine: launch::Engine,
     model: String,
+    models: Vec<String>,
+    model_efforts: HashMap<String, Vec<String>>,
+    catalog_note: String,
+    catalog_pending: bool,
+    effort: Option<String>,
     prompt: String,
     field: usize,
 }
+
+#[derive(Debug)]
+struct EffortPicker { session_id: String, engine: String, model: String,
+    levels: Vec<String>, selected: usize }
 
 #[derive(Debug, Clone)]
 struct QueueRow { id: String, preview: String }
@@ -159,6 +193,9 @@ struct ChipHit {
 struct ChipInfo {
     kind: &'static str,
     label: String,
+    lines: Vec<String>,
+    scroll: usize,
+    owner: Option<(String, String)>,
 }
 
 fn chip_hint(kind: &str) -> &'static str {
@@ -166,13 +203,45 @@ fn chip_hint(kind: &str) -> &'static str {
         "permission" => "Permission mode for this session · click to choose",
         "engine" => "Engine for new sessions · click to choose",
         "model" => "Model for this session · click to choose",
+        "repo" => "This session's repository and base branch · click for worktree details",
+        "directory" => "This session's directory; no Git repository is active",
+        "effort" => "Daemon-reported effort · Alt+F sets a new-session default where supported",
         "context" => "Current session context usage · click for details",
-        "memory" => "Project/user memory: % of separate LORE caps",
+        "memory" => "User and scoped LORE memory · click to view entries",
         "beliefs" => "LORE beliefs · click to browse",
-        "cost" => "Reported session cost · click for details",
-        "lore" => "LORE state and scrub health · click for details",
+        "cost" => "Provider billing and quota information",
+        "balance" => "Current DeepSeek API account balance",
         "more" => "More chips · click to reveal hidden chips",
         _ => "",
+    }
+}
+
+fn repo_chip(status: &doxa_worktrees::RepoStatus) -> (&'static str, String) {
+    match status {
+        doxa_worktrees::RepoStatus::Directory { name } =>
+            ("directory", format!("dir {}", safe_label(name))),
+        doxa_worktrees::RepoStatus::Repository { repo, base, checked_out, sha, worktree } => {
+            let mut label = safe_label(repo);
+            if let Some(branch) = base.as_deref().or(checked_out.as_deref()) {
+                label.push_str(" ⎇ ");
+                label.push_str(&safe_label(branch));
+            }
+            if let Some(worktree) = worktree {
+                if worktree == "linked worktree" {
+                    label.push_str(" [wt]");
+                } else {
+                    label.push_str(" [wt ");
+                    label.push_str(&safe_label(checked_out.as_deref().unwrap_or("detached")));
+                    label.push(']');
+                }
+            }
+            if let Some(sha) = sha.as_ref().filter(|sha| !base.as_deref().or(checked_out.as_deref())
+                .is_some_and(|branch| branch.starts_with(sha.as_str()))) {
+                label.push_str(" @");
+                label.push_str(sha);
+            }
+            ("repo", label)
+        }
     }
 }
 
@@ -257,7 +326,9 @@ fn wrapped_rows(text: &str, width: usize) -> usize {
 fn chip_text(kind: &str, label: &str) -> String {
     if kind == "more" {
         format!(" {label} › ")
-    } else if matches!(kind, "engine" | "model" | "permission" | "beliefs") {
+    } else if kind == "effort" && label == "Effort ?" {
+        format!(" {label} ")
+    } else if matches!(kind, "engine" | "model" | "effort" | "permission" | "beliefs") {
         format!(" {label} ▾ ")
     } else {
         format!(" {label} ")
@@ -412,6 +483,10 @@ pub struct Session {
 struct SessionTelemetry {
     context: Option<String>,
     cost: Option<String>,
+    billing_mode: Option<String>,
+    subscription_type: Option<String>,
+    quota: Option<String>,
+    balance: Option<String>,
     lore: Option<String>,
 }
 
@@ -428,7 +503,7 @@ impl SessionTelemetry {
         }
         if let Some(cost) = data["session_cost_usd"].as_f64()
             .filter(|value| value.is_finite() && *value >= 0.0) {
-            self.cost = Some(format!("${cost:.4} session"));
+            self.cost = Some(format!("${cost:.4}"));
         } else if let Some(cost) = data["cost_usd"].as_f64()
             .filter(|value| value.is_finite() && *value >= 0.0) {
             self.cost = Some(format!("${cost:.4} turn"));
@@ -438,6 +513,22 @@ impl SessionTelemetry {
     }
 
     fn update_status(&mut self, status: &serde_json::Value) {
+        if let Some(billing) = status.get("billing") {
+            self.billing_mode = match billing["mode"].as_str() {
+                Some("api") => Some("api".into()),
+                Some("subscription") => Some("subscription".into()),
+                _ => None,
+            };
+            self.subscription_type = billing["type"].as_str()
+                .filter(|name| !name.is_empty() && name.len() <= 64 && !name.chars().any(char::is_control))
+                .map(safe_label);
+            self.quota = billing["quota"].as_str()
+                .filter(|quota| !quota.is_empty() && quota.len() <= 120 && !quota.chars().any(char::is_control))
+                .map(safe_label);
+            self.balance = billing["balance"].as_str()
+                .filter(|balance| !balance.is_empty() && balance.len() <= 80 && !balance.chars().any(char::is_control))
+                .map(safe_label);
+        }
         let context = status["ctx_percentage"].as_f64()
             .filter(|value| value.is_finite() && (0.0..=100.0).contains(value))
             .map(|value| format!("{value:.0}%"));
@@ -453,8 +544,8 @@ impl SessionTelemetry {
                 if status["usage"]["unpriced_models"].as_array().is_some_and(|models| !models.is_empty()) {
                     "est partial"
                 } else { "est" }
-            } else { "session" };
-            self.cost = Some(format!("${cost:.4} {label}"));
+            } else { "" };
+            self.cost = Some(format!("${cost:.4} {label}").trim_end().to_owned());
         } else if status.get("total_cost_usd").is_some() {
             self.cost = None;
         }
@@ -466,6 +557,23 @@ impl SessionTelemetry {
                 Some("unavailable") => Some("scrub unavailable".into()),
                 _ => None,
             };
+        }
+    }
+
+    fn billing_label(&self, engine: Option<&str>) -> Option<String> {
+        match engine {
+            Some("deepseek" | "glm") => Some(self.cost.clone().unwrap_or_else(|| "$?".into())),
+            Some("codex" | "claude") => match self.billing_mode.as_deref() {
+                Some("api") => Some(self.cost.clone().unwrap_or_else(|| "$?".into())),
+                Some("subscription") => {
+                    let tier = self.subscription_type.as_deref().filter(|tier| *tier != "subscription");
+                    if tier.is_none() && self.quota.is_none() { return None; }
+                    Some(format!("Sub {} · {}", tier.unwrap_or("?"),
+                        self.quota.as_deref().unwrap_or("quota ?")))
+                }
+                _ => None,
+            },
+            _ => None,
         }
     }
 
@@ -705,15 +813,26 @@ pub struct App {
     input_cursor: usize,
     input_drafts: HashMap<(usize, String), (String, usize)>,
     session_identity: HashMap<String, (Option<String>, Option<String>)>,
+    session_efforts: HashMap<String, String>,
+    catalog_efforts: HashMap<(String, String), Vec<String>>,
+    next_efforts: HashMap<String, String>,
     pub(crate) custom_names: HashMap<String, String>,
     session_telemetry: HashMap<String, SessionTelemetry>,
     // LORE owns these counts. A bounded background query keeps store I/O off
     // the draw path; an unavailable sidecar leaves the chip unknown.
     memory_cache: HashMap<String, (Option<doxa_lore::MemoryUsage>, Instant)>,
-    memory_pending: Option<(String, String, Receiver<Option<doxa_lore::MemoryUsage>>)>,
+    memory_pending: Option<(String, String, Receiver<Option<(doxa_lore::MemoryUsage, bool)>>)>,
+    memory_repo: HashMap<String, bool>,
+    memory_menu_pending: Option<(String, String, Receiver<Result<Vec<String>, &'static str>>)>,
+    repo_cache: HashMap<String, (Option<doxa_worktrees::RepoStatus>, Instant)>,
+    repo_pending: Option<(String, PathBuf, u64, Receiver<Option<doxa_worktrees::RepoStatus>>)>,
+    repo_epoch: HashMap<String, u64>,
     chip_offsets: [usize; 2],
     chip_hover: Option<ChipHit>,
     chip_info: Option<ChipInfo>,
+    // Mouse coordinates must come from the last painted frame, which may
+    // differ from the terminal size reported by an earlier resize event.
+    rendered_chip_hits: RefCell<Option<Vec<ChipHit>>>,
     blink_on: bool,
     blink_at: Instant,
     model_capabilities: HashMap<String, bool>,
@@ -726,11 +845,13 @@ pub struct App {
     stop_confirmation: Option<String>,
     pending_stops: Vec<String>,
     model_picker: Option<ModelPicker>,
+    effort_picker: Option<EffortPicker>,
     attach_picker: Option<AttachPicker>,
     lore_picker: Option<LorePicker>,
     engine_picker: bool,
     engine_selected: usize,
     new_session: Option<NewSession>,
+    vendor_catalog_pending: Option<(launch::Engine, Receiver<Option<Vec<doxa_vendors::ModelCapability>>>)>,
     pending_launches: Vec<(launch::LaunchOptions, Option<String>, usize)>,
     pending_attaches: Vec<(String, usize)>,
     attaching_ids: HashSet<String>,
@@ -816,13 +937,22 @@ impl Default for App {
             input_cursor: 0,
             input_drafts: HashMap::new(),
             session_identity: HashMap::new(),
+            session_efforts: HashMap::new(),
+            catalog_efforts: HashMap::new(),
+            next_efforts: HashMap::new(),
             custom_names: HashMap::new(),
             session_telemetry: HashMap::new(),
             memory_cache: HashMap::new(),
             memory_pending: None,
+            memory_repo: HashMap::new(),
+            memory_menu_pending: None,
+            repo_cache: HashMap::new(),
+            repo_pending: None,
+            repo_epoch: HashMap::new(),
             chip_offsets: [0, 0],
             chip_hover: None,
             chip_info: None,
+            rendered_chip_hits: RefCell::new(None),
             blink_on: true,
             blink_at: Instant::now(),
             model_capabilities: HashMap::new(),
@@ -835,11 +965,13 @@ impl Default for App {
             stop_confirmation: None,
             pending_stops: Vec::new(),
             model_picker: None,
+            effort_picker: None,
             attach_picker: None,
             lore_picker: None,
             engine_picker: false,
             engine_selected: 0,
             new_session: None,
+            vendor_catalog_pending: None,
             pending_launches: Vec::new(),
             pending_attaches: Vec::new(),
             attaching_ids: HashSet::new(),
@@ -900,6 +1032,12 @@ impl Default for App {
 }
 
 impl App {
+    fn invalidate_repo(&mut self, id: &str) {
+        self.repo_cache.remove(id);
+        let epoch = self.repo_epoch.entry(id.to_owned()).or_default();
+        *epoch = epoch.wrapping_add(1);
+    }
+
     pub fn apply_update(&mut self, update: DaemonUpdate) {
         match update {
             DaemonUpdate::Upsert(mut session) => {
@@ -938,6 +1076,22 @@ impl App {
             return false;
         };
         match kind {
+            "branch_reply" => {
+                if frame["ok"] == true && frame["message"].as_str().is_some() {
+                    if let Some(id) = frame["session_id"].as_str() { self.invalidate_repo(id); }
+                }
+                if frame["ok"] != true {
+                    self.notice = format!("branch: {}", safe_label(frame["error"].as_str().unwrap_or("switch refused")));
+                } else if let Some(message) = frame["message"].as_str() {
+                    self.notice = format!("branch: {}", safe_label(message));
+                } else {
+                    let base = safe_label(frame["base"].as_str().unwrap_or("(none)"));
+                    let rows = frame["branches"].as_array().into_iter().flatten()
+                        .filter_map(|v| v.as_str()).take(30).map(safe_label).collect::<Vec<_>>();
+                    self.notice = format!("branch: {base} · {} · /branch <name>", rows.join(", "));
+                }
+                true
+            }
             "queue_list_reply" => {
                 let Some(id) = frame["session_id"].as_str() else { return false; };
                 let Some(picker) = self.queue_picker.as_mut().filter(|picker| picker.session_id == id) else { return false; };
@@ -1032,6 +1186,9 @@ impl App {
                 let model = frame.get("model").and_then(|v| v.as_str()).map(safe_label).filter(|s| !s.is_empty());
                 let engine = frame.get("engine").and_then(|v| v.as_str()).map(safe_label).filter(|s| !s.is_empty());
                 self.session_identity.insert(id.to_owned(), (engine, model.clone()));
+                if let Some(effort) = frame["effort"].as_str().filter(|effort| !effort.is_empty()) {
+                    self.session_efforts.insert(id.to_owned(), safe_label(effort));
+                } else { self.session_efforts.remove(id); }
                 self.session_telemetry.entry(id.to_owned()).or_default().update_status(frame);
                 self.model_capabilities.insert(id.to_owned(), frame["can_set_model"] == true);
                 self.permission_capabilities.insert(id.to_owned(), frame["can_set_permission_mode"] == true);
@@ -1046,9 +1203,21 @@ impl App {
                     if path.is_absolute() && raw.len() <= 4096 {
                         if self.session_cwds.get(id) != Some(&path) {
                             self.memory_cache.remove(id);
+                            self.memory_repo.remove(id);
+                            self.invalidate_repo(id);
                         }
                         self.session_cwds.insert(id.to_owned(), path);
+                    } else {
+                        self.session_cwds.remove(id);
+                        self.memory_cache.remove(id);
+                        self.memory_repo.remove(id);
+                        self.invalidate_repo(id);
                     }
+                } else {
+                    self.session_cwds.remove(id);
+                    self.memory_cache.remove(id);
+                    self.memory_repo.remove(id);
+                    self.invalidate_repo(id);
                 }
                 let transcript = self
                     .sessions
@@ -1084,7 +1253,14 @@ impl App {
                     self.peer_map.event(&id, event_type, data);
                 }
                 match event_type {
+                    "branch_changed" => {
+                        self.invalidate_repo(&id);
+                        true
+                    }
                     "model_changed" => {
+                        if self.effort_picker.as_ref().is_some_and(|picker| picker.session_id == id) {
+                            self.effort_picker = None;
+                        }
                         let old_model = self.session_identity.get(&id).and_then(|identity| identity.1.clone());
                         let new_model = data.get("model").and_then(|v| v.as_str()).map(safe_label).filter(|s| !s.is_empty());
                         if let Some(identity) = self.session_identity.get_mut(&id) {
@@ -1151,6 +1327,7 @@ impl App {
                                 self.drag = None;
                                 self.tool_modal = false;
                                 self.model_picker = None;
+                                self.effort_picker = None;
                                 self.permission_picker = None;
                                 self.permission_confirm_dont_ask = false;
                                 self.engine_picker = false;
@@ -1331,6 +1508,11 @@ impl App {
                         if status.get("model").is_some() {
                             identity.1 = status.get("model").and_then(|v| v.as_str()).map(safe_label).filter(|s| !s.is_empty());
                         }
+                        if status.get("effort").is_some() {
+                            if let Some(effort) = status["effort"].as_str().filter(|effort| !effort.is_empty()) {
+                                self.session_efforts.insert(id.to_owned(), safe_label(effort));
+                            } else { self.session_efforts.remove(id); }
+                        }
                         if let Some(can_set) = status.get("can_set_model").and_then(|v| v.as_bool()) {
                             self.model_capabilities.insert(id.to_owned(), can_set);
                         }
@@ -1496,6 +1678,7 @@ impl App {
                 self.size = Rect::new(0, 0, w, h);
                 self.drag = None;
                 self.chip_hover = None;
+                *self.rendered_chip_hits.borrow_mut() = None;
                 if self.chip_info.is_some() && self.active_chooser_rect().is_none() {
                     self.chip_info = None;
                 }
@@ -1519,9 +1702,10 @@ impl App {
                     self.stop_confirmation = None;
                     self.notice = "Session stop cancelled · enlarge terminal to confirm".into();
                 }
-                if ((self.model_picker.is_some() || self.engine_picker || self.new_session.is_some()) && (w < 29 || h < 11))
+                if ((self.model_picker.is_some() || self.effort_picker.is_some() || self.engine_picker || self.new_session.is_some()) && (w < 29 || h < 11))
                     || (self.permission_picker.is_some() && (w < 60 || h < 15)) {
                     self.model_picker = None;
+                    self.effort_picker = None;
                     self.engine_picker = false;
                     self.new_session = None;
                     self.permission_picker = None;
@@ -1560,7 +1744,7 @@ impl App {
         }
         if self.focus != Focus::Prompt || self.active_request_index().is_some()
             || self.stop_confirmation.is_some() || self.lore_picker.is_some()
-            || self.new_session.is_some() || self.model_picker.is_some()
+            || self.new_session.is_some() || self.model_picker.is_some() || self.effort_picker.is_some()
             || self.permission_picker.is_some() || self.engine_picker || self.action_menu
             || self.history_modal || self.queue_picker.is_some() || self.attach_picker.is_some() || self.diff_modal || self.map_modal || self.tool_modal {
             return false;
@@ -1639,7 +1823,7 @@ impl App {
         let mut parts = input.split_whitespace();
         let Some(name) = parts.next() else { return false; };
         let args: Vec<&str> = parts.collect();
-        if !matches!(name, "/help" | "/about" | "/sessions" | "/model" | "/engine"
+        if !matches!(name, "/help" | "/about" | "/sessions" | "/model" | "/effort" | "/engine"
             | "/mode" | "/beliefs" | "/diff" | "/peers" | "/split"
             | "/vsplit" | "/pane" | "/sidebar" | "/detach" | "/dir") {
             return false;
@@ -1688,6 +1872,7 @@ impl App {
             "/about" => self.notice = format!("DOXA Rust {}", env!("CARGO_PKG_VERSION")),
             "/sessions" => self.open_history(),
             "/model" => self.open_model_picker(),
+            "/effort" => self.open_effort_picker(),
             "/engine" => self.open_engine_picker(),
             "/mode" => self.open_permission_picker(),
             "/beliefs" => self.open_lore_picker(),
@@ -1753,12 +1938,27 @@ impl App {
         }
         if self.stop_confirmation.is_some() { return self.stop_confirmation_key(key); }
         if self.chip_info.is_some() {
-            if key.code == KeyCode::Esc { self.chip_info = None; return true; }
+            if key.code == KeyCode::Esc {
+                self.chip_info = None;
+                self.memory_menu_pending = None;
+                return true;
+            }
+            if let Some(info) = self.chip_info.as_mut().filter(|info| info.kind == "memory") {
+                match key.code {
+                    KeyCode::Up => info.scroll = info.scroll.saturating_sub(1),
+                    KeyCode::Down => info.scroll = info.scroll.saturating_add(1).min(info.lines.len().saturating_sub(1)),
+                    KeyCode::PageUp => info.scroll = info.scroll.saturating_sub(8),
+                    KeyCode::PageDown => info.scroll = info.scroll.saturating_add(8).min(info.lines.len().saturating_sub(1)),
+                    _ => return false,
+                }
+                return true;
+            }
             return false;
         }
         if self.lore_picker.is_some() { return self.lore_picker_key(key); }
         if self.new_session.is_some() { return self.new_session_key(key); }
         if self.model_picker.is_some() { return self.model_picker_key(key); }
+        if self.effort_picker.is_some() { return self.effort_picker_key(key); }
         if self.permission_picker.is_some() { return self.permission_picker_key(key); }
         if self.engine_picker { return self.engine_picker_key(key); }
         if self.action_menu {
@@ -1832,6 +2032,7 @@ impl App {
         }
         if key.code == KeyCode::Char('l') && alt { self.open_lore_picker(); return true; }
         if key.code == KeyCode::Char('m') && alt { self.open_model_picker(); return true; }
+        if key.code == KeyCode::Char('f') && alt { self.open_effort_picker(); return true; }
         if key.code == KeyCode::Char('p') && alt { self.open_permission_picker(); return true; }
         if key.code == KeyCode::Char('e') && alt { self.open_engine_picker(); return true; }
         if key.code == KeyCode::Char('x') && alt { self.open_stop_confirmation(); return true; }
@@ -2078,6 +2279,20 @@ impl App {
             }
             "/pending" => { self.notice = "Local command unavailable: /pending arguments".into(); true }
             "/attach" => { self.local_attach(args); true }
+            "/branch" => {
+                let target = args.trim();
+                if target.split_whitespace().count() > 1 || target.len() > 200
+                    || target.chars().any(unsafe_input_char) {
+                    self.notice = "Usage: /branch [local-or-remote-name]".into();
+                } else if let Some(id) = self.groups[self.active_group].active_id() {
+                    self.pending_queue_commands.push(crate::bridge::WorkerCommand::Branch(
+                        id.to_owned(), (!target.is_empty()).then(|| target.to_owned())));
+                    self.input.clear();
+                    self.input_cursor = 0;
+                    self.notice = "Checking branch…".into();
+                } else { self.notice = "Select a session before switching branch".into(); }
+                true
+            }
             "/rename" => { self.local_rename(args); true }
             "/mesh" if !args.trim().is_empty() => {
                 self.notice = "Local command unavailable: /mesh arguments".into(); true
@@ -2085,7 +2300,7 @@ impl App {
             "/mesh" | "/msg" => false,
             "/movepane" | "/collection" | "/fleet" | "/img" | "/login"
             | "/logout" | "/settings" | "/setup" | "/doctor" | "/plugins"
-            | "/reload-plugins" | "/branch" | "/effort" | "/usage"
+            | "/reload-plugins" | "/effort" | "/usage"
             | "/context" | "/clear" | "/cd"
             | "/compact" | "/update" => {
                 self.notice = format!("Local command unavailable: {}", safe_label(command));
@@ -2251,6 +2466,55 @@ impl App {
         self.pending_model_queries.push(id);
     }
 
+    fn open_effort_picker(&mut self) {
+        if self.size.width > 0 && (self.size.width < 29 || self.size.height < 11) {
+            self.notice = "Enlarge terminal to open effort picker".into();
+            return;
+        }
+        let Some(id) = self.groups[self.active_group].active_id().map(str::to_owned) else {
+            self.notice = "Select a session to inspect its effort".into();
+            return;
+        };
+        let Some((Some(engine), Some(model))) = self.session_identity.get(&id) else {
+            self.notice = "Effort capability is unknown for this session".into();
+            return;
+        };
+        let levels = self.catalog_efforts.get(&(engine.clone(), model.clone())).cloned()
+            .unwrap_or_else(|| effort_choices(engine, model).iter().map(|level| (*level).to_owned()).collect());
+        if levels.is_empty() {
+            self.notice = "No verified effort choices for this session model; check the new-session vendor catalog".into();
+            return;
+        }
+        let selected = self.next_efforts.get(engine).or_else(|| self.session_efforts.get(&id))
+            .and_then(|current| levels.iter().position(|level| level == current)).unwrap_or(0);
+        self.effort_picker = Some(EffortPicker { session_id: id, engine: engine.clone(), model: model.clone(),
+            levels, selected });
+    }
+
+    fn select_effort(&mut self) {
+        let Some(picker) = self.effort_picker.take() else { return; };
+        let Some((Some(engine), Some(model))) = self.session_identity.get(&picker.session_id) else { return; };
+        if engine != &picker.engine || model != &picker.model { return; }
+        let Some(chosen) = picker.levels.get(picker.selected) else { return; };
+        let allowed = self.catalog_efforts.get(&(engine.clone(), model.clone())).cloned()
+            .unwrap_or_else(|| effort_choices(engine, model).iter().map(|level| (*level).to_owned()).collect());
+        if !allowed.contains(chosen) { return; }
+        self.next_efforts.insert(engine.clone(), chosen.clone());
+        self.notice = format!("{engine} effort for new sessions: {chosen} · current session unchanged");
+    }
+
+    fn effort_picker_key(&mut self, key: KeyEvent) -> bool {
+        let Some(picker) = self.effort_picker.as_mut() else { return false; };
+        match key.code {
+            KeyCode::Esc => self.effort_picker = None,
+            KeyCode::Up => picker.selected = picker.selected.saturating_sub(1),
+            KeyCode::Down => picker.selected = (picker.selected + 1).min(picker.levels.len().saturating_sub(1)),
+            KeyCode::Enter => self.select_effort(),
+            _ => return false,
+        }
+        true
+    }
+
     fn open_permission_picker(&mut self) {
         if self.size.width > 0 && (self.size.width < 60 || self.size.height < 15) {
             self.notice = "Enlarge terminal to open permission picker".into();
@@ -2357,33 +2621,175 @@ impl App {
             _ => launch::Engine::Glm,
         };
         self.engine_picker = false;
-        self.new_session = Some(NewSession { engine, model: String::new(), prompt: String::new(), field: 0 });
+        let models = vendor_models(engine);
+        let model = vendor_default_model(engine).to_owned();
+        let engine_id = engine_name(engine);
+        // A previous account-scoped catalog must not survive a vendor
+        // re-selection when a later lookup fails or the credential changes.
+        self.catalog_efforts.retain(|(name, _), _| name != engine_id);
+        let model_efforts = models.iter().map(|name| ((*name).to_owned(),
+            effort_choices(engine_id, name).iter().map(|level| (*level).to_owned()).collect())).collect::<HashMap<_, _>>();
+        let effort = self.next_efforts.get(engine_id)
+            .filter(|level| effort_choices(engine_id, &model).contains(&level.as_str()))
+            .cloned().or_else(|| (!models.is_empty()).then(|| "high".to_owned()));
+        self.vendor_catalog_pending = None;
+        let mut catalog_pending = false;
+        if let Some(vendor) = match engine {
+            launch::Engine::DeepSeek => Some(doxa_vendors::Vendor::DeepSeek),
+            launch::Engine::Glm => Some(doxa_vendors::Vendor::Glm),
+            _ => None,
+        } {
+            if !cfg!(test) && std::env::var(vendor.env_var()).is_ok_and(|key| !key.is_empty()) {
+                let (tx, rx) = mpsc::sync_channel(1);
+                std::thread::spawn(move || {
+                    let result = tokio::runtime::Builder::new_current_thread().enable_all().build()
+                        .ok().and_then(|runtime| runtime.block_on(doxa_vendors::catalog_models(vendor)));
+                    let _ = tx.send(result);
+                });
+                self.vendor_catalog_pending = Some((engine, rx));
+                catalog_pending = true;
+            }
+        }
+        self.new_session = Some(NewSession { engine, model,
+            models: models.iter().map(|name| (*name).to_owned()).collect(),
+            model_efforts,
+            catalog_note: if catalog_pending { "Checking vendor model catalog…".into() }
+                else { "Static fallback; vendor catalog unavailable".into() },
+            catalog_pending, effort, prompt: String::new(), field: 0 });
+    }
+
+    fn poll_vendor_catalog(&mut self) -> bool {
+        let result = match self.vendor_catalog_pending.as_ref() {
+            Some((engine, rx)) => match rx.try_recv() {
+                Ok(result) => Some((*engine, result)),
+                Err(TryRecvError::Disconnected) => Some((*engine, None)),
+                Err(TryRecvError::Empty) => None,
+            },
+            None => None,
+        };
+        let Some((engine, result)) = result else { return false; };
+        self.vendor_catalog_pending = None;
+        let Some(form) = self.new_session.as_mut().filter(|form| form.engine == engine) else { return false; };
+        form.catalog_pending = false;
+        if let Some(live) = result {
+            let vetted = vendor_models(engine);
+            let mut model_efforts = HashMap::new();
+            let mut defaults = HashMap::new();
+            let mut metadata_count = 0;
+            for row in live {
+                let known = vetted.contains(&row.id.as_str());
+                let mut levels = if !row.effort_metadata_present && known {
+                    effort_choices(engine_name(engine), &row.id).iter().map(|level| (*level).to_owned()).collect::<Vec<_>>()
+                } else { row.efforts.clone() };
+                if row.effort_metadata_present && !row.efforts.is_empty() {
+                    metadata_count += 1;
+                    // The DeepSeek catalogue omits `none`, which disables thinking;
+                    // only the measured legacy models may offer it.
+                    if engine == launch::Engine::DeepSeek && known && !levels.iter().any(|level| level == "none") {
+                        levels.insert(0, "none".into());
+                    }
+                }
+                if !levels.is_empty() {
+                    if let Some(default) = row.default_effort { defaults.insert(row.id.clone(), default); }
+                    model_efforts.insert(row.id, levels);
+                }
+            }
+            form.models = model_efforts.keys().cloned().collect();
+            form.models.sort();
+            form.model_efforts = model_efforts;
+            self.catalog_efforts.retain(|(name, _), _| name != engine_name(engine));
+            self.catalog_efforts.extend(form.model_efforts.iter().map(|(model, levels)|
+                ((engine_name(engine).to_owned(), model.clone()), levels.clone())));
+            form.catalog_note = if form.models.is_empty() {
+                "Live catalog has no models with verified effort support; choose another engine or retry later".into()
+            } else if metadata_count > 0 {
+                "Live vendor catalog · per-model effort where available; known models use measured fallback".into()
+            } else {
+                "Live vendor catalog · measured effort fallback for known models".into()
+            };
+            if !form.models.contains(&form.model) {
+                form.model = form.models.first().cloned().unwrap_or_default();
+            }
+            let levels = form.model_efforts.get(&form.model).cloned().unwrap_or_default();
+            if form.effort.as_ref().is_none_or(|level| !levels.contains(level)) {
+                form.effort = defaults.get(&form.model).cloned()
+                    .or_else(|| levels.iter().find(|level| *level == "high").cloned())
+                    .or_else(|| levels.first().cloned());
+            }
+        } else {
+            form.catalog_note = "Static fallback; vendor catalog unavailable".into();
+        }
+        true
     }
 
     fn new_session_key(&mut self, key: KeyEvent) -> bool {
         let form = self.new_session.as_mut().unwrap();
+        let vendor = !vendor_models(form.engine).is_empty();
+        let fields = if vendor { 3 } else { 2 };
+        let prompt_field = fields - 1;
         match key.code {
             KeyCode::Esc => self.new_session = None,
-            KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % 2,
-            KeyCode::BackTab | KeyCode::Up => form.field = (form.field + 1) % 2,
+            KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % fields,
+            KeyCode::BackTab | KeyCode::Up => form.field = (form.field + fields - 1) % fields,
+            KeyCode::Left | KeyCode::Right if vendor && form.field <= 1 => {
+                if form.field == 0 {
+                    let choices = &form.models;
+                    if choices.is_empty() { return true; }
+                    let current = choices.iter().position(|model| *model == form.model).unwrap_or(0);
+                    let next = if key.code == KeyCode::Right { (current + 1) % choices.len() }
+                        else { (current + choices.len() - 1) % choices.len() };
+                    form.model = choices[next].clone();
+                    // Discard an effort no longer supported by the new model.
+                    let levels = form.model_efforts.get(&form.model).cloned().unwrap_or_default();
+                    if form.effort.as_ref().is_none_or(|level| !levels.contains(level)) {
+                        form.effort = levels.iter().find(|level| *level == "high").cloned()
+                            .or_else(|| levels.first().cloned());
+                    }
+                } else {
+                    let levels = form.model_efforts.get(&form.model).map(Vec::as_slice).unwrap_or(&[]);
+                    if levels.is_empty() { form.effort = None; return true; }
+                    let current = form.effort.as_deref().and_then(|level| levels.iter().position(|x| *x == level)).unwrap_or(0);
+                    let next = if key.code == KeyCode::Right { (current + 1) % levels.len() }
+                        else { (current + levels.len() - 1) % levels.len() };
+                    form.effort = Some(levels[next].clone());
+                }
+            }
             KeyCode::Backspace => {
-                if form.field == 0 { form.model.pop(); } else { form.prompt.pop(); }
+                if form.field == prompt_field { form.prompt.pop(); }
+                else if !vendor && form.field == 0 { form.model.pop(); }
             }
             KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
                 && !c.is_control() => {
-                let target = if form.field == 0 { &mut form.model } else { &mut form.prompt };
-                let limit = if form.field == 0 { 128 } else { MAX_INPUT_BYTES };
-                if target.len() + c.len_utf8() <= limit { target.push(c); }
+                if form.field == prompt_field {
+                    if form.prompt.len() + c.len_utf8() <= MAX_INPUT_BYTES { form.prompt.push(c); }
+                } else if !vendor && form.field == 0 && form.model.len() + c.len_utf8() <= 128 { form.model.push(c); }
             }
-            KeyCode::Enter if form.field == 0 => form.field = 1,
+            KeyCode::Enter if form.field < prompt_field => form.field += 1,
             KeyCode::Enter => {
                 if self.launching {
                     self.notice = "Session launch already in progress".into();
                     return true;
                 }
+                if vendor && form.catalog_pending {
+                    self.notice = "Waiting for vendor model catalog".into();
+                    return true;
+                }
+                if vendor && form.models.is_empty() {
+                    self.notice = "No verified models with effort capability are available".into();
+                    return true;
+                }
                 let form = self.new_session.take().unwrap();
                 let mut options = launch::LaunchOptions { engine: form.engine, ..Default::default() };
                 if !form.model.trim().is_empty() { options.model = Some(form.model.trim().to_owned()); }
+                if vendor {
+                    let allowed = form.model_efforts.get(&form.model).map(Vec::as_slice).unwrap_or(&[]);
+                    if !form.models.contains(&form.model) ||
+                        form.effort.as_ref().is_none_or(|level| !allowed.contains(level)) {
+                        self.notice = "Model or effort capability changed; session was not started".into();
+                        return true;
+                    }
+                    options.effort = form.effort;
+                }
                 if form.engine == launch::Engine::Claude {
                     options.claude_script = std::env::var_os("DOXA_CLAUDE_SCRIPT").map(PathBuf::from);
                 }
@@ -2590,14 +2996,45 @@ impl App {
                                  user_chars: u64, user_cap_chars: u64) {
         let usage = doxa_lore::MemoryUsage { project_chars, project_cap_chars, user_chars, user_cap_chars };
         self.memory_cache.insert(id.to_owned(), (Some(usage), Instant::now()));
+        self.memory_repo.insert(id.to_owned(), true);
+    }
+
+    /// Inject a deterministic repository snapshot for gallery fixtures. Live
+    /// sessions receive this state from the background Git probe instead.
+    pub fn set_repo_status(&mut self, id: &str, status: doxa_worktrees::RepoStatus) {
+        self.repo_cache.insert(id.to_owned(), (Some(status), Instant::now()));
+    }
+
+    /// Deterministic gallery state for the read-only memory menu. Live menus
+    /// always use the LORE sidecar through `open_memory_menu`.
+    #[doc(hidden)]
+    pub fn show_memory_menu_fixture(&mut self, group: usize, user: &[&str], project: &[&str], beliefs: &[&str]) {
+        if group >= self.groups.len() { return; }
+        self.open_chip_info("memory", group);
+        let Some(info) = self.chip_info.as_mut() else { return; };
+        info.owner = self.groups[group].active_id().and_then(|id|
+            self.session_cwds.get(id).and_then(|cwd| cwd.to_str()).map(|cwd| (id.to_owned(), cwd.to_owned())));
+        let mut lines = vec!["## User memory".to_owned()];
+        lines.extend(user.iter().take(8).map(|line| clipped_title(line, 120).0));
+        lines.extend([String::new(), "## Project memory".to_owned()]);
+        lines.extend(project.iter().take(8).map(|line| clipped_title(line, 120).0));
+        lines.extend([String::new(), "## Global active LORE beliefs · retrieved on demand".to_owned()]);
+        lines.extend(beliefs.iter().take(8).map(|line| clipped_title(line, 120).0));
+        info.lines = lines;
+        info.scroll = 0;
+        self.memory_menu_pending = None;
     }
 
     fn poll_memory(&mut self) -> bool {
         let mut changed = false;
         if let Some((id, cwd, receiver)) = self.memory_pending.take() {
             match receiver.try_recv() {
-                Ok(usage) => {
+                Ok(result) => {
                     if self.session_cwds.get(&id).and_then(|path| path.to_str()) == Some(cwd.as_str()) {
+                        let usage = result.map(|(usage, repo)| {
+                            self.memory_repo.insert(id.clone(), repo);
+                            usage
+                        });
                         changed = self.memory_cache.get(&id).is_none_or(|(old, _)| *old != usage);
                         self.memory_cache.insert(id, (usage, Instant::now()));
                     }
@@ -2626,13 +3063,86 @@ impl App {
             let (tx, rx) = mpsc::sync_channel(1);
             self.memory_pending = Some((id, cwd.clone(), rx));
             std::thread::spawn(move || {
-                let usage = doxa_lore::LoreClient::spawn(&python, Duration::from_secs(2))
-                    .and_then(|mut lore| lore.memory_usage(&cwd)).ok();
+                let (scope, repo) = crate::memory_menu::scope_path(Path::new(&cwd));
+                let usage = scope.to_str().and_then(|scope| doxa_lore::LoreClient::spawn(&python, Duration::from_secs(2))
+                    .and_then(|mut lore| lore.memory_usage(scope)).ok())
+                    .map(|usage| (usage, repo));
                 let _ = tx.send(usage);
             });
             break;
         }
         changed
+    }
+
+    fn poll_repo(&mut self) -> bool {
+        let mut changed = false;
+        if let Some((id, cwd, epoch, receiver)) = self.repo_pending.take() {
+            match receiver.try_recv() {
+                Ok(status) => {
+                    if self.session_cwds.get(&id) == Some(&cwd)
+                        && self.repo_epoch.get(&id).copied().unwrap_or_default() == epoch {
+                        changed = self.repo_cache.get(&id).is_none_or(|(old, _)| *old != status);
+                        self.repo_cache.insert(id, (status, Instant::now()));
+                    }
+                }
+                Err(TryRecvError::Disconnected) => {
+                    if self.session_cwds.get(&id) == Some(&cwd)
+                        && self.repo_epoch.get(&id).copied().unwrap_or_default() == epoch {
+                        changed = self.repo_cache.get(&id).is_some_and(|(old, _)| old.is_some());
+                        self.repo_cache.insert(id, (None, Instant::now()));
+                    }
+                }
+                Err(TryRecvError::Empty) => self.repo_pending = Some((id, cwd, epoch, receiver)),
+            }
+        }
+        if self.repo_pending.is_some() { return changed; }
+        for group in [self.active_group, 1 - self.active_group] {
+            let Some(id) = self.groups[group].active_id().map(str::to_owned) else { continue; };
+            if self.offline_ids.contains(&id) { continue; }
+            let Some(cwd) = self.session_cwds.get(&id).cloned() else { continue; };
+            if self.repo_cache.get(&id).is_some_and(|(_, checked)| checked.elapsed() < Duration::from_secs(5)) {
+                continue;
+            }
+            let epoch = self.repo_epoch.get(&id).copied().unwrap_or_default();
+            let (tx, rx) = mpsc::sync_channel(1);
+            self.repo_pending = Some((id, cwd.clone(), epoch, rx));
+            std::thread::spawn(move || { let _ = tx.send(doxa_worktrees::repo_status(&cwd)); });
+            break;
+        }
+        changed
+    }
+
+    fn poll_memory_menu(&mut self) -> bool {
+        let Some((id, cwd, receiver)) = self.memory_menu_pending.take() else { return false; };
+        match receiver.try_recv() {
+            Ok(result) => {
+                if self.groups[self.active_group].active_id() != Some(id.as_str())
+                    || self.session_cwds.get(&id).and_then(|path| path.to_str()) != Some(cwd.as_str()) {
+                    return false;
+                }
+                if let Some(info) = self.chip_info.as_mut().filter(|info| info.kind == "memory") {
+                    info.lines = match result {
+                        Ok(lines) => lines,
+                        Err(message) => vec![message.to_owned()],
+                    };
+                    info.scroll = 0;
+                    return true;
+                }
+                false
+            }
+            Err(TryRecvError::Empty) => {
+                self.memory_menu_pending = Some((id, cwd, receiver));
+                false
+            }
+            Err(TryRecvError::Disconnected) => {
+                if let Some(info) = self.chip_info.as_mut().filter(|info| info.kind == "memory") {
+                    info.lines = vec!["LORE unavailable".to_owned()];
+                    info.scroll = 0;
+                    return true;
+                }
+                false
+            },
+        }
     }
 
     fn poll_lore(&mut self) -> bool {
@@ -3707,7 +4217,9 @@ impl App {
         } else if self.engine_picker {
             7
         } else if let Some(form) = &self.new_session {
-            if form.engine == launch::Engine::Claude { 8 } else { 7 }
+            if form.engine == launch::Engine::Claude || !vendor_models(form.engine).is_empty() { 8 } else { 7 }
+        } else if let Some(picker) = &self.effort_picker {
+            (4 + picker.levels.len()).clamp(5, 10) as u16
         } else if self.permission_picker.is_some() {
             10
         } else if let Some(picker) = &self.model_picker {
@@ -3728,7 +4240,9 @@ impl App {
         } else if self.action_menu {
             (ACTIONS.len() + 2).min(15) as u16
         } else if self.chip_info.is_some() {
-            5
+            self.chip_info.as_ref().map_or(5, |info| if info.kind == "memory" {
+                (info.lines.len() + 2).clamp(7, 19) as u16
+            } else { 5 })
         } else if self.history_modal {
             (self.history_matches().len() + 3).clamp(5, 15) as u16
         } else if let Some(picker) = &self.queue_picker {
@@ -3775,19 +4289,37 @@ impl App {
         } else {
             chips.push(("model", "Model".to_owned()));
         }
+        let effort = id.and_then(|id| self.session_efforts.get(id)).map(String::as_str).unwrap_or("?");
+        chips.push(("effort", format!("Effort {effort}")));
+        if let Some(status) = id.and_then(|id| self.repo_cache.get(id))
+            .and_then(|(status, _)| status.as_ref()) {
+            chips.push(repo_chip(status));
+        }
         chips.push(("context", format!("Ctx {}", telemetry.and_then(|value| value.context.as_deref()).unwrap_or("?"))));
         let memory = self.memory_cache.get(id.unwrap_or("")).and_then(|(usage, _)| *usage)
-            .map(|usage| format!("p {}%/u {}%",
+            .map(|usage| format!("{} {}%/u {}%",
+                if self.memory_repo.get(id.unwrap_or("")).copied().unwrap_or(false) { "p" } else { "f" },
                 memory_fill_percent(usage.project_chars, usage.project_cap_chars),
                 memory_fill_percent(usage.user_chars, usage.user_cap_chars)))
-            .unwrap_or_else(|| "p ?/u ?".to_owned());
+            .unwrap_or_else(|| "u ? · scope ?".to_owned());
         chips.push(("memory", memory));
         let beliefs = telemetry.and_then(|value| value.lore.as_deref())
             .filter(|label| label.ends_with(" beliefs"))
             .unwrap_or("Beliefs");
         chips.push(("beliefs", beliefs.to_owned()));
-        chips.push(("cost", format!("Cost {}", telemetry.and_then(|value| value.cost.as_deref()).unwrap_or("?"))));
-        chips.push(("lore", format!("LORE {}", telemetry.and_then(|value| value.lore.as_deref()).unwrap_or("?"))));
+        let engine = identity.and_then(|pair| pair.0.as_deref());
+        if let Some(label) = telemetry.and_then(|value| value.billing_label(engine))
+            .or_else(|| match engine {
+                Some("deepseek" | "glm") => Some("$?".into()),
+                _ => None,
+            }) {
+            chips.push(("cost", label));
+        }
+        if engine == Some("deepseek") {
+            if let Some(balance) = telemetry.and_then(|value| value.balance.as_deref()) {
+                chips.push(("balance", format!("Balance {balance}")));
+            }
+        }
         chips
     }
 
@@ -3871,6 +4403,12 @@ impl App {
     }
 
     fn chip_hit_at(&self, column: u16, row: u16) -> Option<ChipHit> {
+        if let Some(hits) = self.rendered_chip_hits.borrow().as_ref() {
+            return hits.iter().find(|hit| hit.rect.contains(
+                ratatui::layout::Position::new(column, row))).cloned();
+        }
+        // Before the first paint, tests and synthetic input may still use
+        // the current size. Interactive input always uses painted regions.
         let layout = self.layout(self.size);
         let panes = layout.panes.map(|panes| vec![(0, panes[0]), (1, panes[1])])
             .unwrap_or_else(|| vec![(self.active_group, layout.body)]);
@@ -3891,15 +4429,58 @@ impl App {
         None
     }
 
+    fn repo_detail(&self, group: usize) -> Option<String> {
+        let id = self.groups[group].active_id()?;
+        let (Some(doxa_worktrees::RepoStatus::Repository { base, checked_out, worktree, .. }), _) = self.repo_cache.get(id)? else {
+            return None;
+        };
+        let state = if let Some(worktree) = worktree {
+            if worktree == "linked worktree" { "linked worktree".to_owned() }
+            else { format!("managed worktree {}", safe_label(worktree)) }
+        } else { "main checkout".to_owned() };
+        Some(format!("base {} · HEAD {} · {state}",
+            safe_label(base.as_deref().unwrap_or("?")),
+            safe_label(checked_out.as_deref().unwrap_or("detached"))))
+    }
+
     fn open_chip_info(&mut self, kind: &'static str, group: usize) {
-        let label = self.chips(group).into_iter().find(|(candidate, _)| *candidate == kind)
+        let mut label = self.chips(group).into_iter().find(|(candidate, _)| *candidate == kind)
             .map(|(_, label)| label).unwrap_or_default();
+        if kind == "repo" {
+            if let Some(detail) = self.repo_detail(group) {
+                label.push_str(" · ");
+                label.push_str(&detail);
+            }
+        }
         self.active_group = group;
-        self.chip_info = Some(ChipInfo { kind, label });
+        self.chip_info = Some(ChipInfo { kind, label, lines: Vec::new(), scroll: 0, owner: None });
         if self.active_chooser_rect().is_none() {
             self.chip_info = None;
             self.notice = "Enlarge active pane to inspect chip details".into();
         }
+    }
+
+    fn open_memory_menu(&mut self, group: usize) {
+        self.open_chip_info("memory", group);
+        let Some(info) = self.chip_info.as_mut() else { return; };
+        info.lines = vec!["Loading LORE memory…".into()];
+        let Some(id) = self.groups[group].active_id().map(str::to_owned) else {
+            info.lines = vec!["No active session".into()];
+            return;
+        };
+        let Some(cwd) = self.session_cwds.get(&id).and_then(|path| path.to_str()).map(str::to_owned) else {
+            info.lines = vec!["Session directory unavailable".into()];
+            return;
+        };
+        info.owner = Some((id.clone(), cwd.clone()));
+        let python = std::env::var_os("DOXA_LORE_PYTHON")
+            .map(PathBuf::from).unwrap_or_else(|| PathBuf::from("python3"));
+        let (tx, rx) = mpsc::sync_channel(1);
+        self.memory_menu_pending = Some((id, cwd.clone(), rx));
+        std::thread::spawn(move || {
+            let result = crate::memory_menu::fetch(&python, Path::new(&cwd));
+            let _ = tx.send(result);
+        });
     }
 
     fn mouse(&mut self, mouse: MouseEvent) -> bool {
@@ -3913,10 +4494,28 @@ impl App {
             return true;
         }
         if self.chip_info.is_some() {
+            let inside_menu = self.active_chooser_rect().is_some_and(|area| area.contains(
+                ratatui::layout::Position::new(mouse.column, mouse.row)));
+            if let Some(info) = self.chip_info.as_mut().filter(|info| info.kind == "memory") {
+                if inside_menu {
+                    match mouse.kind {
+                        MouseEventKind::ScrollUp => {
+                            info.scroll = info.scroll.saturating_sub(3);
+                            return true;
+                        }
+                        MouseEventKind::ScrollDown => {
+                            info.scroll = info.scroll.saturating_add(3).min(info.lines.len().saturating_sub(1));
+                            return true;
+                        }
+                        _ => {}
+                    }
+                }
+            }
             if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
                 let inside = self.active_chooser_rect().is_some_and(|area| area.contains(
                     ratatui::layout::Position::new(mouse.column, mouse.row)));
                 self.chip_info = None;
+                self.memory_menu_pending = None;
                 if inside { return true; }
             } else { return false; }
         }
@@ -4022,13 +4621,14 @@ impl App {
         }
         if self.active_request_index().is_none()
             && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
-            && (self.engine_picker || self.new_session.is_some() || self.model_picker.is_some() || self.permission_picker.is_some()) {
+            && (self.engine_picker || self.new_session.is_some() || self.model_picker.is_some() || self.effort_picker.is_some() || self.permission_picker.is_some()) {
             let Some(menu) = self.active_chooser_rect() else { return false; };
             let (x, y, width, height) = (menu.x, menu.y, menu.width, menu.height);
             if mouse.column < x || mouse.column >= x + width || mouse.row < y || mouse.row >= y + height {
                 self.engine_picker = false;
                 self.new_session = None;
                 self.model_picker = None;
+                self.effort_picker = None;
                 self.permission_picker = None;
                 self.permission_confirm_dont_ask = false;
                 return true;
@@ -4046,6 +4646,16 @@ impl App {
                 return true;
             }
             if self.new_session.is_some() { return true; }
+            if let Some(picker) = &mut self.effort_picker {
+                let visible = usize::from(height.saturating_sub(4)).max(1);
+                let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+                let row = start + usize::from(mouse.row.saturating_sub(y + 3));
+                if mouse.row >= y + 3 && row < picker.levels.len() {
+                    picker.selected = row;
+                    self.select_effort();
+                }
+                return true;
+            }
             if let Some((_, selected)) = &mut self.permission_picker {
                 let offset = if height >= 10 { 4 } else { 2 };
                 if mouse.row >= y + offset {
@@ -4085,6 +4695,7 @@ impl App {
             || self.lore_picker.is_some()
             || self.diff_modal
             || self.model_picker.is_some()
+            || self.effort_picker.is_some()
             || self.permission_picker.is_some()
             || self.engine_picker
             || self.stop_confirmation.is_some()
@@ -4101,7 +4712,9 @@ impl App {
                     "permission" => self.open_permission_picker(),
                     "engine" => self.open_engine_picker(),
                     "model" => self.open_model_picker(),
+                    "effort" => self.open_effort_picker(),
                     "beliefs" => self.open_lore_picker(),
+                    "memory" => self.open_memory_menu(hit.group),
                     "more" => {
                         let visible = self.chip_window(hit.group, usize::from(self.pane_regions(hit.group, hit.pane)[3].width));
                         let count = visible.len().saturating_sub(1).max(1);
@@ -4283,6 +4896,7 @@ impl App {
     pub fn draw(&self, frame: &mut Frame) {
         let area = frame.area();
         self.visible_tool_sections.borrow_mut().clear();
+        *self.rendered_chip_hits.borrow_mut() = Some(Vec::new());
         frame.render_widget(Block::default().style(Style::default().bg(theme::BASE).fg(theme::TEXT)), area);
         if area.width < 20 || area.height < 5 {
             frame.render_widget(Paragraph::new("DOXA · enlarge terminal"), area);
@@ -4310,7 +4924,7 @@ impl App {
                 let fallback = Rect::new(area.x + (area.width - width) / 2,
                     area.y + (area.height - height) / 2, width, height);
                 if self.action_menu || self.lore_picker.is_some() || self.engine_picker
-                    || self.new_session.is_some() || self.model_picker.is_some() || self.permission_picker.is_some() {
+                    || self.new_session.is_some() || self.model_picker.is_some() || self.effort_picker.is_some() || self.permission_picker.is_some() {
                     frame.render_widget(Clear, fallback);
                     if self.action_menu { self.draw_actions(frame, fallback); }
                     else if self.lore_picker.is_some() { self.draw_lore_picker(frame, fallback); }
@@ -4340,7 +4954,9 @@ impl App {
         if self.chip_info.is_some() || self.active_chooser_rect().is_some()
             || self.active_request_index().is_some() || self.map_modal || self.diff_modal
             || self.tool_modal || self.stop_confirmation.is_some() { return; }
-        let hint = chip_hint(hit.kind);
+        let hint = if hit.kind == "repo" {
+            self.repo_detail(hit.group).unwrap_or_else(|| chip_hint(hit.kind).to_owned())
+        } else { chip_hint(hit.kind).to_owned() };
         if hint.is_empty() || hit.rect.y <= hit.pane.y.saturating_add(3) { return; }
         let width = (hint.width() + 2).min(usize::from(hit.pane.width)) as u16;
         let x = hit.rect.x.min(hit.pane.right().saturating_sub(width));
@@ -4369,7 +4985,7 @@ impl App {
     }
 
     fn draw_chip_picker(&self, frame: &mut Frame, area: Rect) {
-        if !self.engine_picker && self.new_session.is_none() && self.model_picker.is_none() && self.permission_picker.is_none() { return; }
+        if !self.engine_picker && self.new_session.is_none() && self.model_picker.is_none() && self.effort_picker.is_none() && self.permission_picker.is_none() { return; }
         let height = area.height;
         let modal = area;
         let mut lines = Vec::new();
@@ -4394,13 +5010,24 @@ impl App {
                 launch::Engine::DeepSeek => "deepseek", launch::Engine::Glm => "glm", launch::Engine::Fixture => "fixture" };
             lines.push(Line::from(format!(" Engine: {name}")));
             if height >= 8 {
-                lines.push(Line::from(" Blank model uses configured engine default."));
-                lines.push(Line::from(""));
+                lines.push(Line::from(if vendor_models(form.engine).is_empty() {
+                    " Blank model uses configured engine default."
+                } else { " Left/Right choose vendor model and effort." }));
+                lines.push(Line::from(if vendor_models(form.engine).is_empty() {
+                    "".to_owned()
+                } else { format!(" {}", safe_label(&form.catalog_note)) }));
             }
-            lines.push(Line::styled(format!(" {} Model: {}", if form.field == 0 { '›' } else { ' ' }, safe_label(&form.model)),
+            lines.push(Line::styled(format!(" {} Model: {}", if form.field == 0 { '›' } else { ' ' },
+                safe_label(&form.model)),
                 Style::default().fg(if form.field == 0 { theme::ACCENT } else { theme::SECONDARY })));
-            lines.push(Line::styled(format!(" {} First prompt: {}", if form.field == 1 { '›' } else { ' ' }, safe_label(&form.prompt)),
-                Style::default().fg(if form.field == 1 { theme::ACCENT } else { theme::SECONDARY })));
+            let prompt_field = if vendor_models(form.engine).is_empty() { 1 } else { 2 };
+            if prompt_field == 2 {
+                lines.push(Line::styled(format!(" {} Effort: {}", if form.field == 1 { '›' } else { ' ' },
+                    form.effort.as_deref().unwrap_or("unknown")),
+                    Style::default().fg(if form.field == 1 { theme::ACCENT } else { theme::SECONDARY })));
+            }
+            lines.push(Line::styled(format!(" {} First prompt: {}", if form.field == prompt_field { '›' } else { ' ' }, safe_label(&form.prompt)),
+                Style::default().fg(if form.field == prompt_field { theme::ACCENT } else { theme::SECONDARY })));
             if form.engine == launch::Engine::Claude {
                 lines.push(Line::from(" Claude sidecar is bundled by the preview installer."));
             }
@@ -4423,6 +5050,17 @@ impl App {
                 lines.push(Line::styled(format!(" {} {} {} · {}", if index == *selected { '›' } else { ' ' },
                     if current { '●' } else { ' ' }, mode, description),
                     Style::default().fg(if index == *selected { theme::ACCENT } else { theme::SECONDARY })));
+            }
+        } else if let Some(picker) = &self.effort_picker {
+            title = " Effort · new sessions only · Enter select · Esc close ";
+            let current = self.session_efforts.get(&picker.session_id).map(String::as_str).unwrap_or("unknown");
+            lines.push(Line::from(format!(" Current session keeps {current}; {}/{}", picker.engine, picker.model)));
+            lines.push(Line::from(""));
+            let visible = usize::from(height.saturating_sub(4)).max(1);
+            let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+            for (index, level) in picker.levels.iter().enumerate().skip(start).take(visible) {
+                lines.push(Line::styled(format!(" {} {}", if index == picker.selected { '›' } else { ' ' }, level),
+                    Style::default().fg(if index == picker.selected { theme::ACCENT } else { theme::SECONDARY })));
             }
         } else {
             title = " Model · this session · R retry · Enter select · Esc close ";
@@ -4448,6 +5086,25 @@ impl App {
 
     fn draw_chip_info(&self, frame: &mut Frame, area: Rect) {
         let Some(info) = &self.chip_info else { return; };
+        if info.kind == "memory" {
+            let current = self.groups[self.active_group].active_id().and_then(|id|
+                self.session_cwds.get(id).and_then(|cwd| cwd.to_str()).map(|cwd| (id, cwd)));
+            let owner_matches = info.owner.as_ref().is_some_and(|(id, cwd)| current == Some((id.as_str(), cwd.as_str())));
+            let message;
+            let source = if info.owner.is_some() && !owner_matches {
+                message = vec!["Session changed; reopen memory".to_owned()];
+                &message
+            } else { &info.lines };
+            let visible = usize::from(area.height.saturating_sub(2)).max(1);
+            let start = info.scroll.min(source.len().saturating_sub(visible));
+            let lines: Vec<String> = source.iter().skip(start).take(visible)
+                .map(|line| clipped_title(line, usize::from(area.width.saturating_sub(2))).0).collect();
+            frame.render_widget(Paragraph::new(lines.join("\n"))
+                .block(Block::default().title(" LORE memory · ↑↓ scroll · Esc close ").borders(Borders::ALL)
+                    .border_style(Style::default().fg(theme::ACCENT)))
+                .style(Style::default().fg(theme::TEXT).bg(theme::RAISED)), area);
+            return;
+        }
         let title = format!(" {} · Esc close ", safe_label(info.kind));
         let body = format!(" {}\n {}", safe_label(&info.label), chip_hint(info.kind));
         frame.render_widget(Paragraph::new(body).wrap(Wrap { trim: false })
@@ -4965,7 +5622,7 @@ impl App {
         if active && chooser_height > 0 {
             if self.active_request_index().is_some_and(|index| self.input_requests[index].kind == "ask_user") {
                 self.draw_request(frame, inner[2], true);
-            } else if self.engine_picker || self.new_session.is_some() || self.model_picker.is_some() || self.permission_picker.is_some() {
+            } else if self.engine_picker || self.new_session.is_some() || self.model_picker.is_some() || self.effort_picker.is_some() || self.permission_picker.is_some() {
                 self.draw_chip_picker(frame, inner[2]);
             } else if self.lore_picker.is_some() {
                 self.draw_lore_picker(frame, inner[2]);
@@ -4982,9 +5639,19 @@ impl App {
             }
         }
         let mut chip_spans = Vec::new();
+        let mut chip_x = inner[3].x;
         for (kind, label) in self.chip_window(index, usize::from(inner[3].width)) {
             if !chip_spans.is_empty() { chip_spans.push(Span::raw(" ")); }
-            chip_spans.push(Span::styled(chip_text(kind, &label),
+            let text = chip_text(kind, &label);
+            let end = chip_x.saturating_add(text.width() as u16).min(inner[3].right());
+            if end > chip_x {
+                if let Some(hits) = self.rendered_chip_hits.borrow_mut().as_mut() {
+                    hits.push(ChipHit { group: index, kind,
+                        rect: Rect::new(chip_x, inner[3].y, end - chip_x, 1), pane: area });
+                }
+            }
+            chip_x = end.saturating_add(1);
+            chip_spans.push(Span::styled(text,
                 Style::default().fg(if matches!(kind, "engine" | "more") { theme::ACCENT } else { theme::TEXT })
                     .bg(theme::HIGHLIGHT)));
         }
@@ -5183,6 +5850,9 @@ fn run_loop(
         changed |= app.poll_resume();
         changed |= app.poll_lore();
         changed |= app.poll_memory();
+        changed |= app.poll_repo();
+        changed |= app.poll_memory_menu();
+        changed |= app.poll_vendor_catalog();
         changed |= app.tick_blink(Instant::now());
         if prompt_sender.is_none() {
             if let Some(id) = app.pending_peer_refresh.take() {
@@ -5706,8 +6376,9 @@ mod tests {
         assert_eq!(chips[0], ("permission", "Permissions auto".into()));
         assert_eq!(chips[1], ("engine", "claude".into()));
         assert_eq!(chips[2], ("model", "sonnet".into()));
-        assert_eq!(chips[3].0, "context");
-        assert!(chips[3].1.starts_with("Ctx "));
+        assert_eq!(chips[3], ("effort", "Effort ?".into()));
+        assert_eq!(chips[4].0, "context");
+        assert!(chips[4].1.starts_with("Ctx "));
 
         let pane = app.layout(app.size).body;
         let chip_y = pane.bottom().saturating_sub(prompt_height("", pane.height) + 2);
@@ -5747,14 +6418,62 @@ mod tests {
         app.memory_pending = Some(("s".into(), "/repo/old".into(), rx));
         app.apply_daemon_frame(&json!({"type":"hello", "session_id":"s", "cwd":"/repo/new"}));
         app.offline_ids.insert("s".into());
-        tx.send(Some(doxa_lore::MemoryUsage {
+        tx.send(Some((doxa_lore::MemoryUsage {
             project_chars: 400, project_cap_chars: 1000,
             user_chars: 200, user_cap_chars: 500,
-        })).unwrap();
+        }, true))).unwrap();
         app.poll_memory();
         assert!(!app.memory_cache.contains_key("s"));
         assert_eq!(app.chips(0).iter().find(|(kind, _)| *kind == "memory").unwrap().1,
-            "p ?/u ?");
+            "u ? · scope ?");
+    }
+
+    #[test]
+    fn memory_chip_opens_inline_entries_for_active_pane_and_rejects_stale_scope() {
+        let mut app = App::default();
+        app.rail_visible = false;
+        app.handle(Event::Resize(160, 32));
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"left","cwd":"/tmp/left"}));
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"right","cwd":"/tmp/right"}));
+        app.groups[1].tabs.push("right".into());
+        app.active_group = 1;
+        app.open_memory_menu(1);
+        assert_eq!(app.chip_info.as_ref().unwrap().kind, "memory");
+        let menu = app.active_chooser_rect().unwrap();
+        let pane = app.layout(app.size).panes.unwrap()[1];
+        assert_eq!(menu.x, pane.x);
+        assert!(menu.bottom() < pane.bottom());
+        let (tx, rx) = mpsc::sync_channel(1);
+        app.memory_menu_pending = Some(("right".into(), "/tmp/right".into(), rx));
+        tx.send(Ok(vec!["## User memory".into(), "- verified user fact".into(),
+            "## Folder memory".into(), "- verified folder fact".into()])).unwrap();
+        assert!(app.poll_memory_menu());
+        let rendered = painted_at(&app, 160, 32);
+        assert!(rendered.contains("verified user fact"), "{rendered}");
+        assert!(rendered.contains("verified folder fact"), "{rendered}");
+        let (tx, rx) = mpsc::sync_channel(1);
+        app.memory_menu_pending = Some(("right".into(), "/tmp/right".into(), rx));
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"right","cwd":"/tmp/moved"}));
+        tx.send(Ok(vec!["- stale secret".into()])).unwrap();
+        assert!(!app.poll_memory_menu());
+        assert!(!painted_at(&app, 160, 32).contains("stale secret"));
+        let rendered = painted_at(&app, 160, 32);
+        assert!(rendered.contains("Session changed; reopen memory"));
+        assert!(!rendered.contains("verified folder fact"));
+    }
+
+    #[test]
+    fn memory_gallery_fixture_renders_curated_and_global_sections_without_lore_worker() {
+        let mut app = App::default();
+        app.handle(Event::Resize(120, 32));
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"gallery","cwd":"/demo/project"}));
+        app.show_memory_menu_fixture(0, &["- User entry"], &["- Project entry"], &["- Global belief"]);
+        assert!(app.memory_menu_pending.is_none());
+        let rendered = painted_at(&app, 120, 32);
+        assert!(rendered.contains("User entry"), "{rendered}");
+        assert!(rendered.contains("Project entry"), "{rendered}");
+        assert!(rendered.contains("Global active LORE beliefs"), "{rendered}");
+        assert!(rendered.contains("Global belief"), "{rendered}");
     }
 
     #[test]
@@ -5770,11 +6489,11 @@ mod tests {
         let pane = layout.panes.map_or(layout.body, |panes| panes[0]);
         let visible = app.chip_window(0, usize::from(pane.width));
         assert_eq!(visible.iter().take(4).map(|(kind, _)| *kind).collect::<Vec<_>>(),
-            vec!["permission", "engine", "model", "context"]);
+            vec!["permission", "engine", "model", "effort"]);
         assert_eq!(visible[0].1, "Permissions default");
         assert_eq!(visible[1].1, "claude");
         assert_eq!(visible[2].1, "claude-sonnet-4");
-        assert!(visible[3].1.starts_with("Ctx "));
+        assert_eq!(visible[3].1, "Effort ?");
         let occupied = visible.iter().map(|(kind, label)| chip_text(kind, label).width()).sum::<usize>()
             + visible.len().saturating_sub(1);
         assert!(occupied <= usize::from(pane.width));
@@ -5898,9 +6617,9 @@ mod tests {
         app.handle(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
         app.handle(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
-        for c in "deepseek-test".chars() {
-            app.handle(Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)));
-        }
+        assert_eq!(app.new_session.as_ref().unwrap().model, "deepseek-flash");
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.new_session.as_ref().unwrap().effort.as_deref(), Some("high"));
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         for c in "Explain this".chars() {
             app.handle(Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)));
@@ -5908,11 +6627,160 @@ mod tests {
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         let (options, prompt, group) = app.pending_launches.pop().unwrap();
         assert_eq!(options.engine, launch::Engine::DeepSeek);
-        assert_eq!(options.model.as_deref(), Some("deepseek-test"));
+        assert_eq!(options.model.as_deref(), Some("deepseek-flash"));
+        assert_eq!(options.effort.as_deref(), Some("high"));
         assert_eq!(prompt.as_deref(), Some("Explain this"));
         assert_eq!(group, 0);
         assert!(app.launching);
         assert!(app.new_session.is_none());
+    }
+
+    #[test]
+    fn effort_chip_picker_is_per_session_and_sets_only_new_session_default() {
+        let mut app = App::default();
+        app.handle(Event::Resize(220, 32));
+        app.rail_visible = false;
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"deep-1",
+            "engine":"deepseek","model":"deepseek-flash","effort":"high"}));
+        app.groups[0].tabs = vec!["deep-1".into()];
+        let effort_index = app.chips(0).iter().position(|(kind, _)| *kind == "effort").unwrap();
+        assert_eq!(app.chips(0)[effort_index], ("effort", "Effort high".into()));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::ALT)));
+        assert_eq!(app.effort_picker.as_ref().unwrap().levels, ["none", "low", "high", "max"]);
+        assert_eq!(app.effort_picker.as_ref().unwrap().selected, 2);
+        assert!(painted(&app).contains("new sessions only"));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.next_efforts["deepseek"], "max");
+        assert_eq!(app.session_efforts["deep-1"], "high");
+
+        let effort_hit = app.rendered_chip_hits.borrow().as_ref().unwrap().iter()
+            .find(|hit| hit.kind == "effort").unwrap().clone();
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: effort_hit.rect.x + 1, row: effort_hit.rect.y, modifiers: KeyModifiers::NONE }));
+        assert!(app.effort_picker.is_some());
+        let menu = app.active_chooser_rect().unwrap();
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: menu.x + 2, row: menu.y + 3, modifiers: KeyModifiers::NONE }));
+        assert_eq!(app.next_efforts["deepseek"], "none");
+        assert!(app.effort_picker.is_none());
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"glm-2",
+            "engine":"glm","model":"glm-5.3-flash","effort":"low"}));
+        app.groups[0].tabs.push("glm-2".into());
+        app.groups[0].active = 1;
+        assert_eq!(app.chips(0).iter().find(|(kind, _)| *kind == "effort").unwrap().1, "Effort low");
+        app.open_effort_picker();
+        assert_eq!(app.effort_picker.as_ref().unwrap().levels, ["low", "high", "max"]);
+        assert!(!app.effort_picker.as_ref().unwrap().levels.contains(&"none".to_owned()));
+        assert_eq!(app.next_efforts["deepseek"], "none");
+        app.apply_daemon_frame(&json!({"type":"event","session_id":"glm-2",
+            "event":{"type":"model_changed","data":{"model":"unknown-new-model"}}}));
+        assert!(app.effort_picker.is_none());
+        app.open_effort_picker();
+        assert!(app.effort_picker.is_none());
+    }
+
+    #[test]
+    fn effort_capability_and_vendor_model_choices_fail_closed() {
+        assert_eq!(effort_choices("glm", "glm-5.3-flash"), ["low", "high", "max"]);
+        assert!(effort_choices("glm", "glm-unverified").is_empty());
+        assert!(effort_choices("deepseek", "glm-5.3-flash").is_empty());
+        assert!(effort_choices("codex", "gpt-6").is_empty());
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"unknown",
+            "engine":"codex","model":"gpt-6","effort":"high"}));
+        app.groups[0].tabs = vec!["unknown".into()];
+        app.open_effort_picker();
+        assert!(app.effort_picker.is_none());
+        assert!(app.notice.contains("No verified effort"));
+
+        app.engine_selected = 2;
+        app.select_new_engine();
+        assert_eq!(app.new_session.as_ref().unwrap().model, "deepseek-flash");
+        assert_eq!(app.new_session.as_ref().unwrap().effort.as_deref(), Some("high"));
+        app.new_session.as_mut().unwrap().field = 0;
+        app.new_session_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(app.new_session.as_ref().unwrap().model, "deepseek-v4-pro");
+        app.engine_selected = 3;
+        app.select_new_engine();
+        assert_eq!(app.new_session.as_ref().unwrap().model, "glm-5.3-flash");
+        assert_eq!(app.new_session.as_ref().unwrap().effort.as_deref(), Some("high"));
+        let form = app.new_session.as_ref().unwrap();
+        assert!(!vendor_models(form.engine).contains(&"deepseek-v4-pro"));
+        assert!(!effort_choices(engine_name(form.engine), &form.model).contains(&"none"));
+    }
+
+    #[test]
+    fn live_vendor_catalog_refresh_filters_models_and_switch_discards_stale_rows() {
+        fn row(id: &str, efforts: &[&str], default: Option<&str>) -> doxa_vendors::ModelCapability {
+            doxa_vendors::ModelCapability { id: id.into(), efforts: efforts.iter().map(|x| (*x).into()).collect(),
+                default_effort: default.map(str::to_owned), effort_metadata_present: !efforts.is_empty() }
+        }
+        let mut app = App::default();
+        app.engine_selected = 2;
+        app.select_new_engine();
+        let (tx, rx) = mpsc::sync_channel(1);
+        app.vendor_catalog_pending = Some((launch::Engine::DeepSeek, rx));
+        app.new_session.as_mut().unwrap().catalog_pending = true;
+        tx.send(Some(vec![row("deepseek-v4-pro", &["low", "high", "max"], Some("high")),
+            row("deepseek-next", &["low", "max"], Some("max"))])).unwrap();
+        assert!(app.poll_vendor_catalog());
+        let form = app.new_session.as_ref().unwrap();
+        assert_eq!(form.models, ["deepseek-next", "deepseek-v4-pro"]);
+        assert_eq!(form.model_efforts["deepseek-next"], ["low", "max"]);
+        assert_eq!(form.model, "deepseek-next");
+        assert_eq!(form.effort.as_deref(), Some("max"));
+        assert!(form.catalog_note.contains("Live vendor"));
+
+        // A present but unusable capability list is different from absent
+        // metadata: never resurrect the static levels for that live model.
+        let (tx, rx) = mpsc::sync_channel(1);
+        app.vendor_catalog_pending = Some((launch::Engine::DeepSeek, rx));
+        tx.send(Some(vec![doxa_vendors::ModelCapability { id: "deepseek-flash".into(),
+            efforts: Vec::new(), default_effort: None, effort_metadata_present: true }])).unwrap();
+        assert!(app.poll_vendor_catalog());
+        assert!(app.new_session.as_ref().unwrap().models.is_empty());
+
+        let (stale_tx, stale_rx) = mpsc::sync_channel(1);
+        app.vendor_catalog_pending = Some((launch::Engine::DeepSeek, stale_rx));
+        app.engine_selected = 3;
+        app.select_new_engine();
+        assert!(stale_tx.send(Some(vec![row("deepseek-flash", &[], None)])).is_err());
+        assert_eq!(app.new_session.as_ref().unwrap().model, "glm-5.3-flash");
+        let (tx, rx) = mpsc::sync_channel(1);
+        app.vendor_catalog_pending = Some((launch::Engine::Glm, rx));
+        app.new_session.as_mut().unwrap().catalog_pending = true;
+        tx.send(Some(vec![row("unknown-glm", &[], None)])).unwrap();
+        assert!(app.poll_vendor_catalog());
+        assert!(app.new_session.as_ref().unwrap().models.is_empty());
+        assert!(app.new_session.as_ref().unwrap().model.is_empty());
+        assert!(app.new_session.as_ref().unwrap().catalog_note.contains("choose another engine"));
+        app.new_session.as_mut().unwrap().field = 2;
+        app.new_session_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.pending_launches.is_empty());
+        assert!(app.notice.contains("No verified models"));
+
+        app.engine_selected = 3;
+        app.select_new_engine();
+        let (tx, rx) = mpsc::sync_channel(1);
+        app.vendor_catalog_pending = Some((launch::Engine::Glm, rx));
+        tx.send(Some(vec![row("glm-5.3-flash", &[], None)])).unwrap();
+        assert!(app.poll_vendor_catalog());
+        assert!(app.new_session.as_ref().unwrap().catalog_note.contains("measured effort fallback"));
+
+        app.engine_selected = 2;
+        app.select_new_engine();
+        let (tx, rx) = mpsc::sync_channel(1);
+        app.vendor_catalog_pending = Some((launch::Engine::DeepSeek, rx));
+        app.new_session.as_mut().unwrap().catalog_pending = true;
+        tx.send(None).unwrap();
+        assert!(app.poll_vendor_catalog());
+        assert_eq!(app.new_session.as_ref().unwrap().models, ["deepseek-flash", "deepseek-v4-pro"]);
+        assert!(app.new_session.as_ref().unwrap().catalog_note.contains("Static fallback"));
+        app.catalog_efforts.insert(("deepseek".into(), "deepseek-flash".into()), vec!["low".into()]);
+        app.engine_selected = 2;
+        app.select_new_engine();
+        assert!(!app.catalog_efforts.contains_key(&("deepseek".into(), "deepseek-flash".into())));
     }
 
     #[test]
@@ -5967,12 +6835,77 @@ mod tests {
         assert_eq!(app.session_telemetry.get("s").unwrap().lore.as_deref(), Some("scrub unavailable"));
     }
 
+    #[test]
+    fn deepseek_balance_chip_requires_valid_available_balance() {
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"deep", "engine":"deepseek"}));
+        app.groups[0].tabs = vec!["deep".into()];
+        assert!(!app.chips(0).iter().any(|(kind, _)| *kind == "balance"));
+        app.apply_daemon_frame(&json!({"type":"telemetry_status", "session_id":"deep",
+            "status":{"session_id":"deep", "billing":{"mode":"api","balance":"$3.25 · ¥25.50"}}}));
+        assert!(app.chips(0).iter().any(|(kind, label)| *kind == "balance" && label == "Balance $3.25 · ¥25.50"));
+        app.apply_daemon_frame(&json!({"type":"telemetry_status", "session_id":"deep",
+            "status":{"session_id":"deep", "billing":null}}));
+        assert!(!app.chips(0).iter().any(|(kind, _)| *kind == "balance"));
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"glm", "engine":"glm",
+            "billing":{"mode":"api","balance":"$100.00"}}));
+        app.groups[0].tabs = vec!["glm".into()];
+        assert!(!app.chips(0).iter().any(|(kind, _)| *kind == "balance"));
+    }
+
     fn painted(app: &App) -> String {
         let mut terminal = Terminal::new(TestBackend::new(100, 28)).unwrap();
         terminal.draw(|frame| app.draw(frame)).unwrap();
         let buffer = terminal.backend().buffer();
         (0..28).map(|y| (0..100).map(|x| buffer[(x, y)].symbol()).collect::<String>())
             .collect::<Vec<_>>().join("\n")
+    }
+
+    #[test]
+    fn repository_chip_tracks_each_panes_actual_session_and_invalidates_stale_work() {
+        use doxa_worktrees::RepoStatus;
+        let mut app = App::default();
+        app.rail_visible = false;
+        app.handle(Event::Resize(220, 32));
+        app.groups[0].tabs = vec!["a".into(), "b".into()];
+        app.groups[1].tabs = vec!["c".into()];
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"a","cwd":"/tmp/a"}));
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"b","cwd":"/tmp/b"}));
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"c","cwd":"/tmp/c"}));
+        app.set_repo_status("a", RepoStatus::Repository {
+            repo: "project".into(), base: Some("main".into()),
+            checked_out: Some("doxa/a".into()), sha: Some("1234567".into()),
+            worktree: Some("doxa/a".into()),
+        });
+        app.set_repo_status("b", RepoStatus::Directory { name: "scratch".into() });
+        app.set_repo_status("c", RepoStatus::Repository {
+            repo: "other".into(), base: Some("feature".into()),
+            checked_out: Some("feature".into()), sha: Some("abcdef0".into()),
+            worktree: None,
+        });
+        assert!(app.chips(0).contains(&("repo", "project ⎇ main [wt doxa/a] @1234567".into())));
+        assert_eq!(app.repo_detail(0).as_deref(), Some("base main · HEAD doxa/a · managed worktree doxa/a"));
+        let rendered = painted_at(&app, 220, 32);
+        assert!(rendered.contains("project ⎇ main [wt doxa/a] @1234567"));
+        assert!(rendered.contains("u ? · scope ?"));
+        assert!(app.chips(1).contains(&("repo", "other ⎇ feature @abcdef0".into())));
+        app.groups[0].active = 1;
+        assert!(app.chips(0).contains(&("directory", "dir scratch".into())));
+        assert!(!app.chips(0).iter().any(|(kind, _)| *kind == "repo"));
+        app.handle(Event::Resize(100, 28));
+        assert!(app.chips(0).contains(&("directory", "dir scratch".into())));
+        app.apply_daemon_frame(&json!({"type":"event","session_id":"c",
+            "event":{"type":"branch_changed","data":{"base":"main"}}}));
+        assert!(!app.chips(1).iter().any(|(kind, _)| *kind == "repo"));
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"b","cwd":"/tmp/new"}));
+        assert!(!app.chips(0).iter().any(|(kind, _)| *kind == "directory"));
+        let (tx, rx) = mpsc::sync_channel(1);
+        let old_epoch = app.repo_epoch.get("b").copied().unwrap_or_default();
+        app.repo_pending = Some(("b".into(), PathBuf::from("/tmp/new"), old_epoch, rx));
+        app.invalidate_repo("b");
+        tx.send(Some(RepoStatus::Directory { name: "stale".into() })).unwrap();
+        app.poll_repo();
+        assert!(!app.chips(0).iter().any(|(kind, _)| *kind == "directory"));
     }
 
     fn painted_at(app: &App, width: u16, height: u16) -> String {
@@ -6011,10 +6944,11 @@ mod tests {
                 "permission" => assert!(app.permission_picker.is_some()),
                 "engine" => assert!(app.engine_picker),
                 "model" => assert!(app.model_picker.is_some()),
+                "effort" => assert!(app.notice.contains("No verified effort")),
                 "beliefs" => assert!(app.lore_picker.is_some()),
                 _ => {
                     assert_eq!(app.chip_info.as_ref().map(|info| info.kind), Some(kind));
-                    if kind == "memory" { assert!(painted_at(&app, 220, 32).contains("separate LORE caps")); }
+                    if kind == "memory" { assert!(painted_at(&app, 220, 32).contains("Loading LORE memory")); }
                 }
             }
             app.handle(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
@@ -6054,7 +6988,7 @@ mod tests {
             assert_eq!(app.input_drafts.get(&(0, "left".into())).unwrap().0, "left draft");
         }
         }
-        assert!(chip_hint("memory").contains("% of separate LORE caps"));
+        assert!(chip_hint("memory").contains("click to view entries"));
     }
 
     #[test]
@@ -6079,6 +7013,41 @@ mod tests {
             column: x, row: strip.y, modifiers: KeyModifiers::NONE }));
         assert_ne!(app.chip_offsets[0], 0);
         assert!(app.chip_window(0, usize::from(strip.width)).iter().any(|(kind, _)| *kind == "memory"));
+    }
+
+    #[test]
+    fn chip_hits_match_painted_cells_and_exclude_prompt_separator() {
+        let mut app = App::default();
+        app.rail_visible = false;
+        app.handle(Event::Resize(140, 32));
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"s", "engine":"claude",
+            "model":"sonnet", "permission_mode":"auto", "can_set_permission_mode":true}));
+        app.groups[0].tabs = vec!["s".into()];
+
+        // A redraw can observe new dimensions before its Resize event reaches
+        // the input loop. Mouse hits must follow the frame the user sees.
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let hits = app.rendered_chip_hits.borrow().clone().unwrap();
+        let permission = hits.iter().find(|hit| hit.kind == "permission").unwrap();
+        let stale_pane = app.layout(app.size).body;
+        assert_ne!(permission.rect.y, app.pane_regions(0, stale_pane)[3].y);
+        for hit in &hits {
+            for x in hit.rect.x..hit.rect.right() {
+                assert_eq!(terminal.backend().buffer()[(x, hit.rect.y)].bg, theme::HIGHLIGHT);
+                assert_eq!(app.chip_hit_at(x, hit.rect.y).as_ref().map(|hit| hit.kind), Some(hit.kind));
+            }
+            assert!(app.chip_hit_at(hit.rect.x, hit.rect.y - 1).is_none());
+            assert!(app.chip_hit_at(hit.rect.x, hit.rect.y + 1).is_none());
+        }
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Moved,
+            column: permission.rect.x + 1, row: permission.rect.y + 1,
+            modifiers: KeyModifiers::NONE }));
+        assert!(app.chip_hover.is_none());
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: permission.rect.x + 1, row: permission.rect.y,
+            modifiers: KeyModifiers::NONE }));
+        assert!(app.permission_picker.is_some());
     }
 
     #[test]
@@ -6486,6 +7455,7 @@ mod tests {
             belief_x += chip_text(kind, &label).width() as u16 + 1;
         }
         let chip_y = pane.bottom().saturating_sub(prompt_height("", pane.height) + 2);
+        painted(&app);
         app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
             column: belief_x + 2, row: chip_y, modifiers: KeyModifiers::NONE }));
         assert_eq!(app.active_group, 1);
@@ -7207,6 +8177,23 @@ for line in sys.stdin:
         assert!(app.lore_picker.as_ref().unwrap().proposal_mode);
         assert!(app.input.is_empty());
         assert!(app.pending_prompts.is_empty());
+    }
+
+    #[test]
+    fn branch_command_targets_active_daemon_and_never_becomes_a_prompt() {
+        let mut app = App::default();
+        app.groups[0].tabs.push("session-1".into());
+        app.input = "/branch feature".into();
+        app.input_cursor = app.input.len();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(matches!(app.pending_queue_commands.pop(),
+            Some(crate::bridge::WorkerCommand::Branch(id, Some(name)))
+                if id == "session-1" && name == "feature"));
+        assert!(app.pending_prompts.is_empty());
+        assert!(app.input.is_empty());
+        app.apply_daemon_frame(&json!({"type":"branch_reply", "session_id":"session-1",
+            "ok":false,"error":"session is busy"}));
+        assert!(app.notice.contains("session is busy"));
     }
 
     #[test]

@@ -71,6 +71,10 @@ it removes only a verified clean checkout whose recorded branch has no commits
 ahead of its base. Dirty trees, unique commits, branch switches, unreadable
 metadata, and failed Git checks are kept for manual review. `doxa doctor`
 lists verified managed worktrees with no live session and never deletes them.
+`doxa worktrees list` previews managed worktrees without an attachable session
+for manual review. A listed checkout may still belong to a legacy Python
+session. Automatic orphan deletion stays disabled until both runtimes share a
+worktree lock.
 Fixture sessions keep their supplied directory unless `DOXA_WORKTREE=1` is
 set explicitly for integration testing.
 `doxa new --branch NAME` starts the managed worktree from an existing local or
@@ -78,8 +82,10 @@ remote-tracking branch. It prefers a same-named local branch over
 `origin/NAME`. An unknown branch, disabled worktrees, or a request combined
 with `--resume` fails before starting the session; the launch checkout is
 never switched. `doxa branch` lists local branch bases from this checkout.
-`doxa branch NAME` refuses a live base switch and points to
-`doxa new --branch NAME`; live `/branch` controls remain to be ported.
+`doxa branch NAME --session ID` changes an idle managed session's base, as
+does `/branch` in its pane. The worktree must be clean, have no unique commits,
+and still match its pinned base commit. An active or queued turn blocks the
+switch. `doxa branch NAME` without a session ID lists available bases.
 
 Or compile and install the main line with the POSIX installer:
 
@@ -168,15 +174,16 @@ the JSONL file retains the full history. Older daemons without snapshot
 metadata fall back to their 512-event replay ring. A turn still running at
 attach can have text that was streamed but not yet persisted, so its earlier
 in-flight deltas may be absent. `Ctrl+T` opens bounded tool activity cards;
-clickable links are still 2.0 work. The binary version is `2.0.0-alpha.12`;
+clickable links are still 2.0 work. The binary version is `2.0.0-alpha.13`;
 this is an alpha release.
 
 `Ctrl+R` opens a searchable picker for attached and archived sessions with
 bounded transcript tails. Archived transcripts open read-only and never receive
 prompts. `/search TEXT` scans a bounded older archived tail. `/resume [ID or
-prefix]` opens a picker that can attach a live session or start a saved Claude
-or vendor session when its engine, model, and stored history can be verified.
-Archived Codex resume is not yet available in the TUI. `/queue` opens a picker
+prefix]` opens a picker that can attach a live session or start a saved Claude,
+Codex, or vendor session when its engine, model, and stored history can be
+verified. The recorded directory must still exist for archived resume;
+deleted managed worktrees cannot yet be reconstructed. `/queue` opens a picker
 above the active prompt for a live session. Its previews are scrubbed by LORE;
 press `X` to cancel the selected waiting prompt by its stable ID, `R` to
 refresh, or `Esc` to close it. `F2` (or `Alt+G`) opens a 256 KiB worktree diff in an
@@ -199,11 +206,23 @@ index. Duplicate queued hunks are refused. Pending
 rejections block closing the diff or leaving the UI until they finish, and are
 cancelled if the session ends. The diff pane requires enough
 terminal space for two panes. Each split pane has its own prompt and keeps a draft for its active
-session. Its status rows show engine and model chips, plus context, cost, and
-LORE status. The `p X%/u Y%` chip shows curated project and user memory fill
-against each scope's cap. Both counts and caps come from LORE; `?` means LORE
-could not report usage. Hover over a chip for its meaning, or click a read-only
-chip to see details above the prompt. Estimated cost is labeled. In a prompt, `Enter` submits, while
+session. Its chip row shows engine, model, reasoning effort, repository, context, curated memory, beliefs,
+and available billing data. Dollar cost appears only for API-billed sessions. A connected
+Claude subscription shows its reported plan and cached quota when the local
+CLI cache belongs to the same account; `~` marks stale cached usage. Codex
+plan and quota remain unknown until its daemon has a verified provider source,
+so no subscription pill is shown for it yet.
+The `p X%/u Y%` chip shows curated project and user memory fill
+against each scope's cap. A folder outside Git uses `f` in place of `p`.
+Both counts and caps come from LORE; `?` means LORE could not report usage.
+Click the memory chip to inspect the scoped curated entries and up to 20
+current global beliefs in a scrollable menu above the prompt. The beliefs are
+global, while project memory follows the main repository when the session runs
+in a worktree. The separate beliefs picker can page beyond the first 20.
+The repository chip shows the base branch, checked-out worktree branch, and
+commit for the active session. A plain folder shows `dir NAME`. Hover over a
+chip for its meaning, or click a read-only chip to see details above the
+prompt. Estimated cost is labeled. In a prompt, `Enter` submits, while
 `Shift+Enter` or `Alt+Enter` inserts a newline (`Ctrl+J` also works when
 reported distinctly by the terminal). An ambiguous `Ctrl+Enter` report never
 submits a prompt; use `Alt+Enter` for a newline. `Alt+Up` restores a rejected
@@ -212,12 +231,23 @@ lines; `Home`, `End`, `Backspace`, and `Delete` edit at the cursor. Bracketed
 paste preserves line breaks, removes terminal control characters, and never
 submits. Prompts are capped at 10 KiB; an oversized paste is truncated with a
 notice. Drafts and cursor positions stay with each session pane.
-Engine, model, permission, and LORE belief chips share one row directly above
+Permission, engine, model, effort, repository, and LORE chips share one row directly above
 each pane's prompt. Their pickers, the action menu, and daemon question choices
 expand upward in the active pane, leaving its prompt and the other pane visible.
 `Alt+E` opens an engine picker,
-then a model and first-prompt form that starts a new session in the selected
-pane. A blank model uses the configured default. Claude uses the sidecar
+then a model, reasoning effort, and first-prompt form that starts a new session
+in the selected pane. DeepSeek and GLM model choices follow the selected
+vendor. With an API key, DOXA refreshes that vendor's bounded model catalog
+without blocking redraw. DeepSeek's reported per-model effort levels drive
+the form; known GLM models use measured effort levels because its catalog
+does not expose a verified effort contract. If the lookup fails, the form
+labels its static fallback. A live catalog with no supported model/effort
+pair leaves launch disabled with an explanation. A blank model for other
+engines uses the configured default. The effort chip immediately follows the
+model chip and displays the active daemon's reported value, or `?` when it
+has no verified value. `Alt+F` and bare `/effort` open an inline picker for a
+new-session default where supported. Selecting there does not change the
+active session. Claude uses the sidecar
 installed beside `doxa-rs`; `DOXA_CLAUDE_SCRIPT` can select another absolute
 path during development. The active
 session's engine cannot be switched. `Alt+M` opens the live model picker when the daemon
@@ -289,6 +319,10 @@ are disabled by default. Set `DOXA_VENDOR_TOOLS=workspace-read` when launching
 the session to allow the model to read UTF-8 files below the workspace. File
 contents are sent to the model provider after LORE scrubbing. This is a
 session-wide opt-in; there is no per-call approval in this preview.
+With a DeepSeek API key, an optional background request to DeepSeek's official
+balance endpoint can add a balance chip. USD and CNY balances are shown
+separately without conversion. An unavailable response leaves the chip hidden;
+GLM/Z.ai does not make a balance request.
 
 ## Native daemon
 

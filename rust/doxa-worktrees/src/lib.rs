@@ -2,7 +2,7 @@
 //! Every uncertain cleanup decision keeps the branch and directory.
 use std::collections::HashSet;
 use std::env;
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
@@ -28,17 +28,56 @@ pub struct BranchStatus {
     pub checked_out: Option<String>,
 }
 
+/// Read-only location of one session's actual checkout. A recorded base is
+/// used only when its managed sidecar passes the full ownership check.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RepoStatus {
+    Repository { repo: String, base: Option<String>, checked_out: Option<String>,
+        sha: Option<String>, worktree: Option<String> },
+    Directory { name: String },
+}
+
+pub fn repo_status(cwd: &Path) -> Option<RepoStatus> {
+    let cwd = cwd.canonicalize().ok()?;
+    if !cwd.is_dir() { return None; }
+    let top = git_text(&cwd, &["rev-parse", "--show-toplevel"])
+        .and_then(|top| PathBuf::from(top).canonicalize().ok());
+    let Some(checkout) = top else {
+        let name = cwd.file_name().and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty()).unwrap_or("/").to_owned();
+        return Some(RepoStatus::Directory { name });
+    };
+    let main = main_root(&checkout).unwrap_or_else(|| checkout.clone());
+    let repo = main.file_name()?.to_str()?.to_owned();
+    let checked_out = git_text(&checkout, &["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .filter(|branch| safe_ref(branch));
+    let sha = git_text(&checkout, &["rev-parse", "--verify", "HEAD^{commit}"])
+        .filter(|oid| valid_commit_oid(oid)).map(|oid| oid[..7].to_owned());
+    let managed = read_record(&checkout);
+    let base = managed.as_ref().map(|(_, base, _, _)| base.clone()).or_else(|| checked_out.clone());
+    let worktree = if let Some((record, _, _, _)) = managed {
+        Some(record.branch)
+    } else if checkout != main {
+        Some("linked worktree".into())
+    } else { None };
+    Some(RepoStatus::Repository { repo, base, checked_out, sha, worktree })
+}
+
 pub struct Managed {
     path: PathBuf,
     created: bool,
     finished: bool,
+    // Held even for an already existing worktree reused by a resumed daemon.
+    lock: Option<File>,
 }
 impl Managed {
     pub fn path(&self) -> &Path { &self.path }
     pub fn finish(&mut self) -> String {
         if self.finished || !self.created { return String::new(); }
         self.finished = true;
-        finalize(&self.path)
+        let note = finalize_locked(&self.path);
+        self.lock.take();
+        note
     }
 }
 impl Drop for Managed {
@@ -144,22 +183,76 @@ pub fn branch_status(cwd: &Path) -> Option<BranchStatus> {
     let checkout = PathBuf::from(git_text(cwd, &["rev-parse", "--show-toplevel"])?);
     let checked_out = base_ref(&checkout);
     let managed = read_record(&checkout);
-    let own = managed.as_ref().map(|(record, _, _)| record.branch.as_str());
+    let own = managed.as_ref().map(|(record, _, _, _)| record.branch.as_str());
     let text = git_text(&main, &["branch", "--format=%(refname:short)"])?;
     let branches = text.lines().map(str::trim)
         .filter(|name| safe_ref(name) && Some(*name) != own)
         .map(str::to_owned).collect();
     Some(BranchStatus {
         branches,
-        base: managed.map(|(_, base, _)| base).or_else(|| checked_out.clone()),
+        base: managed.map(|(_, base, _, _)| base).or_else(|| checked_out.clone()),
         checked_out,
     })
 }
 
-/// Live rebasing is not yet supported by the native daemon. Keep this refusal
-/// in the worktree API so callers cannot mistake `resolve_base` for a switch.
-pub fn live_switch_refusal() -> &'static str {
-    "live base switching is unavailable in Rust; use `doxa-rs new --branch NAME` to start an isolated session, or finish the current session and switch your checkout explicitly with git"
+/// Change only a verified session-owned worktree. The caller must serialize
+/// this with prompt admission and reject active or queued turns first.
+pub fn switch_base(path: &Path, requested: &str) -> Result<String, String> {
+    let (record, old_base, main, base_oid) = read_record(path).ok_or_else(||
+        "no verified doxa worktree here; switching the actual checkout is refused".to_owned())?;
+    let keep = || format!("kept {} — merge when ready", record.branch);
+    if worktree_for_branch(&main, &record.branch).as_ref() != Some(&record.path)
+        || git_text(&record.path, &["symbolic-ref", "--quiet", "--short", "HEAD"])
+            .as_deref() != Some(record.branch.as_str()) {
+        return Err("worktree branch identity changed; switch refused".into());
+    }
+    let target = resolve_base(&main, requested)
+        .ok_or_else(|| format!("no such local or remote-tracking branch: {requested}"))?;
+    if target == record.branch {
+        return Err("this session's own branch cannot be its base".into());
+    }
+    let status = git_text(&record.path, &["status", "--porcelain", "--untracked-files=all", "--ignored"])
+        .ok_or_else(|| "could not inspect worktree status; switch refused".to_owned())?;
+    if !status.is_empty() { return Err(format!("{} has uncommitted changes; {}", record.branch, keep())); }
+    let spec = format!("{old_base}..{}", record.branch);
+    let ahead = git_text(&record.path, &["rev-list", "--count", &spec])
+        .ok_or_else(|| "could not measure commits against the current base; switch refused".to_owned())?;
+    if ahead != "0" { return Err(format!("{} is {ahead} commit(s) ahead of {old_base}; {}", record.branch, keep())); }
+    let before = git_text(&record.path, &["rev-parse", "--verify", "HEAD^{commit}"])
+        .filter(|oid| valid_commit_oid(oid))
+        .ok_or_else(|| "could not verify worktree HEAD; switch refused".to_owned())?;
+    if base_oid.as_deref() != Some(before.as_str()) {
+        return Err("pinned base commit differs from worktree HEAD; switch refused".into());
+    }
+    let target_oid = git_text(&record.path, &["rev-parse", "--verify", &format!("{target}^{{commit}}")])
+        .filter(|oid| valid_commit_oid(oid))
+        .ok_or_else(|| "could not verify target commit; switch refused".to_owned())?;
+    // Update the checkout/index to the exact target tree without asking Git
+    // to infer a replay range. A moving old base can make `git rebase target`
+    // replay commits that belonged to that base, even with zero unique work.
+    // read-tree refuses local file conflicts; if the ref CAS fails afterward,
+    // the resulting staged changes remain visible and finalize keeps them.
+    if !git(&record.path, &["read-tree", "-m", "-u", &before, &target_oid], Duration::from_secs(30))
+        .is_some_and(|(ok, _)| ok) {
+        return Err(format!("checkout of {target} failed; inspect {}; {}", record.path.display(), keep()));
+    }
+    let full_ref = format!("refs/heads/{}", record.branch);
+    if !git(&main, &["update-ref", &full_ref, &target_oid, &before], Duration::from_secs(10))
+        .is_some_and(|(ok, _)| ok) {
+        return Err(format!("branch moved during switch; inspect {}; {}", record.path.display(), keep()));
+    }
+    let after = git_text(&record.path, &["rev-parse", "--verify", "HEAD^{commit}"]);
+    if after.as_deref() != Some(target_oid.as_str())
+        || git_text(&record.path, &["symbolic-ref", "--quiet", "--short", "HEAD"])
+            .as_deref() != Some(record.branch.as_str()) {
+        return Err(format!("branch changed during switch; inspect {}; {}", record.path.display(), keep()));
+    }
+    // A sidecar mismatch after a successful rebase must be left in place so
+    // finalize cannot infer that the new branch has no unmerged work.
+    if !replace_base_record(&record.path, &main, &record.branch, &record.session_id, &old_base, &before, &target, &target_oid) {
+        return Err(format!("branch moved to {target}, but metadata could not be updated; inspect {}; {}", record.path.display(), keep()));
+    }
+    Ok(format!("{} now based on {target}", record.branch))
 }
 fn short_id(id: &str) -> String {
     let short: String = id.chars().filter(char::is_ascii_alphanumeric).take(8).collect();
@@ -191,7 +284,29 @@ fn ensure_owned_dir(path: &Path) -> Option<PathBuf> {
 fn meta_path(path: &Path) -> Option<PathBuf> {
     Some(root()?.join(".meta").join(format!("{}.json", path.file_name()?.to_str()?)))
 }
-fn read_record(path: &Path) -> Option<(Record, String, PathBuf)> {
+fn lock_path(path: &Path) -> Option<PathBuf> {
+    Some(root()?.join(".meta").join(format!("{}.lock", path.file_name()?.to_str()?)))
+}
+/// Locks are intentionally retained after cleanup. Unlinking a lock allows a
+/// second process to lock a new inode while the first still holds the old one.
+fn lock_worktree(path: &Path) -> Option<File> {
+    let target = lock_path(path)?;
+    let parent = target.parent()?;
+    owned_dir(parent)?;
+    let file = OpenOptions::new().read(true).write(true).create(true).mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+        .open(&target).ok()?;
+    let stat = file.metadata().ok()?;
+    let path_stat = fs::symlink_metadata(&target).ok()?;
+    if !stat.is_file() || stat.uid() != unsafe { libc::geteuid() }
+        || stat.permissions().mode() & 0o077 != 0
+        || stat.dev() != path_stat.dev() || stat.ino() != path_stat.ino() {
+        return None;
+    }
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 { return None; }
+    Some(file)
+}
+fn read_record(path: &Path) -> Option<(Record, String, PathBuf, Option<String>)> {
     let meta_path = meta_path(path)?;
     let raw = fs::symlink_metadata(&meta_path).ok()?;
     if !raw.file_type().is_file() || raw.uid() != unsafe { libc::geteuid() }
@@ -210,7 +325,11 @@ fn read_record(path: &Path) -> Option<(Record, String, PathBuf)> {
     let id = data.get("session_id")?.as_str()?.to_owned();
     let branch = data.get("branch")?.as_str()?.to_owned();
     let base = data.get("base_ref")?.as_str()?.to_owned();
-    if data.get("base_oid").is_some_and(|value| value.as_str().is_none_or(|oid| !valid_commit_oid(oid))) {
+    let base_oid = match data.get("base_oid") {
+        Some(value) => Some(value.as_str()?.to_owned()),
+        None => None,
+    };
+    if base_oid.as_deref().is_some_and(|oid| !valid_commit_oid(oid)) {
         return None;
     }
     let main = PathBuf::from(data.get("main_root")?.as_str()?);
@@ -221,7 +340,7 @@ fn read_record(path: &Path) -> Option<(Record, String, PathBuf)> {
         || path.file_name()?.to_str()? != format!("{}-{}", main.file_name()?.to_str()?, short_id(&id)) {
         return None;
     }
-    Some((Record { path: canonical, branch, session_id: id }, base, main))
+    Some((Record { path: canonical, branch, session_id: id }, base, main, base_oid))
 }
 fn write_record(path: &Path, main: &Path, branch: &str, base: &str, base_oid: &str, id: &str) -> Option<()> {
     if !valid_commit_oid(base_oid) { return None; }
@@ -244,6 +363,40 @@ fn write_record(path: &Path, main: &Path, branch: &str, base: &str, base_oid: &s
     })();
     let _ = fs::remove_file(temp);
     result
+}
+fn replace_base_record(path: &Path, main: &Path, branch: &str, session_id: &str, old_base: &str,
+    old_head: &str, new_base: &str, new_oid: &str) -> bool {
+    let Some(meta) = meta_path(path) else { return false; };
+    let Some(parent) = meta.parent() else { return false; };
+    if owned_dir(parent).is_none() { return false; }
+    let Ok(raw) = fs::symlink_metadata(&meta) else { return false; };
+    if !raw.file_type().is_file() || raw.uid() != unsafe { libc::geteuid() }
+        || raw.permissions().mode() & 0o077 != 0 || raw.len() > MAX_META_BYTES { return false; }
+    let Ok(source) = OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(&meta) else { return false; };
+    let Ok(stat) = source.metadata() else { return false; };
+    if (raw.dev(), raw.ino()) != (stat.dev(), stat.ino()) { return false; }
+    let mut bytes = Vec::new();
+    if source.take(MAX_META_BYTES + 1).read_to_end(&mut bytes).is_err() || bytes.len() as u64 > MAX_META_BYTES { return false; }
+    let Ok(mut data) = serde_json::from_slice::<serde_json::Value>(&bytes) else { return false; };
+    if data["branch"] != branch || data["base_ref"] != old_base
+        || data["main_root"] != main.to_string_lossy().as_ref()
+        || data["session_id"] != session_id { return false; }
+    // A legacy Python sidecar may not have base_oid. Its observed HEAD was
+    // already checked before the Git operation, and the name is preserved.
+    if data["base_oid"].as_str().is_some_and(|oid| !valid_commit_oid(oid)) { return false; }
+    if !valid_commit_oid(old_head) || !valid_commit_oid(new_oid) { return false; }
+    data["base_ref"] = serde_json::Value::String(new_base.to_owned());
+    data["base_oid"] = serde_json::Value::String(new_oid.to_owned());
+    let stamp = SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|t| t.as_nanos());
+    let Some(stamp) = stamp else { return false; };
+    let temp = parent.join(format!(".base-{}-{stamp}.tmp", std::process::id()));
+    let Ok(mut file) = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&temp) else { return false; };
+    let written = serde_json::to_writer(&mut file, &data).is_ok()
+        && file.flush().is_ok() && file.sync_all().is_ok()
+        && fs::symlink_metadata(&meta).is_ok_and(|now| (now.dev(), now.ino()) == (raw.dev(), raw.ino()))
+        && fs::rename(&temp, &meta).is_ok();
+    if !written { let _ = fs::remove_file(&temp); }
+    written
 }
 fn worktree_for_branch(main: &Path, branch: &str) -> Option<PathBuf> {
     let text = git_text(main, &["worktree", "list", "--porcelain"])?;
@@ -283,18 +436,23 @@ pub fn create_from(cwd: &Path, id: &str, requested_base: Option<&str>) -> Option
     };
     let short = short_id(id);
     let branch = format!("doxa/{short}");
-    if branch == base { return None; }
     let repo = main.file_name()?.to_str()?;
     let worktrees = ensure_owned_dir(&root()?)?;
     let path = worktrees.join(format!("{repo}-{short}"));
     if let Some(existing) = worktree_for_branch(&main, &branch) {
-        let (record, old_base, _) = read_record(&existing)?;
+        let (record, old_base, _, _) = read_record(&existing)?;
         if record.path != existing.canonicalize().ok()? || record.session_id != id || record.path != path
-            || requested_base.is_some() && old_base != base {
+            || requested_base.is_some() && old_base != base
+            || branch == base && cwd.canonicalize().ok()? != record.path {
             return None;
         }
-        return Some(Managed { path: record.path, created: false, finished: false });
+        let lock = lock_worktree(&record.path)?;
+        // The metadata may have changed while we waited for the lock.
+        let (locked, _, _, _) = read_record(&record.path)?;
+        if locked.path != record.path || locked.session_id != id { return None; }
+        return Some(Managed { path: record.path, created: false, finished: false, lock: Some(lock) });
     }
+    if branch == base { return None; }
     if fs::symlink_metadata(&path).is_ok() || meta_path(&path).is_some_and(|p| fs::symlink_metadata(p).is_ok()) {
         return None;
     }
@@ -313,13 +471,21 @@ pub fn create_from(cwd: &Path, id: &str, requested_base: Option<&str>) -> Option
         // Preserve it for inspection, but never run a session in it.
         return None;
     }
-    Some(Managed { path, created: true, finished: false })
+    let lock = lock_worktree(&path)?;
+    Some(Managed { path, created: true, finished: false, lock: Some(lock) })
 }
 
 /// Remove only a verified, clean managed worktree with no unique commits.
 /// Any uncertainty yields a keep message and leaves user data untouched.
 pub fn finalize(path: &Path) -> String {
-    let Some((record, base, main)) = read_record(path) else {
+    let Some(_lock) = lock_worktree(path) else {
+        return "worktree cleanup lock unavailable; kept it".into();
+    };
+    finalize_locked(path)
+}
+
+fn finalize_locked(path: &Path) -> String {
+    let Some((record, base, main, base_oid)) = read_record(path) else {
         return "worktree ownership could not be verified; kept it".into();
     };
     let keep = || format!("kept {} at {} — merge when ready", record.branch, record.path.display());
@@ -328,7 +494,13 @@ pub fn finalize(path: &Path) -> String {
     // clean checkout is still theirs; never remove it on this sidecar's say.
     if git_text(&record.path, &["symbolic-ref", "--quiet", "--short", "HEAD"])
         .as_deref() != Some(record.branch.as_str()) { return keep(); }
-    let Some(status) = git_text(&record.path, &["status", "--porcelain", "--untracked-files=all"]) else { return keep(); };
+    if !base_oid.as_deref().is_none_or(|oid| {
+        git(&main, &["merge-base", "--is-ancestor", oid, &record.branch], Duration::from_secs(10))
+            .is_some_and(|(ok, _)| ok)
+    }) { return keep(); }
+    // Git considers ignored files disposable during `worktree remove`, even
+    // without --force. They may still be valuable user data.
+    let Some(status) = git_text(&record.path, &["status", "--porcelain", "--ignored", "--untracked-files=all"]) else { return keep(); };
     if !status.is_empty() { return keep(); }
     let spec = format!("{base}..{}", record.branch);
     if git_text(&record.path, &["rev-list", "--count", &spec]).as_deref() != Some("0") { return keep(); }
@@ -362,22 +534,251 @@ pub fn list_orphans(live_ids: &HashSet<String>) -> Vec<Record> {
         if path.extension().is_none_or(|ext| ext != "json") { continue; }
         let Some(stem) = path.file_stem() else { continue; };
         let target = root.join(stem);
-        let Some((record, _, _)) = read_record(&target) else { continue; };
+        let Some((record, _, _, _)) = read_record(&target) else { continue; };
         if !live_ids.contains(&record.session_id) { rows.push(record); }
     }
     rows.sort_by(|a, b| a.path.cmp(&b.path));
     rows
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OrphanState {
+    Ready { head_oid: String },
+    Dirty,
+    UniqueCommits,
+    Uncertain,
+}
+
+#[derive(Clone, Debug)]
+pub struct OrphanPreview {
+    pub record: Record,
+    pub state: OrphanState,
+}
+
+fn orphan_state(record: &Record, base: &str, main: &Path, base_oid: Option<&str>) -> OrphanState {
+    // Python 1.19 does not write base_oid or hold the Rust advisory lock.
+    // Its daemon may be starting before registry publication, so those
+    // sidecars are survey-only and never eligible for automated cleanup.
+    let Some(base_oid) = base_oid else { return OrphanState::Uncertain; };
+    if worktree_for_branch(main, &record.branch).as_ref() != Some(&record.path)
+        || git_text(&record.path, &["symbolic-ref", "--quiet", "--short", "HEAD"])
+            .as_deref() != Some(record.branch.as_str()) {
+        return OrphanState::Uncertain;
+    }
+    if !git(main, &["merge-base", "--is-ancestor", base_oid, &record.branch], Duration::from_secs(10))
+        .is_some_and(|(ok, _)| ok) { return OrphanState::Uncertain; }
+    let Some(status) = git_text(&record.path, &["status", "--porcelain", "--ignored", "--untracked-files=all"])
+        else { return OrphanState::Uncertain; };
+    if !status.is_empty() { return OrphanState::Dirty; }
+    let spec = format!("{base}..{}", record.branch);
+    match git_text(&record.path, &["rev-list", "--count", &spec]).as_deref() {
+        Some("0") => {},
+        Some(value) if value.parse::<u64>().is_ok_and(|n| n > 0) => return OrphanState::UniqueCommits,
+        _ => return OrphanState::Uncertain,
+    }
+    match git_text(main, &["rev-parse", "--verify", &record.branch]) {
+        Some(head_oid) if valid_commit_oid(&head_oid) => OrphanState::Ready { head_oid },
+        _ => OrphanState::Uncertain,
+    }
+}
+
+/// Preview verified local orphans. Only `Ready` entries are eligible for
+/// removal; dirty or uniquely committed trees remain visible for recovery.
+pub fn preview_orphans(live_ids: &HashSet<String>) -> Vec<OrphanPreview> {
+    list_orphans(live_ids).into_iter().map(|record| {
+        let state = match read_record(&record.path) {
+            Some((current, base, main, base_oid)) if current.branch == record.branch
+                && current.session_id == record.session_id => orphan_state(&record, &base, &main, base_oid.as_deref()),
+            _ => OrphanState::Uncertain,
+        };
+        OrphanPreview { record, state }
+    }).collect()
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CleanupResult {
+    Removed,
+    Kept(String),
+}
+
+/// Explicitly remove one previously previewed clean orphan. The caller must
+/// provide a fresh live-session reader: registry failures refuse cleanup.
+/// Both the previewed branch OID and all ownership/status checks are repeated
+/// while holding the same lock as a Rust session daemon.
+pub fn cleanup_orphan(
+    preview: &OrphanPreview,
+    live_ids: impl Fn() -> Option<HashSet<String>>,
+) -> CleanupResult {
+    let OrphanState::Ready { head_oid } = &preview.state else {
+        return CleanupResult::Kept("orphan was not previewed as clean".into());
+    };
+    let Some(live) = live_ids() else {
+        return CleanupResult::Kept("live sessions could not be verified".into());
+    };
+    if live.contains(&preview.record.session_id) {
+        return CleanupResult::Kept("session is live".into());
+    }
+    let Some(_lock) = lock_worktree(&preview.record.path) else {
+        return CleanupResult::Kept("worktree is locked or its lock is untrusted".into());
+    };
+    // A process can start or replace metadata between preview and lock.
+    let Some((record, base, main, base_oid)) = read_record(&preview.record.path) else {
+        return CleanupResult::Kept("worktree ownership could not be verified".into());
+    };
+    if record.path != preview.record.path || record.branch != preview.record.branch
+        || record.session_id != preview.record.session_id {
+        return CleanupResult::Kept("worktree identity changed".into());
+    }
+    if !matches!(orphan_state(&record, &base, &main, base_oid.as_deref()), OrphanState::Ready { head_oid: current } if current == *head_oid) {
+        return CleanupResult::Kept("worktree changed since preview".into());
+    }
+    let Some(live) = live_ids() else {
+        return CleanupResult::Kept("live sessions could not be verified".into());
+    };
+    if live.contains(&record.session_id) {
+        return CleanupResult::Kept("session became live".into());
+    }
+    let note = finalize_locked(&record.path);
+    if note.is_empty() { CleanupResult::Removed } else { CleanupResult::Kept(note) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // These fixtures set DOXA_HOME/DOXA_WORKTREE for the whole test process.
+    static TEST_ENV_LOCK: Mutex<()> = Mutex::new(());
+
     fn run_git(cwd: &Path, args: &[&str]) {
         let result = Command::new("git").args(args).current_dir(cwd).output().unwrap();
         assert!(result.status.success(), "git {:?}: {}", args, String::from_utf8_lossy(&result.stderr));
     }
     #[test]
+    fn live_switch_updates_base_and_preserves_dirty_or_unique_work() {
+        let _serial = TEST_ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        env::set_var("DOXA_HOME", dir.path().join("home"));
+        env::set_var("DOXA_WORKTREE", "1");
+        let main = dir.path().join("repo");
+        fs::create_dir(&main).unwrap();
+        run_git(&main, &["init", "-q", "-b", "main"]);
+        fs::write(main.join("file"), "main\n").unwrap();
+        run_git(&main, &["add", "file"]);
+        run_git(&main, &["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "test: base"]);
+        run_git(&main, &["checkout", "-qb", "feature"]);
+        fs::write(main.join("file"), "feature\n").unwrap();
+        run_git(&main, &["add", "file"]);
+        run_git(&main, &["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "test: feature"]);
+        let feature_oid = git_text(&main, &["rev-parse", "HEAD"]).unwrap();
+        run_git(&main, &["checkout", "-q", "main"]);
+        let main_oid = git_text(&main, &["rev-parse", "HEAD"]).unwrap();
+        assert_eq!(repo_status(dir.path()), Some(RepoStatus::Directory { name: dir.path().file_name().unwrap().to_string_lossy().into_owned() }));
+        assert_eq!(repo_status(&main), Some(RepoStatus::Repository {
+            repo: "repo".into(), base: Some("main".into()), checked_out: Some("main".into()),
+            sha: Some(main_oid[..7].into()), worktree: None,
+        }));
+        assert!(switch_base(&main, "feature").unwrap_err().contains("no verified"));
+        let mut tree = create(&main, "switch001").unwrap();
+        let path = tree.path().to_path_buf();
+        assert_eq!(repo_status(&path), Some(RepoStatus::Repository {
+            repo: "repo".into(), base: Some("main".into()), checked_out: Some("doxa/switch00".into()),
+            sha: Some(main_oid[..7].into()), worktree: Some("doxa/switch00".into()),
+        }));
+        assert!(switch_base(&path, "doxa/switch00").unwrap_err().contains("own branch"));
+        assert!(switch_base(&path, "missing").unwrap_err().contains("no such"));
+        let metadata_path = meta_path(&path).unwrap();
+        let mut stale: serde_json::Value = serde_json::from_slice(&fs::read(&metadata_path).unwrap()).unwrap();
+        stale["base_oid"] = serde_json::json!(feature_oid);
+        fs::write(&metadata_path, serde_json::to_vec(&stale).unwrap()).unwrap();
+        assert!(switch_base(&path, "feature").unwrap_err().contains("pinned base"));
+        assert_eq!(git_text(&path, &["rev-parse", "HEAD"]).as_deref(), Some(main_oid.as_str()));
+        stale["base_oid"] = serde_json::json!(main_oid);
+        fs::write(&metadata_path, serde_json::to_vec(&stale).unwrap()).unwrap();
+        assert!(switch_base(&path, "feature").unwrap().contains("now based"));
+        assert_eq!(repo_status(&path), Some(RepoStatus::Repository {
+            repo: "repo".into(), base: Some("feature".into()), checked_out: Some("doxa/switch00".into()),
+            sha: Some(feature_oid[..7].into()), worktree: Some("doxa/switch00".into()),
+        }));
+        assert_eq!(git_text(&path, &["rev-parse", "HEAD"]).as_deref(), Some(feature_oid.as_str()));
+        assert_eq!(git_text(&main, &["rev-parse", "HEAD"]).as_deref(), Some(main_oid.as_str()));
+        let data: serde_json::Value = serde_json::from_slice(&fs::read(meta_path(&path).unwrap()).unwrap()).unwrap();
+        assert_eq!(data["base_ref"], "feature");
+        assert_eq!(data["base_oid"], feature_oid);
+        fs::write(path.join("scratch"), "dirty").unwrap();
+        assert!(switch_base(&path, "main").unwrap_err().contains("uncommitted"));
+        fs::remove_file(path.join("scratch")).unwrap();
+        fs::write(path.join("file"), "own commit\n").unwrap();
+        run_git(&path, &["add", "file"]);
+        run_git(&path, &["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "test: own"]);
+        let own_oid = git_text(&path, &["rev-parse", "HEAD"]).unwrap();
+        assert!(switch_base(&path, "main").unwrap_err().contains("ahead"));
+        assert_eq!(git_text(&path, &["rev-parse", "HEAD"]).as_deref(), Some(own_oid.as_str()));
+        assert!(tree.finish().contains("kept"));
+    }
+    #[test]
+    fn switch_does_not_replay_old_base_commits_when_base_advanced() {
+        let _serial = TEST_ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        env::set_var("DOXA_HOME", dir.path().join("home"));
+        env::set_var("DOXA_WORKTREE", "1");
+        let main = dir.path().join("repo");
+        fs::create_dir(&main).unwrap();
+        run_git(&main, &["init", "-q", "-b", "main"]);
+        fs::write(main.join("file"), "A\n").unwrap();
+        run_git(&main, &["add", "file"]);
+        run_git(&main, &["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "test: A"]);
+        let a = git_text(&main, &["rev-parse", "HEAD"]).unwrap();
+        fs::write(main.join("file"), "B\n").unwrap();
+        run_git(&main, &["add", "file"]);
+        run_git(&main, &["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "test: B"]);
+        let mut tree = create(&main, "baseadv1").unwrap();
+        let path = tree.path().to_path_buf();
+        fs::write(main.join("file"), "C\n").unwrap();
+        run_git(&main, &["add", "file"]);
+        run_git(&main, &["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "test: C"]);
+        run_git(&main, &["branch", "feature", &a]);
+        run_git(&main, &["checkout", "-q", "feature"]);
+        fs::write(main.join("file"), "X\n").unwrap();
+        run_git(&main, &["add", "file"]);
+        run_git(&main, &["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "test: X"]);
+        let x = git_text(&main, &["rev-parse", "HEAD"]).unwrap();
+        run_git(&main, &["checkout", "-q", "main"]);
+        assert!(switch_base(&path, "feature").unwrap().contains("now based"));
+        assert_eq!(git_text(&path, &["rev-parse", "HEAD"]).as_deref(), Some(x.as_str()));
+        assert_eq!(fs::read_to_string(path.join("file")).unwrap(), "X\n");
+        assert_eq!(git_text(&path, &["status", "--porcelain"]).unwrap(), "");
+        assert!(tree.finish().is_empty());
+    }
+    #[test]
+    fn switch_refuses_ignored_files_that_target_would_overwrite() {
+        let _serial = TEST_ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        env::set_var("DOXA_HOME", dir.path().join("home"));
+        env::set_var("DOXA_WORKTREE", "1");
+        let main = dir.path().join("repo");
+        fs::create_dir(&main).unwrap();
+        run_git(&main, &["init", "-q", "-b", "main"]);
+        fs::write(main.join(".gitignore"), "cache/\n").unwrap();
+        run_git(&main, &["add", ".gitignore"]);
+        run_git(&main, &["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "test: ignore cache"]);
+        let mut tree = create(&main, "ignored1").unwrap();
+        let path = tree.path().to_path_buf();
+        fs::create_dir(path.join("cache")).unwrap();
+        fs::write(path.join("cache/user.txt"), "private work\n").unwrap();
+        run_git(&main, &["checkout", "-qb", "feature"]);
+        fs::create_dir(main.join("cache")).unwrap();
+        fs::write(main.join("cache/user.txt"), "tracked target\n").unwrap();
+        run_git(&main, &["add", "-f", "cache/user.txt"]);
+        run_git(&main, &["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "test: track cache"]);
+        assert!(switch_base(&path, "feature").unwrap_err().contains("uncommitted"));
+        assert_eq!(fs::read_to_string(path.join("cache/user.txt")).unwrap(), "private work\n");
+        // Finalization's ignored-file rule is covered by orphan cleanup.
+        let _ = tree.finish();
+    }
+    #[test]
     fn clean_tree_is_removed_but_dirty_and_committed_work_are_kept() {
+        let _serial = TEST_ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().join("home");
         env::set_var("DOXA_HOME", &home);
@@ -454,6 +855,9 @@ mod tests {
         let reused = create(&main, "b1b2c3d4dirty").unwrap();
         assert_eq!(reused.path(), dirty_path);
         drop(reused); // a restarted daemon must not delete another instance's tree
+        let resumed = create(&dirty_path, "b1b2c3d4dirty").unwrap();
+        assert_eq!(resumed.path(), dirty_path);
+        drop(resumed); // archived cwd is the managed tree itself
         assert!(dirty_path.join("untracked.txt").exists());
         assert!(create_from(&main, "b1b2c3d4dirty", Some("feature")).is_none());
         assert_eq!(read_record(&dirty_path).unwrap().1, "main");
@@ -506,6 +910,91 @@ mod tests {
         run_git(&main, &["update-ref", "refs/heads/race", "HEAD"]);
         assert!(!delete_if_unchanged(&main, "race", &old_oid));
         assert!(git_text(&main, &["rev-parse", "race"]).is_some());
+
+        let mut orphan = create(&main, "h1b2c3d4orphan").unwrap();
+        let orphan_path = orphan.path().to_path_buf();
+        fs::write(orphan_path.join("scratch"), "keep").unwrap();
+        assert!(orphan.finish().contains("kept"));
+        fs::remove_file(orphan_path.join("scratch")).unwrap();
+        let preview = preview_orphans(&HashSet::new()).into_iter()
+            .find(|row| row.record.path == orphan_path).unwrap();
+        assert!(matches!(preview.state, OrphanState::Ready { .. }));
+        assert!(matches!(cleanup_orphan(&preview, || Some(HashSet::from(["h1b2c3d4orphan".into()]))), CleanupResult::Kept(_)));
+        assert!(orphan_path.exists());
+        let checks = std::cell::Cell::new(0);
+        assert!(matches!(cleanup_orphan(&preview, || {
+            checks.set(checks.get() + 1);
+            Some(if checks.get() == 2 { HashSet::from(["h1b2c3d4orphan".into()]) } else { HashSet::new() })
+        }), CleanupResult::Kept(_)));
+        assert_eq!(checks.get(), 2);
+        assert!(orphan_path.exists());
+        assert!(matches!(cleanup_orphan(&preview, || None), CleanupResult::Kept(_)));
+        let sidecar = meta_path(&orphan_path).unwrap();
+        let original_sidecar = fs::read(&sidecar).unwrap();
+        let mut stale: serde_json::Value = serde_json::from_slice(&original_sidecar).unwrap();
+        stale["base_oid"] = serde_json::Value::String(git_text(&main, &["rev-parse", "feature"]).unwrap());
+        fs::write(&sidecar, serde_json::to_vec(&stale).unwrap()).unwrap();
+        let stale_preview = preview_orphans(&HashSet::new()).into_iter()
+            .find(|row| row.record.path == orphan_path).unwrap();
+        assert_eq!(stale_preview.state, OrphanState::Uncertain);
+        assert!(matches!(cleanup_orphan(&preview, || Some(HashSet::new())), CleanupResult::Kept(_)));
+        fs::write(&sidecar, &original_sidecar).unwrap();
+        let mut legacy: serde_json::Value = serde_json::from_slice(&fs::read(&sidecar).unwrap()).unwrap();
+        legacy.as_object_mut().unwrap().remove("base_oid");
+        fs::write(&sidecar, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        let legacy_preview = preview_orphans(&HashSet::new()).into_iter()
+            .find(|row| row.record.path == orphan_path).unwrap();
+        assert_eq!(legacy_preview.state, OrphanState::Uncertain);
+        assert!(matches!(cleanup_orphan(&preview, || Some(HashSet::new())), CleanupResult::Kept(_)));
+        fs::write(&sidecar, original_sidecar).unwrap();
+        assert_eq!(cleanup_orphan(&preview, || Some(HashSet::new())), CleanupResult::Removed);
+        assert!(!orphan_path.exists());
+        assert!(git_text(&main, &["show-ref", "--verify", "refs/heads/doxa/h1b2c3d4"]).is_none());
+
+        let mut locked = create(&main, "i1b2c3d4locked").unwrap();
+        let locked_path = locked.path().to_path_buf();
+        let preview = preview_orphans(&HashSet::new()).into_iter()
+            .find(|row| row.record.path == locked_path).unwrap();
+        assert!(matches!(cleanup_orphan(&preview, || Some(HashSet::new())), CleanupResult::Kept(_)));
+        assert!(locked_path.exists());
+        assert!(locked.finish().is_empty());
+
+        let mut ahead = create(&main, "j1b2c3d4ahead").unwrap();
+        let ahead_path = ahead.path().to_path_buf();
+        fs::write(ahead_path.join("file.txt"), "new work\n").unwrap();
+        run_git(&ahead_path, &["add", "file.txt"]);
+        run_git(&ahead_path, &["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "test: retained work"]);
+        assert!(ahead.finish().contains("kept"));
+        let preview = preview_orphans(&HashSet::new()).into_iter()
+            .find(|row| row.record.path == ahead_path).unwrap();
+        assert_eq!(preview.state, OrphanState::UniqueCommits);
+        assert!(matches!(cleanup_orphan(&preview, || Some(HashSet::new())), CleanupResult::Kept(_)));
+        assert!(ahead_path.exists());
+
+        let mut race_tree = create(&main, "k1b2c3d4race").unwrap();
+        let race_path = race_tree.path().to_path_buf();
+        fs::write(race_path.join("scratch"), "keep").unwrap();
+        assert!(race_tree.finish().contains("kept"));
+        fs::remove_file(race_path.join("scratch")).unwrap();
+        let preview = preview_orphans(&HashSet::new()).into_iter()
+            .find(|row| row.record.path == race_path).unwrap();
+        fs::write(race_path.join("new"), "changed since preview").unwrap();
+        assert!(matches!(cleanup_orphan(&preview, || Some(HashSet::new())), CleanupResult::Kept(_)));
+        assert!(race_path.exists());
+
+        fs::write(main.join(".gitignore"), "cache/\n").unwrap();
+        run_git(&main, &["add", ".gitignore"]);
+        run_git(&main, &["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "test: ignore cache"]);
+        let mut ignored = create(&main, "l1b2c3d4ignored").unwrap();
+        let ignored_path = ignored.path().to_path_buf();
+        fs::create_dir(ignored_path.join("cache")).unwrap();
+        fs::write(ignored_path.join("cache/user.txt"), "valuable ignored data\n").unwrap();
+        let preview = preview_orphans(&HashSet::new()).into_iter()
+            .find(|row| row.record.path == ignored_path).unwrap();
+        assert_eq!(preview.state, OrphanState::Dirty);
+        assert!(ignored.finish().contains("kept"));
+        assert_eq!(fs::read_to_string(ignored_path.join("cache/user.txt")).unwrap(), "valuable ignored data\n");
+
         env::remove_var("DOXA_HOME");
         env::remove_var("DOXA_WORKTREE");
     }

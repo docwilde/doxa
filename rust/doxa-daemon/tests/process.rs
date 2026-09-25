@@ -1258,6 +1258,52 @@ fn existing_transcript_without_thread_id_refuses_new_codex_thread() {
 }
 
 #[test]
+fn explicit_codex_resume_requires_matching_thread_metadata() {
+    let dir = tempfile::tempdir().unwrap();
+    let codex = dir.path().join("codex-fixture");
+    let python = dir.path().join("lore-fixture");
+    fake_scrubber(&python, false);
+    executable(&codex, "#!/bin/sh\necho started > should-not-start\n");
+    let project = dir.path().join("project");
+    fs::create_dir(&project).unwrap();
+    let transcript = project.join("codex-session.jsonl");
+    let thread = project.join("codex-session.codex.json");
+    let run = || Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+        .args(["--runtime-dir", dir.path().to_str().unwrap(),
+            "--cwd", dir.path().to_str().unwrap(), "--session-id", "codex-session",
+            "--engine", "codex", "--codex-bin", codex.to_str().unwrap(),
+            "--lore-python", python.to_str().unwrap(), "--resume", "true"])
+        .output().unwrap();
+    assert!(!run().status.success(), "resume without saved state must fail");
+    fs::write(&transcript, b"{\"type\":\"user\"}\n").unwrap();
+    for state in [
+        json!({"thread_id":"thread_1","session_id":"other","cwd":dir.path()}),
+        json!({"thread_id":"thread_1","session_id":"codex-session","cwd":"/wrong"}),
+        json!({"thread_id":"-unsafe","session_id":"codex-session","cwd":dir.path()}),
+        json!({"thread_id":"thread_1","session_id":"codex-session","cwd":dir.path()}),
+        json!({"thread_id":"thread_1","session_id":"codex-session","cwd":dir.path(),"turn_incomplete":true}),
+    ] {
+        fs::write(&thread, state.to_string()).unwrap();
+        let output = run();
+        assert!(!output.status.success(), "bad state must refuse resume");
+        assert!(!project.join("should-not-start").exists());
+        assert!(!dir.path().join("registry/codex-session.json").exists());
+    }
+    fs::write(&thread, json!({"thread_id":"thread_1","session_id":"codex-session",
+        "cwd":dir.path(),"model":null,"turn_incomplete":false}).to_string()).unwrap();
+    let mut resumed = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+        .args(["--runtime-dir", dir.path().to_str().unwrap(),
+            "--cwd", dir.path().to_str().unwrap(), "--session-id", "codex-session",
+            "--engine", "codex", "--codex-bin", codex.to_str().unwrap(),
+            "--lore-python", python.to_str().unwrap(), "--resume", "true"])
+        .stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+    wait_until(|| dir.path().join("registry/codex-session.json").exists());
+    resumed.kill().unwrap();
+    resumed.wait().unwrap();
+    assert!(!dir.path().join("should-not-start").exists(), "provider must wait for a prompt");
+}
+
+#[test]
 fn thread_identity_is_durable_before_turn_completes() {
     let dir = tempfile::tempdir().unwrap();
     let codex = dir.path().join("codex-fixture");
@@ -1923,8 +1969,10 @@ mod vendor_process {
             let mut process = start_vendor(dir.path(), vendor, &endpoint, &lore);
             assert_eq!(process.entry()["engine"], vendor);
             let (mut reader, mut socket) = process.connect();
+            let hello = receive(&mut reader);
+            assert_eq!(hello["effort"], "high");
             assert_eq!(
-                receive(&mut reader)["model"],
+                hello["model"],
                 if vendor == "glm" {
                     "glm-5.3-flash"
                 } else {

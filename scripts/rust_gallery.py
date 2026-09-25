@@ -14,7 +14,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
 ROOT = Path(__file__).resolve().parents[1]
-SCENES = ("hero", "tool-activity", "needs-input", "permissions", "history", "queue")
+SCENES = ("hero", "tool-activity", "needs-input", "permissions", "effort", "history", "queue", "memory")
 FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
 CELL_W, CELL_H = 14, 26
 BOX_STROKES = {
@@ -38,6 +38,16 @@ def draw_box_stroke(draw: ImageDraw.ImageDraw, symbol: str, left: int, top: int,
         draw.line((center_x, center_y, center_x, top + CELL_H), fill=color, width=2)
 
 
+def draw_branch_symbol(draw: ImageDraw.ImageDraw, left: int, top: int,
+                       color: tuple[int, int, int]) -> None:
+    """Render U+2387 consistently when the screenshot font lacks its glyph."""
+    left_x, right_x = left + 4, left + 10
+    draw.line((left_x, top + 6, left_x, top + 19, right_x, top + 13, right_x, top + 7),
+              fill=color, width=2)
+    for x, y in ((left_x, top + 5), (right_x, top + 6), (left_x, top + 20)):
+        draw.ellipse((x - 2, y - 2, x + 2, y + 2), fill=color)
+
+
 def capture(name: str) -> None:
     raw = subprocess.check_output(
         ["cargo", "run", "--quiet", "--manifest-path", "rust/doxa-tui/Cargo.toml",
@@ -54,6 +64,8 @@ def capture(name: str) -> None:
         draw.rectangle((left, top, left + CELL_W - 1, top + CELL_H - 1), fill=tuple(bg))
         if symbol in BOX_STROKES:
             draw_box_stroke(draw, symbol, left, top, tuple(fg))
+        elif symbol == "⎇":
+            draw_branch_symbol(draw, left, top, tuple(fg))
         elif symbol.strip():
             draw.text((left, top + 1), symbol, font=font, fill=tuple(fg), stroke_width=0)
     dest = ROOT / "assets" / "shots" / f"rust-{name}.png"

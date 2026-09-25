@@ -179,22 +179,20 @@ fn read_entry(path: &Path, runtime: &Path, uid: u32) -> Option<Session> {
 /// Match Python's worktree-aware `main_repo_root_of(cwd) or cwd` scope.
 pub fn current_scope() -> io::Result<String> {
     let cwd = env::current_dir()?;
+    Ok(repo_root_for(&cwd).unwrap_or(cwd).to_string_lossy().into_owned())
+}
+
+/// Resolve a checkout to the main repository, including linked worktrees.
+/// None means there is no verified Git repository at this session directory.
+pub fn repo_root_for(cwd: &Path) -> Option<PathBuf> {
     let output = Command::new("git").args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
-        .current_dir(&cwd).output();
-    if let Ok(output) = output {
-        if output.status.success() {
-            if let Ok(raw) = std::str::from_utf8(&output.stdout) {
-                let common = PathBuf::from(raw.trim());
-                if common.is_absolute() {
-                    let root = if common.file_name().is_some_and(|name| name == ".git") {
-                        common.parent().unwrap_or(&common)
-                    } else { common.as_path() };
-                    return Ok(root.to_string_lossy().into_owned());
-                }
-            }
-        }
-    }
-    Ok(cwd.to_string_lossy().into_owned())
+        .env_remove("GIT_DIR").env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_COMMON_DIR").env_remove("GIT_INDEX_FILE")
+        .current_dir(cwd).output().ok()?;
+    if !output.status.success() { return None; }
+    let common = PathBuf::from(std::str::from_utf8(&output.stdout).ok()?.trim());
+    if !common.is_absolute() || common.file_name()? != ".git" { return None; }
+    common.parent()?.canonicalize().ok()
 }
 
 fn pid_alive(pid: i32) -> bool {

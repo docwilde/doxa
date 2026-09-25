@@ -259,8 +259,8 @@ fn telemetry_chips_keep_per_session_provenance_and_unknowns() {
     app.apply_daemon_frame(&json!({"type":"hello","session_id":"vendor","engine":"glm"}));
     app.groups[1].tabs.push("vendor".into());
     let unknown = screen(&app, 300, 24);
-    assert!(unknown.contains("Ctx ?   p ?/u ?   Beliefs ▾   Cost ?   LORE scrub ready"), "{unknown}");
-    assert!(unknown.contains("Ctx ?   p ?/u ?   Beliefs ▾   Cost ?   LORE ?"), "{unknown}");
+    assert!(!unknown.contains("Plan ?") && !unknown.contains("quota ?"), "{unknown}");
+    assert!(unknown.contains("Beliefs ▾   $?"), "{unknown}");
     app.apply_daemon_frame(&json!({"type":"event","session_id":"codex","event":{"type":"turn_done","data":{
         "input_tokens":120,"output_tokens":30,"usage_scope":"session","usage_source":"codex_cli_turn_completed",
         "ctx_percentage":null,"session_cost_usd":null
@@ -275,22 +275,22 @@ fn telemetry_chips_keep_per_session_provenance_and_unknowns() {
     assert!(rendered.contains("p 0%/u 40%"), "{rendered}");
     assert!(!rendered.contains("Tokens "), "{rendered}");
     assert!(rendered.contains("Ctx ?"), "{rendered}");
-    assert!(rendered.contains("Cost ?"), "{rendered}");
+    assert!(!rendered.contains("Plan ?") && !rendered.contains("quota ?"), "{rendered}");
     app.apply_daemon_frame(&json!({"type":"reply","ok":true,"status":{"session_id":"codex","lore_scrub":"unavailable"}}));
     let rendered = screen(&app, 300, 24);
-    assert!(rendered.contains("LORE scrub unavailable"), "{rendered}");
+    assert!(!rendered.contains("LORE scrub"), "{rendered}");
     app.apply_daemon_frame(&json!({"type":"telemetry_unavailable","session_id":"codex"}));
-    assert!(screen(&app, 300, 24).contains("LORE ?"));
+    assert!(!screen(&app, 300, 24).contains("LORE ?"));
     app.apply_daemon_frame(&json!({"type":"event","session_id":"vendor","event":{"type":"turn_done","data":{
         "ctx_percentage":null,"cost_usd":null,"session_cost_usd":null
     }}}));
-    assert!(screen(&app, 300, 24).contains("Ctx ?   p 0%/u 40%   Beliefs ▾   Cost ?   LORE ?"));
+    assert!(screen(&app, 300, 24).contains("Ctx ?   p 0%/u 40%   Beliefs ▾   $?"));
 }
 
 #[test]
 fn telemetry_status_restores_reported_values_without_inventing_zero_usage() {
     let mut app = App::default();
-    app.apply_daemon_frame(&json!({"type":"hello","session_id":"one","engine":"codex"}));
+    app.apply_daemon_frame(&json!({"type":"hello","session_id":"one","engine":"deepseek"}));
     app.apply_daemon_frame(&json!({"type":"reply","ok":true,"status":{
         "session_id":"one","ctx_percentage":42.5,"total_cost_usd":0.0123,
         "belief_count":9,"usage":{"num_turns":2,"input_tokens":1000,"output_tokens":50,
@@ -298,14 +298,51 @@ fn telemetry_status_restores_reported_values_without_inventing_zero_usage() {
     }}));
     let rendered = screen(&app, 300, 24);
     assert!(rendered.contains("Ctx 42%"), "{rendered}");
-    assert!(rendered.contains("p ?/u ?"), "{rendered}");
+    assert!(rendered.contains("u ? · scope ?"), "{rendered}");
     assert!(!rendered.contains("Tokens "), "{rendered}");
-    assert!(rendered.contains("Cost $0.0123 est"), "{rendered}");
-    assert!(rendered.contains("LORE 9 beliefs"), "{rendered}");
+    assert!(rendered.contains("$0.0123 est"), "{rendered}");
+    assert!(!rendered.contains("Cost ") && !rendered.contains("$0.0123 session"), "{rendered}");
+    assert!(rendered.contains("9 beliefs ▾"), "{rendered}");
     app.apply_daemon_frame(&json!({"type":"reply","ok":true,"status":{
         "session_id":"one","usage":{"num_turns":0,"input_tokens":0,"output_tokens":0}
     }}));
-    assert!(screen(&app, 300, 24).contains("p ?/u ?"));
+    assert!(screen(&app, 300, 24).contains("u ? · scope ?"));
+}
+
+#[test]
+fn subscription_billing_uses_provider_snapshot_and_never_displays_list_price_as_spend() {
+    let mut app = App::default();
+    app.apply_daemon_frame(&json!({"type":"hello","session_id":"unknown-plan","engine":"claude",
+        "billing":{"mode":"subscription","type":"subscription","quota":null}}));
+    let rendered = screen(&app, 300, 24);
+    assert!(!rendered.contains("Sub ?") && !rendered.contains("quota ?"), "{rendered}");
+    app.apply_daemon_frame(&json!({"type":"hello","session_id":"known-plan","engine":"claude",
+        "billing":{"mode":"subscription","type":"pro","quota":null}}));
+    app.groups[1].tabs.push("known-plan".into());
+    let rendered = screen(&app, 300, 24);
+    assert!(rendered.contains("Sub pro · quota ?"), "{rendered}");
+
+    let mut app = App::default();
+    app.apply_daemon_frame(&json!({"type":"hello","session_id":"claude-1","engine":"claude",
+        "billing":{"mode":"subscription","type":"max 20x","quota":"s:9% w:48%~"}}));
+    app.apply_daemon_frame(&json!({"type":"reply","ok":true,"status":{"session_id":"claude-1",
+        "total_cost_usd":1.2345}}));
+    let rendered = screen(&app, 300, 24);
+    assert!(rendered.contains("Sub max 20x · s:9% w:48%~"), "{rendered}");
+    assert!(!rendered.contains("$1.2345"), "{rendered}");
+
+    app.apply_daemon_frame(&json!({"type":"hello","session_id":"codex-1","engine":"codex"}));
+    app.groups[1].tabs.push("codex-1".into());
+    app.apply_daemon_frame(&json!({"type":"reply","ok":true,"status":{"session_id":"codex-1",
+        "total_cost_usd":9.8765}}));
+    let rendered = screen(&app, 300, 24);
+    assert!(!rendered.contains("Plan ?") && !rendered.contains("quota ?"), "{rendered}");
+    assert!(!rendered.contains("$9.8765"), "{rendered}");
+    app.apply_daemon_frame(&json!({"type":"reply","ok":true,"status":{"session_id":"codex-1",
+        "billing":{"mode":"api"},"total_cost_usd":9.8765}}));
+    let rendered = screen(&app, 300, 24);
+    assert!(rendered.contains("$9.8765"), "{rendered}");
+    assert!(!rendered.contains("Cost ") && !rendered.contains("$9.8765 session"), "{rendered}");
 }
 
 #[test]

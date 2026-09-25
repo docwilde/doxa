@@ -5,6 +5,42 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.13 — 2026-09-25
+
+- Resume verified archived native Codex threads from the session picker. Require
+  a matching, owned, complete thread record and transcript; refuse ambiguous
+  engine state or a mismatched model.
+- Switch an idle managed session's base with `/branch` or
+  `doxa branch NAME --session ID`. Preserve dirty trees, unique commits, and
+  stale or changed worktree metadata.
+- Preview orphaned managed worktrees with `doxa worktrees` for manual review.
+  Preserve ignored files in cleanup and branch-switch checks. Automatic
+  orphan deletion remains disabled until legacy Python sessions share the
+  worktree lock.
+- Hit-test chip hover and clicks against the painted frame so resizing and
+  pane separators cannot activate the wrong chip.
+- Remove the redundant LORE scrub status chip while retaining secret scrub
+  checks and fail-closed handling.
+- Show dollar costs only for API-billed sessions. For a verified Claude
+  subscription, show its connected account's plan and same-account cached
+  quota; omit the subscription pill when both plan and quota are unknown.
+- Show DeepSeek API account balance from its optional official balance
+  endpoint, without blocking turns or querying Z.ai. Omit the balance chip
+  when no valid response is available.
+- Show each session's repository, base, checked-out worktree branch, and
+  commit in a chip, with full Git details on hover or click. Plain folders
+  show their directory name instead.
+- Open the user/project memory chip into an inline, read-only LORE view. It
+  lists the scoped curated entries and up to 20 current global beliefs;
+  worktree sessions resolve project memory through the main repository.
+- Put the daemon-reported reasoning effort immediately after the model chip.
+  DeepSeek and GLM session creation refreshes each selected vendor's model
+  catalog off the draw path. DeepSeek's reported per-model effort levels drive
+  choices; known GLM models use measured effort levels. A labeled static
+  fallback covers an unavailable catalog, and malformed live capabilities
+  cannot re-enable stale choices. The effort picker states that its selection
+  applies to new sessions; it does not change an active turn.
+
 ## 2.0.0-alpha.12 — 2026-09-25
 
 - Add a root Cargo workspace and shared lockfile so `cargo build --locked`

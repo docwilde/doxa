@@ -20,6 +20,7 @@ pub struct PeerHost {
     lore: Mutex<Option<LoreClient>>,
     lore_python: Option<PathBuf>,
     runtime: PathBuf,
+    cwd: PathBuf,
     scope: String,
     session_id: String,
     title: String,
@@ -55,6 +56,7 @@ impl PeerHost {
             lore: Mutex::new(None),
             lore_python: lore_python.map(Path::to_path_buf),
             runtime,
+            cwd: cwd.to_path_buf(),
             scope,
             session_id,
             title,
@@ -327,9 +329,11 @@ impl PeerHost {
 
 impl Host for PeerHost {
     fn initial_model(&self) -> Option<String> { self.inner.initial_model() }
+    fn initial_effort(&self) -> Option<String> { self.inner.initial_effort() }
     fn initial_permission_mode(&self) -> String { self.inner.initial_permission_mode() }
     fn can_set_model(&self) -> bool { self.inner.can_set_model() }
     fn can_set_permission_mode(&self) -> bool { self.inner.can_set_permission_mode() }
+    fn billing_snapshot(&self) -> Option<Value> { self.inner.billing_snapshot() }
     fn lore_scrub_status(&self) -> Option<&'static str> { self.inner.lore_scrub_status() }
     fn transcript_snapshot(&self) -> io::Result<Option<(PathBuf, u64)>> {
         self.inner.transcript_snapshot()
@@ -372,6 +376,21 @@ impl Host for PeerHost {
         match method {
             "peers" => self.peers(),
             "msg" => self.msg(params),
+            "branch" => {
+                let status = doxa_worktrees::branch_status(&self.cwd)
+                    .ok_or_else(|| "branch: no supported Git checkout here".to_owned())?;
+                Ok(serde_json::json!({"branches":status.branches,"base":status.base,
+                    "checked_out":status.checked_out}))
+            },
+            "switch_branch" => {
+                let requested = params["name"].as_str()
+                    .filter(|name| !name.is_empty() && name.len() <= 200)
+                    .ok_or_else(|| "branch name is required".to_owned())?;
+                let message = doxa_worktrees::switch_base(&self.cwd, requested)?;
+                let status = doxa_worktrees::branch_status(&self.cwd)
+                    .ok_or_else(|| "branch changed but status could not be read".to_owned())?;
+                Ok(serde_json::json!({"message":message,"base":status.base}))
+            },
             _ => self.inner.call(method, params),
         }
     }

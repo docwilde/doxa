@@ -1,6 +1,6 @@
 [project]
 name = "doxa"
-version = "2.0.0a12"
+version = "2.0.0a13"
 description = "Internal Python LORE and Claude sidecars for the Rust DOXA terminal."
 readme = "README.md"
 requires-python = ">=3.11"

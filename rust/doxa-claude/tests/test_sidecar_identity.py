@@ -7,6 +7,7 @@ import pathlib
 import sys
 import types
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest import mock
 
 
@@ -17,6 +18,52 @@ spec.loader.exec_module(sidecar)
 
 
 class IdentityTests(unittest.TestCase):
+    def test_billing_snapshot_uses_matching_local_tier_and_marks_stale_quota(self):
+        from doxa import identity
+
+        stale = identity.Usage(
+            session=identity.UsageLimit("session", 9, "normal", ""),
+            weekly=identity.UsageLimit("weekly_all", 48, "normal", ""),
+            scoped=None, scope_label="",
+            fetched_at=datetime.now(timezone.utc) - timedelta(hours=7),
+        )
+        for precise, expected in [("default_claude_max_5x", "max 5x"),
+                                  ("default_claude_max_20x", "max 20x")]:
+            with self.subTest(precise=precise), \
+                 mock.patch.object(identity, "local_account", return_value={
+                     "emailAddress": "person@example.com",
+                     "organizationRateLimitTier": precise,
+                 }), \
+                 mock.patch.object(identity, "usage", return_value=stale):
+                self.assertEqual(sidecar.billing_snapshot({
+                    "email": "PERSON@example.com", "subscriptionType": "Claude Max",
+                }), {"mode": "subscription", "type": expected,
+                     "quota": "s:9% w:48%~"})
+
+    def test_billing_snapshot_rejects_foreign_local_tier_and_quota(self):
+        from doxa import identity
+
+        with mock.patch.object(identity, "local_account", return_value={
+            "emailAddress": "other@example.com",
+            "organizationRateLimitTier": "default_claude_max_20x",
+        }), mock.patch.object(identity, "usage") as usage:
+            self.assertEqual(sidecar.billing_snapshot({
+                "email": "person@example.com", "subscriptionType": "Claude Max",
+            }), {"mode": "subscription", "type": "max", "quota": None})
+            usage.assert_not_called()
+
+    def test_billing_snapshot_requires_sdk_subscription(self):
+        from doxa import identity
+
+        with mock.patch.object(identity, "local_account") as local, \
+             mock.patch.object(identity, "usage") as usage:
+            self.assertIsNone(sidecar.billing_snapshot({
+                "email": "person@example.com", "apiProvider": "firstParty",
+            }))
+            self.assertIsNone(sidecar.billing_snapshot(None))
+            local.assert_not_called()
+            usage.assert_not_called()
+
     def test_catalog_probe_does_not_block_model_or_control_replies(self):
         from doxa import claude_catalog, providers
 

@@ -18,6 +18,97 @@ pub const MAX_HISTORY_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_HISTORY_MESSAGES: usize = 512;
 pub const MAX_TOOL_RESULT_BYTES: usize = 1024 * 1024;
 pub const MAX_TURN_DURATION: Duration = Duration::from_secs(3600);
+const BALANCE_URL: &str = "https://api.deepseek.com/user/balance";
+const BALANCE_BODY_MAX: usize = 4096;
+
+/// Optional display-only account balance. The endpoint is fixed to DeepSeek's
+/// official API and never derived from a chat-completions endpoint override.
+pub async fn deepseek_balance() -> Option<String> {
+    let key = std::env::var("DEEPSEEK_API_KEY").ok().filter(|key| !key.is_empty())?;
+    deepseek_balance_at(BALANCE_URL, &key).await
+}
+
+async fn deepseek_balance_at(endpoint: &str, key: &str) -> Option<String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .redirect(reqwest::redirect::Policy::none())
+        .build().ok()?;
+    let response = client.get(endpoint).bearer_auth(key).send().await.ok()?;
+    if !response.status().is_success() { return None; }
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.ok()?;
+        if body.len().saturating_add(chunk.len()) > BALANCE_BODY_MAX { return None; }
+        body.extend_from_slice(&chunk);
+    }
+    let data: Value = serde_json::from_slice(&body).ok()?;
+    data["is_available"].as_bool()?;
+    let infos = data["balance_infos"].as_array()?;
+    let mut amounts = Vec::new();
+    for info in infos.iter().take(4) {
+        let currency = info["currency"].as_str()?;
+        let amount = info["total_balance"].as_str()?;
+        if !valid_balance_amount(amount) { return None; }
+        let prefix = match currency { "USD" => "$", "CNY" => "¥", _ => return None };
+        if amounts.iter().any(|(seen, _)| *seen == currency) { return None; }
+        amounts.push((currency, format!("{prefix}{amount}")));
+    }
+    if amounts.is_empty() { return None; }
+    amounts.sort_by_key(|(currency, _)| if *currency == "USD" { 0 } else { 1 });
+    Some(amounts.into_iter().map(|(_, label)| label).collect::<Vec<_>>().join(" · "))
+}
+
+fn valid_balance_amount(amount: &str) -> bool {
+    if amount.is_empty() || amount.len() > 24 { return false; }
+    let (whole, fraction) = amount.split_once('.').unwrap_or((amount, ""));
+    !whole.is_empty() && whole.bytes().all(|b| b.is_ascii_digit())
+        && (!amount.contains('.') || !fraction.is_empty() && fraction.len() <= 4 && fraction.bytes().all(|b| b.is_ascii_digit()))
+        && amount.bytes().filter(|b| *b == b'.').count() <= 1
+}
+
+#[cfg(test)]
+mod balance_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    async fn mock_balance(status: &str, body: &str) -> (String, tokio::task::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/user/balance", listener.local_addr().unwrap());
+        let reply = format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+        let worker = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 2048];
+            let count = stream.read(&mut request).await.unwrap();
+            let _ = stream.write_all(reply.as_bytes()).await;
+            String::from_utf8_lossy(&request[..count]).into_owned()
+        });
+        (url, worker)
+    }
+
+    #[tokio::test]
+    async fn balance_reads_only_valid_official_shape_and_uses_bearer_key() {
+        let (url, worker) = mock_balance("200 OK", r#"{"is_available":true,"balance_infos":[{"currency":"CNY","total_balance":"25.50"},{"currency":"USD","total_balance":"3.25"}]}"#).await;
+        assert_eq!(deepseek_balance_at(&url, "secret-key").await.as_deref(), Some("$3.25 · ¥25.50"));
+        let request = worker.await.unwrap();
+        assert!(request.starts_with("GET /user/balance HTTP/1.1"));
+        assert!(request.to_ascii_lowercase().contains("authorization: bearer secret-key"));
+
+        for body in [
+            r#"{"is_available":true,"balance_infos":[{"currency":"USD","total_balance":"-1"}]}"#,
+            r#"{"is_available":true,"balance_infos":[{"currency":"USD","total_balance":"1e9"}]}"#,
+            r#"{"is_available":true,"balance_infos":[{"currency":"BAD","total_balance":"1.00"}]}"#,
+        ] {
+            let (url, worker) = mock_balance("200 OK", body).await;
+            assert!(deepseek_balance_at(&url, "secret-key").await.is_none());
+            worker.await.unwrap();
+        }
+        let (url, worker) = mock_balance("401 Unauthorized", "{}").await;
+        assert!(deepseek_balance_at(&url, "secret-key").await.is_none());
+        worker.await.unwrap();
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Vendor {
@@ -43,6 +134,12 @@ impl Vendor {
             Self::Glm => "https://api.z.ai/api/paas/v4/chat/completions",
         }
     }
+    pub fn models_endpoint(self) -> &'static str {
+        match self {
+            Self::DeepSeek => "https://api.deepseek.com/models",
+            Self::Glm => "https://api.z.ai/api/paas/v4/models",
+        }
+    }
     pub fn default_model(self) -> &'static str {
         match self {
             Self::DeepSeek => "deepseek-flash",
@@ -51,6 +148,136 @@ impl Vendor {
     }
     fn valid_effort(self, effort: &str) -> bool {
         matches!(effort, "low" | "high" | "max") || self == Self::DeepSeek && effort == "none"
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelCapability {
+    pub id: String,
+    /// Only levels the provider lists and this transport can encode.
+    pub efforts: Vec<String>,
+    pub default_effort: Option<String>,
+    /// An advertised list with no usable levels must not trigger a fallback.
+    pub effort_metadata_present: bool,
+}
+
+/// Bounded account-scoped model catalogue. A missing credential, network
+/// failure, or malformed body returns None so callers can label a fallback.
+pub async fn catalog_models(vendor: Vendor) -> Option<Vec<ModelCapability>> {
+    let key = std::env::var(vendor.env_var()).ok().filter(|key| !key.is_empty())?;
+    catalog_models_at(vendor, vendor.models_endpoint(), &key).await
+}
+
+async fn catalog_models_at(vendor: Vendor, endpoint: &str, key: &str) -> Option<Vec<ModelCapability>> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(8))
+        .redirect(reqwest::redirect::Policy::none()).build().ok()?;
+    let response = client.get(endpoint).bearer_auth(key).send().await.ok()?;
+    if !response.status().is_success() { return None; }
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.ok()?;
+        if body.len().saturating_add(chunk.len()) > 4 * 1024 * 1024 { return None; }
+        body.extend_from_slice(&chunk);
+    }
+    let payload: Value = serde_json::from_slice(&body).ok()?;
+    let rows = payload.get("data").and_then(Value::as_array)?;
+    let mut models = Vec::new();
+    for row in rows.iter().take(1000) {
+        let Some(id) = row.get("id").and_then(Value::as_str) else { continue; };
+        if !id.is_empty() && id.len() <= 128 && id.bytes().all(|byte|
+            byte.is_ascii_alphanumeric() || b"-._:/".contains(&byte))
+            && !models.iter().any(|existing: &ModelCapability| existing.id == id) {
+            let mut efforts = Vec::new();
+            // Only DeepSeek documents this per-model response field. GLM's
+            // catalogue IDs are useful, but capability-shaped data there is
+            // not a verified contract for effort selection.
+            let effort_metadata_present = vendor == Vendor::DeepSeek && row.get("effort").is_some();
+            let documented_levels = (vendor == Vendor::DeepSeek)
+                .then(|| row.pointer("/effort/supported_levels").and_then(Value::as_array)).flatten();
+            if let Some(levels) = documented_levels {
+                for level in levels.iter().take(32).filter_map(Value::as_str) {
+                    if vendor.valid_effort(level)
+                        && !efforts.iter().any(|seen| seen == level) {
+                        efforts.push(level.to_owned());
+                    }
+                }
+            }
+            let default_effort = row.pointer("/effort/default_level").and_then(Value::as_str)
+                .filter(|level| efforts.iter().any(|seen| seen == level)).map(str::to_owned);
+            models.push(ModelCapability { id: id.to_owned(), efforts, default_effort,
+                effort_metadata_present });
+        }
+    }
+    // A valid empty catalogue is authoritative; falling back to old static
+    // IDs here would offer models the account may no longer have.
+    Some(models)
+}
+
+#[cfg(test)]
+mod catalog_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    async fn serve(status: &str, body: String, extra_headers: &str) -> (String, tokio::task::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/models", listener.local_addr().unwrap());
+        let reply = format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{extra_headers}Connection: close\r\n\r\n{body}", body.len());
+        let worker = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let count = stream.read(&mut request).await.unwrap();
+            let _ = stream.write_all(reply.as_bytes()).await;
+            String::from_utf8_lossy(&request[..count]).into_owned()
+        });
+        (url, worker)
+    }
+
+    #[tokio::test]
+    async fn model_catalog_is_bounded_and_does_not_follow_redirects() {
+        let (url, worker) = serve("200 OK", r#"{"data":[{"id":"deepseek-flash","effort":{"supported_levels":["low","high","max"],"default_level":"high"}},{"id":"deepseek-flash"},{"id":"new-model","effort":{"supported_levels":["medium","max","high"],"default_level":"medium"}},{"id":"bad\u202e-id","effort":{"supported_levels":["high"]}},{"id":"has space","effort":{"supported_levels":["high"]}}]}"#.into(), "").await;
+        assert_eq!(catalog_models_at(Vendor::DeepSeek, &url, "test-secret").await.unwrap(), [
+            ModelCapability { id: "deepseek-flash".into(), efforts: vec!["low".into(), "high".into(), "max".into()], default_effort: Some("high".into()), effort_metadata_present: true },
+            ModelCapability { id: "new-model".into(), efforts: vec!["max".into(), "high".into()], default_effort: None, effort_metadata_present: true },
+        ]);
+        let request = worker.await.unwrap();
+        assert!(request.contains("Authorization: Bearer test-secret") || request.contains("authorization: Bearer test-secret"));
+        let (url, worker) = serve("302 Found", String::new(), "Location: https://example.invalid/models\r\n").await;
+        assert!(catalog_models_at(Vendor::DeepSeek, &url, "test-secret").await.is_none());
+        worker.await.unwrap();
+        let rows = (0..1001).map(|i| format!("{{\"id\":\"model-{i}\"}}")).collect::<Vec<_>>().join(",");
+        let (url, worker) = serve("200 OK", format!("{{\"data\":[{rows}]}}"), "").await;
+        assert_eq!(catalog_models_at(Vendor::DeepSeek, &url, "test-secret").await.unwrap().len(), 1000);
+        worker.await.unwrap();
+        let (url, worker) = serve("200 OK", r#"{"data":[{"id":"bad\u202e-id"}]}"#.into(), "").await;
+        assert!(catalog_models_at(Vendor::DeepSeek, &url, "test-secret").await.unwrap().is_empty());
+        worker.await.unwrap();
+        let (url, worker) = serve("200 OK", r#"{"data":[{"id":"deepseek-flash","effort":{"supported_levels":"high"}}]}"#.into(), "").await;
+        assert_eq!(catalog_models_at(Vendor::DeepSeek, &url, "test-secret").await.unwrap(),
+            [ModelCapability { id: "deepseek-flash".into(), efforts: Vec::new(),
+                default_effort: None, effort_metadata_present: true }]);
+        worker.await.unwrap();
+        let (url, worker) = serve("200 OK", format!("{{\"data\":[{{\"id\":\"{}\"}}]}}", "a".repeat(4 * 1024 * 1024)), "").await;
+        assert!(catalog_models_at(Vendor::DeepSeek, &url, "test-secret").await.is_none());
+        worker.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn only_documented_deepseek_effort_metadata_is_used() {
+        let body = r#"{"data":[{"id":"next-model","effort":{"supported_levels":["none","low","high"],"default_level":"none"}}]}"#;
+        let (url, worker) = serve("200 OK", body.into(), "").await;
+        let models = catalog_models_at(Vendor::DeepSeek, &url, "key").await.unwrap();
+        assert_eq!(models[0].efforts, ["none", "low", "high"]);
+        assert_eq!(models[0].default_effort.as_deref(), Some("none"));
+        worker.await.unwrap();
+        let (url, worker) = serve("200 OK", body.into(), "").await;
+        let models = catalog_models_at(Vendor::Glm, &url, "key").await.unwrap();
+        assert!(models[0].efforts.is_empty());
+        assert!(models[0].default_effort.is_none());
+        assert!(!models[0].effort_metadata_present);
+        worker.await.unwrap();
     }
 }
 
