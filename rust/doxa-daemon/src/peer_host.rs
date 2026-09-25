@@ -20,6 +20,7 @@ pub struct PeerHost {
     lore: Mutex<Option<LoreClient>>,
     lore_python: Option<PathBuf>,
     runtime: PathBuf,
+    cwd: PathBuf,
     scope: String,
     session_id: String,
     title: String,
@@ -55,6 +56,7 @@ impl PeerHost {
             lore: Mutex::new(None),
             lore_python: lore_python.map(Path::to_path_buf),
             runtime,
+            cwd: cwd.to_path_buf(),
             scope,
             session_id,
             title,
@@ -372,6 +374,21 @@ impl Host for PeerHost {
         match method {
             "peers" => self.peers(),
             "msg" => self.msg(params),
+            "branch" => {
+                let status = doxa_worktrees::branch_status(&self.cwd)
+                    .ok_or_else(|| "branch: no supported Git checkout here".to_owned())?;
+                Ok(serde_json::json!({"branches":status.branches,"base":status.base,
+                    "checked_out":status.checked_out}))
+            },
+            "switch_branch" => {
+                let requested = params["name"].as_str()
+                    .filter(|name| !name.is_empty() && name.len() <= 200)
+                    .ok_or_else(|| "branch name is required".to_owned())?;
+                let message = doxa_worktrees::switch_base(&self.cwd, requested)?;
+                let status = doxa_worktrees::branch_status(&self.cwd)
+                    .ok_or_else(|| "branch changed but status could not be read".to_owned())?;
+                Ok(serde_json::json!({"message":message,"base":status.base}))
+            },
             _ => self.inner.call(method, params),
         }
     }

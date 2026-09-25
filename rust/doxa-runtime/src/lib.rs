@@ -436,7 +436,7 @@ fn handle_call(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame: &Value) {
     let Some(req_id) = frame["id"].as_u64() else { return; };
     let Some(method) = frame["method"].as_str() else { return; };
     let params = frame.get("params").filter(|v| v.is_object()).cloned().unwrap_or_else(|| json!({}));
-    let _control_guard = matches!(method, "set_model" | "set_permission_mode")
+    let _control_guard = matches!(method, "set_model" | "set_permission_mode" | "switch_branch")
         .then(|| inner.controls.lock().unwrap());
     let (result, changed) = if method == "queue" {
         let state = inner.state.lock().unwrap();
@@ -477,6 +477,21 @@ fn handle_call(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame: &Value) {
             "can_set_model":can_set_model,
             "can_set_permission_mode":can_set_permission_mode,
             "lore_scrub":lore_scrub}})), None)
+    } else if method == "switch_branch" {
+        let idle = {
+            let state = inner.state.lock().unwrap();
+            !state.busy && state.prompts.is_empty() && !inner.stopping.load(Ordering::Acquire)
+        };
+        if !idle {
+            (Err("branch switch requires an idle session with no queued prompts".into()), None)
+        } else {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(||
+                inner.host.call(method, &params)
+            )).unwrap_or_else(|_| Err("branch switch host panicked".into()));
+            let event = result.as_ref().ok().and_then(|value| value["base"].as_str())
+                .map(|base| json!({"type":"branch_changed","data":{"base":base}}));
+            (result, event)
+        }
     } else if matches!(method, "set_model" | "set_permission_mode") {
         // Control calls may wait on a sidecar. Hold the control lock across
         // that call, but never the global state lock: event publishing and

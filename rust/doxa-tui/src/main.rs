@@ -1,6 +1,7 @@
 use doxa_tui::{bridge, discovery, fleet_plan, fleet_view, launch, ui_state};
 use std::collections::HashSet;
 use std::io::{self, Write};
+use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::process::Stdio;
@@ -31,7 +32,7 @@ Commands:
   attach [ID]          Reattach a live session by full ID or unique prefix
   stop [ID]            Stop a live session
   list                 List live sessions
-  branch [NAME]        List local base branches; NAME explains safe creation
+  branch [NAME]        List branches; use NAME --session ID to switch an idle session
   doctor               Check provider and launcher dependencies
   fleet ...            Inspect or start Python-backed fleet runs
 
@@ -199,9 +200,6 @@ fn run(args: &[String]) -> io::Result<()> {
     if options.branch.is_some() && command != Some("new") {
         return Err(invalid("--branch requires new"));
     }
-    if command == Some("branch") && prefix.is_some() {
-        return Err(invalid("branch reads the current checkout; --session is not supported"));
-    }
     match command {
         Some("--version") => {
             println!("doxa {}", env!("CARGO_PKG_VERSION"));
@@ -209,8 +207,42 @@ fn run(args: &[String]) -> io::Result<()> {
         }
         Some("--demo") => doxa_tui::ui::run(),
         Some("branch") => {
-            if branch_target.is_some() {
-                return Err(invalid(doxa_worktrees::live_switch_refusal()));
+            if let Some(target) = branch_target {
+                let id = prefix.ok_or_else(|| invalid("branch NAME requires --session ID so the daemon can verify that the session is idle"))?;
+                let sessions = discovery::sessions()?;
+                let session = discovery::select(&sessions, Some(id))?;
+                let mut client = doxa_tui::transport::DaemonClient::connect(&session.socket, None)
+                    .map_err(io::Error::other)?;
+                if client.hello["session_id"] != session.id {
+                    return Err(invalid("session identity changed during branch switch"));
+                }
+                let mut params = Map::new();
+                params.insert("name".into(), Value::String(target.to_owned()));
+                let reply = client.call("switch_branch", params).map_err(io::Error::other)?;
+                if reply["ok"] != true {
+                    return Err(invalid(reply["error"].as_str().unwrap_or("branch switch refused")));
+                }
+                println!("branch: {}", reply["message"].as_str().unwrap_or("switched"));
+                return Ok(());
+            }
+            if let Some(id) = prefix {
+                let sessions = discovery::sessions()?;
+                let session = discovery::select(&sessions, Some(id))?;
+                let mut client = doxa_tui::transport::DaemonClient::connect(&session.socket, None)
+                    .map_err(io::Error::other)?;
+                if client.hello["session_id"] != session.id {
+                    return Err(invalid("session identity changed during branch listing"));
+                }
+                let reply = client.call("branch", Map::new()).map_err(io::Error::other)?;
+                if reply["ok"] != true { return Err(invalid(reply["error"].as_str().unwrap_or("branch listing refused"))); }
+                println!("branch: {}", reply["base"].as_str().unwrap_or("(none)"));
+                println!();
+                for name in reply["branches"].as_array().into_iter().flatten().filter_map(|row| row.as_str()) {
+                    let mark = if Some(name) == reply["base"].as_str() { "▸" } else { " " };
+                    println!(" {mark} {name}");
+                }
+                println!("\nusage: doxa branch NAME --session ID");
+                return Ok(());
             }
             let cwd = std::env::current_dir()?;
             let status = doxa_worktrees::branch_status(&cwd)

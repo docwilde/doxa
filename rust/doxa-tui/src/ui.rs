@@ -942,6 +942,19 @@ impl App {
             return false;
         };
         match kind {
+            "branch_reply" => {
+                if frame["ok"] != true {
+                    self.notice = format!("branch: {}", safe_label(frame["error"].as_str().unwrap_or("switch refused")));
+                } else if let Some(message) = frame["message"].as_str() {
+                    self.notice = format!("branch: {}", safe_label(message));
+                } else {
+                    let base = safe_label(frame["base"].as_str().unwrap_or("(none)"));
+                    let rows = frame["branches"].as_array().into_iter().flatten()
+                        .filter_map(|v| v.as_str()).take(30).map(safe_label).collect::<Vec<_>>();
+                    self.notice = format!("branch: {base} · {} · /branch <name>", rows.join(", "));
+                }
+                true
+            }
             "queue_list_reply" => {
                 let Some(id) = frame["session_id"].as_str() else { return false; };
                 let Some(picker) = self.queue_picker.as_mut().filter(|picker| picker.session_id == id) else { return false; };
@@ -2083,6 +2096,20 @@ impl App {
             }
             "/pending" => { self.notice = "Local command unavailable: /pending arguments".into(); true }
             "/attach" => { self.local_attach(args); true }
+            "/branch" => {
+                let target = args.trim();
+                if target.split_whitespace().count() > 1 || target.len() > 200
+                    || target.chars().any(unsafe_input_char) {
+                    self.notice = "Usage: /branch [local-or-remote-name]".into();
+                } else if let Some(id) = self.groups[self.active_group].active_id() {
+                    self.pending_queue_commands.push(crate::bridge::WorkerCommand::Branch(
+                        id.to_owned(), (!target.is_empty()).then(|| target.to_owned())));
+                    self.input.clear();
+                    self.input_cursor = 0;
+                    self.notice = "Checking branch…".into();
+                } else { self.notice = "Select a session before switching branch".into(); }
+                true
+            }
             "/rename" => { self.local_rename(args); true }
             "/mesh" if !args.trim().is_empty() => {
                 self.notice = "Local command unavailable: /mesh arguments".into(); true
@@ -2090,7 +2117,7 @@ impl App {
             "/mesh" | "/msg" => false,
             "/movepane" | "/collection" | "/fleet" | "/img" | "/login"
             | "/logout" | "/settings" | "/setup" | "/doctor" | "/plugins"
-            | "/reload-plugins" | "/branch" | "/effort" | "/usage"
+            | "/reload-plugins" | "/effort" | "/usage"
             | "/context" | "/clear" | "/cd"
             | "/compact" | "/update" => {
                 self.notice = format!("Local command unavailable: {}", safe_label(command));
@@ -7265,6 +7292,23 @@ for line in sys.stdin:
         assert!(app.lore_picker.as_ref().unwrap().proposal_mode);
         assert!(app.input.is_empty());
         assert!(app.pending_prompts.is_empty());
+    }
+
+    #[test]
+    fn branch_command_targets_active_daemon_and_never_becomes_a_prompt() {
+        let mut app = App::default();
+        app.groups[0].tabs.push("session-1".into());
+        app.input = "/branch feature".into();
+        app.input_cursor = app.input.len();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(matches!(app.pending_queue_commands.pop(),
+            Some(crate::bridge::WorkerCommand::Branch(id, Some(name)))
+                if id == "session-1" && name == "feature"));
+        assert!(app.pending_prompts.is_empty());
+        assert!(app.input.is_empty());
+        app.apply_daemon_frame(&json!({"type":"branch_reply", "session_id":"session-1",
+            "ok":false,"error":"session is busy"}));
+        assert!(app.notice.contains("session is busy"));
     }
 
     #[test]

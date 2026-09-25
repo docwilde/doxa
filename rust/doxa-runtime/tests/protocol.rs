@@ -108,6 +108,53 @@ impl Fixture {
     fn new() -> Self { Self { gate: (Mutex::new(false), Condvar::new()), prompts: Mutex::new(vec![]) } }
     fn release(&self) { *self.gate.0.lock().unwrap() = true; self.gate.1.notify_all(); }
 }
+struct BranchGate { gate: (Mutex<bool>, Condvar), calls: AtomicUsize }
+impl Host for BranchGate {
+    fn prompt(&self, _: &str, emit: &mut dyn FnMut(Value)) {
+        let mut ready = self.gate.0.lock().unwrap();
+        while !*ready { ready = self.gate.1.wait(ready).unwrap(); }
+        emit(json!({"type":"turn_done","data":{}}));
+    }
+    fn call(&self, method: &str, _: &Value) -> Result<Value, String> {
+        if method != "switch_branch" { return Err("unexpected call".into()); }
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(json!({"base":"feature"}))
+    }
+}
+
+#[test]
+fn branch_switch_waits_for_idle_and_empty_prompt_queue() {
+    let dir = tempfile::tempdir().unwrap();
+    let host = Arc::new(BranchGate { gate: (Mutex::new(false), Condvar::new()), calls: AtomicUsize::new(0) });
+    let handle = Daemon::bind(dir.path(), session(), host.clone()).unwrap().start();
+    let (mut reader, mut writer) = connect(handle.socket_path());
+    recv(&mut reader);
+    send(&mut writer, json!({"type":"attach","cursor":null}));
+    send(&mut writer, json!({"type":"prompt","id":1,"text":"running"}));
+    assert_eq!(recv(&mut reader)["ok"], true);
+    send(&mut writer, json!({"type":"prompt","id":2,"text":"queued"}));
+    // Events may precede the second prompt acknowledgement.
+    while recv(&mut reader)["id"] != 2 {}
+    send(&mut writer, json!({"type":"call","id":3,"method":"switch_branch","params":{"name":"feature"}}));
+    let refused = loop { let frame = recv(&mut reader); if frame["id"] == 3 { break frame; } };
+    assert_eq!(refused["ok"], false);
+    assert!(refused["error"].as_str().unwrap().contains("idle"));
+    assert_eq!(host.calls.load(Ordering::SeqCst), 0);
+    *host.gate.0.lock().unwrap() = true;
+    host.gate.1.notify_all();
+    // Wait for both turns to drain before asking again.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        send(&mut writer, json!({"type":"call","id":4,"method":"status","params":{}}));
+        let status = loop { let frame = recv(&mut reader); if frame["id"] == 4 { break frame; } };
+        if status["status"]["running"] == false && status["status"]["queued"] == 0 { break; }
+        assert!(Instant::now() < deadline);
+    }
+    send(&mut writer, json!({"type":"call","id":5,"method":"switch_branch","params":{"name":"feature"}}));
+    let accepted = loop { let frame = recv(&mut reader); if frame["id"] == 5 { break frame; } };
+    assert_eq!(accepted["ok"], true);
+    assert_eq!(host.calls.load(Ordering::SeqCst), 1);
+}
 impl Host for Fixture {
     fn prompt(&self, text: &str, emit: &mut dyn FnMut(Value)) {
         self.prompts.lock().unwrap().push(text.to_owned());

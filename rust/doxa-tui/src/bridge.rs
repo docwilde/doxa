@@ -30,6 +30,7 @@ pub enum WorkerCommand {
     Models(String),
     SetModel(String, String),
     SetPermissionMode(String, String),
+    Branch(String, Option<String>),
     QueueList(String),
     QueueCancel(String, String),
     Stop(String),
@@ -247,6 +248,7 @@ pub fn connect_sessions(sessions: &[Session]) -> io::Result<MultiBridge> {
                 WorkerCommand::Prompt(id, _) | WorkerCommand::Answer(id, _, _) | WorkerCommand::Peers(id)
                 | WorkerCommand::Models(id) | WorkerCommand::SetModel(id, _)
                 | WorkerCommand::SetPermissionMode(id, _) | WorkerCommand::QueueList(id)
+                | WorkerCommand::Branch(id, _)
                 | WorkerCommand::QueueCancel(id, _) => id,
                 WorkerCommand::Message(id, _, _) | WorkerCommand::Stop(id) => id,
                 WorkerCommand::Launch(_, _, _) | WorkerCommand::Attach(_, _) => unreachable!(),
@@ -296,6 +298,8 @@ fn rejected(command: WorkerCommand, message: &str) -> Value {
         WorkerCommand::SetModel(id, _) => json!({"type":"set_model_reply", "session_id":id,
             "ok":false, "error":message}),
         WorkerCommand::SetPermissionMode(id, _) => json!({"type":"set_permission_mode_reply", "session_id":id,
+            "ok":false, "error":message}),
+        WorkerCommand::Branch(id, _) => json!({"type":"branch_reply", "session_id":id,
             "ok":false, "error":message}),
         WorkerCommand::QueueList(id) => json!({"type":"queue_list_reply", "session_id":id,
             "ok":false, "error":message}),
@@ -462,6 +466,23 @@ fn worker_loop(
                             "ok":reply["ok"] == true, "mode":reply.get("mode"),
                             "error":reply.get("error")}),
                         Err(error) => json!({"type":"set_permission_mode_reply", "session_id":id,
+                            "ok":false, "error":error.to_string()}),
+                    };
+                    if frames.send(reply).is_err() { return; }
+                }
+                Ok(WorkerCommand::Branch(id, target)) => {
+                    let result = if id == session_id {
+                        let mut params = Map::new();
+                        if let Some(name) = target.as_ref() { params.insert("name".into(), Value::String(name.clone())); }
+                        client.call(if target.is_some() { "switch_branch" } else { "branch" }, params)
+                    } else { Err(TransportError::Malformed("branch target is not attached")) };
+                    cursor.store(client.cursor, Ordering::Relaxed);
+                    let reply = match result {
+                        Ok(reply) => json!({"type":"branch_reply", "session_id":id,
+                            "ok":reply["ok"] == true, "base":reply.get("base"),
+                            "branches":reply.get("branches"), "message":reply.get("message"),
+                            "error":reply.get("error")}),
+                        Err(error) => json!({"type":"branch_reply", "session_id":id,
                             "ok":false, "error":error.to_string()}),
                     };
                     if frames.send(reply).is_err() { return; }

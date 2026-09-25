@@ -160,10 +160,52 @@ pub fn branch_status(cwd: &Path) -> Option<BranchStatus> {
     })
 }
 
-/// Live rebasing is not yet supported by the native daemon. Keep this refusal
-/// in the worktree API so callers cannot mistake `resolve_base` for a switch.
-pub fn live_switch_refusal() -> &'static str {
-    "live base switching is unavailable in Rust; use `doxa-rs new --branch NAME` to start an isolated session, or finish the current session and switch your checkout explicitly with git"
+/// Change only a verified session-owned worktree. The caller must serialize
+/// this with prompt admission and reject active or queued turns first.
+pub fn switch_base(path: &Path, requested: &str) -> Result<String, String> {
+    let (record, old_base, main) = read_record(path).ok_or_else(||
+        "no verified doxa worktree here; switching the actual checkout is refused".to_owned())?;
+    let keep = || format!("kept {} — merge when ready", record.branch);
+    if worktree_for_branch(&main, &record.branch).as_ref() != Some(&record.path)
+        || git_text(&record.path, &["symbolic-ref", "--quiet", "--short", "HEAD"])
+            .as_deref() != Some(record.branch.as_str()) {
+        return Err("worktree branch identity changed; switch refused".into());
+    }
+    let target = resolve_base(&main, requested)
+        .ok_or_else(|| format!("no such local or remote-tracking branch: {requested}"))?;
+    if target == record.branch {
+        return Err("this session's own branch cannot be its base".into());
+    }
+    let status = git_text(&record.path, &["status", "--porcelain", "--untracked-files=all"])
+        .ok_or_else(|| "could not inspect worktree status; switch refused".to_owned())?;
+    if !status.is_empty() { return Err(format!("{} has uncommitted changes; {}", record.branch, keep())); }
+    let spec = format!("{old_base}..{}", record.branch);
+    let ahead = git_text(&record.path, &["rev-list", "--count", &spec])
+        .ok_or_else(|| "could not measure commits against the current base; switch refused".to_owned())?;
+    if ahead != "0" { return Err(format!("{} is {ahead} commit(s) ahead of {old_base}; {}", record.branch, keep())); }
+    let before = git_text(&record.path, &["rev-parse", "--verify", "HEAD^{commit}"])
+        .filter(|oid| valid_commit_oid(oid))
+        .ok_or_else(|| "could not verify worktree HEAD; switch refused".to_owned())?;
+    let target_oid = git_text(&record.path, &["rev-parse", "--verify", &format!("{target}^{{commit}}")])
+        .filter(|oid| valid_commit_oid(oid))
+        .ok_or_else(|| "could not verify target commit; switch refused".to_owned())?;
+    // A clean, commit-free session may move to a different base. Rebase does
+    // the checkout/index update as one Git operation and refuses locked trees.
+    if !git(&record.path, &["rebase", &target_oid], Duration::from_secs(30)).is_some_and(|(ok, _)| ok) {
+        return Err(format!("rebase onto {target} failed; inspect {}; {}", record.path.display(), keep()));
+    }
+    let after = git_text(&record.path, &["rev-parse", "--verify", "HEAD^{commit}"]);
+    if after.as_deref() != Some(target_oid.as_str())
+        || git_text(&record.path, &["symbolic-ref", "--quiet", "--short", "HEAD"])
+            .as_deref() != Some(record.branch.as_str()) {
+        return Err(format!("branch changed during switch; inspect {}; {}", record.path.display(), keep()));
+    }
+    // A sidecar mismatch after a successful rebase must be left in place so
+    // finalize cannot infer that the new branch has no unmerged work.
+    if !replace_base_record(&record.path, &main, &record.branch, &record.session_id, &old_base, &before, &target, &target_oid) {
+        return Err(format!("branch moved to {target}, but metadata could not be updated; inspect {}; {}", record.path.display(), keep()));
+    }
+    Ok(format!("{} now based on {target}", record.branch))
 }
 fn short_id(id: &str) -> String {
     let short: String = id.chars().filter(char::is_ascii_alphanumeric).take(8).collect();
@@ -274,6 +316,40 @@ fn write_record(path: &Path, main: &Path, branch: &str, base: &str, base_oid: &s
     })();
     let _ = fs::remove_file(temp);
     result
+}
+fn replace_base_record(path: &Path, main: &Path, branch: &str, session_id: &str, old_base: &str,
+    old_head: &str, new_base: &str, new_oid: &str) -> bool {
+    let Some(meta) = meta_path(path) else { return false; };
+    let Some(parent) = meta.parent() else { return false; };
+    if owned_dir(parent).is_none() { return false; }
+    let Ok(raw) = fs::symlink_metadata(&meta) else { return false; };
+    if !raw.file_type().is_file() || raw.uid() != unsafe { libc::geteuid() }
+        || raw.permissions().mode() & 0o077 != 0 || raw.len() > MAX_META_BYTES { return false; }
+    let Ok(source) = OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(&meta) else { return false; };
+    let Ok(stat) = source.metadata() else { return false; };
+    if (raw.dev(), raw.ino()) != (stat.dev(), stat.ino()) { return false; }
+    let mut bytes = Vec::new();
+    if source.take(MAX_META_BYTES + 1).read_to_end(&mut bytes).is_err() || bytes.len() as u64 > MAX_META_BYTES { return false; }
+    let Ok(mut data) = serde_json::from_slice::<serde_json::Value>(&bytes) else { return false; };
+    if data["branch"] != branch || data["base_ref"] != old_base
+        || data["main_root"] != main.to_string_lossy().as_ref()
+        || data["session_id"] != session_id { return false; }
+    // A legacy Python sidecar may not have base_oid. Its observed HEAD was
+    // already checked before the Git operation, and the name is preserved.
+    if data["base_oid"].as_str().is_some_and(|oid| !valid_commit_oid(oid)) { return false; }
+    if !valid_commit_oid(old_head) || !valid_commit_oid(new_oid) { return false; }
+    data["base_ref"] = serde_json::Value::String(new_base.to_owned());
+    data["base_oid"] = serde_json::Value::String(new_oid.to_owned());
+    let stamp = SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|t| t.as_nanos());
+    let Some(stamp) = stamp else { return false; };
+    let temp = parent.join(format!(".base-{}-{stamp}.tmp", std::process::id()));
+    let Ok(mut file) = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&temp) else { return false; };
+    let written = serde_json::to_writer(&mut file, &data).is_ok()
+        && file.flush().is_ok() && file.sync_all().is_ok()
+        && fs::symlink_metadata(&meta).is_ok_and(|now| (now.dev(), now.ino()) == (raw.dev(), raw.ino()))
+        && fs::rename(&temp, &meta).is_ok();
+    if !written { let _ = fs::remove_file(&temp); }
+    written
 }
 fn worktree_for_branch(main: &Path, branch: &str) -> Option<PathBuf> {
     let text = git_text(main, &["worktree", "list", "--porcelain"])?;
@@ -520,6 +596,46 @@ mod tests {
     fn run_git(cwd: &Path, args: &[&str]) {
         let result = Command::new("git").args(args).current_dir(cwd).output().unwrap();
         assert!(result.status.success(), "git {:?}: {}", args, String::from_utf8_lossy(&result.stderr));
+    }
+    #[test]
+    fn live_switch_updates_base_and_preserves_dirty_or_unique_work() {
+        let dir = tempfile::tempdir().unwrap();
+        env::set_var("DOXA_HOME", dir.path().join("home"));
+        env::set_var("DOXA_WORKTREE", "1");
+        let main = dir.path().join("repo");
+        fs::create_dir(&main).unwrap();
+        run_git(&main, &["init", "-q", "-b", "main"]);
+        fs::write(main.join("file"), "main\n").unwrap();
+        run_git(&main, &["add", "file"]);
+        run_git(&main, &["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "test: base"]);
+        run_git(&main, &["checkout", "-qb", "feature"]);
+        fs::write(main.join("file"), "feature\n").unwrap();
+        run_git(&main, &["add", "file"]);
+        run_git(&main, &["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "test: feature"]);
+        let feature_oid = git_text(&main, &["rev-parse", "HEAD"]).unwrap();
+        run_git(&main, &["checkout", "-q", "main"]);
+        let main_oid = git_text(&main, &["rev-parse", "HEAD"]).unwrap();
+        assert!(switch_base(&main, "feature").unwrap_err().contains("no verified"));
+        let mut tree = create(&main, "switch001").unwrap();
+        let path = tree.path().to_path_buf();
+        assert!(switch_base(&path, "doxa/switch00").unwrap_err().contains("own branch"));
+        assert!(switch_base(&path, "missing").unwrap_err().contains("no such"));
+        assert!(switch_base(&path, "feature").unwrap().contains("now based"));
+        assert_eq!(git_text(&path, &["rev-parse", "HEAD"]).as_deref(), Some(feature_oid.as_str()));
+        assert_eq!(git_text(&main, &["rev-parse", "HEAD"]).as_deref(), Some(main_oid.as_str()));
+        let data: serde_json::Value = serde_json::from_slice(&fs::read(meta_path(&path).unwrap()).unwrap()).unwrap();
+        assert_eq!(data["base_ref"], "feature");
+        assert_eq!(data["base_oid"], feature_oid);
+        fs::write(path.join("scratch"), "dirty").unwrap();
+        assert!(switch_base(&path, "main").unwrap_err().contains("uncommitted"));
+        fs::remove_file(path.join("scratch")).unwrap();
+        fs::write(path.join("file"), "own commit\n").unwrap();
+        run_git(&path, &["add", "file"]);
+        run_git(&path, &["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "test: own"]);
+        let own_oid = git_text(&path, &["rev-parse", "HEAD"]).unwrap();
+        assert!(switch_base(&path, "main").unwrap_err().contains("ahead"));
+        assert_eq!(git_text(&path, &["rev-parse", "HEAD"]).as_deref(), Some(own_oid.as_str()));
+        assert!(tree.finish().contains("kept"));
     }
     #[test]
     fn clean_tree_is_removed_but_dirty_and_committed_work_are_kept() {
