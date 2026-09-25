@@ -1,7 +1,7 @@
 <p align="center"><img src="assets/logo.png" width="560" alt="DOXA — belief earning knowledge"></p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Rust%202.0-alpha.10-f59f00" alt="Rust 2.0 alpha.10 is the main frontend">
+  <img src="https://img.shields.io/badge/Rust%202.0-alpha.11-f59f00" alt="Rust 2.0 alpha.11 is the main frontend">
   <a href="https://github.com/docwilde/doxa/releases"><img src="https://img.shields.io/github/v/release/docwilde/doxa?label=release&color=e8590c" alt="latest release"></a>
   <a href="https://github.com/docwilde/doxa/actions/workflows/rust-ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/docwilde/doxa/rust-ci.yml?branch=main&label=Rust%20CI" alt="Rust CI status"></a>
   <img src="https://img.shields.io/badge/TUI-Ratatui-2f9e44" alt="Rust TUI built with Ratatui">
@@ -36,13 +36,13 @@ Launch and reattach [four engines](rust/README.md), work
 across grouped tabs and two-pane splits with separate prompts, inspect bounded
 worktree diffs and tool cards, change supported models and permissions, and
 browse LORE beliefs and peer activity. The [Rust guide](rust/README.md)
-describes its current capabilities and limits. Worktree lifecycle, diff hunk
-rejection, LORE proposal approval, fleets, and remote control are still being
-ported.
+describes its current capabilities and limits. Managed worktrees, diff hunk
+rejection, LORE proposal review, and Python-backed fleet operation are in the
+alpha. Native fleet supervision and remote control are still being ported.
 
 ## Gallery
 
-### Rust 2.0 alpha.10
+### Rust 2.0 alpha.11
 
 ![Single Rust session pane showing collapsed tool calls below the assistant reply](assets/shots/rust-tool-activity.png)
 
@@ -75,7 +75,7 @@ curl -fsSL https://raw.githubusercontent.com/docwilde/doxa/main/scripts/install.
 
 The installer builds the Rust frontend and daemon from `main` and installs the
 Rust `doxa` command in `~/.local/bin` (or `DOXA_RUST_BIN_DIR`). Pass a tag such
-as `v2.0.0-alpha.10` after `sh -s --` to pin a release. It uses Git, Cargo,
+as `v2.0.0-alpha.11` after `sh -s --` to pin a release. It uses Git, Cargo,
 Python 3.11+, and `uv`; the Python environment it creates is private to the
 LORE and Claude sidecars. No Python frontend command is installed. See the
 [Rust guide](rust/README.md) for provider setup and current limits.

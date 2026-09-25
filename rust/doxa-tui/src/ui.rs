@@ -1,5 +1,5 @@
 //! Terminal shell for the Rust frontend. Daemon adapters can feed [`App::apply_update`].
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::cell::RefCell;
 use std::io::{self, IsTerminal, Stdout};
 use std::path::PathBuf;
@@ -35,12 +35,17 @@ const MIN_PANE_WIDTH: u16 = 28;
 const MIN_PANE_HEIGHT: u16 = 8;
 const MIN_RAIL_WIDTH: u16 = 12;
 const MAX_PENDING_PROMPTS: usize = 32;
+const MAX_QUEUED_REJECTIONS: usize = 8;
+const MAX_REJECT_REASON_BYTES: usize = 1024;
 const MAX_INPUT_REQUESTS: usize = 32;
 const INPUT_BLINK_INTERVAL: Duration = Duration::from_millis(650);
 // JSON may expand one input byte to a six-byte Unicode escape.
 const MAX_INPUT_BYTES: usize = 10 * 1024;
 const MAX_TRANSCRIPT_BYTES: usize = 512 * 1024;
 const MAX_ANSWER_BYTES: usize = 10 * 1024;
+// Reserve metadata wrapping even in a narrow review modal. This is also the
+// number used by the read-through gate, so it never credits hidden raw rows.
+const REVIEW_BODY_RESERVE: u16 = 10;
 const ACTIONS: [(&str, &str); 13] = [
     ("Peer map", "Ctrl+M"),
     ("Tool activity", "Ctrl+T"),
@@ -81,9 +86,40 @@ struct ModelPicker {
 }
 
 #[derive(Debug)]
+struct AttachPicker {
+    rows: Vec<crate::discovery::Session>,
+    query: String,
+    selected: usize,
+}
+
+#[derive(Clone, Debug)]
+struct RejectDraft {
+    index: usize,
+    reason: String,
+}
+
+#[derive(Debug)]
+struct PendingRejection {
+    session_id: String,
+    snapshot: diff_view::DiffSnapshot,
+    index: usize,
+    reason: String,
+}
+
+#[derive(Debug)]
 struct LorePicker {
     query: String,
     rows: Vec<lore_picker::Belief>,
+    proposals: Vec<lore_picker::Proposal>,
+    proposal_mode: bool,
+    review: Option<doxa_lore::PendingReview>,
+    review_scroll: usize,
+    review_seen: usize,
+    review_width: usize,
+    armed_resolution: Option<doxa_lore::PendingDecision>,
+    can_resolve: bool,
+    resolving: bool,
+    cwd: String,
     selected: usize,
     offset: u16,
     evidence: Option<(u64, Vec<lore_picker::Evidence>)>,
@@ -105,6 +141,39 @@ fn safe_label(value: &str) -> String {
         .chars()
         .take(200)
         .collect()
+}
+
+fn attach_matches(session: &crate::discovery::Session, query: &str) -> bool {
+    let query = query.to_lowercase();
+    query.is_empty() || session.id.to_lowercase().starts_with(&query)
+        || session.title.to_lowercase().contains(&query)
+}
+
+fn visible_raw_line(value: &str) -> String {
+    value.chars().flat_map(|ch| {
+        if ch.is_control() || matches!(ch, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}') {
+            ch.escape_debug().collect::<String>().chars().collect::<Vec<_>>()
+        } else { vec![ch] }
+    }).collect()
+}
+
+fn raw_visual_rows(raw: &str, width: usize) -> Vec<String> {
+    let mut rows = Vec::new();
+    for line in raw.split('\n') {
+        let mut row = String::new();
+        let mut cells = 0;
+        for ch in visible_raw_line(line).chars() {
+            let next = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if cells + next > width.max(1) && !row.is_empty() {
+                rows.push(std::mem::take(&mut row));
+                cells = 0;
+            }
+            row.push(ch);
+            cells += next;
+        }
+        rows.push(row);
+    }
+    rows
 }
 
 fn clipped_title(value: &str, width: usize) -> (String, bool) {
@@ -615,6 +684,7 @@ pub struct App {
     input_cursor: usize,
     input_drafts: HashMap<(usize, String), (String, usize)>,
     session_identity: HashMap<String, (Option<String>, Option<String>)>,
+    pub(crate) custom_names: HashMap<String, String>,
     session_telemetry: HashMap<String, SessionTelemetry>,
     chip_offsets: [usize; 2],
     blink_on: bool,
@@ -629,15 +699,19 @@ pub struct App {
     stop_confirmation: Option<String>,
     pending_stops: Vec<String>,
     model_picker: Option<ModelPicker>,
+    attach_picker: Option<AttachPicker>,
     lore_picker: Option<LorePicker>,
     engine_picker: bool,
     engine_selected: usize,
     new_session: Option<NewSession>,
     pending_launches: Vec<(launch::LaunchOptions, Option<String>, usize)>,
+    pending_attaches: Vec<(String, usize)>,
+    attaching_ids: HashSet<String>,
     launching: bool,
     pending_model_queries: Vec<String>,
     pending_model_changes: Vec<(String, String)>,
     pub pending_prompts: Vec<(String, String)>,
+    pending_peer_messages: Vec<(String, String, String)>,
     pub input_requests: Vec<InputRequest>,
     pub pending_answers: Vec<(String, String, serde_json::Value)>,
     pub rejected_drafts: HashMap<String, Vec<String>>,
@@ -665,6 +739,12 @@ pub struct App {
     diff_files: Vec<usize>,
     diff_hunks: Vec<usize>,
     diff_pending: Option<Receiver<(String, diff_view::DiffSnapshot)>>,
+    diff_snapshot: Option<diff_view::DiffSnapshot>,
+    diff_reject_confirm: Option<RejectDraft>,
+    diff_reject_queue: VecDeque<PendingRejection>,
+    diff_reject_active: Option<PendingRejection>,
+    diff_reject_feedback: Option<(String, String)>,
+    diff_reject_pending: Option<Receiver<(String, Result<String, String>, String)>>,
     session_cwds: HashMap<String, PathBuf>,
     pending_peer_refresh: Option<String>,
     pub notice: String,
@@ -701,6 +781,7 @@ impl Default for App {
             input_cursor: 0,
             input_drafts: HashMap::new(),
             session_identity: HashMap::new(),
+            custom_names: HashMap::new(),
             session_telemetry: HashMap::new(),
             chip_offsets: [0, 0],
             blink_on: true,
@@ -715,15 +796,19 @@ impl Default for App {
             stop_confirmation: None,
             pending_stops: Vec::new(),
             model_picker: None,
+            attach_picker: None,
             lore_picker: None,
             engine_picker: false,
             engine_selected: 0,
             new_session: None,
             pending_launches: Vec::new(),
+            pending_attaches: Vec::new(),
+            attaching_ids: HashSet::new(),
             launching: false,
             pending_model_queries: Vec::new(),
             pending_model_changes: Vec::new(),
             pending_prompts: Vec::new(),
+            pending_peer_messages: Vec::new(),
             input_requests: Vec::new(),
             pending_answers: Vec::new(),
             rejected_drafts: HashMap::new(),
@@ -751,6 +836,12 @@ impl Default for App {
             diff_files: Vec::new(),
             diff_hunks: Vec::new(),
             diff_pending: None,
+            diff_snapshot: None,
+            diff_reject_confirm: None,
+            diff_reject_queue: VecDeque::new(),
+            diff_reject_active: None,
+            diff_reject_feedback: None,
+            diff_reject_pending: None,
             session_cwds: HashMap::new(),
             pending_peer_refresh: None,
             notice: "Disconnected · waiting for daemon".into(),
@@ -800,6 +891,30 @@ impl App {
             return false;
         };
         match kind {
+            "attach_reply" => {
+                let Some(reply_id) = frame["session_id"].as_str() else { return false; };
+                if !self.attaching_ids.remove(reply_id) { return false; }
+                if frame["ok"] == true {
+                    if let Some(id) = frame["session_id"].as_str().filter(|id| crate::discovery::valid_id(id)) {
+                        let target = frame["group"].as_u64().filter(|group| *group < 2)
+                            .map(|group| group as usize).unwrap_or(self.active_group);
+                        if target != 0 {
+                            if let Some(index) = self.groups[0].tabs.iter().position(|tab| tab == id) {
+                                self.groups[0].tabs.remove(index);
+                                self.groups[0].active = self.groups[0].active.min(self.groups[0].tabs.len().saturating_sub(1));
+                            }
+                        }
+                        let group = &mut self.groups[target];
+                        if !group.tabs.iter().any(|tab| tab == id) { group.tabs.push(id.to_owned()); }
+                        group.active = group.tabs.iter().position(|tab| tab == id).unwrap_or(group.active);
+                        self.active_group = target;
+                        self.notice = format!("Attached · {}", safe_label(id));
+                    }
+                } else {
+                    self.notice = format!("Attach failed · {}", safe_label(frame["message"].as_str().unwrap_or("unknown error")));
+                }
+                true
+            }
             "launch_reply" => {
                 if !self.launching { return false; }
                 self.launching = false;
@@ -863,7 +978,7 @@ impl App {
                     .unwrap_or_default();
                 self.apply_update(DaemonUpdate::Upsert(Session {
                     id: id.into(),
-                    title: model.clone().unwrap_or_else(|| safe_label(id)),
+                    title: self.custom_names.get(id).cloned().unwrap_or_else(|| model.clone().unwrap_or_else(|| safe_label(id))),
                     collection: cwd,
                     transcript,
                     status: "Connected".into(),
@@ -896,7 +1011,8 @@ impl App {
                             identity.1 = new_model.clone();
                         }
                         if let Some(session) = self.sessions.iter_mut().find(|s| s.id == id) {
-                            if old_model.as_deref() == Some(session.title.as_str()) {
+                            if !self.custom_names.contains_key(&id)
+                                && old_model.as_deref() == Some(session.title.as_str()) {
                                 if let Some(model) = new_model { session.title = model; }
                             }
                         }
@@ -994,6 +1110,12 @@ impl App {
                         self.append_event(&id, event_type, data)
                     }
                     "session_done" => {
+                        self.session_activity.remove(&id);
+                        let before = self.diff_reject_queue.len();
+                        self.diff_reject_queue.retain(|item| item.session_id != id);
+                        if self.diff_reject_queue.len() != before {
+                            self.notice = "Queued hunk rejections cancelled because the session ended".into();
+                        }
                         self.apply_update(DaemonUpdate::Status {
                             id: id.clone(),
                             text: "Ended".into(),
@@ -1024,6 +1146,33 @@ impl App {
                     return false;
                 };
                 self.peer_map.roster(id, frame)
+            }
+            "peer_message_reply" => {
+                let Some(session) = frame["session_id"].as_str()
+                    .filter(|id| self.sessions.iter().any(|entry| entry.id == *id)) else { return false; };
+                let delivered = frame["delivered_to"].as_array().is_some_and(|ids| !ids.is_empty())
+                    || (frame["delivered_to"].is_null() && frame["peer"].is_object());
+                if !delivered {
+                    if let Some(draft) = frame["draft"].as_str() {
+                        self.rejected_drafts.entry(session.to_owned()).or_default().push(draft.to_owned());
+                    }
+                }
+                self.notice = if frame["uncertain"] == true {
+                    "Peer delivery unconfirmed · inspect peer before Alt+Up retry".into()
+                } else if frame["ok"] != true {
+                    format!("Peer message failed · {}", safe_label(frame["error"].as_str().unwrap_or("unknown error")))
+                } else if frame["ledger_error"].as_str().is_some_and(|s| !s.is_empty()) {
+                    "Peer message delivered · delivery ledger write failed".into()
+                } else if delivered {
+                    let title = frame["peer"]["title"].as_str().map(safe_label).unwrap_or_else(|| "peer".into());
+                    format!("Peer message sent to {title}")
+                } else {
+                    "Peer message was not delivered · inspect the peer before retrying".into()
+                };
+                if self.groups[self.active_group].active_id() != Some(session) {
+                    self.notice = format!("{} · {}", safe_label(session), self.notice);
+                }
+                true
             }
             "models_reply" => {
                 let Some(id) = frame.get("session_id").and_then(|v| v.as_str()) else { return false; };
@@ -1134,6 +1283,7 @@ impl App {
             }
             "client_notice" => {
                 if let Some(id) = frame.get("session_id").and_then(|v| v.as_str()) {
+                    self.session_activity.remove(id);
                     self.apply_update(DaemonUpdate::Status {
                         id: id.into(),
                         text: "Disconnected".into(),
@@ -1269,6 +1419,10 @@ impl App {
                     self.history_modal = false;
                     self.notice = "Enlarge active pane to search sessions".into();
                 }
+                if self.attach_picker.is_some() && self.active_chooser_rect().is_none() {
+                    self.attach_picker = None;
+                    self.notice = "Enlarge active pane to choose a live session".into();
+                }
                 if self.lore_picker.is_some() && (w < 34 || h < 13) {
                     self.lore_picker = None;
                     self.notice = "Enlarge terminal to open LORE beliefs".into();
@@ -1307,11 +1461,20 @@ impl App {
     }
 
     fn paste(&mut self, text: &str) -> bool {
+        if self.diff_reject_confirm.is_some() {
+            for ch in text.chars() {
+                self.append_reject_reason(if ch.is_whitespace() { ' ' } else { ch });
+                if self.diff_reject_confirm.as_ref().is_some_and(|draft| draft.reason.len() >= MAX_REJECT_REASON_BYTES) {
+                    break;
+                }
+            }
+            return true;
+        }
         if self.focus != Focus::Prompt || self.active_request_index().is_some()
             || self.stop_confirmation.is_some() || self.lore_picker.is_some()
             || self.new_session.is_some() || self.model_picker.is_some()
             || self.permission_picker.is_some() || self.engine_picker || self.action_menu
-            || self.history_modal || self.diff_modal || self.map_modal || self.tool_modal {
+            || self.history_modal || self.attach_picker.is_some() || self.diff_modal || self.map_modal || self.tool_modal {
             return false;
         }
         let mut clean = String::new();
@@ -1336,6 +1499,17 @@ impl App {
         }
         if truncated { self.notice = "Prompt input limit reached · paste truncated".into(); }
         !clean.is_empty() || truncated
+    }
+
+    fn append_reject_reason(&mut self, ch: char) {
+        if ch.is_control() { return; }
+        if let Some(draft) = &mut self.diff_reject_confirm {
+            if draft.reason.len() + ch.len_utf8() <= MAX_REJECT_REASON_BYTES {
+                draft.reason.push(ch);
+            } else {
+                self.notice = "Rejection reason limited to 1024 bytes".into();
+            }
+        }
     }
 
     fn insert_input(&mut self, ch: char) -> bool {
@@ -1365,11 +1539,125 @@ impl App {
         true
     }
 
+    /// Handle bare DOXA commands before a prompt can reach an agent. Unknown
+    /// slash commands still go to the provider (including `/compact` and
+    /// plugin commands). Known commands with arguments stay in the draft
+    /// until Rust has an explicit implementation for that form.
+    fn dispatch_prompt_command(&mut self) -> bool {
+        let input = self.input.trim();
+        if !input.starts_with('/') || input.contains('\n') {
+            return false;
+        }
+        let mut parts = input.split_whitespace();
+        let Some(name) = parts.next() else { return false; };
+        let args: Vec<&str> = parts.collect();
+        if !matches!(name, "/help" | "/about" | "/sessions" | "/model" | "/engine"
+            | "/mode" | "/beliefs" | "/diff" | "/peers" | "/split"
+            | "/vsplit" | "/pane" | "/sidebar" | "/detach" | "/dir") {
+            return false;
+        }
+        if !args.is_empty() && !matches!(name, "/pane" | "/sidebar") {
+            self.notice = format!("{name} arguments are not available in Rust yet");
+            return true;
+        }
+        let pane_target = if name == "/pane" && !args.is_empty() {
+            match args.as_slice() {
+                ["1"] => Some(0),
+                ["2"] => Some(1),
+                _ => {
+                    self.notice = "Usage: /pane [1|2]".into();
+                    return true;
+                }
+            }
+        } else { None };
+        let sidebar = if name == "/sidebar" && !args.is_empty() {
+            match args.as_slice() {
+                ["on"] => Some((true, None)),
+                ["off"] => Some((false, None)),
+                ["wider"] => Some((true, Some(self.rail_width.saturating_add(4).min(80)))),
+                ["narrower"] => Some((true, Some(self.rail_width.saturating_sub(4).max(MIN_RAIL_WIDTH)))),
+                ["width", width] => match width.parse::<u16>() {
+                    Ok(width) if (MIN_RAIL_WIDTH..=80).contains(&width) => Some((true, Some(width))),
+                    _ => {
+                        self.notice = "Sidebar width must be 12–80 cells".into();
+                        return true;
+                    }
+                },
+                _ => {
+                    self.notice = "Usage: /sidebar [on|off|wider|narrower|width N]".into();
+                    return true;
+                }
+            }
+        } else { None };
+        let name = name.to_owned();
+        self.input.clear();
+        self.input_cursor = 0;
+        match name.as_str() {
+            "/help" => {
+                self.action_menu = true;
+                self.action_selected = 0;
+            }
+            "/about" => self.notice = format!("DOXA Rust {}", env!("CARGO_PKG_VERSION")),
+            "/sessions" => self.open_history(),
+            "/model" => self.open_model_picker(),
+            "/engine" => self.open_engine_picker(),
+            "/mode" => self.open_permission_picker(),
+            "/beliefs" => self.open_lore_picker(),
+            "/diff" => self.open_diff(),
+            "/peers" => {
+                self.map_modal = true;
+                self.peer_map.selected = 0;
+                self.pending_peer_refresh = Some(
+                    self.groups[self.active_group].active_id().unwrap_or("").to_owned(),
+                );
+            }
+            "/split" => {
+                self.split = Split::Horizontal;
+                self.split_requested = true;
+            }
+            "/vsplit" => {
+                self.split = Split::Vertical;
+                self.split_requested = true;
+            }
+            "/pane" => {
+                self.active_group = pane_target.unwrap_or(1 - self.active_group);
+                self.split_requested = true;
+                self.focus = Focus::Prompt;
+            }
+            "/sidebar" => {
+                if let Some((visible, width)) = sidebar {
+                    self.rail_visible = visible;
+                    if let Some(width) = width { self.rail_width = width; }
+                } else {
+                    self.rail_visible = !self.rail_visible;
+                }
+            }
+            "/detach" => self.detach_active_tab(),
+            "/dir" => {
+                self.notice = self.groups[self.active_group].active_id()
+                    .and_then(|id| self.session_cwds.get(id))
+                    .map(|cwd| format!("Session directory · {}", safe_label(&cwd.to_string_lossy())))
+                    .unwrap_or_else(|| "Session directory unavailable".into());
+            }
+            _ => unreachable!("recognized bare DOXA command"),
+        }
+        true
+    }
+
     fn key(&mut self, key: KeyEvent) -> bool {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         if key.code == KeyCode::Char('q') && ctrl {
+            if !self.diff_reject_queue.is_empty() || self.diff_reject_active.is_some()
+                || self.diff_reject_feedback.is_some() {
+                self.notice = "Wait for queued hunk rejections before leaving".into();
+                return true;
+            }
             self.should_quit = true;
+            return true;
+        }
+        if key.code == KeyCode::Char('w') && ctrl {
+            self.detach_active_tab();
             return true;
         }
         if self.active_request_index().is_some() {
@@ -1387,7 +1675,11 @@ impl App {
         if self.history_modal {
             return self.history_key(key);
         }
+        if self.attach_picker.is_some() { return self.attach_picker_key(key); }
         if self.diff_modal {
+            return self.diff_key(key);
+        }
+        if self.diff_pane && self.diff_reject_confirm.is_some() {
             return self.diff_key(key);
         }
         if self.map_modal {
@@ -1456,6 +1748,10 @@ impl App {
         }
         if key.code == KeyCode::F(4) {
             if self.diff_pane {
+                if self.rejections_for_target() > 0 {
+                    self.notice = "Wait for queued hunk rejections before closing this diff".into();
+                    return true;
+                }
                 self.diff_pane = false;
             } else {
                 self.diff_pane = true;
@@ -1471,6 +1767,7 @@ impl App {
         if self.diff_pane {
             match key.code {
                 KeyCode::F(5) => { self.load_diff(); return true; }
+                KeyCode::Char('r' | 'R') if alt => { self.begin_diff_reject(); return true; }
                 KeyCode::PageUp if alt => { self.diff_scroll = self.diff_scroll.saturating_sub(10); return true; }
                 KeyCode::PageDown if alt => { self.diff_scroll = self.diff_scroll.saturating_add(10); return true; }
                 KeyCode::Char('n' | 'N') if alt => { self.jump_diff(true, true); return true; }
@@ -1622,9 +1919,32 @@ impl App {
             }
             KeyCode::Enter if self.focus == Focus::Prompt => {
                 if !self.input.is_empty() {
+                    if self.dispatch_prompt_command() { return true; }
+                    if self.submit_local_command() { return true; }
                     if let Some(id) = self.groups[self.active_group].active_id() {
                         if self.offline_ids.contains(id) {
                             self.notice = "Archived transcript is read-only".into();
+                        } else if self.input == "/peers" || self.input == "/mesh" {
+                            self.map_modal = true;
+                            self.peer_map.selected = 0;
+                            self.pending_peer_refresh = Some(id.to_owned());
+                            self.input.clear();
+                            self.input_cursor = 0;
+                        } else if self.input == "/msg" || self.input.starts_with("/msg ") {
+                            let mut parts = self.input.splitn(3, ' ');
+                            let _command = parts.next();
+                            let target = parts.next().unwrap_or("");
+                            let body = parts.next().unwrap_or("");
+                            if target.is_empty() || body.trim().is_empty() {
+                                self.notice = "Usage: /msg <session_prefix> <text>".into();
+                            } else if self.pending_peer_messages.len() >= MAX_PENDING_PROMPTS {
+                                self.notice = "Peer message queue full · wait for daemon".into();
+                            } else {
+                                self.pending_peer_messages.push((id.to_owned(), target.to_owned(), body.to_owned()));
+                                self.input.clear();
+                                self.input_cursor = 0;
+                                self.notice = "Peer message queued".into();
+                            }
                         } else if self.pending_prompts.len() < MAX_PENDING_PROMPTS {
                             self.pending_prompts
                                 .push((id.to_owned(), std::mem::take(&mut self.input)));
@@ -1641,6 +1961,171 @@ impl App {
             }
             _ => false,
         }
+    }
+
+    fn submit_local_command(&mut self) -> bool {
+        if !self.input.trim_start().starts_with('/') || self.input.contains('\n') {
+            return false;
+        }
+        let line = self.input.trim().to_owned();
+        let (command, args) = line.split_once(char::is_whitespace).unwrap_or((line.as_str(), ""));
+        match command {
+            "/pending" if args.trim().is_empty() => {
+                self.input.clear();
+                self.input_cursor = 0;
+                self.open_pending_picker();
+                true
+            }
+            "/pending" => { self.notice = "Local command unavailable: /pending arguments".into(); true }
+            "/attach" => { self.local_attach(args); true }
+            "/rename" => { self.local_rename(args); true }
+            "/mesh" if !args.trim().is_empty() => {
+                self.notice = "Local command unavailable: /mesh arguments".into(); true
+            }
+            "/mesh" | "/msg" => false,
+            "/movepane" | "/collection" | "/fleet" | "/img" | "/login"
+            | "/logout" | "/settings" | "/setup" | "/doctor" | "/plugins"
+            | "/reload-plugins" | "/branch" | "/effort" | "/usage"
+            | "/context" | "/queue" | "/clear" | "/cd" | "/search"
+            | "/resume" | "/compact" | "/update" => {
+                self.notice = format!("Local command unavailable: {}", safe_label(command));
+                true
+            }
+            _ => false, // Provider and plugin slash commands remain available.
+        }
+    }
+
+    fn local_attach(&mut self, args: &str) {
+        let query = args.trim();
+        if query.len() > 200 || query.chars().any(unsafe_input_char) {
+            self.notice = "attach: query must be at most 200 bytes without control characters".into();
+            return;
+        }
+        let live = match crate::discovery::sessions() {
+            Ok(rows) => rows,
+            Err(error) => { self.notice = format!("attach: discovery failed · {}", safe_label(&error.to_string())); return; }
+        };
+        let candidates: Vec<_> = if query.is_empty() {
+            live.into_iter().filter(|session| !self.groups.iter().any(|group| group.tabs.contains(&session.id))).collect()
+        } else {
+            // ID matches win over titles, so a familiar ID prefix never
+            // silently attaches a different session named after that prefix.
+            let exact: Vec<_> = live.iter().filter(|session| session.id == query).cloned().collect();
+            if !exact.is_empty() { exact } else {
+                let prefixes: Vec<_> = live.iter().filter(|session| session.id.starts_with(query)).cloned().collect();
+                if !prefixes.is_empty() { prefixes } else {
+                    let query = query.to_lowercase();
+                    live.into_iter().filter(|session| session.title.to_lowercase().contains(&query)).collect()
+                }
+            }
+        };
+        match candidates.as_slice() {
+            [] => { self.notice = if query.is_empty() { "attach: no detached live sessions".into() }
+                else { format!("attach: no live session matches {}", safe_label(query)) }; }
+            [one] => self.attach_selected(&one.id),
+            _ => {
+                self.attach_picker = Some(AttachPicker { rows: candidates, query: String::new(), selected: 0 });
+                if self.active_chooser_rect().is_none() {
+                    self.attach_picker = None;
+                    self.notice = "Enlarge active pane to choose a live session".into();
+                } else {
+                    self.input.clear();
+                    self.input_cursor = 0;
+                }
+            }
+        }
+    }
+
+    fn attach_matches(&self) -> Vec<usize> {
+        let Some(picker) = &self.attach_picker else { return Vec::new(); };
+        picker.rows.iter().enumerate().filter_map(|(index, session)|
+            attach_matches(session, &picker.query).then_some(index)).collect()
+    }
+
+    fn attach_picker_key(&mut self, key: KeyEvent) -> bool {
+        let len = self.attach_matches().len();
+        let Some(picker) = self.attach_picker.as_mut() else { return false; };
+        match key.code {
+            KeyCode::Esc => self.attach_picker = None,
+            KeyCode::Up => picker.selected = picker.selected.saturating_sub(1),
+            KeyCode::Down => picker.selected = (picker.selected + 1).min(len.saturating_sub(1)),
+            KeyCode::Backspace => { picker.query.pop(); picker.selected = 0; }
+            KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+                if !unsafe_input_char(c) && picker.query.len() + c.len_utf8() <= 200 {
+                    picker.query.push(c);
+                    picker.selected = 0;
+                }
+            }
+            KeyCode::Enter => self.open_selected_attach(),
+            _ => return false,
+        }
+        true
+    }
+
+    fn open_selected_attach(&mut self) {
+        let Some(picker) = &self.attach_picker else { return; };
+        let Some(&index) = self.attach_matches().get(picker.selected) else { return; };
+        let id = picker.rows[index].id.clone();
+        self.attach_picker = None;
+        // Registry entries are hints: a row may have gone stale while the
+        // picker was open. The bridge performs one more identity check.
+        match crate::discovery::sessions() {
+            Ok(live) if live.iter().any(|session| session.id == id) => self.attach_selected(&id),
+            Ok(_) => self.notice = format!("attach: session is no longer live · {}", safe_label(&id)),
+            Err(error) => self.notice = format!("attach: discovery failed · {}", safe_label(&error.to_string())),
+        }
+    }
+
+    fn attach_selected(&mut self, id: &str) {
+        for (group_index, group) in self.groups.iter_mut().enumerate() {
+            if let Some(index) = group.tabs.iter().position(|tab| tab == id) {
+                group.active = index;
+                self.active_group = group_index;
+                self.input.clear();
+                self.input_cursor = 0;
+                self.notice = format!("Already open · {}", safe_label(id));
+                return;
+            }
+        }
+        if self.attaching_ids.contains(id) {
+            self.notice = format!("Already attaching · {}", safe_label(id));
+            return;
+        }
+        self.attaching_ids.insert(id.to_owned());
+        self.pending_attaches.push((id.to_owned(), self.active_group));
+        self.input.clear();
+        self.input_cursor = 0;
+        self.notice = format!("Attaching · {}", safe_label(id));
+    }
+
+    fn local_rename(&mut self, args: &str) {
+        let Some(id) = self.groups[self.active_group].active_id().map(str::to_owned) else {
+            self.notice = "rename: select a tab".into();
+            return;
+        };
+        if args.len() > 200 || args.chars().any(unsafe_input_char) {
+            self.notice = "rename: name must be at most 200 bytes without control characters".into();
+            return;
+        }
+        let name = args.trim();
+        if name.is_empty() {
+            self.custom_names.remove(&id);
+            let automatic = self.session_identity.get(&id).and_then(|identity| identity.1.as_deref())
+                .map(safe_label).unwrap_or_else(|| safe_label(&id));
+            if let Some(session) = self.sessions.iter_mut().find(|session| session.id == id) {
+                session.title = automatic;
+            }
+            self.notice = "Tab name cleared".into();
+        } else {
+            let name = name.to_owned();
+            self.custom_names.insert(id.clone(), name.clone());
+            if let Some(session) = self.sessions.iter_mut().find(|session| session.id == id) {
+                session.title = name;
+            }
+            self.notice = "Tab renamed and pinned".into();
+        }
+        self.input.clear();
+        self.input_cursor = 0;
     }
 
     fn open_model_picker(&mut self) {
@@ -1848,16 +2333,35 @@ impl App {
     }
 
     fn open_lore_picker(&mut self) {
+        self.open_lore_picker_mode(false);
+    }
+
+    fn open_pending_picker(&mut self) {
+        self.open_lore_picker_mode(true);
+    }
+
+    fn open_lore_picker_mode(&mut self, proposal_mode: bool) {
+        let cwd = self.groups[self.active_group].active_id()
+            .and_then(|id| self.session_cwds.get(id))
+            .map(|path| path.to_string_lossy().into_owned())
+            .or_else(|| std::env::current_dir().ok().map(|path| path.to_string_lossy().into_owned()))
+            .unwrap_or_default();
         self.lore_picker = Some(LorePicker {
             query: String::new(), rows: Vec::new(), selected: 0, offset: 0,
+            proposals: Vec::new(), proposal_mode, review: None,
+            review_scroll: 0, review_seen: 0, review_width: 0,
+            armed_resolution: None, can_resolve: false, resolving: false, cwd: cwd.clone(),
             evidence: None, status: String::new(), pending: None,
         });
-        self.load_lore(lore_picker::Query::Beliefs(0));
+        if proposal_mode { self.load_lore(lore_picker::Query::Proposals(cwd, 0)); }
+        else { self.load_lore(lore_picker::Query::Beliefs(0)); }
     }
 
     fn load_lore(&mut self, query: lore_picker::Query) {
         let Some(picker) = &mut self.lore_picker else { return; };
-        picker.status = "Loading from LORE…".into();
+        picker.resolving = matches!(&query, lore_picker::Query::Resolve(..));
+        picker.status = if picker.resolving { "Resolving this proposal with LORE…" }
+            else { "Loading from LORE…" }.into();
         picker.pending = None;
         let python = std::env::var_os("DOXA_LORE_PYTHON")
             .map(PathBuf::from).unwrap_or_else(|| PathBuf::from("python3"));
@@ -1877,6 +2381,9 @@ impl App {
             Err(TryRecvError::Disconnected) => Err("LORE worker unavailable"),
         };
         picker.pending = None;
+        let was_resolving = picker.resolving;
+        picker.resolving = false;
+        let mut urgent_resolution = false;
         match result {
             Ok(lore_picker::ResultPage::Beliefs(rows)) => {
                 picker.rows = rows;
@@ -1900,17 +2407,135 @@ impl App {
                     picker.status = "Evidence trail · read only".into();
                 }
             }
+            Ok(lore_picker::ResultPage::Proposals(rows)) => {
+                picker.proposals = rows;
+                picker.selected = 0;
+                picker.review = None;
+                picker.armed_resolution = None;
+                picker.status = if picker.proposals.is_empty() { "No staged proposals on this page" }
+                    else { "Staged proposals · select one to read its complete raw contents" }.into();
+            }
+            Ok(lore_picker::ResultPage::Review(review, can_resolve)) => {
+                if picker.proposal_mode && picker.proposals.iter().any(|row| row.pid == review.pid()) {
+                    picker.review = Some(review);
+                    picker.review_scroll = 0;
+                    picker.review_seen = 0;
+                    picker.review_width = 0;
+                    picker.armed_resolution = None;
+                    picker.can_resolve = can_resolve;
+                    picker.status = if can_resolve {
+                        "Read the complete raw proposal; A approve or R reject after reaching the end"
+                    } else { "Read only · installed LORE lacks atomic reviewed resolution" }.into();
+                }
+            }
+            Ok(lore_picker::ResultPage::Resolved(resolution)) => {
+                picker.review = None;
+                picker.armed_resolution = None;
+                picker.status = match resolution {
+                    doxa_lore::PendingResolution::Approved => "Proposal approved and archived".into(),
+                    doxa_lore::PendingResolution::Rejected => "Proposal rejected and archived".into(),
+                    doxa_lore::PendingResolution::Refused { code, applied: true } =>
+                        { urgent_resolution = true; format!("Applied, but archive failed ({code}); do not retry automatically") },
+                    doxa_lore::PendingResolution::Refused { code, applied: false } =>
+                        format!("Resolution refused: {code}"),
+                };
+                picker.proposals.clear();
+            }
             Err(message) => {
-                picker.status = message.into();
-                picker.rows.clear();
-                picker.evidence = None;
+                picker.status = if was_resolving {
+                    urgent_resolution = true;
+                    "Resolution outcome unknown; inspect LORE pending and archive before retrying".into()
+                } else { message.into() };
+                if picker.proposal_mode { picker.review = None; picker.armed_resolution = None; }
+                else { picker.rows.clear(); picker.evidence = None; }
             }
         }
+        if urgent_resolution { self.notice = picker.status.clone(); }
         true
     }
 
     fn lore_picker_key(&mut self, key: KeyEvent) -> bool {
+        let review_area = self.active_chooser_rect();
         let picker = self.lore_picker.as_mut().unwrap();
+        if picker.resolving { return true; }
+        if picker.proposal_mode {
+            if let Some(review) = &picker.review {
+                let Some(area) = review_area else { return true; };
+                let width = usize::from(area.width.saturating_sub(3)).max(1);
+                let visible = usize::from(area.height.saturating_sub(REVIEW_BODY_RESERVE));
+                let total = raw_visual_rows(review.raw(), width).len();
+                if picker.review_width != width {
+                    picker.review_width = width;
+                    picker.review_scroll = 0;
+                    picker.review_seen = 0;
+                    picker.armed_resolution = None;
+                }
+                if visible > 0 && picker.review_scroll <= picker.review_seen {
+                    picker.review_seen = picker.review_seen.max(picker.review_scroll.saturating_add(visible)).min(total);
+                }
+                let max_scroll = total.saturating_sub(visible);
+                match key.code {
+                    KeyCode::Esc => { picker.review = None; picker.armed_resolution = None; }
+                    KeyCode::Up => { picker.review_scroll = picker.review_scroll.saturating_sub(1); picker.armed_resolution = None; }
+                    KeyCode::Down => { picker.review_scroll = (picker.review_scroll + 1).min(max_scroll); picker.armed_resolution = None; }
+                    KeyCode::PageUp => { picker.review_scroll = picker.review_scroll.saturating_sub(visible.saturating_sub(1).max(1)); picker.armed_resolution = None; }
+                    KeyCode::PageDown => { picker.review_scroll = picker.review_scroll.saturating_add(visible.saturating_sub(1).max(1)).min(max_scroll); picker.armed_resolution = None; }
+                    KeyCode::Char('a' | 'A') if picker.can_resolve && visible > 0 && picker.review_seen == total && picker.pending.is_none() => {
+                        picker.armed_resolution = Some(doxa_lore::PendingDecision::Approve);
+                        picker.status = "Approve this exact proposal? Press Enter to confirm, Esc to cancel".into();
+                    }
+                    KeyCode::Char('r' | 'R') if picker.can_resolve && visible > 0 && picker.review_seen == total && picker.pending.is_none() => {
+                        picker.armed_resolution = Some(doxa_lore::PendingDecision::Reject);
+                        picker.status = "Reject this exact proposal? Press Enter to confirm, Esc to cancel".into();
+                    }
+                    KeyCode::Enter if picker.armed_resolution.is_some() && picker.pending.is_none() => {
+                        let decision = picker.armed_resolution.take().unwrap();
+                        let cwd = picker.cwd.clone();
+                        let review = review.clone();
+                        self.load_lore(lore_picker::Query::Resolve(cwd, review, decision));
+                    }
+                    _ => {
+                        if picker.review_seen < total {
+                            picker.status = "Read through the end before choosing approve or reject".into();
+                        }
+                    }
+                }
+                return true;
+            }
+            match key.code {
+                KeyCode::Esc => self.lore_picker = None,
+                KeyCode::Char('b') if picker.review.is_none() => {
+                    picker.proposal_mode = false;
+                    picker.offset = 0;
+                    picker.selected = 0;
+                    self.load_lore(lore_picker::Query::Beliefs(0));
+                }
+                KeyCode::Up => picker.selected = picker.selected.saturating_sub(1),
+                KeyCode::Down => picker.selected = (picker.selected + 1).min(picker.proposals.len().saturating_sub(1)),
+                KeyCode::Enter | KeyCode::Right => {
+                    if let Some(pid) = picker.proposals.get(picker.selected).map(|row| row.pid.clone()) {
+                        let cwd = picker.cwd.clone();
+                        self.load_lore(lore_picker::Query::Review(cwd, pid));
+                    }
+                }
+                KeyCode::PageDown => {
+                    picker.offset = picker.offset.saturating_add(lore_picker::PAGE_SIZE as u16).min(10000);
+                    let (cwd, offset) = (picker.cwd.clone(), picker.offset);
+                    self.load_lore(lore_picker::Query::Proposals(cwd, offset));
+                }
+                KeyCode::PageUp => {
+                    picker.offset = picker.offset.saturating_sub(lore_picker::PAGE_SIZE as u16);
+                    let (cwd, offset) = (picker.cwd.clone(), picker.offset);
+                    self.load_lore(lore_picker::Query::Proposals(cwd, offset));
+                }
+                KeyCode::F(5) => {
+                    let (cwd, offset) = (picker.cwd.clone(), picker.offset);
+                    self.load_lore(lore_picker::Query::Proposals(cwd, offset));
+                }
+                _ => return false,
+            }
+            return true;
+        }
         match key.code {
             KeyCode::Esc => {
                 if picker.evidence.is_some() { picker.evidence = None; }
@@ -1924,6 +2549,13 @@ impl App {
                 }
             }
             KeyCode::Backspace if picker.evidence.is_none() => { picker.query.pop(); },
+            KeyCode::Char('p' | 'P') if picker.evidence.is_none() && picker.query.is_empty() => {
+                picker.proposal_mode = true;
+                picker.offset = 0;
+                picker.selected = 0;
+                let cwd = picker.cwd.clone();
+                self.load_lore(lore_picker::Query::Proposals(cwd, 0));
+            }
             KeyCode::F(5) if picker.evidence.is_none() => {
                 picker.query.clear();
                 let offset = picker.offset;
@@ -2008,9 +2640,34 @@ impl App {
     }
 
     fn open_diff(&mut self) {
-        if self.diff_modal { self.diff_modal = false; return; }
+        if self.diff_modal {
+            if self.rejections_for_target() > 0 {
+                self.notice = "Wait for queued hunk rejections before closing this diff".into();
+            } else { self.diff_modal = false; }
+            return;
+        }
         self.diff_modal = true;
         self.load_diff();
+    }
+
+    fn rejections_for_target(&self) -> usize {
+        let Some(id) = self.diff_target.as_deref() else { return 0; };
+        self.diff_reject_queue.iter().filter(|item| item.session_id == id).count()
+            + usize::from(self.diff_reject_active.as_ref().is_some_and(|item| item.session_id == id))
+    }
+
+    fn queued_diff_rows(&self) -> HashSet<usize> {
+        let mut rows = HashSet::new();
+        let (Some(id), Some(current)) = (self.diff_target.as_deref(), self.diff_snapshot.as_ref()) else { return rows; };
+        for (index, hunk) in current.rejectable.iter().enumerate() {
+            if self.diff_reject_queue.iter().any(|item| item.session_id == id
+                && current.same_hunk(index, &item.snapshot, item.index))
+                || self.diff_reject_active.as_ref().is_some_and(|item| item.session_id == id
+                    && current.same_hunk(index, &item.snapshot, item.index)) {
+                rows.insert(hunk.row);
+            }
+        }
+        rows
     }
 
     fn load_diff(&mut self) {
@@ -2018,6 +2675,8 @@ impl App {
         self.diff_files.clear();
         self.diff_hunks.clear();
         self.diff_pending = None;
+        self.diff_snapshot = None;
+        self.diff_reject_confirm = None;
         let Some(id) = self.groups[self.active_group].active_id().map(str::to_owned) else {
             self.diff_target = None;
             self.diff_text = "Select a session to inspect its worktree.".into();
@@ -2035,6 +2694,41 @@ impl App {
     }
 
     fn poll_diff(&mut self) -> bool {
+        if self.diff_reject_feedback.is_some() && self.pending_prompts.len() < MAX_PENDING_PROMPTS {
+            self.pending_prompts.push(self.diff_reject_feedback.take().expect("retained feedback"));
+            self.notice = "Notifying the session about the reverted hunk".into();
+            return true;
+        }
+        if let Some(receiver) = &self.diff_reject_pending {
+            match receiver.try_recv() {
+                Ok((id, result, message)) => {
+                    self.diff_reject_pending = None;
+                    self.diff_reject_active = None;
+                    match result {
+                        Ok(note) => {
+                            if self.pending_prompts.len() < MAX_PENDING_PROMPTS {
+                                self.pending_prompts.push((id, message));
+                                self.notice = format!("{note} · notifying the session");
+                            } else {
+                                self.diff_reject_feedback = Some((id, message));
+                                self.notice = format!("{note} · feedback retained until the prompt queue has room");
+                            }
+                            self.load_diff();
+                        }
+                        Err(note) => self.notice = note,
+                    }
+                    return true;
+                }
+                Err(TryRecvError::Disconnected) => {
+                    self.diff_reject_pending = None;
+                    self.diff_reject_active = None;
+                    self.notice = "Hunk rejection worker stopped unexpectedly; inspect the worktree.".into();
+                    return true;
+                }
+                Err(TryRecvError::Empty) => {}
+            }
+        }
+        if self.start_next_rejection() { return true; }
         if self.diff_pane && self.diff_target.as_deref() != self.groups[self.active_group].active_id() {
             self.load_diff();
             return true;
@@ -2045,8 +2739,9 @@ impl App {
                 self.diff_pending = None;
                 if self.groups[self.active_group].active_id() == Some(id.as_str()) {
                     self.diff_text = markdown::sanitize(&snapshot.text);
-                    self.diff_files = snapshot.files;
-                    self.diff_hunks = snapshot.hunks;
+                    self.diff_files = snapshot.files.clone();
+                    self.diff_hunks = snapshot.hunks.clone();
+                    self.diff_snapshot = Some(snapshot);
                     self.diff_scroll = 0;
                     return true;
                 }
@@ -2060,9 +2755,26 @@ impl App {
     }
 
     fn diff_key(&mut self, key: KeyEvent) -> bool {
+        if self.diff_reject_confirm.is_some() {
+            match key.code {
+                KeyCode::Enter => self.confirm_diff_reject(),
+                KeyCode::Esc => {
+                    self.diff_reject_confirm = None;
+                    self.notice = "Hunk rejection cancelled".into();
+                }
+                KeyCode::Backspace => {
+                    if let Some(draft) = &mut self.diff_reject_confirm { draft.reason.pop(); }
+                }
+                KeyCode::Char(ch) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+                    self.append_reject_reason(ch);
+                }
+                _ => return true,
+            }
+            return true;
+        }
         match key.code {
-            KeyCode::Esc | KeyCode::F(2) => self.diff_modal = false,
-            KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::ALT) => self.diff_modal = false,
+            KeyCode::Esc | KeyCode::F(2) => self.open_diff(),
+            KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::ALT) => self.open_diff(),
             KeyCode::Char('r' | 'R') => { self.diff_modal = false; self.open_diff(); },
             KeyCode::Up => self.diff_scroll = self.diff_scroll.saturating_sub(1),
             KeyCode::Down => self.diff_scroll = self.diff_scroll.saturating_add(1),
@@ -2072,8 +2784,93 @@ impl App {
             KeyCode::Char('p' | 'P') => self.jump_diff(true, false),
             KeyCode::Char('j' | 'J') => self.jump_diff(false, true),
             KeyCode::Char('k' | 'K') => self.jump_diff(false, false),
+            KeyCode::Char('x' | 'X') => self.begin_diff_reject(),
             _ => return false,
         }
+        true
+    }
+
+    fn begin_diff_reject(&mut self) {
+        if self.diff_reject_queue.len() + usize::from(self.diff_reject_active.is_some()) >= MAX_QUEUED_REJECTIONS {
+            self.notice = "Too many queued hunk rejections".into();
+            return;
+        }
+        let Some(id) = self.diff_target.as_ref() else { self.notice = "Select a session first".into(); return; };
+        if self.groups[self.active_group].active_id() != Some(id.as_str()) {
+            self.notice = "Active session changed; refresh the diff before rejecting".into();
+            return;
+        }
+        if !self.session_activity.contains_key(id) {
+            self.notice = "Session activity is unknown; wait for a status update".into();
+            return;
+        }
+        let Some(snapshot) = self.diff_snapshot.as_ref() else { self.notice = "Load the diff before rejecting an edit".into(); return; };
+        let Some(row) = snapshot.hunks.iter().copied().filter(|row| *row <= self.diff_scroll).next_back()
+            .or_else(|| snapshot.hunks.first().copied()) else {
+            self.notice = "No tracked hunk is visible in this diff".into();
+            return;
+        };
+        let Some(index) = snapshot.rejectable.iter().position(|hunk| hunk.row == row) else {
+            self.notice = "This hunk has file-level changes or a truncated patch; inspect it with git".into();
+            return;
+        };
+        self.diff_scroll = snapshot.rejectable[index].row;
+        self.diff_reject_confirm = Some(RejectDraft { index, reason: String::new() });
+        self.notice = format!("Reject {} in {}? Type optional reason · Enter confirm · Esc cancel",
+            snapshot.rejectable[index].header, snapshot.rejectable[index].path);
+    }
+
+    fn confirm_diff_reject(&mut self) {
+        let Some(draft) = self.diff_reject_confirm.take() else { return; };
+        let Some(id) = self.diff_target.clone() else { return; };
+        if self.groups[self.active_group].active_id() != Some(id.as_str()) {
+            self.notice = "Active session changed; rejection cancelled".into();
+            return;
+        }
+        if !self.session_activity.contains_key(&id) {
+            self.notice = "Session activity is unknown; rejection cancelled".into();
+            return;
+        }
+        let Some(snapshot) = self.diff_snapshot.clone() else { return; };
+        if snapshot.rejectable.get(draft.index).is_none() { return; }
+        if self.diff_reject_queue.iter().any(|queued| queued.session_id == id
+            && snapshot.same_hunk(draft.index, &queued.snapshot, queued.index))
+            || self.diff_reject_active.as_ref().is_some_and(|active| active.session_id == id
+                && snapshot.same_hunk(draft.index, &active.snapshot, active.index)) {
+            self.notice = "This hunk is already queued for rejection".into();
+            return;
+        }
+        if self.diff_reject_queue.len() + usize::from(self.diff_reject_active.is_some()) >= MAX_QUEUED_REJECTIONS {
+            self.notice = "Too many queued hunk rejections".into();
+            return;
+        }
+        self.diff_reject_queue.push_back(PendingRejection {
+            session_id: id, snapshot, index: draft.index, reason: draft.reason,
+        });
+        if self.start_next_rejection() { return; }
+        self.notice = format!("Hunk rejection queued until session is idle · {} pending", self.diff_reject_queue.len());
+    }
+
+    fn start_next_rejection(&mut self) -> bool {
+        if self.diff_reject_pending.is_some() || self.diff_reject_feedback.is_some()
+            || self.pending_prompts.len() >= MAX_PENDING_PROMPTS { return false; }
+        let Some(position) = self.diff_reject_queue.iter().position(|item| {
+            self.session_activity.get(&item.session_id).copied() == Some((false, 0))
+        }) else { return false; };
+        let job = self.diff_reject_queue.remove(position).expect("queued rejection");
+        let Some(hunk) = job.snapshot.rejectable.get(job.index) else { return false; };
+        let message = hunk.message(&job.reason);
+        let id = job.session_id.clone();
+        let snapshot = job.snapshot.clone();
+        let index = job.index;
+        let (tx, rx) = mpsc::sync_channel(1);
+        self.diff_reject_pending = Some(rx);
+        self.diff_reject_active = Some(job);
+        self.notice = "Checking and reverting the selected hunk…".into();
+        std::thread::spawn(move || {
+            let outcome = diff_view::reject(&snapshot, index);
+            let _ = tx.send((id, outcome, message));
+        });
         true
     }
 
@@ -2445,6 +3242,37 @@ impl App {
         }
     }
 
+    /// Remove only the active tab. Its daemon and rail entry remain available
+    /// for reattachment; closing the final tab exits the otherwise empty UI.
+    fn detach_active_tab(&mut self) {
+        let group = &mut self.groups[self.active_group];
+        if group.active >= group.tabs.len() {
+            self.notice = "No active tab to detach".into();
+            return;
+        }
+        let id = group.tabs.remove(group.active);
+        group.active = group.active.min(group.tabs.len().saturating_sub(1));
+        group.scroll = 0;
+        self.notice = format!("Tab detached · {id} remains available in sessions");
+
+        if self.groups.iter().all(|group| group.tabs.is_empty()) {
+            self.should_quit = true;
+        } else if self.groups[0].tabs.is_empty() {
+            self.groups.swap(0, 1);
+            for id in self.groups[0].tabs.clone() {
+                if let Some(draft) = self.input_drafts.remove(&(1, id.clone())) {
+                    self.input_drafts.insert((0, id), draft);
+                }
+            }
+            self.active_group = 0;
+            self.split_requested = false;
+        } else if self.groups[1].tabs.is_empty() {
+            self.active_group = 0;
+            self.split_requested = false;
+        }
+        self.focus = Focus::Prompt;
+    }
+
     fn previous_tab(&mut self) {
         let p = &mut self.groups[self.active_group];
         p.active = p.active.saturating_sub(1);
@@ -2551,7 +3379,11 @@ impl App {
             (4 + picker.models.len() + usize::from(picker.catalog_pending || !picker.loading && picker.models.is_empty()))
                 .clamp(5, 13) as u16
         } else if let Some(picker) = &self.lore_picker {
-            if let Some((_, evidence)) = &picker.evidence {
+            if picker.review.is_some() {
+                19
+            } else if picker.proposal_mode {
+                (7 + picker.proposals.len()).clamp(5, 19) as u16
+            } else if let Some((_, evidence)) = &picker.evidence {
                 let rows = evidence.len().saturating_mul(2);
                 (if rows <= 4 { 4 + rows } else { 7 + rows }).clamp(5, 19) as u16
             } else {
@@ -2562,6 +3394,8 @@ impl App {
             (ACTIONS.len() + 2).min(15) as u16
         } else if self.history_modal {
             (self.history_matches().len() + 3).clamp(5, 15) as u16
+        } else if self.attach_picker.is_some() {
+            (self.attach_matches().len() + 3).clamp(5, 15) as u16
         } else {
             return None;
         };
@@ -2675,6 +3509,42 @@ impl App {
     }
 
     fn mouse(&mut self, mouse: MouseEvent) -> bool {
+        if self.attach_picker.is_some() {
+            let Some(menu) = self.active_chooser_rect() else { return false; };
+            match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if mouse.column < menu.x || mouse.column >= menu.right()
+                        || mouse.row < menu.y || mouse.row >= menu.bottom() {
+                        self.attach_picker = None;
+                        return true;
+                    }
+                    let first_row = menu.y.saturating_add(2);
+                    if mouse.row >= first_row && mouse.row < menu.bottom().saturating_sub(1) {
+                        let visible = usize::from(menu.height.saturating_sub(3)).max(1);
+                        let selected = self.attach_picker.as_ref().unwrap().selected;
+                        let start = selected.saturating_sub(visible.saturating_sub(1));
+                        let position = start + usize::from(mouse.row - first_row);
+                        if position < self.attach_matches().len() {
+                            self.attach_picker.as_mut().unwrap().selected = position;
+                            self.open_selected_attach();
+                        }
+                    }
+                    return true;
+                }
+                MouseEventKind::ScrollUp => {
+                    let picker = self.attach_picker.as_mut().unwrap();
+                    picker.selected = picker.selected.saturating_sub(1);
+                    return true;
+                }
+                MouseEventKind::ScrollDown => {
+                    let max = self.attach_matches().len().saturating_sub(1);
+                    let picker = self.attach_picker.as_mut().unwrap();
+                    picker.selected = (picker.selected + 1).min(max);
+                    return true;
+                }
+                _ => return false,
+            }
+        }
         if self.history_modal {
             let Some(menu) = self.active_chooser_rect() else { return false; };
             match mouse.kind {
@@ -2768,6 +3638,7 @@ impl App {
             || self.map_modal
             || self.action_menu
             || self.history_modal
+            || self.attach_picker.is_some()
             || self.lore_picker.is_some()
             || self.diff_modal
             || self.model_picker.is_some()
@@ -3145,8 +4016,67 @@ impl App {
             .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED))), area);
     }
 
+    fn draw_attach_picker(&self, frame: &mut Frame, area: Rect) {
+        let Some(picker) = &self.attach_picker else { return; };
+        let matches = self.attach_matches();
+        let mut lines = vec![Line::from(format!(" Search: {}", safe_label(&picker.query)))];
+        if matches.is_empty() { lines.push(Line::from(" No matching live sessions")); }
+        let visible = usize::from(area.height.saturating_sub(3)).max(1);
+        let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+        for (position, &index) in matches.iter().enumerate().skip(start).take(visible) {
+            let session = &picker.rows[index];
+            let title = if session.title.trim().is_empty() { "Untitled session" } else { &session.title };
+            let label = format!(" {} {} · {}", if position == picker.selected { '›' } else { ' ' },
+                safe_label(title), safe_label(&session.id));
+            let style = if position == picker.selected { Style::default().fg(theme::ACCENT).bg(theme::HIGHLIGHT).add_modifier(Modifier::BOLD) }
+                else { Style::default().fg(theme::SECONDARY) };
+            let label = clipped_title(&label, usize::from(area.width.saturating_sub(2))).0;
+            let padded = format!("{label}{}", " ".repeat(usize::from(area.width.saturating_sub(2)).saturating_sub(label.width())));
+            lines.push(Line::styled(padded, style));
+        }
+        frame.render_widget(Paragraph::new(lines).block(Block::default()
+            .title(" Attach live session · type to filter ")
+            .borders(Borders::ALL).border_style(Style::default().fg(theme::ACCENT))
+            .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED))), area);
+    }
+
     fn draw_lore_picker(&self, frame: &mut Frame, area: Rect) {
         let Some(picker) = &self.lore_picker else { return; };
+        if picker.proposal_mode {
+            let label_width = usize::from(area.width.saturating_sub(3));
+            let mut lines = vec![Line::from(format!(" {}", clipped_title(&picker.status, label_width).0))];
+            if let Some(review) = &picker.review {
+                lines.push(Line::from(format!(" {}", clipped_title(&format!("{} · inode {}", review.pid(), review.inode()), label_width).0)));
+                lines.push(Line::from(format!(" SHA-256 {}", review.sha256())));
+                lines.push(Line::from(clipped_title(if picker.can_resolve {
+                    " Raw proposal · ↓/PgDn read all · A approve · R reject · Esc back"
+                } else { " Raw proposal · read only with this LORE version · Esc back" }, label_width).0));
+                let visible = usize::from(area.height.saturating_sub(REVIEW_BODY_RESERVE));
+                let width = usize::from(area.width.saturating_sub(3)).max(1);
+                // Preserve all raw content across visual rows; terminal controls
+                // are shown with visible escapes, and no field is summarized.
+                let visual_rows = raw_visual_rows(review.raw(), width);
+                for line in visual_rows.iter().skip(picker.review_scroll).take(visible) {
+                    lines.push(Line::from(line.clone()));
+                }
+            } else {
+                lines.push(Line::from(" Select one proposal to review its complete raw contents"));
+                lines.push(Line::from(format!(" Page offset {} · {} rows", picker.offset, picker.proposals.len())));
+                let visible = usize::from(area.height.saturating_sub(6)).max(1);
+                let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+                for (index, row) in picker.proposals.iter().enumerate().skip(start).take(visible) {
+                    let label = format!(" {} {} · {}/{} · {} · {}", if index == picker.selected { '›' } else { ' ' },
+                        safe_label(&row.pid), safe_label(&row.kind), safe_label(&row.action),
+                        safe_label(&row.scope), safe_label(&row.summary));
+                    lines.push(Line::styled(label, Style::default().fg(if index == picker.selected { theme::ACCENT } else { theme::SECONDARY })));
+                }
+            }
+            frame.render_widget(Paragraph::new(lines)
+                .block(Block::default().title(" LORE proposals · Enter full review · PgUp/PgDn page · B beliefs · Esc close ")
+                    .borders(Borders::ALL).border_style(Style::default().fg(theme::ACCENT)))
+                .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)).wrap(Wrap { trim: false }), area);
+            return;
+        }
         let height = area.height;
         let modal = area;
         let compact = height < 10;
@@ -3179,7 +4109,7 @@ impl App {
             }
         }
         frame.render_widget(Paragraph::new(lines)
-            .block(Block::default().title(" LORE beliefs · Enter search · → evidence · PgUp/PgDn page · F5 reload · Esc close ")
+            .block(Block::default().title(" LORE beliefs · Enter search · → evidence · P proposals · PgUp/PgDn page · Esc close ")
             .borders(Borders::ALL).border_style(Style::default().fg(theme::ACCENT)))
             .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)).wrap(Wrap { trim: false }), modal);
     }
@@ -3191,33 +4121,55 @@ impl App {
         if width < 24 || height < 8 { return; }
         let modal = Rect::new(area.x + (area.width - width) / 2, area.y + (area.height - height) / 2, width, height);
         frame.render_widget(Clear, modal);
-        let rows: Vec<Line> = self.diff_text.lines()
+        let queued_rows = self.queued_diff_rows();
+        let mut rows: Vec<Line> = self.diff_text.lines().enumerate()
             .skip(self.diff_scroll)
-            .take(usize::from(height.saturating_sub(2)))
-            .map(|line| {
+            .take(usize::from(height.saturating_sub(if self.diff_reject_confirm.is_some() { 3 } else { 2 })))
+            .map(|(row, line)| {
+            if queued_rows.contains(&row) {
+                return Line::styled(format!("⏳ {line}"), Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD));
+            }
             let color = if line.starts_with('+') && !line.starts_with("+++") { theme::SUCCESS }
                 else if line.starts_with('-') && !line.starts_with("---") { theme::ERROR }
                 else if line.starts_with("@@") { theme::ACCENT } else { theme::SECONDARY };
             Line::styled(line.to_owned(), Style::default().fg(color))
         }).collect();
+        if let Some(draft) = &self.diff_reject_confirm {
+            rows.push(Line::styled(format!(" Reason (optional): {}_ · Enter confirm · Esc cancel", draft.reason),
+                Style::default().fg(theme::ACCENT)));
+        }
+        let pending = self.rejections_for_target();
+        let title = format!(" Worktree diff{} · N/P files · J/K hunks · X reject · R refresh · F2/Esc close ",
+            if pending == 0 { String::new() } else { format!(" · {pending} queued") });
         frame.render_widget(Paragraph::new(rows)
-            .block(Block::default().title(" Worktree diff · N/P files · J/K hunks · R refresh · F2/Esc close ")
+            .block(Block::default().title(title)
                 .borders(Borders::ALL).border_style(Style::default().fg(theme::BORDER))
             .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED))), modal);
     }
 
     fn draw_diff_pane(&self, frame: &mut Frame, area: Rect) {
-        let rows: Vec<Line> = self.diff_text.lines()
+        let queued_rows = self.queued_diff_rows();
+        let mut rows: Vec<Line> = self.diff_text.lines().enumerate()
             .skip(self.diff_scroll)
-            .take(usize::from(area.height.saturating_sub(2)))
-            .map(|line| {
+            .take(usize::from(area.height.saturating_sub(if self.diff_reject_confirm.is_some() { 3 } else { 2 })))
+            .map(|(row, line)| {
+                if queued_rows.contains(&row) {
+                    return Line::styled(format!("⏳ {line}"), Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD));
+                }
                 let color = if line.starts_with('+') && !line.starts_with("+++") { theme::SUCCESS }
                     else if line.starts_with('-') && !line.starts_with("---") { theme::ERROR }
                     else if line.starts_with("@@") { theme::ACCENT } else { theme::SECONDARY };
                 Line::styled(line.to_owned(), Style::default().fg(color))
             }).collect();
+        if let Some(draft) = &self.diff_reject_confirm {
+            rows.push(Line::styled(format!(" Reason (optional): {}_ · Enter confirm · Esc cancel", draft.reason),
+                Style::default().fg(theme::ACCENT)));
+        }
+        let pending = self.rejections_for_target();
+        let title = format!(" Worktree diff{} · Alt+N/B files · Alt+J/K hunks · Alt+R reject · F5 refresh · F4 close ",
+            if pending == 0 { String::new() } else { format!(" · {pending} queued") });
         frame.render_widget(Paragraph::new(rows)
-            .block(Block::default().title(" Worktree diff · Alt+N/B files · Alt+J/K hunks · F5 refresh · F4 close ")
+            .block(Block::default().title(title)
                 .borders(Borders::ALL).border_style(Style::default().fg(theme::BORDER)))
             .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)), area);
     }
@@ -3542,6 +4494,8 @@ impl App {
                 self.draw_actions(frame, inner[2]);
             } else if self.history_modal {
                 self.draw_history(frame, inner[2]);
+            } else if self.attach_picker.is_some() {
+                self.draw_attach_picker(frame, inner[2]);
             }
         }
         let mut chip_spans = Vec::new();
@@ -3755,21 +4709,37 @@ fn run_loop(
                 app.notice = "Session launch unavailable · daemon connection closed".into();
                 changed = true;
             }
+            if !app.pending_attaches.is_empty() {
+                app.pending_attaches.clear();
+                app.attaching_ids.clear();
+                app.notice = "Session attach unavailable · daemon connection closed".into();
+                changed = true;
+            }
             if !app.pending_stops.is_empty() {
                 app.pending_stops.clear();
                 app.notice = "Session stop unavailable · daemon connection closed".into();
                 changed = true;
             }
+            if !app.pending_peer_messages.is_empty() {
+                for (id, target, text) in app.pending_peer_messages.drain(..) {
+                    app.rejected_drafts.entry(id).or_default().push(format!("/msg {target} {text}"));
+                }
+                app.notice = "Peer delivery unavailable · Alt+Up restores message".into();
+                changed = true;
+            }
         }
         if let Some(sender) = &prompt_sender {
             let disconnected = dispatch_launches(&mut app, sender);
+            let disconnected = dispatch_attaches(&mut app, sender) || disconnected;
             let disconnected = dispatch_prompts(&mut app, sender) || disconnected;
             let disconnected = dispatch_answers(&mut app, sender) || disconnected;
             let disconnected = dispatch_peer_refresh(&mut app, sender) || disconnected;
+            let disconnected = dispatch_peer_messages(&mut app, sender) || disconnected;
             let disconnected = dispatch_model_controls(&mut app, sender) || disconnected;
             let disconnected = dispatch_stops(&mut app, sender) || disconnected;
             if disconnected {
                 prompt_sender = None;
+                app.session_activity.clear();
                 changed = true;
             }
         }
@@ -3799,8 +4769,28 @@ fn dispatch_launches(app: &mut App, sender: &SyncSender<crate::bridge::WorkerCom
                 return false;
             }
             Err(TrySendError::Disconnected(_)) => {
+                app.attaching_ids.clear();
                 app.launching = false;
                 app.notice = "Session launch unavailable".into();
+                return true;
+            }
+            Err(_) => unreachable!(),
+        }
+    }
+    false
+}
+
+fn dispatch_attaches(app: &mut App, sender: &SyncSender<crate::bridge::WorkerCommand>) -> bool {
+    let mut attaches = std::mem::take(&mut app.pending_attaches).into_iter();
+    while let Some((id, group)) = attaches.next() {
+        match sender.try_send(crate::bridge::WorkerCommand::Attach(id, group)) {
+            Ok(()) => {}
+            Err(TrySendError::Full(crate::bridge::WorkerCommand::Attach(id, group))) => {
+                app.pending_attaches.extend(std::iter::once((id, group)).chain(attaches));
+                return false;
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                app.notice = "Session attach unavailable".into();
                 return true;
             }
             Err(_) => unreachable!(),
@@ -3992,6 +4982,29 @@ fn dispatch_peer_refresh(app: &mut App, sender: &SyncSender<crate::bridge::Worke
     }
 }
 
+fn dispatch_peer_messages(app: &mut App, sender: &SyncSender<crate::bridge::WorkerCommand>) -> bool {
+    let mut messages = std::mem::take(&mut app.pending_peer_messages).into_iter();
+    while let Some((id, target, body)) = messages.next() {
+        match sender.try_send(crate::bridge::WorkerCommand::Message(id, target, body)) {
+            Ok(()) => {}
+            Err(TrySendError::Full(crate::bridge::WorkerCommand::Message(id, target, body))) => {
+                app.pending_peer_messages.extend(std::iter::once((id, target, body)).chain(messages));
+                return false;
+            }
+            Err(TrySendError::Disconnected(crate::bridge::WorkerCommand::Message(id, target, body))) => {
+                app.rejected_drafts.entry(id).or_default().push(format!("/msg {target} {body}"));
+                for (id, target, body) in messages {
+                    app.rejected_drafts.entry(id).or_default().push(format!("/msg {target} {body}"));
+                }
+                app.notice = "Peer delivery unavailable · Alt+Up restores message".into();
+                return true;
+            }
+            Err(_) => unreachable!(),
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4005,6 +5018,61 @@ mod tests {
         assert!(!app.should_quit);
         app.handle(Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)));
         assert!(app.should_quit);
+    }
+
+    #[test]
+    fn peer_commands_use_active_session_without_becoming_model_prompts() {
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"session-1"}));
+        app.input = "/msg peer-12 hello from this pane".into();
+        app.input_cursor = app.input.len();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.pending_peer_messages, vec![("session-1".into(), "peer-12".into(), "hello from this pane".into())]);
+        assert!(app.pending_prompts.is_empty());
+        assert!(app.input.is_empty());
+
+        app.input = "/peers".into();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(app.map_modal);
+        assert_eq!(app.pending_peer_refresh.as_deref(), Some("session-1"));
+        assert!(app.pending_prompts.is_empty());
+    }
+
+    #[test]
+    fn peer_message_usage_and_uncertain_delivery_are_explicit() {
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"session-1"}));
+        app.input = "/msg peer-12".into();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(app.notice.starts_with("Usage:"));
+        assert_eq!(app.input, "/msg peer-12");
+        assert!(app.pending_peer_messages.is_empty());
+        assert!(app.apply_daemon_frame(&json!({"type":"peer_message_reply", "session_id":"session-1",
+            "ok":false, "uncertain":true, "draft":"/msg peer-12 important text"})));
+        assert!(app.notice.contains("unconfirmed"));
+        assert!(app.notice.contains("before Alt+Up retry"));
+        assert_eq!(app.rejected_drafts["session-1"], ["/msg peer-12 important text"]);
+        assert!(app.apply_daemon_frame(&json!({"type":"peer_message_reply", "session_id":"session-1",
+            "ok":true, "peer":{"title":"Builder"}, "delivered_to":["peer-12"],
+            "ledger_error":"disk full"})));
+        assert!(app.notice.contains("ledger write failed"));
+        assert!(app.apply_daemon_frame(&json!({"type":"peer_message_reply", "session_id":"session-1",
+            "ok":true, "peer":{"title":"Python peer"}, "delivered_to":null})));
+        assert!(app.notice.contains("sent to Python peer"));
+    }
+
+    #[test]
+    fn background_peer_failure_keeps_recoverable_draft_in_its_session() {
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"first"}));
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"second"}));
+        app.groups[0].tabs = vec!["first".into(), "second".into()];
+        app.groups[0].active = 0;
+        assert!(app.apply_daemon_frame(&json!({"type":"peer_message_reply", "session_id":"second",
+            "ok":false, "error":"peer left", "draft":"/msg peer-2 hello"})));
+        assert_eq!(app.rejected_drafts["second"], ["/msg peer-2 hello"]);
+        assert!(app.notice.contains("second"));
+        assert!(app.notice.contains("peer left"));
     }
 
     #[test]
@@ -4395,6 +5463,133 @@ mod tests {
     }
 
     #[test]
+    fn bare_doxa_commands_stay_local_and_unknown_provider_commands_pass_through() {
+        let mut app = App::default();
+        app.groups[0].tabs.push("s".into());
+        app.handle(Event::Resize(100, 28));
+
+        app.input = "/help".into();
+        app.input_cursor = app.input.len();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(app.action_menu);
+        assert!(app.input.is_empty());
+        assert!(app.pending_prompts.is_empty());
+        app.action_menu = false;
+
+        app.input = "/model opus".into();
+        app.input_cursor = app.input.len();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.input, "/model opus");
+        assert!(app.notice.contains("arguments are not available"));
+        assert!(app.pending_prompts.is_empty());
+
+        app.input = "/compact".into();
+        app.input_cursor = app.input.len();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(app.notice.contains("Local command unavailable"));
+        assert!(app.pending_prompts.is_empty());
+
+        app.input = "/provider-command".into();
+        app.input_cursor = app.input.len();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.pending_prompts, [("s".into(), "/provider-command".into())]);
+    }
+
+    #[test]
+    fn bare_layout_commands_change_the_real_pane_state() {
+        let mut app = App::default();
+        app.handle(Event::Resize(100, 28));
+        app.groups[0].tabs.push("s".into());
+        assert!(app.layout(app.size).panes.is_none());
+
+        app.input = "/vsplit".into();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.split, Split::Vertical);
+        assert!(app.layout(app.size).panes.is_some());
+        assert!(app.pending_prompts.is_empty());
+
+        app.input = "/pane".into();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.active_group, 1);
+
+        app.input = "/pane".into();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.active_group, 0);
+
+        app.input = "/detach".into();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn detach_keeps_other_tabs_and_reopens_from_rail() {
+        let mut app = App::default();
+        app.handle(Event::Resize(100, 28));
+        for id in ["first", "second"] {
+            app.apply_update(DaemonUpdate::Upsert(Session {
+                id: id.into(), title: id.into(), collection: String::new(),
+                transcript: String::new(), status: "Ready".into(),
+            }));
+        }
+        app.groups[0].tabs.push("second".into());
+        app.groups[0].active = 1;
+        app.input = "/detach".into();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.groups[0].tabs, ["first"]);
+        assert!(!app.should_quit);
+        assert!(app.sessions.iter().any(|session| session.id == "second"));
+        app.rail_selected = app.rail_order().iter().position(|index| app.sessions[*index].id == "second").unwrap();
+        app.open_selected();
+        assert_eq!(app.groups[0].active_id(), Some("second"));
+    }
+
+    #[test]
+    fn detaching_last_tab_in_first_pane_preserves_other_pane_draft() {
+        let mut app = App::default();
+        app.handle(Event::Resize(100, 28));
+        app.groups[0].tabs.push("first".into());
+        app.groups[1].tabs.push("second".into());
+        app.input_drafts.insert((1, "second".into()), ("other draft".into(), 11));
+        app.input = "/detach".into();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.groups[0].active_id(), Some("second"));
+        assert!(app.groups[1].tabs.is_empty());
+        assert_eq!(app.input, "other draft");
+        assert!(!app.should_quit);
+        assert!(!app.split_requested);
+    }
+
+    #[test]
+    fn pane_sidebar_and_directory_command_forms_stay_local() {
+        let mut app = App::default();
+        app.handle(Event::Resize(100, 28));
+        app.groups[0].tabs.push("first".into());
+        app.session_cwds.insert("first".into(), PathBuf::from("/repo/project"));
+
+        for (command, target) in [("/pane 2", 1), ("/pane 1", 0)] {
+            app.input = command.into();
+            app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+            assert_eq!(app.active_group, target);
+        }
+        app.input = "/sidebar width 32".into();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.rail_width, 32);
+        assert!(app.rail_visible);
+        app.input = "/sidebar off".into();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(!app.rail_visible);
+        app.input = "/dir".into();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(app.notice.contains("/repo/project"));
+        assert!(app.pending_prompts.is_empty());
+
+        app.input = "/pane 3".into();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.input, "/pane 3");
+        assert!(app.notice.contains("Usage: /pane"));
+    }
+
+    #[test]
     fn bracketed_paste_preserves_lines_sanitizes_controls_and_caps_bytes() {
         let mut app = App::default();
         app.groups[0].tabs.push("s".into());
@@ -4601,7 +5796,10 @@ mod tests {
         assert_eq!(app.active_chooser_rect().unwrap().bottom(), menu.bottom());
         app.action_menu = false;
         app.lore_picker = Some(LorePicker { rows: vec![], selected: 0, query: String::new(),
-            offset: 0, status: "Ready".into(), evidence: None, pending: None });
+            offset: 0, status: "Ready".into(), evidence: None, pending: None,
+            proposals: Vec::new(), proposal_mode: false, review: None, review_scroll: 0,
+            review_seen: 0, review_width: 0, armed_resolution: None,
+            can_resolve: false, resolving: false, cwd: String::new() });
         let lore = app.active_chooser_rect().unwrap();
         assert_eq!(lore.bottom(), menu.bottom());
         assert!(lore.height < menu.height, "empty LORE list should stay compact");
@@ -4818,7 +6016,7 @@ mod tests {
     }
 
     #[test]
-    fn diff_view_is_read_only_modal_and_renders_patch_colors() {
+    fn diff_view_modal_renders_patch_colors() {
         let mut app = App::default();
         app.handle(Event::Resize(100, 28));
         app.diff_modal = true;
@@ -4828,6 +6026,98 @@ mod tests {
         assert!(view.contains("+new"));
         app.handle(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
         assert!(!app.diff_modal);
+    }
+
+    #[test]
+    fn diff_reject_waits_for_idle_turn_and_sends_bounded_reason_after_reverting() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| assert!(std::process::Command::new("git").args(args)
+            .current_dir(dir.path()).status().unwrap().success());
+        git(&["init", "-q"]);
+        std::fs::write(dir.path().join("tracked.txt"), "old\n").unwrap();
+        git(&["add", "tracked.txt"]);
+        git(&["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "test: baseline"]);
+        std::fs::write(dir.path().join("tracked.txt"), "new\n").unwrap();
+        let snapshot = diff_view::read(dir.path());
+        let mut app = App::default();
+        app.groups[0].tabs.push("session".into());
+        app.diff_target = Some("session".into());
+        app.diff_scroll = snapshot.rejectable[0].row;
+        app.diff_snapshot = Some(snapshot);
+        app.session_activity.insert("session".into(), (true, 0));
+        app.begin_diff_reject();
+        assert_eq!(app.diff_reject_confirm.as_ref().map(|draft| draft.index), Some(0));
+        app.diff_modal = true;
+        app.handle(Event::Paste("Please keep the old behavior\n".into()));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(app.diff_reject_confirm.is_none());
+        assert_eq!(app.diff_reject_queue.len(), 1);
+        assert!(app.diff_reject_pending.is_none());
+        assert_eq!(std::fs::read_to_string(dir.path().join("tracked.txt")).unwrap(), "new\n");
+        assert!(painted(&app).contains("queued"));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE)));
+        assert!(app.diff_modal);
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)));
+        assert!(!app.should_quit);
+        app.begin_diff_reject();
+        app.confirm_diff_reject();
+        assert_eq!(app.diff_reject_queue.len(), 1);
+        assert!(app.notice.contains("already queued"));
+        app.session_activity.insert("session".into(), (false, 0));
+        assert!(app.poll_diff());
+        assert!(app.diff_reject_pending.is_some());
+        app.pending_prompts = vec![("other".into(), "waiting".into()); MAX_PENDING_PROMPTS];
+        for _ in 0..100 {
+            app.poll_diff();
+            if app.diff_reject_pending.is_none() && app.diff_reject_feedback.is_some() { break; }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(app.diff_reject_pending.is_none());
+        assert!(app.diff_reject_feedback.is_some());
+        assert_eq!(app.pending_prompts.len(), MAX_PENDING_PROMPTS);
+        app.pending_prompts.clear();
+        assert!(app.poll_diff());
+        assert!(app.diff_reject_feedback.is_none());
+        assert_eq!(std::fs::read_to_string(dir.path().join("tracked.txt")).unwrap(), "old\n");
+        assert_eq!(app.pending_prompts.len(), 1);
+        assert_eq!(app.pending_prompts[0].0, "session");
+        assert!(app.pending_prompts[0].1.contains("Do not re-apply"));
+        assert!(app.pending_prompts[0].1.contains("Why: Please keep the old behavior"));
+    }
+
+    #[test]
+    fn queued_diff_rejection_refuses_stale_patch_without_sending_feedback() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| assert!(std::process::Command::new("git").args(args)
+            .current_dir(dir.path()).status().unwrap().success());
+        git(&["init", "-q"]);
+        std::fs::write(dir.path().join("tracked.txt"), "old\n").unwrap();
+        git(&["add", "tracked.txt"]);
+        git(&["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "test: baseline"]);
+        std::fs::write(dir.path().join("tracked.txt"), "new\n").unwrap();
+        let snapshot = diff_view::read(dir.path());
+        let mut app = App::default();
+        app.groups[0].tabs.push("session".into());
+        app.diff_target = Some("session".into());
+        app.diff_scroll = snapshot.rejectable[0].row;
+        app.diff_snapshot = Some(snapshot);
+        app.session_activity.insert("session".into(), (true, 0));
+        app.begin_diff_reject();
+        app.handle(Event::Paste(format!("{}\n\u{1b}", "x".repeat(2000))));
+        assert_eq!(app.diff_reject_confirm.as_ref().unwrap().reason.len(), MAX_REJECT_REASON_BYTES);
+        app.confirm_diff_reject();
+        assert_eq!(app.diff_reject_queue.len(), 1);
+        std::fs::write(dir.path().join("tracked.txt"), "agent changed again\n").unwrap();
+        app.session_activity.insert("session".into(), (false, 0));
+        for _ in 0..100 {
+            app.poll_diff();
+            if app.diff_reject_pending.is_none() && app.diff_reject_queue.is_empty()
+                && app.notice.contains("changed") { break; }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(std::fs::read_to_string(dir.path().join("tracked.txt")).unwrap(), "agent changed again\n");
+        assert!(app.pending_prompts.is_empty());
+        assert!(app.notice.contains("changed"));
     }
 
     #[test]
@@ -4854,6 +6144,9 @@ mod tests {
         assert_eq!(app.diff_scroll, 3);
         app.handle(Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)));
         assert_eq!(app.input, "x");
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::ALT)));
+        assert!(app.stop_confirmation.is_none());
+        assert!(app.notice.contains("activity is unknown") || app.notice.contains("Load the diff"));
         app.handle(Event::Key(KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE)));
         assert!(!app.diff_pane);
         assert!(painted(&app).contains("hidden transcript"));
@@ -5100,10 +6393,15 @@ mod tests {
 
     #[test]
     fn lore_picker_keeps_prompt_and_displays_only_read_results() {
+        assert_eq!(visible_raw_line("x\ty\u{0000}z"), "x\\ty\\0z");
+        assert_eq!(raw_visual_rows("界界", 3), vec!["界", "界"]);
         let mut app = App { input: "unsent draft".into(), ..Default::default() };
         app.lore_picker = Some(LorePicker {
             query: String::new(), rows: Vec::new(), selected: 0, offset: 0,
             evidence: None, status: String::new(), pending: None,
+            proposals: Vec::new(), proposal_mode: false, review: None, review_scroll: 0,
+            review_seen: 0, review_width: 0, armed_resolution: None,
+            can_resolve: false, resolving: false, cwd: String::new(),
         });
         let (tx, rx) = mpsc::sync_channel(1);
         app.lore_picker.as_mut().unwrap().pending = Some(rx);
@@ -5119,5 +6417,156 @@ mod tests {
         assert!(app.lore_picker.is_none());
         assert_eq!(app.input, "unsent draft");
         assert!(app.pending_prompts.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn proposal_action_requires_reading_to_end_then_explicit_arm() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let sidecar = dir.path().join("sidecar");
+        std::fs::write(&sidecar, r#"#!/usr/bin/env python3
+import hashlib, json, sys
+print(json.dumps({'type':'hello','proto':1,'capabilities':['scrub','snapshot','pending_review_v1','resolve_reviewed_v1']}), flush=True)
+for line in sys.stdin:
+    req = json.loads(line)
+    raw = json.dumps({'kind':'memory','text':'x'*4000})
+    value = {'pid':req['pid'],'raw':raw,'sha256':hashlib.sha256(raw.encode()).hexdigest(),'inode':11,'complete':True}
+    print(json.dumps({'type':'reply','id':req['id'],'ok':True,'value':value}), flush=True)
+"#).unwrap();
+        let mut permissions = std::fs::metadata(&sidecar).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&sidecar, permissions).unwrap();
+        let lore_picker::ResultPage::Review(review, can_resolve) = lore_picker::fetch(&sidecar,
+            lore_picker::Query::Review("/repo".into(), "one".into())).unwrap() else { panic!("review") };
+        assert!(can_resolve);
+        let mut app = App::default();
+        app.size = Rect::new(0, 0, 100, 40);
+        app.lore_picker = Some(LorePicker {
+            query: String::new(), rows: Vec::new(), selected: 0, offset: 0,
+            proposals: vec![lore_picker::Proposal { pid: "one".into(), kind: "memory".into(),
+                action: "add".into(), scope: "user".into(), summary: String::new() }],
+            proposal_mode: true, review: Some(review), review_scroll: 0,
+            review_seen: 0, review_width: 0, armed_resolution: None,
+            can_resolve, resolving: false, cwd: "/repo".into(),
+            evidence: None, status: String::new(), pending: None,
+        });
+        app.lore_picker_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert!(app.lore_picker.as_ref().unwrap().armed_resolution.is_none());
+        for _ in 0..200 {
+            if app.lore_picker.as_ref().unwrap().review_seen ==
+                raw_visual_rows(app.lore_picker.as_ref().unwrap().review.as_ref().unwrap().raw(),
+                    app.lore_picker.as_ref().unwrap().review_width).len() { break; }
+            app.lore_picker_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        }
+        app.lore_picker_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert_eq!(app.lore_picker.as_ref().unwrap().armed_resolution, Some(doxa_lore::PendingDecision::Approve));
+        assert!(app.lore_picker.as_ref().unwrap().pending.is_none());
+        app.lore_picker.as_mut().unwrap().armed_resolution = None;
+        app.lore_picker.as_mut().unwrap().can_resolve = false;
+        app.lore_picker_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+        assert!(app.lore_picker.as_ref().unwrap().armed_resolution.is_none());
+    }
+
+    #[test]
+    fn pending_local_command_opens_proposals_without_sending_prompt() {
+        let mut app = App::default();
+        app.size = Rect::new(0, 0, 100, 40);
+        app.groups[0].tabs.push("session-1".into());
+        app.input = " /pending ".into();
+        app.input_cursor = app.input.len();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(app.lore_picker.as_ref().unwrap().proposal_mode);
+        assert!(app.input.is_empty());
+        assert!(app.pending_prompts.is_empty());
+    }
+
+    #[test]
+    fn attach_selection_queues_new_tab_and_focuses_existing_tab() {
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"current", "model":"model"}));
+        app.input = "/attach detached".into();
+        app.attach_selected("detached");
+        assert_eq!(app.pending_attaches, [("detached".into(), 0)]);
+        assert_eq!(app.groups[0].active_id(), Some("current"));
+        assert!(app.pending_prompts.is_empty());
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"detached", "model":"other"}));
+        app.apply_daemon_frame(&json!({"type":"attach_reply", "ok":true,
+            "session_id":"detached", "group":0}));
+        assert_eq!(app.groups[0].active_id(), Some("detached"));
+        assert_eq!(app.groups[0].tabs, ["current", "detached"]);
+        app.groups[0].active = 0;
+        app.attach_selected("detached");
+        assert_eq!(app.groups[0].active_id(), Some("detached"));
+        assert_eq!(app.groups[0].tabs.len(), 2);
+    }
+
+    #[test]
+    fn attach_picker_filters_titles_and_ids_without_sending_a_prompt() {
+        let row = |id: &str, title: &str| crate::discovery::Session {
+            id: id.into(), title: title.into(), socket: PathBuf::new(),
+            scope_key: String::new(), clients: None, started_at: String::new(),
+        };
+        let mut app = App::default();
+        app.size = Rect::new(0, 0, 100, 30);
+        app.attach_picker = Some(AttachPicker { rows: vec![row("abc123", "Alpha work"),
+            row("def456", "Beta work")], query: String::new(), selected: 0 });
+        assert!(app.active_chooser_rect().is_some());
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE)));
+        assert_eq!(app.attach_matches(), [1]);
+        assert!(app.pending_prompts.is_empty());
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
+        assert_eq!(app.attach_picker.as_ref().unwrap().selected, 1);
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        assert!(app.attach_picker.is_none());
+        assert!(app.pending_attaches.is_empty());
+        assert!(attach_matches(&row("id123", "Release planning"), "plan"));
+        assert!(attach_matches(&row("id123", "Release planning"), "ID1"));
+        app.attach_picker = Some(AttachPicker { rows: vec![row("definitely-not-live-attach-test", "Gone")],
+            query: String::new(), selected: 0 });
+        app.open_selected_attach();
+        assert!(app.attach_picker.is_none());
+        assert!(app.pending_attaches.is_empty());
+        assert!(app.notice.starts_with("attach:"));
+    }
+
+    #[test]
+    fn rename_pins_label_until_cleared_and_slash_commands_never_queue_prompts() {
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"s", "model":"old"}));
+        app.input = "/rename A useful name".into();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.custom_names.get("s").map(String::as_str), Some("A useful name"));
+        assert_eq!(app.sessions[0].title, "A useful name");
+        app.apply_daemon_frame(&json!({"type":"event", "session_id":"s",
+            "event":{"type":"model_changed", "data":{"model":"new"}}}));
+        assert_eq!(app.sessions[0].title, "A useful name");
+        app.input = "/rename".into();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(app.custom_names.is_empty());
+        assert_eq!(app.sessions[0].title, "new");
+        for command in ["/attach bad/id", "/doctor", "/pending unsupported"] {
+            app.input = command.into();
+            app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+            assert!(app.notice.contains("attach:") || app.notice.contains("unavailable"));
+            assert!(app.pending_prompts.is_empty());
+        }
+    }
+
+    #[test]
+    fn partial_lore_archive_failure_stays_visible_and_never_retries() {
+        let mut app = App::default();
+        app.open_pending_picker();
+        let (tx, rx) = mpsc::sync_channel(1);
+        let picker = app.lore_picker.as_mut().unwrap();
+        picker.pending = Some(rx);
+        picker.resolving = true;
+        tx.send(Ok(lore_picker::ResultPage::Resolved(
+            doxa_lore::PendingResolution::Refused { code: "archive_failed".into(), applied: true }))).unwrap();
+        assert!(app.poll_lore());
+        assert!(app.notice.contains("do not retry automatically"));
+        assert!(app.lore_picker.as_ref().unwrap().pending.is_none());
+        assert!(!app.lore_picker.as_ref().unwrap().resolving);
     }
 }

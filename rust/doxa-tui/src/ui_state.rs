@@ -18,6 +18,7 @@ use crate::ui::{App, PaneGroup, Split};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LayoutSignature {
     groups: [(Vec<String>, usize); 2],
+    custom_names: Vec<(String, String)>,
     active_group: usize,
     split: Split,
     split_percent: u16,
@@ -28,6 +29,11 @@ impl LayoutSignature {
     pub fn capture(app: &App) -> Self {
         Self {
             groups: app.groups.clone().map(|g| (g.tabs, g.active)),
+            custom_names: {
+                let mut names: Vec<_> = app.custom_names.iter().map(|(id, name)| (id.clone(), name.clone())).collect();
+                names.sort();
+                names
+            },
             active_group: app.active_group,
             split: app.split,
             split_percent: app.split_percent,
@@ -172,6 +178,11 @@ impl UiStateStore {
             }
         }
         app.groups = groups;
+        for tab in &tabs {
+            if let Some(name) = tab.pinned_name.as_ref().filter(|name| !name.is_empty()) {
+                app.custom_names.insert(tab.session_id.clone(), name.clone());
+            }
+        }
         app.split = split;
         app.split_percent = percent;
         if let Some(rust_ui) = record.raw.get("rust_ui") {
@@ -227,7 +238,7 @@ impl UiStateStore {
                         .and_then(|r| r.tabs.iter().find(|t| t.session_id == *id));
                     tabs.push(Tab {
                         session_id: id.clone(),
-                        pinned_name: old.and_then(|t| t.pinned_name.clone()),
+                        pinned_name: app.custom_names.get(id).cloned(),
                         cwd: old.and_then(|t| t.cwd.clone()),
                     });
                 }
@@ -341,6 +352,8 @@ fn leaf(record: &TabSet, id: &str) -> Value {
         .unwrap_or_else(|| json!({"kind":"leaf","session_id":id}));
     if let Some(name) = old.and_then(|t| t.pinned_name.as_ref()) {
         row["pinned_name"] = json!(name);
+    } else if let Some(object) = row.as_object_mut() {
+        object.remove("pinned_name");
     }
     if let Some(cwd) = old.and_then(|t| t.cwd.as_ref()) {
         row["cwd"] = json!(cwd);
@@ -518,4 +531,32 @@ fn parse_legacy_tree(raw: &Value, live: &[String]) -> Option<([PaneGroup; 2], Sp
         }
     }
     Some((groups, parse_orientation(&raw["orientation"])?, weight(raw)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn pinned_tab_name_round_trips_and_clear_removes_leaf_name() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut store = UiStateStore::new(temp.path(), "/project", "machine").unwrap();
+        let mut app = App::default();
+        app.groups[0].tabs.push("session-1".into());
+        app.custom_names.insert("session-1".into(), "My work".into());
+        store.save(&app).unwrap();
+        let saved = std::fs::read_to_string(store.path()).unwrap();
+        assert!(saved.contains("My work"));
+        let mut restored = App::default();
+        assert!(store.restore(&mut restored, &["session-1".into()]));
+        assert_eq!(restored.custom_names.get("session-1").map(String::as_str), Some("My work"));
+        restored.apply_daemon_frame(&json!({"type":"hello", "session_id":"session-1", "model":"auto"}));
+        assert_eq!(restored.sessions[0].title, "My work");
+        restored.custom_names.remove("session-1");
+        store.save(&restored).unwrap();
+        let saved: Value = serde_json::from_slice(&std::fs::read(store.path()).unwrap()).unwrap();
+        assert!(saved["tabs"][0]["pinned_name"].is_null());
+        assert!(saved["layout"]["groups"]["tabs"][0].get("pinned_name").is_none());
+    }
 }

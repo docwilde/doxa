@@ -60,7 +60,11 @@ impl Process {
         serde_json::from_slice(&fs::read(&self.registry).unwrap()).unwrap()
     }
     fn start_codex(runtime: &Path, codex: &Path, python: &Path) -> Self {
-        let child = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+        Self::start_codex_with_inbound(runtime, codex, python, false)
+    }
+    fn start_codex_with_inbound(runtime: &Path, codex: &Path, python: &Path, inbound: bool) -> Self {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"));
+        command
             .args([
                 "--runtime-dir",
                 runtime.to_str().unwrap(),
@@ -79,9 +83,9 @@ impl Process {
             ])
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
-            .env("DOXA_HOME", runtime.join("home"))
-            .spawn()
-            .unwrap();
+            .env("DOXA_HOME", runtime.join("home"));
+        if inbound { command.env("DOXA_PEER_INBOUND_TURNS", "yes"); }
+        let child = command.spawn().unwrap();
         let registry = runtime.join("registry/codex-session.json");
         wait_until(|| registry.exists());
         let entry: Value = serde_json::from_slice(&fs::read(&registry).unwrap()).unwrap();
@@ -93,7 +97,11 @@ impl Process {
         }
     }
     fn start_claude(runtime: &Path, script: &Path) -> Self {
-        let child = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+        Self::start_claude_with_budget(runtime, script, None)
+    }
+    fn start_claude_with_budget(runtime: &Path, script: &Path, budget: Option<&str>) -> Self {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"));
+        command
             .args([
                 "--runtime-dir",
                 runtime.to_str().unwrap(),
@@ -111,9 +119,9 @@ impl Process {
                 script.to_str().unwrap(),
             ])
             .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
+            .stderr(Stdio::piped());
+        if let Some(budget) = budget { command.env("DOXA_SESSION_BUDGET_USD", budget); }
+        let child = command.spawn().unwrap();
         let registry = runtime.join("registry/claude-session.json");
         wait_until(|| registry.exists());
         let entry: Value = serde_json::from_slice(&fs::read(&registry).unwrap()).unwrap();
@@ -189,6 +197,157 @@ fn native_registry_uses_main_checkout_scope_from_linked_worktree() {
         libc::kill(process.child.id() as libc::pid_t, libc::SIGTERM);
     }
     wait_until(|| process.exited());
+}
+
+#[test]
+fn daemon_runs_in_managed_worktree_and_cleans_it_on_real_exit() {
+    let dir = tempfile::tempdir().unwrap();
+    let main = dir.path().join("repo");
+    let runtime = dir.path().join("runtime");
+    let home = dir.path().join("home");
+    fs::create_dir(&main).unwrap();
+    let git = |args: &[&str]| {
+        let output = Command::new("git").args(args).current_dir(&main).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    };
+    git(&["init", "-q", "-b", "main"]);
+    fs::write(main.join("README"), "seed\n").unwrap();
+    git(&["add", "README"]);
+    git(&["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "test: seed"]);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+        .args(["--runtime-dir", runtime.to_str().unwrap(), "--cwd", main.to_str().unwrap(),
+            "--session-id", "session123", "--linger", "10"])
+        .env("DOXA_HOME", &home).env("DOXA_WORKTREE", "1")
+        .stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
+    let registry = runtime.join("registry/session123.json");
+    wait_until(|| registry.exists());
+    let row: Value = serde_json::from_slice(&fs::read(&registry).unwrap()).unwrap();
+    let worktree = home.join("worktrees/repo-session1");
+    assert_eq!(row["cwd"], worktree.to_str().unwrap());
+    assert_eq!(row["repo_root"], main.to_str().unwrap());
+    assert!(worktree.join("README").exists());
+    unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM); }
+    wait_until(|| child.try_wait().unwrap().is_some());
+    assert!(!worktree.exists());
+    assert!(!home.join("worktrees/.meta/repo-session1.json").exists());
+    assert!(!registry.exists());
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+        .args(["--runtime-dir", runtime.to_str().unwrap(), "--cwd", main.to_str().unwrap(),
+            "--session-id", "session234", "--linger", "10"])
+        .env("DOXA_HOME", &home).env("DOXA_WORKTREE", "1")
+        .stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
+    let registry = runtime.join("registry/session234.json");
+    wait_until(|| registry.exists());
+    let kept = home.join("worktrees/repo-session2");
+    fs::write(kept.join("user.txt"), "work to keep\n").unwrap();
+    unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM); }
+    wait_until(|| child.try_wait().unwrap().is_some());
+    assert_eq!(fs::read_to_string(kept.join("user.txt")).unwrap(), "work to keep\n");
+    assert!(home.join("worktrees/.meta/repo-session2.json").exists());
+}
+
+#[test]
+fn requested_base_branch_is_honored_and_invalid_requests_never_fall_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let main = dir.path().join("repo");
+    let runtime = dir.path().join("runtime");
+    let home = dir.path().join("home");
+    fs::create_dir(&main).unwrap();
+    let git = |args: &[&str]| {
+        let output = Command::new("git").args(args).current_dir(&main).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    };
+    git(&["init", "-q", "-b", "main"]);
+    fs::write(main.join("README"), "main\n").unwrap();
+    git(&["add", "README"]);
+    git(&["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "test: main"]);
+    git(&["checkout", "-qb", "feature"]);
+    fs::write(main.join("README"), "feature\n").unwrap();
+    git(&["add", "README"]);
+    git(&["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "test: feature"]);
+    git(&["checkout", "-q", "main"]);
+    let args = ["--runtime-dir", runtime.to_str().unwrap(), "--cwd", main.to_str().unwrap(),
+        "--session-id", "branch123", "--linger", "10", "--base-branch", "feature"];
+    let mut child = Command::new(env!("CARGO_BIN_EXE_doxa-daemon")).args(args)
+        .env("DOXA_HOME", &home).env("DOXA_WORKTREE", "1")
+        .stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
+    let registry = runtime.join("registry/branch123.json");
+    wait_until(|| registry.exists());
+    let worktree = home.join("worktrees/repo-branch12");
+    assert_eq!(fs::read_to_string(worktree.join("README")).unwrap(), "feature\n");
+    let meta: Value = serde_json::from_slice(&fs::read(home.join("worktrees/.meta/repo-branch12.json")).unwrap()).unwrap();
+    assert_eq!(meta["base_ref"], "feature");
+    assert_eq!(fs::read_to_string(main.join("README")).unwrap(), "main\n");
+    unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM); }
+    wait_until(|| child.try_wait().unwrap().is_some());
+
+    for bad in ["missing", "--output=/tmp/unsafe"] {
+        let result = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+            .args(["--runtime-dir", runtime.to_str().unwrap(), "--cwd", main.to_str().unwrap(),
+                "--session-id", "badbranch", "--base-branch", bad])
+            .env("DOXA_HOME", &home).env("DOXA_WORKTREE", "1").output().unwrap();
+        assert!(!result.status.success());
+        assert!(!runtime.join("registry/badbranch.json").exists());
+    }
+    let disabled = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+        .args(["--runtime-dir", runtime.to_str().unwrap(), "--cwd", main.to_str().unwrap(),
+            "--session-id", "badbranch", "--base-branch", "feature"])
+        .env("DOXA_HOME", &home).env("DOXA_WORKTREE", "0").output().unwrap();
+    assert!(!disabled.status.success());
+    assert!(!runtime.join("registry/badbranch.json").exists());
+}
+#[test]
+fn managed_worktree_conflict_refuses_to_start_in_original_checkout() {
+    let dir = tempfile::tempdir().unwrap();
+    let main = dir.path().join("repo");
+    let runtime = dir.path().join("runtime");
+    let home = dir.path().join("home");
+    fs::create_dir(&main).unwrap();
+    let git = |args: &[&str]| {
+        let output = Command::new("git").args(args).current_dir(&main).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    };
+    git(&["init", "-q", "-b", "main"]);
+    fs::write(main.join("README"), "seed\n").unwrap();
+    git(&["add", "README"]);
+    git(&["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "test: seed"]);
+    git(&["branch", "doxa/conflict"]);
+
+    let args = ["--runtime-dir", runtime.to_str().unwrap(), "--cwd", main.to_str().unwrap(),
+        "--session-id", "conflict123", "--linger", "10"];
+    let rejected = Command::new(env!("CARGO_BIN_EXE_doxa-daemon")).args(args)
+        .env("DOXA_HOME", &home).env("DOXA_WORKTREE", "1").output().unwrap();
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("managed worktree unavailable"));
+    assert!(!runtime.join("registry/conflict123.json").exists());
+    assert_eq!(fs::read_to_string(main.join("README")).unwrap(), "seed\n");
+
+    // Explicitly disabling managed worktrees still permits the launch directory.
+    let mut allowed = Command::new(env!("CARGO_BIN_EXE_doxa-daemon")).args(args)
+        .env("DOXA_HOME", &home).env("DOXA_WORKTREE", "0")
+        .stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
+    let registry = runtime.join("registry/conflict123.json");
+    wait_until(|| registry.exists());
+    let row: Value = serde_json::from_slice(&fs::read(&registry).unwrap()).unwrap();
+    assert_eq!(row["cwd"], main.to_str().unwrap());
+    unsafe { libc::kill(allowed.id() as libc::pid_t, libc::SIGTERM); }
+    wait_until(|| allowed.try_wait().unwrap().is_some());
+
+    // A plain directory has no Git checkout to isolate, so it remains usable.
+    let plain = dir.path().join("plain");
+    fs::create_dir(&plain).unwrap();
+    let mut non_git = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+        .args(["--runtime-dir", runtime.to_str().unwrap(), "--cwd", plain.to_str().unwrap(),
+            "--session-id", "nogit123", "--linger", "10"])
+        .env("DOXA_HOME", &home).env("DOXA_WORKTREE", "1")
+        .stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
+    let registry = runtime.join("registry/nogit123.json");
+    wait_until(|| registry.exists());
+    let row: Value = serde_json::from_slice(&fs::read(&registry).unwrap()).unwrap();
+    assert_eq!(row["cwd"], plain.to_str().unwrap());
+    unsafe { libc::kill(non_git.id() as libc::pid_t, libc::SIGTERM); }
+    wait_until(|| non_git.try_wait().unwrap().is_some());
 }
 fn executable(path: &Path, body: &str) {
     fs::write(path, body).unwrap();
@@ -442,6 +601,49 @@ fn rejects_traversal_and_existing_registry() {
         libc::kill(process.child.id() as libc::pid_t, libc::SIGTERM);
     }
     wait_until(|| process.exited());
+}
+
+#[test]
+fn rejects_inbound_turn_starting_without_lore_before_binding() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+        .args(["--runtime-dir", dir.path().to_str().unwrap(), "--session-id", "fleet-slot"])
+        .env("DOXA_PEER_INBOUND_TURNS", "yes")
+        .output().unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("inbound peer turns require Codex or vendor"));
+    assert!(!dir.path().join("registry/fleet-slot.json").exists());
+}
+
+#[test]
+fn rejects_invalid_ceiling_before_binding() {
+    let dir = tempfile::tempdir().unwrap();
+    for value in ["NaN", "-2", "not-a-number"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+            .args(["--runtime-dir", dir.path().to_str().unwrap(), "--session-id", "fleet-slot"])
+            .env("DOXA_SESSION_BUDGET_USD", value)
+            .output().unwrap();
+        assert!(!output.status.success(), "{value}");
+        assert!(!dir.path().join("registry/fleet-slot.json").exists());
+    }
+}
+
+#[test]
+fn rejects_budgeted_codex_until_native_price_basis_exists() {
+    let dir = tempfile::tempdir().unwrap();
+    let codex = dir.path().join("codex-fixture");
+    let python = dir.path().join("lore-fixture");
+    executable(&codex, "#!/bin/sh\nexit 0\n");
+    fake_scrubber(&python, false);
+    let output = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+        .args(["--runtime-dir", dir.path().to_str().unwrap(), "--session-id", "fleet-slot",
+            "--engine", "codex", "--codex-bin", codex.to_str().unwrap(),
+            "--lore-python", python.to_str().unwrap()])
+        .env("DOXA_SESSION_BUDGET_USD", "1.0")
+        .output().unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("requires reported USD cost"));
+    assert!(!dir.path().join("registry/fleet-slot.json").exists());
 }
 
 #[test]
@@ -1099,6 +1301,35 @@ for line in sys.stdin:
     assert_eq!(receive(&mut reader)["ok"], true);
     wait_until(|| process.exited());
     assert!(finalized.exists());
+}
+
+#[test]
+fn claude_reported_spend_blocks_next_prompt_over_daemon_socket() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("claude-cost.py");
+    fs::write(&script, r#"import json, sys
+print(json.dumps({"type":"hello","protocol":"doxa-claude-sidecar","version":1}),flush=True)
+for line in sys.stdin:
+    frame=json.loads(line)
+    print(json.dumps({"type":"reply","id":frame["id"],"ok":True,"result":{}}),flush=True)
+    if frame["method"] == "prompt":
+        print(json.dumps({"type":"event","event":"turn_done","data":{"cost_usd":1.1}}),flush=True)
+"#).unwrap();
+    let mut process = Process::start_claude_with_budget(dir.path(), &script, Some("1.0"));
+    let (mut reader, mut socket) = process.connect();
+    receive(&mut reader);
+    send(&mut socket, json!({"type":"attach","cursor":null}));
+    send(&mut socket, json!({"type":"prompt","id":1,"text":"first"}));
+    assert_eq!(receive(&mut reader)["ok"], true);
+    assert_eq!(receive(&mut reader)["event"]["type"], "turn_done");
+    send(&mut socket, json!({"type":"prompt","id":2,"text":"second"}));
+    assert_eq!(receive(&mut reader)["ok"], true);
+    let refusal = receive(&mut reader);
+    assert_eq!(refusal["event"]["type"], "turn_refused");
+    assert_eq!(refusal["event"]["data"]["reason"], "budget");
+    assert_eq!(refusal["event"]["data"]["spent_usd"], 1.1);
+    unsafe { libc::kill(process.child.id() as libc::pid_t, libc::SIGTERM); }
+    wait_until(|| process.exited());
 }
 
 #[test]
@@ -2235,4 +2466,115 @@ fn native_inbox_emits_scrubbed_peer_message_and_cleans_socket() {
     assert_eq!(receive(&mut reader)["ok"], true);
     wait_until(|| process.exited());
     assert!(!peer_socket.exists());
+}
+
+#[test]
+fn inbound_direct_peer_starts_scrubbed_turn_but_broadcast_does_not() {
+    let dir = tempfile::tempdir().unwrap();
+    let codex = dir.path().join("codex-fixture");
+    let python = dir.path().join("lore-fixture");
+    let captured = dir.path().join("captured-prompt");
+    fake_scrubber(&python, false);
+    executable(&codex, &format!(r#"#!/bin/sh
+cat >> '{}'
+echo '{{"type":"thread.started","thread_id":"thread_1"}}'
+echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}}'
+"#, captured.display()));
+    let (_sender_listener, _) = registry_peer(dir.path(), "sender", dir.path().to_str().unwrap(), "sender");
+    let mut process = Process::start_codex_with_inbound(dir.path(), &codex, &python, true);
+    let peer_socket = PathBuf::from(process.entry()["socket_path"].as_str().unwrap());
+    let (mut reader, mut socket) = process.connect();
+    receive(&mut reader);
+    send(&mut socket, json!({"type":"attach","cursor":null}));
+    let frame = |kind, body: &str| doxa_peers::delivery::PeerFrame {
+        from_id: "sender".into(), from_title: "fixture-secret title".into(),
+        sent_at: peer_now(), body: body.into(),
+        from_repo: Some(dir.path().display().to_string()), kind,
+    };
+    doxa_peers::delivery::send(&peer_socket, &frame(Some("broadcast".into()), "broadcast note")).unwrap();
+    assert_eq!(receive(&mut reader)["event"]["type"], "peer_message");
+    send(&mut socket, json!({"type":"call","id":1,"method":"status","params":{}}));
+    let status = receive(&mut reader);
+    assert_eq!(status["status"]["running"], false);
+    assert_eq!(status["status"]["queued"], 0);
+    doxa_peers::delivery::send(&peer_socket, &frame(Some("direct".into()), "fixture-secret body")).unwrap();
+    assert_eq!(receive(&mut reader)["event"]["type"], "peer_message");
+    let mut started = false;
+    loop {
+        let event = receive(&mut reader);
+        assert!(event["turn"].as_str().unwrap_or("").starts_with("peer-"));
+        if event["event"]["type"] == "turn_started" {
+            started = true;
+            assert_eq!(event["event"]["data"]["peer_started"], true);
+            assert!(event["event"]["data"]["peer_origin"].as_str().unwrap().contains("sender"));
+            let prompt = event["event"]["data"]["prompt"].as_str().unwrap();
+            assert!(prompt.starts_with("[PEER-STARTED TURN]"));
+            assert!(prompt.contains("[PEER MESSAGES -- UNTRUSTED]"));
+            assert!(prompt.contains("[redacted] body"));
+            assert!(!prompt.contains("fixture-secret"));
+        }
+        if event["event"]["type"] == "turn_done" { break; }
+    }
+    assert!(started);
+    let provider_prompt = fs::read_to_string(captured).unwrap();
+    assert!(provider_prompt.contains("[PEER-STARTED TURN]"));
+    assert!(provider_prompt.contains("[redacted] body"));
+    assert!(provider_prompt.contains("broadcast note"));
+    assert!(!provider_prompt.contains("fixture-secret"));
+    send(&mut socket, json!({"type":"call","id":2,"method":"stop","params":{}}));
+    assert_eq!(receive(&mut reader)["ok"], true);
+    wait_until(|| process.exited());
+}
+
+#[test]
+fn inbound_peer_uses_typed_prompt_queue_while_turn_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    let codex = dir.path().join("codex-fixture");
+    let python = dir.path().join("lore-fixture");
+    let release = dir.path().join("release-first");
+    fake_scrubber(&python, false);
+    executable(&codex, &format!(r#"#!/bin/sh
+cat >/dev/null
+if [ ! -f '{}' ]; then
+  while [ ! -f '{}' ]; do sleep 0.01; done
+fi
+echo '{{"type":"thread.started","thread_id":"thread_1"}}'
+echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}}'
+"#, release.display(), release.display()));
+    let (_sender_listener, _) = registry_peer(dir.path(), "sender", dir.path().to_str().unwrap(), "sender");
+    let mut process = Process::start_codex_with_inbound(dir.path(), &codex, &python, true);
+    let peer_socket = PathBuf::from(process.entry()["socket_path"].as_str().unwrap());
+    let (mut reader, mut socket) = process.connect();
+    receive(&mut reader);
+    send(&mut socket, json!({"type":"attach","cursor":null}));
+    send(&mut socket, json!({"type":"prompt","id":1,"text":"first"}));
+    assert_eq!(receive(&mut reader)["ok"], true);
+    assert_eq!(receive(&mut reader)["event"]["type"], "turn_started");
+    doxa_peers::delivery::send(&peer_socket, &doxa_peers::delivery::PeerFrame {
+        from_id: "sender".into(), from_title: "sender".into(), sent_at: peer_now(),
+        body: "peer task".into(), from_repo: None, kind: Some("direct".into()),
+    }).unwrap();
+    assert_eq!(receive(&mut reader)["event"]["type"], "peer_message");
+    let queued = receive(&mut reader);
+    assert_eq!(queued["event"]["type"], "prompt_queued");
+    assert_eq!(queued["event"]["data"]["peer_started"], true);
+    assert_eq!(queued["event"]["data"]["position"], 1);
+    send(&mut socket, json!({"type":"call","id":2,"method":"status","params":{}}));
+    let status = receive(&mut reader);
+    assert_eq!(status["status"]["running"], true);
+    assert_eq!(status["status"]["queued"], 1);
+    fs::write(&release, b"go").unwrap();
+    let mut saw_dequeue = false;
+    let mut saw_peer = false;
+    for _ in 0..8 {
+        let frame = receive(&mut reader);
+        if frame["event"]["type"] == "prompt_dequeued" { saw_dequeue = true; }
+        if frame["event"]["type"] == "turn_started" &&
+            frame["turn"].as_str().unwrap_or("").starts_with("peer-") { saw_peer = true; }
+        if saw_peer && frame["event"]["type"] == "turn_done" { break; }
+    }
+    assert!(saw_dequeue && saw_peer);
+    send(&mut socket, json!({"type":"call","id":3,"method":"stop","params":{}}));
+    assert_eq!(receive(&mut reader)["ok"], true);
+    wait_until(|| process.exited());
 }

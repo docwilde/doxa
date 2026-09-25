@@ -20,6 +20,7 @@ const MAX_ENTRY_BYTES: u64 = 64 * 1024;
 #[derive(Debug, Clone)]
 pub struct Session {
     pub id: String,
+    pub title: String,
     pub socket: PathBuf,
     pub scope_key: String,
     pub clients: Option<u64>,
@@ -34,8 +35,7 @@ struct Entry {
     pid: i32,
     heartbeat_at: String,
     started_at: String,
-    #[serde(rename = "title")]
-    _title: String,
+    title: String,
     daemon_socket: Option<String>,
     clients: Option<u64>,
 }
@@ -168,6 +168,7 @@ fn read_entry(path: &Path, runtime: &Path, uid: u32) -> Option<Session> {
     }
     Some(Session {
         id: entry.session_id,
+        title: entry.title,
         socket,
         scope_key: entry.repo_root.filter(|s| !s.is_empty()).unwrap_or(entry.cwd),
         clients: entry.clients,
@@ -263,6 +264,7 @@ mod tests {
     fn selection_never_guesses() {
         let entries = ["abc123", "abc456"].map(|id| Session {
             id: id.into(),
+            title: String::new(),
             socket: PathBuf::new(),
             scope_key: String::new(),
             clients: None,
@@ -296,7 +298,9 @@ mod tests {
         };
         let uid = unsafe { libc::geteuid() };
         write(&entry);
-        assert_eq!(read_entry(&path, runtime, uid).unwrap().id, "test");
+        let session = read_entry(&path, runtime, uid).unwrap();
+        assert_eq!(session.id, "test");
+        assert_eq!(session.title, "running");
         entry["heartbeat_at"] = "2000-01-01T00:00:00.000000Z".into();
         write(&entry);
         assert!(read_entry(&path, runtime, uid).is_none());

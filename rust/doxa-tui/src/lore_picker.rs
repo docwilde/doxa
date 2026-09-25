@@ -1,13 +1,22 @@
 //! Read-only, bounded LORE picker data. The external sidecar owns search,
 //! storage, and secret scrubbing; this module never opens LORE's store.
 
-use doxa_lore::{ConsultHit, LoreClient};
+use doxa_lore::{ConsultHit, LoreClient, PendingDecision, PendingResolution, PendingReview};
 use serde_json::Value;
 use std::path::Path;
 use std::time::Duration;
 
 pub const PAGE_SIZE: u8 = 20;
 pub const EVIDENCE_LIMIT: u8 = 20;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Proposal {
+    pub pid: String,
+    pub kind: String,
+    pub action: String,
+    pub scope: String,
+    pub summary: String,
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Belief {
@@ -35,6 +44,9 @@ pub enum ResultPage {
     Beliefs(Vec<Belief>),
     Search(Option<ConsultHit>),
     Evidence(u64, Vec<Evidence>),
+    Proposals(Vec<Proposal>),
+    Review(PendingReview, bool),
+    Resolved(PendingResolution),
 }
 
 #[derive(Clone, Debug)]
@@ -42,10 +54,33 @@ pub enum Query {
     Beliefs(u16),
     Search(String),
     Evidence(u64),
+    Proposals(String, u16),
+    Review(String, String),
+    Resolve(String, PendingReview, PendingDecision),
 }
 
 fn short(value: &Value, key: &str, max: usize) -> Option<String> {
     value.get(key)?.as_str().filter(|text| text.len() <= max).map(str::to_owned)
+}
+
+pub fn parse_proposals(rows: Vec<Value>) -> Result<Vec<Proposal>, ()> {
+    if rows.len() > PAGE_SIZE as usize { return Err(()); }
+    rows.iter().map(|row| {
+        let pid = short(row, "pid", 128).ok_or(())?;
+        if pid.is_empty() || !pid.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') { return Err(()); }
+        let field = |key| -> Result<String, ()> {
+            match row.get(key) {
+                None => Ok(String::new()),
+                Some(_) => short(row, key, 4096).ok_or(()),
+            }
+        };
+        let summary = ["text", "claim", "path", "name", "description", "reason"]
+            .iter().find_map(|key| row.get(*key).and_then(Value::as_str))
+            .unwrap_or("");
+        if summary.len() > 4096 { return Err(()); }
+        Ok(Proposal { pid, kind: field("kind")?, action: field("action")?,
+            scope: field("scope")?, summary: summary.to_owned() })
+    }).collect()
 }
 
 pub fn parse_beliefs(rows: Vec<Value>) -> Result<Vec<Belief>, ()> {
@@ -90,6 +125,17 @@ pub fn fetch(python: &Path, query: Query) -> Result<ResultPage, &'static str> {
         Query::Evidence(id) => client.evidence(id, EVIDENCE_LIMIT)
             .map_err(|_| "Evidence unavailable")
             .and_then(|rows| parse_evidence(rows).map(|rows| ResultPage::Evidence(id, rows)).map_err(|_| "Invalid LORE evidence reply")),
+        Query::Proposals(cwd, offset) => client.pending(&cwd, offset, PAGE_SIZE)
+            .map_err(|_| "Proposal list unavailable")
+            .and_then(|rows| parse_proposals(rows).map(ResultPage::Proposals).map_err(|_| "Invalid LORE proposal reply")),
+        Query::Review(cwd, pid) => {
+            let writable = client.can_resolve_reviewed();
+            client.pending_review(&cwd, &pid)
+                .map(|review| ResultPage::Review(review, writable))
+                .map_err(|_| "Complete proposal review unavailable")
+        }
+        Query::Resolve(cwd, review, decision) => client.resolve_reviewed(&cwd, &review, decision)
+            .map(ResultPage::Resolved).map_err(|_| "Proposal resolution unavailable"),
     }
 }
 
@@ -108,6 +154,10 @@ mod tests {
         let evidence = parse_evidence(vec![json!({"session_id":"s","project":"p","note":"n","note_truncated":false,"created":"2026","source_engine":"codex","trail_truncated":true})]).unwrap();
         assert!(evidence[0].trail_truncated);
         assert!(parse_evidence(vec![json!({"session_id":"s","project":"p","note":"n","note_truncated":false,"created":"2026","trail_truncated":"yes"})]).is_err());
+        let proposals = parse_proposals(vec![json!({"pid":"one-1","kind":"memory","action":"add","scope":"user","text":"[redacted]"})]).unwrap();
+        assert_eq!(proposals[0].summary, "[redacted]");
+        assert!(parse_proposals(vec![json!({"pid":"../outside","text":"unsafe"})]).is_err());
+        assert!(parse_proposals(vec![json!({"pid":"one","text":"x".repeat(4097)})]).is_err());
     }
 
     #[cfg(unix)]
@@ -145,5 +195,35 @@ for line in sys.stdin:
         perms.set_mode(0o700);
         fs::set_permissions(&old, perms).unwrap();
         assert!(fetch(&old, Query::Beliefs(0)).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn proposal_picker_reads_complete_snapshot_without_write_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sidecar");
+        fs::write(&path, r##"#!/usr/bin/env python3
+import hashlib, json, sys
+print(json.dumps({'type':'hello','proto':1,'capabilities':['scrub','snapshot','pending','pending_review_v1']}), flush=True)
+raw = '{"kind":"sync","op":{"signed":"entire bytes"}}\n'
+for line in sys.stdin:
+    req = json.loads(line)
+    assert req['op'] in ('pending', 'pending_review_v1')
+    assert req['cwd'] == '/repo'
+    if req['op'] == 'pending':
+        value = [{'pid':'one','kind':'sync','scope':'user','text':'[redacted]'}]
+    else:
+        assert req['pid'] == 'one'
+        value = {'pid':'one','raw':raw,'sha256':hashlib.sha256(raw.encode()).hexdigest(),'inode':7,'complete':True}
+    print(json.dumps({'type':'reply','id':req['id'],'ok':True,'value':value}), flush=True)
+"##).unwrap();
+        let mut perms = fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o700);
+        fs::set_permissions(&path, perms).unwrap();
+        let ResultPage::Proposals(rows) = fetch(&path, Query::Proposals("/repo".into(), 0)).unwrap() else { panic!("proposals") };
+        assert_eq!(rows[0].summary, "[redacted]");
+        let ResultPage::Review(review, writable) = fetch(&path, Query::Review("/repo".into(), rows[0].pid.clone())).unwrap() else { panic!("review") };
+        assert!(review.raw().contains("entire bytes"));
+        assert!(!writable);
     }
 }

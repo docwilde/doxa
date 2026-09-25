@@ -1,6 +1,6 @@
 [package]
 name = "doxa-tui"
-version = "2.0.0-alpha.10"
+version = "2.0.0-alpha.11"
 edition = "2021"
 publish = false
 license = "AGPL-3.0-only"
@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 doxa-state = { path = "../doxa-state" }
+doxa-worktrees = { path = "../doxa-worktrees" }
 doxa-lore = { path = "../doxa-lore" }
 crossterm = "0.28"
 doxa-protocol = { path = "../doxa-protocol" }

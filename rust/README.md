@@ -1,5 +1,8 @@
 # DOXA Rust 2.0
 
+The [1.19 parity tracker](../docs/rust-1.19-parity.md) names the remaining
+features before a stable Rust 2.0 release.
+
 Rust 2.0 is the main DOXA frontend. The installer exposes it as `doxa`; the
 build artifact is still named `doxa-rs` for source builds. The Python 1.x
 frontend is retired from the current installer. Python remains in a private
@@ -24,7 +27,7 @@ Build the native frontend and daemon from this repository:
 commands build incrementally before running and accept the corresponding
 `doxa-rs` options, such as `./task new --engine claude --model NAME`.
 `./task build --release` and `DOXA_TASK_PROFILE=release ./task run` select a
-release build. `./task test` runs the TUI, daemon, and Claude sidecar tests;
+release build. `./task test` runs all Rust crate and Claude sidecar tests;
 `./task clean` removes only its build directory (`target/rust-task` by default).
 The script selects `.venv/bin/python` when present, then `python3`, for LORE
 and Claude. Set `DOXA_LORE_PYTHON=/absolute/path/to/python` or pass
@@ -48,6 +51,28 @@ The daemon executable is located beside `doxa-rs`, then on `PATH`; an absolute
 `linger_secs` config value. `--sandbox` sets the native Codex sandbox. Use
 `--engine fixture` only for local integration checks.
 
+Native sessions started in a Git checkout now get a linked worktree under
+`$DOXA_HOME/worktrees/<repo>-<session-prefix>` on a `doxa/<session-prefix>`
+branch. A sidecar in `worktrees/.meta` records the original repository and
+base branch and pins its starting commit for stable diff comparisons. The new
+checkout starts at that branch tip; uncommitted changes
+in the launch directory stay there. `DOXA_WORKTREE=0` or `worktree_per_session = false` in
+`$DOXA_HOME/config.toml` runs in the launch directory; outside Git, sessions
+also run there. In a supported Git checkout, failure to create or verify the
+managed worktree stops session launch and reports an error. Detaching keeps the
+worktree. When the daemon actually exits,
+it removes only a verified clean checkout whose recorded branch has no commits
+ahead of its base. Dirty trees, unique commits, branch switches, unreadable
+metadata, and failed Git checks are kept for manual review. `doxa doctor`
+lists verified managed worktrees with no live session and never deletes them.
+Fixture sessions keep their supplied directory unless `DOXA_WORKTREE=1` is
+set explicitly for integration testing.
+`doxa new --branch NAME` starts the managed worktree from an existing local or
+remote-tracking branch. It prefers a same-named local branch over
+`origin/NAME`. An unknown branch, disabled worktrees, or a request combined
+with `--resume` fails before starting the session; the launch checkout is
+never switched. Live `/branch` listing and base switching remain to be ported.
+
 Or compile and install the main line with the POSIX installer:
 
 ```sh
@@ -68,11 +93,57 @@ sessions, use `--list` and select one by full ID or unique ID prefix.
 without a connection. `Ctrl+P` opens the action menu; use Up/Down, Enter, and
 Esc to navigate the peer map, tool activity, session rail selection, tabs, and
 panes. `Ctrl+M` and `Ctrl+T` remain direct shortcuts. `Ctrl+Q` detaches the Rust UI
-without stopping its daemon; `Ctrl+C` is left available for terminal copy.
+without stopping its daemon; `Ctrl+W` detaches only the active tab and leaves
+its session running. `Ctrl+C` is left available for terminal copy.
+Bare `/help`, `/about`, `/sessions`, `/model`, `/engine`, `/mode`, `/beliefs`,
+`/diff`, `/peers`, `/split`, `/vsplit`, `/pane`, `/sidebar`, `/dir`, and `/detach` are
+handled locally from the prompt. Forms with arguments remain in the draft with
+an explicit notice until their Rust behavior is implemented, except `/pane 1|2`
+and `/sidebar on|off|wider|narrower|width N`, which are available. Known DOXA
+commands that need more porting, including `/compact`, stay in the draft with a
+notice. Unknown provider and plugin slash commands go to the active engine.
 `Ctrl+M` opens the read-only peer communications
 map; Up/Down selects a peer, R refreshes the live roster, and Esc closes it.
+For Python 1.19 fleet runs, `doxa-rs fleet runs` lists manifests under
+`$DOXA_HOME/fleet`, `doxa-rs fleet status RUN_ID` shows run and slot phases,
+and `doxa-rs fleet attach RUN_ID SLOT` attaches to one slot's live daemon.
+`doxa-rs fleet start <doxa-fleet options>` currently invokes the installed
+Python fleet harness in the sidecar environment. Its own parser enforces the
+capacity, spend budget, socket length, arm barrier, approval, and teardown
+rules. `--dry-run` shows assignments without starting sessions.
+`doxa-rs fleet preflight --sessions N --run-budget USD [--root PATH]` checks
+the memory estimate, explicit spend ceiling, and Unix socket path length in
+Rust without creating a run. Use `--allow-unbudgeted` to record an intentional
+absence of a ceiling and `--force` only to override the memory estimate.
+`--sessions` counts every daemon, including a supervisor when present.
+This preview does not verify provider pricing or approval behavior; the live
+start still uses the Python harness for those controls.
+The native daemon captures `DOXA_SESSION_BUDGET_USD` at startup for Claude
+sessions and refuses the next turn once reported USD spend reaches the ceiling.
+If a completed budgeted turn has no valid cost, further turns are refused.
+Budgeted native Codex and vendor sessions are rejected at startup until their
+priced token accounting is implemented. A truthy `DOXA_PEER_INBOUND_TURNS`
+lets validated direct peer messages start or queue a turn in native Codex and
+vendor sessions. They use the same eight-slot queue as typed prompts;
+broadcasts stay passive. Messages that cannot enter the queue are retained
+for a later turn up to eight pending frames, with an explicit overflow event.
+Claude continues to use its Python sidecar peer loop and rejects this native
+switch. Python fleet start remains the live path for full run supervision.
+`doxa-rs fleet stop RUN_ID` sends stop requests to the run's validated live
+slot sockets and waits up to 60 seconds for each daemon connection to close.
+It reports slots with missing sockets or unconfirmed shutdown separately; it
+does not signal processes or rewrite the Python supervisor's manifest. A
+Python supervisor may continue until its own run loop notices the closed slots.
+Use `--root ABSOLUTE_PATH` when the fleet was started under another root.
+Run IDs may be unique prefixes. Attachment requires an owner-private manifest
+and socket inside the run's private runtime directory.
 The map uses `tui-nodes` 0.9 with the Rust frontend's Ratatui 0.29.
 Lines show observed traffic and the detail row names sent and received counts.
+Type `/peers` or `/mesh` in a session prompt to open the same map. Type
+`/msg <session-prefix> <text>` to send a direct message through that session's
+daemon. The daemon resolves the prefix among live same-project peers and
+scrubs the message with LORE before delivery. The terminal reports failed and
+unconfirmed sends; check with the peer before retrying an unconfirmed send.
 Native daemons report a same-project, scrubbed peer roster when LORE is
 available; other daemons can report an unavailable state. On attach, the frontend restores prompts and
 assistant text from the daemon's persisted JSONL file, then follows live
@@ -83,19 +154,31 @@ the JSONL file retains the full history. Older daemons without snapshot
 metadata fall back to their 512-event replay ring. A turn still running at
 attach can have text that was streamed but not yet persisted, so its earlier
 in-flight deltas may be absent. `Ctrl+T` opens bounded tool activity cards;
-clickable links are still 2.0 work. The binary version is `2.0.0-alpha.10`;
+clickable links are still 2.0 work. The binary version is `2.0.0-alpha.11`;
 this is an alpha release.
 
 `Ctrl+R` opens a searchable picker for attached and archived sessions with
 bounded transcript tails. Archived transcripts open read-only and never receive
-prompts. `F2` (or `Alt+G`) opens a read-only, 256 KiB worktree diff in an
+prompts. `F2` (or `Alt+G`) opens a 256 KiB worktree diff in an
 asynchronous modal. It compares tracked changes with the recorded worktree
 base when one exists, or with `HEAD`, and lists bounded untracked filenames
 without reading their contents. `F4` keeps that diff visible beside the active
 session while its prompt stays usable; `F5` refreshes it and `Alt+PageUp` /
 `Alt+PageDown` scroll it. The other session pane reappears when the diff pane
-closes. The diff pane is read-only and requires enough terminal space for two
-panes. Each split pane has its own prompt and keeps a draft for its active
+closes. In the modal, `X` selects a regular tracked text hunk at the scroll position for rejection;
+in the side pane use `Alt+R`. Type an optional reason (up to 1024 bytes),
+then press `Enter` to confirm or `Esc` to cancel. A rejection chosen during an
+active turn is visibly queued and does not touch the worktree until the session
+is idle. The frontend checks that the same patch still exists, reverse-applies just that hunk, then sends feedback through
+the session's normal prompt path. Hunks with rename, copy, creation, deletion,
+or mode metadata are excluded because reversing them can change the whole file.
+If the hunk has changed, it leaves the file
+alone and asks for a refresh. A file with staged changes must be unstaged
+before a hunk can be rejected, so the rejected edit cannot remain in Git's
+index. Duplicate queued hunks are refused. Pending
+rejections block closing the diff or leaving the UI until they finish, and are
+cancelled if the session ends. The diff pane requires enough
+terminal space for two panes. Each split pane has its own prompt and keeps a draft for its active
 session. Its status rows show engine and model chips, plus context, token usage,
 cost, and LORE status when the daemon reports them. Unknown values display `?`;
 token scope and estimated cost are labeled. In a prompt, `Enter` submits, while
@@ -120,10 +203,27 @@ Python DOXA's warm dark palette.
 `Alt+P` opens the Claude permission mode picker when supported by the session.
 Entering `dontAsk` requires a second Enter confirmation because unapproved
 calls are silently denied.
-`Alt+L` opens a read-only LORE belief picker when the external LORE bridge is
-available. It shows bounded recent beliefs, a search hit, and evidence for the
-selected belief. `Alt+X` asks for confirmation before stopping the active
-session; the session stays visible as read-only after a successful stop.
+`Alt+L` opens the LORE picker when the external bridge is available. It shows
+bounded recent beliefs, a search hit, and evidence for the selected belief.
+Press `P` with an empty search to page staged proposals, then Enter to scroll
+the complete raw proposal. After reading to the end, `A` or `R` arms one
+approval or rejection; Enter confirms it. The sidecar rechecks the displayed
+SHA-256 and inode before asking LORE to claim that one proposal. Older LORE
+builds without the atomic API keep proposal review read only. An approval that
+lands but fails to archive is reported as a partial completion and is never
+retried automatically. The local `/pending` command opens the proposal picker
+without sending a prompt to the model. `Alt+X` asks for confirmation before
+stopping the active session; the session stays visible as read-only after a
+successful stop.
+The local `/attach QUERY` command searches live daemon IDs and titles, then
+rechecks the selected ID before connecting and opening it in a new tab. An
+exact ID takes precedence over an ID prefix, then a title match. If that
+session is already open, the command focuses its tab. Bare `/attach` opens a
+filtered picker above the active prompt when several detached sessions are
+available; keyboard and mouse selection keep the prompt visible. `/rename NAME` pins the active
+tab's label in the shared tabset; bare `/rename` restores its automatic label.
+Unimplemented slash commands remain in the draft with a visible error and
+are never submitted as model prompts.
 The diff view supports file and hunk navigation with `N`/`P` and `J`/`K`
 in its modal, or `Alt+N`/`Alt+B` and `Alt+J`/`Alt+K` in the persistent pane.
 

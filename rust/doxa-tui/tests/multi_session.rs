@@ -4,6 +4,7 @@ use doxa_tui::ui::App;
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::fs::PermissionsExt;
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -34,7 +35,7 @@ fn until(frames: &mpsc::Receiver<Value>, pred: impl Fn(&Value) -> bool) -> Value
 }
 
 fn session(id: &str, socket: std::path::PathBuf) -> Session {
-    Session { id: id.into(), socket, scope_key: "/tmp".into(), clients: None, started_at: String::new() }
+    Session { id: id.into(), title: String::new(), socket, scope_key: "/tmp".into(), clients: None, started_at: String::new() }
 }
 
 #[test]
@@ -164,4 +165,57 @@ fn stop_targets_only_selected_socket_and_other_session_keeps_prompting() {
     bridge.shutdown();
     server_a.join().unwrap();
     server_b.join().unwrap();
+}
+
+#[test]
+fn dynamic_attach_rechecks_live_registry_before_routing() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = dir.path().join("runtime");
+    let registry = runtime.join("registry");
+    std::fs::create_dir_all(&registry).unwrap();
+    std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::set_permissions(&registry, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let initial_path = dir.path().join("initial.sock");
+    let initial_listener = UnixListener::bind(&initial_path).unwrap();
+    let attached_path = runtime.join(format!("daemon-attached-{}.sock", std::process::id()));
+    let attached_listener = UnixListener::bind(&attached_path).unwrap();
+    std::fs::set_permissions(&attached_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let (release_initial, wait_initial) = mpsc::channel();
+    let (release_attached, wait_attached) = mpsc::channel();
+    let initial = thread::spawn(move || {
+        let socket = accept(&initial_listener, "initial", 0, None);
+        wait_initial.recv_timeout(Duration::from_secs(5)).unwrap();
+        drop(socket);
+    });
+    let attached = thread::spawn(move || {
+        let socket = accept(&attached_listener, "attached", 0, None);
+        wait_attached.recv_timeout(Duration::from_secs(5)).unwrap();
+        drop(socket);
+    });
+    let previous = std::env::var_os("DOXA_RUNTIME_DIR");
+    std::env::set_var("DOXA_RUNTIME_DIR", &runtime);
+    let bridge = connect_sessions(&[session("initial", initial_path)]).unwrap();
+    until(&bridge.frames, |f| f["type"] == "hello");
+    bridge.commands.send(WorkerCommand::Attach("attached".into(), 1)).unwrap();
+    let refused = until(&bridge.frames, |f| f["type"] == "attach_reply");
+    assert_eq!(refused["ok"], false);
+    let entry = json!({"session_id":"attached", "pid":std::process::id(),
+        "cwd":"/tmp", "repo_root":null, "title":"attached",
+        "heartbeat_at":time::OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339).unwrap(),
+        "started_at":"2026-01-01T00:00:00Z", "daemon_socket":attached_path});
+    let entry_path = registry.join("attached.json");
+    std::fs::write(&entry_path, serde_json::to_vec(&entry).unwrap()).unwrap();
+    std::fs::set_permissions(&entry_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    bridge.commands.send(WorkerCommand::Attach("attached".into(), 1)).unwrap();
+    let reply = until(&bridge.frames, |f| f["type"] == "attach_reply");
+    assert_eq!(reply["ok"], true);
+    assert_eq!(reply["group"], 1);
+    until(&bridge.frames, |f| f["type"] == "hello" && f["session_id"] == "attached");
+    if let Some(old) = previous { std::env::set_var("DOXA_RUNTIME_DIR", old); }
+    else { std::env::remove_var("DOXA_RUNTIME_DIR"); }
+    release_initial.send(()).unwrap();
+    release_attached.send(()).unwrap();
+    bridge.shutdown();
+    initial.join().unwrap();
+    attached.join().unwrap();
 }

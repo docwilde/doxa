@@ -154,7 +154,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-lore"
-version = "2.0.0-alpha.10"
+version = "2.0.0-alpha.11"
 dependencies = [
  "libc",
  "serde_json",
@@ -163,14 +163,14 @@ dependencies = [
 
 [[package]]
 name = "doxa-protocol"
-version = "2.0.0-alpha.10"
+version = "2.0.0-alpha.11"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "doxa-state"
-version = "2.0.0-alpha.10"
+version = "2.0.0-alpha.11"
 dependencies = [
  "libc",
  "serde",
@@ -183,12 +183,13 @@ dependencies = [
 
 [[package]]
 name = "doxa-tui"
-version = "2.0.0-alpha.10"
+version = "2.0.0-alpha.11"
 dependencies = [
  "crossterm",
  "doxa-lore",
  "doxa-protocol",
  "doxa-state",
+ "doxa-worktrees",
  "libc",
  "pulldown-cmark",
  "ratatui",
@@ -199,6 +200,15 @@ dependencies = [
  "toml",
  "tui-nodes",
  "unicode-width 0.2.0",
+]
+
+[[package]]
+name = "doxa-worktrees"
+version = "2.0.0-alpha.11"
+dependencies = [
+ "libc",
+ "serde_json",
+ "toml",
 ]
 
 [[package]]

@@ -1,9 +1,9 @@
 //! Native daemon startup and CLI settings shared with the Rust frontend.
 use crate::discovery::{self, Session};
 use std::env;
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -42,6 +42,7 @@ impl Engine {
 #[derive(Debug, Default, Clone)]
 pub struct LaunchOptions {
     pub engine: Engine,
+    pub branch: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
     pub linger: Option<f64>,
@@ -203,6 +204,22 @@ fn random_id() -> io::Result<String> {
 
 pub fn spawn(options: &LaunchOptions) -> io::Result<Session> {
     let cwd = fs::canonicalize(env::current_dir()?)?;
+    let branch = if let Some(requested) = options.branch.as_deref() {
+        if !doxa_worktrees::enabled() {
+            return Err(invalid("--branch needs worktree_per_session; turn it on or change your checkout explicitly with git"));
+        }
+        if options.engine == Engine::Fixture && env::var("DOXA_WORKTREE").as_deref() != Ok("1") {
+            return Err(invalid("fixture --branch needs DOXA_WORKTREE=1"));
+        }
+        if !doxa_worktrees::is_supported_checkout(&cwd) {
+            return Err(invalid("--branch needs a Git checkout"));
+        }
+        Some(doxa_worktrees::resolve_base(&cwd, requested)
+            .ok_or_else(|| invalid(format!("no such local or remote-tracking branch: {requested}")))?)
+    } else { None };
+    if branch.is_some() && options.resume.is_some() {
+        return Err(invalid("--branch cannot change the base of a resumed session"));
+    }
     let runtime = discovery::runtime_dir()?;
     if !runtime.is_absolute() {
         return Err(invalid("runtime directory must be absolute"));
@@ -281,6 +298,7 @@ pub fn spawn(options: &LaunchOptions) -> io::Result<Session> {
         "--linger",
         &linger.to_string(),
     ]);
+    if let Some(base) = &branch { command.args(["--base-branch", base]); }
     match options.engine {
         Engine::Fixture => {
             if options.model.is_some()
@@ -380,11 +398,26 @@ pub fn spawn(options: &LaunchOptions) -> io::Result<Session> {
             }
         }
     }
-    let mut child = command
+    // Keep a private startup diagnostic so a failed daemon can tell the TUI
+    // why it refused to launch (including worktree safety failures).
+    let stderr_path = env::temp_dir().join(format!(".doxa-daemon-{id}-{}.stderr", random_id()?));
+    let stderr_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&stderr_path)?;
+    let mut child = match command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
+        .stderr(Stdio::from(stderr_file))
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) => {
+            let _ = fs::remove_file(&stderr_path);
+            return Err(error);
+        }
+    };
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let sessions = match discovery::sessions() {
@@ -392,6 +425,7 @@ pub fn spawn(options: &LaunchOptions) -> io::Result<Session> {
             Err(error) => {
                 let _ = child.kill();
                 let _ = child.wait();
+                let _ = fs::remove_file(&stderr_path);
                 return Err(error);
             }
         };
@@ -402,9 +436,34 @@ pub fn spawn(options: &LaunchOptions) -> io::Result<Session> {
                     .file_name()
                     .is_some_and(|name| name == expected_socket.as_str())
         }) {
+            let _ = fs::remove_file(&stderr_path);
             return Ok(session);
         }
-        if let Some(status) = child.try_wait()? {
+        let status = match child.try_wait() {
+            Ok(status) => status,
+            Err(error) => {
+                let _ = fs::remove_file(&stderr_path);
+                return Err(error);
+            }
+        };
+        if let Some(status) = status {
+            let mut bytes = Vec::new();
+            if let Ok(file) = File::open(&stderr_path) {
+                let _ = file.take(4096).read_to_end(&mut bytes);
+            }
+            let _ = fs::remove_file(&stderr_path);
+            let diagnostic = String::from_utf8_lossy(&bytes);
+            let diagnostic = diagnostic.trim();
+            if !diagnostic.is_empty() {
+                return Err(io::Error::other(format!(
+                    "native daemon exited before startup ({status}): {diagnostic}"
+                )));
+            }
+            if branch.is_some() {
+                return Err(io::Error::other(format!(
+                    "native daemon exited before startup ({status}); check provider dependencies and whether the requested branch can open in a managed worktree"
+                )));
+            }
             return Err(io::Error::other(format!(
                 "native daemon exited before startup ({status}); check {} dependencies",
                 match options.engine {
@@ -418,6 +477,7 @@ pub fn spawn(options: &LaunchOptions) -> io::Result<Session> {
         if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
+            let _ = fs::remove_file(&stderr_path);
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 "native daemon did not register within 10 seconds",
@@ -491,6 +551,7 @@ mod tests {
         });
         let session = Session {
             id: "session-1".into(),
+            title: String::new(),
             socket,
             scope_key: "/tmp".into(),
             clients: Some(0),

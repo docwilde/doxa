@@ -24,12 +24,33 @@ pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 /// A complete, immutable pending-file snapshot for a human review screen.
 /// The raw JSON is the exact UTF-8 byte sequence whose digest LORE reports.
 /// This value alone grants no authority to approve or mutate the proposal.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct PendingReview {
     pid: String,
     raw: String,
     sha256: String,
     inode: u64,
+}
+
+impl std::fmt::Debug for PendingReview {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PendingReview")
+            .field("pid", &self.pid)
+            .field("sha256", &self.sha256)
+            .field("inode", &self.inode)
+            .field("raw_bytes", &self.raw.len())
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingDecision { Approve, Reject }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PendingResolution {
+    Approved,
+    Rejected,
+    Refused { code: String, applied: bool },
 }
 
 impl PendingReview {
@@ -112,6 +133,10 @@ pub struct LoreClient {
 impl LoreClient {
     pub fn is_alive(&self) -> bool {
         self.alive
+    }
+
+    pub fn can_resolve_reviewed(&self) -> bool {
+        self.capabilities.contains("resolve_reviewed_v1")
     }
 
     /// Launch the sidecar lazily, only when a session requests LORE.
@@ -355,6 +380,34 @@ impl LoreClient {
             sha256: sha256.to_owned(),
             inode,
         })
+    }
+
+    /// Resolve one proposal the caller has fully rendered and a person has
+    /// explicitly confirmed. The sidecar rechecks project scope and snapshot;
+    /// LORE then claims the inode before applying or archiving it.
+    pub fn resolve_reviewed(&mut self, cwd: &str, review: &PendingReview,
+                            decision: PendingDecision) -> Result<PendingResolution, LoreError> {
+        if cwd.is_empty() || cwd.len() > 4096 || cwd.contains('\0') {
+            return Err(LoreError::InvalidFrame);
+        }
+        let decision = match decision { PendingDecision::Approve => "approve", PendingDecision::Reject => "reject" };
+        let value = self.request_value("resolve_reviewed_v1", json!({
+            "cwd":cwd, "pid":review.pid(), "decision":decision,
+            "expected":{"sha256":review.sha256(), "inode":review.inode()}
+        }))?;
+        match value["status"].as_str() {
+            Some("approved") if value.as_object().is_some_and(|o| o.len() == 1) => Ok(PendingResolution::Approved),
+            Some("rejected") if value.as_object().is_some_and(|o| o.len() == 1) => Ok(PendingResolution::Rejected),
+            Some("refused") => {
+                let code = value["error"].as_str().filter(|s| !s.is_empty() && s.len() <= 64
+                    && s.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'))
+                    .ok_or(LoreError::InvalidFrame)?;
+                let applied = value["applied"].as_bool().ok_or(LoreError::InvalidFrame)?;
+                if applied && code != "archive_failed" { return Err(LoreError::InvalidFrame); }
+                Ok(PendingResolution::Refused { code: code.to_owned(), applied })
+            }
+            _ => Err(LoreError::InvalidFrame),
+        }
     }
 
     /// One active FTS belief. It is derived data for citation, never an instruction.

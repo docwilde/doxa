@@ -20,9 +20,11 @@ use crate::launch::{self, LaunchOptions};
 
 pub enum WorkerCommand {
     Launch(LaunchOptions, Option<String>, usize),
+    Attach(String, usize),
     Prompt(String, String),
     Answer(String, String, Value),
     Peers(String),
+    Message(String, String, String),
     Models(String),
     SetModel(String, String),
     SetPermissionMode(String, String),
@@ -173,6 +175,35 @@ pub fn connect_sessions(sessions: &[Session]) -> io::Result<MultiBridge> {
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             };
             let command = match command {
+                WorkerCommand::Attach(id, group) => {
+                    if routes.contains_key(&id) {
+                        let _ = router_frames.send(json!({"type":"attach_reply", "ok":true,
+                            "session_id":id, "group":group}));
+                        continue;
+                    }
+                    if routes.len() >= 64 {
+                        let _ = router_frames.send(json!({"type":"attach_reply", "ok":false,
+                            "message":"64 attached sessions is the limit"}));
+                        continue;
+                    }
+                    // Re-read the trusted registry at dispatch time. The UI's earlier
+                    // discovery result is only a selection hint, never a socket path.
+                    let live = crate::discovery::sessions();
+                    let session = live.as_ref().ok().and_then(|rows| rows.iter().find(|s| s.id == id));
+                    let result = session.ok_or_else(|| io::Error::new(io::ErrorKind::NotFound,
+                        "session is no longer live")).and_then(|s| attach_worker(s, &router_frames, &router_guard));
+                    match result {
+                        Ok((tx, connected, worker)) => {
+                            routes.insert(id.clone(), (tx, connected));
+                            added_workers.push(worker);
+                            let _ = router_frames.send(json!({"type":"attach_reply", "ok":true,
+                                "session_id":id, "group":group}));
+                        }
+                        Err(error) => { let _ = router_frames.send(json!({"type":"attach_reply", "ok":false,
+                            "message":error.to_string()})); }
+                    }
+                    continue;
+                }
                 WorkerCommand::Launch(options, prompt, group) => {
                     if routes.len().saturating_add(launches_in_flight) >= 64 {
                         let _ = router_frames.send(json!({"type":"launch_reply", "ok":false,
@@ -190,8 +221,8 @@ pub fn connect_sessions(sessions: &[Session]) -> io::Result<MultiBridge> {
                 WorkerCommand::Prompt(id, _) | WorkerCommand::Answer(id, _, _) | WorkerCommand::Peers(id)
                 | WorkerCommand::Models(id) | WorkerCommand::SetModel(id, _)
                 | WorkerCommand::SetPermissionMode(id, _) => id,
-                WorkerCommand::Stop(id) => id,
-                WorkerCommand::Launch(_, _, _) => unreachable!(),
+                WorkerCommand::Message(id, _, _) | WorkerCommand::Stop(id) => id,
+                WorkerCommand::Launch(_, _, _) | WorkerCommand::Attach(_, _) => unreachable!(),
             };
             let Some((route, connected)) = routes.get(id) else {
                 let _ = router_frames.send(rejected(command, "Session is not attached"));
@@ -222,12 +253,17 @@ fn rejected(command: WorkerCommand, message: &str) -> Value {
     match command {
         WorkerCommand::Launch(_, _, group) => json!({"type":"launch_reply", "ok":false,
             "message":message, "group":group}),
+        WorkerCommand::Attach(id, group) => json!({"type":"attach_reply", "ok":false,
+            "session_id":id, "message":message, "group":group}),
         WorkerCommand::Prompt(id, text) => json!({"type":"prompt_rejected", "session_id":id,
             "text":text, "message":message}),
         WorkerCommand::Answer(session, request, _) => json!({"type":"answer_reply", "session_id":session,
             "request_id":request, "ok":false, "message":message}),
         WorkerCommand::Peers(id) => json!({"type":"peer_roster", "session_id":id,
             "ok":false, "error":message}),
+        WorkerCommand::Message(id, target, text) => json!({"type":"peer_message_reply", "session_id":id,
+            "ok":false, "uncertain":false, "error":message,
+            "draft":format!("/msg {target} {text}")}),
         WorkerCommand::Models(id) => json!({"type":"models_reply", "session_id":id,
             "ok":false, "error":message}),
         WorkerCommand::SetModel(id, _) => json!({"type":"set_model_reply", "session_id":id,
@@ -254,14 +290,21 @@ pub fn run_sessions(sessions: &[Session], store: Option<crate::ui_state::UiState
 
 /// Attach to one daemon socket with the same dynamic routing used by a restored roster.
 pub fn run_socket(path: impl AsRef<Path>) -> io::Result<()> {
+    run_socket_expected(path, None)
+}
+
+pub fn run_socket_expected(path: impl AsRef<Path>, expected: Option<&str>) -> io::Result<()> {
     let path = path.as_ref();
     let client = DaemonClient::connect(path, None).map_err(as_io_error)?;
     let id = client.hello["session_id"].as_str()
         .filter(|id| crate::discovery::valid_id(id))
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid session ID"))?
         .to_owned();
+    if expected.is_some_and(|expected| expected != id) {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "fleet slot session identity changed"));
+    }
     drop(client);
-    run_sessions(&[Session { id, socket: path.to_path_buf(), scope_key: String::new(),
+    run_sessions(&[Session { id, title: String::new(), socket: path.to_path_buf(), scope_key: String::new(),
         clients: None, started_at: String::new() }], None)
 }
 
@@ -341,6 +384,10 @@ fn worker_loop(
                 Ok(WorkerCommand::Launch(_, _, group)) => {
                     let _ = frames.send(json!({"type":"launch_reply", "ok":false,
                         "message":"Session launch is unavailable on this connection", "group":group}));
+                }
+                Ok(WorkerCommand::Attach(id, group)) => {
+                    let _ = frames.send(json!({"type":"attach_reply", "ok":false,
+                        "session_id":id, "message":"Session attach is unavailable on this connection", "group":group}));
                 }
                 Ok(WorkerCommand::Models(id)) => {
                     let result = if id == session_id { client.call("list_models", Map::new()) }
@@ -435,6 +482,35 @@ fn worker_loop(
                             "error":reply.get("error")}),
                         Err(ref error) => json!({"type":"peer_roster", "session_id":id,
                             "ok":false, "error":error.to_string()}),
+                    };
+                    if frames.send(reply).is_err() { return; }
+                    if matches!(result, Err(TransportError::Closed)) { return; }
+                }
+                Ok(WorkerCommand::Message(id, target, text)) => {
+                    let draft = format!("/msg {target} {text}");
+                    if id != session_id {
+                        let _ = frames.send(json!({"type":"peer_message_reply", "session_id":id,
+                            "ok":false, "error":"Peer target session is not attached", "draft":draft}));
+                        continue;
+                    }
+                    let mut params = Map::new();
+                    params.insert("target".into(), Value::String(target));
+                    params.insert("text".into(), Value::String(text));
+                    let result = client.call("msg", params);
+                    cursor.store(client.cursor, Ordering::Relaxed);
+                    if matches!(result, Err(TransportError::Closed)) {
+                        if let Some(guard) = roster_guard { revoke(guard); }
+                    }
+                    let reply = match &result {
+                        Ok(reply) => json!({"type":"peer_message_reply", "session_id":id,
+                            "ok":reply["ok"] == true, "peer":reply.get("peer"),
+                            "delivered_to":reply.get("delivered_to"),
+                            "failed":reply.get("failed"), "ledger_error":reply.get("ledger_error"),
+                            "error":reply.get("error"), "draft":draft}),
+                        Err(error) => json!({"type":"peer_message_reply", "session_id":id,
+                            "ok":false,
+                            "uncertain":!matches!(error, TransportError::FrameTooLarge | TransportError::RequestIdsExhausted),
+                            "error":error.to_string(), "draft":draft}),
                     };
                     if frames.send(reply).is_err() { return; }
                     if matches!(result, Err(TransportError::Closed)) { return; }
@@ -610,6 +686,14 @@ mod tests {
                 json!({"type":"call","id":2,"method":"peers","params":{}}));
             writeln!(socket, "{}", json!({"type":"reply","id":2,"ok":true,
                 "peers":[{"session_id":"peer-1","title":"Builder"}]})).unwrap();
+            line.clear();
+            reader.read_line(&mut line).unwrap();
+            assert_eq!(serde_json::from_str::<Value>(&line).unwrap(),
+                json!({"type":"call","id":3,"method":"msg",
+                    "params":{"target":"peer-1","text":"hello"}}));
+            writeln!(socket, "{}", json!({"type":"reply","id":3,"ok":true,
+                "peer":{"session_id":"peer-1","title":"Builder"},
+                "delivered_to":["peer-1"],"failed":[]})).unwrap();
         });
         let client = DaemonClient::connect(&path, None).unwrap();
         let (frames, prompts, worker) = spawn_worker(client);
@@ -631,6 +715,10 @@ mod tests {
         let peers = frames.recv_timeout(Duration::from_secs(2)).unwrap();
         assert_eq!(peers["type"], "peer_roster");
         assert_eq!(peers["peers"][0]["session_id"], "peer-1");
+        prompts.send(WorkerCommand::Message("session-1".into(), "peer-1".into(), "hello".into())).unwrap();
+        let sent = frames.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(sent["type"], "peer_message_reply");
+        assert_eq!(sent["delivered_to"], json!(["peer-1"]));
         drop(prompts);
         worker.join().unwrap();
         server.join().unwrap();
