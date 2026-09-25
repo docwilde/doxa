@@ -54,6 +54,7 @@ fn pane_boundary(app: &App) -> (u16, u16) {
 fn vertical_divider_drag_respects_minimum_width_and_release() {
     let mut app = App::default();
     app.handle(Event::Resize(120, 40));
+    app.handle(Event::Key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT)));
     let (x, y) = pane_boundary(&app);
     assert!(app.handle(mouse(MouseEventKind::Down(MouseButton::Left), x, y)));
     assert!(app.handle(mouse(MouseEventKind::Drag(MouseButton::Left), 110, y)));
@@ -73,7 +74,7 @@ fn vertical_divider_drag_respects_minimum_width_and_release() {
 fn horizontal_divider_drag_respects_minimum_height_and_resize_cancels_drag() {
     let mut app = App::default();
     app.rail_visible = false;
-    app.split = Split::Horizontal;
+    app.handle(Event::Key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::ALT)));
     app.handle(Event::Resize(90, 40));
     let (x, y) = pane_boundary(&app);
     assert!(app.handle(mouse(MouseEventKind::Down(MouseButton::Left), x, y)));

@@ -42,6 +42,15 @@ processes.
 | Scroll key to terminal output | 0.715 / 0.794 |
 | Terminal resize to last output byte | 0.879 / 1.218 |
 
+The separate `python3 scripts/bench_rust_cli_startup.py --runs 60` harness
+starts the release `doxa-rs --demo` command in a fresh PTY and empty
+`DOXA_HOME` for each sample. Time from process launch to the first visible
+`Sessions` text was 1.474 / 1.845 ms at 160 × 48 and 1.170 / 1.365 ms at
+80 × 24. These are fresh processes with warm OS page caches. This includes
+CLI parsing and terminal startup but skips live session discovery, daemon
+startup, providers, and restoration; first visible text is not the final
+painted frame.
+
 Before the event-loop fix in `b7873bc`, the same phase-varying PTY harness
 measured daemon text update to terminal output at 78.581 / 99.336 ms. The
 loop had waited for keyboard input before drawing received frames. It now

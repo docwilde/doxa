@@ -4155,7 +4155,7 @@ mod tests {
     }
 
     #[test]
-    fn wide_pane_keeps_four_primary_chips_visible_without_prefixes() {
+    fn single_pane_keeps_four_primary_chips_visible_without_prefixes() {
         let mut app = App::default();
         app.handle(Event::Resize(148, 31));
         app.split = Split::Horizontal;
@@ -4163,7 +4163,8 @@ mod tests {
             "engine":"claude", "model":"claude-sonnet-4", "permission_mode":"default",
             "can_set_permission_mode":true, "can_set_model":true}));
         app.groups[0].tabs = vec!["claude-1".into()];
-        let pane = app.layout(app.size).panes.unwrap()[0];
+        let layout = app.layout(app.size);
+        let pane = layout.panes.map_or(layout.body, |panes| panes[0]);
         let visible = app.chip_window(0, usize::from(pane.width));
         assert_eq!(visible.iter().take(4).map(|(kind, _)| *kind).collect::<Vec<_>>(),
             vec!["permission", "engine", "model", "context"]);
