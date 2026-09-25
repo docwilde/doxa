@@ -12,7 +12,8 @@ the stable 2.0 release has not been cut.
   Python bridge.
 - Show per-session usage and context details in scrollable panels above the
   active prompt; unavailable provider telemetry remains explicitly unknown.
-- Add named session collections with ordering and local collection commands.
+- Add named session collections with ordering, foldable rail headings, and
+  local collection commands. Empty named collections survive a restart.
 
 ## 2.0.0-alpha.21 — 2026-09-25
 
