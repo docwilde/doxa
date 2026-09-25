@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
-use tokio::time::{sleep_until, timeout, Instant as TokioInstant};
+use tokio::time::{sleep, sleep_until, timeout, Instant as TokioInstant};
 use tokio_util::sync::CancellationToken;
 
 use crate::codex::{duration_ms, CodexJsonlNormalizer, ParseError, TokenUsage, MAX_LINE_BYTES};
@@ -192,7 +192,24 @@ impl CodexCliDriver {
                 }
             });
         }
-        let mut child = command.spawn().map_err(DriverError::Spawn)?;
+        // A CLI upgrade can briefly hold its executable open for writing.
+        // Linux reports ETXTBSY during that window. Retry a few times within
+        // the turn deadline; every other spawn failure remains immediate.
+        let mut busy_retries = 0;
+        let mut child = loop {
+            match command.spawn() {
+                Ok(child) => break child,
+                Err(error) if error.raw_os_error() == Some(libc::ETXTBSY) && busy_retries < 3 => {
+                    busy_retries += 1;
+                    tokio::select! {
+                        _ = sleep(Duration::from_millis(30)) => {},
+                        _ = cancel.cancelled() => return Err(DriverError::Cancelled),
+                        _ = sleep_until(deadline) => return Err(DriverError::Spawn(error)),
+                    }
+                }
+                Err(error) => return Err(DriverError::Spawn(error)),
+            }
+        };
         let mut group = ProcessGroupGuard::new(child.id());
         self.normalizer.begin_turn();
         let stderr = child.stderr.take().expect("piped stderr");

@@ -45,13 +45,14 @@ async fn fake_cli_receives_stdin_and_resumes_with_safe_argv() {
     opts.model = Some("gpt-test".into());
     opts.sandbox = SandboxMode::ReadOnly;
     let mut driver = CodexCliDriver::new(opts, str::to_owned);
-    let prompt = "secret prompt; $(touch /tmp/doxa-should-never-execute)";
-    let (result, first) = events(&mut driver, prompt).await;
+    let injection_marker = dir.path().join("should-never-execute");
+    let prompt = format!("secret prompt; $(touch {})", injection_marker.display());
+    let (result, first) = events(&mut driver, &prompt).await;
     let result = result.unwrap();
     assert_eq!(result.thread_id.as_deref(), Some("thread_1"));
     assert_eq!(result.usage.input_tokens, 2);
     assert_eq!(fs::read_to_string(&prompt_path).unwrap(), prompt);
-    assert!(!Path::new("/tmp/doxa-should-never-execute").exists());
+    assert!(!injection_marker.exists());
     assert_eq!(first.iter().map(|e| e.kind.as_str()).collect::<Vec<_>>(), ["text_delta", "turn_done"]);
     let (_, second) = events(&mut driver, "second").await;
     assert_eq!(second.last().unwrap().data["num_turns"], 2);
@@ -62,7 +63,26 @@ async fn fake_cli_receives_stdin_and_resumes_with_safe_argv() {
     assert!(groups[0].contains("approval_policy=\"never\"\n"));
     assert!(groups[0].contains("sandbox_mode=\"read-only\"\n"));
     assert!(groups[0].contains("-m\ngpt-test\n-\n"));
-    assert!(!args.contains(prompt));
+    assert!(!args.contains(&prompt));
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn executable_busy_during_upgrade_is_retried_within_turn_deadline() {
+    let dir = TempDir::new().unwrap();
+    let script = fake_script(dir.path(),
+        "cat >/dev/null\nprintf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"thread_1\"}' '{\"type\":\"turn.completed\"}'");
+    // An open writer makes exec return ETXTBSY on Linux. Release it after
+    // the first spawn attempt to exercise the bounded retry path.
+    let writer = fs::OpenOptions::new().write(true).open(&script).unwrap();
+    let release = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(45)).await;
+        drop(writer);
+    });
+    let mut driver = CodexCliDriver::new(options(&dir, script), str::to_owned);
+    let (result, _) = events(&mut driver, "test").await;
+    release.await.unwrap();
+    assert_eq!(result.unwrap().thread_id.as_deref(), Some("thread_1"));
 }
 
 #[tokio::test]
