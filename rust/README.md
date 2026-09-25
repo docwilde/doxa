@@ -85,7 +85,8 @@ remote-tracking branch. It prefers a same-named local branch over
 with `--resume` fails before starting the session; the launch checkout is
 never switched. `doxa branch` lists local branch bases from this checkout.
 `doxa branch NAME --session ID` changes an idle managed session's base, as
-does `/branch` in its pane. The worktree must be clean, have no unique commits,
+does `/branch <name>` in its pane. Bare `/branch` opens a local base-branch
+picker above the pane's prompt. The worktree must be clean, have no unique commits,
 and still match its pinned base commit. An active or queued turn blocks the
 switch. `doxa branch NAME` without a session ID lists available bases.
 

@@ -176,6 +176,14 @@ struct AttachPicker {
     selected: usize,
 }
 
+#[derive(Debug)]
+struct BranchPicker {
+    session_id: String,
+    branches: Vec<String>,
+    base: String,
+    selected: usize,
+}
+
 #[derive(Clone, Debug)]
 struct RejectDraft {
     index: usize,
@@ -1133,6 +1141,7 @@ pub struct App {
     model_picker: Option<ModelPicker>,
     effort_picker: Option<EffortPicker>,
     attach_picker: Option<AttachPicker>,
+    branch_picker: Option<BranchPicker>,
     lore_picker: Option<LorePicker>,
     engine_picker: bool,
     engine_selected: usize,
@@ -1275,6 +1284,7 @@ impl Default for App {
             model_picker: None,
             effort_picker: None,
             attach_picker: None,
+            branch_picker: None,
             lore_picker: None,
             engine_picker: false,
             engine_selected: 0,
@@ -1393,18 +1403,34 @@ impl App {
         };
         match kind {
             "branch_reply" => {
+                let Some(id) = frame["session_id"].as_str() else { return false; };
                 if frame["ok"] == true && frame["message"].as_str().is_some() {
-                    if let Some(id) = frame["session_id"].as_str() { self.invalidate_repo(id); }
+                    self.invalidate_repo(id);
                 }
                 if frame["ok"] != true {
                     self.notice = format!("branch: {}", safe_label(frame["error"].as_str().unwrap_or("switch refused")));
                 } else if let Some(message) = frame["message"].as_str() {
                     self.notice = format!("branch: {}", safe_label(message));
                 } else {
-                    let base = safe_label(frame["base"].as_str().unwrap_or("(none)"));
-                    let rows = frame["branches"].as_array().into_iter().flatten()
-                        .filter_map(|v| v.as_str()).take(30).map(safe_label).collect::<Vec<_>>();
-                    self.notice = format!("branch: {base} · {} · /branch <name>", rows.join(", "));
+                    let Some(base) = frame["base"].as_str() else { return false; };
+                    if base.len() > 200 || base.chars().any(unsafe_input_char) { return false; }
+                    let Some(rows) = frame["branches"].as_array() else { return false; };
+                    if self.groups[self.active_group].active_id() != Some(id) { return false; }
+                    let branches: Vec<String> = rows.iter().filter_map(|row| row.as_str())
+                        .filter(|name| !name.is_empty() && name.len() <= 200
+                            && !name.chars().any(unsafe_input_char))
+                        .take(100).map(str::to_owned).collect();
+                    if branches.is_empty() {
+                        self.notice = "branch: no local base branches available".into();
+                    } else {
+                        let selected = branches.iter().position(|name| name == base).unwrap_or(0);
+                        self.branch_picker = Some(BranchPicker { session_id: id.into(),
+                            branches, base: base.into(), selected });
+                        if self.active_chooser_rect().is_none() {
+                            self.branch_picker = None;
+                            self.notice = "Enlarge active pane to choose a branch".into();
+                        }
+                    }
                 }
                 true
             }
@@ -2155,6 +2181,10 @@ impl App {
                     self.attach_picker = None;
                     self.notice = "Enlarge active pane to choose a live session".into();
                 }
+                if self.branch_picker.is_some() && self.active_chooser_rect().is_none() {
+                    self.branch_picker = None;
+                    self.notice = "Enlarge active pane to choose a branch".into();
+                }
                 if self.queue_picker.is_some() && self.active_chooser_rect().is_none() {
                     self.queue_picker = None;
                     self.notice = "Enlarge active pane to inspect queued prompts".into();
@@ -2194,6 +2224,7 @@ impl App {
         };
         let after = (self.active_group, self.groups[self.active_group].active_id().unwrap_or("").to_owned());
         if before != after {
+            self.branch_picker = None;
             let moved_active_tab = std::mem::take(&mut self.moved_active_tab)
                 && !before.1.is_empty() && before.1 == after.1
                 && !self.groups[before.0].tabs.contains(&before.1)
@@ -2228,7 +2259,7 @@ impl App {
             || self.stop_confirmation.is_some() || self.lore_picker.is_some() || self.settings_menu.is_some()
             || self.new_session.is_some() || self.model_picker.is_some() || self.effort_picker.is_some()
             || self.permission_picker.is_some() || self.engine_picker || self.action_menu
-            || self.history_modal || self.queue_picker.is_some() || self.attach_picker.is_some() || self.diff_modal || self.map_modal || self.tool_modal {
+            || self.history_modal || self.queue_picker.is_some() || self.attach_picker.is_some() || self.branch_picker.is_some() || self.diff_modal || self.map_modal || self.tool_modal {
             return false;
         }
         let mut clean = String::new();
@@ -2287,7 +2318,7 @@ impl App {
             || self.new_session.is_some() || self.model_picker.is_some()
             || self.effort_picker.is_some() || self.permission_picker.is_some()
             || self.engine_picker || self.action_menu || self.history_modal
-            || self.queue_picker.is_some() || self.attach_picker.is_some()
+            || self.queue_picker.is_some() || self.attach_picker.is_some() || self.branch_picker.is_some()
             || self.diff_modal || self.map_modal || self.tool_modal {
             return Vec::new();
         }
@@ -2493,6 +2524,7 @@ impl App {
         }
         if self.queue_picker.is_some() { return self.queue_key(key); }
         if self.attach_picker.is_some() { return self.attach_picker_key(key); }
+        if self.branch_picker.is_some() { return self.branch_picker_key(key); }
         if self.diff_modal {
             return self.diff_key(key);
         }
@@ -3021,6 +3053,34 @@ impl App {
             _ => return false,
         }
         true
+    }
+
+    fn branch_picker_key(&mut self, key: KeyEvent) -> bool {
+        let Some(picker) = self.branch_picker.as_mut() else { return false; };
+        match key.code {
+            KeyCode::Esc => self.branch_picker = None,
+            KeyCode::Up => picker.selected = picker.selected.saturating_sub(1),
+            KeyCode::Down => picker.selected = (picker.selected + 1).min(picker.branches.len().saturating_sub(1)),
+            KeyCode::Enter => self.choose_branch(),
+            _ => return false,
+        }
+        true
+    }
+
+    fn choose_branch(&mut self) {
+        let Some(picker) = self.branch_picker.take() else { return; };
+        if self.groups[self.active_group].active_id() != Some(picker.session_id.as_str()) {
+            self.notice = "Branch choice cancelled: active session changed".into();
+            return;
+        }
+        let Some(branch) = picker.branches.get(picker.selected) else { return; };
+        if branch == &picker.base {
+            self.notice = format!("branch: already based on {}", safe_label(branch));
+            return;
+        }
+        self.pending_queue_commands.push(crate::bridge::WorkerCommand::Branch(
+            picker.session_id, Some(branch.clone())));
+        self.notice = format!("Checking branch {}…", safe_label(branch));
     }
 
     fn open_selected_attach(&mut self) {
@@ -5494,6 +5554,8 @@ impl App {
             (picker.rows.len() + 3).clamp(5, 15) as u16
         } else if self.attach_picker.is_some() {
             (self.attach_matches().len() + 3).clamp(5, 15) as u16
+        } else if let Some(picker) = &self.branch_picker {
+            (picker.branches.len() + 3).clamp(5, 15) as u16
         } else if !self.slash_suggestions().is_empty() {
             (self.slash_suggestions().len() + 2).clamp(5, 10) as u16
         } else {
@@ -5705,7 +5767,8 @@ impl App {
         self.active_chooser_rect().is_some() || self.active_request_index().is_some()
             || self.map_modal || self.diff_modal || self.tool_modal || self.action_menu
             || self.history_modal || self.queue_picker.is_some() || self.attach_picker.is_some()
-            || self.lore_picker.is_some() || self.settings_menu.is_some() || self.model_picker.is_some()
+            || self.branch_picker.is_some() || self.lore_picker.is_some()
+            || self.settings_menu.is_some() || self.model_picker.is_some()
             || self.effort_picker.is_some() || self.permission_picker.is_some()
             || self.engine_picker || self.new_session.is_some()
             || self.chip_info.is_some() || self.stop_confirmation.is_some()
@@ -5931,6 +5994,40 @@ impl App {
                         _ => {}
                     }
                 }
+            }
+        }
+        if self.branch_picker.is_some() {
+            let Some(menu) = self.active_chooser_rect() else { return false; };
+            match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if !menu.contains(ratatui::layout::Position::new(mouse.column, mouse.row)) {
+                        self.branch_picker = None;
+                    } else {
+                        let first_row = menu.y.saturating_add(2);
+                        if mouse.row >= first_row && mouse.row < menu.bottom().saturating_sub(1) {
+                            let visible = usize::from(menu.height.saturating_sub(3)).max(1);
+                            let picker = self.branch_picker.as_mut().unwrap();
+                            let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+                            let position = start + usize::from(mouse.row - first_row);
+                            if position < picker.branches.len() {
+                                picker.selected = position;
+                                self.choose_branch();
+                            }
+                        }
+                    }
+                    return true;
+                }
+                MouseEventKind::ScrollUp => {
+                    let picker = self.branch_picker.as_mut().unwrap();
+                    picker.selected = picker.selected.saturating_sub(1);
+                    return true;
+                }
+                MouseEventKind::ScrollDown => {
+                    let picker = self.branch_picker.as_mut().unwrap();
+                    picker.selected = (picker.selected + 1).min(picker.branches.len().saturating_sub(1));
+                    return true;
+                }
+                _ => return false,
             }
         }
         if self.attach_picker.is_some() {
@@ -6160,6 +6257,7 @@ impl App {
             || self.history_modal
             || self.queue_picker.is_some()
             || self.attach_picker.is_some()
+            || self.branch_picker.is_some()
             || self.lore_picker.is_some()
             || self.diff_modal
             || self.model_picker.is_some()
@@ -6701,6 +6799,28 @@ impl App {
         }
         frame.render_widget(Paragraph::new(lines).block(Block::default()
             .title(" Attach live session · type to filter ")
+            .borders(Borders::ALL).border_style(Style::default().fg(theme::ACCENT))
+            .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED))), area);
+    }
+
+    fn draw_branch_picker(&self, frame: &mut Frame, area: Rect) {
+        let Some(picker) = &self.branch_picker else { return; };
+        let mut lines = vec![Line::from(format!(" Current base: {}", safe_label(&picker.base)))];
+        let visible = usize::from(area.height.saturating_sub(3)).max(1);
+        let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+        for (index, branch) in picker.branches.iter().enumerate().skip(start).take(visible) {
+            let current = if branch == &picker.base { " · current" } else { "" };
+            let label = format!(" {} {}{}", if index == picker.selected { '›' } else { ' ' },
+                safe_label(branch), current);
+            let label = clipped_title(&label, usize::from(area.width.saturating_sub(2))).0;
+            let padded = format!("{label}{}", " ".repeat(usize::from(area.width.saturating_sub(2)).saturating_sub(label.width())));
+            let style = if index == picker.selected {
+                Style::default().fg(theme::ACCENT).bg(theme::HIGHLIGHT).add_modifier(Modifier::BOLD)
+            } else { Style::default().fg(theme::SECONDARY) };
+            lines.push(Line::styled(padded, style));
+        }
+        frame.render_widget(Paragraph::new(lines).block(Block::default()
+            .title(" Base branch · Enter select · Esc close ")
             .borders(Borders::ALL).border_style(Style::default().fg(theme::ACCENT))
             .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED))), area);
     }
@@ -7260,6 +7380,8 @@ impl App {
                 self.draw_queue_picker(frame, inner[2]);
             } else if self.attach_picker.is_some() {
                 self.draw_attach_picker(frame, inner[2]);
+            } else if self.branch_picker.is_some() {
+                self.draw_branch_picker(frame, inner[2]);
             } else if !self.slash_suggestions().is_empty() {
                 self.draw_slash_suggestions(frame, inner[2]);
             }
@@ -10833,6 +10955,66 @@ for line in sys.stdin:
         app.apply_daemon_frame(&json!({"type":"branch_reply", "session_id":"session-1",
             "ok":false,"error":"session is busy"}));
         assert!(app.notice.contains("session is busy"));
+    }
+
+    #[test]
+    fn branch_listing_opens_bounded_picker_and_enter_targets_active_session() {
+        let mut app = App::default();
+        app.size = Rect::new(0, 0, 100, 35);
+        app.groups[0].tabs.push("session-1".into());
+        app.input = "/branch".into();
+        app.input_cursor = app.input.len();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(matches!(app.pending_queue_commands.pop(),
+            Some(crate::bridge::WorkerCommand::Branch(id, None)) if id == "session-1"));
+        assert!(app.apply_daemon_frame(&json!({"type":"branch_reply", "session_id":"session-1",
+            "ok":true,"base":"main","branches":["feature","main","bad\nname"]})));
+        assert_eq!(app.branch_picker.as_ref().unwrap().branches, ["feature", "main"]);
+        assert_eq!(app.branch_picker.as_ref().unwrap().selected, 1);
+        assert!(app.active_chooser_rect().is_some());
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(app.branch_picker.is_none());
+        assert!(matches!(app.pending_queue_commands.pop(),
+            Some(crate::bridge::WorkerCommand::Branch(id, Some(name)))
+                if id == "session-1" && name == "feature"));
+        assert!(app.pending_prompts.is_empty());
+    }
+
+    #[test]
+    fn branch_picker_cancel_and_stale_reply_do_not_switch_checkout() {
+        let mut app = App::default();
+        app.size = Rect::new(0, 0, 100, 35);
+        app.groups[0].tabs.push("session-1".into());
+        assert!(!app.apply_daemon_frame(&json!({"type":"branch_reply", "session_id":"other",
+            "ok":true,"base":"main","branches":["feature"]})));
+        assert!(app.branch_picker.is_none());
+        app.apply_daemon_frame(&json!({"type":"branch_reply", "session_id":"session-1",
+            "ok":true,"base":"main","branches":["feature","main"]}));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        assert!(app.branch_picker.is_none());
+        assert!(app.pending_queue_commands.is_empty());
+    }
+
+    #[test]
+    fn branch_picker_mouse_selects_row_and_click_outside_cancels() {
+        let mut app = App::default();
+        app.size = Rect::new(0, 0, 100, 35);
+        app.groups[0].tabs.push("session-1".into());
+        let list = json!({"type":"branch_reply", "session_id":"session-1",
+            "ok":true,"base":"main","branches":["feature","main"]});
+        app.apply_daemon_frame(&list);
+        let menu = app.active_chooser_rect().unwrap();
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: menu.x + 2, row: menu.y + 2, modifiers: KeyModifiers::NONE }));
+        assert!(matches!(app.pending_queue_commands.pop(),
+            Some(crate::bridge::WorkerCommand::Branch(id, Some(name)))
+                if id == "session-1" && name == "feature"));
+        app.apply_daemon_frame(&list);
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: menu.x, row: menu.y.saturating_sub(1), modifiers: KeyModifiers::NONE }));
+        assert!(app.branch_picker.is_none());
+        assert!(app.pending_queue_commands.is_empty());
     }
 
     #[test]
