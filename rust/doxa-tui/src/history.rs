@@ -4,7 +4,7 @@
 use serde_json::Value;
 use crate::transport::TranscriptSnapshot;
 use std::ffi::{CStr, OsStr, OsString};
-use std::fs::{File, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::os::unix::ffi::OsStrExt;
@@ -239,11 +239,43 @@ fn claude_history_present(root: &Path, id: &str, uid: u32) -> bool {
     false
 }
 
+fn ready_resume_cwd(cwd: &Path, id: &str, missing: bool, python: &Path,
+    expected_root: &Path, expected_slug: &str) -> Result<PathBuf, &'static str> {
+    let _recovered = if missing {
+        Some(doxa_worktrees::recover_missing(cwd, id)
+            .map_err(|reason| {
+                if reason.contains("pinned base commit") {
+                    "saved checkout lacks pinned Git metadata; recovery refused"
+                } else if reason.contains("registered to another checkout")
+                    || reason.contains("checkout path already exists")
+                    || reason.contains("checkout path was occupied") {
+                    "session branch or path belongs to another checkout; recovery refused"
+                } else {
+                    "managed checkout could not be recovered; deleted uncommitted files cannot be restored from Git"
+                }
+            })?)
+    } else { None };
+    let canonical = cwd.canonicalize().map_err(|_| "session directory is gone")?;
+    if canonical != cwd || !canonical.is_dir() { return Err("session directory changed during verification"); }
+    let mut lore = doxa_lore::LoreClient::spawn(python, Duration::from_secs(3))
+        .map_err(|_| "LORE unavailable for resume verification")?;
+    let (root, slug) = lore.transcript_identity(&canonical.to_string_lossy())
+        .map_err(|_| "cannot verify session project")?;
+    if root != expected_root || slug != expected_slug {
+        return Err("session directory does not match transcript project");
+    }
+    Ok(canonical)
+}
+
 fn resume_plan_in(entry: &OfflineSession, python: &Path, expected_root: &Path, claude_root: &Path) -> Result<LaunchOptions, &'static str> {
     if !crate::discovery::valid_id(&entry.id) { return Err("invalid session ID"); }
     let cwd = entry.cwd.as_ref().ok_or("session directory was not recorded")?;
-    let cwd = cwd.canonicalize().map_err(|_| "session directory is gone")?;
-    if !cwd.is_dir() { return Err("session directory is gone"); }
+    let (cwd, missing) = match cwd.canonicalize() {
+        Ok(path) if path.is_dir() => (path, false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && cwd.is_absolute()
+            && fs::symlink_metadata(cwd).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) => (cwd.clone(), true),
+        _ => return Err("session directory is gone"),
+    };
     let mut lore = doxa_lore::LoreClient::spawn(python, Duration::from_secs(3))
         .map_err(|_| "LORE unavailable for resume verification")?;
     let (root, slug) = lore.transcript_identity(&cwd.to_string_lossy())
@@ -295,12 +327,14 @@ fn resume_plan_in(entry: &OfflineSession, python: &Path, expected_root: &Path, c
                 && !model.chars().any(char::is_control) => Some(model.clone()),
             _ => return Err("invalid Codex model in thread record"),
         };
+        let cwd = ready_resume_cwd(&cwd, &entry.id, missing, python, expected_root, &entry.project)?;
         return Ok(LaunchOptions { engine: Engine::Codex, cwd: Some(cwd), model,
             resume: Some(entry.id.clone()), ..LaunchOptions::default() });
     }
     let name = format!("{}.messages.json", entry.id);
     let Some(mut saved) = open_at(&dir, OsStr::new(&name), libc::O_RDONLY | libc::O_NONBLOCK) else {
         if claude_history_present(claude_root, &entry.id, uid) {
+            let cwd = ready_resume_cwd(&cwd, &entry.id, missing, python, expected_root, &entry.project)?;
             return Ok(LaunchOptions { engine: Engine::Claude, cwd: Some(cwd),
                 resume: Some(entry.id.clone()), ..LaunchOptions::default() });
         }
@@ -324,6 +358,7 @@ fn resume_plan_in(entry: &OfflineSession, python: &Path, expected_root: &Path, c
     let model = state["model"].as_str().filter(|m| !m.is_empty() && m.len() <= 128 && !m.chars().any(char::is_control))
         .ok_or("saved vendor model is unknown")?;
     if !state["messages"].is_array() { return Err("invalid replay state"); }
+    let cwd = ready_resume_cwd(&cwd, &entry.id, missing, python, expected_root, &entry.project)?;
     Ok(LaunchOptions { engine, cwd: Some(cwd), model: Some(model.to_owned()),
         resume: Some(entry.id.clone()), ..LaunchOptions::default() })
 }
@@ -635,6 +670,24 @@ for line in sys.stdin:
         fs::remove_file(&record).unwrap();
         symlink(temp.path().join("outside"), &record).unwrap();
         assert!(resume_plan_in(&entry, &script, &root, &temp.path().join("cli-projects")).is_err());
+    }
+
+    #[test]
+    fn missing_checkout_does_not_trigger_recovery_for_invalid_replay_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("projects");
+        fs::create_dir_all(root.join("project")).unwrap();
+        let cwd = temp.path().join("missing-checkout");
+        let script = fake_lore(temp.path(), &root);
+        let entry = OfflineSession { id: "saved-1".into(), project: "project".into(),
+            markdown: String::new(), cwd: Some(cwd.clone()) };
+        fs::write(root.join("project/saved-1.jsonl"), b"saved transcript\n").unwrap();
+        fs::write(root.join("project/saved-1.codex.json"),
+            serde_json::json!({"thread_id":"thread-123", "session_id":"other",
+                "cwd":cwd, "turn_incomplete":false}).to_string()).unwrap();
+        assert_eq!(resume_plan_in(&entry, &script, &root, &temp.path().join("cli-projects"))
+            .unwrap_err(), "Codex thread record does not match this session");
+        assert!(!cwd.exists());
     }
 
     #[test]

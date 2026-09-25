@@ -177,10 +177,14 @@ fn options() -> io::Result<Options> {
         }
     }
     // Do not let registry entries claim an unvalidated path or identity.
-    cwd = fs::canonicalize(cwd)?;
-    if !cwd.is_dir() {
-        return Err(invalid("cwd must be a directory"));
-    }
+    cwd = match fs::canonicalize(&cwd) {
+        Ok(path) if path.is_dir() => path,
+        Ok(_) => return Err(invalid("cwd must be a directory")),
+        Err(error) if resume && error.kind() == io::ErrorKind::NotFound
+            && cwd.is_absolute()
+            && fs::symlink_metadata(&cwd).is_err_and(|e| e.kind() == io::ErrorKind::NotFound) => cwd,
+        Err(error) => return Err(error),
+    };
     let id = session_id.as_bytes();
     if id.is_empty()
         || id.len() > 128
@@ -542,7 +546,10 @@ fn run() -> io::Result<()> {
     let manage_fixture = options.engine == Engine::Fixture
         && env::var("DOXA_WORKTREE").is_ok_and(|value| value == "1");
     let use_worktrees = options.engine != Engine::Fixture || manage_fixture;
-    let mut managed = if use_worktrees {
+    let mut managed = if use_worktrees && options.resume && !options.cwd.exists() {
+        Some(doxa_worktrees::recover_missing(&options.cwd, &options.session_id)
+            .map_err(|message| invalid(&format!("managed worktree recovery refused: {message}")))?)
+    } else if use_worktrees {
         doxa_worktrees::create_from(&options.cwd, &options.session_id, options.base_branch.as_deref())
     } else { None };
     if options.base_branch.is_some() && managed.is_none() {
@@ -554,6 +561,16 @@ fn run() -> io::Result<()> {
             "managed worktree unavailable for {}; inspect conflicting doxa/ branches and DOXA_HOME/worktrees, or explicitly set DOXA_WORKTREE=0 to use this checkout",
             options.cwd.display()
         )));
+    }
+    if options.resume {
+        if let Some(tree) = &managed {
+            match doxa_worktrees::repo_status(tree.path()) {
+                Some(doxa_worktrees::RepoStatus::Repository {
+                    checked_out: Some(ref checked_out), worktree: Some(ref branch), ..
+                }) if checked_out == branch => {},
+                _ => return Err(invalid("managed worktree branch changed; resume refused")),
+            }
+        }
     }
     if let Some(tree) = &managed { options.cwd = tree.path().to_path_buf(); }
     let mut codex_host = None;
