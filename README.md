@@ -112,7 +112,8 @@ in supporting terminals.
 
 ![Rust session history picker above the prompt in a single session pane](assets/shots/rust-history.png)
 
-*Session history searches attached and archived transcripts.*
+*Session history searches attached and archived transcripts and groups
+scrubbed indexed excerpts beneath each matching session.*
 
 ![Rust queued prompt picker expanded above the prompt, showing scrubbed previews and a selected row](assets/shots/rust-queue.png)
 
