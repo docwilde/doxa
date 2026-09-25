@@ -76,6 +76,11 @@ in supporting terminals.
 
 ### Rust 2.0 alpha.25
 
+![Rust directory picker expanded above a single session prompt](assets/shots/rust-repo-picker.png)
+
+*Click the repo chip to browse folders. Enter opens the selected current folder
+in a new tab; the upper border can be dragged to show more entries.*
+
 ![Rust command registry opened above the active prompt](assets/shots/rust-help.png)
 
 *`/help` lists the supported Rust forms and calls out unavailable 1.19 commands.*
