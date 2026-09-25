@@ -5,6 +5,16 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.24 — 2026-09-25
+
+- Debounce live session search, discard stale results, and show grouped,
+  scrubbed LORE index excerpts for each matching session.
+- Align `/pane` and `/pane 2` with the existing pane groups: report the
+  current layout for bare `/pane` and refuse navigation to an absent group.
+- Add `doxa settings` to inspect and safely persist native linger and
+  per-session worktree preferences. `doxa setup` now points to provider CLI
+  sign-in commands without handling credentials.
+
 ## 2.0.0-alpha.23 — 2026-09-25
 
 - Add a scrollable `/help` registry for all 42 Python 1.19 DOXA command

@@ -4429,6 +4429,26 @@ impl App {
         changed
     }
 
+    /// Populate the deterministic screenshot renderer without scanning local
+    /// history or contacting a provider.
+    #[doc(hidden)]
+    pub fn show_history_fixture(&mut self, query: &str, entries: Vec<history::OfflineSession>) {
+        self.history_modal = true;
+        self.history_resume = false;
+        self.history_query = query.to_owned();
+        self.history_selected = 0;
+        self.cancel_history_query();
+        for entry in entries {
+            self.history_scanned_matches.insert(entry.id.clone(), query.to_lowercase());
+            self.history_entries.insert(entry.id.clone(), entry.clone());
+            if self.sessions.iter().any(|session| session.id == entry.id) { continue; }
+            self.offline_ids.insert(entry.id.clone());
+            self.sessions.push(Session { id: entry.id.clone(), title: entry.id,
+                collection: safe_label(&entry.project), transcript: transcript_tail(&entry.markdown).to_owned(),
+                status: "Archived · read-only".into() });
+        }
+    }
+
     fn history_key(&mut self, key: KeyEvent) -> bool {
         match key.code {
             KeyCode::Esc | KeyCode::Char('r') if key.code == KeyCode::Esc || key.modifiers.contains(KeyModifiers::CONTROL) => {

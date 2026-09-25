@@ -112,7 +112,15 @@ installer against `main` and replaces an installed Rust launcher after a
 successful build. It uses the current install directory and honors
 `DOXA_RUST_REPO_URL` for fork installations. A source build uses `./task install`.
 `doxa setup` reports effective model and effort preferences, LORE store
-selection, and provider authentication status without changing settings.
+selection, and provider authentication status. It shows the provider CLI
+sign-in commands; DOXA does not handle credentials.
+`doxa settings` reports effective native `linger_secs` and
+`worktree_per_session` values and their sources. Use
+`doxa settings set linger_secs 45`,
+`doxa settings set worktree_per_session off`, or
+`doxa settings unset worktree_per_session` to change future sessions.
+Active environment overrides must be removed before changing their stored
+value. Other Python 1.19 settings are still outside this native CLI.
 `doxa auth status [claude|codex]` observes only provider CLI exit status;
 `doxa plugins` lists Claude Code plugin names and enabled flags without
 reading plugin contents into the terminal.
@@ -192,7 +200,7 @@ the JSONL file retains the full history. Older daemons without snapshot
 metadata fall back to their 512-event replay ring. A turn still running at
 attach can have text that was streamed but not yet persisted, so its earlier
 in-flight deltas may be absent. `Ctrl+T` opens bounded tool activity cards.
-The binary version is `2.0.0-alpha.23`;
+The binary version is `2.0.0-alpha.24`;
 this is an alpha release.
 
 In the transcript, user messages have a highlighted body and a left rule;
