@@ -1251,7 +1251,7 @@ fn interrupt_reaps_codex_process_group() {
     executable(
         &codex,
         &format!(
-            "#!/bin/sh\ncat >/dev/null\nsh -c 'sleep 1; echo leaked > {}' &\nwait\n",
+            "#!/bin/sh\ncat >/dev/null\necho '{{\"type\":\"thread.started\",\"thread_id\":\"thread_1\"}}'\nsh -c 'sleep 1; echo leaked > {}' &\nwait\n",
             marker.display()
         ),
     );
@@ -1262,6 +1262,8 @@ fn interrupt_reaps_codex_process_group() {
     send(&mut socket, json!({"type":"prompt","id":1,"text":"hello"}));
     assert_eq!(receive(&mut reader)["ok"], true);
     assert_eq!(receive(&mut reader)["event"]["type"], "turn_started");
+    let thread_path = dir.path().join("project/codex-session.codex.json");
+    wait_until(|| thread_path.exists());
     send(
         &mut socket,
         json!({"type":"call","id":2,"method":"interrupt","params":{}}),
@@ -1281,12 +1283,26 @@ fn interrupt_reaps_codex_process_group() {
     }
     thread::sleep(Duration::from_millis(1200));
     assert!(!marker.exists(), "Codex descendant survived interruption");
+    let thread: Value = serde_json::from_slice(&fs::read(&thread_path).unwrap()).unwrap();
+    assert_eq!(thread["thread_id"], "thread_1");
+    assert_eq!(thread["turn_incomplete"], true);
     send(
         &mut socket,
         json!({"type":"call","id":3,"method":"stop","params":{}}),
     );
     assert_eq!(receive(&mut reader)["ok"], true);
     wait_until(|| process.exited());
+    let restart = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+        .args([
+            "--runtime-dir", dir.path().to_str().unwrap(),
+            "--cwd", dir.path().to_str().unwrap(),
+            "--session-id", "codex-session", "--engine", "codex",
+            "--codex-bin", codex.to_str().unwrap(),
+            "--lore-python", python.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(!restart.status.success(), "incomplete turn must refuse restart");
 }
 
 #[test]

@@ -329,14 +329,24 @@ impl Host for CodexHost {
             }
             Err(error) => Err(DriverError::Spawn(error)),
         };
+        // A provider error or interrupted turn can leave the provider thread
+        // ahead of our durable transcript. Keep its restart guard armed.
+        let turn_succeeded = result.is_ok()
+            && terminal_event
+                .as_ref()
+                .and_then(|frame| frame["data"]["is_error"].as_bool())
+                == Some(false);
         if !self.scrub_failed.load(Ordering::Acquire) {
-            if !thread_write_failed.get() && !assistant_text.is_empty() {
+            if turn_succeeded && !thread_write_failed.get() && !assistant_text.is_empty() {
                 let _ = self.persist(json!({"type":"assistant","message":{"role":"assistant",
                     "content":[{"type":"text","text":assistant_text}]},
                     "sessionId":self.session_id,"timestamp":crate::iso_now()}));
             }
             if let Some(id) = self.driver.lock().unwrap().thread_id().map(str::to_owned) {
-                let _ = self.persist_thread(&id, self.persistence_failed.load(Ordering::Acquire));
+                let _ = self.persist_thread(
+                    &id,
+                    !turn_succeeded || self.persistence_failed.load(Ordering::Acquire),
+                );
             } else {
                 eprintln!("doxa-daemon: Codex turn ended without a thread ID");
                 self.persistence_failed.store(true, Ordering::Release);
@@ -352,6 +362,12 @@ impl Host for CodexHost {
         if self.persistence_failed.load(Ordering::Acquire) {
             *self.active.lock().unwrap() = None;
             emit(json!({"type":"turn_done","data":{"is_error":true,"error":"Codex persistence failed; session cannot safely continue"}}));
+            return;
+        }
+        if !turn_succeeded {
+            self.persistence_failed.store(true, Ordering::Release);
+            *self.active.lock().unwrap() = None;
+            emit(json!({"type":"turn_done","data":{"is_error":true,"error":"Codex turn incomplete; session cannot safely continue"}}));
             return;
         }
         self.index_transcript();
