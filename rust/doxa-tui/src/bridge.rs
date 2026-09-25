@@ -23,6 +23,7 @@ pub enum WorkerCommand {
     Prompt(String, String),
     Answer(String, String, Value),
     Peers(String),
+    Message(String, String, String),
     Models(String),
     SetModel(String, String),
     SetPermissionMode(String, String),
@@ -190,7 +191,7 @@ pub fn connect_sessions(sessions: &[Session]) -> io::Result<MultiBridge> {
                 WorkerCommand::Prompt(id, _) | WorkerCommand::Answer(id, _, _) | WorkerCommand::Peers(id)
                 | WorkerCommand::Models(id) | WorkerCommand::SetModel(id, _)
                 | WorkerCommand::SetPermissionMode(id, _) => id,
-                WorkerCommand::Stop(id) => id,
+                WorkerCommand::Message(id, _, _) | WorkerCommand::Stop(id) => id,
                 WorkerCommand::Launch(_, _, _) => unreachable!(),
             };
             let Some((route, connected)) = routes.get(id) else {
@@ -228,6 +229,9 @@ fn rejected(command: WorkerCommand, message: &str) -> Value {
             "request_id":request, "ok":false, "message":message}),
         WorkerCommand::Peers(id) => json!({"type":"peer_roster", "session_id":id,
             "ok":false, "error":message}),
+        WorkerCommand::Message(id, target, text) => json!({"type":"peer_message_reply", "session_id":id,
+            "ok":false, "uncertain":false, "error":message,
+            "draft":format!("/msg {target} {text}")}),
         WorkerCommand::Models(id) => json!({"type":"models_reply", "session_id":id,
             "ok":false, "error":message}),
         WorkerCommand::SetModel(id, _) => json!({"type":"set_model_reply", "session_id":id,
@@ -439,6 +443,35 @@ fn worker_loop(
                     if frames.send(reply).is_err() { return; }
                     if matches!(result, Err(TransportError::Closed)) { return; }
                 }
+                Ok(WorkerCommand::Message(id, target, text)) => {
+                    let draft = format!("/msg {target} {text}");
+                    if id != session_id {
+                        let _ = frames.send(json!({"type":"peer_message_reply", "session_id":id,
+                            "ok":false, "error":"Peer target session is not attached", "draft":draft}));
+                        continue;
+                    }
+                    let mut params = Map::new();
+                    params.insert("target".into(), Value::String(target));
+                    params.insert("text".into(), Value::String(text));
+                    let result = client.call("msg", params);
+                    cursor.store(client.cursor, Ordering::Relaxed);
+                    if matches!(result, Err(TransportError::Closed)) {
+                        if let Some(guard) = roster_guard { revoke(guard); }
+                    }
+                    let reply = match &result {
+                        Ok(reply) => json!({"type":"peer_message_reply", "session_id":id,
+                            "ok":reply["ok"] == true, "peer":reply.get("peer"),
+                            "delivered_to":reply.get("delivered_to"),
+                            "failed":reply.get("failed"), "ledger_error":reply.get("ledger_error"),
+                            "error":reply.get("error"), "draft":draft}),
+                        Err(error) => json!({"type":"peer_message_reply", "session_id":id,
+                            "ok":false,
+                            "uncertain":!matches!(error, TransportError::FrameTooLarge | TransportError::RequestIdsExhausted),
+                            "error":error.to_string(), "draft":draft}),
+                    };
+                    if frames.send(reply).is_err() { return; }
+                    if matches!(result, Err(TransportError::Closed)) { return; }
+                }
                 Ok(WorkerCommand::Prompt(id, text)) => {
                     if id != session_id {
                         if frames
@@ -610,6 +643,14 @@ mod tests {
                 json!({"type":"call","id":2,"method":"peers","params":{}}));
             writeln!(socket, "{}", json!({"type":"reply","id":2,"ok":true,
                 "peers":[{"session_id":"peer-1","title":"Builder"}]})).unwrap();
+            line.clear();
+            reader.read_line(&mut line).unwrap();
+            assert_eq!(serde_json::from_str::<Value>(&line).unwrap(),
+                json!({"type":"call","id":3,"method":"msg",
+                    "params":{"target":"peer-1","text":"hello"}}));
+            writeln!(socket, "{}", json!({"type":"reply","id":3,"ok":true,
+                "peer":{"session_id":"peer-1","title":"Builder"},
+                "delivered_to":["peer-1"],"failed":[]})).unwrap();
         });
         let client = DaemonClient::connect(&path, None).unwrap();
         let (frames, prompts, worker) = spawn_worker(client);
@@ -631,6 +672,10 @@ mod tests {
         let peers = frames.recv_timeout(Duration::from_secs(2)).unwrap();
         assert_eq!(peers["type"], "peer_roster");
         assert_eq!(peers["peers"][0]["session_id"], "peer-1");
+        prompts.send(WorkerCommand::Message("session-1".into(), "peer-1".into(), "hello".into())).unwrap();
+        let sent = frames.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(sent["type"], "peer_message_reply");
+        assert_eq!(sent["delivered_to"], json!(["peer-1"]));
         drop(prompts);
         worker.join().unwrap();
         server.join().unwrap();

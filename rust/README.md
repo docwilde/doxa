@@ -79,6 +79,11 @@ engine.
 map; Up/Down selects a peer, R refreshes the live roster, and Esc closes it.
 The map uses `tui-nodes` 0.9 with the Rust frontend's Ratatui 0.29.
 Lines show observed traffic and the detail row names sent and received counts.
+Type `/peers` or `/mesh` in a session prompt to open the same map. Type
+`/msg <session-prefix> <text>` to send a direct message through that session's
+daemon. The daemon resolves the prefix among live same-project peers and
+scrubs the message with LORE before delivery. The terminal reports failed and
+unconfirmed sends; check with the peer before retrying an unconfirmed send.
 Native daemons report a same-project, scrubbed peer roster when LORE is
 available; other daemons can report an unavailable state. On attach, the frontend restores prompts and
 assistant text from the daemon's persisted JSONL file, then follows live

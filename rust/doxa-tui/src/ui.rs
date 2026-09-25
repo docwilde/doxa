@@ -638,6 +638,7 @@ pub struct App {
     pending_model_queries: Vec<String>,
     pending_model_changes: Vec<(String, String)>,
     pub pending_prompts: Vec<(String, String)>,
+    pending_peer_messages: Vec<(String, String, String)>,
     pub input_requests: Vec<InputRequest>,
     pub pending_answers: Vec<(String, String, serde_json::Value)>,
     pub rejected_drafts: HashMap<String, Vec<String>>,
@@ -724,6 +725,7 @@ impl Default for App {
             pending_model_queries: Vec::new(),
             pending_model_changes: Vec::new(),
             pending_prompts: Vec::new(),
+            pending_peer_messages: Vec::new(),
             input_requests: Vec::new(),
             pending_answers: Vec::new(),
             rejected_drafts: HashMap::new(),
@@ -1024,6 +1026,33 @@ impl App {
                     return false;
                 };
                 self.peer_map.roster(id, frame)
+            }
+            "peer_message_reply" => {
+                let Some(session) = frame["session_id"].as_str()
+                    .filter(|id| self.sessions.iter().any(|entry| entry.id == *id)) else { return false; };
+                let delivered = frame["delivered_to"].as_array().is_some_and(|ids| !ids.is_empty())
+                    || (frame["delivered_to"].is_null() && frame["peer"].is_object());
+                if !delivered {
+                    if let Some(draft) = frame["draft"].as_str() {
+                        self.rejected_drafts.entry(session.to_owned()).or_default().push(draft.to_owned());
+                    }
+                }
+                self.notice = if frame["uncertain"] == true {
+                    "Peer delivery unconfirmed · inspect peer before Alt+Up retry".into()
+                } else if frame["ok"] != true {
+                    format!("Peer message failed · {}", safe_label(frame["error"].as_str().unwrap_or("unknown error")))
+                } else if frame["ledger_error"].as_str().is_some_and(|s| !s.is_empty()) {
+                    "Peer message delivered · delivery ledger write failed".into()
+                } else if delivered {
+                    let title = frame["peer"]["title"].as_str().map(safe_label).unwrap_or_else(|| "peer".into());
+                    format!("Peer message sent to {title}")
+                } else {
+                    "Peer message was not delivered · inspect the peer before retrying".into()
+                };
+                if self.groups[self.active_group].active_id() != Some(session) {
+                    self.notice = format!("{} · {}", safe_label(session), self.notice);
+                }
+                true
             }
             "models_reply" => {
                 let Some(id) = frame.get("session_id").and_then(|v| v.as_str()) else { return false; };
@@ -1688,6 +1717,27 @@ impl App {
                     if let Some(id) = self.groups[self.active_group].active_id() {
                         if self.offline_ids.contains(id) {
                             self.notice = "Archived transcript is read-only".into();
+                        } else if self.input == "/peers" || self.input == "/mesh" {
+                            self.map_modal = true;
+                            self.peer_map.selected = 0;
+                            self.pending_peer_refresh = Some(id.to_owned());
+                            self.input.clear();
+                            self.input_cursor = 0;
+                        } else if self.input == "/msg" || self.input.starts_with("/msg ") {
+                            let mut parts = self.input.splitn(3, ' ');
+                            let _command = parts.next();
+                            let target = parts.next().unwrap_or("");
+                            let body = parts.next().unwrap_or("");
+                            if target.is_empty() || body.trim().is_empty() {
+                                self.notice = "Usage: /msg <session_prefix> <text>".into();
+                            } else if self.pending_peer_messages.len() >= MAX_PENDING_PROMPTS {
+                                self.notice = "Peer message queue full · wait for daemon".into();
+                            } else {
+                                self.pending_peer_messages.push((id.to_owned(), target.to_owned(), body.to_owned()));
+                                self.input.clear();
+                                self.input_cursor = 0;
+                                self.notice = "Peer message queued".into();
+                            }
                         } else if self.pending_prompts.len() < MAX_PENDING_PROMPTS {
                             self.pending_prompts
                                 .push((id.to_owned(), std::mem::take(&mut self.input)));
@@ -3823,12 +3873,20 @@ fn run_loop(
                 app.notice = "Session stop unavailable · daemon connection closed".into();
                 changed = true;
             }
+            if !app.pending_peer_messages.is_empty() {
+                for (id, target, text) in app.pending_peer_messages.drain(..) {
+                    app.rejected_drafts.entry(id).or_default().push(format!("/msg {target} {text}"));
+                }
+                app.notice = "Peer delivery unavailable · Alt+Up restores message".into();
+                changed = true;
+            }
         }
         if let Some(sender) = &prompt_sender {
             let disconnected = dispatch_launches(&mut app, sender);
             let disconnected = dispatch_prompts(&mut app, sender) || disconnected;
             let disconnected = dispatch_answers(&mut app, sender) || disconnected;
             let disconnected = dispatch_peer_refresh(&mut app, sender) || disconnected;
+            let disconnected = dispatch_peer_messages(&mut app, sender) || disconnected;
             let disconnected = dispatch_model_controls(&mut app, sender) || disconnected;
             let disconnected = dispatch_stops(&mut app, sender) || disconnected;
             if disconnected {
@@ -4055,6 +4113,29 @@ fn dispatch_peer_refresh(app: &mut App, sender: &SyncSender<crate::bridge::Worke
     }
 }
 
+fn dispatch_peer_messages(app: &mut App, sender: &SyncSender<crate::bridge::WorkerCommand>) -> bool {
+    let mut messages = std::mem::take(&mut app.pending_peer_messages).into_iter();
+    while let Some((id, target, body)) = messages.next() {
+        match sender.try_send(crate::bridge::WorkerCommand::Message(id, target, body)) {
+            Ok(()) => {}
+            Err(TrySendError::Full(crate::bridge::WorkerCommand::Message(id, target, body))) => {
+                app.pending_peer_messages.extend(std::iter::once((id, target, body)).chain(messages));
+                return false;
+            }
+            Err(TrySendError::Disconnected(crate::bridge::WorkerCommand::Message(id, target, body))) => {
+                app.rejected_drafts.entry(id).or_default().push(format!("/msg {target} {body}"));
+                for (id, target, body) in messages {
+                    app.rejected_drafts.entry(id).or_default().push(format!("/msg {target} {body}"));
+                }
+                app.notice = "Peer delivery unavailable · Alt+Up restores message".into();
+                return true;
+            }
+            Err(_) => unreachable!(),
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4068,6 +4149,61 @@ mod tests {
         assert!(!app.should_quit);
         app.handle(Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)));
         assert!(app.should_quit);
+    }
+
+    #[test]
+    fn peer_commands_use_active_session_without_becoming_model_prompts() {
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"session-1"}));
+        app.input = "/msg peer-12 hello from this pane".into();
+        app.input_cursor = app.input.len();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.pending_peer_messages, vec![("session-1".into(), "peer-12".into(), "hello from this pane".into())]);
+        assert!(app.pending_prompts.is_empty());
+        assert!(app.input.is_empty());
+
+        app.input = "/peers".into();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(app.map_modal);
+        assert_eq!(app.pending_peer_refresh.as_deref(), Some("session-1"));
+        assert!(app.pending_prompts.is_empty());
+    }
+
+    #[test]
+    fn peer_message_usage_and_uncertain_delivery_are_explicit() {
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"session-1"}));
+        app.input = "/msg peer-12".into();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(app.notice.starts_with("Usage:"));
+        assert_eq!(app.input, "/msg peer-12");
+        assert!(app.pending_peer_messages.is_empty());
+        assert!(app.apply_daemon_frame(&json!({"type":"peer_message_reply", "session_id":"session-1",
+            "ok":false, "uncertain":true, "draft":"/msg peer-12 important text"})));
+        assert!(app.notice.contains("unconfirmed"));
+        assert!(app.notice.contains("before Alt+Up retry"));
+        assert_eq!(app.rejected_drafts["session-1"], ["/msg peer-12 important text"]);
+        assert!(app.apply_daemon_frame(&json!({"type":"peer_message_reply", "session_id":"session-1",
+            "ok":true, "peer":{"title":"Builder"}, "delivered_to":["peer-12"],
+            "ledger_error":"disk full"})));
+        assert!(app.notice.contains("ledger write failed"));
+        assert!(app.apply_daemon_frame(&json!({"type":"peer_message_reply", "session_id":"session-1",
+            "ok":true, "peer":{"title":"Python peer"}, "delivered_to":null})));
+        assert!(app.notice.contains("sent to Python peer"));
+    }
+
+    #[test]
+    fn background_peer_failure_keeps_recoverable_draft_in_its_session() {
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"first"}));
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"second"}));
+        app.groups[0].tabs = vec!["first".into(), "second".into()];
+        app.groups[0].active = 0;
+        assert!(app.apply_daemon_frame(&json!({"type":"peer_message_reply", "session_id":"second",
+            "ok":false, "error":"peer left", "draft":"/msg peer-2 hello"})));
+        assert_eq!(app.rejected_drafts["second"], ["/msg peer-2 hello"]);
+        assert!(app.notice.contains("second"));
+        assert!(app.notice.contains("peer left"));
     }
 
     #[test]
