@@ -236,6 +236,7 @@ pub fn spawn(options: &LaunchOptions) -> io::Result<Session> {
         .model
         .clone()
         .or_else(|| {
+            if options.engine == Engine::Codex && options.resume.is_some() { return None; }
             if options.engine.vendor_key().is_none() {
                 configured_string("model", "DOXA_MODEL", None)
             } else {
@@ -243,6 +244,7 @@ pub fn spawn(options: &LaunchOptions) -> io::Result<Session> {
             }
         })
         .or_else(|| {
+            if options.engine == Engine::Codex && options.resume.is_some() { return None; }
             cfg.as_ref()
                 .and_then(|c| c.get("models"))
                 .and_then(|m| m.get(options.engine.model_key()))

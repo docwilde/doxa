@@ -392,14 +392,14 @@ pub fn create_from(cwd: &Path, id: &str, requested_base: Option<&str>) -> Option
     };
     let short = short_id(id);
     let branch = format!("doxa/{short}");
-    if branch == base { return None; }
     let repo = main.file_name()?.to_str()?;
     let worktrees = ensure_owned_dir(&root()?)?;
     let path = worktrees.join(format!("{repo}-{short}"));
     if let Some(existing) = worktree_for_branch(&main, &branch) {
         let (record, old_base, _, _) = read_record(&existing)?;
         if record.path != existing.canonicalize().ok()? || record.session_id != id || record.path != path
-            || requested_base.is_some() && old_base != base {
+            || requested_base.is_some() && old_base != base
+            || branch == base && cwd.canonicalize().ok()? != record.path {
             return None;
         }
         let lock = lock_worktree(&record.path)?;
@@ -408,6 +408,7 @@ pub fn create_from(cwd: &Path, id: &str, requested_base: Option<&str>) -> Option
         if locked.path != record.path || locked.session_id != id { return None; }
         return Some(Managed { path: record.path, created: false, finished: false, lock: Some(lock) });
     }
+    if branch == base { return None; }
     if fs::symlink_metadata(&path).is_ok() || meta_path(&path).is_some_and(|p| fs::symlink_metadata(p).is_ok()) {
         return None;
     }
@@ -726,6 +727,9 @@ mod tests {
         let reused = create(&main, "b1b2c3d4dirty").unwrap();
         assert_eq!(reused.path(), dirty_path);
         drop(reused); // a restarted daemon must not delete another instance's tree
+        let resumed = create(&dirty_path, "b1b2c3d4dirty").unwrap();
+        assert_eq!(resumed.path(), dirty_path);
+        drop(resumed); // archived cwd is the managed tree itself
         assert!(dirty_path.join("untracked.txt").exists());
         assert!(create_from(&main, "b1b2c3d4dirty", Some("feature")).is_none());
         assert_eq!(read_record(&dirty_path).unwrap().1, "main");
