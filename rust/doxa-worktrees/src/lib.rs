@@ -99,6 +99,9 @@ fn safe_ref(value: &str) -> bool {
     !value.is_empty() && value.len() <= 200 && !value.starts_with('-') && !value.contains("..")
         && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"_./-".contains(&byte))
 }
+fn valid_commit_oid(value: &str) -> bool {
+    matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
 fn main_root(cwd: &Path) -> Option<PathBuf> {
     if git_text(cwd, &["rev-parse", "--is-bare-repository"])?.as_str() != "false" { return None; }
     let common = PathBuf::from(git_text(cwd, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?);
@@ -174,6 +177,9 @@ fn read_record(path: &Path) -> Option<(Record, String, PathBuf)> {
     let id = data.get("session_id")?.as_str()?.to_owned();
     let branch = data.get("branch")?.as_str()?.to_owned();
     let base = data.get("base_ref")?.as_str()?.to_owned();
+    if data.get("base_oid").is_some_and(|value| value.as_str().is_none_or(|oid| !valid_commit_oid(oid))) {
+        return None;
+    }
     let main = PathBuf::from(data.get("main_root")?.as_str()?);
     let root = root()?.canonicalize().ok()?;
     let canonical = path.canonicalize().ok()?;
@@ -184,7 +190,8 @@ fn read_record(path: &Path) -> Option<(Record, String, PathBuf)> {
     }
     Some((Record { path: canonical, branch, session_id: id }, base, main))
 }
-fn write_record(path: &Path, main: &Path, branch: &str, base: &str, id: &str) -> Option<()> {
+fn write_record(path: &Path, main: &Path, branch: &str, base: &str, base_oid: &str, id: &str) -> Option<()> {
+    if !valid_commit_oid(base_oid) { return None; }
     let target = meta_path(path)?;
     let parent = target.parent()?;
     ensure_owned_dir(parent)?;
@@ -194,7 +201,8 @@ fn write_record(path: &Path, main: &Path, branch: &str, base: &str, id: &str) ->
     let mut file = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&temp).ok()?;
     let result = (|| {
         serde_json::to_writer(&mut file, &serde_json::json!({
-            "main_root": main, "branch": branch, "base_ref": base, "session_id": id
+            "main_root": main, "branch": branch, "base_ref": base,
+            "base_oid": base_oid, "session_id": id
         })).ok()?;
         file.flush().ok()?;
         file.sync_all().ok()?;
@@ -261,7 +269,11 @@ pub fn create_from(cwd: &Path, id: &str, requested_base: Option<&str>) -> Option
         return None;
     }
     let path = path.canonicalize().ok()?;
-    if write_record(&path, &main, &branch, &base, id).is_none() {
+    // Resolve the newly created checkout's HEAD, not the mutable base ref.
+    // The base branch can advance between selection and `git worktree add`.
+    let base_oid = git_text(&path, &["rev-parse", "--verify", "HEAD^{commit}"])
+        .filter(|oid| valid_commit_oid(oid));
+    if base_oid.as_deref().and_then(|oid| write_record(&path, &main, &branch, &base, oid, id)).is_none() {
         eprintln!("doxa-daemon: worktree metadata unavailable; keeping {}", path.display());
         if requested_base.is_some() { return None; }
         return Some(Managed { path, created: false, finished: false });
@@ -360,6 +372,18 @@ mod tests {
         let mut clean = create(&main, "a1b2c3d4clean").unwrap();
         let clean_path = clean.path().to_path_buf();
         assert!(clean_path.join("file.txt").exists());
+        let recorded = meta_path(&clean_path).unwrap();
+        let initial_oid = git_text(&clean_path, &["rev-parse", "HEAD"]).unwrap();
+        let metadata: serde_json::Value = serde_json::from_slice(&fs::read(&recorded).unwrap()).unwrap();
+        assert_eq!(metadata["base_ref"], "main");
+        assert_eq!(metadata["base_oid"], initial_oid);
+        fs::write(main.join("file.txt"), "advanced base\n").unwrap();
+        run_git(&main, &["add", "file.txt"]);
+        run_git(&main, &["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "test: advance base"]);
+        assert_ne!(git_text(&main, &["rev-parse", "main"]).unwrap(), initial_oid);
+        let metadata_after: serde_json::Value = serde_json::from_slice(&fs::read(&recorded).unwrap()).unwrap();
+        assert_eq!(metadata_after["base_oid"], initial_oid);
+        assert_eq!(git_text(&clean_path, &["rev-parse", "HEAD"]).unwrap(), initial_oid);
         assert_eq!(list_orphans(&HashSet::new()).len(), 1);
         assert!(list_orphans(&HashSet::from(["a1b2c3d4clean".into()])).is_empty());
         assert!(clean.finish().is_empty());
