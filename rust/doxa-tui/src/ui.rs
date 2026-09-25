@@ -3674,7 +3674,13 @@ fn run_loop(
                 Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
             }
         }
-        if event::poll(Duration::from_millis(50))? {
+        // A frame is ready now. Paint before waiting for terminal input so a
+        // daemon update never waits through an otherwise idle input poll.
+        if changed {
+            terminal.draw(|frame| app.draw(frame))?;
+            changed = false;
+        }
+        if event::poll(Duration::from_millis(10))? {
             changed |= app.handle(event::read()?);
         }
         changed |= app.poll_diff();
