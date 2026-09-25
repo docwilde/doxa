@@ -111,6 +111,11 @@ Use `doxa help` for CLI commands and options. `doxa update` runs the bundled
 installer against `main` and replaces an installed Rust launcher after a
 successful build. It uses the current install directory and honors
 `DOXA_RUST_REPO_URL` for fork installations. A source build uses `./task install`.
+`doxa setup` reports effective model and effort preferences, LORE store
+selection, and provider authentication status without changing settings.
+`doxa auth status [claude|codex]` observes only provider CLI exit status;
+`doxa plugins` lists Claude Code plugin names and enabled flags without
+reading plugin contents into the terminal.
 
 With one live daemon session, `doxa` attaches to it directly. With multiple
 sessions, use `--list` and select one by full ID or unique ID prefix.
@@ -125,9 +130,13 @@ Bare `/help`, `/about`, `/sessions`, `/model`, `/engine`, `/mode`, `/beliefs`,
 `/diff`, `/peers`, `/split`, `/vsplit`, `/pane`, `/movepane`, `/sidebar`, `/dir`, and `/detach` are
 handled locally from the prompt. Forms with arguments remain in the draft with
 an explicit notice until their Rust behavior is implemented, except `/pane 1|2`,
-`/movepane [1|2]`, and `/sidebar on|off|wider|narrower|width N`, which are available. Known DOXA
-commands that need more porting, including `/compact`, stay in the draft with a
-notice. Unknown provider and plugin slash commands go to the active engine.
+`/movepane [1|2]`, `/cd <path>`, and `/sidebar on|off|wider|narrower|width N`, which are available.
+`/cd` verifies the directory and starts a new tab there; the running session
+keeps its original working directory. Explicit Claude `/compact` first waits
+for a successful LORE review in the sidecar. Codex/vendor compaction and
+Claude compaction without a capable sidecar remain blocked. Other unsupported
+DOXA commands stay in the draft with a notice. Unknown provider and plugin
+slash commands go to the active engine.
 `Ctrl+M` opens the read-only peer communications
 map; Up/Down selects a peer, R refreshes the live roster, and Esc closes it.
 For Python 1.19 fleet runs, `doxa fleet runs` lists manifests under
@@ -144,11 +153,14 @@ absence of a ceiling and `--force` only to override the memory estimate.
 `--sessions` counts every daemon, including a supervisor when present.
 This preview does not verify provider pricing or approval behavior; the live
 start still uses the Python harness for those controls.
-The native daemon captures `DOXA_SESSION_BUDGET_USD` at startup for Claude
-sessions and refuses the next turn once reported USD spend reaches the ceiling.
-If a completed budgeted turn has no valid cost, further turns are refused.
-Budgeted native Codex and vendor sessions are rejected at startup until their
-priced token accounting is implemented. A truthy `DOXA_PEER_INBOUND_TURNS`
+The native daemon captures `DOXA_SESSION_BUDGET_USD` at startup. Claude uses
+reported USD cost. Known DeepSeek and GLM models use a dated price sheet and
+sum complete per-request token usage, charging all prompt tokens at the full
+input rate. The daemon refuses later turns once the ceiling is reached or
+accounting becomes uncertain. Provider pricing can change, so the native
+vendor number is a conservative estimate based on the recorded sheet date,
+not a live balance. Budgeted Codex and resume remain unavailable; model
+switching is refused while a priced vendor ceiling is active. A truthy `DOXA_PEER_INBOUND_TURNS`
 lets validated direct peer messages start or queue a turn in native Codex and
 vendor sessions. They use the same eight-slot queue as typed prompts;
 broadcasts stay passive. Messages that cannot enter the queue are retained
@@ -180,7 +192,7 @@ the JSONL file retains the full history. Older daemons without snapshot
 metadata fall back to their 512-event replay ring. A turn still running at
 attach can have text that was streamed but not yet persisted, so its earlier
 in-flight deltas may be absent. `Ctrl+T` opens bounded tool activity cards.
-The binary version is `2.0.0-alpha.20`;
+The binary version is `2.0.0-alpha.21`;
 this is an alpha release.
 
 In the transcript, user messages have a highlighted body and a left rule;

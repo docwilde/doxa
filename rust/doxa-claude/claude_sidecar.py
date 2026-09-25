@@ -11,6 +11,7 @@ import asyncio
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -20,6 +21,22 @@ PROTOCOL = "doxa-claude-sidecar"
 VERSION = 1
 EOF_FINALIZE_TIMEOUT = 5.0
 TASK_CANCEL_TIMEOUT = 1.0
+COMPACT_REVIEW_DEADLINE = 185.0  # below the Rust host's 195-second acknowledgement deadline
+
+
+async def reviewed_compact_ready(engine: object, prompt: str,
+                                 timeout: float = COMPACT_REVIEW_DEADLINE) -> bool:
+    """Only a completed LORE review permits forwarding this exact command."""
+    if not prompt.strip().startswith("/compact"):
+        return True
+    if prompt.strip() != "/compact":
+        return False
+    deadline = time.monotonic() + timeout
+    try:
+        completed = await asyncio.wait_for(engine.review_before_compact(), timeout=timeout)
+    except (Exception, asyncio.CancelledError):
+        return False
+    return bool(completed) and time.monotonic() < deadline
 
 
 def validate_identity(session_id: str | None, resume: str | None) -> tuple[str | None, str | None]:
@@ -97,7 +114,8 @@ async def run() -> None:
 
     emit({"type": "hello", "protocol": PROTOCOL, "version": VERSION,
           "capabilities": ["start", "prompt", "answer", "interrupt", "finalize",
-                           "set_model", "set_permission_mode", "list_models"]})
+                           "set_model", "set_permission_mode", "list_models",
+                           "reviewed_compact_v1"]})
     engine = None
     turn = None
     catalog_task = None
@@ -234,6 +252,8 @@ async def run() -> None:
                     raise ValueError("invalid prompt")
                 if turn is not None and not turn.done():
                     raise ValueError("turn running")
+                if not await reviewed_compact_ready(engine, prompt):
+                    raise ValueError("LORE review unavailable")
                 turn = asyncio.create_task(publish_turn(prompt))
                 emit({"type": "reply", "id": request_id, "ok": True, "result": {}})
             elif method == "answer" and engine is not None:

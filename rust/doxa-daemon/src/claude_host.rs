@@ -45,6 +45,7 @@ pub struct ClaudeHost {
     admission: Mutex<()>,
     model_control: bool,
     permission_control: bool,
+    reviewed_compact: bool,
     initial_model: Option<String>,
     initial_permission_mode: String,
     billing: Option<Value>,
@@ -63,6 +64,7 @@ impl ClaudeHost {
             .map_err(|_| "Claude sidecar could not start".to_owned())?;
         let model_control = bridge.supports("set_model");
         let permission_control = bridge.supports("set_permission_mode");
+        let reviewed_compact = bridge.supports("reviewed_compact_v1");
         let params = json!({"cwd":cwd,"session_id":session_id,
             "resume":if resume { Some(session_id) } else { None }, "model":model});
         let id = bridge
@@ -113,6 +115,7 @@ impl ClaudeHost {
             admission: Mutex::new(()),
             model_control,
             permission_control,
+            reviewed_compact,
             initial_model,
             initial_permission_mode,
             billing,
@@ -164,6 +167,10 @@ impl Host for ClaudeHost {
     fn initial_permission_mode(&self) -> String { self.initial_permission_mode.clone() }
     fn billing_snapshot(&self) -> Option<Value> { self.billing.clone() }
     fn prompt(&self, text: &str, emit: &mut dyn FnMut(Value)) {
+        if text.trim_start().starts_with("/compact") && !self.reviewed_compact {
+            emit(done("Reviewed compaction is unavailable in this Claude sidecar"));
+            return;
+        }
         let (events_tx, events_rx) = mpsc::sync_channel(EVENT_QUEUE);
         let (reply_tx, reply_rx) = mpsc::channel();
         let admitted = {
@@ -191,11 +198,14 @@ impl Host for ClaudeHost {
             emit(done(reason));
             return;
         }
-        match reply_rx.recv_timeout(RPC_TIMEOUT) {
+        let timeout = if text.trim() == "/compact" { Duration::from_secs(195) } else { RPC_TIMEOUT };
+        match reply_rx.recv_timeout(timeout) {
             Ok(Ok(_)) => {}
             _ => {
                 self.active.store(false, Ordering::Release);
-                emit(done("Claude sidecar refused prompt"));
+                emit(done(if text.trim_start().starts_with("/compact") {
+                    "LORE review failed or timed out; compaction refused"
+                } else { "Claude sidecar refused prompt" }));
                 return;
             }
         }

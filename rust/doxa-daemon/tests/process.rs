@@ -787,7 +787,22 @@ fn rejects_budgeted_codex_until_native_price_basis_exists() {
         .env("DOXA_SESSION_BUDGET_USD", "1.0")
         .output().unwrap();
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("requires reported USD cost"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("requires complete priced usage accounting"));
+    assert!(!dir.path().join("registry/fleet-slot.json").exists());
+}
+
+#[test]
+fn rejects_unpriced_vendor_budget_before_binding() {
+    let dir = tempfile::tempdir().unwrap();
+    let python = dir.path().join("lore-fixture");
+    fake_scrubber(&python, false);
+    let output = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+        .args(["--runtime-dir", dir.path().to_str().unwrap(), "--session-id", "fleet-slot",
+            "--engine", "glm", "--model", "glm-5-turbo", "--lore-python", python.to_str().unwrap()])
+        .env("DOXA_SESSION_BUDGET_USD", "1.0")
+        .output().unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("no native budget price for glm:glm-5-turbo"));
     assert!(!dir.path().join("registry/fleet-slot.json").exists());
 }
 
@@ -1980,6 +1995,45 @@ mod vendor_process {
 
     fn start_vendor(runtime: &Path, vendor: &str, endpoint: &str, lore: &Path) -> Process {
         start_vendor_resume(runtime, vendor, endpoint, lore, false)
+    }
+
+    #[test]
+    fn priced_vendor_budget_blocks_the_next_socket_prompt() {
+        let dir = tempfile::tempdir().unwrap();
+        let lore = dir.path().join("lore-fixture");
+        fake_scrubber(&lore, false);
+        let body = "data: {\"model\":\"deepseek-flash\",\"choices\":[{\"finish_reason\":\"stop\",\"delta\":{\"content\":\"answer\"}}],\"usage\":{\"prompt_tokens\":1000000,\"completion_tokens\":1000000}}\n\ndata: [DONE]\n\n";
+        let (endpoint, server) = fake_vendor_frames(vec![body.to_owned()]);
+        let child = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+            .args(["--runtime-dir", dir.path().to_str().unwrap(), "--cwd", dir.path().to_str().unwrap(),
+                "--session-id", "vendor-session", "--linger", "10", "--engine", "deepseek",
+                "--model", "deepseek-flash", "--lore-python", lore.to_str().unwrap(),
+                "--vendor-endpoint", &endpoint])
+            .env("DEEPSEEK_API_KEY", "test-key-1234")
+            .env("DOXA_SESSION_BUDGET_USD", "1.0")
+            .stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
+        let registry = dir.path().join("registry/vendor-session.json");
+        wait_until(|| registry.exists());
+        let entry: Value = serde_json::from_slice(&fs::read(&registry).unwrap()).unwrap();
+        let mut process = Process { child, registry, socket: PathBuf::from(entry["daemon_socket"].as_str().unwrap()) };
+        let (mut reader, mut socket) = process.connect();
+        receive(&mut reader);
+        send(&mut socket, json!({"type":"attach","cursor":null}));
+        send(&mut socket, json!({"type":"prompt","id":1,"text":"question"}));
+        assert_eq!(receive(&mut reader)["ok"], true);
+        assert_eq!(receive(&mut reader)["event"]["type"], "turn_started");
+        assert_eq!(receive(&mut reader)["event"]["type"], "text_delta");
+        let done = receive(&mut reader);
+        assert_eq!(done["event"]["data"]["cost_usd"], 1.5);
+        send(&mut socket, json!({"type":"prompt","id":2,"text":"again"}));
+        assert_eq!(receive(&mut reader)["ok"], true);
+        let refused = receive(&mut reader);
+        assert_eq!(refused["event"]["type"], "turn_refused");
+        assert_eq!(refused["event"]["data"]["spent_usd"], 1.5);
+        send(&mut socket, json!({"type":"call","id":3,"method":"stop","params":{}}));
+        assert_eq!(receive(&mut reader)["ok"], true);
+        wait_until(|| process.exited());
+        assert_eq!(server.join().unwrap().len(), 1);
     }
 
     fn start_vendor_resume(

@@ -167,11 +167,11 @@ async fn turn_runs_two_gated_tool_steps_and_preserves_history_and_usage() {
     let _credential_guard = credential_guard().await;
     std::env::set_var("DEEPSEEK_API_KEY", "test-secret-1234");
     let tool = |id: &str, x: u64| {
-        format!("data: {{\"choices\":[{{\"finish_reason\":\"tool_calls\",\"delta\":{{\"tool_calls\":[{{\"index\":0,\"id\":\"{id}\",\"function\":{{\"name\":\"lookup\",\"arguments\":\"{{\\\"x\\\":{x}}}\"}}}}]}}}}],\"usage\":{{\"prompt_tokens\":2,\"completion_tokens\":3}}}}\n\ndata: [DONE]\n\n")
+        format!("data: {{\"model\":\"deepseek-flash\",\"choices\":[{{\"finish_reason\":\"tool_calls\",\"delta\":{{\"tool_calls\":[{{\"index\":0,\"id\":\"{id}\",\"function\":{{\"name\":\"lookup\",\"arguments\":\"{{\\\"x\\\":{x}}}\"}}}}]}}}}],\"usage\":{{\"prompt_tokens\":2,\"completion_tokens\":3}}}}\n\ndata: [DONE]\n\n")
     };
     let first = tool("call-1", 1);
     let second = tool("call-2", 2);
-    let final_body = "data: {\"choices\":[{\"finish_reason\":\"stop\",\"delta\":{\"content\":\"done\"}}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":7}}\n\ndata: [DONE]\n\n";
+    let final_body = "data: {\"model\":\"deepseek-flash\",\"choices\":[{\"finish_reason\":\"stop\",\"delta\":{\"content\":\"done\"}}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":7}}\n\ndata: [DONE]\n\n";
     let (url, task) = multi_server(vec![
         Box::leak(first.into_boxed_str()),
         Box::leak(second.into_boxed_str()),
@@ -197,6 +197,8 @@ async fn turn_runs_two_gated_tool_steps_and_preserves_history_and_usage() {
     let requests = task.join().unwrap().0;
     assert_eq!(gate.calls, vec!["1", "2"]);
     assert_eq!(result.requests, 3);
+    assert!(result.usage_complete);
+    assert!(result.model_consistent);
     assert_eq!(
         (result.usage.prompt_tokens, result.usage.completion_tokens),
         (9, 13)
@@ -265,6 +267,8 @@ async fn turn_freezes_credential_across_tool_steps_and_scrubs_original_key() {
     .await
     .unwrap();
     let (requests, auth) = task.join().unwrap();
+    assert!(!outcome.usage_complete);
+    assert!(!outcome.model_consistent);
     assert_eq!(auth, ["original-key-1234", "original-key-1234"]);
     assert_eq!(outcome.text, "***");
     assert_eq!(requests[1]["messages"][2]["content"], "{\"echo\":\"***\"}");

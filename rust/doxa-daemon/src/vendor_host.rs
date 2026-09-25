@@ -194,6 +194,10 @@ impl Host for VendorHost {
     }
 
     fn prompt(&self, text: &str, emit: &mut dyn FnMut(Value)) {
+        if text.trim_start().starts_with("/compact") {
+            emit(done("Reviewed compaction is unavailable for this provider"));
+            return;
+        }
         if self.storage_uncertain.load(Ordering::Acquire) {
             emit(done("Vendor storage state is uncertain; restart refused"));
             return;
@@ -359,6 +363,8 @@ impl Host for VendorHost {
                         "num_turns":turns,"model":model,
                         "prompt_tokens":outcome.usage.prompt_tokens,
                         "completion_tokens":outcome.usage.completion_tokens,
+                        "usage_complete":outcome.usage_complete,
+                        "model_consistent":outcome.model_consistent,
                         "usage_scope":"turn","usage_source":"vendor_response",
                         "cost_usd":null,"session_cost_usd":null,
                         "ctx_percentage":null,"ctx_tokens":null,"ctx_max_tokens":null}}));

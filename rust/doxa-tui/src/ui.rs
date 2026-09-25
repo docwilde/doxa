@@ -68,7 +68,7 @@ const ACTIONS: [(&str, &str); 14] = [
     ("Stop active session", "Alt+X"),
     ("Move tab to other pane", "/movepane"),
 ];
-const SLASH_COMMANDS: [(&str, &str); 26] = [
+const SLASH_COMMANDS: [(&str, &str); 27] = [
     ("/help", "Open actions"), ("/about", "Show Rust version"),
     ("/sessions", "Browse sessions"), ("/search", "Search saved sessions"),
     ("/resume", "Resume saved session"), ("/attach", "Attach live session"),
@@ -81,7 +81,8 @@ const SLASH_COMMANDS: [(&str, &str); 26] = [
     ("/rename", "Rename session"), ("/split", "Horizontal split"),
     ("/vsplit", "Vertical split"), ("/pane", "Switch pane"),
     ("/sidebar", "Session rail"), ("/detach", "Close tab"),
-    ("/dir", "Session directory"), ("/movepane", "Move active tab"),
+    ("/dir", "Session directory"), ("/cd", "Open directory in new tab"),
+    ("/movepane", "Move active tab"),
 ];
 
 const ENGINE_CHOICES: [&str; 4] = ["codex", "claude", "deepseek", "glm"];
@@ -2127,8 +2128,8 @@ impl App {
     }
 
     /// Handle bare DOXA commands before a prompt can reach an agent. Unknown
-    /// slash commands still go to the provider (including `/compact` and
-    /// plugin commands). Known commands with arguments stay in the draft
+    /// slash commands still go to the provider (except reviewed `/compact`
+    /// and plugin commands). Known commands with arguments stay in the draft
     /// until Rust has an explicit implementation for that form.
     fn dispatch_prompt_command(&mut self) -> bool {
         let input = self.input.trim();
@@ -2637,6 +2638,21 @@ impl App {
                 true
             }
             "/rename" => { self.local_rename(args); true }
+            "/cd" => { self.local_cd(args); true }
+            "/compact" => {
+                let engine = self.groups[self.active_group].active_id()
+                    .and_then(|id| self.session_identity.get(id))
+                    .and_then(|identity| identity.0.as_deref());
+                if args.trim().is_empty() && engine == Some("claude") {
+                    return false; // The Claude sidecar reviews synchronously before forwarding.
+                }
+                self.notice = if !args.trim().is_empty() {
+                    "Usage: /compact".into()
+                } else {
+                    "Reviewed compaction is available only for Claude sessions".into()
+                };
+                true
+            }
             "/mesh" if !args.trim().is_empty() => {
                 self.notice = "Local command unavailable: /mesh arguments".into(); true
             }
@@ -2657,8 +2673,8 @@ impl App {
             "/collection" | "/fleet" | "/img" | "/login"
             | "/logout" | "/settings" | "/setup" | "/doctor" | "/plugins"
             | "/reload-plugins" | "/effort" | "/usage"
-            | "/context" | "/clear" | "/cd"
-            | "/compact" | "/update" => {
+            | "/context" | "/clear"
+            | "/update" => {
                 self.notice = format!("Local command unavailable: {}", safe_label(command));
                 true
             }
@@ -2771,6 +2787,71 @@ impl App {
         self.input.clear();
         self.input_cursor = 0;
         self.notice = format!("Attaching · {}", safe_label(id));
+    }
+
+    fn local_cd(&mut self, args: &str) {
+        let Some(id) = self.groups[self.active_group].active_id() else {
+            self.notice = "cd: select a session first".into();
+            return;
+        };
+        let Some(engine) = self.session_identity.get(id).and_then(|identity| identity.0.as_deref()) else {
+            self.notice = "cd: session engine is unavailable".into();
+            return;
+        };
+        if self.launching {
+            self.notice = "cd: wait for the current session launch".into();
+            return;
+        }
+        let requested = args.trim();
+        if requested.is_empty() {
+            self.notice = "Usage: /cd <path> — open a new session tab there".into();
+            return;
+        }
+        if requested.len() > 4096 || requested.chars().any(unsafe_input_char) {
+            self.notice = "cd: path is too long or contains control characters".into();
+            return;
+        }
+        let path = if requested == "~" || requested.starts_with("~/") {
+            let Some(home) = std::env::var_os("HOME") else {
+                self.notice = "cd: home directory is unavailable".into();
+                return;
+            };
+            PathBuf::from(home).join(requested.strip_prefix("~/").unwrap_or(""))
+        } else {
+            let requested = Path::new(requested);
+            if requested.is_absolute() { requested.to_path_buf() }
+            else {
+                self.session_cwds.get(id).cloned()
+                    .or_else(|| std::env::current_dir().ok()).unwrap_or_default().join(requested)
+            }
+        };
+        let Ok(cwd) = std::fs::canonicalize(path) else {
+            self.notice = "cd: directory does not exist or cannot be opened".into();
+            return;
+        };
+        if !cwd.is_dir() {
+            self.notice = "cd: target is not a directory".into();
+            return;
+        }
+        let engine = match engine {
+            "claude" => launch::Engine::Claude,
+            "codex" => launch::Engine::Codex,
+            "deepseek" => launch::Engine::DeepSeek,
+            "glm" => launch::Engine::Glm,
+            _ => {
+                self.notice = "cd: session engine cannot be launched here".into();
+                return;
+            }
+        };
+        let mut options = launch::LaunchOptions { engine, cwd: Some(cwd.clone()), ..Default::default() };
+        if engine == launch::Engine::Claude {
+            options.claude_script = std::env::var_os("DOXA_CLAUDE_SCRIPT").map(PathBuf::from);
+        }
+        self.pending_launches.push((options, None, self.active_group));
+        self.launching = true;
+        self.input.clear();
+        self.input_cursor = 0;
+        self.notice = format!("Opening a new tab at {} · current session stays here", safe_label(&cwd.display().to_string()));
     }
 
     fn local_rename(&mut self, args: &str) {
@@ -7532,6 +7613,39 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn cd_opens_new_tab_at_verified_directory_without_moving_existing_session() {
+        let root = tempfile::tempdir().unwrap();
+        let child = root.path().join("child");
+        std::fs::create_dir(&child).unwrap();
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"existing",
+            "engine":"claude", "model":"sonnet", "cwd":root.path()}));
+        app.input = "/cd child".into();
+        assert!(app.submit_local_command());
+        let (options, prompt, group) = app.pending_launches.pop().unwrap();
+        assert_eq!(options.engine, launch::Engine::Claude);
+        assert_eq!(options.cwd.as_deref(), Some(child.as_path()));
+        assert!(prompt.is_none());
+        assert_eq!(group, 0);
+        assert_eq!(app.groups[0].active_id(), Some("existing"));
+        assert_eq!(app.session_cwds["existing"], root.path());
+        assert!(app.input.is_empty());
+    }
+
+    #[test]
+    fn cd_refuses_invalid_directory_and_keeps_draft() {
+        let root = tempfile::tempdir().unwrap();
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"existing",
+            "engine":"codex", "cwd":root.path()}));
+        app.input = "/cd missing".into();
+        assert!(app.submit_local_command());
+        assert!(app.pending_launches.is_empty());
+        assert_eq!(app.input, "/cd missing");
+        assert!(app.notice.contains("does not exist"));
+    }
+
+    #[test]
     fn effort_chip_picker_requests_current_session_change_and_waits_for_event() {
         let mut app = App::default();
         app.handle(Event::Resize(220, 32));
@@ -8115,7 +8229,20 @@ for line in sys.stdin:
         app.input = "/compact".into();
         app.input_cursor = app.input.len();
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
-        assert!(app.notice.contains("Local command unavailable"));
+        assert!(app.notice.contains("only for Claude"));
+        assert!(app.pending_prompts.is_empty());
+
+        app.session_identity.insert("s".into(), (Some("claude".into()), None));
+        app.input = "/compact".into();
+        app.input_cursor = app.input.len();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.pending_prompts, [("s".into(), "/compact".into())]);
+        app.pending_prompts.clear();
+
+        app.input = "/compact extra".into();
+        app.input_cursor = app.input.len();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(app.notice.contains("Usage: /compact"));
         assert!(app.pending_prompts.is_empty());
 
         app.input = "/provider-command".into();

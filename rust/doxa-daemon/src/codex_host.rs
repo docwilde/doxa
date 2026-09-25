@@ -293,6 +293,11 @@ impl Host for CodexHost {
         self.store.transcript_snapshot()
     }
     fn prompt(&self, text: &str, emit: &mut dyn FnMut(Value)) {
+        if text.trim_start().starts_with("/compact") {
+            emit(json!({"type":"turn_done","data":{"is_error":true,
+                "error":"Reviewed compaction is unavailable for Codex sessions"}}));
+            return;
+        }
         if self.persistence_failed.load(Ordering::Acquire) {
             emit(json!({"type":"turn_done","data":{"is_error":true,"error":"Codex persistence failed; session cannot safely continue"}}));
             return;
