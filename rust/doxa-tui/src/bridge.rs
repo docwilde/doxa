@@ -495,6 +495,10 @@ fn worker_loop(
 fn forward_status(client: &mut DaemonClient, frames: &SyncSender<Value>, session_id: &str) -> bool {
     match client.call("status", Map::new()) {
         Ok(mut reply) if reply["ok"] == true && reply.get("status").is_some() => {
+            // The runtime may publish turn_done before clearing its busy flag.
+            // Keep this internal refresh separate from a user-requested status
+            // reply so it cannot restore stale activity or replace the notice.
+            reply["type"] = Value::String("telemetry_status".into());
             reply["session_id"] = Value::String(session_id.to_owned());
             if let Some(status) = reply.get_mut("status").and_then(Value::as_object_mut) {
                 status.insert("session_id".into(), Value::String(session_id.to_owned()));
@@ -621,7 +625,9 @@ mod tests {
         let (frames, prompts, worker) = spawn_worker(client);
         assert_eq!(frames.recv_timeout(Duration::from_secs(2)).unwrap()["lore_scrub"], "ready");
         assert_eq!(frames.recv_timeout(Duration::from_secs(2)).unwrap()["event"]["type"], "turn_done");
-        assert_eq!(frames.recv_timeout(Duration::from_secs(2)).unwrap()["status"]["lore_scrub"], "unavailable");
+        let status = frames.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(status["type"], "telemetry_status");
+        assert_eq!(status["status"]["lore_scrub"], "unavailable");
         drop(prompts);
         worker.join().unwrap();
         server.join().unwrap();

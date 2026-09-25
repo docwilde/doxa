@@ -938,6 +938,12 @@ impl App {
                 }
                 false
             }
+            "telemetry_status" => {
+                let Some(id) = frame["session_id"].as_str() else { return false; };
+                let Some(status) = frame.get("status") else { return false; };
+                self.session_telemetry.entry(id.to_owned()).or_default().update_status(status);
+                true
+            }
             "reply" => {
                 // Both native and Python daemons broadcast prompt_queued after
                 // the enqueue reply. Count that event once, not this reply.
@@ -3420,6 +3426,22 @@ mod tests {
         assert_eq!(app.active_group, 0);
         assert!(!app.apply_daemon_frame(&json!({"type":"launch_reply", "ok":true,
             "session_id":"unrequested", "group":1})));
+    }
+
+    #[test]
+    fn internal_telemetry_refresh_cannot_restore_running_after_turn_done() {
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"s", "engine":"codex",
+            "running":true, "lore_scrub":"ready"}));
+        app.apply_daemon_frame(&json!({"type":"event", "session_id":"s",
+            "event":{"type":"turn_done", "data":{"is_error":false}}}));
+        assert_eq!(app.session_activity.get("s").unwrap().0, false);
+        let notice = app.notice.clone();
+        app.apply_daemon_frame(&json!({"type":"telemetry_status", "session_id":"s",
+            "status":{"session_id":"s", "running":true, "lore_scrub":"unavailable"}}));
+        assert_eq!(app.session_activity.get("s").unwrap().0, false);
+        assert_eq!(app.notice, notice);
+        assert_eq!(app.session_telemetry.get("s").unwrap().lore.as_deref(), Some("scrub unavailable"));
     }
 
     fn painted(app: &App) -> String {
