@@ -41,6 +41,30 @@ def validate_identity(session_id: str | None, resume: str | None) -> tuple[str |
     return session_id, resume
 
 
+def billing_snapshot(account: object) -> dict | None:
+    """Use SDK subscription auth; add local precision only for the same account."""
+    if not isinstance(account, dict):
+        return None
+    subscription = account.get("subscriptionType")
+    if not isinstance(subscription, str) or not subscription.strip():
+        return None
+    from doxa import identity as identity_mod
+
+    local = identity_mod.local_account()
+    sdk_email = account.get("email")
+    local_email = local.get("emailAddress") if isinstance(local, dict) else None
+    same_account = (isinstance(sdk_email, str) and isinstance(local_email, str)
+                    and sdk_email.strip().casefold() == local_email.strip().casefold()
+                    and bool(sdk_email.strip()))
+    tier = (identity_mod.account_tier(account, local) if same_account
+            else identity_mod.tier_short(subscription))
+    if not tier:
+        return None
+    usage = identity_mod.usage() if same_account else None
+    return {"mode": "subscription", "type": tier,
+            "quota": usage.chip() if usage else None}
+
+
 def emit(frame: dict) -> bool:
     raw = json.dumps(frame, ensure_ascii=False, separators=(",", ":")).encode()
     complete = len(raw) + 1 <= MAX_FRAME
@@ -180,21 +204,7 @@ async def run() -> None:
                 # mode, so it is never enough to classify billing here.
                 billing = None
                 try:
-                    from doxa import identity as identity_mod
-                    account = getattr(candidate, "account", None) or {}
-                    subscription = account.get("subscriptionType") if isinstance(account, dict) else None
-                    tier = (identity_mod.tier_short(subscription) if isinstance(subscription, str)
-                            else None)
-                    local = identity_mod.local_account() if tier else {}
-                    sdk_email = account.get("email") if isinstance(account, dict) else None
-                    local_email = local.get("emailAddress") if isinstance(local, dict) else None
-                    same_account = (isinstance(sdk_email, str) and isinstance(local_email, str)
-                                    and sdk_email.strip().casefold() == local_email.strip().casefold()
-                                    and bool(sdk_email.strip()))
-                    usage = identity_mod.usage() if tier and same_account else None
-                    if tier:
-                        billing = {"mode": "subscription", "type": tier,
-                                   "quota": usage.chip() if usage else None}
+                    billing = billing_snapshot(getattr(candidate, "account", None))
                 except Exception:
                     pass  # optional account data cannot prevent a session
                 try:
