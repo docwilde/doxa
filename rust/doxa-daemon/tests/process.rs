@@ -2955,11 +2955,17 @@ log = open('__LOG__','a')
 init=read(); assert init['method']=='initialize'
 send({'id':init['id'],'result':{'userAgent':'fake'}})
 assert read()['method']=='initialized'
-thread=read(); log.write(thread['method']+'\n'); log.flush()
+thread=read()
+if thread['method']=='model/list':
+    send({'id':thread['id'],'result':{'data':[{'model':'gpt-test','hidden':False,'isDefault':True,'supportedReasoningEfforts':[{'reasoningEffort':'low'},{'reasoningEffort':'high'}],'defaultReasoningEffort':'low'}, {'model':'no-reasoning','hidden':False,'supportedReasoningEfforts':[]}, {'model':'hidden-model','hidden':True,'supportedReasoningEfforts':[]}], 'nextCursor':None}})
+    sys.exit(0)
+log.write(thread['method']+'\n'); log.flush()
 assert thread['method'] in ('thread/start','thread/resume')
 send({'id':thread['id'],'result':{'thread':{'id':'thread_1'}}})
 turn=read(); assert turn['method']=='turn/start'
 assert 'fixture-secret' in turn['params']['input'][0]['text']
+if 'second' in turn['params']['input'][0]['text']:
+    assert turn['params']['model']=='gpt-test' and turn['params']['effort']=='high'
 send({'id':turn['id'],'result':{'turn':{'id':'turn_1'}}})
 send({'method':'item/reasoning/textDelta','params':{'threadId':'thread_1','turnId':'turn_1','itemId':'r','delta':'fixture-secret thought'}})
 send({'method':'item/started','params':{'threadId':'thread_1','turnId':'turn_1','item':{'type':'commandExecution','id':'cmd_1','command':'echo fixture-secret'}}})
@@ -2979,8 +2985,33 @@ for line in sys.stdin: pass
         receive(&mut reader);
         send(&mut socket, json!({"type":"attach","cursor":null}));
         for prompt_id in [1, 2] {
-        send(&mut socket, json!({"type":"prompt","id":prompt_id,"text":"fixture-secret prompt"}));
-        assert_eq!(receive(&mut reader)["ok"], true);
+        if prompt_id == 2 {
+            for (method, params, expected) in [
+                ("list_models", json!({}), true),
+                ("set_model", json!({"model":"hidden-model"}), false),
+                ("set_model", json!({"model":"no-reasoning"}), true),
+                ("set_effort", json!({"effort":"high"}), false),
+                ("set_model", json!({"model":"gpt-test"}), true),
+                ("set_effort", json!({"effort":"unsupported"}), false),
+                ("set_effort", json!({"effort":"high"}), true),
+            ] {
+                send(&mut socket, json!({"type":"call","id":10,"method":method,"params":params}));
+                loop {
+                    let reply = receive(&mut reader);
+                    if reply["type"] == "reply" && reply["id"] == 10 {
+                        assert_eq!(reply["ok"], expected, "{method}: {reply}");
+                        if method == "list_models" { assert_eq!(reply["models"], json!(["gpt-test", "no-reasoning"])); }
+                        if method == "set_model" && params["model"] == "no-reasoning" { assert!(reply["effort"].is_null()); }
+                        break;
+                    }
+                }
+            }
+        }
+        send(&mut socket, json!({"type":"prompt","id":prompt_id,"text":if prompt_id == 2 { "fixture-secret second" } else { "fixture-secret prompt" }}));
+        loop {
+            let reply = receive(&mut reader);
+            if reply["type"] == "reply" && reply["id"] == prompt_id { assert_eq!(reply["ok"], true); break; }
+        }
         let mut kinds = Vec::new();
         loop {
             let frame = receive(&mut reader);
@@ -3010,6 +3041,8 @@ for line in sys.stdin: pass
     let thread: Value = serde_json::from_slice(&fs::read(dir.path().join("project/codex-session.codex.json")).unwrap()).unwrap();
     assert_eq!(thread["transport"], "app-server");
     assert_eq!(thread["turn_incomplete"], false);
+    assert_eq!(thread["model"], "gpt-test");
+    assert_eq!(thread["effort"], "high");
     let transcript = fs::read_to_string(dir.path().join("project/codex-session.jsonl")).unwrap();
     assert!(!transcript.contains("fixture-secret"));
     assert!(transcript.contains("[redacted] answer"));
@@ -3047,4 +3080,55 @@ fn stopping_codex_during_unanswered_appserver_initialization_is_prompt() {
     }
     wait_until(|| process.exited());
     assert!(started.elapsed() < Duration::from_secs(2), "stop waited for app-server RPC timeout");
+}
+
+#[test]
+fn saved_exec_codex_settings_preserve_transport_and_resume_thread() {
+    let dir = tempfile::tempdir().unwrap();
+    let codex = dir.path().join("codex-fixture");
+    let python = dir.path().join("lore-fixture");
+    let args = dir.path().join("args.log");
+    fake_scrubber(&python, false);
+    executable(&codex, &format!(r#"#!/usr/bin/env python3
+import json, sys
+if sys.argv[1]=='app-server':
+    def read(): return json.loads(sys.stdin.readline())
+    def send(v): print(json.dumps(v),flush=True)
+    init=read(); send({{'id':init['id'],'result':{{}}}})
+    assert read()['method']=='initialized'
+    req=read(); assert req['method']=='model/list'
+    send({{'id':req['id'],'result':{{'data':[{{'model':'account-model','isDefault':True,'supportedReasoningEfforts':[{{'reasoningEffort':'high'}}],'defaultReasoningEffort':'high'}}], 'nextCursor':None}}}})
+else:
+    with open({:?},'a') as log: log.write(json.dumps(sys.argv[1:])+'\n')
+    sys.stdin.read()
+    print(json.dumps({{'type':'thread.started','thread_id':'thread_legacy'}}))
+    print(json.dumps({{'type':'item.completed','item':{{'type':'agent_message','text':'answer'}}}}))
+    print(json.dumps({{'type':'turn.completed','usage':{{'input_tokens':1,'output_tokens':1}}}}))
+"#, args.to_str().unwrap()));
+    for restart in [false, true] {
+        let mut process = Process::start_codex(dir.path(), &codex, &python);
+        let (mut reader, mut socket) = process.connect();
+        receive(&mut reader);
+        send(&mut socket, json!({"type":"attach","cursor":null}));
+        if !restart {
+            for (method, params) in [("set_model", json!({"model":"account-model"})), ("set_effort", json!({"effort":"high"}))] {
+                send(&mut socket, json!({"type":"call","id":10,"method":method,"params":params}));
+                loop { let reply = receive(&mut reader); if reply["type"] == "reply" && reply["id"] == 10 { assert_eq!(reply["ok"], true, "{reply}"); break; } }
+            }
+        }
+        send(&mut socket, json!({"type":"prompt","id":11,"text":"prompt"}));
+        loop { let frame = receive(&mut reader); if frame["event"]["type"] == "turn_done" { assert_eq!(frame["event"]["data"]["is_error"], false); break; } }
+        send(&mut socket, json!({"type":"call","id":12,"method":"stop","params":{}}));
+        assert_eq!(receive(&mut reader)["ok"], true);
+        wait_until(|| process.exited());
+    }
+    let calls: Vec<Value> = fs::read_to_string(args).unwrap().lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+    assert_eq!(calls.len(), 2);
+    for call in &calls { assert!(call.as_array().unwrap().contains(&json!("account-model"))); assert!(call.as_array().unwrap().contains(&json!("model_reasoning_effort=\"high\""))); }
+    assert_eq!(calls[1][1], "resume");
+    assert_eq!(calls[1][2], "thread_legacy");
+    let thread: Value = serde_json::from_slice(&fs::read(dir.path().join("project/codex-session.codex.json")).unwrap()).unwrap();
+    assert_eq!(thread["transport"], "exec");
+    assert_eq!(thread["model"], "account-model");
+    assert_eq!(thread["effort"], "high");
 }

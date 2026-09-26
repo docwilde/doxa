@@ -54,6 +54,7 @@ async fn fake_cli_receives_stdin_and_resumes_with_safe_argv() {
     assert_eq!(fs::read_to_string(&prompt_path).unwrap(), prompt);
     assert!(!injection_marker.exists());
     assert_eq!(first.iter().map(|e| e.kind.as_str()).collect::<Vec<_>>(), ["text_delta", "turn_done"]);
+    driver.set_selection(Some("gpt-new".into()), Some("high".into()));
     let (_, second) = events(&mut driver, "second").await;
     assert_eq!(second.last().unwrap().data["num_turns"], 2);
     let args = fs::read_to_string(&args_path).unwrap();
@@ -63,6 +64,8 @@ async fn fake_cli_receives_stdin_and_resumes_with_safe_argv() {
     assert!(groups[0].contains("approval_policy=\"never\"\n"));
     assert!(groups[0].contains("sandbox_mode=\"read-only\"\n"));
     assert!(groups[0].contains("-m\ngpt-test\n-\n"));
+    assert!(groups[1].contains("-m\ngpt-new\n"));
+    assert!(groups[1].contains("model_reasoning_effort=\"high\"\n"));
     assert!(!args.contains(&prompt));
 }
 

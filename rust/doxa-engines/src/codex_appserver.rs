@@ -49,6 +49,7 @@ impl From<io::Error> for AppServerError {
 
 pub struct AppServerDriver {
     options: AppServerOptions,
+    effort: Option<String>,
     scrub: Box<dyn Fn(&str) -> String + Send + Sync>,
     child: Child,
     // Keep the unreaped leader PID reserved until killing this original group.
@@ -78,6 +79,12 @@ impl AppServerDriver {
         options: AppServerOptions,
         scrub: impl Fn(&str) -> String + Send + Sync + 'static,
     ) -> Result<Self, AppServerError> {
+        let mut driver = Self::initialize(options, scrub).await?;
+        driver.start_thread().await?;
+        Ok(driver)
+    }
+
+    async fn initialize(options: AppServerOptions, scrub: impl Fn(&str) -> String + Send + Sync + 'static) -> Result<Self, AppServerError> {
         if options.resume_thread.as_deref().is_some_and(|id| !valid_thread_id(id)) {
             return Err(AppServerError::Protocol("invalid resume thread ID"));
         }
@@ -97,7 +104,7 @@ impl AppServerDriver {
         let scrub = std::sync::Arc::new(scrub);
         let tool_scrub = scrub.clone();
         let mut driver = Self {
-            options, scrub: Box::new(move |text| scrub(text)), child, process_group, stdin, stdout, next_id: 0,
+            options, effort: None, scrub: Box::new(move |text| scrub(text)), child, process_group, stdin, stdout, next_id: 0,
             thread_id: None, turn_id: None, reasoning_bytes: 0, reasoning_chars: 0,
             reasoning_buffer: String::new(), reasoning_truncated: false,
             assistant_buffers: Vec::new(), assistant_bytes: 0, assistant_message_emitted: false, usage: None,
@@ -107,6 +114,11 @@ impl AppServerDriver {
         };
         driver.request("initialize", json!({"clientInfo":{"name":"doxa","title":null,"version":env!("CARGO_PKG_VERSION")},"capabilities":null})).await?;
         driver.send(json!({"method":"initialized"})).await?;
+        Ok(driver)
+    }
+
+    async fn start_thread(&mut self) -> Result<(), AppServerError> {
+        let driver = self;
         let result = if let Some(id) = driver.options.resume_thread.clone() {
             driver.request("thread/resume", json!({"threadId":id,"cwd":driver.options.cwd,"model":driver.options.model,"approvalPolicy":"never","sandbox":sandbox_name(driver.options.sandbox),"excludeTurns":true})).await?
         } else {
@@ -119,7 +131,43 @@ impl AppServerDriver {
             return Err(AppServerError::Protocol("resume returned a different thread ID"));
         }
         driver.thread_id = Some(id.to_owned());
-        Ok(driver)
+        Ok(())
+    }
+
+    /// Catalog discovery initializes a short-lived process without creating a thread.
+    pub async fn discover_models(options: AppServerOptions) -> Result<Vec<Value>, AppServerError> {
+        let mut driver = Self::initialize(options, str::to_owned).await?;
+        let result = driver.list_models().await;
+        driver.shutdown().await;
+        result
+    }
+
+    pub async fn list_models(&mut self) -> Result<Vec<Value>, AppServerError> {
+        let mut rows = Vec::new();
+        let mut cursor = Value::Null;
+        for _ in 0..4 {
+            let result = self.request("model/list", json!({"cursor":cursor,"limit":100,"includeHidden":false})).await?;
+            for row in result["data"].as_array().ok_or(AppServerError::Protocol("invalid model catalog"))? {
+                let Some(model) = row["model"].as_str().filter(|value| !value.is_empty() && value.len() <= 128 && !value.chars().any(char::is_control)) else { continue; };
+                if row["hidden"] == true { continue; }
+                let efforts: Vec<_> = row["supportedReasoningEfforts"].as_array().into_iter().flatten()
+                    .filter_map(|value| value["reasoningEffort"].as_str())
+                    .filter(|value| !value.is_empty() && value.len() <= 32 && value.bytes().all(|b| b.is_ascii_alphanumeric()))
+                    .take(16).collect();
+                let default = row["defaultReasoningEffort"].as_str().filter(|value| efforts.contains(value));
+                rows.push(json!({"model":model,"efforts":efforts,"default_effort":default,"is_default":row["isDefault"] == true}));
+                if rows.len() >= 100 { return Ok(rows); }
+            }
+            cursor = result["nextCursor"].clone();
+            if cursor.is_null() { break; }
+            if cursor.as_str().is_none_or(|value| value.len() > 1024) { return Err(AppServerError::Protocol("invalid catalog cursor")); }
+        }
+        Ok(rows)
+    }
+
+    pub fn set_selection(&mut self, model: Option<String>, effort: Option<String>) {
+        self.options.model = model;
+        self.effort = effort;
     }
 
     pub fn thread_id(&self) -> &str { self.thread_id.as_deref().expect("thread start succeeded") }
@@ -154,7 +202,7 @@ impl AppServerDriver {
         self.tool_normalizer.begin_turn();
         let deadline = tokio::time::Instant::now() + self.options.turn_timeout;
         let thread_id = self.thread_id().to_owned();
-        let request_id = self.send_request_bounded("turn/start", json!({"threadId":thread_id,"input":[{"type":"text","text":prompt,"text_elements":[]}]}), Some(cancel), deadline).await?;
+        let request_id = self.send_request_bounded("turn/start", json!({"threadId":thread_id,"model":self.options.model,"effort":self.effort,"input":[{"type":"text","text":prompt,"text_elements":[]}]}), Some(cancel), deadline).await?;
         let response = self.wait_response(request_id, Some(cancel), deadline).await?;
         let turn_id = response.pointer("/turn/id").and_then(Value::as_str)
             .filter(|id| valid_thread_id(id))

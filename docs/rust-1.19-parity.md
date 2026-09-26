@@ -29,7 +29,7 @@ commands still pass to the active engine.
 | `/peers`, `/mesh`, `/msg` | Local or partial | Rich peer details, browser mesh and remote peers |
 | `/diff` | Partial | Full 1.19 diff command options and worktree controls |
 | `/fleet` | Bridge or partial; native Claude and known-model vendor per-session spend ceilings | Native supervisor, approval desk, barrier, Codex priced budget, budgeted resume and fleet tab |
-| `/model`, `/engine`, `/mode`, `/effort` | Local picker for bare form; new-session vendor models refresh from account catalogs, with DeepSeek per-model effort and measured GLM fallback; live effort chip reports daemon state; Codex account catalogs provide same-thread idle model/effort changes, and known DeepSeek/GLM models accept idle live effort changes for the next turn | Supported argument forms for other engines and newer catalog-only vendor models |
+| `/model`, `/engine`, `/mode`, `/effort` | Local picker for bare form; new-session vendor models refresh from account catalogs, with DeepSeek per-model effort and measured GLM fallback; live effort chip reports daemon state; known DeepSeek/GLM models accept idle live effort changes for the next turn; Codex model and effort choices use the account app-server catalog and apply to the next turn on the same thread, including saved exec sessions | Supported argument forms for other engines and newer catalog-only vendor models |
 | `/beliefs`, `/pending` | Belief reading, exact reviewed confirm/contradict/stale/retract actions, and staged approve/reject after complete raw review | Broader 1.19 memory management screens |
 | `/sessions`, `/search`, `/resume`, `/attach` | Debounced live search with grouped, scrubbed LORE index excerpts, exact owned-file loading and bounded scan fallback, verified saved Claude/Codex/vendor resume with guarded missing-checkout recovery, CLI attach/Claude resume and live TUI attach picker with ID/title search | Python-style prompt-line search menu and results from indexed external transcripts that DOXA cannot open |
 | `/usage`, `/context`, `/queue` | Scrollable per-session usage/context panels and queued prompt list/cancel picker | Provider context component breakdown and more detailed usage history |
@@ -54,3 +54,6 @@ commands still pass to the active engine.
 
 The Rust guide in [`rust/README.md`](../rust/README.md) describes commands
 already available in the preview.
+
+Codex settings changes require an idle session with no queued prompts. Existing daemon processes keep their old implementation: stop an idle session after upgrading, then resume its verified saved thread. Selected model and effort are persisted for verified recovery; legacy exec transport remains exec. Catalog discovery initializes a bounded short-lived app-server process without creating a provider thread.
+When the current Codex model is unknown (for example a CLI-configured default), select a model from the verified model picker before choosing effort; DOXA does not guess the running thread's model from the catalog default.

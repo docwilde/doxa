@@ -1801,6 +1801,10 @@ impl App {
                         true
                     }
                     "model_changed" => {
+                        if data.get("effort").is_some() {
+                            if let Some(effort) = data["effort"].as_str() { self.session_efforts.insert(id.clone(), safe_label(effort)); }
+                            else { self.session_efforts.remove(&id); }
+                        }
                         if self.effort_picker.as_ref().is_some_and(|picker| picker.session_id == id) {
                             self.effort_picker = None;
                         }
@@ -2011,6 +2015,16 @@ impl App {
             }
             "models_reply" => {
                 let Some(id) = frame.get("session_id").and_then(|v| v.as_str()) else { return false; };
+                if frame["ok"] == true && self.session_identity.get(id).is_some_and(|identity| identity.0.as_deref() == Some("codex")) {
+                    for row in frame["capabilities"].as_array().into_iter().flatten().take(100) {
+                        if let Some(model) = row["model"].as_str().filter(|model| !model.is_empty() && model.len() <= 128 && !model.chars().any(char::is_control)) {
+                            let levels = row["efforts"].as_array().into_iter().flatten().filter_map(serde_json::Value::as_str)
+                                .filter(|level| !level.is_empty() && level.len() <= 32 && level.bytes().all(|b| b.is_ascii_alphanumeric()))
+                                .take(16).map(str::to_owned).collect();
+                            self.catalog_efforts.insert(("codex".into(), model.into()), levels);
+                        }
+                    }
+                }
                 if let Some(picker) = self.model_picker.as_mut().filter(|picker| picker.session_id == id) {
                     picker.loading = false;
                     picker.catalog_pending = frame["loading"] == true;
@@ -3594,9 +3608,14 @@ impl App {
             self.notice = "Effort capability is unknown for this session".into();
             return;
         };
+        if engine == "codex" && !self.catalog_efforts.contains_key(&(engine.clone(), model.clone())) {
+            self.open_model_picker();
+            self.notice = "Loading Codex model capabilities; select a model, then choose effort".into();
+            return;
+        }
         let known = effort_choices(engine, model);
         let levels = self.catalog_efforts.get(&(engine.clone(), model.clone()))
-            .map(|levels| levels.iter().filter(|level| known.contains(&level.as_str())).cloned().collect())
+            .map(|levels| levels.iter().filter(|level| engine == "codex" || known.contains(&level.as_str())).cloned().collect())
             .unwrap_or_else(|| known.iter().map(|level| (*level).to_owned()).collect::<Vec<_>>());
         if levels.is_empty() {
             self.notice = "Live effort change is unavailable for this session model".into();
@@ -3615,7 +3634,7 @@ impl App {
         let Some(chosen) = picker.levels.get(picker.selected) else { return; };
         let known = effort_choices(engine, model);
         let allowed = self.catalog_efforts.get(&(engine.clone(), model.clone()))
-            .map(|levels| levels.iter().filter(|level| known.contains(&level.as_str())).cloned().collect())
+            .map(|levels| levels.iter().filter(|level| engine == "codex" || known.contains(&level.as_str())).cloned().collect())
             .unwrap_or_else(|| known.iter().map(|level| (*level).to_owned()).collect::<Vec<_>>());
         if !allowed.contains(chosen) { return; }
         self.pending_effort_changes.push((picker.session_id, chosen.clone()));
@@ -9254,6 +9273,26 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn codex_catalog_drives_same_session_effort_and_clears_absent_effort() {
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"codex-1",
+            "engine":"codex","model":"account-model","effort":"high","can_set_model":true}));
+        app.groups[0].tabs = vec!["codex-1".into()];
+        app.open_model_picker();
+        app.apply_daemon_frame(&json!({"type":"models_reply","session_id":"codex-1","ok":true,
+            "models":["account-model"],"capabilities":[{"model":"account-model","efforts":["minimal","high"]}]}));
+        app.model_picker = None;
+        app.open_effort_picker();
+        assert_eq!(app.effort_picker.as_ref().unwrap().levels, ["minimal", "high"]);
+        app.effort_picker.as_mut().unwrap().selected = 0;
+        app.select_effort();
+        assert_eq!(app.pending_effort_changes.last(), Some(&("codex-1".into(), "minimal".into())));
+        app.apply_daemon_frame(&json!({"type":"event","session_id":"codex-1",
+            "event":{"type":"model_changed","data":{"model":"no-reasoning","effort":null}}}));
+        assert!(!app.session_efforts.contains_key("codex-1"));
+    }
+
+    #[test]
     fn effort_capability_and_vendor_model_choices_fail_closed() {
         assert_eq!(effort_choices("glm", "glm-5.3-flash"), ["low", "high", "max"]);
         assert!(effort_choices("glm", "glm-unverified").is_empty());
@@ -9265,7 +9304,7 @@ for line in sys.stdin:
         app.groups[0].tabs = vec!["unknown".into()];
         app.open_effort_picker();
         assert!(app.effort_picker.is_none());
-        assert!(app.notice.contains("Live effort change is unavailable"));
+        assert!(app.notice.contains("Loading Codex model capabilities"));
 
         app.engine_selected = 2;
         app.select_new_engine();
