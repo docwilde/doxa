@@ -1,4 +1,5 @@
 use doxa_engines::codex_driver::{CodexCliDriver, DriverError, DriverOptions};
+use doxa_engines::codex_appserver::{AppServerDriver, AppServerOptions, AppServerError};
 use doxa_lore::{LoreClient, LoreError};
 use doxa_runtime::Host;
 use doxa_transcript::TranscriptStore;
@@ -42,7 +43,8 @@ fn bounded_tool_data(kind: &str, data: &Value) -> Value {
 /// A sequential Codex session. The daemon may call `stop` concurrently with
 /// `prompt`, so the cancellation token lives outside the driver lock.
 pub struct CodexHost {
-    driver: Mutex<CodexCliDriver>,
+    driver: Mutex<CodexTransport>,
+    runtime: Mutex<tokio::runtime::Runtime>,
     active: Mutex<Option<CancellationToken>>,
     scrub_failed: Arc<AtomicBool>,
     persistence_failed: AtomicBool,
@@ -54,7 +56,23 @@ pub struct CodexHost {
     cwd: String,
     model: Option<String>,
     rollout_path: Mutex<Option<PathBuf>>,
+    transport: &'static str,
     closing: AtomicBool,
+}
+
+enum CodexTransport {
+    Exec(CodexCliDriver),
+    AppServer { options: AppServerOptions, active: Option<AppServerDriver>, resume_thread: Option<String> },
+}
+
+impl CodexTransport {
+    fn thread_id(&self) -> Option<&str> {
+        match self {
+            Self::Exec(driver) => driver.thread_id(),
+            Self::AppServer { active, resume_thread, .. } =>
+                active.as_ref().map(AppServerDriver::thread_id).or(resume_thread.as_deref()),
+        }
+    }
 }
 
 enum IndexCommand {
@@ -94,6 +112,7 @@ impl CodexHost {
             .read_thread()
             .map_err(|_| "Codex thread record unreadable; session was not started".to_owned())?;
         let mut rollout_path = None;
+        let mut saved_transport = None;
         let previous = if let Some(value) = thread_record {
             if value.get("turn_incomplete") != Some(&Value::Bool(false)) {
                 return Err("Codex transcript is incomplete; refusing to resume the thread".to_owned());
@@ -120,6 +139,12 @@ impl CodexHost {
                 .ok_or("existing session has no valid Codex thread ID")?;
             rollout_path = value["rollout_path"].as_str().map(PathBuf::from)
                 .filter(|path| codex_context::size(path, thread).is_some());
+            saved_transport = match value.get("transport") {
+                None => Some("exec"),
+                Some(Value::String(transport)) if transport == "exec" => Some("exec"),
+                Some(Value::String(transport)) if transport == "app-server" => Some("app-server"),
+                _ => return Err("Codex thread record has invalid transport".to_owned()),
+            };
             Some(thread.to_owned())
         } else {
             if resume || transcript.is_some() {
@@ -131,7 +156,12 @@ impl CodexHost {
             options.resume_thread = Some(id);
             options.require_resume = true;
         }
+        let transport = saved_transport.unwrap_or_else(|| {
+            if std::env::var("DOXA_CODEX_APPSERVER").as_deref() == Ok("0") { "exec" } else { "app-server" }
+        });
         let model = options.model.clone();
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()
+            .map_err(|_| "Codex runtime could not start".to_owned())?;
         let lore = Arc::new(Mutex::new(client));
         let (index_tx, index_rx) = mpsc::channel();
         let index_lore = lore.clone();
@@ -168,8 +198,19 @@ impl CodexHost {
                 }
             }
         };
+        let driver = if transport == "app-server" {
+            CodexTransport::AppServer {
+                options: AppServerOptions { executable: options.executable.clone(), cwd: options.cwd.clone(),
+                    model: options.model.clone(), sandbox: options.sandbox,
+                    resume_thread: options.resume_thread.clone(), turn_timeout: options.turn_timeout },
+                active: None, resume_thread: options.resume_thread.clone(),
+            }
+        } else {
+            CodexTransport::Exec(CodexCliDriver::new(options, scrub))
+        };
         Ok(Self {
-            driver: Mutex::new(CodexCliDriver::new(options, scrub)),
+            driver: Mutex::new(driver),
+            runtime: Mutex::new(runtime),
             active: Mutex::new(None),
             scrub_failed,
             persistence_failed: AtomicBool::new(false),
@@ -181,6 +222,7 @@ impl CodexHost {
             cwd,
             model,
             rollout_path: Mutex::new(rollout_path),
+            transport,
             closing: AtomicBool::new(false),
         })
     }
@@ -204,7 +246,7 @@ impl CodexHost {
         if rollout.as_ref().is_some_and(|path| codex_context::size(path, thread_id).is_none()) {
             *rollout = None;
         }
-        if rollout.is_none() {
+        if self.transport == "exec" && rollout.is_none() {
             *rollout = codex_context::find(thread_id, std::time::SystemTime::now());
         }
         let mut fields = Map::new();
@@ -212,6 +254,7 @@ impl CodexHost {
         fields.insert("turn_incomplete".into(), json!(turn_incomplete));
         fields.insert("session_id".into(), json!(self.session_id));
         fields.insert("model".into(), json!(self.model));
+        fields.insert("transport".into(), json!(self.transport));
         fields.insert("cwd".into(), json!(self.cwd));
         fields.insert("recorded".into(), json!(crate::iso_now()));
         if let Some(path) = rollout.as_ref() {
@@ -276,6 +319,14 @@ impl CodexHost {
             }
             thread::sleep(Duration::from_millis(10));
         }
+        let runtime = self.runtime.lock().unwrap();
+        if let CodexTransport::AppServer { active, .. } = &mut *self.driver.lock().unwrap() {
+            // Do not rely on process exit or the last client Arc dropping to
+            // reap the app-server and any tool descendants.
+            if let Some(app) = active.as_mut() { runtime.block_on(app.shutdown()); }
+            *active = None;
+        }
+        drop(runtime);
         self.index_transcript();
         let _ = self.index_tx.send(IndexCommand::Stop);
         self.index_worker
@@ -377,56 +428,95 @@ impl Host for CodexHost {
         };
         let thread_write_failed = Cell::new(false);
         let mut terminal_event = None;
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build();
-        let result = match runtime {
-            Ok(runtime) => {
+        let mut handle_event = |event: doxa_engines::EngineEvent| {
+            if self.scrub_failed.load(Ordering::Acquire)
+                || self.persistence_failed.load(Ordering::Acquire) {
+                token.cancel();
+            }
+            if !self.scrub_failed.load(Ordering::Acquire)
+                && !self.persistence_failed.load(Ordering::Acquire) {
+                if event.kind == "text_delta" {
+                    if let Some(text) = event.data["text"].as_str() {
+                        assistant_text.push_str(text);
+                    }
+                }
+                let frame = json!({"type":event.kind,"data":event.data});
+                if event.kind == "turn_done" {
+                    terminal_event = Some(frame);
+                } else if !thread_write_failed.get() {
+                    if matches!(event.kind.as_str(), "tool_call" | "tool_result" | "tool_result_detail")
+                        && self.persist_tool_event(&event.kind, &event.data).is_err() {
+                        token.cancel();
+                    } else {
+                        emit(frame);
+                    }
+                }
+            }
+        };
+        let result = {
+                // Keep the reactor alive between turns: the app-server's
+                // pipes and process watcher belong to this session runtime.
+                let runtime = self.runtime.lock().unwrap();
                 let mut driver = self.driver.lock().unwrap();
                 let provider_prompt = if driver.thread_id().is_none() {
                     self.first_turn_prompt(text)
                 } else {
                     text.to_owned()
                 };
-                runtime.block_on(driver.run_turn_with_thread(
-                    &provider_prompt,
-                    &token,
-                    |event| {
-                        if self.scrub_failed.load(Ordering::Acquire)
-                            || self.persistence_failed.load(Ordering::Acquire) {
-                            token.cancel();
-                        }
-                        // The normalizer scrubbed all provider strings before
-                        // this callback. Once scrubbing fails, discard output.
-                        if !self.scrub_failed.load(Ordering::Acquire)
-                            && !self.persistence_failed.load(Ordering::Acquire) {
-                            if event.kind == "text_delta" {
-                                if let Some(text) = event.data["text"].as_str() {
-                                    assistant_text.push_str(text);
-                                }
+                match &mut *driver {
+                    CodexTransport::Exec(driver) => runtime.block_on(driver.run_turn_with_thread(
+                        &provider_prompt, &token, &mut handle_event,
+                        |id| {
+                            if self.persist_thread(id, true).is_err() {
+                                thread_write_failed.set(true);
+                                token.cancel();
                             }
-                            let frame = json!({"type":event.kind,"data":event.data});
-                            if event.kind == "turn_done" {
-                                terminal_event = Some(frame);
-                            } else if !thread_write_failed.get() {
-                                if matches!(event.kind.as_str(), "tool_call" | "tool_result" | "tool_result_detail")
-                                    && self.persist_tool_event(&event.kind, &event.data).is_err() {
-                                    token.cancel();
-                                } else {
-                                    emit(frame);
+                        },
+                    )).map(|_| ()).map_err(|error| match error {
+                        DriverError::Cancelled => "Codex turn cancelled".to_owned(),
+                        DriverError::MissingResumeThread => "Codex thread ID unavailable".to_owned(),
+                        DriverError::InvalidThreadId => "Codex thread ID invalid".to_owned(),
+                        DriverError::Spawn(_) => "Codex process could not start".to_owned(),
+                    }),
+                    CodexTransport::AppServer { options, active, resume_thread } => {
+                        if active.is_none() {
+                            let lore = self.lore.clone();
+                            let failed = self.scrub_failed.clone();
+                            let scrub = move |text: &str| match lore.lock().unwrap().scrub(text) {
+                                Ok(clean) => clean,
+                                Err(_) => { failed.store(true, Ordering::Release); SCRUB_FAILURE.to_owned() }
+                            };
+                            match runtime.block_on(AppServerDriver::spawn(options.clone(), scrub)) {
+                                Ok(app) => {
+                                    *resume_thread = Some(app.thread_id().to_owned());
+                                    if self.persist_thread(app.thread_id(), true).is_err() {
+                                        thread_write_failed.set(true);
+                                        token.cancel();
+                                    }
+                                    *active = Some(app);
                                 }
+                                Err(_) => { thread_write_failed.set(true); }
                             }
                         }
-                    },
-                    |id| {
-                        if self.persist_thread(id, true).is_err() {
-                            thread_write_failed.set(true);
-                            token.cancel();
+                        if thread_write_failed.get() {
+                            Err("Codex app-server startup or thread persistence failed".to_owned())
+                        } else {
+                            let outcome = runtime.block_on(active.as_mut().expect("spawn succeeded").run_turn(
+                                &provider_prompt, &token, &mut handle_event,
+                            )).map_err(|error| match error {
+                                AppServerError::Server(message) => message,
+                                AppServerError::Cancelled => "Codex turn cancelled".to_owned(),
+                                AppServerError::TimedOut => "Codex app-server turn timed out".to_owned(),
+                                _ => "Codex app-server protocol or process failed".to_owned(),
+                            });
+                            if outcome.is_err() {
+                                if let Some(app) = active.as_mut() { runtime.block_on(app.shutdown()); }
+                                *active = None;
+                            }
+                            outcome
                         }
-                    },
-                ))
-            }
-            Err(error) => Err(DriverError::Spawn(error)),
+                    }
+                }
         };
         // A provider error or interrupted turn can leave the provider thread
         // ahead of our durable transcript. Keep its restart guard armed.
@@ -467,7 +557,10 @@ impl Host for CodexHost {
         if !turn_succeeded {
             self.persistence_failed.store(true, Ordering::Release);
             *self.active.lock().unwrap() = None;
-            emit(json!({"type":"turn_done","data":{"is_error":true,"error":"Codex turn incomplete; session cannot safely continue"}}));
+            let reason = if self.transport == "app-server" {
+                result.as_ref().err().cloned().unwrap_or_else(|| "Codex turn incomplete; session cannot safely continue".to_owned())
+            } else { "Codex turn incomplete; session cannot safely continue".to_owned() };
+            emit(json!({"type":"turn_done","data":{"is_error":true,"error":reason}}));
             return;
         }
         self.index_transcript();
@@ -475,6 +568,7 @@ impl Host for CodexHost {
         match result {
             Ok(_) => {
                 if let Some(mut event) = terminal_event {
+                    if self.transport == "exec" {
                     let before = if new_thread { Some(0) } else { rollout_before };
                     if let (Some(before), Some(id), Some(path)) = (before,
                         self.driver.lock().unwrap().thread_id().map(str::to_owned),
@@ -486,18 +580,11 @@ impl Host for CodexHost {
                             }
                         }
                     }
+                    }
                     emit(event);
                 }
             }
-            Err(error) => {
-                let reason = match error {
-                    DriverError::Cancelled => "Codex turn cancelled",
-                    DriverError::MissingResumeThread => {
-                        "Codex thread ID unavailable; refusing to start a new thread"
-                    }
-                    DriverError::InvalidThreadId => "Codex thread ID is invalid",
-                    DriverError::Spawn(_) => "Codex process could not start",
-                };
+            Err(reason) => {
                 emit(json!({"type":"turn_done","data":{"is_error":true,"error":reason}}));
             }
         }

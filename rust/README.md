@@ -57,6 +57,19 @@ The daemon executable is located beside `doxa-rs`, then on `PATH`; an absolute
 `linger_secs` config value. `--sandbox` sets the native Codex sandbox. Use
 `--engine fixture` only for local integration checks.
 
+New Codex sessions use the app-server transport. The reasoning count streams
+live as an estimate and is replaced by exact provider usage when reported.
+Reasoning content and assistant messages are buffered within size limits and
+scrubbed as complete text before display, preventing split credentials from
+bypassing LORE. App-server context usage follows Codex TUI's 12,000 token
+reserve for both used tokens and the effective window. DOXA records the
+transport with the thread ID, so existing `codex exec --json` sessions retain
+their original recovery path. `DOXA_CODEX_APPSERVER=0` selects the legacy
+transport for a new session. Interactive approval and unsupported tool requests
+are explicitly refused with an error; app-server approval dialogs are not yet
+available. A refused or interrupted turn retains its incomplete-turn recovery
+guard rather than silently starting a replacement thread.
+
 Native sessions started in a Git checkout now get a linked worktree under
 `$DOXA_HOME/worktrees/<repo>-<session-prefix>` on a `doxa/<session-prefix>`
 branch. A sidecar in `worktrees/.meta` records the original repository and
