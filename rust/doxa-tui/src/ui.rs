@@ -1053,7 +1053,7 @@ fn input_request_body(request: &InputRequest, title_width: usize) -> (String, Op
 }
 
 fn ask_user_option_at(request: &InputRequest, menu: Rect, row: u16) -> Option<usize> {
-    if request.kind != "ask_user" || row <= menu.y || row >= menu.bottom().saturating_sub(1) {
+    if request.kind != "ask_user" || request.sending || row <= menu.y || row >= menu.bottom().saturating_sub(1) {
         return None;
     }
     let (body, _, option_rows) = input_request_body(request, usize::from(menu.width.saturating_sub(4)));
@@ -1103,12 +1103,16 @@ fn streamed_turn_start(source: &str) -> Option<usize> {
         } else {
             for line in paragraph.lines() {
                 let line = line.trim_start();
-                if line.starts_with("```") {
-                    if fence == Some("```") { fence = None; }
-                    else if fence.is_none() { fence = Some("```"); }
-                } else if line.starts_with("~~~") {
-                    if fence == Some("~~~") { fence = None; }
-                    else if fence.is_none() { fence = Some("~~~"); }
+                if let Some(marker @ (b'`' | b'~')) = line.as_bytes().first().copied() {
+                    let count = line.bytes().take_while(|byte| *byte == marker).count();
+                    if count >= 3 {
+                        match fence {
+                            Some((open_marker, open_count)) if marker == open_marker && count >= open_count
+                                && line[count..].trim().is_empty() => fence = None,
+                            None => fence = Some((marker, count)),
+                            _ => {},
+                        }
+                    }
                 }
             }
         }
@@ -1595,7 +1599,8 @@ impl App {
             "queue_cancel_reply" => {
                 let Some(id) = frame["session_id"].as_str() else { return false; };
                 let Some(picker) = self.queue_picker.as_mut().filter(|picker| picker.session_id == id) else { return false; };
-                if picker.cancelling.as_deref() != frame["queue_id"].as_str() { return false; }
+                let Some(expected) = picker.cancelling.as_deref() else { return false; };
+                if Some(expected) != frame["queue_id"].as_str() { return false; }
                 picker.cancelling = None;
                 self.notice = if frame["ok"] == true { "Queued prompt cancelled".into() }
                     else { format!("Queue cancellation failed · {}", safe_label(frame["error"].as_str().unwrap_or("item already started"))) };
@@ -11263,6 +11268,23 @@ for line in sys.stdin:
             matches!(receiver.recv().unwrap(), crate::bridge::WorkerCommand::Prompt(_, text) if text == "second")
         );
         assert_eq!(app.pending_prompts[0].1, "third");
+    }
+
+    #[test]
+    fn stream_heading_detection_respects_longer_outer_fences() {
+        let prefix = "**You:**\n\nhello\n\n**Assistant:**\n\n";
+        let source = format!("{prefix}````markdown\n\n```\n\n**Assistant:**\n\n```\n\n````\n\nend");
+        assert_eq!(streamed_turn_start(&source), prefix.find("**Assistant:**"));
+    }
+
+    #[test]
+    fn sending_answer_rows_do_not_select_options() {
+        let request = InputRequest::from_event("a", &json!({"id":"r", "kind":"ask_user", "questions":[{"question":"Pick", "options":[{"label":"One"}]}]})).unwrap();
+        let mut sending = request.clone();
+        sending.sending = true;
+        let menu = Rect::new(0, 0, 80, 15);
+        for row in 1..14 { assert_eq!(ask_user_option_at(&sending, menu, row), None); }
+        assert!((1..14).any(|row| ask_user_option_at(&request, menu, row) == Some(1)));
     }
 
     #[test]
