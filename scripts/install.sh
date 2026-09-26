@@ -99,19 +99,52 @@ main() {
   chmod 700 "$sidecar_root" || exit 1
   sidecar_env="$sidecar_root/$sha"
   [ ! -L "$sidecar_env" ] || { printf 'doxa-install: sidecar environment must not be a symlink\n' >&2; exit 1; }
-  if [ -e "$sidecar_env" ] || [ -L "$sidecar_env" ]; then
-    [ -d "$sidecar_env" ] && [ ! -L "$sidecar_env" ] || {
+  sidecar_ready() {
+    [ -d "$1" ] && [ ! -L "$1" ] &&
+      "$1/bin/python" -I -c 'import doxa.lore_bridge, doxa.engine, lore_core, claude_agent_sdk' >/dev/null 2>&1
+  }
+  if [ -e "$sidecar_env" ]; then
+    [ -d "$sidecar_env" ] || {
       printf 'doxa-install: sidecar path is not a directory: %s\n' "$sidecar_env" >&2; exit 1;
     }
+    if ! sidecar_ready "$sidecar_env"; then
+      # An untrappable interruption can leave a venv before sync completes.
+      # Build at its permanent path: moving a venv breaks entrypoint shebangs.
+      # Preserve the old environment, including any active pointer, on failure.
+      repaired_bin=$(readlink "$bin_dir/.doxa-sidecar-current" 2>/dev/null || :)
+      repaired_env=${repaired_bin%/bin}
+      case "$repaired_env" in
+        "$sidecar_root/$sha.repair."*)
+          repaired_suffix=${repaired_env#"$sidecar_root/$sha.repair."}
+          case "$repaired_suffix" in
+            "" | *[!a-zA-Z0-9]*) repaired_env="" ;;
+          esac ;;
+        *) repaired_env="" ;;
+      esac
+      if [ "$repaired_bin" = "$repaired_env/bin" ] &&
+          [ "$(cat "$repaired_env/.doxa-install-sha" 2>/dev/null || :)" = "$sha" ] &&
+          sidecar_ready "$repaired_env"; then
+        sidecar_env="$repaired_env"
+      else
+        sidecar_env=$(mktemp -d "$sidecar_root/$sha.repair.XXXXXXXX") || exit 1
+        new_sidecar="$sidecar_env"
+      fi
+    fi
   else
     new_sidecar="$sidecar_env"
+  fi
+  if [ -n "$new_sidecar" ]; then
     uv venv --python python3 "$sidecar_env" || exit 1
     VIRTUAL_ENV="$sidecar_env" uv sync --frozen --active --no-dev --no-editable --project "$checkout" || exit 1
   fi
   chmod 700 "$sidecar_env" || exit 1
-  "$sidecar_env/bin/python" -c 'import doxa.lore_bridge, doxa.engine, lore_core, claude_agent_sdk' || {
+  sidecar_ready "$sidecar_env" || {
     printf 'doxa-install: sidecar import check failed\n' >&2; exit 1;
   }
+
+  if [ -n "$new_sidecar" ]; then
+    printf '%s\n' "$sha" > "$sidecar_env/.doxa-install-sha" || exit 1
+  fi
 
   mkdir -p "$bin_dir" || exit 1
   for name in doxa doxa-rs doxa-daemon-rs doxa-claude-sidecar.py .doxa-sidecar-current; do
