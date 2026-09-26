@@ -3032,32 +3032,42 @@ fn codex_appserver_default_streams_persists_and_resumes() {
     let log = dir.path().join("methods.log");
     fake_scrubber(&python, false);
     let script = r#"#!/usr/bin/env python3
-import json, sys
+import json, sys, tomllib
 
 def read(): return json.loads(sys.stdin.readline())
 def send(v): print(json.dumps(v),flush=True)
 log = open('__LOG__','a')
 init=read(); assert init['method']=='initialize'
-send({'id':init['id'],'result':{'userAgent':'fake'}})
+send({'id':init['id'],'result':{'userAgent':'codex_cli_rs/0.156.1'}})
 assert read()['method']=='initialized'
 thread=read()
+if thread['method']=='hooks/list':
+    overrides=[sys.argv[i+1] for i,x in enumerate(sys.argv[:-1]) if x=='-c']
+    hooks=next(tomllib.loads(x)['hooks'] for x in overrides if x.startswith('hooks='))
+    key=next(iter(hooks['state']))
+    row={'key':key,'command':hooks['PreCompact'][0]['hooks'][0]['command'],
+         'handlerType':'command','enabled':True,'trustStatus':'trusted',
+         'currentHash':hooks['state'][key]['trusted_hash'],'eventName':'preCompact',
+         'source':'sessionFlags','timeoutSec':240,'async':False}
+    send({'id':thread['id'],'result':{'data':[{'cwd':thread['params']['cwds'][0],'hooks':[row]}],'errors':[]}})
+    thread=read()
 if thread['method']=='model/list':
     send({'id':thread['id'],'result':{'data':[{'model':'gpt-test','hidden':False,'isDefault':True,'supportedReasoningEfforts':[{'reasoningEffort':'low'},{'reasoningEffort':'high'}],'defaultReasoningEffort':'low'}, {'model':'no-reasoning','hidden':False,'supportedReasoningEfforts':[]}, {'model':'hidden-model','hidden':True,'supportedReasoningEfforts':[]}], 'nextCursor':None}})
     sys.exit(0)
 log.write(thread['method']+'\n'); log.flush()
 assert thread['method'] in ('thread/start','thread/resume')
-send({'id':thread['id'],'result':{'thread':{'id':'thread_1'}}})
+send({'id':thread['id'],'result':{'thread':{'id':'thread-1'}}})
 turn=read(); assert turn['method']=='turn/start'
 assert 'fixture-secret' in turn['params']['input'][0]['text']
 if 'second' in turn['params']['input'][0]['text']:
     assert turn['params']['model']=='gpt-test' and turn['params']['effort']=='high'
 send({'id':turn['id'],'result':{'turn':{'id':'turn_1'}}})
-send({'method':'item/reasoning/textDelta','params':{'threadId':'thread_1','turnId':'turn_1','itemId':'r','delta':'fixture-secret thought'}})
-send({'method':'item/started','params':{'threadId':'thread_1','turnId':'turn_1','item':{'type':'commandExecution','id':'cmd_1','command':'echo fixture-secret'}}})
-send({'method':'item/completed','params':{'threadId':'thread_1','turnId':'turn_1','item':{'type':'commandExecution','id':'cmd_1','command':'echo fixture-secret','status':'completed','aggregatedOutput':'fixture-secret tool output','exitCode':0}}})
-send({'method':'item/agentMessage/delta','params':{'threadId':'thread_1','turnId':'turn_1','itemId':'a','delta':'fixture-secret answer'}})
-send({'method':'thread/tokenUsage/updated','params':{'threadId':'thread_1','turnId':'turn_1','tokenUsage':{'total':{'inputTokens':100,'outputTokens':50,'cachedInputTokens':10},'last':{'totalTokens':20000,'reasoningOutputTokens':7},'modelContextWindow':32000}}})
-send({'method':'turn/completed','params':{'threadId':'thread_1','turn':{'id':'turn_1','status':'completed','error':None}}})
+send({'method':'item/reasoning/textDelta','params':{'threadId':'thread-1','turnId':'turn_1','itemId':'r','delta':'fixture-secret thought'}})
+send({'method':'item/started','params':{'threadId':'thread-1','turnId':'turn_1','item':{'type':'commandExecution','id':'cmd_1','command':'echo fixture-secret'}}})
+send({'method':'item/completed','params':{'threadId':'thread-1','turnId':'turn_1','item':{'type':'commandExecution','id':'cmd_1','command':'echo fixture-secret','status':'completed','aggregatedOutput':'fixture-secret tool output','exitCode':0}}})
+send({'method':'item/agentMessage/delta','params':{'threadId':'thread-1','turnId':'turn_1','itemId':'a','delta':'fixture-secret answer'}})
+send({'method':'thread/tokenUsage/updated','params':{'threadId':'thread-1','turnId':'turn_1','tokenUsage':{'total':{'inputTokens':100,'outputTokens':50,'cachedInputTokens':10},'last':{'totalTokens':20000,'reasoningOutputTokens':7},'modelContextWindow':32000}}})
+send({'method':'turn/completed','params':{'threadId':'thread-1','turn':{'id':'turn_1','status':'completed','error':None}}})
 for line in sys.stdin: pass
 "#.replace("__LOG__", log.to_str().unwrap());
     let (setup, body) = script.split_once("turn=read();").unwrap();
@@ -3105,7 +3115,7 @@ for line in sys.stdin: pass
             let kind = event["type"].as_str().unwrap_or("");
             kinds.push(kind.to_owned());
             if kind == "turn_done" {
-                assert_eq!(event["data"]["is_error"], false);
+                assert_eq!(event["data"]["is_error"], false, "{event}");
                 assert_eq!(event["data"]["ctx_tokens"], 8000);
                 assert_eq!(event["data"]["ctx_percentage"], 40.0);
                 assert!(event["data"]["reasoning_output_tokens"].is_null());
