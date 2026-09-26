@@ -170,6 +170,13 @@ struct ModelPicker {
     catalog_pending: bool,
 }
 
+impl ModelPicker {
+    fn row_offset(&self) -> u16 { 3 + u16::from(self.catalog_pending) }
+    fn visible_rows(&self, height: u16) -> usize {
+        usize::from(height.saturating_sub(self.row_offset() + 1)).max(1)
+    }
+}
+
 #[derive(Debug)]
 struct AttachPicker {
     rows: Vec<crate::discovery::Session>,
@@ -6267,10 +6274,11 @@ impl App {
             let index = start + usize::from(row - menu.y - 3);
             if index < picker.levels.len() && picker.selected != index { picker.selected = index; return true; }
         } else if let Some(picker) = self.model_picker.as_mut() {
-            if row < menu.y + 3 { return false; }
-            let visible = usize::from(menu.height.saturating_sub(4)).max(1);
+            let offset = picker.row_offset();
+            if row < menu.y + offset { return false; }
+            let visible = picker.visible_rows(menu.height);
             let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
-            let index = start + usize::from(row - menu.y - 3);
+            let index = start + usize::from(row - menu.y - offset);
             if index < picker.models.len() && picker.selected != index { picker.selected = index; return true; }
         } else if let Some(picker) = self.attach_picker.as_mut() {
             if row < menu.y + 2 { return false; }
@@ -6762,10 +6770,11 @@ impl App {
                 return true;
             }
             let picker = self.model_picker.as_mut().unwrap();
-            let visible = usize::from(height.saturating_sub(4)).max(1);
+            let offset = picker.row_offset();
+            let visible = picker.visible_rows(height);
             let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
-            let row = start + usize::from(mouse.row.saturating_sub(y + 3));
-            if mouse.row >= y + 3 && row < picker.models.len() && !picker.loading {
+            let row = start + usize::from(mouse.row.saturating_sub(y + offset));
+            if mouse.row >= y + offset && row < picker.models.len() && !picker.loading {
                 self.pending_model_changes.push((picker.session_id.clone(), picker.models[row].clone()));
                 self.notice = format!("Requesting model · {}", picker.models[row]);
                 self.model_picker = None;
@@ -7205,7 +7214,7 @@ impl App {
             } else if !picker.loading && picker.models.is_empty() {
                 lines.push(Line::from(" No verified models available for this session"));
             }
-            let visible = usize::from(height.saturating_sub(4)).max(1);
+            let visible = picker.visible_rows(height);
             let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
             for (index, model) in picker.models.iter().enumerate().skip(start).take(visible) {
                 lines.push(Line::styled(format!(" {} {}", if index == picker.selected { '›' } else { ' ' }, model),
@@ -9699,6 +9708,29 @@ for line in sys.stdin:
             selected: 24, note: "Verified models".into(), loading: false, catalog_pending: false });
         let (menu, start) = hover_first_picker_row(&mut app, 3);
         click_picker_row(&mut app, menu, 3);
+        assert_eq!(app.pending_model_changes, vec![("session".into(), models[start].clone())]);
+    }
+
+    #[test]
+    fn pending_model_catalog_hover_and_click_match_visible_rows() {
+        let mut app = scrolled_picker_app();
+        let models: Vec<_> = (0..30).map(|i| format!("model-{i:02}")).collect();
+        app.model_picker = Some(ModelPicker { session_id: "session".into(), models: models.clone(),
+            selected: 24, note: "Verified models".into(), loading: false, catalog_pending: true });
+        let menu = app.active_chooser_rect().unwrap();
+        click_picker_row(&mut app, menu, 3);
+        assert!(app.pending_model_changes.is_empty(), "probe text is not a model");
+        assert!(app.model_picker.is_some());
+        let picker = app.model_picker.as_ref().unwrap();
+        let start = chooser_visible_start(&app.chooser_view_start, picker.selected, picker.visible_rows(menu.height));
+        let text = painted_at(&app, 100, 28);
+        assert!(text.lines().nth(usize::from(menu.y + 4)).unwrap().contains(&models[start]));
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Moved,
+            column: menu.x + 2, row: menu.y + 4, modifiers: KeyModifiers::NONE }));
+        assert_eq!(app.model_picker.as_ref().unwrap().selected, start);
+        let hovered = painted_at(&app, 100, 28);
+        assert!(hovered.lines().nth(usize::from(menu.y + 4)).unwrap().contains(&models[start]));
+        click_picker_row(&mut app, menu, 4);
         assert_eq!(app.pending_model_changes, vec![("session".into(), models[start].clone())]);
     }
 

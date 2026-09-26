@@ -11,9 +11,10 @@ the stable 2.0 release has not been cut.
   above the processing spinner, including recovered and expanded tool detail.
   Preserve fold identities and invalidate streamed rendering shortcuts that
   would otherwise drop the relocated tool section.
-
 - Make engine session forms mouse actionable, including Claude: click the
   model and prompt fields, then use the visible Start session action.
+- Keep model picker hover and click targets aligned with visible rows during
+  a background catalog refresh; status text no longer selects a model.
 
 ## 2.0.0-alpha.26 — 2026-09-26
 
