@@ -18,20 +18,46 @@ spec.loader.exec_module(sidecar)
 
 
 class IdentityTests(unittest.TestCase):
-    def test_session_engine_options_accepts_older_installed_engine(self):
+    def test_session_engine_options_requires_explicit_peer_ownership(self):
         class OlderEngine:
             def __init__(self, cwd, session_id=None, resume=None, model=None):
                 pass
 
         class CurrentEngine:
-            def __init__(self, cwd, detail_events=False):
+            def __init__(self, cwd, detail_events=False, peer_presence=True):
                 pass
 
         options = {"cwd": "/project", "session_id": "session"}
-        self.assertEqual(sidecar.session_engine_options(OlderEngine, options), options)
+        with self.assertRaises(sidecar.PeerPresenceUnsupported):
+            sidecar.session_engine_options(OlderEngine, options)
         self.assertEqual(sidecar.session_engine_options(CurrentEngine, options),
-                         {**options, "detail_events": True})
+                         {**options, "detail_events": True, "peer_presence": False})
         self.assertEqual(options, {"cwd": "/project", "session_id": "session"})
+
+    def test_outdated_engine_refuses_start_before_constructor_or_registry(self):
+        class OlderEngine:
+            def __init__(self, **options):
+                raise AssertionError("unsupported engine must not be constructed")
+
+        engine_module = types.ModuleType("doxa.engine")
+        engine_module.SessionEngine = OlderEngine
+        requests = iter([{"type": "request", "id": 1, "method": "start",
+                          "params": {"cwd": str(SIDECAR.parent), "session_id": "old"}}])
+        replies = []
+
+        async def read_frame(_reader, _limit):
+            try:
+                return json.dumps(next(requests)).encode() + b"\n"
+            except StopIteration:
+                return b""
+
+        with mock.patch.dict(sys.modules, {"doxa.engine": engine_module}), \
+             mock.patch.object(sidecar.asyncio, "to_thread", read_frame), \
+             mock.patch.object(sidecar, "emit", replies.append):
+            asyncio.run(sidecar.run())
+        reply = next(frame for frame in replies if frame["type"] == "reply")
+        self.assertFalse(reply["ok"])
+        self.assertEqual(reply["error"], "peer_presence_unsupported_update_python_and_restart")
 
     def test_compact_review_deadline_blocks_delayed_worker(self):
         class SlowEngine:
@@ -110,7 +136,7 @@ class IdentityTests(unittest.TestCase):
         from doxa import claude_catalog, providers
 
         class FakeEngine:
-            def __init__(self, **_options):
+            def __init__(self, peer_presence=True, **_options):
                 pass
 
             async def start(self):
@@ -183,7 +209,7 @@ class IdentityTests(unittest.TestCase):
         from doxa import claude_catalog, providers
 
         class FakeEngine:
-            def __init__(self, **_options):
+            def __init__(self, peer_presence=True, **_options):
                 pass
 
             async def start(self):
@@ -292,7 +318,7 @@ class IdentityTests(unittest.TestCase):
         class FakeEngine:
             instance = None
 
-            def __init__(self, **_options):
+            def __init__(self, peer_presence=True, **_options):
                 self.finalize_calls = 0
                 FakeEngine.instance = self
 
@@ -335,7 +361,7 @@ class IdentityTests(unittest.TestCase):
         class FakeEngine:
             instances = []
 
-            def __init__(self, **_options):
+            def __init__(self, peer_presence=True, **_options):
                 self.finalize_calls = 0
                 FakeEngine.instances.append(self)
 
@@ -383,7 +409,7 @@ class IdentityTests(unittest.TestCase):
         class FakeEngine:
             instance = None
 
-            def __init__(self, **_options):
+            def __init__(self, peer_presence=True, **_options):
                 self.finalize_calls = 0
                 FakeEngine.instance = self
 
@@ -419,7 +445,7 @@ class IdentityTests(unittest.TestCase):
         from doxa import claude_catalog
 
         class FakeEngine:
-            def __init__(self, **_options):
+            def __init__(self, peer_presence=True, **_options):
                 pass
 
             async def start(self):
@@ -486,7 +512,7 @@ class IdentityTests(unittest.TestCase):
             attempts = 0
             finalize_calls = 0
 
-            def __init__(self, **_options):
+            def __init__(self, peer_presence=True, **_options):
                 pass
 
             async def start(self):
@@ -532,7 +558,7 @@ class IdentityTests(unittest.TestCase):
         class FakeEngine:
             instance = None
 
-            def __init__(self, **_options):
+            def __init__(self, peer_presence=True, **_options):
                 self.finalize_calls = 0
                 self.turn_cancelled = False
                 FakeEngine.instance = self
@@ -581,7 +607,7 @@ class IdentityTests(unittest.TestCase):
         class FakeEngine:
             cancelled = False
 
-            def __init__(self, **_options):
+            def __init__(self, peer_presence=True, **_options):
                 pass
 
             async def start(self):
@@ -617,7 +643,7 @@ class IdentityTests(unittest.TestCase):
         class FakeEngine:
             instance = None
 
-            def __init__(self, **_options):
+            def __init__(self, peer_presence=True, **_options):
                 self.cancellations = 0
                 self.finalize_calls = 0
                 FakeEngine.instance = self
@@ -669,7 +695,7 @@ class IdentityTests(unittest.TestCase):
         class FakeEngine:
             instance = None
 
-            def __init__(self, **_options):
+            def __init__(self, peer_presence=True, **_options):
                 FakeEngine.instance = self
                 self.permission_mode = "default"
                 self._turn_running = False

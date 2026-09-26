@@ -1493,7 +1493,9 @@ class SessionEngine:
         parent_session_id: str | None = None,
         lore: "bool | None" = None,
         detail_events: bool = False,
+        peer_presence: bool = True,
     ) -> None:
+        self.peer_presence = peer_presence
         self.detail_events = detail_events
         self.cwd = cwd
         self.model = model
@@ -2882,6 +2884,7 @@ class SessionEngine:
             self.peer_host = peers_mod.PeerHost(
                 session_id=self.session_id,
                 cwd=self.cwd,
+                publish_presence=self.peer_presence,
                 on_message=self._on_peer_frame,
                 on_peer_joined=self._on_peer_joined,
                 on_peer_left=self._on_peer_left,

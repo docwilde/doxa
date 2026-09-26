@@ -59,14 +59,21 @@ def validate_identity(session_id: str | None, resume: str | None) -> tuple[str |
     return session_id, resume
 
 
-def session_engine_options(engine_type: type, options: dict) -> dict:
-    """Enable detailed events only when the installed Python engine supports them.
+class PeerPresenceUnsupported(RuntimeError):
+    """An old Python engine cannot safely share the native registry."""
 
-    A locally built Rust frontend can use an older, still compatible private
-    sidecar environment. Passing an unknown constructor option would otherwise
-    reject every Claude session before its daemon registers.
+
+def session_engine_options(engine_type: type, options: dict) -> dict:
+    """Require native registry ownership support before constructing the engine.
+
+    Detailed events remain optional. Older private Python environments lacking
+    explicit peer_presence support must be updated before a native session can
+    start; accepting arbitrary kwargs is not proof registry writes are disabled.
     """
     parameters = inspect.signature(engine_type).parameters
+    if "peer_presence" not in parameters:
+        raise PeerPresenceUnsupported()
+    options = {**options, "peer_presence": False}
     if "detail_events" in parameters or any(
         parameter.kind is inspect.Parameter.VAR_KEYWORD
         for parameter in parameters.values()
@@ -325,6 +332,9 @@ async def run() -> None:
                 break
             else:
                 raise ValueError("invalid state or method")
+        except PeerPresenceUnsupported:
+            emit({"type": "reply", "id": request_id, "ok": False,
+                  "error": "peer_presence_unsupported_update_python_and_restart"})
         except Exception:
             # SDK exception strings can contain sensitive request material.
             emit({"type": "reply", "id": request_id, "ok": False,

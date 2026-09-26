@@ -79,6 +79,9 @@ impl ClaudeHost {
             match bridge.recv(remaining.min(Duration::from_secs(1))) {
                 Ok(frame) if frame["type"] == "reply" && frame["id"] == id => {
                     if frame["ok"] != true {
+                        if frame["error"] == "peer_presence_unsupported_update_python_and_restart" {
+                            return Err("Claude Python engine is outdated; run doxa update, then restart DOXA".to_owned());
+                        }
                         return Err("Claude sidecar refused session start".to_owned());
                     }
                     break frame["result"].clone();
