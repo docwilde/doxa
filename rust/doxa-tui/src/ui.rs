@@ -1135,7 +1135,11 @@ impl RenderedTranscript {
                 let (tail_lines, tail_sections) = transcript_tools::render(tail, width, None, None);
                 if tail_sections.is_empty() && lines.len() > tail_lines.len() {
                     prefix_lines = lines.len() - tail_lines.len() - 1;
-                    turn_start = Some(start);
+                    // A deferred tool section at the end belongs to this
+                    // turn, even if its source precedes the final heading.
+                    if sections.iter().all(|section| section.line < prefix_lines) {
+                        turn_start = Some(start);
+                    }
                 }
             }
         }
@@ -11675,6 +11679,31 @@ for line in sys.stdin:
         app.apply_daemon_frame(&json!({"type":"event", "session_id":"s",
             "event":{"type":"text_delta", "data":{"text":"continued"}}}));
         assert!(app.sessions[0].transcript.ends_with("**Assistant:**\n\ncontinued"));
+    }
+
+    #[test]
+    fn live_tool_activity_stays_between_latest_response_and_spinner() {
+        let mut app = App::default();
+        app.handle(Event::Resize(100, 28));
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"s"}));
+        let event = |kind: &str, data: serde_json::Value| json!({"type":"event", "session_id":"s", "event":{"type":kind,"data":data}});
+        app.apply_daemon_frame(&event("turn_started", json!({"prompt":"inspect"})));
+        app.apply_daemon_frame(&event("text_delta", json!({"text":"First response"})));
+        app.apply_daemon_frame(&event("tool_call", json!({"name":"Read","input":{}})));
+        app.apply_daemon_frame(&event("text_delta", json!({"text":"Latest response"})));
+        for expanded in [false, true] {
+            if expanded { app.expanded_tool_sections.insert("s".into(), HashSet::from([0])); }
+            let frame = painted(&app);
+            assert!(frame.find("Latest response").unwrap() < frame.find("1 tool call").unwrap());
+            assert!(frame.find("1 tool call").unwrap() < frame.find("Processing").unwrap());
+        }
+        let source = "**You:**\n\nInspect\n\nTool: Read started\n\n**Assistant:**\n\nAnswer";
+        let mut cached = RenderedTranscript::render(0,"s", source, 80,None,None,0,&[]);
+        let appended = format!("{source} continued");
+        cached.update(&appended,80,None,None,0,&[]);
+        let (fresh, sections) = transcript_tools::render(&appended,80,None,None);
+        assert_eq!(cached.lines,fresh);
+        assert_eq!(cached.sections,sections);
     }
 
     #[test]
