@@ -12,6 +12,9 @@ the stable 2.0 release has not been cut.
   Preserve fold identities and invalidate streamed rendering shortcuts that
   would otherwise drop the relocated tool section.
 
+- Make engine session forms mouse actionable, including Claude: click the
+  model and prompt fields, then use the visible Start session action.
+
 ## 2.0.0-alpha.26 — 2026-09-26
 
 - Use the Codex app-server transport for new sessions, with official context

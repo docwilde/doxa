@@ -14,7 +14,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
 ROOT = Path(__file__).resolve().parents[1]
-SCENES = ("hero", "repo-picker", "tool-activity", "tool-expanded", "restored-tool", "processing", "reasoning", "commands", "help", "needs-input", "permissions", "effort", "history", "queue", "memory")
+SCENES = ("hero", "repo-picker", "claude-session", "tool-activity", "tool-expanded", "restored-tool", "processing", "reasoning", "commands", "help", "needs-input", "permissions", "effort", "history", "queue", "memory")
 FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
 CELL_W, CELL_H = 14, 26
 BOX_STROKES = {

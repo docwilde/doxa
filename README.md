@@ -87,7 +87,7 @@ in a new tab; the upper border can be dragged to show more entries.*
 
 ![Single Rust session pane showing collapsed tool calls below the assistant reply](assets/shots/rust-tool-activity.png)
 
-*Tool calls stay collapsed in the transcript until expanded.*
+*Tool calls stay collapsed below the latest reply until expanded.*
 
 ![Rust session pane with the tool activity section expanded to show call inputs and results](assets/shots/rust-tool-expanded.png)
 
@@ -99,7 +99,7 @@ in a new tab; the upper border can be dragged to show more entries.*
 
 ![Rust session pane showing separate prompt and answer turns with a processing spinner](assets/shots/rust-processing.png)
 
-*User messages have a warm highlight, agent replies keep the normal surface, and the pane shows processing while the next request runs.*
+*User messages have a warm highlight. The latest reply appears above its tool section, followed by the processing spinner.*
 
 ![Rust session pane with a live Reasoning/Thinking token count above the prompt](assets/shots/rust-reasoning.png)
 
@@ -112,6 +112,10 @@ in a new tab; the upper border can be dragged to show more entries.*
 ![Rust input request choices expanded above the prompt in a single session pane](assets/shots/rust-needs-input.png)
 
 *A daemon input request expands above the active prompt.*
+
+![Rust Claude session form with clickable model and prompt fields and a Start session action](assets/shots/rust-claude-session.png)
+
+*Choosing Claude opens a session form. Click its fields and Start session, or use the keyboard.*
 
 ![Rust Claude permission picker above the prompt in a single session pane](assets/shots/rust-permissions.png)
 
