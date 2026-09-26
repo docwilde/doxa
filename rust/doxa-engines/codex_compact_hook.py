@@ -44,6 +44,15 @@ def safe_read(path, limit):
 
 
 def messages_from_rollout(data, scrub):
+    def clean(value):
+        if isinstance(value, str):
+            return scrub(value)
+        if isinstance(value, list):
+            return [clean(item) for item in value]
+        if isinstance(value, dict):
+            return {key: clean(item) for key, item in value.items()}
+        return value
+
     rows = []
     for line in data.splitlines():
         if len(line) > MAX_LINE:
@@ -56,7 +65,48 @@ def messages_from_rollout(data, scrub):
         if row.get("type") != "response_item":
             continue
         item = row.get("payload")
-        if not isinstance(item, dict) or item.get("type") != "message":
+        if not isinstance(item, dict):
+            continue
+        kind = item.get("type")
+        if kind in ("function_call", "custom_tool_call", "local_shell_call", "tool_search_call", "web_search_call"):
+            # This identifier is used only in the review snapshot. Provider
+            # search records may omit an ID; they cannot authorize an action.
+            call_id = item.get("call_id") or item.get("id") or f"review-tool-{len(rows)}"
+            name = item.get("name") or kind
+            if not isinstance(call_id, str) or not isinstance(name, str):
+                raise ValueError("invalid provider tool identity")
+            arguments = item.get("arguments", item.get("input", item.get("action")))
+            if kind == "function_call":
+                if not isinstance(arguments, str):
+                    raise ValueError("invalid provider tool arguments")
+                try:
+                    arguments = json.loads(arguments)
+                except ValueError:
+                    arguments = {"raw": arguments}
+            rows.append({"type": "assistant", "message": {"role": "assistant", "content": [
+                {"type": "tool_use", "id": scrub(call_id), "name": scrub(name), "input": clean(arguments)}]}})
+            continue
+        if kind in ("function_call_output", "custom_tool_call_output", "tool_search_output"):
+            call_id = item.get("call_id") or item.get("id") or f"review-result-{len(rows)}"
+            if not isinstance(call_id, str):
+                raise ValueError("invalid provider tool result identity")
+            output = item.get("output", item.get("tools"))
+            if kind == "tool_search_output":
+                output = json.dumps(clean(output), ensure_ascii=False)
+            elif isinstance(output, list):
+                # Preserve text output without copying image/audio payloads or
+                # opaque provider metadata into a reviewer prompt.
+                output = "\n".join(block["text"] for block in output
+                    if isinstance(block, dict) and block.get("type") in ("input_text", "output_text", "text")
+                    and isinstance(block.get("text"), str))
+            if not isinstance(output, str):
+                if kind != "tool_search_output":
+                    raise ValueError("invalid provider tool result")
+                output = json.dumps(output, ensure_ascii=False)
+            rows.append({"type": "user", "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": scrub(call_id), "content": scrub(output)}]}})
+            continue
+        if kind != "message":
             continue
         role = item.get("role")
         if role not in ("user", "assistant"):

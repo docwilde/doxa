@@ -95,3 +95,24 @@ def test_worker_timeout_kills_and_reaps_process_group(monkeypatch):
     assert not hook.run_worker(Path("fixture"), Path("fixture"), timeout=0.01)
     assert calls == [(123, hook.signal.SIGKILL)]
     assert process.waits == 2
+
+
+def test_review_keeps_scrubbed_tool_commands_and_results_without_binary_payloads():
+    items = [
+        {"type":"message", "role":"user", "content":[{"type":"input_text", "text":"request"}]},
+        {"type":"function_call", "call_id":"call-1", "name":"exec_command", "arguments":'{"cmd":"SECRET command"}'},
+        {"type":"function_call_output", "call_id":"call-1", "output":"SECRET result"},
+        {"type":"custom_tool_call", "call_id":"call-2", "name":"apply_patch", "input":"SECRET patch"},
+        {"type":"custom_tool_call_output", "call_id":"call-2", "output":[
+            {"type":"input_text", "text":"SECRET detail"}, {"type":"input_image", "image_url":"BINARY"}]},
+        {"type":"reasoning", "encrypted_content":"ENCRYPTED"},
+    ]
+    data = b"\n".join(json.dumps({"type":"response_item", "payload":item}).encode() for item in items)
+    rows = hook.messages_from_rollout(data, lambda text: text.replace("SECRET", "[redacted]"))
+    assert rows[1]["message"]["content"][0] == {
+        "type":"tool_use", "id":"call-1", "name":"exec_command", "input":{"cmd":"[redacted] command"}}
+    assert rows[2]["message"]["content"][0]["content"] == "[redacted] result"
+    assert rows[3]["message"]["content"][0]["input"] == "[redacted] patch"
+    assert rows[4]["message"]["content"][0]["content"] == "[redacted] detail"
+    assert not any(value in json.dumps(rows) for value in ("SECRET", "BINARY", "ENCRYPTED"))
+    assert len(rows) == 5
