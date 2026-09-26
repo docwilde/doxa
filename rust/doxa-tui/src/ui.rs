@@ -5285,9 +5285,12 @@ impl App {
             .map(|(_, _, _, section)| *section).collect();
         if visible.is_empty() { return false; }
         let current = self.selected_tool_sections.get(&id).copied();
-        let position = current.and_then(|value| visible.iter().position(|index| *index == value))
-            .unwrap_or(if forward { 0 } else { visible.len() - 1 });
-        let next = if forward { (position + 1).min(visible.len() - 1) } else { position.saturating_sub(1) };
+        let next = match current.and_then(|value| visible.iter().position(|index| *index == value)) {
+            Some(position) if forward => (position + 1).min(visible.len() - 1),
+            Some(position) => position.saturating_sub(1),
+            None if forward => 0,
+            None => visible.len() - 1,
+        };
         self.selected_tool_sections.insert(id, visible[next]);
         true
     }
@@ -7084,10 +7087,10 @@ impl App {
         if width < 36 || height < 8 { return; }
         let modal = Rect::new(area.x + (area.width - width) / 2,
             area.y + (area.height - height) / 2, width, height);
-        let lines = vec![Line::from(" Stop and finalize this session?"),
-            Line::from(""), Line::from(format!(" Session ID: {id}")), Line::from(""),
-            Line::from(" The daemon will finish its shutdown work. This tab and draft remain visible."),
-            Line::from(""), Line::from(" Press Y to stop · Esc or N to cancel")];
+        let lines = vec![Line::from(clipped_title(&format!(" Session: {}", safe_label(id)),
+                usize::from(width.saturating_sub(2))).0),
+            Line::from(" Daemon shutdown runs; tab and draft stay."),
+            Line::from(""), Line::from(" Y stop · Esc/N cancel")];
         frame.render_widget(Clear, modal);
         frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false })
             .block(Block::default().title(" Stop active session ").borders(Borders::ALL)
@@ -8055,11 +8058,13 @@ fn open_link(url: &str) -> io::Result<()> {
     let opener = "open";
     #[cfg(not(target_os = "macos"))]
     let opener = "xdg-open";
-    std::process::Command::new(opener).arg(url)
+    let mut child = std::process::Command::new(opener).arg(url)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .spawn().map(|_| ())
+        .spawn()?;
+    std::thread::spawn(move || { let _ = child.wait(); });
+    Ok(())
 }
 
 pub fn run() -> io::Result<()> {
@@ -9543,6 +9548,34 @@ for line in sys.stdin:
     fn click_picker_row(app: &mut App, menu: Rect, offset: u16) {
         app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
             column: menu.x + 2, row: menu.y + offset, modifiers: KeyModifiers::NONE }));
+    }
+
+    #[test]
+    fn minimum_stop_confirmation_shows_confirmation_and_cancel_keys() {
+        let mut app = App::default();
+        app.stop_confirmation = Some("a-long-session-identifier-that-can-wrap".into());
+        let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+        terminal.draw(|frame| app.draw_stop_confirmation(frame, Rect::new(0, 0, 40, 12))).unwrap();
+        let buffer = terminal.backend().buffer();
+        let text = (0..12).map(|y| (0..40).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>().join("\n");
+        assert!(text.contains("Y stop · Esc/N cancel"));
+        assert!(text.contains("draft stay."));
+    }
+
+    #[test]
+    fn initial_tool_section_navigation_selects_visible_edge_without_skipping() {
+        for forward in [false, true] {
+            let mut app = scrolled_picker_app();
+            app.sessions.push(Session { id: "session".into(), title: "Session".into(),
+                collection: String::new(), transcript: "Tool: Read started".into(), status: "Ready".into() });
+            *app.visible_tool_sections.borrow_mut() = (0..3).map(|index|
+                (Rect::new(0, index as u16, 20, 1), 0, "session".into(), index)).collect();
+            assert!(app.select_tool_section(forward));
+            assert_eq!(app.selected_tool_sections["session"], if forward { 0 } else { 2 });
+            assert!(app.select_tool_section(forward));
+            assert_eq!(app.selected_tool_sections["session"], 1);
+        }
     }
 
     #[test]
