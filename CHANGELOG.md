@@ -5,6 +5,13 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.27 — 2026-09-26
+
+- Keep each turn's expandable tool activity below its latest response and
+  above the processing spinner, including recovered and expanded tool detail.
+  Preserve fold identities and invalidate streamed rendering shortcuts that
+  would otherwise drop the relocated tool section.
+
 ## 2.0.0-alpha.26 — 2026-09-26
 
 - Use the Codex app-server transport for new sessions, with official context
