@@ -110,6 +110,28 @@ pub fn auth_action_cancellable(name: &str, action: &str, mut progress: impl FnMu
     Ok(format!("{} {action} completed; {}", provider.label, state_text(provider_state(provider))))
 }
 
+fn secret_auth_parameter(url: &str) -> bool {
+    // OAuth URLs commonly percent-encode redirect_uri and scope values.
+    // Decode parameter names only, preventing encoded secret keys from
+    // bypassing the output filter while retaining usable public login URLs.
+    for query in url.split(['?', '#']).skip(1) {
+        for pair in query.split('&') {
+            let key = pair.split('=').next().unwrap_or_default();
+            let mut decoded = Vec::new(); let mut bytes = key.bytes();
+            while let Some(byte) = bytes.next() {
+                if byte == b'%' {
+                    let Some(high) = bytes.next().and_then(|b| (b as char).to_digit(16)) else { return true };
+                    let Some(low) = bytes.next().and_then(|b| (b as char).to_digit(16)) else { return true };
+                    decoded.push((high * 16 + low) as u8);
+                } else { decoded.push(byte); }
+            }
+            let Ok(key) = String::from_utf8(decoded) else { return true };
+            if ["access_token", "refresh_token", "id_token", "api_key", "code"].contains(&key.to_ascii_lowercase().as_str()) { return true; }
+        }
+    }
+    false
+}
+
 fn public_auth_progress(line: &str) -> Option<String> {
     for word in line.split_whitespace() {
         let url = word.trim_end_matches(['.', ',', ')']);
@@ -117,7 +139,7 @@ fn public_auth_progress(line: &str) -> Option<String> {
         let host = rest.split(['/', '?', '#']).next()?;
         if !["auth.openai.com", "chatgpt.com", "claude.ai", "console.anthropic.com", "platform.openai.com"].contains(&host) { continue; }
         let lower = url.to_ascii_lowercase();
-        if url.chars().any(char::is_control) || url.contains('%') || lower.contains("token") || lower.contains("api_key") || lower.contains("code=") { continue; }
+        if url.chars().any(char::is_control) || lower.contains("token") || lower.contains("api_key") || lower.contains("code=") || secret_auth_parameter(url) { continue; }
         return Some(format!("Open in your browser: {url}"));
     }
     let lower = line.to_ascii_lowercase();
@@ -458,6 +480,7 @@ mod tests {
         assert_eq!(public_auth_progress("https://auth.openai.com/login?access_token=SECRET"), None);
         assert_eq!(public_auth_progress("https://auth.openai.com/login?%63ode=SECRET"), None);
         assert_eq!(public_auth_progress("https://auth.openai.com/login?state=public"), Some("Open in your browser: https://auth.openai.com/login?state=public".into()));
+        assert_eq!(public_auth_progress("https://claude.ai/login?redirect_uri=http%3A%2F%2Flocalhost&scope=user%3Ainference"), Some("Open in your browser: https://claude.ai/login?redirect_uri=http%3A%2F%2Flocalhost&scope=user%3Ainference".into()));
         assert_eq!(public_auth_progress("Device code: ABCD-EFGH"), Some("Device code: ABCD-EFGH".into()));
     }
 
