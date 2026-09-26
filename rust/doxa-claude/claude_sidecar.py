@@ -139,7 +139,7 @@ async def run() -> None:
     emit({"type": "hello", "protocol": PROTOCOL, "version": VERSION,
           "capabilities": ["start", "prompt", "answer", "interrupt", "finalize",
                            "set_model", "set_permission_mode", "list_models",
-                           "reviewed_compact_v1"]})
+                           "reviewed_compact_v1", "context_detail"]})
     engine = None
     turn = None
     catalog_task = None
@@ -286,6 +286,12 @@ async def run() -> None:
                 applied = await engine.answer_needs_input(params["id"], answer)
                 emit({"type": "reply", "id": request_id, "ok": True,
                       "result": {"applied": applied}})
+            elif method == "context_detail" and engine is not None:
+                detail = await asyncio.wait_for(engine.context_usage(), timeout=5.0)
+                if not isinstance(detail, dict):
+                    raise ValueError("context unavailable")
+                emit({"type": "reply", "id": request_id, "ok": True,
+                      "result": {**detail, "source": "Claude official context_usage"}})
             elif method == "list_models" and engine is not None:
                 result = (catalog_task.result() if catalog_task.done() else
                           {"models": [], "loading": True,

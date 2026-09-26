@@ -238,6 +238,11 @@ impl Host for ClaudeHost {
 
     fn call(&self, method: &str, params: &Value) -> Result<Value, String> {
         match method {
+            "context_detail" => {
+                let result = self.rpc("context_detail", json!({}))?;
+                if !result.is_object() { return Err("Claude context detail is unavailable".into()); }
+                Ok(result)
+            }
             "list_models" => {
                 if !self.model_control { return Err("Claude sidecar does not support set_model".into()); }
                 self.rpc("list_models", json!({}))

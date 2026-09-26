@@ -131,6 +131,12 @@ impl AppServerDriver {
             return Err(AppServerError::Protocol("resume returned a different thread ID"));
         }
         driver.thread_id = Some(id.to_owned());
+        // The account catalog default may differ from this thread's profile.
+        // Only the thread/start or thread/resume response identifies its model.
+        if let Some(model) = result["model"].as_str().filter(|value|
+            !value.is_empty() && value.len() <= 128 && !value.chars().any(char::is_control)) {
+            driver.options.model = Some(model.to_owned());
+        }
         Ok(())
     }
 
@@ -171,6 +177,8 @@ impl AppServerDriver {
     }
 
     pub fn thread_id(&self) -> &str { self.thread_id.as_deref().expect("thread start succeeded") }
+
+    pub fn model(&self) -> Option<&str> { self.options.model.as_deref() }
 
     pub async fn shutdown(&mut self) {
         self.kill_group();

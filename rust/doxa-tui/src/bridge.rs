@@ -33,6 +33,7 @@ pub enum WorkerCommand {
     SetPermissionMode(String, String),
     Branch(String, Option<String>),
     QueueList(String),
+    ContextDetail(String),
     QueueCancel(String, String),
     Status(String),
     Stop(String),
@@ -251,7 +252,7 @@ pub fn connect_sessions(sessions: &[Session]) -> io::Result<MultiBridge> {
             let id = match &command {
                 WorkerCommand::Prompt(id, _) | WorkerCommand::Answer(id, _, _) | WorkerCommand::Peers(id)
                 | WorkerCommand::Models(id) | WorkerCommand::SetModel(id, _) | WorkerCommand::SetEffort(id, _)
-                | WorkerCommand::SetPermissionMode(id, _) | WorkerCommand::QueueList(id) | WorkerCommand::Status(id)
+                | WorkerCommand::SetPermissionMode(id, _) | WorkerCommand::QueueList(id) | WorkerCommand::ContextDetail(id) | WorkerCommand::Status(id)
                 | WorkerCommand::Branch(id, _)
                 | WorkerCommand::QueueCancel(id, _) => id,
                 WorkerCommand::Message(id, _, _) | WorkerCommand::Stop(id)
@@ -299,6 +300,8 @@ fn rejected(command: WorkerCommand, message: &str) -> Value {
             "ok":false, "uncertain":false, "error":message,
             "draft":format!("/msg {target} {text}")}),
         WorkerCommand::Models(id) => json!({"type":"models_reply", "session_id":id,
+            "ok":false, "error":message}),
+        WorkerCommand::ContextDetail(id) => json!({"type":"context_detail", "session_id":id,
             "ok":false, "error":message}),
         WorkerCommand::SetModel(id, _) => json!({"type":"set_model_reply", "session_id":id,
             "ok":false, "error":message}),
@@ -529,6 +532,21 @@ fn worker_loop(
                             "ok":false, "error":error.to_string()}),
                     };
                     if frames.send(reply).is_err() { return; }
+                }
+                Ok(WorkerCommand::ContextDetail(id)) => {
+                    let result = if id == session_id { client.call("context_detail", Map::new()) }
+                        else { Err(TransportError::Malformed("context target is not attached")) };
+                    cursor.store(client.cursor, Ordering::Relaxed);
+                    let frame = match &result {
+                        Ok(reply) if reply["ok"] == true => json!({"type":"context_detail",
+                            "session_id":id,"ok":true,"detail":reply["result"]}),
+                        Ok(_) => json!({"type":"context_detail","session_id":id,
+                            "ok":false,"error":"Context detail is unavailable for this session"}),
+                        Err(error) => json!({"type":"context_detail","session_id":id,
+                            "ok":false,"error":error.to_string()}),
+                    };
+                    if frames.send(frame).is_err() { return; }
+                    if matches!(result, Err(TransportError::Closed)) { return; }
                 }
                 Ok(WorkerCommand::QueueList(id)) => {
                     let result = if id == session_id { client.call("queue", Map::new()) }
