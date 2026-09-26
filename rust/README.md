@@ -226,7 +226,7 @@ the JSONL file retains the full history. Older daemons without snapshot
 metadata fall back to their 512-event replay ring. A turn still running at
 attach can have text that was streamed but not yet persisted, so its earlier
 in-flight deltas may be absent. `Ctrl+T` opens bounded tool activity cards.
-The binary version is `2.0.0-alpha.27`;
+The binary version is `2.0.0-alpha.28`;
 this is an alpha release.
 
 In the transcript, user messages have a highlighted body and a left rule;

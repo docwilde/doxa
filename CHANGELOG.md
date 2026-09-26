@@ -5,6 +5,15 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.28 — 2026-09-26
+
+- Isolate optional Codex transcript indexing in its own bounded LORE client so
+  a stalled or failed index request cannot block prompt scrubbing or disable
+  later turns. Mandatory scrubbing continues to refuse unsafe output on failure.
+- Recover incomplete same-version sidecar environments on installer retry,
+  preserving the installed launcher and sidecar pointer until the repaired
+  environment has synced locked dependencies and passed its import check.
+
 ## 2.0.0-alpha.27 — 2026-09-26
 
 - Generate canonical UUIDv4 session IDs accepted by Claude CLI; normalize older
