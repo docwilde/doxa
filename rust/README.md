@@ -57,6 +57,20 @@ The daemon executable is located beside `doxa-rs`, then on `PATH`; an absolute
 `linger_secs` config value. `--sandbox` sets the native Codex sandbox. Use
 `--engine fixture` only for local integration checks.
 
+New Codex sessions use the app-server transport. The reasoning count streams
+live as an estimate. Codex's last-inference reasoning usage is not promoted to
+an exact turn total when a turn can include multiple model inferences.
+Reasoning content and assistant messages are buffered within size limits and
+scrubbed as complete text before display, preventing split credentials from
+bypassing LORE. App-server context usage follows Codex TUI's 12,000 token
+reserve for both used tokens and the effective window. DOXA records the
+transport with the thread ID, so existing `codex exec --json` sessions retain
+their original recovery path. `DOXA_CODEX_APPSERVER=0` selects the legacy
+transport for a new session. Interactive approval and unsupported tool requests
+are explicitly refused with an error; app-server approval dialogs are not yet
+available. A refused or interrupted turn retains its incomplete-turn recovery
+guard rather than silently starting a replacement thread.
+
 Native sessions started in a Git checkout now get a linked worktree under
 `$DOXA_HOME/worktrees/<repo>-<session-prefix>` on a `doxa/<session-prefix>`
 branch. A sidecar in `worktrees/.meta` records the original repository and
@@ -205,7 +219,7 @@ the JSONL file retains the full history. Older daemons without snapshot
 metadata fall back to their 512-event replay ring. A turn still running at
 attach can have text that was streamed but not yet persisted, so its earlier
 in-flight deltas may be absent. `Ctrl+T` opens bounded tool activity cards.
-The binary version is `2.0.0-alpha.25`;
+The binary version is `2.0.0-alpha.26`;
 this is an alpha release.
 
 In the transcript, user messages have a highlighted body and a left rule;
@@ -225,7 +239,7 @@ count. Its text becomes available only after the completed stream is scrubbed;
 Codex reasoning summaries fold into the same row. Select the row
 and press `Enter` or click to expand it. The processing spinner appears below
 the transcript while a turn is running.
-The Codex CLI JSON stream does not provide live reasoning deltas, so its
+Legacy Codex CLI sessions do not provide live reasoning deltas, so their
 reasoning count becomes available only when the provider reports completed
 turn usage.
 Typing `/` at the start of the prompt shows matching DOXA commands above the

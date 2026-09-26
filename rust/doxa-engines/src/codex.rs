@@ -16,6 +16,9 @@ const RESULT_SUMMARY_CHARS: usize = 280;
 const TOOL_DETAIL_CHUNK_BYTES: usize = 8 * 1024;
 const MAX_TOOL_DETAIL_BYTES: usize = 256 * 1024;
 const BAD_SAMPLE_CHARS: usize = 120;
+const MAX_TRACKED_TOOLS: usize = 1024;
+const MAX_TRACKED_TOOL_BYTES: usize = 256 * 1024;
+const MAX_TOOL_ID_BYTES: usize = 256;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum ParseError {
@@ -37,6 +40,7 @@ pub struct CodexJsonlNormalizer {
     pending: Vec<u8>,
     thread_id: Option<String>,
     started: HashMap<String, Instant>,
+    started_bytes: usize,
     usage: TokenUsage,
     usage_observed: bool,
     bad_frames: usize,
@@ -49,7 +53,7 @@ impl CodexJsonlNormalizer {
     pub fn new(scrub: impl Fn(&str) -> String + Send + Sync + 'static) -> Self {
         Self {
             scrub: Box::new(scrub), pending: Vec::new(), thread_id: None,
-            started: HashMap::new(), usage: TokenUsage::default(), usage_observed: false,
+            started: HashMap::new(), started_bytes: 0, usage: TokenUsage::default(), usage_observed: false,
             bad_frames: 0, bad_sample: String::new(), closed: false, num_turns: 0,
         }
     }
@@ -57,6 +61,7 @@ impl CodexJsonlNormalizer {
     pub fn begin_turn(&mut self) {
         self.pending.clear();
         self.started.clear();
+        self.started_bytes = 0;
         self.bad_frames = 0;
         self.bad_sample.clear();
         self.closed = false;
@@ -176,15 +181,21 @@ impl CodexJsonlNormalizer {
         // Provider-supplied names and IDs reach chips and transcripts too.
         // Keep raw IDs only for internal duration correlation.
         let display_name = (self.scrub)(&name);
-        let display_id = (self.scrub)(&id);
+        let display_id = (self.scrub)(&truncate(&id, MAX_TOOL_ID_BYTES));
         if event_kind == "item.started" {
-            self.started.insert(id.clone(), Instant::now());
+            if id.len() <= MAX_TOOL_ID_BYTES && (self.started.contains_key(&id)
+                || (self.started.len() < MAX_TRACKED_TOOLS
+                    && self.started_bytes.saturating_add(id.len()) <= MAX_TRACKED_TOOL_BYTES)) {
+                if self.started.insert(id.clone(), Instant::now()).is_none() { self.started_bytes += id.len(); }
+            }
             return vec![EngineEvent::new("tool_call", json!({"id":display_id,"name":display_name,"input":self.tool_input(&item_kind,item)}))];
         }
         let (detail, is_error) = self.tool_result(&item_kind, item);
         let summary = truncate(&detail, RESULT_SUMMARY_CHARS);
         let duration_ms = self.started.get(&id).map(|start| start.elapsed().as_millis() as u64);
-        if event_kind == "item.completed" { self.started.remove(&id); }
+        if event_kind == "item.completed" && self.started.remove(&id).is_some() {
+            self.started_bytes = self.started_bytes.saturating_sub(id.len());
+        }
         let mut events = vec![EngineEvent::new("tool_result", json!({"id":display_id,"name":display_name,"result_summary":summary,"is_error":is_error,"duration_ms":duration_ms}))];
         let limit = detail.len().min(MAX_TOOL_DETAIL_BYTES);
         let mut displayed = 0;
@@ -291,3 +302,26 @@ fn turn_done_data(duration_ms: Option<u64>, num_turns: u64, is_error: bool) -> V
 
 // Used by the future process adapter to convert a wall-clock Duration.
 pub fn duration_ms(duration: Duration) -> u64 { duration.as_millis().min(u128::from(u64::MAX)) as u64 }
+
+#[cfg(test)]
+mod tracking_bounds_tests {
+    use super::*;
+
+    #[test]
+    fn uncompleted_tools_cannot_grow_duration_tracking_without_bound() {
+        let mut normalizer = CodexJsonlNormalizer::new(str::to_owned);
+        normalizer.begin_turn();
+        for index in 0..3000 {
+            let item = json!({"id":format!("{}_{index}", "x".repeat(240)),"type":"command_execution","command":"true"});
+            normalizer.map_item("item.started", Some(&item));
+        }
+        assert!(normalizer.started.len() <= MAX_TRACKED_TOOLS);
+        assert!(normalizer.started_bytes <= MAX_TRACKED_TOOL_BYTES);
+        let oversized = json!({"id":"x".repeat(MAX_TOOL_ID_BYTES + 1),"type":"command_execution","command":"true"});
+        normalizer.map_item("item.started", Some(&oversized));
+        assert!(!normalizer.started.contains_key(oversized["id"].as_str().unwrap()));
+        normalizer.begin_turn();
+        assert!(normalizer.started.is_empty());
+        assert_eq!(normalizer.started_bytes, 0);
+    }
+}

@@ -62,6 +62,23 @@ impl Process {
     fn start_codex(runtime: &Path, codex: &Path, python: &Path) -> Self {
         Self::start_codex_with_inbound(runtime, codex, python, false)
     }
+    fn start_codex_appserver(runtime: &Path, codex: &Path, python: &Path, resume: bool) -> Self {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"));
+        command.args([
+            "--runtime-dir", runtime.to_str().unwrap(), "--cwd", runtime.to_str().unwrap(),
+            "--session-id", "codex-session", "--linger", "10", "--engine", "codex",
+            "--codex-bin", codex.to_str().unwrap(), "--lore-python", python.to_str().unwrap(),
+            "--resume", if resume { "true" } else { "false" },
+        ]).stdout(Stdio::null()).stderr(Stdio::piped())
+            .env("DOXA_HOME", runtime.join("home"))
+            .env_remove("DOXA_CODEX_APPSERVER");
+        if resume { command.env("DOXA_CODEX_APPSERVER", "0"); }
+        let child = command.spawn().unwrap();
+        let registry = runtime.join("registry/codex-session.json");
+        wait_until(|| registry.exists());
+        let entry: Value = serde_json::from_slice(&fs::read(&registry).unwrap()).unwrap();
+        Self { child, registry, socket: PathBuf::from(entry["daemon_socket"].as_str().unwrap()) }
+    }
     fn start_codex_with_inbound(runtime: &Path, codex: &Path, python: &Path, inbound: bool) -> Self {
         let mut command = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"));
         command
@@ -83,7 +100,8 @@ impl Process {
             ])
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
-            .env("DOXA_HOME", runtime.join("home"));
+            .env("DOXA_HOME", runtime.join("home"))
+            .env("DOXA_CODEX_APPSERVER", "0");
         if inbound { command.env("DOXA_PEER_INBOUND_TURNS", "yes"); }
         let child = command.spawn().unwrap();
         let registry = runtime.join("registry/codex-session.json");
@@ -2913,4 +2931,120 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}
     send(&mut socket, json!({"type":"call","id":6,"method":"stop","params":{}}));
     assert_eq!(receive(&mut reader)["ok"], true);
     wait_until(|| process.exited());
+}
+
+#[test]
+fn codex_appserver_default_streams_persists_and_resumes() {
+    let cache = std::env::var_os("TMPDIR").map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::env::var_os("XDG_CACHE_HOME").map(std::path::PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".cache")))
+            .unwrap_or_else(|| std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"))
+            .join("doxa-tests"));
+    std::fs::create_dir_all(&cache).unwrap();
+    let dir = tempfile::tempdir_in(cache).unwrap();
+    let codex = dir.path().join("codex-appserver-fixture");
+    let python = dir.path().join("lore-fixture");
+    let log = dir.path().join("methods.log");
+    fake_scrubber(&python, false);
+    let script = r#"#!/usr/bin/env python3
+import json, sys
+
+def read(): return json.loads(sys.stdin.readline())
+def send(v): print(json.dumps(v),flush=True)
+log = open('__LOG__','a')
+init=read(); assert init['method']=='initialize'
+send({'id':init['id'],'result':{'userAgent':'fake'}})
+assert read()['method']=='initialized'
+thread=read(); log.write(thread['method']+'\n'); log.flush()
+assert thread['method'] in ('thread/start','thread/resume')
+send({'id':thread['id'],'result':{'thread':{'id':'thread_1'}}})
+turn=read(); assert turn['method']=='turn/start'
+assert 'fixture-secret' in turn['params']['input'][0]['text']
+send({'id':turn['id'],'result':{'turn':{'id':'turn_1'}}})
+send({'method':'item/reasoning/textDelta','params':{'threadId':'thread_1','turnId':'turn_1','itemId':'r','delta':'fixture-secret thought'}})
+send({'method':'item/started','params':{'threadId':'thread_1','turnId':'turn_1','item':{'type':'commandExecution','id':'cmd_1','command':'echo fixture-secret'}}})
+send({'method':'item/completed','params':{'threadId':'thread_1','turnId':'turn_1','item':{'type':'commandExecution','id':'cmd_1','command':'echo fixture-secret','status':'completed','aggregatedOutput':'fixture-secret tool output','exitCode':0}}})
+send({'method':'item/agentMessage/delta','params':{'threadId':'thread_1','turnId':'turn_1','itemId':'a','delta':'fixture-secret answer'}})
+send({'method':'thread/tokenUsage/updated','params':{'threadId':'thread_1','turnId':'turn_1','tokenUsage':{'total':{'inputTokens':100,'outputTokens':50,'cachedInputTokens':10},'last':{'totalTokens':20000,'reasoningOutputTokens':7},'modelContextWindow':32000}}})
+send({'method':'turn/completed','params':{'threadId':'thread_1','turn':{'id':'turn_1','status':'completed','error':None}}})
+for line in sys.stdin: pass
+"#.replace("__LOG__", log.to_str().unwrap());
+    let (setup, body) = script.split_once("turn=read();").unwrap();
+    let body = format!("turn=json.loads(line);{}", body.split("for line in sys.stdin: pass").next().unwrap());
+    let script = format!("{setup}for line in sys.stdin:\n{}", body.lines().map(|line| format!("    {line}\n")).collect::<String>());
+    executable(&codex, &script);
+    for resume in [false, true] {
+        let mut process = Process::start_codex_appserver(dir.path(), &codex, &python, resume);
+        let (mut reader, mut socket) = process.connect();
+        receive(&mut reader);
+        send(&mut socket, json!({"type":"attach","cursor":null}));
+        for prompt_id in [1, 2] {
+        send(&mut socket, json!({"type":"prompt","id":prompt_id,"text":"fixture-secret prompt"}));
+        assert_eq!(receive(&mut reader)["ok"], true);
+        let mut kinds = Vec::new();
+        loop {
+            let frame = receive(&mut reader);
+            assert!(!frame.to_string().contains("fixture-secret"));
+            let event = &frame["event"];
+            let kind = event["type"].as_str().unwrap_or("");
+            kinds.push(kind.to_owned());
+            if kind == "turn_done" {
+                assert_eq!(event["data"]["is_error"], false);
+                assert_eq!(event["data"]["ctx_tokens"], 8000);
+                assert_eq!(event["data"]["ctx_percentage"], 40.0);
+                assert!(event["data"]["reasoning_output_tokens"].is_null());
+                assert_eq!(event["data"]["reasoning_count_is_estimate"], true);
+                break;
+            }
+        }
+        assert!(kinds.contains(&"reasoning_delta".to_owned()));
+        assert!(kinds.contains(&"tool_call".to_owned()));
+        assert!(kinds.contains(&"tool_result_detail".to_owned()));
+        assert!(kinds.contains(&"text_delta".to_owned()));
+        }
+        send(&mut socket, json!({"type":"call","id":2,"method":"stop","params":{}}));
+        assert_eq!(receive(&mut reader)["ok"], true);
+        wait_until(|| process.exited());
+    }
+    assert_eq!(fs::read_to_string(log).unwrap(), "thread/start\nthread/resume\n");
+    let thread: Value = serde_json::from_slice(&fs::read(dir.path().join("project/codex-session.codex.json")).unwrap()).unwrap();
+    assert_eq!(thread["transport"], "app-server");
+    assert_eq!(thread["turn_incomplete"], false);
+    let transcript = fs::read_to_string(dir.path().join("project/codex-session.jsonl")).unwrap();
+    assert!(!transcript.contains("fixture-secret"));
+    assert!(transcript.contains("[redacted] answer"));
+}
+
+#[test]
+fn stopping_codex_during_unanswered_appserver_initialization_is_prompt() {
+    let cache = std::env::var_os("TMPDIR").map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::env::var_os("XDG_CACHE_HOME").map(std::path::PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".cache")))
+            .unwrap_or_else(|| std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"))
+            .join("doxa-tests"));
+    std::fs::create_dir_all(&cache).unwrap();
+    let dir = tempfile::tempdir_in(cache).unwrap();
+    let codex = dir.path().join("codex-never-initializes");
+    let python = dir.path().join("lore-fixture");
+    let marker = dir.path().join("initialization-received");
+    fake_scrubber(&python, false);
+    executable(&codex, &format!("#!/usr/bin/env python3\nimport sys,time\nsys.stdin.readline()\nopen({:?},'w').write('ready')\ntime.sleep(30)\n", marker.to_str().unwrap()));
+    let mut process = Process::start_codex_appserver(dir.path(), &codex, &python, false);
+    let (mut reader, mut socket) = process.connect();
+    receive(&mut reader);
+    send(&mut socket, json!({"type":"attach","cursor":null}));
+    send(&mut socket, json!({"type":"prompt","id":1,"text":"not submitted"}));
+    assert_eq!(receive(&mut reader)["ok"], true);
+    wait_until(|| marker.exists());
+    let started = Instant::now();
+    send(&mut socket, json!({"type":"call","id":2,"method":"stop","params":{}}));
+    loop {
+        let frame = receive(&mut reader);
+        if frame["type"] == "reply" && frame["id"] == 2 {
+            assert_eq!(frame["ok"], true);
+            break;
+        }
+    }
+    wait_until(|| process.exited());
+    assert!(started.elapsed() < Duration::from_secs(2), "stop waited for app-server RPC timeout");
 }

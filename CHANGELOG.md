@@ -5,6 +5,19 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.26 — 2026-09-26
+
+- Use the Codex app-server transport for new sessions, with official context
+  telemetry and live estimated reasoning counts. Saved CLI sessions retain
+  their transport; `DOXA_CODEX_APPSERVER=0` selects CLI for new sessions.
+- Scrub complete assistant messages and complete reasoning before display;
+  discard truncated reasoning content rather than expose a partial secret.
+- Bound provider frames, notifications, tool tracking, and turn buffers. Apply
+  cancellation and write deadlines, and terminate the original process group
+  before reaping its leader so tool descendants cannot survive cleanup.
+- Preserve incomplete-turn recovery guards and persisted expandable tool
+  detail. Unsupported interactive app-server approvals are explicitly refused.
+
 ## 2.0.0-alpha.25 — 2026-09-26
 
 - Report Codex context from the current owned rollout's last token count and

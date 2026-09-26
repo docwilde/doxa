@@ -25,7 +25,7 @@ enum Block<'a> {
     Prose(&'a str),
     Heading(&'a str),
     Tools(Vec<&'a str>),
-    Reasoning { text: String, tokens: u64, streaming: bool },
+    Reasoning { text: String, tokens: u64, streaming: bool, exact: bool },
 }
 
 fn reasoning_block(paragraph: &str) -> Option<Block<'_>> {
@@ -34,6 +34,7 @@ fn reasoning_block(paragraph: &str) -> Option<Block<'_>> {
         text: data.get("text")?.as_str()?.to_owned(),
         tokens: data.get("tokens")?.as_u64()?,
         streaming: data.get("streaming")?.as_bool()?,
+        exact: data.get("exact").and_then(|value| value.as_bool()).unwrap_or(false),
     })
 }
 
@@ -163,14 +164,15 @@ fn render_turn(blocks: &mut Vec<Block<'_>>, lines: &mut Vec<Line<'static>>,
                     }
                 }
             }
-            Block::Reasoning { text, tokens, streaming } => {
+            Block::Reasoning { text, tokens, streaming, exact } => {
                 flush_prose(&mut prose, lines, speaker);
                 speaker = Some(Speaker::Assistant);
                 let index = sections.len();
                 sections.push(Section { index, line: lines.len() });
                 let open = expanded.is_some_and(|set| set.contains(&index));
                 let marker = if open { "▾" } else { "▸" };
-                let label = format!(" {marker} Reasoning/Thinking · ~{tokens} tokens{}",
+                let estimate = if exact { "" } else { "~" };
+                let label = format!(" {marker} Reasoning/Thinking · {estimate}{tokens} tokens{}",
                     if streaming { " · receiving" } else { "" });
                 let style = if selected == Some(index) {
                     Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)

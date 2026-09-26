@@ -584,6 +584,7 @@ fn append_turn_heading(session: &mut Session, heading: &str) -> bool {
 struct ReasoningStream {
     text: String,
     tokens: u64,
+    exact: bool,
     visible: bool,
     streaming: bool,
 }
@@ -600,7 +601,7 @@ impl std::fmt::Debug for ReasoningStream {
 
 fn set_reasoning_marker(session: &mut Session, stream: &ReasoningStream) {
     let marker = format!("{}{}", transcript_tools::REASONING_PREFIX,
-        serde_json::json!({"text":stream.text,"tokens":stream.tokens,"streaming":stream.streaming}));
+        serde_json::json!({"text":stream.text,"tokens":stream.tokens,"streaming":stream.streaming,"exact":stream.exact}));
     if stream.visible {
         if let Some(start) = session.transcript.rfind(transcript_tools::REASONING_PREFIX) {
             let end = session.transcript[start..].find("\n\n")
@@ -1857,6 +1858,10 @@ impl App {
                         self.streaming_text.remove(&id);
                         if let Some(stream) = self.reasoning_streams.get_mut(&id) {
                             stream.streaming = false;
+                            if let Some(tokens) = data["reasoning_output_tokens"].as_u64() {
+                                stream.tokens = tokens;
+                                stream.exact = true;
+                            }
                             if let Some(session) = self.sessions.iter_mut().find(|session| session.id == id) {
                                 set_reasoning_marker(session, stream);
                             }
@@ -11789,11 +11794,12 @@ for line in sys.stdin:
         assert!(live.iter().any(|line| line.to_string().contains("~37 tokens · receiving")));
         app.apply_daemon_frame(&event("reasoning_delta", json!({"text":"scrubbed thought","approx_tokens":42,"final":true})));
         app.apply_daemon_frame(&event("text_delta", json!({"text":"Answer"})));
-        app.apply_daemon_frame(&event("turn_done", json!({"is_error":false})));
+        app.apply_daemon_frame(&event("turn_done", json!({"is_error":false,"reasoning_output_tokens":7})));
         let transcript = &app.sessions[0].transcript;
         let (collapsed, _) = transcript_tools::render(transcript, 80, None, None);
         assert!(!collapsed.iter().any(|line| line.to_string().contains("scrubbed thought")));
-        assert!(collapsed.iter().any(|line| line.to_string().contains("~42 tokens")));
+        assert!(collapsed.iter().any(|line| line.to_string().contains("Thinking · 7 tokens")));
+        assert!(!collapsed.iter().any(|line| line.to_string().contains("~7 tokens")));
         let (expanded, _) = transcript_tools::render(transcript, 80, Some(&HashSet::from([0])), None);
         assert!(expanded.iter().any(|line| line.to_string().contains("scrubbed thought")));
         assert!(expanded.iter().any(|line| line.to_string().contains("Answer")));
