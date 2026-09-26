@@ -6401,6 +6401,10 @@ impl App {
                 if menu.contains(ratatui::layout::Position::new(mouse.column, mouse.row)) {
                     match mouse.kind {
                         MouseEventKind::Down(MouseButton::Left) => {
+                            if mouse.column <= menu.x || mouse.column >= menu.right().saturating_sub(1)
+                                || mouse.row <= menu.y || mouse.row >= menu.bottom().saturating_sub(1) {
+                                return true;
+                            }
                             let visible = usize::from(menu.height.saturating_sub(2)).max(1);
                             let start = chooser_visible_start(&self.chooser_view_start, self.slash_selected, visible);
                             let position = start + usize::from(mouse.row.saturating_sub(menu.y + 1));
@@ -6645,6 +6649,9 @@ impl App {
                 self.effort_picker = None;
                 self.permission_picker = None;
                 self.permission_confirm_dont_ask = false;
+                return true;
+            }
+            if mouse.column == x || mouse.column == x + width - 1 || mouse.row == y + height - 1 {
                 return true;
             }
             if self.engine_picker {
@@ -8241,6 +8248,7 @@ fn dispatch_attaches(app: &mut App, sender: &SyncSender<crate::bridge::WorkerCom
                 return false;
             }
             Err(TrySendError::Disconnected(_)) => {
+                app.attaching_ids.clear();
                 app.notice = "Session attach unavailable".into();
                 return true;
             }
@@ -8316,6 +8324,10 @@ fn save_layout_if_changed(
 ) -> bool {
     let layout = crate::ui_state::LayoutSignature::capture(app);
     if layout == *saved_layout {
+        if !app.has_offline_open_tabs() && app.notice == "Layout save skipped · archived tabs are read-only" {
+            app.notice.clear();
+            return true;
+        }
         return false;
     }
     if app.groups.iter().any(|group| group.tabs.iter().any(|id| app.offline_ids.contains(id))) {
@@ -8412,6 +8424,11 @@ fn dispatch_model_controls(app: &mut App, sender: &SyncSender<crate::bridge::Wor
                 break;
             }
             Err(TrySendError::Disconnected(_)) => {
+                if let Some(picker) = app.model_picker.as_mut() {
+                    picker.loading = false;
+                    picker.catalog_pending = false;
+                    picker.note = "Daemon unavailable for model catalog · R retry".into();
+                }
                 app.notice = "Daemon unavailable for model catalog".into();
                 return true;
             }
@@ -9481,6 +9498,38 @@ for line in sys.stdin:
     fn click_picker_row(app: &mut App, menu: Rect, offset: u16) {
         app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
             column: menu.x + 2, row: menu.y + offset, modifiers: KeyModifiers::NONE }));
+    }
+
+    #[test]
+    fn chooser_bottom_border_never_activates_hidden_choice() {
+        for kind in ["engine", "model", "effort", "permission", "slash"] {
+            let mut app = scrolled_picker_app();
+            match kind {
+                "engine" => app.engine_picker = true,
+                "model" => app.model_picker = Some(ModelPicker { session_id: "session".into(),
+                    models: vec!["one".into(), "two".into(), "three".into()], selected: 0,
+                    note: String::new(), loading: false, catalog_pending: false }),
+                "effort" => app.effort_picker = Some(EffortPicker { session_id: "session".into(),
+                    engine: "deepseek".into(), model: "deepseek-flash".into(),
+                    levels: vec!["none".into(), "low".into(), "high".into()], selected: 0 }),
+                "permission" => app.permission_picker = Some(("session".into(), 0)),
+                _ => { app.focus = Focus::Prompt; app.input = "/".into(); }
+            }
+            app.active_chooser_rect();
+            app.chooser_height_override.set(Some(5));
+            let menu = app.active_chooser_rect().unwrap();
+            app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+                column: menu.x + 2, row: menu.bottom() - 1, modifiers: KeyModifiers::NONE }));
+            assert!(app.pending_model_changes.is_empty(), "{kind}");
+            assert!(app.pending_effort_changes.is_empty(), "{kind}");
+            assert!(app.pending_permission_changes.is_empty(), "{kind}");
+            assert!(app.new_session.is_none(), "{kind}");
+            if kind == "engine" { assert!(app.engine_picker); }
+            if kind == "model" { assert!(app.model_picker.is_some()); }
+            if kind == "effort" { assert_eq!(app.effort_picker.as_ref().unwrap().selected, 0); }
+            if kind == "permission" { assert_eq!(app.permission_picker.as_ref().unwrap().1, 0); }
+            if kind == "slash" { assert_eq!(app.input, "/"); }
+        }
     }
 
     #[test]
@@ -11294,6 +11343,42 @@ for line in sys.stdin:
         let written: serde_json::Value =
             serde_json::from_slice(&std::fs::read(store.path()).unwrap()).unwrap();
         assert_eq!(written["rust_ui"]["rail_width"], 33);
+    }
+
+    #[test]
+    fn disconnected_attach_clears_marker_and_model_catalog_can_retry() {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        drop(receiver);
+        let mut app = App::default();
+        app.attach_selected("session");
+        assert!(dispatch_attaches(&mut app, &sender));
+        assert!(app.attaching_ids.is_empty());
+        app.attach_selected("session");
+        assert_eq!(app.pending_attaches.len(), 1);
+        app.model_picker = Some(ModelPicker { session_id: "session".into(), models: Vec::new(),
+            selected: 0, note: "Loading".into(), loading: true, catalog_pending: false });
+        app.pending_model_queries.push("session".into());
+        assert!(dispatch_model_controls(&mut app, &sender));
+        assert!(!app.model_picker.as_ref().unwrap().loading);
+        assert!(app.model_picker_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)));
+        assert_eq!(app.pending_model_queries, ["session"]);
+    }
+
+    #[test]
+    fn restoring_saved_layout_clears_obsolete_archived_tab_notice() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = crate::ui_state::UiStateStore::new(dir.path(), "/repo", "machine").unwrap();
+        let mut app = App::default();
+        app.groups[0].tabs.push("live".into());
+        let mut saved = crate::ui_state::LayoutSignature::capture(&app);
+        let complete = Mutex::new(true);
+        app.offline_ids.insert("archive".into());
+        app.groups[0].tabs.push("archive".into());
+        assert!(save_layout_if_changed(&mut app, &mut store, &complete, &mut saved));
+        assert!(app.notice.contains("archived tabs"));
+        app.groups[0].tabs.pop();
+        assert!(save_layout_if_changed(&mut app, &mut store, &complete, &mut saved));
+        assert!(app.notice.is_empty());
     }
 
     #[test]
