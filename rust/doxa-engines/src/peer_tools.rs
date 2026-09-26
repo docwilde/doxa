@@ -1,5 +1,6 @@
 //! Narrow provider tool definitions for same-project DOXA messaging.
 use serde_json::{json, Value};
+pub type Handler = std::sync::Arc<dyn Fn(&str, &Value) -> Result<Value, String> + Send + Sync>;
 pub const LIST: &str = "mcp__doxa__peer_list";
 pub const SEND: &str = "mcp__doxa__peer_send";
 pub const HISTORY: &str = "mcp__doxa__peer_history";
@@ -17,7 +18,8 @@ pub fn rpc(name: &str, arguments: &Value) -> Result<&'static str, &'static str> 
     match name {
         LIST if object.is_empty() => Ok("peers"),
         HISTORY if object.is_empty() => Ok("peer_history"),
-        SEND if object.len() == 2 && object["target"].as_str().is_some() && object["text"].as_str().is_some() => Ok("msg"),
+        SEND if object.len() == 2 && object.get("target").and_then(Value::as_str).is_some()
+            && object.get("text").and_then(Value::as_str).is_some() => Ok("msg"),
         _ => Err("Unsupported peer tool or arguments"),
     }
 }
@@ -31,6 +33,7 @@ mod tests {
         assert_eq!(rpc(SEND, &json!({"target":"owned","text":"message"})), Ok("msg"));
         assert!(rpc("stop", &json!({})).is_err());
         assert!(rpc(SEND, &json!({"target":"owned","text":"message","approve":true})).is_err());
+        assert!(rpc(SEND, &json!({"arbitrary":"x","missing":"y"})).is_err());
         assert!(rpc(HISTORY, &json!({"session":"another"})).is_err());
     }
 }

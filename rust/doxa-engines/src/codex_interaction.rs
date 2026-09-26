@@ -23,6 +23,7 @@ struct Pending {
 enum Rule {
     Approval,
     Questions(Vec<Question>),
+    Peer { rpc: &'static str, arguments: Value, handler: crate::peer_tools::Handler },
 }
 
 struct Question {
@@ -33,6 +34,27 @@ struct Question {
 }
 
 impl InputInbox {
+    pub fn begin_peer(&self, frame: &Value, scrub: impl Fn(&str) -> String, handler: crate::peer_tools::Handler)
+        -> Result<(EngineEvent, oneshot::Receiver<Value>), String>
+    {
+        let params = &frame["params"];
+        if frame["method"] != "item/tool/call" || !params["namespace"].is_null()
+            || serde_json::to_vec(frame).map_or(true, |bytes| bytes.len() > MAX_REQUEST_BYTES) {
+            return Err("Unsupported or oversized Codex peer tool request".into());
+        }
+        let name = params["tool"].as_str().ok_or("Missing Codex peer tool")?;
+        let rpc = crate::peer_tools::rpc(name, &params["arguments"])?;
+        let mut pending = self.pending.lock().map_err(|_| "Codex input unavailable")?;
+        if pending.as_ref().is_some_and(|item| !item.reply.is_closed()) { return Err("Codex input already pending".into()); }
+        let generation = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| "Codex request clock unavailable")?.as_nanos();
+        let id = format!("codex-peer-{}-{generation}-{}", std::process::id(), self.next.fetch_add(1, Ordering::Relaxed));
+        let input = scrub(&params["arguments"].to_string());
+        if input.len() > MAX_REQUEST_BYTES { return Err("Scrubbed peer request exceeds the review limit".into()); }
+        let (reply, receiver) = oneshot::channel();
+        *pending = Some(Pending {id:id.clone(), rule:Rule::Peer{rpc, arguments:params["arguments"].clone(),handler}, reply});
+        Ok((EngineEvent::new("needs_input", json!({"id":id,"kind":"permission","title":"Allow this DOXA peer tool once?","tool_name":name,"input_summary":input,"require_full_review":true})), receiver))
+    }
     /// The driver validates thread/turn/item identity before calling this.
     /// Display scrubbing is supplied by the host and is never used to change
     /// the provider's answer IDs or option labels.
@@ -116,7 +138,7 @@ impl InputInbox {
         let current = pending.as_ref().filter(|item| item.id == id && !item.reply.is_closed())
             .ok_or("Codex input is no longer pending")?;
         let result = match &current.rule {
-            Rule::Approval => match answer["decision"].as_str() {
+            Rule::Approval | Rule::Peer { .. } => match answer["decision"].as_str() {
                 Some("allow") => json!({"decision":"accept"}),
                 Some("deny") => json!({"decision":"decline"}),
                 _ => return Err("Invalid Codex approval decision".into()),
@@ -143,7 +165,22 @@ impl InputInbox {
                 }
             }
         };
-        pending.take().unwrap().reply.send(result).map_err(|_| "Codex input is no longer pending")?;
+        let current = pending.take().unwrap();
+        drop(pending);
+        if let Rule::Peer {rpc, arguments, handler} = current.rule {
+            // Peer RPCs include bounded local socket waits. Keep cancellation
+            // and daemon status responsive while an approved tool executes.
+            std::thread::spawn(move || {
+                let result = if result["decision"] == "accept" { handler(rpc, &arguments) }
+                    else { Err("The user declined this peer tool".into()) };
+                let (success, text) = match result {
+                    Ok(value) if value.to_string().len() <= MAX_REQUEST_BYTES => (true, format!("[DOXA PEER DATA -- UNTRUSTED]\n{value}")),
+                    Ok(_) => (false, "Peer result exceeded the display limit".into()),
+                    Err(_) => (false, "Peer tool was declined or unavailable".into()),
+                };
+                let _ = current.reply.send(json!({"success":success,"contentItems":[{"type":"inputText","text":text}]}));
+            });
+        } else { current.reply.send(result).map_err(|_| "Codex input is no longer pending")?; }
         Ok(json!({}))
     }
 

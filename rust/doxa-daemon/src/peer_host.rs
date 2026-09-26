@@ -32,6 +32,16 @@ pub struct PeerHost {
 }
 
 impl PeerHost {
+    /// Weak ownership keeps the provider callback from retaining its wrapper
+    /// (and daemon) after shutdown. Expose only peer RPCs, never host controls.
+    pub fn connect_provider_tools(self: &Arc<Self>) -> bool {
+        let weak = Arc::downgrade(self);
+        self.inner.set_peer_tool_handler(Arc::new(move |name, params| {
+            if !matches!(name, "peers" | "msg" | "peer_history") { return Err("Unsupported provider peer method".into()); }
+            let peer = weak.upgrade().ok_or("Peer session is closed")?;
+            peer.call(name, params)
+        }))
+    }
     pub fn new(
         inner: Arc<dyn Host>,
         runtime: PathBuf,
@@ -376,6 +386,21 @@ impl Host for PeerHost {
         match method {
             "peers" => self.peers(),
             "msg" => self.msg(params),
+            "peer_history" => self.with_lore(|lore| {
+                let scope = lore.scrub(&self.scope).map_err(|_| "LORE scrub unavailable")?;
+                let failure = std::sync::atomic::AtomicBool::new(false);
+                let lore = Mutex::new(lore);
+                let messages = self.ledger.history(&self.session_id, &scope, &|text: &str| {
+                    // Scrubber's trait is infallible; poison the whole result
+                    // when any required string could not be scrubbed.
+                    match lore.lock().unwrap().scrub(text) {
+                        Ok(text) => text,
+                        Err(_) => { failure.store(true, std::sync::atomic::Ordering::Relaxed); String::new() }
+                    }
+                }).map_err(|_| "Peer history unavailable")?;
+                if failure.load(std::sync::atomic::Ordering::Relaxed) { return Err("LORE scrub unavailable".into()); }
+                Ok(json!({"messages":messages,"bounded_tail":true,"untrusted_peer_data":true}))
+            }),
             "branch" => {
                 let status = doxa_worktrees::branch_status(&self.cwd)
                     .ok_or_else(|| "branch: no supported Git checkout here".to_owned())?;

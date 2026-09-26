@@ -51,6 +51,7 @@ pub struct AppServerDriver {
     options: AppServerOptions,
     effort: Option<String>,
     interactive: bool,
+    peer_tools: bool,
     review_items: Vec<Value>,
     scrub: Box<dyn Fn(&str) -> String + Send + Sync>,
     child: Child,
@@ -93,8 +94,17 @@ impl AppServerDriver {
         options: AppServerOptions,
         scrub: impl Fn(&str) -> String + Send + Sync + 'static,
     ) -> Result<Self, AppServerError> {
+        Self::spawn_interactive_with_tools(options, scrub, false).await
+    }
+
+    pub async fn spawn_interactive_with_tools(
+        options: AppServerOptions,
+        scrub: impl Fn(&str) -> String + Send + Sync + 'static,
+        peer_tools: bool,
+    ) -> Result<Self, AppServerError> {
         let mut driver = Self::initialize(options, scrub).await?;
         driver.interactive = true;
+        driver.peer_tools = peer_tools;
         driver.start_thread().await?;
         Ok(driver)
     }
@@ -119,7 +129,7 @@ impl AppServerDriver {
         let scrub = std::sync::Arc::new(scrub);
         let tool_scrub = scrub.clone();
         let mut driver = Self {
-            options, effort: None, interactive: false, review_items: Vec::new(), scrub: Box::new(move |text| scrub(text)), child, process_group, stdin, stdout, next_id: 0,
+            options, effort: None, interactive: false, peer_tools: false, review_items: Vec::new(), scrub: Box::new(move |text| scrub(text)), child, process_group, stdin, stdout, next_id: 0,
             thread_id: None, turn_id: None, reasoning_bytes: 0, reasoning_chars: 0,
             reasoning_buffer: String::new(), reasoning_truncated: false,
             assistant_buffers: Vec::new(), assistant_bytes: 0, assistant_message_emitted: false, usage: None, effective_model: None,
@@ -138,7 +148,9 @@ impl AppServerDriver {
         let result = if let Some(id) = driver.options.resume_thread.clone() {
             driver.request("thread/resume", json!({"threadId":id,"cwd":driver.options.cwd,"model":driver.options.model,"approvalPolicy":approval,"sandbox":sandbox_name(driver.options.sandbox),"excludeTurns":true})).await?
         } else {
-            driver.request("thread/start", json!({"cwd":driver.options.cwd,"model":driver.options.model,"approvalPolicy":approval,"sandbox":sandbox_name(driver.options.sandbox)})).await?
+            let mut params = json!({"cwd":driver.options.cwd,"model":driver.options.model,"approvalPolicy":approval,"sandbox":sandbox_name(driver.options.sandbox)});
+            if driver.peer_tools { params["dynamicTools"] = json!(crate::peer_tools::definitions()); }
+            driver.request("thread/start", params).await?
         };
         let id = result.pointer("/thread/id").and_then(Value::as_str)
             .filter(|id| valid_thread_id(id))
@@ -274,6 +286,11 @@ impl AppServerDriver {
                     let pending = request(&frame).map_err(|message| AppServerError::Server((self.scrub)(&message)))?;
                     if let Some((event, receiver)) = pending {
                         let request_id = event.data["id"].clone();
+                        let is_peer = frame["method"] == "item/tool/call";
+                        if is_peer {
+                            let input = (self.scrub)(&frame["params"]["arguments"].to_string());
+                            emit(EngineEvent::new("tool_call", json!({"id":frame["params"]["callId"],"name":frame["params"]["tool"],"input":input})));
+                        }
                         emit(event);
                         let answer = tokio::select! {
                             biased;
@@ -283,6 +300,15 @@ impl AppServerDriver {
                         };
                         emit(EngineEvent::new("needs_input_resolved", json!({"id":request_id})));
                         let answer = answer?;
+                        if is_peer {
+                            emit(EngineEvent::new("tool_result", json!({"id":frame["params"]["callId"],"is_error":answer["success"] != true})));
+                            for content in answer["contentItems"].as_array().into_iter().flatten() {
+                                if let Some(text) = content["text"].as_str() {
+                                    let clean = (self.scrub)(text);
+                                    emit(EngineEvent::new("tool_result_detail", json!({"id":frame["params"]["callId"],"text":clean})));
+                                }
+                            }
+                        }
                         self.send_bounded(json!({"id":frame["id"],"result":answer}), Some(cancel), deadline).await?;
                     } else {
                         self.deny_server_request(&frame, Some(cancel), deadline).await?;

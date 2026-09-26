@@ -48,6 +48,8 @@ pub struct CodexHost {
     runtime: Mutex<tokio::runtime::Runtime>,
     active: Mutex<Option<CancellationToken>>,
     input: doxa_engines::codex_interaction::InputInbox,
+    peer_tools: Mutex<Option<doxa_runtime::PeerToolHandler>>,
+    peer_tools_allowed: bool,
     scrub_failed: Arc<AtomicBool>,
     persistence_failed: AtomicBool,
     lore: Arc<Mutex<LoreClient>>,
@@ -117,6 +119,7 @@ impl CodexHost {
             .map_err(|_| "Codex thread record unreadable; session was not started".to_owned())?;
         let mut rollout_path = None;
         let mut saved_transport = None;
+        let mut saved_peer_tools = false;
         let previous = if let Some(value) = thread_record {
             if value.get("turn_incomplete") != Some(&Value::Bool(false)) {
                 return Err("Codex transcript is incomplete; refusing to resume the thread".to_owned());
@@ -150,6 +153,11 @@ impl CodexHost {
                 .ok_or("existing session has no valid Codex thread ID")?;
             rollout_path = value["rollout_path"].as_str().map(PathBuf::from)
                 .filter(|path| codex_context::size(path, thread).is_some());
+            saved_peer_tools = match value.get("peer_tools") {
+                Some(Value::Bool(enabled)) => *enabled,
+                None => false,
+                _ => return Err("Codex peer tool metadata is invalid".into()),
+            };
             saved_transport = match value.get("transport") {
                 None => Some("exec"),
                 Some(Value::String(transport)) if transport == "exec" => Some("exec"),
@@ -170,6 +178,7 @@ impl CodexHost {
         let transport = saved_transport.unwrap_or_else(|| {
             if std::env::var("DOXA_CODEX_APPSERVER").as_deref() == Ok("0") { "exec" } else { "app-server" }
         });
+        let peer_tools_allowed = transport == "app-server" && (options.resume_thread.is_none() || saved_peer_tools);
         let selection = (options.model.clone(), options.effort.clone());
         let catalog_options = AppServerOptions { executable: options.executable.clone(), cwd: options.cwd.clone(),
             model: None, sandbox: options.sandbox, resume_thread: None, turn_timeout: options.turn_timeout };
@@ -237,6 +246,7 @@ impl CodexHost {
             runtime: Mutex::new(runtime),
             active: Mutex::new(None),
             input: Default::default(),
+            peer_tools: Mutex::new(None), peer_tools_allowed,
             scrub_failed,
             persistence_failed: AtomicBool::new(false),
             lore,
@@ -288,6 +298,7 @@ impl CodexHost {
         fields.insert("effort".into(), json!(selection.1));
         drop(selection);
         fields.insert("transport".into(), json!(self.transport));
+        fields.insert("peer_tools".into(), json!(self.peer_tools_allowed && self.peer_tools.lock().unwrap().is_some()));
         fields.insert("cwd".into(), json!(self.cwd));
         fields.insert("recorded".into(), json!(crate::iso_now()));
         if let Some(path) = rollout.as_ref() {
@@ -392,6 +403,12 @@ mod tests {
 }
 
 impl Host for CodexHost {
+    fn set_peer_tool_handler(&self, handler: doxa_runtime::PeerToolHandler) -> bool {
+        if !self.peer_tools_allowed || self.active.lock().unwrap().is_some() { return false; }
+        let mut tools = self.peer_tools.lock().unwrap();
+        if tools.is_some() { return false; }
+        *tools = Some(handler); true
+    }
     fn can_set_model(&self) -> bool { true }
     fn model_change_requires_idle(&self) -> bool { true }
     fn initial_model(&self) -> Option<String> { self.selection.lock().unwrap().0.clone() }
@@ -535,7 +552,7 @@ impl Host for CodexHost {
                                 tokio::select! {
                                     biased;
                                     _ = token.cancelled() => Err(AppServerError::Cancelled),
-                                    result = AppServerDriver::spawn_interactive(options.clone(), scrub) => result,
+                                    result = AppServerDriver::spawn_interactive_with_tools(options.clone(), scrub, self.peer_tools.lock().unwrap().is_some()) => result,
                                 }
                             }) {
                                 Ok(app) => {
@@ -560,16 +577,23 @@ impl Host for CodexHost {
                             active.as_mut().expect("spawn succeeded").set_selection(selected.0, selected.1);
                             let outcome = runtime.block_on(active.as_mut().expect("spawn succeeded").run_turn_interactive(
                                 &provider_prompt, &token, &mut handle_event,
-                                |frame| self.input.begin(frame, |text| {
+                                |frame| {
+                                    let scrub = |text: &str| {
                                     self.lore.lock().unwrap().scrub(text).unwrap_or_else(|_| {
                                         self.scrub_failed.store(true, Ordering::Release);
                                         SCRUB_FAILURE.to_owned()
                                     })
-                                }).and_then(|pending| {
+                                    };
+                                    let pending = if frame["method"] == "item/tool/call" {
+                                        let handler = self.peer_tools.lock().unwrap().clone().ok_or("Codex peer tools unavailable")?;
+                                        self.input.begin_peer(frame, scrub, handler)
+                                    } else { self.input.begin(frame, scrub) };
+                                    pending.and_then(|pending| {
                                     if self.scrub_failed.load(Ordering::Acquire) {
                                         self.input.clear(); Err("LORE scrub failed; Codex input withheld".into())
                                     } else { Ok(Some(pending)) }
-                                }),
+                                    })
+                                },
                             )).map_err(|error| match error {
                                 AppServerError::Server(message) => message,
                                 AppServerError::Cancelled => "Codex turn cancelled".to_owned(),
