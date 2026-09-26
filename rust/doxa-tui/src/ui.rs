@@ -1,6 +1,7 @@
 //! Terminal shell for the Rust frontend. Daemon adapters can feed [`App::apply_update`].
 mod operations_menu;
-mod fleet_menu;
+pub(crate) mod fleet_menu;
+mod fleet_process;
 pub(crate) mod panes;
 mod actions;
 
@@ -77,7 +78,7 @@ const COMMANDS: &[CommandHelp] = &[
     CommandHelp { name: "/sidebar", form: "/sidebar [on|off|wider|narrower|width N]", summary: "Session rail", support: "local" },
     CommandHelp { name: "/collection", form: "/collection [action] [name]", summary: "Organize sessions", support: "local · list/new/rename/delete/add/remove" },
     CommandHelp { name: "/msg", form: "/msg <peer> <text>", summary: "Message a peer", support: "local · same project" },
-    CommandHelp { name: "/fleet", form: "/fleet [runs|status RUN|attach RUN INDEX]", summary: "Fleet manifests and slots", support: "local · verified slot attachment" },
+    CommandHelp { name: "/fleet", form: "/fleet [runs|status RUN|attach RUN INDEX|start OPTIONS|resume RUN]", summary: "Fleet manifests and slots", support: "local · verified slot attachment" },
     CommandHelp { name: "/mesh", form: "/mesh", summary: "Peer map", support: "local · arguments unavailable" },
     CommandHelp { name: "/img", form: "/img [path]", summary: "Image support", support: "unavailable in Rust" },
     CommandHelp { name: "/login", form: "/login", summary: "Provider login", support: "local · selectable operations menu" },
@@ -876,6 +877,7 @@ pub enum Split {
 enum DragTarget {
     Rail,
     Pane(Split),
+    NestedPane(panes::Divider),
     Chooser,
 }
 
@@ -1244,6 +1246,10 @@ pub struct App {
     memory_manager: Option<crate::memory_menu::Manager>,
     operations_menu: Option<operations_menu::Menu>,
     fleet_menu: Option<fleet_menu::Menu>,
+    pub(crate) fleet_views: Vec<fleet_menu::SavedView>,
+    fleet_review: Option<fleet_process::Prepared>,
+    fleet_controller: Option<fleet_process::Controller>,
+    fleet_quit_pending: bool,
     memory_menu_pending: Option<(String, String, Receiver<Result<Vec<String>, &'static str>>)>,
     repo_cache: HashMap<String, (Option<doxa_worktrees::RepoStatus>, Instant)>,
     repo_pending: Option<(String, PathBuf, u64, Receiver<Option<doxa_worktrees::RepoStatus>>)>,
@@ -1403,6 +1409,10 @@ impl Default for App {
             memory_manager: None,
             operations_menu: None,
             fleet_menu: None,
+            fleet_views: Vec::new(),
+            fleet_review: None,
+            fleet_controller: None,
+            fleet_quit_pending: false,
             repo_cache: HashMap::new(),
             repo_pending: None,
             repo_epoch: HashMap::new(),
@@ -2470,8 +2480,10 @@ impl App {
                 self.link_hover = None;
                 self.visible_links.borrow_mut().clear();
                 *self.rendered_chip_hits.borrow_mut() = None;
+                if let Some(review)=&mut self.fleet_review{review.seen.set(0);review.complete.set(false);review.armed=false;if let Some(info)=&mut self.chip_info{info.scroll=0;}}
                 if self.chip_info.is_some() && self.active_chooser_rect().is_none() {
                     self.chip_info = None;
+                    self.fleet_review = None;
                 }
                 if self.history_modal && self.active_chooser_rect().is_none() {
                     self.history_modal = false;
@@ -2784,6 +2796,11 @@ impl App {
     fn key(&mut self, key: KeyEvent) -> bool {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
+        if ctrl && matches!(key.code,KeyCode::Char('q'|'c')) && self.fleet_controller.is_some(){
+            self.fleet_controller.as_mut().unwrap().cancel();
+            self.fleet_quit_pending |= key.code==KeyCode::Char('q');
+            self.notice="Cancelling fleet controller; waiting for slot teardown and process reaping".into();return true;
+        }
         if key.code == KeyCode::Char('q') && ctrl {
             if !self.diff_reject_queue.is_empty() || self.diff_reject_active.is_some()
                 || self.diff_reject_feedback.is_some() {
@@ -2793,6 +2810,7 @@ impl App {
             self.should_quit = true;
             return true;
         }
+        if self.fleet_review.is_some(){return self.fleet_review_key(key);}
         if key.code == KeyCode::Char('w') && ctrl {
             self.detach_active_tab();
             return true;
@@ -3322,7 +3340,7 @@ impl App {
             "/movepane" => {
                 let target = match args.split_whitespace().collect::<Vec<_>>().as_slice() {
                     [] => (self.active_group + 1) % if self.pane_tree.is_some() { self.pane_count() } else { 2 },
-                    [number] if number.parse::<usize>().is_ok_and(|n| n > 0 && n <= self.pane_count()) => number.parse::<usize>().unwrap() - 1,
+                    [number] if number.parse::<usize>().is_ok_and(|n| n > 0 && n <= self.groups.len()) => number.parse::<usize>().unwrap() - 1,
                     _ => { self.notice = "Usage: /movepane [number]".into(); return true; }
                 };
                 if self.move_active_tab(target) {
@@ -3339,22 +3357,7 @@ impl App {
             }
             "/settings" => { self.notice = "Usage: /settings · edit native preferences in the menu".into(); true }
             "/setup" => { self.notice = "Usage: /setup · use the selectable setup menu".into(); true }
-            "/fleet" => {
-                let parts:Vec<_>=args.split_whitespace().collect();
-                let root=match crate::fleet_view::default_root(){Ok(root)=>root,Err(e)=>{self.notice=safe_label(&e.to_string());return true;}};
-                match parts.as_slice(){
-                    [] | ["runs"] => self.open_fleet(root,None),
-                    ["status",run] if doxa_state::valid_session_id(run) => self.open_fleet(root,Some((*run).into())),
-                    ["attach",run,index] => {
-                        match index.parse::<usize>().ok().and_then(|index|crate::fleet_view::slot_socket(&root,run,index).ok()){
-                            Some((_,id))=>self.attach_selected(&id),
-                            None=>self.notice="Fleet slot attachment refused; verify run and live slot".into(),
-                        }
-                    }
-                    _=>self.notice="Usage: /fleet [runs|status RUN|attach RUN INDEX]".into(),
-                }
-                true
-            }
+            "/fleet" => { self.local_fleet(args);true }
             "/img" | "/login"
             | "/logout" | "/doctor" | "/plugins"
             | "/reload-plugins" | "/effort"
@@ -3374,15 +3377,79 @@ impl App {
         }
     }
 
+    fn local_fleet(&mut self,args:&str){
+        let parts=match fleet_process::words(args){Ok(parts)=>parts,Err(error)=>{self.notice=safe_label(&error.to_string());return;}};
+        let start=parts.first().is_some_and(|part|part=="start");
+        let mut command_words=Vec::new();let mut custom_root=None;let mut index=0;
+        while index<parts.len(){
+            if !start && parts[index]=="--root"{
+                index+=1;let Some(path)=parts.get(index)else{self.notice="Fleet --root requires an absolute path".into();return;};
+                let path=PathBuf::from(path);if !path.is_absolute()||custom_root.is_some(){self.notice="Fleet requires one absolute --root path".into();return;}custom_root=Some(path);
+            }else{command_words.push(parts[index].as_str());}index+=1;
+        }
+        let root=match custom_root.map(Ok).unwrap_or_else(crate::fleet_view::default_root){Ok(root)=>root,Err(error)=>{self.notice=safe_label(&error.to_string());return;}};
+        let words=command_words;
+        if words.first().is_some_and(|word|matches!(*word,"start"|"resume")){
+            if self.fleet_controller.is_some(){self.notice="Wait for the current fleet controller to finish or Ctrl+C cancel it".into();return;}
+            let prepared=match words.as_slice(){
+                ["start",..]=>fleet_process::Prepared::start(parts[1..].to_vec(),self.groups[self.active_group].active_id().and_then(|id|self.session_cwds.get(id)).map(PathBuf::as_path)),
+                ["resume",id]=>fleet_process::Prepared::resume(root,id),
+                _=>{self.notice="Usage: /fleet resume RUN".into();return;}
+            };
+            match prepared{
+                Ok(prepared)=>{let lines=prepared.lines.clone();self.fleet_review=Some(prepared);self.fleet_menu=None;
+                    self.chip_info=Some(ChipInfo{kind:"fleet_review",label:String::new(),lines,scroll:0,owner:None});
+                    if self.active_chooser_rect().is_none(){self.fleet_review=None;self.chip_info=None;self.notice="Enlarge terminal before reviewing fleet launch".into();}
+                    else{self.input.clear();self.input_cursor=0;}
+                },Err(error)=>self.notice=format!("Fleet: {}",safe_label(&error.to_string()))
+            }
+            return;
+        }
+        match words.as_slice(){
+            []|["runs"]=>self.open_fleet(root,None),
+            ["status",id]if doxa_state::valid_session_id(id)=>self.open_fleet(root,Some((*id).into())),
+            ["attach",id,index]=>match index.parse::<usize>().ok().and_then(|index|crate::fleet_view::slot_socket(&root,id,index).ok()){
+                Some((_,session))=>self.attach_selected(&session),None=>self.notice="Fleet slot attachment refused; verify run and live slot".into()},
+            _=>self.notice="Usage: /fleet [runs|status RUN|attach RUN INDEX|start OPTIONS|resume RUN]".into()
+        }
+    }
+    fn fleet_review_key(&mut self,key:KeyEvent)->bool{
+        let review=self.fleet_review.as_mut().unwrap();
+        match key.code{
+            KeyCode::Esc=>{self.fleet_review=None;self.chip_info=None;},
+            KeyCode::Up|KeyCode::PageUp=>{let info=self.chip_info.as_mut().unwrap();info.scroll=info.scroll.saturating_sub(if key.code==KeyCode::Up{1}else{8});},
+            KeyCode::Down|KeyCode::PageDown=>{let info=self.chip_info.as_mut().unwrap();info.scroll=info.scroll.saturating_add(if key.code==KeyCode::Down{1}else{8});},
+            KeyCode::Char('A')if key.modifiers==KeyModifiers::SHIFT=>{
+                if review.complete.get(){review.armed=true;self.notice="Fleet launch armed · Shift+Y confirms".into();}else{self.notice="Read the complete fleet plan before arming".into();}
+            },
+            KeyCode::Char('Y')if key.modifiers==KeyModifiers::SHIFT=>{
+                if review.armed&&review.complete.get(){let prepared=self.fleet_review.take().unwrap();let result=std::env::current_exe().and_then(|exe|prepared.launch(&exe));
+                    match result{Ok(controller)=>{let root=controller.root.clone();let id=controller.id.clone();self.fleet_controller=Some(controller);self.open_fleet(root,Some(id));self.notice="Native fleet controller started · Ctrl+C cancels with teardown".into();},Err(error)=>{self.chip_info=None;self.notice=format!("Fleet launch refused: {}",safe_label(&error.to_string()));}}
+                }
+            },_=>{}
+        }true
+    }
     fn open_fleet(&mut self,root:PathBuf,run:Option<String>){
         self.fleet_menu=Some(fleet_menu::Menu::new(root,run));
         self.chip_info=Some(ChipInfo{kind:"fleet",label:"Fleet".into(),lines:vec!["Loading fleet…".into()],scroll:0,owner:None});
         self.input.clear();self.input_cursor=0;
     }
     fn poll_fleet(&mut self)->bool{
-        let Some(menu)=self.fleet_menu.as_mut() else{return false;};
-        if self.chip_info.as_ref().is_none_or(|info|info.kind!="fleet"){self.fleet_menu=None;return false;}
-        let changed=menu.poll();if changed{self.chip_info.as_mut().unwrap().lines=menu.display();}changed
+        let mut changed=false;
+        if let Some(controller)=self.fleet_controller.as_mut(){
+            match controller.poll(){
+                Ok(Some(success))=>{let root=controller.root.clone();let id=controller.id.clone();self.fleet_controller=None;
+                    if self.fleet_menu.is_some()||self.chip_info.is_none(){self.open_fleet(root,Some(id));}self.notice=if success{"Fleet controller exited; showing actual manifest status".into()}else{"Fleet controller exited unsuccessfully; inspect actual manifest status".into()};
+                    if self.fleet_quit_pending{self.should_quit=true;}changed=true;},
+                Err(_)=>{controller.cancel();self.notice="Fleet controller wait failed; cancelling and retaining ownership until reaped".into();},_=>{}
+            }
+        }
+        let Some(menu)=self.fleet_menu.as_mut() else{return changed;};
+        if self.chip_info.as_ref().is_none_or(|info|info.kind!="fleet"){self.fleet_menu=None;return changed;}
+        let polled=menu.poll();if polled{
+            self.chip_info.as_mut().unwrap().lines=menu.display();
+            if let Some(view)=menu.verified_view(){if self.fleet_views.len()<fleet_menu::MAX_SAVED_VIEWS&&!self.fleet_views.contains(&view){self.fleet_views.push(view);}}
+        }changed||polled
     }
 
     fn local_message(&mut self, args: &str) {
@@ -5698,6 +5765,7 @@ impl App {
                 let action = entry.action.clone(); self.action_menu = false;
                 match action {
                     actions::Action::New => self.open_engine_picker(),
+                    actions::Action::Fleet(view) => self.open_fleet(view.root,Some(view.run_id)),
                     actions::Action::Tab(pane, tab) => { if self.groups.get(pane).is_some_and(|g| tab < g.tabs.len()) { self.active_group = pane; self.groups[pane].active = tab; self.focus = Focus::Prompt; } },
                     actions::Action::Stop => self.open_stop_confirmation(),
                     actions::Action::Tools => { self.tool_modal = true; self.tool_scroll = 0; self.tool_selected = self.active_tool_cards().len().saturating_sub(1); },
@@ -6029,7 +6097,7 @@ impl App {
     /// Move the active session tab to the opposite group. Keep a source tab
     /// so moving never implicitly closes a pane group.
     fn move_active_tab(&mut self, target: usize) -> bool {
-        if target >= self.pane_count() || target == self.active_group {
+        if target >= self.groups.len() || target == self.active_group {
             self.notice = "Choose another existing pane group".into();
             return false;
         }
@@ -6233,7 +6301,7 @@ impl App {
         } else if let Some(menu) = &self.operations_menu {
             (menu.lines(usize::from(pane.width)).len() + 2).clamp(7, 19) as u16
         } else if self.chip_info.is_some() {
-            self.chip_info.as_ref().map_or(5, |info| if matches!(info.kind, "memory" | "usage" | "context" | "help" | "fleet") {
+            self.chip_info.as_ref().map_or(5, |info| if matches!(info.kind, "memory" | "usage" | "context" | "help" | "fleet" | "fleet_review") {
                 (info.lines.len() + 2).clamp(7, 19) as u16
             } else { 5 })
         } else if self.history_modal {
@@ -6712,6 +6780,15 @@ impl App {
     }
 
     fn mouse(&mut self, mouse: MouseEvent) -> bool {
+        if self.fleet_review.is_some(){
+            if let Some(area)=self.active_chooser_rect(){
+                if area.contains(ratatui::layout::Position::new(mouse.column,mouse.row)){
+                    match mouse.kind{MouseEventKind::ScrollUp=>return self.fleet_review_key(KeyEvent::new(KeyCode::Up,KeyModifiers::NONE)),MouseEventKind::ScrollDown=>return self.fleet_review_key(KeyEvent::new(KeyCode::Down,KeyModifiers::NONE)),_=>return true}
+                }
+                if mouse.kind==MouseEventKind::Down(MouseButton::Left){self.fleet_review=None;self.chip_info=None;return true;}
+            }
+            return false;
+        }
         if self.drag == Some(DragTarget::Chooser) {
             match mouse.kind {
                 MouseEventKind::Drag(MouseButton::Left) => {
@@ -7356,6 +7433,8 @@ impl App {
                     })
                 {
                     self.drag = Some(DragTarget::Rail);
+                } else if let Some(divider)=self.pane_tree.as_ref().filter(|_|layout.panes.is_some()).and_then(|tree|tree.divider_at(layout.body,mouse.column,mouse.row)) {
+                    self.drag=Some(DragTarget::NestedPane(divider));
                 } else if let Some(panes) = layout.panes.as_ref().filter(|panes| panes.len() == 2 && self.pane_tree.is_none()) {
                     let (first, second) = (panes[0], panes[1]);
                     let on_divider = if self.split == Split::Vertical {
@@ -7423,6 +7502,9 @@ impl App {
                             .column
                             .saturating_sub(layout.outer.x)
                             .clamp(MIN_RAIL_WIDTH, max.max(MIN_RAIL_WIDTH));
+                    }
+                    DragTarget::NestedPane(divider) if layout.panes.is_some() => {
+                        if let Some(tree)=self.pane_tree.as_mut(){tree.resize_divider(layout.body,divider,mouse.column,mouse.row,MIN_PANE_WIDTH,MIN_PANE_HEIGHT);}
                     }
                     DragTarget::Pane(split) if split == self.split && layout.panes.is_some() => {
                         let (axis, length, minimum) = if split == Split::Vertical {
@@ -7719,6 +7801,14 @@ impl App {
             return;
         }
         let Some(info) = &self.chip_info else { return; };
+        if let Some(review)=&self.fleet_review{
+            let lines=info.lines.iter().flat_map(|line|crate::memory_menu::wrap_review(line,usize::from(area.width.saturating_sub(2)).max(1))).collect::<Vec<_>>();
+            let visible=usize::from(area.height.saturating_sub(2));let start=info.scroll.min(lines.len().saturating_sub(visible));let end=start+visible;
+            if start<=review.seen.get(){review.seen.set(review.seen.get().max(end));review.complete.set(end>=lines.len());}
+            frame.render_widget(Paragraph::new(lines.join("\n")).scroll((start.min(u16::MAX as usize)as u16,0))
+                .block(Block::default().title(" Native fleet launch review ").borders(Borders::ALL))
+                .style(Style::default().fg(theme::TEXT).bg(theme::RAISED)),area);return;
+        }
         if info.kind=="fleet" {
             frame.render_widget(Paragraph::new(info.lines.join("\n")).scroll((info.scroll.min(u16::MAX as usize) as u16,0))
                 .block(Block::default().title(" Fleet · PgUp/PgDn scroll ").borders(Borders::ALL))
@@ -10882,7 +10972,7 @@ for line in sys.stdin:
         let info = app.chip_info.as_ref().unwrap();
         assert_eq!(info.kind, "help");
         for form in ["/collection [action] [name]", "/usage", "/context", "/compact",
-            "/fleet [runs|status RUN|attach RUN INDEX]", "/help"] {
+            "/fleet [runs|status RUN|attach RUN INDEX|start OPTIONS|resume RUN]", "/help"] {
             assert!(info.lines.iter().any(|line| line.starts_with(form)), "missing {form}");
         }
         assert!(info.lines.iter().any(|line| line.contains("unavailable in Rust")));
@@ -13183,6 +13273,24 @@ mod parity_tests {
         assert_eq!(app.groups[0].tabs, vec!["a","c"]);
         app.handle(Event::Resize(180,70));
         assert_eq!(app.layout(app.size).panes.unwrap().len(),3);
+    }
+
+    #[test]
+    fn nested_mouse_dividers_resize_both_axes_and_keep_drafts(){
+        let mut app=App::default();app.rail_visible=false;app.handle(Event::Resize(180,80));
+        app.groups[0].tabs=vec!["a".into()];app.groups[1].tabs=vec!["b".into()];app.active_group=1;
+        app.split_active_pane(Split::Horizontal);app.input="keep draft".into();
+        let body=app.layout(app.size).body;let regions=app.layout(app.size).panes.unwrap();let x=regions[1].x+10;let boundary=regions[1].bottom();
+        app.handle(Event::Mouse(MouseEvent{kind:MouseEventKind::Down(MouseButton::Left),column:x,row:boundary,modifiers:KeyModifiers::NONE}));
+        assert!(matches!(app.drag,Some(DragTarget::NestedPane(_))));
+        app.handle(Event::Mouse(MouseEvent{kind:MouseEventKind::Drag(MouseButton::Left),column:x,row:boundary+10,modifiers:KeyModifiers::NONE}));
+        app.handle(Event::Mouse(MouseEvent{kind:MouseEventKind::Up(MouseButton::Left),column:x,row:boundary+10,modifiers:KeyModifiers::NONE}));
+        assert!(app.layout(app.size).panes.unwrap()[1].height>regions[1].height);assert_eq!(app.input,"keep draft");
+        let boundary=regions[0].right();let y=body.y+10;
+        app.handle(Event::Mouse(MouseEvent{kind:MouseEventKind::Down(MouseButton::Left),column:boundary,row:y,modifiers:KeyModifiers::NONE}));
+        app.handle(Event::Mouse(MouseEvent{kind:MouseEventKind::Drag(MouseButton::Left),column:boundary-15,row:y,modifiers:KeyModifiers::NONE}));
+        app.handle(Event::Mouse(MouseEvent{kind:MouseEventKind::Up(MouseButton::Left),column:boundary-15,row:y,modifiers:KeyModifiers::NONE}));
+        assert!(app.layout(app.size).panes.unwrap()[0].width<regions[0].width);assert_eq!(app.input,"keep draft");
     }
 
 }

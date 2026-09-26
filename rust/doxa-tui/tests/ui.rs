@@ -13,6 +13,12 @@ fn key(code: KeyCode, modifiers: KeyModifiers) -> Event {
     Event::Key(KeyEvent::new(code, modifiers))
 }
 
+fn palette(app:&mut App,query:&str){
+    app.handle(key(KeyCode::Char('p'),KeyModifiers::CONTROL));
+    for c in query.chars(){app.handle(key(KeyCode::Char(c),KeyModifiers::NONE));}
+    app.handle(key(KeyCode::Enter,KeyModifiers::NONE));
+}
+
 fn mouse(kind: MouseEventKind, column: u16, row: u16) -> Event {
     Event::Mouse(MouseEvent {
         kind,
@@ -228,9 +234,7 @@ fn move_tab_action_carries_live_draft_and_refuses_last_source_tab() {
     }
     app.groups[0].tabs = vec!["one".into(), "two".into()];
     for c in "keep this draft".chars() { app.handle(key(KeyCode::Char(c), KeyModifiers::NONE)); }
-    app.handle(key(KeyCode::Char('p'), KeyModifiers::CONTROL));
-    for _ in 0..13 { app.handle(key(KeyCode::Down, KeyModifiers::NONE)); }
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
+    palette(&mut app,"/movepane");
     assert_eq!(app.groups[0].tabs, ["two"]);
     assert_eq!(app.groups[1].tabs, ["one"]);
     assert_eq!(app.input, "keep this draft");
@@ -435,10 +439,11 @@ fn keyboard_and_rail_select_sessions_into_independent_groups() {
     assert_eq!(app.groups[1].tabs, vec!["two"]);
     assert_eq!(app.groups[0].tabs, vec!["one"]);
     assert_eq!(app.focus, Focus::Transcript);
+    app.handle(Event::Resize(180,80));
     app.handle(key(KeyCode::Char('h'), KeyModifiers::ALT));
-    assert_eq!(app.split, Split::Horizontal);
-    app.handle(key(KeyCode::Down, KeyModifiers::ALT));
-    assert_eq!(app.split_percent, 55);
+    assert_eq!(app.groups.len(),3);
+    assert_eq!(app.groups[0].tabs,vec!["one"]);
+    assert_eq!(app.groups[1].tabs,vec!["two"]);
     app.handle(Event::Resize(100, 40));
     assert_eq!(app.size, Rect::new(0, 0, 100, 40));
 }
@@ -488,45 +493,23 @@ fn tool_activity_modal_tracks_call_result_and_blocks_layout_mouse() {
 
 #[test]
 fn action_menu_opens_views_and_navigates_sessions_without_leaking_keys_to_prompt() {
-    let mut app = App::default();
-    app.handle(Event::Resize(80, 24));
-    app.apply_update(doxa_tui::ui::DaemonUpdate::Upsert(session("one", "Work")));
-    app.apply_update(doxa_tui::ui::DaemonUpdate::Upsert(session("two", "Work")));
-    app.input = "draft".into();
-    assert!(app.handle(key(KeyCode::Char('p'), KeyModifiers::CONTROL)));
-    assert!(screen(&app, 80, 24).contains("Actions"));
-    assert!(screen(&app, 80, 24).contains("Peer map"));
-    assert!(app.handle(key(KeyCode::Char('x'), KeyModifiers::NONE)));
-    assert_eq!(app.input, "draft");
-    assert!(app.handle(key(KeyCode::Enter, KeyModifiers::NONE)));
-    assert!(screen(&app, 80, 24).contains("Peer"));
-    assert!(app.handle(key(KeyCode::Esc, KeyModifiers::NONE)));
-
-    app.handle(key(KeyCode::Char('p'), KeyModifiers::CONTROL));
-    app.handle(key(KeyCode::Down, KeyModifiers::NONE));
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
-    assert!(screen(&app, 80, 24).contains("Tool activity"));
-    app.handle(key(KeyCode::Esc, KeyModifiers::NONE));
-
-    app.rail_selected = 1;
-    app.handle(key(KeyCode::Char('p'), KeyModifiers::CONTROL));
-    app.handle(key(KeyCode::Down, KeyModifiers::NONE));
-    app.handle(key(KeyCode::Down, KeyModifiers::NONE));
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
-    assert_eq!(app.groups[0].tabs.len(), 2);
-    assert_eq!(app.focus, Focus::Transcript);
-    app.handle(key(KeyCode::Char('p'), KeyModifiers::CONTROL));
-    for _ in 0..3 {
-        app.handle(key(KeyCode::Down, KeyModifiers::NONE));
-    }
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
-    assert_eq!(app.groups[0].active, 0);
-    app.handle(key(KeyCode::Char('p'), KeyModifiers::CONTROL));
-    for _ in 0..4 {
-        app.handle(key(KeyCode::Down, KeyModifiers::NONE));
-    }
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
-    assert_eq!(app.groups[0].active, 1);
+    let mut app=App::default();app.handle(Event::Resize(80,24));
+    app.apply_update(doxa_tui::ui::DaemonUpdate::Upsert(session("one","Work")));
+    app.apply_update(doxa_tui::ui::DaemonUpdate::Upsert(session("two","Work")));
+    app.input="draft".into();
+    app.handle(key(KeyCode::Char('p'),KeyModifiers::CONTROL));
+    assert!(screen(&app,80,24).contains("Actions"));
+    for c in "/peers".chars(){app.handle(key(KeyCode::Char(c),KeyModifiers::NONE));}
+    assert_eq!(app.input,"draft");
+    app.handle(key(KeyCode::Enter,KeyModifiers::NONE));assert!(screen(&app,80,24).contains("Peer"));
+    app.handle(key(KeyCode::Esc,KeyModifiers::NONE));
+    palette(&mut app,"inspect tool");assert!(screen(&app,80,24).contains("Tool activity"));
+    app.handle(key(KeyCode::Esc,KeyModifiers::NONE));
+    palette(&mut app,"/sessions");
+    app.handle(key(KeyCode::Down,KeyModifiers::NONE));app.handle(key(KeyCode::Enter,KeyModifiers::NONE));
+    assert_eq!(app.groups[0].tabs.len(),2);
+    palette(&mut app,"open tab one");assert_eq!(app.groups[0].tabs.get(app.groups[0].active).map(String::as_str),Some("one"));assert_eq!(app.input,"draft");
+    palette(&mut app,"open tab two");assert_eq!(app.groups[0].tabs.get(app.groups[0].active).map(String::as_str),Some("two"));assert_eq!(app.focus,Focus::Prompt);
     assert!(app.pending_prompts.is_empty());
 }
 

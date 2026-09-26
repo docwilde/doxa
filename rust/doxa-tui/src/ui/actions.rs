@@ -2,7 +2,7 @@
 //! operations. Query filtering does not mutate the conversation draft.
 use super::{App, COMMANDS};
 #[derive(Clone, Debug)]
-pub enum Action { New, Tab(usize, usize), Command(&'static str), Stop, Tools, Close, NextPane }
+pub enum Action { New, Fleet(super::fleet_menu::SavedView), Tab(usize, usize), Command(&'static str), Stop, Tools, Close, NextPane }
 #[derive(Clone, Debug)]
 pub struct Entry { pub label: String, pub help: String, pub action: Action }
 pub fn entries(app: &App, query: &str) -> Vec<Entry> {
@@ -15,6 +15,7 @@ pub fn entries(app: &App, query: &str) -> Vec<Entry> {
                 help: super::safe_label(id), action: Action::Tab(pane,tab) });
         }
     }
+    for view in &app.fleet_views{rows.push(Entry{label:format!("Fleet view · {}",super::safe_label(&view.run_id)),help:super::safe_label(&view.root.display().to_string()),action:Action::Fleet(view.clone())});}
     for command in COMMANDS {
         rows.push(Entry { label: format!("{} · {}", command.name, command.summary), help: command.support.into(), action: Action::Command(command.name) });
     }

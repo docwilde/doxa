@@ -21,6 +21,7 @@ use crate::collections::{self, Collection};
 pub struct LayoutSignature {
     groups: Vec<(Vec<String>, usize)>,
     pane_tree: Option<Tree>,
+    fleet_views: Vec<crate::ui::fleet_menu::SavedView>,
     custom_names: Vec<(String, String)>,
     active_group: usize,
     split: Split,
@@ -34,6 +35,7 @@ impl LayoutSignature {
         Self {
             groups: app.groups.iter().map(|g| (g.tabs.clone(), g.active)).collect(),
             pane_tree: app.pane_tree.clone(),
+            fleet_views: app.fleet_views.clone(),
             custom_names: {
                 let mut names: Vec<_> = app.custom_names.iter().map(|(id, name)| (id.clone(), name.clone())).collect();
                 names.sort();
@@ -130,6 +132,7 @@ impl UiStateStore {
         let Some(record) = &self.record else {
             return false;
         };
+        if let Some(views)=record.raw.get("rust_ui").and_then(|ui|ui.get("fleet_views")).and_then(crate::ui::fleet_menu::SavedView::parse){app.fleet_views=views;}
         let live: HashSet<&str> = live_ids.iter().map(String::as_str).collect();
         let tabs: Vec<_> = record
             .tabs
@@ -152,7 +155,8 @@ impl UiStateStore {
         let mut split = Split::Vertical;
         let mut percent = 50;
         if let Some(raw) = layout.and_then(|l| l.get("groups")) {
-            if let Some((projected, orientation, weight, tree)) = parse_groups(raw, &ids) {
+            let owned:HashSet<_>=record.tabs.iter().map(|tab|tab.session_id.as_str()).collect();
+            if let Some((projected, orientation, weight, tree)) = tree_ids(raw).iter().all(|id|owned.contains(id)).then(||parse_groups(raw,&ids)).flatten() {
                 pane_tree = tree;
                 groups = projected;
                 split = orientation;
@@ -273,8 +277,9 @@ impl UiStateStore {
                 }
             }
         }
-        if tabs.is_empty() {
-            return Ok(());
+        if tabs.is_empty() && app.fleet_views.is_empty() { return Ok(()); }
+        if app.fleet_views.len()>crate::ui::fleet_menu::MAX_SAVED_VIEWS || app.fleet_views.iter().any(|view|!view.valid()){
+            return Err(io::Error::new(io::ErrorKind::InvalidInput,"invalid saved fleet view"));
         }
         if tabs.len() != app.groups.iter().map(|g| g.tabs.len()).sum::<usize>() {
             return Err(io::Error::new(
@@ -310,7 +315,7 @@ impl UiStateStore {
         } else if groups.len() == 2 {
             json!({"kind":"split","orientation":orientation(app.split),"weights":[app.split_percent.clamp(20,80) as f64 / 100.0, 1.0 - app.split_percent.clamp(20,80) as f64 / 100.0],"children":groups})
         } else {
-            groups[0].clone()
+            groups.first().cloned().unwrap_or_else(||json!({"kind":"group","active":0,"tabs":[]}))
         };
         let layout = record.raw.entry("layout").or_insert_with(|| json!({}));
         let object = layout
@@ -318,10 +323,11 @@ impl UiStateStore {
             .ok_or_else(|| io::Error::new(io::ErrorKind::Unsupported, "unknown layout format"))?;
         object.insert("groups".into(), group_tree);
         object.insert("trees".into(), Value::Array(trees));
-        record.raw.insert(
-            "rust_ui".into(),
-            json!({"rail_visible":app.rail_visible,"rail_width":app.rail_width.clamp(12,44)}),
-        );
+        let rust_ui=record.raw.entry("rust_ui").or_insert_with(||json!({})).as_object_mut()
+            .ok_or_else(||io::Error::new(io::ErrorKind::Unsupported,"unknown native UI metadata"))?;
+        rust_ui.insert("rail_visible".into(),json!(app.rail_visible));
+        rust_ui.insert("rail_width".into(),json!(app.rail_width.clamp(12,44)));
+        if app.fleet_views.is_empty(){rust_ui.remove("fleet_views");}else{rust_ui.insert("fleet_views".into(),serde_json::to_value(&app.fleet_views).map_err(io::Error::other)?);}
         let keep: HashSet<String> = record.tabs.iter().map(|tab| tab.session_id.clone()).collect();
         let collections = collections::to_json(&app.collections, &keep);
         // A legacy empty tabset can carry an empty collection row as inert
@@ -437,6 +443,7 @@ fn weight(raw: &Value) -> u16 {
         .clamp(20, 80)
 }
 fn supported_layout(raw: &serde_json::Map<String, Value>) -> bool {
+    if raw.get("rust_ui").and_then(|ui|ui.get("fleet_views")).is_some_and(|views|crate::ui::fleet_menu::SavedView::parse(views).is_none()){return false;}
     let Some(layout) = raw.get("layout") else {
         return true;
     };
@@ -447,7 +454,9 @@ fn supported_layout(raw: &serde_json::Map<String, Value>) -> bool {
         return false;
     }
     if let Some(groups) = layout.get("groups") {
-        return supported_group_tree(groups);
+        let owned:HashSet<_>=raw.get("tabs").or_else(||layout.get("tabs")).and_then(Value::as_array).into_iter().flatten()
+            .filter_map(|row|row["session_id"].as_str()).collect();
+        return supported_group_tree(groups)&&tree_ids(groups).iter().all(|id|owned.contains(id));
     }
     if let Some(trees) = layout.get("trees").and_then(Value::as_array) {
         // The old tree format can have one split tree for the active tab.
@@ -703,6 +712,18 @@ mod tests {
         assert_eq!(parse_groups(&saved,&["a".into(),"b".into(),"c".into()]).unwrap().3,Some(tree));
         let oversized=json!({"kind":"split","orientation":"row","children":(0..=MAX_PANES).map(|_|leaf("a")).collect::<Vec<_>>()});
         assert!(!supported_group_tree(&oversized));
+    }
+
+    #[test]
+    fn typed_fleet_views_round_trip_without_synthetic_session_tabs(){
+        let temp=tempfile::tempdir().unwrap();let mut store=UiStateStore::new(temp.path(),"/project","machine").unwrap();
+        let mut app=App::default();app.fleet_views=crate::ui::fleet_menu::SavedView::parse(&json!([{"kind":"fleet","root":"/real/fleet","run_id":"actual-run"}])).unwrap();
+        store.save(&app).unwrap();let raw:Value=serde_json::from_slice(&std::fs::read(store.path()).unwrap()).unwrap();
+        assert_eq!(raw["tabs"],json!([]));assert_eq!(raw["rust_ui"]["fleet_views"][0]["run_id"],"actual-run");
+        let saved=UiStateStore::new(temp.path(),"/project","machine").unwrap();let mut restored=App::default();
+        assert!(!saved.restore(&mut restored,&[]));assert_eq!(restored.fleet_views,app.fleet_views);
+        assert!(restored.groups.iter().all(|group|group.tabs.is_empty()));
+        assert!(crate::ui::fleet_menu::SavedView::parse(&json!([{"kind":"session","root":"/real/fleet","run_id":"actual-run"}])).is_none());
     }
 
 }
