@@ -225,6 +225,14 @@ impl Manager {
         manager
     }
 
+    /// Render-only fixture constructor. No LORE worker or mutation is created.
+    #[doc(hidden)]
+    pub fn from_fixture_review(owner:(String,String),scope:&'static str,value:serde_json::Value)->Result<Self,String>{
+        if !matches!(scope,"project"|"user"){return Err("Invalid fixture scope".into());}
+        let mut manager=Self{owner,scope,selected:0,scroll:0,status:String::new(),last_action:None,entries:Vec::new(),review:None,draft:None,pending:None,fixture:true,refresh_scope:None};
+        manager.accept_review(value)?;Ok(manager)
+    }
+
     fn python() -> PathBuf {
         std::env::var_os("DOXA_LORE_PYTHON").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("python3"))
     }
@@ -348,6 +356,7 @@ impl Manager {
     }
 
     fn submit(&mut self) {
+        if self.fixture { self.status = "Gallery fixture: memory writes disabled".into(); return; }
         let (Some(draft), Some(review)) = (&self.draft, &self.review) else { return; };
         let request = serde_json::json!({"scope":self.scope,"action":draft.action,
             "entry":draft.entry,"text":draft.text,
@@ -357,7 +366,6 @@ impl Manager {
         let python = Self::python();
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         self.pending = Some(rx);
-        if self.fixture { return; }
         std::thread::spawn(move || {
             let result = doxa_lore::LoreClient::spawn(&python, Duration::from_secs(3))
                 .and_then(|mut client| client.memory_action(&cwd.to_string_lossy(), request))

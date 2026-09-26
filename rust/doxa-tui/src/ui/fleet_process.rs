@@ -32,6 +32,13 @@ pub struct Prepared {
 }
 impl fmt::Debug for Prepared{fn fmt(&self,f:&mut fmt::Formatter<'_>)->fmt::Result{f.debug_struct("PreparedFleet").field("root",&self.root).field("id",&self.id).finish_non_exhaustive()}}
 impl Prepared {
+    /// Deterministic renderer fixture; the empty controller arguments prohibit launch.
+    #[doc(hidden)]
+    pub fn from_fixture_review(review:&Value)->io::Result<Self>{
+        let root=PathBuf::from(review["root"].as_str().ok_or_else(||invalid("Fixture root missing"))?);
+        let id=review["run_id"].as_str().filter(|id|doxa_state::valid_session_id(id)).ok_or_else(||invalid("Fixture run ID missing"))?.to_owned();
+        Ok(Self{root,id,lines:review_lines("Start native fleet",review),args:Vec::new(),resume_snapshot:None,prompt_digest:None,seen:Cell::new(0),complete:Cell::new(false),armed:false})
+    }
     pub fn start(mut args:Vec<String>,cwd:Option<&Path>)->io::Result<Self>{
         if !has_option(&args,"--run-id"){
             let id=format!("ui-{}-{}-{}",SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),std::process::id(),NEXT_ID.fetch_add(1,Ordering::Relaxed));
@@ -53,6 +60,7 @@ impl Prepared {
         Ok(Self{lines:review_lines("Resume native fleet",&review),root:root.clone(),id:id.into(),args:vec!["resume".into(),id.into(),"--root".into(),root.to_string_lossy().into_owned()],resume_snapshot:Some(snapshot),prompt_digest:None,seen:Cell::new(0),complete:Cell::new(false),armed:false})
     }
     pub fn launch(self,exe:&Path)->io::Result<Controller>{
+        if self.args.is_empty(){return Err(invalid("Gallery fixture cannot launch a controller"));}
         if !self.armed||!self.complete.get(){return Err(invalid("Read and explicitly confirm the complete fleet review"));}
         if let Some(snapshot)=&self.resume_snapshot{if &crate::fleet_control::snapshot(&self.root,&self.id)?!=snapshot{return Err(invalid("Fleet changed since review; review it again"));}}
         let mut command=Command::new(exe);command.arg("fleet").args(&self.args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).process_group(0);

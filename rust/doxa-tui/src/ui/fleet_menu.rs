@@ -26,13 +26,20 @@ pub struct Menu {
     pub lines: Vec<String>, receiver: Option<Receiver<Result<Reply,String>>>,
     refreshed: Instant,
     verified:bool,
+    fixture:bool,
 }
 impl Menu {
     pub fn new(root: PathBuf, run: Option<String>) -> Self {
-        let mut menu = Self {root,run,rows:Vec::new(),selected:0,lines:vec!["Loading fleet manifests…".into()],receiver:None,refreshed:Instant::now(),verified:false};
+        let mut menu = Self {root,run,rows:Vec::new(),selected:0,lines:vec!["Loading fleet manifests…".into()],receiver:None,refreshed:Instant::now(),verified:false,fixture:false};
         menu.refresh(); menu
     }
+    /// A render-only status fixture. It cannot poll a filesystem or persist a fake run.
+    #[doc(hidden)]
+    pub fn from_fixture(root:PathBuf,id:&str,lines:Vec<String>)->Self{
+        Self{root,run:Some(id.into()),rows:Vec::new(),selected:0,lines,receiver:None,refreshed:Instant::now(),verified:false,fixture:true}
+    }
     fn refresh(&mut self) {
+        if self.fixture{return;}
         if self.receiver.is_some() {return;}
         let root=self.root.clone(); let run=self.run.clone(); let(tx,rx)=mpsc::channel();
         self.receiver=Some(rx); self.refreshed=Instant::now();
@@ -60,6 +67,7 @@ impl Menu {
         });
     }
     pub fn poll(&mut self)->bool {
+        if self.fixture{return false;}
         if let Some(result)=self.receiver.as_ref().and_then(|rx|rx.try_recv().ok()) {
             self.receiver=None;
             match result {
@@ -93,7 +101,7 @@ mod tests {
     use super::*;
     #[test]
     fn hover_rejects_headers_and_rows_outside_real_run_choices() {
-        let mut menu=Menu {root:PathBuf::from("/unused"),run:None,rows:vec!["real-run".into()],selected:0,lines:Vec::new(),receiver:None,refreshed:Instant::now(),verified:false};
+        let mut menu=Menu {root:PathBuf::from("/unused"),run:None,rows:vec!["real-run".into()],selected:0,lines:Vec::new(),receiver:None,refreshed:Instant::now(),verified:false,fixture:false};
         assert!(!menu.hover(0));assert!(!menu.hover(2));assert!(menu.hover(3));assert!(!menu.hover(4));
         menu.run=Some("real-run".into());assert!(!menu.hover(3));
     }

@@ -184,6 +184,48 @@ fn scene(name: &str) -> App {
                 &["- Run parser checks before release", "- Keep reconnect behavior stable"],
                 &["- testing: Reconnect must preserve the transcript", "- release: Cite checks before publishing"]);
         }
+        "memory-management" | "memory-change" => {
+            app.groups[0].tabs=vec!["demo-codex-01".into()];
+            app.sessions.iter_mut().for_each(|session|session.transcript.clear());
+            let entries=["Record the check command and result before release", "Keep each pane's draft with its session"];
+            let chars=entries.join("\n").chars().count();
+            app.set_lore_memory_usage("demo-codex-01",chars as u64,8800,2824,4500);
+            app.show_memory_manager_fixture(0,"project",json!({"scope":"project","key":"/demo/project","sha256":"f".repeat(64),"entries":entries,"chars":chars,"cap_chars":8800})).unwrap();
+            if name=="memory-change"{
+                key(&mut app,KeyCode::Char('e'),KeyModifiers::NONE);
+                for ch in " and include failures".chars(){key(&mut app,KeyCode::Char(ch),KeyModifiers::NONE);}
+                key(&mut app,KeyCode::Enter,KeyModifiers::NONE);
+            }
+            app.notice="Fixture · curated memory · writes disabled".into();
+        }
+        "fleet-review" => {
+            app.groups[0].tabs=vec!["demo-codex-01".into()];
+            app.sessions.iter_mut().for_each(|session|session.transcript.clear());
+            app.show_fleet_review_fixture(&json!({"review_version":1,"run_id":"parser-checks","root":"/demo/fleet","cwd":"/demo/project","mode":"symmetric","workers":2,"sessions":2,"seed":7,"run_budget_usd":6.0,"allow_unbudgeted":false,"approval_policy":"none","approval_grace_s":0,"dry_run":false,"prompt_sha256":"a".repeat(64),"quiescence_timeout_s":1800,"quiescence_grace_s":5,"preflight":"Planned 2 workers; budget bounded","slots":[{"index":0,"engine":"codex","model":"gpt-6-sol","role":"worker"},{"index":1,"engine":"claude","model":"claude-sonnet-4","role":"worker"}]})).unwrap();
+            // Drive the same reducer/visibility watermark used by the live menu.
+            let mut terminal=Terminal::new(TestBackend::new(126,31)).unwrap();
+            terminal.draw(|frame|app.draw(frame)).unwrap();
+            key(&mut app,KeyCode::PageDown,KeyModifiers::NONE);
+            app.notice="Fixture · fleet launch review · controller disabled".into();
+        }
+        "fleet-view" => {
+            app.groups[0].tabs=vec!["demo-codex-01".into()];
+            app.sessions.iter_mut().for_each(|session|session.transcript.clear());
+            app.show_fleet_view_fixture("parser-checks",&[
+                "Fleet · ↑/↓ select · Enter open · B runs · R refresh · Esc close",
+                "fleet parser-checks — finished",
+                "mode symmetric · sessions 2",
+                "  slot 0 · worker · stopped · demo-codex-01",
+                "  slot 1 · worker · stopped · demo-claude-02",
+                "Native controller phase: finished",
+                "Total budget USD: 6.0",
+                "Approval policy: none",
+                "Approvals asked: 0",
+                "Auto approved: 0",
+                "Attach a slot: /fleet attach parser-checks <index>",
+            ]);
+            app.notice="Fixture · recorded fleet view · no live controller".into();
+        }
         _ => panic!("unknown scene: {name}"),
     }
     app
@@ -202,7 +244,7 @@ fn rgb(color: Color) -> [u8; 3] {
 fn main() {
     let name = std::env::args().nth(1).expect("scene name");
     let (width,height) = match name.as_str() {
-        "hero" | "repo-picker" | "claude-session" | "tool-activity" | "tool-expanded" | "restored-tool" | "processing" | "reasoning" | "commands" | "help" | "needs-input" | "permissions" | "effort" | "history" | "queue" | "memory" => (126,31),
+        "hero" | "repo-picker" | "claude-session" | "tool-activity" | "tool-expanded" | "restored-tool" | "processing" | "reasoning" | "commands" | "help" | "needs-input" | "permissions" | "effort" | "history" | "queue" | "memory" | "memory-management" | "memory-change" | "fleet-review" | "fleet-view" => (126,31),
         _ => panic!("unknown scene"),
     };
     let app = scene(&name);

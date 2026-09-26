@@ -4671,6 +4671,31 @@ impl App {
         self.memory_menu_pending = None;
     }
 
+    /// Render a curated-memory fixture through the production manager and reducer.
+    #[doc(hidden)]
+    pub fn show_memory_manager_fixture(&mut self,group:usize,scope:&'static str,review:serde_json::Value)->Result<(),String>{
+        if group>=self.groups.len(){return Err("Fixture pane missing".into());}
+        let id=self.groups[group].active_id().ok_or("Fixture session missing")?.to_owned();
+        let cwd=self.session_cwds.get(&id).and_then(|path|path.to_str()).ok_or("Fixture directory missing")?.to_owned();
+        self.active_group=group;
+        self.memory_manager=Some(crate::memory_menu::Manager::from_fixture_review((id.clone(),cwd.clone()),scope,review)?);
+        self.chip_info=Some(ChipInfo{kind:"memory",label:String::new(),lines:Vec::new(),scroll:0,owner:Some((id,cwd))});Ok(())
+    }
+    /// Render an immutable fleet plan; confirmation cannot start a controller.
+    #[doc(hidden)]
+    pub fn show_fleet_review_fixture(&mut self,review:&serde_json::Value)->Result<(),String>{
+        let prepared=fleet_process::Prepared::from_fixture_review(review).map_err(|error|error.to_string())?;
+        self.chip_info=Some(ChipInfo{kind:"fleet_review",label:String::new(),lines:prepared.lines.clone(),scroll:0,owner:None});
+        self.fleet_review=Some(prepared);Ok(())
+    }
+    /// Render a manifest-status fixture without disk access or saved run state.
+    #[doc(hidden)]
+    pub fn show_fleet_view_fixture(&mut self,id:&str,lines:&[&str]){
+        let lines=lines.iter().map(|line|(*line).to_owned()).collect::<Vec<_>>();
+        self.fleet_menu=Some(fleet_menu::Menu::from_fixture(PathBuf::from("/demo/fleet"),id,lines.clone()));
+        self.chip_info=Some(ChipInfo{kind:"fleet",label:"Fixture fleet".into(),lines,scroll:0,owner:None});
+    }
+
     fn poll_memory(&mut self) -> bool {
         let mut changed = false;
         if let Some((id, cwd, receiver)) = self.memory_pending.take() {
@@ -13291,6 +13316,22 @@ mod parity_tests {
         app.handle(Event::Mouse(MouseEvent{kind:MouseEventKind::Drag(MouseButton::Left),column:boundary-15,row:y,modifiers:KeyModifiers::NONE}));
         app.handle(Event::Mouse(MouseEvent{kind:MouseEventKind::Up(MouseButton::Left),column:boundary-15,row:y,modifiers:KeyModifiers::NONE}));
         assert!(app.layout(app.size).panes.unwrap()[0].width<regions[0].width);assert_eq!(app.input,"keep draft");
+    }
+
+    #[test]
+    fn gallery_fixture_menus_never_write_spawn_or_save_fake_runs(){
+        let mut app=App::default();app.handle(Event::Resize(126,31));
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"gallery","engine":"codex","cwd":"/gallery"}));
+        app.show_memory_manager_fixture(0,"project",json!({"scope":"project","key":"/gallery","sha256":"f".repeat(64),"entries":["fixture fact"],"chars":12,"cap_chars":8800})).unwrap();
+        app.key(KeyEvent::new(KeyCode::Char('e'),KeyModifiers::NONE));app.key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
+        let mut terminal=Terminal::new(ratatui::backend::TestBackend::new(126,31)).unwrap();terminal.draw(|frame|app.draw(frame)).unwrap();
+        app.key(KeyEvent::new(KeyCode::Char('Y'),KeyModifiers::SHIFT));
+        assert!(app.memory_manager.as_ref().unwrap().fixture);assert!(!app.memory_manager.as_ref().unwrap().busy());
+        app.memory_manager=None;app.chip_info=None;
+        app.show_fleet_review_fixture(&json!({"run_id":"gallery-run","root":"/gallery/fleet","mode":"symmetric","sessions":1})).unwrap();
+        app.fleet_review.as_mut().unwrap().complete.set(true);app.fleet_review.as_mut().unwrap().armed=true;
+        app.key(KeyEvent::new(KeyCode::Char('Y'),KeyModifiers::SHIFT));assert!(app.fleet_controller.is_none());assert!(app.notice.contains("fixture cannot launch"));
+        app.show_fleet_view_fixture("gallery-run",&["Fixture status"]);assert!(!app.poll_fleet());assert!(app.fleet_views.is_empty());
     }
 
 }
