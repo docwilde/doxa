@@ -1,6 +1,6 @@
 //! Terminal shell for the Rust frontend. Daemon adapters can feed [`App::apply_update`].
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::io::{self, IsTerminal, Stdout, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
@@ -18,10 +18,11 @@ use crossterm::{
     execute,
 };
 use ratatui::backend::CrosstermBackend;
+use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Tabs, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Tabs, Widget, Wrap};
 use ratatui::{Frame, Terminal};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -184,6 +185,31 @@ struct BranchPicker {
     selected: usize,
 }
 
+#[derive(Debug)]
+struct RepoPicker {
+    current_dir: PathBuf,
+    paths: Vec<PathBuf>,
+    selected: usize,
+}
+
+fn chooser_visible_start(view_start: &Cell<usize>, selected: usize, visible: usize) -> usize {
+    // Moving the selection within the painted viewport must not move its rows.
+    let start = view_start.get();
+    let start = if selected < start { selected }
+        else if selected >= start.saturating_add(visible) {
+            selected.saturating_sub(visible.saturating_sub(1))
+        } else { start };
+    view_start.set(start);
+    start
+}
+
+fn chooser_list_lines(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
+    lines.into_iter().map(|line| {
+        let text: String = line.spans.iter().map(|span| span.content.as_ref()).collect();
+        Line::styled(clipped_title(&text, width).0, line.style)
+    }).collect()
+}
+
 #[derive(Clone, Debug)]
 struct RejectDraft {
     index: usize,
@@ -200,6 +226,7 @@ struct PendingRejection {
 
 #[derive(Debug)]
 struct LorePicker {
+    session_id: Option<String>,
     query: String,
     rows: Vec<lore_picker::Belief>,
     proposals: Vec<lore_picker::Proposal>,
@@ -298,8 +325,8 @@ fn chip_hint(kind: &str) -> &'static str {
         "permission" => "Permission mode for this session · click to choose",
         "engine" => "Engine for new sessions · click to choose",
         "model" => "Model for this session · click to choose",
-        "repo" => "This session's repository and base branch · click for worktree details",
-        "directory" => "This session's directory; no Git repository is active",
+        "repo" => "Choose a known directory for a new session tab",
+        "directory" => "Choose a known directory for a new session tab",
         "effort" => "Effort · current session; Alt+F selects the next turn when idle",
         "context" => "Current session context usage · click for details",
         "memory" => "User and scoped LORE memory · click to view entries",
@@ -308,6 +335,14 @@ fn chip_hint(kind: &str) -> &'static str {
         "balance" => "Current DeepSeek API account balance",
         "more" => "More chips · click to reveal hidden chips",
         _ => "",
+    }
+}
+
+fn chooser_row_style(selected: bool) -> Style {
+    if selected {
+        Style::default().fg(theme::ACCENT).bg(theme::HIGHLIGHT).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme::SECONDARY)
     }
 }
 
@@ -406,6 +441,40 @@ fn clipped_title(value: &str, width: usize) -> (String, bool) {
 fn unsafe_input_char(ch: char) -> bool {
     ch.is_control()
         || matches!(ch, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+}
+
+fn safe_repo_directory(path: &Path) -> Option<PathBuf> {
+    let path = std::fs::canonicalize(path).ok()?;
+    let label = path.to_str()?;
+    (path.is_dir() && label.len() <= 4096 && !label.chars().any(unsafe_input_char))
+        .then_some(path)
+}
+
+fn repo_directory_entries(current: &Path) -> Vec<PathBuf> {
+    // Directory enumeration is bounded so a huge worktree never stalls the UI.
+    let mut paths = vec![current.to_path_buf()];
+    if let Some(parent) = current.parent().and_then(safe_repo_directory) {
+        if parent != current { paths.push(parent); }
+    }
+    let mut children: Vec<_> = std::fs::read_dir(current).into_iter().flatten()
+        .take(128).filter_map(Result::ok)
+        .filter_map(|entry| safe_repo_directory(&entry.path()))
+        .filter(|path| path != current && !paths.contains(path))
+        .collect();
+    children.sort();
+    children.dedup();
+    paths.extend(children);
+    paths
+}
+
+fn repo_path_label(path: &Path) -> String {
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        if let Ok(relative) = path.strip_prefix(&home) {
+            return if relative.as_os_str().is_empty() { "~".into() }
+                else { format!("~/{}", relative.display()) };
+        }
+    }
+    path.display().to_string()
 }
 
 fn prompt_height(draft: &str, pane_height: u16) -> u16 {
@@ -808,6 +877,7 @@ pub enum Split {
 enum DragTarget {
     Rail,
     Pane(Split),
+    Chooser,
 }
 
 #[derive(Clone, Copy)]
@@ -937,9 +1007,10 @@ impl InputRequest {
     }
 }
 
-fn input_request_body(request: &InputRequest, title_width: usize) -> (String, Option<usize>) {
+fn input_request_body(request: &InputRequest, title_width: usize) -> (String, Option<usize>, Vec<usize>) {
     let mut body = String::new();
     let mut selected_row = None;
+    let mut option_rows = Vec::new();
     if request.kind == "ask_user" {
         if let Some(question) = request.questions.get(request.step) {
             if !question.header.is_empty() {
@@ -951,6 +1022,7 @@ fn input_request_body(request: &InputRequest, title_width: usize) -> (String, Op
                 body.push_str("\n\n");
             }
             for (i, option) in question.options.iter().enumerate() {
+                option_rows.push(body.lines().count());
                 if i + 1 == request.selected { selected_row = Some(body.lines().count()); }
                 body.push_str(&format!(
                     "{} {}. {}\n",
@@ -978,7 +1050,31 @@ fn input_request_body(request: &InputRequest, title_width: usize) -> (String, Op
     if request.sending {
         body.push_str("\nSending answer…");
     }
-    (body, selected_row)
+    (body, selected_row, option_rows)
+}
+
+fn ask_user_option_at(request: &InputRequest, menu: Rect, row: u16) -> Option<usize> {
+    if request.kind != "ask_user" || request.sending || row <= menu.y || row >= menu.bottom().saturating_sub(1) {
+        return None;
+    }
+    let (body, _, option_rows) = input_request_body(request, usize::from(menu.width.saturating_sub(4)));
+    // Render the same wrapping and scroll as the visible dialog into a small
+    // scratch buffer. Each option uses an invisible color marker, so a click
+    // on a wrapped description cannot accidentally choose the next option.
+    let lines: Vec<Line> = body.lines().enumerate().map(|(line_index, text)| {
+        if let Some(option) = option_rows.iter().rposition(|&start| start <= line_index) {
+            Line::styled(text.to_owned(), Style::default().bg(Color::Rgb(0, 0, (option + 1) as u8)))
+        } else { Line::from(text.to_owned()) }
+    }).collect();
+    let area = Rect::new(0, 0, menu.width, menu.height);
+    let mut buffer = Buffer::empty(area);
+    Paragraph::new(lines).wrap(Wrap { trim: false }).scroll((request.scroll, 0))
+        .block(Block::default().borders(Borders::ALL)).render(area, &mut buffer);
+    let local_row = row - menu.y;
+    (1..menu.width.saturating_sub(1)).find_map(|x| match buffer[(x, local_row)].bg {
+        Color::Rgb(0, 0, option) if option > 0 => Some(usize::from(option)),
+        _ => None,
+    })
 }
 
 #[derive(Debug)]
@@ -1008,12 +1104,16 @@ fn streamed_turn_start(source: &str) -> Option<usize> {
         } else {
             for line in paragraph.lines() {
                 let line = line.trim_start();
-                if line.starts_with("```") {
-                    if fence == Some("```") { fence = None; }
-                    else if fence.is_none() { fence = Some("```"); }
-                } else if line.starts_with("~~~") {
-                    if fence == Some("~~~") { fence = None; }
-                    else if fence.is_none() { fence = Some("~~~"); }
+                if let Some(marker @ (b'`' | b'~')) = line.as_bytes().first().copied() {
+                    let count = line.bytes().take_while(|byte| *byte == marker).count();
+                    if count >= 3 {
+                        match fence {
+                            Some((open_marker, open_count)) if marker == open_marker && count >= open_count
+                                && line[count..].trim().is_empty() => fence = None,
+                            None => fence = Some((marker, count)),
+                            _ => {},
+                        }
+                    }
                 }
             }
         }
@@ -1142,6 +1242,10 @@ pub struct App {
     effort_picker: Option<EffortPicker>,
     attach_picker: Option<AttachPicker>,
     branch_picker: Option<BranchPicker>,
+    repo_picker: Option<RepoPicker>,
+    chooser_height_override: Cell<Option<u16>>,
+    chooser_view_start: Cell<usize>,
+    chooser_owner: RefCell<Option<String>>,
     lore_picker: Option<LorePicker>,
     engine_picker: bool,
     engine_selected: usize,
@@ -1285,6 +1389,10 @@ impl Default for App {
             effort_picker: None,
             attach_picker: None,
             branch_picker: None,
+            repo_picker: None,
+            chooser_height_override: Cell::new(None),
+            chooser_view_start: Cell::new(0),
+            chooser_owner: RefCell::new(None),
             lore_picker: None,
             engine_picker: false,
             engine_selected: 0,
@@ -1358,6 +1466,43 @@ impl Default for App {
 }
 
 impl App {
+    fn chooser_identity(&self) -> Option<String> {
+        let kind = if let Some(index) = self.active_request_index().filter(|&index|
+            self.input_requests[index].kind == "ask_user") {
+            format!("ask_user:{}:{}", self.input_requests[index].id, self.input_requests[index].step)
+        } else if self.settings_menu.is_some() { "settings".into() }
+        else if self.engine_picker { "engine".into() }
+        else if self.new_session.is_some() { "new_session".into() }
+        else if self.effort_picker.is_some() { "effort".into() }
+        else if self.permission_picker.is_some() { "permission".into() }
+        else if self.model_picker.is_some() { "model".into() }
+        else if self.repo_picker.is_some() { "repo".into() }
+        else if let Some(picker) = &self.lore_picker {
+            format!("lore:{}:{}:{}:{}", picker.proposal_mode, picker.review.is_some(),
+                picker.belief_review.is_some(), picker.evidence.is_some())
+        }
+        else if self.action_menu { "actions".into() }
+        else if let Some(info) = &self.chip_info { format!("chip_info:{}", info.kind) }
+        else if self.history_modal { "history".into() }
+        else if self.queue_picker.is_some() { "queue".into() }
+        else if self.attach_picker.is_some() { "attach".into() }
+        else if self.branch_picker.is_some() { "branch".into() }
+        else if !self.slash_suggestions().is_empty() { "slash".into() }
+        else { return None; };
+        Some(format!("{}:{}:{kind}", self.active_group,
+            self.groups[self.active_group].active_id().unwrap_or("")))
+    }
+
+    fn sync_chooser_state(&self) {
+        let identity = self.chooser_identity();
+        let mut owner = self.chooser_owner.borrow_mut();
+        if *owner != identity {
+            *owner = identity;
+            self.chooser_height_override.set(None);
+            self.chooser_view_start.set(0);
+        }
+    }
+
     fn invalidate_repo(&mut self, id: &str) {
         self.repo_cache.remove(id);
         let epoch = self.repo_epoch.entry(id.to_owned()).or_default();
@@ -1455,7 +1600,8 @@ impl App {
             "queue_cancel_reply" => {
                 let Some(id) = frame["session_id"].as_str() else { return false; };
                 let Some(picker) = self.queue_picker.as_mut().filter(|picker| picker.session_id == id) else { return false; };
-                if picker.cancelling.as_deref() != frame["queue_id"].as_str() { return false; }
+                let Some(expected) = picker.cancelling.as_deref() else { return false; };
+                if Some(expected) != frame["queue_id"].as_str() { return false; }
                 picker.cancelling = None;
                 self.notice = if frame["ok"] == true { "Queued prompt cancelled".into() }
                     else { format!("Queue cancellation failed · {}", safe_label(frame["error"].as_str().unwrap_or("item already started"))) };
@@ -1780,6 +1926,8 @@ impl App {
                         self.append_event(&id, event_type, data)
                     }
                     "session_done" => {
+                        self.input_requests.retain(|request| request.session_id != id);
+                        self.pending_answers.retain(|(session, _, _)| session != &id);
                         self.streaming_text.remove(&id);
                         self.session_activity.remove(&id);
                         let before = self.diff_reject_queue.len();
@@ -1907,6 +2055,8 @@ impl App {
             "clear_finalize_reply" => {
                 let Some(id) = frame["session_id"].as_str() else { return false; };
                 if frame["ok"] == true {
+                    let selected_id = self.rail_order().get(self.rail_selected)
+                        .map(|index| self.sessions[*index].id.clone());
                     self.sessions.retain(|session| session.id != id);
                     self.session_activity.remove(id);
                     self.session_identity.remove(id);
@@ -1930,7 +2080,10 @@ impl App {
                     self.selected_tool_sections.remove(id);
                     self.tool_cards_revision.remove(id);
                     self.input_requests.retain(|request| request.session_id != id);
-                    self.rail_selected = self.rail_selected.min(self.rail_order().len().saturating_sub(1));
+                    self.pending_answers.retain(|(session, _, _)| session != id);
+                    self.rail_selected = selected_id.and_then(|selected| self.rail_order().iter()
+                        .position(|index| self.sessions[*index].id == selected))
+                        .unwrap_or_else(|| self.rail_selected.min(self.rail_order().len().saturating_sub(1)));
                     self.notice = "Previous session finalized".into();
                 } else {
                     self.notice = format!("Previous session remains live · {}",
@@ -2061,6 +2214,10 @@ impl App {
                 let Some(text) = frame.get("text").and_then(|v| v.as_str()) else {
                     return false;
                 };
+                if text.len() > MAX_INPUT_BYTES || text.chars().any(|ch| unsafe_input_char(ch) && ch != '\n') {
+                    self.notice = "Rejected prompt exceeds input limits · inspect the originating client".into();
+                    return true;
+                }
                 let Some(target) = frame.get("session_id").and_then(|v| v.as_str()) else {
                     return false;
                 };
@@ -2094,6 +2251,10 @@ impl App {
                 let Some(text) = frame.get("text").and_then(|v| v.as_str()) else {
                     return false;
                 };
+                if text.len() > MAX_INPUT_BYTES || text.chars().any(|ch| unsafe_input_char(ch) && ch != '\n') {
+                    self.notice = "Rejected prompt exceeds input limits · inspect the originating client".into();
+                    return true;
+                }
                 let Some(target) = frame.get("session_id").and_then(|v| v.as_str()) else {
                     return false;
                 };
@@ -2120,11 +2281,11 @@ impl App {
         let Some(row) = structured_event(event_type, data) else {
             return false;
         };
-        let heading_needed = matches!(event_type, "tool_call" | "tool_result")
-            && self.streaming_text.insert(id.to_owned());
         let Some(session) = self.sessions.iter_mut().find(|s| s.id == id) else {
             return false;
         };
+        let heading_needed = matches!(event_type, "tool_call" | "tool_result")
+            && self.streaming_text.insert(id.to_owned());
         if heading_needed { append_turn_heading(session, "Assistant"); }
         if append_transcript(session, &row) {
             self.notice = "Transcript tail limited to 512 KiB".into();
@@ -2133,6 +2294,7 @@ impl App {
     }
 
     fn append_reasoning(&mut self, id: &str, data: &serde_json::Value, progress: bool) -> bool {
+        if !self.sessions.iter().any(|session| session.id == id) { return false; }
         let stream = self.reasoning_streams.entry(id.to_owned()).or_default();
         if let Some(tokens) = data.get("approx_tokens").and_then(|value| value.as_u64()) {
             stream.tokens = stream.tokens.max(tokens);
@@ -2185,6 +2347,10 @@ impl App {
                     self.branch_picker = None;
                     self.notice = "Enlarge active pane to choose a branch".into();
                 }
+                if self.repo_picker.is_some() && self.active_chooser_rect().is_none() {
+                    self.repo_picker = None;
+                    self.notice = "Enlarge active pane to choose a directory".into();
+                }
                 if self.queue_picker.is_some() && self.active_chooser_rect().is_none() {
                     self.queue_picker = None;
                     self.notice = "Enlarge active pane to inspect queued prompts".into();
@@ -2201,8 +2367,8 @@ impl App {
                     self.stop_confirmation = None;
                     self.notice = "Session stop cancelled · enlarge terminal to confirm".into();
                 }
-                if ((self.model_picker.is_some() || self.effort_picker.is_some() || self.engine_picker || self.new_session.is_some()) && (w < 29 || h < 11))
-                    || (self.permission_picker.is_some() && (w < 60 || h < 15)) {
+                if ((self.model_picker.is_some() || self.effort_picker.is_some() || self.engine_picker || self.new_session.is_some()) && self.active_chooser_rect().is_none())
+                    || (self.permission_picker.is_some() && self.active_chooser_rect().is_none()) {
                     self.model_picker = None;
                     self.effort_picker = None;
                     self.engine_picker = false;
@@ -2242,6 +2408,7 @@ impl App {
             self.slash_selected = 0;
             self.slash_dismissed = false;
         }
+        self.sync_chooser_state();
         changed
     }
 
@@ -2257,7 +2424,7 @@ impl App {
         }
         if self.focus != Focus::Prompt || self.active_request_index().is_some()
             || self.stop_confirmation.is_some() || self.lore_picker.is_some() || self.settings_menu.is_some()
-            || self.new_session.is_some() || self.model_picker.is_some() || self.effort_picker.is_some()
+            || self.new_session.is_some() || self.repo_picker.is_some() || self.model_picker.is_some() || self.effort_picker.is_some()
             || self.permission_picker.is_some() || self.engine_picker || self.action_menu
             || self.history_modal || self.queue_picker.is_some() || self.attach_picker.is_some() || self.branch_picker.is_some() || self.diff_modal || self.map_modal || self.tool_modal {
             return false;
@@ -2315,7 +2482,7 @@ impl App {
         if self.focus != Focus::Prompt || self.slash_dismissed
             || self.active_request_index().is_some() || self.stop_confirmation.is_some()
             || self.chip_info.is_some() || self.lore_picker.is_some() || self.settings_menu.is_some()
-            || self.new_session.is_some() || self.model_picker.is_some()
+            || self.new_session.is_some() || self.repo_picker.is_some() || self.model_picker.is_some()
             || self.effort_picker.is_some() || self.permission_picker.is_some()
             || self.engine_picker || self.action_menu || self.history_modal
             || self.queue_picker.is_some() || self.attach_picker.is_some() || self.branch_picker.is_some()
@@ -2510,6 +2677,7 @@ impl App {
             return false;
         }
         if self.settings_menu.is_some() { return self.settings_menu_key(key); }
+        if self.repo_picker.is_some() { return self.repo_picker_key(key); }
         if self.lore_picker.is_some() { return self.lore_picker_key(key); }
         if self.new_session.is_some() { return self.new_session_key(key); }
         if self.model_picker.is_some() { return self.model_picker_key(key); }
@@ -3286,6 +3454,53 @@ impl App {
         self.notice = format!("Opening a new tab at {} · current session stays here", safe_label(&cwd.display().to_string()));
     }
 
+    fn open_repo_picker(&mut self, group: usize) {
+        self.active_group = group;
+        let Some(id) = self.groups[group].active_id() else {
+            self.notice = "Choose a session first".into();
+            return;
+        };
+        let source = self.session_cwds.get(id).cloned();
+        let current = source.as_deref().and_then(safe_repo_directory)
+            .or_else(|| source.as_deref().and_then(Path::parent).and_then(safe_repo_directory));
+        let Some(current_dir) = current else {
+            self.notice = "Current session directory is unavailable".into();
+            return;
+        };
+        self.chip_info = None;
+        let paths = repo_directory_entries(&current_dir);
+        self.repo_picker = Some(RepoPicker { current_dir, paths, selected: 0 });
+        if self.active_chooser_rect().is_none() {
+            self.repo_picker = None;
+            self.notice = "Enlarge active pane to choose a directory".into();
+        }
+    }
+
+    fn repo_picker_key(&mut self, key: KeyEvent) -> bool {
+        let picker = self.repo_picker.as_mut().unwrap();
+        match key.code {
+            KeyCode::Esc => self.repo_picker = None,
+            KeyCode::Up => picker.selected = picker.selected.saturating_sub(1),
+            KeyCode::Down => picker.selected = (picker.selected + 1).min(picker.paths.len() - 1),
+            KeyCode::Enter => {
+                let launch_current = picker.selected == 0;
+                let path = picker.paths[picker.selected].clone();
+                if launch_current {
+                    self.repo_picker = None;
+                    if let Some(path) = path.to_str() { self.local_cd(path); }
+                } else if let Some(current_dir) = safe_repo_directory(&path) {
+                    picker.paths = repo_directory_entries(&current_dir);
+                    picker.current_dir = current_dir;
+                    picker.selected = 0;
+                } else {
+                    self.notice = "Directory no longer available".into();
+                }
+            }
+            _ => return false,
+        }
+        true
+    }
+
     fn local_collection(&mut self, args: &str) {
         let (verb, rest) = args.trim().split_once(char::is_whitespace)
             .map_or((args.trim(), ""), |(verb, rest)| (verb, rest.trim()));
@@ -3718,17 +3933,27 @@ impl App {
     /// positions are shared by paint and mouse hit testing.
     fn history_rows(&self, visible: usize) -> Vec<(usize, bool, String)> {
         let matches = self.history_matches();
+        let selected_row = matches.iter().take(self.history_selected).map(|&index|
+            1 + self.history_snippets(&self.sessions[index].id).len().min(2)).sum();
+        let start = chooser_visible_start(&self.chooser_view_start, selected_row, visible);
         let mut rows = Vec::new();
-        for (position, &index) in matches.iter().enumerate().skip(self.history_selected) {
+        let mut visual_row = 0;
+        for (position, &index) in matches.iter().enumerate() {
             if rows.len() >= visible { break; }
             let session = &self.sessions[index];
-            let label = format!(" {} {} · {}{}", if position == self.history_selected { '›' } else { ' ' },
-                safe_label(&session.title), safe_label(&session.id),
-                if self.offline_ids.contains(&session.id) { " · archived" } else { "" });
-            rows.push((position, true, label));
+            if visual_row >= start {
+                let label = format!(" {} {} · {}{}", if position == self.history_selected { '›' } else { ' ' },
+                    safe_label(&session.title), safe_label(&session.id),
+                    if self.offline_ids.contains(&session.id) { " · archived" } else { "" });
+                rows.push((position, true, label));
+            }
+            visual_row += 1;
             for snippet in self.history_snippets(&session.id).iter().take(2) {
                 if rows.len() >= visible { break; }
-                rows.push((position, false, format!("    ↳ {}", safe_label(snippet))));
+                if visual_row >= start {
+                    rows.push((position, false, format!("    ↳ {}", safe_label(snippet))));
+                }
+                visual_row += 1;
             }
         }
         rows
@@ -3759,10 +3984,15 @@ impl App {
             return;
         }
         if self.history_pending.is_none() {
-            let (tx, rx) = mpsc::sync_channel(1);
-            self.history_pending = Some(rx);
-            std::thread::spawn(move || { let _ = tx.send(history::discover()); });
+            self.start_history_inventory();
         }
+    }
+
+    fn start_history_inventory(&mut self) {
+        let (tx, rx) = mpsc::sync_channel(1);
+        self.history_pending = Some(rx);
+        self.history_scan_query = None;
+        std::thread::spawn(move || { let _ = tx.send(history::discover()); });
     }
 
     fn local_search(&mut self, args: &str) {
@@ -3782,6 +4012,16 @@ impl App {
 
     fn schedule_history_query(&mut self, now: Instant) {
         if self.history_resume { return; }
+        if self.history_query.trim().is_empty() {
+            // /search without a query and deleting the last search character
+            // both need the recent inventory, not a cancelled query receiver.
+            if self.history_pending.is_none() || self.history_scan_query.is_some() {
+                self.start_history_inventory();
+            }
+            self.history_query_due = None;
+            self.prune_unopened_history();
+            return;
+        }
         // Dropping the receiver cancels delivery from an older worker. Its
         // bounded file/sidecar work may finish, but can no longer paint UI.
         self.history_pending = None;
@@ -3795,18 +4035,25 @@ impl App {
         // inventory so reopening search can reuse results, while repeated
         // distinct queries cannot retain unbounded transcript tails.
         const MAX_CACHED_ARCHIVED: usize = 64;
+        let selected_id = self.history_modal.then(|| self.history_matches()
+            .get(self.history_selected).map(|&index| self.sessions[index].id.clone())).flatten();
         let open: HashSet<String> = self.groups.iter()
             .flat_map(|group| group.tabs.iter().cloned()).collect();
         let unopened: Vec<_> = self.sessions.iter().filter(|session|
             self.offline_ids.contains(&session.id) && !open.contains(&session.id))
             .map(|session| session.id.clone()).collect();
         let excess = unopened.len().saturating_sub(MAX_CACHED_ARCHIVED);
-        let evict: HashSet<_> = unopened.into_iter().take(excess).collect();
+        let evict: HashSet<_> = unopened.into_iter()
+            .filter(|id| selected_id.as_ref() != Some(id)).take(excess).collect();
         if evict.is_empty() { return; }
         self.sessions.retain(|session| !evict.contains(&session.id));
         self.offline_ids.retain(|id| !evict.contains(id));
         self.history_entries.retain(|id, _| !evict.contains(id));
         self.history_scanned_matches.retain(|id, _| !evict.contains(id));
+        if let Some(id) = selected_id {
+            self.history_selected = self.history_matches().iter()
+                .position(|&index| self.sessions[index].id == id).unwrap_or(0);
+        }
     }
 
     fn cancel_history_query(&mut self) {
@@ -4009,6 +4256,7 @@ impl App {
             .or_else(|| std::env::current_dir().ok().map(|path| path.to_string_lossy().into_owned()))
             .unwrap_or_default();
         self.lore_picker = Some(LorePicker {
+            session_id: self.groups[self.active_group].active_id().map(str::to_owned),
             query: String::new(), rows: Vec::new(), selected: 0, offset: 0,
             proposals: Vec::new(), proposal_mode, review: None,
             review_scroll: 0, review_seen: 0, review_width: 0,
@@ -4075,18 +4323,17 @@ impl App {
     }
 
     fn poll_memory(&mut self) -> bool {
-        // A completed scan can change excerpts or the loading indicator even
-        // when every hit is already present in the session list.
-        let mut changed = true;
+        let mut changed = false;
         if let Some((id, cwd, receiver)) = self.memory_pending.take() {
             match receiver.try_recv() {
                 Ok(result) => {
                     if self.session_cwds.get(&id).and_then(|path| path.to_str()) == Some(cwd.as_str()) {
+                        let mut repo_changed = false;
                         let usage = result.map(|(usage, repo)| {
-                            self.memory_repo.insert(id.clone(), repo);
+                            repo_changed = self.memory_repo.insert(id.clone(), repo) != Some(repo);
                             usage
                         });
-                        changed = self.memory_cache.get(&id).is_none_or(|(old, _)| *old != usage);
+                        changed = repo_changed || self.memory_cache.get(&id).is_none_or(|(old, _)| *old != usage);
                         self.memory_cache.insert(id, (usage, Instant::now()));
                     }
                 }
@@ -4186,6 +4433,10 @@ impl App {
                 false
             }
             Err(TryRecvError::Disconnected) => {
+                if self.groups[self.active_group].active_id() != Some(id.as_str())
+                    || self.session_cwds.get(&id).and_then(|path| path.to_str()) != Some(cwd.as_str()) {
+                    return false;
+                }
                 if let Some(info) = self.chip_info.as_mut().filter(|info| info.kind == "memory") {
                     info.lines = vec!["LORE unavailable".to_owned()];
                     info.scroll = 0;
@@ -4331,10 +4582,11 @@ impl App {
         if refresh_after_action {
             let offset = picker.offset;
             self.notice = picker.result_status.clone().unwrap_or_default();
-            if let Some(id) = self.groups[self.active_group].active_id() {
+            if let Some(id) = picker.session_id.as_ref().filter(|id|
+                self.session_cwds.get(*id).and_then(|path| path.to_str()) == Some(picker.cwd.as_str())) {
                 self.memory_cache.remove(id);
-                self.session_telemetry.entry(id.to_owned()).or_default().lore = None;
-                self.pending_queue_commands.push(crate::bridge::WorkerCommand::Status(id.to_owned()));
+                self.session_telemetry.entry(id.clone()).or_default().lore = None;
+                self.pending_queue_commands.push(crate::bridge::WorkerCommand::Status(id.clone()));
             }
             self.load_lore(lore_picker::Query::Beliefs(offset));
         }
@@ -4346,6 +4598,27 @@ impl App {
         let picker = self.lore_picker.as_mut().unwrap();
         if picker.resolving { return true; }
         if picker.pending.is_some() { return true; }
+        // Dismissal must remain possible when a split or resized pane cannot
+        // show the review, and when an exact-selection guard has invalidated it.
+        if key.code == KeyCode::Esc {
+            if picker.proposal_mode && picker.review.is_some() {
+                picker.review = None;
+                picker.armed_resolution = None;
+                return true;
+            }
+            if picker.belief_review.is_some() {
+                if picker.belief_action.is_some() {
+                    picker.belief_action = None;
+                    picker.belief_note.clear();
+                    picker.retract_armed = false;
+                    picker.status = "Belief action cancelled".into();
+                } else {
+                    picker.belief_review = None;
+                    picker.can_act_on_beliefs = false;
+                }
+                return true;
+            }
+        }
         if picker.proposal_mode {
             if let Some(review) = &picker.review {
                 let Some(area) = review_area else { return true; };
@@ -4358,6 +4631,11 @@ impl App {
                     picker.review_seen = 0;
                     picker.armed_resolution = None;
                 }
+                if visible == 0 {
+                    picker.armed_resolution = None;
+                    picker.status = "Enlarge the review to read its complete contents".into();
+                    return true;
+                }
                 if visible > 0 && picker.review_scroll <= picker.review_seen {
                     picker.review_seen = picker.review_seen.max(picker.review_scroll.saturating_add(visible)).min(total);
                 }
@@ -4368,11 +4646,13 @@ impl App {
                     KeyCode::Down => { picker.review_scroll = (picker.review_scroll + 1).min(max_scroll); picker.armed_resolution = None; }
                     KeyCode::PageUp => { picker.review_scroll = picker.review_scroll.saturating_sub(visible.saturating_sub(1).max(1)); picker.armed_resolution = None; }
                     KeyCode::PageDown => { picker.review_scroll = picker.review_scroll.saturating_add(visible.saturating_sub(1).max(1)).min(max_scroll); picker.armed_resolution = None; }
-                    KeyCode::Char('a' | 'A') if picker.can_resolve && visible > 0 && picker.review_seen == total && picker.pending.is_none() => {
+                    KeyCode::Char('a' | 'A') if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                        && picker.can_resolve && visible > 0 && picker.review_seen == total && picker.pending.is_none() => {
                         picker.armed_resolution = Some(doxa_lore::PendingDecision::Approve);
                         picker.status = "Approve this exact proposal? Press Enter to confirm, Esc to cancel".into();
                     }
-                    KeyCode::Char('r' | 'R') if picker.can_resolve && visible > 0 && picker.review_seen == total && picker.pending.is_none() => {
+                    KeyCode::Char('r' | 'R') if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                        && picker.can_resolve && visible > 0 && picker.review_seen == total && picker.pending.is_none() => {
                         picker.armed_resolution = Some(doxa_lore::PendingDecision::Reject);
                         picker.status = "Reject this exact proposal? Press Enter to confirm, Esc to cancel".into();
                     }
@@ -4444,6 +4724,12 @@ impl App {
                 picker.belief_action = None;
                 picker.retract_armed = false;
             }
+            if visible == 0 {
+                picker.belief_action = None;
+                picker.retract_armed = false;
+                picker.status = "Enlarge the review to read its complete contents".into();
+                return true;
+            }
             if visible > 0 && picker.review_scroll <= picker.review_seen {
                 picker.review_seen = picker.review_seen.max(picker.review_scroll.saturating_add(visible)).min(total);
             }
@@ -4496,7 +4782,8 @@ impl App {
                 KeyCode::Down => picker.review_scroll = (picker.review_scroll + 1).min(max_scroll),
                 KeyCode::PageUp => picker.review_scroll = picker.review_scroll.saturating_sub(visible.saturating_sub(1).max(1)),
                 KeyCode::PageDown => picker.review_scroll = picker.review_scroll.saturating_add(visible.saturating_sub(1).max(1)).min(max_scroll),
-                KeyCode::Char(c) if picker.can_act_on_beliefs && visible > 0 && picker.review_seen == total => {
+                KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                    && picker.can_act_on_beliefs && visible > 0 && picker.review_seen == total => {
                     picker.belief_action = match c.to_ascii_lowercase() {
                         'c' => Some(doxa_lore::BeliefAction::Confirmed),
                         'x' => Some(doxa_lore::BeliefAction::Contradicted),
@@ -4998,9 +5285,12 @@ impl App {
             .map(|(_, _, _, section)| *section).collect();
         if visible.is_empty() { return false; }
         let current = self.selected_tool_sections.get(&id).copied();
-        let position = current.and_then(|value| visible.iter().position(|index| *index == value))
-            .unwrap_or(if forward { 0 } else { visible.len() - 1 });
-        let next = if forward { (position + 1).min(visible.len() - 1) } else { position.saturating_sub(1) };
+        let next = match current.and_then(|value| visible.iter().position(|index| *index == value)) {
+            Some(position) if forward => (position + 1).min(visible.len() - 1),
+            Some(position) => position.saturating_sub(1),
+            None if forward => 0,
+            None => visible.len() - 1,
+        };
         self.selected_tool_sections.insert(id, visible[next]);
         true
     }
@@ -5510,8 +5800,9 @@ impl App {
     /// Space for a chooser inside the active pane, immediately above its
     /// prompt. Reserving this space keeps the transcript and prompt visible.
     fn chooser_rect(&self, pane: Rect) -> Option<Rect> {
+        self.sync_chooser_state();
         let wanted = if let Some(index) = self.active_request_index().filter(|&index| self.input_requests[index].kind == "ask_user") {
-            let (body, _) = input_request_body(&self.input_requests[index],
+            let (body, _, _) = input_request_body(&self.input_requests[index],
                 usize::from(pane.width.saturating_sub(4)));
             wrapped_rows(&body, usize::from(pane.width.saturating_sub(2)))
                 .saturating_add(2).clamp(6, 18) as u16
@@ -5528,6 +5819,8 @@ impl App {
         } else if let Some(picker) = &self.model_picker {
             (4 + picker.models.len() + usize::from(picker.catalog_pending || !picker.loading && picker.models.is_empty()))
                 .clamp(5, 13) as u16
+        } else if let Some(picker) = &self.repo_picker {
+            (picker.paths.len() + 3).clamp(5, 15) as u16
         } else if let Some(picker) = &self.lore_picker {
             if picker.review.is_some() || picker.belief_review.is_some() {
                 19
@@ -5565,7 +5858,7 @@ impl App {
         let draft = group.active_id().map_or("", |_| self.input.as_str());
         let prompt = prompt_height(draft, pane.height);
         let available = pane.height.saturating_sub(3 + prompt + 1 + 1 + 1);
-        let height = wanted.min(available);
+        let height = self.chooser_height_override.get().unwrap_or(wanted).min(available);
         if height < 5 || pane.width < 18 { return None; }
         Some(Rect::new(pane.x, pane.bottom().saturating_sub(prompt + 1 + 1 + height), pane.width, height))
     }
@@ -5770,7 +6063,7 @@ impl App {
             || self.branch_picker.is_some() || self.lore_picker.is_some()
             || self.settings_menu.is_some() || self.model_picker.is_some()
             || self.effort_picker.is_some() || self.permission_picker.is_some()
-            || self.engine_picker || self.new_session.is_some()
+            || self.engine_picker || self.new_session.is_some() || self.repo_picker.is_some()
             || self.chip_info.is_some() || self.stop_confirmation.is_some()
     }
 
@@ -5903,8 +6196,137 @@ impl App {
         });
     }
 
+    fn hover_chooser(&mut self, column: u16, row: u16) -> bool {
+        let Some(menu) = self.active_chooser_rect() else { return false; };
+        if column <= menu.x || column >= menu.right().saturating_sub(1)
+            || row <= menu.y || row >= menu.bottom().saturating_sub(1) { return false; }
+        if let Some(index) = self.active_request_index() {
+            if self.input_requests[index].kind != "ask_user" || self.input_requests[index].sending {
+                return false;
+            }
+            if let Some(option) = ask_user_option_at(&self.input_requests[index], menu, row) {
+                if self.input_requests[index].selected != option {
+                    self.input_requests[index].selected = option;
+                    return true;
+                }
+            }
+            return false;
+        }
+        let visible = usize::from(menu.height.saturating_sub(3)).max(1);
+        let attach_len = self.attach_picker.as_ref().map(|_| self.attach_matches().len());
+        if let Some(settings) = self.settings_menu.as_mut() {
+            if (menu.y + 3..menu.y + 5).contains(&row) {
+                let index = usize::from(row - menu.y - 3);
+                if settings.selected != index { settings.selected = index; return true; }
+            }
+        } else if let Some(picker) = self.branch_picker.as_mut() {
+            if row < menu.y + 2 { return false; }
+            let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
+            let index = start + usize::from(row - menu.y - 2);
+            if index < picker.branches.len() && picker.selected != index { picker.selected = index; return true; }
+        } else if let Some(picker) = self.repo_picker.as_mut() {
+            if row < menu.y + 2 { return false; }
+            let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
+            let index = start + usize::from(row - menu.y - 2);
+            if index < picker.paths.len() && picker.selected != index { picker.selected = index; return true; }
+        } else if self.engine_picker {
+            let offset = if menu.height >= 10 { 4 } else { 2 };
+            if row < menu.y + offset { return false; }
+            let visible = usize::from(menu.height.saturating_sub(offset + 1)).max(1);
+            let start = chooser_visible_start(&self.chooser_view_start, self.engine_selected, visible);
+            let index = start + usize::from(row - menu.y - offset);
+            if index < ENGINE_CHOICES.len() && self.engine_selected != index { self.engine_selected = index; return true; }
+        } else if let Some(form) = self.new_session.as_mut() {
+            let first = menu.y + if menu.height >= 8 { 4 } else { 2 };
+            let fields = if vendor_models(form.engine).is_empty() { 2 } else { 3 };
+            if row >= first && usize::from(row - first) < fields {
+                let index = usize::from(row - first);
+                if form.field != index { form.field = index; return true; }
+            }
+        } else if let Some((_, selected)) = self.permission_picker.as_mut() {
+            let offset = if menu.height >= 10 { 4 } else { 2 };
+            if row < menu.y + offset { return false; }
+            let visible = usize::from(menu.height.saturating_sub(offset + 1)).max(1);
+            let start = chooser_visible_start(&self.chooser_view_start, *selected, visible);
+            let index = start + usize::from(row - menu.y - offset);
+            if index < PERMISSION_CHOICES.len() && *selected != index { *selected = index; return true; }
+        } else if let Some(picker) = self.effort_picker.as_mut() {
+            if row < menu.y + 3 { return false; }
+            let visible = usize::from(menu.height.saturating_sub(4)).max(1);
+            let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
+            let index = start + usize::from(row - menu.y - 3);
+            if index < picker.levels.len() && picker.selected != index { picker.selected = index; return true; }
+        } else if let Some(picker) = self.model_picker.as_mut() {
+            if row < menu.y + 3 { return false; }
+            let visible = usize::from(menu.height.saturating_sub(4)).max(1);
+            let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
+            let index = start + usize::from(row - menu.y - 3);
+            if index < picker.models.len() && picker.selected != index { picker.selected = index; return true; }
+        } else if let Some(picker) = self.attach_picker.as_mut() {
+            if row < menu.y + 2 { return false; }
+            let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
+            let index = start + usize::from(row - menu.y - 2);
+            if index < attach_len.unwrap_or(0) && picker.selected != index { picker.selected = index; return true; }
+        } else if let Some(picker) = self.queue_picker.as_mut() {
+            if row < menu.y + 2 { return false; }
+            let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
+            let index = start + usize::from(row - menu.y - 2);
+            if index < picker.rows.len() && picker.selected != index { picker.selected = index; return true; }
+        } else if self.history_modal {
+            if row < menu.y + 2 { return false; }
+            if let Some((index, header, _)) = self.history_rows(visible).get(usize::from(row - menu.y - 2)) {
+                if *header && self.history_selected != *index { self.history_selected = *index; return true; }
+            }
+        } else if let Some(picker) = self.lore_picker.as_mut() {
+            if picker.review.is_some() || picker.belief_review.is_some() || picker.evidence.is_some()
+                || picker.pending.is_some() { return false; }
+            let compact = menu.height < 10;
+            let first = if picker.proposal_mode { menu.y + 4 } else { menu.y + if compact { 3 } else { 6 } };
+            if row < first { return false; }
+            let reserve = if picker.proposal_mode { 6 } else if compact { 4 } else { 8 };
+            let visible = usize::from(menu.height.saturating_sub(reserve)).max(1);
+            if usize::from(row - first) >= visible { return false; }
+            let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
+            let index = start + usize::from(row - first);
+            let count = if picker.proposal_mode { picker.proposals.len() } else { picker.rows.len() };
+            if index < count && picker.selected != index { picker.selected = index; return true; }
+        } else if self.action_menu {
+            let visible = usize::from(menu.height.saturating_sub(2)).max(1);
+            let start = chooser_visible_start(&self.chooser_view_start, self.action_selected, visible);
+            let index = start + usize::from(row - menu.y - 1);
+            if index < ACTIONS.len() && self.action_selected != index { self.action_selected = index; return true; }
+        } else if !self.slash_suggestions().is_empty() {
+            let visible = usize::from(menu.height.saturating_sub(2)).max(1);
+            let start = chooser_visible_start(&self.chooser_view_start, self.slash_selected, visible);
+            let index = start + usize::from(row - menu.y - 1);
+            if index < self.slash_suggestions().len() && self.slash_selected != index { self.slash_selected = index; return true; }
+        }
+        false
+    }
+
     fn mouse(&mut self, mouse: MouseEvent) -> bool {
+        if self.drag == Some(DragTarget::Chooser) {
+            match mouse.kind {
+                MouseEventKind::Drag(MouseButton::Left) => {
+                    let layout = self.layout(self.size);
+                    let pane = layout.panes.map_or(layout.body, |panes| panes[self.active_group]);
+                    let draft = self.groups[self.active_group].active_id().map_or("", |_| self.input.as_str());
+                    let prompt = prompt_height(draft, pane.height);
+                    let max = pane.height.saturating_sub(3 + prompt + 1 + 1 + 1);
+                    let bottom = pane.bottom().saturating_sub(prompt + 2);
+                    self.chooser_height_override.set(Some(bottom.saturating_sub(mouse.row).clamp(5, max.max(5))));
+                    return true;
+                }
+                MouseEventKind::Up(MouseButton::Left) => { self.drag = None; return true; }
+                _ => {}
+            }
+        }
         if mouse.kind == MouseEventKind::Moved {
+            if self.hover_chooser(mouse.column, mouse.row) {
+                self.chip_hover = None;
+                self.link_hover = None;
+                return true;
+            }
             let overlay = self.link_interaction_blocked();
             let chip = (!overlay).then(|| self.chip_hit_at(mouse.column, mouse.row)).flatten();
             let link = (!overlay).then(|| self.link_at(mouse.column, mouse.row)).flatten();
@@ -5912,6 +6334,56 @@ impl App {
             self.chip_hover = chip;
             self.link_hover = link;
             return changed;
+        }
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left)
+            && self.active_chooser_rect().is_some_and(|area|
+                mouse.row == area.y && mouse.column >= area.x && mouse.column < area.right()) {
+            self.drag = Some(DragTarget::Chooser);
+            return true;
+        }
+        if let Some(index) = self.active_request_index() {
+            if self.input_requests[index].kind == "ask_user"
+                && mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                if let Some(menu) = self.active_chooser_rect() {
+                    if mouse.column > menu.x && mouse.column < menu.right().saturating_sub(1) {
+                        if let Some(option) = ask_user_option_at(&self.input_requests[index], menu, mouse.row) {
+                            self.input_requests[index].selected = option;
+                            return self.request_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+                        }
+                    }
+                }
+            }
+        }
+        if self.repo_picker.is_some() {
+            let Some(menu) = self.active_chooser_rect() else { return false; };
+            let inside = menu.contains(ratatui::layout::Position::new(mouse.column, mouse.row));
+            return match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if !inside { self.repo_picker = None; return true; }
+                    if mouse.row >= menu.y + 2 && mouse.row < menu.bottom().saturating_sub(1) {
+                        let picker = self.repo_picker.as_mut().unwrap();
+                        let visible = usize::from(menu.height.saturating_sub(3)).max(1);
+                        let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
+                        let index = start + usize::from(mouse.row - menu.y - 2);
+                        if index < picker.paths.len() {
+                            picker.selected = index;
+                            return self.repo_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+                        }
+                    }
+                    true
+                }
+                MouseEventKind::ScrollUp if inside => {
+                    let picker = self.repo_picker.as_mut().unwrap();
+                    picker.selected = picker.selected.saturating_sub(1);
+                    true
+                }
+                MouseEventKind::ScrollDown if inside => {
+                    let picker = self.repo_picker.as_mut().unwrap();
+                    picker.selected = (picker.selected + 1).min(picker.paths.len() - 1);
+                    true
+                }
+                _ => false,
+            }
         }
         if mouse.kind == MouseEventKind::Down(MouseButton::Left)
             && mouse.modifiers.contains(KeyModifiers::CONTROL)
@@ -5974,8 +6446,12 @@ impl App {
                 if menu.contains(ratatui::layout::Position::new(mouse.column, mouse.row)) {
                     match mouse.kind {
                         MouseEventKind::Down(MouseButton::Left) => {
+                            if mouse.column <= menu.x || mouse.column >= menu.right().saturating_sub(1)
+                                || mouse.row <= menu.y || mouse.row >= menu.bottom().saturating_sub(1) {
+                                return true;
+                            }
                             let visible = usize::from(menu.height.saturating_sub(2)).max(1);
-                            let start = self.slash_selected.saturating_sub(visible.saturating_sub(1));
+                            let start = chooser_visible_start(&self.chooser_view_start, self.slash_selected, visible);
                             let position = start + usize::from(mouse.row.saturating_sub(menu.y + 1));
                             if mouse.row > menu.y && position < suggestions.len() {
                                 self.slash_selected = position;
@@ -6007,7 +6483,7 @@ impl App {
                         if mouse.row >= first_row && mouse.row < menu.bottom().saturating_sub(1) {
                             let visible = usize::from(menu.height.saturating_sub(3)).max(1);
                             let picker = self.branch_picker.as_mut().unwrap();
-                            let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+                            let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
                             let position = start + usize::from(mouse.row - first_row);
                             if position < picker.branches.len() {
                                 picker.selected = position;
@@ -6043,7 +6519,7 @@ impl App {
                     if mouse.row >= first_row && mouse.row < menu.bottom().saturating_sub(1) {
                         let visible = usize::from(menu.height.saturating_sub(3)).max(1);
                         let selected = self.attach_picker.as_ref().unwrap().selected;
-                        let start = selected.saturating_sub(visible.saturating_sub(1));
+                        let start = chooser_visible_start(&self.chooser_view_start, selected, visible);
                         let position = start + usize::from(mouse.row - first_row);
                         if position < self.attach_matches().len() {
                             self.attach_picker.as_mut().unwrap().selected = position;
@@ -6111,7 +6587,7 @@ impl App {
                         if mouse.row >= first && mouse.row < menu.bottom().saturating_sub(1) {
                             let picker = self.queue_picker.as_mut().unwrap();
                             let visible = usize::from(menu.height.saturating_sub(3)).max(1);
-                            let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+                            let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
                             picker.selected = (start + usize::from(mouse.row - first)).min(picker.rows.len().saturating_sub(1));
                         }
                     }
@@ -6147,6 +6623,7 @@ impl App {
                     picker.belief_action = None;
                     picker.retract_armed = false;
                 }
+                if visible == 0 { return true; }
                 if visible > 0 && picker.review_scroll <= picker.review_seen {
                     picker.review_seen = picker.review_seen.max(picker.review_scroll.saturating_add(visible)).min(total);
                 }
@@ -6161,13 +6638,35 @@ impl App {
                 }
                 return true;
             }
-            if picker.proposal_mode || picker.evidence.is_some() { return true; }
+            if picker.evidence.is_some() || picker.review.is_some() { return true; }
+            if picker.proposal_mode {
+                let visible = usize::from(menu.height.saturating_sub(6)).max(1);
+                match mouse.kind {
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        let first = menu.y + 4;
+                        let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
+                        if mouse.row >= first && mouse.row < first.saturating_add(visible as u16) {
+                            let index = start + usize::from(mouse.row - first);
+                            if let Some(pid) = picker.proposals.get(index).map(|row| row.pid.clone()) {
+                                if picker.selected == index {
+                                    let cwd = picker.cwd.clone();
+                                    self.load_lore(lore_picker::Query::Review(cwd, pid));
+                                } else { picker.selected = index; }
+                            }
+                        }
+                    }
+                    MouseEventKind::ScrollUp => picker.selected = picker.selected.saturating_sub(1),
+                    MouseEventKind::ScrollDown => picker.selected = (picker.selected + 1).min(picker.proposals.len().saturating_sub(1)),
+                    _ => {}
+                }
+                return true;
+            }
             match mouse.kind {
                 MouseEventKind::Down(MouseButton::Left) => {
                     let compact = menu.height < 10;
                     let first = menu.y.saturating_add(if compact { 3 } else { 6 });
                     let visible = usize::from(menu.height.saturating_sub(if compact { 4 } else { 8 })).max(1);
-                    let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+                    let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
                     if mouse.row >= first && mouse.row < first.saturating_add(visible as u16) {
                         let index = start + usize::from(mouse.row - first);
                         if let Some(id) = picker.rows.get(index).map(|row| row.id) {
@@ -6198,11 +6697,14 @@ impl App {
                 self.permission_confirm_dont_ask = false;
                 return true;
             }
+            if mouse.column == x || mouse.column == x + width - 1 || mouse.row == y + height - 1 {
+                return true;
+            }
             if self.engine_picker {
                 let offset = if height >= 10 { 4 } else { 2 };
                 if mouse.row < y + offset { return true; }
                 let visible = usize::from(height.saturating_sub(offset + 1)).max(1);
-                let start = self.engine_selected.saturating_sub(visible.saturating_sub(1));
+                let start = chooser_visible_start(&self.chooser_view_start, self.engine_selected, visible);
                 let row = start + usize::from(mouse.row.saturating_sub(y + offset));
                 if row < ENGINE_CHOICES.len() {
                     self.engine_selected = row;
@@ -6213,7 +6715,7 @@ impl App {
             if self.new_session.is_some() { return true; }
             if let Some(picker) = &mut self.effort_picker {
                 let visible = usize::from(height.saturating_sub(4)).max(1);
-                let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+                let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
                 let row = start + usize::from(mouse.row.saturating_sub(y + 3));
                 if mouse.row >= y + 3 && row < picker.levels.len() {
                     picker.selected = row;
@@ -6225,7 +6727,7 @@ impl App {
                 let offset = if height >= 10 { 4 } else { 2 };
                 if mouse.row >= y + offset {
                     let visible = usize::from(height.saturating_sub(offset + 1)).max(1);
-                    let start = selected.saturating_sub(visible.saturating_sub(1));
+                    let start = chooser_visible_start(&self.chooser_view_start, *selected, visible);
                     let row = start + usize::from(mouse.row - (y + offset));
                     if row < PERMISSION_CHOICES.len() {
                         *selected = row;
@@ -6241,7 +6743,7 @@ impl App {
             }
             let picker = self.model_picker.as_mut().unwrap();
             let visible = usize::from(height.saturating_sub(4)).max(1);
-            let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+            let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
             let row = start + usize::from(mouse.row.saturating_sub(y + 3));
             if mouse.row >= y + 3 && row < picker.models.len() && !picker.loading {
                 self.pending_model_changes.push((picker.session_id.clone(), picker.models[row].clone()));
@@ -6265,7 +6767,7 @@ impl App {
             || self.permission_picker.is_some()
             || self.engine_picker
             || self.stop_confirmation.is_some()
-            || self.new_session.is_some()
+            || self.new_session.is_some() || self.repo_picker.is_some()
         {
             // A request belongs to its session, not the whole terminal. Let
             // the user focus the other pane and keep working while this one
@@ -6301,6 +6803,7 @@ impl App {
                     "model" => self.open_model_picker(),
                     "effort" => self.open_effort_picker(),
                     "beliefs" => self.open_lore_picker(),
+                    "repo" | "directory" => self.open_repo_picker(hit.group),
                     "memory" => self.open_memory_menu(hit.group),
                     "more" => {
                         let visible = self.chip_window(hit.group, usize::from(self.pane_regions(hit.group, hit.pane)[3].width));
@@ -6532,11 +7035,12 @@ impl App {
             if width >= 18 && height >= 3 {
                 let fallback = Rect::new(area.x + (area.width - width) / 2,
                     area.y + (area.height - height) / 2, width, height);
-                if self.settings_menu.is_some() || self.action_menu || self.lore_picker.is_some() || self.engine_picker
+                if self.settings_menu.is_some() || self.action_menu || self.lore_picker.is_some() || self.repo_picker.is_some() || self.engine_picker
                     || self.new_session.is_some() || self.model_picker.is_some() || self.effort_picker.is_some() || self.permission_picker.is_some() {
                     frame.render_widget(Clear, fallback);
                     if self.settings_menu.is_some() { self.draw_settings_menu(frame, fallback); }
                     else if self.action_menu { self.draw_actions(frame, fallback); }
+                    else if self.repo_picker.is_some() { self.draw_repo_picker(frame, fallback); }
                     else if self.lore_picker.is_some() { self.draw_lore_picker(frame, fallback); }
                     else { self.draw_chip_picker(frame, fallback); }
                 }
@@ -6583,10 +7087,10 @@ impl App {
         if width < 36 || height < 8 { return; }
         let modal = Rect::new(area.x + (area.width - width) / 2,
             area.y + (area.height - height) / 2, width, height);
-        let lines = vec![Line::from(" Stop and finalize this session?"),
-            Line::from(""), Line::from(format!(" Session ID: {id}")), Line::from(""),
-            Line::from(" The daemon will finish its shutdown work. This tab and draft remain visible."),
-            Line::from(""), Line::from(" Press Y to stop · Esc or N to cancel")];
+        let lines = vec![Line::from(clipped_title(&format!(" Session: {}", safe_label(id)),
+                usize::from(width.saturating_sub(2))).0),
+            Line::from(" Daemon shutdown runs; tab and draft stay."),
+            Line::from(""), Line::from(" Y stop · Esc/N cancel")];
         frame.render_widget(Clear, modal);
         frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false })
             .block(Block::default().title(" Stop active session ").borders(Borders::ALL)
@@ -6609,10 +7113,10 @@ impl App {
             } else { lines.push(Line::from(" Choose engine:")); }
             let offset = if height >= 10 { 4 } else { 2 };
             let visible = usize::from(height.saturating_sub(offset + 1)).max(1);
-            let start = self.engine_selected.saturating_sub(visible.saturating_sub(1));
+            let start = chooser_visible_start(&self.chooser_view_start, self.engine_selected, visible);
             for (index, engine) in ENGINE_CHOICES.iter().enumerate().skip(start).take(visible) {
                 lines.push(Line::styled(format!(" {} {}", if index == self.engine_selected { '›' } else { ' ' }, engine),
-                    Style::default().fg(if index == self.engine_selected { theme::ACCENT } else { theme::SECONDARY })));
+                    chooser_row_style(index == self.engine_selected)));
             }
         } else if let Some(form) = &self.new_session {
             title = " New session · Tab field · Enter continue/start · Esc close ";
@@ -6629,15 +7133,15 @@ impl App {
             }
             lines.push(Line::styled(format!(" {} Model: {}", if form.field == 0 { '›' } else { ' ' },
                 safe_label(&form.model)),
-                Style::default().fg(if form.field == 0 { theme::ACCENT } else { theme::SECONDARY })));
+                chooser_row_style(form.field == 0)));
             let prompt_field = if vendor_models(form.engine).is_empty() { 1 } else { 2 };
             if prompt_field == 2 {
                 lines.push(Line::styled(format!(" {} Effort: {}", if form.field == 1 { '›' } else { ' ' },
                     form.effort.as_deref().unwrap_or("unknown")),
-                    Style::default().fg(if form.field == 1 { theme::ACCENT } else { theme::SECONDARY })));
+                    chooser_row_style(form.field == 1)));
             }
             lines.push(Line::styled(format!(" {} First prompt: {}", if form.field == prompt_field { '›' } else { ' ' }, safe_label(&form.prompt)),
-                Style::default().fg(if form.field == prompt_field { theme::ACCENT } else { theme::SECONDARY })));
+                chooser_row_style(form.field == prompt_field)));
             if form.engine == launch::Engine::Claude {
                 lines.push(Line::from(" Claude sidecar is bundled by the preview installer."));
             }
@@ -6654,12 +7158,12 @@ impl App {
             } else { lines.push(Line::from(" Permission mode:")); }
             let offset = if height >= 10 { 4 } else { 2 };
             let visible = usize::from(height.saturating_sub(offset + 1)).max(1);
-            let start = selected.saturating_sub(visible.saturating_sub(1));
+            let start = chooser_visible_start(&self.chooser_view_start, *selected, visible);
             for (index, (mode, description)) in PERMISSION_CHOICES.iter().enumerate().skip(start).take(visible) {
                 let current = self.permission_modes.get(id).is_some_and(|current| current == mode);
                 lines.push(Line::styled(format!(" {} {} {} · {}", if index == *selected { '›' } else { ' ' },
                     if current { '●' } else { ' ' }, mode, description),
-                    Style::default().fg(if index == *selected { theme::ACCENT } else { theme::SECONDARY })));
+                    chooser_row_style(index == *selected)));
             }
         } else if let Some(picker) = &self.effort_picker {
             title = " Effort · this session · Enter select · Esc close ";
@@ -6667,10 +7171,10 @@ impl App {
             lines.push(Line::from(format!(" Current: {current} · {}/{} · idle session required", picker.engine, picker.model)));
             lines.push(Line::from(""));
             let visible = usize::from(height.saturating_sub(4)).max(1);
-            let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+            let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
             for (index, level) in picker.levels.iter().enumerate().skip(start).take(visible) {
                 lines.push(Line::styled(format!(" {} {}", if index == picker.selected { '›' } else { ' ' }, level),
-                    Style::default().fg(if index == picker.selected { theme::ACCENT } else { theme::SECONDARY })));
+                    chooser_row_style(index == picker.selected)));
             }
         } else {
             title = " Model · this session · R retry · Enter select · Esc close ";
@@ -6683,10 +7187,10 @@ impl App {
                 lines.push(Line::from(" No verified models available for this session"));
             }
             let visible = usize::from(height.saturating_sub(4)).max(1);
-            let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+            let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
             for (index, model) in picker.models.iter().enumerate().skip(start).take(visible) {
                 lines.push(Line::styled(format!(" {} {}", if index == picker.selected { '›' } else { ' ' }, model),
-                    Style::default().fg(if index == picker.selected { theme::ACCENT } else { theme::SECONDARY })));
+                    chooser_row_style(index == picker.selected)));
             }
         }
         frame.render_widget(Paragraph::new(lines).block(Block::default().title(title)
@@ -6785,7 +7289,7 @@ impl App {
         let mut lines = vec![Line::from(format!(" Search: {}", safe_label(&picker.query)))];
         if matches.is_empty() { lines.push(Line::from(" No matching live sessions")); }
         let visible = usize::from(area.height.saturating_sub(3)).max(1);
-        let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+        let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
         for (position, &index) in matches.iter().enumerate().skip(start).take(visible) {
             let session = &picker.rows[index];
             let title = if session.title.trim().is_empty() { "Untitled session" } else { &session.title };
@@ -6807,7 +7311,7 @@ impl App {
         let Some(picker) = &self.branch_picker else { return; };
         let mut lines = vec![Line::from(format!(" Current base: {}", safe_label(&picker.base)))];
         let visible = usize::from(area.height.saturating_sub(3)).max(1);
-        let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+        let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
         for (index, branch) in picker.branches.iter().enumerate().skip(start).take(visible) {
             let current = if branch == &picker.base { " · current" } else { "" };
             let label = format!(" {} {}{}", if index == picker.selected { '›' } else { ' ' },
@@ -6825,12 +7329,37 @@ impl App {
             .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED))), area);
     }
 
+    fn draw_repo_picker(&self, frame: &mut Frame, area: Rect) {
+        let Some(picker) = &self.repo_picker else { return; };
+        let mut lines = vec![Line::from(" Select a folder · Enter browse · current opens new tab")];
+        let visible = usize::from(area.height.saturating_sub(3)).max(1);
+        let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
+        let width = usize::from(area.width.saturating_sub(2));
+        for (index, path) in picker.paths.iter().enumerate().skip(start).take(visible) {
+            let marker = if index == 0 { "current" }
+                else if picker.current_dir.parent() == Some(path.as_path()) { "up" }
+                else { "folder" };
+            let label = format!(" {} {} · {}", if index == picker.selected { '›' } else { ' ' },
+                marker, safe_label(&repo_path_label(path)));
+            let label = clipped_title(&label, width).0;
+            let padded = format!("{label}{}", " ".repeat(width.saturating_sub(label.width())));
+            let style = if index == picker.selected {
+                Style::default().fg(theme::ACCENT).bg(theme::HIGHLIGHT).add_modifier(Modifier::BOLD)
+            } else { Style::default().fg(theme::SECONDARY) };
+            lines.push(Line::styled(padded, style));
+        }
+        frame.render_widget(Paragraph::new(lines).block(Block::default()
+            .title(" Directory · ↑↓ select · Enter browse/open · Esc close ")
+            .borders(Borders::ALL).border_style(Style::default().fg(theme::ACCENT)))
+            .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)), area);
+    }
+
     fn draw_slash_suggestions(&self, frame: &mut Frame, area: Rect) {
         let matches = self.slash_suggestions();
         if matches.is_empty() { return; }
         let visible = usize::from(area.height.saturating_sub(2)).max(1);
         let selected = self.slash_selected.min(matches.len() - 1);
-        let start = selected.saturating_sub(visible.saturating_sub(1));
+        let start = chooser_visible_start(&self.chooser_view_start, selected, visible);
         let rows: Vec<Line> = matches.iter().enumerate().skip(start).take(visible)
             .map(|(index, (command, description))| {
                 let label = format!(" {} {:<12} {}", if index == selected { '›' } else { ' ' }, command, description);
@@ -6853,7 +7382,7 @@ impl App {
             else if picker.cancelling.is_some() { " Cancelling selected prompt…" }
             else { " X cancel selected · R refresh · Esc close" })];
         let visible = usize::from(area.height.saturating_sub(3)).max(1);
-        let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+        let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
         for (index, row) in picker.rows.iter().enumerate().skip(start).take(visible) {
             let ambiguous = picker.rows.iter().filter(|item| item.id == row.id).count() > 1;
             let label = format!(" {} {} · {}{}", if index == picker.selected { '›' } else { ' ' },
@@ -6894,13 +7423,16 @@ impl App {
                 lines.push(Line::from(" Select one proposal to review its complete raw contents"));
                 lines.push(Line::from(format!(" Page offset {} · {} rows", picker.offset, picker.proposals.len())));
                 let visible = usize::from(area.height.saturating_sub(6)).max(1);
-                let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+                let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
                 for (index, row) in picker.proposals.iter().enumerate().skip(start).take(visible) {
                     let label = format!(" {} {} · {}/{} · {} · {}", if index == picker.selected { '›' } else { ' ' },
                         safe_label(&row.pid), safe_label(&row.kind), safe_label(&row.action),
                         safe_label(&row.scope), safe_label(&row.summary));
-                    lines.push(Line::styled(label, Style::default().fg(if index == picker.selected { theme::ACCENT } else { theme::SECONDARY })));
+                    lines.push(Line::styled(label, chooser_row_style(index == picker.selected)));
                 }
+            }
+            if picker.review.is_none() {
+                lines = chooser_list_lines(lines, usize::from(area.width.saturating_sub(2)));
             }
             frame.render_widget(Paragraph::new(lines)
                 .block(Block::default().title(" LORE proposals · Enter full review · PgUp/PgDn page · B beliefs · Esc close ")
@@ -6954,25 +7486,30 @@ impl App {
         }
         if let Some((id, evidence)) = &picker.evidence {
             lines.push(Line::from(format!(" Belief #{id} · {} evidence rows", evidence.len())));
-            for row in evidence.iter().take(usize::from(height.saturating_sub(if compact { 4 } else { 9 }) / 2)) {
+            let trail_notice = evidence.last().is_some_and(|row| row.trail_truncated);
+            let reserve = if compact { 4 } else { 9 } + u16::from(trail_notice);
+            for row in evidence.iter().take(usize::from(height.saturating_sub(reserve) / 2)) {
                 lines.push(Line::from(format!(" {} · {} · {}{}", safe_label(&row.created), safe_label(&row.project), safe_label(&row.session_id),
                     row.source_engine.as_ref().map(|engine| format!(" · {}", safe_label(engine))).unwrap_or_default())));
                 lines.push(Line::from(format!("   {}{}", safe_label(&row.note), if row.truncated { "…" } else { "" })));
             }
-            if evidence.last().is_some_and(|row| row.trail_truncated) {
+            if trail_notice {
                 lines.push(Line::from(" More evidence exists in LORE"));
             }
         } else {
             lines.push(Line::from(format!(" Page offset {} · {} rows", picker.offset, picker.rows.len())));
             let visible = usize::from(height.saturating_sub(if compact { 4 } else { 8 })).max(1);
-            let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+            let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
             for (index, row) in picker.rows.iter().enumerate().skip(start).take(visible) {
                 let label = format!(" {} #{} · {} · {:.0}% · {}{}{}", if index == picker.selected { '›' } else { ' ' }, row.id,
                     safe_label(&row.subject), row.confidence * 100.0, safe_label(&row.claim),
                     row.evidence_count.map(|count| format!(" · {count} evidence")).unwrap_or_default(),
                     if row.truncated { " · claim clipped" } else { "" });
-                lines.push(Line::styled(label, Style::default().fg(if index == picker.selected { theme::ACCENT } else { theme::SECONDARY })));
+                lines.push(Line::styled(label, chooser_row_style(index == picker.selected)));
             }
+        }
+        if picker.evidence.is_none() {
+            lines = chooser_list_lines(lines, usize::from(area.width.saturating_sub(2)));
         }
         frame.render_widget(Paragraph::new(lines)
             .block(Block::default().title(" LORE beliefs · Enter review/search · → evidence · P proposals · PgUp/PgDn page · Esc close ")
@@ -7047,9 +7584,7 @@ impl App {
         let height = area.height;
         let modal = area;
         let visible = usize::from(height.saturating_sub(2));
-        let start = self
-            .action_selected
-            .saturating_sub(visible.saturating_sub(1));
+        let start = chooser_visible_start(&self.chooser_view_start, self.action_selected, visible);
         let rows: Vec<Line> = ACTIONS
             .iter()
             .enumerate()
@@ -7163,7 +7698,7 @@ impl App {
             width,
             height,
         ) };
-        let (body, selected_row) = input_request_body(request,
+        let (body, selected_row, _) = input_request_body(request,
             usize::from(modal.width.saturating_sub(4)));
         let question = request.questions.get(request.step);
         let lines: Vec<Line> = body.lines().enumerate().map(|(index, text)| {
@@ -7368,6 +7903,8 @@ impl App {
                 self.draw_settings_menu(frame, inner[2]);
             } else if self.engine_picker || self.new_session.is_some() || self.model_picker.is_some() || self.effort_picker.is_some() || self.permission_picker.is_some() {
                 self.draw_chip_picker(frame, inner[2]);
+            } else if self.repo_picker.is_some() {
+                self.draw_repo_picker(frame, inner[2]);
             } else if self.lore_picker.is_some() {
                 self.draw_lore_picker(frame, inner[2]);
             } else if self.action_menu {
@@ -7521,11 +8058,13 @@ fn open_link(url: &str) -> io::Result<()> {
     let opener = "open";
     #[cfg(not(target_os = "macos"))]
     let opener = "xdg-open";
-    std::process::Command::new(opener).arg(url)
+    let mut child = std::process::Command::new(opener).arg(url)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .spawn().map(|_| ())
+        .spawn()?;
+    std::thread::spawn(move || { let _ = child.wait(); });
+    Ok(())
 }
 
 pub fn run() -> io::Result<()> {
@@ -7759,6 +8298,7 @@ fn dispatch_attaches(app: &mut App, sender: &SyncSender<crate::bridge::WorkerCom
                 return false;
             }
             Err(TrySendError::Disconnected(_)) => {
+                app.attaching_ids.clear();
                 app.notice = "Session attach unavailable".into();
                 return true;
             }
@@ -7834,6 +8374,10 @@ fn save_layout_if_changed(
 ) -> bool {
     let layout = crate::ui_state::LayoutSignature::capture(app);
     if layout == *saved_layout {
+        if !app.has_offline_open_tabs() && app.notice == "Layout save skipped · archived tabs are read-only" {
+            app.notice.clear();
+            return true;
+        }
         return false;
     }
     if app.groups.iter().any(|group| group.tabs.iter().any(|id| app.offline_ids.contains(id))) {
@@ -7930,6 +8474,11 @@ fn dispatch_model_controls(app: &mut App, sender: &SyncSender<crate::bridge::Wor
                 break;
             }
             Err(TrySendError::Disconnected(_)) => {
+                if let Some(picker) = app.model_picker.as_mut() {
+                    picker.loading = false;
+                    picker.catalog_pending = false;
+                    picker.note = "Daemon unavailable for model catalog · R retry".into();
+                }
                 app.notice = "Daemon unavailable for model catalog".into();
                 return true;
             }
@@ -8976,6 +9525,430 @@ for line in sys.stdin:
             .collect::<Vec<_>>().join("\n")
     }
 
+    fn scrolled_picker_app() -> App {
+        let mut app = App::default();
+        app.rail_visible = false;
+        app.handle(Event::Resize(100, 28));
+        app.groups[0].tabs.push("session".into());
+        app
+    }
+
+    fn hover_first_picker_row(app: &mut App, offset: u16) -> (Rect, usize) {
+        painted_at(app, 100, 28);
+        let start = app.chooser_view_start.get();
+        assert!(start > 0, "test must start with a scrolled viewport");
+        let menu = app.active_chooser_rect().unwrap();
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Moved,
+            column: menu.x + 2, row: menu.y + offset, modifiers: KeyModifiers::NONE }));
+        painted_at(app, 100, 28);
+        assert_eq!(app.chooser_view_start.get(), start, "hover must not shift visible entries");
+        (menu, start)
+    }
+
+    fn click_picker_row(app: &mut App, menu: Rect, offset: u16) {
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: menu.x + 2, row: menu.y + offset, modifiers: KeyModifiers::NONE }));
+    }
+
+    #[test]
+    fn minimum_stop_confirmation_shows_confirmation_and_cancel_keys() {
+        let mut app = App::default();
+        app.stop_confirmation = Some("a-long-session-identifier-that-can-wrap".into());
+        let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+        terminal.draw(|frame| app.draw_stop_confirmation(frame, Rect::new(0, 0, 40, 12))).unwrap();
+        let buffer = terminal.backend().buffer();
+        let text = (0..12).map(|y| (0..40).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+            .collect::<Vec<_>>().join("\n");
+        assert!(text.contains("Y stop · Esc/N cancel"));
+        assert!(text.contains("draft stay."));
+    }
+
+    #[test]
+    fn initial_tool_section_navigation_selects_visible_edge_without_skipping() {
+        for forward in [false, true] {
+            let mut app = scrolled_picker_app();
+            app.sessions.push(Session { id: "session".into(), title: "Session".into(),
+                collection: String::new(), transcript: "Tool: Read started".into(), status: "Ready".into() });
+            *app.visible_tool_sections.borrow_mut() = (0..3).map(|index|
+                (Rect::new(0, index as u16, 20, 1), 0, "session".into(), index)).collect();
+            assert!(app.select_tool_section(forward));
+            assert_eq!(app.selected_tool_sections["session"], if forward { 0 } else { 2 });
+            assert!(app.select_tool_section(forward));
+            assert_eq!(app.selected_tool_sections["session"], 1);
+        }
+    }
+
+    #[test]
+    fn chooser_bottom_border_never_activates_hidden_choice() {
+        for kind in ["engine", "model", "effort", "permission", "slash"] {
+            let mut app = scrolled_picker_app();
+            match kind {
+                "engine" => app.engine_picker = true,
+                "model" => app.model_picker = Some(ModelPicker { session_id: "session".into(),
+                    models: vec!["one".into(), "two".into(), "three".into()], selected: 0,
+                    note: String::new(), loading: false, catalog_pending: false }),
+                "effort" => app.effort_picker = Some(EffortPicker { session_id: "session".into(),
+                    engine: "deepseek".into(), model: "deepseek-flash".into(),
+                    levels: vec!["none".into(), "low".into(), "high".into()], selected: 0 }),
+                "permission" => app.permission_picker = Some(("session".into(), 0)),
+                _ => { app.focus = Focus::Prompt; app.input = "/".into(); }
+            }
+            app.active_chooser_rect();
+            app.chooser_height_override.set(Some(5));
+            let menu = app.active_chooser_rect().unwrap();
+            app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+                column: menu.x + 2, row: menu.bottom() - 1, modifiers: KeyModifiers::NONE }));
+            assert!(app.pending_model_changes.is_empty(), "{kind}");
+            assert!(app.pending_effort_changes.is_empty(), "{kind}");
+            assert!(app.pending_permission_changes.is_empty(), "{kind}");
+            assert!(app.new_session.is_none(), "{kind}");
+            if kind == "engine" { assert!(app.engine_picker); }
+            if kind == "model" { assert!(app.model_picker.is_some()); }
+            if kind == "effort" { assert_eq!(app.effort_picker.as_ref().unwrap().selected, 0); }
+            if kind == "permission" { assert_eq!(app.permission_picker.as_ref().unwrap().1, 0); }
+            if kind == "slash" { assert_eq!(app.input, "/"); }
+        }
+    }
+
+    #[test]
+    fn scrolled_repo_hover_redraw_click_opens_same_visible_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let paths: Vec<_> = (0..30).map(|i| root.path().join(format!("child-{i:02}"))).collect();
+        for path in &paths { std::fs::create_dir(path).unwrap(); }
+        let mut app = scrolled_picker_app();
+        app.repo_picker = Some(RepoPicker { current_dir: root.path().to_path_buf(),
+            paths: paths.clone(), selected: 24 });
+        app.active_chooser_rect();
+        app.chooser_height_override.set(Some(8));
+        let (menu, start) = hover_first_picker_row(&mut app, 2);
+        assert_eq!(app.repo_picker.as_ref().unwrap().selected, start);
+        click_picker_row(&mut app, menu, 2);
+        assert_eq!(app.repo_picker.as_ref().unwrap().current_dir, paths[start]);
+        assert_eq!(app.chooser_height_override.get(), Some(8), "folder browsing keeps the chosen height");
+    }
+
+    #[test]
+    fn scrolled_branch_hover_redraw_click_requests_same_visible_branch() {
+        let mut app = scrolled_picker_app();
+        let branches: Vec<_> = (0..30).map(|i| format!("branch-{i:02}")).collect();
+        app.branch_picker = Some(BranchPicker { session_id: "session".into(), base: "main".into(),
+            branches: branches.clone(), selected: 24 });
+        let (menu, start) = hover_first_picker_row(&mut app, 2);
+        click_picker_row(&mut app, menu, 2);
+        assert!(matches!(&app.pending_queue_commands[0], crate::bridge::WorkerCommand::Branch(id, Some(branch))
+            if id == "session" && branch == &branches[start]));
+    }
+
+    #[test]
+    fn scrolled_model_hover_redraw_click_requests_same_visible_model() {
+        let mut app = scrolled_picker_app();
+        let models: Vec<_> = (0..30).map(|i| format!("model-{i:02}")).collect();
+        app.model_picker = Some(ModelPicker { session_id: "session".into(), models: models.clone(),
+            selected: 24, note: "Verified models".into(), loading: false, catalog_pending: false });
+        let (menu, start) = hover_first_picker_row(&mut app, 3);
+        click_picker_row(&mut app, menu, 3);
+        assert_eq!(app.pending_model_changes, vec![("session".into(), models[start].clone())]);
+    }
+
+    #[test]
+    fn long_lore_claim_and_proposal_rows_keep_hover_click_target() {
+        let cwd = tempfile::tempdir().unwrap();
+        for proposal_mode in [false, true] {
+            let mut app = scrolled_picker_app();
+            app.lore_picker = Some(LorePicker {
+            session_id: None,
+                rows: (1..=2).map(|id| lore_picker::Belief { id, subject: format!("belief-{id}"),
+                    claim: "long claim ".repeat(80), truncated: false, confidence: 0.9,
+                    evidence_count: None }).collect(),
+                proposals: (1..=2).map(|id| lore_picker::Proposal { pid: format!("proposal-{id}"),
+                    kind: "belief".into(), action: "add".into(), scope: "project".into(),
+                    summary: "long summary ".repeat(80) }).collect(),
+                selected: 0, query: String::new(), offset: 0, status: "long status ".repeat(40),
+                evidence: None, pending: None, proposal_mode, review: None, review_scroll: 0,
+                review_seen: 0, review_width: 0, armed_resolution: None, can_resolve: false,
+                resolving: false, cwd: cwd.path().display().to_string(), belief_review: None,
+                can_act_on_beliefs: false, belief_action: None, belief_note: String::new(),
+                retract_armed: false, belief_acting: false, result_status: None,
+            });
+            let menu = app.active_chooser_rect().unwrap();
+            let offset = if proposal_mode { 5 } else if menu.height < 10 { 4 } else { 7 };
+            let rendered = painted_at(&app, 100, 28);
+            let row = usize::from(menu.y + offset);
+            assert!(rendered.lines().nth(row).unwrap().contains(if proposal_mode { "proposal-2" } else { "#2" }));
+            app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Moved,
+                column: menu.x + 2, row: menu.y + offset, modifiers: KeyModifiers::NONE }));
+            assert_eq!(app.lore_picker.as_ref().unwrap().selected, 1);
+            let hovered = painted_at(&app, 100, 28);
+            assert!(hovered.lines().nth(row).unwrap().contains(if proposal_mode { "proposal-2" } else { "#2" }));
+            click_picker_row(&mut app, menu, offset);
+            let picker = app.lore_picker.as_ref().unwrap();
+            assert_eq!(picker.selected, 1);
+            assert!(picker.pending.is_some(), "click requests review of the highlighted entry");
+        }
+    }
+
+    #[test]
+    fn chooser_resize_resets_after_close_menu_change_and_pane_switch() {
+        let mut app = scrolled_picker_app();
+        app.engine_picker = true;
+        let menu = app.active_chooser_rect().unwrap();
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: menu.x + 2, row: menu.y, modifiers: KeyModifiers::NONE }));
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Drag(MouseButton::Left),
+            column: menu.x + 2, row: menu.bottom() - 5, modifiers: KeyModifiers::NONE }));
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Up(MouseButton::Left),
+            column: menu.x + 2, row: menu.bottom() - 5, modifiers: KeyModifiers::NONE }));
+        assert_eq!(app.active_chooser_rect().unwrap().height, 5);
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        assert_eq!(app.chooser_height_override.get(), None);
+        app.engine_picker = true;
+        assert_eq!(app.active_chooser_rect().unwrap().height, 7);
+        app.chooser_height_override.set(Some(5));
+        app.engine_picker = false;
+        app.model_picker = Some(ModelPicker { session_id: "session".into(), models: vec!["one".into(), "two".into()],
+            selected: 0, note: String::new(), loading: false, catalog_pending: false });
+        assert_eq!(app.active_chooser_rect().unwrap().height, 6);
+        app.chooser_height_override.set(Some(5));
+        app.active_group = 1;
+        app.groups[1].tabs.push("other".into());
+        assert_eq!(app.active_chooser_rect().unwrap().height, 6);
+    }
+
+    #[test]
+    fn repo_chip_picker_hovers_browses_and_opens_verified_directory_in_new_tab() {
+        let root = tempfile::tempdir().unwrap();
+        let child = root.path().join("child");
+        std::fs::create_dir(&child).unwrap();
+        let mut app = App::default();
+        app.rail_visible = false;
+        app.handle(Event::Resize(100, 28));
+        app.groups[0].tabs.push("session".into());
+        app.session_identity.insert("session".into(), (Some("codex".into()), None));
+        app.session_cwds.insert("session".into(), child.clone());
+        app.repo_cache.insert("session".into(),
+            (Some(doxa_worktrees::RepoStatus::Directory { name: "child".into() }), Instant::now()));
+        let mut initial = Terminal::new(TestBackend::new(100, 28)).unwrap();
+        initial.draw(|frame| app.draw(frame)).unwrap();
+        let hit = app.rendered_chip_hits.borrow().as_ref().unwrap().iter()
+            .find(|hit| hit.kind == "directory").unwrap().clone();
+        assert!(app.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: hit.rect.x, row: hit.rect.y, modifiers: KeyModifiers::NONE }));
+        let menu = app.active_chooser_rect().unwrap();
+        assert_eq!(app.repo_picker.as_ref().unwrap().paths, vec![child, root.path().to_path_buf()]);
+        assert!(app.mouse(MouseEvent { kind: MouseEventKind::Moved,
+            column: menu.x + 2, row: menu.y + 3, modifiers: KeyModifiers::NONE }));
+        assert_eq!(app.repo_picker.as_ref().unwrap().selected, 1);
+        let mut terminal = Terminal::new(TestBackend::new(100, 28)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert_eq!(terminal.backend().buffer()[(menu.x + 2, menu.y + 3)].bg, theme::HIGHLIGHT);
+        app.repo_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.repo_picker.as_ref().unwrap().current_dir, root.path());
+        assert!(app.pending_launches.is_empty());
+        app.repo_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.repo_picker.is_none());
+        assert_eq!(app.pending_launches[0].0.cwd.as_deref(), Some(root.path()));
+        assert_eq!(app.groups[0].active_id(), Some("session"));
+    }
+
+    #[test]
+    fn repo_picker_mouse_scroll_click_and_unsafe_path_filter() {
+        let root = tempfile::tempdir().unwrap();
+        let child = root.path().join("child");
+        let unsafe_child = root.path().join("unsafe\nname");
+        std::fs::create_dir(&child).unwrap();
+        std::fs::create_dir(&unsafe_child).unwrap();
+        let mut app = App::default();
+        app.rail_visible = false;
+        app.handle(Event::Resize(100, 28));
+        app.groups[0].tabs.push("session".into());
+        app.session_identity.insert("session".into(), (Some("codex".into()), None));
+        app.session_cwds.insert("session".into(), child);
+        app.open_repo_picker(0);
+        assert_eq!(app.repo_picker.as_ref().unwrap().paths.len(), 2);
+        let menu = app.active_chooser_rect().unwrap();
+        assert!(app.mouse(MouseEvent { kind: MouseEventKind::ScrollDown,
+            column: menu.x + 2, row: menu.y + 2, modifiers: KeyModifiers::NONE }));
+        assert_eq!(app.repo_picker.as_ref().unwrap().selected, 1);
+        assert!(app.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: menu.x + 2, row: menu.y + 3, modifiers: KeyModifiers::NONE }));
+        assert_eq!(app.repo_picker.as_ref().unwrap().current_dir, root.path());
+        assert!(app.pending_launches.is_empty());
+        app.session_cwds.insert("session".into(), unsafe_child);
+        app.open_repo_picker(0);
+        assert_eq!(app.repo_picker.as_ref().unwrap().current_dir, root.path());
+        assert!(!app.repo_picker.as_ref().unwrap().paths.iter().any(|path|
+            path.to_string_lossy().contains("unsafe\nname")));
+    }
+
+    #[test]
+    fn repo_picker_browses_child_directories_and_returns_to_parent() {
+        let root = tempfile::tempdir().unwrap();
+        let child = root.path().join("child");
+        let grandchild = child.join("grandchild");
+        std::fs::create_dir_all(&grandchild).unwrap();
+        let mut app = App::default();
+        app.rail_visible = false;
+        app.handle(Event::Resize(100, 28));
+        app.groups[0].tabs.push("session".into());
+        app.session_identity.insert("session".into(), (Some("codex".into()), None));
+        app.session_cwds.insert("session".into(), root.path().to_path_buf());
+        app.open_repo_picker(0);
+        let child_index = app.repo_picker.as_ref().unwrap().paths.iter()
+            .position(|path| path == &child).unwrap();
+        app.repo_picker.as_mut().unwrap().selected = child_index;
+        app.repo_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.repo_picker.as_ref().unwrap().current_dir, child);
+        let grandchild_index = app.repo_picker.as_ref().unwrap().paths.iter()
+            .position(|path| path == &grandchild).unwrap();
+        app.repo_picker.as_mut().unwrap().selected = grandchild_index;
+        app.repo_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.repo_picker.as_ref().unwrap().current_dir, grandchild);
+        app.repo_picker.as_mut().unwrap().selected = 1;
+        app.repo_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.repo_picker.as_ref().unwrap().current_dir, child);
+        assert!(app.pending_launches.is_empty());
+    }
+
+    #[test]
+    fn repo_picker_does_not_substitute_another_sessions_directory() {
+        let other = tempfile::tempdir().unwrap();
+        let mut app = App::default();
+        app.handle(Event::Resize(100, 28));
+        app.groups[0].tabs.push("missing".into());
+        app.session_cwds.insert("other".into(), other.path().to_path_buf());
+        app.open_repo_picker(0);
+        assert!(app.repo_picker.is_none());
+        assert_eq!(app.notice, "Current session directory is unavailable");
+    }
+
+    #[test]
+    fn repo_picker_shows_home_relative_paths_without_changing_targets() {
+        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else { return; };
+        let target = home.join("example").join("project");
+        assert_eq!(repo_path_label(&target), "~/example/project");
+    }
+
+    #[test]
+    fn branch_and_settings_rows_select_on_hover() {
+        let mut app = App::default();
+        app.rail_visible = false;
+        app.handle(Event::Resize(100, 28));
+        app.groups[0].tabs.push("session".into());
+        app.branch_picker = Some(BranchPicker { session_id: "session".into(),
+            base: "main".into(), branches: vec!["main".into(), "feature".into()], selected: 0 });
+        let menu = app.active_chooser_rect().unwrap();
+        assert!(app.mouse(MouseEvent { kind: MouseEventKind::Moved,
+            column: menu.x + 2, row: menu.y + 3, modifiers: KeyModifiers::NONE }));
+        assert_eq!(app.branch_picker.as_ref().unwrap().selected, 1);
+        app.branch_picker = None;
+        app.settings_menu = Some(SettingsMenu { rows: [("120".into(), false), ("false".into(), false)],
+            selected: 0, linger_draft: None });
+        let menu = app.active_chooser_rect().unwrap();
+        assert!(app.mouse(MouseEvent { kind: MouseEventKind::Moved,
+            column: menu.x + 2, row: menu.y + 4, modifiers: KeyModifiers::NONE }));
+        assert_eq!(app.settings_menu.as_ref().unwrap().selected, 1);
+    }
+
+    #[test]
+    fn ask_user_hover_click_and_border_drag_use_inline_menu() {
+        let mut app = App::default();
+        app.rail_visible = false;
+        app.handle(Event::Resize(100, 28));
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"session", "engine":"codex"}));
+        app.groups[0].tabs.push("session".into());
+        app.apply_daemon_frame(&json!({"type":"event", "session_id":"session",
+            "event":{"type":"needs_input", "data":{"id":"question", "kind":"ask_user",
+                "questions":[{"question":"Choose?", "options":[
+                    {"label":"First", "description":"One"}, {"label":"Second", "description":"Two"}]}]}}}));
+        let before = app.active_chooser_rect().unwrap();
+        assert!(app.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: before.x + 2, row: before.y, modifiers: KeyModifiers::NONE }));
+        assert!(app.mouse(MouseEvent { kind: MouseEventKind::Drag(MouseButton::Left),
+            column: before.x + 2, row: before.y.saturating_sub(2), modifiers: KeyModifiers::NONE }));
+        let menu = app.active_chooser_rect().unwrap();
+        assert!(menu.height > before.height);
+        app.mouse(MouseEvent { kind: MouseEventKind::Up(MouseButton::Left),
+            column: menu.x + 2, row: menu.y, modifiers: KeyModifiers::NONE });
+        let request = &app.input_requests[0];
+        let second = (menu.y + 1..menu.bottom() - 1)
+            .find(|&row| ask_user_option_at(request, menu, row) == Some(2)).unwrap();
+        assert!(app.mouse(MouseEvent { kind: MouseEventKind::Moved,
+            column: menu.x + 2, row: second, modifiers: KeyModifiers::NONE }));
+        assert_eq!(app.input_requests[0].selected, 2);
+        assert!(app.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: menu.x + 2, row: second, modifiers: KeyModifiers::NONE }));
+        assert_eq!(app.pending_answers.len(), 1);
+        assert_eq!(app.pending_answers[0].2["answers"]["Choose?"], "Second");
+    }
+
+    #[test]
+    fn ask_user_mouse_mapping_matches_wrapped_visible_option() {
+        let mut app = App::default();
+        app.input_requests.push(InputRequest::from_event("session", &json!({
+            "id":"question", "kind":"ask_user", "questions":[{"question":"Choose?",
+                "options":[
+                    {"label":"First option with several long words that wrap into more than one row",
+                     "description":"A description that also wraps across the menu"},
+                    {"label":"Second", "description":"Short"}]}]
+        })).unwrap());
+        app.groups[0].tabs.push("session".into());
+        let menu = Rect::new(0, 0, 34, 16);
+        let mut terminal = Terminal::new(TestBackend::new(menu.width, menu.height)).unwrap();
+        terminal.draw(|frame| app.draw_request(frame, menu, true)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let second_row = (1..menu.height - 1).find(|&row|
+            (1..menu.width - 1).map(|x| buffer[(x, row)].symbol()).collect::<String>().contains("Second"))
+            .unwrap();
+        assert_eq!(ask_user_option_at(&app.input_requests[0], menu, second_row), Some(2));
+    }
+
+    #[test]
+    fn inline_chooser_upper_border_drag_resizes_and_hover_tracks_selected_row() {
+        let mut app = App::default();
+        app.rail_visible = false;
+        app.handle(Event::Resize(100, 30));
+        app.groups[0].tabs.push("session".into());
+        app.engine_picker = true;
+        let before = app.active_chooser_rect().unwrap();
+        assert!(app.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: before.x + 3, row: before.y, modifiers: KeyModifiers::NONE }));
+        assert!(app.mouse(MouseEvent { kind: MouseEventKind::Drag(MouseButton::Left),
+            column: before.x + 3, row: before.y.saturating_sub(3), modifiers: KeyModifiers::NONE }));
+        let after = app.active_chooser_rect().unwrap();
+        assert!(after.height > before.height);
+        assert_eq!(after.bottom(), before.bottom());
+        assert!(app.mouse(MouseEvent { kind: MouseEventKind::Up(MouseButton::Left),
+            column: before.x + 3, row: after.y, modifiers: KeyModifiers::NONE }));
+        let row = after.y + if after.height >= 10 { 5 } else { 3 };
+        assert!(app.mouse(MouseEvent { kind: MouseEventKind::Moved,
+            column: after.x + 2, row, modifiers: KeyModifiers::NONE }));
+        assert_eq!(app.engine_selected, 1);
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert_eq!(terminal.backend().buffer()[(after.x + 2, row)].bg, theme::HIGHLIGHT);
+    }
+
+    #[test]
+    fn model_picker_hover_highlights_and_enter_activates_hovered_model() {
+        let mut app = App::default();
+        app.rail_visible = false;
+        app.handle(Event::Resize(100, 28));
+        app.groups[0].tabs.push("session".into());
+        app.model_picker = Some(ModelPicker { session_id: "session".into(),
+            models: vec!["first".into(), "second".into()], selected: 0,
+            note: "Verified models".into(), loading: false, catalog_pending: false });
+        let menu = app.active_chooser_rect().unwrap();
+        let row = menu.y + 4;
+        assert!(app.mouse(MouseEvent { kind: MouseEventKind::Moved,
+            column: menu.x + 2, row, modifiers: KeyModifiers::NONE }));
+        assert_eq!(app.model_picker.as_ref().unwrap().selected, 1);
+        let mut terminal = Terminal::new(TestBackend::new(100, 28)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert_eq!(terminal.backend().buffer()[(menu.x + 2, row)].bg, theme::HIGHLIGHT);
+        app.model_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.pending_model_changes, vec![("session".into(), "second".into())]);
+    }
+
     #[test]
     fn every_chip_hover_and_click_uses_rendered_strip_geometry() {
         let mut app = App::default();
@@ -9711,7 +10684,7 @@ for line in sys.stdin:
         app.action_menu = true;
         assert_eq!(app.active_chooser_rect().unwrap().bottom(), menu.bottom());
         app.action_menu = false;
-        app.lore_picker = Some(LorePicker { rows: vec![], selected: 0, query: String::new(),
+        app.lore_picker = Some(LorePicker { session_id: None, rows: vec![], selected: 0, query: String::new(),
             offset: 0, status: "Ready".into(), evidence: None, pending: None,
             proposals: Vec::new(), proposal_mode: false, review: None, review_scroll: 0,
             review_seen: 0, review_width: 0, armed_resolution: None,
@@ -9901,7 +10874,7 @@ for line in sys.stdin:
         let rows: Vec<_> = painted(&app).lines().map(str::to_owned).collect();
         assert!(rows[usize::from(menu.y)].contains('…'));
         assert!(rows[usize::from(menu.y + 1)].contains("Which deployment"));
-        let (body, _) = input_request_body(&app.input_requests[0], usize::from(menu.width.saturating_sub(4)));
+        let (body, _, _) = input_request_body(&app.input_requests[0], usize::from(menu.width.saturating_sub(4)));
         assert!(body.contains(&question));
         assert!(!body.contains("Question:"));
         app.handle(Event::Key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE)));
@@ -9956,6 +10929,41 @@ for line in sys.stdin:
         }
         assert!(app.offline_ids.contains("archive-79"));
         assert!(app.offline_ids.len() <= 65);
+    }
+
+    #[test]
+    fn pruning_archived_inventory_preserves_highlighted_session_identity() {
+        for selected in [0, 20] {
+            let mut app = App::default();
+            for index in 0..80 {
+                let id = format!("archive-{index:02}");
+                app.offline_ids.insert(id.clone());
+                app.sessions.push(Session { id: id.clone(), title: id, collection: "project".into(),
+                    transcript: String::new(), status: "Archived".into() });
+            }
+            app.history_modal = true;
+            app.history_selected = selected;
+            let expected = app.sessions[selected].id.clone();
+            app.prune_unopened_history();
+            assert_eq!(app.sessions.len(), 64);
+            assert_eq!(app.sessions[app.history_matches()[app.history_selected]].id, expected);
+        }
+    }
+
+    #[test]
+    fn empty_search_preserves_pending_recent_history_inventory() {
+        let mut app = App::default();
+        app.handle(Event::Resize(100, 28));
+        let (tx, rx) = mpsc::sync_channel(1);
+        app.history_pending = Some(rx);
+        app.local_search("");
+        assert!(app.history_modal);
+        tx.send(vec![history::OfflineSession { id: "saved-empty-search".into(),
+            project: "project".into(), markdown: "saved turn".into(),
+            search_snippets: Vec::new(), cwd: None }]).unwrap();
+        assert!(app.poll_history());
+        assert!(app.sessions.iter().any(|session| session.id == "saved-empty-search"));
+        assert!(app.history_query_due.is_none());
     }
 
     #[test]
@@ -10417,6 +11425,42 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn disconnected_attach_clears_marker_and_model_catalog_can_retry() {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        drop(receiver);
+        let mut app = App::default();
+        app.attach_selected("session");
+        assert!(dispatch_attaches(&mut app, &sender));
+        assert!(app.attaching_ids.is_empty());
+        app.attach_selected("session");
+        assert_eq!(app.pending_attaches.len(), 1);
+        app.model_picker = Some(ModelPicker { session_id: "session".into(), models: Vec::new(),
+            selected: 0, note: "Loading".into(), loading: true, catalog_pending: false });
+        app.pending_model_queries.push("session".into());
+        assert!(dispatch_model_controls(&mut app, &sender));
+        assert!(!app.model_picker.as_ref().unwrap().loading);
+        assert!(app.model_picker_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)));
+        assert_eq!(app.pending_model_queries, ["session"]);
+    }
+
+    #[test]
+    fn restoring_saved_layout_clears_obsolete_archived_tab_notice() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = crate::ui_state::UiStateStore::new(dir.path(), "/repo", "machine").unwrap();
+        let mut app = App::default();
+        app.groups[0].tabs.push("live".into());
+        let mut saved = crate::ui_state::LayoutSignature::capture(&app);
+        let complete = Mutex::new(true);
+        app.offline_ids.insert("archive".into());
+        app.groups[0].tabs.push("archive".into());
+        assert!(save_layout_if_changed(&mut app, &mut store, &complete, &mut saved));
+        assert!(app.notice.contains("archived tabs"));
+        app.groups[0].tabs.pop();
+        assert!(save_layout_if_changed(&mut app, &mut store, &complete, &mut saved));
+        assert!(app.notice.is_empty());
+    }
+
+    #[test]
     fn full_worker_queue_keeps_prompts_in_order() {
         let (sender, receiver) = mpsc::sync_channel(1);
         sender
@@ -10445,6 +11489,61 @@ for line in sys.stdin:
             matches!(receiver.recv().unwrap(), crate::bridge::WorkerCommand::Prompt(_, text) if text == "second")
         );
         assert_eq!(app.pending_prompts[0].1, "third");
+    }
+
+    #[test]
+    fn stream_heading_detection_respects_longer_outer_fences() {
+        let prefix = "**You:**\n\nhello\n\n**Assistant:**\n\n";
+        let source = format!("{prefix}````markdown\n\n```\n\n**Assistant:**\n\n```\n\n````\n\nend");
+        assert_eq!(streamed_turn_start(&source), prefix.find("**Assistant:**"));
+    }
+
+    #[test]
+    fn sending_answer_rows_do_not_select_options() {
+        let request = InputRequest::from_event("a", &json!({"id":"r", "kind":"ask_user", "questions":[{"question":"Pick", "options":[{"label":"One"}]}]})).unwrap();
+        let mut sending = request.clone();
+        sending.sending = true;
+        let menu = Rect::new(0, 0, 80, 15);
+        for row in 1..14 { assert_eq!(ask_user_option_at(&sending, menu, row), None); }
+        assert!((1..14).any(|row| ask_user_option_at(&request, menu, row) == Some(1)));
+    }
+
+    #[test]
+    fn ended_session_clears_pending_input_and_answers() {
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"a"}));
+        app.apply_daemon_frame(&json!({"type":"event", "session_id":"a",
+            "event":{"type":"needs_input", "data":{"id":"request", "kind":"ask_user",
+                "questions":[{"question":"Choose", "options":[{"label":"One"},{"label":"Two"}]}]}}}));
+        app.pending_answers.push(("a".into(), "request".into(), json!({})));
+        app.apply_daemon_frame(&json!({"type":"event", "session_id":"a", "event":{"type":"session_done", "data":{}}}));
+        assert!(app.input_requests.is_empty());
+        assert!(app.pending_answers.is_empty());
+    }
+
+    #[test]
+    fn rejected_prompts_obey_input_bounds_and_unknown_streams_are_ignored() {
+        let mut app = App::default();
+        for kind in ["prompt_rejected", "prompt_uncertain"] {
+            for text in ["x".repeat(MAX_INPUT_BYTES + 1), "bad\u{001b}draft".into()] {
+                app.apply_daemon_frame(&json!({"type":kind,"session_id":"","text":text}));
+            }
+        }
+        assert!(app.input.is_empty());
+        assert!(app.rejected_drafts.is_empty());
+        assert!(!app.append_reasoning("missing", &json!({"text":"secret"}), false));
+        assert!(!app.append_event("missing", "tool_call", &json!({"name":"read"})));
+        assert!(app.reasoning_streams.is_empty());
+        assert!(app.streaming_text.is_empty());
+    }
+
+    #[test]
+    fn finalized_session_preserves_selected_rail_identity() {
+        let mut app = App::default();
+        for id in ["a", "b", "c"] { app.apply_daemon_frame(&json!({"type":"hello", "session_id":id})); }
+        app.rail_selected = app.rail_order().iter().position(|index| app.sessions[*index].id == "b").unwrap();
+        app.apply_daemon_frame(&json!({"type":"clear_finalize_reply", "session_id":"a", "ok":true}));
+        assert_eq!(app.sessions[app.rail_order()[app.rail_selected]].id, "b");
     }
 
     #[test]
@@ -10714,6 +11813,7 @@ for line in sys.stdin:
         assert_eq!(raw_visual_rows("界界", 3), vec!["界", "界"]);
         let mut app = App { input: "unsent draft".into(), ..Default::default() };
         app.lore_picker = Some(LorePicker {
+            session_id: None,
             query: String::new(), rows: Vec::new(), selected: 0, offset: 0,
             evidence: None, status: String::new(), pending: None,
             proposals: Vec::new(), proposal_mode: false, review: None, review_scroll: 0,
@@ -10754,6 +11854,10 @@ for line in sys.stdin:
                 picker.belief_review.as_ref().unwrap().claim());
             if picker.review_seen == raw_visual_rows(&full, picker.review_width).len() { break; }
         }
+        app.lore_picker_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(app.lore_picker.as_ref().unwrap().belief_action.is_none());
+        app.lore_picker_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::ALT));
+        assert!(app.lore_picker.as_ref().unwrap().belief_action.is_none());
         app.lore_picker_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
         assert_eq!(app.lore_picker.as_ref().unwrap().belief_action, Some(doxa_lore::BeliefAction::Confirmed));
         app.lore_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -10774,6 +11878,132 @@ for line in sys.stdin:
         assert!(app.pending_queue_commands.iter().any(|command|
             matches!(command, crate::bridge::WorkerCommand::Status(id) if id == "s")));
         assert!(app.lore_picker.as_ref().unwrap().belief_review.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn belief_review_zero_height_cannot_scroll_or_lose_escape() {
+        let mut app = app_with_review();
+        app.sync_chooser_state();
+        app.chooser_height_override.set(Some(5));
+        app.lore_picker_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        let menu = app.active_chooser_rect().unwrap();
+        app.mouse(MouseEvent { kind: MouseEventKind::ScrollDown,
+            column: menu.x + 2, row: menu.y + 2, modifiers: KeyModifiers::NONE });
+        assert_eq!(app.lore_picker.as_ref().unwrap().review_scroll, 0);
+        assert_eq!(app.lore_picker.as_ref().unwrap().review_seen, 0);
+        app.chooser_height_override.set(Some(0));
+        app.lore_picker_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.lore_picker.as_ref().unwrap().belief_review.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn belief_action_completion_refreshes_its_original_session() {
+        let mut app = app_with_review();
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"other","cwd":"/other"}));
+        app.groups[0].tabs = vec!["s".into(), "other".into()];
+        app.groups[0].active = 1;
+        app.set_lore_memory_usage("s", 10, 100, 10, 100);
+        app.set_lore_memory_usage("other", 20, 100, 20, 100);
+        let (tx, rx) = mpsc::sync_channel(1);
+        let picker = app.lore_picker.as_mut().unwrap();
+        picker.pending = Some(rx);
+        picker.resolving = true;
+        picker.belief_acting = true;
+        tx.send(Ok(lore_picker::ResultPage::BeliefActed(doxa_lore::BeliefActionResult {
+            status: doxa_lore::BeliefStatus::Active, retired: false,
+            confirmed: 1, contradicted: 0, stale: 0,
+        }))).unwrap();
+        assert!(app.poll_lore());
+        assert!(!app.memory_cache.contains_key("s"));
+        assert!(app.memory_cache.contains_key("other"));
+        assert!(app.pending_queue_commands.iter().any(|command|
+            matches!(command, crate::bridge::WorkerCommand::Status(id) if id == "s")));
+        assert!(!app.pending_queue_commands.iter().any(|command|
+            matches!(command, crate::bridge::WorkerCommand::Status(id) if id == "other")));
+    }
+
+    #[test]
+    fn idle_memory_poll_does_not_force_redraw() {
+        let mut app = App::default();
+        app.groups[0].tabs.push("s".into());
+        app.session_cwds.insert("s".into(), PathBuf::from("/repo"));
+        app.set_lore_memory_usage("s", 10, 100, 10, 100);
+        assert!(!app.poll_memory());
+        assert!(app.memory_pending.is_none());
+    }
+
+    #[test]
+    fn memory_scope_change_redraws_even_when_usage_counts_are_equal() {
+        let mut app = App::default();
+        app.groups[0].tabs.push("s".into());
+        app.session_cwds.insert("s".into(), PathBuf::from("/repo"));
+        app.set_lore_memory_usage("s", 10, 100, 10, 100);
+        let usage = app.memory_cache["s"].0.clone().unwrap();
+        let (tx, rx) = mpsc::sync_channel(1);
+        app.memory_pending = Some(("s".into(), "/repo".into(), rx));
+        tx.send(Some((usage, false))).unwrap();
+        assert!(app.poll_memory());
+        assert_eq!(app.memory_repo.get("s"), Some(&false));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lore_footer_hover_never_selects_an_offscreen_row() {
+        let mut app = app_with_review();
+        let picker = app.lore_picker.as_mut().unwrap();
+        picker.belief_review = None;
+        picker.rows = (1..=30).map(|id| lore_picker::Belief { id, subject: "subject".into(),
+            claim: "claim".into(), truncated: false, confidence: 0.8, evidence_count: Some(1) }).collect();
+        let menu = app.active_chooser_rect().unwrap();
+        let footer = menu.y + 6 + menu.height.saturating_sub(8);
+        app.mouse(MouseEvent { kind: MouseEventKind::Moved,
+            column: menu.x + 2, row: footer, modifiers: KeyModifiers::NONE });
+        assert_eq!(app.lore_picker.as_ref().unwrap().selected, 0);
+        let picker = app.lore_picker.as_mut().unwrap();
+        picker.proposal_mode = true;
+        picker.proposals = (1..=30).map(|index| lore_picker::Proposal { pid: index.to_string(),
+            kind: "memory".into(), action: "add".into(), scope: "user".into(), summary: "summary".into() }).collect();
+        let menu = app.active_chooser_rect().unwrap();
+        let footer = menu.y + 4 + menu.height.saturating_sub(6);
+        app.mouse(MouseEvent { kind: MouseEventKind::Moved,
+            column: menu.x + 2, row: footer, modifiers: KeyModifiers::NONE });
+        assert_eq!(app.lore_picker.as_ref().unwrap().selected, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compact_evidence_menu_keeps_the_truncation_notice_visible() {
+        let mut app = app_with_review();
+        let picker = app.lore_picker.as_mut().unwrap();
+        picker.belief_review = None;
+        picker.evidence = Some((7, (0..2).map(|_| lore_picker::Evidence {
+            session_id: "session".into(), project: "repo".into(), note: "note".into(),
+            created: "today".into(), source_engine: None, truncated: false, trail_truncated: true,
+        }).collect()));
+        let mut terminal = Terminal::new(TestBackend::new(100, 8)).unwrap();
+        terminal.draw(|frame| app.draw_lore_picker(frame, Rect::new(0, 0, 100, 8))).unwrap();
+        let buffer = terminal.backend().buffer();
+        let screen = (0..8).map(|row| (0..100).map(|x| buffer[(x, row)].symbol())
+            .collect::<String>()).collect::<Vec<_>>().join("\n");
+        assert!(screen.contains("More evidence exists in LORE"));
+    }
+
+    #[test]
+    fn disconnected_memory_menu_does_not_replace_another_sessions_content() {
+        let mut app = App::default();
+        app.size = Rect::new(0, 0, 100, 28);
+        app.groups[0].tabs.push("other".into());
+        app.session_cwds.insert("s".into(), PathBuf::from("/repo"));
+        app.session_cwds.insert("other".into(), PathBuf::from("/other"));
+        app.show_memory_menu_fixture(0, &["Keep this"], &[], &[]);
+        let expected = app.chip_info.as_ref().unwrap().lines.clone();
+        let (tx, rx) = mpsc::sync_channel(1);
+        app.memory_menu_pending = Some(("s".into(), "/repo".into(), rx));
+        drop(tx);
+        assert!(!app.poll_memory_menu());
+        assert_eq!(app.chip_info.as_ref().unwrap().lines, expected);
     }
 
     #[cfg(unix)]
@@ -10810,6 +12040,8 @@ for line in sys.stdin:
         assert!(!app.lore_picker.as_ref().unwrap().can_act_on_beliefs);
         assert!(app.lore_picker.as_ref().unwrap().belief_action.is_none());
         assert!(app.lore_picker.as_ref().unwrap().status.contains("Selection changed"));
+        app.lore_picker_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.lore_picker.as_ref().unwrap().belief_review.is_none());
     }
 
     #[test]
@@ -10899,6 +12131,7 @@ for line in sys.stdin:
         let mut app = App::default();
         app.size = Rect::new(0, 0, 100, 40);
         app.lore_picker = Some(LorePicker {
+            session_id: None,
             query: String::new(), rows: Vec::new(), selected: 0, offset: 0,
             proposals: vec![lore_picker::Proposal { pid: "one".into(), kind: "memory".into(),
                 action: "add".into(), scope: "user".into(), summary: String::new() }],
@@ -10910,14 +12143,24 @@ for line in sys.stdin:
             result_status: None,
             evidence: None, status: String::new(), pending: None,
         });
+        app.sync_chooser_state();
+        app.chooser_height_override.set(Some(5));
         app.lore_picker_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
         assert!(app.lore_picker.as_ref().unwrap().armed_resolution.is_none());
+        app.lore_picker_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        assert_eq!(app.lore_picker.as_ref().unwrap().review_scroll, 0);
+        assert_eq!(app.lore_picker.as_ref().unwrap().review_seen, 0);
+        app.chooser_height_override.set(None);
         for _ in 0..200 {
             if app.lore_picker.as_ref().unwrap().review_seen ==
                 raw_visual_rows(app.lore_picker.as_ref().unwrap().review.as_ref().unwrap().raw(),
                     app.lore_picker.as_ref().unwrap().review_width).len() { break; }
             app.lore_picker_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
         }
+        app.lore_picker_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        assert!(app.lore_picker.as_ref().unwrap().armed_resolution.is_none());
+        app.lore_picker_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::ALT));
+        assert!(app.lore_picker.as_ref().unwrap().armed_resolution.is_none());
         app.lore_picker_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
         assert_eq!(app.lore_picker.as_ref().unwrap().armed_resolution, Some(doxa_lore::PendingDecision::Approve));
         assert!(app.lore_picker.as_ref().unwrap().pending.is_none());
@@ -10925,6 +12168,9 @@ for line in sys.stdin:
         app.lore_picker.as_mut().unwrap().can_resolve = false;
         app.lore_picker_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
         assert!(app.lore_picker.as_ref().unwrap().armed_resolution.is_none());
+        app.chooser_height_override.set(Some(0));
+        app.lore_picker_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.lore_picker.as_ref().unwrap().review.is_none());
     }
 
     #[test]

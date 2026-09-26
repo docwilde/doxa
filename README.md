@@ -1,8 +1,8 @@
 <p align="center"><img src="assets/logo.png" width="560" alt="DOXA — belief earning knowledge"></p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Rust%202.0-alpha.24-f59f00" alt="Rust 2.0 alpha.24 is the main frontend">
-  <a href="https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.24"><img src="https://img.shields.io/github/v/release/docwilde/doxa?include_prereleases&amp;sort=semver&amp;label=Rust%20preview&amp;color=e8590c" alt="latest Rust preview release"></a>
+  <img src="https://img.shields.io/badge/Rust%202.0-alpha.25-f59f00" alt="Rust 2.0 alpha.25 is the main frontend">
+  <a href="https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.25"><img src="https://img.shields.io/github/v/release/docwilde/doxa?include_prereleases&amp;sort=semver&amp;label=Rust%20preview&amp;color=e8590c" alt="latest Rust preview release"></a>
   <a href="https://github.com/docwilde/doxa/actions/workflows/rust-ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/docwilde/doxa/rust-ci.yml?branch=main&label=Rust%20CI" alt="Rust CI status"></a>
   <img src="https://img.shields.io/badge/TUI-Ratatui-2f9e44" alt="Rust TUI built with Ratatui">
   <img src="https://img.shields.io/badge/auth-provider%20CLI%20or%20API%20key-2f9e44" alt="authentication follows the selected engine">
@@ -14,7 +14,7 @@
 > can edit files and run commands with your privileges. Read
 > [Non-goals](#non-goals) before using it on important work.
 
-The current Rust preview is [v2.0.0-alpha.24](https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.24).
+The current Rust preview is [v2.0.0-alpha.25](https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.25).
 GitHub labels 1.19 as the latest stable release while Rust 2.0 remains a prerelease.
 
 **DOXA** is a terminal for coding agents. Development now leads with the
@@ -53,6 +53,10 @@ offer setup diagnostics; `doxa settings` shows and changes native linger and
 worktree preferences for future sessions. `/settings` opens those same
 preferences above the active prompt, including their effective sources.
 `/branch` opens a local branch picker for a managed session.
+Clicking the repo chip opens a directory picker above the prompt; its top
+border can be dragged to show more entries. Selectable rows highlight under
+the pointer. Codex sessions now show current context usage when DOXA can
+verify the owned Codex rollout and its latest token count.
 `/usage` and `/context` open per-session detail panels, and `/collection`
 organizes the session rail. Native fleet preflight reports supervisor capacity
 and approval policy before handing execution to the Python bridge.
@@ -70,7 +74,12 @@ in supporting terminals.
 
 ## Gallery
 
-### Rust 2.0 alpha.24
+### Rust 2.0 alpha.25
+
+![Rust directory picker expanded above a single session prompt](assets/shots/rust-repo-picker.png)
+
+*Click the repo chip to browse folders. Enter opens the selected current folder
+in a new tab; the upper border can be dragged to show more entries.*
 
 ![Rust command registry opened above the active prompt](assets/shots/rust-help.png)
 
@@ -140,7 +149,7 @@ curl -fsSL https://raw.githubusercontent.com/docwilde/doxa/main/scripts/install.
 
 The installer builds the Rust frontend and daemon from `main` and installs the
 Rust `doxa` command in `~/.local/bin` (or `DOXA_RUST_BIN_DIR`). Pass a tag such
-as `v2.0.0-alpha.24` after `sh -s --` to pin a release. It uses Git, Cargo,
+as `v2.0.0-alpha.25` after `sh -s --` to pin a release. It uses Git, Cargo,
 Python 3.11+, and `uv`; the Python environment it creates is private to the
 LORE and Claude sidecars. No Python frontend command is installed. See the
 [Rust guide](rust/README.md) for provider setup and current limits.
