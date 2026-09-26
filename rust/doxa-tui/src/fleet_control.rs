@@ -425,7 +425,12 @@ fn monitor(store: &Store, value: &mut Value, slots: &mut [Slot], timeout: Option
         let mut any_busy = false;
         for (index, slot) in slots.iter_mut().enumerate() {
             for _ in 0..256 {
-                let Some(frame) = slot.client.poll_frame(Duration::from_millis(1)).map_err(io::Error::other)? else { break; };
+                let frame = match slot.client.poll_frame(Duration::from_millis(1)) {
+                    Ok(frame) => frame,
+                    Err(_) if STOP.load(Ordering::Relaxed) => { value["stopped"] = json!(true); return Ok(()); }
+                    Err(error) => return Err(io::Error::other(error)),
+                };
+                let Some(frame) = frame else { break; };
                 let event = &frame["event"]; let data = &event["data"];
                 match event["type"].as_str() {
                     Some("turn_start") => slot.busy = true,
