@@ -44,6 +44,7 @@ pub struct ClaudeHost {
     closing: AtomicBool,
     admission: Mutex<()>,
     model_control: bool,
+    effort_control: bool,
     permission_control: bool,
     reviewed_compact: bool,
     initial_model: Option<String>,
@@ -63,6 +64,7 @@ impl ClaudeHost {
         let mut bridge = Bridge::spawn(python, script)
             .map_err(|_| "Claude sidecar could not start".to_owned())?;
         let model_control = bridge.supports("set_model");
+        let effort_control = bridge.supports("set_effort");
         let permission_control = bridge.supports("set_permission_mode");
         let reviewed_compact = bridge.supports("reviewed_compact_v1");
         let params = json!({"cwd":cwd,"session_id":session_id,
@@ -117,6 +119,7 @@ impl ClaudeHost {
             closing: AtomicBool::new(false),
             admission: Mutex::new(()),
             model_control,
+            effort_control,
             permission_control,
             reviewed_compact,
             initial_model,
@@ -134,7 +137,7 @@ impl ClaudeHost {
                 reply: tx,
             })
             .map_err(|_| "Claude sidecar closed".to_owned())?;
-        rx.recv_timeout(RPC_TIMEOUT)
+        rx.recv_timeout(if method == "set_effort" { Duration::from_secs(60) } else { RPC_TIMEOUT })
             .map_err(|_| "Claude sidecar did not answer".to_owned())?
     }
 
@@ -263,6 +266,18 @@ impl Host for ClaudeHost {
                     result["model"].as_str().ok_or("invalid model reply")?
                 };
                 Ok(json!({"model":selected}))
+            }
+            "set_effort" => {
+                let _admission = self.admission.lock().unwrap();
+                if !self.effort_control { return Err("Claude sidecar does not support effort resume".into()); }
+                if self.turn_active() || self.closing.load(Ordering::Acquire) {
+                    return Err("Claude effort changes require an idle session".into());
+                }
+                let effort = params["effort"].as_str().ok_or("effort is required")?;
+                if !matches!(effort, "low" | "medium" | "high" | "xhigh" | "max") {
+                    return Err("unsupported Claude effort".into());
+                }
+                self.rpc("set_effort", json!({"effort":effort}))
             }
             "set_permission_mode" => {
                 if !self.permission_control {

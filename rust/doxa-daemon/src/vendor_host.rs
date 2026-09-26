@@ -28,8 +28,9 @@ fn emit_content_chunks(kind: &str, content: &str, approx_tokens: u64, emit: &mut
 
 pub struct VendorHost {
     vendor: Vendor,
-    model: String,
+    model: Mutex<String>,
     effort: Mutex<String>,
+    catalog: Mutex<Option<Vec<doxa_vendors::ModelCapability>>>,
     lore: Mutex<LoreClient>,
     scrub_failed: AtomicBool,
     history: Mutex<Vec<Value>>,
@@ -120,8 +121,9 @@ impl VendorHost {
         }
         let host = Self {
             vendor,
-            model,
+            model: Mutex::new(model),
             effort: Mutex::new(effort),
+            catalog: Mutex::new(None),
             lore: Mutex::new(lore),
             scrub_failed: AtomicBool::new(false),
             history: Mutex::new(history),
@@ -178,7 +180,15 @@ impl VendorHost {
     }
 }
 
+struct ActiveTurn<'a>(&'a Mutex<Option<watch::Sender<bool>>>);
+impl Drop for ActiveTurn<'_> {
+    fn drop(&mut self) { *self.0.lock().unwrap() = None; }
+}
+
 impl Host for VendorHost {
+    fn can_set_model(&self) -> bool { true }
+    fn model_change_requires_idle(&self) -> bool { true }
+    fn initial_model(&self) -> Option<String> { Some(self.model.lock().unwrap().clone()) }
     fn initial_effort(&self) -> Option<String> { Some(self.effort.lock().unwrap().clone()) }
     fn billing_snapshot(&self) -> Option<Value> {
         if self.vendor != Vendor::DeepSeek { return None; }
@@ -214,12 +224,18 @@ impl Host for VendorHost {
             }
         };
         let (sender, cancel) = watch::channel(false);
-        *self.active.lock().unwrap() = Some(sender);
+        {
+            let mut active = self.active.lock().unwrap();
+            if active.is_some() { emit(done("Vendor turn already running")); return; }
+            *active = Some(sender);
+        }
+        let _active_turn = ActiveTurn(&self.active);
         if self.closing.load(Ordering::Acquire) {
             self.cancel();
         }
         let started = Instant::now();
         let effort = self.effort.lock().unwrap().clone();
+        let selected_model = self.model.lock().unwrap().clone();
         emit(json!({"type":"turn_started","data":{"prompt":prompt,
             "vendor_tools":if self.workspace_read { "workspace-read" } else { "none" }}}));
         let mut history = self.history.lock().unwrap().clone();
@@ -253,7 +269,7 @@ impl Host for VendorHost {
                     runtime.block_on(doxa_vendors::run_turn_local(
                         self.vendor,
                         endpoint,
-                        &self.model,
+                        &selected_model,
                         &effort,
                         &mut history,
                         &prompt,
@@ -265,7 +281,7 @@ impl Host for VendorHost {
                 } else {
                     runtime.block_on(doxa_vendors::run_turn(
                         self.vendor,
-                        &self.model,
+                        &selected_model,
                         &effort,
                         &mut history,
                         &prompt,
@@ -278,7 +294,7 @@ impl Host for VendorHost {
                 #[cfg(not(feature = "local-test-server"))]
                 runtime.block_on(doxa_vendors::run_turn(
                     self.vendor,
-                    &self.model,
+                    &selected_model,
                     &effort,
                     &mut history,
                     &prompt,
@@ -293,7 +309,6 @@ impl Host for VendorHost {
         if reasoning_chars > 0 && reasoning_chars.div_ceil(4) > reported_tokens {
             emit(json!({"type":"reasoning_progress","data":{"approx_tokens":reasoning_chars.div_ceil(4)}}));
         }
-        *self.active.lock().unwrap() = None;
         match result {
             Ok(outcome) => {
                 // The crate masks its API key; LORE must scrub every other
@@ -303,7 +318,7 @@ impl Host for VendorHost {
                 let final_text = history.last().and_then(|message| message["content"].as_str());
                 let text = final_text.ok_or(()).and_then(|text| self.scrub(text));
                 let reasoning = self.scrub(&outcome.reasoning);
-                let model = self.scrub(outcome.model.as_deref().unwrap_or(&self.model));
+                let model = self.scrub(outcome.model.as_deref().unwrap_or(&selected_model));
                 if let (Ok(text), Ok(reasoning), Ok(model)) = (text, reasoning, model) {
                     history = saved_history;
                     history.push(json!({"role":"user","content":prompt}));
@@ -330,7 +345,7 @@ impl Host for VendorHost {
                     }
                     let saved = self.store.try_write_vendor_messages(
                         self.vendor.engine_id(),
-                        &self.model,
+                        &selected_model,
                         &history,
                         |value| {
                             self.scrub(value)
@@ -386,16 +401,49 @@ impl Host for VendorHost {
 
     fn call(&self, method: &str, params: &Value) -> Result<Value, String> {
         match method {
-            "set_effort" => {
-                let effort = params.get("effort").and_then(Value::as_str)
-                    .ok_or("set_effort requires an effort string")?;
-                if !self.vendor.effort_choices(&self.model).contains(&effort) {
-                    return Err("unsupported effort for this vendor model".into());
+            "list_models" => {
+                let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|_| "catalog runtime unavailable")?;
+                let catalog = runtime.block_on(doxa_vendors::catalog_models(self.vendor));
+                let verified = catalog.is_some();
+                let rows = catalog.unwrap_or_else(|| {
+                    let ids: &[&str] = match self.vendor {
+                        Vendor::DeepSeek => &["deepseek-flash", "deepseek-v4-pro"],
+                        Vendor::Glm => &["glm-4.5", "glm-4.5-air", "glm-4.6", "glm-4.7", "glm-5", "glm-5-turbo", "glm-5.1", "glm-5.2", "glm-5.3", "glm-5.3-flash"],
+                    };
+                    ids.iter().map(|id| doxa_vendors::ModelCapability { id: (*id).into(), efforts: self.vendor.effort_choices(id).iter().map(|s| (*s).into()).collect(), default_effort: Some("high".into()), effort_metadata_present: false }).collect()
+                });
+                *self.catalog.lock().unwrap() = Some(rows.clone());
+                Ok(json!({"models":rows.iter().map(|r| &r.id).collect::<Vec<_>>(),
+                    "capabilities":rows.iter().map(|r| json!({"model":r.id,"efforts":r.efforts,"default_effort":r.default_effort})).collect::<Vec<_>>(),
+                    "note":if verified { "Provider account catalog · changes apply next turn" } else { "Local model fallback; provider catalog unavailable · changes apply next turn" }}))
+            }
+            "set_model" | "set_effort" => {
+                let active = self.active.lock().unwrap();
+                if active.is_some() || self.closing.load(Ordering::Acquire) { return Err("vendor settings require an idle session".into()); }
+                if self.storage_uncertain.load(Ordering::Acquire) { return Err("vendor storage state is uncertain".into()); }
+                let mut model = self.model.lock().unwrap();
+                let mut effort = self.effort.lock().unwrap();
+                let selected = if method == "set_model" { params["model"].as_str().ok_or("model required")? } else { &model };
+                let catalog = self.catalog.lock().unwrap();
+                let advertised = catalog.as_ref().and_then(|rows| rows.iter().find(|row| row.id == selected));
+                if catalog.is_some() && advertised.is_none() { return Err("model is unavailable in the current provider catalog".into()); }
+                let fallback = self.vendor.effort_choices(selected);
+                let choices = advertised.map(|row| row.efforts.iter().map(String::as_str).collect::<Vec<_>>())
+                    .unwrap_or_else(|| fallback.to_vec());
+                if choices.is_empty() { return Err("model has no verified native vendor effort capability".into()); }
+                let default = advertised.and_then(|row| row.default_effort.as_deref()).filter(|level| choices.contains(level)).unwrap_or_else(|| if choices.contains(&"high") { "high" } else { choices[0] });
+                let chosen = if method == "set_effort" { params["effort"].as_str().ok_or("effort required")? }
+                    else if choices.contains(&effort.as_str()) { effort.as_str() } else { default };
+                if !choices.contains(&chosen) { return Err("unsupported effort for this vendor model".into()); }
+                doxa_vendors::request_body(self.vendor, selected, &[], chosen).map_err(|_| "unsupported vendor selection")?;
+                let selected = selected.to_owned(); let chosen = chosen.to_owned();
+                if selected != *model {
+                    let history = self.history.lock().unwrap();
+                    self.store.try_write_vendor_messages(self.vendor.engine_id(), &selected, &history, |value| self.scrub(value).map_err(|_| std::io::Error::other("LORE scrub failed")))
+                        .map_err(|_| "vendor selection could not be safely saved")?;
                 }
-                doxa_vendors::request_body(self.vendor, &self.model, &[], effort)
-                    .map_err(|_| "unsupported effort for this vendor model")?;
-                *self.effort.lock().unwrap() = effort.to_owned();
-                Ok(json!({"effort":effort}))
+                *model = selected; *effort = chosen;
+                Ok(json!({"model":*model,"effort":*effort}))
             }
             "interrupt" => {
                 self.cancel();

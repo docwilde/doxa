@@ -2278,6 +2278,34 @@ mod vendor_process {
     }
 
     #[test]
+    fn vendor_model_control_preserves_history_and_changes_next_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let lore = dir.path().join("lore-fixture"); fake_scrubber(&lore, false);
+        let (endpoint, server) = fake_vendor(2, "answer");
+        let mut process = start_vendor(dir.path(), "deepseek", &endpoint, &lore);
+        let (mut reader, mut socket) = process.connect();
+        assert_eq!(receive(&mut reader)["can_set_model"], true);
+        send(&mut socket, json!({"type":"attach","cursor":null}));
+        for id in 1..=2 {
+            if id == 2 {
+                send(&mut socket, json!({"type":"call","id":10,"method":"set_model","params":{"model":"deepseek-v4-pro"}}));
+                let reply = receive(&mut reader); assert_eq!(reply["ok"], true); assert_eq!(reply["model"], "deepseek-v4-pro");
+                assert_eq!(receive(&mut reader)["event"]["type"], "model_changed");
+            }
+            send(&mut socket, json!({"type":"prompt","id":id,"text":"hello"}));
+            while receive(&mut reader)["event"]["type"] != "turn_done" {}
+        }
+        send(&mut socket, json!({"type":"call","id":11,"method":"set_model","params":{"model":"unverified-model"}}));
+        assert_eq!(receive(&mut reader)["ok"], false);
+        send(&mut socket, json!({"type":"call","id":12,"method":"stop","params":{}}));
+        assert_eq!(receive(&mut reader)["ok"], true); wait_until(|| process.exited());
+        let requests = server.join().unwrap();
+        assert_eq!(requests[0]["model"], "deepseek-flash");
+        assert_eq!(requests[1]["model"], "deepseek-v4-pro");
+        assert_eq!(requests[1]["messages"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
     fn vendor_workspace_read_is_opt_in_scrubbed_and_turn_local() {
         let dir = tempfile::tempdir().unwrap();
         let lore = dir.path().join("lore-fixture");

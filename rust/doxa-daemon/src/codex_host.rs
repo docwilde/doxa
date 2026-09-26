@@ -536,6 +536,10 @@ impl Host for CodexHost {
                                 }
                             }) {
                                 Ok(app) => {
+                                    if let Some(model) = app.model() {
+                                        self.selection.lock().unwrap().0 = Some(model.to_owned());
+                                        handle_event(doxa_engines::EngineEvent::new("model_changed", json!({"model":model})));
+                                    }
                                     *resume_thread = Some(app.thread_id().to_owned());
                                     if self.persist_thread(app.thread_id(), true).is_err() {
                                         thread_write_failed.set(true);

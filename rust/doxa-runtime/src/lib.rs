@@ -81,6 +81,7 @@ struct State {
     model: Option<String>,
     permission_mode: String,
     effort: Option<String>,
+    pending_effort: Option<String>,
 }
 
 struct Inner {
@@ -150,7 +151,7 @@ impl Daemon {
             inner: Arc::new(Inner { state: Mutex::new(State {
                 next_seq: 0, ring: VecDeque::new(), clients: HashMap::new(), busy: false,
                 prompts: VecDeque::new(), next_queue_id: 1, next_turn_id: 1,
-                model, permission_mode, effort,
+                model, permission_mode, effort, pending_effort: None,
             }), controls: Mutex::new(()), host, session, stopping: AtomicBool::new(false), next_client_id: AtomicU64::new(1),
                 active_connections: AtomicUsize::new(0) }),
             listener, socket_path, socket_ino,
@@ -249,6 +250,12 @@ fn remove_owned_socket(path: &Path, inode: u64) {
 impl Inner {
     fn publish(&self, turn: Option<&str>, event: Value) {
         let mut state = self.state.lock().unwrap();
+        if event["type"] == "model_changed" {
+            if let Some(model) = event["data"]["model"].as_str().filter(|s| !s.is_empty() && !s.chars().any(char::is_control)) { state.model = Some(model.to_owned()); }
+        }
+        if event["type"] == "effort_verified" {
+            if let Some(effort) = event["data"]["effort"].as_str().filter(|s| !s.is_empty() && !s.chars().any(char::is_control)) { state.effort = Some(effort.to_owned()); state.pending_effort = None; }
+        }
         let seq = state.next_seq;
         let Some(next) = seq.checked_add(1) else { return; };
         state.next_seq = next;
@@ -317,7 +324,7 @@ fn handle_client(inner: Arc<Inner>, stream: UnixStream) {
         json!({"type":"hello", "proto":1, "doxa":inner.session.doxa_version,
             "session_id":inner.session.session_id, "model":state.model,
             "permission_mode":state.permission_mode, "bypass_armed":false,
-            "engine":inner.session.engine, "effort":state.effort, "cwd":inner.session.cwd, "next_seq":state.next_seq,
+            "engine":inner.session.engine, "effort":state.effort,"pending_effort":state.pending_effort, "cwd":inner.session.cwd, "next_seq":state.next_seq,
             "transcript_path":transcript.as_ref().map(|(path, _)| path.to_string_lossy().into_owned()),
             "transcript_bytes":transcript.as_ref().map(|(_, size)| *size),
             "running":state.busy,"queued":state.prompts.len(),
@@ -495,7 +502,7 @@ fn handle_call(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame: &Value) {
         let state = inner.state.lock().unwrap();
         (Ok(json!({"status":{"session_id":inner.session.session_id,"cwd":inner.session.cwd,
             "model":state.model,"permission_mode":state.permission_mode,
-            "engine":inner.session.engine,"effort":state.effort,"running":state.busy,"queued":state.prompts.len(),
+            "engine":inner.session.engine,"effort":state.effort,"pending_effort":state.pending_effort,"running":state.busy,"queued":state.prompts.len(),
             "can_set_model":can_set_model,
             "can_set_permission_mode":can_set_permission_mode,
             "lore_scrub":lore_scrub,"billing":billing}})), None)
@@ -517,8 +524,11 @@ fn handle_call(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame: &Value) {
     } else if method == "set_effort" {
         // Admission and control share the state mutex. A prompt cannot be
         // admitted between the idle check and the host's effort update.
-        let mut state = inner.state.lock().unwrap();
-        if state.busy || !state.prompts.is_empty() || inner.stopping.load(Ordering::Acquire) {
+        let refuse = {
+            let state = inner.state.lock().unwrap();
+            state.busy || !state.prompts.is_empty() || inner.stopping.load(Ordering::Acquire)
+        };
+        if refuse {
             (Err("effort change requires an idle session with no queued prompts".into()), None)
         } else {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(||
@@ -532,8 +542,11 @@ fn handle_call(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame: &Value) {
             });
             let changed = result.as_ref().ok().and_then(|extra| extra["effort"].as_str())
                 .map(|effort| {
-                    state.effort = Some(effort.to_owned());
-                    json!({"type":"effort_changed","data":{"effort":effort}})
+                    let pending = result.as_ref().ok().is_some_and(|extra| extra["verification_pending"] == true);
+                    let mut state = inner.state.lock().unwrap();
+                    if pending { state.pending_effort = Some(effort.to_owned()); }
+                    else { state.effort = Some(effort.to_owned()); state.pending_effort = None; }
+                    json!({"type":if pending { "effort_requested" } else { "effort_changed" },"data":{"effort":effort,"verification_pending":pending}})
                 });
             (result, changed)
         }
@@ -551,7 +564,7 @@ fn handle_call(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame: &Value) {
                 && state.permission_mode != "dontAsk" && (state.busy || !state.prompts.is_empty())
         };
         if refuse_model {
-            (Err("Finish the current response and queued prompts, then change the Codex model for the next turn".into()), None)
+            (Err("Finish the current response and queued prompts, then change the model for the next turn".into()), None)
         } else if refuse_dont_ask {
             (Err("dontAsk requires an idle session with no queued prompts".into()), None)
         } else {

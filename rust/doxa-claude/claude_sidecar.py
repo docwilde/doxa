@@ -139,7 +139,8 @@ async def run() -> None:
     emit({"type": "hello", "protocol": PROTOCOL, "version": VERSION,
           "capabilities": ["start", "prompt", "answer", "interrupt", "finalize",
                            "set_model", "set_permission_mode", "list_models",
-                           "reviewed_compact_v1", "context_detail"]})
+                           "reviewed_compact_v1", "context_detail"]
+                          + (["set_effort"] if hasattr(SessionEngine, "set_effort") else [])})
     engine = None
     turn = None
     catalog_task = None
@@ -161,6 +162,7 @@ async def run() -> None:
             available = [m for m in models if m.source != "fallback"]
             return {"models": [m.id for m in available[:100]
                                if isinstance(m.id, str) and 0 < len(m.id) <= 128],
+                    "capabilities": [{"model": m.id, "efforts": ["low", "medium", "high", "xhigh", "max"] if hasattr(SessionEngine, "set_effort") else []} for m in available[:100]],
                     "note": (provider.catalog_note(available) if available else
                              "No verified Claude model catalog available")[:500]}
         except Exception:  # optional catalog discovery must not stop the session
@@ -309,6 +311,16 @@ async def run() -> None:
                 selected = await engine.set_model(model)
                 emit({"type": "reply", "id": request_id, "ok": True,
                       "result": {"model": selected}})
+            elif method == "set_effort" and engine is not None:
+                if turn is not None and not turn.done():
+                    raise ValueError("effort changes require an idle session")
+                effort = params.get("effort")
+                if effort not in ("low", "medium", "high", "xhigh", "max"):
+                    raise ValueError("invalid effort")
+                selected = await engine.set_effort(effort)
+                emit({"type": "reply", "id": request_id, "ok": True,
+                      "result": {"effort": selected,
+                                 "verification_pending": bool(getattr(engine, "_resume_identity_pending", None))}})
             elif method == "set_permission_mode" and engine is not None:
                 mode = params["mode"]
                 if mode not in ("default", "acceptEdits", "plan", "auto", "dontAsk"):
