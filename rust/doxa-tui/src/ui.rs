@@ -1,6 +1,6 @@
 //! Terminal shell for the Rust frontend. Daemon adapters can feed [`App::apply_update`].
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::io::{self, IsTerminal, Stdout, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
@@ -190,6 +190,17 @@ struct RepoPicker {
     current_dir: PathBuf,
     paths: Vec<PathBuf>,
     selected: usize,
+}
+
+fn chooser_visible_start(view_start: &Cell<usize>, selected: usize, visible: usize) -> usize {
+    // Moving the selection within the painted viewport must not move its rows.
+    let start = view_start.get();
+    let start = if selected < start { selected }
+        else if selected >= start.saturating_add(visible) {
+            selected.saturating_sub(visible.saturating_sub(1))
+        } else { start };
+    view_start.set(start);
+    start
 }
 
 #[derive(Clone, Debug)]
@@ -1220,7 +1231,9 @@ pub struct App {
     attach_picker: Option<AttachPicker>,
     branch_picker: Option<BranchPicker>,
     repo_picker: Option<RepoPicker>,
-    chooser_height_override: Option<u16>,
+    chooser_height_override: Cell<Option<u16>>,
+    chooser_view_start: Cell<usize>,
+    chooser_owner: RefCell<Option<String>>,
     lore_picker: Option<LorePicker>,
     engine_picker: bool,
     engine_selected: usize,
@@ -1365,7 +1378,9 @@ impl Default for App {
             attach_picker: None,
             branch_picker: None,
             repo_picker: None,
-            chooser_height_override: None,
+            chooser_height_override: Cell::new(None),
+            chooser_view_start: Cell::new(0),
+            chooser_owner: RefCell::new(None),
             lore_picker: None,
             engine_picker: false,
             engine_selected: 0,
@@ -1439,6 +1454,43 @@ impl Default for App {
 }
 
 impl App {
+    fn chooser_identity(&self) -> Option<String> {
+        let kind = if let Some(index) = self.active_request_index().filter(|&index|
+            self.input_requests[index].kind == "ask_user") {
+            format!("ask_user:{}:{}", self.input_requests[index].id, self.input_requests[index].step)
+        } else if self.settings_menu.is_some() { "settings".into() }
+        else if self.engine_picker { "engine".into() }
+        else if self.new_session.is_some() { "new_session".into() }
+        else if self.effort_picker.is_some() { "effort".into() }
+        else if self.permission_picker.is_some() { "permission".into() }
+        else if self.model_picker.is_some() { "model".into() }
+        else if self.repo_picker.is_some() { "repo".into() }
+        else if let Some(picker) = &self.lore_picker {
+            format!("lore:{}:{}:{}:{}", picker.proposal_mode, picker.review.is_some(),
+                picker.belief_review.is_some(), picker.evidence.is_some())
+        }
+        else if self.action_menu { "actions".into() }
+        else if let Some(info) = &self.chip_info { format!("chip_info:{}", info.kind) }
+        else if self.history_modal { "history".into() }
+        else if self.queue_picker.is_some() { "queue".into() }
+        else if self.attach_picker.is_some() { "attach".into() }
+        else if self.branch_picker.is_some() { "branch".into() }
+        else if !self.slash_suggestions().is_empty() { "slash".into() }
+        else { return None; };
+        Some(format!("{}:{}:{kind}", self.active_group,
+            self.groups[self.active_group].active_id().unwrap_or("")))
+    }
+
+    fn sync_chooser_state(&self) {
+        let identity = self.chooser_identity();
+        let mut owner = self.chooser_owner.borrow_mut();
+        if *owner != identity {
+            *owner = identity;
+            self.chooser_height_override.set(None);
+            self.chooser_view_start.set(0);
+        }
+    }
+
     fn invalidate_repo(&mut self, id: &str) {
         self.repo_cache.remove(id);
         let epoch = self.repo_epoch.entry(id.to_owned()).or_default();
@@ -2327,6 +2379,7 @@ impl App {
             self.slash_selected = 0;
             self.slash_dismissed = false;
         }
+        self.sync_chooser_state();
         changed
     }
 
@@ -3851,17 +3904,27 @@ impl App {
     /// positions are shared by paint and mouse hit testing.
     fn history_rows(&self, visible: usize) -> Vec<(usize, bool, String)> {
         let matches = self.history_matches();
+        let selected_row = matches.iter().take(self.history_selected).map(|&index|
+            1 + self.history_snippets(&self.sessions[index].id).len().min(2)).sum();
+        let start = chooser_visible_start(&self.chooser_view_start, selected_row, visible);
         let mut rows = Vec::new();
-        for (position, &index) in matches.iter().enumerate().skip(self.history_selected) {
+        let mut visual_row = 0;
+        for (position, &index) in matches.iter().enumerate() {
             if rows.len() >= visible { break; }
             let session = &self.sessions[index];
-            let label = format!(" {} {} · {}{}", if position == self.history_selected { '›' } else { ' ' },
-                safe_label(&session.title), safe_label(&session.id),
-                if self.offline_ids.contains(&session.id) { " · archived" } else { "" });
-            rows.push((position, true, label));
+            if visual_row >= start {
+                let label = format!(" {} {} · {}{}", if position == self.history_selected { '›' } else { ' ' },
+                    safe_label(&session.title), safe_label(&session.id),
+                    if self.offline_ids.contains(&session.id) { " · archived" } else { "" });
+                rows.push((position, true, label));
+            }
+            visual_row += 1;
             for snippet in self.history_snippets(&session.id).iter().take(2) {
                 if rows.len() >= visible { break; }
-                rows.push((position, false, format!("    ↳ {}", safe_label(snippet))));
+                if visual_row >= start {
+                    rows.push((position, false, format!("    ↳ {}", safe_label(snippet))));
+                }
+                visual_row += 1;
             }
         }
         rows
@@ -5643,6 +5706,7 @@ impl App {
     /// Space for a chooser inside the active pane, immediately above its
     /// prompt. Reserving this space keeps the transcript and prompt visible.
     fn chooser_rect(&self, pane: Rect) -> Option<Rect> {
+        self.sync_chooser_state();
         let wanted = if let Some(index) = self.active_request_index().filter(|&index| self.input_requests[index].kind == "ask_user") {
             let (body, _, _) = input_request_body(&self.input_requests[index],
                 usize::from(pane.width.saturating_sub(4)));
@@ -5700,7 +5764,7 @@ impl App {
         let draft = group.active_id().map_or("", |_| self.input.as_str());
         let prompt = prompt_height(draft, pane.height);
         let available = pane.height.saturating_sub(3 + prompt + 1 + 1 + 1);
-        let height = self.chooser_height_override.unwrap_or(wanted).min(available);
+        let height = self.chooser_height_override.get().unwrap_or(wanted).min(available);
         if height < 5 || pane.width < 18 { return None; }
         Some(Rect::new(pane.x, pane.bottom().saturating_sub(prompt + 1 + 1 + height), pane.width, height))
     }
@@ -6063,19 +6127,19 @@ impl App {
             }
         } else if let Some(picker) = self.branch_picker.as_mut() {
             if row < menu.y + 2 { return false; }
-            let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+            let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
             let index = start + usize::from(row - menu.y - 2);
             if index < picker.branches.len() && picker.selected != index { picker.selected = index; return true; }
         } else if let Some(picker) = self.repo_picker.as_mut() {
             if row < menu.y + 2 { return false; }
-            let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+            let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
             let index = start + usize::from(row - menu.y - 2);
             if index < picker.paths.len() && picker.selected != index { picker.selected = index; return true; }
         } else if self.engine_picker {
             let offset = if menu.height >= 10 { 4 } else { 2 };
             if row < menu.y + offset { return false; }
             let visible = usize::from(menu.height.saturating_sub(offset + 1)).max(1);
-            let start = self.engine_selected.saturating_sub(visible.saturating_sub(1));
+            let start = chooser_visible_start(&self.chooser_view_start, self.engine_selected, visible);
             let index = start + usize::from(row - menu.y - offset);
             if index < ENGINE_CHOICES.len() && self.engine_selected != index { self.engine_selected = index; return true; }
         } else if let Some(form) = self.new_session.as_mut() {
@@ -6089,29 +6153,29 @@ impl App {
             let offset = if menu.height >= 10 { 4 } else { 2 };
             if row < menu.y + offset { return false; }
             let visible = usize::from(menu.height.saturating_sub(offset + 1)).max(1);
-            let start = selected.saturating_sub(visible.saturating_sub(1));
+            let start = chooser_visible_start(&self.chooser_view_start, *selected, visible);
             let index = start + usize::from(row - menu.y - offset);
             if index < PERMISSION_CHOICES.len() && *selected != index { *selected = index; return true; }
         } else if let Some(picker) = self.effort_picker.as_mut() {
             if row < menu.y + 3 { return false; }
             let visible = usize::from(menu.height.saturating_sub(4)).max(1);
-            let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+            let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
             let index = start + usize::from(row - menu.y - 3);
             if index < picker.levels.len() && picker.selected != index { picker.selected = index; return true; }
         } else if let Some(picker) = self.model_picker.as_mut() {
             if row < menu.y + 3 { return false; }
             let visible = usize::from(menu.height.saturating_sub(4)).max(1);
-            let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+            let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
             let index = start + usize::from(row - menu.y - 3);
             if index < picker.models.len() && picker.selected != index { picker.selected = index; return true; }
         } else if let Some(picker) = self.attach_picker.as_mut() {
             if row < menu.y + 2 { return false; }
-            let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+            let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
             let index = start + usize::from(row - menu.y - 2);
             if index < attach_len.unwrap_or(0) && picker.selected != index { picker.selected = index; return true; }
         } else if let Some(picker) = self.queue_picker.as_mut() {
             if row < menu.y + 2 { return false; }
-            let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+            let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
             let index = start + usize::from(row - menu.y - 2);
             if index < picker.rows.len() && picker.selected != index { picker.selected = index; return true; }
         } else if self.history_modal {
@@ -6125,19 +6189,20 @@ impl App {
             let compact = menu.height < 10;
             let first = if picker.proposal_mode { menu.y + 4 } else { menu.y + if compact { 3 } else { 6 } };
             if row < first { return false; }
-            let visible = usize::from(menu.height.saturating_sub(if compact { 4 } else { 8 })).max(1);
-            let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+            let reserve = if picker.proposal_mode { 6 } else if compact { 4 } else { 8 };
+            let visible = usize::from(menu.height.saturating_sub(reserve)).max(1);
+            let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
             let index = start + usize::from(row - first);
             let count = if picker.proposal_mode { picker.proposals.len() } else { picker.rows.len() };
             if index < count && picker.selected != index { picker.selected = index; return true; }
         } else if self.action_menu {
             let visible = usize::from(menu.height.saturating_sub(2)).max(1);
-            let start = self.action_selected.saturating_sub(visible.saturating_sub(1));
+            let start = chooser_visible_start(&self.chooser_view_start, self.action_selected, visible);
             let index = start + usize::from(row - menu.y - 1);
             if index < ACTIONS.len() && self.action_selected != index { self.action_selected = index; return true; }
         } else if !self.slash_suggestions().is_empty() {
             let visible = usize::from(menu.height.saturating_sub(2)).max(1);
-            let start = self.slash_selected.saturating_sub(visible.saturating_sub(1));
+            let start = chooser_visible_start(&self.chooser_view_start, self.slash_selected, visible);
             let index = start + usize::from(row - menu.y - 1);
             if index < self.slash_suggestions().len() && self.slash_selected != index { self.slash_selected = index; return true; }
         }
@@ -6154,7 +6219,7 @@ impl App {
                     let prompt = prompt_height(draft, pane.height);
                     let max = pane.height.saturating_sub(3 + prompt + 1 + 1 + 1);
                     let bottom = pane.bottom().saturating_sub(prompt + 2);
-                    self.chooser_height_override = Some(bottom.saturating_sub(mouse.row).clamp(5, max.max(5)));
+                    self.chooser_height_override.set(Some(bottom.saturating_sub(mouse.row).clamp(5, max.max(5))));
                     return true;
                 }
                 MouseEventKind::Up(MouseButton::Left) => { self.drag = None; return true; }
@@ -6203,7 +6268,7 @@ impl App {
                     if mouse.row >= menu.y + 2 && mouse.row < menu.bottom().saturating_sub(1) {
                         let picker = self.repo_picker.as_mut().unwrap();
                         let visible = usize::from(menu.height.saturating_sub(3)).max(1);
-                        let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+                        let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
                         let index = start + usize::from(mouse.row - menu.y - 2);
                         if index < picker.paths.len() {
                             picker.selected = index;
@@ -6287,7 +6352,7 @@ impl App {
                     match mouse.kind {
                         MouseEventKind::Down(MouseButton::Left) => {
                             let visible = usize::from(menu.height.saturating_sub(2)).max(1);
-                            let start = self.slash_selected.saturating_sub(visible.saturating_sub(1));
+                            let start = chooser_visible_start(&self.chooser_view_start, self.slash_selected, visible);
                             let position = start + usize::from(mouse.row.saturating_sub(menu.y + 1));
                             if mouse.row > menu.y && position < suggestions.len() {
                                 self.slash_selected = position;
@@ -6319,7 +6384,7 @@ impl App {
                         if mouse.row >= first_row && mouse.row < menu.bottom().saturating_sub(1) {
                             let visible = usize::from(menu.height.saturating_sub(3)).max(1);
                             let picker = self.branch_picker.as_mut().unwrap();
-                            let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+                            let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
                             let position = start + usize::from(mouse.row - first_row);
                             if position < picker.branches.len() {
                                 picker.selected = position;
@@ -6355,7 +6420,7 @@ impl App {
                     if mouse.row >= first_row && mouse.row < menu.bottom().saturating_sub(1) {
                         let visible = usize::from(menu.height.saturating_sub(3)).max(1);
                         let selected = self.attach_picker.as_ref().unwrap().selected;
-                        let start = selected.saturating_sub(visible.saturating_sub(1));
+                        let start = chooser_visible_start(&self.chooser_view_start, selected, visible);
                         let position = start + usize::from(mouse.row - first_row);
                         if position < self.attach_matches().len() {
                             self.attach_picker.as_mut().unwrap().selected = position;
@@ -6423,7 +6488,7 @@ impl App {
                         if mouse.row >= first && mouse.row < menu.bottom().saturating_sub(1) {
                             let picker = self.queue_picker.as_mut().unwrap();
                             let visible = usize::from(menu.height.saturating_sub(3)).max(1);
-                            let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+                            let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
                             picker.selected = (start + usize::from(mouse.row - first)).min(picker.rows.len().saturating_sub(1));
                         }
                     }
@@ -6479,7 +6544,7 @@ impl App {
                     let compact = menu.height < 10;
                     let first = menu.y.saturating_add(if compact { 3 } else { 6 });
                     let visible = usize::from(menu.height.saturating_sub(if compact { 4 } else { 8 })).max(1);
-                    let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+                    let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
                     if mouse.row >= first && mouse.row < first.saturating_add(visible as u16) {
                         let index = start + usize::from(mouse.row - first);
                         if let Some(id) = picker.rows.get(index).map(|row| row.id) {
@@ -6514,7 +6579,7 @@ impl App {
                 let offset = if height >= 10 { 4 } else { 2 };
                 if mouse.row < y + offset { return true; }
                 let visible = usize::from(height.saturating_sub(offset + 1)).max(1);
-                let start = self.engine_selected.saturating_sub(visible.saturating_sub(1));
+                let start = chooser_visible_start(&self.chooser_view_start, self.engine_selected, visible);
                 let row = start + usize::from(mouse.row.saturating_sub(y + offset));
                 if row < ENGINE_CHOICES.len() {
                     self.engine_selected = row;
@@ -6525,7 +6590,7 @@ impl App {
             if self.new_session.is_some() { return true; }
             if let Some(picker) = &mut self.effort_picker {
                 let visible = usize::from(height.saturating_sub(4)).max(1);
-                let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+                let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
                 let row = start + usize::from(mouse.row.saturating_sub(y + 3));
                 if mouse.row >= y + 3 && row < picker.levels.len() {
                     picker.selected = row;
@@ -6537,7 +6602,7 @@ impl App {
                 let offset = if height >= 10 { 4 } else { 2 };
                 if mouse.row >= y + offset {
                     let visible = usize::from(height.saturating_sub(offset + 1)).max(1);
-                    let start = selected.saturating_sub(visible.saturating_sub(1));
+                    let start = chooser_visible_start(&self.chooser_view_start, *selected, visible);
                     let row = start + usize::from(mouse.row - (y + offset));
                     if row < PERMISSION_CHOICES.len() {
                         *selected = row;
@@ -6553,7 +6618,7 @@ impl App {
             }
             let picker = self.model_picker.as_mut().unwrap();
             let visible = usize::from(height.saturating_sub(4)).max(1);
-            let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+            let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
             let row = start + usize::from(mouse.row.saturating_sub(y + 3));
             if mouse.row >= y + 3 && row < picker.models.len() && !picker.loading {
                 self.pending_model_changes.push((picker.session_id.clone(), picker.models[row].clone()));
@@ -6923,7 +6988,7 @@ impl App {
             } else { lines.push(Line::from(" Choose engine:")); }
             let offset = if height >= 10 { 4 } else { 2 };
             let visible = usize::from(height.saturating_sub(offset + 1)).max(1);
-            let start = self.engine_selected.saturating_sub(visible.saturating_sub(1));
+            let start = chooser_visible_start(&self.chooser_view_start, self.engine_selected, visible);
             for (index, engine) in ENGINE_CHOICES.iter().enumerate().skip(start).take(visible) {
                 lines.push(Line::styled(format!(" {} {}", if index == self.engine_selected { '›' } else { ' ' }, engine),
                     chooser_row_style(index == self.engine_selected)));
@@ -6968,7 +7033,7 @@ impl App {
             } else { lines.push(Line::from(" Permission mode:")); }
             let offset = if height >= 10 { 4 } else { 2 };
             let visible = usize::from(height.saturating_sub(offset + 1)).max(1);
-            let start = selected.saturating_sub(visible.saturating_sub(1));
+            let start = chooser_visible_start(&self.chooser_view_start, *selected, visible);
             for (index, (mode, description)) in PERMISSION_CHOICES.iter().enumerate().skip(start).take(visible) {
                 let current = self.permission_modes.get(id).is_some_and(|current| current == mode);
                 lines.push(Line::styled(format!(" {} {} {} · {}", if index == *selected { '›' } else { ' ' },
@@ -6981,7 +7046,7 @@ impl App {
             lines.push(Line::from(format!(" Current: {current} · {}/{} · idle session required", picker.engine, picker.model)));
             lines.push(Line::from(""));
             let visible = usize::from(height.saturating_sub(4)).max(1);
-            let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+            let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
             for (index, level) in picker.levels.iter().enumerate().skip(start).take(visible) {
                 lines.push(Line::styled(format!(" {} {}", if index == picker.selected { '›' } else { ' ' }, level),
                     chooser_row_style(index == picker.selected)));
@@ -6997,7 +7062,7 @@ impl App {
                 lines.push(Line::from(" No verified models available for this session"));
             }
             let visible = usize::from(height.saturating_sub(4)).max(1);
-            let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+            let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
             for (index, model) in picker.models.iter().enumerate().skip(start).take(visible) {
                 lines.push(Line::styled(format!(" {} {}", if index == picker.selected { '›' } else { ' ' }, model),
                     chooser_row_style(index == picker.selected)));
@@ -7099,7 +7164,7 @@ impl App {
         let mut lines = vec![Line::from(format!(" Search: {}", safe_label(&picker.query)))];
         if matches.is_empty() { lines.push(Line::from(" No matching live sessions")); }
         let visible = usize::from(area.height.saturating_sub(3)).max(1);
-        let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+        let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
         for (position, &index) in matches.iter().enumerate().skip(start).take(visible) {
             let session = &picker.rows[index];
             let title = if session.title.trim().is_empty() { "Untitled session" } else { &session.title };
@@ -7121,7 +7186,7 @@ impl App {
         let Some(picker) = &self.branch_picker else { return; };
         let mut lines = vec![Line::from(format!(" Current base: {}", safe_label(&picker.base)))];
         let visible = usize::from(area.height.saturating_sub(3)).max(1);
-        let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+        let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
         for (index, branch) in picker.branches.iter().enumerate().skip(start).take(visible) {
             let current = if branch == &picker.base { " · current" } else { "" };
             let label = format!(" {} {}{}", if index == picker.selected { '›' } else { ' ' },
@@ -7143,7 +7208,7 @@ impl App {
         let Some(picker) = &self.repo_picker else { return; };
         let mut lines = vec![Line::from(" Select a folder · Enter browse · current opens new tab")];
         let visible = usize::from(area.height.saturating_sub(3)).max(1);
-        let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+        let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
         let width = usize::from(area.width.saturating_sub(2));
         for (index, path) in picker.paths.iter().enumerate().skip(start).take(visible) {
             let marker = if index == 0 { "current" }
@@ -7169,7 +7234,7 @@ impl App {
         if matches.is_empty() { return; }
         let visible = usize::from(area.height.saturating_sub(2)).max(1);
         let selected = self.slash_selected.min(matches.len() - 1);
-        let start = selected.saturating_sub(visible.saturating_sub(1));
+        let start = chooser_visible_start(&self.chooser_view_start, selected, visible);
         let rows: Vec<Line> = matches.iter().enumerate().skip(start).take(visible)
             .map(|(index, (command, description))| {
                 let label = format!(" {} {:<12} {}", if index == selected { '›' } else { ' ' }, command, description);
@@ -7192,7 +7257,7 @@ impl App {
             else if picker.cancelling.is_some() { " Cancelling selected prompt…" }
             else { " X cancel selected · R refresh · Esc close" })];
         let visible = usize::from(area.height.saturating_sub(3)).max(1);
-        let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+        let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
         for (index, row) in picker.rows.iter().enumerate().skip(start).take(visible) {
             let ambiguous = picker.rows.iter().filter(|item| item.id == row.id).count() > 1;
             let label = format!(" {} {} · {}{}", if index == picker.selected { '›' } else { ' ' },
@@ -7233,7 +7298,7 @@ impl App {
                 lines.push(Line::from(" Select one proposal to review its complete raw contents"));
                 lines.push(Line::from(format!(" Page offset {} · {} rows", picker.offset, picker.proposals.len())));
                 let visible = usize::from(area.height.saturating_sub(6)).max(1);
-                let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+                let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
                 for (index, row) in picker.proposals.iter().enumerate().skip(start).take(visible) {
                     let label = format!(" {} {} · {}/{} · {} · {}", if index == picker.selected { '›' } else { ' ' },
                         safe_label(&row.pid), safe_label(&row.kind), safe_label(&row.action),
@@ -7304,7 +7369,7 @@ impl App {
         } else {
             lines.push(Line::from(format!(" Page offset {} · {} rows", picker.offset, picker.rows.len())));
             let visible = usize::from(height.saturating_sub(if compact { 4 } else { 8 })).max(1);
-            let start = picker.selected.saturating_sub(visible.saturating_sub(1));
+            let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
             for (index, row) in picker.rows.iter().enumerate().skip(start).take(visible) {
                 let label = format!(" {} #{} · {} · {:.0}% · {}{}{}", if index == picker.selected { '›' } else { ' ' }, row.id,
                     safe_label(&row.subject), row.confidence * 100.0, safe_label(&row.claim),
@@ -7386,9 +7451,7 @@ impl App {
         let height = area.height;
         let modal = area;
         let visible = usize::from(height.saturating_sub(2));
-        let start = self
-            .action_selected
-            .saturating_sub(visible.saturating_sub(1));
+        let start = chooser_visible_start(&self.chooser_view_start, self.action_selected, visible);
         let rows: Vec<Line> = ACTIONS
             .iter()
             .enumerate()
@@ -9315,6 +9378,98 @@ for line in sys.stdin:
         let buffer = terminal.backend().buffer();
         (0..height).map(|y| (0..width).map(|x| buffer[(x, y)].symbol()).collect::<String>())
             .collect::<Vec<_>>().join("\n")
+    }
+
+    fn scrolled_picker_app() -> App {
+        let mut app = App::default();
+        app.rail_visible = false;
+        app.handle(Event::Resize(100, 28));
+        app.groups[0].tabs.push("session".into());
+        app
+    }
+
+    fn hover_first_picker_row(app: &mut App, offset: u16) -> (Rect, usize) {
+        painted_at(app, 100, 28);
+        let start = app.chooser_view_start.get();
+        assert!(start > 0, "test must start with a scrolled viewport");
+        let menu = app.active_chooser_rect().unwrap();
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Moved,
+            column: menu.x + 2, row: menu.y + offset, modifiers: KeyModifiers::NONE }));
+        painted_at(app, 100, 28);
+        assert_eq!(app.chooser_view_start.get(), start, "hover must not shift visible entries");
+        (menu, start)
+    }
+
+    fn click_picker_row(app: &mut App, menu: Rect, offset: u16) {
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: menu.x + 2, row: menu.y + offset, modifiers: KeyModifiers::NONE }));
+    }
+
+    #[test]
+    fn scrolled_repo_hover_redraw_click_opens_same_visible_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let paths: Vec<_> = (0..30).map(|i| root.path().join(format!("child-{i:02}"))).collect();
+        for path in &paths { std::fs::create_dir(path).unwrap(); }
+        let mut app = scrolled_picker_app();
+        app.repo_picker = Some(RepoPicker { current_dir: root.path().to_path_buf(),
+            paths: paths.clone(), selected: 24 });
+        app.active_chooser_rect();
+        app.chooser_height_override.set(Some(8));
+        let (menu, start) = hover_first_picker_row(&mut app, 2);
+        assert_eq!(app.repo_picker.as_ref().unwrap().selected, start);
+        click_picker_row(&mut app, menu, 2);
+        assert_eq!(app.repo_picker.as_ref().unwrap().current_dir, paths[start]);
+        assert_eq!(app.chooser_height_override.get(), Some(8), "folder browsing keeps the chosen height");
+    }
+
+    #[test]
+    fn scrolled_branch_hover_redraw_click_requests_same_visible_branch() {
+        let mut app = scrolled_picker_app();
+        let branches: Vec<_> = (0..30).map(|i| format!("branch-{i:02}")).collect();
+        app.branch_picker = Some(BranchPicker { session_id: "session".into(), base: "main".into(),
+            branches: branches.clone(), selected: 24 });
+        let (menu, start) = hover_first_picker_row(&mut app, 2);
+        click_picker_row(&mut app, menu, 2);
+        assert!(matches!(&app.pending_queue_commands[0], crate::bridge::WorkerCommand::Branch(id, Some(branch))
+            if id == "session" && branch == &branches[start]));
+    }
+
+    #[test]
+    fn scrolled_model_hover_redraw_click_requests_same_visible_model() {
+        let mut app = scrolled_picker_app();
+        let models: Vec<_> = (0..30).map(|i| format!("model-{i:02}")).collect();
+        app.model_picker = Some(ModelPicker { session_id: "session".into(), models: models.clone(),
+            selected: 24, note: "Verified models".into(), loading: false, catalog_pending: false });
+        let (menu, start) = hover_first_picker_row(&mut app, 3);
+        click_picker_row(&mut app, menu, 3);
+        assert_eq!(app.pending_model_changes, vec![("session".into(), models[start].clone())]);
+    }
+
+    #[test]
+    fn chooser_resize_resets_after_close_menu_change_and_pane_switch() {
+        let mut app = scrolled_picker_app();
+        app.engine_picker = true;
+        let menu = app.active_chooser_rect().unwrap();
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: menu.x + 2, row: menu.y, modifiers: KeyModifiers::NONE }));
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Drag(MouseButton::Left),
+            column: menu.x + 2, row: menu.bottom() - 5, modifiers: KeyModifiers::NONE }));
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Up(MouseButton::Left),
+            column: menu.x + 2, row: menu.bottom() - 5, modifiers: KeyModifiers::NONE }));
+        assert_eq!(app.active_chooser_rect().unwrap().height, 5);
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        assert_eq!(app.chooser_height_override.get(), None);
+        app.engine_picker = true;
+        assert_eq!(app.active_chooser_rect().unwrap().height, 7);
+        app.chooser_height_override.set(Some(5));
+        app.engine_picker = false;
+        app.model_picker = Some(ModelPicker { session_id: "session".into(), models: vec!["one".into(), "two".into()],
+            selected: 0, note: String::new(), loading: false, catalog_pending: false });
+        assert_eq!(app.active_chooser_rect().unwrap().height, 6);
+        app.chooser_height_override.set(Some(5));
+        app.active_group = 1;
+        app.groups[1].tabs.push("other".into());
+        assert_eq!(app.active_chooser_rect().unwrap().height, 6);
     }
 
     #[test]
