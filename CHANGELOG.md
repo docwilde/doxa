@@ -23,6 +23,11 @@ the stable 2.0 release has not been cut.
 - Replace the installed sidecar pointer on upgrade even when the old pointer
   is a symlink to a directory; verify it points to the new build before
   completing installation.
+- Clear pending input when a session ends, validate recovered drafts, and keep
+  session rail selection stable after finalization. Preserve nested Markdown
+  code fences during streamed transcript updates.
+- Keep the recent session inventory for an empty search and preserve the
+  highlighted archived result while asynchronous results are pruned.
 
 ## 2.0.0-alpha.24 — 2026-09-26
 
