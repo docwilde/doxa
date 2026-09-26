@@ -2936,7 +2936,10 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}
 #[test]
 fn codex_appserver_default_streams_persists_and_resumes() {
     let cache = std::env::var_os("TMPDIR").map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/doxa-test-cache"));
+        .unwrap_or_else(|| std::env::var_os("XDG_CACHE_HOME").map(std::path::PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".cache")))
+            .unwrap_or_else(|| std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"))
+            .join("doxa-tests"));
     std::fs::create_dir_all(&cache).unwrap();
     let dir = tempfile::tempdir_in(cache).unwrap();
     let codex = dir.path().join("codex-appserver-fixture");
@@ -3015,7 +3018,10 @@ for line in sys.stdin: pass
 #[test]
 fn stopping_codex_during_unanswered_appserver_initialization_is_prompt() {
     let cache = std::env::var_os("TMPDIR").map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/doxa-test-cache"));
+        .unwrap_or_else(|| std::env::var_os("XDG_CACHE_HOME").map(std::path::PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".cache")))
+            .unwrap_or_else(|| std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"))
+            .join("doxa-tests"));
     std::fs::create_dir_all(&cache).unwrap();
     let dir = tempfile::tempdir_in(cache).unwrap();
     let codex = dir.path().join("codex-never-initializes");

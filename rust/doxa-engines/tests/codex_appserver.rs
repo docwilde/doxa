@@ -7,7 +7,10 @@ use tokio_util::sync::CancellationToken;
 
 fn fake() -> (tempfile::TempDir, AppServerOptions) {
     let cache = std::env::var_os("TMPDIR").map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/doxa-test-cache"));
+        .unwrap_or_else(|| std::env::var_os("XDG_CACHE_HOME").map(std::path::PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".cache")))
+            .unwrap_or_else(|| std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"))
+            .join("doxa-tests"));
     std::fs::create_dir_all(&cache).unwrap();
     let dir = tempfile::tempdir_in(cache).unwrap();
     let executable = dir.path().join("fake-codex");
@@ -87,7 +90,10 @@ async fn fake_appserver_resume_uses_the_recorded_thread() {
 #[tokio::test]
 async fn cancellation_interrupts_and_reaps_appserver_process_group() {
     let cache = std::env::var_os("TMPDIR").map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/doxa-test-cache"));
+        .unwrap_or_else(|| std::env::var_os("XDG_CACHE_HOME").map(std::path::PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".cache")))
+            .unwrap_or_else(|| std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"))
+            .join("doxa-tests"));
     std::fs::create_dir_all(&cache).unwrap();
     let dir = tempfile::tempdir_in(cache).unwrap();
     let executable = dir.path().join("fake-codex");
