@@ -5820,7 +5820,8 @@ impl App {
         } else if self.engine_picker {
             7
         } else if let Some(form) = &self.new_session {
-            if form.engine == launch::Engine::Claude || !vendor_models(form.engine).is_empty() { 8 } else { 7 }
+            if !vendor_models(form.engine).is_empty() { 9 }
+            else if form.engine == launch::Engine::Claude { 8 } else { 7 }
         } else if let Some(picker) = &self.effort_picker {
             (4 + picker.levels.len()).clamp(5, 10) as u16
         } else if self.permission_picker.is_some() {
@@ -6248,7 +6249,7 @@ impl App {
         } else if let Some(form) = self.new_session.as_mut() {
             let first = menu.y + if menu.height >= 8 { 4 } else { 2 };
             let fields = if vendor_models(form.engine).is_empty() { 2 } else { 3 };
-            if row >= first && usize::from(row - first) < fields {
+            if row >= first && usize::from(row - first) <= fields {
                 let index = usize::from(row - first);
                 if form.field != index { form.field = index; return true; }
             }
@@ -6721,7 +6722,17 @@ impl App {
                 }
                 return true;
             }
-            if self.new_session.is_some() { return true; }
+            if let Some(form) = self.new_session.as_mut() {
+                let first = y + if height >= 8 { 4 } else { 2 };
+                let fields = if vendor_models(form.engine).is_empty() { 2 } else { 3 };
+                if mouse.row >= first && usize::from(mouse.row - first) <= fields {
+                    form.field = usize::from(mouse.row - first);
+                    if form.field == fields {
+                        self.new_session_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+                    }
+                }
+                return true;
+            }
             if let Some(picker) = &mut self.effort_picker {
                 let visible = usize::from(height.saturating_sub(4)).max(1);
                 let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
@@ -7151,9 +7162,8 @@ impl App {
             }
             lines.push(Line::styled(format!(" {} First prompt: {}", if form.field == prompt_field { '›' } else { ' ' }, safe_label(&form.prompt)),
                 chooser_row_style(form.field == prompt_field)));
-            if form.engine == launch::Engine::Claude {
-                lines.push(Line::from(" Claude sidecar is bundled by the preview installer."));
-            }
+            lines.push(Line::styled(" [ Start session ]",
+                chooser_row_style(form.field == prompt_field + 1)));
         } else if let Some((id, selected)) = &self.permission_picker {
             title = " Claude permissions · this session · Enter select · Esc close ";
             if height >= 10 {
@@ -9082,6 +9092,39 @@ for line in sys.stdin:
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert!(!app.engine_picker);
         assert_eq!(app.new_session.as_ref().unwrap().engine, launch::Engine::Claude);
+    }
+
+    #[test]
+    fn claude_engine_form_accepts_mouse_fields_and_start_without_an_initial_prompt() {
+        let mut app = App::default();
+        app.rail_visible = false;
+        app.handle(Event::Resize(100, 28));
+        app.open_engine_picker();
+        let engines = app.active_chooser_rect().unwrap();
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: engines.x + 2, row: engines.y + 3, modifiers: KeyModifiers::NONE }));
+        assert_eq!(app.new_session.as_ref().unwrap().engine, launch::Engine::Claude);
+        let form = app.active_chooser_rect().unwrap();
+        let first = form.y + if form.height >= 8 { 4 } else { 2 };
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: form.x + 2, row: first + 1, modifiers: KeyModifiers::NONE }));
+        assert_eq!(app.new_session.as_ref().unwrap().field, 1);
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: form.x + 2, row: first, modifiers: KeyModifiers::NONE }));
+        assert_eq!(app.new_session.as_ref().unwrap().field, 0);
+        for c in "sonnet".chars() {
+            app.handle(Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)));
+        }
+        let rendered = painted(&app);
+        assert!(rendered.contains("Start session"));
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: form.x + 2, row: first + 2, modifiers: KeyModifiers::NONE }));
+        assert!(app.new_session.is_none());
+        let (options, prompt, _) = app.pending_launches.pop().unwrap();
+        assert_eq!(options.engine, launch::Engine::Claude);
+        assert_eq!(options.model.as_deref(), Some("sonnet"));
+        assert!(options.codex_bin.is_none() && options.sandbox.is_none() && options.effort.is_none());
+        assert!(prompt.is_none());
     }
 
     #[test]
