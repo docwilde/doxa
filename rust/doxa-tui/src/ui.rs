@@ -3983,10 +3983,15 @@ impl App {
             return;
         }
         if self.history_pending.is_none() {
-            let (tx, rx) = mpsc::sync_channel(1);
-            self.history_pending = Some(rx);
-            std::thread::spawn(move || { let _ = tx.send(history::discover()); });
+            self.start_history_inventory();
         }
+    }
+
+    fn start_history_inventory(&mut self) {
+        let (tx, rx) = mpsc::sync_channel(1);
+        self.history_pending = Some(rx);
+        self.history_scan_query = None;
+        std::thread::spawn(move || { let _ = tx.send(history::discover()); });
     }
 
     fn local_search(&mut self, args: &str) {
@@ -4006,6 +4011,16 @@ impl App {
 
     fn schedule_history_query(&mut self, now: Instant) {
         if self.history_resume { return; }
+        if self.history_query.trim().is_empty() {
+            // /search without a query and deleting the last search character
+            // both need the recent inventory, not a cancelled query receiver.
+            if self.history_pending.is_none() || self.history_scan_query.is_some() {
+                self.start_history_inventory();
+            }
+            self.history_query_due = None;
+            self.prune_unopened_history();
+            return;
+        }
         // Dropping the receiver cancels delivery from an older worker. Its
         // bounded file/sidecar work may finish, but can no longer paint UI.
         self.history_pending = None;
@@ -4019,18 +4034,25 @@ impl App {
         // inventory so reopening search can reuse results, while repeated
         // distinct queries cannot retain unbounded transcript tails.
         const MAX_CACHED_ARCHIVED: usize = 64;
+        let selected_id = self.history_modal.then(|| self.history_matches()
+            .get(self.history_selected).map(|&index| self.sessions[index].id.clone())).flatten();
         let open: HashSet<String> = self.groups.iter()
             .flat_map(|group| group.tabs.iter().cloned()).collect();
         let unopened: Vec<_> = self.sessions.iter().filter(|session|
             self.offline_ids.contains(&session.id) && !open.contains(&session.id))
             .map(|session| session.id.clone()).collect();
         let excess = unopened.len().saturating_sub(MAX_CACHED_ARCHIVED);
-        let evict: HashSet<_> = unopened.into_iter().take(excess).collect();
+        let evict: HashSet<_> = unopened.into_iter()
+            .filter(|id| selected_id.as_ref() != Some(id)).take(excess).collect();
         if evict.is_empty() { return; }
         self.sessions.retain(|session| !evict.contains(&session.id));
         self.offline_ids.retain(|id| !evict.contains(id));
         self.history_entries.retain(|id, _| !evict.contains(id));
         self.history_scanned_matches.retain(|id, _| !evict.contains(id));
+        if let Some(id) = selected_id {
+            self.history_selected = self.history_matches().iter()
+                .position(|&index| self.sessions[index].id == id).unwrap_or(0);
+        }
     }
 
     fn cancel_history_query(&mut self) {
@@ -10779,6 +10801,41 @@ for line in sys.stdin:
         }
         assert!(app.offline_ids.contains("archive-79"));
         assert!(app.offline_ids.len() <= 65);
+    }
+
+    #[test]
+    fn pruning_archived_inventory_preserves_highlighted_session_identity() {
+        for selected in [0, 20] {
+            let mut app = App::default();
+            for index in 0..80 {
+                let id = format!("archive-{index:02}");
+                app.offline_ids.insert(id.clone());
+                app.sessions.push(Session { id: id.clone(), title: id, collection: "project".into(),
+                    transcript: String::new(), status: "Archived".into() });
+            }
+            app.history_modal = true;
+            app.history_selected = selected;
+            let expected = app.sessions[selected].id.clone();
+            app.prune_unopened_history();
+            assert_eq!(app.sessions.len(), 64);
+            assert_eq!(app.sessions[app.history_matches()[app.history_selected]].id, expected);
+        }
+    }
+
+    #[test]
+    fn empty_search_preserves_pending_recent_history_inventory() {
+        let mut app = App::default();
+        app.handle(Event::Resize(100, 28));
+        let (tx, rx) = mpsc::sync_channel(1);
+        app.history_pending = Some(rx);
+        app.local_search("");
+        assert!(app.history_modal);
+        tx.send(vec![history::OfflineSession { id: "saved-empty-search".into(),
+            project: "project".into(), markdown: "saved turn".into(),
+            search_snippets: Vec::new(), cwd: None }]).unwrap();
+        assert!(app.poll_history());
+        assert!(app.sessions.iter().any(|session| session.id == "saved-empty-search"));
+        assert!(app.history_query_due.is_none());
     }
 
     #[test]
