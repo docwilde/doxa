@@ -344,7 +344,10 @@ event. Newer models discovered only from a live catalog remain available
 in the new-session form, but live effort control is unavailable until their
 model capability is built into the native host. Claude uses the sidecar
 installed beside `doxa-rs`; `DOXA_CLAUDE_SCRIPT` can select another absolute
-path during development. The active
+path during development. New native sessions use canonical UUIDs accepted by
+Claude CLI, and the Rust daemon owns their peer presence. After upgrading,
+restart DOXA so it loads the matching private Python environment; outdated
+environments are refused with an update-and-restart instruction. The active
 session's engine cannot be switched. `Alt+M` opens the live model picker when the daemon
 advertises model control. Claude catalog choices come from a bounded startup
 CLI probe; an unavailable catalog offers no guessed models. The colors follow
