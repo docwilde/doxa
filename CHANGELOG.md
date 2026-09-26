@@ -17,6 +17,9 @@ the stable 2.0 release has not been cut.
   child navigation, keyboard and mouse selection, and a draggable upper border.
 - Highlight selectable rows under the pointer across the inline pickers;
   `ask_user` choices can now be hovered and clicked above the prompt.
+- Keep scrolled picker rows stable through hover and click, reset resized
+  submenu height when the menu or pane changes, and clip LORE list summaries
+  to one row so pointer targets match the visible belief or proposal.
 - Replace the installed sidecar pointer on upgrade even when the old pointer
   is a symlink to a directory; verify it points to the new build before
   completing installation.
