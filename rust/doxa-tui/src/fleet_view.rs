@@ -26,9 +26,9 @@ pub fn default_root() -> io::Result<PathBuf> {
 }
 
 fn private_file(path: &Path) -> io::Result<File> {
-    let file = OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(path)?;
+    let file = OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path)?;
     let metadata = file.metadata()?;
-    if !metadata.is_file() || metadata.uid() != unsafe { libc::geteuid() }
+    if !metadata.is_file() || metadata.nlink() != 1 || metadata.uid() != unsafe { libc::geteuid() }
         || metadata.permissions().mode() & 0o077 != 0
         || metadata.len() > MAX_MANIFEST_BYTES {
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, "unsafe fleet manifest"));
@@ -288,6 +288,22 @@ mod tests {
     use super::*;
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixListener;
+
+    #[test]
+    fn manifest_rejects_fifo_without_waiting_for_a_writer_and_hard_links() {
+        let temp = tempfile::Builder::new().prefix("doxa-fleet-audit-")
+            .tempdir().unwrap();
+        let fifo = temp.path().join("manifest.json");
+        let name = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        assert!(private_file(&fifo).is_err());
+        fs::remove_file(&fifo).unwrap();
+        fs::write(&fifo, "{}").unwrap();
+        fs::set_permissions(&fifo, fs::Permissions::from_mode(0o600)).unwrap();
+        let alias = temp.path().join("alias.json");
+        fs::hard_link(&fifo, &alias).unwrap();
+        assert!(private_file(&fifo).is_err());
+    }
 
     #[test]
     fn reads_python_manifest_and_refuses_ambiguous_or_unsafe_attach() {
