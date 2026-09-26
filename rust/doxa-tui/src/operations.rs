@@ -1,4 +1,4 @@
-//! Read-only setup checks. Provider CLIs own their credentials; only probe
+//! Native setup and provider authentication operations. Provider CLIs own their credentials; only probe
 //! exit status is observed, and their output is never captured or displayed.
 
 use std::io;
@@ -88,6 +88,97 @@ pub fn auth_status(name: Option<&str>) -> io::Result<String> {
     } else { PROVIDERS.iter().collect() };
     Ok(selected.into_iter().map(|provider| format!("{}: {}", provider.label,
         state_text(provider_state(provider)))).collect::<Vec<_>>().join("\n"))
+}
+
+/// Run the chosen provider's supported browser login/logout command. Only
+/// allowlisted public login progress reaches callers, never arbitrary output.
+pub fn auth_action(name: &str, action: &str, mut progress: impl FnMut(String)) -> io::Result<String> {
+    let provider = PROVIDERS.iter().find(|p| p.name == name).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "choose claude or codex explicitly"))?;
+    let args: &[&str] = match (name, action) {
+        ("claude", "login") => &["auth", "login"],
+        ("claude", "logout") => &["auth", "logout"],
+        ("codex", "login") => &["login"],
+        ("codex", "logout") => &["logout"],
+        _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, "auth action must be login or logout")),
+    };
+    let binary = locate(provider.binary).ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "provider CLI not installed"))?;
+    run_auth(&binary, args, Duration::from_secs(900), &mut progress)?;
+    Ok(format!("{} {action} completed; {}", provider.label, state_text(provider_state(provider))))
+}
+
+fn public_auth_progress(line: &str) -> Option<String> {
+    for word in line.split_whitespace() {
+        let url = word.trim_end_matches(['.', ',', ')']);
+        let Some(rest) = url.strip_prefix("https://") else { continue };
+        let host = rest.split(['/', '?', '#']).next()?;
+        if !["auth.openai.com", "chatgpt.com", "claude.ai", "console.anthropic.com", "platform.openai.com"].contains(&host) { continue; }
+        let lower = url.to_ascii_lowercase();
+        if url.chars().any(char::is_control) || url.contains('%') || lower.contains("token") || lower.contains("api_key") || lower.contains("code=") { continue; }
+        return Some(format!("Open in your browser: {url}"));
+    }
+    let lower = line.to_ascii_lowercase();
+    if ["device code", "verification code", "one-time code"].iter().any(|key| lower.contains(key)) {
+        if let Some(code) = line.split_whitespace().last().filter(|code| code.len() >= 4 && code.len() <= 32 && code.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'-')) {
+            return Some(format!("Device code: {code}"));
+        }
+    }
+    None
+}
+
+fn run_auth(binary: &Path, args: &[&str], timeout: Duration, progress: &mut impl FnMut(String)) -> io::Result<()> {
+    use std::os::fd::FromRawFd;
+    let (mut master, mut slave) = (-1, -1);
+    if unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null(), std::ptr::null()) } != 0 { return Err(io::Error::last_os_error()); }
+    let mut reader = unsafe { std::fs::File::from_raw_fd(master) };
+    let terminal = unsafe { std::fs::File::from_raw_fd(slave) };
+    unsafe { libc::fcntl(master, libc::F_SETFL, libc::O_NONBLOCK); }
+    let mut child = Command::new(binary).args(args).stdin(terminal.try_clone()?).stdout(terminal.try_clone()?).stderr(terminal).process_group(0).spawn()?;
+    let deadline = Instant::now() + timeout;
+    let mut pending = String::new();
+    loop {
+        let mut bytes = [0u8; 4096];
+        if let Ok(count) = reader.read(&mut bytes) {
+            pending.push_str(&String::from_utf8_lossy(&bytes[..count]));
+            while let Some(end) = pending.find(['\n', '\r']) {
+                let line = pending[..end].to_owned();
+                pending.drain(..=end);
+                if let Some(value) = public_auth_progress(&line) { progress(value); }
+            }
+            if pending.len() > 8192 { pending.clear(); }
+        }
+        if let Some(status) = child.try_wait()? {
+            if status.success() { return Ok(()); }
+            return Err(io::Error::other("provider authentication command failed; credentials remain owned by its CLI"));
+        }
+        if Instant::now() >= deadline {
+            unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL); }
+            let _ = child.wait();
+            return Err(io::Error::new(io::ErrorKind::TimedOut, "provider authentication timed out"));
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
+pub fn setup_choose_store(shared: bool) -> io::Result<String> {
+    if std::env::var("LORE_ROOT").ok().is_some_and(|s| !s.trim().is_empty()) { return Err(io::Error::new(io::ErrorKind::PermissionDenied, "LORE_ROOT overrides the stored choice")); }
+    let home = doxa_home()?;
+    let path = if shared {
+        let path = PathBuf::from(std::env::var_os("HOME").ok_or_else(|| io::Error::other("HOME unset"))?).join(".claude/lore");
+        if !path.is_dir() { return Err(io::Error::new(io::ErrorKind::NotFound, "Claude LORE store not found")); }
+        path
+    } else { home.join("lore") };
+    if std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) { return Err(io::Error::other("LORE store must not be a symlink")); }
+    std::fs::create_dir_all(&path)?;
+    doxa_state::update_config(&home.join("config.toml"), |config| { config.insert("lore_root".into(), toml::Value::String(path.display().to_string())); Ok(()) })?;
+    Ok(format!("LORE store selected: {}. New sessions use this store.", safe_report_value(&path.display().to_string())))
+}
+
+pub fn setup_default(key: &str, value: Option<&str>) -> io::Result<String> {
+    let env = match key { "model" => "DOXA_MODEL", "effort" => "DOXA_EFFORT", _ => return Err(io::Error::other("default must be model or effort")) };
+    if std::env::var(env).ok().is_some_and(|s| !s.trim().is_empty()) { return Err(io::Error::other(format!("{env} overrides this preference"))); }
+    if value.is_some_and(|v| v.is_empty() || v.len() > 200 || v.chars().any(char::is_control)) { return Err(io::Error::other("enter a nonempty default without control characters")); }
+    doxa_state::update_config(&doxa_home()?.join("config.toml"), |config| { if let Some(value) = value { config.insert(key.into(), toml::Value::String(value.into())); } else { config.remove(key); } Ok(()) })?;
+    Ok(format!("{key} default updated for new sessions"))
 }
 
 fn doxa_home() -> io::Result<PathBuf> {
@@ -244,6 +335,7 @@ fn safe_plugin_name(name: &str) -> bool {
         && name.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"._-@".contains(&byte))
 }
 
+#[cfg(test)]
 fn plugin_rows(installed: &serde_json::Value, settings: &serde_json::Value) -> Vec<String> {
     let enabled = settings.get("enabledPlugins").and_then(serde_json::Value::as_object);
     let mut rows = installed.get("plugins").and_then(serde_json::Value::as_object)
@@ -260,6 +352,46 @@ fn plugin_rows(installed: &serde_json::Value, settings: &serde_json::Value) -> V
     rows
 }
 
+pub fn plugins_change(value: bool) -> io::Result<String> {
+    if std::env::var("DOXA_ADOPT_PLUGINS").ok().is_some_and(|s| !s.trim().is_empty()) { return Err(io::Error::new(io::ErrorKind::PermissionDenied, "DOXA_ADOPT_PLUGINS overrides config.toml")); }
+    doxa_state::update_config(&doxa_home()?.join("config.toml"), |config| { config.insert("adopt_plugins".into(), toml::Value::Boolean(value)); Ok(()) })?;
+    Ok(format!("Claude plugin adoption {} for new sessions; hooks, MCP servers and lore@lore remain refused", if value { "enabled" } else { "disabled" }))
+}
+
+fn adoption_enabled() -> io::Result<bool> {
+    let config = doxa_state::load_config_checked(&doxa_home()?.join("config.toml"))?;
+    let value = std::env::var("DOXA_ADOPT_PLUGINS").ok().filter(|v| !v.trim().is_empty());
+    Ok(if let Some(value) = value { !matches!(value.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off") } else { match config.get("adopt_plugins") { Some(toml::Value::Boolean(v)) => *v, Some(toml::Value::String(v)) => !v.trim().is_empty() && !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off"), _ => false } })
+}
+
+fn content_count(path: &Path, skills: bool) -> usize {
+    std::fs::read_dir(path).into_iter().flatten().filter_map(Result::ok).take(10000).filter(|entry| {
+        entry.file_type().is_ok_and(|t| if skills { t.is_dir() && entry.path().join("SKILL.md").is_file() } else { t.is_file() && entry.path().extension().is_some_and(|s| s == "md") })
+    }).count()
+}
+
+fn detailed_plugin_rows(installed: &serde_json::Value, settings: &serde_json::Value, on: bool) -> Vec<String> {
+    let enabled = settings.get("enabledPlugins").and_then(serde_json::Value::as_object);
+    let mut rows = Vec::new();
+    for (name, entries) in installed.get("plugins").and_then(serde_json::Value::as_object).into_iter().flat_map(|m| m.iter()) {
+        if !safe_plugin_name(name) || name.contains("..") { continue; }
+        let Some(entry) = entries.as_array().and_then(|v| v.first()) else { continue };
+        let Some(path) = entry.get("installPath").and_then(serde_json::Value::as_str).filter(|v| !v.is_empty()).map(PathBuf::from) else { continue };
+        let counts = [content_count(&path.join("commands"), false), content_count(&path.join("skills"), true), content_count(&path.join("agents"), false)];
+        let refusal = if name == "lore@lore" { Some("LORE already runs inside DOXA; duplicate carrier blocked") } else if enabled.and_then(|m| m.get(name)) != Some(&serde_json::Value::Bool(true)) { Some("disabled in Claude Code") } else if counts.iter().sum::<usize>() == 0 { Some("no commands, skills or agents") } else { None };
+        let status = refusal.unwrap_or(if on { "adopted by new Claude sessions" } else { "would adopt when enabled" });
+        rows.push(format!("{name}: {status}\n  {} commands · {} skills · {} agents; hooks and MCP always excluded", counts[0], counts[1], counts[2]));
+        if refusal.is_none() {
+            let plugin = name.split('@').next().unwrap_or(name);
+            let mut commands = std::fs::read_dir(path.join("commands")).into_iter().flatten().filter_map(Result::ok).filter(|e| e.file_type().is_ok_and(|t| t.is_file())).filter_map(|e| { let p = e.path(); (p.extension().is_some_and(|s| s == "md")).then(|| p.file_stem().and_then(|s| s.to_str()).map(str::to_owned)).flatten() }).filter(|s| safe_plugin_name(s)).collect::<Vec<_>>();
+            commands.sort();
+            for command in commands { rows.push(format!("  /{plugin}:{command}")); }
+        }
+    }
+    rows.sort();
+    rows
+}
+
 pub fn plugins_report() -> io::Result<String> {
     let base = std::env::var_os("CLAUDE_CONFIG_DIR").filter(|value| !value.is_empty())
         .map(PathBuf::from)
@@ -269,9 +401,10 @@ pub fn plugins_report() -> io::Result<String> {
         .unwrap_or(serde_json::Value::Null);
     let settings = read_claude_json(&base.join("settings.json"))
         .unwrap_or(serde_json::Value::Null);
-    let rows = plugin_rows(&installed, &settings);
-    if rows.is_empty() { Ok("no Claude Code plugins found".into()) }
-    else { Ok(format!("Claude Code plugins (inventory only)\n{}", rows.join("\n"))) }
+    let on = adoption_enabled()?;
+    let rows = detailed_plugin_rows(&installed, &settings, on);
+    if rows.is_empty() { Ok(format!("Claude plugin adoption: {} · no Claude Code plugins found", if on { "ON" } else { "OFF" })) }
+    else { Ok(format!("Claude plugin adoption: {} · refreshed from CLI registry\n{}\n\nChanges apply to new sessions; the sidecar rebuilds sanitized copies at launch.", if on { "ON" } else { "OFF" }, rows.join("\n"))) }
 }
 
 #[cfg(test)]
@@ -302,6 +435,49 @@ mod tests {
         let start = Instant::now();
         assert_eq!(probe(Path::new("/bin/sh"), &[script.to_str().unwrap()], Duration::from_millis(10)), AuthState::TimedOut);
         assert!(start.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn auth_progress_rejects_secrets_and_untrusted_urls() {
+        assert_eq!(public_auth_progress("secret credential"), None);
+        assert_eq!(public_auth_progress("https://evil.test/login"), None);
+        assert_eq!(public_auth_progress("https://auth.openai.com/login?access_token=SECRET"), None);
+        assert_eq!(public_auth_progress("https://auth.openai.com/login?%63ode=SECRET"), None);
+        assert_eq!(public_auth_progress("https://auth.openai.com/login?state=public"), Some("Open in your browser: https://auth.openai.com/login?state=public".into()));
+        assert_eq!(public_auth_progress("Device code: ABCD-EFGH"), Some("Device code: ABCD-EFGH".into()));
+    }
+
+    #[test]
+    fn auth_private_pty_filters_output_and_times_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.sh");
+        fs::write(&path, "printf 'secret credential\\nhttps://claude.ai/login\\n'\nsleep 0.1\n").unwrap();
+        let mut messages = Vec::new();
+        run_auth(Path::new("/bin/sh"), &[path.to_str().unwrap()], Duration::from_secs(2), &mut |s| messages.push(s)).unwrap();
+        assert_eq!(messages, vec!["Open in your browser: https://claude.ai/login"]);
+        fs::write(&path, "sleep 5\n").unwrap();
+        assert_eq!(run_auth(Path::new("/bin/sh"), &[path.to_str().unwrap()], Duration::from_millis(20), &mut |_| {}).unwrap_err().kind(), io::ErrorKind::TimedOut);
+    }
+
+    #[test]
+    fn plugin_preview_keeps_lore_blocked_and_disabled_plugins_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("commands")).unwrap();
+        fs::write(dir.path().join("commands/run.md"), "example").unwrap();
+        let installed = serde_json::json!({"plugins": {
+            "safe@market": [{"installPath": dir.path()}],
+            "lore@lore": [{"installPath": dir.path()}],
+            "disabled@market": [{"installPath": dir.path()}],
+            "unsafe..@market": [{"installPath": dir.path()}]
+        }});
+        let settings = serde_json::json!({"enabledPlugins": {"safe@market": true, "lore@lore": true}});
+        let rows = detailed_plugin_rows(&installed, &settings, true).join("\n");
+        assert!(rows.contains("safe@market: adopted by new Claude sessions"));
+        assert!(rows.contains("/safe:run"));
+        assert!(rows.contains("duplicate carrier blocked"));
+        assert!(rows.contains("disabled in Claude Code"));
+        assert!(!rows.contains("/lore:run"));
+        assert!(!rows.contains("unsafe.."));
     }
 
     #[test]
@@ -352,4 +528,26 @@ mod tests {
         let settings = serde_json::json!({"enabledPlugins": {"safe@market": true}});
         assert_eq!(plugin_rows(&installed, &settings), vec!["safe@market: enabled in Claude Code"]);
     }
+}
+
+pub fn setup_interactive() -> io::Result<()> {
+    use std::io::{IsTerminal, Write};
+    println!("{}", setup_report()?);
+    if !io::stdin().is_terminal() { return Ok(()); }
+    fn ask(question: &str) -> io::Result<String> {
+        print!("{question} "); io::stdout().flush()?;
+        let mut answer = String::new(); io::stdin().read_line(&mut answer)?;
+        Ok(answer.trim().to_owned())
+    }
+    match ask("LORE store: [d] create DOXA store, [s] share existing Claude store, Enter skip:")?.as_str() {
+        "d" => println!("{}", setup_choose_store(false)?),
+        "s" => println!("{}", setup_choose_store(true)?),
+        _ => {}
+    }
+    for key in ["model", "effort"] {
+        let value = ask(&format!("{key} default (Enter keeps current):"))?;
+        if !value.is_empty() { println!("{}", setup_default(key, Some(&value))?); }
+    }
+    println!("setup complete\n{}", setup_report()?);
+    Ok(())
 }

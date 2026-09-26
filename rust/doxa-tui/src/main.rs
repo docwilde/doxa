@@ -37,12 +37,15 @@ Commands:
   worktrees cleanup FULL_ID --confirm
                        Remove one verified clean Rust orphan
   doctor               Check provider and launcher dependencies
-  setup                Inspect authentication, LORE store, and stored preferences
+  setup                Interactive authentication, LORE store, and defaults wizard
   settings             Show native settings and their effective sources
   settings set KEY VALUE | unset KEY
                        Persist linger_secs or worktree_per_session for new sessions
   auth status [NAME]   Check Claude or Codex CLI authentication without showing CLI output
-  plugins              List names and enabled flags from Claude Code's plugin registry
+  auth login|logout NAME
+                       Run the selected provider browser authentication
+  plugins [refresh | adopt on|off]
+                       Discover plugins or change sanitized adoption for new sessions
   fleet ...            Inspect or start Python-backed fleet runs
 
 Run doxa without a command to restore this project's live sessions or start
@@ -122,7 +125,7 @@ fn run(args: &[String]) -> io::Result<()> {
             }
             "setup" => {
                 if args.len() != 1 { return Err(invalid("setup takes no arguments")); }
-                println!("{}", operations::setup_report()?);
+                operations::setup_interactive()?;
                 return Ok(());
             }
             "settings" => {
@@ -137,17 +140,21 @@ fn run(args: &[String]) -> io::Result<()> {
                 return Ok(());
             }
             "auth" => {
-                let name = match args {
-                    [_, status] if status == "status" => None,
-                    [_, status, name] if status == "status" => Some(name.as_str()),
-                    _ => return Err(invalid("usage: doxa auth status [claude|codex]")),
-                };
-                println!("{}", operations::auth_status(name)?);
+                match args {
+                    [_, action] if action == "status" => println!("{}", operations::auth_status(None)?),
+                    [_, action, name] if action == "status" => println!("{}", operations::auth_status(Some(name))?),
+                    [_, action, name] if action == "login" || action == "logout" => println!("{}", operations::auth_action(name, action, |message| println!("{message}"))?),
+                    _ => return Err(invalid("usage: doxa auth status [claude|codex] | auth login|logout claude|codex")),
+                }
                 return Ok(());
             }
             "plugins" => {
-                if args.len() != 1 { return Err(invalid("plugins takes no arguments")); }
-                println!("{}", operations::plugins_report()?);
+                match args {
+                    [_] => println!("{}", operations::plugins_report()?),
+                    [_, action] if action == "refresh" => println!("{}", operations::plugins_report()?),
+                    [_, action, value] if action == "adopt" && (value == "on" || value == "off") => println!("{}", operations::plugins_change(value == "on")?),
+                    _ => return Err(invalid("usage: doxa plugins [refresh | adopt on|off]")),
+                }
                 return Ok(());
             }
             _ => {}
@@ -599,3 +606,7 @@ mod tests {
         assert!(script.contains("main \"$@\""));
     }
 }
+
+#[cfg(test)]
+#[path = "ui/operations_menu.rs"]
+mod operations_menu_test;
