@@ -81,6 +81,20 @@ fn short(value: &str) -> String {
     value.chars().filter(|ch| !ch.is_control()).take(80).collect()
 }
 
+/// Canonical recorded run IDs, newest first. Display truncation is never used
+/// to select a run; manifests must agree with their validated directory name.
+pub fn run_ids(root: &Path) -> io::Result<Vec<String>> {
+    let mut rows = Vec::new();
+    for dir in run_dirs(root)? {
+        let Ok(value) = manifest(&dir) else { continue; };
+        let Some(id) = dir.file_name().and_then(|name| name.to_str()) else { continue; };
+        if value["run_id"].as_str() != Some(id) { continue; }
+        rows.push((value["started_at"].as_str().unwrap_or("").to_owned(), id.to_owned()));
+    }
+    rows.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    Ok(rows.into_iter().map(|(_, id)| id).collect())
+}
+
 pub fn runs(root: &Path) -> io::Result<String> {
     let mut rows = Vec::new();
     for dir in run_dirs(root)? {

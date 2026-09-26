@@ -186,6 +186,10 @@ impl Host for BudgetHost {
                                 }
                             } else { data["prompt_tokens"].as_u64().zip(data["completion_tokens"].as_u64()) };
                             tokens
+                                // The inherited sourced row covers GPT-5.5
+                                // prompts up to 272K. Aggregate turn input is
+                                // an upper bound for every call in that turn.
+                                .filter(|(input, _)| self.priced_model.as_deref() != Some("gpt-5.5") || *input <= 272_000)
                                 .map(|(input, output)| (input as f64 * price.input + output as f64 * price.output) / 1_000_000.0)
                         } else { None }
                     }
@@ -383,6 +387,19 @@ mod tests {
         let mut events = Vec::new(); host.prompt("hello", &mut |event| events.push(event));
         assert_eq!(events[0]["type"], "turn_refused");
         assert!(events[0]["data"]["spent_usd"].is_null());
+    }
+
+    #[test]
+    fn codex_long_context_outside_published_row_fails_closed_at_boundary() {
+        for (input, priced) in [(272_000, true), (272_001, false)] {
+            let data = json!({"model":"gpt-5.5","model_consistent":true,"usage_complete":true,
+                "usage_source":"codex_cli_turn_completed","turn_input_tokens":input,"turn_output_tokens":0});
+            let host = BudgetHost::new_priced(Arc::new(VendorCostHost(data)), 100.0, "codex", "gpt-5.5").unwrap();
+            let mut events = Vec::new(); host.prompt("hello", &mut |event| events.push(event));
+            host.prompt("hello", &mut |event| events.push(event));
+            assert_eq!(events[0]["data"]["cost_usd"].is_number(), priced);
+            assert_eq!(events[1]["type"] == "turn_refused", !priced);
+        }
     }
 
 }

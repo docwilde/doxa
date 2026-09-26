@@ -137,7 +137,9 @@ impl Process {
                 script.to_str().unwrap(),
             ])
             .stdout(Stdio::null())
-            .stderr(Stdio::piped());
+            .stderr(Stdio::piped())
+            .env("DOXA_HOME", runtime.join("home"))
+            .env_remove("DOXA_SESSION_BUDGET_USD");
         if let Some(budget) = budget { command.env("DOXA_SESSION_BUDGET_USD", budget); }
         let child = command.spawn().unwrap();
         let registry = runtime.join("registry/claude-session.json");
@@ -774,7 +776,7 @@ fn rejects_inbound_turn_starting_without_lore_before_binding() {
         .env("DOXA_PEER_INBOUND_TURNS", "yes")
         .output().unwrap();
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("inbound peer turns require Codex or vendor"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("inbound peer turns require an engine with LORE scrub"));
     assert!(!dir.path().join("registry/fleet-slot.json").exists());
 }
 
@@ -792,21 +794,26 @@ fn rejects_invalid_ceiling_before_binding() {
 }
 
 #[test]
-fn rejects_budgeted_codex_until_native_price_basis_exists() {
+fn rejects_budgeted_codex_without_selected_price_basis() {
     let dir = tempfile::tempdir().unwrap();
     let codex = dir.path().join("codex-fixture");
     let python = dir.path().join("lore-fixture");
     executable(&codex, "#!/bin/sh\nexit 0\n");
     fake_scrubber(&python, false);
-    let output = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
-        .args(["--runtime-dir", dir.path().to_str().unwrap(), "--session-id", "fleet-slot",
+    for (model, expected) in [(None, "budgeted Codex session requires a priced model"),
+        (Some("gpt-reserve"), "no native budget price for selected Codex model")] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"));
+        command.args(["--runtime-dir", dir.path().to_str().unwrap(), "--session-id", "fleet-slot",
             "--engine", "codex", "--codex-bin", codex.to_str().unwrap(),
             "--lore-python", python.to_str().unwrap()])
-        .env("DOXA_SESSION_BUDGET_USD", "1.0")
-        .output().unwrap();
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("requires complete priced usage accounting"));
-    assert!(!dir.path().join("registry/fleet-slot.json").exists());
+            .env("DOXA_HOME", dir.path().join("home"))
+            .env("DOXA_SESSION_BUDGET_USD", "1.0");
+        if let Some(model) = model { command.args(["--model", model]); }
+        let output = command.output().unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains(expected));
+        assert!(!dir.path().join("registry/fleet-slot.json").exists());
+    }
 }
 
 #[test]
