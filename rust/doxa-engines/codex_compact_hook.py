@@ -54,6 +54,12 @@ def messages_from_rollout(data, scrub):
             return {key: clean(item) for key, item in value.items()}
         return value
 
+    def record(role, content, source):
+        result = {"type": role, "message": {"role": role, "content": content}, "engine": "codex"}
+        if isinstance(source.get("timestamp"), str):
+            result["timestamp"] = scrub(source["timestamp"])
+        return result
+
     rows = []
     for line in data.splitlines():
         if len(line) > MAX_LINE:
@@ -84,8 +90,8 @@ def messages_from_rollout(data, scrub):
                     arguments = json.loads(arguments)
                 except ValueError:
                     arguments = {"raw": arguments}
-            rows.append({"type": "assistant", "message": {"role": "assistant", "content": [
-                {"type": "tool_use", "id": scrub(call_id), "name": scrub(name), "input": clean(arguments)}]}})
+            rows.append(record("assistant", [
+                {"type": "tool_use", "id": scrub(call_id), "name": scrub(name), "input": clean(arguments)}], row))
             continue
         if kind in ("function_call_output", "custom_tool_call_output", "tool_search_output"):
             call_id = item.get("call_id") or item.get("id") or f"review-result-{len(rows)}"
@@ -104,8 +110,8 @@ def messages_from_rollout(data, scrub):
                 if kind != "tool_search_output":
                     raise ValueError("invalid provider tool result")
                 output = json.dumps(output, ensure_ascii=False)
-            rows.append({"type": "user", "message": {"role": "user", "content": [
-                {"type": "tool_result", "tool_use_id": scrub(call_id), "content": scrub(output)}]}})
+            rows.append(record("user", [
+                {"type": "tool_result", "tool_use_id": scrub(call_id), "content": scrub(output)}], row))
             continue
         if kind != "message":
             continue
@@ -123,8 +129,7 @@ def messages_from_rollout(data, scrub):
                     raise ValueError("invalid provider text")
                 texts.append(scrub(text))
         if texts:
-            rows.append({"type": role, "message": {"role": role,
-                         "content": [{"type": "text", "text": "\n".join(texts)}]}})
+            rows.append(record(role, [{"type": "text", "text": "\n".join(texts)}], row))
     if not rows:
         raise ValueError("no reviewable provider messages")
     return rows
