@@ -123,7 +123,7 @@ in a new tab; the upper border can be dragged to show more entries.*
 
 ![Rust reasoning effort picker above the prompt for a DeepSeek session](assets/shots/rust-effort.png)
 
-*The effort chip reports the current session; on supported vendor models, picker choices apply before its next turn when idle.*
+*The effort chip reports the current session. Supported Codex and vendor choices apply to its next turn when idle.*
 
 ![Rust session history picker above the prompt in a single session pane](assets/shots/rust-history.png)
 
