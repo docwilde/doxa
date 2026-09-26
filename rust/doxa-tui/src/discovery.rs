@@ -77,7 +77,11 @@ fn trusted_dir(path: &Path, uid: u32) -> io::Result<()> {
 
 /// List live, attachable daemon sessions across all project scopes.
 pub fn sessions() -> io::Result<Vec<Session>> {
-    let runtime = runtime_dir()?;
+    sessions_in(&runtime_dir()?)
+}
+
+/// Discover only an explicit, trusted native fleet runtime.
+pub fn sessions_in(runtime: &Path) -> io::Result<Vec<Session>> {
     let uid = unsafe { libc::geteuid() };
     match trusted_dir(&runtime, uid) {
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),

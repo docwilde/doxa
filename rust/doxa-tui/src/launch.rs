@@ -3,7 +3,7 @@ use crate::discovery::{self, Session};
 use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -211,7 +211,44 @@ fn random_id() -> io::Result<String> {
     Ok(format!("{}-{}-{}-{}-{}", &hex[..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..]))
 }
 
+fn saved_budget(session_id: &str) -> io::Result<Option<f64>> {
+    let home = env::var_os("DOXA_HOME").filter(|value| !value.is_empty()).map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|value| PathBuf::from(value).join(".doxa")))
+        .ok_or_else(|| invalid("DOXA home is unset"))?;
+    if !home.is_absolute() { return Err(invalid("DOXA home must be absolute")); }
+    let path = home.join("budgets").join(format!("{session_id}.json"));
+    let file = match OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let meta = file.metadata()?;
+    if !meta.is_file() || meta.nlink() != 1 || meta.uid() != unsafe { libc::geteuid() } || meta.mode() & 0o077 != 0 || meta.len() > 65536 {
+        return Err(invalid("untrusted resume budget journal"));
+    }
+    let mut bytes = Vec::new(); file.take(65537).read_to_end(&mut bytes)?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+    if value["version"] != 1 || value["identity"]["session_id"] != session_id || value["unknown"] != false {
+        return Err(invalid("resume spend accounting is unavailable or unknown"));
+    }
+    let ceiling = value["identity"]["ceiling_usd"].as_f64().filter(|value| value.is_finite() && *value > 0.0)
+        .ok_or_else(|| invalid("invalid saved resume budget"))?;
+    Ok(Some(ceiling))
+}
+
 pub fn spawn(options: &LaunchOptions) -> io::Result<Session> {
+    spawn_inner(options, None, &[])
+}
+
+/// Fleet-scoped child environment without changing the frontend process.
+pub fn spawn_fleet(options: &LaunchOptions, runtime: &Path, budget: Option<f64>, inbound: bool) -> io::Result<Session> {
+    let mut environment = vec![("DOXA_RUNTIME_DIR", runtime.to_string_lossy().into_owned()),
+        ("DOXA_PEER_INBOUND_TURNS", if inbound { "1" } else { "0" }.into())];
+    environment.push(("DOXA_SESSION_BUDGET_USD", budget.map(|value| value.to_string()).unwrap_or_default()));
+    spawn_inner(options, Some(runtime), &environment)
+}
+
+fn spawn_inner(options: &LaunchOptions, fleet_runtime: Option<&Path>, environment: &[(&str, String)]) -> io::Result<Session> {
     let requested_cwd = options.cwd.clone().unwrap_or(env::current_dir()?);
     let cwd = match fs::canonicalize(&requested_cwd) {
         Ok(cwd) if cwd.is_dir() => cwd,
@@ -242,7 +279,7 @@ pub fn spawn(options: &LaunchOptions) -> io::Result<Session> {
     if branch.is_some() && options.resume.is_some() {
         return Err(invalid("--branch cannot change the base of a resumed session"));
     }
-    let runtime = discovery::runtime_dir()?;
+    let runtime = match fleet_runtime { Some(path) => path.to_path_buf(), None => discovery::runtime_dir()? };
     if !runtime.is_absolute() {
         return Err(invalid("runtime directory must be absolute"));
     }
@@ -312,11 +349,19 @@ pub fn spawn(options: &LaunchOptions) -> io::Result<Session> {
     if options.resume.is_some() {
         // A second daemon with the same conversation ID would create two
         // writers. The UI checks earlier; this is the final pre-spawn gate.
-        if discovery::sessions()?.iter().any(|session| session.id == id) {
+        if discovery::sessions_in(&runtime)?.iter().any(|session| session.id == id) {
             return Err(invalid("session is already running; attach to it instead"));
         }
     }
     let mut command = Command::new(daemon);
+    for (key, value) in environment { command.env(key, value); }
+    if environment.is_empty() && options.resume.is_some() {
+        if let Some(ceiling) = saved_budget(&id)? {
+            // Restore the original allowance, never a fresh allowance. The
+            // daemon verifies engine/model/cwd and the durable spent total.
+            command.env("DOXA_SESSION_BUDGET_USD", ceiling.to_string());
+        }
+    }
     command.args([
         "--runtime-dir",
         runtime
@@ -453,7 +498,7 @@ pub fn spawn(options: &LaunchOptions) -> io::Result<Session> {
     };
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let sessions = match discovery::sessions() {
+        let sessions = match discovery::sessions_in(&runtime) {
             Ok(sessions) => sessions,
             Err(error) => {
                 let _ = child.kill();

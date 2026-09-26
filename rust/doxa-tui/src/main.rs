@@ -1,4 +1,4 @@
-use doxa_tui::{bridge, discovery, fleet_plan, fleet_view, launch, operations, ui_state};
+use doxa_tui::{bridge, discovery, fleet_control, fleet_plan, fleet_view, launch, operations, ui_state};
 use std::collections::HashSet;
 use std::io::{self, Write};
 use serde_json::{Map, Value};
@@ -46,7 +46,7 @@ Commands:
                        Run the selected provider browser authentication
   plugins [refresh | adopt on|off]
                        Discover plugins or change sanitized adoption for new sessions
-  fleet ...            Inspect or start Python-backed fleet runs
+  fleet ...            Inspect or start native fleet runs
 
 Run doxa without a command to restore this project's live sessions or start
 a native Codex session. Pass --engine or --model to start a new session.
@@ -61,7 +61,7 @@ DeepSeek/GLM: --effort low|high|max (DeepSeek also none).
 Use --lore-python PATH for the LORE sidecar; API keys come from provider env vars.
 
 Fleet: doxa fleet preflight --sessions N --run-budget USD [--supervisor ENGINE[:MODEL]] [--approve none|peer|all] [--approval-grace SECONDS] [--root PATH]
-       doxa fleet start [Python fleet options]
+       doxa fleet start --pool ENGINE:MODEL --prompt TEXT -n N --run-budget USD
        doxa fleet runs | status RUN_ID | stop RUN_ID | attach RUN_ID SLOT
 
 Run doxa doctor --engine NAME to check a provider; doxa --version shows the build.
@@ -510,6 +510,9 @@ fn worktrees(args: &[String]) -> io::Result<()> {
 
 fn fleet(args: &[String]) -> io::Result<()> {
     if args.first().is_some_and(|arg| arg == "start") {
+        return fleet_control::start(&args[1..]);
+    }
+    if args.first().is_some_and(|arg| arg == "start-python") {
         return fleet_start_compat(&args[1..]);
     }
     if args.first().is_some_and(|arg| arg == "preflight") {
@@ -534,6 +537,17 @@ fn fleet(args: &[String]) -> io::Result<()> {
     match words.as_slice() {
         ["runs"] => println!("{}", fleet_view::runs(&root)?),
         ["status", run] => println!("{}", fleet_view::status(&root, run)?),
+        ["resume", run] => return fleet_control::resume(&root, run),
+        ["review", run, slot, request] => {
+            let slot = slot.parse().map_err(|_| invalid("fleet slot must be a number"))?;
+            let reviewed = fleet_control::review(&root, run, slot, request)?;
+            println!("{}\nReview token: {}", serde_json::to_string_pretty(&reviewed.request)?, reviewed.token);
+        },
+        ["answer", run, slot, request, token, answer] => {
+            let slot = slot.parse().map_err(|_| invalid("fleet slot must be a number"))?;
+            let answer: serde_json::Value = serde_json::from_str(answer).map_err(|_| invalid("fleet answer must be a JSON object"))?;
+            println!("{}", fleet_control::answer(&root, run, slot, request, token, answer)?);
+        },
         ["stop", run] => {
             let report = fleet_view::stop(&root, run)?;
             println!("{}", report.text);
@@ -546,7 +560,7 @@ fn fleet(args: &[String]) -> io::Result<()> {
             let (socket, session_id) = fleet_view::slot_socket(&root, run, slot)?;
             return bridge::run_socket_expected(socket, Some(&session_id));
         }
-        _ => return Err(invalid("usage: doxa fleet start PYTHON_FLEET_OPTIONS|preflight --sessions N --run-budget USD [--supervisor ENGINE[:MODEL]] [--approve none|peer|all] [--approval-grace SECONDS] [--root ABSOLUTE_PATH]|runs|status RUN_ID|stop RUN_ID|attach RUN_ID SLOT [--root ABSOLUTE_PATH]")),
+        _ => return Err(invalid("usage: doxa fleet start --pool ENGINE:MODEL --prompt TEXT -n N --run-budget USD|start-python PYTHON_FLEET_OPTIONS|preflight --sessions N --run-budget USD [--supervisor ENGINE[:MODEL]] [--approve none|peer|all] [--approval-grace SECONDS] [--root ABSOLUTE_PATH]|runs|status RUN_ID|stop RUN_ID|attach RUN_ID SLOT [--root ABSOLUTE_PATH]")),
     }
     Ok(())
 }
