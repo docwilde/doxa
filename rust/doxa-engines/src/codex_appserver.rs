@@ -20,6 +20,9 @@ use crate::codex_driver::{valid_thread_id, SandboxMode};
 use crate::codex::CodexJsonlNormalizer;
 use crate::EngineEvent;
 
+#[path = "codex_appserver_compact.rs"]
+mod reviewed_compact;
+
 const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 const MAX_REASONING_BYTES: usize = 256 * 1024;
 const RPC_TIMEOUT: Duration = Duration::from_secs(15);
@@ -52,6 +55,7 @@ pub struct AppServerDriver {
     effort: Option<String>,
     interactive: bool,
     peer_tools: bool,
+    compact_gate: Option<crate::codex_compact::CompactGate>,
     review_items: Vec<Value>,
     scrub: Box<dyn Fn(&str) -> String + Send + Sync>,
     child: Child,
@@ -109,7 +113,25 @@ impl AppServerDriver {
         Ok(driver)
     }
 
+    pub async fn spawn_protected(
+        options: AppServerOptions,
+        scrub: impl Fn(&str) -> String + Send + Sync + 'static,
+        peer_tools: bool,
+        gate: crate::codex_compact::CompactGate,
+    ) -> Result<Self, AppServerError> {
+        let mut driver = Self::initialize_with_gate(options, scrub, Some(gate)).await?;
+        driver.interactive = true;
+        driver.peer_tools = peer_tools;
+        driver.start_thread().await?;
+        Ok(driver)
+    }
+
     async fn initialize(options: AppServerOptions, scrub: impl Fn(&str) -> String + Send + Sync + 'static) -> Result<Self, AppServerError> {
+        Self::initialize_with_gate(options, scrub, None).await
+    }
+
+    async fn initialize_with_gate(options: AppServerOptions, scrub: impl Fn(&str) -> String + Send + Sync + 'static,
+        compact_gate: Option<crate::codex_compact::CompactGate>) -> Result<Self, AppServerError> {
         if options.resume_thread.as_deref().is_some_and(|id| !valid_thread_id(id)) {
             return Err(AppServerError::Protocol("invalid resume thread ID"));
         }
@@ -117,6 +139,9 @@ impl AppServerDriver {
         command.arg("app-server").arg("--stdio")
             .current_dir(&options.cwd).stdin(Stdio::piped())
             .stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true);
+        if let Some(gate) = &compact_gate {
+            for value in gate.cli_overrides() { command.arg("-c").arg(value); }
+        }
         unsafe {
             command.as_std_mut().pre_exec(|| {
                 if libc::setsid() == -1 { Err(io::Error::last_os_error()) } else { Ok(()) }
@@ -129,7 +154,7 @@ impl AppServerDriver {
         let scrub = std::sync::Arc::new(scrub);
         let tool_scrub = scrub.clone();
         let mut driver = Self {
-            options, effort: None, interactive: false, peer_tools: false, review_items: Vec::new(), scrub: Box::new(move |text| scrub(text)), child, process_group, stdin, stdout, next_id: 0,
+            options, effort: None, interactive: false, peer_tools: false, compact_gate, review_items: Vec::new(), scrub: Box::new(move |text| scrub(text)), child, process_group, stdin, stdout, next_id: 0,
             thread_id: None, turn_id: None, reasoning_bytes: 0, reasoning_chars: 0,
             reasoning_buffer: String::new(), reasoning_truncated: false,
             assistant_buffers: Vec::new(), assistant_bytes: 0, assistant_message_emitted: false, usage: None, effective_model: None,
@@ -137,8 +162,20 @@ impl AppServerDriver {
             pending_bytes: 0,
             tool_normalizer: CodexJsonlNormalizer::new(move |text| tool_scrub(text)),
         };
-        driver.request("initialize", json!({"clientInfo":{"name":"doxa","title":null,"version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true}})).await?;
+        let initialized = driver.request("initialize", json!({"clientInfo":{"name":"doxa","title":null,"version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true}})).await?;
         driver.send(json!({"method":"initialized"})).await?;
+        if driver.compact_gate.is_some() {
+            // The server's build version is authoritative. The client version
+            // in its suffix never becomes proof of the provider hook contract.
+            let version = initialized["userAgent"].as_str().and_then(|agent| agent.split_whitespace().next())
+                .and_then(|prefix| prefix.rsplit_once('/').map(|(_, version)| version));
+            if version != Some(crate::codex_compact::SUPPORTED_VERSION) {
+                return Err(AppServerError::Protocol("Codex build has no verified DOXA compaction hook contract"));
+            }
+            let hooks = driver.request("hooks/list", json!({"cwds":[driver.options.cwd]})).await?;
+            driver.compact_gate.as_mut().unwrap().verify_hooks(&hooks)
+                .map_err(|_| AppServerError::Protocol("DOXA Codex compaction hook is not active with verified trust"))?;
+        }
         Ok(driver)
     }
 
@@ -159,6 +196,9 @@ impl AppServerDriver {
             return Err(AppServerError::Protocol("resume returned a different thread ID"));
         }
         driver.thread_id = Some(id.to_owned());
+        if let Some(gate) = driver.compact_gate.as_mut() {
+            gate.bind_thread(id).map_err(|_| AppServerError::Protocol("DOXA compaction gate could not bind the actual thread"))?;
+        }
         // The account catalog default may differ from this thread's profile.
         // Only the thread/start or thread/resume response identifies its model.
         if let Some(model) = result["model"].as_str().filter(|value|
@@ -323,6 +363,19 @@ impl AppServerDriver {
                     continue;
                 }
                 match method {
+                    "hook/started" if params["run"]["eventName"] == "preCompact" => {
+                        emit(EngineEvent::new("lore_review_started", json!({"before":"compaction"})));
+                    }
+                    "hook/completed" => {
+                        if let Some(gate) = self.compact_gate.as_mut() {
+                            match gate.observe_completion(&params["run"]) {
+                                crate::codex_compact::ReviewOutcome::Reviewed => emit(EngineEvent::new("lore_review_completed", json!({"before":"compaction"}))),
+                                crate::codex_compact::ReviewOutcome::Blocked => return Err(AppServerError::Server("LORE review blocked Codex compaction".into())),
+                                crate::codex_compact::ReviewOutcome::Failed => { self.kill_group(); return Err(AppServerError::Protocol("Codex compaction review hook failed; protected session stopped")); }
+                                crate::codex_compact::ReviewOutcome::Unrelated => {},
+                            }
+                        }
+                    }
                     "model/rerouted" => {
                         // A reroute invalidates a single-model ceiling even if
                         // the replacement also happens to have a price row.

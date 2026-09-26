@@ -208,6 +208,11 @@ impl Ledger {
         if !meta.is_dir() || meta.file_type().is_symlink() || meta.uid() != unsafe { libc::geteuid() }
             || meta.mode() & 0o077 != 0 { return Err(invalid("unsafe ledger directory")); }
         let dir = OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC).open(parent)?;
+        let opened_dir = dir.metadata()?;
+        if (opened_dir.dev(), opened_dir.ino()) != (meta.dev(), meta.ino())
+            || opened_dir.uid() != unsafe {libc::geteuid()} || opened_dir.mode() & 0o077 != 0 {
+            return Err(invalid("ledger directory changed during open"));
+        }
         use std::ffi::CString;
         use std::os::unix::ffi::OsStrExt;
         use std::os::fd::FromRawFd;

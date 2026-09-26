@@ -689,7 +689,6 @@ fn run() -> io::Result<()> {
         event_tx,
     )?);
     peer_host.connect_provider_tools();
-    let provider_peer_tools = peer_host.peer_tools_ready();
     let host: Arc<dyn Host> = peer_host.clone();
     let session = Session {
         session_id: options.session_id.clone(),
@@ -699,7 +698,6 @@ fn run() -> io::Result<()> {
         doxa_version: env!("CARGO_PKG_VERSION").into(),
     };
     let mut handle = Daemon::bind(&options.runtime, session, host)?.start();
-    handle.publish(json!({"type":"provider_peer_tools","data":{"available":provider_peer_tools}}));
     let inbox = Inbox::bind(&options.runtime, &options.session_id)?;
     let mut registry = Registry::new(&options, inbox.path(), handle.socket_path())?;
     registry.write(0)?;

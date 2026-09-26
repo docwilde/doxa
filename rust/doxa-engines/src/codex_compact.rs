@@ -72,7 +72,10 @@ impl CompactGate {
     /// Append as process-local `-c` overrides. These trust this single pinned
     /// command; they never set bypass_hook_trust or edit CODEX_HOME/config.toml.
     pub fn cli_overrides(&self) -> Vec<String> {
-        vec!["features.codex_hooks=true".into(), format!("hooks={{PreCompact=[{{matcher={},hooks=[{{type=\"command\",command={},timeout={},async=false}}]}}],state={{{}={{enabled=true,trusted_hash={}}}}}}", string(MATCHER), string(&self.command), HOOK_TIMEOUT, string(HOOK_KEY), string(&self.hash))]
+        let group = format!("{{matcher={},hooks=[{{type=\"command\",command={},timeout={},async=false}}]}}",
+            string(MATCHER), string(&self.command), HOOK_TIMEOUT);
+        let state = format!("{}={{enabled=true,trusted_hash={}}}", string(HOOK_KEY), string(&self.hash));
+        vec!["features.codex_hooks=true".into(), format!("hooks={{PreCompact=[{group}],state={{{state}}}}}")]
     }
     /// Call `hooks/list` after initialize and BEFORE starting/resuming a thread.
     /// Failure means this provider must not claim protected compaction.

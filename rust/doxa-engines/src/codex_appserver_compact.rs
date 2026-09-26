@@ -12,7 +12,7 @@ impl AppServerDriver {
         let thread = self.thread_id().to_owned();
         let deadline = tokio::time::Instant::now() + self.options.turn_timeout;
         let request = self.send_request_bounded("thread/compact/start", json!({"threadId":thread}), Some(cancel), deadline).await?;
-        self.wait_response(request, Some(cancel), deadline).await?;
+        self.wait_response(request, Some(cancel), deadline, false).await?;
         let mut turn: Option<String> = None;
         let mut reviewed = false;
         let mut completed = false;

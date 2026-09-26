@@ -350,6 +350,7 @@ fn handle_client(inner: Arc<Inner>, stream: UnixStream) {
     };
     let can_set_model = inner.host.can_set_model();
     let can_set_permission_mode = inner.host.can_set_permission_mode();
+    let peer_tools_ready = inner.host.peer_tools_ready();
     let lore_scrub = inner.host.lore_scrub_status();
     let billing = inner.host.billing_snapshot();
     let hello = {
@@ -363,7 +364,7 @@ fn handle_client(inner: Arc<Inner>, stream: UnixStream) {
             "running":state.busy,"queued":state.prompts.len(),
             "pending_inputs":state.pending_inputs,"pending_inputs_complete":state.pending_inputs_complete,
             "can_set_model":can_set_model,
-            "can_set_permission_mode":can_set_permission_mode,
+            "can_set_permission_mode":can_set_permission_mode,"peer_tools_ready":peer_tools_ready,
             "lore_scrub":lore_scrub,"billing":billing})
     };
     if writer.set_write_timeout(Some(Duration::from_secs(2))).is_err() ||
@@ -546,6 +547,7 @@ fn handle_call(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame: &Value) {
     } else if method == "status" {
         let can_set_model = inner.host.can_set_model();
         let can_set_permission_mode = inner.host.can_set_permission_mode();
+        let peer_tools_ready = inner.host.peer_tools_ready();
         let lore_scrub = inner.host.lore_scrub_status();
         let billing = inner.host.billing_snapshot();
         let state = inner.state.lock().unwrap();
@@ -553,7 +555,7 @@ fn handle_call(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame: &Value) {
             "model":state.model,"permission_mode":state.permission_mode,
             "engine":inner.session.engine,"effort":state.effort,"pending_effort":state.pending_effort,"running":state.busy,"queued":state.prompts.len(),
             "can_set_model":can_set_model,
-            "can_set_permission_mode":can_set_permission_mode,
+            "can_set_permission_mode":can_set_permission_mode,"peer_tools_ready":peer_tools_ready,
             "lore_scrub":lore_scrub,"billing":billing}})), None)
     } else if method == "switch_branch" {
         let idle = {

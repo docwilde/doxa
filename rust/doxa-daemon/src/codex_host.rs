@@ -50,6 +50,7 @@ pub struct CodexHost {
     input: doxa_engines::codex_interaction::InputInbox,
     peer_tools: Mutex<Option<doxa_runtime::PeerToolHandler>>,
     peer_tools_allowed: bool,
+    lore_python: PathBuf,
     scrub_failed: Arc<AtomicBool>,
     persistence_failed: AtomicBool,
     lore: Arc<Mutex<LoreClient>>,
@@ -246,7 +247,7 @@ impl CodexHost {
             runtime: Mutex::new(runtime),
             active: Mutex::new(None),
             input: Default::default(),
-            peer_tools: Mutex::new(None), peer_tools_allowed,
+            peer_tools: Mutex::new(None), peer_tools_allowed, lore_python: lore_python.to_owned(),
             scrub_failed,
             persistence_failed: AtomicBool::new(false),
             lore,
@@ -265,6 +266,29 @@ impl CodexHost {
         let effort = host.initial_effort();
         if let Some(effort) = effort { host.call("set_effort", &json!({"effort":effort}))?; }
         Ok(host)
+    }
+
+    fn compact_gate(&self) -> Result<doxa_engines::codex_compact::CompactGate, AppServerError> {
+        use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+        let home = std::env::var_os("HOME").map(PathBuf::from).ok_or(AppServerError::Protocol("HOME is unavailable for the compact gate"))?;
+        let doxa_home = std::env::var_os("DOXA_HOME").map(PathBuf::from).unwrap_or_else(|| home.join(".doxa"));
+        let codex_home = std::env::var_os("CODEX_HOME").map(PathBuf::from).unwrap_or_else(|| home.join(".codex"));
+        if !doxa_home.is_absolute() || !codex_home.is_absolute() { return Err(AppServerError::Protocol("Compact gate requires absolute DOXA and Codex homes")); }
+        let root = doxa_home.join("compact-hooks");
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&root)?;
+        let meta = std::fs::symlink_metadata(&root)?;
+        if !meta.is_dir() || meta.file_type().is_symlink() || meta.uid() != unsafe {libc::geteuid()} || meta.mode() & 0o077 != 0 {
+            return Err(AppServerError::Protocol("Compact hook directory is not private and owned"));
+        }
+        let generation = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| AppServerError::Protocol("Compact gate clock unavailable"))?.as_nanos();
+        let directory = root.join(format!("codex-{}-{generation}", std::process::id()));
+        std::fs::DirBuilder::new().mode(0o700).create(&directory)?;
+        match doxa_engines::codex_compact::CompactGate::prepare(&directory, &self.lore_python, &codex_home,
+            Path::new(&self.cwd), &self.session_id, doxa_engines::codex_compact::SUPPORTED_VERSION) {
+            Ok(gate) => Ok(gate),
+            Err(error) => { let _ = std::fs::remove_dir(directory); Err(AppServerError::Io(error)) }
+        }
     }
 
     fn persist(&self, record: Value) -> io::Result<()> {
@@ -403,6 +427,9 @@ mod tests {
 }
 
 impl Host for CodexHost {
+    fn peer_tools_ready(&self) -> bool {
+        self.peer_tools_allowed && self.peer_tools.lock().unwrap().is_some()
+    }
     fn set_peer_tool_handler(&self, handler: doxa_runtime::PeerToolHandler) -> bool {
         if !self.peer_tools_allowed || self.active.lock().unwrap().is_some() { return false; }
         let mut tools = self.peer_tools.lock().unwrap();
@@ -420,10 +447,12 @@ impl Host for CodexHost {
         self.store.transcript_snapshot()
     }
     fn prompt(&self, text: &str, emit: &mut dyn FnMut(Value)) {
-        if text.trim_start().starts_with("/compact") {
-            emit(json!({"type":"turn_done","data":{"is_error":true,
-                "error":"Reviewed compaction is unavailable for Codex sessions"}}));
-            return;
+        let compaction = text.trim() == "/compact";
+        if text.split_whitespace().next() == Some("/compact") && !compaction {
+            emit(json!({"type":"turn_done","data":{"is_error":true,"error":"Use /compact without arguments"}})); return;
+        }
+        if compaction && (self.transport != "app-server" || self.driver.lock().unwrap().thread_id().is_none()) {
+            emit(json!({"type":"turn_done","data":{"is_error":true,"error":"Reviewed compaction requires an existing native Codex app-server thread"}})); return;
         }
         if self.persistence_failed.load(Ordering::Acquire) {
             emit(json!({"type":"turn_done","data":{"is_error":true,"error":"Codex persistence failed; session cannot safely continue"}}));
@@ -455,8 +484,10 @@ impl Host for CodexHost {
             }
         };
         emit(json!({"type":"turn_started","data":{"prompt":display_prompt}}));
-        let user_record = json!({"type":"user", "message":{"role":"user","content":text},
-            "cwd":self.cwd, "sessionId":self.session_id, "timestamp":crate::iso_now()});
+        let user_record = if compaction {
+            json!({"type":"doxa_command","command":"compact","cwd":self.cwd,"sessionId":self.session_id,"timestamp":crate::iso_now()})
+        } else { json!({"type":"user", "message":{"role":"user","content":text},
+            "cwd":self.cwd, "sessionId":self.session_id, "timestamp":crate::iso_now()}) };
         if self.persist(user_record).is_err() {
             *self.active.lock().unwrap() = None;
             let reason = if self.scrub_failed.load(Ordering::Acquire) {
@@ -541,6 +572,7 @@ impl Host for CodexHost {
                         DriverError::Spawn(_) => "Codex process could not start".to_owned(),
                     }),
                     CodexTransport::AppServer { options, active, resume_thread } => {
+                        let mut startup_error = None;
                         if active.is_none() {
                             let lore = self.lore.clone();
                             let failed = self.scrub_failed.clone();
@@ -548,11 +580,15 @@ impl Host for CodexHost {
                                 Ok(clean) => clean,
                                 Err(_) => { failed.store(true, Ordering::Release); SCRUB_FAILURE.to_owned() }
                             };
+                            let peer_tools_enabled = self.peer_tools.lock().unwrap().is_some();
                             match runtime.block_on(async {
                                 tokio::select! {
                                     biased;
                                     _ = token.cancelled() => Err(AppServerError::Cancelled),
-                                    result = AppServerDriver::spawn_interactive_with_tools(options.clone(), scrub, self.peer_tools.lock().unwrap().is_some()) => result,
+                                    result = async {
+                                        let gate = self.compact_gate()?;
+                                        AppServerDriver::spawn_protected(options.clone(), scrub, peer_tools_enabled, gate).await
+                                    } => result,
                                 }
                             }) {
                                 Ok(app) => {
@@ -561,21 +597,31 @@ impl Host for CodexHost {
                                         handle_event(doxa_engines::EngineEvent::new("model_changed", json!({"model":model})));
                                     }
                                     *resume_thread = Some(app.thread_id().to_owned());
+                                    options.resume_thread = resume_thread.clone();
                                     if self.persist_thread(app.thread_id(), true).is_err() {
                                         thread_write_failed.set(true);
                                         token.cancel();
                                     }
                                     *active = Some(app);
                                 }
-                                Err(_) => { thread_write_failed.set(true); }
+                                Err(error) => {
+                                    startup_error = Some(match error {
+                                        AppServerError::Protocol(message) => message.to_owned(),
+                                        AppServerError::Server(message) => message,
+                                        _ => "Codex app-server or compaction review gate could not start".into(),
+                                    });
+                                    thread_write_failed.set(true);
+                                }
                             }
                         }
                         if thread_write_failed.get() {
-                            Err("Codex app-server startup or thread persistence failed".to_owned())
+                            Err(startup_error.unwrap_or_else(|| "Codex app-server thread persistence failed".to_owned()))
                         } else {
                             let selected = self.selection.lock().unwrap().clone();
                             active.as_mut().expect("spawn succeeded").set_selection(selected.0, selected.1);
-                            let outcome = runtime.block_on(active.as_mut().expect("spawn succeeded").run_turn_interactive(
+                            let outcome = if compaction {
+                                runtime.block_on(active.as_mut().expect("spawn succeeded").compact(&token, &mut handle_event))
+                            } else { runtime.block_on(active.as_mut().expect("spawn succeeded").run_turn_interactive(
                                 &provider_prompt, &token, &mut handle_event,
                                 |frame| {
                                     let scrub = |text: &str| {
@@ -594,7 +640,7 @@ impl Host for CodexHost {
                                     } else { Ok(Some(pending)) }
                                     })
                                 },
-                            )).map_err(|error| match error {
+                            )) }.map_err(|error| match error {
                                 AppServerError::Server(message) => message,
                                 AppServerError::Cancelled => "Codex turn cancelled".to_owned(),
                                 AppServerError::TimedOut => "Codex app-server turn timed out".to_owned(),
