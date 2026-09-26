@@ -334,6 +334,7 @@ def test_sidecar_scrub_snapshot_and_generic_error(monkeypatch):
     monkeypatch.setattr(lore_bridge, "_lore", lambda: (lambda text: text.replace("SECRET", "[redacted]"), snapshot))
     monkeypatch.setattr(lore_bridge, "_extensions", lambda: None)
     monkeypatch.setattr(lore_bridge, "_memory_usage_ops", lambda: None)
+    monkeypatch.setattr(lore_bridge, "_memory_manage_ops", lambda: None)
     requests = [
         {"id": 1, "op": "scrub", "text": "SECRET"},
         {"id": 2, "op": "snapshot", "cwd": "/repo", "scope": "project"},
@@ -472,6 +473,7 @@ def test_pending_sync_and_refresh_are_bounded_and_scoped(monkeypatch):
         lambda cwd: "this", lambda: 30, lambda: rows,
         (lambda text: text.replace("SECRET", "[redacted]"), lambda: state)))
     monkeypatch.setattr(lore_bridge, "_memory_usage_ops", lambda: None)
+    monkeypatch.setattr(lore_bridge, "_memory_manage_ops", lambda: None)
     requests = [
         {"id": 1, "op": "pending", "cwd": "/repo", "limit": 1},
         {"id": 2, "op": "pending", "cwd": "/repo", "offset": 1, "limit": 1},
@@ -575,6 +577,7 @@ def test_consult_beliefs_and_evidence_are_bounded_scrubbed_and_cite_only(monkeyp
     monkeypatch.setattr(lore_bridge, "_lore", lambda: (lambda text: text.replace("SECRET", "[redacted]"), lambda cwd, scope: ""))
     monkeypatch.setattr(lore_bridge, "_extensions", lambda: None)
     monkeypatch.setattr(lore_bridge, "_memory_usage_ops", lambda: None)
+    monkeypatch.setattr(lore_bridge, "_memory_manage_ops", lambda: None)
     monkeypatch.setattr(lore_bridge, "_read_ops", lambda: (lambda: sqlite3.connect(db_path), lambda text, op: text))
     requests = [
         {"id": 1, "op": "consult", "prompt": "fact"},
@@ -686,3 +689,81 @@ def test_belief_review_and_action_refuse_foreign_missing_and_changed_rows(tmp_pa
             "action": "confirmed", "note": "checked"}, ops)
     assert error.value.code == "belief_changed"
     assert calls == []
+
+
+def _memory_wire(tmp_path, requests, **extra):
+    """Every write targets a disposable pinned LORE store, never live memory."""
+    source = os.environ.get("DOXA_TEST_LORE_API_PATH")
+    env = dict(os.environ, LORE_ROOT=str(tmp_path / "lore"),
+               LORE_SKILLS_DIR=str(tmp_path / "skills"), LORE_PROJECTS_DIR=str(tmp_path / "projects"),
+               LORE_WRITE_GATE="off")
+    env.update(extra)
+    if source:
+        env["DOXA_LORE_CORE_PATH"] = source
+    else:
+        env.pop("DOXA_LORE_CORE_PATH", None)
+        env["DOXA_LORE_SOURCE"] = "package"
+    result = subprocess.run([sys.executable, "-m", "doxa.lore_bridge"],
+                            input=b"".join(map(lore_bridge._frame, requests)),
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
+                            cwd=Path(__file__).resolve().parent.parent, timeout=10, check=True)
+    frames = [json.loads(line) for line in result.stdout.splitlines()]
+    assert "memory_action_v1" in frames[0]["capabilities"]
+    return frames[1:]
+
+
+def _memory_req(tmp_path, action, text="", entry="", body=""):
+    return {"id": 1, "op": "memory_action_v1", "cwd": str(tmp_path), "scope": "user",
+            "action": action, "text": text, "entry": entry,
+            "expected": {"key": "user", "sha256": hashlib.sha256(body.encode()).hexdigest()}}
+
+
+def test_curated_memory_actions_use_canonical_lore_and_refuse_stale_review(tmp_path):
+    frames = _memory_wire(tmp_path, [
+        _memory_req(tmp_path, "add", "old fact"),
+        _memory_req(tmp_path, "replace", "new fact", "old fact", "- old fact\n"),
+        _memory_req(tmp_path, "remove", entry="old fact", body="- old fact\n"),
+        {"id": 4, "op": "memory_review_v1", "cwd": str(tmp_path), "scope": "user"},
+        _memory_req(tmp_path, "remove", entry="new fact", body="- new fact\n"),
+    ])
+    assert frames[0]["value"]["status"] == "applied"
+    assert frames[1]["value"]["status"] == "applied"
+    assert frames[2]["error"] == "memory_changed"
+    assert frames[3]["value"]["entries"] == ["new fact"]
+    assert frames[4]["value"]["status"] == "applied"
+    assert (tmp_path / "lore" / "USER.md").read_text() == ""
+
+
+def test_curated_memory_ambiguous_match_and_caps_do_not_change_store(tmp_path):
+    root = tmp_path / "lore"
+    root.mkdir()
+    body = "- fact\n- longer fact\n"
+    (root / "USER.md").write_text(body)
+    frames = _memory_wire(tmp_path, [
+        _memory_req(tmp_path, "remove", entry="fact", body=body),
+        _memory_req(tmp_path, "add", "another fact over budget", body=body),
+    ], LORE_USER_CAP="30")
+    assert frames[0]["error"] == "memory_ambiguous"
+    assert frames[1]["error"] == "memory_over_cap"
+    assert (root / "USER.md").read_text() == body
+
+
+def test_curated_memory_preserves_lore_hook_gate_and_wire_frames(tmp_path):
+    frames = _memory_wire(tmp_path, [_memory_req(tmp_path, "add", "staged fact")],
+                          LORE_WRITE_GATE="on", AI_AGENT="claude-code_test_harness")
+    assert frames[0]["value"] == {"status": "staged"}
+    assert not (tmp_path / "lore" / "USER.md").exists()
+    pending = list((tmp_path / "lore" / "pending").glob("*.json"))
+    assert len(pending) == 1
+    assert json.loads(pending[0].read_text())["text"] == "staged fact"
+
+
+def test_curated_memory_secret_or_control_review_cannot_authorize_changes(tmp_path):
+    root = tmp_path / "lore"
+    root.mkdir()
+    body = "- fact\x1b[31m\n"
+    (root / "USER.md").write_text(body)
+    frames = _memory_wire(tmp_path, [{"id": 1, "op": "memory_review_v1",
+                                    "cwd": str(tmp_path), "scope": "user"}])
+    assert frames[0]["error"] == "memory_incomplete"
+    assert "fact" not in str(frames)

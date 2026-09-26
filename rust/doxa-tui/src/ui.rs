@@ -1,4 +1,6 @@
 //! Terminal shell for the Rust frontend. Daemon adapters can feed [`App::apply_update`].
+mod operations_menu;
+
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::cell::{Cell, RefCell};
 use std::io::{self, IsTerminal, Stdout, Write};
@@ -90,20 +92,20 @@ const COMMANDS: &[CommandHelp] = &[
     CommandHelp { name: "/fleet", form: "/fleet ...", summary: "Fleet control", support: "unavailable in Rust" },
     CommandHelp { name: "/mesh", form: "/mesh", summary: "Peer map", support: "local · arguments unavailable" },
     CommandHelp { name: "/img", form: "/img [path]", summary: "Image support", support: "unavailable in Rust" },
-    CommandHelp { name: "/login", form: "/login [provider]", summary: "Provider login", support: "unavailable in Rust" },
-    CommandHelp { name: "/logout", form: "/logout [provider]", summary: "Provider logout", support: "unavailable in Rust" },
+    CommandHelp { name: "/login", form: "/login", summary: "Provider login", support: "local · selectable operations menu" },
+    CommandHelp { name: "/logout", form: "/logout", summary: "Provider logout", support: "local · selectable operations menu" },
     CommandHelp { name: "/settings", form: "/settings", summary: "Native settings", support: "local · linger and worktree for new sessions" },
-    CommandHelp { name: "/setup", form: "/setup", summary: "Setup checks", support: "CLI only · doxa setup" },
+    CommandHelp { name: "/setup", form: "/setup", summary: "Setup checks", support: "local · auth checks, LORE store, defaults" },
     CommandHelp { name: "/doctor", form: "/doctor", summary: "Health checks", support: "unavailable in Rust" },
-    CommandHelp { name: "/plugins", form: "/plugins", summary: "Plugin inventory", support: "unavailable in Rust" },
-    CommandHelp { name: "/reload-plugins", form: "/reload-plugins", summary: "Refresh plugins", support: "unavailable in Rust" },
+    CommandHelp { name: "/plugins", form: "/plugins", summary: "Plugin inventory", support: "local · selectable operations menu" },
+    CommandHelp { name: "/reload-plugins", form: "/reload-plugins", summary: "Refresh plugins", support: "local · selectable operations menu" },
     CommandHelp { name: "/model", form: "/model", summary: "Select session model", support: "local · picker; name argument unavailable" },
     CommandHelp { name: "/engine", form: "/engine", summary: "Engine for new sessions", support: "local · picker; ID argument unavailable" },
     CommandHelp { name: "/branch", form: "/branch [name]", summary: "Switch base branch", support: "local · active session" },
     CommandHelp { name: "/mode", form: "/mode", summary: "Permission mode", support: "local · picker; name argument unavailable" },
     CommandHelp { name: "/effort", form: "/effort", summary: "Reasoning effort", support: "local · picker; level argument unavailable" },
     CommandHelp { name: "/usage", form: "/usage", summary: "Session usage", support: "local · reported totals only" },
-    CommandHelp { name: "/context", form: "/context", summary: "Context window", support: "local · measured totals; no component breakdown" },
+    CommandHelp { name: "/context", form: "/context", summary: "Context window", support: "local · official telemetry and reported context details" },
     CommandHelp { name: "/queue", form: "/queue", summary: "Queued prompts", support: "local · cancel selected item with X" },
     CommandHelp { name: "/clear", form: "/clear", summary: "Fresh session in this tab", support: "local · idle session and writable tabset required" },
     CommandHelp { name: "/detach", form: "/detach", summary: "Leave session running", support: "local" },
@@ -112,6 +114,7 @@ const COMMANDS: &[CommandHelp] = &[
     CommandHelp { name: "/rename", form: "/rename [name]", summary: "Name active tab", support: "local" },
     CommandHelp { name: "/dir", form: "/dir", summary: "Session directory", support: "local" },
     CommandHelp { name: "/cd", form: "/cd <path>", summary: "Open directory", support: "local · new tab" },
+    CommandHelp { name: "/memory", form: "/memory", summary: "LORE curated memory", support: "local · scoped entries; M to add/edit/remove" },
     CommandHelp { name: "/beliefs", form: "/beliefs", summary: "LORE beliefs", support: "local · requires LORE" },
     CommandHelp { name: "/pending", form: "/pending", summary: "LORE proposals", support: "local · requires LORE" },
     CommandHelp { name: "/search", form: "/search [terms]", summary: "Search saved sessions", support: "local · LORE index then bounded transcript scan" },
@@ -1209,6 +1212,7 @@ pub struct App {
     session_identity: HashMap<String, (Option<String>, Option<String>)>,
     session_efforts: HashMap<String, String>,
     catalog_efforts: HashMap<(String, String), Vec<String>>,
+    effort_catalog_pending: Option<(String, String, String)>,
     next_efforts: HashMap<String, String>,
     pub(crate) custom_names: HashMap<String, String>,
     session_telemetry: HashMap<String, SessionTelemetry>,
@@ -1217,6 +1221,8 @@ pub struct App {
     memory_cache: HashMap<String, (Option<doxa_lore::MemoryUsage>, Instant)>,
     memory_pending: Option<(String, String, Receiver<Option<(doxa_lore::MemoryUsage, bool)>>)>,
     memory_repo: HashMap<String, bool>,
+    memory_manager: Option<crate::memory_menu::Manager>,
+    operations_menu: Option<operations_menu::Menu>,
     memory_menu_pending: Option<(String, String, Receiver<Result<Vec<String>, &'static str>>)>,
     repo_cache: HashMap<String, (Option<doxa_worktrees::RepoStatus>, Instant)>,
     repo_pending: Option<(String, PathBuf, u64, Receiver<Option<doxa_worktrees::RepoStatus>>)>,
@@ -1294,6 +1300,7 @@ pub struct App {
     history_resume: bool,
     history_explicit: bool,
     history_query: String,
+    history_query_cursor: usize,
     history_selected: usize,
     history_pending: Option<Receiver<Vec<history::OfflineSession>>>,
     history_scan_query: Option<String>,
@@ -1360,6 +1367,7 @@ impl Default for App {
             session_identity: HashMap::new(),
             session_efforts: HashMap::new(),
             catalog_efforts: HashMap::new(),
+            effort_catalog_pending: None,
             next_efforts: HashMap::new(),
             custom_names: HashMap::new(),
             session_telemetry: HashMap::new(),
@@ -1367,6 +1375,8 @@ impl Default for App {
             memory_pending: None,
             memory_repo: HashMap::new(),
             memory_menu_pending: None,
+            memory_manager: None,
+            operations_menu: None,
             repo_cache: HashMap::new(),
             repo_pending: None,
             repo_epoch: HashMap::new(),
@@ -1441,6 +1451,7 @@ impl Default for App {
             history_resume: false,
             history_explicit: false,
             history_query: String::new(),
+            history_query_cursor: 0,
             history_selected: 0,
             history_pending: None,
             history_scan_query: None,
@@ -1821,10 +1832,14 @@ impl App {
                         }
                         true
                     }
-                    "effort_changed" => {
+                    "effort_changed" | "effort_verified" => {
                         if let Some(effort) = data["effort"].as_str().filter(|effort| !effort.is_empty()) {
                             self.session_efforts.insert(id, safe_label(effort));
                         }
+                        true
+                    }
+                    "effort_requested" => {
+                        self.notice = format!("Requested effort {} · awaiting provider verification", safe_label(data["effort"].as_str().unwrap_or("unknown")));
                         true
                     }
                     "permission_mode_changed" => {
@@ -2013,16 +2028,42 @@ impl App {
                 }
                 true
             }
+            "context_detail" => {
+                let Some(id) = frame["session_id"].as_str() else { return false; };
+                if self.groups[self.active_group].active_id() != Some(id) { return false; }
+                let Some(info) = self.chip_info.as_mut().filter(|info| info.kind == "context"
+                    && info.owner.as_ref().is_some_and(|owner| owner.0 == id)) else { return false; };
+                info.lines.retain(|line| line != "Loading reported context details…");
+                if frame["ok"] != true {
+                    info.lines.push("Detailed context metadata not reported by this engine".into());
+                    return true;
+                }
+                info.lines.extend(context_detail_lines(&frame["detail"]));
+                true
+            }
             "models_reply" => {
                 let Some(id) = frame.get("session_id").and_then(|v| v.as_str()) else { return false; };
-                if frame["ok"] == true && self.session_identity.get(id).is_some_and(|identity| identity.0.as_deref() == Some("codex")) {
+                if frame["ok"] == true {
+                    let engine = self.session_identity.get(id).and_then(|identity| identity.0.as_deref()).unwrap_or("");
                     for row in frame["capabilities"].as_array().into_iter().flatten().take(100) {
                         if let Some(model) = row["model"].as_str().filter(|model| !model.is_empty() && model.len() <= 128 && !model.chars().any(char::is_control)) {
                             let levels = row["efforts"].as_array().into_iter().flatten().filter_map(serde_json::Value::as_str)
                                 .filter(|level| !level.is_empty() && level.len() <= 32 && level.bytes().all(|b| b.is_ascii_alphanumeric()))
                                 .take(16).map(str::to_owned).collect();
-                            self.catalog_efforts.insert(("codex".into(), model.into()), levels);
+                            self.catalog_efforts.insert((engine.into(), model.into()), levels);
                         }
+                    }
+                }
+                if self.effort_catalog_pending.as_ref().is_some_and(|pending| pending.0 == id)
+                    && frame["loading"] != true {
+                    let (owner, engine, model) = self.effort_catalog_pending.take().unwrap();
+                    if self.groups[self.active_group].active_id() == Some(owner.as_str())
+                        && self.session_identity.get(&owner).is_some_and(|identity|
+                            identity.0.as_deref() == Some(engine.as_str()) && identity.1.as_deref() == Some(model.as_str())) {
+                        self.model_picker = None;
+                        if frame["ok"] == true && self.catalog_efforts.contains_key(&(engine, model)) { self.open_effort_picker(); }
+                        else { self.notice = "Live effort capability unavailable from this engine".into(); }
+                        return true;
                     }
                 }
                 if let Some(picker) = self.model_picker.as_mut().filter(|picker| picker.session_id == id) {
@@ -2355,6 +2396,7 @@ impl App {
         let before = (self.active_group, self.groups[self.active_group].active_id().unwrap_or("").to_owned());
         let changed = match event {
             Event::Resize(w, h) => {
+                if let Some(manager) = &mut self.memory_manager { manager.reset_review_visibility(); }
                 self.size = Rect::new(0, 0, w, h);
                 self.drag = None;
                 self.chip_hover = None;
@@ -2688,6 +2730,33 @@ impl App {
         }
         if self.stop_confirmation.is_some() { return self.stop_confirmation_key(key); }
         if self.chip_info.is_some() {
+            if let Some(menu) = &mut self.operations_menu {
+                menu.key(key);
+                if menu.closed() { self.operations_menu = None; self.chip_info = None; }
+                else if let Some(info) = &mut self.chip_info { info.lines = menu.lines(usize::from(self.size.width)); }
+                return true;
+            }
+            if self.memory_manager.is_some() {
+                let current = self.groups[self.active_group].active_id().and_then(|id|
+                    self.session_cwds.get(id).and_then(|p| p.to_str()).map(|cwd| (id, cwd)));
+                let manager = self.memory_manager.as_mut().unwrap();
+                if current != Some((manager.owner.0.as_str(), manager.owner.1.as_str())) {
+                    self.memory_manager = None; self.chip_info = None;
+                    self.notice = "Session changed; reopen memory".into();
+                    return true;
+                }
+                if key.code == KeyCode::Esc && !manager.editing() {
+                    self.memory_manager = None; self.chip_info = None; return true;
+                }
+                return manager.key(key);
+            }
+            if key.code == KeyCode::Char('m') && self.chip_info.as_ref().is_some_and(|i| i.kind == "memory") {
+                if let Some(owner) = self.chip_info.as_ref().and_then(|i| i.owner.clone()) {
+                    self.memory_menu_pending = None;
+                    self.memory_manager = Some(crate::memory_menu::Manager::new(owner));
+                }
+                return true;
+            }
             if key.code == KeyCode::Esc {
                 self.chip_info = None;
                 self.memory_menu_pending = None;
@@ -3062,6 +3131,25 @@ impl App {
         let line = self.input.trim().to_owned();
         let (command, args) = line.split_once(char::is_whitespace).unwrap_or((line.as_str(), ""));
         match command {
+            "/setup" | "/login" | "/logout" | "/plugins" | "/reload-plugins" if args.trim().is_empty() => {
+                let kind = if command == "/reload-plugins" { "plugins" } else { &command[1..] };
+                self.input.clear(); self.input_cursor = 0;
+                self.memory_menu_pending = None;
+                self.memory_manager = None;
+                self.operations_menu = Some(operations_menu::Menu::new(kind));
+                self.chip_info = Some(ChipInfo { kind: "operations", label: String::new(),
+                    lines: self.operations_menu.as_ref().unwrap().lines(usize::from(self.size.width)),
+                    scroll: 0, owner: None });
+                if self.active_chooser_rect().is_none() {
+                    self.operations_menu = None; self.chip_info = None;
+                    self.notice = "Enlarge pane to open operations".into();
+                }
+                true
+            }
+            "/memory" if args.trim().is_empty() => {
+                self.input.clear(); self.input_cursor = 0;
+                self.open_memory_menu(self.active_group); true
+            }
             "/pending" if args.trim().is_empty() => {
                 self.input.clear();
                 self.input_cursor = 0;
@@ -3146,7 +3234,7 @@ impl App {
                 true
             }
             "/settings" => { self.notice = "Usage: /settings · edit native preferences in the menu".into(); true }
-            "/setup" => { self.notice = "Run `doxa setup` in a shell for auth and store checks".into(); true }
+            "/setup" => { self.notice = "Usage: /setup · use the selectable setup menu".into(); true }
             "/fleet" | "/img" | "/login"
             | "/logout" | "/doctor" | "/plugins"
             | "/reload-plugins" | "/effort"
@@ -3608,14 +3696,18 @@ impl App {
             self.notice = "Effort capability is unknown for this session".into();
             return;
         };
-        if engine == "codex" && !self.catalog_efforts.contains_key(&(engine.clone(), model.clone())) {
-            self.open_model_picker();
-            self.notice = "Loading Codex model capabilities; select a model, then choose effort".into();
+        if matches!(engine.as_str(), "codex" | "claude") && !self.catalog_efforts.contains_key(&(engine.clone(), model.clone())) {
+            self.effort_catalog_pending = Some((id.clone(), engine.clone(), model.clone()));
+            self.model_picker = Some(ModelPicker { session_id: id.clone(), models: Vec::new(),
+                selected: 0, note: "Loading effort capabilities for the current model…".into(),
+                loading: true, catalog_pending: true });
+            self.pending_model_queries.push(id);
+            self.notice = "Loading current model effort capabilities…".into();
             return;
         }
         let known = effort_choices(engine, model);
         let levels = self.catalog_efforts.get(&(engine.clone(), model.clone()))
-            .map(|levels| levels.iter().filter(|level| engine == "codex" || known.contains(&level.as_str())).cloned().collect())
+            .map(|levels| levels.clone())
             .unwrap_or_else(|| known.iter().map(|level| (*level).to_owned()).collect::<Vec<_>>());
         if levels.is_empty() {
             self.notice = "Live effort change is unavailable for this session model".into();
@@ -3634,7 +3726,7 @@ impl App {
         let Some(chosen) = picker.levels.get(picker.selected) else { return; };
         let known = effort_choices(engine, model);
         let allowed = self.catalog_efforts.get(&(engine.clone(), model.clone()))
-            .map(|levels| levels.iter().filter(|level| engine == "codex" || known.contains(&level.as_str())).cloned().collect())
+            .map(|levels| levels.clone())
             .unwrap_or_else(|| known.iter().map(|level| (*level).to_owned()).collect::<Vec<_>>());
         if !allowed.contains(chosen) { return; }
         self.pending_effort_changes.push((picker.session_id, chosen.clone()));
@@ -3705,7 +3797,7 @@ impl App {
     fn model_picker_key(&mut self, key: KeyEvent) -> bool {
         let picker = self.model_picker.as_mut().unwrap();
         match key.code {
-            KeyCode::Esc => self.model_picker = None,
+            KeyCode::Esc => { self.model_picker = None; self.effort_catalog_pending = None; },
             KeyCode::Up => picker.selected = picker.selected.saturating_sub(1),
             KeyCode::Down => picker.selected = (picker.selected + 1).min(picker.models.len().saturating_sub(1)),
             KeyCode::Char('r' | 'R') if !picker.loading => {
@@ -4012,6 +4104,7 @@ impl App {
         self.history_scan_query = None;
         self.history_query_due = None;
         self.history_query.clear();
+        self.history_query_cursor = 0;
         self.history_selected = 0;
         if self.active_chooser_rect().is_none() {
             self.history_modal = false;
@@ -4041,6 +4134,7 @@ impl App {
         self.open_history();
         if self.history_modal {
             self.history_query = query.to_owned();
+        self.history_query_cursor = self.history_query.len();
             self.schedule_history_query(Instant::now());
         }
     }
@@ -4140,6 +4234,7 @@ impl App {
         self.history_resume = true;
         self.history_explicit = !query.is_empty();
         self.history_query = query.to_owned();
+        self.history_query_cursor = self.history_query.len();
         // Explicit IDs search the full bounded transcript inventory rather
         // than only the recent-history window.
         if !query.is_empty() {
@@ -4446,7 +4541,28 @@ impl App {
     }
 
     fn poll_memory_menu(&mut self) -> bool {
-        let Some((id, cwd, receiver)) = self.memory_menu_pending.take() else { return false; };
+        let mut changed = false;
+        if let Some(manager) = &mut self.memory_manager {
+            let current = self.groups[self.active_group].active_id().and_then(|id|
+                self.session_cwds.get(id).and_then(|path| path.to_str()).map(|cwd| (id, cwd)));
+            if current == Some((manager.owner.0.as_str(), manager.owner.1.as_str())) {
+                changed |= manager.poll();
+                if manager.refresh_scope.take().is_some() { self.memory_cache.clear(); }
+            } else {
+                self.memory_manager = None;
+                if let Some(info) = &mut self.chip_info { info.lines = vec!["Session changed; reopen memory".into()]; }
+                changed = true;
+            }
+        }
+        if let Some(menu) = &mut self.operations_menu {
+            menu.poll();
+            if let Some(info) = &mut self.chip_info {
+                let lines = menu.lines(usize::from(self.size.width));
+                if info.lines != lines { info.lines = lines; changed = true; }
+            }
+        }
+
+        let Some((id, cwd, receiver)) = self.memory_menu_pending.take() else { return changed; };
         match receiver.try_recv() {
             Ok(result) => {
                 if self.groups[self.active_group].active_id() != Some(id.as_str())
@@ -4455,7 +4571,7 @@ impl App {
                 }
                 if let Some(info) = self.chip_info.as_mut().filter(|info| info.kind == "memory") {
                     info.lines = match result {
-                        Ok(lines) => lines,
+                        Ok(mut lines) => { lines.insert(0, "M manage curated entries · /beliefs and /pending for reviews".into()); lines },
                         Err(message) => vec![message.to_owned()],
                     };
                     info.scroll = 0;
@@ -4942,6 +5058,7 @@ impl App {
         self.history_modal = true;
         self.history_resume = false;
         self.history_query = query.to_owned();
+        self.history_query_cursor = self.history_query.len();
         self.history_selected = 0;
         self.cancel_history_query();
         for entry in entries {
@@ -4956,6 +5073,8 @@ impl App {
     }
 
     fn history_key(&mut self, key: KeyEvent) -> bool {
+        self.history_query_cursor = self.history_query_cursor.min(self.history_query.len());
+        while !self.history_query.is_char_boundary(self.history_query_cursor) { self.history_query_cursor -= 1; }
         match key.code {
             KeyCode::Esc | KeyCode::Char('r') if key.code == KeyCode::Esc || key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.history_modal = false;
@@ -4964,11 +5083,36 @@ impl App {
             }
             KeyCode::Up => self.history_selected = self.history_selected.saturating_sub(1),
             KeyCode::Down => self.history_selected = (self.history_selected + 1).min(self.history_matches().len().saturating_sub(1)),
-            KeyCode::Backspace => { self.history_query.pop(); self.history_selected = 0;
-                self.schedule_history_query(Instant::now()); }
+            KeyCode::Left => {
+                self.history_query_cursor = self.history_query[..self.history_query_cursor].char_indices().next_back().map_or(0, |(index, _)| index);
+            }
+            KeyCode::Right => {
+                if let Some(c) = self.history_query[self.history_query_cursor..].chars().next() { self.history_query_cursor += c.len_utf8(); }
+            }
+            KeyCode::Home => self.history_query_cursor = 0,
+            KeyCode::End => self.history_query_cursor = self.history_query.len(),
+            KeyCode::Backspace => {
+                if let Some((index, _)) = self.history_query[..self.history_query_cursor].char_indices().next_back() {
+                    self.history_query.drain(index..self.history_query_cursor);
+                    self.history_query_cursor = index;
+                    self.history_selected = 0;
+                    self.schedule_history_query(Instant::now());
+                }
+            }
+            KeyCode::Delete => {
+                if let Some(c) = self.history_query[self.history_query_cursor..].chars().next() {
+                    self.history_query.drain(self.history_query_cursor..self.history_query_cursor + c.len_utf8());
+                    self.history_selected = 0;
+                    self.schedule_history_query(Instant::now());
+                }
+            }
             KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
-                if self.history_query.len() + c.len_utf8() <= 200 { self.history_query.push(c); self.history_selected = 0;
-                    self.schedule_history_query(Instant::now()); }
+                if !unsafe_input_char(c) && self.history_query.len() + c.len_utf8() <= 200 {
+                    self.history_query.insert(self.history_query_cursor, c);
+                    self.history_query_cursor += c.len_utf8();
+                    self.history_selected = 0;
+                    self.schedule_history_query(Instant::now());
+                }
             }
             KeyCode::Enter => {
                 self.open_selected_history();
@@ -5871,6 +6015,10 @@ impl App {
             }
         } else if self.action_menu {
             (ACTIONS.len() + 2).min(15) as u16
+        } else if self.memory_manager.is_some() {
+            19
+        } else if let Some(menu) = &self.operations_menu {
+            (menu.lines(usize::from(pane.width)).len() + 2).clamp(7, 19) as u16
         } else if self.chip_info.is_some() {
             self.chip_info.as_ref().map_or(5, |info| if matches!(info.kind, "memory" | "usage" | "context" | "help") {
                 (info.lines.len() + 2).clamp(7, 19) as u16
@@ -6118,6 +6266,8 @@ impl App {
     }
 
     fn open_chip_info(&mut self, kind: &'static str, group: usize) {
+        self.memory_manager = None;
+        self.operations_menu = None;
         if matches!(kind, "context" | "cost") {
             self.active_group = group;
             self.open_diagnostic(if kind == "cost" { "usage" } else { "context" });
@@ -6198,8 +6348,12 @@ impl App {
         }
         if kind == "context" {
             lines.push(String::new());
-            lines.push("Component breakdown unavailable in this view".into());
-            lines.push("No token counts are estimated here".into());
+            lines.push("Loading reported context details…".into());
+            if let Some((Some(usage), _)) = self.memory_cache.get(&id) {
+                lines.push(format!("Curated project memory: {} / {} Unicode chars (LORE cap)", usage.project_chars, usage.project_cap_chars));
+                lines.push(format!("Curated user memory: {} / {} Unicode chars (LORE cap)", usage.user_chars, usage.user_cap_chars));
+            }
+            self.pending_queue_commands.push(crate::bridge::WorkerCommand::ContextDetail(id.clone()));
         }
         self.chip_info = Some(ChipInfo { kind, label: String::new(), lines, scroll: 0,
             owner: Some((id, String::new())) });
@@ -6210,9 +6364,11 @@ impl App {
     }
 
     fn open_memory_menu(&mut self, group: usize) {
+        self.memory_manager = None;
+        self.operations_menu = None;
         self.open_chip_info("memory", group);
         let Some(info) = self.chip_info.as_mut() else { return; };
-        info.lines = vec!["Loading LORE memory…".into()];
+        info.lines = vec!["Loading LORE memory… · M manage curated entries".into()];
         let Some(id) = self.groups[group].active_id().map(str::to_owned) else {
             info.lines = vec!["No active session".into()];
             return;
@@ -6452,6 +6608,47 @@ impl App {
             return false;
         }
         if self.chip_info.is_some() {
+            let area = self.active_chooser_rect();
+            if let Some(menu) = &mut self.operations_menu {
+                if let Some(area) = area {
+                    let inside = mouse.column > area.x && mouse.column < area.right().saturating_sub(1)
+                        && mouse.row > area.y && mouse.row < area.bottom().saturating_sub(1);
+                    if inside && matches!(mouse.kind, MouseEventKind::Moved | MouseEventKind::Down(MouseButton::Left)) {
+                        let choice_row = usize::from(mouse.row - area.y - 1);
+                        let choice = menu.choice_at(choice_row);
+                        menu.hover(choice_row);
+                        if choice && mouse.kind == MouseEventKind::Down(MouseButton::Left) { menu.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)); }
+                        if let Some(info) = &mut self.chip_info { info.lines = menu.lines(usize::from(area.width)); }
+                        return true;
+                    }
+                    if !area.contains(ratatui::layout::Position::new(mouse.column, mouse.row))
+                        && mouse.kind == MouseEventKind::Down(MouseButton::Left) && !menu.busy() {
+                        self.operations_menu = None; self.chip_info = None;
+                    }
+                }
+                return true;
+            }
+            if let Some(manager) = &mut self.memory_manager {
+                if let Some(area) = area {
+                    let inside = mouse.column > area.x && mouse.column < area.right().saturating_sub(1)
+                        && mouse.row >= area.y + 2 && mouse.row < area.bottom().saturating_sub(2);
+                    if inside {
+                        match mouse.kind {
+                            MouseEventKind::Moved | MouseEventKind::Down(MouseButton::Left) => {
+                                return manager.hover(usize::from(mouse.row - area.y - 2), usize::from(area.height.saturating_sub(4)));
+                            }
+                            MouseEventKind::ScrollUp => return manager.key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
+                            MouseEventKind::ScrollDown => return manager.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+                            _ => {}
+                        }
+                    }
+                    if !area.contains(ratatui::layout::Position::new(mouse.column, mouse.row))
+                        && mouse.kind == MouseEventKind::Down(MouseButton::Left) && !manager.busy() {
+                        self.memory_manager = None; self.chip_info = None;
+                    }
+                }
+                return true;
+            }
             let inside_menu = self.active_chooser_rect().is_some_and(|area| area.contains(
                 ratatui::layout::Position::new(mouse.column, mouse.row)));
             if let Some(info) = self.chip_info.as_mut().filter(|info| info.kind == "memory") {
@@ -7277,6 +7474,15 @@ impl App {
     }
 
     fn draw_chip_info(&self, frame: &mut Frame, area: Rect) {
+        if let Some(manager) = &self.memory_manager {
+            manager.draw(frame, area); return;
+        }
+        if let Some(menu) = &self.operations_menu {
+            frame.render_widget(Paragraph::new(menu.lines(usize::from(area.width.saturating_sub(2))).join("\n"))
+                .block(Block::default().title(" DOXA operations ").borders(Borders::ALL))
+                .style(Style::default().fg(theme::TEXT).bg(theme::RAISED)), area);
+            return;
+        }
         let Some(info) = &self.chip_info else { return; };
         if matches!(info.kind, "memory" | "usage" | "context" | "help") {
             let current = self.groups[self.active_group].active_id().and_then(|id|
@@ -7312,7 +7518,7 @@ impl App {
     fn draw_history(&self, frame: &mut Frame, area: Rect) {
         if !self.history_modal { return; }
         let matches = self.history_matches();
-        let mut lines = vec![Line::from(format!(" Search: {}", safe_label(&self.history_query)))];
+        let mut lines = vec![Line::from(if self.history_resume { " Select a session to resume" } else { " Type search terms in the prompt below" })];
         if matches.is_empty() { lines.push(Line::from(if self.history_pending.is_some() || self.history_query_due.is_some() { " Finding saved transcripts…" } else { " No matching sessions" })); }
         let visible = usize::from(area.height.saturating_sub(3)).max(1);
         for (position, header, label) in self.history_rows(visible) {
@@ -7828,7 +8034,8 @@ impl App {
             .and_then(|id| self.sessions.iter().find(|s| s.id == id));
         let active = self.active_group == index;
         let (draft, cursor) = group.active_id().map(|id| {
-            if active { (self.input.as_str(), self.input_cursor) }
+            if active && self.history_modal { (self.history_query.as_str(), self.history_query_cursor.min(self.history_query.len())) }
+            else if active { (self.input.as_str(), self.input_cursor) }
             else { self.input_drafts.get(&(index, id.to_owned()))
                 .map(|(text, cursor)| (text.as_str(), *cursor)).unwrap_or(("", 0)) }
         }).unwrap_or(("", 0));
@@ -8008,7 +8215,7 @@ impl App {
                 .scroll((scroll_y as u16, scroll_x as u16))
                 .style(Style::default().fg(theme::TEXT).bg(theme::RAISED))
                 .block(Block::default()
-                    .title(if active && self.focus == Focus::Prompt { " Prompt ● " } else { " Prompt " })
+                    .title(if active && self.history_modal { " Search sessions ● " } else if active && self.focus == Focus::Prompt { " Prompt ● " } else { " Prompt " })
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(if active && self.focus == Focus::Prompt { theme::ACCENT } else { theme::BORDER }))),
             inner[4],
@@ -8022,6 +8229,60 @@ impl App {
             Rect { height: 1, ..inner[5] },
         );
     }
+}
+
+/// Official provider component tokens stay distinct from DOXA snapshot chars.
+fn context_detail_lines(detail: &serde_json::Value) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(source) = detail["source"].as_str() {
+        lines.push(format!("Source: {}", safe_label(source)));
+    }
+    if let Some(categories) = detail["categories"].as_array() {
+        lines.push("## Reported context components (tokens)".into());
+        for row in categories.iter().take(64) {
+            if let (Some(name), Some(tokens)) = (row["name"].as_str(), row["tokens"].as_u64()) {
+                lines.push(format!("{}: {tokens}", clipped_title(&safe_label(name), 160).0));
+            }
+        }
+    }
+    if let Some(files) = detail["memory_files"].as_array() {
+        lines.push("## Reported memory files (tokens)".into());
+        for row in files.iter().take(64) {
+            if let (Some(path), Some(tokens)) = (row["path"].as_str(), row["tokens"].as_u64()) {
+                lines.push(format!("{} · {}: {tokens}", clipped_title(&safe_label(path), 200).0,
+                    safe_label(row["type"].as_str().unwrap_or("file"))));
+            }
+        }
+    }
+    for field in ["mcp_tools", "agents"] {
+        if let Some(rows) = detail[field].as_array() {
+            lines.push(format!("## Reported {}", field.replace('_', " ")));
+            for row in rows.iter().take(64) {
+                if let Some(name) = row.as_str().or_else(|| row["name"].as_str()).or_else(|| row["agent_type"].as_str()) {
+                    let count = row["tokens"].as_u64().map(|tokens| format!(": {tokens} tokens")).unwrap_or_default();
+                    lines.push(format!("{}{count}", clipped_title(&safe_label(name), 160).0));
+                }
+            }
+        }
+    }
+    for (key, label) in [("total_tokens", "Reported total"), ("max_tokens", "Reported context window"),
+        ("raw_max_tokens", "Raw context window"), ("autocompact_threshold", "Auto compact threshold")] {
+        if let Some(tokens) = detail[key].as_u64() { lines.push(format!("{label}: {tokens} tokens")); }
+    }
+    if let Some(enabled) = detail["autocompact_enabled"].as_bool() { lines.push(format!("Auto compact enabled: {enabled}")); }
+    for key in ["adopted_skills", "adopted_skill_plugins"] {
+        if let Some(count) = detail[key].as_u64() { lines.push(format!("{}: {count} (DOXA count)", key.replace('_', " "))); }
+    }
+    if let Some(object) = detail.as_object() {
+        let mut counters: Vec<_> = object.iter().filter(|(key, value)| key.ends_with("_chars") && value.as_u64().is_some()).collect();
+        counters.sort_by_key(|(key, _)| *key);
+        if !counters.is_empty() { lines.push("## DOXA local snapshot metadata (characters; not token counts)".into()); }
+        for (key, value) in counters.into_iter().take(32) {
+            lines.push(format!("{}: {} chars", safe_label(key).replace('_', " "), value));
+        }
+    }
+    if lines.is_empty() { lines.push("No detailed context metadata reported".into()); }
+    lines
 }
 
 fn transcript_window(
@@ -9304,7 +9565,7 @@ for line in sys.stdin:
         app.groups[0].tabs = vec!["unknown".into()];
         app.open_effort_picker();
         assert!(app.effort_picker.is_none());
-        assert!(app.notice.contains("Loading Codex model capabilities"));
+        assert!(app.notice.contains("Loading current model effort capabilities"));
 
         app.engine_selected = 2;
         app.select_new_engine();
@@ -10100,7 +10361,7 @@ for line in sys.stdin:
                 "permission" => assert!(app.permission_picker.is_some()),
                 "engine" => assert!(app.engine_picker),
                 "model" => assert!(app.model_picker.is_some()),
-                "effort" => assert!(app.notice.contains("Live effort change is unavailable")),
+                "effort" => assert!(app.model_picker.is_some() && app.effort_catalog_pending.is_some()),
                 "beliefs" => assert!(app.lore_picker.is_some()),
                 _ => {
                     assert_eq!(app.chip_info.as_ref().map(|info| info.kind), Some(kind));
@@ -10389,7 +10650,7 @@ for line in sys.stdin:
         let mut app = App::default();
         app.groups[0].tabs.push("s".into());
         app.handle(Event::Resize(100, 30));
-        assert_eq!(COMMANDS.len(), 42);
+        assert_eq!(COMMANDS.len(), 43);
         let mut names = std::collections::HashSet::new();
         for row in COMMANDS { assert!(names.insert(row.name)); }
         app.open_help();
@@ -10420,6 +10681,8 @@ for line in sys.stdin:
             app.input_cursor = app.input.len();
             app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
             assert!(app.pending_prompts.is_empty(), "forwarded {command}");
+            app.chip_info = None;
+            app.operations_menu = None;
         }
         app.input = "/provider-command".into();
         app.input_cursor = app.input.len();
@@ -12499,5 +12762,136 @@ for line in sys.stdin:
         assert!(app.notice.contains("do not retry automatically"));
         assert!(app.lore_picker.as_ref().unwrap().pending.is_none());
         assert!(!app.lore_picker.as_ref().unwrap().resolving);
+    }
+}
+
+impl std::fmt::Debug for operations_menu::Menu {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OperationsMenu").field("busy", &self.busy()).finish()
+    }
+}
+
+#[cfg(test)]
+mod parity_tests {
+    use super::*;
+    use serde_json::json;
+    fn paint(app: &App) -> String {
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(app.size.width, app.size.height)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        terminal.backend().buffer().content.iter().map(|cell| cell.symbol()).collect()
+    }
+    fn click(app: &mut App, column: u16, row: u16) {
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column, row, modifiers: KeyModifiers::NONE }));
+    }
+    #[test]
+    fn search_edits_actual_prompt_query_and_restores_saved_draft() {
+        let mut app = App::default();
+        app.size = Rect::new(0, 0, 100, 28);
+        app.groups[0].tabs = vec!["s".into()];
+        app.input = "unsent draft".into();
+        app.input_cursor = app.input.len();
+        app.show_history_fixture("find", Vec::new());
+        app.history_pending = None;
+        let screen = paint(&app);
+        assert!(screen.contains("Search sessions ●"));
+        assert!(screen.contains("> find▏"));
+        assert!(!screen.contains("> unsent draft"));
+        app.history_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert_eq!(app.history_query, "findx");
+        app.history_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.input, "unsent draft");
+        assert!(paint(&app).contains("> unsent draft▏"));
+    }
+    #[test]
+    fn context_details_keep_provider_tokens_separate_from_local_chars_and_ignore_other_owner() {
+        let mut app = App::default();
+        app.size = Rect::new(0, 0, 100, 28);
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"s","engine":"claude","model":"sonnet","cwd":"/fixture"}));
+        app.groups[0].tabs = vec!["s".into()];
+        app.open_diagnostic("context");
+        let original = app.chip_info.as_ref().unwrap().lines.clone();
+        assert!(!app.apply_daemon_frame(&json!({"type":"context_detail","session_id":"other","ok":true,
+            "detail":{"categories":[{"name":"fake","tokens":3}]}})));
+        assert_eq!(app.chip_info.as_ref().unwrap().lines, original);
+        assert!(app.apply_daemon_frame(&json!({"type":"context_detail","session_id":"s","ok":true,
+            "detail":{"source":"Claude official context_usage","categories":[{"name":"system prompt","tokens":123},{"name":"missing"}],
+                "memory_files":[{"path":"MEMORY.md","tokens":17}], "agents":[{"agent_type":"reviewer","tokens":12}],
+                "lore_snapshot_chars":321,"max_tokens":1000}})));
+        let text = app.chip_info.as_ref().unwrap().lines.join("\n");
+        assert!(text.contains("system prompt: 123"));
+        assert!(text.contains("reviewer: 12 tokens"));
+        assert!(text.contains("lore snapshot chars: 321 chars"));
+        assert!(!text.contains("missing:"));
+        assert!(!text.contains("321 tokens"));
+    }
+    #[test]
+    fn claude_effort_chip_loads_current_capability_without_model_change_and_waits_for_verification() {
+        let mut app = App::default();
+        app.size = Rect::new(0, 0, 220, 32);
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"s","engine":"claude","model":"account-model",
+            "effort":"high","can_set_model":true,"cwd":"/fixture"}));
+        app.groups[0].tabs = vec!["s".into()];
+        paint(&app);
+        let hit = app.rendered_chip_hits.borrow().as_ref().unwrap().iter().find(|hit| hit.kind == "effort").unwrap().clone();
+        click(&mut app, hit.rect.x + 1, hit.rect.y);
+        assert_eq!(app.pending_model_queries, vec!["s"]);
+        assert!(app.pending_model_changes.is_empty());
+        app.apply_daemon_frame(&json!({"type":"models_reply","session_id":"s","ok":true,"models":["account-model"],
+            "capabilities":[{"model":"account-model","efforts":["low","high","max"]}]}));
+        assert!(app.model_picker.is_none());
+        assert_eq!(app.effort_picker.as_ref().unwrap().levels, ["low", "high", "max"]);
+        let menu = app.active_chooser_rect().unwrap();
+        click(&mut app, menu.x + 2, menu.y + 3);
+        assert_eq!(app.pending_effort_changes, vec![("s".into(), "low".into())]);
+        assert_eq!(app.session_efforts.get("s").map(String::as_str), Some("high"));
+        app.apply_daemon_frame(&json!({"type":"event","session_id":"s","event":{"type":"effort_requested","data":{"effort":"low"}}}));
+        assert_eq!(app.session_efforts.get("s").map(String::as_str), Some("high"));
+        app.apply_daemon_frame(&json!({"type":"event","session_id":"s","event":{"type":"effort_verified","data":{"effort":"low"}}}));
+        assert_eq!(app.session_efforts.get("s").map(String::as_str), Some("low"));
+    }
+    #[test]
+    fn prompt_search_cursor_edits_utf8_without_touching_draft() {
+        let mut app = App::default();
+        app.history_modal = true;
+        app.history_query = "aü界".into();
+        app.history_query_cursor = app.history_query.len();
+        app.input = "draft".into();
+        app.history_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        app.history_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(app.history_query, "a界");
+        app.history_key(KeyEvent::new(KeyCode::Char('ß'), KeyModifiers::NONE));
+        assert_eq!(app.history_query, "aß界");
+        app.history_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+        assert_eq!(app.history_query, "aß");
+        assert_eq!(app.input, "draft");
+    }
+    #[test]
+    fn cancelled_effort_catalog_does_not_reopen_on_async_reply() {
+        let mut app = App::default();
+        app.size = Rect::new(0, 0, 100, 28);
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"s","engine":"codex","model":"m","effort":"high"}));
+        app.groups[0].tabs = vec!["s".into()];
+        app.open_effort_picker();
+        app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        app.apply_daemon_frame(&json!({"type":"models_reply","session_id":"s","ok":true,"models":["m"],
+            "capabilities":[{"model":"m","efforts":["high"]}]}));
+        assert!(app.effort_picker.is_none());
+        assert!(app.model_picker.is_none());
+    }
+    #[test]
+    fn operations_menu_opens_above_prompt_and_border_click_does_not_start_login() {
+        let mut app = App::default();
+        app.size = Rect::new(0, 0, 100, 28);
+        app.groups[0].tabs = vec!["s".into()];
+        app.input = "/login".into();
+        app.submit_local_command();
+        let area = app.active_chooser_rect().unwrap();
+        assert!(paint(&app).contains("Claude (Anthropic)"));
+        click(&mut app, area.x, area.y + 2);
+        click(&mut app, area.x + 2, area.y + 1);
+        assert!(!app.operations_menu.as_ref().unwrap().busy());
+        app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.operations_menu.is_none());
     }
 }

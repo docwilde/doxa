@@ -333,6 +333,48 @@ impl LoreClient {
         Ok(MemoryUsage { project_chars, user_chars, project_cap_chars, user_cap_chars })
     }
 
+    /// Scoped, complete curated entries and optimistic review identity.
+    pub fn memory_review(&mut self, cwd: &str, scope: &str) -> Result<Value, LoreError> {
+        if cwd.is_empty() || cwd.len() > 4096 || cwd.contains('\0') || !matches!(scope, "user" | "project") {
+            return Err(LoreError::InvalidFrame);
+        }
+        let value = self.request_value("memory_review_v1", json!({"cwd":cwd,"scope":scope}))?;
+        let entries = value["entries"].as_array().ok_or(LoreError::InvalidFrame)?;
+        let mut body = String::new();
+        if entries.len() > 400 || value["scope"] != scope
+            || value["key"].as_str().is_none_or(|key| key.is_empty() || key.len() > 4096 || key.chars().any(char::is_control))
+            || value["cap_chars"].as_u64().is_none_or(|cap| cap == 0 || cap > MAX_MEMORY_CHARS) {
+            return Err(LoreError::InvalidFrame);
+        }
+        for entry in entries {
+            let text = entry.as_str().ok_or(LoreError::InvalidFrame)?;
+            if text.len() > 16384 || text.chars().any(char::is_control) { return Err(LoreError::InvalidFrame); }
+            body.push_str("- "); body.push_str(text); body.push('\n');
+        }
+        let digest = format!("{:x}", Sha256::digest(body.as_bytes()));
+        if body.len() > 65536 || value["chars"].as_u64() != Some(body.chars().count() as u64)
+            || value["sha256"].as_str() != Some(digest.as_str()) { return Err(LoreError::InvalidFrame); }
+        Ok(value)
+    }
+
+    /// Apply the explicitly reviewed draft through LORE's lock and write gate.
+    pub fn memory_action(&mut self, cwd: &str, request: Value) -> Result<Value, LoreError> {
+        if cwd.is_empty() || cwd.len() > 4096 || cwd.contains('\0') || !request.is_object() {
+            return Err(LoreError::InvalidFrame);
+        }
+        if !matches!(request["scope"].as_str(), Some("user" | "project"))
+            || !matches!(request["action"].as_str(), Some("add" | "replace" | "remove"))
+            || request["text"].as_str().is_none_or(|text| text.len() > 16384 || text.chars().any(char::is_control))
+            || request["entry"].as_str().is_none_or(|text| text.len() > 16384 || text.chars().any(char::is_control))
+            || request["expected"]["sha256"].as_str().is_none_or(|digest| !valid_digest(digest))
+            || request["expected"]["key"].as_str().is_none_or(|key| key.is_empty() || key.len() > 4096) {
+            return Err(LoreError::InvalidFrame);
+        }
+        let mut fields = request;
+        fields["cwd"] = json!(cwd);
+        self.request_value("memory_action_v1", fields)
+    }
+
     /// Ask LORE for its actual Python 1.x transcript location. Reimplementing
     /// `project_slug` here would risk writing a second history for one project.
     pub fn transcript_identity(&mut self, cwd: &str) -> Result<(PathBuf, String), LoreError> {
@@ -777,6 +819,12 @@ impl LoreClient {
                 Some("belief_changed") => "belief_changed",
                 Some("belief_unavailable") => "belief_unavailable",
                 Some("belief_incomplete") => "belief_incomplete",
+                Some("memory_incomplete") => "memory_incomplete",
+                Some("memory_changed") => "memory_changed",
+                Some("memory_ambiguous") => "memory_ambiguous",
+                Some("memory_over_cap") => "memory_over_cap",
+                Some("memory_refused") => "memory_refused",
+
                 _ => "remote_error",
             };
             Err(LoreError::Remote(code))

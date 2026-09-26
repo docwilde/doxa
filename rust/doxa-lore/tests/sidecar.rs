@@ -410,3 +410,34 @@ for line in sys.stdin:
         Err(LoreError::InvalidFrame)
     ));
 }
+
+#[test]
+fn curated_review_checks_exact_unicode_chars_digest_and_rejects_malformed_action() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = fake(dir.path(), r#"
+import hashlib, json, sys
+print(json.dumps({'type':'hello','proto':1,'capabilities':['scrub','snapshot','memory_review_v1','memory_action_v1']}), flush=True)
+body = '- ü fact\n'
+for line in sys.stdin:
+    req = json.loads(line)
+    if req['op'] == 'memory_review_v1':
+        value = {'scope':req['scope'],'key':'user','entries':['ü fact'], 'chars':len(body),'cap_chars':9000,'sha256':hashlib.sha256(body.encode()).hexdigest()}
+        if req['cwd'] == '/wrong': value['chars'] = len(body.encode())
+        if req['cwd'] == '/changed': value['entries'] = ['changed fact']
+    else:
+        assert req['expected']['key'] == 'user'
+        assert req['expected']['sha256'] == hashlib.sha256(body.encode()).hexdigest()
+        assert req['scope'] == 'user' and req['action'] == 'remove'
+        value = {'status':'staged'}
+    print(json.dumps({'type':'reply','id':req['id'],'ok':True,'value':value}), flush=True)
+"#);
+    let mut client = LoreClient::spawn(&path, Duration::from_secs(2)).unwrap();
+    let review = client.memory_review("/repo", "user").unwrap();
+    assert_eq!(review["entries"][0], "ü fact");
+    for cwd in ["/wrong", "/changed"] {
+        assert!(matches!(client.memory_review(cwd, "user"), Err(LoreError::InvalidFrame)));
+    }
+    assert!(matches!(client.memory_action("/repo", serde_json::json!({"scope":"user","action":"remove", "text":"", "entry":"ü fact", "expected":{"key":"user","sha256":"wrong"}})), Err(LoreError::InvalidFrame)));
+    let result = client.memory_action("/repo", serde_json::json!({"scope":"user","action":"remove", "text":"", "entry":"ü fact", "expected":{"key":"user","sha256":review["sha256"]}})).unwrap();
+    assert_eq!(result["status"], "staged");
+}
