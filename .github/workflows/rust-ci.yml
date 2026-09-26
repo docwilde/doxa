@@ -56,7 +56,7 @@ jobs:
       - name: Test completed Claude compaction review gate
         run: uv run pytest tests/test_engine.py -k compact -q
       - name: Test protected Codex compaction hook
-        run: uv run pytest rust/doxa-engines/tests/test_codex_compact_hook.py -q
+        run: uv run pytest rust/doxa-engines/tests/test_codex_compact_hook.py rust/doxa-engines/tests/test_codex_compact_deadline.py -q
       - name: Test native daemon protocol
         env:
           DOXA_TEST_PYTHON: ${{ github.workspace }}/.venv/bin/python
