@@ -203,6 +203,13 @@ fn chooser_visible_start(view_start: &Cell<usize>, selected: usize, visible: usi
     start
 }
 
+fn chooser_list_lines(lines: Vec<Line<'static>>, width: usize) -> Vec<Line<'static>> {
+    lines.into_iter().map(|line| {
+        let text: String = line.spans.iter().map(|span| span.content.as_ref()).collect();
+        Line::styled(clipped_title(&text, width).0, line.style)
+    }).collect()
+}
+
 #[derive(Clone, Debug)]
 struct RejectDraft {
     index: usize,
@@ -6538,7 +6545,29 @@ impl App {
                 }
                 return true;
             }
-            if picker.proposal_mode || picker.evidence.is_some() { return true; }
+            if picker.evidence.is_some() || picker.review.is_some() { return true; }
+            if picker.proposal_mode {
+                let visible = usize::from(menu.height.saturating_sub(6)).max(1);
+                match mouse.kind {
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        let first = menu.y + 4;
+                        let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
+                        if mouse.row >= first && mouse.row < first.saturating_add(visible as u16) {
+                            let index = start + usize::from(mouse.row - first);
+                            if let Some(pid) = picker.proposals.get(index).map(|row| row.pid.clone()) {
+                                if picker.selected == index {
+                                    let cwd = picker.cwd.clone();
+                                    self.load_lore(lore_picker::Query::Review(cwd, pid));
+                                } else { picker.selected = index; }
+                            }
+                        }
+                    }
+                    MouseEventKind::ScrollUp => picker.selected = picker.selected.saturating_sub(1),
+                    MouseEventKind::ScrollDown => picker.selected = (picker.selected + 1).min(picker.proposals.len().saturating_sub(1)),
+                    _ => {}
+                }
+                return true;
+            }
             match mouse.kind {
                 MouseEventKind::Down(MouseButton::Left) => {
                     let compact = menu.height < 10;
@@ -7306,6 +7335,9 @@ impl App {
                     lines.push(Line::styled(label, chooser_row_style(index == picker.selected)));
                 }
             }
+            if picker.review.is_none() {
+                lines = chooser_list_lines(lines, usize::from(area.width.saturating_sub(2)));
+            }
             frame.render_widget(Paragraph::new(lines)
                 .block(Block::default().title(" LORE proposals · Enter full review · PgUp/PgDn page · B beliefs · Esc close ")
                     .borders(Borders::ALL).border_style(Style::default().fg(theme::ACCENT)))
@@ -7377,6 +7409,9 @@ impl App {
                     if row.truncated { " · claim clipped" } else { "" });
                 lines.push(Line::styled(label, chooser_row_style(index == picker.selected)));
             }
+        }
+        if picker.evidence.is_none() {
+            lines = chooser_list_lines(lines, usize::from(area.width.saturating_sub(2)));
         }
         frame.render_widget(Paragraph::new(lines)
             .block(Block::default().title(" LORE beliefs · Enter review/search · → evidence · P proposals · PgUp/PgDn page · Esc close ")
@@ -9443,6 +9478,42 @@ for line in sys.stdin:
         let (menu, start) = hover_first_picker_row(&mut app, 3);
         click_picker_row(&mut app, menu, 3);
         assert_eq!(app.pending_model_changes, vec![("session".into(), models[start].clone())]);
+    }
+
+    #[test]
+    fn long_lore_claim_and_proposal_rows_keep_hover_click_target() {
+        let cwd = tempfile::tempdir().unwrap();
+        for proposal_mode in [false, true] {
+            let mut app = scrolled_picker_app();
+            app.lore_picker = Some(LorePicker {
+                rows: (1..=2).map(|id| lore_picker::Belief { id, subject: format!("belief-{id}"),
+                    claim: "long claim ".repeat(80), truncated: false, confidence: 0.9,
+                    evidence_count: None }).collect(),
+                proposals: (1..=2).map(|id| lore_picker::Proposal { pid: format!("proposal-{id}"),
+                    kind: "belief".into(), action: "add".into(), scope: "project".into(),
+                    summary: "long summary ".repeat(80) }).collect(),
+                selected: 0, query: String::new(), offset: 0, status: "long status ".repeat(40),
+                evidence: None, pending: None, proposal_mode, review: None, review_scroll: 0,
+                review_seen: 0, review_width: 0, armed_resolution: None, can_resolve: false,
+                resolving: false, cwd: cwd.path().display().to_string(), belief_review: None,
+                can_act_on_beliefs: false, belief_action: None, belief_note: String::new(),
+                retract_armed: false, belief_acting: false, result_status: None,
+            });
+            let menu = app.active_chooser_rect().unwrap();
+            let offset = if proposal_mode { 5 } else if menu.height < 10 { 4 } else { 7 };
+            let rendered = painted_at(&app, 100, 28);
+            let row = usize::from(menu.y + offset);
+            assert!(rendered.lines().nth(row).unwrap().contains(if proposal_mode { "proposal-2" } else { "#2" }));
+            app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Moved,
+                column: menu.x + 2, row: menu.y + offset, modifiers: KeyModifiers::NONE }));
+            assert_eq!(app.lore_picker.as_ref().unwrap().selected, 1);
+            let hovered = painted_at(&app, 100, 28);
+            assert!(hovered.lines().nth(row).unwrap().contains(if proposal_mode { "proposal-2" } else { "#2" }));
+            click_picker_row(&mut app, menu, offset);
+            let picker = app.lore_picker.as_ref().unwrap();
+            assert_eq!(picker.selected, 1);
+            assert!(picker.pending.is_some(), "click requests review of the highlighted entry");
+        }
     }
 
     #[test]
