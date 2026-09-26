@@ -131,7 +131,11 @@ fn run_auth(binary: &Path, args: &[&str], timeout: Duration, progress: &mut impl
     if unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null(), std::ptr::null()) } != 0 { return Err(io::Error::last_os_error()); }
     let mut reader = unsafe { std::fs::File::from_raw_fd(master) };
     let terminal = unsafe { std::fs::File::from_raw_fd(slave) };
-    unsafe { libc::fcntl(master, libc::F_SETFL, libc::O_NONBLOCK); }
+    unsafe {
+        libc::fcntl(master, libc::F_SETFL, libc::O_NONBLOCK);
+        libc::fcntl(master, libc::F_SETFD, libc::FD_CLOEXEC);
+        libc::fcntl(slave, libc::F_SETFD, libc::FD_CLOEXEC);
+    }
     let mut child = Command::new(binary).args(args).stdin(terminal.try_clone()?).stdout(terminal.try_clone()?).stderr(terminal).process_group(0).spawn()?;
     let deadline = Instant::now() + timeout;
     let mut pending = String::new();
