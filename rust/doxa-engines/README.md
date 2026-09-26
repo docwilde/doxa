@@ -1,34 +1,67 @@
-# `doxa-engines` first slice
+# Native Codex integration
 
-This standalone crate normalizes `codex exec --json` stdout into DOXA's
-`{ "type": "...", "data": { ... } }` engine event shape. It has no TUI or daemon
-dependency. Feed arbitrary stdout byte chunks to `push_bytes`, call
-`begin_turn` before each turn, and call `finish_turn` after the subprocess
-exits. `finish_turn` handles a final line without a newline and emits one
-`turn_done` unless a `turn.failed` or `error` frame already did so. A line
-over 8 MiB returns `LineTooLong`; the future process adapter must stop and
-report that failure instead of continuing with an unsynchronized stream.
+`doxa-engines` translates Codex events into DOXA's `{ "type", "data" }`
+protocol. New daemon sessions use the app-server transport; saved CLI sessions
+keep `codex exec --json` and their original provider thread. The daemon owns
+transcript persistence, LORE scrubbing, session recovery and spend guards.
 
-Construct the parser with the application's secret scrubber. There is no
-default identity scrubber because text and tool output enter UI/transcripts.
-The Rust port does not yet have a `lore_core.scrub` equivalent; the fixture
-uses a small explicit scrubber only to prove this injection boundary.
+## App server
 
-The Unix-only `CodexCliDriver` now launches the CLI with separate argv
-elements, sends the prompt on stdin, streams stdout into this normalizer,
-drains a bounded stderr tail concurrently, and kills the process group on
-cancellation, timeout, parser overrun, or explicit terminal error. It uses
-the same first-turn / `exec resume THREAD` argv shape as Python, except
-that MCP overrides and linked-worktree Git writable-root overrides are not
-yet present. It validates a thread ID before passing it to the CLI.
+The native driver initializes the app server, starts or resumes a thread, and
+sends each prompt through `turn/start`. Model and reasoning effort changes
+apply to the next turn on that same thread. Account model discovery uses a
+separate bounded app-server process without starting a provider thread.
 
-The driver does **not** authenticate `codex`, persist thread IDs or
-transcripts, register MCP, implement Git writable-root widening, enforce
-budget, or provide a production secret scrubber. `EngineCapabilities::default()`
-advertises none of those provider features. The Python `doxa/codex.py`
-remains the behavior reference. Running this driver requires an already
-installed, authenticated Codex CLI; tests use executable shell fixtures
-and no account.
+The driver handles user questions, command approvals, file approvals and
+DOXA peer tool requests. Replies are bound to the exact provider thread,
+turn and request. Approvals are for one action. File approvals require the
+complete cached proposal; secret input requests are refused until a masked
+input interface exists. Cancellation clears pending answers. Peer tools
+require human approval and accept only known operations with exact scoped
+session IDs. Returned peer text is marked as untrusted data.
 
-Run `cargo test --manifest-path rust/doxa-engines/Cargo.toml` from the repo
-root. Fixture data contains no credentials.
+Thread IDs and whether DOXA dynamic tools were registered are persisted.
+Legacy threads are not assumed to contain tools. Interrupted or failed turns
+keep the recovery guard instead of silently creating a replacement thread.
+
+Assistant and reasoning text are bounded and scrubbed as complete messages.
+The UI can count incoming reasoning while retaining its content behind a fold.
+Context usage follows the provider's telemetry and Codex TUI reserve. Usage
+is considered complete only when the reported model and accounting basis
+match; incomplete usage cannot authorize additional budgeted turns.
+
+## Compaction review
+
+Protected native app-server sessions currently require **Codex 0.156.1**.
+Initialization checks the server's build identity and `hooks/list` verifies
+DOXA's synchronous, trusted `PreCompact` command hash before a thread starts.
+An unsupported build or missing trusted hook refuses startup with its reason.
+DOXA adds its own session configuration; it does not overwrite global Codex
+settings or trust unrelated user hooks.
+
+The pinned hook binds the actual provider thread and owned rollout, creates
+a scrubbed private snapshot, and waits for the configured LORE reviewer.
+Failure or a changed source returns a blocking hook decision. Manual
+`/compact` uses `thread/compact/start` and waits for matching review and
+compaction events; it is not sent as a model prompt. A failed hook notification
+stops the protected session.
+
+**Provider limitation:** Codex 0.156.1 can continue compaction if the operating
+system cannot spawn a hook, or if the hook times out or returns invalid output.
+DOXA's parent can stop the process after observing failure, but this does not
+guarantee that the provider has not already compacted. Normal reviewer failures
+return a valid blocking decision before the hook deadline. Stable parity must
+retain this distinction until the provider guarantees blocking infrastructure
+failures.
+
+## Verification
+
+```sh
+cargo test --locked -p doxa-engines
+python -m pytest rust/doxa-engines/tests/test_codex_compact_hook.py -q
+```
+
+Tests use local executable fixtures and fake review workers. They cover
+stream boundaries, deadlines, cancellation, exact input replies, one-action
+approvals, protected build/hook checks and compaction ordering without account
+inference. The Python 1.19 `doxa/codex.py` remains the legacy behavior reference.
