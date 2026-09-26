@@ -131,3 +131,62 @@ fn private_parent_is_required_and_missing_file_is_empty() {
     fs::remove_file(path).unwrap();
     assert!(ledger.recent(1).unwrap().is_empty());
 }
+
+#[test]
+fn provider_history_is_scoped_scrubbed_and_bounded() {
+    let (_dir, ledger, path) = fixture();
+    let clean = |text: &str| text.replace("first", "[redacted]");
+    let history = ledger.history("s-alpha", "/repo/one", &clean).unwrap();
+    assert_eq!(history.iter().map(|m| m.body.as_str()).collect::<Vec<_>>(), ["[redacted]", "second"]);
+    assert!(ledger.history("s-alpha", "/repo/two", &clean).unwrap().is_empty());
+    assert!(ledger.history("unrelated", "/repo/one", &clean).unwrap().is_empty());
+
+    let mut row: serde_json::Value = serde_json::from_slice(
+        include_bytes!("fixtures/python_ledger.jsonl").split(|b| *b == b'\n').next().unwrap()
+    ).unwrap();
+    // The discarded prefix ends in the middle of a record; neither it nor
+    // an unfinished final record may appear in provider-visible history.
+    let mut bytes = vec![b'x'; 300 * 1024];
+    bytes.push(b'\n');
+    for n in 0..25 {
+        row["body"] = serde_json::json!(format!("record-{n}"));
+        bytes.extend(serde_json::to_vec(&row).unwrap()); bytes.push(b'\n');
+    }
+    bytes.extend_from_slice(b"{\"body\":\"unfinished\"");
+    fs::write(&path, bytes).unwrap();
+    let history = ledger.history("s-alpha", "/repo/one", &clean).unwrap();
+    assert_eq!(history.len(), 20);
+    assert_eq!(history.first().unwrap().body, "record-5");
+    assert_eq!(history.last().unwrap().body, "record-24");
+
+    row["body"] = serde_json::json!("z".repeat(10_000));
+    let mut bytes = Vec::new();
+    for _ in 0..4 { bytes.extend(serde_json::to_vec(&row).unwrap()); bytes.push(b'\n'); }
+    fs::write(&path, bytes).unwrap();
+    let history = ledger.history("s-alpha", "/repo/one", &clean).unwrap();
+    assert_eq!(history.len(), 2);
+    assert!(history.iter().map(|m| serde_json::to_vec(m).unwrap().len()).sum::<usize>() <= 24 * 1024);
+}
+
+#[test]
+fn provider_history_refuses_public_links_and_fifo_without_blocking() {
+    let (dir, ledger, path) = fixture();
+    let clean = |text: &str| text.to_owned();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(ledger.history("s-alpha", "/repo/one", &clean).is_err());
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    let hard = dir.path().join("hard");
+    fs::hard_link(&path, &hard).unwrap();
+    assert!(ledger.history("s-alpha", "/repo/one", &clean).is_err());
+    fs::remove_file(hard).unwrap();
+    let real = dir.path().join("real"); fs::rename(&path, &real).unwrap();
+    symlink(&real, &path).unwrap();
+    assert!(ledger.history("s-alpha", "/repo/one", &clean).is_err());
+    fs::remove_file(&path).unwrap();
+    use std::os::unix::ffi::OsStrExt;
+    let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+    let started = std::time::Instant::now();
+    assert!(ledger.history("s-alpha", "/repo/one", &clean).is_err());
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
+}

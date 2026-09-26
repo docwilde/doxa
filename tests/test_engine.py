@@ -117,6 +117,12 @@ async def test_explicit_compact_review_permit_is_consumed_once(monkeypatch, tmp_
     assert (await engine._on_pre_compact({"trigger": "manual"}, None, {}))["decision"] == "block"
     assert engine._build_options().hooks["PreCompact"][0].timeout == 200
 
+    monkeypatch.setattr(engine, "_review_before_compact_sync", lambda: True)
+    assert await engine.review_before_compact()
+    monkeypatch.setenv("LORE_DISABLE_REVIEW", "1")
+    assert (await engine._on_pre_compact({"trigger": "manual"}, None, {}))["decision"] == "block"
+    assert not engine._compact_preapproved
+
 
 def _script_one_turn_with_tool_call() -> list:
     return [

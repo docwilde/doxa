@@ -675,7 +675,9 @@ impl Host for CodexHost {
                     &id,
                     !turn_succeeded || self.persistence_failed.load(Ordering::Acquire),
                 );
-            } else {
+            } else if result.is_ok() {
+                // A rejected startup has no provider thread to persist. Keep
+                // its specific compatibility/trust error for the user below.
                 eprintln!("doxa-daemon: Codex turn ended without a thread ID");
                 self.persistence_failed.store(true, Ordering::Release);
             }

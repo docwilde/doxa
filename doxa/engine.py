@@ -2003,9 +2003,12 @@ class SessionEngine:
         """Await review before either automatic or manual compaction.
 
         PreCompact's decision field can refuse the operation; continue_
-        cannot. The matcher deadline exceeds our bounded review worker so
-        its fail-open timeout is never used as a policy decision.
+        cannot. The matcher deadline exceeds our bounded review worker;
+        review errors and disabled review explicitly refuse compaction.
         """
+        if not self.lore or stage_disabled("review"):
+            self._compact_preapproved = False
+            return {"decision": "block", "reason": "LORE review is disabled; compaction refused"}
         if getattr(self, "_compact_preapproved", False):
             self._compact_preapproved = False
             return {}
@@ -2284,8 +2287,7 @@ class SessionEngine:
     async def review_before_compact(self) -> bool:
         """Finish a LORE review before an explicit provider compaction.
 
-        This is deliberately stricter than the best-effort PreCompact hook:
-        a disabled or failed reviewer must leave the provider transcript alone.
+        A disabled or failed reviewer must leave the provider transcript alone.
         The worker runs in a separate process because its progress goes to
         stdout, which is the Rust sidecar's JSON protocol channel.
         """

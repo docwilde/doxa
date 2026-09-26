@@ -55,6 +55,8 @@ jobs:
           TMPDIR="$native_claude_tests" uv run pytest tests/test_resume.py tests/test_native_peer_presence.py -q --basetemp="$native_claude_tests"
       - name: Test completed Claude compaction review gate
         run: uv run pytest tests/test_engine.py -k compact -q
+      - name: Test protected Codex compaction hook
+        run: uv run pytest rust/doxa-engines/tests/test_codex_compact_hook.py -q
       - name: Test native daemon protocol
         env:
           DOXA_TEST_PYTHON: ${{ github.workspace }}/.venv/bin/python
