@@ -97,6 +97,41 @@ def test_a_resuming_session_sends_resume_alone(tmp_path):
     assert options.fork_session is False
 
 
+def test_uuid_hex_local_identity_is_canonical_for_provider_start_and_resume(tmp_path):
+    local_id = "123456789abc4def8123456789abcdef"
+    canonical = "12345678-9abc-4def-8123-456789abcdef"
+    fresh = SessionEngine(cwd=str(tmp_path), session_id=local_id)
+    options = fresh._build_options()
+    assert options.session_id == canonical
+    assert options.resume is None
+    assert fresh.session_id == local_id
+    assert fresh.transcript_path.name == local_id + ".jsonl"
+    resumed = SessionEngine(cwd=str(tmp_path), session_id=local_id, resume=local_id)
+    options = resumed._build_options()
+    assert options.resume == canonical
+    assert options.session_id is None
+    assert resumed.session_id == local_id
+    assert resumed.resume == local_id
+
+
+@pytest.mark.asyncio
+async def test_legacy_hex_identity_queries_canonical_provider_without_rewriting_local_id(tmp_path):
+    from claude_agent_sdk import SystemMessage
+    from tests.fakes import FakeClient
+
+    local_id = "123456789abc4def8123456789abcdef"
+    canonical = "12345678-9abc-4def-8123-456789abcdef"
+    engine = SessionEngine(cwd=str(tmp_path), session_id=local_id, lore=False)
+    client = FakeClient(engine._build_options(), [SystemMessage(subtype="init", data={"session_id":canonical, "model":"opus"})])
+    engine._client = client
+    engine._connected = True
+    async for _ in engine.send("test prompt"):
+        pass
+    assert client.queried[-1][1] == canonical
+    assert engine.session_id == local_id
+    assert engine.transcript_path.name == local_id + ".jsonl"
+
+
 def test_a_non_uuid_session_id_is_simply_not_pinned(tmp_path):
     """The SDK requires a UUID. A short synthetic id (the suite is full of
     them) must cost one omitted key, never a refused connect."""

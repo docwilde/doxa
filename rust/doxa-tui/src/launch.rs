@@ -205,7 +205,10 @@ fn configured_string(key: &str, env_key: &str, config: Option<&toml::Value>) -> 
 fn random_id() -> io::Result<String> {
     let mut bytes = [0_u8; 16];
     File::open("/dev/urandom")?.read_exact(&mut bytes)?;
-    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    Ok(format!("{}-{}-{}-{}-{}", &hex[..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..]))
 }
 
 pub fn spawn(options: &LaunchOptions) -> io::Result<Session> {
@@ -633,7 +636,10 @@ mod tests {
         let first = random_id().unwrap();
         let second = random_id().unwrap();
         assert!(discovery::valid_id(&first));
-        assert_eq!(first.len(), 32);
+        assert_eq!(first.len(), 36);
+        assert_eq!(&first[14..15], "4");
+        assert!(matches!(&first[19..20], "8" | "9" | "a" | "b"));
+        assert_eq!(first.chars().filter(|c| *c == '-').count(), 4);
         assert_ne!(first, second);
     }
 }

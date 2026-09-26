@@ -1208,10 +1208,18 @@ def _iso_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
+def _provider_session_id(value: str) -> str:
+    """Normalize UUID spellings for Claude CLI, preserving local DOXA identity."""
+    try:
+        return str(uuid.UUID(value))
+    except (ValueError, AttributeError, TypeError):
+        return value
+
+
 def _is_uuid(value: str) -> bool:
-    """Would the CLI accept this as its own ``--session-id``? The SDK says
-    only "Must be a valid UUID", so this asks ``uuid.UUID`` and nothing
-    else. Real sessions always pass (SessionEngine mints uuid4, and so
+    """Can this local identity be normalized to a CLI UUID? The CLI requires
+    canonical hyphenated spelling; _provider_session_id handles that boundary.
+    Real sessions always pass (SessionEngine mints uuid4, and so
     does spawn_daemon); the synthetic ids the test suite hands in ("s1",
     "sess-a") do not, and a session that cannot pin its id simply does
     not -- see _build_options, where a false answer here means one fewer
@@ -2753,8 +2761,8 @@ class SessionEngine:
             # instead of forking into a second one the user never asked
             # for.
             **(
-                {"resume": self.resume} if self.resume
-                else {"session_id": self.session_id}
+                {"resume": _provider_session_id(self.resume)} if self.resume
+                else {"session_id": _provider_session_id(self.session_id)}
                 if _is_uuid(self.session_id) else {}
             ),
             # Connect-time only -- see effort_level(). None leaves the CLI's
@@ -3449,7 +3457,7 @@ class SessionEngine:
             "turn_id": self._turn_id,
         })
 
-        await self._client.query(outbound, session_id=self.session_id)
+        await self._client.query(outbound, session_id=_provider_session_id(self.session_id))
 
         pending_assistant_blocks: list[dict] = []
         reasoning_fragments: list[str] = []
