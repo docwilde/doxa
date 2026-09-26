@@ -3234,3 +3234,39 @@ else:
     assert_eq!(thread["model"], "account-model");
     assert_eq!(thread["effort"], "high");
 }
+
+#[test]
+fn codex_protected_startup_preserves_authoritative_build_refusal() {
+    let cache = std::env::var_os("TMPDIR").map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join(".cache/doxa-tests"));
+    fs::create_dir_all(&cache).unwrap();
+    let dir=tempfile::tempdir_in(cache).unwrap();
+    let codex=dir.path().join("unsupported-codex");
+    let python=dir.path().join("fake-lore");
+    fake_scrubber(&python,false);
+    executable(&codex,r#"#!/usr/bin/python3
+import json,sys
+init=json.loads(sys.stdin.readline())
+assert init['method']=='initialize'
+print(json.dumps({'id':init['id'],'result':{'userAgent':'codex_cli_rs/0.0.1'}}),flush=True)
+assert json.loads(sys.stdin.readline())['method']=='initialized'
+# A protected startup must refuse before hooks/list or thread/start.
+assert not sys.stdin.readline()
+"#);
+    let mut process=Process::start_codex_appserver(dir.path(),&codex,&python,false);
+    let (mut reader,mut socket)=process.connect();receive(&mut reader);
+    send(&mut socket,json!({"type":"attach","cursor":null}));
+    send(&mut socket,json!({"type":"prompt","id":1,"text":"never delivered to a provider"}));
+    loop {
+        let frame=receive(&mut reader);
+        if frame["event"]["type"]=="turn_done" {
+            assert_eq!(frame["event"]["data"]["is_error"],true);
+            assert_eq!(frame["event"]["data"]["error"],"Codex build has no verified DOXA compaction hook contract");
+            break;
+        }
+    }
+    send(&mut socket,json!({"type":"call","id":2,"method":"stop","params":{}}));
+    loop { let frame=receive(&mut reader);if frame["type"]=="reply"&&frame["id"]==2 {assert_eq!(frame["ok"],true);break;} }
+    wait_until(||process.exited());
+    assert!(!dir.path().join("project/codex-session.codex.json").exists());
+}
