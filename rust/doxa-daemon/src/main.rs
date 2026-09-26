@@ -159,7 +159,7 @@ fn options() -> io::Result<Options> {
             }
             Some("--effort") => {
                 let chosen = value.into_string().map_err(|_| invalid("invalid effort"))?;
-                if !matches!(chosen.as_str(), "none" | "low" | "high" | "max") {
+                if chosen.is_empty() || chosen.len() > 32 || !chosen.bytes().all(|b| b.is_ascii_alphanumeric()) {
                     return Err(invalid("invalid effort"));
                 }
                 effort = Some(chosen);
@@ -214,9 +214,6 @@ fn options() -> io::Result<Options> {
             .ok_or_else(|| invalid("--base-branch must name an existing local or remote-tracking branch"))?;
     }
     if engine == Engine::Codex {
-        if effort.is_some() {
-            return Err(invalid("effort requires a vendor engine"));
-        }
         codex_bin = Some(executable(
             codex_bin.ok_or_else(|| invalid("Codex needs --codex-bin"))?,
         )?);
@@ -595,6 +592,7 @@ fn run() -> io::Result<()> {
                 .clone()
                 .expect("validated Codex executable");
             driver.model = options.model.clone();
+            driver.effort = options.effort.clone();
             driver.sandbox = options.sandbox;
             let host = Arc::new(
                 CodexHost::new(

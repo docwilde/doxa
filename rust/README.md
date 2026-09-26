@@ -71,6 +71,13 @@ are explicitly refused with an error; app-server approval dialogs are not yet
 available. A refused or interrupted turn retains its incomplete-turn recovery
 guard rather than silently starting a replacement thread.
 
+Codex model and effort choices can change within an existing idle session.
+`Alt+M` loads the authenticated account model catalog; `Alt+F` uses that
+model's advertised effort levels. Choices apply to the next turn on the
+same thread and survive recovery, including saved CLI sessions. Finish an
+active response and empty its prompt queue before changing settings.
+`--effort` also selects the startup effort for a Codex session.
+
 Native sessions started in a Git checkout now get a linked worktree under
 `$DOXA_HOME/worktrees/<repo>-<session-prefix>` on a `doxa/<session-prefix>`
 branch. A sidecar in `worktrees/.meta` records the original repository and
@@ -219,7 +226,7 @@ the JSONL file retains the full history. Older daemons without snapshot
 metadata fall back to their 512-event replay ring. A turn still running at
 attach can have text that was streamed but not yet persisted, so its earlier
 in-flight deltas may be absent. `Ctrl+T` opens bounded tool activity cards.
-The binary version is `2.0.0-alpha.26`;
+The binary version is `2.0.0-alpha.27`;
 this is an alpha release.
 
 In the transcript, user messages have a highlighted body and a left rule;
@@ -329,8 +336,8 @@ pair leaves launch disabled with an explanation. A blank model for other
 engines uses the configured default. The effort chip immediately follows the
 model chip and displays the active daemon's reported value, or `?` when it
 has no verified value. Its tooltip identifies the level as effort. `Alt+F`
-and bare `/effort` open an inline picker for the current DeepSeek or GLM
-session for known models. The daemon accepts a
+and bare `/effort` open an inline picker for the current Codex session using
+account catalog capabilities, or a DeepSeek/GLM session for known models. The daemon accepts a
 change only while the session is idle with no queued prompts; a successful
 change applies to the next admitted turn and updates the chip after its
 event. Newer models discovered only from a live catalog remain available

@@ -36,6 +36,7 @@ pub trait Host: Send + Sync + 'static {
     fn initial_effort(&self) -> Option<String> { None }
     fn initial_permission_mode(&self) -> String { "default".to_owned() }
     fn can_set_model(&self) -> bool { false }
+    fn model_change_requires_idle(&self) -> bool { false }
     fn can_set_permission_mode(&self) -> bool { false }
     /// Provider-verified billing snapshot; None means unknown.
     fn billing_snapshot(&self) -> Option<Value> { None }
@@ -540,12 +541,18 @@ fn handle_call(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame: &Value) {
         // Control calls may wait on a sidecar. Hold the control lock across
         // that call, but never the global state lock: event publishing and
         // status reads must remain responsive while a sidecar answers.
+        let refuse_model = method == "set_model" && inner.host.model_change_requires_idle() && {
+            let state = inner.state.lock().unwrap();
+            state.busy || !state.prompts.is_empty() || inner.stopping.load(Ordering::Acquire)
+        };
         let refuse_dont_ask = {
             let state = inner.state.lock().unwrap();
             method == "set_permission_mode" && params["mode"] == "dontAsk"
                 && state.permission_mode != "dontAsk" && (state.busy || !state.prompts.is_empty())
         };
-        if refuse_dont_ask {
+        if refuse_model {
+            (Err("Finish the current response and queued prompts, then change the Codex model for the next turn".into()), None)
+        } else if refuse_dont_ask {
             (Err("dontAsk requires an idle session with no queued prompts".into()), None)
         } else {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(||
@@ -565,7 +572,8 @@ fn handle_call(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame: &Value) {
                 (Ok(extra), "set_model") => extra["model"].as_str().map(|model| {
                     let mut state = inner.state.lock().unwrap();
                     state.model = if model == "default" { None } else { Some(model.to_owned()) };
-                    json!({"type":"model_changed","data":{"model":model}})
+                    if extra.get("effort").is_some() { state.effort = extra["effort"].as_str().map(str::to_owned); }
+                    json!({"type":"model_changed","data":{"model":model,"effort":state.effort}})
                 }),
                 (Ok(extra), "set_permission_mode") => extra["mode"].as_str().map(|mode| {
                     let mut state = inner.state.lock().unwrap();

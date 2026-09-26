@@ -43,6 +43,7 @@ pub struct DriverOptions {
     pub executable: PathBuf,
     pub cwd: PathBuf,
     pub model: Option<String>,
+    pub effort: Option<String>,
     pub sandbox: SandboxMode,
     pub turn_timeout: Duration,
     /// A previously recorded Codex thread ID for an explicit resume.
@@ -57,6 +58,7 @@ impl DriverOptions {
             executable: PathBuf::from("codex"),
             cwd,
             model: None,
+            effort: None,
             sandbox: SandboxMode::WorkspaceWrite,
             turn_timeout: Duration::from_secs(3600),
             resume_thread: None,
@@ -87,6 +89,9 @@ impl DriverOptions {
         ]);
         if let Some(model) = &self.model {
             args.extend(["-m".to_owned(), model.clone()]);
+        }
+        if let Some(effort) = &self.effort {
+            args.extend(["-c".to_owned(), format!("model_reasoning_effort={}", serde_json::to_string(effort).unwrap())]);
         }
         args.push("-".to_owned());
         Ok(args)
@@ -136,6 +141,11 @@ impl CodexCliDriver {
             normalizer: CodexJsonlNormalizer::new(scrub),
             turns_finished: 0,
         }
+    }
+
+    pub fn set_selection(&mut self, model: Option<String>, effort: Option<String>) {
+        self.options.model = model;
+        self.options.effort = effort;
     }
 
     pub fn thread_id(&self) -> Option<&str> {

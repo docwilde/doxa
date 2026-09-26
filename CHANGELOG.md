@@ -5,6 +5,20 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.27 — 2026-09-26
+
+- Change Codex models and reasoning effort in an existing idle session,
+  applying account-supported choices on the next turn without replacing its
+  thread. Persist settings for app-server and recovered CLI sessions.
+- Keep each turn's expandable tool activity below its latest response and
+  above the processing spinner, including recovered and expanded tool detail.
+  Preserve fold identities and invalidate streamed rendering shortcuts that
+  would otherwise drop the relocated tool section.
+- Make engine session forms mouse actionable, including Claude: click the
+  model and prompt fields, then use the visible Start session action.
+- Keep model picker hover and click targets aligned with visible rows during
+  a background catalog refresh; status text no longer selects a model.
+
 ## 2.0.0-alpha.26 — 2026-09-26
 
 - Use the Codex app-server transport for new sessions, with official context

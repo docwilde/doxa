@@ -53,6 +53,7 @@ New-session options: --engine codex|claude|deepseek|glm, --model NAME,
   --branch LOCAL_OR_REMOTE, --linger SECONDS, --resume FULL_SESSION_ID.
 Codex: --sandbox read-only|workspace-write|danger-full-access, --codex-bin PATH.
 Claude: --claude-python PATH, --claude-script ABSOLUTE_PATH.
+Codex: --effort uses account model capabilities.
 DeepSeek/GLM: --effort low|high|max (DeepSeek also none).
 Use --lore-python PATH for the LORE sidecar; API keys come from provider env vars.
 

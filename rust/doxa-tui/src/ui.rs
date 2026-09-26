@@ -170,6 +170,13 @@ struct ModelPicker {
     catalog_pending: bool,
 }
 
+impl ModelPicker {
+    fn row_offset(&self) -> u16 { 3 + u16::from(self.catalog_pending) }
+    fn visible_rows(&self, height: u16) -> usize {
+        usize::from(height.saturating_sub(self.row_offset() + 1)).max(1)
+    }
+}
+
 #[derive(Debug)]
 struct AttachPicker {
     rows: Vec<crate::discovery::Session>,
@@ -1135,7 +1142,11 @@ impl RenderedTranscript {
                 let (tail_lines, tail_sections) = transcript_tools::render(tail, width, None, None);
                 if tail_sections.is_empty() && lines.len() > tail_lines.len() {
                     prefix_lines = lines.len() - tail_lines.len() - 1;
-                    turn_start = Some(start);
+                    // A deferred tool section at the end belongs to this
+                    // turn, even if its source precedes the final heading.
+                    if sections.iter().all(|section| section.line < prefix_lines) {
+                        turn_start = Some(start);
+                    }
                 }
             }
         }
@@ -1790,6 +1801,10 @@ impl App {
                         true
                     }
                     "model_changed" => {
+                        if data.get("effort").is_some() {
+                            if let Some(effort) = data["effort"].as_str() { self.session_efforts.insert(id.clone(), safe_label(effort)); }
+                            else { self.session_efforts.remove(&id); }
+                        }
                         if self.effort_picker.as_ref().is_some_and(|picker| picker.session_id == id) {
                             self.effort_picker = None;
                         }
@@ -2000,6 +2015,16 @@ impl App {
             }
             "models_reply" => {
                 let Some(id) = frame.get("session_id").and_then(|v| v.as_str()) else { return false; };
+                if frame["ok"] == true && self.session_identity.get(id).is_some_and(|identity| identity.0.as_deref() == Some("codex")) {
+                    for row in frame["capabilities"].as_array().into_iter().flatten().take(100) {
+                        if let Some(model) = row["model"].as_str().filter(|model| !model.is_empty() && model.len() <= 128 && !model.chars().any(char::is_control)) {
+                            let levels = row["efforts"].as_array().into_iter().flatten().filter_map(serde_json::Value::as_str)
+                                .filter(|level| !level.is_empty() && level.len() <= 32 && level.bytes().all(|b| b.is_ascii_alphanumeric()))
+                                .take(16).map(str::to_owned).collect();
+                            self.catalog_efforts.insert(("codex".into(), model.into()), levels);
+                        }
+                    }
+                }
                 if let Some(picker) = self.model_picker.as_mut().filter(|picker| picker.session_id == id) {
                     picker.loading = false;
                     picker.catalog_pending = frame["loading"] == true;
@@ -3583,9 +3608,14 @@ impl App {
             self.notice = "Effort capability is unknown for this session".into();
             return;
         };
+        if engine == "codex" && !self.catalog_efforts.contains_key(&(engine.clone(), model.clone())) {
+            self.open_model_picker();
+            self.notice = "Loading Codex model capabilities; select a model, then choose effort".into();
+            return;
+        }
         let known = effort_choices(engine, model);
         let levels = self.catalog_efforts.get(&(engine.clone(), model.clone()))
-            .map(|levels| levels.iter().filter(|level| known.contains(&level.as_str())).cloned().collect())
+            .map(|levels| levels.iter().filter(|level| engine == "codex" || known.contains(&level.as_str())).cloned().collect())
             .unwrap_or_else(|| known.iter().map(|level| (*level).to_owned()).collect::<Vec<_>>());
         if levels.is_empty() {
             self.notice = "Live effort change is unavailable for this session model".into();
@@ -3604,7 +3634,7 @@ impl App {
         let Some(chosen) = picker.levels.get(picker.selected) else { return; };
         let known = effort_choices(engine, model);
         let allowed = self.catalog_efforts.get(&(engine.clone(), model.clone()))
-            .map(|levels| levels.iter().filter(|level| known.contains(&level.as_str())).cloned().collect())
+            .map(|levels| levels.iter().filter(|level| engine == "codex" || known.contains(&level.as_str())).cloned().collect())
             .unwrap_or_else(|| known.iter().map(|level| (*level).to_owned()).collect::<Vec<_>>());
         if !allowed.contains(chosen) { return; }
         self.pending_effort_changes.push((picker.session_id, chosen.clone()));
@@ -5816,7 +5846,8 @@ impl App {
         } else if self.engine_picker {
             7
         } else if let Some(form) = &self.new_session {
-            if form.engine == launch::Engine::Claude || !vendor_models(form.engine).is_empty() { 8 } else { 7 }
+            if !vendor_models(form.engine).is_empty() { 9 }
+            else if form.engine == launch::Engine::Claude { 8 } else { 7 }
         } else if let Some(picker) = &self.effort_picker {
             (4 + picker.levels.len()).clamp(5, 10) as u16
         } else if self.permission_picker.is_some() {
@@ -6244,7 +6275,7 @@ impl App {
         } else if let Some(form) = self.new_session.as_mut() {
             let first = menu.y + if menu.height >= 8 { 4 } else { 2 };
             let fields = if vendor_models(form.engine).is_empty() { 2 } else { 3 };
-            if row >= first && usize::from(row - first) < fields {
+            if row >= first && usize::from(row - first) <= fields {
                 let index = usize::from(row - first);
                 if form.field != index { form.field = index; return true; }
             }
@@ -6262,10 +6293,11 @@ impl App {
             let index = start + usize::from(row - menu.y - 3);
             if index < picker.levels.len() && picker.selected != index { picker.selected = index; return true; }
         } else if let Some(picker) = self.model_picker.as_mut() {
-            if row < menu.y + 3 { return false; }
-            let visible = usize::from(menu.height.saturating_sub(4)).max(1);
+            let offset = picker.row_offset();
+            if row < menu.y + offset { return false; }
+            let visible = picker.visible_rows(menu.height);
             let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
-            let index = start + usize::from(row - menu.y - 3);
+            let index = start + usize::from(row - menu.y - offset);
             if index < picker.models.len() && picker.selected != index { picker.selected = index; return true; }
         } else if let Some(picker) = self.attach_picker.as_mut() {
             if row < menu.y + 2 { return false; }
@@ -6717,7 +6749,17 @@ impl App {
                 }
                 return true;
             }
-            if self.new_session.is_some() { return true; }
+            if let Some(form) = self.new_session.as_mut() {
+                let first = y + if height >= 8 { 4 } else { 2 };
+                let fields = if vendor_models(form.engine).is_empty() { 2 } else { 3 };
+                if mouse.row >= first && usize::from(mouse.row - first) <= fields {
+                    form.field = usize::from(mouse.row - first);
+                    if form.field == fields {
+                        self.new_session_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+                    }
+                }
+                return true;
+            }
             if let Some(picker) = &mut self.effort_picker {
                 let visible = usize::from(height.saturating_sub(4)).max(1);
                 let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
@@ -6747,10 +6789,11 @@ impl App {
                 return true;
             }
             let picker = self.model_picker.as_mut().unwrap();
-            let visible = usize::from(height.saturating_sub(4)).max(1);
+            let offset = picker.row_offset();
+            let visible = picker.visible_rows(height);
             let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
-            let row = start + usize::from(mouse.row.saturating_sub(y + 3));
-            if mouse.row >= y + 3 && row < picker.models.len() && !picker.loading {
+            let row = start + usize::from(mouse.row.saturating_sub(y + offset));
+            if mouse.row >= y + offset && row < picker.models.len() && !picker.loading {
                 self.pending_model_changes.push((picker.session_id.clone(), picker.models[row].clone()));
                 self.notice = format!("Requesting model · {}", picker.models[row]);
                 self.model_picker = None;
@@ -7147,9 +7190,8 @@ impl App {
             }
             lines.push(Line::styled(format!(" {} First prompt: {}", if form.field == prompt_field { '›' } else { ' ' }, safe_label(&form.prompt)),
                 chooser_row_style(form.field == prompt_field)));
-            if form.engine == launch::Engine::Claude {
-                lines.push(Line::from(" Claude sidecar is bundled by the preview installer."));
-            }
+            lines.push(Line::styled(" [ Start session ]",
+                chooser_row_style(form.field == prompt_field + 1)));
         } else if let Some((id, selected)) = &self.permission_picker {
             title = " Claude permissions · this session · Enter select · Esc close ";
             if height >= 10 {
@@ -7191,7 +7233,7 @@ impl App {
             } else if !picker.loading && picker.models.is_empty() {
                 lines.push(Line::from(" No verified models available for this session"));
             }
-            let visible = usize::from(height.saturating_sub(4)).max(1);
+            let visible = picker.visible_rows(height);
             let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
             for (index, model) in picker.models.iter().enumerate().skip(start).take(visible) {
                 lines.push(Line::styled(format!(" {} {}", if index == picker.selected { '›' } else { ' ' }, model),
@@ -9081,6 +9123,39 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn claude_engine_form_accepts_mouse_fields_and_start_without_an_initial_prompt() {
+        let mut app = App::default();
+        app.rail_visible = false;
+        app.handle(Event::Resize(100, 28));
+        app.open_engine_picker();
+        let engines = app.active_chooser_rect().unwrap();
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: engines.x + 2, row: engines.y + 3, modifiers: KeyModifiers::NONE }));
+        assert_eq!(app.new_session.as_ref().unwrap().engine, launch::Engine::Claude);
+        let form = app.active_chooser_rect().unwrap();
+        let first = form.y + if form.height >= 8 { 4 } else { 2 };
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: form.x + 2, row: first + 1, modifiers: KeyModifiers::NONE }));
+        assert_eq!(app.new_session.as_ref().unwrap().field, 1);
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: form.x + 2, row: first, modifiers: KeyModifiers::NONE }));
+        assert_eq!(app.new_session.as_ref().unwrap().field, 0);
+        for c in "sonnet".chars() {
+            app.handle(Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)));
+        }
+        let rendered = painted(&app);
+        assert!(rendered.contains("Start session"));
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: form.x + 2, row: first + 2, modifiers: KeyModifiers::NONE }));
+        assert!(app.new_session.is_none());
+        let (options, prompt, _) = app.pending_launches.pop().unwrap();
+        assert_eq!(options.engine, launch::Engine::Claude);
+        assert_eq!(options.model.as_deref(), Some("sonnet"));
+        assert!(options.codex_bin.is_none() && options.sandbox.is_none() && options.effort.is_none());
+        assert!(prompt.is_none());
+    }
+
+    #[test]
     fn new_session_form_queues_engine_model_and_first_prompt() {
         let mut app = App::default();
         app.handle(Event::Resize(100, 28));
@@ -9198,6 +9273,26 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn codex_catalog_drives_same_session_effort_and_clears_absent_effort() {
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"codex-1",
+            "engine":"codex","model":"account-model","effort":"high","can_set_model":true}));
+        app.groups[0].tabs = vec!["codex-1".into()];
+        app.open_model_picker();
+        app.apply_daemon_frame(&json!({"type":"models_reply","session_id":"codex-1","ok":true,
+            "models":["account-model"],"capabilities":[{"model":"account-model","efforts":["minimal","high"]}]}));
+        app.model_picker = None;
+        app.open_effort_picker();
+        assert_eq!(app.effort_picker.as_ref().unwrap().levels, ["minimal", "high"]);
+        app.effort_picker.as_mut().unwrap().selected = 0;
+        app.select_effort();
+        assert_eq!(app.pending_effort_changes.last(), Some(&("codex-1".into(), "minimal".into())));
+        app.apply_daemon_frame(&json!({"type":"event","session_id":"codex-1",
+            "event":{"type":"model_changed","data":{"model":"no-reasoning","effort":null}}}));
+        assert!(!app.session_efforts.contains_key("codex-1"));
+    }
+
+    #[test]
     fn effort_capability_and_vendor_model_choices_fail_closed() {
         assert_eq!(effort_choices("glm", "glm-5.3-flash"), ["low", "high", "max"]);
         assert!(effort_choices("glm", "glm-unverified").is_empty());
@@ -9209,7 +9304,7 @@ for line in sys.stdin:
         app.groups[0].tabs = vec!["unknown".into()];
         app.open_effort_picker();
         assert!(app.effort_picker.is_none());
-        assert!(app.notice.contains("Live effort change is unavailable"));
+        assert!(app.notice.contains("Loading Codex model capabilities"));
 
         app.engine_selected = 2;
         app.select_new_engine();
@@ -9652,6 +9747,29 @@ for line in sys.stdin:
             selected: 24, note: "Verified models".into(), loading: false, catalog_pending: false });
         let (menu, start) = hover_first_picker_row(&mut app, 3);
         click_picker_row(&mut app, menu, 3);
+        assert_eq!(app.pending_model_changes, vec![("session".into(), models[start].clone())]);
+    }
+
+    #[test]
+    fn pending_model_catalog_hover_and_click_match_visible_rows() {
+        let mut app = scrolled_picker_app();
+        let models: Vec<_> = (0..30).map(|i| format!("model-{i:02}")).collect();
+        app.model_picker = Some(ModelPicker { session_id: "session".into(), models: models.clone(),
+            selected: 24, note: "Verified models".into(), loading: false, catalog_pending: true });
+        let menu = app.active_chooser_rect().unwrap();
+        click_picker_row(&mut app, menu, 3);
+        assert!(app.pending_model_changes.is_empty(), "probe text is not a model");
+        assert!(app.model_picker.is_some());
+        let picker = app.model_picker.as_ref().unwrap();
+        let start = chooser_visible_start(&app.chooser_view_start, picker.selected, picker.visible_rows(menu.height));
+        let text = painted_at(&app, 100, 28);
+        assert!(text.lines().nth(usize::from(menu.y + 4)).unwrap().contains(&models[start]));
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Moved,
+            column: menu.x + 2, row: menu.y + 4, modifiers: KeyModifiers::NONE }));
+        assert_eq!(app.model_picker.as_ref().unwrap().selected, start);
+        let hovered = painted_at(&app, 100, 28);
+        assert!(hovered.lines().nth(usize::from(menu.y + 4)).unwrap().contains(&models[start]));
+        click_picker_row(&mut app, menu, 4);
         assert_eq!(app.pending_model_changes, vec![("session".into(), models[start].clone())]);
     }
 
@@ -11675,6 +11793,31 @@ for line in sys.stdin:
         app.apply_daemon_frame(&json!({"type":"event", "session_id":"s",
             "event":{"type":"text_delta", "data":{"text":"continued"}}}));
         assert!(app.sessions[0].transcript.ends_with("**Assistant:**\n\ncontinued"));
+    }
+
+    #[test]
+    fn live_tool_activity_stays_between_latest_response_and_spinner() {
+        let mut app = App::default();
+        app.handle(Event::Resize(100, 28));
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"s"}));
+        let event = |kind: &str, data: serde_json::Value| json!({"type":"event", "session_id":"s", "event":{"type":kind,"data":data}});
+        app.apply_daemon_frame(&event("turn_started", json!({"prompt":"inspect"})));
+        app.apply_daemon_frame(&event("text_delta", json!({"text":"First response"})));
+        app.apply_daemon_frame(&event("tool_call", json!({"name":"Read","input":{}})));
+        app.apply_daemon_frame(&event("text_delta", json!({"text":"Latest response"})));
+        for expanded in [false, true] {
+            if expanded { app.expanded_tool_sections.insert("s".into(), HashSet::from([0])); }
+            let frame = painted(&app);
+            assert!(frame.find("Latest response").unwrap() < frame.find("1 tool call").unwrap());
+            assert!(frame.find("1 tool call").unwrap() < frame.find("Processing").unwrap());
+        }
+        let source = "**You:**\n\nInspect\n\nTool: Read started\n\n**Assistant:**\n\nAnswer";
+        let mut cached = RenderedTranscript::render(0,"s", source, 80,None,None,0,&[]);
+        let appended = format!("{source} continued");
+        cached.update(&appended,80,None,None,0,&[]);
+        let (fresh, sections) = transcript_tools::render(&appended,80,None,None);
+        assert_eq!(cached.lines,fresh);
+        assert_eq!(cached.sections,sections);
     }
 
     #[test]

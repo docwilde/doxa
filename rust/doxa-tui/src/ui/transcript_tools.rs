@@ -106,7 +106,27 @@ fn render_turn(blocks: &mut Vec<Block<'_>>, lines: &mut Vec<Line<'static>>,
             prose.clear();
         }
     };
+    // Keep fold identities in transcript order while laying each turn's tool
+    // activity out after its final response. New prose must not move the tool
+    // section back above the response or change which section is expanded.
+    let mut next_index = sections.len();
+    let mut ordered = Vec::with_capacity(blocks.len());
+    let mut tools = Vec::new();
     for block in blocks.drain(..) {
+        let index = if matches!(block, Block::Tools(_) | Block::Reasoning { .. }) {
+            let index = next_index;
+            next_index += 1;
+            Some(index)
+        } else { None };
+        if matches!(block, Block::Tools(_)) {
+            ordered.push((Block::Heading("**Assistant:**"), None));
+            tools.push((block, index));
+        } else {
+            ordered.push((block, index));
+        }
+    }
+    ordered.extend(tools);
+    for (block, section_index) in ordered {
         match block {
             Block::Heading(paragraph) => {
                 flush_prose(&mut prose, lines, speaker);
@@ -124,7 +144,7 @@ fn render_turn(blocks: &mut Vec<Block<'_>>, lines: &mut Vec<Line<'static>>,
             Block::Tools(tools) => {
                 flush_prose(&mut prose, lines, speaker);
                 speaker = Some(Speaker::Assistant);
-                let index = sections.len();
+                let index = section_index.expect("foldable blocks have an identity");
                 sections.push(Section { index, line: lines.len() });
                 let calls = tools.iter().filter(|row| {
                     let display = row.split_once(RESTORED_TOOL_PREFIX).map_or(**row, |(display, _)| display);
@@ -167,7 +187,7 @@ fn render_turn(blocks: &mut Vec<Block<'_>>, lines: &mut Vec<Line<'static>>,
             Block::Reasoning { text, tokens, streaming, exact } => {
                 flush_prose(&mut prose, lines, speaker);
                 speaker = Some(Speaker::Assistant);
-                let index = sections.len();
+                let index = section_index.expect("foldable blocks have an identity");
                 sections.push(Section { index, line: lines.len() });
                 let open = expanded.is_some_and(|set| set.contains(&index));
                 let marker = if open { "▾" } else { "▸" };
@@ -275,6 +295,31 @@ mod tests {
         let text = shown(&lines);
         assert!(text.contains("first-input") && text.contains("first-result") && text.contains("second-input"));
         assert!(!text.contains("third-input"));
+    }
+
+    #[test]
+    fn tools_follow_final_response_collapsed_and_expanded() {
+        let source = "**You:**\n\nQuestion\n\n**Assistant:**\n\nFirst response\n\nTool: Read started · input\n\nSecond response\n\nTool: Read finished · result\n\nLast response";
+        for expanded in [None, Some(HashSet::from([0]))] {
+            let (lines, sections) = render(source, 80, expanded.as_ref(), None);
+            let text = shown(&lines);
+            assert!(text.find("Last response").unwrap() < text.find("1 tool call").unwrap());
+            assert_eq!(sections.len(), 1);
+            if expanded.is_some() { assert!(text.find("Last response").unwrap() < text.find("input").unwrap()); }
+        }
+    }
+
+    #[test]
+    fn tool_identity_survives_later_reasoning_and_stays_in_its_turn() {
+        let reasoning = format!("{REASONING_PREFIX}{}", json!({"text":"hidden thinking", "tokens":10, "streaming":false}));
+        let source = format!("**You:**\n\nFirst question\n\nTool: Read started · visible input\n\n{reasoning}\n\n**Assistant:**\n\nFinal answer\n\n**You:**\n\nNext question");
+        let (lines, sections) = render(&source, 80, Some(&HashSet::from([0])), None);
+        let text = shown(&lines);
+        assert!(text.find("Final answer").unwrap() < text.find("1 tool call").unwrap());
+        assert!(text.find("1 tool call").unwrap() < text.find("Next question").unwrap());
+        assert!(text.contains("visible input"));
+        assert!(!text.contains("hidden thinking"));
+        assert_eq!(sections.iter().map(|section| section.index).collect::<Vec<_>>(), vec![1, 0]);
     }
 
     #[test]

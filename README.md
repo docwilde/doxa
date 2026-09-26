@@ -1,8 +1,8 @@
 <p align="center"><img src="assets/logo.png" width="560" alt="DOXA — belief earning knowledge"></p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Rust%202.0-alpha.26-f59f00" alt="Rust 2.0 alpha.26 is the main frontend">
-  <a href="https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.26"><img src="https://img.shields.io/github/v/release/docwilde/doxa?include_prereleases&amp;sort=semver&amp;label=Rust%20preview&amp;color=e8590c" alt="latest Rust preview release"></a>
+  <img src="https://img.shields.io/badge/Rust%202.0-alpha.27-f59f00" alt="Rust 2.0 alpha.27 is the main frontend">
+  <a href="https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.27"><img src="https://img.shields.io/github/v/release/docwilde/doxa?include_prereleases&amp;sort=semver&amp;label=Rust%20preview&amp;color=e8590c" alt="latest Rust preview release"></a>
   <a href="https://github.com/docwilde/doxa/actions/workflows/rust-ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/docwilde/doxa/rust-ci.yml?branch=main&label=Rust%20CI" alt="Rust CI status"></a>
   <img src="https://img.shields.io/badge/TUI-Ratatui-2f9e44" alt="Rust TUI built with Ratatui">
   <img src="https://img.shields.io/badge/auth-provider%20CLI%20or%20API%20key-2f9e44" alt="authentication follows the selected engine">
@@ -14,7 +14,7 @@
 > can edit files and run commands with your privileges. Read
 > [Non-goals](#non-goals) before using it on important work.
 
-The current Rust preview is [v2.0.0-alpha.26](https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.26).
+The current Rust preview is [v2.0.0-alpha.27](https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.27).
 GitHub labels 1.19 as the latest stable release while Rust 2.0 remains a prerelease.
 
 **DOXA** is a terminal for coding agents. Development now leads with the
@@ -74,7 +74,7 @@ in supporting terminals.
 
 ## Gallery
 
-### Rust 2.0 alpha.26
+### Rust 2.0 alpha.27
 
 ![Rust directory picker expanded above a single session prompt](assets/shots/rust-repo-picker.png)
 
@@ -87,7 +87,7 @@ in a new tab; the upper border can be dragged to show more entries.*
 
 ![Single Rust session pane showing collapsed tool calls below the assistant reply](assets/shots/rust-tool-activity.png)
 
-*Tool calls stay collapsed in the transcript until expanded.*
+*Tool calls stay collapsed below the latest reply until expanded.*
 
 ![Rust session pane with the tool activity section expanded to show call inputs and results](assets/shots/rust-tool-expanded.png)
 
@@ -99,7 +99,7 @@ in a new tab; the upper border can be dragged to show more entries.*
 
 ![Rust session pane showing separate prompt and answer turns with a processing spinner](assets/shots/rust-processing.png)
 
-*User messages have a warm highlight, agent replies keep the normal surface, and the pane shows processing while the next request runs.*
+*User messages have a warm highlight. The latest reply appears above its tool section, followed by the processing spinner.*
 
 ![Rust session pane with a live Reasoning/Thinking token count above the prompt](assets/shots/rust-reasoning.png)
 
@@ -113,13 +113,17 @@ in a new tab; the upper border can be dragged to show more entries.*
 
 *A daemon input request expands above the active prompt.*
 
+![Rust Claude session form with clickable model and prompt fields and a Start session action](assets/shots/rust-claude-session.png)
+
+*Choosing Claude opens a session form. Click its fields and Start session, or use the keyboard.*
+
 ![Rust Claude permission picker above the prompt in a single session pane](assets/shots/rust-permissions.png)
 
 *The permission picker expands from the chip row above the active prompt.*
 
 ![Rust reasoning effort picker above the prompt for a DeepSeek session](assets/shots/rust-effort.png)
 
-*The effort chip reports the current session; on supported vendor models, picker choices apply before its next turn when idle.*
+*The effort chip reports the current session. Supported Codex and vendor choices apply to its next turn when idle.*
 
 ![Rust session history picker above the prompt in a single session pane](assets/shots/rust-history.png)
 
@@ -149,7 +153,7 @@ curl -fsSL https://raw.githubusercontent.com/docwilde/doxa/main/scripts/install.
 
 The installer builds the Rust frontend and daemon from `main` and installs the
 Rust `doxa` command in `~/.local/bin` (or `DOXA_RUST_BIN_DIR`). Pass a tag such
-as `v2.0.0-alpha.26` after `sh -s --` to pin a release. It uses Git, Cargo,
+as `v2.0.0-alpha.27` after `sh -s --` to pin a release. It uses Git, Cargo,
 Python 3.11+, and `uv`; the Python environment it creates is private to the
 LORE and Claude sidecars. No Python frontend command is installed. See the
 [Rust guide](rust/README.md) for provider setup and current limits.

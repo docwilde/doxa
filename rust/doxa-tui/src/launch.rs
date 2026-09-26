@@ -347,7 +347,6 @@ pub fn spawn(options: &LaunchOptions) -> io::Result<Session> {
         Engine::Codex => {
             if options.claude_python.is_some()
                 || options.claude_script.is_some()
-                || options.effort.is_some()
             {
                 return Err(invalid("Claude options require --engine claude"));
             }
@@ -370,6 +369,7 @@ pub fn spawn(options: &LaunchOptions) -> io::Result<Session> {
             if let Some(model) = &model {
                 command.arg("--model").arg(model);
             }
+            if let Some(effort) = &options.effort { command.arg("--effort").arg(effort); }
         }
         Engine::Claude => {
             if options.codex_bin.is_some()
