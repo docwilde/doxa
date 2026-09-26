@@ -58,7 +58,8 @@ The daemon executable is located beside `doxa-rs`, then on `PATH`; an absolute
 `--engine fixture` only for local integration checks.
 
 New Codex sessions use the app-server transport. The reasoning count streams
-live as an estimate and is replaced by exact provider usage when reported.
+live as an estimate. Codex's last-inference reasoning usage is not promoted to
+an exact turn total when a turn can include multiple model inferences.
 Reasoning content and assistant messages are buffered within size limits and
 scrubbed as complete text before display, preventing split credentials from
 bypassing LORE. App-server context usage follows Codex TUI's 12,000 token

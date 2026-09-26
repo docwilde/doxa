@@ -2987,7 +2987,8 @@ for line in sys.stdin: pass
                 assert_eq!(event["data"]["is_error"], false);
                 assert_eq!(event["data"]["ctx_tokens"], 8000);
                 assert_eq!(event["data"]["ctx_percentage"], 40.0);
-                assert_eq!(event["data"]["reasoning_output_tokens"], 7);
+                assert!(event["data"]["reasoning_output_tokens"].is_null());
+                assert_eq!(event["data"]["reasoning_count_is_estimate"], true);
                 break;
             }
         }

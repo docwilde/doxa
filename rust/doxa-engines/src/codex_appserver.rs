@@ -51,6 +51,9 @@ pub struct AppServerDriver {
     options: AppServerOptions,
     scrub: Box<dyn Fn(&str) -> String + Send + Sync>,
     child: Child,
+    // Keep the unreaped leader PID reserved until killing this original group.
+    // Reaping first would allow PID/PGID reuse and miss surviving descendants.
+    process_group: Option<u32>,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
     next_id: u64,
@@ -87,12 +90,13 @@ impl AppServerDriver {
             });
         }
         let mut child = command.spawn()?;
+        let process_group = child.id();
         let stdin = child.stdin.take().ok_or(AppServerError::Protocol("missing stdin"))?;
         let stdout = BufReader::new(child.stdout.take().ok_or(AppServerError::Protocol("missing stdout"))?);
         let scrub = std::sync::Arc::new(scrub);
         let tool_scrub = scrub.clone();
         let mut driver = Self {
-            options, scrub: Box::new(move |text| scrub(text)), child, stdin, stdout, next_id: 0,
+            options, scrub: Box::new(move |text| scrub(text)), child, process_group, stdin, stdout, next_id: 0,
             thread_id: None, turn_id: None, reasoning_bytes: 0, reasoning_chars: 0,
             reasoning_buffer: String::new(), reasoning_truncated: false,
             assistant_buffers: Vec::new(), assistant_bytes: 0, usage: None,
@@ -120,13 +124,15 @@ impl AppServerDriver {
     pub fn thread_id(&self) -> &str { self.thread_id.as_deref().expect("thread start succeeded") }
 
     pub async fn shutdown(&mut self) {
-        if self.child.try_wait().ok().flatten().is_none() {
-            if let Some(pid) = self.child.id() {
-                unsafe { libc::kill(-(pid as i32), libc::SIGKILL); }
-            }
-        }
+        self.kill_group();
         let _ = self.child.start_kill();
         let _ = timeout(Duration::from_secs(5), self.child.wait()).await;
+    }
+
+    fn kill_group(&mut self) {
+        if let Some(pid) = self.process_group.take() {
+            unsafe { libc::kill(-(pid as i32), libc::SIGKILL); }
+        }
     }
 
     /// The caller must persist this ID *before* submitting a turn. The
@@ -145,7 +151,7 @@ impl AppServerDriver {
         self.tool_normalizer.begin_turn();
         let deadline = tokio::time::Instant::now() + self.options.turn_timeout;
         let thread_id = self.thread_id().to_owned();
-        let request_id = self.send_request("turn/start", json!({"threadId":thread_id,"input":[{"type":"text","text":prompt,"text_elements":[]}]})).await?;
+        let request_id = self.send_request_bounded("turn/start", json!({"threadId":thread_id,"input":[{"type":"text","text":prompt,"text_elements":[]}]}), Some(cancel), deadline).await?;
         let response = self.wait_response(request_id, Some(cancel), deadline).await?;
         let turn_id = response.pointer("/turn/id").and_then(Value::as_str)
             .filter(|id| valid_thread_id(id))
@@ -159,7 +165,7 @@ impl AppServerDriver {
                 tokio::select! {
                     value = self.read_frame() => value?,
                     _ = cancel.cancelled() => {
-                        let _ = self.send_request("turn/interrupt", json!({"threadId":thread_id,"turnId":turn_id})).await;
+                        let _ = self.send_request_bounded("turn/interrupt", json!({"threadId":thread_id,"turnId":turn_id}), None, tokio::time::Instant::now() + Duration::from_millis(200)).await;
                         return Err(AppServerError::Cancelled);
                     }
                     _ = tokio::time::sleep_until(deadline) => return Err(AppServerError::TimedOut),
@@ -167,7 +173,7 @@ impl AppServerDriver {
             };
             if let Some(method) = frame.get("method").and_then(Value::as_str) {
                 if frame.get("id").is_some() {
-                    self.deny_server_request(&frame).await?;
+                    self.deny_server_request(&frame, Some(cancel), deadline).await?;
                     continue;
                 }
                 let params = &frame["params"];
@@ -180,6 +186,7 @@ impl AppServerDriver {
                 match method {
                     "item/agentMessage/delta" => {
                         if let (Some(id), Some(delta)) = (params["itemId"].as_str(), params["delta"].as_str()) {
+                            if !valid_thread_id(id) { return Err(AppServerError::Protocol("invalid assistant item ID")); }
                             if self.assistant_bytes.saturating_add(delta.len()) > MAX_FRAME_BYTES {
                                 return Err(AppServerError::Protocol("assistant turn text exceeded display limit"));
                             }
@@ -213,18 +220,21 @@ impl AppServerDriver {
                         emit(EngineEvent::new("usage", json!({
                             "input_tokens":last["inputTokens"].as_u64(),"output_tokens":last["outputTokens"].as_u64(),
                             "cache_read_input_tokens":last["cachedInputTokens"].as_u64(),
-                            "reasoning_output_tokens":last["reasoningOutputTokens"].as_u64(),
+                            "inference_reasoning_output_tokens":last["reasoningOutputTokens"].as_u64(),
                             "context_window":context_window,"context_used":last["totalTokens"].as_u64(),
-                            "reasoning_count_is_estimate":false
+                            "reasoning_count_is_estimate":true
                         })));
                     }
                     "item/started" | "item/completed" => {
                         if method == "item/completed" && params["item"]["type"] == "agentMessage" {
                             if let Some(id) = params["item"]["id"].as_str() {
+                                if !valid_thread_id(id) { return Err(AppServerError::Protocol("invalid assistant item ID")); }
                                 let buffered = self.assistant_buffers.iter().position(|(key, _)| key == id)
                                     .map(|index| self.assistant_buffers.remove(index).1);
+                                let buffered_bytes = buffered.as_ref().map_or(0, String::len);
                                 let text = params["item"]["text"].as_str().map(str::to_owned).or(buffered).unwrap_or_default();
-                                if text.len() > MAX_FRAME_BYTES { return Err(AppServerError::Protocol("assistant item exceeded display limit")); }
+                                self.assistant_bytes = self.assistant_bytes.saturating_add(text.len().saturating_sub(buffered_bytes));
+                                if self.assistant_bytes > MAX_FRAME_BYTES { return Err(AppServerError::Protocol("assistant turn text exceeded display limit")); }
                                 emit(EngineEvent::new("text_delta", json!({"text":(self.scrub)(&text)})));
                             }
                         }
@@ -261,7 +271,7 @@ impl AppServerDriver {
                             "input_tokens":total.and_then(|u| u["inputTokens"].as_u64()),
                             "output_tokens":total.and_then(|u| u["outputTokens"].as_u64()),
                             "cache_read_input_tokens":total.and_then(|u| u["cachedInputTokens"].as_u64()),
-                            "reasoning_output_tokens":last.and_then(|u| u["reasoningOutputTokens"].as_u64()),
+                            "reasoning_output_tokens":null,"reasoning_count_is_estimate":true,
                             "ctx_tokens":used,"ctx_max_tokens":window,"ctx_percentage":pct,
                             "cost_usd":null,"session_cost_usd":null,
                         })));
@@ -282,18 +292,28 @@ impl AppServerDriver {
     }
 
     async fn send_request(&mut self, method: &str, params: Value) -> Result<u64, AppServerError> {
+        self.send_request_bounded(method, params, None, tokio::time::Instant::now() + RPC_TIMEOUT).await
+    }
+
+    async fn send_request_bounded(&mut self, method: &str, params: Value, cancel: Option<&CancellationToken>, deadline: tokio::time::Instant) -> Result<u64, AppServerError> {
         self.next_id += 1;
-        self.send(json!({"id":self.next_id,"method":method,"params":params})).await?;
+        self.send_bounded(json!({"id":self.next_id,"method":method,"params":params}), cancel, deadline).await?;
         Ok(self.next_id)
     }
 
     async fn send(&mut self, frame: Value) -> Result<(), AppServerError> {
+        self.send_bounded(frame, None, tokio::time::Instant::now() + RPC_TIMEOUT).await
+    }
+
+    async fn send_bounded(&mut self, frame: Value, cancel: Option<&CancellationToken>, deadline: tokio::time::Instant) -> Result<(), AppServerError> {
         let mut encoded = serde_json::to_vec(&frame).map_err(io::Error::other)?;
         if encoded.len() > MAX_FRAME_BYTES { return Err(AppServerError::Protocol("outgoing frame too large")); }
         encoded.push(b'\n');
-        self.stdin.write_all(&encoded).await?;
-        self.stdin.flush().await?;
-        Ok(())
+        tokio::select! {
+            result = async { self.stdin.write_all(&encoded).await?; self.stdin.flush().await } => result.map_err(AppServerError::Io),
+            _ = async { if let Some(token) = cancel { token.cancelled().await } else { std::future::pending().await } } => Err(AppServerError::Cancelled),
+            _ = tokio::time::sleep_until(deadline) => Err(AppServerError::TimedOut),
+        }
     }
 
     async fn read_frame(&mut self) -> Result<Value, AppServerError> {
@@ -325,7 +345,7 @@ impl AppServerDriver {
                 return Ok(frame["result"].clone());
             }
             if frame.get("method").is_some() && frame.get("id").is_some() {
-                self.deny_server_request(&frame).await?;
+                self.deny_server_request(&frame, cancel, deadline).await?;
             } else if frame.get("method").is_some() {
                 let bytes = serde_json::to_vec(&frame).map_err(io::Error::other)?.len();
                 if self.pending_notifications.len() >= 256 || self.pending_bytes.saturating_add(bytes) > MAX_FRAME_BYTES {
@@ -339,28 +359,24 @@ impl AppServerDriver {
 
     /// There is no DOXA approval bridge in this slice. Deny every server
     /// request explicitly; never silently grant shell, patch, or new tools.
-    async fn deny_server_request(&mut self, frame: &Value) -> Result<(), AppServerError> {
+    async fn deny_server_request(&mut self, frame: &Value, cancel: Option<&CancellationToken>, deadline: tokio::time::Instant) -> Result<(), AppServerError> {
         let Some(id) = frame.get("id") else { return Ok(()); };
         let result = match frame["method"].as_str().unwrap_or("") {
             "item/commandExecution/requestApproval" => json!({"decision":"decline"}),
             "item/fileChange/requestApproval" => json!({"decision":"decline"}),
             _ => {
-                self.send(json!({"id":id,"error":{"code":-32601,"message":"DOXA cannot handle this server request"}})).await?;
+                self.send_bounded(json!({"id":id,"error":{"code":-32601,"message":"DOXA cannot handle this server request"}}), cancel, deadline).await?;
                 return Err(AppServerError::Server("Codex requested an interactive tool or approval that DOXA cannot handle; the request was refused".to_owned()));
             }
         };
-        self.send(json!({"id":id,"result":result})).await?;
+        self.send_bounded(json!({"id":id,"result":result}), cancel, deadline).await?;
         Err(AppServerError::Server("Codex requested interactive approval; DOXA refused it because app-server approval dialogs are not supported yet".to_owned()))
     }
 }
 
 impl Drop for AppServerDriver {
     fn drop(&mut self) {
-        if self.child.try_wait().ok().flatten().is_none() {
-            if let Some(pid) = self.child.id() {
-            unsafe { libc::kill(-(pid as i32), libc::SIGKILL); }
-            }
-        }
+        self.kill_group();
         let _ = self.child.start_kill();
     }
 }

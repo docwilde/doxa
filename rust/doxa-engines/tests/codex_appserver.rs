@@ -66,9 +66,11 @@ async fn fake_appserver_streams_reasoning_progress_and_exact_usage() {
     assert_eq!(events[4].data["text"], "[redacted] result");
     assert_eq!(events[6].data["text"], "[redacted]");
     assert_eq!(events[7].data["text"], "clean");
-    assert_eq!(events[5].data["reasoning_output_tokens"], 7);
+    assert_eq!(events[5].data["inference_reasoning_output_tokens"], 7);
     assert_eq!(events[5].data["context_window"], 200000);
     assert_eq!(events[8].data["is_error"], false);
+    assert!(events[8].data["reasoning_output_tokens"].is_null());
+    assert_eq!(events[8].data["reasoning_count_is_estimate"], true);
     assert!(events.iter().all(|event| !event.data.to_string().contains("secret")));
 }
 
@@ -131,4 +133,86 @@ async fn approval_is_refused_with_a_clear_error() {
     assert!(matches!(outcome, Err(doxa_engines::codex_appserver::AppServerError::Server(ref message)) if message.contains("refused") && message.contains("not supported")));
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(std::fs::read_to_string(marker).unwrap(), "denied");
+}
+
+#[tokio::test]
+async fn turn_write_honors_timeout_and_cancellation_when_server_stops_reading() {
+    for cancel_write in [false, true] {
+        let (_dir, mut options) = fake();
+        let script = std::fs::read_to_string(&options.executable).unwrap()
+            .replace("turn = read()", "import time; time.sleep(10)\nturn = read()");
+        std::fs::write(&options.executable, script).unwrap();
+        options.turn_timeout = if cancel_write { Duration::from_secs(3) } else { Duration::from_millis(80) };
+        let mut driver = AppServerDriver::spawn(options, |s| s.to_owned()).await.unwrap();
+        let cancel = CancellationToken::new();
+        if cancel_write {
+            let trigger = cancel.clone();
+            tokio::spawn(async move { tokio::time::sleep(Duration::from_millis(80)).await; trigger.cancel(); });
+        }
+        let started = std::time::Instant::now();
+        let result = driver.run_turn(&"a".repeat(4 * 1024 * 1024), &cancel, |_| {}).await;
+        if cancel_write {
+            assert!(matches!(result, Err(doxa_engines::codex_appserver::AppServerError::Cancelled)));
+        } else {
+            assert!(matches!(result, Err(doxa_engines::codex_appserver::AppServerError::TimedOut)));
+        }
+        assert!(started.elapsed() < Duration::from_secs(1));
+        driver.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn group_cleanup_kills_descendant_after_server_leader_exits() {
+    let (dir, options) = fake();
+    let marker = dir.path().join("orphan-survived");
+    let script = std::fs::read_to_string(&options.executable).unwrap();
+    let injection = format!("import subprocess\nsubprocess.Popen(['/bin/sh','-c','sleep 1; touch {}'],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\nsys.exit(0)\n", marker.display());
+    let script = script.replace("send({'id':turn['id'],'result':{'turn':{'id':'turn_1'}}})", &format!("send({{'id':turn['id'],'result':{{'turn':{{'id':'turn_1'}}}}}})\n{injection}"));
+    std::fs::write(&options.executable, script).unwrap();
+    let mut driver = AppServerDriver::spawn(options, |s| s.to_owned()).await.unwrap();
+    assert!(driver.run_turn("hello", &CancellationToken::new(), |_| {}).await.is_err());
+    driver.shutdown().await;
+    drop(driver);
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    assert!(!marker.exists(), "orphan tool survived an exited app-server leader");
+}
+
+#[tokio::test]
+async fn completed_only_snapshots_and_oversized_item_ids_are_bounded() {
+    for oversized_id in [false, true] {
+        let (_dir, options) = fake();
+        let script = std::fs::read_to_string(&options.executable).unwrap();
+        let injection = if oversized_id {
+            "send({'method':'item/agentMessage/delta','params':{'threadId':'thread_1','turnId':'turn_1','itemId':'x'*1000,'delta':'answer'}})\n".to_owned()
+        } else {
+            "for i in range(3):\n    send({'method':'item/completed','params':{'threadId':'thread_1','turnId':'turn_1','item':{'type':'agentMessage','id':'msg_'+str(i),'text':'x'*(3*1024*1024)}}})\n".to_owned()
+        };
+        let script = script.replace("send({'id':turn['id'],'result':{'turn':{'id':'turn_1'}}})", &format!("send({{'id':turn['id'],'result':{{'turn':{{'id':'turn_1'}}}}}})\n{injection}"));
+        std::fs::write(&options.executable, script).unwrap();
+        let mut driver = AppServerDriver::spawn(options, |s| s.to_owned()).await.unwrap();
+        let mut emitted_bytes = 0;
+        let result = driver.run_turn("hello", &CancellationToken::new(), |event| {
+            if event.kind == "text_delta" { emitted_bytes += event.data["text"].as_str().unwrap().len(); }
+        }).await;
+        assert!(matches!(result, Err(doxa_engines::codex_appserver::AppServerError::Protocol(_))));
+        assert!(emitted_bytes <= 8 * 1024 * 1024);
+        driver.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn multiple_inferences_do_not_promote_last_reasoning_usage_to_turn_total() {
+    let (_dir, options) = fake();
+    let script = std::fs::read_to_string(&options.executable).unwrap();
+    let prefix = "send({'method':'turn/completed'";
+    let second_usage = "send({'method':'thread/tokenUsage/updated','params':{'threadId':'thread_1','turnId':'turn_1','tokenUsage':{'total':{'reasoningOutputTokens':10},'last':{'reasoningOutputTokens':3,'totalTokens':100},'modelContextWindow':200000}}})\n";
+    std::fs::write(&options.executable, script.replace(prefix, &format!("{second_usage}{prefix}"))).unwrap();
+    let mut driver = AppServerDriver::spawn(options, |s| s.to_owned()).await.unwrap();
+    let mut terminal = None;
+    driver.run_turn("hello", &CancellationToken::new(), |event| {
+        if event.kind == "turn_done" { terminal = Some(event.data); }
+    }).await.unwrap();
+    let terminal = terminal.unwrap();
+    assert!(terminal["reasoning_output_tokens"].is_null());
+    assert_eq!(terminal["reasoning_count_is_estimate"], true);
 }
