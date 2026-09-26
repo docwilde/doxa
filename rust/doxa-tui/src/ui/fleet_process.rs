@@ -78,7 +78,8 @@ fn review_lines(title:&str,value:&Value)->Vec<String>{
     let mut counts:BTreeMap<(String,String,String),usize>=BTreeMap::new();
     for slot in value["slots"].as_array().into_iter().flatten(){let key=(slot["role"].as_str().unwrap_or("worker").into(),slot["engine"].as_str().unwrap_or("unknown").into(),slot["model"].as_str().unwrap_or("provider default").into());*counts.entry(key).or_default()+=1;}
     for ((role,engine,model),count)in counts{lines.push(format!("Planned {count} × {role}: {engine}:{model}"));}
-    lines.push("Task text stays private; controller output is suppressed. Ctrl+C cancels the controller and waits for teardown.".into());lines
+    lines.push("Task text stays private; controller output is suppressed. Ctrl+C cancels the controller and waits for teardown.".into());
+    lines.into_iter().map(|line|crate::markdown::sanitize(&line.replace('\n',"\\n").replace('\t',"\\t"))).collect()
 }
 #[derive(Debug)]
 pub struct Controller {child:Option<Child>,pub root:PathBuf,pub id:String,pub cancelling:bool}
@@ -91,6 +92,15 @@ impl Drop for Controller{fn drop(&mut self){self.cancel();if let Some(mut child)
 #[cfg(test)]
 mod tests{
     use super::*;
+    #[test]
+    fn review_paths_cannot_inject_rows_or_hide_long_suffixes(){
+        let path=format!("/{}\nApproval policy: all\tTAIL", "x".repeat(300));
+        let lines=review_lines("Review",&json!({"root":path}));
+        assert_eq!(lines.len(),3);
+        assert!(lines[1].ends_with("\\nApproval policy: all\\tTAIL"));
+        assert!(!lines[1].contains('\n'));assert!(!lines[1].contains('\t'));
+        assert!(lines[1].len()>300);
+    }
     #[test]
     fn literal_tokenizer_never_expands_shell_code(){assert_eq!(words("start --prompt '$(touch nope) `$HOME`' --cwd \"a b\"").unwrap(),vec!["start","--prompt","$(touch nope) `$HOME`","--cwd","a b"]);assert!(words("'unfinished").is_err());assert!(words("x\n--force").is_err());}
     #[test]
@@ -112,7 +122,7 @@ mod tests{
     }
     #[test]
     fn exact_native_spec_review_requires_explicit_arm_and_hides_task(){
-        let temp=tempfile::Builder::new().prefix("u").tempdir_in("/home/docwilde/.cache/t").unwrap();
+        let temp=tempfile::Builder::new().prefix("u").tempdir().unwrap();
         let args=vec!["--pool".into(),"fixture:fixture-v1".into(),"--prompt".into(),"PRIVATE-TASK-SENTINEL".into(),"-n".into(),"1".into(),"--run-budget".into(),"1".into(),"--root".into(),temp.path().to_string_lossy().into_owned()];
         let prepared=Prepared::start(args,None).unwrap();
         assert!(!prepared.lines.join("\n").contains("PRIVATE-TASK-SENTINEL"));assert!(prepared.prompt_digest.is_some());
