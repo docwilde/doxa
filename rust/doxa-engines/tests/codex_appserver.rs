@@ -233,3 +233,27 @@ async fn already_cancelled_turn_never_submits_a_prompt() {
     assert!(!marker.exists());
     driver.shutdown().await;
 }
+
+#[tokio::test]
+async fn completed_messages_are_separated_and_split_deltas_scrub_as_one_message() {
+    let (_dir, options) = fake();
+    let script = std::fs::read_to_string(&options.executable).unwrap();
+    let insertion = r#"
+send({'method':'item/completed','params':{'threadId':'thread_1','turnId':'turn_1','item':{'type':'agentMessage','id':'empty','text':''}}})
+send({'method':'item/agentMessage/delta','params':{'threadId':'thread_1','turnId':'turn_1','itemId':'first','delta':'sec'}})
+send({'method':'item/agentMessage/delta','params':{'threadId':'thread_1','turnId':'turn_1','itemId':'first','delta':'ret first'}})
+send({'method':'item/completed','params':{'threadId':'thread_1','turnId':'turn_1','item':{'type':'agentMessage','id':'first'}}})
+send({'method':'item/completed','params':{'threadId':'thread_1','turnId':'turn_1','item':{'type':'agentMessage','id':'empty_middle','text':''}}})
+send({'method':'item/completed','params':{'threadId':'thread_1','turnId':'turn_1','item':{'type':'agentMessage','id':'second','text':'secret second'}}})
+"#;
+    let response = "send({'id':turn['id'],'result':{'turn':{'id':'turn_1'}}})";
+    std::fs::write(&options.executable, script.replace(response, &format!("{response}\n{insertion}"))).unwrap();
+    let mut driver = AppServerDriver::spawn(options, |s| s.replace("secret", "[redacted]")).await.unwrap();
+    let mut messages = Vec::new();
+    driver.run_turn("hello", &CancellationToken::new(), |event| {
+        if event.kind == "text_delta" { messages.push(event.data["text"].as_str().unwrap().to_owned()); }
+    }).await.unwrap();
+    assert_eq!(messages, ["[redacted] first", "\n\n[redacted] second", "\n\nanswer"]);
+    assert_eq!(messages.concat(), "[redacted] first\n\n[redacted] second\n\nanswer");
+    assert!(messages.concat().len() <= 8 * 1024 * 1024);
+}

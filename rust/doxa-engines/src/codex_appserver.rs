@@ -65,6 +65,7 @@ pub struct AppServerDriver {
     reasoning_truncated: bool,
     assistant_buffers: Vec<(String, String)>,
     assistant_bytes: usize,
+    assistant_message_emitted: bool,
     usage: Option<Value>,
     pending_notifications: VecDeque<(Value, usize)>,
     pending_bytes: usize,
@@ -99,7 +100,7 @@ impl AppServerDriver {
             options, scrub: Box::new(move |text| scrub(text)), child, process_group, stdin, stdout, next_id: 0,
             thread_id: None, turn_id: None, reasoning_bytes: 0, reasoning_chars: 0,
             reasoning_buffer: String::new(), reasoning_truncated: false,
-            assistant_buffers: Vec::new(), assistant_bytes: 0, usage: None,
+            assistant_buffers: Vec::new(), assistant_bytes: 0, assistant_message_emitted: false, usage: None,
             pending_notifications: VecDeque::new(),
             pending_bytes: 0,
             tool_normalizer: CodexJsonlNormalizer::new(move |text| tool_scrub(text)),
@@ -148,6 +149,7 @@ impl AppServerDriver {
         self.reasoning_truncated = false;
         self.assistant_buffers.clear();
         self.assistant_bytes = 0;
+        self.assistant_message_emitted = false;
         self.usage = None;
         self.tool_normalizer.begin_turn();
         let deadline = tokio::time::Instant::now() + self.options.turn_timeout;
@@ -236,7 +238,7 @@ impl AppServerDriver {
                                 let text = params["item"]["text"].as_str().map(str::to_owned).or(buffered).unwrap_or_default();
                                 self.assistant_bytes = self.assistant_bytes.saturating_add(text.len().saturating_sub(buffered_bytes));
                                 if self.assistant_bytes > MAX_FRAME_BYTES { return Err(AppServerError::Protocol("assistant turn text exceeded display limit")); }
-                                emit(EngineEvent::new("text_delta", json!({"text":(self.scrub)(&text)})));
+                                self.emit_assistant_message(&text, &mut emit)?;
                             }
                         }
                         if let Some(item) = normalize_tool_item(&params["item"]) {
@@ -257,8 +259,8 @@ impl AppServerDriver {
                                 else { (self.scrub)(&self.reasoning_buffer) };
                             emit(EngineEvent::new("reasoning_delta", json!({"text":text,"approx_tokens":self.reasoning_chars / 4,"count_is_estimate":true,"final":true})));
                         }
-                        for (_, text) in self.assistant_buffers.drain(..) {
-                            emit(EngineEvent::new("text_delta", json!({"text":(self.scrub)(&text)})));
+                        for (_, text) in std::mem::take(&mut self.assistant_buffers) {
+                            self.emit_assistant_message(&text, &mut emit)?;
                         }
                         let total = self.usage.as_ref().map(|u| &u["total"]);
                         let last = self.usage.as_ref().map(|u| &u["last"]);
@@ -284,6 +286,22 @@ impl AppServerDriver {
                 }
             }
         }
+    }
+
+    fn emit_assistant_message(&mut self, text: &str, emit: &mut impl FnMut(EngineEvent)) -> Result<(), AppServerError> {
+        if text.is_empty() { return Ok(()); }
+        // Scrub the whole provider message before adding a display separator;
+        // fragment boundaries never become secret-scrubbing boundaries.
+        let clean = (self.scrub)(text);
+        if clean.is_empty() { return Ok(()); }
+        let separator = if self.assistant_message_emitted { "\n\n" } else { "" };
+        self.assistant_bytes = self.assistant_bytes.saturating_add(separator.len());
+        if self.assistant_bytes > MAX_FRAME_BYTES {
+            return Err(AppServerError::Protocol("assistant turn text exceeded display limit"));
+        }
+        emit(EngineEvent::new("text_delta", json!({"text":format!("{separator}{clean}")})));
+        self.assistant_message_emitted = true;
+        Ok(())
     }
 
     async fn request(&mut self, method: &str, params: Value) -> Result<Value, AppServerError> {
