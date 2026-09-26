@@ -931,8 +931,11 @@ class PeerHost:
         model: str | None = None,
         engine: str | None = None,
         parent_session_id: str | None = None,
+        publish_presence: bool = True,
     ) -> None:
         self.session_id = session_id
+        # Native Rust owns the shared registry; this host retains SDK delivery.
+        self.publish_presence = publish_presence
         self.cwd = str(cwd)
         self.title = title or (Path(self.cwd).name or "doxa")
         # main_repo_root_of, NOT repo_root_of: a worktree-per-session
@@ -1024,12 +1027,15 @@ class PeerHost:
             self._server = None
         with contextlib.suppress(OSError):
             self.socket_path.unlink()
-        with contextlib.suppress(OSError):
-            self.registry_path.unlink()
+        if self.publish_presence:
+            with contextlib.suppress(OSError):
+                self.registry_path.unlink()
 
     # -- presence ----------------------------------------------------
 
     def _write_entry(self) -> None:
+        if not self.publish_presence:
+            return
         entry = {
             "session_id": self.session_id,
             "pid": os.getpid(),

@@ -48,6 +48,11 @@ jobs:
           uv run pytest tests/test_install_rust.py -q
       - name: Test native LORE sidecar boundary
         run: uv run pytest tests/test_lore_bridge.py -q
+      - name: Test native Claude identity and peer ownership
+        run: |
+          native_claude_tests=$(mktemp -d "$RUNNER_TEMP/dc-XXXXXX")
+          trap 'rm -rf "$native_claude_tests"' EXIT
+          TMPDIR="$native_claude_tests" uv run pytest tests/test_resume.py tests/test_native_peer_presence.py -q --basetemp="$native_claude_tests"
       - name: Test native daemon protocol
         env:
           DOXA_TEST_PYTHON: ${{ github.workspace }}/.venv/bin/python

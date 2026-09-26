@@ -7,6 +7,11 @@ the stable 2.0 release has not been cut.
 
 ## 2.0.0-alpha.27 — 2026-09-26
 
+- Generate canonical UUIDv4 session IDs accepted by Claude CLI; normalize older
+  UUID hex IDs at provider start/resume boundaries while preserving local identity.
+- Give the native daemon sole ownership of Claude peer presence while keeping
+  SDK peer delivery on the shared registry. Reject outdated Python sidecars
+  with an update-and-restart instruction.
 - Change Codex models and reasoning effort in an existing idle session,
   applying account-supported choices on the next turn without replacing its
   thread. Persist settings for app-server and recovered CLI sessions.

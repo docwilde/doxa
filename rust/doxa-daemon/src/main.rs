@@ -327,7 +327,10 @@ fn python_executable(path: PathBuf) -> io::Result<PathBuf> {
 fn random_id() -> io::Result<String> {
     let mut bytes = [0u8; 16];
     File::open("/dev/urandom")?.read_exact(&mut bytes)?;
-    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    Ok(format!("{}-{}-{}-{}-{}", &hex[..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..]))
 }
 fn iso_now() -> String {
     let now = SystemTime::now()
@@ -782,6 +785,16 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generated_session_id_is_canonical_uuid_v4() {
+        let id = random_id().unwrap();
+        assert_eq!(id.len(), 36);
+        assert_eq!(&id[14..15], "4");
+        assert!(matches!(&id[19..20], "8" | "9" | "a" | "b"));
+        assert_eq!(id.split('-').map(str::len).collect::<Vec<_>>(), [8, 4, 4, 4, 12]);
+    }
+
 
     #[test]
     fn linger_rejects_values_that_would_overflow_or_stall_shutdown() {
