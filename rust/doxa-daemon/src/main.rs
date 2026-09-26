@@ -522,21 +522,22 @@ fn run() -> io::Result<()> {
     // Acquire before constructing a host: vendor and Claude resume open the
     // saved conversation state during host startup, before registry publish.
     let _claim = SessionClaim::acquire(&options.runtime, &options.session_id)?;
-    // Match Python 1.19's explicit-truthy switch. Claude keeps its own Python
-    // sidecar peer loop; starting a second native loop there would duplicate
-    // delivery, so only native hosts with a LORE scrubber accept this switch.
+    // Match Python 1.19's explicit-truthy switch. The native registry owns
+    // delivery/admission for every real host, including Claude. The SDK
+    // sidecar disables its independent inbound turn loop.
     let inbound = env::var("DOXA_PEER_INBOUND_TURNS").unwrap_or_default();
     let inbound_turns = !inbound.trim().is_empty()
         && !matches!(inbound.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off");
-    if inbound_turns && matches!(options.engine, Engine::Fixture | Engine::Claude) {
-        return Err(invalid("native inbound peer turns require Codex or vendor engine with LORE scrub; Claude uses the Python sidecar peer loop"));
+    if inbound_turns && options.engine == Engine::Fixture {
+        return Err(invalid("native inbound peer turns require an engine with LORE scrub"));
     }
     let ceiling = match env::var("DOXA_SESSION_BUDGET_USD") {
         Ok(raw) if !raw.trim().is_empty() => {
             let value: f64 = raw.trim().parse().map_err(|_| invalid("invalid session budget"))?;
             if !value.is_finite() || value <= 0.0 { return Err(invalid("invalid session budget")); }
             if options.engine == Engine::Codex {
-                return Err(invalid("native Codex budget requires complete priced usage accounting; use the Python fleet harness"));
+                let model = options.model.as_deref().ok_or_else(|| invalid("budgeted Codex session requires a priced model"))?;
+                if !budget_host::priced_vendor_model("codex", model) { return Err(invalid("no native budget price for selected Codex model")); }
             }
             if let Some(vendor) = options.engine.vendor() {
                 let model = options.model.as_deref().ok_or_else(|| invalid("budgeted vendor session requires a model"))?;
@@ -544,13 +545,17 @@ fn run() -> io::Result<()> {
                     return Err(invalid(&format!("no native budget price for {}:{model}", vendor.engine_id())));
                 }
             }
-            if options.resume {
-                return Err(invalid("budgeted native resume requires durable spend accounting"));
-            }
             Some(value)
         }
         _ => None,
     };
+    let budget_home = env::var_os("DOXA_HOME").filter(|value| !value.is_empty()).map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env::var_os("HOME").unwrap_or_default()).join(".doxa"));
+    if !budget_home.is_absolute() { return Err(invalid("DOXA home must be absolute")); }
+    let budget_path = budget_home.join("budgets").join(format!("{}.json", options.session_id));
+    if ceiling.is_none() && fs::symlink_metadata(&budget_path).is_ok() {
+        return Err(invalid("session has durable budget accounting; resume requires the original session budget"));
+    }
     // Fixture sessions normally retain the exact cwd named by tests. An
     // explicit DOXA_WORKTREE=1 opts the fixture into lifecycle testing.
     let manage_fixture = options.engine == Engine::Fixture
@@ -656,10 +661,15 @@ fn run() -> io::Result<()> {
         }
     };
     let host: Arc<dyn Host> = match ceiling {
-        Some(value) if options.engine.vendor().is_some() => Arc::new(
+        Some(value) => {
+            let budget = if options.engine.vendor().is_some() || options.engine == Engine::Codex {
             BudgetHost::new_priced(host, value, options.engine.name(), options.model.as_deref().expect("validated budget model"))
-                .map_err(|error| invalid(&error))?),
-        Some(value) => Arc::new(BudgetHost::new(host, value)),
+                .map_err(|error| invalid(&error))?
+            } else { BudgetHost::new(host, value) };
+            let identity = json!({"session_id":options.session_id,"engine":options.engine.name(),
+                "model":options.model,"cwd":options.cwd,"ceiling_usd":value});
+            Arc::new(budget.durable(budget_path, identity, options.resume)?)
+        },
         None => host,
     };
     let scrub_python = match options.engine {

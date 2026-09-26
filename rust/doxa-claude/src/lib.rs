@@ -57,6 +57,8 @@ impl Bridge {
     pub fn spawn(python: impl AsRef<Path>, script: impl AsRef<Path>) -> Result<Self, Error> {
         let mut child = Command::new(python.as_ref())
             .arg("-u").arg(script.as_ref())
+            // Native inbox, runtime queue and budget wrapper own admission.
+            .env("DOXA_PEER_INBOUND_TURNS", "0")
             .process_group(0)
             .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null())
             .spawn()?;
