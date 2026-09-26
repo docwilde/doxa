@@ -28,7 +28,6 @@ enum Rule {
 
 struct Question {
     id: String,
-    text: String,
     labels: Vec<String>,
     freeform: bool,
 }
@@ -95,7 +94,7 @@ impl InputInbox {
                     }
                     let freeform = labels.is_empty() || row["isOther"] == true;
                     display.push(json!({"id":id,"question":scrub(text),"header":scrub(row["header"].as_str().unwrap_or("")),"options":options,"isOther":freeform}));
-                    questions.push(Question {id:id.into(), text:scrub(text), labels, freeform});
+                    questions.push(Question {id:id.into(), labels, freeform});
                 }
                 (Rule::Questions(questions), json!({"kind":"ask_user","questions":display}))
             }
@@ -146,15 +145,13 @@ impl InputInbox {
             Rule::Questions(questions) => {
                 if answer["cancelled"] == true { json!({"answers":{}}) } else {
                     let answers = answer["answers"].as_object().ok_or("Missing Codex answers")?;
-                    if answers.len() != questions.len() { return Err("Incomplete Codex answers".into()); }
+                    if answers.len() != questions.len() || answers.keys().any(|id| !questions.iter().any(|question| question.id == *id)) {
+                        return Err("Codex answers require the exact reviewed question IDs".into());
+                    }
                     let mut result = Map::new();
                     for question in questions {
-                        // Claude clients used question text as the key. Accept
-                        // that legacy form only if it identifies one question.
-                        let choice = answers.get(&question.id).or_else(|| {
-                            (questions.iter().filter(|q| q.text == question.text).count() == 1)
-                                .then(|| answers.get(&question.text)).flatten()
-                        }).and_then(Value::as_str).filter(|value| !value.trim().is_empty() && value.len() <= 8192)
+                        let choice = answers.get(&question.id)
+                            .and_then(Value::as_str).filter(|value| !value.trim().is_empty() && value.len() <= 8192)
                             .ok_or("Invalid Codex answer")?;
                         if !question.freeform && !question.labels.iter().any(|label| label == choice) {
                             return Err("Codex answer is not one of the reviewed options".into());
@@ -201,6 +198,19 @@ mod tests {
         inbox.answer(id, &json!({"answers":{"q1":"Second"}})).unwrap();
         assert_eq!(receiver.try_recv().unwrap(), json!({"answers":{"q1":{"answers":["Second"]}}}));
         assert!(inbox.answer(id, &json!({"answers":{"q1":"First"}})).is_err());
+    }
+    #[test]
+    fn question_text_cannot_alias_another_id_or_hide_an_unanswered_question() {
+        let inbox = InputInbox::default();
+        let frame = json!({"method":"item/tool/requestUserInput","params":{"questions":[
+            {"id":"q1","question":"q2","options":[{"label":"First"}]},
+            {"id":"q2","question":"other","options":[{"label":"First"}]}]}});
+        let (event, mut receiver) = inbox.begin(&frame, str::to_owned).unwrap();
+        let id = event.data["id"].as_str().unwrap();
+        assert!(inbox.answer(id, &json!({"answers":{"q2":"First","unused":"First"}})).is_err());
+        assert!(inbox.answer(id, &json!({"answers":{"q2":"First","other":"First"}})).is_err());
+        inbox.answer(id, &json!({"answers":{"q1":"First","q2":"First"}})).unwrap();
+        assert_eq!(receiver.try_recv().unwrap()["answers"].as_object().unwrap().len(), 2);
     }
     #[test]
     fn secret_and_scrubbed_option_requests_are_refused() {
