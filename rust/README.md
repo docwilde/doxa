@@ -219,7 +219,7 @@ the JSONL file retains the full history. Older daemons without snapshot
 metadata fall back to their 512-event replay ring. A turn still running at
 attach can have text that was streamed but not yet persisted, so its earlier
 in-flight deltas may be absent. `Ctrl+T` opens bounded tool activity cards.
-The binary version is `2.0.0-alpha.25`;
+The binary version is `2.0.0-alpha.26`;
 this is an alpha release.
 
 In the transcript, user messages have a highlighted body and a left rule;
@@ -239,7 +239,7 @@ count. Its text becomes available only after the completed stream is scrubbed;
 Codex reasoning summaries fold into the same row. Select the row
 and press `Enter` or click to expand it. The processing spinner appears below
 the transcript while a turn is running.
-The Codex CLI JSON stream does not provide live reasoning deltas, so its
+Legacy Codex CLI sessions do not provide live reasoning deltas, so their
 reasoning count becomes available only when the provider reports completed
 turn usage.
 Typing `/` at the start of the prompt shows matching DOXA commands above the

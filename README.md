@@ -1,8 +1,8 @@
 <p align="center"><img src="assets/logo.png" width="560" alt="DOXA — belief earning knowledge"></p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Rust%202.0-alpha.25-f59f00" alt="Rust 2.0 alpha.25 is the main frontend">
-  <a href="https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.25"><img src="https://img.shields.io/github/v/release/docwilde/doxa?include_prereleases&amp;sort=semver&amp;label=Rust%20preview&amp;color=e8590c" alt="latest Rust preview release"></a>
+  <img src="https://img.shields.io/badge/Rust%202.0-alpha.26-f59f00" alt="Rust 2.0 alpha.26 is the main frontend">
+  <a href="https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.26"><img src="https://img.shields.io/github/v/release/docwilde/doxa?include_prereleases&amp;sort=semver&amp;label=Rust%20preview&amp;color=e8590c" alt="latest Rust preview release"></a>
   <a href="https://github.com/docwilde/doxa/actions/workflows/rust-ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/docwilde/doxa/rust-ci.yml?branch=main&label=Rust%20CI" alt="Rust CI status"></a>
   <img src="https://img.shields.io/badge/TUI-Ratatui-2f9e44" alt="Rust TUI built with Ratatui">
   <img src="https://img.shields.io/badge/auth-provider%20CLI%20or%20API%20key-2f9e44" alt="authentication follows the selected engine">
@@ -14,7 +14,7 @@
 > can edit files and run commands with your privileges. Read
 > [Non-goals](#non-goals) before using it on important work.
 
-The current Rust preview is [v2.0.0-alpha.25](https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.25).
+The current Rust preview is [v2.0.0-alpha.26](https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.26).
 GitHub labels 1.19 as the latest stable release while Rust 2.0 remains a prerelease.
 
 **DOXA** is a terminal for coding agents. Development now leads with the
@@ -56,7 +56,7 @@ preferences above the active prompt, including their effective sources.
 Clicking the repo chip opens a directory picker above the prompt; its top
 border can be dragged to show more entries. Selectable rows highlight under
 the pointer. Codex sessions now show current context usage when DOXA can
-verify the owned Codex rollout and its latest token count.
+receive official app-server token usage; legacy CLI sessions use their verified owned rollout. New Codex sessions use app-server, with live estimated reasoning counts. Saved CLI sessions retain their existing transport.
 `/usage` and `/context` open per-session detail panels, and `/collection`
 organizes the session rail. Native fleet preflight reports supervisor capacity
 and approval policy before handing execution to the Python bridge.
@@ -66,7 +66,7 @@ grouped, scrubbed excerpts as you type. Guarded `/clear` starts a fresh
 session in the same tab after verifying a writable
 tabset.
 Processing appears inside each transcript; reasoning is folded behind a live
-token counter, and expanded tool activity shows scrubbed result detail.
+token counter. Codex reasoning content is scrubbed as a whole before becoming available to expand; its live count remains an estimate. Expanded tool activity shows scrubbed result detail.
 Restored Claude and newly persisted Codex sessions keep expandable tool details in the bounded transcript
 view. User turns are highlighted without visible role headings. Transcript
 HTTP(S) links open in the browser with Ctrl+left click and show a pointer cursor
@@ -74,7 +74,7 @@ in supporting terminals.
 
 ## Gallery
 
-### Rust 2.0 alpha.25
+### Rust 2.0 alpha.26
 
 ![Rust directory picker expanded above a single session prompt](assets/shots/rust-repo-picker.png)
 
@@ -149,7 +149,7 @@ curl -fsSL https://raw.githubusercontent.com/docwilde/doxa/main/scripts/install.
 
 The installer builds the Rust frontend and daemon from `main` and installs the
 Rust `doxa` command in `~/.local/bin` (or `DOXA_RUST_BIN_DIR`). Pass a tag such
-as `v2.0.0-alpha.25` after `sh -s --` to pin a release. It uses Git, Cargo,
+as `v2.0.0-alpha.26` after `sh -s --` to pin a release. It uses Git, Cargo,
 Python 3.11+, and `uv`; the Python environment it creates is private to the
 LORE and Claude sidecars. No Python frontend command is installed. See the
 [Rust guide](rust/README.md) for provider setup and current limits.
