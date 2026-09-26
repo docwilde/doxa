@@ -601,14 +601,29 @@ class SessionDaemon:
         session ID". The cwd a resume is launched with is the cwd LORE
         recorded for that session -- which IS its worktree, when it had
         one -- so the right move is to enter it as given, not to make a
-        second one beside it."""
+        second one beside it. A managed resume claims its existing lifecycle
+        lock and verifies its pinned sidecar before starting the engine."""
         if self.resume:
+            if worktrees_mod.managed_record_present(self.cwd) and not worktrees_mod.claim_lifecycle(self.cwd, self.session_id):
+                raise RuntimeError(
+                    "managed worktree resume refused: lifecycle lock is busy or "
+                    "ownership/pinned base cannot be verified; keep the old checkout "
+                    "and start a new session from the main repository"
+                )
             return
+        # A session launched inside an existing managed checkout must not
+        # fall back to it unlocked if creation fails or isolation is disabled.
+        original_cwd = self.cwd
         path = worktrees_mod.create(
             self.cwd, self.session_id, base_branch=self.base_branch
         )
         if path:
             self.cwd = path
+        elif worktrees_mod.managed_record_present(original_cwd):
+            raise RuntimeError(
+                "managed worktree startup refused: isolation failed; "
+                "start a new session from the main repository"
+            )
 
     def _finalize_worktree(self) -> "str | None":
         """Worktree cleanup at REAL finalize (never at a mere detach --
@@ -633,9 +648,10 @@ class SessionDaemon:
         """Start the engine, serve the socket, run until finalized (linger
         expiry, explicit stop, or SIGTERM)."""
         registry_dir()  # ensure runtime dirs exist with clamped perms
+        # Refuse an occupied managed checkout before touching its socket.
+        self._apply_worktree()
         with contextlib.suppress(OSError):
             self.socket_path.unlink()
-        self._apply_worktree()
         self.engine = self._engine_factory(
             self.cwd, self.session_id, str(self.socket_path)
         )
