@@ -28,6 +28,11 @@ the stable 2.0 release has not been cut.
   code fences during streamed transcript updates.
 - Keep the recent session inventory for an empty search and preserve the
   highlighted archived result while asynchronous results are pruned.
+- Ignore picker border clicks and recover attach/catalog controls after a
+  disconnect. Keep LORE action refresh tied to its original session; reject
+  modified action chords and preserve review credit when resized or dismissed.
+- Stop idle memory polling from forcing redraws, refresh changed memory scope,
+  and keep LORE footer targets and compact evidence notices within the viewport.
 
 ## 2.0.0-alpha.24 — 2026-09-26
 
