@@ -68,6 +68,7 @@ pub struct AppServerDriver {
     assistant_bytes: usize,
     assistant_message_emitted: bool,
     usage: Option<Value>,
+    effective_model: Option<String>,
     pending_notifications: VecDeque<(Value, usize)>,
     pending_bytes: usize,
     tool_normalizer: CodexJsonlNormalizer,
@@ -107,7 +108,7 @@ impl AppServerDriver {
             options, effort: None, scrub: Box::new(move |text| scrub(text)), child, process_group, stdin, stdout, next_id: 0,
             thread_id: None, turn_id: None, reasoning_bytes: 0, reasoning_chars: 0,
             reasoning_buffer: String::new(), reasoning_truncated: false,
-            assistant_buffers: Vec::new(), assistant_bytes: 0, assistant_message_emitted: false, usage: None,
+            assistant_buffers: Vec::new(), assistant_bytes: 0, assistant_message_emitted: false, usage: None, effective_model: None,
             pending_notifications: VecDeque::new(),
             pending_bytes: 0,
             tool_normalizer: CodexJsonlNormalizer::new(move |text| tool_scrub(text)),
@@ -135,6 +136,7 @@ impl AppServerDriver {
         // Only the thread/start or thread/resume response identifies its model.
         if let Some(model) = result["model"].as_str().filter(|value|
             !value.is_empty() && value.len() <= 128 && !value.chars().any(char::is_control)) {
+            driver.effective_model = Some(model.to_owned());
             driver.options.model = Some(model.to_owned());
         }
         Ok(())
@@ -172,13 +174,14 @@ impl AppServerDriver {
     }
 
     pub fn set_selection(&mut self, model: Option<String>, effort: Option<String>) {
+        if model != self.options.model { self.effective_model = None; }
         self.options.model = model;
         self.effort = effort;
     }
 
     pub fn thread_id(&self) -> &str { self.thread_id.as_deref().expect("thread start succeeded") }
 
-    pub fn model(&self) -> Option<&str> { self.options.model.as_deref() }
+    pub fn model(&self) -> Option<&str> { self.effective_model.as_deref() }
 
     pub async fn shutdown(&mut self) {
         self.kill_group();
@@ -243,6 +246,12 @@ impl AppServerDriver {
                     continue;
                 }
                 match method {
+                    "model/rerouted" => {
+                        // A reroute invalidates a single-model ceiling even if
+                        // the replacement also happens to have a price row.
+                        self.effective_model = None;
+                        emit(EngineEvent::new("model_changed", json!({"model":null,"message":"Codex rerouted this turn; effective model accounting is unknown"})));
+                    }
                     "item/agentMessage/delta" => {
                         if let (Some(id), Some(delta)) = (params["itemId"].as_str(), params["delta"].as_str()) {
                             if !valid_thread_id(id) { return Err(AppServerError::Protocol("invalid assistant item ID")); }
@@ -326,6 +335,9 @@ impl AppServerDriver {
                             (window > 0 && used <= window).then_some(100.0 * used as f64 / window as f64));
                         emit(EngineEvent::new("turn_done", json!({
                             "is_error":failed,"error":error,"usage_scope":"session",
+                            "model":self.effective_model,
+                            "model_consistent":self.effective_model.is_some() && self.effective_model == self.options.model,
+                            "usage_complete":total.is_some_and(|u| u["inputTokens"].as_u64().is_some() && u["outputTokens"].as_u64().is_some()),
                             "usage_source":"codex_app_server_token_usage_updated",
                             "input_tokens":total.and_then(|u| u["inputTokens"].as_u64()),
                             "output_tokens":total.and_then(|u| u["outputTokens"].as_u64()),
