@@ -126,7 +126,9 @@ fn secret_auth_parameter(url: &str) -> bool {
                 } else { decoded.push(byte); }
             }
             let Ok(key) = String::from_utf8(decoded) else { return true };
-            if ["access_token", "refresh_token", "id_token", "api_key", "code"].contains(&key.to_ascii_lowercase().as_str()) { return true; }
+            let key = key.to_ascii_lowercase();
+            if ["api_key", "code", "password", "passwd", "authorization", "bearer", "jwt", "key"].contains(&key.as_str())
+                || ["token", "secret", "credential"].iter().any(|word| key.contains(word)) { return true; }
         }
     }
     false
@@ -204,9 +206,51 @@ pub fn setup_choose_store(shared: bool) -> io::Result<String> {
         path
     } else { home.join("lore") };
     if std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) { return Err(io::Error::other("LORE store must not be a symlink")); }
-    std::fs::create_dir_all(&path)?;
+    if !shared {
+        let directory = create_private_store(&path)?;
+        use std::os::unix::fs::PermissionsExt;
+        directory.set_permissions(std::fs::Permissions::from_mode(0o700))?;
+        let opened = directory.metadata()?;
+        let current = std::fs::symlink_metadata(&path)?;
+        if (opened.dev(), opened.ino()) != (current.dev(), current.ino()) {
+            return Err(io::Error::other("DOXA LORE store changed during setup"));
+        }
+    }
     doxa_state::update_config(&home.join("config.toml"), |config| { config.insert("lore_root".into(), toml::Value::String(path.display().to_string())); Ok(()) })?;
     Ok(format!("LORE store selected: {}. New sessions use this store.", safe_report_value(&path.display().to_string())))
+}
+
+/// Anchor each component to its opened parent, creating private directories.
+/// A symlink in an existing ancestor is refused before any descendant changes.
+fn create_private_store(path: &Path) -> io::Result<std::fs::File> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+    if !path.is_absolute() { return Err(io::Error::other("DOXA LORE store must be absolute")); }
+    let mut directory = std::fs::OpenOptions::new().read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW).open("/")?;
+    for component in path.components() {
+        let name = match component {
+            std::path::Component::RootDir => continue,
+            std::path::Component::Normal(name) => std::ffi::CString::new(name.as_bytes())
+                .map_err(|_| io::Error::other("invalid LORE directory name"))?,
+            _ => return Err(io::Error::other("LORE store path must not contain relative components")),
+        };
+        let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+        let mut fd = unsafe { libc::openat(directory.as_raw_fd(), name.as_ptr(), flags) };
+        if fd < 0 && io::Error::last_os_error().kind() == io::ErrorKind::NotFound {
+            if unsafe { libc::mkdirat(directory.as_raw_fd(), name.as_ptr(), 0o700) } != 0
+                && io::Error::last_os_error().kind() != io::ErrorKind::AlreadyExists {
+                return Err(io::Error::last_os_error());
+            }
+            fd = unsafe { libc::openat(directory.as_raw_fd(), name.as_ptr(), flags) };
+        }
+        if fd < 0 { return Err(io::Error::last_os_error()); }
+        directory = unsafe { std::fs::File::from_raw_fd(fd) };
+    }
+    if directory.metadata()?.uid() != unsafe { libc::geteuid() } {
+        return Err(io::Error::other("DOXA LORE store must be owned by this user"));
+    }
+    Ok(directory)
 }
 
 pub fn setup_default(key: &str, value: Option<&str>) -> io::Result<String> {
@@ -479,6 +523,9 @@ mod tests {
         assert_eq!(public_auth_progress("https://evil.test/login"), None);
         assert_eq!(public_auth_progress("https://auth.openai.com/login?access_token=SECRET"), None);
         assert_eq!(public_auth_progress("https://auth.openai.com/login?%63ode=SECRET"), None);
+        assert_eq!(public_auth_progress("https://auth.openai.com/login?client_secret=PRIVATE"), None);
+        assert_eq!(public_auth_progress("https://auth.openai.com/login?%63lient_secret=PRIVATE"), None);
+        assert_eq!(public_auth_progress("https://auth.openai.com/login?password=PRIVATE"), None);
         assert_eq!(public_auth_progress("https://auth.openai.com/login?state=public"), Some("Open in your browser: https://auth.openai.com/login?state=public".into()));
         assert_eq!(public_auth_progress("https://claude.ai/login?redirect_uri=http%3A%2F%2Flocalhost&scope=user%3Ainference"), Some("Open in your browser: https://claude.ai/login?redirect_uri=http%3A%2F%2Flocalhost&scope=user%3Ainference".into()));
         assert_eq!(public_auth_progress("Device code: ABCD-EFGH"), Some("Device code: ABCD-EFGH".into()));
