@@ -141,6 +141,7 @@ impl AppServerDriver {
         &mut self, prompt: &str, cancel: &CancellationToken,
         mut emit: impl FnMut(EngineEvent),
     ) -> Result<(), AppServerError> {
+        if cancel.is_cancelled() { return Err(AppServerError::Cancelled); }
         self.reasoning_bytes = 0;
         self.reasoning_chars = 0;
         self.reasoning_buffer.clear();
@@ -306,13 +307,15 @@ impl AppServerDriver {
     }
 
     async fn send_bounded(&mut self, frame: Value, cancel: Option<&CancellationToken>, deadline: tokio::time::Instant) -> Result<(), AppServerError> {
+        if cancel.is_some_and(CancellationToken::is_cancelled) { return Err(AppServerError::Cancelled); }
         let mut encoded = serde_json::to_vec(&frame).map_err(io::Error::other)?;
         if encoded.len() > MAX_FRAME_BYTES { return Err(AppServerError::Protocol("outgoing frame too large")); }
         encoded.push(b'\n');
         tokio::select! {
-            result = async { self.stdin.write_all(&encoded).await?; self.stdin.flush().await } => result.map_err(AppServerError::Io),
+            biased;
             _ = async { if let Some(token) = cancel { token.cancelled().await } else { std::future::pending().await } } => Err(AppServerError::Cancelled),
             _ = tokio::time::sleep_until(deadline) => Err(AppServerError::TimedOut),
+            result = async { self.stdin.write_all(&encoded).await?; self.stdin.flush().await } => result.map_err(AppServerError::Io),
         }
     }
 

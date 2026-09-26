@@ -3009,3 +3009,32 @@ for line in sys.stdin: pass
     assert!(!transcript.contains("fixture-secret"));
     assert!(transcript.contains("[redacted] answer"));
 }
+
+#[test]
+fn stopping_codex_during_unanswered_appserver_initialization_is_prompt() {
+    let cache = std::env::var("TMPDIR").expect("tests must use cache TMPDIR");
+    let dir = tempfile::tempdir_in(cache).unwrap();
+    let codex = dir.path().join("codex-never-initializes");
+    let python = dir.path().join("lore-fixture");
+    let marker = dir.path().join("initialization-received");
+    fake_scrubber(&python, false);
+    executable(&codex, &format!("#!/usr/bin/env python3\nimport sys,time\nsys.stdin.readline()\nopen({:?},'w').write('ready')\ntime.sleep(30)\n", marker.to_str().unwrap()));
+    let mut process = Process::start_codex_appserver(dir.path(), &codex, &python, false);
+    let (mut reader, mut socket) = process.connect();
+    receive(&mut reader);
+    send(&mut socket, json!({"type":"attach","cursor":null}));
+    send(&mut socket, json!({"type":"prompt","id":1,"text":"not submitted"}));
+    assert_eq!(receive(&mut reader)["ok"], true);
+    wait_until(|| marker.exists());
+    let started = Instant::now();
+    send(&mut socket, json!({"type":"call","id":2,"method":"stop","params":{}}));
+    loop {
+        let frame = receive(&mut reader);
+        if frame["type"] == "reply" && frame["id"] == 2 {
+            assert_eq!(frame["ok"], true);
+            break;
+        }
+    }
+    wait_until(|| process.exited());
+    assert!(started.elapsed() < Duration::from_secs(2), "stop waited for app-server RPC timeout");
+}

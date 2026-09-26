@@ -492,7 +492,13 @@ impl Host for CodexHost {
                                 Ok(clean) => clean,
                                 Err(_) => { failed.store(true, Ordering::Release); SCRUB_FAILURE.to_owned() }
                             };
-                            match runtime.block_on(AppServerDriver::spawn(options.clone(), scrub)) {
+                            match runtime.block_on(async {
+                                tokio::select! {
+                                    biased;
+                                    _ = token.cancelled() => Err(AppServerError::Cancelled),
+                                    result = AppServerDriver::spawn(options.clone(), scrub) => result,
+                                }
+                            }) {
                                 Ok(app) => {
                                     *resume_thread = Some(app.thread_id().to_owned());
                                     if self.persist_thread(app.thread_id(), true).is_err() {

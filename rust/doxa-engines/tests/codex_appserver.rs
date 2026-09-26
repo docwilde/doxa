@@ -216,3 +216,20 @@ async fn multiple_inferences_do_not_promote_last_reasoning_usage_to_turn_total()
     assert!(terminal["reasoning_output_tokens"].is_null());
     assert_eq!(terminal["reasoning_count_is_estimate"], true);
 }
+
+#[tokio::test]
+async fn already_cancelled_turn_never_submits_a_prompt() {
+    let (dir, options) = fake();
+    let marker = dir.path().join("prompt-submitted");
+    let script = std::fs::read_to_string(&options.executable).unwrap();
+    let script = script.replace("turn = read()", &format!("turn = read()\nopen({:?},'w').write('submitted')", marker.to_str().unwrap()));
+    std::fs::write(&options.executable, script).unwrap();
+    let mut driver = AppServerDriver::spawn(options, |s| s.to_owned()).await.unwrap();
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    assert!(matches!(driver.run_turn("hello", &cancel, |_| {}).await,
+        Err(doxa_engines::codex_appserver::AppServerError::Cancelled)));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(!marker.exists());
+    driver.shutdown().await;
+}
