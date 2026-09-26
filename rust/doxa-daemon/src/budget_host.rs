@@ -130,6 +130,8 @@ impl BudgetHost {
 }
 
 impl Host for BudgetHost {
+    fn peer_tools_ready(&self) -> bool { self.inner.peer_tools_ready() }
+    fn set_peer_tool_handler(&self, handler: doxa_runtime::PeerToolHandler) -> bool { self.inner.set_peer_tool_handler(handler) }
     fn initial_effort(&self) -> Option<String> { self.inner.initial_effort() }
     fn prompt(&self, text: &str, emit: &mut dyn FnMut(Value)) {
         // The runtime serializes prompt execution, but this mutex also keeps

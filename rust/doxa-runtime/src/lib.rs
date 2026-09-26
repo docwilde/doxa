@@ -43,6 +43,7 @@ pub trait Host: Send + Sync + 'static {
     /// Called once before prompt admission. Returns true only when the host
     /// can expose these bounded, same-scope tools to its actual provider.
     fn set_peer_tool_handler(&self, _: PeerToolHandler) -> bool { false }
+    fn peer_tools_ready(&self) -> bool { false }
     /// Provider-verified billing snapshot; None means unknown.
     fn billing_snapshot(&self) -> Option<Value> { None }
     /// Only the scrub preflight and sticky runtime scrub failure are known.

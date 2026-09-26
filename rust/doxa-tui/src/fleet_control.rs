@@ -98,11 +98,9 @@ impl Spec {
         if timeout.is_none() && !prompt.trim().is_empty() { timeout = Some(Duration::from_secs(1800)); }
         let pool = pool.ok_or_else(|| invalid("native fleet requires --pool"))?;
         if pool.is_empty() || pool.len() > 128 { return Err(invalid("invalid fleet pool size")); }
-        // Native provider hosts currently expose peer RPCs to the client, not
-        // provider tool calls. Claude's SDK engine exposes the peer tools.
         if let Some(supervisor) = &preflight.supervisor {
-            if choice(supervisor)?.engine != launch::Engine::Claude || pool.iter().any(|entry| entry.engine != launch::Engine::Claude) {
-                return Err(invalid("native supervisor requires Claude peer tools for every slot; use symmetric mode for native Codex/vendors"));
+            if choice(supervisor)?.engine == launch::Engine::Fixture || pool.iter().any(|entry| entry.engine == launch::Engine::Fixture) {
+                return Err(invalid("supervisor fleets require provider peer tools; fixture engine has none"));
             }
         }
         let cwd = fs::canonicalize(cwd)?;
@@ -148,7 +146,7 @@ impl Store {
         let claim = fs::OpenOptions::new().read(true).write(true).create(true).mode(0o600)
             .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(run.join("native.lock"))?;
         let meta = claim.metadata()?;
-        if !meta.is_file() || meta.uid() != unsafe { libc::geteuid() } || meta.mode() & 0o077 != 0 { return Err(invalid("untrusted native fleet lock")); }
+        if !meta.is_file() || meta.nlink() != 1 || meta.uid() != unsafe { libc::geteuid() } || meta.mode() & 0o077 != 0 { return Err(invalid("untrusted native fleet lock")); }
         if unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&claim), libc::LOCK_EX | libc::LOCK_NB) } != 0 { return Err(io::Error::other("native fleet already has a coordinator")); }
         Ok(Self { run, _claim: claim })
     }
@@ -156,13 +154,15 @@ impl Store {
         let dir = trusted_dir(&self.run)?;
         let mut temp = tempfile::Builder::new().prefix(".manifest-").tempfile_in(&self.run)?;
         temp.as_file().set_permissions(fs::Permissions::from_mode(0o600))?;
-        temp.write_all(&serde_json::to_vec(value)?)?; temp.as_file().sync_all()?;
+        let bytes = serde_json::to_vec(value)?;
+        if bytes.len() > 1024 * 1024 { return Err(invalid("native fleet manifest exceeds the bounded journal limit")); }
+        temp.write_all(&bytes)?; temp.as_file().sync_all()?;
         temp.persist(self.run.join("manifest.json")).map_err(|error| error.error)?; dir.sync_all()
     }
     fn load(&self) -> io::Result<Value> {
         let mut file = fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(self.run.join("manifest.json"))?;
         let meta = file.metadata()?;
-        if !meta.is_file() || meta.uid() != unsafe { libc::geteuid() } || meta.mode() & 0o077 != 0 || meta.len() > 1024 * 1024 { return Err(invalid("untrusted native fleet manifest")); }
+        if !meta.is_file() || meta.nlink() != 1 || meta.uid() != unsafe { libc::geteuid() } || meta.mode() & 0o077 != 0 || meta.len() > 1024 * 1024 { return Err(invalid("untrusted native fleet manifest")); }
         let mut bytes = Vec::new(); Read::by_ref(&mut file).take(1024 * 1024 + 1).read_to_end(&mut bytes)?;
         let value: Value = serde_json::from_slice(&bytes)?;
         if value["native_version"] != 1 || value["run_id"].as_str() != self.run.file_name().and_then(|name| name.to_str()) { return Err(invalid("native fleet identity mismatch")); }
@@ -237,6 +237,10 @@ pub fn resume(root: &Path, id: &str) -> io::Result<()> {
         let assigned = choice(engine)?;
         let session = discovery::Session { id:session_id, title:String::new(), socket, scope_key:String::new(), clients:None, started_at:String::new() };
         let mut slot = connect(session, &assigned, budget)?;
+        if value["mode"] == "supervisor" {
+            let capability = rpc(&mut slot.client, "peer_tools_status", json!({}))?;
+            if capability["provider_peer_tools"] != true { return Err(invalid("supervisor resume has no verified provider peer tools")); }
+        }
         if slot.client.hello["cwd"] != row["cwd"] || slot.client.hello["model"] != row["effective_model"] {
             return Err(invalid("fleet slot identity or effective model changed; resume withheld"));
         }
@@ -303,7 +307,11 @@ pub fn start(args: &[String]) -> io::Result<()> {
             value["slots"].as_array_mut().unwrap().push(json!({"index":index,"role":if spec.preflight.supervisor.is_some() && index == 0 { "supervisor" } else { "worker" },
                 "engine":engine_name(assigned.engine),"model":assigned.model,"phase":"started","session_id":session.id,"socket_path":session.socket,"pending_asks":[],"approvals":[]}));
             store.save(&value)?;
-            let slot = connect(session, assigned, budget)?;
+            let mut slot = connect(session, assigned, budget)?;
+            if spec.preflight.supervisor.is_some() {
+                let capability = rpc(&mut slot.client, "peer_tools_status", json!({}))?;
+                if capability["provider_peer_tools"] != true { return Err(invalid("supervisor barrier withheld: slot has no verified provider peer tools")); }
+            }
             value["slots"][index]["cwd"] = slot.client.hello["cwd"].clone();
             value["slots"][index]["effective_model"] = slot.client.hello["model"].clone();
             store.save(&value)?;

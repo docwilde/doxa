@@ -3,7 +3,7 @@ use doxa_lore::LoreClient;
 use doxa_runtime::Host;
 use doxa_transcript::TranscriptStore;
 use doxa_vendors::{Delta, Error, Vendor, MAX_TURN_DURATION};
-use crate::vendor_tools::WorkspaceReadGate;
+use crate::vendor_tools::{NativeVendorGate, PeerDesk};
 use serde_json::{json, Value};
 use std::path::Path;
 use std::path::PathBuf;
@@ -37,6 +37,8 @@ pub struct VendorHost {
     store: TranscriptStore,
     cwd: String,
     workspace_read: bool,
+    peer_tools: Mutex<Option<doxa_runtime::PeerToolHandler>>,
+    peer_desk: Arc<PeerDesk>,
     storage_uncertain: AtomicBool,
     committed_bytes: AtomicU64,
     active: Mutex<Option<watch::Sender<bool>>>,
@@ -130,6 +132,8 @@ impl VendorHost {
             store,
             cwd: cwd.into_owned(),
             workspace_read,
+            peer_tools: Mutex::new(None),
+            peer_desk: Arc::new(PeerDesk::default()),
             storage_uncertain: AtomicBool::new(false),
             committed_bytes: AtomicU64::new(committed_bytes),
             active: Mutex::new(None),
@@ -172,6 +176,7 @@ impl VendorHost {
     }
 
     fn cancel(&self) {
+        self.peer_desk.clear();
         if let Ok(active) = self.active.lock() {
             if let Some(sender) = active.as_ref() {
                 let _ = sender.send(true);
@@ -186,6 +191,17 @@ impl Drop for ActiveTurn<'_> {
 }
 
 impl Host for VendorHost {
+    fn peer_tools_ready(&self) -> bool {
+        !self.closing.load(Ordering::Acquire) && self.peer_tools.lock().is_ok_and(|handler| handler.is_some())
+    }
+    fn set_peer_tool_handler(&self, handler: doxa_runtime::PeerToolHandler) -> bool {
+        if let Ok(active) = self.active.lock() {
+            if active.is_some() || self.closing.load(Ordering::Acquire) { return false; }
+            if let Ok(mut peer) = self.peer_tools.lock() { *peer = Some(handler); return true; }
+        }
+        false
+    }
+
     fn can_set_model(&self) -> bool { true }
     fn model_change_requires_idle(&self) -> bool { true }
     fn initial_model(&self) -> Option<String> { Some(self.model.lock().unwrap().clone()) }
@@ -236,17 +252,29 @@ impl Host for VendorHost {
         let started = Instant::now();
         let effort = self.effort.lock().unwrap().clone();
         let selected_model = self.model.lock().unwrap().clone();
+        let peer = self.peer_tools.lock().unwrap().clone();
         emit(json!({"type":"turn_started","data":{"prompt":prompt,
-            "vendor_tools":if self.workspace_read { "workspace-read" } else { "none" }}}));
+            "vendor_tools":match (self.workspace_read, peer.is_some()) {
+                (true, true) => "workspace-read, peers", (true, false) => "workspace-read",
+                (false, true) => "peers", (false, false) => "none"
+            }}}));
         let mut history = self.history.lock().unwrap().clone();
         let saved_history = history.clone();
         let scrub_tool = |value: &str| self.scrub(value);
-        let mut gate = WorkspaceReadGate::new(Path::new(&self.cwd), &scrub_tool);
-        let gate = if self.workspace_read { Some(&mut gate as &mut dyn doxa_vendors::ToolGate) } else { None };
+        let tools_enabled = self.workspace_read || peer.is_some();
+        let output = std::cell::RefCell::new(&mut *emit);
+        let tool_events = Arc::new(Mutex::new(Vec::new()));
+        let emit_tool = |event: Value| (output.borrow_mut())(event);
+        let mut gate = NativeVendorGate::new(Path::new(&self.cwd), self.workspace_read, peer,
+            self.peer_desk.clone(), &scrub_tool, &emit_tool, tool_events.clone());
+        let gate = if tools_enabled { Some(&mut gate as &mut dyn doxa_vendors::ToolGate) } else { None };
         let mut reasoning_chars = 0u64;
         let mut reported_tokens = 0u64;
         let mut last_progress = Instant::now();
         let mut on_delta = |delta: Delta| {
+            if let Ok(mut events) = tool_events.lock() {
+                for event in events.drain(..) { (output.borrow_mut())(event); }
+            }
             if let Delta::Reasoning(text) = delta {
                 reasoning_chars = reasoning_chars.saturating_add(text.chars().count() as u64);
                 let estimate = reasoning_chars.div_ceil(4);
@@ -255,7 +283,7 @@ impl Host for VendorHost {
                     last_progress = Instant::now();
                     // Only the count crosses this boundary before LORE has
                     // scrubbed the complete reasoning stream.
-                    emit(json!({"type":"reasoning_progress","data":{"approx_tokens":estimate}}));
+                    (output.borrow_mut())(json!({"type":"reasoning_progress","data":{"approx_tokens":estimate}}));
                 }
             }
         };
@@ -306,6 +334,8 @@ impl Host for VendorHost {
             }
             Err(_) => Err(Error::Transport),
         };
+        drop(output);
+        if let Ok(mut events) = tool_events.lock() { for event in events.drain(..) { emit(event); } }
         if reasoning_chars > 0 && reasoning_chars.div_ceil(4) > reported_tokens {
             emit(json!({"type":"reasoning_progress","data":{"approx_tokens":reasoning_chars.div_ceil(4)}}));
         }
@@ -401,6 +431,7 @@ impl Host for VendorHost {
 
     fn call(&self, method: &str, params: &Value) -> Result<Value, String> {
         match method {
+            "answer_needs_input" => self.peer_desk.answer(params["id"].as_str().ok_or("Peer request ID required")?, &params["answer"]),
             "list_models" => {
                 let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|_| "catalog runtime unavailable")?;
                 let catalog = runtime.block_on(doxa_vendors::catalog_models(self.vendor));

@@ -343,6 +343,7 @@ impl PeerHost {
 }
 
 impl Host for PeerHost {
+    fn peer_tools_ready(&self) -> bool { self.inner.peer_tools_ready() }
     fn initial_model(&self) -> Option<String> { self.inner.initial_model() }
     fn initial_effort(&self) -> Option<String> { self.inner.initial_effort() }
     fn initial_permission_mode(&self) -> String { self.inner.initial_permission_mode() }
@@ -389,6 +390,7 @@ impl Host for PeerHost {
     }
     fn call(&self, method: &str, params: &Value) -> Result<Value, String> {
         match method {
+            "peer_tools_status" => Ok(json!({"provider_peer_tools":self.peer_tools_ready()})),
             "peers" => self.peers(),
             "msg" => self.msg(params),
             "peer_history" => self.with_lore(|lore| {

@@ -255,7 +255,8 @@ async def run() -> None:
                     complete = emit({"type": "reply", "id": request_id, "ok": True,
                                      "result": {"event": started.type, "data": started.data,
                                                 "permission_mode": getattr(candidate, "permission_mode", "default"),
-                                                "billing": billing}})
+                                                "billing": billing,
+                                                "peer_tools_ready": getattr(candidate, "peer_host", None) is not None}})
                 except Exception:
                     try:
                         await asyncio.wait_for(candidate.finalize(), timeout=EOF_FINALIZE_TIMEOUT)

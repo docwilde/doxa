@@ -47,6 +47,7 @@ pub struct ClaudeHost {
     effort_control: bool,
     permission_control: bool,
     reviewed_compact: bool,
+    peer_tools_ready: bool,
     initial_model: Option<String>,
     initial_permission_mode: String,
     billing: Option<Value>,
@@ -96,6 +97,7 @@ impl ClaudeHost {
                 Err(_) => return Err("Claude sidecar closed during startup".to_owned()),
             }
         };
+        let peer_tools_ready = start["peer_tools_ready"] == true;
         let initial_model = start["data"]["model"].as_str().map(str::to_owned);
         let initial_permission_mode = start["permission_mode"].as_str().unwrap_or("default");
         if !matches!(initial_permission_mode, "default" | "acceptEdits" | "plan" | "auto" | "dontAsk") {
@@ -122,6 +124,7 @@ impl ClaudeHost {
             effort_control,
             permission_control,
             reviewed_compact,
+            peer_tools_ready,
             initial_model,
             initial_permission_mode,
             billing,
@@ -167,6 +170,7 @@ impl ClaudeHost {
 }
 
 impl Host for ClaudeHost {
+    fn peer_tools_ready(&self) -> bool { self.peer_tools_ready && !self.closing.load(Ordering::Acquire) }
     fn can_set_model(&self) -> bool { self.model_control }
     fn can_set_permission_mode(&self) -> bool { self.permission_control }
     fn initial_model(&self) -> Option<String> { self.initial_model.clone() }
