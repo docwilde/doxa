@@ -90,24 +90,55 @@ pub fn auth_status(name: Option<&str>) -> io::Result<String> {
         state_text(provider_state(provider)))).collect::<Vec<_>>().join("\n"))
 }
 
+/// Only public browser/device authentication is supported; credentials remain
+/// in the provider CLI. No raw extra argument can reach that subprocess.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AuthRequest {
+    pub provider: &'static str,
+    pub action: &'static str,
+    pub device_auth: bool,
+}
+
+pub fn parse_auth_request(action: &str, arguments: &str) -> io::Result<Option<AuthRequest>> {
+    let action = match action { "login" => "login", "logout" => "logout", _ => return Err(io::Error::other("auth action must be login or logout")) };
+    let words: Vec<_> = arguments.split_whitespace().collect();
+    if words.is_empty() { return Ok(None); }
+    let provider = match words[0].to_ascii_lowercase().as_str() {
+        "claude" => "claude", "codex" => "codex",
+        _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, "choose claude or codex explicitly")),
+    };
+    let device_auth = match words.as_slice() {
+        [_] => false,
+        [_, "--device-auth"] if provider == "codex" && action == "login" => true,
+        _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, "use login claude|codex [--device-auth (Codex only)] or logout claude|codex")),
+    };
+    Ok(Some(AuthRequest { provider, action, device_auth }))
+}
+
 /// Run the chosen provider's supported browser login/logout command. Only
 /// allowlisted public login progress reaches callers, never arbitrary output.
 pub fn auth_action(name: &str, action: &str, progress: impl FnMut(String)) -> io::Result<String> {
     auth_action_cancellable(name, action, progress, &std::sync::atomic::AtomicBool::new(false))
 }
 
-pub fn auth_action_cancellable(name: &str, action: &str, mut progress: impl FnMut(String), cancel: &std::sync::atomic::AtomicBool) -> io::Result<String> {
-    let provider = PROVIDERS.iter().find(|p| p.name == name).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "choose claude or codex explicitly"))?;
-    let args: &[&str] = match (name, action) {
-        ("claude", "login") => &["auth", "login"],
-        ("claude", "logout") => &["auth", "logout"],
-        ("codex", "login") => &["login"],
-        ("codex", "logout") => &["logout"],
-        _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, "auth action must be login or logout")),
+pub fn auth_action_cancellable(name: &str, action: &str, progress: impl FnMut(String), cancel: &std::sync::atomic::AtomicBool) -> io::Result<String> {
+    let request = parse_auth_request(action, name)?.ok_or_else(|| io::Error::other("choose claude or codex explicitly"))?;
+    auth_action_request(request, progress, cancel)
+}
+
+pub fn auth_action_request(request: AuthRequest, mut progress: impl FnMut(String), cancel: &std::sync::atomic::AtomicBool) -> io::Result<String> {
+    let provider = PROVIDERS.iter().find(|p| p.name == request.provider).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "choose claude or codex explicitly"))?;
+    let args: &[&str] = match (request.provider, request.action, request.device_auth) {
+        ("claude", "login", false) => &["auth", "login"],
+        ("claude", "logout", false) => &["auth", "logout"],
+        ("codex", "login", false) => &["login"],
+        ("codex", "login", true) => &["login", "--device-auth"],
+        ("codex", "logout", false) => &["logout"],
+        _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, "unsupported provider authentication option")),
     };
     let binary = locate(provider.binary).ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "provider CLI not installed"))?;
     run_auth_cancellable(&binary, args, Duration::from_secs(900), &mut progress, cancel)?;
-    Ok(format!("{} {action} completed; {}", provider.label, state_text(provider_state(provider))))
+    Ok(format!("{} {} completed; {}", provider.label, request.action, state_text(provider_state(provider))))
 }
 
 fn secret_auth_parameter(url: &str) -> bool {
@@ -134,7 +165,58 @@ fn secret_auth_parameter(url: &str) -> bool {
     false
 }
 
+fn strip_auth_ansi(line: &str) -> Option<String> {
+    let mut output = String::new(); let mut chars = line.chars().peekable();
+    while let Some(character) = chars.next() {
+        if character == '\u{1b}' {
+            match chars.next()? {
+                '[' => {
+                    let mut ended = false;
+                    for value in chars.by_ref() { if ('@'..='~').contains(&value) { ended = true; break; } }
+                    if !ended { return None; }
+                }
+                ']' => {
+                    let mut ended = false;
+                    while let Some(value) = chars.next() {
+                        if value == '\u{7}' { ended = true; break; }
+                        if value == '\u{1b}' { if chars.next()? != '\\' { return None; } ended = true; break; }
+                    }
+                    if !ended { return None; }
+                }
+                _ => return None,
+            }
+        } else if character.is_control() && character != '\t' { return None; }
+        else { output.push(character); }
+    }
+    Some(output)
+}
+
+#[derive(Default)]
+struct AuthProgress { next_device_code: bool, blank_lines_left: u8 }
+impl AuthProgress {
+    fn line(&mut self, line: &str) -> Option<String> {
+        let clean = match strip_auth_ansi(line) { Some(clean) => clean, None => { self.next_device_code = false; return None; } };
+        let code = clean.trim();
+        // A PTY's CRLF delimiter can produce one empty line between chunks.
+        // Preserve the exact next-line prompt context only across that gap.
+        if code.is_empty() && self.next_device_code && self.blank_lines_left > 0 {
+            self.blank_lines_left -= 1; return None;
+        }
+        let expected = std::mem::take(&mut self.next_device_code);
+        // Official Codex0.156.1 prints the public code on the line after this
+        // exact prompt. Never capture unrelated standalone CLI output.
+        if expected && (4..=32).contains(&code.len()) && code.bytes().all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'-') {
+            return Some(format!("Device code: {code}"));
+        }
+        let report = public_auth_progress(&clean);
+        self.next_device_code = report.is_none() && clean.to_ascii_lowercase().contains("enter this one-time code");
+        self.blank_lines_left = u8::from(self.next_device_code);
+        report
+    }
+}
+
 fn public_auth_progress(line: &str) -> Option<String> {
+    let clean = strip_auth_ansi(line)?; let line = clean.as_str();
     for word in line.split_whitespace() {
         let url = word.trim_end_matches(['.', ',', ')']);
         let Some(rest) = url.strip_prefix("https://") else { continue };
@@ -160,6 +242,7 @@ fn run_auth(binary: &Path, args: &[&str], timeout: Duration, progress: &mut impl
 
 fn run_auth_cancellable(binary: &Path, args: &[&str], timeout: Duration, progress: &mut impl FnMut(String), cancel: &std::sync::atomic::AtomicBool) -> io::Result<()> {
     use std::os::fd::FromRawFd;
+    if cancel.load(std::sync::atomic::Ordering::Acquire) { return Err(io::Error::new(io::ErrorKind::Interrupted, "provider authentication cancelled")); }
     let (mut master, mut slave) = (-1, -1);
     if unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null(), std::ptr::null()) } != 0 { return Err(io::Error::last_os_error()); }
     let mut reader = unsafe { std::fs::File::from_raw_fd(master) };
@@ -172,6 +255,7 @@ fn run_auth_cancellable(binary: &Path, args: &[&str], timeout: Duration, progres
     let mut child = Command::new(binary).args(args).stdin(terminal.try_clone()?).stdout(terminal.try_clone()?).stderr(terminal).process_group(0).spawn()?;
     let deadline = Instant::now() + timeout;
     let mut pending = String::new();
+    let mut reports = AuthProgress::default();
     loop {
         let mut bytes = [0u8; 4096];
         if let Ok(count) = reader.read(&mut bytes) {
@@ -179,7 +263,7 @@ fn run_auth_cancellable(binary: &Path, args: &[&str], timeout: Duration, progres
             while let Some(end) = pending.find(['\n', '\r']) {
                 let line = pending[..end].to_owned();
                 pending.drain(..=end);
-                if let Some(value) = public_auth_progress(&line) { progress(value); }
+                if let Some(value) = reports.line(&line) { progress(value); }
             }
             if pending.len() > 8192 { pending.clear(); }
         }
@@ -517,6 +601,25 @@ mod tests {
         assert!(start.elapsed() < Duration::from_secs(1));
     }
 
+    #[test]
+    fn explicit_auth_request_accepts_only_browser_and_codex_device_forms() {
+        assert_eq!(parse_auth_request("login", "CODEX --device-auth").unwrap(), Some(AuthRequest { provider:"codex", action:"login", device_auth:true }));
+        assert_eq!(parse_auth_request("logout", "claude").unwrap(), Some(AuthRequest { provider:"claude", action:"logout", device_auth:false }));
+        assert_eq!(parse_auth_request("login", "").unwrap(), None);
+        for (action, args) in [("login", "unknown"), ("login", "claude --device-auth"), ("logout", "codex --device-auth"), ("login", "codex --with-access-token"), ("login", "codex --device-auth extra")] {
+            assert!(parse_auth_request(action, args).is_err());
+        }
+    }
+    #[test]
+    fn codex_official_device_prompt_reveals_only_public_url_and_labeled_next_code() {
+        let mut report = AuthProgress::default();
+        assert_eq!(report.line("   \u{1b}[34mhttps://auth.openai.com/codex/device\u{1b}[0m"), Some("Open in your browser: https://auth.openai.com/codex/device".into()));
+        assert_eq!(report.line("2. Enter this one-time code \u{1b}[90m(expires in 15 minutes)\u{1b}[0m"), None);
+        assert_eq!(report.line(""), None);
+        assert_eq!(report.line("   \u{1b}[34mABCD-EFGH\u{1b}[0m"), Some("Device code: ABCD-EFGH".into()));
+        assert_eq!(report.line("UNRELATED-PRIVATE"), None);
+        assert_eq!(report.line("\u{1b}[34mhttps://auth.openai.com/login?client_secret=PRIVATE\u{1b}[0m"), None);
+    }
     #[test]
     fn auth_progress_rejects_secrets_and_untrusted_urls() {
         assert_eq!(public_auth_progress("secret credential"), None);

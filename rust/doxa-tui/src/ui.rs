@@ -81,8 +81,8 @@ const COMMANDS: &[CommandHelp] = &[
     CommandHelp { name: "/fleet", form: "/fleet [runs|status RUN|attach RUN INDEX|start OPTIONS|resume RUN]", summary: "Fleet manifests and slots", support: "local · verified slot attachment" },
     CommandHelp { name: "/mesh", form: "/mesh", summary: "Peer map", support: "local · arguments unavailable" },
     CommandHelp { name: "/img", form: "/img [path]", summary: "Image support", support: "unavailable in Rust" },
-    CommandHelp { name: "/login", form: "/login", summary: "Provider login", support: "local · selectable operations menu" },
-    CommandHelp { name: "/logout", form: "/logout", summary: "Provider logout", support: "local · selectable operations menu" },
+    CommandHelp { name: "/login", form: "/login [claude|codex] [--device-auth]", summary: "Provider login", support: "local · selectable operations menu" },
+    CommandHelp { name: "/logout", form: "/logout [claude|codex]", summary: "Provider logout", support: "local · selectable operations menu" },
     CommandHelp { name: "/settings", form: "/settings", summary: "Native settings", support: "local · linger and worktree for new sessions" },
     CommandHelp { name: "/setup", form: "/setup", summary: "Setup checks", support: "local · auth checks, LORE store, defaults" },
     CommandHelp { name: "/doctor", form: "/doctor", summary: "Health checks", support: "unavailable in Rust" },
@@ -3254,18 +3254,24 @@ impl App {
                 if command == "/model" { self.open_model_picker(); } else { self.open_effort_picker(); self.apply_requested_argument(); }
                 true
             }
-            "/setup" | "/login" | "/logout" | "/plugins" | "/reload-plugins" if args.trim().is_empty() => {
+            "/setup" | "/login" | "/logout" | "/plugins" | "/reload-plugins" if args.trim().is_empty() || matches!(command, "/login" | "/logout") => {
                 let kind = if command == "/reload-plugins" { "plugins" } else { &command[1..] };
+                let menu = if matches!(command, "/login" | "/logout") { operations_menu::Menu::with_auth_args(kind, args) }
+                    else { Ok(operations_menu::Menu::new(kind)) };
+                let menu = match menu { Ok(menu) => menu, Err(error) => { self.notice = format!("{command}: {error}"); return true; } };
                 self.input.clear(); self.input_cursor = 0;
                 self.memory_menu_pending = None;
                 self.memory_manager = None;
-                self.operations_menu = Some(operations_menu::Menu::new(kind));
+                self.operations_menu = Some(menu);
                 self.chip_info = Some(ChipInfo { kind: "operations", label: String::new(),
                     lines: self.operations_menu.as_ref().unwrap().lines(usize::from(self.size.width)),
                     scroll: 0, owner: None });
                 if self.active_chooser_rect().is_none() {
                     self.operations_menu = None; self.chip_info = None;
                     self.notice = "Enlarge pane to open operations".into();
+                } else if let Some(menu) = &mut self.operations_menu {
+                    menu.start_requested();
+                    if let Some(info) = &mut self.chip_info { info.lines = menu.lines(usize::from(self.size.width)); }
                 }
                 true
             }

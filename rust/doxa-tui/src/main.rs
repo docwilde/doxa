@@ -42,8 +42,8 @@ Commands:
   settings set KEY VALUE | unset KEY
                        Persist linger_secs or worktree_per_session for new sessions
   auth status [NAME]   Check Claude or Codex CLI authentication without showing CLI output
-  auth login|logout NAME
-                       Run the selected provider browser authentication
+  auth login NAME [--device-auth (Codex only)] | auth logout NAME
+                       Run the explicitly selected provider authentication
   plugins [refresh | adopt on|off]
                        Discover plugins or change sanitized adoption for new sessions
   fleet ...            Inspect or start native fleet runs
@@ -145,7 +145,11 @@ fn run(args: &[String]) -> io::Result<()> {
                     [_, action] if action == "status" => println!("{}", operations::auth_status(None)?),
                     [_, action, name] if action == "status" => println!("{}", operations::auth_status(Some(name))?),
                     [_, action, name] if action == "login" || action == "logout" => println!("{}", operations::auth_action(name, action, |message| println!("{message}"))?),
-                    _ => return Err(invalid("usage: doxa auth status [claude|codex] | auth login|logout claude|codex")),
+                    [_, action, name, option] if action == "login" && option == "--device-auth" => {
+                        let request = operations::parse_auth_request(action, &format!("{name} {option}"))?.ok_or_else(|| invalid("choose a provider explicitly"))?;
+                        println!("{}", operations::auth_action_request(request, |message| println!("{message}"), &std::sync::atomic::AtomicBool::new(false))?);
+                    },
+                    _ => return Err(invalid("usage: doxa auth status [claude|codex] | auth login claude|codex [--device-auth (Codex only)] | auth logout claude|codex")),
                 }
                 return Ok(());
             }

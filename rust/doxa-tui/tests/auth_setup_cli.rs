@@ -20,11 +20,16 @@ print('https://auth.openai.com/callback?access_token=FIXTURE_PRIVATE_CREDENTIAL'
 print('https://auth.openai.com/login?%63lient_secret=FIXTURE_PRIVATE_CREDENTIAL',flush=True)
 status=(provider=='claude' and args==['auth','status']) or (provider=='codex' and args==['login','status'])
 if status: sys.exit(0 if state.exists() else 1)
-login=(provider=='claude' and args==['auth','login']) or (provider=='codex' and args==['login'])
+login=(provider=='claude' and args==['auth','login']) or (provider=='codex' and args in (['login'],['login','--device-auth']))
 logout=(provider=='claude' and args==['auth','logout']) or (provider=='codex' and args==['logout'])
 if login:
- print('https://claude.ai/login?redirect_uri=http%3A%2F%2Flocalhost&scope=user%3Ainference',flush=True)
- print('Device code: ABCD-EFGH',flush=True)
+ if args==['login','--device-auth']:
+  print('   \x1b[34mhttps://auth.openai.com/codex/device\x1b[0m',flush=True)
+  print('2. Enter this one-time code \x1b[90m(expires in 15 minutes)\x1b[0m',flush=True)
+  print('   \x1b[34mABCD-EFGH\x1b[0m',flush=True)
+ else:
+  print('https://claude.ai/login?redirect_uri=http%3A%2F%2Flocalhost&scope=user%3Ainference',flush=True)
+  print('Device code: ABCD-EFGH',flush=True)
  state.write_text('fixture state only')
 elif logout: state.unlink(missing_ok=True)
 else: sys.exit(23)
@@ -102,4 +107,20 @@ fn terminal_setup_refuses_symlinked_store_ancestor_before_mutating_target() {
     let child=fixture.command(&["setup"]).stdin(Stdio::from(terminal)).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
     input.write_all(b"d\n\n\n").unwrap();let output=wait_bounded(child);
     assert!(!output.status.success());assert_eq!(fs::read_dir(&outside).unwrap().count(),0);
+}
+
+#[test]
+fn explicit_device_login_forwards_only_verified_codex_flag() {
+    let fixture=Fixture::new();
+    let login=fixture.command(&["auth","login","codex","--device-auth"]).output().unwrap();
+    assert!(login.status.success(),"{}",String::from_utf8_lossy(&login.stderr));
+    let stdout=String::from_utf8_lossy(&login.stdout);
+    assert!(stdout.contains("Device code: ABCD-EFGH"));assert!(stdout.contains("https://auth.openai.com/codex/device"));
+    assert!(!stdout.contains('\u{1b}'));assert!(!stdout.contains("FIXTURE_PRIVATE_CREDENTIAL"));
+    let calls=fs::read_to_string(fixture.root.path().join("calls")).unwrap();
+    assert!(calls.contains(r#"["codex", ["login", "--device-auth"]]"#));
+    for args in [vec!["auth","login","claude","--device-auth"],vec!["auth","logout","codex","--device-auth"],vec!["auth","login","codex","--with-api-key"]] {
+        assert!(!fixture.command(&args).output().unwrap().status.success());
+    }
+    assert_eq!(fs::read_to_string(fixture.root.path().join("calls")).unwrap(),calls,"unsupported options must never invoke a provider CLI");
 }
