@@ -53,7 +53,8 @@ impl Menu {
         lines.extend(self.messages.iter().rev().take(18).rev().flat_map(|s| s.lines().map(str::to_owned)));
         lines
     }
-    pub fn hover(&mut self, row: usize) { if row > 0 && row <= self.rows.len() { self.selected = row - 1; } }
+    pub fn choice_at(&self, row: usize) -> bool { !self.busy() && self.editing.is_none() && row > 0 && row <= self.rows.len() }
+    pub fn hover(&mut self, row: usize) { if self.choice_at(row) { self.selected = row - 1; } }
     pub fn key(&mut self, key: KeyEvent) {
         if key.code == KeyCode::Esc { if !self.busy() { self.closed = true; } return; }
         if self.busy() { return; }
@@ -120,6 +121,7 @@ mod tests {
         let mut menu = Menu::new("login");
         menu.poll(); menu.hover(1);
         assert!(!menu.busy());
+        assert!(!menu.choice_at(0)); assert!(menu.choice_at(1)); assert!(!menu.choice_at(99));
         assert!(menu.lines(80).iter().any(|l| l.contains("Claude")));
         menu.key(KeyEvent::new(KeyCode::Down, crossterm::event::KeyModifiers::NONE));
         assert_eq!(menu.selected, 1);
