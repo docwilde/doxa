@@ -226,6 +226,7 @@ struct PendingRejection {
 
 #[derive(Debug)]
 struct LorePicker {
+    session_id: Option<String>,
     query: String,
     rows: Vec<lore_picker::Belief>,
     proposals: Vec<lore_picker::Proposal>,
@@ -4255,6 +4256,7 @@ impl App {
             .or_else(|| std::env::current_dir().ok().map(|path| path.to_string_lossy().into_owned()))
             .unwrap_or_default();
         self.lore_picker = Some(LorePicker {
+            session_id: self.groups[self.active_group].active_id().map(str::to_owned),
             query: String::new(), rows: Vec::new(), selected: 0, offset: 0,
             proposals: Vec::new(), proposal_mode, review: None,
             review_scroll: 0, review_seen: 0, review_width: 0,
@@ -4321,18 +4323,17 @@ impl App {
     }
 
     fn poll_memory(&mut self) -> bool {
-        // A completed scan can change excerpts or the loading indicator even
-        // when every hit is already present in the session list.
-        let mut changed = true;
+        let mut changed = false;
         if let Some((id, cwd, receiver)) = self.memory_pending.take() {
             match receiver.try_recv() {
                 Ok(result) => {
                     if self.session_cwds.get(&id).and_then(|path| path.to_str()) == Some(cwd.as_str()) {
+                        let mut repo_changed = false;
                         let usage = result.map(|(usage, repo)| {
-                            self.memory_repo.insert(id.clone(), repo);
+                            repo_changed = self.memory_repo.insert(id.clone(), repo) != Some(repo);
                             usage
                         });
-                        changed = self.memory_cache.get(&id).is_none_or(|(old, _)| *old != usage);
+                        changed = repo_changed || self.memory_cache.get(&id).is_none_or(|(old, _)| *old != usage);
                         self.memory_cache.insert(id, (usage, Instant::now()));
                     }
                 }
@@ -4432,6 +4433,10 @@ impl App {
                 false
             }
             Err(TryRecvError::Disconnected) => {
+                if self.groups[self.active_group].active_id() != Some(id.as_str())
+                    || self.session_cwds.get(&id).and_then(|path| path.to_str()) != Some(cwd.as_str()) {
+                    return false;
+                }
                 if let Some(info) = self.chip_info.as_mut().filter(|info| info.kind == "memory") {
                     info.lines = vec!["LORE unavailable".to_owned()];
                     info.scroll = 0;
@@ -4577,10 +4582,11 @@ impl App {
         if refresh_after_action {
             let offset = picker.offset;
             self.notice = picker.result_status.clone().unwrap_or_default();
-            if let Some(id) = self.groups[self.active_group].active_id() {
+            if let Some(id) = picker.session_id.as_ref().filter(|id|
+                self.session_cwds.get(*id).and_then(|path| path.to_str()) == Some(picker.cwd.as_str())) {
                 self.memory_cache.remove(id);
-                self.session_telemetry.entry(id.to_owned()).or_default().lore = None;
-                self.pending_queue_commands.push(crate::bridge::WorkerCommand::Status(id.to_owned()));
+                self.session_telemetry.entry(id.clone()).or_default().lore = None;
+                self.pending_queue_commands.push(crate::bridge::WorkerCommand::Status(id.clone()));
             }
             self.load_lore(lore_picker::Query::Beliefs(offset));
         }
@@ -4592,6 +4598,27 @@ impl App {
         let picker = self.lore_picker.as_mut().unwrap();
         if picker.resolving { return true; }
         if picker.pending.is_some() { return true; }
+        // Dismissal must remain possible when a split or resized pane cannot
+        // show the review, and when an exact-selection guard has invalidated it.
+        if key.code == KeyCode::Esc {
+            if picker.proposal_mode && picker.review.is_some() {
+                picker.review = None;
+                picker.armed_resolution = None;
+                return true;
+            }
+            if picker.belief_review.is_some() {
+                if picker.belief_action.is_some() {
+                    picker.belief_action = None;
+                    picker.belief_note.clear();
+                    picker.retract_armed = false;
+                    picker.status = "Belief action cancelled".into();
+                } else {
+                    picker.belief_review = None;
+                    picker.can_act_on_beliefs = false;
+                }
+                return true;
+            }
+        }
         if picker.proposal_mode {
             if let Some(review) = &picker.review {
                 let Some(area) = review_area else { return true; };
@@ -4604,6 +4631,11 @@ impl App {
                     picker.review_seen = 0;
                     picker.armed_resolution = None;
                 }
+                if visible == 0 {
+                    picker.armed_resolution = None;
+                    picker.status = "Enlarge the review to read its complete contents".into();
+                    return true;
+                }
                 if visible > 0 && picker.review_scroll <= picker.review_seen {
                     picker.review_seen = picker.review_seen.max(picker.review_scroll.saturating_add(visible)).min(total);
                 }
@@ -4614,11 +4646,13 @@ impl App {
                     KeyCode::Down => { picker.review_scroll = (picker.review_scroll + 1).min(max_scroll); picker.armed_resolution = None; }
                     KeyCode::PageUp => { picker.review_scroll = picker.review_scroll.saturating_sub(visible.saturating_sub(1).max(1)); picker.armed_resolution = None; }
                     KeyCode::PageDown => { picker.review_scroll = picker.review_scroll.saturating_add(visible.saturating_sub(1).max(1)).min(max_scroll); picker.armed_resolution = None; }
-                    KeyCode::Char('a' | 'A') if picker.can_resolve && visible > 0 && picker.review_seen == total && picker.pending.is_none() => {
+                    KeyCode::Char('a' | 'A') if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                        && picker.can_resolve && visible > 0 && picker.review_seen == total && picker.pending.is_none() => {
                         picker.armed_resolution = Some(doxa_lore::PendingDecision::Approve);
                         picker.status = "Approve this exact proposal? Press Enter to confirm, Esc to cancel".into();
                     }
-                    KeyCode::Char('r' | 'R') if picker.can_resolve && visible > 0 && picker.review_seen == total && picker.pending.is_none() => {
+                    KeyCode::Char('r' | 'R') if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                        && picker.can_resolve && visible > 0 && picker.review_seen == total && picker.pending.is_none() => {
                         picker.armed_resolution = Some(doxa_lore::PendingDecision::Reject);
                         picker.status = "Reject this exact proposal? Press Enter to confirm, Esc to cancel".into();
                     }
@@ -4690,6 +4724,12 @@ impl App {
                 picker.belief_action = None;
                 picker.retract_armed = false;
             }
+            if visible == 0 {
+                picker.belief_action = None;
+                picker.retract_armed = false;
+                picker.status = "Enlarge the review to read its complete contents".into();
+                return true;
+            }
             if visible > 0 && picker.review_scroll <= picker.review_seen {
                 picker.review_seen = picker.review_seen.max(picker.review_scroll.saturating_add(visible)).min(total);
             }
@@ -4742,7 +4782,8 @@ impl App {
                 KeyCode::Down => picker.review_scroll = (picker.review_scroll + 1).min(max_scroll),
                 KeyCode::PageUp => picker.review_scroll = picker.review_scroll.saturating_sub(visible.saturating_sub(1).max(1)),
                 KeyCode::PageDown => picker.review_scroll = picker.review_scroll.saturating_add(visible.saturating_sub(1).max(1)).min(max_scroll),
-                KeyCode::Char(c) if picker.can_act_on_beliefs && visible > 0 && picker.review_seen == total => {
+                KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+                    && picker.can_act_on_beliefs && visible > 0 && picker.review_seen == total => {
                     picker.belief_action = match c.to_ascii_lowercase() {
                         'c' => Some(doxa_lore::BeliefAction::Confirmed),
                         'x' => Some(doxa_lore::BeliefAction::Contradicted),
@@ -6241,6 +6282,7 @@ impl App {
             if row < first { return false; }
             let reserve = if picker.proposal_mode { 6 } else if compact { 4 } else { 8 };
             let visible = usize::from(menu.height.saturating_sub(reserve)).max(1);
+            if usize::from(row - first) >= visible { return false; }
             let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
             let index = start + usize::from(row - first);
             let count = if picker.proposal_mode { picker.proposals.len() } else { picker.rows.len() };
@@ -6578,6 +6620,7 @@ impl App {
                     picker.belief_action = None;
                     picker.retract_armed = false;
                 }
+                if visible == 0 { return true; }
                 if visible > 0 && picker.review_scroll <= picker.review_seen {
                     picker.review_seen = picker.review_seen.max(picker.review_scroll.saturating_add(visible)).min(total);
                 }
@@ -7440,12 +7483,14 @@ impl App {
         }
         if let Some((id, evidence)) = &picker.evidence {
             lines.push(Line::from(format!(" Belief #{id} · {} evidence rows", evidence.len())));
-            for row in evidence.iter().take(usize::from(height.saturating_sub(if compact { 4 } else { 9 }) / 2)) {
+            let trail_notice = evidence.last().is_some_and(|row| row.trail_truncated);
+            let reserve = if compact { 4 } else { 9 } + u16::from(trail_notice);
+            for row in evidence.iter().take(usize::from(height.saturating_sub(reserve) / 2)) {
                 lines.push(Line::from(format!(" {} · {} · {}{}", safe_label(&row.created), safe_label(&row.project), safe_label(&row.session_id),
                     row.source_engine.as_ref().map(|engine| format!(" · {}", safe_label(engine))).unwrap_or_default())));
                 lines.push(Line::from(format!("   {}{}", safe_label(&row.note), if row.truncated { "…" } else { "" })));
             }
-            if evidence.last().is_some_and(|row| row.trail_truncated) {
+            if trail_notice {
                 lines.push(Line::from(" More evidence exists in LORE"));
             }
         } else {
@@ -9578,6 +9623,7 @@ for line in sys.stdin:
         for proposal_mode in [false, true] {
             let mut app = scrolled_picker_app();
             app.lore_picker = Some(LorePicker {
+            session_id: None,
                 rows: (1..=2).map(|id| lore_picker::Belief { id, subject: format!("belief-{id}"),
                     claim: "long claim ".repeat(80), truncated: false, confidence: 0.9,
                     evidence_count: None }).collect(),
@@ -10605,7 +10651,7 @@ for line in sys.stdin:
         app.action_menu = true;
         assert_eq!(app.active_chooser_rect().unwrap().bottom(), menu.bottom());
         app.action_menu = false;
-        app.lore_picker = Some(LorePicker { rows: vec![], selected: 0, query: String::new(),
+        app.lore_picker = Some(LorePicker { session_id: None, rows: vec![], selected: 0, query: String::new(),
             offset: 0, status: "Ready".into(), evidence: None, pending: None,
             proposals: Vec::new(), proposal_mode: false, review: None, review_scroll: 0,
             review_seen: 0, review_width: 0, armed_resolution: None,
@@ -11734,6 +11780,7 @@ for line in sys.stdin:
         assert_eq!(raw_visual_rows("界界", 3), vec!["界", "界"]);
         let mut app = App { input: "unsent draft".into(), ..Default::default() };
         app.lore_picker = Some(LorePicker {
+            session_id: None,
             query: String::new(), rows: Vec::new(), selected: 0, offset: 0,
             evidence: None, status: String::new(), pending: None,
             proposals: Vec::new(), proposal_mode: false, review: None, review_scroll: 0,
@@ -11774,6 +11821,10 @@ for line in sys.stdin:
                 picker.belief_review.as_ref().unwrap().claim());
             if picker.review_seen == raw_visual_rows(&full, picker.review_width).len() { break; }
         }
+        app.lore_picker_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(app.lore_picker.as_ref().unwrap().belief_action.is_none());
+        app.lore_picker_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::ALT));
+        assert!(app.lore_picker.as_ref().unwrap().belief_action.is_none());
         app.lore_picker_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
         assert_eq!(app.lore_picker.as_ref().unwrap().belief_action, Some(doxa_lore::BeliefAction::Confirmed));
         app.lore_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -11794,6 +11845,132 @@ for line in sys.stdin:
         assert!(app.pending_queue_commands.iter().any(|command|
             matches!(command, crate::bridge::WorkerCommand::Status(id) if id == "s")));
         assert!(app.lore_picker.as_ref().unwrap().belief_review.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn belief_review_zero_height_cannot_scroll_or_lose_escape() {
+        let mut app = app_with_review();
+        app.sync_chooser_state();
+        app.chooser_height_override.set(Some(5));
+        app.lore_picker_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        let menu = app.active_chooser_rect().unwrap();
+        app.mouse(MouseEvent { kind: MouseEventKind::ScrollDown,
+            column: menu.x + 2, row: menu.y + 2, modifiers: KeyModifiers::NONE });
+        assert_eq!(app.lore_picker.as_ref().unwrap().review_scroll, 0);
+        assert_eq!(app.lore_picker.as_ref().unwrap().review_seen, 0);
+        app.chooser_height_override.set(Some(0));
+        app.lore_picker_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.lore_picker.as_ref().unwrap().belief_review.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn belief_action_completion_refreshes_its_original_session() {
+        let mut app = app_with_review();
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"other","cwd":"/other"}));
+        app.groups[0].tabs = vec!["s".into(), "other".into()];
+        app.groups[0].active = 1;
+        app.set_lore_memory_usage("s", 10, 100, 10, 100);
+        app.set_lore_memory_usage("other", 20, 100, 20, 100);
+        let (tx, rx) = mpsc::sync_channel(1);
+        let picker = app.lore_picker.as_mut().unwrap();
+        picker.pending = Some(rx);
+        picker.resolving = true;
+        picker.belief_acting = true;
+        tx.send(Ok(lore_picker::ResultPage::BeliefActed(doxa_lore::BeliefActionResult {
+            status: doxa_lore::BeliefStatus::Active, retired: false,
+            confirmed: 1, contradicted: 0, stale: 0,
+        }))).unwrap();
+        assert!(app.poll_lore());
+        assert!(!app.memory_cache.contains_key("s"));
+        assert!(app.memory_cache.contains_key("other"));
+        assert!(app.pending_queue_commands.iter().any(|command|
+            matches!(command, crate::bridge::WorkerCommand::Status(id) if id == "s")));
+        assert!(!app.pending_queue_commands.iter().any(|command|
+            matches!(command, crate::bridge::WorkerCommand::Status(id) if id == "other")));
+    }
+
+    #[test]
+    fn idle_memory_poll_does_not_force_redraw() {
+        let mut app = App::default();
+        app.groups[0].tabs.push("s".into());
+        app.session_cwds.insert("s".into(), PathBuf::from("/repo"));
+        app.set_lore_memory_usage("s", 10, 100, 10, 100);
+        assert!(!app.poll_memory());
+        assert!(app.memory_pending.is_none());
+    }
+
+    #[test]
+    fn memory_scope_change_redraws_even_when_usage_counts_are_equal() {
+        let mut app = App::default();
+        app.groups[0].tabs.push("s".into());
+        app.session_cwds.insert("s".into(), PathBuf::from("/repo"));
+        app.set_lore_memory_usage("s", 10, 100, 10, 100);
+        let usage = app.memory_cache["s"].0.clone().unwrap();
+        let (tx, rx) = mpsc::sync_channel(1);
+        app.memory_pending = Some(("s".into(), "/repo".into(), rx));
+        tx.send(Some((usage, false))).unwrap();
+        assert!(app.poll_memory());
+        assert_eq!(app.memory_repo.get("s"), Some(&false));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lore_footer_hover_never_selects_an_offscreen_row() {
+        let mut app = app_with_review();
+        let picker = app.lore_picker.as_mut().unwrap();
+        picker.belief_review = None;
+        picker.rows = (1..=30).map(|id| lore_picker::Belief { id, subject: "subject".into(),
+            claim: "claim".into(), truncated: false, confidence: 0.8, evidence_count: Some(1) }).collect();
+        let menu = app.active_chooser_rect().unwrap();
+        let footer = menu.y + 6 + menu.height.saturating_sub(8);
+        app.mouse(MouseEvent { kind: MouseEventKind::Moved,
+            column: menu.x + 2, row: footer, modifiers: KeyModifiers::NONE });
+        assert_eq!(app.lore_picker.as_ref().unwrap().selected, 0);
+        let picker = app.lore_picker.as_mut().unwrap();
+        picker.proposal_mode = true;
+        picker.proposals = (1..=30).map(|index| lore_picker::Proposal { pid: index.to_string(),
+            kind: "memory".into(), action: "add".into(), scope: "user".into(), summary: "summary".into() }).collect();
+        let menu = app.active_chooser_rect().unwrap();
+        let footer = menu.y + 4 + menu.height.saturating_sub(6);
+        app.mouse(MouseEvent { kind: MouseEventKind::Moved,
+            column: menu.x + 2, row: footer, modifiers: KeyModifiers::NONE });
+        assert_eq!(app.lore_picker.as_ref().unwrap().selected, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compact_evidence_menu_keeps_the_truncation_notice_visible() {
+        let mut app = app_with_review();
+        let picker = app.lore_picker.as_mut().unwrap();
+        picker.belief_review = None;
+        picker.evidence = Some((7, (0..2).map(|_| lore_picker::Evidence {
+            session_id: "session".into(), project: "repo".into(), note: "note".into(),
+            created: "today".into(), source_engine: None, truncated: false, trail_truncated: true,
+        }).collect()));
+        let mut terminal = Terminal::new(TestBackend::new(100, 8)).unwrap();
+        terminal.draw(|frame| app.draw_lore_picker(frame, Rect::new(0, 0, 100, 8))).unwrap();
+        let buffer = terminal.backend().buffer();
+        let screen = (0..8).map(|row| (0..100).map(|x| buffer[(x, row)].symbol())
+            .collect::<String>()).collect::<Vec<_>>().join("\n");
+        assert!(screen.contains("More evidence exists in LORE"));
+    }
+
+    #[test]
+    fn disconnected_memory_menu_does_not_replace_another_sessions_content() {
+        let mut app = App::default();
+        app.size = Rect::new(0, 0, 100, 28);
+        app.groups[0].tabs.push("other".into());
+        app.session_cwds.insert("s".into(), PathBuf::from("/repo"));
+        app.session_cwds.insert("other".into(), PathBuf::from("/other"));
+        app.show_memory_menu_fixture(0, &["Keep this"], &[], &[]);
+        let expected = app.chip_info.as_ref().unwrap().lines.clone();
+        let (tx, rx) = mpsc::sync_channel(1);
+        app.memory_menu_pending = Some(("s".into(), "/repo".into(), rx));
+        drop(tx);
+        assert!(!app.poll_memory_menu());
+        assert_eq!(app.chip_info.as_ref().unwrap().lines, expected);
     }
 
     #[cfg(unix)]
@@ -11830,6 +12007,8 @@ for line in sys.stdin:
         assert!(!app.lore_picker.as_ref().unwrap().can_act_on_beliefs);
         assert!(app.lore_picker.as_ref().unwrap().belief_action.is_none());
         assert!(app.lore_picker.as_ref().unwrap().status.contains("Selection changed"));
+        app.lore_picker_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.lore_picker.as_ref().unwrap().belief_review.is_none());
     }
 
     #[test]
@@ -11919,6 +12098,7 @@ for line in sys.stdin:
         let mut app = App::default();
         app.size = Rect::new(0, 0, 100, 40);
         app.lore_picker = Some(LorePicker {
+            session_id: None,
             query: String::new(), rows: Vec::new(), selected: 0, offset: 0,
             proposals: vec![lore_picker::Proposal { pid: "one".into(), kind: "memory".into(),
                 action: "add".into(), scope: "user".into(), summary: String::new() }],
@@ -11930,14 +12110,24 @@ for line in sys.stdin:
             result_status: None,
             evidence: None, status: String::new(), pending: None,
         });
+        app.sync_chooser_state();
+        app.chooser_height_override.set(Some(5));
         app.lore_picker_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
         assert!(app.lore_picker.as_ref().unwrap().armed_resolution.is_none());
+        app.lore_picker_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        assert_eq!(app.lore_picker.as_ref().unwrap().review_scroll, 0);
+        assert_eq!(app.lore_picker.as_ref().unwrap().review_seen, 0);
+        app.chooser_height_override.set(None);
         for _ in 0..200 {
             if app.lore_picker.as_ref().unwrap().review_seen ==
                 raw_visual_rows(app.lore_picker.as_ref().unwrap().review.as_ref().unwrap().raw(),
                     app.lore_picker.as_ref().unwrap().review_width).len() { break; }
             app.lore_picker_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
         }
+        app.lore_picker_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+        assert!(app.lore_picker.as_ref().unwrap().armed_resolution.is_none());
+        app.lore_picker_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::ALT));
+        assert!(app.lore_picker.as_ref().unwrap().armed_resolution.is_none());
         app.lore_picker_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
         assert_eq!(app.lore_picker.as_ref().unwrap().armed_resolution, Some(doxa_lore::PendingDecision::Approve));
         assert!(app.lore_picker.as_ref().unwrap().pending.is_none());
@@ -11945,6 +12135,9 @@ for line in sys.stdin:
         app.lore_picker.as_mut().unwrap().can_resolve = false;
         app.lore_picker_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
         assert!(app.lore_picker.as_ref().unwrap().armed_resolution.is_none());
+        app.chooser_height_override.set(Some(0));
+        app.lore_picker_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.lore_picker.as_ref().unwrap().review.is_none());
     }
 
     #[test]
