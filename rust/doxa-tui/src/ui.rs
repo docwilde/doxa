@@ -1920,6 +1920,8 @@ impl App {
                         self.append_event(&id, event_type, data)
                     }
                     "session_done" => {
+                        self.input_requests.retain(|request| request.session_id != id);
+                        self.pending_answers.retain(|(session, _, _)| session != &id);
                         self.streaming_text.remove(&id);
                         self.session_activity.remove(&id);
                         let before = self.diff_reject_queue.len();
@@ -2047,6 +2049,8 @@ impl App {
             "clear_finalize_reply" => {
                 let Some(id) = frame["session_id"].as_str() else { return false; };
                 if frame["ok"] == true {
+                    let selected_id = self.rail_order().get(self.rail_selected)
+                        .map(|index| self.sessions[*index].id.clone());
                     self.sessions.retain(|session| session.id != id);
                     self.session_activity.remove(id);
                     self.session_identity.remove(id);
@@ -2070,7 +2074,10 @@ impl App {
                     self.selected_tool_sections.remove(id);
                     self.tool_cards_revision.remove(id);
                     self.input_requests.retain(|request| request.session_id != id);
-                    self.rail_selected = self.rail_selected.min(self.rail_order().len().saturating_sub(1));
+                    self.pending_answers.retain(|(session, _, _)| session != id);
+                    self.rail_selected = selected_id.and_then(|selected| self.rail_order().iter()
+                        .position(|index| self.sessions[*index].id == selected))
+                        .unwrap_or_else(|| self.rail_selected.min(self.rail_order().len().saturating_sub(1)));
                     self.notice = "Previous session finalized".into();
                 } else {
                     self.notice = format!("Previous session remains live · {}",
@@ -2201,6 +2208,10 @@ impl App {
                 let Some(text) = frame.get("text").and_then(|v| v.as_str()) else {
                     return false;
                 };
+                if text.len() > MAX_INPUT_BYTES || text.chars().any(|ch| unsafe_input_char(ch) && ch != '\n') {
+                    self.notice = "Rejected prompt exceeds input limits · inspect the originating client".into();
+                    return true;
+                }
                 let Some(target) = frame.get("session_id").and_then(|v| v.as_str()) else {
                     return false;
                 };
@@ -2234,6 +2245,10 @@ impl App {
                 let Some(text) = frame.get("text").and_then(|v| v.as_str()) else {
                     return false;
                 };
+                if text.len() > MAX_INPUT_BYTES || text.chars().any(|ch| unsafe_input_char(ch) && ch != '\n') {
+                    self.notice = "Rejected prompt exceeds input limits · inspect the originating client".into();
+                    return true;
+                }
                 let Some(target) = frame.get("session_id").and_then(|v| v.as_str()) else {
                     return false;
                 };
@@ -2260,11 +2275,11 @@ impl App {
         let Some(row) = structured_event(event_type, data) else {
             return false;
         };
-        let heading_needed = matches!(event_type, "tool_call" | "tool_result")
-            && self.streaming_text.insert(id.to_owned());
         let Some(session) = self.sessions.iter_mut().find(|s| s.id == id) else {
             return false;
         };
+        let heading_needed = matches!(event_type, "tool_call" | "tool_result")
+            && self.streaming_text.insert(id.to_owned());
         if heading_needed { append_turn_heading(session, "Assistant"); }
         if append_transcript(session, &row) {
             self.notice = "Transcript tail limited to 512 KiB".into();
@@ -2273,6 +2288,7 @@ impl App {
     }
 
     fn append_reasoning(&mut self, id: &str, data: &serde_json::Value, progress: bool) -> bool {
+        if !self.sessions.iter().any(|session| session.id == id) { return false; }
         let stream = self.reasoning_streams.entry(id.to_owned()).or_default();
         if let Some(tokens) = data.get("approx_tokens").and_then(|value| value.as_u64()) {
             stream.tokens = stream.tokens.max(tokens);
@@ -2345,8 +2361,8 @@ impl App {
                     self.stop_confirmation = None;
                     self.notice = "Session stop cancelled · enlarge terminal to confirm".into();
                 }
-                if ((self.model_picker.is_some() || self.effort_picker.is_some() || self.engine_picker || self.new_session.is_some()) && (w < 29 || h < 11))
-                    || (self.permission_picker.is_some() && (w < 60 || h < 15)) {
+                if ((self.model_picker.is_some() || self.effort_picker.is_some() || self.engine_picker || self.new_session.is_some()) && self.active_chooser_rect().is_none())
+                    || (self.permission_picker.is_some() && self.active_chooser_rect().is_none()) {
                     self.model_picker = None;
                     self.effort_picker = None;
                     self.engine_picker = false;
@@ -11247,6 +11263,44 @@ for line in sys.stdin:
             matches!(receiver.recv().unwrap(), crate::bridge::WorkerCommand::Prompt(_, text) if text == "second")
         );
         assert_eq!(app.pending_prompts[0].1, "third");
+    }
+
+    #[test]
+    fn ended_session_clears_pending_input_and_answers() {
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"a"}));
+        app.apply_daemon_frame(&json!({"type":"event", "session_id":"a",
+            "event":{"type":"needs_input", "data":{"id":"request", "kind":"ask_user",
+                "questions":[{"question":"Choose", "options":[{"label":"One"},{"label":"Two"}]}]}}}));
+        app.pending_answers.push(("a".into(), "request".into(), json!({})));
+        app.apply_daemon_frame(&json!({"type":"event", "session_id":"a", "event":{"type":"session_done", "data":{}}}));
+        assert!(app.input_requests.is_empty());
+        assert!(app.pending_answers.is_empty());
+    }
+
+    #[test]
+    fn rejected_prompts_obey_input_bounds_and_unknown_streams_are_ignored() {
+        let mut app = App::default();
+        for kind in ["prompt_rejected", "prompt_uncertain"] {
+            for text in ["x".repeat(MAX_INPUT_BYTES + 1), "bad\u{001b}draft".into()] {
+                app.apply_daemon_frame(&json!({"type":kind,"session_id":"","text":text}));
+            }
+        }
+        assert!(app.input.is_empty());
+        assert!(app.rejected_drafts.is_empty());
+        assert!(!app.append_reasoning("missing", &json!({"text":"secret"}), false));
+        assert!(!app.append_event("missing", "tool_call", &json!({"name":"read"})));
+        assert!(app.reasoning_streams.is_empty());
+        assert!(app.streaming_text.is_empty());
+    }
+
+    #[test]
+    fn finalized_session_preserves_selected_rail_identity() {
+        let mut app = App::default();
+        for id in ["a", "b", "c"] { app.apply_daemon_frame(&json!({"type":"hello", "session_id":id})); }
+        app.rail_selected = app.rail_order().iter().position(|index| app.sessions[*index].id == "b").unwrap();
+        app.apply_daemon_frame(&json!({"type":"clear_finalize_reply", "session_id":"a", "ok":true}));
+        assert_eq!(app.sessions[app.rail_order()[app.rail_selected]].id, "b");
     }
 
     #[test]
