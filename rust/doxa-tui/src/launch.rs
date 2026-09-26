@@ -245,6 +245,16 @@ pub fn spawn_fleet(options: &LaunchOptions, runtime: &Path, budget: Option<f64>,
     let mut environment = vec![("DOXA_RUNTIME_DIR", runtime.to_string_lossy().into_owned()),
         ("DOXA_PEER_INBOUND_TURNS", if inbound { "1" } else { "0" }.into())];
     environment.push(("DOXA_SESSION_BUDGET_USD", budget.map(|value| value.to_string()).unwrap_or_default()));
+    let run = runtime.parent().ok_or_else(|| invalid("fleet runtime has no run root"))?;
+    let ledger = run.join("home/peers/messages.jsonl");
+    if !runtime.is_absolute() { return Err(invalid("fleet runtime must be absolute")); }
+    for directory in [run.to_owned(), run.join("home"), run.join("home/peers")] {
+        let metadata = fs::symlink_metadata(directory)?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() || metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o077 != 0 {
+            return Err(invalid("fleet ledger scope must be private and owned"));
+        }
+    }
+    environment.push(("DOXA_PEER_LEDGER", ledger.to_string_lossy().into_owned()));
     spawn_inner(options, Some(runtime), &environment)
 }
 

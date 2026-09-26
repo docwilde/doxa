@@ -1,4 +1,4 @@
-use doxa_tui::{bridge, discovery, fleet_control, fleet_plan, fleet_view, launch, operations, ui_state};
+use doxa_tui::{bridge, discovery, fleet_control, fleet_plan, fleet_view, launch, mesh_control, operations, ui_state};
 use std::collections::HashSet;
 use std::io::{self, Write};
 use serde_json::{Map, Value};
@@ -47,6 +47,7 @@ Commands:
   plugins [refresh | adopt on|off]
                        Discover plugins or change sanitized adoption for new sessions
   fleet ...            Inspect or start native fleet runs
+  mesh serve           Serve the private peer graph until Ctrl-C
 
 Run doxa without a command to restore this project's live sessions or start
 a native Codex session. Pass --engine or --model to start a new session.
@@ -159,6 +160,15 @@ fn run(args: &[String]) -> io::Result<()> {
             }
             _ => {}
         }
+    }
+    if args.first().is_some_and(|arg| arg == "mesh") {
+        let ledger = match &args[1..] {
+            [] => mesh_control::default_ledger()?,
+            [mode] if mode == "serve" => mesh_control::default_ledger()?,
+            [mode, flag, path] if mode == "serve" && flag == "--ledger" => PathBuf::from(path),
+            _ => return Err(invalid("usage: doxa mesh serve [--ledger ABSOLUTE_PATH] | doxa fleet mesh RUN_ID [--root ROOT]")),
+        };
+        return mesh_control::serve(&ledger);
     }
     if args.first().is_some_and(|arg| arg == "fleet") {
         return fleet(&args[1..]);
@@ -535,6 +545,7 @@ fn fleet(args: &[String]) -> io::Result<()> {
     }
     let root = match root { Some(root) => root, None => fleet_view::default_root()? };
     match words.as_slice() {
+        ["mesh", run] => return mesh_control::serve(&mesh_control::run_ledger(&root, run)?),
         ["runs"] => println!("{}", fleet_view::runs(&root)?),
         ["status", run] => println!("{}", fleet_view::status(&root, run)?),
         ["resume", run] => return fleet_control::resume(&root, run),

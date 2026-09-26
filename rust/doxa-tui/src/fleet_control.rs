@@ -17,6 +17,12 @@ fn rpc(client: &mut DaemonClient, method: &str, value: Value) -> io::Result<Valu
     Ok(reply)
 }
 
+// A signal may interrupt either a poll or an RPC. Once cancellation was
+// requested, always finish teardown instead of surfacing an incidental EINTR.
+fn cancellation_result(result: io::Result<()>, value: &mut Value) -> io::Result<()> {
+    if STOP.load(Ordering::Relaxed) { value["stopped"] = json!(true); Ok(()) } else { result }
+}
+
 static STOP: AtomicBool = AtomicBool::new(false);
 extern "C" fn stop_signal(_: libc::c_int) { STOP.store(true, Ordering::Relaxed); }
 struct Signals { interrupt: libc::sighandler_t, terminate: libc::sighandler_t }
@@ -121,7 +127,7 @@ impl Spec {
             "mode":if self.preflight.supervisor.is_some() { "supervisor" } else { "symmetric" },
             "workers":self.preflight.sessions,"sessions":assignments.len(),"run_budget_usd":self.preflight.run_budget_usd,
             "allow_unbudgeted":self.preflight.allow_unbudgeted,"approval_policy":self.preflight.approve,
-            "approval_grace_s":self.preflight.approval_grace_s,"dry_run":self.dry_run,"seed":self.seed,
+            "approval_grace_s":self.preflight.approval_grace_s,"dry_run":self.dry_run,"seed":self.seed,"quiescence_timeout_s":self.timeout.map(|duration| duration.as_secs_f64()),"quiescence_grace_s":self.quiet.as_secs_f64(),
             "preflight":preflight,"slots":assignments.iter().enumerate().map(|(index, choice)| json!({
                 "index":index,"engine":engine_name(choice.engine),"model":choice.model,
                 "role":if self.preflight.supervisor.is_some() && index == 0 { "supervisor" } else { "worker" }
@@ -258,6 +264,10 @@ pub fn resume(root: &Path, id: &str) -> io::Result<()> {
         let assigned = choice(engine)?;
         let session = discovery::Session { id:session_id, title:String::new(), socket, scope_key:String::new(), clients:None, started_at:String::new() };
         let mut slot = connect(session, &assigned, budget)?;
+        if value["ledger_path"].is_string() {
+            let capability = rpc(&mut slot.client, "peer_tools_status", json!({}))?;
+            if capability["ledger_path"] != value["ledger_path"] { return Err(invalid("fleet private ledger identity changed; resume withheld")); }
+        }
         if value["mode"] == "supervisor" {
             let capability = rpc(&mut slot.client, "peer_tools_status", json!({}))?;
             if capability["provider_peer_tools"] != true { return Err(invalid("supervisor resume has no verified provider peer tools")); }
@@ -281,6 +291,7 @@ pub fn resume(root: &Path, id: &str) -> io::Result<()> {
     let timeout = value["spec"]["quiescence_timeout_s"].as_f64().map(|seconds| seconds.to_string()).map(|value| seconds(&value)).transpose()?;
     let quiet = seconds(&value["spec"]["quiescence_grace_s"].as_f64().unwrap_or(5.0).to_string())?;
     let result = monitor(&store, &mut value, &mut slots, timeout, quiet);
+    let result = cancellation_result(result, &mut value);
     let mut stop_failed = false;
     for slot in &slots { if launch::stop(&slot.session).is_err() { stop_failed = true; } }
     value["live"] = json!(false); value["phase"] = json!(if stop_failed { "teardown_incomplete" } else { "finished" });
@@ -317,8 +328,10 @@ pub fn start(args: &[String]) -> io::Result<()> {
     let _signals = Signals::install()?;
     let store = Store::create(&spec.preflight.root, &spec.preflight.run_id)?;
     let runtime = store.run.join("rt"); fs::DirBuilder::new().mode(0o700).create(&runtime)?;
+    let ledger_home = store.run.join("home"); fs::DirBuilder::new().mode(0o700).create(&ledger_home)?;
+    fs::DirBuilder::new().mode(0o700).create(ledger_home.join("peers"))?;
     let budget = spec.preflight.run_budget_usd.map(|total| total / assigned.len() as f64);
-    let mut value = json!({"native_version":1,"run_id":spec.preflight.run_id,"started_at":now(),"heartbeat_at":now(),
+    let mut value = json!({"native_version":1,"run_id":spec.preflight.run_id,"ledger_path":ledger_home.join("peers/messages.jsonl"),"started_at":now(),"heartbeat_at":now(),
         "live":true,"phase":"starting","mode":if spec.preflight.supervisor.is_some() { "supervisor" } else { "symmetric" },
         "spec":{"sessions":assigned.len(),"seed":spec.seed,"sampler":"splitmix64-v1","run_budget_usd":spec.preflight.run_budget_usd,
             "allow_unbudgeted":spec.preflight.allow_unbudgeted,"cwd":spec.cwd,"quiescence_timeout_s":spec.timeout.map(|duration| duration.as_secs_f64()),"quiescence_grace_s":spec.quiet.as_secs_f64()},
@@ -347,6 +360,11 @@ pub fn start(args: &[String]) -> io::Result<()> {
             slots.push(slot);
         }
         ensure_not_cancelled()?;
+        for slot in &mut slots {
+            ensure_not_cancelled()?;
+            let capability = rpc(&mut slot.client, "peer_tools_status", json!({}))?;
+            if capability["ledger_path"] != value["ledger_path"] { return Err(invalid("fleet private ledger identity not verified; barrier withheld")); }
+        }
         value["phase"] = json!("barrier_ready"); store.save(&value)?;
         if !spec.prompt.trim().is_empty() {
             dispatch(&store, &mut value, &mut slots, &spec.prompt)?;
@@ -355,6 +373,7 @@ pub fn start(args: &[String]) -> io::Result<()> {
         println!("native fleet {} ready; fleet attach {} 0", spec.preflight.run_id, spec.preflight.run_id);
         monitor(&store, &mut value, &mut slots, spec.timeout, spec.quiet)
     })();
+    let result = cancellation_result(result, &mut value);
     // Every identity successfully published is stopped, even when connect failed.
     let mut stop_failed = false;
     for row in value["slots"].as_array().unwrap() {
@@ -547,6 +566,52 @@ mod tests {
         dispatch(&store, &mut manifest, &mut slots, "same task for every worker").unwrap();
         for server in servers { server.join().unwrap(); }
         assert!(store.load().unwrap()["slots"].as_array().unwrap().iter().all(|slot| slot["phase"] == "dispatched"));
+    }
+
+    #[test]
+    fn approval_desk_persists_review_before_allow_and_refuses_questions_and_spawns() {
+        use std::io::{BufRead, BufReader};
+        use std::os::unix::net::UnixListener;
+        for (policy, kind, allowed) in [("peer", "permission", true), ("all", "ask_user", false), ("all", "spawn", false)] {
+            let root = tempfile::tempdir().unwrap();
+            fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+            let store = Store::create(root.path(), "desk-test").unwrap();
+            let path = store.run.join("s.sock");
+            let listener = UnixListener::bind(&path).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+            let ask = json!({"id":"ask-1","kind":kind,"tool_name":"mcp__doxa__peer_send","detail":{"to":"worker","text":"bounded task"}});
+            let expected = ask.clone(); let manifest_path = store.run.join("manifest.json");
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                writeln!(stream, "{}", json!({"type":"hello","proto":1,"session_id":"desk-session","cwd":"/fixture","engine":"fixture","next_seq":0})).unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap()); let mut line = String::new();
+                reader.read_line(&mut line).unwrap(); // attach
+                line.clear(); reader.read_line(&mut line).unwrap();
+                let command: Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(command["method"], "answer_needs_input");
+                assert_eq!(command["params"]["reviewed_request"], expected);
+                let persisted: Value = serde_json::from_slice(&fs::read(manifest_path).unwrap()).unwrap();
+                assert_eq!(persisted["slots"][0]["approvals"][0]["delivered"], false);
+                assert_eq!(persisted["slots"][0]["approvals"][0]["decision"], if allowed { "allow" } else { "deny" });
+                if kind == "ask_user" {
+                    assert_eq!(command["params"]["answer"]["cancelled"], true);
+                    assert_eq!(command["params"]["answer"]["declined"], true);
+                } else { assert_eq!(command["params"]["answer"]["decision"], if allowed { "allow" } else { "deny" }); }
+                writeln!(stream, "{}", json!({"type":"reply","id":command["id"],"ok":true,"applied":true})).unwrap();
+                line.clear(); reader.read_line(&mut line).unwrap();
+                let state: Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(state["method"], "get_state");
+                writeln!(stream, "{}", json!({"type":"reply","id":state["id"],"ok":true,"running":false,"queued":0})).unwrap();
+            });
+            let client = DaemonClient::connect(&path, None).unwrap();
+            let mut slots = vec![Slot { session: discovery::Session { id:"desk-session".into(), title:String::new(), socket:path,
+                scope_key:String::new(), clients:None, started_at:String::new() }, client, pending:vec![(ask, Instant::now())], busy:false }];
+            let mut value = json!({"native_version":1,"run_id":"desk-test","mode":"symmetric","approvals":{"policy":policy,"grace_s":0,"auto_approved":0,"refused":0},"slots":[{"phase":"dispatched","approvals":[]}]});
+            store.save(&value).unwrap();
+            monitor(&store, &mut value, &mut slots, None, Duration::ZERO).unwrap();
+            server.join().unwrap();
+            assert_eq!(store.load().unwrap()["slots"][0]["approvals"][0]["delivered"], true);
+        }
     }
 
 }

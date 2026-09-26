@@ -61,6 +61,7 @@ fn sockets_gone(value: &Value) -> bool {
 fn native_symmetric_fleet_dispatches_all_slots_and_tears_down_isolated_runtime() {
     let fixture = Fixture::new(); let mut child = fixture.start("0.2"); finish(&mut child);
     let manifest = fixture.manifest();
+    assert_eq!(manifest["ledger_path"], fixture.root.join("run/home/peers/messages.jsonl").to_string_lossy().as_ref());
     assert_eq!(manifest["mode"], "symmetric"); assert_eq!(manifest["phase"], "finished");
     assert_eq!(manifest["live"], false); assert_eq!(manifest["quiesced"], true);
     let slots = manifest["slots"].as_array().unwrap(); assert_eq!(slots.len(), 2);
@@ -123,4 +124,31 @@ fn ambiguous_dispatch_resume_never_creates_runtime_or_sends_a_prompt() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("interrupted barrier"));
     assert!(!run.join("rt").exists());
+}
+
+#[test]
+fn reviewed_prompt_digest_refuses_changed_input_before_launch() {
+    let fixture = Fixture::new();
+    let output = fixture.command().env("DOXA_FLEET_REVIEW_PROMPT_SHA256", "not-the-reviewed-digest")
+        .args(["fleet", "start", "--pool", "fixture", "--prompt", "changed task", "-n", "1", "--allow-unbudgeted", "--run-id", "run", "--root", fixture.root.to_str().unwrap()]).output().unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("prompt changed after review"));
+    assert!(!fixture.root.exists()); assert!(!fixture.home.exists());
+}
+
+#[test]
+fn fleet_mesh_cli_stops_its_owned_loopback_renderer() {
+    use std::io::{BufRead, BufReader};
+    let fixture = Fixture::new(); let mut fleet = fixture.start("0.1"); finish(&mut fleet);
+    let mut child = fixture.command().env("DOXA_MESH_OPEN_BROWSER", "0")
+        .args(["fleet", "mesh", "run", "--root", fixture.root.to_str().unwrap()])
+        .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::inherit()).spawn().unwrap();
+    let mut reader = BufReader::new(child.stdout.take().unwrap()); let mut line = String::new();
+    reader.read_line(&mut line).unwrap(); assert!(line.starts_with("mesh:"));
+    line.clear(); reader.read_line(&mut line).unwrap();
+    let address = line.trim().trim_start_matches("http://").split('/').next().unwrap().to_owned();
+    assert!(std::net::TcpStream::connect(&address).is_ok());
+    unsafe { assert_eq!(libc::kill(child.id() as libc::pid_t, libc::SIGINT), 0); }
+    finish(&mut child);
+    assert!(std::net::TcpStream::connect(address).is_err());
 }

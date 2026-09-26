@@ -27,6 +27,7 @@ pub struct PeerHost {
     limiter: Mutex<RateLimiter>,
     inbound_limiters: Mutex<HashMap<String, RateLimiter>>,
     ledger: Ledger,
+    ledger_path: PathBuf,
     events: SyncSender<Value>,
     pending: Mutex<VecDeque<Value>>,
 }
@@ -62,6 +63,9 @@ impl PeerHost {
         if !home.is_absolute() {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "DOXA home must be absolute"));
         }
+        let ledger = std::env::var_os("DOXA_PEER_LEDGER").filter(|value| !value.is_empty()).map(PathBuf::from)
+            .unwrap_or_else(|| home.join("peers/messages.jsonl"));
+        if !ledger.is_absolute() { return Err(io::Error::new(io::ErrorKind::InvalidInput, "peer ledger must be absolute")); }
         Ok(Self {
             inner,
             lore: Mutex::new(None),
@@ -73,7 +77,8 @@ impl PeerHost {
             title,
             limiter: Mutex::new(RateLimiter::new(SendLimits::default())),
             inbound_limiters: Mutex::new(HashMap::new()),
-            ledger: Ledger::new(home.join("peers/messages.jsonl")),
+            ledger_path: ledger.clone(),
+            ledger: Ledger::new(ledger),
             events,
             pending: Mutex::new(VecDeque::new()),
         })
@@ -390,7 +395,7 @@ impl Host for PeerHost {
     }
     fn call(&self, method: &str, params: &Value) -> Result<Value, String> {
         match method {
-            "peer_tools_status" => Ok(json!({"provider_peer_tools":self.peer_tools_ready()})),
+            "peer_tools_status" => Ok(json!({"provider_peer_tools":self.peer_tools_ready(),"ledger_path":self.ledger_path})),
             "peers" => self.peers(),
             "msg" => self.msg(params),
             "peer_history" => self.with_lore(|lore| {
