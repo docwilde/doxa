@@ -47,6 +47,7 @@ pub struct CodexHost {
     driver: Mutex<CodexTransport>,
     runtime: Mutex<tokio::runtime::Runtime>,
     active: Mutex<Option<CancellationToken>>,
+    input: doxa_engines::codex_interaction::InputInbox,
     scrub_failed: Arc<AtomicBool>,
     persistence_failed: AtomicBool,
     lore: Arc<Mutex<LoreClient>>,
@@ -235,6 +236,7 @@ impl CodexHost {
             driver: Mutex::new(driver),
             runtime: Mutex::new(runtime),
             active: Mutex::new(None),
+            input: Default::default(),
             scrub_failed,
             persistence_failed: AtomicBool::new(false),
             lore,
@@ -306,6 +308,7 @@ impl CodexHost {
     }
 
     fn cancel(&self) {
+        self.input.clear();
         if let Some(token) = self.active.lock().unwrap().as_ref() {
             token.cancel();
         }
@@ -532,7 +535,7 @@ impl Host for CodexHost {
                                 tokio::select! {
                                     biased;
                                     _ = token.cancelled() => Err(AppServerError::Cancelled),
-                                    result = AppServerDriver::spawn(options.clone(), scrub) => result,
+                                    result = AppServerDriver::spawn_interactive(options.clone(), scrub) => result,
                                 }
                             }) {
                                 Ok(app) => {
@@ -555,8 +558,18 @@ impl Host for CodexHost {
                         } else {
                             let selected = self.selection.lock().unwrap().clone();
                             active.as_mut().expect("spawn succeeded").set_selection(selected.0, selected.1);
-                            let outcome = runtime.block_on(active.as_mut().expect("spawn succeeded").run_turn(
+                            let outcome = runtime.block_on(active.as_mut().expect("spawn succeeded").run_turn_interactive(
                                 &provider_prompt, &token, &mut handle_event,
+                                |frame| self.input.begin(frame, |text| {
+                                    self.lore.lock().unwrap().scrub(text).unwrap_or_else(|_| {
+                                        self.scrub_failed.store(true, Ordering::Release);
+                                        SCRUB_FAILURE.to_owned()
+                                    })
+                                }).and_then(|pending| {
+                                    if self.scrub_failed.load(Ordering::Acquire) {
+                                        self.input.clear(); Err("LORE scrub failed; Codex input withheld".into())
+                                    } else { Ok(Some(pending)) }
+                                }),
                             )).map_err(|error| match error {
                                 AppServerError::Server(message) => message,
                                 AppServerError::Cancelled => "Codex turn cancelled".to_owned(),
@@ -572,6 +585,7 @@ impl Host for CodexHost {
                     }
                 }
         };
+        self.input.clear();
         // A provider error or interrupted turn can leave the provider thread
         // ahead of our durable transcript. Keep its restart guard armed.
         let turn_succeeded = result.is_ok()
@@ -646,6 +660,10 @@ impl Host for CodexHost {
 
     fn call(&self, method: &str, params: &Value) -> Result<Value, String> {
         match method {
+            "answer_needs_input" => {
+                let id = params["id"].as_str().ok_or("Codex answer needs an ID")?;
+                self.input.answer(id, &params["answer"])
+            }
             "list_models" | "set_model" | "set_effort" => {
                 if self.active.lock().unwrap().is_some() || self.closing.load(Ordering::Acquire) {
                     return Err("Codex settings require an idle session; retry after the turn completes".into());

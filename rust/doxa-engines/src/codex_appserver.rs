@@ -1,5 +1,5 @@
-//! Bounded Codex app-server protocol adapter. Interactive server requests are
-//! explicitly refused until DOXA has a matching approval UI bridge.
+//! Bounded Codex app-server protocol adapter with explicit request routing.
+//! Interactive requests require a host bridge; unknown requests are refused.
 //!
 //! The shapes below come from `codex app-server generate-ts --experimental`
 //! (Codex 0.156.1). Stdio is newline-delimited JSON-RPC without LSP headers.
@@ -50,6 +50,8 @@ impl From<io::Error> for AppServerError {
 pub struct AppServerDriver {
     options: AppServerOptions,
     effort: Option<String>,
+    interactive: bool,
+    review_items: Vec<Value>,
     scrub: Box<dyn Fn(&str) -> String + Send + Sync>,
     child: Child,
     // Keep the unreaped leader PID reserved until killing this original group.
@@ -85,6 +87,18 @@ impl AppServerDriver {
         Ok(driver)
     }
 
+    /// Interactive mode uses provider approvals instead of silently running
+    /// commands that need escalation. Catalog discovery never creates a thread.
+    pub async fn spawn_interactive(
+        options: AppServerOptions,
+        scrub: impl Fn(&str) -> String + Send + Sync + 'static,
+    ) -> Result<Self, AppServerError> {
+        let mut driver = Self::initialize(options, scrub).await?;
+        driver.interactive = true;
+        driver.start_thread().await?;
+        Ok(driver)
+    }
+
     async fn initialize(options: AppServerOptions, scrub: impl Fn(&str) -> String + Send + Sync + 'static) -> Result<Self, AppServerError> {
         if options.resume_thread.as_deref().is_some_and(|id| !valid_thread_id(id)) {
             return Err(AppServerError::Protocol("invalid resume thread ID"));
@@ -105,7 +119,7 @@ impl AppServerDriver {
         let scrub = std::sync::Arc::new(scrub);
         let tool_scrub = scrub.clone();
         let mut driver = Self {
-            options, effort: None, scrub: Box::new(move |text| scrub(text)), child, process_group, stdin, stdout, next_id: 0,
+            options, effort: None, interactive: false, review_items: Vec::new(), scrub: Box::new(move |text| scrub(text)), child, process_group, stdin, stdout, next_id: 0,
             thread_id: None, turn_id: None, reasoning_bytes: 0, reasoning_chars: 0,
             reasoning_buffer: String::new(), reasoning_truncated: false,
             assistant_buffers: Vec::new(), assistant_bytes: 0, assistant_message_emitted: false, usage: None, effective_model: None,
@@ -113,17 +127,18 @@ impl AppServerDriver {
             pending_bytes: 0,
             tool_normalizer: CodexJsonlNormalizer::new(move |text| tool_scrub(text)),
         };
-        driver.request("initialize", json!({"clientInfo":{"name":"doxa","title":null,"version":env!("CARGO_PKG_VERSION")},"capabilities":null})).await?;
+        driver.request("initialize", json!({"clientInfo":{"name":"doxa","title":null,"version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true}})).await?;
         driver.send(json!({"method":"initialized"})).await?;
         Ok(driver)
     }
 
     async fn start_thread(&mut self) -> Result<(), AppServerError> {
         let driver = self;
+        let approval = if driver.interactive { "on-request" } else { "never" };
         let result = if let Some(id) = driver.options.resume_thread.clone() {
-            driver.request("thread/resume", json!({"threadId":id,"cwd":driver.options.cwd,"model":driver.options.model,"approvalPolicy":"never","sandbox":sandbox_name(driver.options.sandbox),"excludeTurns":true})).await?
+            driver.request("thread/resume", json!({"threadId":id,"cwd":driver.options.cwd,"model":driver.options.model,"approvalPolicy":approval,"sandbox":sandbox_name(driver.options.sandbox),"excludeTurns":true})).await?
         } else {
-            driver.request("thread/start", json!({"cwd":driver.options.cwd,"model":driver.options.model,"approvalPolicy":"never","sandbox":sandbox_name(driver.options.sandbox)})).await?
+            driver.request("thread/start", json!({"cwd":driver.options.cwd,"model":driver.options.model,"approvalPolicy":approval,"sandbox":sandbox_name(driver.options.sandbox)})).await?
         };
         let id = result.pointer("/thread/id").and_then(Value::as_str)
             .filter(|id| valid_thread_id(id))
@@ -199,7 +214,17 @@ impl AppServerDriver {
     /// daemon integration will retain the existing incomplete-turn guard.
     pub async fn run_turn(
         &mut self, prompt: &str, cancel: &CancellationToken,
+        emit: impl FnMut(EngineEvent),
+    ) -> Result<(), AppServerError> {
+        self.run_turn_interactive(prompt, cancel, emit, |_| Ok(None)).await
+    }
+
+    /// A host creates a single-use input receiver before the display event is
+    /// emitted. Waiting for a user remains cancellable and time bounded.
+    pub async fn run_turn_interactive(
+        &mut self, prompt: &str, cancel: &CancellationToken,
         mut emit: impl FnMut(EngineEvent),
+        mut request: impl FnMut(&Value) -> Result<Option<(EngineEvent, tokio::sync::oneshot::Receiver<Value>)>, String>,
     ) -> Result<(), AppServerError> {
         if cancel.is_cancelled() { return Err(AppServerError::Cancelled); }
         self.reasoning_bytes = 0;
@@ -210,11 +235,12 @@ impl AppServerDriver {
         self.assistant_bytes = 0;
         self.assistant_message_emitted = false;
         self.usage = None;
+        self.review_items.clear();
         self.tool_normalizer.begin_turn();
         let deadline = tokio::time::Instant::now() + self.options.turn_timeout;
         let thread_id = self.thread_id().to_owned();
         let request_id = self.send_request_bounded("turn/start", json!({"threadId":thread_id,"model":self.options.model,"effort":self.effort,"input":[{"type":"text","text":prompt,"text_elements":[]}]}), Some(cancel), deadline).await?;
-        let response = self.wait_response(request_id, Some(cancel), deadline).await?;
+        let response = self.wait_response(request_id, Some(cancel), deadline, true).await?;
         let turn_id = response.pointer("/turn/id").and_then(Value::as_str)
             .filter(|id| valid_thread_id(id))
             .ok_or(AppServerError::Protocol("turn response lacks a valid ID"))?.to_owned();
@@ -235,7 +261,32 @@ impl AppServerDriver {
             };
             if let Some(method) = frame.get("method").and_then(Value::as_str) {
                 if frame.get("id").is_some() {
-                    self.deny_server_request(&frame, Some(cancel), deadline).await?;
+                    let params = &frame["params"];
+                    if params["threadId"].as_str() != Some(thread_id.as_str())
+                        || params["turnId"].as_str() != Some(turn_id.as_str()) {
+                        self.send_bounded(json!({"id":frame["id"],"error":{"code":-32602,"message":"Request does not belong to the active turn"}}), Some(cancel), deadline).await?;
+                        return Err(AppServerError::Protocol("server request has a different thread or turn"));
+                    }
+                    let mut frame = frame;
+                    if let Some(item) = self.review_items.iter().find(|item| item["id"] == frame["params"]["itemId"]) {
+                        frame["doxa_item"] = item.clone();
+                    }
+                    let pending = request(&frame).map_err(|message| AppServerError::Server((self.scrub)(&message)))?;
+                    if let Some((event, receiver)) = pending {
+                        let request_id = event.data["id"].clone();
+                        emit(event);
+                        let answer = tokio::select! {
+                            biased;
+                            _ = cancel.cancelled() => Err(AppServerError::Cancelled),
+                            _ = tokio::time::sleep_until(deadline) => Err(AppServerError::TimedOut),
+                            value = receiver => value.map_err(|_| AppServerError::Server("Codex input request was closed".into())),
+                        };
+                        emit(EngineEvent::new("needs_input_resolved", json!({"id":request_id})));
+                        let answer = answer?;
+                        self.send_bounded(json!({"id":frame["id"],"result":answer}), Some(cancel), deadline).await?;
+                    } else {
+                        self.deny_server_request(&frame, Some(cancel), deadline).await?;
+                    }
                     continue;
                 }
                 let params = &frame["params"];
@@ -294,6 +345,15 @@ impl AppServerDriver {
                         })));
                     }
                     "item/started" | "item/completed" => {
+                        let item = &params["item"];
+                        if item["type"] == "fileChange" {
+                            if let Some(index) = self.review_items.iter().position(|old| old["id"] == item["id"]) {
+                                self.review_items.remove(index);
+                            }
+                            if self.review_items.len() < 32 && serde_json::to_vec(item).is_ok_and(|v| v.len() <= 16 * 1024) {
+                                self.review_items.push(item.clone());
+                            }
+                        }
                         if method == "item/completed" && params["item"]["type"] == "agentMessage" {
                             if let Some(id) = params["item"]["id"].as_str() {
                                 if !valid_thread_id(id) { return Err(AppServerError::Protocol("invalid assistant item ID")); }
@@ -374,7 +434,7 @@ impl AppServerDriver {
 
     async fn request(&mut self, method: &str, params: Value) -> Result<Value, AppServerError> {
         let id = self.send_request(method, params).await?;
-        timeout(RPC_TIMEOUT, self.wait_response(id, None, tokio::time::Instant::now() + RPC_TIMEOUT))
+        timeout(RPC_TIMEOUT, self.wait_response(id, None, tokio::time::Instant::now() + RPC_TIMEOUT, false))
             .await.map_err(|_| AppServerError::TimedOut)?
     }
 
@@ -422,7 +482,7 @@ impl AppServerDriver {
         serde_json::from_slice(&line).map_err(|_| AppServerError::Protocol("invalid app-server JSON frame"))
     }
 
-    async fn wait_response(&mut self, id: u64, cancel: Option<&CancellationToken>, deadline: tokio::time::Instant) -> Result<Value, AppServerError> {
+    async fn wait_response(&mut self, id: u64, cancel: Option<&CancellationToken>, deadline: tokio::time::Instant, queue_requests: bool) -> Result<Value, AppServerError> {
         loop {
             let frame = tokio::select! {
                 value = self.read_frame() => value?,
@@ -433,7 +493,7 @@ impl AppServerDriver {
                 if !frame["error"].is_null() { return Err(AppServerError::Server((self.scrub)(&frame["error"].to_string()))); }
                 return Ok(frame["result"].clone());
             }
-            if frame.get("method").is_some() && frame.get("id").is_some() {
+            if frame.get("method").is_some() && frame.get("id").is_some() && !queue_requests {
                 self.deny_server_request(&frame, cancel, deadline).await?;
             } else if frame.get("method").is_some() {
                 let bytes = serde_json::to_vec(&frame).map_err(io::Error::other)?.len();

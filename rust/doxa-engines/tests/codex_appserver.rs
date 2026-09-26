@@ -267,3 +267,74 @@ send({'method':'item/completed','params':{'threadId':'thread_1','turnId':'turn_1
     assert_eq!(messages.concat(), "[redacted] first\n\n[redacted] second\n\nanswer");
     assert!(messages.concat().len() <= 8 * 1024 * 1024);
 }
+
+#[tokio::test]
+async fn official_input_and_one_shot_approval_return_the_matching_server_answers() {
+    use doxa_engines::codex_interaction::InputInbox;
+    let (_dir, options) = fake();
+    let script = std::fs::read_to_string(&options.executable).unwrap()
+        .replace("assert thread['params']['approvalPolicy'] == 'never'", "assert thread['params']['approvalPolicy'] == 'on-request'")
+        .replace("send({'id':turn['id'],'result':{'turn':{'id':'turn_1'}}})", r#"send({'id':turn['id'],'result':{'turn':{'id':'turn_1'}}})
+send({'id':'question-rpc','method':'item/tool/requestUserInput','params':{'threadId':'thread_1','turnId':'turn_1','itemId':'ask_1','isBlocking':True,'questions':[{'id':'topic','question':'Choose?','header':'Topic','options':[{'label':'First'},{'label':'Second'}]}]}})
+a=read();assert a['id']=='question-rpc' and a['result']=={'answers':{'topic':{'answers':['Second']}}}
+send({'id':91,'method':'item/commandExecution/requestApproval','params':{'threadId':'thread_1','turnId':'turn_1','itemId':'cmd_1','command':'echo test','cwd':'/fixture'}})
+a=read();assert a['id']==91 and a['result']=={'decision':'accept'}
+"#);
+    std::fs::write(&options.executable, script).unwrap();
+    let mut driver = AppServerDriver::spawn_interactive(options, str::to_owned).await.unwrap();
+    let inbox = InputInbox::default();
+    let mut kinds = Vec::new();
+    driver.run_turn_interactive("hello", &CancellationToken::new(), |event| {
+        if event.kind == "needs_input" {
+            let answer = if event.data["kind"] == "ask_user" {
+                serde_json::json!({"answers":{"topic":"Second"}})
+            } else { serde_json::json!({"decision":"allow"}) };
+            inbox.answer(event.data["id"].as_str().unwrap(), &answer).unwrap();
+        }
+        kinds.push(event.kind);
+    }, |frame| inbox.begin(frame, str::to_owned).map(Some)).await.unwrap();
+    assert_eq!(kinds.iter().filter(|kind| kind.as_str() == "needs_input").count(), 2);
+    assert_eq!(kinds.iter().filter(|kind| kind.as_str() == "needs_input_resolved").count(), 2);
+    driver.shutdown().await;
+}
+
+#[tokio::test]
+async fn cross_thread_questions_never_reach_the_input_ui() {
+    let (_dir, options) = fake();
+    let script = std::fs::read_to_string(&options.executable).unwrap()
+        .replace("send({'id':turn['id'],'result':{'turn':{'id':'turn_1'}}})", r#"send({'id':turn['id'],'result':{'turn':{'id':'turn_1'}}})
+send({'id':91,'method':'item/tool/requestUserInput','params':{'threadId':'OTHER','turnId':'turn_1','itemId':'ask_1','questions':[]}})
+a=read();assert a['error']['code']==-32602
+"#);
+    std::fs::write(&options.executable, script).unwrap();
+    let mut driver = AppServerDriver::spawn(options, str::to_owned).await.unwrap();
+    let mut called = false;
+    let result = driver.run_turn_interactive("hello", &CancellationToken::new(), |_| {}, |_| {called = true; Ok(None)}).await;
+    assert!(!called);
+    assert!(matches!(result, Err(doxa_engines::codex_appserver::AppServerError::Protocol(_))));
+    driver.shutdown().await;
+}
+
+#[tokio::test]
+async fn waiting_for_input_is_cancellable_and_resolves_the_ui() {
+    use doxa_engines::codex_interaction::InputInbox;
+    let (_dir, options) = fake();
+    let script = std::fs::read_to_string(&options.executable).unwrap()
+        .replace("send({'id':turn['id'],'result':{'turn':{'id':'turn_1'}}})", r#"send({'id':turn['id'],'result':{'turn':{'id':'turn_1'}}})
+send({'id':91,'method':'item/tool/requestUserInput','params':{'threadId':'thread_1','turnId':'turn_1','itemId':'ask_1','questions':[{'id':'q','question':'Choose?','options':[{'label':'Yes'}]}]}})
+read()
+"#);
+    std::fs::write(&options.executable, script).unwrap();
+    let mut driver = AppServerDriver::spawn(options, str::to_owned).await.unwrap();
+    let inbox = InputInbox::default();
+    let cancel = CancellationToken::new();
+    let mut resolved = false;
+    let started = std::time::Instant::now();
+    let result = driver.run_turn_interactive("hello", &cancel, |event| {
+        if event.kind == "needs_input" {cancel.cancel();}
+        if event.kind == "needs_input_resolved" {resolved = true;}
+    }, |frame| inbox.begin(frame, str::to_owned).map(Some)).await;
+    assert!(matches!(result, Err(doxa_engines::codex_appserver::AppServerError::Cancelled)));
+    assert!(resolved && started.elapsed() < Duration::from_secs(1));
+    driver.shutdown().await;
+}
