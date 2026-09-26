@@ -122,6 +122,12 @@ def review(manifest_path, event, worker=run_worker):
     first = json.loads(data.splitlines()[0])
     if first.get("type") != "session_meta" or first.get("payload", {}).get("id") != manifest["provider_thread"]:
         return False
+    # Isolated Python imports DOXA from this interpreter's installed package,
+    # never from the provider cwd. Its canonical bootstrap selects the configured
+    # plugin/package implementation and sticky LORE store before lore_core loads.
+    from doxa import _lore_bootstrap
+    _lore_bootstrap.ensure_importable()
+    _lore_bootstrap.export_sticky_lore_root()
     from lore_core import deriver
     from lore_core.config import project_slug, stage_disabled
     from lore_core.scrub import scrub_secrets

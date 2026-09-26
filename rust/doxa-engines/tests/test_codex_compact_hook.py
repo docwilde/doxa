@@ -45,7 +45,12 @@ def fake_lore(observed):
     config.stage_disabled = lambda stage: False
     scrub = types.ModuleType("lore_core.scrub")
     scrub.scrub_secrets = lambda text: text.replace("SECRET", "[redacted]")
-    return {"lore_core":lore,"lore_core.deriver":deriver,"lore_core.config":config,"lore_core.scrub":scrub}
+    doxa = types.ModuleType("doxa")
+    bootstrap = types.ModuleType("doxa._lore_bootstrap")
+    bootstrap.ensure_importable = lambda: observed.append("bootstrap-source")
+    bootstrap.export_sticky_lore_root = lambda: observed.append("bootstrap-store")
+    doxa._lore_bootstrap = bootstrap
+    return {"doxa":doxa,"doxa._lore_bootstrap":bootstrap,"lore_core":lore,"lore_core.deriver":deriver,"lore_core.config":config,"lore_core.scrub":scrub}
 
 
 def test_review_scrubs_pinned_rollout_before_worker_and_refuses_change(tmp_path, monkeypatch):
@@ -54,8 +59,9 @@ def test_review_scrubs_pinned_rollout_before_worker_and_refuses_change(tmp_path,
     observed = []
     with mock.patch.dict(sys.modules, fake_lore(observed)):
         assert hook.review(manifest, event, worker=lambda *_: True)
-        assert "SECRET" not in observed[0]
-        assert "[redacted]" in observed[0]
+        assert observed[:2] == ["bootstrap-source", "bootstrap-store"]
+        assert "SECRET" not in observed[2]
+        assert "[redacted]" in observed[2]
         assert not hook.review(manifest, event, worker=lambda *_: False)
         def changing_worker(*_):
             source.write_text(source.read_text() + '{}\n')
