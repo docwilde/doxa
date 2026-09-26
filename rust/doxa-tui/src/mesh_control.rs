@@ -7,6 +7,7 @@ use serde_json::Value;
 const ADAPTER: &str = r#"
 import os, sys, json, stat
 from pathlib import Path
+if sys.argv[2]: sys.path.insert(0, sys.argv[2])
 from doxa import meshgraph
 path = Path(sys.argv[1])
 directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
@@ -14,7 +15,7 @@ info = os.fstat(directory)
 if info.st_uid != os.getuid() or info.st_mode & 0o077: raise PermissionError('unsafe mesh directory')
 def safe_open(name, mode):
     if Path(name) != path or mode != 'rb': raise PermissionError('unexpected mesh file')
-    fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory)
+    fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
     info = os.fstat(fd)
     if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077 or info.st_nlink != 1 or info.st_size > 134217728:
         os.close(fd); raise PermissionError('unsafe mesh ledger')
@@ -48,12 +49,13 @@ pub fn default_ledger() -> io::Result<PathBuf> {
     Ok(fleet_view::default_root()?.parent().ok_or_else(|| invalid("missing DOXA home"))?.join("peers/messages.jsonl"))
 }
 pub fn run_ledger(root: &Path, id: &str) -> io::Result<PathBuf> {
+    private_directory(root)?;
     let ids = fleet_view::run_ids(root)?;
     let matching: Vec<_> = ids.iter().filter(|candidate| candidate.as_str() == id || candidate.starts_with(id)).collect();
     let selected = ids.iter().find(|candidate| candidate.as_str() == id).or_else(|| if matching.len() == 1 { Some(matching[0]) } else { None })
         .ok_or_else(|| invalid("mesh run ID is missing or ambiguous"))?;
     let run = root.join(selected); private_directory(&run)?;
-    let value: Value = serde_json::from_str(&fs::read_to_string(run.join("manifest.json"))?).map_err(|_| invalid("invalid mesh run manifest"))?;
+    let value = fleet_view::manifest_snapshot(root, selected)?;
     private_directory(&run.join("home"))?;
     let expected = run.join("home/peers/messages.jsonl");
     if value["native_version"].is_number() && value["ledger_path"].as_str() != expected.to_str() {
@@ -65,7 +67,8 @@ pub fn run_ledger(root: &Path, id: &str) -> io::Result<PathBuf> {
 /// switching ledgers. Drop closes the control pipe and reaps the child.
 pub struct MeshServer { child: Option<Child>, pub ledger: PathBuf, url: String }
 impl MeshServer {
-    pub fn start(ledger: &Path) -> io::Result<Self> {
+    pub fn start(ledger: &Path) -> io::Result<Self> { Self::start_at(ledger, None) }
+    fn start_at(ledger: &Path, working_directory: Option<&Path>) -> io::Result<Self> {
         if !ledger.is_absolute() || ledger.file_name().is_none() { return Err(invalid("mesh ledger must be absolute")); }
         let parent = ledger.parent().ok_or_else(|| invalid("mesh ledger has no directory"))?;
         if fs::symlink_metadata(parent).is_err_and(|error| error.kind() == io::ErrorKind::NotFound) {
@@ -79,15 +82,14 @@ impl MeshServer {
             }
         }
         let python = launch::python_executable(&std::env::var_os("DOXA_LORE_PYTHON").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("python3")))?;
-        let mut command = Command::new(python); command.args(["-u", "-c", ADAPTER]).arg(ledger)
-            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
         let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-        // Source builds can be launched from any project directory; installed
-        // releases use their packaged interpreter once this checkout is gone.
-        if source.join("doxa/meshgraph.py").is_file() {
-            let mut paths = vec![source]; paths.extend(std::env::split_paths(&std::env::var_os("PYTHONPATH").unwrap_or_default()));
-            command.env("PYTHONPATH", std::env::join_paths(paths).map_err(|_| invalid("invalid Python module path"))?);
-        }
+        let source = if source.join("doxa/meshgraph.py").is_file() { fs::canonicalize(source)? } else { PathBuf::new() };
+        // Isolated Python excludes the working directory, PYTHONPATH and user
+        // site. Only the compiled checkout bootstrap or packaged sidecar can
+        // supply DOXA; the currently opened project cannot shadow imports.
+        let mut command = Command::new(python); command.args(["-I", "-u", "-c", ADAPTER]).arg(ledger).arg(source)
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+        if let Some(directory) = working_directory { command.current_dir(directory); }
         let mut child = command.spawn()?;
         let output = child.stdout.take().unwrap(); let (sender, receiver) = mpsc::channel();
         std::thread::spawn(move || { let mut line = String::new(); let result = BufReader::new(output).take(4096).read_line(&mut line).map(|_| line); let _ = sender.send(result); });
@@ -162,10 +164,47 @@ mod tests {
         assert!(request(&old, "ledger").contains("sender"));
         let denied = old.rsplit_once('/').unwrap().0.replace(old.split('/').nth(3).unwrap(), "wrong-token");
         assert!(request(&(denied + "/"), "ledger").contains("404"));
+        fs::remove_file(&ledger).unwrap();
+        let filename = std::ffi::CString::new(ledger.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(filename.as_ptr(), 0o600) }, 0);
+        assert!(request(&old, "ledger").contains("200"));
         server.stop().unwrap();
         let address = old.trim_start_matches("http://").split('/').next().unwrap();
         assert!(TcpStream::connect(address).is_err());
         std::os::unix::fs::symlink(&ledger, dir.path().join("link")).unwrap();
         assert!(MeshServer::start(&dir.path().join("link")).is_err());
     }
+    #[test]
+    fn current_project_cannot_shadow_renderer_imports() {
+        let dir = tempfile::tempdir().unwrap(); fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let project = dir.path().join("project"); fs::create_dir(&project).unwrap();
+        let marker = dir.path().join("shadow-executed");
+        fs::write(project.join("doxa.py"), format!("from pathlib import Path\nPath({:?}).write_text('executed')\nraise RuntimeError('shadowed')\n", marker.to_str().unwrap())).unwrap();
+        let ledger = dir.path().join("messages.jsonl");
+        let mut server = MeshServer::start_at(&ledger, Some(&project)).unwrap();
+        assert!(request(server.url(), "").contains("mesh.js"));
+        assert!(!marker.exists()); server.stop().unwrap();
+    }
+    #[test]
+    fn run_manifest_rejects_symlinks_oversize_and_fifo_without_blocking() {
+        let root = tempfile::tempdir().unwrap(); fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let run = root.path().join("run"); fs::DirBuilder::new().mode(0o700).create(&run).unwrap();
+        fs::DirBuilder::new().mode(0o700).create(run.join("home")).unwrap();
+        let manifest = run.join("manifest.json");
+        fs::write(&manifest, vec![b' '; 1024 * 1024 + 1]).unwrap(); fs::set_permissions(&manifest, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(fleet_view::manifest_snapshot(root.path(), "run").is_err());
+        fs::remove_file(&manifest).unwrap();
+        let real = root.path().join("real.json"); fs::write(&real, "{\"run_id\":\"run\"}").unwrap(); fs::set_permissions(&real, fs::Permissions::from_mode(0o600)).unwrap();
+        std::os::unix::fs::symlink(&real, &manifest).unwrap();
+        assert!(run_ledger(root.path(), "run").is_err()); fs::remove_file(&manifest).unwrap();
+        let filename = std::ffi::CString::new(manifest.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(filename.as_ptr(), 0o600) }, 0);
+        let selected_root = root.path().to_owned(); let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            let failed = fleet_view::manifest_snapshot(&selected_root, "run").is_err() && run_ledger(&selected_root, "run").is_err();
+            let _ = sender.send(failed);
+        });
+        assert!(receiver.recv_timeout(Duration::from_secs(1)).expect("FIFO manifest blocked the reader"));
+    }
+
 }

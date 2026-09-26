@@ -95,6 +95,16 @@ pub fn run_ids(root: &Path) -> io::Result<Vec<String>> {
     Ok(rows.into_iter().map(|(_, id)| id).collect())
 }
 
+/// Read the selected native or legacy manifest from one owned bounded inode.
+pub fn manifest_snapshot(root: &Path, id: &str) -> io::Result<Value> {
+    let run = resolve(root, id)?;
+    let value = manifest(&run)?;
+    if value["run_id"].as_str() != run.file_name().and_then(|name| name.to_str()) {
+        return Err(invalid("fleet manifest identity changed"));
+    }
+    Ok(value)
+}
+
 pub fn runs(root: &Path) -> io::Result<String> {
     let mut rows = Vec::new();
     for dir in run_dirs(root)? {
