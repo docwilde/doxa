@@ -39,7 +39,8 @@ impl PeerHost {
         self.inner.set_peer_tool_handler(Arc::new(move |name, params| {
             if !matches!(name, "peers" | "msg" | "peer_history") { return Err("Unsupported provider peer method".into()); }
             let peer = weak.upgrade().ok_or("Peer session is closed")?;
-            peer.call(name, params)
+            if name == "msg" { peer.msg_with_target_mode(params, true) }
+            else { peer.call(name, params) }
         }))
     }
     pub fn new(
@@ -113,6 +114,10 @@ impl PeerHost {
     }
 
     fn msg(&self, params: &Value) -> Result<Value, String> {
+        self.msg_with_target_mode(params, false)
+    }
+
+    fn msg_with_target_mode(&self, params: &Value, exact: bool) -> Result<Value, String> {
         let target = params["target"].as_str().ok_or("invalid peer target")?;
         let body = params["text"].as_str().ok_or("invalid peer message")?;
         if target.is_empty()
@@ -146,7 +151,7 @@ impl PeerHost {
         }
         let matches: Vec<_> = roster
             .iter()
-            .filter(|p| p.session_id.starts_with(target))
+            .filter(|p| target_matches(&p.session_id, target, exact))
             .collect();
         let peer = match matches.as_slice() {
             [peer] => *peer,
@@ -418,5 +423,25 @@ impl Host for PeerHost {
             },
             _ => self.inner.call(method, params),
         }
+    }
+}
+
+/// Provider arguments bind the complete peer identity; interactive CLI callers
+/// retain their documented unambiguous prefix convenience.
+fn target_matches(session_id: &str, target: &str, exact: bool) -> bool {
+    if exact { session_id == target } else { session_id.starts_with(target) }
+}
+
+#[cfg(test)]
+mod provider_target_tests {
+    use super::target_matches;
+    #[test]
+    fn provider_send_cannot_retarget_a_reviewed_prefix_after_roster_change() {
+        assert!(target_matches("peer-original", "peer", false));
+        assert!(target_matches("peer-replacement", "peer", false));
+        assert!(!target_matches("peer-original", "peer", true));
+        assert!(!target_matches("peer-replacement", "peer", true));
+        assert!(target_matches("peer-original", "peer-original", true));
+        assert!(!target_matches("peer-replacement", "peer-original", true));
     }
 }
