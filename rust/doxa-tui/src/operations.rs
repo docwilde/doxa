@@ -92,7 +92,11 @@ pub fn auth_status(name: Option<&str>) -> io::Result<String> {
 
 /// Run the chosen provider's supported browser login/logout command. Only
 /// allowlisted public login progress reaches callers, never arbitrary output.
-pub fn auth_action(name: &str, action: &str, mut progress: impl FnMut(String)) -> io::Result<String> {
+pub fn auth_action(name: &str, action: &str, progress: impl FnMut(String)) -> io::Result<String> {
+    auth_action_cancellable(name, action, progress, &std::sync::atomic::AtomicBool::new(false))
+}
+
+pub fn auth_action_cancellable(name: &str, action: &str, mut progress: impl FnMut(String), cancel: &std::sync::atomic::AtomicBool) -> io::Result<String> {
     let provider = PROVIDERS.iter().find(|p| p.name == name).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "choose claude or codex explicitly"))?;
     let args: &[&str] = match (name, action) {
         ("claude", "login") => &["auth", "login"],
@@ -102,7 +106,7 @@ pub fn auth_action(name: &str, action: &str, mut progress: impl FnMut(String)) -
         _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, "auth action must be login or logout")),
     };
     let binary = locate(provider.binary).ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "provider CLI not installed"))?;
-    run_auth(&binary, args, Duration::from_secs(900), &mut progress)?;
+    run_auth_cancellable(&binary, args, Duration::from_secs(900), &mut progress, cancel)?;
     Ok(format!("{} {action} completed; {}", provider.label, state_text(provider_state(provider))))
 }
 
@@ -125,7 +129,12 @@ fn public_auth_progress(line: &str) -> Option<String> {
     None
 }
 
+#[cfg(test)]
 fn run_auth(binary: &Path, args: &[&str], timeout: Duration, progress: &mut impl FnMut(String)) -> io::Result<()> {
+    run_auth_cancellable(binary, args, timeout, progress, &std::sync::atomic::AtomicBool::new(false))
+}
+
+fn run_auth_cancellable(binary: &Path, args: &[&str], timeout: Duration, progress: &mut impl FnMut(String), cancel: &std::sync::atomic::AtomicBool) -> io::Result<()> {
     use std::os::fd::FromRawFd;
     let (mut master, mut slave) = (-1, -1);
     if unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null(), std::ptr::null()) } != 0 { return Err(io::Error::last_os_error()); }
@@ -154,10 +163,11 @@ fn run_auth(binary: &Path, args: &[&str], timeout: Duration, progress: &mut impl
             if status.success() { return Ok(()); }
             return Err(io::Error::other("provider authentication command failed; credentials remain owned by its CLI"));
         }
-        if Instant::now() >= deadline {
+        if Instant::now() >= deadline || cancel.load(std::sync::atomic::Ordering::Acquire) {
             unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL); }
             let _ = child.wait();
-            return Err(io::Error::new(io::ErrorKind::TimedOut, "provider authentication timed out"));
+            return Err(if cancel.load(std::sync::atomic::Ordering::Acquire) { io::Error::new(io::ErrorKind::Interrupted, "provider authentication cancelled") }
+                else { io::Error::new(io::ErrorKind::TimedOut, "provider authentication timed out") });
         }
         thread::sleep(Duration::from_millis(25));
     }
@@ -460,6 +470,8 @@ mod tests {
         run_auth(Path::new("/bin/sh"), &[path.to_str().unwrap()], Duration::from_secs(2), &mut |s| messages.push(s)).unwrap();
         assert_eq!(messages, vec!["Open in your browser: https://claude.ai/login"]);
         fs::write(&path, "sleep 5\n").unwrap();
+        let cancel = std::sync::atomic::AtomicBool::new(true);
+        assert_eq!(run_auth_cancellable(Path::new("/bin/sh"), &[path.to_str().unwrap()], Duration::from_secs(30), &mut |_| {}, &cancel).unwrap_err().kind(), io::ErrorKind::Interrupted);
         assert_eq!(run_auth(Path::new("/bin/sh"), &[path.to_str().unwrap()], Duration::from_millis(20), &mut |_| {}).unwrap_err().kind(), io::ErrorKind::TimedOut);
     }
 
