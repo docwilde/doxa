@@ -20,6 +20,7 @@ MAX_INPUT = 64 * 1024
 MAX_ROLLOUT = 32 * 1024 * 1024
 MAX_LINE = 1024 * 1024
 REVIEW_TIMEOUT = 180
+REVIEW_DEADLINE = 210  # includes imports/job construction; hook timeout is 240
 
 
 def safe_read(path, limit):
@@ -139,13 +140,17 @@ def run_worker(job, lore_parent, timeout=REVIEW_TIMEOUT):
     )
     try:
         return process.wait(timeout=timeout) == 0
-    except subprocess.TimeoutExpired:
+    except BaseException as failure:
+        # The whole-review deadline can interrupt imports/job construction or
+        # an in-flight worker. Reap its group before the outer gate blocks.
         try:
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
         process.wait()
-        return False
+        if isinstance(failure, subprocess.TimeoutExpired):
+            return False
+        raise
 
 
 def review(manifest_path, event, worker=run_worker):
@@ -214,11 +219,18 @@ def review(manifest_path, event, worker=run_worker):
 
 def main():
     result = False
+    def expired(_number, _frame):
+        raise TimeoutError("bounded LORE review deadline")
+    previous = signal.signal(signal.SIGALRM, expired)
+    signal.setitimer(signal.ITIMER_REAL, REVIEW_DEADLINE)
     try:
         raw = sys.stdin.buffer.read(MAX_INPUT + 1)
         if len(raw) <= MAX_INPUT:
             result = review(sys.argv[1], json.loads(raw))
     except BaseException:
         result = False
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
     return {"continue": result, "suppressOutput": True,
             **({} if result else {"stopReason": "DOXA LORE review did not complete; compaction blocked"})}
