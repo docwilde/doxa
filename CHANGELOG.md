@@ -5,6 +5,30 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## Unreleased — Rust parity work
+
+- Add native setup, explicit provider login/logout and plugin adoption controls,
+  with cancellable login progress and filtering of credential-bearing URLs.
+- Support nested pane groups, generated command actions, prompt-line session
+  search and scoped LORE memory edits. Restore exact pending questions and
+  require complete review before answering a permission request.
+- Apply supported Claude, Codex and vendor model/effort changes to the next
+  turn of the current session. Report provider context details separately from
+  local measurements.
+- Coordinate native fleet launches, start barriers, reviewed approvals,
+  cancellation and durable resume without repeating ambiguous dispatches.
+  Persist spend guards and refuse further turns when usage cannot be verified.
+- Register scoped peer tools for native Codex and vendor hosts, with explicit
+  approval before model-initiated actions and bounded, scrubbed peer history.
+- Share worktree lifecycle locks with updated Python sidecars and keep
+  unverifiable legacy ownership protected from cleanup.
+- Review both manual and automatic provider compaction through LORE. Native
+  Codex currently requires the verified 0.156.1 hook contract. Reviewer errors
+  return a blocking decision; Codex's operating system hook failures can still
+  continue compaction before DOXA observes and stops the session.
+- Preserve precise Codex startup errors, bound the full compaction review
+  deadline, and include scrubbed tool commands/results in review snapshots.
+
 ## 2.0.0-alpha.28 — 2026-09-26
 
 - Isolate optional Codex transcript indexing in its own bounded LORE client so
