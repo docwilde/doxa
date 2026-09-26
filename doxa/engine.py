@@ -1996,13 +1996,27 @@ class SessionEngine:
             return ""
 
     async def _on_pre_compact(self, input_data: dict, tool_use_id, context) -> dict:
-        """PreCompact -- review the transcript-so-far before the harness
-        summarizes it away (see module docstring). Fire-and-forget on a
-        thread executor: worker_run() shells out to a headless `claude -p`
-        call, which must not block the compaction handshake."""
-        loop = asyncio.get_running_loop()
-        loop.run_in_executor(None, self._run_review_sync, True)
-        return {}
+        """Await review before either automatic or manual compaction.
+
+        PreCompact's decision field can refuse the operation; continue_
+        cannot. The matcher deadline exceeds our bounded review worker so
+        its fail-open timeout is never used as a policy decision.
+        """
+        if getattr(self, "_compact_preapproved", False):
+            self._compact_preapproved = False
+            return {}
+        async def review() -> bool:
+            if not self.lore or stage_disabled("review"):
+                return False
+            async with self._review_lock:
+                return await asyncio.to_thread(self._review_before_compact_sync)
+        try:
+            completed = await asyncio.wait_for(review(), timeout=185.0)
+        except (Exception, asyncio.CancelledError):
+            completed = False
+        if completed:
+            return {}
+        return {"decision": "block", "reason": "LORE review failed or is disabled; compaction refused"}
 
     async def _on_pre_tool_use(self, input_data: dict, tool_use_id, context) -> dict:
         """PreToolUse -- the tool-gating choke point (PHASE0 redesign item
@@ -2276,7 +2290,9 @@ class SessionEngine:
         async with self._review_lock:
             if self._turn_running:
                 return False
-            return await asyncio.to_thread(self._review_before_compact_sync)
+            completed = await asyncio.to_thread(self._review_before_compact_sync)
+            self._compact_preapproved = bool(completed)
+            return bool(completed)
 
     def _review_before_compact_sync(self) -> bool:
         import tempfile
@@ -2807,7 +2823,7 @@ class SessionEngine:
             },
             hooks={
                 "UserPromptSubmit": [HookMatcher(hooks=[self._on_user_prompt_submit])],
-                "PreCompact": [HookMatcher(hooks=[self._on_pre_compact])],
+                "PreCompact": [HookMatcher(hooks=[self._on_pre_compact], timeout=200)],
                 "PreToolUse": [HookMatcher(hooks=[self._on_pre_tool_use])],
             },
             # Interactive permission (queue item 5) -- see the module
@@ -3200,6 +3216,8 @@ class SessionEngine:
             return
         self._turn_running = True
         cancelled = False
+        if prompt.strip() != "/compact":
+            self._compact_preapproved = False
         try:
             async for ev in self._send_turn(prompt):
                 yield ev
@@ -3219,6 +3237,7 @@ class SessionEngine:
             # queue, exactly as SessionDaemon._run_turn does after
             # publishing its error.
             self._turn_running = False
+            self._compact_preapproved = False
             # Cleared with the running flag, never separately: a turn id
             # that outlived its turn would attribute the next idle send
             # to a turn that has ended, in the ledger and in the rate

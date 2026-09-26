@@ -78,6 +78,46 @@ async def test_explicit_compact_requires_completed_lore_review(monkeypatch, tmp_
     assert len(calls) == 1
 
 
+@pytest.mark.asyncio
+async def test_automatic_compact_waits_for_review_and_blocks_failure(monkeypatch, tmp_path):
+    import threading
+    engine = SessionEngine(cwd=str(tmp_path))
+    monkeypatch.delenv("LORE_DISABLE_REVIEW", raising=False)
+    started, finish = threading.Event(), threading.Event()
+    def review():
+        started.set()
+        assert finish.wait(2)
+        return True
+    monkeypatch.setattr(engine, "_review_before_compact_sync", review)
+    engine._turn_running = True  # automatic compaction happens inside a turn
+    task = asyncio.create_task(engine._on_pre_compact({"trigger": "auto"}, None, {}))
+    for _ in range(100):
+        if started.is_set():
+            break
+        await asyncio.sleep(0.01)
+    assert started.is_set() and not task.done()
+    finish.set()
+    assert await task == {}
+    monkeypatch.setattr(engine, "_review_before_compact_sync", lambda: False)
+    refused = await engine._on_pre_compact({"trigger": "auto"}, None, {})
+    assert refused["decision"] == "block"
+    assert "continue_" not in refused  # Claude discards this field for PreCompact
+    monkeypatch.setenv("LORE_DISABLE_REVIEW", "1")
+    assert (await engine._on_pre_compact({"trigger": "auto"}, None, {}))["decision"] == "block"
+
+
+@pytest.mark.asyncio
+async def test_explicit_compact_review_permit_is_consumed_once(monkeypatch, tmp_path):
+    engine = SessionEngine(cwd=str(tmp_path))
+    monkeypatch.delenv("LORE_DISABLE_REVIEW", raising=False)
+    monkeypatch.setattr(engine, "_review_before_compact_sync", lambda: True)
+    assert await engine.review_before_compact()
+    monkeypatch.setattr(engine, "_review_before_compact_sync", lambda: False)
+    assert await engine._on_pre_compact({"trigger": "manual"}, None, {}) == {}
+    assert (await engine._on_pre_compact({"trigger": "manual"}, None, {}))["decision"] == "block"
+    assert engine._build_options().hooks["PreCompact"][0].timeout == 200
+
+
 def _script_one_turn_with_tool_call() -> list:
     return [
         StreamEvent(

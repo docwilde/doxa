@@ -287,11 +287,12 @@ async def run() -> None:
                 emit({"type": "reply", "id": request_id, "ok": True,
                       "result": {"applied": applied}})
             elif method == "context_detail" and engine is not None:
+                from doxa.engine import _scrub_json
                 detail = await asyncio.wait_for(engine.context_usage(), timeout=5.0)
                 if not isinstance(detail, dict):
                     raise ValueError("context unavailable")
                 emit({"type": "reply", "id": request_id, "ok": True,
-                      "result": {**detail, "source": "Claude official context_usage"}})
+                      "result": {**_scrub_json(detail), "source": "Claude official context_usage"}})
             elif method == "list_models" and engine is not None:
                 result = (catalog_task.result() if catalog_task.done() else
                           {"models": [], "loading": True,
