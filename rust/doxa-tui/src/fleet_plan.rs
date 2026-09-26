@@ -1,5 +1,4 @@
-//! Native, read-only fleet launch preflight. The Python fleet harness still
-//! owns the live barrier, approval desk, budget enforcement and teardown.
+//! Native, read-only capacity and admission preflight for fleet launch.
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -105,7 +104,7 @@ pub fn check(spec: &Preflight, available_mb: Option<u64>) -> io::Result<String> 
     };
     lines.push(format!("approval posture: --approve {} auto-approves {policy}; unanswered asks are refused after {:.0}s",
         spec.approve, spec.approval_grace_s));
-    lines.push("preflight only; provider price enforcement, live approvals, dispatch barrier and teardown remain in the Python fleet harness".into());
+    lines.push("preflight complete; native fleet launch enforces each slot budget and records barrier, approvals and teardown".into());
     Ok(lines.join("\n"))
 }
 

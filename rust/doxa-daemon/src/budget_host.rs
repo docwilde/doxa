@@ -159,6 +159,9 @@ impl Host for BudgetHost {
                 return;
             }
         }
+        // Also mark memory before entering provider code: runtime catches host
+        // panics, and a caught panic must not reopen the allowance in process.
+        state.unknown = true;
         let mut terminal_seen = false;
         self.inner.prompt(text, &mut |mut event| {
             if event["type"] == "turn_done" {
@@ -187,6 +190,7 @@ impl Host for BudgetHost {
                 };
                 match cost {
                     Some(cost) if cost.is_finite() && cost >= 0.0 => {
+                        state.unknown = false;
                         state.spent += cost;
                         if !state.spent.is_finite() { state.unknown = true; }
                         if let Some(price) = self.pricing {
@@ -363,6 +367,20 @@ mod tests {
             assert_eq!(events[1]["type"], "turn_refused");
         }
         assert!(!priced_vendor_model("codex", "unpriced"));
+    }
+
+    struct PanicHost;
+    impl Host for PanicHost {
+        fn prompt(&self, _: &str, _: &mut dyn FnMut(Value)) { panic!("simulated provider failure"); }
+        fn call(&self, _: &str, _: &Value) -> Result<Value, String> { Ok(json!({})) }
+    }
+    #[test]
+    fn caught_provider_panic_does_not_reopen_live_budget() {
+        let host = BudgetHost::new(Arc::new(PanicHost), 1.0);
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| host.prompt("hello", &mut |_| {}))).is_err());
+        let mut events = Vec::new(); host.prompt("hello", &mut |event| events.push(event));
+        assert_eq!(events[0]["type"], "turn_refused");
+        assert!(events[0]["data"]["spent_usd"].is_null());
     }
 
 }
