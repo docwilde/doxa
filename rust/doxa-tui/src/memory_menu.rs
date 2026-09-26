@@ -430,7 +430,7 @@ impl Manager {
     }
 }
 
-fn wrap_review(line: &str, width: usize) -> Vec<String> {
+pub(crate) fn wrap_review(line: &str, width: usize) -> Vec<String> {
     use unicode_width::UnicodeWidthChar;
     let mut rows = Vec::new();
     let mut row = String::new();
