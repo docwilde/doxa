@@ -965,6 +965,63 @@ for line in sys.stdin:
 }
 
 #[test]
+fn blocked_codex_index_does_not_delay_scrubbing_or_disable_later_turns() {
+    let dir = tempfile::tempdir().unwrap();
+    let codex = dir.path().join("codex-fixture");
+    let python = dir.path().join("lore-fixture");
+    let index_pid = dir.path().join("index-pid");
+    executable(&python, &format!(r#"#!/usr/bin/env python3
+import json, os, sys, time
+print(json.dumps({{"type":"hello","proto":1,"capabilities":["scrub","snapshot","transcript_identity","index_transcript_v1"]}}), flush=True)
+for line in sys.stdin:
+    frame = json.loads(line)
+    if frame["op"] == "transcript_identity":
+        reply = {{"value":{{"projects_dir":frame["cwd"],"slug":"project"}}}}
+    elif frame["op"] == "index_transcript_v1":
+        open({:?}, "w").write(str(os.getpid()))
+        time.sleep(30)
+        reply = {{"value":{{"indexed":1,"consumed":1}}}}
+    else:
+        reply = {{"text":frame.get("text", "").replace("fixture-secret", "[redacted]")}}
+    print(json.dumps({{"type":"reply","id":frame["id"],"ok":True,**reply}}), flush=True)
+"#, index_pid.to_str().unwrap()));
+    executable(&codex, "#!/bin/sh\ncat >/dev/null\necho '{\"type\":\"thread.started\",\"thread_id\":\"thread_1\"}'\necho '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"fixture-secret answer\"}}'\n");
+    let mut process = Process::start_codex(dir.path(), &codex, &python);
+    let (mut reader, mut socket) = process.connect();
+    receive(&mut reader);
+    send(&mut socket, json!({"type":"attach","cursor":null}));
+    let mut turn = |id| {
+        let started = Instant::now();
+        send(&mut socket, json!({"type":"prompt","id":id,"text":"fixture-secret hello"}));
+        assert_eq!(receive(&mut reader)["ok"], true);
+        loop {
+            let frame = receive(&mut reader);
+            assert!(!frame.to_string().contains("fixture-secret"), "unscrubbed display event");
+            if frame["event"]["type"] == "turn_done" {
+                assert_eq!(frame["event"]["data"]["is_error"], false, "{frame}");
+                break;
+            }
+        }
+        assert!(started.elapsed() < Duration::from_secs(2), "optional index delayed mandatory scrub");
+    };
+    turn(1);
+    wait_until(|| index_pid.exists());
+    let pid: i32 = fs::read_to_string(&index_pid).unwrap().parse().unwrap();
+    // This turn scrubs and persists while the index sidecar is blocked.
+    turn(2);
+    // The bounded index request must time out and reap only its own sidecar.
+    wait_until(|| unsafe { libc::kill(pid, 0) } == -1);
+    turn(3);
+    drop(turn);
+    let transcript = fs::read_to_string(dir.path().join("project/codex-session.jsonl")).unwrap();
+    assert!(!transcript.contains("fixture-secret"));
+    assert_eq!(transcript.lines().filter(|line| line.contains("\"type\":\"user\"")).count(), 3);
+    send(&mut socket, json!({"type":"call","id":4,"method":"stop","params":{}}));
+    assert_eq!(receive(&mut reader)["ok"], true);
+    wait_until(|| process.exited());
+}
+
+#[test]
 fn codex_memory_reaches_only_first_provider_stdin_and_not_transcript() {
     let dir = tempfile::tempdir().unwrap();
     let codex = dir.path().join("codex-fixture");

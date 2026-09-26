@@ -9,7 +9,7 @@ use std::cell::Cell;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Sender};
+use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -50,7 +50,7 @@ pub struct CodexHost {
     scrub_failed: Arc<AtomicBool>,
     persistence_failed: AtomicBool,
     lore: Arc<Mutex<LoreClient>>,
-    index_tx: Sender<IndexCommand>,
+    index_tx: SyncSender<IndexCommand>,
     index_worker: Mutex<Option<thread::JoinHandle<()>>>,
     store: TranscriptStore,
     session_id: String,
@@ -175,11 +175,15 @@ impl CodexHost {
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()
             .map_err(|_| "Codex runtime could not start".to_owned())?;
         let lore = Arc::new(Mutex::new(client));
-        let (index_tx, index_rx) = mpsc::channel();
-        let index_lore = lore.clone();
+        let (index_tx, index_rx) = mpsc::sync_channel(1);
+        let index_python = lore_python.to_owned();
         let index_cwd = cwd.clone();
         let index_session_id = session_id.to_owned();
         let index_worker = thread::spawn(move || {
+            // Indexing is optional. Its timeout disables only this client,
+            // never the client used for mandatory scrubbing and persistence.
+            let mut index_lore = None;
+            let mut index_started = false;
             for command in index_rx {
                 if matches!(command, IndexCommand::Stop) {
                     break;
@@ -187,10 +191,17 @@ impl CodexHost {
                 // A dedicated worker keeps a slow external index request out
                 // of the turn-completion path. Requests stay ordered, and a
                 // final pass is queued before shutdown joins the worker.
-                let result = index_lore
-                    .lock()
-                    .unwrap()
-                    .index_transcript(&index_cwd, &index_session_id);
+                if !index_started {
+                    index_started = true;
+                    index_lore = LoreClient::spawn(&index_python, Duration::from_secs(5)).ok();
+                }
+                let result = match index_lore.as_mut() {
+                    Some(client) => client.index_transcript(&index_cwd, &index_session_id),
+                    None => Err(LoreError::Unavailable),
+                };
+                if index_lore.as_ref().is_some_and(|client| !client.is_alive()) {
+                    index_lore = None;
+                }
                 if let Err(error) = result {
                     if !matches!(error, LoreError::Unavailable) {
                         eprintln!("doxa-daemon: LORE transcript indexing failed");
@@ -308,7 +319,9 @@ impl CodexHost {
         }
         // The Rust writer has already scrubbed every persisted record. LORE
         // owns the incremental index and scrubs again before inserting rows.
-        let _ = self.index_tx.send(IndexCommand::Index);
+        // One pending pass is enough: it reads the latest durable transcript.
+        // Coalesce requests so a slow sidecar cannot grow a shutdown backlog.
+        let _ = self.index_tx.try_send(IndexCommand::Index);
     }
 
     /// Codex has no system-message channel. Send memory only when creating a
