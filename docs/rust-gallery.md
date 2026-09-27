@@ -42,3 +42,11 @@ labelled fixture state; it does not create or persist real run identifiers.
 ![Fleet launch review](../assets/shots/rust-fleet-review.png)
 
 ![Recorded fleet view](../assets/shots/rust-fleet-view.png)
+
+## Belief decisions
+
+`rust-beliefs.png` shows the production inline belief browser with per-entry
+Accept and Reject buttons. The fixture disables sidecar reads and memory writes.
+Accept records confirmation; Reject uses canonical retraction and retains history.
+
+![Per-entry belief decisions](../assets/shots/rust-beliefs.png)
