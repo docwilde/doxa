@@ -4,6 +4,7 @@ pub(crate) mod fleet_menu;
 mod fleet_process;
 pub(crate) mod panes;
 mod actions;
+mod commands;
 mod session_controls;
 mod render;
 mod terminal_loop;
@@ -76,68 +77,7 @@ const MAX_ANSWER_BYTES: usize = 10 * 1024;
 // number used by the read-through gate, so it never credits hidden raw rows.
 const REVIEW_BODY_RESERVE: u16 = 10;
 
-struct CommandHelp { name: &'static str, form: &'static str,
-    summary: &'static str, support: &'static str }
-
-// Names mirror Python 1.19's command registry. Forms and support describe
-// this Rust frontend, including commands the Python frontend alone provides.
-const COMMANDS: &[CommandHelp] = &[
-    CommandHelp { name: "/peers", form: "/peers", summary: "Peer map", support: "local" },
-    CommandHelp { name: "/split", form: "/split", summary: "Stacked pane split", support: "local" },
-    CommandHelp { name: "/vsplit", form: "/vsplit", summary: "Side-by-side pane split", support: "local" },
-    CommandHelp { name: "/diff", form: "/diff", summary: "Worktree diff", support: "local · active worktree" },
-    CommandHelp { name: "/pane", form: "/pane [number]", summary: "Switch pane", support: "local · numbered pane groups" },
-    CommandHelp { name: "/movepane", form: "/movepane [number]", summary: "Move active tab", support: "local · source retains its final tab" },
-    CommandHelp { name: "/sidebar", form: "/sidebar [on|off|wider|narrower|width N]", summary: "Session rail", support: "local" },
-    CommandHelp { name: "/collection", form: "/collection [action] [name]", summary: "Organize sessions", support: "local · list/new/rename/delete/add/remove" },
-    CommandHelp { name: "/msg", form: "/msg <peer> <text>", summary: "Message a peer", support: "local · same project" },
-    CommandHelp { name: "/fleet", form: "/fleet [runs|status [RUN]|stop|detach|attach [RUN] INDEX|mesh [RUN]|start OPTIONS|resume RUN]", summary: "Fleet manifests and slots", support: "local · verified slot attachment" },
-    CommandHelp { name: "/mesh", form: "/mesh [RUN|stop]", summary: "Browser peer graph", support: "local · private loopback ledger" },
-    CommandHelp { name: "/img", form: "/img [path]", summary: "Image support", support: "unavailable in Rust" },
-    CommandHelp { name: "/login", form: "/login [claude|codex] [--device-auth]", summary: "Provider login", support: "local · selectable operations menu" },
-    CommandHelp { name: "/logout", form: "/logout [claude|codex]", summary: "Provider logout", support: "local · selectable operations menu" },
-    CommandHelp { name: "/settings", form: "/settings", summary: "Native settings", support: "local · preferences, provenance and defaults" },
-    CommandHelp { name: "/setup", form: "/setup", summary: "Setup checks", support: "local · auth checks, LORE store, defaults" },
-    CommandHelp { name: "/doctor", form: "/doctor", summary: "Health checks", support: "local · selected provider" },
-    CommandHelp { name: "/plugins", form: "/plugins", summary: "Plugin inventory", support: "local · selectable operations menu" },
-    CommandHelp { name: "/reload-plugins", form: "/reload-plugins", summary: "Refresh plugins", support: "local · selectable operations menu" },
-    CommandHelp { name: "/model", form: "/model [name]", summary: "Select session model", support: "local · reported choices or new-session form" },
-    CommandHelp { name: "/engine", form: "/engine [name]", summary: "Engine for new sessions", support: "local · new-session engine form" },
-    CommandHelp { name: "/branch", form: "/branch [name]", summary: "Switch base branch", support: "local · active session" },
-    CommandHelp { name: "/mode", form: "/mode [name]", summary: "Permission mode", support: "local · reported choices or new-session form" },
-    CommandHelp { name: "/effort", form: "/effort [name]", summary: "Reasoning effort", support: "local · authoritative per-model effort choices" },
-    CommandHelp { name: "/usage", form: "/usage", summary: "Session usage", support: "local · reported totals only" },
-    CommandHelp { name: "/context", form: "/context", summary: "Context window", support: "local · official telemetry and reported context details" },
-    CommandHelp { name: "/queue", form: "/queue", summary: "Queued prompts", support: "local · cancel selected item with X" },
-    CommandHelp { name: "/clear", form: "/clear", summary: "Fresh session in this tab", support: "local · idle session and writable tabset required" },
-    CommandHelp { name: "/detach", form: "/detach", summary: "Leave session running", support: "local" },
-    CommandHelp { name: "/attach", form: "/attach [prefix]", summary: "Attach live session", support: "local · new tab" },
-    CommandHelp { name: "/sessions", form: "/sessions [kill <prefix>|kill-detached]", summary: "Live sessions and stop", support: "local · exact live target or detached from this window" },
-    CommandHelp { name: "/rename", form: "/rename [name]", summary: "Name active tab", support: "local" },
-    CommandHelp { name: "/dir", form: "/dir", summary: "Session directory", support: "local" },
-    CommandHelp { name: "/cd", form: "/cd <path>", summary: "Open directory", support: "local · new tab" },
-    CommandHelp { name: "/memory", form: "/memory", summary: "LORE curated memory", support: "local · scoped entries; M to add/edit/remove" },
-    CommandHelp { name: "/beliefs", form: "/beliefs", summary: "LORE beliefs", support: "local · requires LORE" },
-    CommandHelp { name: "/pending", form: "/pending", summary: "LORE proposals", support: "local · requires LORE" },
-    CommandHelp { name: "/search", form: "/search [terms]", summary: "Search saved sessions", support: "local · LORE index then bounded transcript scan" },
-    CommandHelp { name: "/resume", form: "/resume [session-id]", summary: "Resume conversation", support: "local · new tab" },
-    CommandHelp { name: "/compact", form: "/compact", summary: "Compact transcript", support: "Claude only · completed LORE review required" },
-    CommandHelp { name: "/update", form: "/update [--restart]", summary: "Update DOXA", support: "local · reviewed install" },
-    CommandHelp { name: "/help", form: "/help", summary: "Command registry", support: "local" },
-    CommandHelp { name: "/about", form: "/about", summary: "Version and active session identity", support: "local · measured installation and selected session details" },
-];
-
-/// Source-derived no-argument fleet verbs and argument forms shared by help
-/// and the command palette. No controller action is dispatched by a model.
-const FLEET_ACTIONS: &[(&str, &str)] = &[
-    ("/fleet start", "Prepare a pool, task and reviewed plan"),
-    ("/fleet status", "Inspect current run"),
-    ("/fleet attach", "Choose a current-run slot"),
-    ("/fleet mesh", "Open current run graph"),
-    ("/fleet stop", "Stop this window's controller"),
-    ("/fleet detach", "Continue current controller outside this window"),
-    ("/fleet runs", "Choose saved run"),
-];
+use commands::COMMANDS;
 
 const ENGINE_CHOICES: [&str; 4] = ["codex", "claude", "deepseek", "glm"];
 // Fallback model IDs measured from the vendors' catalogues in Python 1.19.
@@ -1645,34 +1585,6 @@ impl App {
         true
     }
 
-    fn slash_suggestions(&self) -> Vec<(&str, &str)> {
-        if self.focus != Focus::Prompt || self.slash_dismissed
-            || self.active_request_index().is_some() || self.stop_confirmation.is_some()
-            || self.chip_info.is_some() || self.lore_picker.is_some() || self.settings_menu.is_some()
-            || self.new_session.is_some() || self.repo_picker.is_some() || self.model_picker.is_some()
-            || self.effort_picker.is_some() || self.permission_picker.is_some()
-            || self.engine_picker || self.action_menu || self.history_modal
-            || self.queue_picker.is_some() || self.attach_picker.is_some() || self.branch_picker.is_some()
-            || self.diff_modal || self.map_modal || self.tool_modal {
-            return Vec::new();
-        }
-        let query = self.input.as_str();
-        if !query.starts_with('/') || query.chars().any(char::is_whitespace) { return Vec::new(); }
-        COMMANDS.iter().filter(|row| row.name.starts_with(query))
-            .map(|row| (row.name, row.summary))
-            .chain(self.plugin_commands.iter().filter(|row| row.name.starts_with(query)).map(|row| (row.name.as_str(), row.summary.as_str()))).collect()
-    }
-
-    fn complete_slash(&mut self) -> bool {
-        let matches = self.slash_suggestions();
-        let Some((command, _)) = matches.get(self.slash_selected.min(matches.len().saturating_sub(1))) else { return false; };
-        let command = (*command).to_owned();
-        self.input = command;
-        self.input_cursor = self.input.len();
-        self.slash_dismissed = true;
-        true
-    }
-
     fn move_input_vertical(&mut self, down: bool) -> bool {
         let before = &self.input[..self.input_cursor];
         let column = before.rsplit('\n').next().unwrap_or("").chars().count();
@@ -1687,125 +1599,6 @@ impl App {
         let target_end = self.input[target_start..].find('\n').map_or(self.input.len(), |i| target_start + i);
         self.input_cursor = target_start + self.input[target_start..target_end]
             .char_indices().nth(column).map_or(target_end - target_start, |(i, _)| i);
-        true
-    }
-
-    /// Handle bare DOXA commands before a prompt can reach an agent. Unknown
-    /// provider and plugin commands still pass through. Known unsupported
-    /// forms stay in the draft.
-    fn dispatch_prompt_command(&mut self) -> bool {
-        let input = self.input.trim();
-        if !input.starts_with('/') || input.contains('\n') {
-            return false;
-        }
-        let mut parts = input.split_whitespace();
-        let Some(name) = parts.next() else { return false; };
-        let args: Vec<&str> = parts.collect();
-        if !matches!(name, "/help" | "/about" | "/sessions" | "/settings" | "/model" | "/effort" | "/engine"
-            | "/mode" | "/beliefs" | "/diff" | "/peers" | "/split"
-            | "/vsplit" | "/pane" | "/sidebar" | "/detach" | "/dir") {
-            return false;
-        }
-        if !args.is_empty() && matches!(name, "/model" | "/effort" | "/mode" | "/engine") { return false; }
-        if name == "/sessions" && !args.is_empty() {
-            let action = crate::sessions::Action::parse(&args);
-            match action {
-                Ok(action) => self.local_sessions_stop(action),
-                Err(error) => self.notice = error.to_string(),
-            }
-            return true;
-        }
-        if !args.is_empty() && !matches!(name, "/pane" | "/sidebar") {
-            self.notice = format!("{name} arguments are not available in Rust yet");
-            return true;
-        }
-        let pane_target = if name == "/pane" && !args.is_empty() {
-            match args.as_slice() {
-                [number] => match number.parse::<usize>() {
-                    Ok(index) if index > 0 && index <= self.pane_count() => Some(index - 1),
-                    _ => { self.notice = format!("Choose pane 1–{}", self.pane_count()); return true; }
-                },
-                _ => { self.notice = "Usage: /pane [number]".into(); return true; }
-            }
-        } else { None };
-        let sidebar = if name == "/sidebar" && !args.is_empty() {
-            match args.as_slice() {
-                ["on"] => Some((true, None)),
-                ["off"] => Some((false, None)),
-                ["wider"] => Some((true, Some(self.rail_width.saturating_add(4).min(80)))),
-                ["narrower"] => Some((true, Some(self.rail_width.saturating_sub(4).max(MIN_RAIL_WIDTH)))),
-                ["width", width] => match width.parse::<u16>() {
-                    Ok(width) if (MIN_RAIL_WIDTH..=80).contains(&width) => Some((true, Some(width))),
-                    _ => {
-                        self.notice = "Sidebar width must be 12–80 cells".into();
-                        return true;
-                    }
-                },
-                _ => {
-                    self.notice = "Usage: /sidebar [on|off|wider|narrower|width N]".into();
-                    return true;
-                }
-            }
-        } else { None };
-        let name = name.to_owned();
-        self.input.clear();
-        self.input_cursor = 0;
-        match name.as_str() {
-            "/help" => {
-                self.open_help();
-            }
-            "/about" => self.open_about(),
-            "/sessions" => self.open_live_sessions(),
-            "/settings" => self.open_settings_menu(),
-            "/model" => self.open_model_picker(),
-            "/effort" => self.open_effort_picker(),
-            "/engine" => self.open_engine_picker(),
-            "/mode" => self.open_permission_picker(),
-            "/beliefs" => self.open_lore_picker(),
-            "/diff" => self.open_diff(),
-            "/peers" => {
-                self.map_modal = true;
-                self.peer_map.selected = 0;
-                self.pending_peer_refresh = Some(
-                    self.groups[self.active_group].active_id().unwrap_or("").to_owned(),
-                );
-            }
-            "/split" => {
-                self.split_active_pane(Split::Horizontal);
-            }
-            "/vsplit" => {
-                self.split_active_pane(Split::Vertical);
-            }
-            "/pane" => {
-                if let Some(target) = pane_target {
-                    self.active_group = target;
-                    self.focus = Focus::Prompt;
-                } else {
-                    self.notice = if self.pane_group_two_exists() {
-                        format!("{} pane groups · /pane <n> to focus one", self.pane_count())
-                    } else {
-                        "One pane group · /split or /vsplit makes a second".into()
-                    };
-                }
-            }
-            "/sidebar" => {
-                if let Some((visible, width)) = sidebar {
-                    self.rail_visible = visible;
-                    if let Some(width) = width { self.rail_width = width; }
-                } else {
-                    self.rail_visible = !self.rail_visible;
-                }
-                self.persist_sidebar();
-            }
-            "/detach" => self.detach_active_tab(),
-            "/dir" => {
-                self.notice = self.groups[self.active_group].active_id()
-                    .and_then(|id| self.session_cwds.get(id))
-                    .map(|cwd| format!("Session directory · {}", safe_label(&cwd.to_string_lossy())))
-                    .unwrap_or_else(|| "Session directory unavailable".into());
-            }
-            _ => unreachable!("recognized bare DOXA command"),
-        }
         true
     }
 
@@ -2273,207 +2066,6 @@ impl App {
                 true
             }
             _ => false,
-        }
-    }
-
-    // This single call site is the prompt Enter handler, never the command
-    // registry, daemon frames, remote messages or model tool callbacks.
-    fn submit_keyboard_shell(&mut self) {
-        let Some(id) = self.groups[self.active_group].active_id().map(str::to_owned) else { self.notice = "Select a session before running a local shell".into(); return; };
-        if self.offline_ids.contains(&id) { self.notice = "Archived transcript is read-only".into(); return; }
-        let Some(cwd) = self.session_cwds.get(&id).cloned() else { self.notice = "Session directory unavailable".into(); return; };
-        let command = self.input[1..].trim().to_owned();
-        if command.is_empty() { self.notice = "!<command> runs locally in the session directory; output is not sent to the model or saved".into(); return; }
-        if self.local_shell_jobs.len() >= 4 { self.notice = "Wait for a local shell command to finish".into(); return; }
-        let shell_id = self.next_shell_id; self.next_shell_id = self.next_shell_id.saturating_add(1);
-        let initial = crate::shell::Result { id: shell_id, command: command.clone(), output: String::new(), status: "running · Ctrl+C cancel".into(), running: true, dropped_bytes: 0 };
-        if let Some(session) = self.sessions.iter_mut().find(|session| session.id == id) {
-            append_transcript(session, &format!("\n\n{}{}\n\n", transcript_tools::SHELL_PREFIX, serde_json::to_string(&initial).unwrap()));
-        }
-        self.local_shell_jobs.push(crate::shell::Job::start(id, shell_id, command, &cwd));
-        self.input.clear(); self.input_cursor = 0; self.notice = "Local shell running · output stays in this window".into();
-    }
-    fn poll_shell(&mut self) -> bool {
-        let mut changed = false; let mut index = 0;
-        while index < self.local_shell_jobs.len() {
-            if let Some(result) = self.local_shell_jobs[index].poll() {
-                let job = self.local_shell_jobs.remove(index);
-                if let Some(session) = self.sessions.iter_mut().find(|session| session.id == job.session) {
-                    let prefix = format!("{}{{\"id\":{},", transcript_tools::SHELL_PREFIX, job.id);
-                    if let Some(start) = session.transcript.find(&prefix) {
-                        let end = session.transcript[start..].find("\n\n").map_or(session.transcript.len(), |end| start + end);
-                        session.transcript.replace_range(start..end, &format!("{}{}", transcript_tools::SHELL_PREFIX, serde_json::to_string(&result).unwrap()));
-                        if session.transcript.len() > MAX_TRANSCRIPT_BYTES { session.transcript = transcript_tail(&session.transcript).to_owned(); }
-                        changed = true;
-                    }
-                }
-            } else { index += 1; }
-        }
-        changed
-    }
-
-    fn submit_local_command(&mut self) -> bool {
-        if !self.input.trim_start().starts_with('/') || self.input.contains('\n') {
-            return false;
-        }
-        let line = self.input.trim().to_owned();
-        let (command, args) = line.split_once(char::is_whitespace).unwrap_or((line.as_str(), ""));
-        match command {
-            "/doctor" if args.trim().is_empty() => {
-                let engine = self.groups[self.active_group].active_id().and_then(|id| self.session_identity.get(id)).and_then(|id| id.0.clone());
-                self.open_operations(operations_menu::Menu::maintenance("doctor", engine, false)); true
-            }
-            "/update" if matches!(args.trim(), "" | "--restart") => {
-                if self.fleet_controller.is_some() || self.groups.iter().flat_map(|g| &g.tabs).any(|id|
-                    self.session_activity.get(id).is_none_or(|(running, queued)| *running || *queued > 0)) {
-                    self.notice = "Wait for idle sessions and an idle fleet controller before updating".into(); return true;
-                }
-                self.restart_executable = if args.trim() == "--restart" { std::env::current_exe().ok() } else { None };
-                self.open_operations(operations_menu::Menu::maintenance("update", None, args.trim() == "--restart")); true
-            }
-            "/model" | "/effort" | "/mode" | "/engine" if !args.trim().is_empty() => {
-                let target = args.trim();
-                if target.split_whitespace().count() != 1 || target.len() > 128 || target.chars().any(unsafe_input_char) {
-                    self.notice = format!("Usage: {command} <name>"); return true;
-                }
-                if command == "/engine" {
-                    if let Some(index) = ENGINE_CHOICES.iter().position(|engine| engine.eq_ignore_ascii_case(target)) {
-                        self.engine_selected = index; self.select_new_engine();
-                        self.input.clear(); self.input_cursor = 0;
-                    } else { self.notice = "Unknown engine · choose claude, codex, deepseek or glm".into(); }
-                    return true;
-                }
-                if command == "/mode" {
-                    if let Some(index) = permission_index(target) {
-                        self.open_permission_picker();
-                        if let Some(picker) = &mut self.permission_picker { picker.1 = index; self.select_permission_mode(); self.input.clear(); self.input_cursor = 0; }
-                    } else { self.notice = "Unknown permission mode · /mode opens supported choices".into(); }
-                    return true;
-                }
-                let Some(id) = self.groups[self.active_group].active_id().map(str::to_owned) else { self.notice = "Select a session first".into(); return true; };
-                self.requested_argument = Some((id, if command == "/model" { "model" } else { "effort" }, target.into()));
-                if command == "/model" { self.open_model_picker(); } else { self.open_effort_picker(); self.apply_requested_argument(); }
-                true
-            }
-            "/setup" | "/login" | "/logout" | "/plugins" | "/reload-plugins" if args.trim().is_empty() || matches!(command, "/login" | "/logout") => {
-                let kind = &command[1..];
-                let menu = if matches!(command, "/login" | "/logout") { operations_menu::Menu::with_auth_args(kind, args) }
-                    else if matches!(command, "/plugins" | "/reload-plugins") { Ok(operations_menu::Menu::with_plugin_report(command == "/reload-plugins")) }
-                    else { Ok(operations_menu::Menu::new(kind)) };
-                let menu = match menu { Ok(menu) => menu, Err(error) => { self.notice = format!("{command}: {error}"); return true; } };
-                self.input.clear(); self.input_cursor = 0;
-                self.memory_menu_pending = None;
-                self.memory_manager = None;
-                self.operations_menu = Some(menu);
-                self.chip_info = Some(ChipInfo { kind: "operations", label: String::new(),
-                    lines: self.operations_menu.as_ref().unwrap().lines(usize::from(self.size.width)),
-                    scroll: 0, owner: None });
-                if self.active_chooser_rect().is_none() {
-                    self.operations_menu = None; self.chip_info = None;
-                    self.notice = "Enlarge pane to open operations".into();
-                } else if let Some(menu) = &mut self.operations_menu {
-                    menu.start_requested();
-                    if let Some(info) = &mut self.chip_info { info.lines = menu.lines(usize::from(self.size.width)); }
-                }
-                true
-            }
-            "/memory" if args.trim().is_empty() => {
-                self.input.clear(); self.input_cursor = 0;
-                self.open_memory_menu(self.active_group); true
-            }
-            "/pending" if args.trim().is_empty() => {
-                self.input.clear();
-                self.input_cursor = 0;
-                self.open_pending_picker();
-                true
-            }
-            "/pending" => { self.notice = "Local command unavailable: /pending arguments".into(); true }
-            "/attach" => { self.local_attach(args); true }
-            "/branch" => {
-                let target = args.trim();
-                if target.split_whitespace().count() > 1 || target.len() > 200
-                    || target.chars().any(unsafe_input_char) {
-                    self.notice = "Usage: /branch [local-or-remote-name]".into();
-                } else if let Some(id) = self.groups[self.active_group].active_id() {
-                    self.pending_queue_commands.push(crate::bridge::WorkerCommand::Branch(
-                        id.to_owned(), (!target.is_empty()).then(|| target.to_owned())));
-                    self.input.clear();
-                    self.input_cursor = 0;
-                    self.notice = "Checking branch…".into();
-                } else { self.notice = "Select a session before switching branch".into(); }
-                true
-            }
-            "/rename" => { self.local_rename(args); true }
-            "/clear" => { self.local_clear(args); true }
-            "/usage" | "/context" => {
-                if !args.trim().is_empty() {
-                    self.notice = format!("Usage: {command}");
-                } else {
-                    let kind = if command == "/usage" { "usage" } else { "context" };
-                    self.input.clear();
-                    self.input_cursor = 0;
-                    self.open_diagnostic(kind);
-                }
-                true
-            }
-            "/collection" => { self.local_collection(args); true }
-            "/cd" => { self.local_cd(args); true }
-            "/compact" => {
-                let engine = self.groups[self.active_group].active_id()
-                    .and_then(|id| self.session_identity.get(id))
-                    .and_then(|identity| identity.0.as_deref());
-                if args.trim().is_empty() && engine == Some("claude") {
-                    return false; // The Claude sidecar reviews synchronously before forwarding.
-                }
-                self.notice = if !args.trim().is_empty() {
-                    "Usage: /compact".into()
-                } else {
-                    "Reviewed compaction is available only for Claude sessions".into()
-                };
-                true
-            }
-            "/mesh" => {
-                self.local_mesh(args, None);
-                true
-            }
-            "/msg" => { self.local_message(args); true }
-            "/movepane" => {
-                let target = match args.split_whitespace().collect::<Vec<_>>().as_slice() {
-                    [] => (self.active_group + 1) % if self.pane_tree.is_some() { self.pane_count() } else { 2 },
-                    [number] if number.parse::<usize>().is_ok_and(|n| n > 0 && n <= self.groups.len()) => number.parse::<usize>().unwrap() - 1,
-                    _ => { self.notice = "Usage: /movepane [number]".into(); return true; }
-                };
-                if self.move_active_tab(target) {
-                    self.input.clear();
-                    self.input_cursor = 0;
-                }
-                true
-            }
-            "/settings" if args.trim().is_empty() => {
-                self.input.clear();
-                self.input_cursor = 0;
-                self.open_settings_menu();
-                true
-            }
-            "/settings" => { self.notice = "Usage: /settings · edit native preferences in the menu".into(); true }
-            "/setup" => { self.notice = "Usage: /setup · use the selectable setup menu".into(); true }
-            "/fleet" => { self.local_fleet(args);true }
-            "/img" | "/login"
-            | "/logout" | "/doctor" | "/plugins"
-            | "/reload-plugins" | "/effort"
-            | "/update" => {
-                self.notice = format!("Local command unavailable: {}", safe_label(command));
-                true
-            }
-            "/search" => { self.local_search(args); true }
-            "/resume" => { self.local_resume(args); true }
-            "/queue" if args.trim().is_empty() => { self.open_queue(); true }
-            "/queue" => { self.notice = "queue: open the picker and use X to cancel a selected item".into(); true }
-            _ if COMMANDS.iter().any(|row| row.name == command) => {
-                self.notice = format!("Local command unavailable: {}", safe_label(command));
-                true
-            }
-            _ => false, // Unknown provider and plugin slash commands remain available.
         }
     }
 
@@ -3126,27 +2718,6 @@ impl App {
         }
         self.input.clear();
         self.input_cursor = 0;
-    }
-
-    fn apply_requested_argument(&mut self) {
-        let Some((owner, kind, target)) = self.requested_argument.clone() else { return; };
-        if self.groups[self.active_group].active_id() != Some(owner.as_str()) { self.requested_argument = None; return; }
-        let chosen = if kind == "model" {
-            self.model_picker.as_ref().filter(|picker| picker.session_id == owner && !picker.loading)
-                .map(|picker| picker.models.iter().position(|model| model == &target))
-        } else {
-            self.effort_picker.as_ref().filter(|picker| picker.session_id == owner)
-                .map(|picker| picker.levels.iter().position(|level| level == &target))
-        };
-        let Some(chosen) = chosen else { return; };
-        self.requested_argument = None;
-        if let Some(index) = chosen {
-            if kind == "model" { self.model_picker.as_mut().unwrap().selected = index; self.model_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)); }
-            else { self.effort_picker.as_mut().unwrap().selected = index; self.select_effort(); }
-            self.input.clear(); self.input_cursor = 0;
-        } else {
-            self.notice = format!("{target} is not in this session's reported {kind} choices");
-        }
     }
 
     fn open_model_picker(&mut self) {
@@ -5388,56 +4959,6 @@ impl App {
         true
     }
 
-    fn action_rows(&self) -> Vec<actions::Entry> { actions::entries(self, &self.action_query) }
-
-    fn action_key(&mut self, key: KeyEvent) -> bool {
-        let rows = self.action_rows();
-        match key.code {
-            KeyCode::Esc | KeyCode::Char('p') if key.code == KeyCode::Esc || key.modifiers.contains(KeyModifiers::CONTROL) => self.action_menu = false,
-            KeyCode::Up => self.action_selected = self.action_selected.saturating_sub(1),
-            KeyCode::Down => self.action_selected = (self.action_selected + 1).min(rows.len().saturating_sub(1)),
-            KeyCode::PageUp => self.action_selected = self.action_selected.saturating_sub(8),
-            KeyCode::PageDown => self.action_selected = (self.action_selected + 8).min(rows.len().saturating_sub(1)),
-            KeyCode::Backspace => { self.action_query.pop(); self.action_selected = 0; },
-            KeyCode::Char(c) if !unsafe_input_char(c) && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
-                if self.action_query.len() + c.len_utf8() <= 200 { self.action_query.push(c); self.action_selected = 0; }
-            }
-            KeyCode::Enter => {
-                let Some(entry) = rows.get(self.action_selected) else { return true; };
-                let action = entry.action.clone(); self.action_menu = false;
-                match action {
-                    actions::Action::Plugin(command) => {
-                        self.action_draft = Some(((self.active_group,self.groups[self.active_group].active_id().unwrap_or("").to_owned()),self.input.clone(), self.input_cursor));
-                        self.input = format!("{command} "); self.input_cursor = self.input.len(); self.focus = Focus::Prompt;
-                    }
-                    actions::Action::New => self.open_engine_picker(),
-                    actions::Action::Fleet(view) => self.open_fleet(view.root,Some(view.run_id)),
-                    actions::Action::Tab(pane, tab) => { if self.groups.get(pane).is_some_and(|g| tab < g.tabs.len()) { self.active_group = pane; self.groups[pane].active = tab; self.focus = Focus::Prompt; } },
-                    actions::Action::Stop => self.open_stop_confirmation(),
-                    actions::Action::Tools => { self.tool_modal = true; self.tool_scroll = 0; self.tool_selected = self.active_tool_cards().len().saturating_sub(1); },
-                    actions::Action::Close => self.detach_active_tab(),
-                    actions::Action::NextPane => { self.active_group = (self.active_group + 1) % if self.pane_tree.is_some() { self.pane_count() } else { 2 }; self.focus = Focus::Prompt; },
-                    actions::Action::Command(command) => {
-                        // Argument-bearing operations prepare the user's prompt
-                        // for editing; bare forms use the same local dispatcher.
-                        if matches!(command, "/msg" | "/collection" | "/cd" | "/fleet" | "/fleet start" | "/fleet attach" | "/img") {
-                            self.action_draft = Some(((self.active_group,self.groups[self.active_group].active_id().unwrap_or("").to_owned()),self.input.clone(), self.input_cursor));
-                            self.input = format!("{command} "); self.input_cursor = self.input.len(); self.focus = Focus::Prompt;
-                        } else {
-                            let saved = (self.input.clone(), self.input_cursor);
-                            self.input = command.into(); self.input_cursor = self.input.len();
-                            if !self.dispatch_prompt_command() { self.submit_local_command(); }
-                            // Palette commands do not consume a conversation draft.
-                            self.input = saved.0; self.input_cursor = saved.1;
-                        }
-                    }
-                }
-            }
-            _ => return false,
-        }
-        true
-    }
-
     fn stop_confirmation_fits(&self) -> bool {
         self.size.width >= 40 && self.size.height >= 12
     }
@@ -6302,30 +5823,6 @@ impl App {
         if self.active_chooser_rect().is_none() {
             self.chip_info = None;
             self.notice = "Enlarge active pane to open about".into();
-        }
-    }
-
-    fn open_help(&mut self) {
-        let mut lines = vec!["Rust DOXA commands · forms shown below".to_owned(),
-            "Unavailable commands stay local; unknown provider commands pass through".to_owned(),
-            String::new()];
-        lines.push("Tab / Shift+Tab: focus prompt, tab headers, transcript, visible chips, sidebar".into());
-        lines.push("Focused chip: Enter opens · tab headers: ←/→ select, Enter prompt · Alt+Tab next pane".into());
-        lines.push("Alt+P or /mode: permission picker".into());
-        lines.push("Drag transcript text to select · Ctrl+C / Ctrl+Shift+C copy · Esc clears · Ctrl+V paste into prompt".into());
-        lines.push("Terminal fallback: Shift+drag, Ctrl+Shift+C / Ctrl+Shift+V; OSC52 support required for native copy".into());
-        for row in COMMANDS {
-            lines.push(format!("{} · {}", row.form, row.summary));
-            lines.push(format!("  {}", row.support));
-        }
-        for command in &self.plugin_commands { lines.push(format!("{} · {} · {} plugin passthrough", if command.usage.is_empty() { &command.name } else { &command.usage }, command.summary, command.plugin)); }
-        lines.push("Local keyboard shell: !<command> · current session directory; output is neither sent nor saved".into());
-        for (command, description) in FLEET_ACTIONS { lines.push(format!("{command} · {description}")); }
-        self.chip_info = Some(ChipInfo { kind: "help", label: String::new(), lines,
-            scroll: 0, owner: None });
-        if self.active_chooser_rect().is_none() {
-            self.chip_info = None;
-            self.notice = "Enlarge active pane to open help".into();
         }
     }
 

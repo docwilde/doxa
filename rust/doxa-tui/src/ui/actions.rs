@@ -1,6 +1,7 @@
 //! One generated command surface for the registry, open tabs and session
 //! operations. Query filtering does not mutate the conversation draft.
-use super::{App, COMMANDS};
+use super::App;
+use super::commands::{COMMANDS, FLEET_ACTIONS};
 #[derive(Clone, Debug)]
 pub enum Action { New, Plugin(String), Fleet(super::fleet_menu::SavedView), Tab(usize, usize), Command(&'static str), Stop, Tools, Close, NextPane }
 #[derive(Clone, Debug)]
@@ -22,7 +23,7 @@ pub fn entries(app: &App, query: &str) -> Vec<Entry> {
     for command in &app.plugin_commands {
         rows.push(Entry { label: format!("Plugin: {} · {}", command.name, command.summary), help: command.usage.clone(), action: Action::Plugin(command.name.clone()) });
     }
-    for (command, description) in super::FLEET_ACTIONS {
+    for (command, description) in FLEET_ACTIONS {
         rows.push(Entry { label: format!("{command} · {description}"), help: "Current fleet run".into(), action: Action::Command(command) });
     }
     rows.extend([
