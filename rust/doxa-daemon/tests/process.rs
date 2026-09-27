@@ -2159,6 +2159,7 @@ mod vendor_process {
             .env("DEEPSEEK_API_KEY", "test-key-1234")
             .env("ZAI_API_KEY", "test-key-1234")
             .env_remove("DOXA_LORE")
+            .env("DOXA_AGENT_PEER_SEND", "1")
             .env("DOXA_VENDOR_TOOLS", if tools { "workspace-read" } else { "" })
             .env("DOXA_HOME", runtime.join("home"))
             .stdout(Stdio::null())

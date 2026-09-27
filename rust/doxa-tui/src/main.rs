@@ -1,4 +1,6 @@
-use doxa_tui::{bridge, discovery, fleet_control, fleet_plan, fleet_view, launch, maintenance, mesh_control, operations, settings, startup_restore, ui_state};
+use doxa_tui::{bridge, discovery, fleet_control, fleet_plan, fleet_view, launch, mesh_control, operations, settings, startup_restore, ui_state};
+#[cfg(test)]
+use doxa_tui::maintenance;
 use std::collections::HashSet;
 use std::io::{self, Write};
 use serde_json::{Map, Value};

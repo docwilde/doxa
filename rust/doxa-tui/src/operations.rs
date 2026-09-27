@@ -2,6 +2,7 @@
 //! exit status is observed, and their output is never captured or displayed.
 
 use std::io;
+use std::sync::atomic::AtomicBool;
 use std::io::Read;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::os::unix::process::CommandExt;

@@ -11722,6 +11722,22 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn adopted_plugin_commands_share_completion_help_and_palette_without_execution() {
+        let mut app = App::default(); app.handle(Event::Resize(100, 30));
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"plugin-session", "engine":"claude"}));
+        app.plugin_commands = vec![crate::operations::PluginCommand { name: "/example:check".into(), summary: "Inspect changes".into(), usage: "/example:check [path]".into(), plugin: "example".into() }];
+        app.input = "/example".into(); assert_eq!(app.slash_suggestions(), vec![("/example:check", "Inspect changes")]);
+        app.complete_slash(); assert_eq!(app.input, "/example:check"); assert!(app.pending_prompts.is_empty());
+        app.open_help(); assert!(app.chip_info.as_ref().unwrap().lines.iter().any(|line| line.contains("/example:check [path]")));
+        app.chip_info = None; app.input = "draft".into();
+        let rows = actions::entries(&app, "example:check"); assert_eq!(rows.len(), 1); assert!(matches!(&rows[0].action, actions::Action::Plugin(name) if name == "/example:check"));
+        assert_eq!(app.input, "draft"); assert!(app.pending_prompts.is_empty());
+        app.input = "/example:check folder".into(); app.input_cursor = app.input.len();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.pending_prompts, [("plugin-session".into(), "/example:check folder".into())]);
+    }
+
+    #[test]
     fn shell_is_keyboard_only_and_never_provider_or_command_dispatch() {
         let root = tempfile::tempdir().unwrap(); let proof = root.path().join("proof");
         let mut app = App::default();

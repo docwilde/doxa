@@ -53,9 +53,9 @@ jobs:
           ./task help
           uv run pytest tests/test_install_rust.py -q
       - name: Test native LORE sidecar boundary
-        run: uv run pytest tests/test_lore_bridge.py -q
+        run: uv run pytest tests/test_lore_bridge.py tests/test_settings_graph.py tests/test_native_agent_tools.py -q
       - name: Test native plugin inventory and sanitized reload
-        run: uv run pytest tests/test_native_plugin_inventory.py -q
+        run: uv run pytest tests/test_native_plugin_inventory.py tests/test_native_plugin_commands.py -q
       - name: Test native Claude identity and peer ownership
         run: |
           native_claude_tests=$(mktemp -d "$RUNNER_TEMP/dc-XXXXXX")
@@ -71,6 +71,10 @@ jobs:
         run: cargo +stable test --locked --manifest-path rust/doxa-runtime/Cargo.toml
       - name: Test native daemon hosts and peer RPC
         run: cargo +stable test --locked --features local-test-server --manifest-path rust/doxa-daemon/Cargo.toml
+      - name: Test native provider LORE contracts without provider accounts
+        env:
+          DOXA_NATIVE_DAEMON: ${{ github.workspace }}/target/debug/doxa-daemon
+        run: uv run pytest tests/test_native_provider_lore.py tests/test_native_spawn.py tests/test_peernet.py tests/test_remote_policy.py -q
       - name: Test managed worktree lifecycle
         run: cargo +stable test --locked --manifest-path rust/doxa-worktrees/Cargo.toml
       - name: Smoke installed Rust launcher and locked sidecars
