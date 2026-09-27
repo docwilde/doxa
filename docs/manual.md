@@ -1072,9 +1072,10 @@ succeeded. The design, including what is deliberately not built, is
 ### Remote drivers
 
 `doxa/remote_policy.py` makes the authorization decision for both optional
-bridges. The browser bridge controls local daemon sessions through Tailscale
-Serve; the machine-wide peer bridge exchanges messages across machines. Both
-require explicit opt-in and an allowed Tailscale login. The peer bridge uses
+bridges. The machine-wide peer bridge exchanges messages across machines
+and requires explicit opt-in and an allowed Tailscale login. The retained
+browser adapter is unavailable until its transport can attest the Tailscale
+proxy; loopback TCP and identity headers alone cannot do so. The peer bridge uses
 a Unix socket and checks the proxy's kernel credentials before accepting an
 identity header. See the [remote plan](plans/remote.md) for the transport and
 browser setup.
