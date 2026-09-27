@@ -522,7 +522,8 @@ fn spawn_inner(options: &LaunchOptions, fleet_runtime: Option<&Path>, environmen
     }
     // Keep a private startup diagnostic so a failed daemon can tell the TUI
     // why it refused to launch (including worktree safety failures).
-    let stderr_path = env::temp_dir().join(format!(".doxa-daemon-{id}-{}.stderr", random_id()?));
+    let registry = doxa_peers::Registry::open(&runtime)?;
+    let stderr_path = registry.runtime().join(format!(".doxa-daemon-{id}-{}.stderr", random_id()?));
     let stderr_file = OpenOptions::new()
         .write(true)
         .create_new(true)
