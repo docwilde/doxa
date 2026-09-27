@@ -25,7 +25,7 @@ main() {
     }
   done
   python3 -c 'import sys; sys.exit(sys.version_info < (3, 11))' || {
-    printf 'doxa-install: Python 3.11 or newer is required for the LORE and Claude sidecars\n' >&2; exit 1;
+    printf 'doxa-install: Python 3.11 or newer is required for the Claude SDK sidecar\n' >&2; exit 1;
   }
   host_target=$(rustc -vV | sed -n 's/^host: //p')
   [ -n "$host_target" ] || { printf 'doxa-install: cannot determine Rust host target\n' >&2; exit 1; }
@@ -103,7 +103,7 @@ main() {
   [ ! -L "$sidecar_env" ] || { printf 'doxa-install: sidecar environment must not be a symlink\n' >&2; exit 1; }
   sidecar_ready() {
     [ -d "$1" ] && [ ! -L "$1" ] &&
-      "$1/bin/python" -I -c 'import doxa.lore_bridge, doxa.engine, lore_core, claude_agent_sdk' >/dev/null 2>&1
+      "$1/bin/python" -I -c 'import doxa.native_lore, doxa.engine, claude_agent_sdk' >/dev/null 2>&1
   }
   if [ -e "$sidecar_env" ]; then
     [ -d "$sidecar_env" ] || {

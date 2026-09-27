@@ -276,3 +276,43 @@ class Agent:
                 or len(set(disabled)) != len(disabled)):
             raise NativeLoreError("invalid_native_status")
         return result
+
+
+def runtime_config() -> dict:
+    """Canonical path and stage metadata; construction never opens the store."""
+    value = request("runtime_config_v1")
+    if not isinstance(value, dict):
+        raise NativeLoreError("invalid_native_frame")
+    for key in ("root", "projects_dir"):
+        raw = value.get(key)
+        if not isinstance(raw, str) or len(raw) > 4096 or "\0" in raw or not Path(raw).is_absolute():
+            raise NativeLoreError("invalid_native_frame")
+    stages = value.get("disabled_stages")
+    if not isinstance(stages, list) or len(stages) > 5 or any(
+            stage not in ("inject", "index", "review", "beliefs", "skills") for stage in stages):
+        raise NativeLoreError("invalid_native_frame")
+    return value
+
+
+def transcript_identity(cwd: str) -> tuple[Path, str]:
+    """Use native Git/worktree identity rather than a Python Git subprocess."""
+    value = request("transcript_identity", cwd=cwd)
+    if not isinstance(value, dict):
+        raise NativeLoreError("invalid_native_frame")
+    root, slug = value.get("projects_dir"), value.get("slug")
+    if (not isinstance(root, str) or len(root) > 4096 or "\0" in root or not Path(root).is_absolute()
+            or not isinstance(slug, str) or not 0 < len(slug) <= 1020 or slug == "." or ".." in slug
+            or any(char in slug for char in ("/", "\\", "\0"))):
+        raise NativeLoreError("invalid_native_frame")
+    return Path(root), slug
+
+
+def stage_disabled(stage: str) -> bool:
+    try:
+        return stage in runtime_config()["disabled_stages"]
+    except NativeLoreError:
+        return True
+
+
+def root_path() -> str:
+    return runtime_config()["root"]

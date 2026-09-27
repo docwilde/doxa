@@ -140,8 +140,7 @@ try:
 except ImportError:  # older SDKs have no rate-limit event surface
     RateLimitEvent = ()
 
-import lore_core
-from lore_core.config import PROJECTS_DIR, project_slug, stage_disabled
+from .native_lore import stage_disabled
 from .native_lore import scrub as scrub_secrets
 
 DEFAULT_MODEL: str | None = None  # None = whatever the CLI/session default is
@@ -1360,7 +1359,7 @@ class SessionEngine:
         # Lineage only, never enforcement -- see peers.PeerInfo.
         # parent_session_id. Threaded to the PeerHost at start().
         self.parent_session_id = parent_session_id or None
-        self.slug = project_slug(cwd)
+        self._projects_dir, self.slug = native_lore_mod.transcript_identity(cwd)
         self._client_factory = client_factory
         self._client: Any = None
         self._connected = False
@@ -1437,9 +1436,8 @@ class SessionEngine:
         #     _maybe_schedule_derive), no session index (finalize), no
         #     belief outcome or retraction, no proposal approved.
         #
-        # What OFF does NOT mean: lore_core is still imported and still
-        # used for scrub_secrets on every persisted line, for project_slug
-        # and for PROJECTS_DIR. The transcript is still written -- it is
+        # The native carrier still supplies pure scrubbing and transcript
+        # identity when memory is off. The transcript is still written -- it is
         # DOXA's own session record, and /resume and the transcript pane
         # depend on it. What stops is DOXA putting anything INTO the store
         # or taking anything OUT of it.
@@ -1504,7 +1502,7 @@ class SessionEngine:
         # guessed, empty when the SDK/CLI doesn't provide them.
         self.server_info: dict[str, Any] | None = None
         self.account: dict[str, Any] = {}
-        self.lore_root = str(lore_core.ROOT)
+        self.lore_root = native_lore_mod.root_path()
 
         # Peer layer (doxa/peers.py): the host lives on the engine, not the
         # TUI, so the presence entry follows whoever hosts the engine when
@@ -1635,7 +1633,7 @@ class SessionEngine:
         self._derive_task: "asyncio.Task | None" = None
         self._last_derive = time.monotonic()
 
-        transcript_dir = PROJECTS_DIR / self.slug
+        transcript_dir = self._projects_dir / self.slug
         transcript_dir.mkdir(parents=True, exist_ok=True)
         self.transcript_path = transcript_dir / f"{self.session_id}.jsonl"
 
@@ -2324,7 +2322,7 @@ class SessionEngine:
                 **(
                     {
                         "native_lore": self._native_agent,
-                        "lore_root": str(lore_core.ROOT),
+                        "lore_root": native_lore_mod.root_path(),
                     }
                     if self.lore
                     else {}

@@ -180,6 +180,7 @@ def export_shared_memory_caps() -> None:
         return
 
 
-ensure_importable()
+# The native runtime never injects a Python LORE checkout. Compatibility
+# callers must request that retired adapter explicitly.
 export_sticky_lore_root()
 export_shared_memory_caps()

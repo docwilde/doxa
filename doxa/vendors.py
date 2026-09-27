@@ -143,7 +143,7 @@ from typing import Any, Callable, Protocol
 
 from . import _lore_bootstrap  # noqa: F401 -- sys.path shim, see that module
 
-from lore_core.config import PROJECTS_DIR, project_slug
+
 from . import native_lore as native_lore_mod
 from .native_lore import scrub as scrub_secrets
 
@@ -1061,7 +1061,7 @@ class ChatApiEngine:
         # attach to, and spawn_daemon would time out waiting for a field
         # that was never going to appear. None in-process.
         self.daemon_socket = daemon_socket or None
-        self.slug = project_slug(self.cwd)
+        self._projects_dir, self.slug = native_lore_mod.transcript_identity(self.cwd)
         # NO environment is captured here, and that is the guarantee, not
         # an omission: an injectable env dict would be a credential stored
         # on the handle, reachable from vars(), a repr or a pickle. The
@@ -1185,7 +1185,7 @@ class ChatApiEngine:
         self._native_belief_count = 0
         self._started = False
 
-        transcript_dir = PROJECTS_DIR / self.slug
+        transcript_dir = self._projects_dir / self.slug
         transcript_dir.mkdir(parents=True, exist_ok=True)
         self.transcript_path = transcript_dir / f"{self.session_id}.jsonl"
         #: The conversation, verbatim, beside the transcript. The LORE
@@ -2406,6 +2406,4 @@ def _peer_title(prompt: str) -> str:
 def lore_root_path() -> str:
     """Where LORE keeps its store, for the ``lore_root`` attribute the
     status surfaces read off any engine handle."""
-    from lore_core.config import ROOT
-
-    return str(ROOT)
+    return native_lore_mod.root_path()

@@ -1,7 +1,7 @@
 [project]
 name = "doxa"
 version = "2.0.0a33"
-description = "Internal Python LORE and Claude sidecars for the Rust DOXA terminal."
+description = "Internal Claude SDK adapters for the native DOXA terminal."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "AGPL-3.0-only"
@@ -37,29 +37,6 @@ dependencies = [
     # scripts/record_gif.py, the previous holder of that comment, is
     # covered by this line too.
     "pillow>=11",
-    # DOXA's memory model IS lore_core -- doxa.engine, doxa.peers,
-    # doxa.operators and doxa.transcript all import it, and until v0.37.0
-    # it was declared nowhere: a bare clone reached into a LORE Claude
-    # Code plugin checkout through a sys.path shim and, finding none,
-    # failed 41 of 52 test modules at collection.
-    #
-    # A git URL because neither project is on PyPI (the README's install
-    # section says the same of DOXA itself). Pinned to a COMMIT rather
-    # than a branch: a branch pin re-resolves to whatever LORE main is
-    # that day, which is how a dependency becomes a moving target.
-    #
-    # This is the commit that gave LORE its packaging metadata (0.35.1).
-    # It becomes `@v0.35.1` once that release is tagged -- a tag reads
-    # better, and until then there is no tag on a LORE that can be
-    # installed at all.
-    #
-    # Nobody has to remember to make that edit:
-    # .github/workflows/lore-bump.yml checks weekly for a LORE tag ahead of
-    # this ref, and when one appears it rewrites the line below, re-locks,
-    # runs the suite and opens a PR. It only ever proposes -- this line is
-    # still only changed by a human merging one. Editing it by hand stays
-    # perfectly fine; the workflow reads whatever is here.
-    "lore-core @ git+https://github.com/docwilde/LORE@v0.58.5",
 ]
 
 [project.optional-dependencies]
@@ -71,6 +48,8 @@ remote = [
 
 [dependency-groups]
 dev = [
+    # Canonical Python APIs remain an interoperability oracle, never a runtime backend.
+    "lore-core @ git+https://github.com/docwilde/LORE@v0.58.5",
     "pytest>=8",
     "pytest-asyncio>=0.24",
 ]
@@ -78,15 +57,6 @@ dev = [
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
-
-# `lore-core @ git+https://...` is a PEP 508 direct reference, which
-# hatchling refuses by default -- the guard exists because PyPI rejects a
-# distribution carrying one, and it is worth being told rather than
-# finding out at upload. DOXA is not on PyPI; the Rust installer syncs this
-# internal sidecar package from a locked repository checkout, so the guard
-# describes a rule that does not apply here.
-[tool.hatch.metadata]
-allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["doxa"]

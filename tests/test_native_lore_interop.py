@@ -50,3 +50,44 @@ def test_native_cli_claude_agent_stages_only_and_recovers_invalid_arguments(nati
         assert not (native / "lore/MEMORY.md").exists()
     finally:
         agent.carrier.close()
+
+
+def test_retained_native_config_and_memory_off_hosts_never_open_store(native, monkeypatch):
+    from doxa import native_lore, engine, codex, vendors
+    native_lore._default.close()
+    try:
+        config = native_lore.runtime_config()
+        assert config["root"] == str(native / "lore")
+        assert config["projects_dir"] == str(native / "projects")
+        assert isinstance(config["disabled_stages"], list)
+        handles = [engine.SessionEngine(str(native), session_id="owned-claude", lore=False, peer_presence=False),
+            codex.CodexEngine(str(native), session_id="owned-codex", lore=False, account_fetch=lambda:{}),
+            vendors.ChatApiEngine(str(native), session_id="owned-vendor", lore=False)]
+        for handle in handles:
+            assert handle._projects_dir == native / "projects"
+            assert not handle.lore
+        assert not (native / "lore").exists()
+    finally:
+        native_lore._default.close()
+
+
+def test_retained_history_reads_actual_native_index_without_python_backend(native):
+    from doxa import native_lore, history
+    native_lore._default.close()
+    try:
+        directory, slug = native_lore.transcript_identity(str(native))
+        directory = directory / slug
+        directory.mkdir(parents=True)
+        record = {"type":"user","cwd":str(native),"timestamp":"2026-09-27T10:00:00Z",
+            "message":{"content":"owned history keyword"}}
+        (directory / "owned-history.jsonl").write_text(json.dumps(record) + "\n")
+        result = native_lore.request("index_transcript_v1", cwd=str(native), session_id="owned-history")
+        assert result == {"indexed":1,"consumed":1}
+        rows = history.recent_sessions(str(native), 1)
+        assert rows[0]["session_id"] == "owned-history" and rows[0]["messages"] == 1
+        assert history.sessions_by_prefix("owned-h")[0]["session_id"] == "owned-history"
+        hits = history.search_sessions("keyword", str(native))
+        assert hits[0]["session_id"] == "owned-history"
+        assert hits[0]["cwd"] == str(native) and hits[0]["engine"] == "claude"
+    finally:
+        native_lore._default.close()

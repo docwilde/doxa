@@ -527,9 +527,8 @@ async def run() -> None:
 def plugin_inventory(reload: bool = False) -> str:
     """No SDK connection: canonical policy, sanitized staging, then LORE scrub."""
     from doxa import _lore_bootstrap, claude_plugins
-    _lore_bootstrap.ensure_importable()
     _lore_bootstrap.export_sticky_lore_root()
-    from lore_core.scrub import scrub_secrets
+    from doxa.native_lore import scrub as scrub_secrets
 
     discovered = claude_plugins.discover()
     staged = claude_plugins.adopt(discovered) if reload else []
@@ -547,8 +546,7 @@ def plugin_commands() -> list[dict]:
     """Fresh read-only canonical adopted commands; no SDK, staging or hooks."""
     import re
     from doxa import _lore_bootstrap, claude_plugins
-    _lore_bootstrap.ensure_importable()
-    from lore_core.scrub import scrub_secrets
+    from doxa.native_lore import scrub as scrub_secrets
 
     rows = []
     seen = set()

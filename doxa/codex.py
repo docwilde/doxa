@@ -214,7 +214,7 @@ from typing import Any, Callable
 from . import _lore_bootstrap  # noqa: F401 -- sys.path shim, see that module
 
 from . import native_lore as native_lore_mod
-from lore_core.config import PROJECTS_DIR, project_slug
+
 from .native_lore import scrub as scrub_secrets
 
 from . import budget as budget_mod
@@ -727,7 +727,7 @@ class CodexEngine:
         # attach to, and spawn_daemon would time out waiting for a field
         # that was never going to appear. None in-process.
         self.daemon_socket = daemon_socket or None
-        self.slug = project_slug(self.cwd)
+        self._projects_dir, self.slug = native_lore_mod.transcript_identity(self.cwd)
         wanted = str(sandbox or os.environ.get("DOXA_CODEX_SANDBOX", "")).strip()
         self.sandbox = wanted if wanted in SANDBOX_MODES else DEFAULT_SANDBOX
         self._exec_factory = exec_factory or asyncio.create_subprocess_exec
@@ -879,7 +879,7 @@ class CodexEngine:
         self._bad_sample = ""
         self._tool_started: "dict[str, float]" = {}
 
-        transcript_dir = PROJECTS_DIR / self.slug
+        transcript_dir = self._projects_dir / self.slug
         transcript_dir.mkdir(parents=True, exist_ok=True)
         self.transcript_path = transcript_dir / f"{self.session_id}.jsonl"
         #: Codex's conversation id, beside the transcript, under DOXA's
@@ -2246,9 +2246,7 @@ def _peer_title(prompt: str) -> str:
 def lore_root_path() -> str:
     """Where LORE keeps its store, for the ``lore_root`` attribute the
     status surfaces read off any engine handle."""
-    from lore_core.config import ROOT
-
-    return str(ROOT)
+    return native_lore_mod.root_path()
 
 
 def _git_write_enabled() -> bool:

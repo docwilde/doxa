@@ -240,6 +240,7 @@ def test_retained_native_context_queries_are_scoped_and_memory_off_is_closed(tmp
         calls.append((op, fields))
         return "[BELIEF GRAPH] owned fixture" if op == "graph_awareness_v1" else "bounded fixture"
     monkeypatch.setattr(engine_mod.native_lore_mod, "request", invoke)
+    monkeypatch.setattr(engine_mod, "stage_disabled", lambda stage:False)
     monkeypatch.setenv("DOXA_GRAPH_CONTEXT", "1")
     monkeypatch.delenv("LORE_DISABLE_BELIEFS", raising=False)
     engine = engine_mod.SessionEngine.__new__(engine_mod.SessionEngine)
@@ -346,3 +347,35 @@ def test_retained_history_artifact_scan_is_native_owned_and_finite(tmp_path, mon
         def __exit__(self, *args): pass
     monkeypatch.setattr(history.os, "scandir", lambda *args:Overflow())
     assert history._beside_transcript("owned", ".codex.json") == []
+
+
+def test_retained_host_modules_import_without_python_lore_backend(tmp_path):
+    import subprocess
+    source = '''import sys, importlib.abc
+class RefusePythonLore(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == "lore_core" or fullname.startswith("lore_core."):
+            raise RuntimeError("Python LORE backend forbidden")
+sys.meta_path.insert(0, RefusePythonLore())
+import doxa.engine, doxa.codex, doxa.vendors, doxa.native_agent_tools
+'''
+    env = {**os.environ, "HOME":str(tmp_path), "DOXA_HOME":str(tmp_path / "doxa"),
+        "LORE_ROOT":str(tmp_path / "lore"), "PYTHONPATH":str(Path(__file__).resolve().parents[1]),
+        "DOXA_LORE_SOURCE":"package"}
+    result = subprocess.run([sys.executable,"-c",source], env=env, capture_output=True, timeout=5)
+    assert result.returncode == 0, result.stderr.decode()
+    assert not (tmp_path / "lore").exists()
+
+
+def test_native_runtime_metadata_is_validated_and_refusal_disables_stages(tmp_path, monkeypatch):
+    from doxa import native_lore
+    config = {"root":str(tmp_path / "lore"),"projects_dir":str(tmp_path / "projects"),
+        "disabled_stages":["review"]}
+    monkeypatch.setattr(native_lore,"request",lambda *args,**kwargs:config)
+    assert native_lore.root_path() == str(tmp_path / "lore")
+    assert native_lore.stage_disabled("review")
+    assert not native_lore.stage_disabled("beliefs")
+    config["root"] = "relative"
+    assert native_lore.stage_disabled("review")
+    with pytest.raises(NativeLoreError): native_lore.root_path()
+    assert not (tmp_path / "lore").exists()
