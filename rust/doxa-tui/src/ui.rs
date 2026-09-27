@@ -11189,6 +11189,37 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn router_attach_failure_releases_pending_target() {
+        const CHILD: &str = "DOXA_TEST_ATTACH_FAILURE";
+        if std::env::var_os(CHILD).is_none() {
+            let dir = tempfile::tempdir().unwrap();
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "ui::tests::router_attach_failure_releases_pending_target"])
+                .env(CHILD, "1").env("DOXA_RUNTIME_DIR", dir.path())
+                .env("DOXA_HOME", dir.path().join("home")).env("HOME", dir.path())
+                .status().unwrap();
+            assert!(status.success());
+            return;
+        }
+        let bridge = crate::bridge::connect_sessions_inner(&[], true).unwrap();
+        let mut app = App::default();
+        app.groups[0].tabs.push("owned".into());
+        app.attach_selected("vanished");
+        assert!(app.attaching_ids.contains("vanished"));
+        assert!(!dispatch_attaches(&mut app, &bridge.commands));
+        let frame = bridge.frames.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(frame["session_id"], "vanished");
+        assert_eq!(frame["group"], 0);
+        assert_eq!(frame["ok"], false);
+        assert!(app.apply_daemon_frame(&frame));
+        assert!(app.attaching_ids.is_empty());
+        assert!(app.notice.starts_with("Attach failed"));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL)));
+        assert!(app.should_quit, "failed attach must not veto closing the owned tab");
+        bridge.shutdown();
+    }
+
+    #[test]
     fn launch_reply_keeps_the_group_chosen_when_launch_started() {
         let mut app = App::default();
         app.launching = true;
