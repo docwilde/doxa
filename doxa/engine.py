@@ -141,9 +141,6 @@ except ImportError:  # older SDKs have no rate-limit event surface
     RateLimitEvent = ()
 
 import lore_core
-from lore_core import context as lore_context
-from lore_core import deriver as lore_deriver
-from lore_core import pending as lore_pending
 from lore_core import store as lore_store
 from lore_core.beliefs import BELIEF_RELATIONS
 from lore_core.config import PROJECTS_DIR, project_slug, stage_disabled
@@ -2144,33 +2141,17 @@ class SessionEngine:
         return True
 
     def _run_review_sync(self, older: bool) -> None:
-        """Blocking: build the deriver job for the transcript so far and run
-        it. Called off the event loop (see _on_pre_compact / finalize).
-
-        Both call sites here are automatic paths (PreCompact hook,
-        host-driven finalize) -- the equivalent of a hook firing in
-        lore_core.deriver.cmd_review, not an explicit `lore review` command
-        -- so this honors LORE_DISABLE_REVIEW the same way cmd_review's hook
-        branch does: skip silently, never block the session over it."""
+        """Native verified derivation; session-end failure never blocks teardown."""
         if not self.lore or stage_disabled("review"):
             return
         try:
-            job = lore_deriver.build_review_job(
-                self.transcript_path, self.slug, cwd_hint=self.cwd, older=older,
-            )
-            if job is None:
-                return
-            job["source_engine"] = "claude"
-            tmp = lore_core.ROOT / "tmp"
-            tmp.mkdir(parents=True, exist_ok=True)
-            jobfile = tmp / f"review-{job['session_id']}.json"
-            jobfile.write_text(json.dumps(job), encoding="utf-8")
-            self._review_worker(jobfile)
+            self._review_worker(self._review_metadata(older))
         except Exception:
-            # A review failure must never take the session down with it --
-            # same posture as cmd_review's hook path ("never block session
-            # end"/"never block the prompt loop").
             pass
+
+    def _review_metadata(self, older: bool) -> dict:
+        return {"cwd":self.cwd, "session_id":self.session_id,
+                "transcript":str(self.transcript_path), "older":bool(older)}
 
     async def review_before_compact(self) -> bool:
         """Finish a LORE review before an explicit provider compaction.
@@ -2189,62 +2170,30 @@ class SessionEngine:
             return bool(completed)
 
     def _review_before_compact_sync(self) -> bool:
-        import tempfile
-        import stat
-
+        if not self.lore or stage_disabled("review"):
+            return False
         try:
-            # LORE's parser returns an empty transcript on open failure. A
-            # missing file must not be mistaken for its short-session rule.
-            with self.transcript_path.open("rb") as source:
-                before = os.fstat(source.fileno())
-                if not stat.S_ISREG(before.st_mode) or before.st_size == 0:
-                    return False
-            job = lore_deriver.build_review_job(
-                self.transcript_path, self.slug, cwd_hint=self.cwd, older=True,
-            )
-            after = self.transcript_path.stat()
-            if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
-                after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns
-            ):
-                return False
-            if job is None:
-                return True  # LORE's minimum-message rule: nothing to derive.
-            job["source_engine"] = "claude"
-            directory = lore_core.ROOT / "tmp"
-            directory.mkdir(parents=True, exist_ok=True)
-            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", suffix=".json",
-                                             prefix="compact-review-", dir=directory,
-                                             delete=False) as file:
-                json.dump(job, file)
-                jobfile = Path(file.name)
-            try:
-                return self._review_worker(jobfile)
-            finally:
-                jobfile.unlink(missing_ok=True)
+            return self._review_worker(self._review_metadata(True))
         except Exception:
             return False
 
     @staticmethod
-    def _review_worker(jobfile: Path) -> bool:
+    def _review_worker(metadata: dict) -> bool:
         import subprocess
         import sys
-
-        # The parent may have selected a Claude plugin checkout over the
-        # installed wheel. A fresh interpreter must use that same source.
-        lore_parent = str(Path(lore_core.__file__).resolve().parent.parent)
+        raw = json.dumps(metadata, ensure_ascii=False, allow_nan=False)
+        if len(raw.encode()) > 16 * 1024:
+            return False
         process = subprocess.Popen(
             [sys.executable, "-I", str(Path(__file__).with_name("review_worker.py")),
-             str(jobfile), lore_parent],
-            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL, start_new_session=True,
-        )
+             "claude", raw], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, start_new_session=True)
         try:
             return process.wait(timeout=185) == 0
         except subprocess.TimeoutExpired:
             return False
         finally:
-            # The supervisor owns the worker PG and kills/reaps it on EOF.
-            # The OS also closes this pipe if the SDK parent is SIGKILLed.
+            # EOF makes the supervisor kill its native worker/provider PG.
             process.stdin.close()
             try:
                 process.wait(timeout=3)
