@@ -496,7 +496,7 @@ fn worker_loop(
                     let reply = match result {
                         Ok(reply) => json!({"type":"set_effort_reply", "session_id":id,
                             "ok":reply["ok"] == true, "effort":reply.get("effort"),
-                            "error":reply.get("error")}),
+                            "verification_pending":reply.get("verification_pending"), "error":reply.get("error")}),
                         Err(error) => json!({"type":"set_effort_reply", "session_id":id,
                             "ok":false, "error":error.to_string()}),
                     };

@@ -929,6 +929,8 @@ pub enum Focus {
     Prompt,
     Rail,
     Transcript,
+    Tabs,
+    Chip(&'static str),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1401,6 +1403,7 @@ pub struct App {
     pending_model_queries: Vec<String>,
     pending_model_changes: Vec<(String, String)>,
     pending_effort_changes: Vec<(String, String)>,
+    pending_effort_verifications: HashMap<String, String>,
     pub pending_prompts: Vec<(String, String)>,
     pending_peer_messages: Vec<(String, String, String)>,
     pub input_requests: Vec<InputRequest>,
@@ -1582,6 +1585,7 @@ impl Default for App {
             pending_model_queries: Vec::new(),
             pending_model_changes: Vec::new(),
             pending_effort_changes: Vec::new(),
+            pending_effort_verifications: HashMap::new(),
             pending_prompts: Vec::new(),
             pending_peer_messages: Vec::new(),
             input_requests: Vec::new(),
@@ -2014,6 +2018,8 @@ impl App {
                         true
                     }
                     "model_changed" => {
+                        self.pending_effort_verifications.remove(&id);
+                        self.pending_effort_changes.retain(|(owner, _)| owner != &id);
                         if data.get("effort").is_some() {
                             if let Some(effort) = data["effort"].as_str() { self.session_efforts.insert(id.clone(), safe_label(effort)); }
                             else { self.session_efforts.remove(&id); }
@@ -2036,12 +2042,29 @@ impl App {
                     }
                     "effort_changed" | "effort_verified" => {
                         if let Some(effort) = data["effort"].as_str().filter(|effort| !effort.is_empty()) {
-                            self.session_efforts.insert(id, safe_label(effort));
+                            self.session_efforts.insert(id.clone(), safe_label(effort));
+                            self.pending_effort_verifications.remove(&id);
+                            if self.groups[self.active_group].active_id() == Some(id.as_str()) {
+                                self.notice = format!("Effort verified · {}", safe_label(effort));
+                            }
                         }
                         true
                     }
                     "effort_requested" => {
-                        self.notice = format!("Requested effort {} · awaiting provider verification", safe_label(data["effort"].as_str().unwrap_or("unknown")));
+                        if let Some(effort) = data["effort"].as_str().filter(|value| !value.is_empty()) {
+                            self.pending_effort_verifications.insert(id.clone(), safe_label(effort));
+                            if self.groups[self.active_group].active_id() == Some(id.as_str()) {
+                                self.notice = format!("Requested effort {} · awaiting provider verification", safe_label(effort));
+                            }
+                        }
+                        true
+                    }
+                    "effort_verification_failed" => {
+                        self.pending_effort_verifications.remove(&id);
+                        self.pending_effort_changes.retain(|(owner, _)| owner != &id);
+                        if self.groups[self.active_group].active_id() == Some(id.as_str()) {
+                            self.notice = "Effort verification failed · previous verified effort retained".into();
+                        }
                         true
                     }
                     "permission_mode_changed" => {
@@ -2088,6 +2111,10 @@ impl App {
                     }
                     "turn_done" => {
                         self.streaming_text.remove(&id);
+                        if data["is_error"] == true && self.pending_effort_verifications.remove(&id).is_some()
+                            && self.groups[self.active_group].active_id() == Some(id.as_str()) {
+                            self.notice = "Effort verification failed · previous verified effort retained".into();
+                        }
                         if let Some(stream) = self.reasoning_streams.get_mut(&id) {
                             stream.streaming = false;
                             if let Some(tokens) = data["reasoning_output_tokens"].as_u64() {
@@ -2311,13 +2338,21 @@ impl App {
                 true
             }
             "set_effort_reply" => {
-                self.notice = if frame["ok"] == true {
-                    format!("Effort accepted · {} · awaiting session event",
-                        safe_label(frame["effort"].as_str().unwrap_or("unknown")))
-                } else {
-                    format!("Effort change failed · {}",
-                        safe_label(frame["error"].as_str().unwrap_or("unknown error")))
-                };
+                let Some(id) = frame["session_id"].as_str() else { return false; };
+                let Some(requested) = self.pending_effort_verifications.get(id).cloned() else { return false; };
+                if frame["ok"] == true && frame["effort"].as_str() != Some(requested.as_str()) { return false; }
+                let active = self.groups[self.active_group].active_id() == Some(id);
+                if frame["ok"] != true {
+                    self.pending_effort_verifications.remove(id);
+                    if active { self.notice = format!("Effort change failed · {}",
+                        safe_label(frame["error"].as_str().unwrap_or("unknown error"))); }
+                } else if frame["verification_pending"] == false {
+                    self.pending_effort_verifications.remove(id);
+                    self.session_efforts.insert(id.to_owned(), requested.clone());
+                    if active { self.notice = format!("Effort verified · {requested}"); }
+                } else if active {
+                    self.notice = format!("Requested effort {requested} · awaiting provider verification");
+                }
                 true
             }
             "set_permission_mode_reply" => {
@@ -3196,21 +3231,23 @@ impl App {
                 self.persist_sidebar();
                 true
             }
-            KeyCode::BackTab | KeyCode::Tab if key.code == KeyCode::BackTab
-                || key.modifiers.contains(KeyModifiers::SHIFT) => {
+            KeyCode::Tab if alt => {
                 self.active_group = (self.active_group + 1) % if self.pane_tree.is_some() { self.pane_count() } else { 2 };
                 self.split_requested = true;
                 self.focus = Focus::Prompt;
                 true
             }
-            KeyCode::Tab => {
-                self.focus = match self.focus {
-                    Focus::Prompt => Focus::Transcript,
-                    Focus::Transcript => Focus::Rail,
-                    Focus::Rail => Focus::Prompt,
-                };
+            KeyCode::BackTab | KeyCode::Tab => {
+                self.cycle_focus(key.code == KeyCode::BackTab || key.modifiers.contains(KeyModifiers::SHIFT));
                 true
             }
+            KeyCode::Enter if matches!(self.focus, Focus::Chip(_)) => {
+                if let Focus::Chip(kind) = self.focus { self.activate_chip(kind, self.active_group); }
+                true
+            }
+            KeyCode::Left if self.focus == Focus::Tabs => { self.previous_tab(); true }
+            KeyCode::Right if self.focus == Focus::Tabs => { self.next_tab(); true }
+            KeyCode::Enter if self.focus == Focus::Tabs => { self.focus = Focus::Prompt; true }
             KeyCode::Esc => {
                 self.focus = Focus::Prompt;
                 true
@@ -4347,6 +4384,7 @@ impl App {
             .map(|levels| levels.clone())
             .unwrap_or_else(|| known.iter().map(|level| (*level).to_owned()).collect::<Vec<_>>());
         if !allowed.contains(chosen) { return; }
+        self.pending_effort_verifications.insert(picker.session_id.clone(), chosen.clone());
         self.pending_effort_changes.push((picker.session_id, chosen.clone()));
         self.notice = format!("Requesting {engine} effort {chosen} for this session…");
     }
@@ -4480,16 +4518,20 @@ impl App {
         };
         self.engine_picker = false;
         let models = vendor_models(engine);
-        let model = vendor_default_model(engine).to_owned();
         let engine_id = engine_name(engine);
+        let config = crate::settings::config_path().map(|path| doxa_state::load_config(&path)).unwrap_or_default();
+        let configured = crate::settings::find("model").ok().map(|setting|
+            crate::settings::raw_from(&config, setting, std::env::var(setting.env).ok().as_deref(), engine_id)).unwrap_or_default();
+        let model = if configured.is_empty() { vendor_default_model(engine).to_owned() } else { configured };
+        let configured_effort = crate::settings::raw("effort");
         // A previous account-scoped catalog must not survive a vendor
         // re-selection when a later lookup fails or the credential changes.
         self.catalog_efforts.retain(|(name, _), _| name != engine_id);
         let model_efforts = models.iter().map(|name| ((*name).to_owned(),
             effort_choices(engine_id, name).iter().map(|level| (*level).to_owned()).collect())).collect::<HashMap<_, _>>();
-        let effort = self.next_efforts.get(engine_id)
-            .filter(|level| effort_choices(engine_id, &model).contains(&level.as_str()))
-            .cloned().or_else(|| (!models.is_empty()).then(|| "high".to_owned()));
+        let effort = self.next_efforts.get(engine_id).cloned().or_else(|| (!configured_effort.is_empty()).then_some(configured_effort))
+            .filter(|level| models.is_empty() || effort_choices(engine_id, &model).contains(&level.as_str()))
+            .or_else(|| (!models.is_empty()).then(|| "high".to_owned()));
         self.vendor_catalog_pending = None;
         let mut catalog_pending = false;
         if let Some(vendor) = match engine {
@@ -7072,6 +7114,43 @@ impl App {
         None
     }
 
+    fn focus_ring(&self) -> Vec<Focus> {
+        let layout = self.layout(self.size);
+        let pane = layout.panes.as_ref().and_then(|panes| panes.get(self.active_group)).copied().unwrap_or(layout.body);
+        let mut ring = vec![Focus::Prompt, Focus::Tabs, Focus::Transcript];
+        ring.extend(self.chip_window(self.active_group, usize::from(self.pane_regions(self.active_group, pane)[3].width))
+            .into_iter().map(|(kind, _)| Focus::Chip(kind)));
+        if layout.rail.is_some() { ring.push(Focus::Rail); }
+        ring
+    }
+
+    fn cycle_focus(&mut self, reverse: bool) {
+        let ring = self.focus_ring();
+        let current = ring.iter().position(|focus| *focus == self.focus).unwrap_or(0);
+        let next = if reverse { (current + ring.len() - 1) % ring.len() } else { (current + 1) % ring.len() };
+        self.focus = ring[next];
+    }
+
+    fn activate_chip(&mut self, kind: &'static str, group: usize) {
+        match kind {
+            "permission" => self.open_permission_picker(),
+            "engine" => self.open_engine_picker(),
+            "model" => self.open_model_picker(),
+            "effort" => self.open_effort_picker(),
+            "beliefs" => self.open_lore_picker(),
+            "repo" | "directory" => self.open_repo_picker(group),
+            "memory" => self.open_memory_menu(group),
+            "more" => {
+                let layout = self.layout(self.size);
+                let pane = layout.panes.as_ref().and_then(|panes| panes.get(group)).copied().unwrap_or(layout.body);
+                let visible = self.chip_window(group, usize::from(self.pane_regions(group, pane)[3].width));
+                let count = visible.len().saturating_sub(1).max(1);
+                self.chip_offsets[group] = (self.chip_offsets[group] + count) % self.chips(group).len();
+            }
+            kind => self.open_chip_info(kind, group),
+        }
+    }
+
     fn chip_window(&self, index: usize, width: usize) -> Vec<(&'static str, String)> {
         let all = self.chips(index);
         let full_width = all.iter().map(|(kind, label)| chip_text(kind, label).width()).sum::<usize>()
@@ -7244,6 +7323,9 @@ impl App {
         let mut lines = vec!["Rust DOXA commands · forms shown below".to_owned(),
             "Unavailable commands stay local; unknown provider commands pass through".to_owned(),
             String::new()];
+        lines.push("Tab / Shift+Tab: focus prompt, tab headers, transcript, visible chips, sidebar".into());
+        lines.push("Focused chip: Enter opens · tab headers: ←/→ select, Enter prompt · Alt+Tab next pane".into());
+        lines.push("Alt+P or /mode: permission picker".into());
         for row in COMMANDS {
             lines.push(format!("{} · {}", row.form, row.summary));
             lines.push(format!("  {}", row.support));
@@ -8054,21 +8136,8 @@ impl App {
             if let Some(hit) = self.chip_hit_at(mouse.column, mouse.row) {
                 self.chip_hover = None;
                 self.active_group = hit.group;
-                match hit.kind {
-                    "permission" => self.open_permission_picker(),
-                    "engine" => self.open_engine_picker(),
-                    "model" => self.open_model_picker(),
-                    "effort" => self.open_effort_picker(),
-                    "beliefs" => self.open_lore_picker(),
-                    "repo" | "directory" => self.open_repo_picker(hit.group),
-                    "memory" => self.open_memory_menu(hit.group),
-                    "more" => {
-                        let visible = self.chip_window(hit.group, usize::from(self.pane_regions(hit.group, hit.pane)[3].width));
-                        let count = visible.len().saturating_sub(1).max(1);
-                        self.chip_offsets[hit.group] = (self.chip_offsets[hit.group] + count) % self.chips(hit.group).len();
-                    }
-                    kind => self.open_chip_info(kind, hit.group),
-                }
+                self.focus = Focus::Chip(hit.kind);
+                self.activate_chip(hit.kind, hit.group);
                 return true;
             }
         }
@@ -8391,7 +8460,7 @@ impl App {
                     " Blank model uses configured engine default."
                 } else { " Left/Right choose vendor model and effort." }));
                 lines.push(Line::from(if vendor_models(form.engine).is_empty() {
-                    "".to_owned()
+                    format!(" Effort preference: {} · verified at connect", safe_label(form.effort.as_deref().unwrap_or("provider default")))
                 } else { format!(" {}", safe_label(&form.catalog_note)) }));
             }
             lines.push(Line::styled(format!(" {} Model: {}", if form.field == 0 { '›' } else { ' ' },
@@ -9117,7 +9186,9 @@ impl App {
                 .title(format!(
                     " Pane {}{} ",
                     index + 1,
-                    if self.active_group == index {
+                    if self.active_group == index && self.focus == Focus::Tabs {
+                        " ● tabs"
+                    } else if self.active_group == index {
                         " ●"
                     } else {
                         ""
@@ -9126,7 +9197,7 @@ impl App {
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(if group.active_id().is_some_and(|id| self.waiting_for_input(id)) && self.blink_on {
                     theme::ERROR
-                } else { theme::BORDER })),
+                } else if self.active_group == index && self.focus == Focus::Tabs { theme::ACCENT } else { theme::BORDER })),
         );
         frame.render_widget(tabs.style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)), tabs_area);
         if clock_width>0 {frame.render_widget(Paragraph::new(self.clock_text.as_str()).style(Style::default().fg(theme::MUTED).bg(theme::RAISED)),Rect::new(inner[0].right()-clock_width,inner[0].y+1,clock_width,1));}
@@ -9239,7 +9310,8 @@ impl App {
             chip_x = end.saturating_add(1);
             chip_spans.push(Span::styled(text,
                 Style::default().fg(if matches!(kind, "engine" | "more") { theme::ACCENT } else { theme::TEXT })
-                    .bg(theme::HIGHLIGHT)));
+                    .bg(theme::HIGHLIGHT)
+                    .add_modifier(if active && self.focus == Focus::Chip(kind) { Modifier::BOLD | Modifier::UNDERLINED | Modifier::REVERSED } else { Modifier::empty() })));
         }
         frame.render_widget(Paragraph::new(Line::from(chip_spans))
             .style(Style::default().bg(theme::RAISED)), inner[3]);
@@ -9912,6 +9984,7 @@ fn dispatch_model_controls(app: &mut App, sender: &SyncSender<crate::bridge::Wor
                 break;
             }
             Err(TrySendError::Disconnected(_)) => {
+                app.pending_effort_verifications.clear();
                 app.notice = "Daemon unavailable for effort change".into();
                 return true;
             }
@@ -12186,15 +12259,15 @@ for line in sys.stdin:
         app.groups[1].tabs.push("b".into());
         app.handle(Event::Paste("a\nb".into()));
         app.handle(Event::Key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)));
-        app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT)));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::ALT)));
         app.handle(Event::Paste("other".into()));
         app.action_menu = true;
         assert!(!app.handle(Event::Paste("ignored".into())));
         app.action_menu = false;
-        app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT)));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::ALT)));
         app.handle(Event::Key(KeyEvent::new(KeyCode::Char('!'), KeyModifiers::NONE)));
         assert_eq!(app.input, "a\n!b");
-        app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT)));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::ALT)));
         assert_eq!(app.input, "other");
     }
 
@@ -12216,7 +12289,7 @@ for line in sys.stdin:
 
         app.groups[1].tabs.clear();
         assert!(app.layout(app.size).panes.is_none());
-        app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT)));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::ALT)));
         assert_eq!(app.active_group, 1);
         assert!(app.layout(app.size).panes.is_some());
 
@@ -12796,7 +12869,7 @@ for line in sys.stdin:
         assert_eq!(app.groups[0].active_id(), Some("beta"));
         assert!(app.input.is_empty());
         app.input = "beta draft".into();
-        app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT)));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::ALT)));
         assert!(app.input.is_empty());
         app.input = "second pane draft".into();
         let first = app.layout(app.size).panes.unwrap()[0];
@@ -12807,7 +12880,7 @@ for line in sys.stdin:
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert_eq!(app.groups[0].active_id(), Some("alpha"));
         assert_eq!(app.input, "alpha draft");
-        app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT)));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::ALT)));
         assert_eq!(app.input, "second pane draft");
     }
 
@@ -13272,11 +13345,11 @@ for line in sys.stdin:
         assert_eq!(app.input, "draft for a");
         app.handle(Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT)));
         assert_eq!(app.input, "draft for a");
-        app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT)));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::ALT)));
         assert!(app.input.is_empty());
         app.handle(Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT)));
         assert_eq!(app.input, "draft for b");
-        app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT)));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::ALT)));
         assert_eq!(app.input, "draft for a");
     }
 
@@ -14195,6 +14268,87 @@ mod parity_tests {
         app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
             column, row, modifiers: KeyModifiers::NONE }));
     }
+    #[test]
+    fn tab_focus_visits_visible_chips_headers_and_reverses_without_switching_pane() {
+        let mut app = App::default();
+        app.size = Rect::new(0, 0, 220, 32);
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"s","engine":"claude","model":"sonnet","effort":"high"}));
+        app.groups[0].tabs = vec!["s".into(), "second".into()];
+        app.input = "unsent draft".into(); app.input_cursor = app.input.len();
+        let ring = app.focus_ring();
+        assert!(ring.contains(&Focus::Tabs)); assert!(ring.contains(&Focus::Chip("engine")));
+        for expected in ring.iter().cycle().skip(1).take(ring.len()) {
+            app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+            assert_eq!(&app.focus, expected);
+            assert_eq!(app.active_group, 0); assert_eq!(app.input, "unsent draft");
+        }
+        for expected in ring.iter().rev() {
+            app.handle(Event::Key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT)));
+            assert_eq!(&app.focus, expected);
+        }
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT)));
+        assert_eq!(app.focus, *ring.last().unwrap());
+        app.focus = Focus::Tabs;
+        assert!(paint(&app).contains("● tabs"));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)));
+        assert_eq!(app.groups[0].active_id(), Some("second"));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.focus, Focus::Prompt);
+        app.focus = Focus::Chip("engine");
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(app.engine_picker); assert!(app.pending_prompts.is_empty());
+        let previous = app.focus;
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+        assert_eq!(app.focus, previous); // modal owns Tab
+    }
+
+    #[test]
+    fn focus_ring_skips_hidden_sidebar_and_clipped_chips() {
+        let mut app = App::default(); app.size = Rect::new(0, 0, 70, 24); app.rail_visible = false;
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"s","engine":"claude","model":"sonnet","effort":"high"}));
+        app.groups[0].tabs = vec!["s".into()];
+        let _ = paint(&app);
+        let visible = app.rendered_chip_hits.borrow().as_ref().unwrap().iter().map(|hit| Focus::Chip(hit.kind)).collect::<Vec<_>>();
+        let ring = app.focus_ring();
+        assert!(!ring.contains(&Focus::Rail));
+        assert_eq!(ring.iter().copied().filter(|focus| matches!(focus, Focus::Chip(_))).collect::<Vec<_>>(), visible);
+        let focused = visible[0]; app.focus = focused;
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(70, 24)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let hit = app.rendered_chip_hits.borrow().as_ref().unwrap()[0].clone();
+        assert!(terminal.backend().buffer()[(hit.rect.x, hit.rect.y)].modifier.contains(Modifier::UNDERLINED));
+    }
+
+    #[test]
+    fn effort_replies_and_failures_belong_to_requesting_session() {
+        let mut app = App::default(); app.size = Rect::new(0, 0, 150, 32);
+        for id in ["a", "b"] { app.apply_daemon_frame(&json!({"type":"hello","session_id":id,"engine":"claude","model":"sonnet","effort":"high"})); }
+        app.groups[0].tabs = vec!["a".into()];
+        app.pending_effort_verifications.insert("b".into(), "low".into());
+        app.notice = "active pane notice".into();
+        app.apply_daemon_frame(&json!({"type":"set_effort_reply","session_id":"b","ok":true,"effort":"low","verification_pending":true}));
+        assert_eq!(app.notice, "active pane notice"); assert_eq!(app.session_efforts["b"], "high");
+        app.pending_effort_verifications.insert("a".into(), "low".into());
+        app.apply_daemon_frame(&json!({"type":"set_effort_reply","session_id":"a","ok":true,"effort":"max","verification_pending":false}));
+        assert_eq!(app.session_efforts["a"], "high");
+        app.apply_daemon_frame(&json!({"type":"set_effort_reply","session_id":"a","ok":true,"effort":"low","verification_pending":true}));
+        assert!(app.notice.contains("awaiting provider"));
+        app.apply_daemon_frame(&json!({"type":"event","session_id":"a","event":{"type":"effort_verification_failed","data":{"effort":"high","requested_effort":"low"}}}));
+        assert_eq!(app.session_efforts["a"], "high"); assert!(!app.pending_effort_verifications.contains_key("a"));
+        assert!(!app.notice.contains("awaiting"));
+        // A delayed reply cannot resurrect the failed request.
+        app.apply_daemon_frame(&json!({"type":"set_effort_reply","session_id":"a","ok":true,"effort":"low","verification_pending":true}));
+        assert!(!app.notice.contains("awaiting"));
+        app.pending_effort_verifications.insert("a".into(), "max".into());
+        app.apply_daemon_frame(&json!({"type":"set_effort_reply","session_id":"a","ok":true,"effort":"max","verification_pending":false}));
+        assert_eq!(app.session_efforts["a"], "max"); assert!(app.notice.contains("verified"));
+        app.apply_daemon_frame(&json!({"type":"set_effort_reply","session_id":"a","ok":true,"effort":"max","verification_pending":true}));
+        assert!(!app.notice.contains("awaiting"));
+        app.pending_effort_verifications.insert("a".into(), "low".into());
+        app.apply_daemon_frame(&json!({"type":"event","session_id":"a","event":{"type":"turn_done","data":{"is_error":true}}}));
+        assert!(!app.pending_effort_verifications.contains_key("a")); assert_eq!(app.session_efforts["a"], "max");
+    }
+
     #[test]
     fn search_edits_actual_prompt_query_and_restores_saved_draft() {
         let mut app = App::default();
