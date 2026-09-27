@@ -1,4 +1,4 @@
-use doxa_tui::{bridge, discovery, fleet_control, fleet_plan, fleet_view, launch, maintenance, mesh_control, operations, ui_state};
+use doxa_tui::{bridge, discovery, fleet_control, fleet_plan, fleet_view, launch, maintenance, mesh_control, operations, settings, startup_restore, ui_state};
 use std::collections::HashSet;
 use std::io::{self, Write};
 use serde_json::{Map, Value};
@@ -40,7 +40,7 @@ Commands:
   setup                Interactive authentication, LORE store, and defaults wizard
   settings             Show native settings and their effective sources
   settings set KEY VALUE | unset KEY
-                       Persist linger_secs or worktree_per_session for new sessions
+                       Persist supported settings or restore their defaults
   auth status [NAME]   Check Claude or Codex CLI authentication without showing CLI output
   auth login NAME [--device-auth (Codex only)] | auth logout NAME
                        Run the explicitly selected provider authentication
@@ -49,14 +49,14 @@ Commands:
   fleet ...            Inspect or start native fleet runs
   mesh serve           Serve the private peer graph until Ctrl-C
 
-Run doxa without a command to restore this project's live sessions or start
-a native Codex session. Pass --engine or --model to start a new session.
+Run doxa without a command to restore this project's saved tabs or start
+a session with the configured engine (Claude by default). Pass --engine or --model to start a new session.
 Ctrl+Q detaches without stopping its daemon.
 
 New-session options: --engine codex|claude|deepseek|glm, --model NAME,
   --branch LOCAL_OR_REMOTE, --linger SECONDS, --resume FULL_SESSION_ID.
 Codex: --sandbox read-only|workspace-write|danger-full-access, --codex-bin PATH.
-Claude: --claude-python PATH, --claude-script ABSOLUTE_PATH.
+Claude: --claude-python PATH, --claude-script ABSOLUTE_PATH, --effort low|medium|high|max.
 Codex: --effort uses account model capabilities.
 DeepSeek/GLM: --effort low|high|max (DeepSeek also none).
 Use --lore-python PATH for the LORE sidecar; API keys come from provider env vars.
@@ -464,19 +464,12 @@ fn run(args: &[String]) -> io::Result<()> {
                 .into_iter()
                 .filter(|s| s.scope_key == scope)
                 .collect();
-            if sessions.is_empty() {
-                let session = launch::spawn(&options)?;
-                eprintln!("started native session {}", session.id);
-                bridge::run_socket(&session.socket)
-            } else {
-                let home = std::env::var_os("DOXA_HOME")
-                    .filter(|s| !s.is_empty())
-                    .map(PathBuf::from)
-                    .or_else(|| std::env::var_os("HOME").map(|s| PathBuf::from(s).join(".doxa")));
-                let store =
-                    home.and_then(|home| ui_state::UiStateStore::for_scope(&home, &scope).ok());
-                bridge::run_sessions(&sessions, store)
-            }
+            let home = std::env::var_os("DOXA_HOME").filter(|s| !s.is_empty()).map(PathBuf::from)
+                .or_else(|| std::env::var_os("HOME").map(|s| PathBuf::from(s).join(".doxa")));
+            let store = home.and_then(|home| ui_state::UiStateStore::for_scope(&home, &scope).ok());
+            let (sessions, store) = startup_restore::prepare(store, sessions, &options,
+                settings::enabled("restore_tabs"), settings::enabled("resume_restored"))?;
+            bridge::run_sessions(&sessions, store)
         }
         _ => Err(invalid("invalid command")),
     }

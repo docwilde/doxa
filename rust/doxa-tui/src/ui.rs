@@ -3571,6 +3571,19 @@ impl App {
         }
     }
 
+    fn offer_first_run(&mut self) -> bool {
+        if self.operations_menu.is_some() || self.chip_info.is_some() || self.settings_menu.is_some() || self.history_modal { return false; }
+        self.operations_menu=Some(operations_menu::Menu::new("setup"));
+        self.chip_info=Some(ChipInfo {kind:"operations",label:String::new(),
+            lines:self.operations_menu.as_ref().unwrap().lines(usize::from(self.size.width)),scroll:0,owner:None});
+        if self.active_chooser_rect().is_none() {self.operations_menu=None;self.chip_info=None;return false;}
+        // Mark when offered; Escape must not cause another automatic offer.
+        let marked=crate::first_run::mark_seen();
+        if matches!(marked,Ok(false)) {self.operations_menu=None;self.chip_info=None;return true;}
+        self.operations_menu.as_mut().unwrap().start_requested();
+        true
+    }
+
     fn open_operations(&mut self, menu: operations_menu::Menu) {
         self.memory_menu_pending = None; self.memory_manager = None;
         self.retire_operations();
@@ -5766,6 +5779,22 @@ impl App {
             _ => return false,
         }
         true
+    }
+
+    pub(crate) fn recorded_session_cwd(&self, id: &str) -> Option<&Path> {
+        self.session_cwds.get(id).map(PathBuf::as_path)
+            .or_else(|| self.history_entries.get(id).and_then(|entry| entry.cwd.as_deref()))
+    }
+
+    pub(crate) fn restore_archive(&mut self, entry: &history::OfflineSession, note: &str) {
+        self.history_entries.insert(entry.id.clone(), entry.clone());
+        self.offline_ids.insert(entry.id.clone());
+        let session = Session { id: entry.id.clone(), title: entry.id.clone(),
+            collection: safe_label(&entry.project), transcript: transcript_tail(&entry.markdown).to_owned(),
+            status: if note.is_empty() { "Archived · read-only".into() }
+                else { format!("Archived · read-only · {}", safe_label(note)) } };
+        if let Some(old) = self.sessions.iter_mut().find(|old| old.id == entry.id) { *old = session; }
+        else { self.sessions.push(session); }
     }
 
     fn poll_history(&mut self) -> bool {
@@ -9394,21 +9423,23 @@ fn run_loop(
             .map(|s| Rect::new(0, 0, s.width, s.height))?,
         ..Default::default()
     };
-    if let Some((store, live_ids, _)) = &state {
-        store.restore(&mut app, live_ids);
-    }
     app.persist_preferences=true;
     app.plugin_refresh_dirty=true;
     app.sidebar_auto=app.preferences.value("sidebar").is_empty();
     app.rail_width=app.preferences.sidebar_width();
     app.rail_visible=match app.preferences.value("sidebar") {""=>app.sessions.len()>1 || !app.collections.is_empty(),"0"|"false"|"off"|"no"=>false,_=>true};
+    if let Some((store, live_ids, _)) = &state {
+        store.restore(&mut app, live_ids);
+    }
     app.refresh_clock();
     if app.preferences.on("key_notice") && guard.measured_keyboard==Some(false) {app.notice="Legacy keys: Ctrl+, → /settings · Shift+Enter → Ctrl+J · Ctrl+Enter → /msg".into();}
     let mut saved_layout = crate::ui_state::LayoutSignature::capture(&app);
     terminal.draw(|frame| app.draw(frame))?;
     let mut pointer_on_link = false;
+    let mut first_run_pending=crate::first_run::needed();
     while !app.should_quit {
         let mut changed = false;
+        if first_run_pending && app.offer_first_run() {first_run_pending=false;changed=true;}
         // Bound work per tick so a busy daemon cannot starve keyboard input.
         for _ in 0..64 {
             match receiver.try_recv() {

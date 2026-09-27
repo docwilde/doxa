@@ -30,3 +30,5 @@ pub mod preferences;
 pub mod belief_graph;
 
 pub mod shell;
+pub mod startup_restore;
+pub mod first_run;

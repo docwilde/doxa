@@ -58,6 +58,9 @@ pub struct UiStateStore {
     scope_key: String,
     record: Option<TabSet>,
     writable_layout: bool,
+    pub(crate) startup_archives: Vec<crate::startup_restore::Archive>,
+    pub(crate) startup_extra_ids: Vec<String>,
+    pub(crate) startup_notice: String,
 }
 
 impl UiStateStore {
@@ -86,6 +89,7 @@ impl UiStateStore {
             scope_key: scope_key.into(),
             record,
             writable_layout,
+            startup_archives: Vec::new(), startup_extra_ids: Vec::new(), startup_notice: String::new(),
         })
     }
 
@@ -106,8 +110,12 @@ impl UiStateStore {
             scope_key: scope_key.into(),
             record,
             writable_layout,
+            startup_archives: Vec::new(), startup_extra_ids: Vec::new(), startup_notice: String::new(),
         })
     }
+
+    pub fn saved_tabs(&self) -> Option<&[Tab]> { self.record.as_ref().map(|record| record.tabs.as_slice()) }
+    pub fn discard_loaded_layout(&mut self) { self.record = None; self.writable_layout = true; }
 
     pub fn path(&self) -> &Path {
         &self.path
@@ -128,14 +136,17 @@ impl UiStateStore {
         Ok(true)
     }
 
-    /// Project a saved tabset onto currently live daemon IDs. Returns false
-    /// when no saved session remains live; the caller keeps its fresh layout.
+    /// Project saved layout onto verified live and readonly transcript identities.
+    /// Missing identities remain protected from accidental persistence.
     pub fn restore(&self, app: &mut App, live_ids: &[String]) -> bool {
         let Some(record) = &self.record else {
             return false;
         };
         if let Some(views)=record.raw.get("rust_ui").and_then(|ui|ui.get("fleet_views")).and_then(crate::ui::fleet_menu::SavedView::parse){app.fleet_views=views;}
-        let live: HashSet<&str> = live_ids.iter().map(String::as_str).collect();
+        for archive in &self.startup_archives { app.restore_archive(&archive.entry, &archive.note); }
+        if !self.startup_notice.is_empty() { app.notice = self.startup_notice.clone(); }
+        let live: HashSet<&str> = live_ids.iter().map(String::as_str)
+            .chain(self.startup_archives.iter().map(|archive| archive.entry.id.as_str())).collect();
         let tabs: Vec<_> = record
             .tabs
             .iter()
@@ -206,6 +217,10 @@ impl UiStateStore {
                     app.active_group = index;
                 }
             }
+        }
+        // Fresh usable tab beside an all-readonly restore; saved focus stays put.
+        for id in &self.startup_extra_ids {
+            if live.contains(id.as_str()) && seen.insert(id.clone()) { groups[0].tabs.push(id.clone()); }
         }
         app.groups = groups;
         app.pane_tree = pane_tree;
@@ -280,9 +295,8 @@ impl UiStateStore {
                 "saved layout exceeds supported pane bounds",
             ));
         }
-        // This UI mounts live daemons only. A saved tab whose daemon is
-        // offline may still have a transcript and restore as an archived tab
-        // in Python. Do not rewrite the shared record from a partial view.
+        // Missing transcripts remain protected even when other saved tabs restore.
+        // A partial view must never prune the shared record.
         if self.record.as_ref().is_some_and(|record| {
             record.tabs.iter().any(|tab| {
                 !persisted_groups
@@ -318,7 +332,7 @@ impl UiStateStore {
                     tabs.push(Tab {
                         session_id: id.clone(),
                         pinned_name: app.custom_names.get(id).cloned(),
-                        cwd: old.and_then(|t| t.cwd.clone()),
+                        cwd: app.recorded_session_cwd(id).map(|cwd| cwd.to_string_lossy().into_owned()).or_else(|| old.and_then(|t| t.cwd.clone())),
                     });
                 }
             }
@@ -787,6 +801,58 @@ mod tests {
         assert!(!serde_json::to_string(&saved.raw).unwrap().contains("kill-me"));
         assert_eq!(app.groups[0].tabs, ["kill-me"]);
         assert_eq!(app.input, "active draft");
+    }
+
+    #[test]
+    fn startup_archives_preserve_saved_order_focus_geometry_and_record() {
+        let dir=tempfile::tempdir().unwrap();
+        let mut store=UiStateStore::new(dir.path(),"/project","machine").unwrap();
+        let mut original=App::default();
+        original.groups[0].tabs=vec!["archive-a".into(),"live-b".into()];
+        original.groups[1].tabs=vec!["archive-c".into()];
+        original.active_group=1;
+        original.split=Split::Horizontal;original.split_percent=37;
+        original.rail_visible=true;original.rail_width=31;
+        original.custom_names.insert("archive-c".into(),"Saved name".into());
+        store.save(&original).unwrap();
+        for id in ["archive-a","archive-c"] {
+            store.startup_archives.push(crate::startup_restore::Archive {
+                entry:crate::history::OfflineSession {id:id.into(),project:"project".into(),markdown:"saved content".into(),search_snippets:vec![],cwd:Some("/project".into())},
+                note:"not resumed — provider history unavailable".into(),
+            });
+        }
+        let mut restored=App::default();
+        assert!(store.restore(&mut restored,&["live-b".into()]));
+        assert_eq!(restored.groups[0].tabs,original.groups[0].tabs);
+        assert_eq!(restored.groups[1].tabs,original.groups[1].tabs);
+        assert_eq!((restored.active_group,restored.split,restored.split_percent),(1,Split::Horizontal,37));
+        assert_eq!((restored.rail_visible,restored.rail_width),(true,31));
+        assert_eq!(restored.custom_names.get("archive-c"),Some(&"Saved name".into()));
+        assert!(restored.has_offline_open_tabs());
+        assert!(restored.sessions.iter().all(|session|session.status.contains("provider history unavailable")));
+        store.save(&restored).unwrap();
+        let saved=load_tabset(store.path(),"/project").unwrap();
+        assert_eq!(saved.tabs.len(),3);
+        assert_eq!(saved.tabs[0].cwd.as_deref(),Some("/project"));
+        assert_eq!(saved.active_session_id.as_deref(),Some("archive-c"));
+        // An unavailable saved transcript is never silently removed.
+        restored.groups[0].tabs.remove(0);
+        let before=std::fs::read(store.path()).unwrap();
+        assert!(store.save(&restored).is_err());
+        assert_eq!(std::fs::read(store.path()).unwrap(),before);
+    }
+    #[test]
+    fn saved_only_restore_keeps_archived_focus_and_adds_one_usable_tab() {
+        let dir=tempfile::tempdir().unwrap();
+        let mut store=UiStateStore::new(dir.path(),"/project","machine").unwrap();
+        let mut app=App::default();app.groups[0].tabs=vec!["archive".into()];store.save(&app).unwrap();
+        store.startup_archives.push(crate::startup_restore::Archive {
+            entry:crate::history::OfflineSession {id:"archive".into(),project:"project".into(),markdown:"saved".into(),search_snippets:vec![],cwd:None},note:String::new()});
+        store.startup_extra_ids.push("fresh".into());
+        let mut restored=App::default();assert!(store.restore(&mut restored,&["fresh".into()]));
+        assert_eq!(restored.groups[0].tabs,vec!["archive","fresh"]);
+        assert_eq!(restored.groups[0].active,0);
+        assert_eq!(store.saved_tabs().unwrap().len(),1);
     }
 
 }
