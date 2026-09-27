@@ -16,7 +16,7 @@ mod diff_controller;
 mod operations_controller;
 mod layout;
 mod terminal_loop;
-pub use terminal_loop::{run, run_with_frames, run_with_channels, run_with_channels_state, run_with_channels_state_guarded};
+pub use terminal_loop::{run, run_with_frames, run_with_channels, run_with_channels_state, run_with_channels_state_guarded, run_with_worker_channels, run_with_worker_channels_state_guarded};
 use render::context_detail_lines;
 #[cfg(test)]
 use render::transcript_window;

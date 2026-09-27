@@ -10,6 +10,22 @@ use crossterm::execute;
 use ratatui::{backend::CrosstermBackend, layout::Rect, Terminal};
 use super::{App, safe_label, links};
 
+/// Legacy wire consumers and owned worker results retain their original
+/// channels, without a relay thread or a second queue.
+enum FrameSource {
+    Wire(Receiver<serde_json::Value>),
+    Worker(Receiver<crate::worker_frames::WorkerFrame>),
+}
+
+impl FrameSource {
+    fn try_reduce(&self, app: &mut App) -> Result<bool, TryRecvError> {
+        match self {
+            Self::Wire(receiver) => receiver.try_recv().map(|frame| app.apply_daemon_frame(&frame)),
+            Self::Worker(receiver) => receiver.try_recv().map(|frame| app.apply_worker_frame(frame)),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum KeyboardProtocol { Legacy, Kitty, Unknown }
 pub(super) fn selected_keyboard_protocol(override_value: Option<&str>) -> KeyboardProtocol {
@@ -105,7 +121,7 @@ pub fn run() -> io::Result<()> {
 /// Drive the terminal with decoded daemon frames supplied by a reader thread.
 /// Transport can be connected without changing terminal ownership or drawing.
 pub fn run_with_frames(receiver: Receiver<serde_json::Value>) -> io::Result<()> {
-    run_loop(receiver, None, None)
+    run_loop(FrameSource::Wire(receiver), None, None)
 }
 
 /// Connect the UI to a transport reader and writer without blocking input.
@@ -114,7 +130,7 @@ pub fn run_with_channels(
     frames: Receiver<serde_json::Value>,
     prompts: SyncSender<crate::bridge::WorkerCommand>,
 ) -> io::Result<()> {
-    run_loop(frames, Some(prompts), None)
+    run_loop(FrameSource::Wire(frames), Some(prompts), None)
 }
 
 /// Drive a multi-session transport with a complete live-ID roster and a
@@ -136,14 +152,36 @@ pub fn run_with_channels_state_guarded(
     complete_roster: Arc<Mutex<bool>>,
 ) -> io::Result<()> {
     run_loop(
-        frames,
+        FrameSource::Wire(frames),
         Some(prompts),
         Some((store, live_ids, complete_roster)),
     )
 }
 
-pub(super) fn run_loop(
-    receiver: Receiver<serde_json::Value>,
+/// Drive the native bridge using owned, typed worker results.
+pub fn run_with_worker_channels(
+    frames: Receiver<crate::worker_frames::WorkerFrame>,
+    prompts: SyncSender<crate::bridge::WorkerCommand>,
+) -> io::Result<()> {
+    run_loop(FrameSource::Worker(frames), Some(prompts), None)
+}
+
+pub fn run_with_worker_channels_state_guarded(
+    frames: Receiver<crate::worker_frames::WorkerFrame>,
+    prompts: SyncSender<crate::bridge::WorkerCommand>,
+    store: crate::ui_state::UiStateStore,
+    live_ids: Vec<String>,
+    complete_roster: Arc<Mutex<bool>>,
+) -> io::Result<()> {
+    run_loop(
+        FrameSource::Worker(frames),
+        Some(prompts),
+        Some((store, live_ids, complete_roster)),
+    )
+}
+
+fn run_loop(
+    receiver: FrameSource,
     mut prompt_sender: Option<SyncSender<crate::bridge::WorkerCommand>>,
     mut state: Option<(crate::ui_state::UiStateStore, Vec<String>, Arc<Mutex<bool>>)>,
 ) -> io::Result<()> {
@@ -193,8 +231,8 @@ pub(super) fn run_loop(
         }
         // Bound work per tick so a busy daemon cannot starve keyboard input.
         for _ in 0..64 {
-            match receiver.try_recv() {
-                Ok(frame) => changed |= app.apply_daemon_frame(&frame),
+            match receiver.try_reduce(&mut app) {
+                Ok(reduced) => changed |= reduced,
                 Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
             }
         }
