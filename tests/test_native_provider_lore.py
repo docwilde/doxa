@@ -32,7 +32,7 @@ def native_home():
         yield Path(home)
 
 
-def fixture_env(home, broken_pending=False):
+def fixture_env(home, broken_pending=False, peer_enabled=False):
     root = home / "lore"
     root.mkdir()
     (root / "USER.md").write_text("- isolated native user memory\n")
@@ -41,12 +41,12 @@ def fixture_env(home, broken_pending=False):
         "PYTHONPATH":str(Path(__file__).resolve().parents[1]),
         "LORE_ROOT":str(root), "LORE_PROJECTS_DIR":str(home / "projects"),
         "DOXA_HOME":str(home / "doxa"), "CODEX_HOME":str(home / "codex"),
-        "DOXA_AGENT_PEER_SEND":"0", "DOXA_VENDOR_TOOLS":"", "DEEPSEEK_API_KEY":"isolated-local-fixture"}
+        "DOXA_AGENT_PEER_SEND":"1" if peer_enabled else "0", "DOXA_VENDOR_TOOLS":"", "DEEPSEEK_API_KEY":"isolated-local-fixture"}
 
 
 @contextlib.contextmanager
-def daemon(home, engine, enabled, *extra, appserver=True, broken_pending=False):
-    env = fixture_env(home,broken_pending)
+def daemon(home, engine, enabled, *extra, appserver=True, broken_pending=False, peer_enabled=False):
+    env = fixture_env(home,broken_pending,peer_enabled)
     env["DOXA_LORE"] = "1" if enabled else "0"
     if not appserver: env["DOXA_CODEX_APPSERVER"] = "0"
     process = subprocess.Popen([BINARY, "--runtime-dir", str(home / "runtime"),
@@ -89,7 +89,7 @@ def daemon(home, engine, enabled, *extra, appserver=True, broken_pending=False):
         process.stderr.close()
 
 
-def drive_turn(send, read, allow):
+def drive_turn(send, read, allow, title="LORE"):
     send({"type":"prompt","id":1,"text":"stage this local fixture proposal"})
     approved = False
     events = []
@@ -99,7 +99,7 @@ def drive_turn(send, read, allow):
         events.append(event)
         if event.get("type") == "needs_input":
             approved = True
-            assert "LORE" in event["data"]["title"]
+            assert title in event["data"]["title"]
             assert event["data"]["require_full_review"] is True
             send({"type":"call","id":2,"method":"answer_needs_input","params":{
                 "id":event["data"]["id"],"answer":{"decision":"allow" if allow else "deny"}}})
@@ -291,5 +291,38 @@ def test_native_vendor_caches_belief_count_and_reports_canonical_two_strikes(nat
                     break
             assert (native_home/"lore/pending").read_text()=="isolated broken backend"
         assert len(requests)==3
+    finally:
+        server.shutdown();worker.join(timeout=5);server.server_close()
+
+
+def test_native_vendor_peer_refusals_return_errors_and_allow_a_recovery_tool(native_home):
+    requests=[]
+    class Provider(http.server.BaseHTTPRequestHandler):
+        def log_message(self,*args): pass
+        def do_POST(self):
+            request=json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            requests.append(request)
+            if len(requests)<=3:
+                name="mcp__doxa__peer_send" if len(requests)<3 else "mcp__doxa__peer_list"
+                arguments={"target":"no-such-isolated-peer","text":"bounded fixture message"} if len(requests)<3 else {}
+                delta={"tool_calls":[{"index":0,"id":f"peer-{len(requests)}","function":{
+                    "name":name,"arguments":json.dumps(arguments)}}]};reason="tool_calls"
+            else:
+                delta={"content":"recovered after retryable peer refusal"};reason="stop"
+            body=("data: "+json.dumps({"choices":[{"finish_reason":reason,"delta":delta}]})+"\n\ndata: [DONE]\n\n").encode()
+            self.send_response(200);self.send_header("Content-Type","text/event-stream")
+            self.send_header("Content-Length",str(len(body)));self.end_headers();self.wfile.write(body)
+    server=http.server.HTTPServer(("127.0.0.1",0),Provider)
+    worker=threading.Thread(target=server.serve_forever,daemon=True);worker.start()
+    try:
+        with daemon(native_home,"deepseek",False,"--vendor-endpoint",f"http://127.0.0.1:{server.server_port}",peer_enabled=True) as (send,read):
+            approved,events=drive_turn(send,read,True,title="peer")
+            assert approved and len(requests)==4
+            errors=[row for row in events if row.get("type")=="tool_result" and row["data"].get("is_error")]
+            assert len(errors)==2
+            assert all("no live same-scope peer matches target" in row["data"]["result_summary"] for row in errors)
+            assert not any(row.get("type")=="tool_disabled" for row in events)
+            tools=[row for row in requests[-1]["messages"] if row.get("role")=="tool"]
+            assert len(tools)==3 and all(json.loads(row["content"])["error"].startswith("peer_send:") for row in tools[:2])
     finally:
         server.shutdown();worker.join(timeout=5);server.server_close()
