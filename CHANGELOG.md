@@ -5,6 +5,40 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.32 — 2026-09-27
+
+- Fix issues found in the post-release source audit: detached provider work now
+  survives until a full idle linger interval, and compaction reviewer descendants
+  stop with their owning Claude sidecar or verified Codex hook.
+- Preserve pane/session drafts and the initiating saved-resume destination across
+  asynchronous completions. Clear failed attach ownership, enforce rail admission,
+  retain deliberately detached restore records while saving current layouts, and
+  admit later tool activity within the existing bounded session cache.
+- Bound Unix connect and Git pipe deadlines. Reuse canonical private worktree
+  configuration reads and reap stopped native daemon children without stopping
+  detached sessions when a frontend closes.
+- Provision isolated Claude settings and synthetic-tested credential copies with
+  unique private atomic files; reject unsafe directories and bound existing
+  settings reads. Refuse the retained browser remote adapter until its transport
+  can attest proxy identity. The credential-checked Unix peer bridge remains.
+- Keep queued Claude prompts until stream cancellation reaches a provider
+  terminal, and explicitly close LORE status database connections after reading.
+- Honor the shared LORE memory capacity settings from Claude's configuration,
+  with explicit process overrides taking precedence. Render the welcome view as
+  native styled text, keep failed new-session forms visible, delay chip tooltips
+  and highlight pointer hover without permanently highlighting the engine.
+- Render hyperlink labels without appended URLs; carry exact destinations through
+  wrapping, tables, folds and cached scrolling for hover tooltips and Ctrl-click.
+  Preserve reported Codex web request inputs at completion and distinguish missing
+  provider result content from an empty search response.
+- Align Claude launcher and host startup deadlines with the SDK initialization
+  policy, and report safe actionable failure classes without exposing stderr.
+- Present beliefs and curated memory as aligned tables, order beliefs by recorded
+  recency, and filter from the prompt while preserving its original draft. Use
+  Shift+A and Shift+R to start the existing exact Accept/Reject review.
+- Document DRY, dependency inversion and ownership findings with coverage and
+  validation limits. Preserve the alpha.31 mesh wheel asset packaging fix.
+
 ## 2.0.0-alpha.31 — 2026-09-27
 
 - Complete the audited Python 1.19 functional paths: safe saved-tab restoration,

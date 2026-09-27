@@ -2,6 +2,7 @@
 
 Baseline: Python `v1.19.0` production consumers, rather than planned APIs or
 unused transport helpers. Alpha.31 closes the audited functional gaps below.
+Alpha.32 adds the subsequent source-audit ownership and deadline corrections.
 Terminal images remain excluded by user preference. Provider capabilities,
 trust gates and unavailable historical data retain their documented limits.
 
@@ -37,6 +38,9 @@ trust gates and unavailable historical data retain their documented limits.
 - Native input, output, tab, roster and snapshot bounds remain enforced. Normal
   manual tab admission is bounded; restoration retains one validated reserved
   fresh-session slot rather than silently deleting an archived conversation.
+- The native remote peer bridge verifies Unix transport credentials. The retained
+  Python browser remote adapter remains unavailable until its transport can
+  attest proxy identity; loopback TCP and identity headers alone are insufficient.
 
 ## Commands
 
@@ -57,7 +61,11 @@ postpones restart. Existing daemons outside this window retain their implementat
 
 Run `./task test` for Rust regressions. Rust CI also tests the installed locked
 Python SDK/LORE seams against disposable stores and local provider fixtures.
-The release includes fresh event-loop benchmarks and production gallery captures;
+Alpha.31 supplied the event-loop benchmark measurements. Production gallery captures
+are labelled by their rendered package version;
 see the [benchmark](rust-ui-benchmark-2026-09-27.md) and
 [gallery](rust-gallery.md). Live-provider compatibility remains bounded by the
 explicit supported contracts.
+
+See the [source audit](source-audit-2026-09-27.md) for confirmed follow-up fixes,
+engineering debt and validation limits.
