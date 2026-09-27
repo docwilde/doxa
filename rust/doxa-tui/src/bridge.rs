@@ -138,9 +138,11 @@ impl MultiBridge {
     }
 }
 
-pub fn connect_sessions(sessions: &[Session]) -> io::Result<MultiBridge> {
-    if sessions.is_empty() || sessions.len() > crate::ui::panes::MAX_TABS {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "expected 1–256 live sessions"));
+pub fn connect_sessions(sessions: &[Session]) -> io::Result<MultiBridge> { connect_sessions_inner(sessions,false) }
+
+fn connect_sessions_inner(sessions:&[Session],readonly_restore:bool)->io::Result<MultiBridge> {
+    if (sessions.is_empty() && !readonly_restore) || sessions.len() > crate::startup_restore::MAX_STARTUP_TABS {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "expected 1–257 startup sessions"));
     }
     let mut seen = HashSet::new();
     if sessions.iter().any(|s| !crate::discovery::valid_id(&s.id) || !seen.insert(s.id.as_str())) {
@@ -166,7 +168,7 @@ pub fn connect_sessions(sessions: &[Session]) -> io::Result<MultiBridge> {
         live_ids.push(session.id.clone());
         workers.push(worker);
     }
-    if live_ids.is_empty() {
+    if live_ids.is_empty() && !readonly_restore {
         drop(command_rx);
         drop(frame_tx);
         for worker in workers { let _ = worker.join(); }
@@ -324,7 +326,7 @@ fn rejected(command: WorkerCommand, message: &str) -> Value {
 }
 
 pub fn run_sessions(sessions: &[Session], store: Option<crate::ui_state::UiStateStore>) -> io::Result<()> {
-    let MultiBridge { frames, commands, live_ids, complete, router, workers } = connect_sessions(sessions)?;
+    let MultiBridge { frames, commands, live_ids, complete, router, workers } = connect_sessions_inner(sessions,store.as_ref().is_some_and(|store|!store.startup_archives.is_empty() || !store.startup_notice.is_empty()))?;
     let result = if let Some(store) = store {
         ui::run_with_channels_state_guarded(frames, commands.clone(), store, live_ids, complete)
     } else {
@@ -797,7 +799,10 @@ mod tests {
             socket:dir.path().join(format!("missing-{i}")),scope_key:String::new(),clients:None,started_at:String::new()}).collect();
         assert_eq!(connect_sessions(&rows).err().unwrap().kind(),io::ErrorKind::NotConnected);
         let mut too_many=rows;too_many.push(Session{id:"extra".into(),title:String::new(),socket:dir.path().join("missing"),scope_key:String::new(),clients:None,started_at:String::new()});
+        assert_eq!(connect_sessions(&too_many).err().unwrap().kind(),io::ErrorKind::NotConnected);
+        too_many.push(Session{id:"extra-2".into(),title:String::new(),socket:dir.path().join("missing-2"),scope_key:String::new(),clients:None,started_at:String::new()});
         assert_eq!(connect_sessions(&too_many).err().unwrap().kind(),io::ErrorKind::InvalidInput);
+        connect_sessions_inner(&[],true).unwrap().shutdown();
     }
 
     #[test]

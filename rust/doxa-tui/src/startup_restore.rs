@@ -4,6 +4,10 @@ use std::path::PathBuf;
 use doxa_state::Tab;
 use crate::{discovery::Session, history::{self, OfflineSession}, launch::{self, LaunchOptions}, ui_state::UiStateStore};
 
+/// One reserved usable tab beside a full readonly restore. Manual additions
+/// keep their normal256 limit; persisted startup layouts may have257 identities.
+pub const MAX_STARTUP_TABS:usize=crate::ui::panes::MAX_TABS+1;
+
 #[derive(Clone, Debug)]
 pub struct Archive { pub entry: OfflineSession, pub note: String }
 
@@ -44,11 +48,11 @@ pub fn prepare(
     let Some(saved) = saved else {
         if !restore { if let Some(store) = &mut store { store.discard_loaded_layout(); } }
         live.truncate(1);
-        if live.is_empty() { live.push(launch::spawn(options)?); }
+        if live.is_empty() { if let Some(session)=try_start_fresh(store.as_mut(),||launch::spawn(options))? {live.push(session);} }
         return Ok((live, store));
     };
-    if saved.len() > crate::ui::panes::MAX_TABS {
-        return Err(io::Error::new(io::ErrorKind::Unsupported, "saved tabset exceeds the native 256-tab restore bound; record retained"));
+    if saved.len() > MAX_STARTUP_TABS || (saved.len() > crate::ui::panes::MAX_TABS && store.as_ref().is_none_or(|store|store.startup_overflow_id.is_none())) {
+        return Err(io::Error::new(io::ErrorKind::Unsupported, "saved tabset exceeds the native 256-tab restore bound plus one reserved startup tab; record retained"));
     }
     let python = options.lore_python.clone().or_else(|| std::env::var_os("DOXA_LORE_PYTHON").map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from("python3"));
@@ -69,17 +73,36 @@ pub fn prepare(
             launch::spawn(&verified).map_err(|error| error.to_string())
         });
     if let Some(store) = &mut store {
-        if result.sessions.is_empty() {
-            let fresh = launch::spawn(options)?;
-            store.startup_extra_ids.push(fresh.id.clone());
-            result.sessions.push(fresh);
-        }
+        ensure_usable(&mut result, store, ||launch::spawn(options))?;
+        let failure=std::mem::take(&mut store.startup_notice);
         store.startup_notice = format!("Restored {} live · {} resumed · {} read-only · {} unavailable",
             result.sessions.len().saturating_sub(result.resumed + store.startup_extra_ids.len()),
             result.resumed, result.archives.len(), result.skipped);
+        if !failure.is_empty() {store.startup_notice.push_str(" · ");store.startup_notice.push_str(&failure);}
+        else if result.sessions.is_empty() { store.startup_notice.push_str(" · reserved fresh slot occupied; detach a tab to make room for a new session"); }
         store.startup_archives = result.archives;
     }
     Ok((result.sessions, store))
+}
+
+fn try_start_fresh(store:Option<&mut UiStateStore>,mut spawn:impl FnMut()->io::Result<Session>)->io::Result<Option<Session>> {
+    match spawn() {
+        Ok(session)=>Ok(Some(session)),
+        Err(error)=>match store {
+            Some(store)=>{store.startup_notice="Fresh session could not start · /setup checks authentication and dependencies; use /engine to retry after setup".into();Ok(None)}
+            None=>Err(error),
+        }
+    }
+}
+
+fn ensure_usable(result:&mut Planned,store:&mut UiStateStore,mut spawn:impl FnMut()->io::Result<Session>)->io::Result<()> {
+    if result.sessions.is_empty() && result.archives.len()<MAX_STARTUP_TABS {
+        if let Some(fresh)=try_start_fresh(Some(&mut *store),&mut spawn)? {
+            if result.archives.len()==crate::ui::panes::MAX_TABS {store.startup_overflow_id=Some(fresh.id.clone());}
+            store.startup_extra_ids.push(fresh.id.clone());result.sessions.push(fresh);
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -123,6 +146,50 @@ mod tests {
         let store=store.unwrap();
         assert!(store.saved_tabs().is_none());
         assert_eq!(std::fs::read(store.path()).unwrap(),before);
+    }
+
+    #[test]
+    fn full_readonly_restore_reserves_one_fresh_slot_and_reloads_257() {
+        let dir=tempfile::tempdir().unwrap();
+        let mut store=UiStateStore::new(dir.path(),"/project","machine").unwrap();
+        let saved:Vec<_>=(0..crate::ui::panes::MAX_TABS).map(|index|tab(&format!("saved-{index}"))).collect();
+        let mut original=crate::ui::App::default();
+        original.groups[0].tabs=saved.iter().map(|tab|tab.session_id.clone()).collect();original.groups[0].active=128;
+        original.rail_width=31;original.rail_visible=true;
+        original.custom_names.insert("saved-128".into(),"saved focus".into());
+        store.save(&original).unwrap();
+        let mut result=plan(&saved,&[],false,|tab|Some(archive(&tab.session_id)),|_|panic!("provider resume not permitted"));
+        let mut spawns=0;
+        ensure_usable(&mut result,&mut store,||{spawns+=1;Ok(live("fresh"))}).unwrap();
+        assert_eq!(spawns,1);assert_eq!(result.archives.len(),256);assert_eq!(result.sessions.len(),1);
+        assert_eq!(store.startup_overflow_id.as_deref(),Some("fresh"));
+        store.startup_archives=result.archives.clone();
+        let mut restored=crate::ui::App::default();
+        assert!(store.restore(&mut restored,&["fresh".into()]));
+        assert_eq!(restored.groups[0].tabs.len(),MAX_STARTUP_TABS);assert_eq!(restored.groups[0].active,128);
+        assert!(store.save_if_complete(&restored,&std::sync::Mutex::new(true)).unwrap());
+        let mut reloaded=UiStateStore::new(dir.path(),"/project","machine").unwrap();
+        assert_eq!(reloaded.saved_tabs().unwrap().len(),MAX_STARTUP_TABS);
+        assert_eq!(reloaded.startup_overflow_id.as_deref(),Some("fresh"));
+        reloaded.startup_archives=result.archives;
+        let mut again=crate::ui::App::default();assert!(reloaded.restore(&mut again,&["fresh".into()]));
+        assert_eq!(again.groups[0].tabs,restored.groups[0].tabs);assert_eq!(again.groups[0].active,128);
+        assert_eq!(again.custom_names.get("saved-128"),Some(&"saved focus".into()));
+        assert_eq!((again.rail_visible,again.rail_width),(true,31));
+        assert!(reloaded.save_if_complete(&again,&std::sync::Mutex::new(true)).unwrap());
+        assert_eq!(crate::ui::panes::MAX_TABS,256); // Manual capacity unchanged.
+    }
+
+    #[test]
+    fn failed_fresh_start_keeps_empty_setup_window_without_phantom_identity() {
+        let mut store=UiStateStore::transient("/project");
+        let session=try_start_fresh(Some(&mut store),||Err(io::Error::other("provider unavailable secret-output"))).unwrap();
+        assert!(session.is_none());assert!(store.startup_notice.contains("/setup"));assert!(store.startup_notice.contains("/engine"));
+        assert!(!store.startup_notice.contains("secret-output"));
+        let mut app=crate::ui::App::default();assert!(!store.restore(&mut app,&[]));
+        assert!(app.sessions.is_empty());assert!(app.groups.iter().all(|group|group.tabs.is_empty()));
+        assert!(app.notice.contains("/setup"));assert!(store.save(&app).is_err());
+        assert!(try_start_fresh(None,||Err(io::Error::other("precise explicit command failure"))).unwrap_err().to_string().contains("precise"));
     }
 
 }

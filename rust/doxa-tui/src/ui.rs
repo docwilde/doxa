@@ -9959,6 +9959,16 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn empty_startup_window_keeps_setup_and_engine_controls_available() {
+        let mut app=App {size:Rect::new(0,0,80,24),..Default::default()};
+        assert!(app.sessions.is_empty());
+        app.open_engine_picker();assert!(app.engine_picker);app.engine_picker=false;
+        app.open_operations(operations_menu::Menu::new("setup"));
+        assert!(app.operations_menu.is_some());assert!(app.pending_prompts.is_empty());
+        assert!(app.pending_launches.is_empty());assert!(!app.launching);
+    }
+
+    #[test]
     fn settings_category_switch_keeps_unsaved_edits_and_escape_discards_them() {
         let mut app=App::default();app.input="keep prompt".into();
         let rows=crate::settings::SETTINGS.iter().map(|setting|crate::settings::Row {setting,value:setting.default.into(),stored:setting.default.into(),source:"default".into(),shadowed:false}).collect::<Vec<_>>();

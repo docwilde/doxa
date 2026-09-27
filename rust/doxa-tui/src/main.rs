@@ -482,7 +482,8 @@ fn run(args: &[String]) -> io::Result<()> {
                 .collect();
             let home = std::env::var_os("DOXA_HOME").filter(|s| !s.is_empty()).map(PathBuf::from)
                 .or_else(|| std::env::var_os("HOME").map(|s| PathBuf::from(s).join(".doxa")));
-            let store = home.and_then(|home| ui_state::UiStateStore::for_scope(&home, &scope).ok());
+            let store = Some(home.and_then(|home| ui_state::UiStateStore::for_scope(&home, &scope).ok())
+                .unwrap_or_else(||ui_state::UiStateStore::transient(&scope)));
             let (sessions, store) = startup_restore::prepare(store, sessions, &options,
                 settings::enabled("restore_tabs"), settings::enabled("resume_restored"))?;
             bridge::run_sessions(&sessions, store)

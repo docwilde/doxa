@@ -61,15 +61,23 @@ pub struct UiStateStore {
     pub(crate) startup_archives: Vec<crate::startup_restore::Archive>,
     pub(crate) startup_extra_ids: Vec<String>,
     pub(crate) startup_notice: String,
+    pub(crate) startup_overflow_id: Option<String>,
 }
 
 impl UiStateStore {
+    /// Keep startup controls usable when a durable tabset could not be opened.
+    /// The transient store never writes; it only carries a startup notice.
+    pub fn transient(scope_key:&str)->Self {
+        Self {path:PathBuf::new(),scope_key:scope_key.into(),record:None,writable_layout:false,
+            startup_archives:Vec::new(),startup_extra_ids:Vec::new(),startup_notice:String::new(),startup_overflow_id:None}
+    }
     /// A clear may finalize its old daemon only when replacing the tab can
     /// be persisted from a complete live view of a representable layout.
     pub fn clear_preflight(&self, app: &App, complete: &Mutex<bool>) -> Result<(), &'static str> {
         if !*complete.lock().map_err(|_| "live roster guard unavailable")? {
             return Err("live roster incomplete");
         }
+        if self.path.as_os_str().is_empty() {return Err("persistent tabset unavailable");}
         if !self.writable_layout { return Err("saved layout exceeds supported pane bounds"); }
         if app.has_offline_open_tabs() { return Err("archived tabs are read-only"); }
         if self.record.as_ref().is_some_and(|record| record.tabs.iter().any(|tab|
@@ -83,13 +91,17 @@ impl UiStateStore {
     pub fn for_scope(home: &Path, scope_key: &str) -> io::Result<Self> {
         let path = resolve_tabset_path(home, scope_key)?;
         let record = load_tabset(&path, scope_key);
-        let writable_layout = record.as_ref().is_none_or(|r| supported_layout(&r.raw));
+        let startup_overflow_id=record.as_ref().and_then(|record|record.raw.get("rust_ui")
+            .and_then(|ui|ui.get("startup_fresh_slot")).and_then(Value::as_str)
+            .filter(|id|valid_session_id(id)&&record.tabs.iter().any(|tab|tab.session_id==*id)).map(str::to_owned));
+        let writable_layout = record.as_ref().is_none_or(|r| supported_layout(&r.raw)
+            && (r.tabs.len()<=MAX_TABS || (r.tabs.len()==crate::startup_restore::MAX_STARTUP_TABS && startup_overflow_id.is_some())));
         Ok(Self {
             path,
             scope_key: scope_key.into(),
             record,
             writable_layout,
-            startup_archives: Vec::new(), startup_extra_ids: Vec::new(), startup_notice: String::new(),
+            startup_archives: Vec::new(), startup_extra_ids: Vec::new(), startup_notice: String::new(), startup_overflow_id,
         })
     }
 
@@ -104,18 +116,22 @@ impl UiStateStore {
         }
         let path = tabset_path(home, scope_key, machine_id);
         let record = load_tabset(&path, scope_key);
-        let writable_layout = record.as_ref().is_none_or(|r| supported_layout(&r.raw));
+        let startup_overflow_id=record.as_ref().and_then(|record|record.raw.get("rust_ui")
+            .and_then(|ui|ui.get("startup_fresh_slot")).and_then(Value::as_str)
+            .filter(|id|valid_session_id(id)&&record.tabs.iter().any(|tab|tab.session_id==*id)).map(str::to_owned));
+        let writable_layout = record.as_ref().is_none_or(|r| supported_layout(&r.raw)
+            && (r.tabs.len()<=MAX_TABS || (r.tabs.len()==crate::startup_restore::MAX_STARTUP_TABS && startup_overflow_id.is_some())));
         Ok(Self {
             path,
             scope_key: scope_key.into(),
             record,
             writable_layout,
-            startup_archives: Vec::new(), startup_extra_ids: Vec::new(), startup_notice: String::new(),
+            startup_archives: Vec::new(), startup_extra_ids: Vec::new(), startup_notice: String::new(), startup_overflow_id,
         })
     }
 
     pub fn saved_tabs(&self) -> Option<&[Tab]> { self.record.as_ref().map(|record| record.tabs.as_slice()) }
-    pub fn discard_loaded_layout(&mut self) { self.record = None; self.writable_layout = true; }
+    pub fn discard_loaded_layout(&mut self) { self.record = None; self.writable_layout = true; self.startup_overflow_id=None; }
 
     pub fn path(&self) -> &Path {
         &self.path
@@ -139,9 +155,8 @@ impl UiStateStore {
     /// Project saved layout onto verified live and readonly transcript identities.
     /// Missing identities remain protected from accidental persistence.
     pub fn restore(&self, app: &mut App, live_ids: &[String]) -> bool {
-        let Some(record) = &self.record else {
-            return false;
-        };
+        if !self.startup_notice.is_empty() { app.notice = self.startup_notice.clone(); }
+        let Some(record) = &self.record else {return false;};
         if let Some(views)=record.raw.get("rust_ui").and_then(|ui|ui.get("fleet_views")).and_then(crate::ui::fleet_menu::SavedView::parse){app.fleet_views=views;}
         for archive in &self.startup_archives { app.restore_archive(&archive.entry, &archive.note); }
         if !self.startup_notice.is_empty() { app.notice = self.startup_notice.clone(); }
@@ -154,7 +169,7 @@ impl UiStateStore {
             .collect();
         let ids: Vec<String> = tabs.iter().map(|t| t.session_id.clone()).collect();
         app.collections = collections::from_json(record.raw.get("collections"), &ids.iter().cloned().collect());
-        if tabs.len() > MAX_TABS { app.notice = "Saved tab count exceeds supported bounds".into(); return false; }
+        if tabs.len() > MAX_TABS + usize::from(self.startup_overflow_id.is_some()) { app.notice = "Saved tab count exceeds supported bounds".into(); return false; }
         if tabs.is_empty() {
             return false;
         }
@@ -283,6 +298,7 @@ impl UiStateStore {
     /// for old DOXA readers, and the tree and legacy trees describe the same
     /// geometry. A record with more complex groups is never overwritten.
     pub fn save(&mut self, app: &App) -> io::Result<()> {
+        if self.path.as_os_str().is_empty() {return Err(io::Error::new(io::ErrorKind::PermissionDenied,"persistent tabset unavailable"));}
         if app.has_unverified_archived_tabs() {
             return Err(io::Error::new(io::ErrorKind::PermissionDenied, "unverified archived tabs cannot be persisted"));
         }
@@ -314,7 +330,7 @@ impl UiStateStore {
                 "saved layout includes offline tabs",
             ));
         }
-        if persisted_groups.len() > MAX_PANES || persisted_groups.iter().map(|g| g.tabs.len()).sum::<usize>() > MAX_TABS {
+        if persisted_groups.len() > MAX_PANES || persisted_groups.iter().map(|g| g.tabs.len()).sum::<usize>() > MAX_TABS + usize::from(self.startup_overflow_id.as_ref().is_some_and(|id|persisted_groups.iter().any(|group|group.tabs.contains(id)))) {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "pane/tab bounds exceeded"));
         }
         let mut seen = HashSet::new();
@@ -386,6 +402,9 @@ impl UiStateStore {
         object.insert("trees".into(), Value::Array(trees));
         let rust_ui=record.raw.entry("rust_ui").or_insert_with(||json!({})).as_object_mut()
             .ok_or_else(||io::Error::new(io::ErrorKind::Unsupported,"unknown native UI metadata"))?;
+        if let Some(id)=self.startup_overflow_id.as_ref().filter(|id|record.tabs.iter().any(|tab|tab.session_id==**id)) {
+            rust_ui.insert("startup_fresh_slot".into(),json!(id));
+        }else{rust_ui.remove("startup_fresh_slot");}
         rust_ui.insert("rail_visible".into(),json!(app.rail_visible));
         rust_ui.insert("rail_width".into(),json!(app.rail_width.clamp(12,44)));
         if app.fleet_views.is_empty(){rust_ui.remove("fleet_views");}else{rust_ui.insert("fleet_views".into(),serde_json::to_value(&app.fleet_views).map_err(io::Error::other)?);}
@@ -534,7 +553,7 @@ fn supported_group_tree(node: &Value) -> bool {
                 *groups += 1;
                 let Some(rows) = node.get("tabs").and_then(Value::as_array) else { return false; };
                 *tabs += rows.len();
-                *groups <= MAX_PANES && *tabs <= MAX_TABS && rows.iter().all(|leaf|
+                *groups <= MAX_PANES && *tabs <= crate::startup_restore::MAX_STARTUP_TABS && rows.iter().all(|leaf|
                     leaf["kind"] == "leaf" && leaf["session_id"].as_str().is_some_and(valid_session_id))
             }
             Some("split") => {
