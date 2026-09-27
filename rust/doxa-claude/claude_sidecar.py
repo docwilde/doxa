@@ -241,10 +241,30 @@ async def run() -> None:
                 lore = params.get("lore")
                 if lore is not None and type(lore) is not bool:
                     raise ValueError("invalid memory policy")
+                depth = params.get("spawn_depth", 0)
+                parent = params.get("parent_session_id")
+                if not isinstance(depth, int) or isinstance(depth, bool) or not 0 <= depth <= 2:
+                    raise ValueError("invalid spawn depth")
+                validate_identity(parent, None)
                 options = {"cwd": cwd, "session_id": session_id, "resume": resume, "lore": lore}
+                parameters = inspect.signature(SessionEngine).parameters
+                if depth or parent:
+                    if "spawn_depth" not in parameters or "parent_session_id" not in parameters:
+                        raise ValueError("native lineage unsupported by Python engine")
+                    options.update(spawn_depth=depth, parent_session_id=parent)
                 if model is not None:
                     options["model"] = model
+                native = params.get("native_spawn")
+                launcher = None
+                if native is not None:
+                    from doxa.native_spawn import native_launcher
+                    launcher = native_launcher(native)
+                    os.environ["DOXA_RUNTIME_DIR"] = native["runtime"]
                 candidate = SessionEngine(**session_engine_options(SessionEngine, options))
+                if native is not None:
+                    from dataclasses import replace
+                    candidate.tool_gate.op_ctx = replace(candidate.tool_gate.op_ctx,
+                        spawn_launch=launcher)
                 started = await candidate.start()
                 # Only the SDK account for this connected session can name
                 # its plan. A cached CLI account might belong to another auth
@@ -260,6 +280,9 @@ async def run() -> None:
                                                 "permission_mode": getattr(candidate, "permission_mode", "default"),
                                                 "billing": billing,
                                                 "lore_enabled": getattr(candidate, "lore", None),
+                                                "spawn_depth": getattr(candidate, "spawn_depth", 0),
+                                                "parent_session_id": getattr(candidate, "parent_session_id", None),
+                                                "native_spawn_ready": launcher is not None,
                                                 "peer_tools_ready": getattr(candidate, "peer_host", None) is not None}})
                 except Exception:
                     try:

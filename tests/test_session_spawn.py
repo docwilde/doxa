@@ -1063,3 +1063,23 @@ async def test_the_popup_opens_on_a_spawn_event_and_answers_allow_or_deny(
         popup.ask(dict(SPAWN_EVENT_DATA))
         assert popup.choose_index(1) is True
         assert popup.answer_payload() == {"decision": "deny"}
+
+
+@pytest.mark.asyncio
+async def test_native_host_launcher_seam_preserves_existing_gate_and_never_calls_python_daemon(
+        tmp_path, armed, runtime, monkeypatch):
+    from dataclasses import replace
+    seen = []
+    def launch(cwd, **kwargs):
+        seen.append((cwd, kwargs))
+        return "native-child", "/native/child.sock"
+    def forbidden(*args, **kwargs):
+        pytest.fail("native host must not spawn a Python daemon")
+    monkeypatch.setattr(daemon_mod, "spawn_daemon", forbidden)
+    context = replace(_ctx(tmp_path, depth=1), spawn_launch=launch)
+    gate = ToolGate(op_ctx=context)
+    out = await gate.execute("mcp__doxa__spawn_session", {"task":"delegate"})
+    assert out["session_id"] == "native-child"
+    assert seen[0][1]["spawn_depth"] == 2
+    assert seen[0][1]["parent_session_id"] == "parent-1"
+    assert seen[0][1]["task"] == "delegate"

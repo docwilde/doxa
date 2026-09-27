@@ -62,6 +62,9 @@ impl ClaudeHost {
         session_id: &str,
         resume: bool,
         model: Option<&str>,
+        runtime: &Path,
+        spawn_depth: u32,
+        parent_session_id: Option<&str>,
     ) -> Result<Self, String> {
         let mut bridge = Bridge::spawn(python, script)
             .map_err(|_| "Claude sidecar could not start".to_owned())?;
@@ -70,7 +73,10 @@ impl ClaudeHost {
         let permission_control = bridge.supports("set_permission_mode");
         let reviewed_compact = bridge.supports("reviewed_compact_v1");
         let params = json!({"cwd":cwd,"session_id":session_id,
-            "resume":if resume { Some(session_id) } else { None }, "model":model, "lore":doxa_state::lore_enabled_default()});
+            "resume":if resume { Some(session_id) } else { None }, "model":model, "lore":doxa_state::lore_enabled_default(),
+            "spawn_depth":spawn_depth,"parent_session_id":parent_session_id,
+            "native_spawn":{"daemon_bin":std::env::current_exe().map_err(|_| "native daemon identity unavailable")?,
+                "python":python,"script":script,"runtime":runtime}});
         let id = bridge
             .request("start", params)
             .map_err(|_| "Claude sidecar start request failed".to_owned())?;
@@ -101,6 +107,12 @@ impl ClaudeHost {
         let lore_enabled = start["lore_enabled"].as_bool();
         if !doxa_state::lore_enabled_default() && lore_enabled != Some(false) {
             return Err("Claude sidecar did not verify memory-off; update Python and restart".into());
+        }
+        if (spawn_depth > 0 || parent_session_id.is_some())
+            && (start["spawn_depth"].as_u64() != Some(spawn_depth as u64)
+                || start["parent_session_id"].as_str() != parent_session_id
+                || start["native_spawn_ready"] != true) {
+            return Err("Claude sidecar did not preserve native child lineage".into());
         }
         let peer_tools_ready = start["peer_tools_ready"] == true;
         let initial_model = start["data"]["model"].as_str().map(str::to_owned);
@@ -472,7 +484,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("sidecar.py");
         fs::write(&path, script).unwrap();
-        let host = ClaudeHost::new(Path::new("python3"), &path, dir.path(), "test", false, None)
+        let host = ClaudeHost::new(Path::new("python3"), &path, dir.path(), "test", false, None, dir.path(), 0, None)
             .unwrap();
         (dir, Arc::new(host))
     }
@@ -551,4 +563,26 @@ for line in sys.stdin:
         assert_eq!(second.last().unwrap()["type"], "turn_done");
         assert!(host.shutdown());
     }
+    #[test]
+    fn native_child_start_requires_exact_depth_parent_and_native_route_echo() {
+        let dir = tempfile::tempdir().unwrap();
+        for valid in [false, true] {
+            let script = dir.path().join("lineage.py");
+            fs::write(&script, format!(r#"import json, sys
+print(json.dumps({{"type":"hello","protocol":"doxa-claude-sidecar","version":1,"capabilities":["start"]}}),flush=True)
+for line in sys.stdin:
+ r=json.loads(line)
+ p=r['params']
+ assert p['spawn_depth']==2 and p['parent_session_id']=='parent-123'
+ assert p['native_spawn']['runtime']=={runtime:?}
+ assert p['native_spawn']['daemon_bin'].startswith('/')
+ result={{"spawn_depth":{depth},"parent_session_id":"parent-123","native_spawn_ready":True,"permission_mode":"default"}}
+ print(json.dumps({{"type":"reply","id":r['id'],"ok":True,"result":result}}),flush=True)
+"#, runtime=dir.path().to_str().unwrap(),depth=if valid { 2 } else { 0 })).unwrap();
+            let result = ClaudeHost::new(Path::new("python3"), &script, dir.path(), "child", false,
+                None, dir.path(), 2, Some("parent-123"));
+            assert_eq!(result.is_ok(), valid);
+        }
+    }
+
 }

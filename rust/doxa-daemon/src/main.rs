@@ -81,6 +81,9 @@ struct Options {
     cwd: PathBuf,
     session_id: String,
     base_branch: Option<String>,
+    spawn_depth: u32,
+    parent_session_id: Option<String>,
+    task: Option<String>,
     linger: Duration,
     engine: Engine,
     codex_bin: Option<PathBuf>,
@@ -93,6 +96,10 @@ struct Options {
     #[cfg(feature = "local-test-server")]
     vendor_endpoint: Option<String>,
     sandbox: SandboxMode,
+}
+fn valid_parent_id(id: &str) -> bool {
+    id.len() <= 128 && id.as_bytes().first().is_some_and(u8::is_ascii_alphanumeric)
+        && id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
 }
 fn linger_duration(value: &str) -> io::Result<Duration> {
     let seconds: f64 = value.parse().map_err(|_| invalid("invalid linger"))?;
@@ -112,6 +119,9 @@ fn options() -> io::Result<Options> {
     let mut session_id = random_id()?;
     let mut explicit_session_id = false;
     let mut base_branch = None;
+    let mut spawn_depth = 0;
+    let mut parent_session_id = None;
+    let mut task = None;
     let mut linger = Duration::from_secs(120);
     let mut engine = Engine::Fixture;
     let mut codex_bin = None;
@@ -136,6 +146,20 @@ fn options() -> io::Result<Options> {
             Some("--session-id") => {
                 session_id = value.into_string().map_err(|_| invalid("invalid session id"))?;
                 explicit_session_id = true;
+            },
+            Some("--spawn-depth") => {
+                spawn_depth = value.to_str().and_then(|value| value.parse::<u32>().ok())
+                    .filter(|depth| *depth <= 2).ok_or_else(|| invalid("spawn depth must be between 0 and 2"))?;
+            },
+            Some("--parent-session-id") => {
+                let parent = value.into_string().map_err(|_| invalid("invalid parent session id"))?;
+                if !valid_parent_id(&parent) { return Err(invalid("invalid parent session id")); }
+                parent_session_id = Some(parent);
+            },
+            Some("--task") => {
+                let text = value.into_string().map_err(|_| invalid("invalid child task"))?;
+                if text.trim().is_empty() || text.chars().count() > 8000 || text.contains('\0') { return Err(invalid("invalid child task")); }
+                task = Some(text);
             },
             Some("--engine") => engine = match value.to_str() {
                 Some("fixture") => Engine::Fixture, Some("codex") => Engine::Codex,
@@ -283,6 +307,9 @@ fn options() -> io::Result<Options> {
         cwd,
         session_id,
         base_branch,
+        spawn_depth,
+        parent_session_id,
+        task,
         linger,
         engine,
         codex_bin,
@@ -417,6 +444,7 @@ struct Registry {
     socket: String,
     daemon_socket: String,
     engine: Engine,
+    parent_session_id: Option<String>,
 }
 impl Registry {
     fn new(options: &Options, socket: &Path, daemon_socket: &Path) -> io::Result<Self> {
@@ -463,6 +491,7 @@ impl Registry {
             socket: socket.to_string_lossy().into_owned(),
             daemon_socket: daemon_socket.to_string_lossy().into_owned(),
             engine: options.engine,
+            parent_session_id: options.parent_session_id.clone(),
         })
     }
     fn write(&mut self, clients: usize) -> io::Result<()> {
@@ -470,7 +499,7 @@ impl Registry {
             "socket_path":self.socket,"daemon_socket":self.daemon_socket,"cwd":self.cwd,
             "repo_root":self.repo_root,"title":format!("DOXA Rust {} session", self.engine.name()),
             "started_at":self.started_at,"heartbeat_at":iso_now(),"clients":clients,
-            "engine":self.engine.name()});
+            "engine":self.engine.name(),"parent_session_id":self.parent_session_id});
         let tmp = self
             .path
             .with_extension(format!("json.{}.tmp", std::process::id()));
@@ -633,6 +662,9 @@ fn run() -> io::Result<()> {
                     &options.session_id,
                     options.resume,
                     options.model.as_deref(),
+                    &options.runtime,
+                    options.spawn_depth,
+                    options.parent_session_id.as_deref(),
                 )
                 .map_err(io::Error::other)?,
             );
@@ -702,6 +734,12 @@ fn run() -> io::Result<()> {
     let inbox = Inbox::bind(&options.runtime, &options.session_id)?;
     let mut registry = Registry::new(&options, inbox.path(), handle.socket_path())?;
     registry.write(0)?;
+    if let Some(task) = &options.task {
+        let origin = options.parent_session_id.as_deref().unwrap_or("child-task");
+        if handle.enqueue_peer_prompt(task.clone(), origin).map_err(io::Error::other)? != ExternalPrompt::Started {
+            return Err(io::Error::other("child task was not admitted"));
+        }
+    }
     unsafe {
         libc::signal(
             libc::SIGTERM,
