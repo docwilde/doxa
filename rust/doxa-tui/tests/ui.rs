@@ -517,6 +517,7 @@ fn action_menu_opens_views_and_navigates_sessions_without_leaking_keys_to_prompt
 #[test]
 fn terminal_backtab_reverses_focus_and_alt_tab_switches_panes() {
     let mut app = App::default();
+    app.handle(Event::Resize(80, 24));
     app.apply_update(doxa_tui::ui::DaemonUpdate::Upsert(session("one", "Work")));
     app.apply_update(doxa_tui::ui::DaemonUpdate::Upsert(session("two", "Work")));
     assert!(app.handle(key(KeyCode::BackTab, KeyModifiers::NONE)));
