@@ -51,7 +51,7 @@ pub struct ClaudeHost {
     initial_model: Option<String>,
     initial_effort: Option<String>,
     initial_permission_mode: String,
-    billing: Option<Value>,
+    billing: Mutex<Option<Value>>,
     lore_enabled: Option<bool>,
     account: Mutex<Option<Value>>,
 }
@@ -139,11 +139,7 @@ impl ClaudeHost {
             return Err("Claude sidecar reported an unavailable initial permission mode".into());
         }
         let initial_permission_mode = initial_permission_mode.to_owned();
-        let billing = start.get("billing").filter(|value| value["mode"] == "subscription"
-            && value["type"].as_str().is_some_and(|tier| !tier.is_empty() && tier.len() <= 64
-                && !tier.chars().any(char::is_control))
-            && value["quota"].as_str().is_none_or(|quota| quota.len() <= 120
-                && !quota.chars().any(char::is_control))).cloned();
+        let billing = start.get("billing").and_then(validated_billing);
         let account = display_account(&start["account"]);
         let (tx, rx) = mpsc::channel();
         let turn_running = Arc::new(AtomicBool::new(false));
@@ -164,7 +160,7 @@ impl ClaudeHost {
             initial_model,
             initial_effort,
             initial_permission_mode,
-            billing, lore_enabled,
+            billing:Mutex::new(billing), lore_enabled,
             account: Mutex::new(account),
         })
     }
@@ -219,7 +215,7 @@ impl Host for ClaudeHost {
     fn initial_model(&self) -> Option<String> { self.initial_model.clone() }
     fn initial_effort(&self) -> Option<String> { self.initial_effort.clone() }
     fn initial_permission_mode(&self) -> String { self.initial_permission_mode.clone() }
-    fn billing_snapshot(&self) -> Option<Value> { self.billing.clone() }
+    fn billing_snapshot(&self) -> Option<Value> { self.billing.lock().ok()?.clone() }
     fn account_snapshot(&self) -> Option<Value> { self.account.lock().unwrap().clone() }
     fn prompt(&self, text: &str, emit: &mut dyn FnMut(Value)) {
         if text.trim_start().starts_with("/compact") && !self.reviewed_compact {
@@ -266,7 +262,12 @@ impl Host for ClaudeHost {
         }
         loop {
             match events_rx.recv_timeout(Duration::from_secs(2)) {
-                Ok(event) => {
+                Ok(mut event) => {
+                    if event["type"] == "billing" {
+                        let Some(billing)=validated_billing(&event["data"]) else { continue; };
+                        event["data"]=billing.clone();
+                        if let Ok(mut current)=self.billing.lock() { *current=Some(billing); }
+                    }
                     let terminal =
                         matches!(event["type"].as_str(), Some("turn_done" | "turn_refused"));
                     emit(event);
@@ -501,6 +502,33 @@ fn broker_loop(mut bridge: Bridge, commands: Receiver<Command>, turn_running: &A
     }
 }
 
+/// Only bounded non-secret subscription telemetry crosses the provider boundary.
+fn validated_billing(value: &Value) -> Option<Value> {
+    if value["mode"] != "subscription" { return None; }
+    let tier=value["type"].as_str().filter(|tier|!tier.is_empty()&&tier.len()<=64&&!tier.chars().any(char::is_control))?;
+    let quota=value.get("quota").unwrap_or(&Value::Null);
+    if !quota.is_null() && quota.as_str().is_none_or(|text|text.len()>120||text.chars().any(char::is_control)) { return None; }
+    let mut result=json!({"mode":"subscription","type":tier,"quota":quota});
+    if let Some(limits)=value.get("quota_limits") {
+        let rows=limits.as_object().filter(|rows|rows.len()<=4)?;
+        let mut projected=serde_json::Map::new();
+        for (window,row) in rows {
+            if !matches!(window.as_str(),"five_hour"|"seven_day"|"seven_day_opus"|"seven_day_sonnet") || !row.is_object() { return None; }
+            let mut clean=serde_json::Map::new();
+            if let Some(percent)=row.get("percent") { if percent.as_u64().is_none_or(|value|value>100) { return None; } clean.insert("percent".into(),percent.clone()); }
+            if let Some(status)=row.get("status") { if !matches!(status.as_str(),Some("allowed"|"allowed_warning"|"rejected")) { return None; } clean.insert("status".into(),status.clone()); }
+            if let Some(reset)=row.get("resets_at") { if reset.as_u64().is_none_or(|value|value>253402300799) { return None; } clean.insert("resets_at".into(),reset.clone()); }
+            if let Some(source)=row.get("source") { if !matches!(source.as_str(),Some("sdk"|"claude_cli_cache")) { return None; } clean.insert("source".into(),source.clone()); }
+            if let Some(stale)=row.get("stale") { if !stale.is_boolean() { return None; } clean.insert("stale".into(),stale.clone()); }
+            projected.insert(window.clone(),Value::Object(clean));
+        }
+        result["quota_limits"]=Value::Object(projected);
+    }
+    if let Some(source)=value.get("quota_source") { if !matches!(source.as_str(),Some("sdk"|"claude_cli_cache"|"mixed")) { return None; } result["quota_source"]=source.clone(); }
+    if let Some(stale)=value.get("quota_stale") { if !stale.is_boolean() { return None; } result["quota_stale"]=stale.clone(); }
+    Some(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -522,6 +550,33 @@ mod tests {
         let host = ClaudeHost::new(Path::new("python3"), &path, dir.path(), "test", false, None, None, dir.path(), 0, None)
             .unwrap();
         (dir, Arc::new(host))
+    }
+
+    #[test]
+    fn reported_subscription_quota_updates_cached_billing_and_filters_raw_fields() {
+        let (_dir,host)=fixture(r#"import json,sys
+print(json.dumps({"type":"hello","protocol":"doxa-claude-sidecar","version":1,"capabilities":[]}),flush=True)
+for line in sys.stdin:
+    frame=json.loads(line)
+    result={"data":{"model":"opus"},"billing":{"mode":"subscription","type":"max 20x","quota":"5h:9% week:48%~"}} if frame["method"]=="start" else {}
+    print(json.dumps({"type":"reply","id":frame["id"],"ok":True,"result":result}),flush=True)
+    if frame["method"]=="prompt":
+        for data in [{"mode":"subscription","type":"max 20x","quota":"5h:23% week:61%","raw":"private account data","quota_limits":{"five_hour":{"percent":23,"status":"allowed_warning","source":"sdk","stale":False},"seven_day":{"percent":61,"source":"sdk","stale":False}},"quota_source":"sdk","quota_stale":False},
+                     {"mode":"subscription","type":"max 20x","quota":"invalid","quota_limits":{"five_hour":{"percent":101}}}]:
+            print(json.dumps({"type":"event","event":"billing","data":data}),flush=True)
+        print(json.dumps({"type":"event","event":"turn_done","data":{}}),flush=True)
+    if frame["method"]=="finalize": break
+"#);
+        assert_eq!(host.billing_snapshot().unwrap()["quota"],"5h:9% week:48%~");
+        let mut events=Vec::new();
+        host.prompt("scripted quota update",&mut |event| {
+            if event["type"]=="billing" { assert_eq!(host.billing_snapshot().unwrap()["quota"],"5h:23% week:61%"); }
+            events.push(event);
+        });
+        let billing:Vec<_>=events.iter().filter(|row|row["type"]=="billing").collect();
+        assert_eq!(billing.len(),1); assert!(billing[0]["data"].get("raw").is_none());
+        assert_eq!(host.billing_snapshot().unwrap()["quota_limits"]["seven_day"]["percent"],61);
+        host.shutdown();
     }
 
     #[test]

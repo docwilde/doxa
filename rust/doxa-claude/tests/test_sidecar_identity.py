@@ -117,7 +117,10 @@ class IdentityTests(unittest.TestCase):
                 self.assertEqual(sidecar.billing_snapshot({
                     "email": "PERSON@example.com", "subscriptionType": "Claude Max",
                 }), {"mode": "subscription", "type": expected,
-                     "quota": "s:9% w:48%~"})
+                     "quota": "5h:9% week:48%~",
+                     "quota_limits": {"five_hour": {"percent":9,"stale":True,"source":"claude_cli_cache"},
+                                      "seven_day": {"percent":48,"stale":True,"source":"claude_cli_cache"}},
+                     "quota_source":"claude_cli_cache","quota_stale":True})
 
     def test_billing_snapshot_rejects_foreign_local_tier_and_quota(self):
         from doxa import identity
@@ -128,7 +131,8 @@ class IdentityTests(unittest.TestCase):
         }), mock.patch.object(identity, "usage") as usage:
             self.assertEqual(sidecar.billing_snapshot({
                 "email": "person@example.com", "subscriptionType": "Claude Max",
-            }), {"mode": "subscription", "type": "max", "quota": None})
+            }), {"mode": "subscription", "type": "max", "quota": None,
+                "quota_limits":{},"quota_source":"claude_cli_cache","quota_stale":False})
             usage.assert_not_called()
 
     def test_billing_snapshot_requires_sdk_subscription(self):

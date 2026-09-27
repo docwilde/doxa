@@ -132,8 +132,8 @@ def billing_snapshot(account: object) -> dict | None:
     if not tier:
         return None
     usage = identity_mod.usage() if same_account else None
-    return {"mode": "subscription", "type": tier,
-            "quota": usage.chip() if usage else None}
+    from doxa.claude_quota import cached_quota
+    return {"mode": "subscription", "type": tier, **cached_quota(usage)}
 
 
 def emit(frame: dict) -> bool:
@@ -211,10 +211,22 @@ async def run() -> None:
         catalog_cached = result
         catalog_completed = time.monotonic()
         return result
+    from doxa.claude_quota import BillingQuota
+    quota = BillingQuota()
 
     async def publish_turn(prompt: str) -> None:
         try:
             async for event in engine.send(prompt):
+                billing = None
+                if event.type == "rate_limit":
+                    billing = quota.update(event.data)
+                elif event.type == "turn_done":
+                    try:
+                        billing = quota.refresh(billing_snapshot(getattr(engine, "account", None)))
+                    except Exception:
+                        pass  # optional cache read cannot fail a completed turn
+                if billing is not None:
+                    emit({"type": "event", "event": "billing", "data": billing})
                 emit({"type": "event", "event": event.type, "data": event.data})
         except asyncio.CancelledError:
             try:
@@ -325,7 +337,7 @@ async def run() -> None:
                 # mode, so it is never enough to classify billing here.
                 billing = None
                 try:
-                    billing = billing_snapshot(getattr(candidate, "account", None))
+                    billing = quota.refresh(billing_snapshot(getattr(candidate, "account", None)))
                 except Exception:
                     pass  # optional account data cannot prevent a session
                 try:

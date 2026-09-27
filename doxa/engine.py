@@ -136,7 +136,7 @@ from claude_agent_sdk import (
 
 try:
     from claude_agent_sdk import RateLimitEvent
-except ImportError:
+except ImportError:  # older SDKs have no rate-limit event surface
     RateLimitEvent = ()
 
 import lore_core
@@ -3533,7 +3533,12 @@ class SessionEngine:
                 self.effort = self._effort_override or self.effort
                 yield EngineEvent("effort_verified", {"effort": self.effort, "session_id": self.session_id})
 
-            if isinstance(message, StreamEvent):
+            if isinstance(message, RateLimitEvent):
+                from .claude_quota import sdk_limit
+                reported = sdk_limit(message)
+                if reported is not None:
+                    yield EngineEvent("rate_limit", reported)
+            elif isinstance(message, StreamEvent):
                 # Subagent trace convention (the trace tree feeds on this):
                 # everything a Task-spawned subagent emits arrives with
                 # parent_tool_use_id = the Task call's own tool_use id --
