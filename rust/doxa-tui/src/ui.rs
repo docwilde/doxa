@@ -9534,6 +9534,18 @@ fn transcript_window(
     (window, top)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KeyboardProtocol { Legacy, Kitty, Unknown }
+fn selected_keyboard_protocol(override_value: Option<&str>) -> KeyboardProtocol {
+    // Startup never asks the terminal to respond before its first visible frame.
+    // Legacy is a selected compatibility mode, not measured lack of support.
+    match override_value {
+        Some("kitty") => KeyboardProtocol::Kitty,
+        Some("unknown") => KeyboardProtocol::Unknown,
+        _ => KeyboardProtocol::Legacy,
+    }
+}
+
 /// Owns terminal modes so every return path, including I/O errors, restores the screen.
 struct TerminalGuard {
     out: Stdout,
@@ -9542,7 +9554,7 @@ struct TerminalGuard {
     mouse: bool,
     paste: bool,
     keyboard: bool,
-    measured_keyboard: Option<bool>,
+    keyboard_protocol: KeyboardProtocol,
 }
 impl TerminalGuard {
     fn enter() -> io::Result<Self> {
@@ -9552,12 +9564,12 @@ impl TerminalGuard {
             alternate: false,
             mouse: false,
             paste: false,
-            keyboard: false,measured_keyboard:None,
+            keyboard: false,keyboard_protocol:KeyboardProtocol::Legacy,
         };
         terminal::enable_raw_mode()?;
         guard.raw = true;
-        guard.measured_keyboard=match std::env::var("DOXA_KEYBOARD_PROTOCOL").ok().as_deref() {Some("kitty")=>Some(true),Some("legacy")=>Some(false),Some("unknown")=>None,_=>terminal::supports_keyboard_enhancement().ok()};
-        if guard.measured_keyboard==Some(true) {execute!(guard.out,crossterm::event::PushKeyboardEnhancementFlags(crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES))?;guard.keyboard=true;}
+        guard.keyboard_protocol=selected_keyboard_protocol(std::env::var("DOXA_KEYBOARD_PROTOCOL").ok().as_deref());
+        if guard.keyboard_protocol==KeyboardProtocol::Kitty {execute!(guard.out,crossterm::event::PushKeyboardEnhancementFlags(crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES))?;guard.keyboard=true;}
         execute!(guard.out, EnterAlternateScreen)?;
         guard.alternate = true;
         execute!(guard.out, EnableMouseCapture,EnableFocusChange)?;
@@ -9682,8 +9694,8 @@ fn run_loop(
         store.restore(&mut app, live_ids);
     }
     app.refresh_clock();
-    if app.preferences.on("key_notice") && guard.measured_keyboard==Some(false) {
-        let keys="Legacy keys: Ctrl+, → /settings · Shift+Enter → Ctrl+J · Ctrl+Enter → /msg";
+    if app.preferences.on("key_notice") && guard.keyboard_protocol==KeyboardProtocol::Legacy {
+        let keys="Legacy key mode: Ctrl+, → /settings · Shift+Enter → Ctrl+J · Ctrl+Enter → /msg";
         if app.notice.is_empty(){app.notice=keys.into();}else{app.notice.push_str(" · ");app.notice.push_str(keys);}
     }
     let mut saved_layout = crate::ui_state::LayoutSignature::capture(&app);
@@ -14386,6 +14398,16 @@ mod parity_tests {
         app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
             column, row, modifiers: KeyModifiers::NONE }));
     }
+    #[test]
+    fn startup_defaults_to_selected_legacy_and_preserves_explicit_protocol_overrides() {
+        assert_eq!(selected_keyboard_protocol(None),KeyboardProtocol::Legacy);
+        assert_eq!(selected_keyboard_protocol(Some("legacy")),KeyboardProtocol::Legacy);
+        assert_eq!(selected_keyboard_protocol(Some("kitty")),KeyboardProtocol::Kitty);
+        assert_eq!(selected_keyboard_protocol(Some("unknown")),KeyboardProtocol::Unknown);
+        assert_eq!(selected_keyboard_protocol(Some("")),KeyboardProtocol::Legacy);
+        assert_eq!(selected_keyboard_protocol(Some("unrecognized")),KeyboardProtocol::Legacy);
+    }
+
     #[test]
     fn native_selection_keyboard_copy_only_exports_visible_selected_cells_and_escape_clears() {
         let mut app=App::default();app.size=Rect::new(0,0,100,28);app.rail_visible=false;
