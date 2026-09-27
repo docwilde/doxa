@@ -13,8 +13,8 @@ Focus never leaves the prompt -- the user keeps typing, the list keeps
 updating underneath. That is the whole point: search is a mode of the
 prompt line, not a screen you visit.
 
-What it queries is unchanged and shared: ``doxa.operators._session_search``,
-the registry operator whose SQL mirrors `lore search` (BM25 over the ``msg``
+What it queries is unchanged and shared: canonical native LORE session search
+whose SQL mirrors `lore search` (BM25 over the ``msg``
 FTS5 table, AND-first-then-OR widening, current project first, then all).
 The snippets it renders are FTS5's own ``snippet()`` output -- the matched
 terms come back already bracketed by SQLite, so the highlighting is the
@@ -128,168 +128,56 @@ def age_cell(hit: dict) -> str:
     return f"{hit_age(hit):>{AGE_COLUMNS - 1}} "
 
 
-def search_sessions(query: str, cwd: str, limit: int = RESULT_LIMIT) -> list[dict]:
-    """BM25 hits from LORE's session index, via the registry operator's own
-    implementation. Each hit: {session_id, project, ts, role, snippet}.
-    Errors (empty query, no index yet) come back as no hits -- a popup
-    must degrade to silence, never to a traceback."""
-    from . import gate as gate_mod
-    from .operators import _session_search
-
-    op_ctx = gate_mod.OperatorContext(
-        session_id="doxa-history-ui",
-        cwd=cwd,
-        repo_root=gate_mod.repo_root_of(cwd),
-    )
+def _native_rows(op: str, **fields) -> list[dict]:
+    from . import native_lore
     try:
-        result = _session_search(query, limit=limit, op_ctx=op_ctx)
+        result = native_lore.request(op, **fields)
     except Exception:
         return []
-    if not isinstance(result, dict) or result.get("error"):
+    return [row for row in result if isinstance(row, dict)] if isinstance(result, list) else []
+
+
+def _history_limit(limit: int, cap: int) -> int:
+    return min(max(limit, 0), cap) if isinstance(limit, int) and not isinstance(limit, bool) else 0
+
+
+def search_sessions(query: str, cwd: str, limit: int = RESULT_LIMIT) -> list[dict]:
+    """Canonical native search, with the same read-only history metadata join."""
+    limit = _history_limit(limit, RESULT_LIMIT)
+    if not limit or not isinstance(query, str) or not query.strip():
         return []
-    hits = [h for h in result.get("hits") or [] if isinstance(h, dict)]
-    return with_titles(hits)
+    return with_titles(_native_rows("session_search_v1", cwd=cwd, query=query)[:limit])
 
 
 def recent_sessions(cwd: str, limit: int = RESULT_LIMIT) -> list[dict]:
-    """What an EMPTY query shows: the most recent indexed sessions, this
-    project first, then everywhere else. An empty box would teach the user
-    that nothing is indexed; the recents say what there is to search."""
-    from lore_core.config import project_slug
-    from lore_core.store import db_connect
-
-    try:
-        conn = db_connect()
-        slug = project_slug(cwd)
-        rows: list = []
-        seen: set[str] = set()
-        for scope in (slug, None):
-            sql = (
-                "SELECT session_id, project, cwd, title, last_ts, messages"
-                " FROM sessions"
-            )
-            params: list = []
-            if scope:
-                sql += " WHERE project = ?"
-                params.append(scope)
-            sql += " ORDER BY last_ts DESC LIMIT ?"
-            params.append(limit)
-            for row in conn.execute(sql, params).fetchall():
-                if row[0] in seen:
-                    continue
-                seen.add(row[0])
-                rows.append(row)
-            if len(rows) >= limit:
-                break
-    except Exception:
-        return []
-    hits: list[dict] = []
-    for session_id, project, cwd_col, title, last_ts, messages in rows[:limit]:
-        count = int(messages or 0)
-        hits.append({
-            "session_id": session_id,
-            "project": project,
-            # The DIRECTORY the session ran in, not the project slug --
-            # see with_titles for why /resume needs the one and cannot
-            # recover it from the other.
-            "cwd": (cwd_col or "").strip(),
-            "ts": last_ts or "",
-            "role": "",
-            "title": (title or "").strip(),
-            "messages": count,
-            "snippet": f"{count} message{'' if count == 1 else 's'}",
-        })
-    return hits
+    """Most recent indexed sessions, this project first, without creating a store."""
+    return _native_rows("sessions_recent_v1", cwd=cwd, limit=_history_limit(limit, RESULT_LIMIT))
 
 
 def sessions_by_prefix(prefix: str, limit: int = 8) -> list[dict]:
-    """Every indexed session whose id starts with ``prefix``, newest first,
-    in the same hit shape :func:`recent_sessions` returns.
-
-    ``/resume <id>`` needs this rather than a filter over the recents:
-    recents are CAPPED and this-project-first, so an id pasted from a
-    conversation twenty sessions ago -- exactly the case somebody types an
-    id for -- would come back "not indexed" while sitting in the table.
-    A prefix query has no such window.
-
-    ``limit`` bounds only the report of an AMBIGUOUS prefix; the caller
-    needs to know there was more than one, not to enumerate them all."""
+    """Literal native prefix lookup; one extra row proves ambiguous matches."""
     term = (prefix or "").strip()
     if not term:
         return []
-    try:
-        from lore_core.store import db_connect
-
-        rows = db_connect().execute(
-            "SELECT session_id, project, cwd, title, last_ts, messages"
-            " FROM sessions WHERE session_id LIKE ? ESCAPE '\\'"
-            " ORDER BY last_ts DESC LIMIT ?",
-            (term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%",
-             limit + 1),
-        ).fetchall()
-    except Exception:  # noqa: BLE001 -- no index is "nothing matches"
-        return []
-    return [
-        {
-            "session_id": session_id,
-            "project": project,
-            "cwd": (cwd_col or "").strip(),
-            "ts": last_ts or "",
-            "role": "",
-            "title": (title or "").strip(),
-            "messages": int(messages or 0),
-            "snippet": "",
-        }
-        for session_id, project, cwd_col, title, last_ts, messages in rows
-    ]
+    return _native_rows("sessions_prefix_v1", prefix=term, limit=_history_limit(limit, 8) + 1)
 
 
 def with_titles(hits: list[dict]) -> list[dict]:
-    """Fill each hit's ``title`` and ``cwd`` from LORE's ``sessions``
-    table. The FTS table stores neither (it indexes messages), and
-    "which conversation was this?" is the first thing a reader of a result
-    list asks.
-
-    ``cwd`` joined in the same pass (v0.56.0) because ``/resume`` needs the
-    DIRECTORY a session ran in and cannot get it from anywhere else. The
-    hit's ``project`` is a SLUG -- ``project_slug`` is
-    ``re.sub(r"[^A-Za-z0-9]", "-", ...)``, which maps ``/`` and ``.`` and
-    ``_`` all onto ``-`` and is therefore not invertible; and the cwd is
-    what both halves of a resume are keyed by (LORE's transcript lives
-    under ``project_slug(cwd)``, and the CLI resolves ``--resume`` against
-    its own store keyed by the cwd the session ran in). One column on a
-    query that was already running beats a second lookup at resume time,
-    and beats guessing a path back out of a lossy slug outright."""
-    ids = [str(h.get("session_id") or "") for h in hits]
-    ids = [i for i in ids if i]
+    """Attach bounded native title/cwd/engine metadata to existing search hits."""
+    # Production search has at most twenty hits. Larger compatibility calls
+    # remain finite and preserve the unmodified remainder.
+    ids = list(dict.fromkeys(str(hit.get("session_id") or "") for hit in hits[:50]))
+    ids = [sid for sid in ids if sid]
     if not ids:
         return hits
-    meta: dict[str, tuple[str, str, str]] = {}
-    try:
-        from lore_core.store import db_connect
-
-        conn = db_connect()
-        has_engine = any(r[0] == "engine" for r in conn.execute(
-            "SELECT name FROM pragma_table_info('sessions')").fetchall())
-        placeholders = ",".join("?" * len(ids))
-        for session_id, title, cwd_col, engine in conn.execute(
-            f"SELECT session_id, title, cwd, "
-            f"{'engine' if has_engine else 'NULL'} FROM sessions"
-            f" WHERE session_id IN ({placeholders})",
-            ids,
-        ).fetchall():
-            meta[str(session_id)] = (
-                (title or "").strip(), (cwd_col or "").strip(),
-                (engine or "").strip(),
-            )
-    except Exception:
-        return hits
-    for hit in hits:
-        title, cwd_col, engine = meta.get(str(hit.get("session_id") or ""), ("", "", ""))
-        hit.setdefault("title", title)
-        hit.setdefault("cwd", cwd_col)
-        if engine:
-            hit.setdefault("engine", engine)
+    rows = _native_rows("session_meta_v1", ids=ids)
+    metadata = {str(row.get("session_id") or ""):row for row in rows}
+    for hit in hits[:50]:
+        row = metadata.get(str(hit.get("session_id") or ""), {})
+        for key in ("title", "cwd", "engine"):
+            value = row.get(key)
+            if isinstance(value, str) and (value or key != "engine"):
+                hit.setdefault(key, value)
     return hits
 
 
@@ -366,16 +254,39 @@ def _beside_transcript(session_id: str, suffix: str) -> "list[Path]":
 
     Never raises: an unreadable state directory reads as "no artefact",
     which is the same answer the caller acts on anyway."""
-    from lore_core.config import PROJECTS_DIR
+    from . import native_lore
+    import stat
 
-    if not valid_session_id(session_id):
+    if not valid_session_id(session_id) or suffix not in (".codex.json", VENDOR_MESSAGES_SUFFIX):
         return []
     try:
-        return sorted(
-            path for path in PROJECTS_DIR.glob(f"*/{session_id}{suffix}")
-            if path.is_file()
-        )
-    except OSError:
+        identity = native_lore.request("transcript_identity", cwd=os.getcwd())
+        root = Path(identity["projects_dir"])
+        if not root.is_absolute():
+            return []
+        fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            entries = []
+            with os.scandir(fd) as iterator:
+                for index, entry in enumerate(iterator):
+                    if index >= 4096:
+                        return []  # Overflow cannot prove resume eligibility.
+                    if not entry.is_dir(follow_symlinks=False):
+                        continue
+                    info = entry.stat(follow_symlinks=False)
+                    if info.st_uid != os.getuid():
+                        continue
+                    path = root / entry.name / f"{session_id}{suffix}"
+                    try:
+                        metadata = path.lstat()
+                    except OSError:
+                        continue
+                    if stat.S_ISREG(metadata.st_mode) and metadata.st_uid == os.getuid() and metadata.st_nlink == 1:
+                        entries.append(path)
+            return sorted(entries)
+        finally:
+            os.close(fd)
+    except (OSError, KeyError, TypeError, ValueError, native_lore.NativeLoreError):
         return []
 
 

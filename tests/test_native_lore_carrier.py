@@ -301,3 +301,48 @@ def test_legacy_operator_helpers_require_frozen_native_context_and_never_fall_ba
     assert len(calls) == 6
     assert all("op_ctx" not in arguments for _, arguments in calls)
     assert not (tmp_path / "state.db").exists()
+
+
+def test_retained_history_uses_bounded_native_readers_and_metadata(tmp_path, monkeypatch):
+    from doxa import history
+    calls = []
+    def request(op, **fields):
+        calls.append((op, fields))
+        if op == "session_meta_v1":
+            return [{"session_id":"owned", "title":"native title", "cwd":str(tmp_path), "engine":"claude"}]
+        return [{"session_id":"owned", "snippet":"matched"}]
+    monkeypatch.setattr("doxa.native_lore.request", request)
+    hits = history.search_sessions("owned", str(tmp_path))
+    assert hits[0]["title"] == "native title" and hits[0]["engine"] == "claude"
+    history.recent_sessions(str(tmp_path), 100000)
+    history.sessions_by_prefix("owned", 100000)
+    assert calls == [("session_search_v1", {"cwd":str(tmp_path),"query":"owned"}),
+        ("session_meta_v1", {"ids":["owned"]}),
+        ("sessions_recent_v1", {"cwd":str(tmp_path),"limit":20}),
+        ("sessions_prefix_v1", {"prefix":"owned","limit":9})]
+    def refuse(*args, **fields):
+        raise NativeLoreError("native_lore_unavailable")
+    monkeypatch.setattr("doxa.native_lore.request", refuse)
+    assert history.recent_sessions(str(tmp_path)) == []
+    assert history.with_titles([{"session_id":"owned"}]) == [{"session_id":"owned"}]
+    assert not (tmp_path / "state.db").exists()
+
+
+def test_retained_history_artifact_scan_is_native_owned_and_finite(tmp_path, monkeypatch):
+    from doxa import history
+    root = tmp_path / "projects"
+    (root / "a").mkdir(parents=True)
+    artifact = root / "a/owned.codex.json"
+    artifact.write_text('{}')
+    (root / "b").symlink_to(root / "a", target_is_directory=True)
+    monkeypatch.setattr("doxa.native_lore.request", lambda *args, **kwargs:{"projects_dir":str(root)})
+    assert history._beside_transcript("owned", ".codex.json") == [artifact]
+    assert history._beside_transcript("../escape", ".codex.json") == []
+    assert history._beside_transcript("owned", "../bad") == []
+    class Entry:
+        def is_dir(self, **kwargs): return False
+    class Overflow:
+        def __enter__(self): return iter([Entry()]*4097)
+        def __exit__(self, *args): pass
+    monkeypatch.setattr(history.os, "scandir", lambda *args:Overflow())
+    assert history._beside_transcript("owned", ".codex.json") == []
