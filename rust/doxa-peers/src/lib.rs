@@ -6,7 +6,7 @@ pub mod presence;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::os::unix::fs::{FileTypeExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -15,8 +15,8 @@ use time::{format_description::well_known::Iso8601, OffsetDateTime};
 
 pub const STALE_AFTER_SECS: i64 = 60;
 pub const HEARTBEAT_SECS: u64 = 15;
-pub const MAX_ENTRY_BYTES: u64 = 64 * 1024;
-pub const MAX_REGISTRY_ENTRIES: usize = 4096;
+pub const MAX_ENTRY_BYTES: u64 = doxa_state::MAX_REGISTRY_BYTES;
+pub const MAX_REGISTRY_ENTRIES: usize = doxa_state::MAX_REGISTRY_ENTRIES;
 pub const MAX_SELF_DESC_CHARS: usize = 64;
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -143,12 +143,10 @@ impl Registry {
         self.write(record)
     }
     pub fn read(&self, scrubber: &impl Scrubber, reap: bool, probe: bool) -> io::Result<Vec<PeerRecord>> {
-        let mut paths: Vec<_> = fs::read_dir(&self.directory)?.take(MAX_REGISTRY_ENTRIES).filter_map(Result::ok).map(|e| e.path())
-            .filter(|p| p.extension() == Some(OsStr::new("json"))).collect();
-        paths.sort();
+        let paths = doxa_state::registry_paths(&self.directory)?;
         let mut out = Vec::new();
         for path in paths {
-            let record = read_one(&path);
+            let record = read_one(&path, false);
             match record {
                 Ok(mut peer) => {
                     if path.file_stem() != Some(OsStr::new(&peer.session_id)) || !safe_id(&peer.session_id) {
@@ -175,12 +173,12 @@ impl Registry {
             .filter(|p| (p.scope_key() == scope || p.scope_key() == scrubbed_scope) && Some(p.session_id.as_str()) != self_id).collect())
     }
     pub fn sweep_stale(&self, scrubber: &impl Scrubber) -> io::Result<usize> {
-        let before = fs::read_dir(&self.directory)?.filter_map(Result::ok).filter(|e| e.path().extension() == Some(OsStr::new("json"))).count();
+        let before = doxa_state::registry_paths(&self.directory)?.len();
         // A failed socket probe alone does not prove that a live peer has
         // exited. Its listener may be temporarily unavailable; let its PID
         // and heartbeat determine whether its presence can be reaped.
         let _ = self.read(scrubber, true, false)?;
-        let after = fs::read_dir(&self.directory)?.filter_map(Result::ok).filter(|e| e.path().extension() == Some(OsStr::new("json"))).count();
+        let after = doxa_state::registry_paths(&self.directory)?.len();
         Ok(before.saturating_sub(after))
     }
     fn reap_socket(&self, name: &str, pid_dead: bool) {
@@ -206,20 +204,8 @@ fn remove_regular_entry(path: &Path) {
         let _ = fs::remove_file(path);
     }
 }
-pub(crate) fn read_one(path: &Path) -> io::Result<PeerRecord> {
-    let meta = fs::symlink_metadata(path)?;
-    if !meta.file_type().is_file() || meta.len() > MAX_ENTRY_BYTES || meta.uid() != unsafe { libc::geteuid() } { return Err(io::Error::new(io::ErrorKind::InvalidData, "unsafe registry entry")); }
-    // Recheck the opened inode: an entry can be swapped for a FIFO or hard
-    // link after symlink_metadata but before open. O_NONBLOCK avoids hanging.
-    let mut file = OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path)?;
-    let opened = file.metadata()?;
-    if !opened.file_type().is_file() || opened.uid() != unsafe { libc::geteuid() }
-        || opened.nlink() != 1 || opened.len() > MAX_ENTRY_BYTES {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "unsafe registry entry"));
-    }
-    let mut bytes = Vec::new();
-    Read::by_ref(&mut file).take(MAX_ENTRY_BYTES + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > MAX_ENTRY_BYTES { return Err(io::Error::new(io::ErrorKind::InvalidData, "oversized registry entry")); }
+pub(crate) fn read_one(path: &Path, private: bool) -> io::Result<PeerRecord> {
+    let bytes = doxa_state::read_registry_entry(path, private)?;
     serde_json::from_slice(&bytes).map_err(io::Error::other)
 }
 pub(crate) fn pid_alive(pid: i32) -> bool {

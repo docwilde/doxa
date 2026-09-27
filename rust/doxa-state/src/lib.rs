@@ -50,12 +50,18 @@ pub fn claude_startup_seconds(initialize_ms: Option<&str>) -> Result<(u64, u64),
 }
 
 fn read_bounded_regular(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
+    read_checked_regular(path, limit, None, false)
+}
+
+fn read_checked_regular(path: &Path, limit: u64, owner: Option<u32>, private: bool) -> io::Result<Vec<u8>> {
     // Recheck the opened inode so a file swapped for a FIFO between path
     // inspection and open cannot block startup or bypass the size limit.
     let file = fs::OpenOptions::new().read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path)?;
     let meta = file.metadata()?;
-    if !meta.is_file() || meta.nlink() != 1 || meta.len() > limit {
+    if !meta.is_file() || meta.nlink() != 1 || meta.len() > limit
+        || owner.is_some_and(|uid| meta.uid() != uid)
+        || (private && meta.mode() & 0o077 != 0) {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "unsafe or oversized state file"));
     }
     let mut raw = Vec::new();
@@ -94,6 +100,31 @@ pub fn runtime_dir(home: &Path, doxa_runtime_dir: Option<&str>, xdg_runtime_dir:
 
 /// Upper bound for one advisory presence file. The Python writer emits only a few KB.
 pub const MAX_REGISTRY_BYTES: u64 = 64 * 1024;
+pub const MAX_REGISTRY_ENTRIES: usize = 4096;
+
+/// Bound all directory entries before sorting/filtering, including unrelated
+/// names. Overflow is an explicit error: a partial roster could hide a second
+/// match and turn an ambiguous peer prefix into the wrong recipient.
+pub fn registry_paths(directory: &Path) -> io::Result<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+    for (index, entry) in fs::read_dir(directory)?.take(MAX_REGISTRY_ENTRIES + 1).enumerate() {
+        if index == MAX_REGISTRY_ENTRIES {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "registry directory exceeds 4096 entries"));
+        }
+        let path = entry?.path();
+        if path.extension().and_then(|extension| extension.to_str()) == Some("json") { paths.push(path); }
+    }
+    paths.sort();
+    Ok(paths)
+}
+
+/// Read the exact opened registry inode without following links or waiting on
+/// FIFOs. The attach UI additionally requires private file mode; peer presence
+/// keeps its existing owned-file contract inside its private directory.
+pub fn read_registry_entry(path: &Path, private: bool) -> io::Result<Vec<u8>> {
+    read_checked_regular(path, MAX_REGISTRY_BYTES, Some(unsafe { libc::geteuid() }), private)
+}
+
 
 /// Raw routing fields are kept separate from display text. Never render these
 /// fields directly; paths and IDs are used only to locate the daemon.
@@ -126,12 +157,15 @@ pub struct DaemonInfo {
 /// Read valid live daemon entries, in newest-first order, without modifying registry files.
 /// The required scrubber runs over each exposed display string. Unknown fields
 /// are dropped; raw routing strings are separate and must never be rendered.
-pub fn list_daemons(registry_dir: &Path, scope: Option<&str>, scrub: impl Fn(&str) -> String) -> Vec<DaemonInfo> {
+pub fn list_daemons(registry_dir: &Path, scope: Option<&str>, scrub: impl Fn(&str) -> String) -> io::Result<Vec<DaemonInfo>> {
     let mut peers = Vec::new();
-    let Ok(paths) = fs::read_dir(registry_dir) else { return peers };
-    for entry in paths.flatten() {
-        if entry.path().extension().and_then(|s| s.to_str()) != Some("json") { continue; }
-        let Ok(raw) = read_bounded_regular(&entry.path(), MAX_REGISTRY_BYTES) else { continue; };
+    let paths = match registry_paths(registry_dir) {
+        Ok(paths) => paths,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(peers),
+        Err(error) => return Err(error),
+    };
+    for path in paths {
+        let Ok(raw) = read_registry_entry(&path, false) else { continue; };
         let Ok(value) = serde_json::from_slice::<Value>(&raw) else { continue; };
         let Some(map) = value.as_object() else { continue; };
         if !["session_id", "pid", "socket_path", "cwd", "repo_root", "title", "started_at", "heartbeat_at"]
@@ -169,7 +203,7 @@ pub fn list_daemons(registry_dir: &Path, scope: Option<&str>, scrub: impl Fn(&st
         });
     }
     peers.sort_by(|a, b| b.route.started_at.cmp(&a.route.started_at));
-    peers
+    Ok(peers)
 }
 
 /// Python's config load failure policy: malformed or absent means empty.

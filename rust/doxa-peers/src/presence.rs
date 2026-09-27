@@ -4,7 +4,7 @@
 use crate::{pid_alive, read_one, safe_id, stale, MAX_REGISTRY_ENTRIES};
 use serde::Serialize;
 use std::ffi::OsStr;
-use std::fs::{self, Metadata};
+use std::fs;
 use std::io;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
@@ -54,13 +54,6 @@ fn safe_socket(runtime: &Path, path: &Path) -> bool {
         && meta.permissions().mode() & 0o077 == 0
 }
 
-fn safe_entry(meta: &Metadata) -> bool {
-    meta.file_type().is_file()
-        && meta.uid() == unsafe { libc::geteuid() }
-        && meta.nlink() == 1
-        && meta.permissions().mode() & 0o077 == 0
-}
-
 fn title(text: String, id: &str) -> String {
     let clean: String = text
         .chars()
@@ -103,22 +96,10 @@ pub fn list_scoped_readonly_limit(runtime: &Path, scope: &str, self_id: &str, li
     if !trusted_dir(&directory)? {
         return Ok(Vec::new());
     }
-    let mut paths: Vec<_> = fs::read_dir(directory)?
-        .take(MAX_REGISTRY_ENTRIES)
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path.extension() == Some(OsStr::new("json")))
-        .collect();
-    paths.sort();
+    let paths = doxa_state::registry_paths(&directory)?;
     let mut result = Vec::new();
     for path in paths {
-        let Ok(meta) = fs::symlink_metadata(&path) else {
-            continue;
-        };
-        if !safe_entry(&meta) {
-            continue;
-        }
-        let Ok(peer) = read_one(&path) else {
+        let Ok(peer) = read_one(&path, true) else {
             continue;
         };
         if path.file_stem() != Some(OsStr::new(&peer.session_id))

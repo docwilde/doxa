@@ -57,6 +57,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import inspect
+import errno
 import json
 import os
 import socket
@@ -79,6 +80,8 @@ STALE_AFTER_SECS = 60.0
 SEND_TIMEOUT_SECS = 2.0
 RECV_TIMEOUT_SECS = 5.0
 MAX_FRAME_BYTES = 64 * 1024
+MAX_ENTRY_BYTES = 64 * 1024
+MAX_REGISTRY_ENTRIES = 4096
 
 # How much of a peer's SELF-DESCRIPTION (provider/model/engine) is ever
 # kept. These are short ids by construction -- "claude", "sonnet",
@@ -620,6 +623,32 @@ def _reap_socket(socket_path: "str | Path | None", pid: "int | None") -> None:
     with contextlib.suppress(OSError):
         target.unlink()
 
+def _registry_paths(directory: Path) -> list[Path]:
+    """Bound enumeration before filtering; overflow never yields a partial roster."""
+    paths: list[Path] = []
+    with os.scandir(directory) as entries:
+        for index, entry in enumerate(entries):
+            if index == MAX_REGISTRY_ENTRIES:
+                raise OSError(errno.EOVERFLOW, "registry directory exceeds 4096 entries")
+            if entry.name.endswith(".json"):
+                paths.append(directory / entry.name)
+    return sorted(paths)
+
+
+def _read_registry_entry(path: Path) -> Any:
+    """Inspect the opened inode, never follow links or block opening a FIFO."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, "rb") as handle:
+        meta = os.fstat(handle.fileno())
+        if (not stat.S_ISREG(meta.st_mode) or meta.st_nlink != 1
+                or meta.st_uid != os.geteuid() or meta.st_size > MAX_ENTRY_BYTES):
+            raise ValueError("unsafe or oversized registry entry")
+        raw = handle.read(MAX_ENTRY_BYTES + 1)
+        if len(raw) > MAX_ENTRY_BYTES:
+            raise ValueError("oversized registry entry")
+    return json.loads(raw.decode("utf-8"))
+
+
 def read_registry(reap: bool = True, probe: bool = False) -> list[PeerInfo]:
     """All live entries. Stale ones (dead pid, old heartbeat, malformed
     JSON) are never returned and -- reap=True -- removed on sight by
@@ -641,9 +670,9 @@ def read_registry(reap: bool = True, probe: bool = False) -> list[PeerInfo]:
     socket: the entry can be rewritten by the next beat, an unlinked
     socket cannot be rebound. See there."""
     live: list[PeerInfo] = []
-    for path in sorted(registry_dir().glob("*.json")):
+    for path in _registry_paths(registry_dir()):
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            data = _read_registry_entry(path)
             info = PeerInfo(**{k: data[k] for k in _ENTRY_FIELDS})
             # Scrubbed HERE, at the one place a registry entry becomes a
             # PeerInfo, for the same reason the message receive path scrubs
@@ -720,9 +749,9 @@ def sweep_stale() -> int:
     questions have different answers for a session that is merely
     suspended."""
     swept = 0
-    for path in sorted(registry_dir().glob("*.json")):
+    for path in _registry_paths(registry_dir()):
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            data = _read_registry_entry(path)
             pid = int(data["pid"])
             socket_path = str(data["socket_path"])
             heartbeat = str(data["heartbeat_at"])
@@ -751,9 +780,9 @@ def count_stale() -> int:
     must not itself mutate the fleet); a normal launch's sweep is what
     actually removes these."""
     stale = 0
-    for path in sorted(registry_dir().glob("*.json")):
+    for path in _registry_paths(registry_dir()):
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            data = _read_registry_entry(path)
             pid = int(data["pid"])
             socket_path = str(data["socket_path"])
             heartbeat = str(data["heartbeat_at"])

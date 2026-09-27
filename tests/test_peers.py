@@ -660,3 +660,44 @@ def test_a_dead_session_still_loses_its_socket(tmp_path, monkeypatch):
 
     assert peers.read_registry(reap=True) == []
     assert not sock_path.exists()
+
+
+def test_registry_entry_reader_rejects_unsafe_inodes_without_blocking(tmp_path, monkeypatch):
+    import time
+    monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path))
+    directory = peers.registry_dir()
+    fifo = directory / "fifo.json"
+    os.mkfifo(fifo)
+    victim = tmp_path / "victim"
+    victim.write_text("keep")
+    (directory / "link.json").symlink_to(victim)
+    os.link(victim, directory / "hard.json")
+    oversized = directory / "huge.json"
+    with oversized.open("wb") as handle:
+        handle.truncate(peers.MAX_ENTRY_BYTES + 1)
+    start = time.monotonic()
+    assert peers.read_registry(reap=False) == []
+    assert time.monotonic() - start < 1
+    assert peers.count_stale() == 4
+    assert peers.sweep_stale() == 4
+    assert victim.read_text() == "keep"
+    assert not list(directory.iterdir())
+
+
+def test_registry_overflow_refuses_all_consumers_before_reaping(tmp_path, monkeypatch):
+    import errno
+    import time
+    monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path))
+    directory = peers.registry_dir()
+    stale = directory / "stale.json"
+    stale.write_text("malformed")
+    # All directory entries consume the budget, even non-JSON names.
+    for index in range(peers.MAX_REGISTRY_ENTRIES):
+        (directory / f"noise-{index}").touch()
+    start = time.monotonic()
+    for operation in [peers.read_registry, peers.sweep_stale, peers.count_stale]:
+        with pytest.raises(OSError) as failure:
+            operation()
+        assert failure.value.errno == errno.EOVERFLOW
+        assert stale.exists()
+    assert time.monotonic() - start < 2

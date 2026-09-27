@@ -104,3 +104,20 @@ fn launch_sweep_keeps_fresh_live_peer_when_socket_is_unreachable() {
     assert_eq!(reg.sweep_stale(&scrub).unwrap(),1);
     assert!(!reg.directory().join("stale.json").exists());
 }
+
+
+#[test]
+fn registry_overflow_refuses_reads_and_pruning_before_any_mutation() {
+    let tmp = tempfile::tempdir().unwrap();
+    let registry = Registry::open(tmp.path().join("runtime")).unwrap();
+    let stale = registry.directory().join("stale.json");
+    fs::write(&stale, "malformed").unwrap();
+    for index in 0..doxa_peers::MAX_REGISTRY_ENTRIES {
+        fs::File::create(registry.directory().join(format!("noise-{index}"))).unwrap();
+    }
+    let start = std::time::Instant::now();
+    assert!(registry.read(&scrub, true, false).is_err());
+    assert!(registry.sweep_stale(&scrub).is_err());
+    assert!(stale.exists());
+    assert!(start.elapsed() < std::time::Duration::from_secs(2));
+}
