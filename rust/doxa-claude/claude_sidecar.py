@@ -448,8 +448,48 @@ def plugin_inventory(reload: bool = False) -> str:
     return "".join(c for c in text if c in "\n\t" or 32 <= ord(c) < 127 or ord(c) >= 160)
 
 
+def plugin_commands() -> list[dict]:
+    """Fresh read-only canonical adopted commands; no SDK, staging or hooks."""
+    import re
+    from doxa import _lore_bootstrap, claude_plugins
+    _lore_bootstrap.ensure_importable()
+    from lore_core.scrub import scrub_secrets
+
+    rows = []
+    seen = set()
+    for plugin, command in claude_plugins.adopted_commands():
+        invocable = command.invocable
+        if not isinstance(invocable, str) or not re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}:[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", invocable):
+            continue
+        name = "/" + invocable
+        if name in seen:
+            continue
+        summary = command.summary or f"{plugin.plugin} plugin command"
+        hint = command.argument_hint
+        if (not isinstance(summary, str) or not isinstance(hint, str)
+                or not isinstance(plugin.plugin, str) or len(summary) > 1024 or len(hint) > 512
+                or any(ord(char) < 32 or 127 <= ord(char) < 160 for char in summary + hint)):
+            continue
+        rows.append({"name":name,"summary":scrub_secrets(summary),
+                     "usage":scrub_secrets(f"{name} {hint}") if hint else "",
+                     "plugin":plugin.plugin})
+        seen.add(name)
+        if len(rows) > 100:
+            raise ValueError("command inventory too large")
+    if len(json.dumps(rows, ensure_ascii=False).encode("utf-8")) > 65536:
+        raise ValueError("command inventory too large")
+    return rows
+
+
 if __name__ == "__main__":
-    if sys.argv[1:] in (["--plugins-report"], ["--reload-plugins"]):
+    if sys.argv[1:] == ["--plugin-commands"]:
+        try:
+            print(json.dumps(plugin_commands(), ensure_ascii=False))
+        except Exception:
+            print("Plugin command inventory failed; verify the installed DOXA Python/LORE dependencies.")
+            sys.exit(1)
+    elif sys.argv[1:] in (["--plugins-report"], ["--reload-plugins"]):
         try:
             text = plugin_inventory(sys.argv[1] == "--reload-plugins")
             if len(text.encode("utf-8")) > 65536:
