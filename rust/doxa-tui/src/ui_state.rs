@@ -707,7 +707,7 @@ mod tests {
         let mut restored = App::default();
         assert!(reloaded.restore(&mut restored,&["one".into(),"two".into(),"fresh".into()]));
         assert_eq!(restored.groups[0].tabs,["two","fresh","one"]);
-        assert_eq!(restored.groups[0].active_id(),Some("fresh"));
+        assert_eq!(restored.groups[0].tabs.get(restored.groups[0].active).map(String::as_str),Some("fresh"));
         assert!(restored.pending_prompts.is_empty());
     }
     use serde_json::json;
