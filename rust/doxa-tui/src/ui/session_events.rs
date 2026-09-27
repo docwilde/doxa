@@ -100,6 +100,44 @@ impl App {
         changed || owner_changed
     }
 
+    /// Apply an owned worker result without decoding synthetic JSON for controls
+    /// and telemetry. Opaque daemon payloads retain the raw-frame boundary.
+    pub fn apply_worker_frame(&mut self, frame: crate::worker_frames::WorkerFrame) -> bool {
+        use crate::worker_frames::{CommandResult, WorkerFrame};
+        let before = self.prompt_owner();
+        let changed = match frame {
+            WorkerFrame::Command { session_id, result: result @ (CommandResult::SetModel { .. }
+                | CommandResult::SetEffort { .. } | CommandResult::SetPermissionMode { .. }) } => {
+                session_controls::ControlReply::from_worker(&session_id, &result)
+                    .is_some_and(|reply| self.apply_control_result(reply))
+            }
+            WorkerFrame::Notice { session_id, message } => {
+                self.session_activity.remove(&session_id);
+                self.apply_update(DaemonUpdate::Status { id: session_id, text: "Disconnected".into() });
+                self.notice = safe_label(&message);
+                true
+            }
+            WorkerFrame::Telemetry { session_id, reply } => {
+                if let Some(status) = reply.get("status") {
+                    self.session_telemetry.entry(session_id).or_default().update_status(status);
+                    true
+                } else { false }
+            }
+            WorkerFrame::TelemetryUnavailable { session_id } => {
+                self.session_telemetry.entry(session_id).or_default().lore = None;
+                true
+            }
+            frame => self.apply_daemon_frame_inner(&frame.into_legacy_value()),
+        };
+        let owner_changed = before != self.prompt_owner();
+        self.finish_prompt_owner_transition(before);
+        if owner_changed {
+            self.transcript_selection.borrow_mut().clear();
+            self.sync_chooser_state();
+        }
+        changed || owner_changed
+    }
+
     fn apply_daemon_frame_inner(&mut self, frame: &serde_json::Value) -> bool {
         let Some(kind) = frame.get("type").and_then(|v| v.as_str()) else {
             return false;
@@ -921,8 +959,12 @@ impl App {
     }
 
     fn apply_control_reply(&mut self, frame: &serde_json::Value) -> bool {
-        use session_controls::{ControlReply, EffortTransition};
-        let Some(reply) = ControlReply::decode(frame) else { return false; };
+        let Some(reply) = session_controls::ControlReply::decode(frame) else { return false; };
+        self.apply_control_result(reply)
+    }
+
+    fn apply_control_result(&mut self, reply: session_controls::ControlReply<'_>) -> bool {
+        use session_controls::EffortTransition;
         let id = reply.owner.id();
         if !self.sessions.iter().any(|session| session.id == id) { return false; }
         let Some(transition) = reply.reduce(self.pending_effort_verifications.get(id).map(String::as_str)) else { return false; };
@@ -995,4 +1037,72 @@ impl App {
         true
     }
 
+}
+
+#[cfg(test)]
+mod tests {
+    use super::App;
+    use crate::ui::{DaemonUpdate, Session};
+    use crate::worker_frames::{CommandResult, ReplyStatus, WorkerFrame};
+    use serde_json::json;
+
+    fn control_app() -> App {
+        let mut app = App::default();
+        for id in ["active", "inactive"] {
+            app.apply_update(DaemonUpdate::Upsert(Session { id: id.into(), title: id.into(),
+                collection: String::new(), transcript: String::new(), status: "Ready".into() }));
+            app.pending_effort_verifications.insert(id.into(), "high".into());
+            app.session_efforts.insert(id.into(), "low".into());
+        }
+        app.notice = "unchanged".into();
+        app
+    }
+
+    fn effort(owner: &str, value: &str, verified: Option<bool>) -> WorkerFrame {
+        WorkerFrame::Command { session_id: owner.into(), result: CommandResult::SetEffort {
+            status: ReplyStatus { ok: true, error: None }, effort: Some(value.into()),
+            verification_pending: verified } }
+    }
+
+    #[test]
+    fn typed_controls_reject_invalid_unknown_and_superseded_owners() {
+        let mut app = control_app();
+        for owner in ["../active", "removed"] {
+            assert!(!app.apply_worker_frame(effort(owner, "high", Some(false))));
+        }
+        assert!(!app.apply_worker_frame(effort("active", "medium", Some(false))));
+        assert_eq!(app.notice, "unchanged");
+        assert_eq!(app.session_efforts["active"], "low");
+        assert_eq!(app.pending_effort_verifications["active"], "high");
+    }
+
+    #[test]
+    fn typed_controls_require_verification_and_keep_inactive_notice_owned() {
+        let mut app = control_app();
+        assert!(app.apply_worker_frame(effort("active", "high", None)));
+        assert_eq!(app.session_efforts["active"], "low");
+        assert_eq!(app.pending_effort_verifications["active"], "high");
+        app.notice = "active notice".into();
+        assert!(app.apply_worker_frame(effort("inactive", "high", Some(false))));
+        assert_eq!(app.notice, "active notice");
+        assert_eq!(app.session_efforts["inactive"], "high");
+        assert!(!app.pending_effort_verifications.contains_key("inactive"));
+    }
+
+    #[test]
+    fn typed_control_and_telemetry_reduction_match_raw_compatibility_path() {
+        let mut typed = control_app();
+        let mut raw = control_app();
+        let outcome = typed.apply_worker_frame(effort("active", "high", Some(false)));
+        assert_eq!(outcome, raw.apply_daemon_frame(&effort("active", "high", Some(false)).into_legacy_value()));
+        let reply = json!({"status":{"ctx_tokens":42,"ctx_max_tokens":100,"belief_count":3}});
+        assert_eq!(typed.apply_worker_frame(WorkerFrame::Telemetry { session_id: "active".into(), reply: reply.clone() }),
+            raw.apply_daemon_frame(&WorkerFrame::Telemetry { session_id: "active".into(), reply }.into_legacy_value()));
+        assert_eq!(typed.notice, raw.notice);
+        assert_eq!(typed.session_efforts, raw.session_efforts);
+        assert_eq!(typed.pending_effort_verifications, raw.pending_effort_verifications);
+        assert_eq!(typed.session_telemetry["active"].context, raw.session_telemetry["active"].context);
+        assert_eq!(typed.session_telemetry["active"].lore, raw.session_telemetry["active"].lore);
+        assert_eq!(typed.groups, raw.groups);
+    }
 }

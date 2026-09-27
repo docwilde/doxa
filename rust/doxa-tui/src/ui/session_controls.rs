@@ -31,7 +31,11 @@ pub(super) struct SessionOwner<'a>(&'a str);
 
 impl<'a> SessionOwner<'a> {
     pub(super) fn decode(frame: &'a Value) -> Option<Self> {
-        frame["session_id"].as_str().filter(|id| crate::discovery::valid_id(id)).map(Self)
+        Self::from_id(frame["session_id"].as_str()?)
+    }
+
+    fn from_id(id: &'a str) -> Option<Self> {
+        crate::discovery::valid_id(id).then_some(Self(id))
     }
 
     pub(super) fn id(self) -> &'a str { self.0 }
@@ -71,6 +75,21 @@ impl<'a> ControlReply<'a> {
         Some(Self { owner: SessionOwner::decode(frame)?, control,
             ok: frame["ok"].as_bool()?, value: frame[field].as_str(),
             error: frame["error"].as_str(), verified: frame["verification_pending"] == false })
+    }
+
+    /// Worker controls have already decoded their outcome and optional fields.
+    /// Retain the same owner validation and exact-request reduction as wire frames.
+    pub(super) fn from_worker(owner: &'a str, result: &'a crate::worker_frames::CommandResult) -> Option<Self> {
+        use crate::worker_frames::CommandResult;
+        let (control, status, value, verified) = match result {
+            CommandResult::SetModel { status, model } => (Control::Model, status, model.as_deref(), false),
+            CommandResult::SetPermissionMode { status, mode } => (Control::Permission, status, mode.as_deref(), false),
+            CommandResult::SetEffort { status, effort, verification_pending } =>
+                (Control::Effort, status, effort.as_deref(), *verification_pending == Some(false)),
+            _ => return None,
+        };
+        Some(Self { owner: SessionOwner::from_id(owner)?, control, ok: status.ok,
+            value, error: status.error.as_deref(), verified })
     }
 
     /// Effort replies may act only on the outstanding exact request. Success
