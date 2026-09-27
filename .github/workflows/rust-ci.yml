@@ -8,6 +8,12 @@ on:
 permissions:
   contents: read
 
+# Process fixtures generate executable scripts. Serial test cases avoid fork
+# inheritance of another fixture's writable descriptor during publication;
+# concurrency regressions explicitly start their own threads and processes.
+env:
+  RUST_TEST_THREADS: "1"
+
 jobs:
   rust:
     runs-on: ubuntu-latest

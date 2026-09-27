@@ -19,6 +19,8 @@ the stable 2.0 release has not been cut.
   local measurements.
 - Coordinate native fleet launches, start barriers, reviewed approvals,
   cancellation and durable resume without repeating ambiguous dispatches.
+  Confirm actual daemon shutdown before recording completion, bound teardown
+  and socket deadlines, and release coordinator locks across process spawning.
   Persist spend guards and refuse further turns when usage cannot be verified.
 - Register scoped peer tools for native Codex and vendor hosts, with explicit
   approval before model-initiated actions and bounded, scrubbed peer history.
