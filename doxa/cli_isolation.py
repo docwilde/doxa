@@ -178,6 +178,7 @@ CREDENTIALS_NAME = ".credentials.json"
 LOGGED_OUT_MARK = ".doxa-logged-out"
 SETTINGS_NAME = "settings.json"
 SKILLS_NAME = "skills"
+MAX_SETTINGS_BYTES = 64 * 1024
 
 
 def cli_config_dir() -> Path:
@@ -221,6 +222,28 @@ def _atomic_private_write(path: Path, write: Callable[[BinaryIO], None]) -> None
         os.close(directory)
 
 
+def _current_private_settings(path: Path) -> object:
+    """Unsafe or oversized current settings are repaired without reading them."""
+    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        metadata = os.fstat(directory)
+        if metadata.st_uid != os.geteuid() or metadata.st_mode & 0o077:
+            raise PermissionError("unsafe isolated CLI directory")
+        fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+        with os.fdopen(fd, "rb") as incoming:
+            metadata = os.fstat(incoming.fileno())
+            if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid()
+                    or metadata.st_nlink != 1 or metadata.st_mode & 0o077
+                    or metadata.st_size > MAX_SETTINGS_BYTES):
+                return None
+            raw = incoming.read(MAX_SETTINGS_BYTES + 1)
+            if len(raw) > MAX_SETTINGS_BYTES:
+                return None
+            return json.loads(raw)
+    finally:
+        os.close(directory)
+
+
 def ensure_cli_config_dir() -> Path:
     """Create the directory and write the DOXA-owned ``settings.json`` if
     it is missing or has drifted from :data:`OWNED_SETTINGS`. DOXA is the
@@ -234,17 +257,22 @@ def ensure_cli_config_dir() -> Path:
     this function may only run once."""
     path = cli_config_dir()
     settings_path = path / SETTINGS_NAME
+    if path.is_symlink():
+        raise PermissionError("isolated CLI directory must not be a symlink")
     try:
-        path.mkdir(parents=True, exist_ok=True)
-        if path.is_symlink() or not stat.S_ISDIR(path.lstat().st_mode):
-            return path
-        os.chmod(path, 0o700)
+        path.mkdir(parents=True, mode=0o700, exist_ok=True)
+        directory = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            if os.fstat(directory).st_uid != os.geteuid():
+                raise PermissionError("unsafe isolated CLI directory")
+            os.fchmod(directory, 0o700)
+        finally:
+            os.close(directory)
         current = None
-        if settings_path.exists() and not settings_path.is_symlink():
-            try:
-                current = json.loads(settings_path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                current = None
+        try:
+            current = _current_private_settings(settings_path)
+        except (OSError, ValueError):
+            pass
         if current != OWNED_SETTINGS:
             body = (json.dumps(OWNED_SETTINGS, indent=2) + "\n").encode("utf-8")
             _atomic_private_write(settings_path, lambda output: output.write(body))
@@ -253,6 +281,14 @@ def ensure_cli_config_dir() -> Path:
         # _build_options still passes CLAUDE_CONFIG_DIR either way, so a
         # read-only home directory degrades to "isolated, unauthenticated"
         # rather than "not isolated at all".
+    # Provisioning failure may yield a missing/unauthenticated directory; an
+    # existing unsafe directory cannot be handed to the CLI as isolation.
+    if path.is_symlink():
+        raise PermissionError("isolated CLI directory must not be a symlink")
+    if path.exists():
+        metadata = path.lstat()
+        if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.geteuid() or metadata.st_mode & 0o077:
+            raise PermissionError("unsafe isolated CLI directory")
     return path
 
 
