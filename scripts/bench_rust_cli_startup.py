@@ -47,6 +47,7 @@ def sample(width: int, height: int, timeout: float) -> dict[str, float]:
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", height, width, 0, 0))
         env = {**os.environ, "TERM": "xterm-256color", "DOXA_HOME": str(Path(temp) / "home"),
                "DOXA_SKIP_FIRST_RUN": "1", "DOXA_SKIP_UPDATE_CHECK": "1"}
+        env.pop("DOXA_KEYBOARD_PROTOCOL", None)  # Exercise actual default startup.
         started = time.perf_counter()
         proc = subprocess.Popen(
             [str(BINARY), "--demo"], stdin=slave, stdout=slave, stderr=slave,
@@ -69,6 +70,8 @@ def sample(width: int, height: int, timeout: float) -> dict[str, float]:
                 if not chunk:
                     raise RuntimeError("process exited before visible text")
                 received = time.perf_counter()
+                if b"\x1b[?u" in pending + chunk or b"\x1b[c" in pending + chunk:
+                    raise RuntimeError("default startup sent a terminal capability probe")
                 if first_byte is None:
                     first_byte = received
                 if VISIBLE_MARKER in pending + chunk:

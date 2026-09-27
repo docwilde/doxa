@@ -85,6 +85,7 @@ def run_once() -> dict:
         winsize(slave, 160, 48)
         env = {**os.environ, "TERM": "xterm-256color", "DOXA_HOME": str(Path(temp) / "home"),
                "DOXA_SKIP_FIRST_RUN": "1", "DOXA_SKIP_UPDATE_CHECK": "1"}
+        env.pop("DOXA_KEYBOARD_PROTOCOL", None)
         started = time.perf_counter()
         proc = subprocess.Popen([str(BINARY), path], stdin=slave, stdout=slave, stderr=slave,
                                 cwd=temp, env=env, start_new_session=True)
