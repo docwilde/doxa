@@ -184,6 +184,7 @@ fn run(args: &[String]) -> io::Result<()> {
     let mut prefix: Option<&str> = None;
     let mut branch_target: Option<&str> = None;
     let mut options = launch::LaunchOptions::default();
+    options.engine = launch::configured_engine();
     let mut explicit_launch = false;
     let mut socket: Option<&str> = None;
     let mut index = 0;

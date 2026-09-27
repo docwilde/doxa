@@ -79,13 +79,13 @@ const COMMANDS: &[CommandHelp] = &[
     CommandHelp { name: "/collection", form: "/collection [action] [name]", summary: "Organize sessions", support: "local · list/new/rename/delete/add/remove" },
     CommandHelp { name: "/msg", form: "/msg <peer> <text>", summary: "Message a peer", support: "local · same project" },
     CommandHelp { name: "/fleet", form: "/fleet [runs|status RUN|attach RUN INDEX|start OPTIONS|resume RUN]", summary: "Fleet manifests and slots", support: "local · verified slot attachment" },
-    CommandHelp { name: "/mesh", form: "/mesh", summary: "Peer map", support: "local · arguments unavailable" },
+    CommandHelp { name: "/mesh", form: "/mesh [RUN|stop]", summary: "Browser peer graph", support: "local · private loopback ledger" },
     CommandHelp { name: "/img", form: "/img [path]", summary: "Image support", support: "unavailable in Rust" },
     CommandHelp { name: "/login", form: "/login [claude|codex] [--device-auth]", summary: "Provider login", support: "local · selectable operations menu" },
     CommandHelp { name: "/logout", form: "/logout [claude|codex]", summary: "Provider logout", support: "local · selectable operations menu" },
     CommandHelp { name: "/settings", form: "/settings", summary: "Native settings", support: "local · linger and worktree for new sessions" },
     CommandHelp { name: "/setup", form: "/setup", summary: "Setup checks", support: "local · auth checks, LORE store, defaults" },
-    CommandHelp { name: "/doctor", form: "/doctor", summary: "Health checks", support: "unavailable in Rust" },
+    CommandHelp { name: "/doctor", form: "/doctor", summary: "Health checks", support: "local · selected provider" },
     CommandHelp { name: "/plugins", form: "/plugins", summary: "Plugin inventory", support: "local · selectable operations menu" },
     CommandHelp { name: "/reload-plugins", form: "/reload-plugins", summary: "Refresh plugins", support: "local · selectable operations menu" },
     CommandHelp { name: "/model", form: "/model [name]", summary: "Select session model", support: "local · reported choices or new-session form" },
@@ -109,7 +109,7 @@ const COMMANDS: &[CommandHelp] = &[
     CommandHelp { name: "/search", form: "/search [terms]", summary: "Search saved sessions", support: "local · LORE index then bounded transcript scan" },
     CommandHelp { name: "/resume", form: "/resume [session-id]", summary: "Resume conversation", support: "local · new tab" },
     CommandHelp { name: "/compact", form: "/compact", summary: "Compact transcript", support: "Claude only · completed LORE review required" },
-    CommandHelp { name: "/update", form: "/update [--restart]", summary: "Update DOXA", support: "unavailable in Rust" },
+    CommandHelp { name: "/update", form: "/update [--restart]", summary: "Update DOXA", support: "local · reviewed install" },
     CommandHelp { name: "/help", form: "/help", summary: "Command registry", support: "local" },
     CommandHelp { name: "/about", form: "/about", summary: "Rust version", support: "local · version only" },
 ];
@@ -1272,6 +1272,10 @@ pub struct App {
     memory_repo: HashMap<String, bool>,
     memory_manager: Option<crate::memory_menu::Manager>,
     operations_menu: Option<operations_menu::Menu>,
+    window_mesh: Option<crate::mesh_control::WindowMesh>,
+    restart_executable: Option<PathBuf>,
+    restart_after_update: bool,
+    retired_operations: Vec<operations_menu::Menu>,
     fleet_menu: Option<fleet_menu::Menu>,
     pub(crate) fleet_views: Vec<fleet_menu::SavedView>,
     fleet_review: Option<fleet_process::Prepared>,
@@ -1437,6 +1441,10 @@ impl Default for App {
             memory_menu_pending: None,
             memory_manager: None,
             operations_menu: None,
+            window_mesh: None,
+            restart_executable: None,
+            restart_after_update: false,
+            retired_operations: Vec::new(),
             fleet_menu: None,
             fleet_views: Vec::new(),
             fleet_review: None,
@@ -2859,7 +2867,7 @@ impl App {
             }
             if let Some(menu) = &mut self.operations_menu {
                 menu.key(key);
-                if menu.closed() { self.operations_menu = None; self.chip_info = None; }
+                if menu.closed() { self.retire_operations(); self.chip_info = None; }
                 else if let Some(info) = &mut self.chip_info { info.lines = menu.lines(usize::from(self.size.width)); }
                 return true;
             }
@@ -3261,6 +3269,18 @@ impl App {
         let line = self.input.trim().to_owned();
         let (command, args) = line.split_once(char::is_whitespace).unwrap_or((line.as_str(), ""));
         match command {
+            "/doctor" if args.trim().is_empty() => {
+                let engine = self.groups[self.active_group].active_id().and_then(|id| self.session_identity.get(id)).and_then(|id| id.0.clone());
+                self.open_operations(operations_menu::Menu::maintenance("doctor", engine, false)); true
+            }
+            "/update" if matches!(args.trim(), "" | "--restart") => {
+                if self.fleet_controller.is_some() || self.groups.iter().flat_map(|g| &g.tabs).any(|id|
+                    self.session_activity.get(id).is_none_or(|(running, queued)| *running || *queued > 0)) {
+                    self.notice = "Wait for idle sessions and an idle fleet controller before updating".into(); return true;
+                }
+                self.restart_executable = if args.trim() == "--restart" { std::env::current_exe().ok() } else { None };
+                self.open_operations(operations_menu::Menu::maintenance("update", None, args.trim() == "--restart")); true
+            }
             "/model" | "/effort" | "/mode" | "/engine" if !args.trim().is_empty() => {
                 let target = args.trim();
                 if target.split_whitespace().count() != 1 || target.len() > 128 || target.chars().any(unsafe_input_char) {
@@ -3362,16 +3382,8 @@ impl App {
                 };
                 true
             }
-            "/mesh" if !args.trim().is_empty() => {
-                self.notice = "Local command unavailable: /mesh arguments".into(); true
-            }
             "/mesh" => {
-                self.map_modal = true;
-                self.peer_map.selected = 0;
-                self.pending_peer_refresh = Some(
-                    self.groups[self.active_group].active_id().unwrap_or("").to_owned());
-                self.input.clear();
-                self.input_cursor = 0;
+                self.local_mesh(args, None);
                 true
             }
             "/msg" => { self.local_message(args); true }
@@ -3415,6 +3427,41 @@ impl App {
         }
     }
 
+    fn open_operations(&mut self, menu: operations_menu::Menu) {
+        self.memory_menu_pending = None; self.memory_manager = None;
+        self.retire_operations();
+        self.operations_menu = Some(menu);
+        self.chip_info = Some(ChipInfo { kind: "operations", label: String::new(),
+            lines: self.operations_menu.as_ref().unwrap().lines(usize::from(self.size.width)), scroll: 0, owner: None });
+        if self.active_chooser_rect().is_none() {
+            self.operations_menu = None; self.chip_info = None;
+            self.notice = "Enlarge pane to open operations".into();
+        } else {
+            self.input.clear(); self.input_cursor = 0;
+            self.operations_menu.as_mut().unwrap().start_requested();
+        }
+    }
+
+    fn retire_operations(&mut self) {
+        if let Some(mut menu) = self.operations_menu.take() {
+            menu.cancel();
+            if menu.busy() { self.retired_operations.push(menu); }
+        }
+    }
+
+    fn local_mesh(&mut self, args: &str, root: Option<PathBuf>) {
+        let args = args.trim();
+        if !args.is_empty() && (args.len() > 200 || !args.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))) {
+            self.notice = "Usage: /mesh [RUN|stop]".into(); return;
+        }
+        let handle = self.window_mesh.get_or_insert_with(crate::mesh_control::WindowMesh::new).handle();
+        self.open_operations(operations_menu::Menu::mesh(handle.clone()));
+        if self.operations_menu.is_some() {
+            if args.eq_ignore_ascii_case("stop") { handle.stop(); }
+            else { handle.start((!args.is_empty()).then(|| args.to_owned()), root); }
+        }
+    }
+
     fn local_fleet(&mut self,args:&str){
         let parts=match fleet_process::words(args){Ok(parts)=>parts,Err(error)=>{self.notice=safe_label(&error.to_string());return;}};
         let start=parts.first().is_some_and(|part|part=="start");
@@ -3444,6 +3491,7 @@ impl App {
             return;
         }
         match words.as_slice(){
+            ["mesh",id]=>self.local_mesh(id,Some(root)),
             []|["runs"]=>self.open_fleet(root,None),
             ["status",id]if doxa_state::valid_session_id(id)=>self.open_fleet(root,Some((*id).into())),
             ["attach",id,index]=>match index.parse::<usize>().ok().and_then(|index|crate::fleet_view::slot_socket(&root,id,index).ok()){
@@ -4846,6 +4894,8 @@ impl App {
     }
 
     fn poll_memory_menu(&mut self) -> bool {
+        for menu in &mut self.retired_operations { menu.poll(); }
+        self.retired_operations.retain(|menu| menu.busy());
         let mut changed = false;
         if let Some(manager) = &mut self.memory_manager {
             let current = self.groups[self.active_group].active_id().and_then(|id|
@@ -4861,6 +4911,7 @@ impl App {
         }
         if let Some(menu) = &mut self.operations_menu {
             menu.poll();
+            if menu.take_restart() { self.restart_after_update = true; self.should_quit = true; changed = true; }
             if let Some(info) = &mut self.chip_info {
                 let lines = menu.lines(usize::from(self.size.width));
                 if info.lines != lines { info.lines = lines; changed = true; }
@@ -6655,7 +6706,7 @@ impl App {
 
     fn open_chip_info(&mut self, kind: &'static str, group: usize) {
         self.memory_manager = None;
-        self.operations_menu = None;
+        self.retire_operations();
         if matches!(kind, "context" | "cost") {
             self.active_group = group;
             self.open_diagnostic(if kind == "cost" { "usage" } else { "context" });
@@ -6753,7 +6804,7 @@ impl App {
 
     fn open_memory_menu(&mut self, group: usize) {
         self.memory_manager = None;
-        self.operations_menu = None;
+        self.retire_operations();
         self.open_chip_info("memory", group);
         let Some(info) = self.chip_info.as_mut() else { return; };
         info.lines = vec!["Loading LORE memory… · M manage curated entries".into()];
@@ -7929,7 +7980,14 @@ impl App {
             manager.draw(frame, area); return;
         }
         if let Some(menu) = &self.operations_menu {
-            frame.render_widget(Paragraph::new(menu.lines(usize::from(area.width.saturating_sub(2))).join("\n"))
+            let width = usize::from(area.width.saturating_sub(2));
+            let lines = menu.lines(width).into_iter().map(|text| {
+                if text.starts_with('›') {
+                    let padding = " ".repeat(width.saturating_sub(text.width()));
+                    Line::from(format!("{text}{padding}")).style(Style::default().fg(theme::TEXT).bg(theme::HIGHLIGHT))
+                } else { Line::from(text) }
+            }).collect::<Vec<_>>();
+            frame.render_widget(Paragraph::new(lines)
                 .block(Block::default().title(" DOXA operations ").borders(Borders::ALL))
                 .style(Style::default().fg(theme::TEXT).bg(theme::RAISED)), area);
             return;
@@ -9039,6 +9097,15 @@ fn run_loop(
     }
     drop(terminal);
     drop(guard);
+    if app.restart_after_update {
+        if let Some(executable) = app.restart_executable.take() {
+            // Capture before update replaces the binary. No providers are
+            // relaunched here; normal startup restores verified live tabs.
+            app.window_mesh = None;
+            use std::os::unix::process::CommandExt;
+            return Err(std::process::Command::new(executable).exec());
+        }
+    }
     Ok(())
 }
 

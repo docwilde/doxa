@@ -5,7 +5,8 @@ use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 
 #[derive(Clone)]
-enum Action { Report, Store(bool), Plugins(bool), Auth(crate::operations::AuthRequest), Reload, Skip }
+enum Action { Report, Store(bool), Plugins(bool), Auth(crate::operations::AuthRequest), Reload, Skip,
+    Maintenance(&'static str, bool), MeshOpen, MeshStop }
 
 pub struct Menu {
     kind: String,
@@ -13,6 +14,7 @@ pub struct Menu {
     selected: usize,
     messages: Vec<String>,
     worker: Option<Receiver<(bool, String)>>,
+    worker_thread: Option<std::thread::JoinHandle<()>>,
     closed: bool,
     step: usize,
     editing: Option<&'static str>,
@@ -20,10 +22,16 @@ pub struct Menu {
     scroll: usize,
     cancel: Option<Arc<AtomicBool>>,
     requested: bool,
+    engine: Option<String>,
+    restart_ready: bool,
+    restart_complete: Option<Arc<AtomicBool>>,
+    mesh: Option<crate::mesh_control::WindowHandle>,
+    mesh_revision: u64,
 }
 impl Menu {
     pub fn new(kind: &str) -> Self {
-        let mut menu = Self { kind: kind.into(), rows: Vec::new(), selected: 0, messages: Vec::new(), worker: None, closed: false, step: 0, editing: None, input: String::new(), scroll: 0, cancel: None, requested: false };
+        let mut menu = Self { kind: kind.into(), rows: Vec::new(), selected: 0, messages: Vec::new(), worker: None, closed: false, step: 0, editing: None, input: String::new(), scroll: 0, cancel: None, requested: false,
+            engine: None, restart_ready: false, restart_complete: None, mesh: None, mesh_revision: 0, worker_thread: None };
         menu.prepare(); menu
     }
     /// Parsing/selection is pure. The UI calls start_requested only after the
@@ -44,6 +52,17 @@ impl Menu {
         menu.requested = true;
         menu
     }
+    pub fn maintenance(kind: &str, engine: Option<String>, restart: bool) -> Self {
+        let mut menu = Self::new(kind); menu.engine = engine;
+        if kind == "doctor" { menu.requested = true; }
+        if kind == "update" { menu.rows[0].1 = Action::Maintenance("update", restart); }
+        menu
+    }
+    pub fn mesh(handle: crate::mesh_control::WindowHandle) -> Self {
+        let mut menu = Self::new("mesh"); menu.mesh = Some(handle); menu
+    }
+    pub fn take_restart(&mut self) -> bool { std::mem::take(&mut self.restart_ready) }
+    pub fn cancel(&mut self) { if let Some(cancel) = &self.cancel { cancel.store(true, Ordering::Release); } }
     pub fn start_requested(&mut self) {
         if self.requested && !self.busy() && !self.closed {
             self.requested = false;
@@ -54,6 +73,9 @@ impl Menu {
     fn prepare(&mut self) {
         self.selected = 0;
         self.rows = match self.kind.as_str() {
+            "doctor" => vec![("Refresh health checks".into(), Action::Maintenance("doctor", false))],
+            "update" => vec![("Build and install latest main".into(), Action::Maintenance("update", false))],
+            "mesh" => vec![("Open graph in browser".into(), Action::MeshOpen), ("Stop mesh server".into(), Action::MeshStop)],
             "login" | "logout" => {
                 let action = if self.kind == "login" { "login" } else { "logout" };
                 let mut rows = vec![("Claude (Anthropic)".into(), Action::Auth(crate::operations::AuthRequest { provider:"claude", action, device_auth:false })),
@@ -70,16 +92,27 @@ impl Menu {
         };
     }
     pub fn poll(&mut self) {
+        if let Some(mesh) = &self.mesh {
+            let state = mesh.snapshot();
+            if state.revision != self.mesh_revision {
+                self.mesh_revision = state.revision;
+                self.messages = vec![state.report];
+                if !state.url.is_empty() { self.messages.push(state.url); }
+            }
+        }
         if let Some(worker) = &self.worker {
             let results = worker.try_iter().collect::<Vec<_>>();
             for (done, message) in results {
                 self.messages.push(message);
-                if done { self.worker = None; self.cancel = None; break; }
+                if done {
+                    self.restart_ready = self.restart_complete.take().is_some_and(|flag| flag.load(Ordering::Acquire));
+                    self.worker = None; self.cancel = None; break;
+                }
             }
         }
     }
     pub fn closed(&self) -> bool { self.closed }
-    pub fn busy(&self) -> bool { self.worker.is_some() }
+    pub fn busy(&self) -> bool { self.worker.is_some() || self.mesh.as_ref().is_some_and(|m| m.snapshot().busy) }
     pub fn lines(&self, width: usize) -> Vec<String> {
         use unicode_width::UnicodeWidthChar;
         let width = width.max(1);
@@ -137,22 +170,38 @@ impl Menu {
     fn apply(&mut self) {
         self.scroll = 0;
         let action = self.rows[self.selected].1.clone();
+        if let Action::Maintenance(kind, restart) = action {
+            let (sender, receiver) = mpsc::channel(); self.worker = Some(receiver);
+            let cancel = Arc::new(AtomicBool::new(false)); self.cancel = Some(cancel.clone());
+            let engine = self.engine.clone();
+            let complete = Arc::new(AtomicBool::new(false)); self.restart_complete = Some(complete.clone());
+            self.messages = vec![if kind == "update" { "Building and installing latest main…" } else { "Checking dependencies…" }.into()];
+            self.worker_thread = Some(std::thread::spawn(move || {
+                let result = crate::maintenance::run(kind, engine.as_deref(), &cancel);
+                complete.store(result.is_ok() && restart, Ordering::Release);
+                let _ = sender.send((true, result.unwrap_or_else(|e| e.to_string())));
+            })); return;
+        }
+        if matches!(action, Action::MeshOpen | Action::MeshStop) {
+            if let Some(mesh) = &self.mesh { if matches!(action, Action::MeshOpen) { mesh.open(); } else { mesh.stop(); } }
+            return;
+        }
         if let Action::Auth(request) = action {
             let (sender, receiver) = mpsc::channel(); self.worker = Some(receiver);
             let cancel = Arc::new(AtomicBool::new(false)); self.cancel = Some(cancel.clone());
-            std::thread::spawn(move || {
+            self.worker_thread = Some(std::thread::spawn(move || {
                 let result = crate::operations::auth_action_request(request, |message| { let _ = sender.send((false, message)); }, &cancel);
                 let _ = sender.send((true, result.unwrap_or_else(|error| error.to_string())));
-            }); return;
+            })); return;
         }
         if matches!(action, Action::Report | Action::Reload) && !(self.kind == "setup" && self.step >= 2) {
             let setup = self.kind == "setup";
             let reload = matches!(action, Action::Reload);
             let (sender, receiver) = mpsc::channel(); self.worker = Some(receiver);
-            std::thread::spawn(move || {
+            self.worker_thread = Some(std::thread::spawn(move || {
                 let result = if setup { crate::operations::setup_report() } else { crate::operations::plugins_bridge(reload) };
                 let _ = sender.send((true, result.unwrap_or_else(|e| e.to_string())));
-            });
+            }));
             if setup { self.step += 1; self.prepare(); }
             return;
         }
@@ -166,6 +215,7 @@ impl Menu {
             Action::Reload => crate::operations::plugins_reload(),
             Action::Skip => Ok("Skipped".into()),
             Action::Auth(_) => unreachable!(),
+            Action::Maintenance(_, _) | Action::MeshOpen | Action::MeshStop => unreachable!(),
         };
         let success = result.is_ok(); self.messages.push(result.unwrap_or_else(|e| e.to_string()));
         if self.kind == "setup" && success {
@@ -175,12 +225,20 @@ impl Menu {
 }
 
 impl Drop for Menu {
-    fn drop(&mut self) { if let Some(cancel) = &self.cancel { cancel.store(true, Ordering::Release); } }
+    fn drop(&mut self) { self.cancel(); if let Some(worker) = self.worker_thread.take() { let _ = worker.join(); } }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn maintenance_menu_keeps_update_reviewable_until_enter() {
+        let doctor = Menu::maintenance("doctor", Some("codex".into()), false);
+        assert!(doctor.requested); assert!(!doctor.busy());
+        let update = Menu::maintenance("update", None, true);
+        assert!(!update.requested && !update.busy());
+        assert!(matches!(update.rows[0].1, Action::Maintenance("update", true)));
+    }
     #[test]
     fn plugin_commands_queue_the_correct_initial_operation_without_side_effects() {
         let report = Menu::with_plugin_report(false);

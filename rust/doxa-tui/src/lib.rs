@@ -23,3 +23,4 @@ pub mod fleet_control;
 pub mod theme;
 
 pub mod mesh_control;
+pub mod maintenance;

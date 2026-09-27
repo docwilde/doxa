@@ -345,7 +345,7 @@ pub fn setup_default(key: &str, value: Option<&str>) -> io::Result<String> {
     Ok(format!("{key} default updated for new sessions"))
 }
 
-fn doxa_home() -> io::Result<PathBuf> {
+pub(crate) fn doxa_home() -> io::Result<PathBuf> {
     std::env::var_os("DOXA_HOME").filter(|value| !value.is_empty()).map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|value| PathBuf::from(value).join(".doxa")))
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "DOXA_HOME and HOME are unset"))
