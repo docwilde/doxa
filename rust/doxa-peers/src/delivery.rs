@@ -199,6 +199,14 @@ impl Ledger {
     /// this session in the exact project scope are returned. A partial first
     /// line or concurrently appended incomplete final line is ignored.
     pub fn history(&self, session: &str, scope: &str, scrubber: &impl Scrubber) -> io::Result<Vec<Message>> {
+        self.history_bounded(session,scope,"both",20,24*1024,scrubber)
+    }
+    /// Filters apply before the row limit, within the same bounded private tail.
+    pub fn history_filtered(&self, session: &str, scope: &str, direction: &str, limit: usize, scrubber: &impl Scrubber) -> io::Result<Vec<Message>> {
+        self.history_bounded(session,scope,direction,limit,48*1024,scrubber)
+    }
+    fn history_bounded(&self, session: &str, scope: &str, direction: &str, limit: usize, output_limit: usize, scrubber: &impl Scrubber) -> io::Result<Vec<Message>> {
+        if !matches!(direction,"both"|"sent"|"received") || !(1..=100).contains(&limit) { return Err(invalid("invalid peer history filter")); }
         let parent = self.path.parent().ok_or_else(|| invalid("ledger has no parent"))?;
         let meta = match fs::symlink_metadata(parent) {
             Ok(meta) => meta,
@@ -239,15 +247,17 @@ impl Ledger {
             if line.len() > 32 * 1024 { continue; }
             let Ok(mut message) = serde_json::from_slice::<Message>(line) else { continue; };
             if message.sender.repo.as_deref() != Some(scope)
-                || (message.sender.session != session && !message.to.iter().any(|target| target == session)) { continue; }
+                || (message.sender.session != session && !message.to.iter().any(|target| target == session))
+                || (direction == "sent" && message.sender.session != session)
+                || (direction == "received" && !message.to.iter().any(|target| target == session)) { continue; }
             message.body = scrubber.scrub(&message.body);
             for value in [&mut message.sender.title, &mut message.sender.repo, &mut message.sender.model, &mut message.sender.engine] {
                 *value = value.take().map(|value| scrubber.scrub(&value));
             }
             let length = serde_json::to_vec(&message).map_err(io::Error::other)?.len();
-            if output_bytes.saturating_add(length) > 24 * 1024 { break; }
+            if output_bytes.saturating_add(length) > output_limit { break; }
             output_bytes += length; result.push(message);
-            if result.len() == 20 { break; }
+            if result.len() == limit { break; }
         }
         result.reverse(); Ok(result)
     }
@@ -318,8 +328,14 @@ pub struct DeliveryResult { pub delivered: Vec<String>, pub failed: Vec<String>,
 /// The single local outbound path: scoped discovery, charge, send, then append only successful recipients.
 pub fn deliver(registry: &Registry, sender: &PeerRecord, recipients: &[String], body: &str, kind: &str,
     turn_id: Option<&str>, limiter: &Mutex<RateLimiter>, ledger: &Ledger, scrubber: &impl Scrubber) -> io::Result<DeliveryResult> {
+    deliver_with_reply(registry,sender,recipients,body,kind,turn_id,None,limiter,ledger,scrubber)
+}
+/// Thread evidence is appended by the same charged delivery path, only after delivery.
+pub fn deliver_with_reply(registry: &Registry, sender: &PeerRecord, recipients: &[String], body: &str, kind: &str,
+    turn_id: Option<&str>, in_reply_to: Option<&str>, limiter: &Mutex<RateLimiter>, ledger: &Ledger, scrubber: &impl Scrubber) -> io::Result<DeliveryResult> {
     if body.trim().is_empty() || body.chars().count() > MAX_BODY_CHARS { return Err(invalid("invalid peer body")); }
     if !matches!(kind, "direct" | "broadcast") { return Err(invalid("invalid peer kind")); }
+    if in_reply_to.is_some_and(|id|Uuid::parse_str(id).is_err()) { return Err(invalid("invalid peer reply reference")); }
     let peers = registry.scoped(sender.scope_key(), Some(&sender.session_id), scrubber, true)?;
     let mut targets = Vec::new();
     for id in recipients {
@@ -339,7 +355,7 @@ pub fn deliver(registry: &Registry, sender: &PeerRecord, recipients: &[String], 
     if result.delivered.is_empty() { return Err(io::Error::new(io::ErrorKind::NotConnected, "nothing was delivered")); }
     let message = Message { v: 1, id: Uuid::new_v4().simple().to_string(), ts: now(),
         sender: Sender { session: sender.session_id.clone(), title: Some(sender.title.clone()), repo: Some(sender.scope_key().to_owned()), model: sender.model.clone(), engine: sender.engine.clone() },
-        to: result.delivered.clone(), kind: kind.to_owned(), in_reply_to: None, body: body.to_owned(), body_sha256: String::new(), latency_ms: None,
+        to: result.delivered.clone(), kind: kind.to_owned(), in_reply_to: in_reply_to.map(str::to_owned), body: body.to_owned(), body_sha256: String::new(), latency_ms: None,
         turn: TurnRef { id: turn_id.map(str::to_owned), state: if turn_id.is_some() { "running" } else { "idle" }.to_owned() } };
     match ledger.append(message, scrubber) { Ok(record) => result.record = Some(record), Err(e) => result.ledger_error = Some(e.to_string()) }
     Ok(result)

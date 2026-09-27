@@ -81,8 +81,15 @@ pub fn list_scoped_readonly(
     runtime: &Path,
     scope: &str,
     self_id: &str,
-    mut scrub: impl FnMut(&str) -> io::Result<String>,
+    scrub: impl FnMut(&str) -> io::Result<String>,
 ) -> io::Result<Vec<DisplayPeer>> {
+    list_scoped_readonly_limit(runtime,scope,self_id,MAX_DISPLAY_PEERS,scrub)
+}
+/// Internal identity verification may need the full bounded roster rather than
+/// a UI page. Every record retains the same private-file/live/scope checks.
+pub fn list_scoped_readonly_limit(runtime: &Path, scope: &str, self_id: &str, limit: usize,
+    mut scrub: impl FnMut(&str) -> io::Result<String>) -> io::Result<Vec<DisplayPeer>> {
+    if !(1..=MAX_REGISTRY_ENTRIES).contains(&limit) { return Err(io::Error::new(io::ErrorKind::InvalidInput,"invalid peer roster limit")); }
     if !runtime.is_absolute() || scope.is_empty() || !safe_id(self_id) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -130,7 +137,7 @@ pub fn list_scoped_readonly(
             session_id: peer.session_id,
             title: display,
         });
-        if result.len() == MAX_DISPLAY_PEERS {
+        if result.len() == limit {
             break;
         }
     }

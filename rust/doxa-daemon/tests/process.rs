@@ -3420,3 +3420,50 @@ fn native_child_keeps_parent_identity_and_starts_task_without_an_attachment() {
     writeln!(stream, "{}", json!({"type":"call","id":1,"method":"stop","params":{}})).unwrap();
     wait_until(|| process.child.try_wait().unwrap().is_some());
 }
+
+#[test]
+fn native_broadcast_reply_and_history_filters_follow_the_owned_delivery_path() {
+    let dir=tempfile::tempdir().unwrap();let codex=dir.path().join("codex-fixture");let python=dir.path().join("lore-fixture");
+    fake_scrubber(&python,false);executable(&codex,"#!/bin/sh\nexit 0\n");
+    let (first,_)=registry_peer(dir.path(),"first",dir.path().to_str().unwrap(),"first teammate");
+    let (second,_)=registry_peer(dir.path(),"second",dir.path().to_str().unwrap(),"second teammate");
+    let (foreign,_)=registry_peer(dir.path(),"foreign","/other-project","outsider");
+    let receive_body=|listener:UnixListener|thread::spawn(move|| {
+        listener.set_nonblocking(true).unwrap();let deadline=Instant::now()+Duration::from_secs(5);
+        loop {
+            match listener.accept() {
+                Ok((mut stream,_))=>{stream.set_read_timeout(Some(Duration::from_millis(500))).unwrap();let mut body=String::new();stream.read_to_string(&mut body).unwrap();if !body.is_empty() { return serde_json::from_str::<Value>(&body).unwrap(); }},
+                Err(error) if error.kind()==std::io::ErrorKind::WouldBlock=>{assert!(Instant::now()<deadline);thread::sleep(Duration::from_millis(5));},
+                Err(error)=>panic!("{error}"),
+            }
+        }
+    });
+    let first=receive_body(first);let second=receive_body(second);
+    let mut process=Process::start_codex(dir.path(),&codex,&python);let (mut reader,mut socket)=process.connect();
+    receive(&mut reader);send(&mut socket,json!({"type":"attach","cursor":null}));
+    let reply="0123456789abcdef0123456789abcdef";
+    send(&mut socket,json!({"type":"call","id":1,"method":"msg","params":{"body":"fixture-secret broadcast","broadcast":true,"in_reply_to":reply}}));
+    let mut result=receive(&mut reader);while result["id"]!=1 { result=receive(&mut reader); }
+    assert_eq!(result["ok"],true);assert_eq!(result["peer_count"],2);assert_eq!(result["kind"],"broadcast");
+    let mut delivered:Vec<_>=result["delivered_to"].as_array().unwrap().iter().map(|id|id.as_str().unwrap()).collect();delivered.sort();assert_eq!(delivered,vec!["first","second"]);
+    for worker in [first,second] { let frame=worker.join().unwrap();assert_eq!(frame["body"],"[redacted] broadcast");assert_eq!(frame["kind"],"broadcast"); }
+    send(&mut socket,json!({"type":"call","id":2,"method":"peer_history","params":{"direction":"sent","limit":1}}));
+    let mut history=receive(&mut reader);while history["id"]!=2 { history=receive(&mut reader); }
+    assert_eq!(history["ok"],true);assert_eq!(history["messages"].as_array().unwrap().len(),1);assert_eq!(history["messages"][0]["in_reply_to"],reply);
+    assert_eq!(history["messages"][0]["id"],result["message_id"]);assert!(!history.to_string().contains("fixture-secret"));
+    send(&mut socket,json!({"type":"call","id":3,"method":"peer_history","params":{"direction":"received","limit":100}}));
+    let mut empty=receive(&mut reader);while empty["id"]!=3 { empty=receive(&mut reader); }
+    assert_eq!(empty["messages"].as_array().unwrap().len(),0);
+    for (id,params) in [(4,json!({"to":"first","body":"bad","broadcast":true})),(5,json!({"body":"bad","broadcast":true,"in_reply_to":"../foreign"}))] {
+        send(&mut socket,json!({"type":"call","id":id,"method":"msg","params":params}));
+        let mut error=receive(&mut reader);while error["id"]!=id { error=receive(&mut reader); }assert_eq!(error["ok"],false);
+    }
+    assert_eq!(fs::read_to_string(dir.path().join("home/peers/messages.jsonl")).unwrap().lines().count(),1);
+    foreign.set_nonblocking(true).unwrap();
+    while let Ok((mut stream,_))=foreign.accept() {
+        stream.set_read_timeout(Some(Duration::from_millis(500))).unwrap();let mut body=String::new();stream.read_to_string(&mut body).unwrap();
+        assert!(body.is_empty(),"foreign scope received a message rather than an empty discovery probe");
+    }
+    send(&mut socket,json!({"type":"call","id":6,"method":"stop","params":{}}));
+    let mut stop=receive(&mut reader);while stop["id"]!=6 { stop=receive(&mut reader); }assert_eq!(stop["ok"],true);wait_until(||process.exited());
+}

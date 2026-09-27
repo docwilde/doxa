@@ -43,6 +43,7 @@ impl PeerHost {
             if !matches!(name, "peers" | "msg" | "peer_history") { return Err("Unsupported provider peer method".into()); }
             let peer = weak.upgrade().ok_or("Peer session is closed")?;
             if name == "msg" { peer.msg_with_target_mode(params, true) }
+            else if name == "peers" && params.as_object().is_some_and(|rows|rows.is_empty()) { peer.call(name,&json!({"limit":25})) }
             else { peer.call(name, params) }
         }))
     }
@@ -113,15 +114,21 @@ impl PeerHost {
     }
 
     fn roster(&self, lore: &mut LoreClient) -> Result<Vec<presence::DisplayPeer>, String> {
-        presence::list_scoped_readonly(&self.runtime, &self.scope, &self.session_id, |text| {
+        presence::list_scoped_readonly_limit(&self.runtime, &self.scope, &self.session_id, doxa_peers::MAX_REGISTRY_ENTRIES, |text| {
             lore.scrub(text)
                 .map_err(|_| io::Error::other("LORE scrub unavailable"))
         })
         .map_err(|_| "peer discovery unavailable or LORE scrub failed".to_owned())
     }
 
-    fn peers(&self) -> Result<Value, String> {
-        self.with_lore(|lore| Ok(json!({"peers":self.roster(lore)?})))
+    fn peers(&self, params: &Value) -> Result<Value, String> {
+        if params.as_object().is_none_or(|rows|rows.keys().any(|key|key!="limit")) { return Err("invalid peer roster limit".into()); }
+        let limit=params.get("limit").map(|value|value.as_u64().ok_or("invalid peer roster limit")).transpose()?.unwrap_or(presence::MAX_DISPLAY_PEERS as u64);
+        if !(1..=100).contains(&limit) { return Err("invalid peer roster limit".into()); }
+        self.with_lore(|lore| {
+            let rows=self.roster(lore)?; let total=rows.len();
+            Ok(json!({"peers":rows.into_iter().take(limit as usize).collect::<Vec<_>>(),"count":total.min(limit as usize),"total_count":total,"bounded":total>limit as usize,"trust":PEER_UNTRUSTED_INTRO,"untrusted_peer_data":true}))
+        })
     }
 
     fn msg(&self, params: &Value) -> Result<Value, String> {
@@ -129,16 +136,16 @@ impl PeerHost {
     }
 
     fn msg_with_target_mode(&self, params: &Value, exact: bool) -> Result<Value, String> {
-        let target = params["target"].as_str().ok_or("invalid peer target")?;
-        let body = params["text"].as_str().ok_or("invalid peer message")?;
-        if target.is_empty()
-            || target.len() > 128
-            || !target
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
-            || body.trim().is_empty()
-            || body.chars().count() > delivery::MAX_BODY_CHARS
-        {
+        if (params.get("target").is_some()&&params.get("to").is_some()) || (params.get("text").is_some()&&params.get("body").is_some()) {
+            return Err("ambiguous peer arguments".into());
+        }
+        let target=params.get("target").or_else(||params.get("to")).map(|value|value.as_str().ok_or("invalid peer target")).transpose()?.unwrap_or("");
+        let body=params.get("text").or_else(||params.get("body")).and_then(Value::as_str).ok_or("invalid peer message")?;
+        let broadcast=params.get("broadcast").map(|value|value.as_bool().ok_or("invalid peer broadcast")).transpose()?.unwrap_or(false);
+        let in_reply_to=params.get("in_reply_to").filter(|value|!value.is_null()).map(|value|value.as_str().ok_or("invalid peer reply reference")).transpose()?;
+        if (broadcast && !target.is_empty()) || (!broadcast && target.is_empty())
+            || target.len()>128 || !target.bytes().all(|byte|byte.is_ascii_alphanumeric()||byte==b'-')
+            || body.trim().is_empty() || body.chars().count()>delivery::MAX_BODY_CHARS {
             return Err("invalid peer target or message".into());
         }
         let (roster, clean_body, clean_title, clean_scope) = self.with_lore(|lore| {
@@ -160,32 +167,21 @@ impl PeerHost {
         if clean_body.chars().count() > delivery::MAX_BODY_CHARS {
             return Err("message too long after scrubbing".into());
         }
-        let matches: Vec<_> = roster
-            .iter()
-            .filter(|p| target_matches(&p.session_id, target, exact))
-            .collect();
-        let peer = match matches.as_slice() {
-            [peer] => *peer,
-            [] => return Err("no live same-scope peer matches target".into()),
-            _ => return Err("peer target is ambiguous".into()),
-        };
-        let registry = Registry::open(&self.runtime).map_err(|_| "peer registry unavailable")?;
-        let mut peer_info = registry
-            .scoped(
-                &self.scope,
-                Some(&self.session_id),
-                &|s: &str| s.to_owned(),
-                true,
-            )
-            .map_err(|_| "peer registry unavailable")?
-            .into_iter()
-            .find(|p| p.session_id == peer.session_id)
-            .ok_or("peer is no longer live")?;
+        let matches:Vec<_>=roster.iter().filter(|peer|broadcast||target_matches(&peer.session_id,target,exact)).collect();
+        if matches.is_empty() { return Err(if broadcast { "no live same-scope peers to broadcast to" } else { "no live same-scope peer matches target" }.into()); }
+        if !broadcast && matches.len()!=1 { return Err("peer target is ambiguous".into()); }
+        let recipients:Vec<String>=matches.iter().map(|peer|peer.session_id.clone()).collect();
+        if recipients.iter().map(|id|id.len()+4).sum::<usize>()>40*1024 { return Err("broadcast recipient evidence exceeds the reply bound; nothing was sent".into()); }
+        let registry=Registry::open(&self.runtime).map_err(|_|"peer registry unavailable")?;
+        let mut peer_infos:Vec<_>=registry.scoped(&self.scope,Some(&self.session_id),&|text:&str|text.to_owned(),true)
+            .map_err(|_|"peer registry unavailable")?.into_iter().filter(|peer|recipients.contains(&peer.session_id)).collect();
+        if peer_infos.len()!=recipients.len() { return Err("a peer is no longer live; nothing was sent".into()); }
         self.with_lore(|lore| {
             let clean = |lore: &mut LoreClient, value: &str| {
                 lore.scrub(value)
                     .map_err(|_| "LORE scrub unavailable".to_owned())
             };
+            for peer_info in peer_infos.iter_mut().filter(|_|!broadcast) {
             peer_info.title = clean(lore, &peer_info.title)?;
             peer_info.cwd = clean(lore, &peer_info.cwd)?;
             peer_info.socket_path = clean(lore, &peer_info.socket_path)?;
@@ -221,6 +217,7 @@ impl PeerHost {
                 .as_deref()
                 .map(|s| clean(lore, s))
                 .transpose()?;
+            }
             Ok(())
         })?;
         let sender = PeerRecord {
@@ -242,13 +239,15 @@ impl PeerHost {
         };
         let scope = self.scope.clone();
         let raw_body = body.to_owned();
-        let result = delivery::deliver(
+        let kind=if broadcast { "broadcast" } else { "direct" };
+        let result = delivery::deliver_with_reply(
             &registry,
             &sender,
-            std::slice::from_ref(&peer.session_id),
+            &recipients,
             body,
-            "direct",
+            kind,
             None,
+            in_reply_to,
             &self.limiter,
             &self.ledger,
             &move |text: &str| {
@@ -263,9 +262,9 @@ impl PeerHost {
         )
         .map_err(|_| "peer delivery failed".to_owned())?;
         let _ = self.events.try_send(json!({"type":"peer_sent","data":{
-            "to":result.delivered,"kind":"direct",
+            "to":result.delivered,"kind":kind,"in_reply_to":in_reply_to,
             "message_id":result.record.as_ref().map(|r| r.id.as_str())}}));
-        Ok(json!({"peer":peer_info,
+        Ok(json!({"peer":if broadcast { None } else { peer_infos.first() },"peer_count":recipients.len(),"kind":kind,"in_reply_to":in_reply_to,"trust":PEER_UNTRUSTED_INTRO,"untrusted_peer_data":true,
             "delivered_to":result.delivered,"failed":result.failed,
             "message_id":result.record.as_ref().map(|r| r.id.as_str()),
             "ledger_error":result.ledger_error}))
@@ -405,13 +404,17 @@ impl Host for PeerHost {
     fn call(&self, method: &str, params: &Value) -> Result<Value, String> {
         match method {
             "peer_tools_status" => Ok(json!({"provider_peer_tools":self.peer_tools_ready(),"ledger_path":self.ledger_path})),
-            "peers" => self.peers(),
+            "peers" => self.peers(params),
             "msg" => self.msg(params),
             "peer_history" => self.with_lore(|lore| {
+                if params.as_object().is_none_or(|rows|rows.keys().any(|key|!matches!(key.as_str(),"direction"|"limit"))) { return Err("invalid peer history filter".into()); }
+                let direction=params.get("direction").map(|value|value.as_str().ok_or("invalid peer history direction")).transpose()?.unwrap_or("both");
+                let limit=params.get("limit").map(|value|value.as_u64().ok_or("invalid peer history limit")).transpose()?.unwrap_or(20);
+                if !matches!(direction,"both"|"sent"|"received") || !(1..=100).contains(&limit) { return Err("invalid peer history filter".into()); }
                 let scope = lore.scrub(&self.scope).map_err(|_| "LORE scrub unavailable")?;
                 let failure = std::sync::atomic::AtomicBool::new(false);
                 let lore = Mutex::new(lore);
-                let messages = self.ledger.history(&self.session_id, &scope, &|text: &str| {
+                let messages = self.ledger.history_filtered(&self.session_id, &scope, direction,limit as usize,&|text: &str| {
                     // Scrubber's trait is infallible; poison the whole result
                     // when any required string could not be scrubbed.
                     match lore.lock().unwrap().scrub(text) {
@@ -420,7 +423,9 @@ impl Host for PeerHost {
                     }
                 }).map_err(|_| "Peer history unavailable")?;
                 if failure.load(std::sync::atomic::Ordering::Relaxed) { return Err("LORE scrub unavailable".into()); }
-                Ok(json!({"messages":messages,"bounded_tail":true,"untrusted_peer_data":true}))
+                let sent=messages.iter().filter(|row|row.sender.session==self.session_id).count();
+                let received=messages.iter().filter(|row|row.to.contains(&self.session_id)).count();
+                Ok(json!({"messages":messages,"sent_count":sent,"received_count":received,"direction":direction,"limit":limit,"bounded_tail":true,"trust":PEER_UNTRUSTED_INTRO,"untrusted_peer_data":true}))
             }),
             "branch" => {
                 let status = doxa_worktrees::branch_status(&self.cwd)

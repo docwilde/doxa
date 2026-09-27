@@ -173,3 +173,27 @@ fn ledger_lock_contention_has_a_deadline() -> io::Result<()> {
     assert_eq!(fs::metadata(&path)?.len(), 0);
     Ok(())
 }
+
+#[test]
+fn broadcast_reply_records_full_fanout_and_refusals_charge_nothing() -> io::Result<()> {
+    let temp=tempfile::tempdir()?;let runtime=temp.path().join("runtime");let registry=Registry::open(&runtime)?;
+    let first=Inbox::bind(&runtime,"first")?;let second=Inbox::bind(&runtime,"second")?;let foreign=Inbox::bind(&runtime,"foreign")?;
+    registry.write(&peer("first",first.path(),"/repo"))?;registry.write(&peer("second",second.path(),"/repo"))?;registry.write(&peer("foreign",foreign.path(),"/other"))?;
+    let ledger_path=temp.path().join("peers/messages.jsonl");let ledger=Ledger::new(ledger_path.clone());
+    let limiter=Mutex::new(RateLimiter::new(SendLimits{per_turn:2,per_window:2,window:Duration::from_secs(60)}));
+    let sender=peer("sender",Path::new("/unused"),"/repo");let clean=|text:&str|text.replace("SECRET","[redacted]");
+    let reply="0123456789abcdef0123456789abcdef";
+    assert!(deliver_with_reply(&registry,&sender,&["first".into(),"foreign".into()],"SECRET","broadcast",Some("t"),Some(reply),&limiter,&ledger,&clean).is_err());
+    assert!(deliver_with_reply(&registry,&sender,&["first".into()],"SECRET","direct",Some("t"),Some("not-a-message"),&limiter,&ledger,&clean).is_err());
+    assert!(!ledger_path.exists());
+    let first=thread::spawn(move||first.receive(&|text:&str|text.to_owned()));let second=thread::spawn(move||second.receive(&|text:&str|text.to_owned()));
+    let result=deliver_with_reply(&registry,&sender,&["first".into(),"second".into()],"SECRET","broadcast",Some("t"),Some(reply),&limiter,&ledger,&clean)?;
+    assert_eq!(result.delivered.len(),2);assert!(result.failed.is_empty());
+    for worker in [first,second] { let frame=worker.join().unwrap()?;assert_eq!(frame.body,"[redacted]");assert_eq!(frame.kind.as_deref(),Some("broadcast")); }
+    assert!(limiter.lock().unwrap().charge(Some("t"),1).is_err());
+    let row=result.record.unwrap();assert_eq!(row.in_reply_to.as_deref(),Some(reply));assert_eq!(row.kind,"broadcast");assert_eq!(row.to.len(),2);
+    assert!(deliver(&registry,&sender,&["first".into()],"again","direct",Some("t"),&limiter,&ledger,&clean).is_err());
+    assert_eq!(fs::read_to_string(ledger_path)?.lines().count(),1);
+    assert!(foreign.poll_receive(&clean)?.is_none());
+    Ok(())
+}
