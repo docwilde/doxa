@@ -21,7 +21,7 @@ pub fn cell(text: &str, width: usize) -> String {
 pub struct BeliefColumns { widths:Vec<usize>, pub actions:bool }
 impl BeliefColumns {
     pub fn new(width:usize)->Self {
-        let widths=if width>=105 {vec![17,7,16,5,4,19,width-74]}
+        let widths=if width>=90 {vec![17,7,16,5,4,19,width-74]}
             else if width>=72 {vec![17,6,12,5,4,0,width-50]}
             else if width>=42 {vec![17,5,8,0,0,0,width-33]}
             else {vec![0,5,0,0,0,0,width.saturating_sub(6)]};
@@ -50,7 +50,7 @@ mod tests {
     use super::*;
     #[test]
     fn columns_remain_aligned_for_wide_unicode_and_terminal_controls() {
-        for width in [24,42,72,105,140] {
+        for width in [24,42,72,90,100,105,140] {
             let columns=BeliefColumns::new(width);
             assert!(columns.header().width()<=width);
             assert!(columns.belief(7,"界界subject","claim\nwith \u{1b} control",0.9,Some(5),Some("2026-09-27T12:00:00Z")).width()<=width);
