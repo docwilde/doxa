@@ -4,7 +4,7 @@
 //! terminal controls and bounds retained text; it never writes tool input or
 //! results to disk. A replayed call/result updates its existing card by ID.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use serde_json::Value;
 
@@ -53,6 +53,7 @@ impl ToolCard {
 #[derive(Clone, Debug, Default)]
 pub(super) struct ToolCards {
     by_session: HashMap<String, Vec<ToolCard>>,
+    recent: VecDeque<String>,
 }
 
 impl ToolCards {
@@ -77,8 +78,10 @@ impl ToolCards {
             return false;
         };
         if !self.by_session.contains_key(session_id) && self.by_session.len() >= MAX_SESSIONS {
-            return false;
+            if let Some(oldest) = self.recent.pop_front() { self.by_session.remove(&oldest); }
         }
+        self.recent.retain(|id| id != session_id);
+        self.recent.push_back(session_id.to_owned());
         let cards = self.by_session.entry(session_id.to_owned()).or_default();
         let index = cards.iter().position(|card| card.id == id);
         if index.is_none() {
@@ -199,6 +202,25 @@ mod tests {
         assert!(card.input.as_ref().unwrap().contains("a.rs"));
         assert_eq!(card.result.as_deref(), Some("done"));
         assert_eq!(card.status(), "finished · 12 ms");
+    }
+
+    #[test]
+    fn later_sessions_receive_cards_without_expanding_the_session_budget() {
+        let mut cards = ToolCards::default();
+        for index in 0..=MAX_SESSIONS {
+            assert!(cards.record(&format!("s{index}"),"tool_call",&json!({"id":"call","name":"Read"})));
+        }
+        assert_eq!(cards.by_session.len(),MAX_SESSIONS);
+        assert!(cards.for_session("s0").is_empty());
+        assert_eq!(cards.for_session(&format!("s{MAX_SESSIONS}")).len(),1);
+        // Activity renews an existing owner; re-entering an evicted owner can
+        // retain new result detail while another idle owner is evicted.
+        cards.record("s1","tool_result",&json!({"id":"call","result_summary":"done"}));
+        cards.record("s0","tool_result_detail",&json!({"id":"call","text":"latest"}));
+        assert_eq!(cards.for_session("s0")[0].result.as_deref(),Some("latest"));
+        assert_eq!(cards.for_session("s1")[0].result.as_deref(),Some("done"));
+        assert!(cards.for_session("s2").is_empty());
+        assert_eq!(cards.by_session.len(),MAX_SESSIONS);
     }
 
     #[test]
