@@ -81,7 +81,8 @@ impl UiStateStore {
         if !self.writable_layout { return Err("saved layout exceeds supported pane bounds"); }
         if app.has_offline_open_tabs() { return Err("archived tabs are read-only"); }
         if self.record.as_ref().is_some_and(|record| record.tabs.iter().any(|tab|
-            !app.groups.iter().any(|group| group.tabs.contains(&tab.session_id)))) {
+            !app.groups.iter().any(|group| group.tabs.contains(&tab.session_id))
+                && !app.detached_this_run.contains(&tab.session_id))) {
             return Err("saved layout includes offline tabs");
         }
         Ok(())
@@ -323,6 +324,7 @@ impl UiStateStore {
                     .any(|group| group.tabs.contains(&tab.session_id))
                     && !app.clear_stop_after_save.contains(&tab.session_id)
                     && !app.killed_this_run.contains(&tab.session_id)
+                    && !app.detached_this_run.contains(&tab.session_id)
             })
         }) {
             return Err(io::Error::new(
@@ -356,7 +358,6 @@ impl UiStateStore {
                 }
             }
         }
-        if tabs.is_empty() && app.fleet_views.is_empty() && app.killed_this_run.is_empty() { return Ok(()); }
         if app.fleet_views.len()>crate::ui::fleet_menu::MAX_SAVED_VIEWS || app.fleet_views.iter().any(|view|!view.valid()){
             return Err(io::Error::new(io::ErrorKind::InvalidInput,"invalid saved fleet view"));
         }
@@ -366,6 +367,20 @@ impl UiStateStore {
                 "same session shown in multiple pane persisted_groups",
             ));
         }
+        // Deliberate Ctrl+W detaches remain flat restore records, as in the
+        // Python window store. They have no invented current pane geometry.
+        for id in &app.detached_this_run {
+            if app.killed_this_run.contains(id) || app.clear_stop_after_save.contains(id) || !seen.insert(id.as_str()) { continue; }
+            if !valid_session_id(id) { return Err(io::Error::new(io::ErrorKind::InvalidInput,"invalid detached session id")); }
+            let old = self.record.as_ref().and_then(|record|record.tabs.iter().find(|tab|tab.session_id==*id));
+            tabs.push(Tab {session_id:id.clone(),
+                pinned_name:app.custom_names.get(id).cloned().or_else(||old.and_then(|tab|tab.pinned_name.clone())),
+                cwd:app.recorded_session_cwd(id).map(|cwd|cwd.to_string_lossy().into_owned()).or_else(||old.and_then(|tab|tab.cwd.clone()))});
+        }
+        if tabs.len()>MAX_TABS + usize::from(self.startup_overflow_id.as_ref().is_some_and(|id|tabs.iter().any(|tab|tab.session_id==*id))) {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput,"saved tab bounds exceeded including detached records"));
+        }
+        if tabs.is_empty() && app.fleet_views.is_empty() && app.killed_this_run.is_empty() { return Ok(()); }
         let active = persisted_groups
             .get(app.active_group)
             .and_then(|g| g.tabs.get(g.active))
@@ -668,6 +683,33 @@ fn parse_legacy_tree(raw: &Value, live: &[String]) -> Option<([PaneGroup; 2], Sp
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn explicit_detach_keeps_flat_restore_record_and_allows_later_layout_saves() {
+        use crossterm::event::{Event,KeyCode,KeyEvent,KeyModifiers};
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = UiStateStore::new(dir.path(),"/project","machine").unwrap();
+        let mut app = App::default();
+        app.groups[0].tabs = vec!["one".into(),"two".into()];
+        app.custom_names.insert("one".into(),"Pinned".into());
+        store.save(&app).unwrap();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('w'),KeyModifiers::CONTROL)));
+        assert_eq!(app.groups[0].tabs,["two"]);
+        app.groups[0].tabs.push("fresh".into()); app.groups[0].active = 1;
+        app.rail_width = 31;
+        assert!(store.save_if_complete(&app,&Mutex::new(true)).unwrap());
+        let saved = load_tabset(store.path(),"/project").unwrap();
+        assert_eq!(saved.tabs.iter().map(|tab|tab.session_id.as_str()).collect::<Vec<_>>(),["two","fresh","one"]);
+        assert_eq!(saved.tabs[2].pinned_name.as_deref(),Some("Pinned"));
+        assert_eq!(saved.raw["layout"]["groups"]["tabs"].as_array().unwrap().len(),2);
+        assert_eq!(saved.raw["rust_ui"]["rail_width"],31);
+        assert_eq!(store.clear_preflight(&app,&Mutex::new(true)),Ok(()));
+        let reloaded = UiStateStore::new(dir.path(),"/project","machine").unwrap();
+        let mut restored = App::default();
+        assert!(reloaded.restore(&mut restored,&["one".into(),"two".into(),"fresh".into()]));
+        assert_eq!(restored.groups[0].tabs,["two","fresh","one"]);
+        assert_eq!(restored.groups[0].active_id(),Some("fresh"));
+        assert!(restored.pending_prompts.is_empty());
+    }
     use serde_json::json;
 
     #[test]

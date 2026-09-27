@@ -1410,6 +1410,7 @@ pub struct App {
     pending_launches: Vec<(launch::LaunchOptions, Option<String>, usize)>,
     pending_attaches: Vec<(String, usize)>,
     attaching_ids: HashSet<String>,
+    pub(crate) detached_this_run: Vec<String>,
     launching: bool,
     pending_model_queries: Vec<String>,
     pending_model_changes: Vec<(String, String)>,
@@ -1595,6 +1596,7 @@ impl Default for App {
             pending_launches: Vec::new(),
             pending_attaches: Vec::new(),
             attaching_ids: HashSet::new(),
+            detached_this_run: Vec::new(),
             launching: false,
             pending_model_queries: Vec::new(),
             pending_model_changes: Vec::new(),
@@ -6854,6 +6856,8 @@ impl App {
             return;
         }
         let id = group.tabs.remove(group.active);
+        if (!self.offline_ids.contains(&id) || self.history_entries.contains_key(&id))
+            && !self.detached_this_run.contains(&id) { self.detached_this_run.push(id.clone()); }
         for job in &self.local_shell_jobs { if job.session == id { job.cancel(); } }
         group.active = group.active.min(group.tabs.len().saturating_sub(1));
         group.scroll = 0;
