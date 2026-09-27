@@ -27,7 +27,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = ROOT / "rust/doxa-tui/target/release/doxa-rs"
-VISIBLE_MARKER = b"Sessions"
+VISIBLE_MARKER = b"Prompt"
 
 
 def summary(samples: list[float]) -> dict[str, float | int]:
@@ -46,8 +46,7 @@ def sample(width: int, height: int, timeout: float) -> dict[str, float]:
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", height, width, 0, 0))
         env = {**os.environ, "TERM": "xterm-256color", "DOXA_HOME": str(Path(temp) / "home"),
-               "DOXA_SKIP_FIRST_RUN": "1", "DOXA_SKIP_UPDATE_CHECK": "1",
-               "DOXA_SIDEBAR": "1"}
+               "DOXA_SKIP_FIRST_RUN": "1", "DOXA_SKIP_UPDATE_CHECK": "1"}
         started = time.perf_counter()
         proc = subprocess.Popen(
             [str(BINARY), "--demo"], stdin=slave, stdout=slave, stderr=slave,
@@ -109,7 +108,7 @@ def main() -> None:
             metric: summary([row[metric] for row in samples])
             for metric in ("first_byte_ms", "first_visible_ms")
         }
-    print(json.dumps({"binary": str(BINARY), "mode": "--demo", "sidebar": "forced visible for historical Sessions marker", "runs_per_size": args.runs,
+    print(json.dumps({"binary": str(BINARY), "mode": "--demo", "visible_marker": VISIBLE_MARKER.decode(), "runs_per_size": args.runs,
                       "results": result}, indent=2))
 
 
