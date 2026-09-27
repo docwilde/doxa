@@ -1000,3 +1000,15 @@ def test_one_normalized_record_over_json_budget_returns_explicit_error(server, l
     monkeypatch.setattr(meshgraph, "MAX_BATCH_WIRE_BYTES", 1024)
     append(ledger, record(body="<" * 200))
     assert get(server, "ledger")[0] == 413
+
+
+def test_browser_topology_retention_fixture_without_browser_or_network():
+    import shutil
+    import subprocess
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node is required for the owned mesh model fixture")
+    fixture = Path(__file__).parent / "fixtures" / "mesh_browser_bounds.cjs"
+    result = subprocess.run([node, str(fixture)], capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stderr
+    assert "rotations, eviction, active state and notice passed" in result.stdout

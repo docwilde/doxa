@@ -47,6 +47,11 @@ const VIEW = {
   pulseMs: 1500,            // travelling dot on a direct message
   ringMs: 1400,             // expanding ring on a broadcast
   maxPulses: 400,
+  maxNodes: 64,
+  maxPairs: 512,
+  maxSeen: 8192,
+  maxDedupeChars: 256,
+  maxMessageChars: 8 << 20, // UTF-16 units: at most 16 MiB of serialized traffic
   maxMessages: 4000,        // ring buffer; the ledger on disk stays complete
   feedRows: 40,
 };
@@ -85,10 +90,13 @@ const COLOUR = {
 const nodes = new Map();
 /** JSON.stringify([from, to]) -> directed pair aggregate */
 const pairs = new Map();
-/** every record we have seen, newest last, capped at VIEW.maxMessages */
+/** Recent whole records, bounded by both count and serialized traffic size. */
 const messages = [];
-/** message ids already ingested -- the guard against a stream replay */
+/** Finite replay window, independent of node eviction so recent traffic stays deduped. */
 const seen = new Set();
+let messageChars = 0;
+// Once history is omitted, counts are a bounded view for this page lifetime.
+const limited = { nodes: false, pairs: false, messages: false, replay: false };
 /** transient visuals: travelling dots and broadcast rings */
 let pulses = [];
 
@@ -193,13 +201,23 @@ function ingest(record, atLoad) {
   // Last-Event-ID and should not replay, but "should not" is not a
   // guarantee worth drawing a doubled graph on.
   const key = record.id || `${record.from}|${record.ts}|${record.body.length}`;
-  if (seen.has(key)) return false;
-  seen.add(key);
+  if (key.length <= VIEW.maxDedupeChars) {
+    if (seen.has(key)) return false;
+    seen.add(key);
+    if (seen.size > VIEW.maxSeen) {
+      seen.delete(seen.values().next().value);
+      limited.replay = true;
+    }
+  } else {
+    // An oversized message identity cannot consume the replay window.
+    limited.replay = true;
+  }
 
   const when = parseTs(record.ts) || Date.now();
   record._t = when;
 
   const sender = touch(record.from);
+  if (!sender) { statsDirty = true; return false; }
   // Identity only ever rides on `from`, so this is the one moment a node
   // can learn what it is called. See the contract note in the README of
   // this change: a session that has only ever RECEIVED stays a short id.
@@ -214,8 +232,18 @@ function ingest(record, atLoad) {
   sender.last = Math.max(sender.last, when);
 
   const edges = Array.isArray(record.edges) ? record.edges : [];
-  for (const edge of edges) {
-    const target = touch(edge.to);
+  // Admit a bounded fan-out before touching nodes: a 4096-recipient record
+  // must not repeatedly create and evict thousands of simulation objects.
+  const active = new Set([selected, dragging && dragging.id].filter(Boolean));
+  const graphEdges = edges.filter((edge) => active.has(edge.to));
+  for (let i = edges.length - 1; i >= 0 && graphEdges.length < VIEW.maxNodes - 1; i--) {
+    if (!active.has(edges[i].to)) graphEdges.push(edges[i]);
+  }
+  if (graphEdges.length < edges.length) limited.nodes = true;
+  const protectedIds = new Set([record.from, ...active]);
+  for (const edge of graphEdges) {
+    const target = touch(edge.to, protectedIds);
+    if (!target) continue;
     target.in += 1;
     target.last = Math.max(target.last, when);
 
@@ -232,9 +260,16 @@ function ingest(record, atLoad) {
           ? [edge.from, edge.to] : [edge.to, edge.from]),
         count: 0, direct: 0, broadcast: 0, unknown: 0, last: 0,
       };
+      if (pairs.size >= VIEW.maxPairs) {
+        pairs.delete(pairs.keys().next().value);
+        limited.pairs = true;
+      }
       pairs.set(pk, pair);
       wake(); // a new edge changes the layout
     }
+    // Refresh insertion order as the finite pair window becomes active.
+    pairs.delete(pk);
+    pairs.set(pk, pair);
     pair.count += 1;
     pair.last = Math.max(pair.last, when);
     if (edge.kind === "broadcast") pair.broadcast += 1;
@@ -242,21 +277,36 @@ function ingest(record, atLoad) {
     else pair.unknown += 1;
   }
 
+  const visibleEdges = graphEdges.filter((edge) => nodes.has(edge.from) && nodes.has(edge.to));
+
   // Only live traffic animates. Replaying a thousand historical records
   // on load must not fire a thousand rings at once -- the snapshot is
   // history, and history is drawn as accumulated weight, not as motion.
   if (!atLoad) {
     if (record.kind === "broadcast") {
-      pulses.push({ type: "ring", node: record.from, t0: performance.now(), n: edges.length });
+      pulses.push({ type: "ring", node: record.from, t0: performance.now(), n: visibleEdges.length });
     }
-    for (const edge of edges) {
+    for (const edge of visibleEdges) {
       pulses.push({ type: "dot", from: edge.from, to: edge.to, kind: edge.kind, t0: performance.now() });
     }
     if (pulses.length > VIEW.maxPulses) pulses = pulses.slice(-VIEW.maxPulses);
   }
 
-  messages.push(record);
-  if (messages.length > VIEW.maxMessages) messages.shift();
+  // The feed retains no duplicate edge projection. Bodies remain exact;
+  // older whole records leave the finite count and serialized-size window.
+  const retained = { ...record };
+  delete retained.edges;
+  Object.defineProperty(retained, "_chars", { value: JSON.stringify(retained).length });
+  if (retained._chars <= VIEW.maxMessageChars) {
+    messages.push(retained);
+    messageChars += retained._chars;
+  } else {
+    limited.messages = true;
+  }
+  while (messages.length > VIEW.maxMessages || messageChars > VIEW.maxMessageChars) {
+    messageChars -= messages.shift()._chars;
+    limited.messages = true;
+  }
 
   statsDirty = true;
   if (!selected || record.from === selected || edges.some((e) => e.to === selected)) {
@@ -265,10 +315,36 @@ function ingest(record, atLoad) {
   return true;
 }
 
-/** Get or create a node. New nodes are seeded near the centre. */
-function touch(id) {
+/** Remove one simulation identity and all projections pointing at it. */
+function removeNode(id) {
+  nodes.delete(id);
+  for (const [key, pair] of pairs) {
+    if (pair.from === id || pair.to === id) pairs.delete(key);
+  }
+  pulses = pulses.filter((pulse) => pulse.node !== id && pulse.from !== id && pulse.to !== id);
+  if (selected === id) { selected = null; feedDirty = true; }
+  if (hovered === id) { hovered = null; canvas.classList.toggle("is-over-node", false); }
+  if (dragging && dragging.id === id) { dragging.pinned = false; dragging = null; }
+}
+
+/** Get or create a node within the recent-activity window. */
+function touch(id, protectedIds = new Set()) {
   let node = nodes.get(id);
-  if (node) return node;
+  if (node) {
+    nodes.delete(id);
+    nodes.set(id, node);
+    return node;
+  }
+  if (nodes.size >= VIEW.maxNodes) {
+    for (const candidate of nodes.keys()) {
+      if (candidate !== selected && (!dragging || candidate !== dragging.id) && !protectedIds.has(candidate)) {
+        removeNode(candidate);
+        limited.nodes = true;
+        break;
+      }
+    }
+  }
+  if (nodes.size >= VIEW.maxNodes) { limited.nodes = true; return null; }
   const angle = nodes.size * 2.399963; // golden angle -- no two start stacked
   const radius = 40 + nodes.size * 9;
   node = {
@@ -301,8 +377,7 @@ function touch(id) {
  *
  * O(N^2) in the repulsion loop: 1024 pair calculations at the
  * experiment's N=32, which costs nothing at 60fps. It stays honest to
- * roughly N=300; past that this wants a Barnes-Hut quadtree, and the
- * place to notice is here rather than in a bug report about a slow page.
+ * N<=64 because the viewport evicts older topology and reports that limit.
  *
  * The simulation SLEEPS. Once mean displacement drops below
  * SIM.sleepBelow the graph is settled and stepping stops entirely, so an
@@ -735,6 +810,9 @@ function renderStats() {
   el.statPairs.textContent = String(pairs.size);
   el.statBcast.textContent = String(broadcasts);
   el.empty.hidden = messages.length > 0;
+  el.limit.hidden = !Object.values(limited).some(Boolean);
+  el.limit.textContent = `Limited view · up to ${VIEW.maxNodes} sessions and ${VIEW.maxPairs} ties; recent traffic only. Full ledger remains on disk.`;
+  el.limit.title = `Up to ${VIEW.maxNodes} sessions, ${VIEW.maxPairs} ties and ${VIEW.maxMessages} recent messages in a 16 MiB serialized traffic window. Older topology, traffic and replay identities may be omitted.`;
 }
 
 /**
@@ -1016,6 +1094,7 @@ function boot() {
   el.statMsgs = byId("stat-msgs");
   el.statPairs = byId("stat-pairs");
   el.statBcast = byId("stat-bcast");
+  el.limit = byId("view-limit");
   el.conn = byId("conn");
   el.empty = byId("empty");
   el.panel = byId("panel");
