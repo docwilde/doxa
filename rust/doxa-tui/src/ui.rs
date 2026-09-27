@@ -1412,6 +1412,8 @@ pub struct App {
     attaching_ids: HashSet<String>,
     pub(crate) detached_this_run: Vec<String>,
     launching: bool,
+    awaiting_initial_attach: bool,
+    startup_recovery: Option<String>,
     pending_model_queries: Vec<String>,
     pending_model_changes: Vec<(String, String)>,
     pending_effort_changes: Vec<(String, String)>,
@@ -1598,6 +1600,8 @@ impl Default for App {
             attaching_ids: HashSet::new(),
             detached_this_run: Vec::new(),
             launching: false,
+            awaiting_initial_attach: false,
+            startup_recovery: None,
             pending_model_queries: Vec::new(),
             pending_model_changes: Vec::new(),
             pending_effort_changes: Vec::new(),
@@ -1995,7 +1999,8 @@ impl App {
                     .find(|s| s.id == id)
                     .map(|s| s.transcript.clone())
                     .unwrap_or_default();
-                let transcript=if self.persist_preferences && transcript.is_empty() && self.preferences.on("boot_banner") {"       █       \n      ███      \n    ███████    \n   █████████   DOXA\n  ███████████  \n █████████████ \n███████████████\n\n".into()} else {transcript};
+                self.awaiting_initial_attach = false;
+                self.startup_recovery = None;
                 self.apply_update(DaemonUpdate::Upsert(Session {
                     id: id.into(),
                     title: self.custom_names.get(id).cloned().unwrap_or_else(|| model.clone().unwrap_or_else(|| safe_label(id))),
@@ -9364,7 +9369,7 @@ impl App {
         if clock_width>0 {frame.render_widget(Paragraph::new(self.clock_text.as_str()).style(Style::default().fg(theme::MUTED).bg(theme::RAISED)),Rect::new(inner[0].right()-clock_width,inner[0].y+1,clock_width,1));}
         let content = session
             .map(|s| s.transcript.as_str())
-            .unwrap_or("No session open. Select one in the rail and press Enter.");
+            .unwrap_or("");
         let id = group.active_id().unwrap_or("");
         let cards_revision = self.tool_cards_revision.get(id).copied().unwrap_or(0);
         let activity_line = if self.activity_label(id) == Some("Processing") {
@@ -9375,7 +9380,17 @@ impl App {
         } else if self.activity_label(id) == Some("Queued") {
             Some(Line::styled(" Queued", Style::default().fg(theme::SECONDARY)))
         } else { None };
-        let (lines, sections, top) = {
+        let (lines, sections, top) = if content.trim().is_empty() {
+            let identity = self.session_identity.get(id);
+            let state = if session.is_some() {
+                crate::welcome::State::Ready {engine:identity.and_then(|value|value.0.as_deref()),
+                    model:identity.and_then(|value|value.1.as_deref())}
+            } else if self.launching { crate::welcome::State::Starting }
+            else if self.awaiting_initial_attach || group.active_id().is_some() { crate::welcome::State::Connecting }
+            else { crate::welcome::State::Empty {reason:self.startup_recovery.as_deref()} };
+            (crate::welcome::lines(state,self.persist_preferences && self.preferences.on("boot_banner"),
+                inner[1].width.saturating_sub(2),inner[1].height),Vec::new(),0)
+        } else {
             let mut cache = self.rendered_transcripts.borrow_mut();
             let position = cache.iter().position(|entry| entry.pane == index && entry.id == id);
             let position = if let Some(position) = position { position } else {
@@ -9746,7 +9761,12 @@ fn run_loop(
     app.sidebar_auto=app.preferences.value("sidebar").is_empty();
     app.rail_width=app.preferences.sidebar_width();
     app.rail_visible=match app.preferences.value("sidebar") {""=>app.sessions.len()>1 || !app.collections.is_empty(),"0"|"false"|"off"|"no"=>false,_=>true};
+    app.awaiting_initial_attach=prompt_sender.is_some();
     if let Some((store, live_ids, _)) = &state {
+        app.awaiting_initial_attach=!live_ids.is_empty();
+        if live_ids.is_empty() && store.startup_failed {
+            app.startup_recovery=Some("Provider startup failed. Check setup, then retry.".into());
+        }
         store.restore(&mut app, live_ids);
     }
     app.refresh_clock();
@@ -11546,6 +11566,40 @@ for line in sys.stdin:
     fn click_picker_row(app: &mut App, menu: Rect, offset: u16) {
         app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
             column: menu.x + 2, row: menu.y + offset, modifiers: KeyModifiers::NONE }));
+    }
+
+    #[test]
+    fn native_welcome_keeps_loading_failure_and_transcript_distinct() {
+        let mut app = App::default();
+        app.rail_visible = false;
+        app.handle(Event::Resize(100, 32));
+        app.persist_preferences = true;
+        app.preferences.set_test("boot_banner", "1");
+        app.preferences.set_test("background", "opaque");
+        app.awaiting_initial_attach = true;
+        let connecting = painted_at(&app, 100, 32);
+        assert!(connecting.contains("Connecting to session"));
+        assert!(!connecting.contains("could not start") && !connecting.contains("Select one in the rail"));
+        app.awaiting_initial_attach = false;
+        app.startup_recovery = Some("Fresh session could not start".into());
+        let recovery = painted_at(&app, 100, 32);
+        assert!(recovery.contains("Session could not start") && recovery.contains("/setup") && recovery.contains("/engine"));
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"s","engine":"codex","model":"gpt-6-sol"}));
+        assert!(app.sessions[0].transcript.is_empty());
+        let mut terminal = Terminal::new(TestBackend::new(100, 32)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let logo = buffer.content.iter().filter(|cell|cell.symbol()=="█").collect::<Vec<_>>();
+        assert!(!logo.is_empty());
+        assert!(logo.iter().all(|cell|cell.fg==theme::ACCENT && cell.bg==theme::BASE));
+        let ready = painted_at(&app, 100, 32);
+        assert!(ready.contains("Session ready") && ready.contains("gpt-6-sol"));
+        app.sessions[0].transcript = "Actual conversation".into();
+        let conversation = painted_at(&app, 100, 32);
+        assert!(conversation.contains("Actual conversation") && !conversation.contains("█"));
+        app.sessions[0].transcript.clear();
+        app.preferences.set_test("boot_banner", "0");
+        assert!(!painted_at(&app, 100, 32).contains("█"));
     }
 
     #[test]

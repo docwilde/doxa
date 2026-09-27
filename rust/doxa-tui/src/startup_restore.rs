@@ -89,7 +89,7 @@ fn try_start_fresh(store:Option<&mut UiStateStore>,mut spawn:impl FnMut()->io::R
     match spawn() {
         Ok(session)=>Ok(Some(session)),
         Err(error)=>match store {
-            Some(store)=>{store.startup_notice="Fresh session could not start · /setup checks authentication and dependencies; use /engine to retry after setup".into();Ok(None)}
+            Some(store)=>{store.startup_failed=true;store.startup_notice="Fresh session could not start · /setup checks authentication and dependencies; use /engine to retry after setup".into();Ok(None)}
             None=>Err(error),
         }
     }
@@ -184,7 +184,7 @@ mod tests {
     fn failed_fresh_start_keeps_empty_setup_window_without_phantom_identity() {
         let mut store=UiStateStore::transient("/project");
         let session=try_start_fresh(Some(&mut store),||Err(io::Error::other("provider unavailable secret-output"))).unwrap();
-        assert!(session.is_none());assert!(store.startup_notice.contains("/setup"));assert!(store.startup_notice.contains("/engine"));
+        assert!(session.is_none());assert!(store.startup_failed);assert!(store.startup_notice.contains("/setup"));assert!(store.startup_notice.contains("/engine"));
         assert!(!store.startup_notice.contains("secret-output"));
         let mut app=crate::ui::App::default();assert!(!store.restore(&mut app,&[]));
         assert!(app.sessions.is_empty());assert!(app.groups.iter().all(|group|group.tabs.is_empty()));
