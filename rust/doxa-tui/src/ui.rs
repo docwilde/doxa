@@ -1366,6 +1366,8 @@ pub struct App {
     belief_browser_fixture: bool,
     belief_button_hover: Option<Rect>,
     chip_hover: Option<ChipHit>,
+    chip_hover_started: Option<(ChipHit, Instant)>,
+    chip_tooltip_visible: bool,
     link_hover: Option<String>,
     visible_links: RefCell<Vec<(Rect, String)>>,
     pending_open_urls: Vec<String>,
@@ -1556,6 +1558,8 @@ impl Default for App {
             belief_browser_fixture: false,
             belief_button_hover: None,
             chip_hover: None,
+            chip_hover_started: None,
+            chip_tooltip_visible: false,
             link_hover: None,
             visible_links: RefCell::new(Vec::new()),
             pending_open_urls: Vec::new(),
@@ -2792,6 +2796,7 @@ impl App {
             let (owner,draft,cursor)=self.action_draft.take().unwrap();if owner==(self.active_group,self.groups[self.active_group].active_id().unwrap_or("").to_owned()){self.input=draft;self.input_cursor=cursor;}else{self.input_drafts.insert(owner,(draft,cursor));}
         }
         self.sync_chooser_state();
+        self.tick_chip_hover(Instant::now());
         if matches!(self.focus, Focus::Chip(_) | Focus::Rail) && !self.focus_ring().contains(&self.focus) {
             self.focus = Focus::Prompt;
         }
@@ -8591,7 +8596,32 @@ impl App {
         if self.preferences.value("background")=="transparent" {for cell in &mut frame.buffer_mut().content {if matches!(cell.bg,theme::BASE|theme::RAISED|theme::RAIL) {cell.bg=Color::Reset;}}}
     }
 
+    /// One dwell timer for the actual painted chip. Input focus has its own
+    /// highlight and does not start or extend pointer tooltips.
+    fn tick_chip_hover(&mut self, now: Instant) -> bool {
+        if self.link_interaction_blocked() || self.chip_hover.is_none() {
+            let changed = self.chip_tooltip_visible || (self.link_interaction_blocked() && self.chip_hover.is_some());
+            self.chip_hover = None;
+            self.chip_hover_started = None;
+            self.chip_tooltip_visible = false;
+            return changed;
+        }
+        let hit = self.chip_hover.as_ref().unwrap();
+        if self.chip_hover_started.as_ref().is_none_or(|(owner,_)|owner != hit) {
+            self.chip_hover_started = Some((hit.clone(), now));
+            let changed = self.chip_tooltip_visible;
+            self.chip_tooltip_visible = false;
+            return changed;
+        }
+        if !self.chip_tooltip_visible && now.saturating_duration_since(self.chip_hover_started.as_ref().unwrap().1) >= Duration::from_millis(500) {
+            self.chip_tooltip_visible = true;
+            return true;
+        }
+        false
+    }
+
     fn draw_chip_tooltip(&self, frame: &mut Frame) {
+        if !self.chip_tooltip_visible { return; }
         let Some(hit) = &self.chip_hover else { return; };
         if self.chip_info.is_some() || self.active_chooser_rect().is_some()
             || self.active_request_index().is_some() || self.map_modal || self.diff_modal
@@ -9526,10 +9556,13 @@ impl App {
                 }
             }
             chip_x = end.saturating_add(1);
+            let hovered = !self.link_interaction_blocked() && self.chip_hover.as_ref()
+                .is_some_and(|hit|hit.group == index && hit.kind == kind);
             chip_spans.push(Span::styled(text,
-                Style::default().fg(if matches!(kind, "engine" | "more") { theme::ACCENT } else { theme::TEXT })
+                Style::default().fg(if hovered { theme::ACCENT } else { theme::TEXT })
                     .bg(theme::HIGHLIGHT)
-                    .add_modifier(if active && self.focus == Focus::Chip(kind) { Modifier::BOLD | Modifier::UNDERLINED | Modifier::REVERSED } else { Modifier::empty() })));
+                    .add_modifier(if active && self.focus == Focus::Chip(kind) { Modifier::BOLD | Modifier::UNDERLINED | Modifier::REVERSED }
+                        else if hovered { Modifier::BOLD } else { Modifier::empty() })));
         }
         frame.render_widget(Paragraph::new(Line::from(chip_spans))
             .style(Style::default().bg(theme::RAISED)), inner[3]);
@@ -9880,6 +9913,7 @@ fn run_loop(
         changed |= app.tick_blink(Instant::now());
         changed |= app.tick_spinner(Instant::now());
         changed |= app.tick_clock(Instant::now());
+        changed |= app.tick_chip_hover(Instant::now());
         if prompt_sender.is_none() {
             if let Some(id) = app.pending_peer_refresh.take() {
                 changed |= app.peer_map.roster(&id, &serde_json::json!({"ok":false}));
@@ -12094,6 +12128,37 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn chip_hover_delays_tooltips_and_resets_owner_without_blocking() {
+        let mut app = App::default();
+        app.rail_visible = false;
+        app.handle(Event::Resize(160, 32));
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"s","engine":"codex","model":"gpt-6-sol"}));
+        let mut terminal = Terminal::new(TestBackend::new(160, 32)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let engine = app.rendered_chip_hits.borrow().as_ref().unwrap().iter().find(|hit|hit.kind=="engine").unwrap().clone();
+        assert_eq!(terminal.backend().buffer()[(engine.rect.x,engine.rect.y)].fg, theme::TEXT);
+        app.handle(Event::Mouse(MouseEvent {kind:MouseEventKind::Moved,column:engine.rect.x,row:engine.rect.y,modifiers:KeyModifiers::NONE}));
+        let since = app.chip_hover_started.as_ref().unwrap().1;
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert_eq!(terminal.backend().buffer()[(engine.rect.x,engine.rect.y)].fg, theme::ACCENT);
+        assert!(!app.tick_chip_hover(since + Duration::from_millis(499)));
+        assert!(app.tick_chip_hover(since + Duration::from_millis(500)));
+        assert!(painted_at(&app,160,32).contains(chip_hint("engine")));
+        assert!(!app.tick_chip_hover(since + Duration::from_secs(1)), "only one threshold redraw");
+        let model = app.rendered_chip_hits.borrow().as_ref().unwrap().iter().find(|hit|hit.kind=="model").unwrap().clone();
+        app.handle(Event::Mouse(MouseEvent {kind:MouseEventKind::Moved,column:model.rect.x,row:model.rect.y,modifiers:KeyModifiers::NONE}));
+        assert!(!app.chip_tooltip_visible);
+        assert_eq!(app.chip_hover_started.as_ref().unwrap().0.kind,"model");
+        app.engine_picker = true;
+        assert!(app.tick_chip_hover(since + Duration::from_secs(2)));
+        assert!(app.chip_hover.is_none() && app.chip_hover_started.is_none());
+        app.engine_picker = false;
+        app.handle(Event::Mouse(MouseEvent {kind:MouseEventKind::Moved,column:engine.rect.x,row:engine.rect.y,modifiers:KeyModifiers::NONE}));
+        app.handle(Event::Resize(140,30));
+        assert!(app.chip_hover_started.is_none());
+    }
+
+    #[test]
     fn every_chip_hover_and_click_uses_rendered_strip_geometry() {
         let mut app = App::default();
         app.rail_visible = false;
@@ -12113,6 +12178,9 @@ for line in sys.stdin:
             assert!(app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Moved,
                 column: inside, row: strip.y, modifiers: KeyModifiers::NONE })));
             assert_eq!(app.chip_hover.as_ref().map(|hit| hit.kind), Some(kind));
+            assert!(!painted_at(&app, 220, 32).contains(chip_hint(kind)), "tooltip waits for dwell");
+            let since = app.chip_hover_started.as_ref().unwrap().1;
+            assert!(app.tick_chip_hover(since + Duration::from_millis(500)));
             let rendered = painted_at(&app, 220, 32);
             assert!(rendered.contains(chip_hint(kind)), "hover hint for {kind}");
             assert!(app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
