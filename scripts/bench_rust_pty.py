@@ -113,7 +113,7 @@ def run_once() -> dict:
                     append_first.append(first)
                     append_last.append(last)
                     append_bytes.append(size)
-                os.write(master, b"\t")  # Prompt -> transcript focus.
+                os.write(master, b"\t\t")  # Prompt -> tab headers -> transcript focus.
                 read_draw(master, time.perf_counter())
 
                 scroll_first, scroll_last, scroll_bytes = [], [], []
