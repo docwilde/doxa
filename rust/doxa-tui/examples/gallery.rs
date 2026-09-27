@@ -1,6 +1,6 @@
 //! Deterministic gallery frames rendered through the production Ratatui App.
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-use doxa_tui::ui::App;
+use doxa_tui::ui::{App, Focus};
 use doxa_tui::{history, transport::TranscriptSnapshot};
 use doxa_worktrees::RepoStatus;
 use ratatui::{backend::TestBackend, style::Color, Terminal};
@@ -88,7 +88,7 @@ fn scene(name: &str) -> App {
         }
         "tool-expanded" => {
             tool_activity(&mut app);
-            key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+            app.focus = Focus::Transcript;
             key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         }
         "restored-tool" => {
@@ -104,7 +104,7 @@ fn scene(name: &str) -> App {
             let bytes = records.iter().map(Value::to_string).collect::<Vec<_>>().join("\n").into_bytes();
             let markdown = history::render(&TranscriptSnapshot { bytes, earlier_bytes_omitted: false });
             event(&mut app, "demo-claude-02", "text_delta", json!({"text":markdown,"snapshot":true}));
-            key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+            app.focus = Focus::Transcript;
             key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
             app.notice = "Restored session · expanded tool detail".into();
         }
