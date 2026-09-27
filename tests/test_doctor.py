@@ -167,23 +167,27 @@ def test_cli_isolation_check_fails_when_spawned_session_not_authenticated(monkey
 # -- LORE store ----------------------------------------------------------
 
 
-def test_lore_store_check_reports_the_real_belief_count():
+def test_lore_store_check_reports_native_belief_count(monkeypatch, tmp_path):
+    from tests.test_native_lore_diagnostics import FakeCarrier
+    from doxa import native_lore
+    client = FakeCarrier({'root':str(tmp_path),'version':'fixture','active_beliefs':7})
+    monkeypatch.setattr(native_lore, 'Carrier', lambda **_: client)
     check = doctor_mod._lore_store_check()
     assert check.status == doctor_mod.STATUS_PASS
-    assert "active belief" in check.detail
+    assert "7 active belief" in check.detail
+    assert client.closed
 
 
-def test_lore_store_check_fails_when_the_store_cannot_open(monkeypatch):
-    import lore_core
-
-    def _boom():
-        raise RuntimeError("db is locked")
-
-    monkeypatch.setattr(lore_core.store, "db_connect", _boom)
+def test_lore_store_check_fails_when_native_store_cannot_open(monkeypatch):
+    from tests.test_native_lore_diagnostics import FakeCarrier
+    from doxa import native_lore
+    client = FakeCarrier(error=RuntimeError("db is locked: private source"))
+    monkeypatch.setattr(native_lore, 'Carrier', lambda **_: client)
     check = doctor_mod._lore_store_check()
     assert check.status == doctor_mod.STATUS_FAIL
-    assert "db is locked" in check.detail
+    assert check.detail == "native LORE store unavailable"
     assert check.fix == "run /setup to choose or create a LORE store"
+    assert client.closed
 
 
 # -- config file -----------------------------------------------------------

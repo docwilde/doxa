@@ -31,8 +31,7 @@ into a bug report may not contain a plausible-looking constant.
 from __future__ import annotations
 
 import importlib
-import json
-import os
+from contextlib import closing
 import platform
 import subprocess
 import tomllib
@@ -153,44 +152,47 @@ def source_dirty() -> bool:
     return proc.returncode == 0 and bool(proc.stdout.strip())
 
 
-def lore_core_version() -> "str | None":
-    """The version of the ``lore_core`` this process LOADED, or None.
-
-    Two tiers, and both are load-bearing:
-
-    * ``lore_core.__version__`` (LORE 0.35.1 and later). It resolves the
-      same way this module does -- plugin manifest when the package sits
-      inside a plugin checkout, wheel metadata when it does not -- so it
-      is right for whichever carrier DOXA ended up with, including the
-      installed distribution that has no manifest to read at all.
-    * The plugin manifest at the bootstrap's own location. Every LORE
-      before 0.35.1 shipped only inside the plugin and carried no version
-      attribute; those installs are still out there, and for them
-      ``.claude-plugin/plugin.json`` beside the package is the only file
-      that declares a version.
-
-    Any failure is None -- an /about row that cannot be filled is omitted,
-    never guessed."""
+def native_lore_info() -> "dict | None":
+    """Measured native runtime metadata, using one short owned carrier."""
     from . import _lore_bootstrap
+    from .native_lore import Carrier, NativeLoreError
 
-    _lore_bootstrap.ensure_importable()
     try:
-        import lore_core
-
-        declared = getattr(lore_core, "__version__", None)
-        if declared:
-            return str(declared)
-    except Exception:  # noqa: BLE001 -- an unimportable lore_core is a row, not a crash
-        pass
-    manifest = (
-        _lore_bootstrap._lore_core_parent() / ".claude-plugin" / "plugin.json"
-    )
-    try:
-        data = json.loads(manifest.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        _lore_bootstrap.export_sticky_lore_root()
+        with closing(Carrier(timeout=1.0)) as client:
+            value = client.request("runtime_config_v1")
+            if not isinstance(value, dict):
+                raise NativeLoreError("invalid_native_frame")
+            for key in ("root", "projects_dir"):
+                raw = value.get(key)
+                if (not isinstance(raw, str) or not 0 < len(raw) <= 4096
+                        or any(ord(char) < 32 or ord(char) == 127 for char in raw)):
+                    raise NativeLoreError("invalid_native_frame")
+                if not Path(raw).is_absolute():
+                    raise NativeLoreError("invalid_native_frame")
+            version = value.get("version")
+            stages = value.get("disabled_stages")
+            if (not isinstance(version, str) or not 0 < len(version) <= 128
+                    or any(ord(char) < 32 or ord(char) == 127 for char in version)
+                    or not isinstance(stages, list) or len(stages) > 5
+                    or any(stage not in ("inject", "index", "review", "beliefs", "skills") for stage in stages)):
+                raise NativeLoreError("invalid_native_frame")
+            process = client.process
+            source = process.args[0] if process is not None else None
+            if (not isinstance(source, str) or not 0 < len(source) <= 4096
+                    or any(ord(char) < 32 or ord(char) == 127 for char in source)):
+                raise NativeLoreError("invalid_native_frame")
+            return {"root":value["root"], "projects_dir":value["projects_dir"],
+                    "version":version, "disabled_stages":stages,
+                    "source":str(Path(source).absolute())}
+    except Exception:  # broken/missing native runtime leaves measured rows empty
         return None
-    version = (data or {}).get("version") if isinstance(data, dict) else None
-    return str(version) if version else None
+
+
+def lore_core_version() -> "str | None":
+    """Native LORE version, or None when the selected carrier cannot answer."""
+    info = native_lore_info()
+    return info["version"] if info is not None else None
 
 
 def _dep_version(module_name: str, dist_name: str) -> "str | None":
@@ -269,37 +271,12 @@ def about_rows(
         found = _dep_version(module_name, dist_name)
         if found:
             rows.append((label, found))
-    # The store PATH comes from lore_core itself (``lore_core.ROOT``, the
-    # same attribute SessionEngine.lore_root reports), not from re-reading
-    # LORE_ROOT: lore_core resolves that variable once at ITS import and a
-    # later change to the environment would make this row disagree with
-    # the store actually in use. The env var is only the fallback for a
-    # machine where lore_core is not importable at all.
-    lore_version = lore_core_version()
-    lore_root = ""
-    try:
-        import lore_core
-
-        lore_root = str(lore_core.ROOT)
-    except Exception:  # noqa: BLE001 -- no lore_core at all: the row degrades
-        lore_root = os.environ.get("LORE_ROOT", "").strip()
-    lore_bits = [bit for bit in (lore_version, lore_root) if bit]
-    if lore_bits:
-        rows.append(("lore", "  ".join(lore_bits)))
-    # WHICH lore_core answered. Since v0.37.0 there are two places one can
-    # come from -- the declared ``lore-core`` dependency, and a LORE plugin
-    # checkout, which still wins when present (see
-    # ``doxa._lore_bootstrap``) -- so the version above is no longer
-    # enough to identify what is running. A user chasing a LORE-behaviour
-    # difference must not have to guess which copy DOXA loaded, and
-    # ``resolved_source`` measures it off ``lore_core.__file__`` rather
-    # than restating the precedence rule.
-    from . import _lore_bootstrap
-
-    source = _lore_bootstrap.resolved_source()
-    if source is not None:
-        kind, location = source
-        rows.append(("lore from", f"{kind}  {location}"))
+    # Native runtime is the authority for version and root. A missing
+    # carrier cannot be replaced with Python package or environment guesses.
+    info = native_lore_info()
+    if info is not None:
+        rows.append(("lore", f"{info['version']}  {info['root']}"))
+        rows.append(("lore from", f"native  {info['source']}"))
     rows.append((
         "platform",
         f"{platform.system()} {platform.release()} ({platform.machine()})",

@@ -61,9 +61,10 @@ def resolved_value(setting: config_mod.Setting) -> str:
     path from the code that owns it, so "read-only" never means "stale
     literal from a docstring"."""
     if setting.env == "LORE_ROOT":
-        import lore_core
+        from .version import native_lore_info
 
-        return str(lore_core.ROOT)
+        info = native_lore_info()
+        return info["root"] if info is not None else "unavailable (native LORE)"
     if setting.env == "DOXA_HOME":
         return str(config_mod.doxa_home())
     if setting.env == "DOXA_RUNTIME_DIR":
