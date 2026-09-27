@@ -28,9 +28,9 @@ pub fn parse_facts(rows:Vec<serde_json::Value>,scope:&str)->Result<Vec<Fact>,&'s
     }).collect()
 }
 
-pub fn fetch_facts(python:&Path,cwd:&Path)->Result<Vec<Fact>,&'static str> {
+pub fn fetch_facts(_python:&Path,cwd:&Path)->Result<Vec<Fact>,&'static str> {
     let (project,is_repo)=scope_path(cwd);
-    let mut lore=doxa_lore::LoreClient::spawn(python,Duration::from_secs(3)).map_err(|_|"LORE unavailable")?;
+    let mut lore=doxa_lore::LoreClient::open(Duration::from_secs(3)).map_err(|_|"LORE unavailable")?;
     let user=lore.memory_entries(cwd.to_str().ok_or("Invalid session directory")?,"user").map_err(|_|"User facts unavailable")?;
     let project=lore.memory_entries(project.to_str().ok_or("Invalid scope directory")?,"project").map_err(|_|"Scoped facts unavailable")?;
     let mut facts=parse_facts(user,"user")?;
@@ -140,10 +140,6 @@ impl Manager {
         manager.accept_review(value)?;Ok(manager)
     }
 
-    fn python() -> PathBuf {
-        std::env::var_os("DOXA_LORE_PYTHON").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("python3"))
-    }
-
     fn load(&mut self) {
         self.review = None;
         self.entries.clear();
@@ -153,12 +149,11 @@ impl Manager {
         self.status = "Loading complete curated entries…".into();
         let cwd = scope_path(Path::new(&self.owner.1)).0;
         let scope = self.scope;
-        let python = Self::python();
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         self.pending = Some(rx);
         if self.fixture { self.pending = None; return; }
         std::thread::spawn(move || {
-            let result = doxa_lore::LoreClient::spawn(&python, Duration::from_secs(3))
+            let result = doxa_lore::LoreClient::open(Duration::from_secs(3))
                 .and_then(|mut client| client.memory_review(&cwd.to_string_lossy(), scope))
                 .map(Reply::Review).map_err(|error| format!("LORE refused memory review: {error}"));
             let _ = tx.send(result);
@@ -270,11 +265,10 @@ impl Manager {
             "expected":{"key":review["key"],"sha256":review["sha256"]}});
         self.status = "Applying through LORE…".into();
         let cwd = scope_path(Path::new(&self.owner.1)).0;
-        let python = Self::python();
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         self.pending = Some(rx);
         std::thread::spawn(move || {
-            let result = doxa_lore::LoreClient::spawn(&python, Duration::from_secs(3))
+            let result = doxa_lore::LoreClient::open(Duration::from_secs(3))
                 .and_then(|mut client| client.memory_action(&cwd.to_string_lossy(), request))
                 .and_then(|value| value["status"].as_str().map(str::to_owned).ok_or(doxa_lore::LoreError::InvalidFrame))
                 .map(Reply::Action).map_err(|error| format!("LORE refused memory change: {error}; R refresh"));

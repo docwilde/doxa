@@ -83,7 +83,7 @@ impl VendorHost {
         };
         doxa_vendors::request_body(vendor, &model, &[], &effort)
             .map_err(|_| "invalid vendor effort".to_owned())?;
-        let mut lore = LoreClient::spawn(lore_python, Duration::from_secs(5)).map_err(|_| {
+        let mut lore = LoreClient::open(Duration::from_secs(5)).map_err(|_| {
             "LORE sidecar is unavailable; vendor session was not started".to_owned()
         })?;
         lore.scrub("DOXA scrub preflight").map_err(|_| {
@@ -191,7 +191,7 @@ impl VendorHost {
             // Optional context reads get their own bounded client. A missing
             // snapshot cannot disable mandatory scrubbing or transcript writes.
             let mut context = self.context.lock().unwrap();
-            if context.is_none() { *context = LoreClient::spawn(&self.lore_python, Duration::from_secs(5)).ok(); }
+            if context.is_none() { *context = LoreClient::open(Duration::from_secs(5)).ok(); }
             let snapshot = context.as_mut().and_then(|client| client.snapshot(&self.cwd, "all").ok())
                 .filter(|text| text.len() <= MAX_CONTEXT_BYTES).unwrap_or_default();
             if context.as_ref().is_some_and(|client| !client.is_alive()) { *context = None; }
@@ -214,7 +214,7 @@ impl VendorHost {
         // Off agents still keep transcripts but never write them into memory.
         if self.lore_enabled && self.committed_bytes.load(Ordering::Acquire) > 0
             && !self.storage_uncertain.load(Ordering::Acquire) && !self.scrub_failed.load(Ordering::Acquire) {
-            if let Ok(mut client) = LoreClient::spawn(&self.lore_python, Duration::from_secs(5)) {
+            if let Ok(mut client) = LoreClient::open(Duration::from_secs(5)) {
                 let _ = client.index_transcript(&self.cwd, &self.session_id);
             }
         }

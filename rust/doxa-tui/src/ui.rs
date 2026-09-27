@@ -5168,7 +5168,7 @@ impl App {
         let python=std::env::var_os("DOXA_LORE_PYTHON").map(PathBuf::from).unwrap_or_else(||PathBuf::from("python3"));
         let(tx,rx)=mpsc::sync_channel(1);self.belief_graph_pending=Some((id,cwd.clone(),browser,rx));
         self.lore_picker.as_mut().unwrap().status="Loading LORE belief neighbourhood…".into();
-        std::thread::spawn(move||{let result=doxa_lore::LoreClient::spawn(&python,Duration::from_secs(3)).and_then(|mut client|client.belief_graph(&cwd,id,browser));let _=tx.send(result);});
+        std::thread::spawn(move||{let result=doxa_lore::LoreClient::open(Duration::from_secs(3)).and_then(|mut client|client.belief_graph(&cwd,id,browser));let _=tx.send(result);});
     }
     fn poll_belief_graph(&mut self)->bool {
         let Some((id,cwd,browser,rx))=self.belief_graph_pending.take() else{return false;};
@@ -5501,7 +5501,7 @@ impl App {
             self.memory_pending = Some((id, cwd.clone(), rx));
             std::thread::spawn(move || {
                 let (scope, repo) = crate::memory_menu::scope_path(Path::new(&cwd));
-                let usage = scope.to_str().and_then(|scope| doxa_lore::LoreClient::spawn(&python, Duration::from_secs(2))
+                let usage = scope.to_str().and_then(|scope| doxa_lore::LoreClient::open(Duration::from_secs(2))
                     .and_then(|mut lore| lore.memory_usage(scope)).ok())
                     .map(|usage| (usage, repo));
                 let _ = tx.send(usage);
@@ -5741,6 +5741,8 @@ impl App {
                 picker.status = match resolution {
                     doxa_lore::PendingResolution::Approved => "Proposal approved and archived".into(),
                     doxa_lore::PendingResolution::Rejected => "Proposal rejected and archived".into(),
+                    doxa_lore::PendingResolution::Indeterminate { code } =>
+                        { urgent_resolution = true; format!("Proposal may have applied ({code}); recovery required, do not retry automatically") },
                     doxa_lore::PendingResolution::Refused { code, applied: true } =>
                         { urgent_resolution = true; format!("Applied, but archive failed ({code}); do not retry automatically") },
                     doxa_lore::PendingResolution::Refused { code, applied: false } =>
@@ -15340,6 +15342,24 @@ for line in sys.stdin:
             else { assert!(app.notice.contains("attach:") || app.notice.contains("unavailable")); }
             assert!(app.pending_prompts.is_empty());
         }
+    }
+
+    #[test]
+    fn indeterminate_lore_resolution_disarms_review_and_requires_recovery() {
+        let mut app = App::default();
+        app.open_pending_picker();
+        let (tx, rx) = mpsc::sync_channel(1);
+        let picker = app.lore_picker.as_mut().unwrap();
+        picker.pending = Some(rx);
+        picker.resolving = true;
+        tx.send(Ok(lore_picker::ResultPage::Resolved(
+            doxa_lore::PendingResolution::Indeterminate { code: "archive_failed".into() }))).unwrap();
+        assert!(app.poll_lore());
+        assert!(app.notice.contains("may have applied"));
+        assert!(app.notice.contains("recovery required"));
+        let picker = app.lore_picker.as_ref().unwrap();
+        assert!(picker.pending.is_none() && picker.review.is_none() && picker.armed_resolution.is_none());
+        assert!(picker.proposals.is_empty() && !picker.resolving);
     }
 
     #[test]

@@ -36,14 +36,14 @@ impl Preview {
         }false
     }
     pub fn needs_read(&self)->bool {self.hover.as_ref().is_some_and(|hover|hover.visible&&!hover.requested&&hover.display.is_none())}
-    pub fn read(&mut self,python:PathBuf) {
+    pub fn read(&mut self,_python:PathBuf) {
         let Some(hover)=self.hover.as_mut().filter(|hover|hover.visible&&!hover.requested&&hover.display.is_none()) else{return;};
         hover.requested=true;
         let owner=hover.owner.clone();let(tx,rx)=mpsc::sync_channel(1);hover.pending=Some(rx);
-        // Dropping a hover drops only its receiver. The owned sidecar has a
-        // bounded startup/request deadlines and is reaped when the worker exits.
+        // Dropping a hover drops its receiver. Canonical reads enforce bounded
+        // resource and lock deadlines inside the native client.
         std::thread::spawn(move||{
-            let result=doxa_lore::LoreClient::spawn(&python,Duration::from_secs(3))
+            let result=doxa_lore::LoreClient::open(Duration::from_secs(3))
                 .and_then(|mut client|client.belief_display(&owner.cwd,owner.id)).map_err(|_|());
             let _=tx.send(result);
         });

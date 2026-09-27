@@ -155,10 +155,10 @@ pub fn discover() -> Vec<OfflineSession> {
 
 /// Resolve a saved tab through canonical project identity, then open only its
 /// exact owned transcript. A missing managed checkout can use its recorded cwd.
-pub fn saved_session(id: &str, cwd: &Path, python: &Path) -> Option<OfflineSession> {
+pub fn saved_session(id: &str, cwd: &Path, _python: &Path) -> Option<OfflineSession> {
     if !crate::discovery::valid_id(id) || !cwd.is_absolute() { return None; }
     let root = projects_dir()?;
-    if let Ok(mut lore) = LoreClient::spawn(python, Duration::from_secs(3)) {
+    if let Ok(mut lore) = LoreClient::open(Duration::from_secs(3)) {
         if let Ok((canonical_root, project)) = lore.transcript_identity(&cwd.to_string_lossy()) {
             if canonical_root == root {
                 let mut entries = indexed_hits_in(&root, vec![SessionSearchHit {
@@ -190,9 +190,7 @@ pub fn discover_query(query: &str, cwd: &Path) -> Vec<OfflineSession> {
     if query.is_empty() || query.len() > 200 || query.chars().any(char::is_control) { return Vec::new(); }
     let Some(root) = projects_dir() else { return Vec::new(); };
     if let Some(cwd) = cwd.to_str() {
-        let python = std::env::var_os("DOXA_LORE_PYTHON").filter(|value| !value.is_empty())
-            .map(PathBuf::from).unwrap_or_else(|| PathBuf::from("python3"));
-        if let Ok(mut lore) = LoreClient::spawn(&python, Duration::from_secs(3)) {
+        if let Ok(mut lore) = LoreClient::open(Duration::from_secs(3)) {
             if let Ok(hits) = lore.session_search(cwd, query) {
                 let found = indexed_hits_in(&root, hits);
                 if !found.is_empty() { return found; }
@@ -288,10 +286,10 @@ fn discover_in(root: &Path, prefix: Option<&str>, query: Option<&str>) -> Vec<Of
 
 /// Verify the session's recorded cwd maps back to this transcript directory,
 /// then require the original engine's replay artefact.
-pub fn resume_plan(entry: &OfflineSession, python: &Path) -> Result<LaunchOptions, &'static str> {
+pub fn resume_plan(entry: &OfflineSession, _python: &Path) -> Result<LaunchOptions, &'static str> {
     let root = projects_dir().ok_or("transcript root unavailable")?;
     let claude = claude_store_root().ok_or("DOXA home unavailable")?;
-    resume_plan_in(entry, python, &root, &claude)
+    resume_plan_in(entry, &root, &claude, &|| LoreClient::open(Duration::from_secs(3)))
 }
 
 fn claude_store_root() -> Option<PathBuf> {
@@ -313,8 +311,8 @@ fn claude_history_present(root: &Path, id: &str, uid: u32) -> bool {
     false
 }
 
-fn ready_resume_cwd(cwd: &Path, id: &str, missing: bool, python: &Path,
-    expected_root: &Path, expected_slug: &str) -> Result<PathBuf, &'static str> {
+fn ready_resume_cwd(cwd: &Path, id: &str, missing: bool,
+    expected_root: &Path, expected_slug: &str, open_lore: &impl Fn() -> Result<LoreClient, doxa_lore::LoreError>) -> Result<PathBuf, &'static str> {
     let _recovered = if missing {
         Some(doxa_worktrees::recover_missing(cwd, id)
             .map_err(|reason| {
@@ -331,8 +329,7 @@ fn ready_resume_cwd(cwd: &Path, id: &str, missing: bool, python: &Path,
     } else { None };
     let canonical = cwd.canonicalize().map_err(|_| "session directory is gone")?;
     if canonical != cwd || !canonical.is_dir() { return Err("session directory changed during verification"); }
-    let mut lore = doxa_lore::LoreClient::spawn(python, Duration::from_secs(3))
-        .map_err(|_| "LORE unavailable for resume verification")?;
+    let mut lore = open_lore().map_err(|_| "LORE unavailable for resume verification")?;
     let (root, slug) = lore.transcript_identity(&canonical.to_string_lossy())
         .map_err(|_| "cannot verify session project")?;
     if root != expected_root || slug != expected_slug {
@@ -341,7 +338,7 @@ fn ready_resume_cwd(cwd: &Path, id: &str, missing: bool, python: &Path,
     Ok(canonical)
 }
 
-fn resume_plan_in(entry: &OfflineSession, python: &Path, expected_root: &Path, claude_root: &Path) -> Result<LaunchOptions, &'static str> {
+fn resume_plan_in(entry: &OfflineSession, expected_root: &Path, claude_root: &Path, open_lore: &impl Fn() -> Result<LoreClient, doxa_lore::LoreError>) -> Result<LaunchOptions, &'static str> {
     if !crate::discovery::valid_id(&entry.id) { return Err("invalid session ID"); }
     let cwd = entry.cwd.as_ref().ok_or("session directory was not recorded")?;
     let (cwd, missing) = match cwd.canonicalize() {
@@ -357,7 +354,7 @@ fn resume_plan_in(entry: &OfflineSession, python: &Path, expected_root: &Path, c
     let root = if missing {
         expected_root.to_path_buf()
     } else {
-        let mut lore = doxa_lore::LoreClient::spawn(python, Duration::from_secs(3))
+        let mut lore = doxa_lore::LoreClient::open(Duration::from_secs(3))
             .map_err(|_| "LORE unavailable for resume verification")?;
         let (root, slug) = lore.transcript_identity(&cwd.to_string_lossy())
             .map_err(|_| "cannot verify session project")?;
@@ -410,14 +407,14 @@ fn resume_plan_in(entry: &OfflineSession, python: &Path, expected_root: &Path, c
                 && !model.chars().any(char::is_control) => Some(model.clone()),
             _ => return Err("invalid Codex model in thread record"),
         };
-        let cwd = ready_resume_cwd(&cwd, &entry.id, missing, python, expected_root, &entry.project)?;
+        let cwd = ready_resume_cwd(&cwd, &entry.id, missing, expected_root, &entry.project, open_lore)?;
         return Ok(LaunchOptions { engine: Engine::Codex, cwd: Some(cwd), model,
             resume: Some(entry.id.clone()), ..LaunchOptions::default() });
     }
     let name = format!("{}.messages.json", entry.id);
     let Some(mut saved) = open_at(&dir, OsStr::new(&name), libc::O_RDONLY | libc::O_NONBLOCK) else {
         if claude_history_present(claude_root, &entry.id, uid) {
-            let cwd = ready_resume_cwd(&cwd, &entry.id, missing, python, expected_root, &entry.project)?;
+            let cwd = ready_resume_cwd(&cwd, &entry.id, missing, expected_root, &entry.project, open_lore)?;
             return Ok(LaunchOptions { engine: Engine::Claude, cwd: Some(cwd),
                 resume: Some(entry.id.clone()), ..LaunchOptions::default() });
         }
@@ -441,7 +438,7 @@ fn resume_plan_in(entry: &OfflineSession, python: &Path, expected_root: &Path, c
     let model = state["model"].as_str().filter(|m| !m.is_empty() && m.len() <= 128 && !m.chars().any(char::is_control))
         .ok_or("saved vendor model is unknown")?;
     if !state["messages"].is_array() { return Err("invalid replay state"); }
-    let cwd = ready_resume_cwd(&cwd, &entry.id, missing, python, expected_root, &entry.project)?;
+    let cwd = ready_resume_cwd(&cwd, &entry.id, missing, expected_root, &entry.project, open_lore)?;
     Ok(LaunchOptions { engine, cwd: Some(cwd), model: Some(model.to_owned()),
         resume: Some(entry.id.clone()), ..LaunchOptions::default() })
 }
@@ -647,6 +644,10 @@ mod tests {
     use std::os::unix::fs::{symlink, PermissionsExt};
     use std::process::Command;
 
+    fn resume_fixture(entry: &OfflineSession, python: &Path, root: &Path, claude: &Path) -> Result<LaunchOptions, &'static str> {
+        resume_plan_in(entry, root, claude, &|| LoreClient::spawn(python, Duration::from_secs(3)))
+    }
+
     fn fake_lore(dir: &Path, root: &Path) -> PathBuf {
         let script = dir.join("fake-lore");
         fs::write(&script, format!(r#"#!/usr/bin/env python3
@@ -804,16 +805,16 @@ for line in sys.stdin:
         fs::write(root.join("project/saved-1.jsonl"), b"saved transcript\n").unwrap();
         let replay = root.join("project/saved-1.messages.json");
         fs::write(&replay, br#"{"engine":"deepseek","session_id":"saved-1","model":"deepseek-chat","messages":[]}"#).unwrap();
-        let plan = resume_plan_in(&entry, &script, &root, &temp.path().join("cli-projects")).unwrap();
+        let plan = resume_fixture(&entry, &script, &root, &temp.path().join("cli-projects")).unwrap();
         assert_eq!(plan.engine, Engine::DeepSeek);
         assert_eq!(plan.cwd, Some(cwd));
         assert_eq!(plan.resume.as_deref(), Some("saved-1"));
         let mut wrong = entry.clone();
         wrong.project = "another-project".into();
-        assert!(resume_plan_in(&wrong, &script, &root, &temp.path().join("cli-projects")).is_err());
+        assert!(resume_fixture(&wrong, &script, &root, &temp.path().join("cli-projects")).is_err());
         fs::remove_file(&replay).unwrap();
         symlink(temp.path().join("outside"), &replay).unwrap();
-        assert!(resume_plan_in(&entry, &script, &root, &temp.path().join("cli-projects")).is_err());
+        assert!(resume_fixture(&entry, &script, &root, &temp.path().join("cli-projects")).is_err());
     }
 
     #[test]
@@ -829,12 +830,12 @@ for line in sys.stdin:
         let entry = OfflineSession { id: "saved-1".into(), project: "project".into(),
             markdown: String::new(), search_snippets: Vec::new(), cwd: Some(cwd) };
         fs::write(root.join("project/saved-1.jsonl"), b"saved transcript\n").unwrap();
-        assert!(resume_plan_in(&entry, &script, &root, &cli).is_err());
+        assert!(resume_fixture(&entry, &script, &root, &cli).is_err());
         fs::write(cli.join("encoded-cwd/saved-1.jsonl"), b"saved CLI history\n").unwrap();
-        let plan = resume_plan_in(&entry, &script, &root, &cli).unwrap();
+        let plan = resume_fixture(&entry, &script, &root, &cli).unwrap();
         assert_eq!(plan.engine, Engine::Claude);
         fs::write(root.join("project/saved-1.codex.json"), b"{}").unwrap();
-        assert!(resume_plan_in(&entry, &script, &root, &cli).unwrap_err().contains("ambiguous"));
+        assert!(resume_fixture(&entry, &script, &root, &cli).unwrap_err().contains("ambiguous"));
     }
 
     #[test]
@@ -852,7 +853,7 @@ for line in sys.stdin:
         let state = serde_json::json!({"thread_id":"thread-123", "session_id":"saved-1",
             "cwd":cwd, "model":"gpt-test", "turn_incomplete":false});
         fs::write(&record, state.to_string()).unwrap();
-        let plan = resume_plan_in(&entry, &script, &root, &temp.path().join("cli-projects")).unwrap();
+        let plan = resume_fixture(&entry, &script, &root, &temp.path().join("cli-projects")).unwrap();
         assert_eq!(plan.engine, Engine::Codex);
         assert_eq!(plan.resume.as_deref(), Some("saved-1"));
         assert_eq!(plan.model.as_deref(), Some("gpt-test"));
@@ -863,11 +864,11 @@ for line in sys.stdin:
             serde_json::json!({"thread_id":"thread-123", "session_id":"saved-1", "cwd":cwd, "turn_incomplete":true}),
         ] {
             fs::write(&record, bad.to_string()).unwrap();
-            assert!(resume_plan_in(&entry, &script, &root, &temp.path().join("cli-projects")).is_err());
+            assert!(resume_fixture(&entry, &script, &root, &temp.path().join("cli-projects")).is_err());
         }
         fs::remove_file(&record).unwrap();
         symlink(temp.path().join("outside"), &record).unwrap();
-        assert!(resume_plan_in(&entry, &script, &root, &temp.path().join("cli-projects")).is_err());
+        assert!(resume_fixture(&entry, &script, &root, &temp.path().join("cli-projects")).is_err());
     }
 
     #[test]
@@ -883,7 +884,7 @@ for line in sys.stdin:
         fs::write(root.join("project/saved-1.codex.json"),
             serde_json::json!({"thread_id":"thread-123", "session_id":"other",
                 "cwd":cwd, "turn_incomplete":false}).to_string()).unwrap();
-        assert_eq!(resume_plan_in(&entry, &script, &root, &temp.path().join("cli-projects"))
+        assert_eq!(resume_fixture(&entry, &script, &root, &temp.path().join("cli-projects"))
             .unwrap_err(), "Codex thread record does not match this session");
         assert!(!cwd.exists());
     }
@@ -945,12 +946,12 @@ for line in sys.stdin:
             markdown: String::new(), search_snippets: Vec::new(), cwd: Some(cwd.clone()) };
         fs::write(&record, serde_json::json!({"thread_id":"thread-123",
             "session_id":"other", "cwd":cwd, "turn_incomplete":false}).to_string()).unwrap();
-        assert!(resume_plan_in(&entry, &script, &root, &temp.path().join("claude"))
+        assert!(resume_fixture(&entry, &script, &root, &temp.path().join("claude"))
             .unwrap_err().contains("thread record does not match"));
         assert!(!cwd.exists(), "invalid replay state reconstructed the checkout");
         fs::write(&record, serde_json::json!({"thread_id":"thread-123",
             "session_id":"saved123-session", "cwd":cwd, "turn_incomplete":false}).to_string()).unwrap();
-        let plan = resume_plan_in(&entry, &script, &root, &temp.path().join("claude")).unwrap();
+        let plan = resume_fixture(&entry, &script, &root, &temp.path().join("claude")).unwrap();
         assert_eq!(plan.cwd.as_deref(), Some(cwd.as_path()));
         assert_eq!(plan.engine, Engine::Codex);
         assert_eq!(fs::read_to_string(cwd.join("README")).unwrap(), "seed\n");

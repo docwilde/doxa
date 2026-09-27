@@ -41,14 +41,11 @@ pub enum WorkerCommand {
 }
 
 fn safe_queue_rows(reply: &Value) -> Vec<Value> {
-    let python = std::env::var_os("DOXA_LORE_PYTHON").map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("python3"));
-    safe_queue_rows_with_python(reply, &python)
+    safe_queue_rows_with_client(reply, doxa_lore::LoreClient::open(Duration::from_secs(2)).ok())
 }
 
-fn safe_queue_rows_with_python(reply: &Value, python: &Path) -> Vec<Value> {
+fn safe_queue_rows_with_client(reply: &Value, mut lore: Option<doxa_lore::LoreClient>) -> Vec<Value> {
     let Some(rows) = reply["queue"].as_array() else { return Vec::new(); };
-    let mut lore = doxa_lore::LoreClient::spawn(&python, Duration::from_secs(2)).ok();
     rows.iter().take(64).filter_map(|row| {
         let id = row["id"].as_str()?;
         if id.is_empty() || id.len() > 128 || !id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-') {
@@ -885,15 +882,15 @@ for line in sys.stdin:
         let mut perms = std::fs::metadata(&script).unwrap().permissions();
         perms.set_mode(0o700);
         std::fs::set_permissions(&script, perms).unwrap();
-        let rows = safe_queue_rows_with_python(&json!({"queue":[
+        let rows = safe_queue_rows_with_client(&json!({"queue":[
             {"id":"q7","text":"my SECRET token"}, {"id":"../unsafe","text":"SECRET"}
-        ]}), &script);
+        ]}), doxa_lore::LoreClient::spawn(&script, Duration::from_secs(2)).ok());
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["id"], "q7");
         assert_eq!(rows[0]["preview"], "my [redacted] token");
         assert!(!serde_json::to_string(&rows).unwrap().contains("SECRET"));
-        let unavailable = safe_queue_rows_with_python(&json!({"queue":[{"id":"q8","text":"SECRET"}]}),
-            &dir.path().join("missing-interpreter"));
+        let unavailable = safe_queue_rows_with_client(&json!({"queue":[{"id":"q8","text":"SECRET"}]}),
+            None);
         assert_eq!(unavailable[0]["preview"], "[preview unavailable]");
     }
 

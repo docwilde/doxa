@@ -136,10 +136,12 @@ pub fn parse_evidence(rows: Vec<Value>) -> Result<Vec<Evidence>, ()> {
     }).collect()
 }
 
-/// Each query gets a short-lived sidecar so a closed picker cannot leave a
-/// background process holding memory. Call from a worker thread, never redraw.
-pub fn fetch(python: &Path, query: Query) -> Result<ResultPage, &'static str> {
-    let mut client = LoreClient::spawn(python, Duration::from_secs(2)).map_err(|_| "LORE unavailable")?;
+/// Each query gets a native client. Call from a worker thread, never redraw.
+pub fn fetch(_python: &Path, query: Query) -> Result<ResultPage, &'static str> {
+    fetch_with_client(LoreClient::open(Duration::from_secs(2)).map_err(|_| "LORE unavailable")?, query)
+}
+
+fn fetch_with_client(mut client: LoreClient, query: Query) -> Result<ResultPage, &'static str> {
     match query {
         Query::Beliefs(offset) => client.beliefs(offset, PAGE_SIZE)
             .map_err(|_| "Belief list unavailable")
@@ -183,6 +185,10 @@ mod tests {
     use serde_json::json;
     #[cfg(unix)]
     use std::{fs, os::unix::fs::PermissionsExt};
+
+    fn fetch_fixture(python: &Path, query: Query) -> Result<ResultPage, &'static str> {
+        fetch_with_client(LoreClient::spawn(python, Duration::from_secs(2)).map_err(|_| "Fixture unavailable")?, query)
+    }
 
     #[test]
     fn filter_input_matches_canonical_character_and_byte_limits() {
@@ -240,11 +246,11 @@ for line in sys.stdin:
         let mut perms = fs::metadata(&path).unwrap().permissions();
         perms.set_mode(0o700);
         fs::set_permissions(&path, perms).unwrap();
-        let ResultPage::Beliefs(rows) = fetch(&path, Query::Beliefs(0)).unwrap() else { panic!("belief list") };
+        let ResultPage::Beliefs(rows) = fetch_fixture(&path, Query::Beliefs(0)).unwrap() else { panic!("belief list") };
         assert_eq!(rows[0].claim, "[redacted]");
-        let ResultPage::Search(Some(hit)) = fetch(&path, Query::Search("hello".into())).unwrap() else { panic!("search") };
+        let ResultPage::Search(Some(hit)) = fetch_fixture(&path, Query::Search("hello".into())).unwrap() else { panic!("search") };
         assert_eq!(hit.id, 4);
-        let ResultPage::Evidence(4, rows) = fetch(&path, Query::Evidence(4)).unwrap() else { panic!("evidence") };
+        let ResultPage::Evidence(4, rows) = fetch_fixture(&path, Query::Evidence(4)).unwrap() else { panic!("evidence") };
         assert_eq!(rows[0].note, "[redacted]");
 
         let old = dir.path().join("old-sidecar");
@@ -252,7 +258,7 @@ for line in sys.stdin:
         let mut perms = fs::metadata(&old).unwrap().permissions();
         perms.set_mode(0o700);
         fs::set_permissions(&old, perms).unwrap();
-        assert!(fetch(&old, Query::Beliefs(0)).is_err());
+        assert!(fetch_fixture(&old, Query::Beliefs(0)).is_err());
     }
 
     #[cfg(unix)]
@@ -278,9 +284,9 @@ for line in sys.stdin:
         let mut perms = fs::metadata(&path).unwrap().permissions();
         perms.set_mode(0o700);
         fs::set_permissions(&path, perms).unwrap();
-        let ResultPage::Proposals(rows) = fetch(&path, Query::Proposals("/repo".into(), 0)).unwrap() else { panic!("proposals") };
+        let ResultPage::Proposals(rows) = fetch_fixture(&path, Query::Proposals("/repo".into(), 0)).unwrap() else { panic!("proposals") };
         assert_eq!(rows[0].summary, "[redacted]");
-        let ResultPage::Review(review, writable) = fetch(&path, Query::Review("/repo".into(), rows[0].pid.clone())).unwrap() else { panic!("review") };
+        let ResultPage::Review(review, writable) = fetch_fixture(&path, Query::Review("/repo".into(), rows[0].pid.clone())).unwrap() else { panic!("review") };
         assert!(review.raw().contains("entire bytes"));
         assert!(!writable);
     }

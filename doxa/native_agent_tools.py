@@ -128,4 +128,5 @@ def serve() -> None:
 
 
 if __name__ == "__main__":
-    serve()
+    from .native_lore import executable
+    os.execv(executable(), [executable(), "agent-bridge"])

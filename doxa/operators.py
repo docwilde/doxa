@@ -103,7 +103,7 @@ def _configured_if(ctx_key: str) -> Callable[["dict | None"], bool]:
     convention as the harness reference. ctx absent, or the key absent/
     falsy within it, both read as "not configured"."""
     def _pred(ctx: "dict | None") -> bool:
-        return bool((ctx or {}).get(ctx_key))
+        return bool((ctx or {}).get(ctx_key) or (ctx_key in ("belief_store", "lore_root") and (ctx or {}).get("native_lore")))
     return _pred
 
 
@@ -1160,6 +1160,7 @@ def to_sdk_tools(
     include_write: bool = False,
     ctx: "dict | None" = None,
     extra: "Sequence[dict[str, Operator]]" = (),
+    native_lore: "Sequence[dict] | None" = None,
 ) -> list[SdkMcpTool]:
     """Project the registry to claude_agent_sdk.SdkMcpTool definitions, in
     registration order. All three gates compose (harness contract): a write
@@ -1202,7 +1203,13 @@ def to_sdk_tools(
             return _mcp_result(result)
         return handler
 
-    return [
+    from .native_lore import LORE_TOOLS
+    native = [SdkMcpTool(name=row["name"], description=row["description"],
+        input_schema=row["inputSchema"], handler=make_handler(row["name"])) for row in (native_lore or [])
+        if (include_write or row["name"] != "lore_remember")
+        and (allowed is None or row["name"] in allowed)
+        and (configured is None or row["name"] in configured)]
+    return native + [
         SdkMcpTool(
             name=op.name,
             description=f"{op.description} [cost: {op.cost}]"
@@ -1213,6 +1220,7 @@ def to_sdk_tools(
         for op in (list(OPERATORS.values())
                    + (list(WRITE_OPERATORS.values()) if include_write else [])
                    + tail)
-        if (allowed is None or op.name in allowed)
+        if (native_lore is None or op.name not in LORE_TOOLS)
+        and (allowed is None or op.name in allowed)
         and (configured is None or op.name in configured)
     ]

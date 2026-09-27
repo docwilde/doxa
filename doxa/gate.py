@@ -97,6 +97,7 @@ class OperatorContext:
     cwd: str
     repo_root: str
     belief_store: "Callable[[], Any] | None" = None
+    native_lore: "Callable[[str, dict], Any] | None" = None
     source_engine: "str | None" = None
     """Engine that produced a memory proposal. Set by the session host, never
     accepted from model tool arguments, and retained when a different engine
@@ -286,6 +287,13 @@ class ToolGate:
         # sidecar goes into a NEW dict, never a mutation of the caller's
         # args, and only for operators that declare it.
         args = {k: v for k, v in dict(args or {}).items() if k != "op_ctx"}
+        if self.op_ctx is not None and self.op_ctx.native_lore is not None:
+            from .native_lore import LORE_TOOLS
+            if name in LORE_TOOLS:
+                try:
+                    return self.op_ctx.native_lore(name, args)
+                except Exception:
+                    return {"error": f"{name} failed: native LORE unavailable"}
         kwargs = args
         if self.op_ctx is not None and name in _OP_CTX_NAMES:
             kwargs = dict(args)

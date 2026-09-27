@@ -100,6 +100,7 @@ from . import config as config_mod
 from . import gate as gate_mod
 from . import images as images_mod
 from . import operators as operators_mod
+from . import native_lore as native_lore_mod
 from . import peerdelivery as peerdelivery_mod
 from . import peerledger as peerledger_mod
 from . import peers as peers_mod
@@ -146,7 +147,7 @@ from lore_core import pending as lore_pending
 from lore_core import store as lore_store
 from lore_core.beliefs import BELIEF_RELATIONS
 from lore_core.config import PROJECTS_DIR, project_slug, stage_disabled
-from lore_core.scrub import scrub_secrets
+from .native_lore import scrub as scrub_secrets
 
 DEFAULT_MODEL: str | None = None  # None = whatever the CLI/session default is
 
@@ -1764,13 +1765,16 @@ class SessionEngine:
         # in _build_options) because its state must span the whole session,
         # not one options object. The sidecar carries only HOST-resolved
         # values; nothing model-supplied ever lands in it.
+        self._native_agent = native_lore_mod.Agent(session_id=self.session_id, cwd=self.cwd,
+            engine="claude", spawn_depth=self.spawn_depth) if self.lore else None
         self.tool_gate = gate_mod.ToolGate(
             allowed=allowed_tools,
             op_ctx=gate_mod.OperatorContext(
                 session_id=self.session_id,
                 cwd=self.cwd,
                 repo_root=gate_mod.repo_root_of(self.cwd),
-                belief_store=lore_store.db_connect,
+                belief_store=None,
+                native_lore=self._native_lore_tool,
                 source_engine="claude",
                 # Both HOST-resolved, like everything else on this
                 # sidecar: the depth came in on this process's argv, and
@@ -1903,12 +1907,12 @@ class SessionEngine:
         if not self.lore:
             return {}
         parts: list[str] = []
-        interval = lore_context.refresh_interval()
+        interval = native_lore_mod.request("refresh_interval")
         if interval is not None:
             now = time.monotonic()
             if now - self._last_refresh >= interval:
                 self._last_refresh = now
-                snapshot = lore_context.build_context(self.cwd)
+                snapshot = native_lore_mod.request("snapshot", cwd=self.cwd, scope="all")
                 parts.append(
                     "LORE MEMORY REFRESH -- current as of now; supersedes any "
                     "earlier lore snapshot in this conversation.\n\n" + snapshot
@@ -1944,20 +1948,10 @@ class SessionEngine:
         if floor is None:
             return None
         try:
-            expr = lore_store.fts_expr(prompt, " OR ")
-            if not expr:
+            hit = native_lore_mod.request("consult", prompt=prompt)
+            if hit is None or hit.get("citation_status") != "cite_only":
                 return None
-            conn = lore_store.db_connect()
-            row = conn.execute(
-                "SELECT b.id, b.claim, b.confidence, bm25(belief_fts)"
-                " FROM beliefs b JOIN belief_fts f ON b.id = f.belief_id"
-                " WHERE belief_fts MATCH ? AND b.status = 'active'"
-                " ORDER BY bm25(belief_fts) LIMIT 1",
-                (expr,),
-            ).fetchone()
-            if row is None:
-                return None
-            bid, claim, confidence, score = row
+            bid, claim, confidence, score = hit["id"], hit["claim"], hit["confidence"], hit["score"]
             if -float(score) < floor:
                 return None
             claim_line = " ".join(_scrub_text(claim).split())[:240]
@@ -2045,6 +2039,14 @@ class SessionEngine:
         one stage) everything passes -- the calling convention is what a
         future stage model plugs into."""
         return self.tool_gate.pre_tool_use(input_data)
+
+    async def _native_lore_tool(self, name: str, arguments: dict) -> Any:
+        if not self.lore or self._native_agent is None:
+            return {"error": "LORE memory is unavailable in this session"}
+        try:
+            return await asyncio.to_thread(self._native_agent.call, name, arguments)
+        except native_lore_mod.NativeLoreError:
+            return {"error": f"{name} failed: native LORE unavailable"}
 
     def _on_tool_disabled(self, name: str, reason: str) -> None:
         """Two-strikes disable fired from inside the gate (during SDK tool
@@ -2656,7 +2658,7 @@ class SessionEngine:
         # so nothing to append and nothing to report a length for. Building
         # it and then discarding it would still read the store, which on a
         # fleet run is the very access the switch exists to prevent.
-        snapshot = lore_context.build_context(self.cwd) if self.lore else ""
+        snapshot = native_lore_mod.request("snapshot", cwd=self.cwd, scope="all") if self.lore else ""
         # /context reports this length verbatim -- see lore_snapshot_chars.
         self.lore_snapshot_chars = len(snapshot)
         # Second (optional) system-prompt appendix -- see
@@ -2694,10 +2696,13 @@ class SessionEngine:
         # deliberate -- lore_remember only STAGES a pending proposal, so the
         # review gate is what keeps the write path safe, not its absence.
         # The configuredness ctx names the seams this engine actually wired.
+        if self._native_agent is not None:
+            self._native_agent.tools()  # Freeze canonical host identity before exposing tools.
         native_tools = operators_mod.to_sdk_tools(
             self.tool_gate.execute,
             allowed=self.tool_gate.allowed,
             include_write=True,
+            native_lore=self._native_agent.tools() if self._native_agent is not None else [],
             ctx={
                 # The two LORE seams, named ONLY when this session has
                 # memory. Absence here is what makes every lore_* operator
@@ -2708,7 +2713,7 @@ class SessionEngine:
                 # a refusal it can retry.
                 **(
                     {
-                        "belief_store": lore_store.db_connect,
+                        "native_lore": self._native_agent,
                         "lore_root": str(lore_core.ROOT),
                     }
                     if self.lore
@@ -4122,17 +4127,12 @@ class SessionEngine:
         )
 
     def belief_count(self) -> int:
-        """Active belief count for the status bar -- same query
-        lore_core.context.build_context uses to decide whether to mention
-        the belief store."""
-        if not self.lore:
+        """Canonical native status, with no Python store fallback."""
+        if not self.lore or self._native_agent is None:
             return 0
         try:
-            conn = lore_store.db_connect()
-            return conn.execute(
-                "SELECT count(*) FROM beliefs WHERE status = 'active'"
-            ).fetchone()[0]
-        except Exception:
+            return self._native_agent.status().get("belief_count") or 0
+        except native_lore_mod.NativeLoreError:
             return 0
 
     async def list_beliefs(
@@ -4544,8 +4544,9 @@ class SessionEngine:
         # close.
         if self.lore:
             try:
-                conn = lore_store.db_connect()
-                added, _consumed = lore_store.index_live(conn, self.transcript_path)
+                result = native_lore_mod.request("index_transcript_v1", cwd=self.cwd,
+                    session_id=self.session_id)
+                added = int(result.get("indexed", 0))
                 indexed = added
             except Exception:
                 pass
@@ -4561,7 +4562,10 @@ class SessionEngine:
                 pass
             self._connected = False
 
+        belief_count = self.belief_count()
+        if self._native_agent is not None:
+            self._native_agent.carrier.close()
         return EngineEvent("session_done", {
             "indexed": indexed,
-            "belief_count": self.belief_count(),
+            "belief_count": belief_count,
         })

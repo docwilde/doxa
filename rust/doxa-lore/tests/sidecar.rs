@@ -351,7 +351,7 @@ for line in sys.stdin:
 }
 
 #[test]
-fn reviewed_resolution_is_one_snapshot_and_reports_partial_archive() {
+fn reviewed_resolution_is_one_snapshot_and_preserves_indeterminate_archive() {
     let dir = tempfile::tempdir().unwrap();
     let path = fake(dir.path(), r#"
 import hashlib, json, sys
@@ -366,7 +366,7 @@ for line in sys.stdin:
         assert req['cwd'] == '/repo' and req['pid'] == 'one'
         assert req['expected'] == {'sha256':hashlib.sha256(raw.encode()).hexdigest(),'inode':17}
         if req['decision'] == 'approve':
-            value = {'status':'refused','error':'archive_failed','applied':True}
+            value = {'status':'refused','error':'archive_failed','applied':None,'may_have_applied':True}
         else:
             value = {'status':'rejected'}
     print(json.dumps({'type':'reply','id':req['id'],'ok':True,'value':value}), flush=True)
@@ -375,7 +375,7 @@ for line in sys.stdin:
     let review = client.pending_review("/repo", "one").unwrap();
     assert_eq!(client.resolve_reviewed("/repo", &review, PendingDecision::Reject).unwrap(), PendingResolution::Rejected);
     assert_eq!(client.resolve_reviewed("/repo", &review, PendingDecision::Approve).unwrap(),
-        PendingResolution::Refused { code: "archive_failed".into(), applied: true });
+        PendingResolution::Indeterminate { code: "archive_failed".into() });
 }
 
 #[test]

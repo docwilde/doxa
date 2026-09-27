@@ -95,14 +95,10 @@ impl PeerHost {
         &self,
         work: impl FnOnce(&mut LoreClient) -> Result<T, String>,
     ) -> Result<T, String> {
-        let python = self
-            .lore_python
-            .as_deref()
-            .ok_or("LORE scrub unavailable")?;
         let mut guard = self.lore.lock().map_err(|_| "LORE scrub unavailable")?;
         if guard.is_none() {
             *guard = Some(
-                LoreClient::spawn(python, Duration::from_secs(5))
+                LoreClient::open(Duration::from_secs(5))
                     .map_err(|_| "LORE scrub unavailable")?,
             );
         }
