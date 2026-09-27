@@ -19,6 +19,9 @@ pub fn entries(app: &App, query: &str) -> Vec<Entry> {
     for command in COMMANDS {
         rows.push(Entry { label: format!("{} · {}", command.name, command.summary), help: command.support.into(), action: Action::Command(command.name) });
     }
+    for (command, description) in super::FLEET_ACTIONS {
+        rows.push(Entry { label: format!("{command} · {description}"), help: "Current fleet run".into(), action: Action::Command(command) });
+    }
     rows.extend([
         Entry { label: "Stop active session".into(), help: "Review before stopping daemon".into(), action: Action::Stop },
         Entry { label: "Inspect tool calls".into(), help: "Current session".into(), action: Action::Tools },

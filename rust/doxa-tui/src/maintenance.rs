@@ -61,6 +61,49 @@ fn run_at(exe: &Path, kind: &str, engine: Option<&str>, cancel: &AtomicBool, tim
     Ok("Update installed. Existing sessions retain their daemon version.".into())
 }
 
+#[derive(Debug)]
+pub struct RestartReport { pub stopped: Vec<String>, pub error: Option<&'static str> }
+#[derive(Debug)]
+pub struct Restart {
+    receiver: mpsc::Receiver<RestartReport>, worker: Option<std::thread::JoinHandle<()>>,
+}
+impl Restart {
+    pub fn start(ids: Vec<String>) -> io::Result<Self> {
+        let runtime = crate::discovery::runtime_dir()?;
+        let selected = crate::discovery::sessions_in(&runtime)?;
+        let entries = ids.iter().map(|id| selected.iter().find(|entry| &entry.id == id).cloned()
+            .ok_or_else(|| io::Error::other("A restart target is no longer live"))).collect::<io::Result<Vec<_>>>()?;
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let worker = std::thread::Builder::new().name("update-restart".into()).spawn(move || {
+            let mut report = RestartReport { stopped: Vec::new(), error: None };
+            let deadline = Instant::now() + Duration::from_secs(60);
+            for entry in &entries {
+                // The native host checks idle state under the same lock as
+                // prompt admission. A turn arriving during installation is
+                // never cancelled just to upgrade its daemon.
+                if crate::sessions::stop_idle_verified(&runtime, entry, deadline).is_err() {
+                    report.error = Some("Restart refused by a changed or busy session; completed stops remain saved for recovery"); break;
+                }
+                report.stopped.push(entry.id.clone());
+            }
+            if report.error.is_none() {
+                loop {
+                    match crate::discovery::sessions_in(&runtime) {
+                        Ok(live) if entries.iter().all(|old| !live.iter().any(|new| new.id == old.id && new.socket == old.socket)) => break,
+                        Err(_) => { report.error = Some("Could not verify daemon teardown; restart retained for manual recovery"); break; },
+                        _ if Instant::now() >= deadline => { report.error = Some("Daemon finalization timed out; restart retained for manual recovery"); break; },
+                        _ => std::thread::sleep(Duration::from_millis(25)),
+                    }
+                }
+            }
+            let _ = sender.send(report);
+        })?;
+        Ok(Self { receiver, worker: Some(worker) })
+    }
+    pub fn poll(&self) -> Option<RestartReport> { self.receiver.try_recv().ok() }
+}
+impl Drop for Restart { fn drop(&mut self) { if let Some(worker) = self.worker.take() { let _ = worker.join(); } } }
+
 #[cfg(test)]
 mod tests {
     use super::*;

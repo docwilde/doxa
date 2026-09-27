@@ -111,7 +111,19 @@ const COMMANDS: &[CommandHelp] = &[
     CommandHelp { name: "/compact", form: "/compact", summary: "Compact transcript", support: "Claude only · completed LORE review required" },
     CommandHelp { name: "/update", form: "/update [--restart]", summary: "Update DOXA", support: "local · reviewed install" },
     CommandHelp { name: "/help", form: "/help", summary: "Command registry", support: "local" },
-    CommandHelp { name: "/about", form: "/about", summary: "Rust version", support: "local · version only" },
+    CommandHelp { name: "/about", form: "/about", summary: "Rust version", support: "local · measured installation and selected session details" },
+];
+
+/// Source-derived no-argument fleet verbs and argument forms shared by help
+/// and the command palette. No controller action is dispatched by a model.
+const FLEET_ACTIONS: &[(&str, &str)] = &[
+    ("/fleet start", "Prepare a pool, task and reviewed plan"),
+    ("/fleet status", "Inspect current run"),
+    ("/fleet attach", "Choose a current-run slot"),
+    ("/fleet mesh", "Open current run graph"),
+    ("/fleet stop", "Stop this window's controller"),
+    ("/fleet detach", "Continue current controller outside this window"),
+    ("/fleet runs", "Choose saved run"),
 ];
 
 const ENGINE_CHOICES: [&str; 4] = ["codex", "claude", "deepseek", "glm"];
@@ -1298,6 +1310,8 @@ pub struct App {
     window_mesh: Option<crate::mesh_control::WindowMesh>,
     restart_executable: Option<PathBuf>,
     restart_after_update: bool,
+    restart_waiting: bool,
+    restart_job: Option<crate::maintenance::Restart>,
     retired_operations: Vec<operations_menu::Menu>,
     local_shell_jobs: Vec<crate::shell::Job>,
     next_shell_id: u64,
@@ -1475,6 +1489,8 @@ impl Default for App {
             window_mesh: None,
             restart_executable: None,
             restart_after_update: false,
+            restart_waiting: false,
+            restart_job: None,
             retired_operations: Vec::new(),
             local_shell_jobs: Vec::new(),
             next_shell_id: 1,
@@ -2895,6 +2911,9 @@ impl App {
     fn key(&mut self, key: KeyEvent) -> bool {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
+        if self.restart_job.is_some() || self.restart_waiting {
+            self.notice = "Finalizing idle sessions for restart; saved tabs will be restored".into(); return true;
+        }
         if ctrl && key.code == KeyCode::Char('c') {
             let id = self.groups[self.active_group].active_id();
             if self.local_shell_jobs.iter().any(|job| Some(job.session.as_str()) == id) {
@@ -5179,6 +5198,37 @@ impl App {
         changed
     }
 
+    fn restart_after_install(&mut self, state: &mut Option<(crate::ui_state::UiStateStore, Vec<String>, Arc<Mutex<bool>>)>) -> bool {
+        if self.restart_waiting {
+            self.restart_waiting = false;
+            if self.fleet_controller.is_some() || !self.local_shell_jobs.is_empty()
+                || self.launching || !self.pending_prompts.is_empty() || !self.pending_launches.is_empty() || !self.attaching_ids.is_empty()
+                || self.groups.iter().flat_map(|g| &g.tabs).filter(|id| !self.offline_ids.contains(*id))
+                    .any(|id| self.session_activity.get(id).is_none_or(|(running, queued)| *running || *queued > 0)) {
+                self.notice = "Update installed; restart postponed because sessions became busy".into(); return true;
+            }
+            let Some((store, _, complete)) = state else { self.notice = "Update installed; restart needs a durable saved tabset".into(); return true; };
+            if !matches!(store.save_if_complete(self, complete), Ok(true)) {
+                self.notice = "Update installed; restart postponed because the tabset could not be saved".into(); return true;
+            }
+            let mut ids = self.groups.iter().flat_map(|g| &g.tabs).filter(|id| !self.offline_ids.contains(*id)).cloned().collect::<Vec<_>>();
+            ids.sort(); ids.dedup();
+            match crate::maintenance::Restart::start(ids) {
+                Ok(worker) => { self.restart_job = Some(worker); self.notice = "Finalizing idle sessions for restart; saved tabs will be restored".into(); },
+                Err(_) => { self.notice = "Update installed; restart postponed because a target is no longer live".into(); },
+            }
+            return true;
+        }
+        if let Some(report) = self.restart_job.as_ref().and_then(|worker| worker.poll()) {
+            self.restart_job = None;
+            for id in report.stopped { self.offline_ids.insert(id.clone()); self.session_activity.remove(&id); self.input_requests.retain(|request| request.session_id != id); }
+            if let Some(error) = report.error { self.notice = error.into(); }
+            else { self.restart_after_update = true; self.should_quit = true; }
+            return true;
+        }
+        false
+    }
+
     fn poll_memory_menu(&mut self) -> bool {
         for menu in &mut self.retired_operations { menu.poll(); }
         self.retired_operations.retain(|menu| menu.busy());
@@ -5197,7 +5247,7 @@ impl App {
         }
         if let Some(menu) = &mut self.operations_menu {
             menu.poll();
-            if menu.take_restart() { self.restart_after_update = true; self.should_quit = true; changed = true; }
+            if menu.take_restart() { self.restart_waiting = true; changed = true; }
             if let Some(info) = &mut self.chip_info {
                 let lines = menu.lines(usize::from(self.size.width));
                 if info.lines != lines { info.lines = lines; changed = true; }
@@ -6224,7 +6274,7 @@ impl App {
                     actions::Action::Command(command) => {
                         // Argument-bearing operations prepare the user's prompt
                         // for editing; bare forms use the same local dispatcher.
-                        if matches!(command, "/msg" | "/collection" | "/cd" | "/fleet" | "/img") {
+                        if matches!(command, "/msg" | "/collection" | "/cd" | "/fleet" | "/fleet start" | "/fleet attach" | "/img") {
                             self.action_draft = Some(((self.active_group,self.groups[self.active_group].active_id().unwrap_or("").to_owned()),self.input.clone(), self.input_cursor));
                             self.input = format!("{command} "); self.input_cursor = self.input.len(); self.focus = Focus::Prompt;
                         } else {
@@ -9417,6 +9467,7 @@ fn run_loop(
                 changed = true;
             }
         }
+        changed |= app.restart_after_install(&mut state);
         if changed {
             terminal.draw(|frame| app.draw(frame))?;
         }
@@ -9425,8 +9476,8 @@ fn run_loop(
     drop(guard);
     if app.restart_after_update {
         if let Some(executable) = app.restart_executable.take() {
-            // Capture before update replaces the binary. No providers are
-            // relaunched here; normal startup restores verified live tabs.
+            // Capture before update replaces the binary. Owned idle daemons
+            // have finalized; startup restores only verified provider state.
             app.window_mesh = None;
             app.local_shell_jobs.clear();
             use std::os::unix::process::CommandExt;
@@ -11549,6 +11600,17 @@ for line in sys.stdin:
         app.input_cursor = app.input.len();
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert_eq!(app.pending_prompts, [("s".into(), "/provider-command".into())]);
+    }
+
+    #[test]
+    fn successful_update_never_stops_busy_or_unsaved_sessions_to_restart() {
+        let mut app = App::default(); app.apply_daemon_frame(&json!({"type":"hello", "session_id":"restart-session"}));
+        app.restart_waiting = true; let mut state = None;
+        assert!(app.restart_after_install(&mut state)); assert!(app.restart_job.is_none()); assert!(!app.should_quit);
+        assert!(app.notice.contains("busy"));
+        app.session_activity.insert("restart-session".into(), (false, 0)); app.restart_waiting = true;
+        assert!(app.restart_after_install(&mut state)); assert!(app.notice.contains("durable"));
+        assert!(app.restart_job.is_none()); assert!(!app.restart_after_update);
     }
 
     #[test]

@@ -136,6 +136,20 @@ mod tests{
         assert_eq!(unsafe{libc::kill(pid as i32,0)},-1);
     }
     #[test]
+    fn detached_controller_stays_alive_and_is_reaped_when_it_finishes() {
+        let dir = tempfile::tempdir().unwrap(); let done = dir.path().join("done");
+        let child = Command::new("python3").args(["-c", "import time,pathlib,sys; time.sleep(.15); pathlib.Path(sys.argv[1]).write_text('completed')", done.to_str().unwrap()])
+            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).process_group(0).spawn().unwrap();
+        let pid = child.id();
+        let controller = Controller { child: Some(child), root: dir.path().to_owned(), id: "fixture-detach".into(), cancelling: false };
+        let (root, id) = controller.detach(); assert_eq!(root, dir.path()); assert_eq!(id, "fixture-detach");
+        assert_eq!(unsafe { libc::kill(pid as i32, 0) }, 0);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while unsafe { libc::kill(pid as i32, 0) } == 0 { assert!(std::time::Instant::now() < deadline); std::thread::sleep(std::time::Duration::from_millis(10)); }
+        assert_eq!(std::fs::read_to_string(done).unwrap(), "completed");
+    }
+
+    #[test]
     fn exact_native_spec_review_requires_explicit_arm_and_hides_task(){
         let temp=tempfile::Builder::new().prefix("u").tempdir().unwrap();
         let args=vec!["--pool".into(),"fixture:fixture-v1".into(),"--prompt".into(),"PRIVATE-TASK-SENTINEL".into(),"-n".into(),"1".into(),"--run-budget".into(),"1".into(),"--root".into(),temp.path().to_string_lossy().into_owned()];

@@ -66,6 +66,14 @@ fn run(runtime: &Path, action: Action, attached: HashSet<String>) -> Report {
 }
 
 pub fn stop_verified(runtime: &Path, selected: &Session, deadline: Instant) -> io::Result<()> {
+    stop_verified_method(runtime, selected, deadline, "stop")
+}
+
+pub fn stop_idle_verified(runtime: &Path, selected: &Session, deadline: Instant) -> io::Result<()> {
+    stop_verified_method(runtime, selected, deadline, "stop_if_idle")
+}
+
+fn stop_verified_method(runtime: &Path, selected: &Session, deadline: Instant, method: &str) -> io::Result<()> {
     let fresh = discovery::sessions_in(runtime)?.into_iter().find(|entry|
         entry.id == selected.id && entry.socket == selected.socket)
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "session identity changed before stop"))?;
@@ -76,7 +84,7 @@ pub fn stop_verified(runtime: &Path, selected: &Session, deadline: Instant) -> i
     client.verify_peer(pid).map_err(io::Error::other)?;
     if client.hello["session_id"] != fresh.id { return Err(io::Error::new(io::ErrorKind::PermissionDenied, "session identity changed during stop")); }
     if Instant::now() >= deadline { return Err(io::Error::new(io::ErrorKind::TimedOut, "session stop deadline reached")); }
-    let reply = client.call_until("stop", serde_json::Map::new(), deadline).map_err(io::Error::other)?;
+    let reply = client.call_until(method, serde_json::Map::new(), deadline).map_err(io::Error::other)?;
     if reply["ok"] != true { return Err(io::Error::other("daemon refused stop request")); }
     Ok(())
 }
@@ -111,7 +119,7 @@ mod tests {
         use std::io::{BufRead, BufReader, Write};
         use std::os::unix::{fs::PermissionsExt, net::UnixListener};
         use time::{OffsetDateTime, format_description::well_known::Rfc3339};
-        for mode in ["wrong-pid", "wrong-hello", "refused", "ok"] {
+        for mode in ["wrong-pid", "wrong-hello", "refused", "ok", "idle-refused", "idle-ok"] {
             let dir = tempfile::tempdir().unwrap();
             std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
             let registry = dir.path().join("registry");
@@ -138,12 +146,13 @@ mod tests {
                 } else {
                     reader.read_line(&mut line).unwrap();
                     let request: serde_json::Value = serde_json::from_str(&line).unwrap();
-                    assert_eq!(request["method"], "stop");
-                    writeln!(stream, "{}", serde_json::json!({"type":"reply","id":request["id"],"ok":mode == "ok"})).unwrap();
+                    assert_eq!(request["method"], if mode.starts_with("idle-") { "stop_if_idle" } else { "stop" });
+                    writeln!(stream, "{}", serde_json::json!({"type":"reply","id":request["id"],"ok":matches!(mode, "ok" | "idle-ok")})).unwrap();
                 }
             });
             let selected = discovery::sessions_in(dir.path()).unwrap().pop().unwrap();
-            assert_eq!(stop_verified(dir.path(), &selected, Instant::now() + Duration::from_secs(2)).is_ok(), mode == "ok");
+            let stopped = if mode.starts_with("idle-") { stop_idle_verified(dir.path(), &selected, Instant::now() + Duration::from_secs(2)) } else { stop_verified(dir.path(), &selected, Instant::now() + Duration::from_secs(2)) };
+            assert_eq!(stopped.is_ok(), matches!(mode, "ok" | "idle-ok"));
             server.join().unwrap(); let _ = other.kill(); let _ = other.wait();
         }
     }
