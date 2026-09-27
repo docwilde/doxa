@@ -19,4 +19,7 @@ pub mod operations;
 pub mod peer_map;
 pub mod fleet_view;
 pub mod fleet_plan;
+pub mod fleet_control;
 pub mod theme;
+
+pub mod mesh_control;

@@ -783,3 +783,72 @@ fn invalid_stop_reply_does_not_stop_listener() {
     let (mut next, _) = connect(handle.socket_path());
     assert_eq!(recv(&mut next)["type"], "hello");
 }
+
+#[test]
+fn effort_resume_request_does_not_claim_verified_current_setting() {
+    struct ResumeEffort;
+    impl Host for ResumeEffort {
+        fn initial_effort(&self) -> Option<String> { Some("low".into()) }
+        fn call(&self, _: &str, _: &Value) -> Result<Value, String> {
+            Ok(json!({"effort":"high","verification_pending":true}))
+        }
+        fn prompt(&self, _: &str, emit: &mut dyn FnMut(Value)) {
+            emit(json!({"type":"effort_verified","data":{"effort":"high"}}));
+            emit(json!({"type":"model_changed","data":{"model":"verified-model"}}));
+            emit(json!({"type":"turn_done","data":{}}));
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let handle = Daemon::bind(dir.path(), session(), Arc::new(ResumeEffort)).unwrap().start();
+    let (mut reader, mut writer) = connect(handle.socket_path()); recv(&mut reader);
+    send(&mut writer, json!({"type":"attach","cursor":null}));
+    send(&mut writer, json!({"type":"call","id":1,"method":"set_effort","params":{"effort":"high"}}));
+    assert_eq!(recv(&mut reader)["verification_pending"], true);
+    assert_eq!(recv(&mut reader)["event"]["type"], "effort_requested");
+    send(&mut writer, json!({"type":"call","id":2,"method":"status","params":{}}));
+    let status = recv(&mut reader)["status"].clone();
+    assert_eq!(status["effort"], "low"); assert_eq!(status["pending_effort"], "high");
+    send(&mut writer, json!({"type":"prompt","id":3,"text":"verify"}));
+    while recv(&mut reader)["event"]["type"] != "turn_done" {}
+    send(&mut writer, json!({"type":"call","id":4,"method":"status","params":{}}));
+    let status = loop { let frame = recv(&mut reader); if frame["id"] == 4 { break frame["status"].clone(); } };
+    assert_eq!(status["effort"], "high"); assert!(status["pending_effort"].is_null());
+    assert_eq!(status["model"], "verified-model");
+}
+
+#[test]
+fn pending_input_snapshots_survive_replay_overflow_and_require_exact_review() {
+    struct Answers(AtomicUsize);
+    impl Host for Answers {
+        fn prompt(&self, _: &str, _: &mut dyn FnMut(Value)) {}
+        fn call(&self, method: &str, _: &Value) -> Result<Value, String> {
+            assert_eq!(method, "answer_needs_input");
+            self.0.fetch_add(1, Ordering::SeqCst); Ok(json!({}))
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let host = Arc::new(Answers(AtomicUsize::new(0)));
+    let handle = Daemon::bind(dir.path(), session(), host.clone()).unwrap().start();
+    let request = json!({"id":"opaque-1","kind":"permission","input_summary":"echo reviewed"});
+    handle.publish(json!({"type":"needs_input","data":request}));
+    for _ in 0..520 {handle.publish(json!({"type":"notice","data":{}}));}
+    let (mut reader, mut writer) = connect(handle.socket_path());
+    let hello = recv(&mut reader);
+    assert_eq!(hello["pending_inputs"], json!([request]));
+    send(&mut writer, json!({"type":"attach","cursor":hello["next_seq"]}));
+    send(&mut writer, json!({"type":"call","id":1,"method":"get_state","params":{}}));
+    let state = recv(&mut reader);
+    assert_eq!(state["pending_inputs"], json!([request]));
+    assert_eq!(state["pending_inputs_complete"], true);
+    send(&mut writer, json!({"type":"call","id":2,"method":"answer_needs_input","params":{"id":"opaque-1","answer":{"decision":"allow"},"reviewed_request":{"id":"opaque-1","input_summary":"different"}}}));
+    assert_eq!(recv(&mut reader)["ok"], false);
+    assert_eq!(host.0.load(Ordering::SeqCst), 0);
+    send(&mut writer, json!({"type":"call","id":3,"method":"answer_needs_input","params":{"id":"opaque-1","answer":{"decision":"deny"},"reviewed_request":request}}));
+    assert_eq!(recv(&mut reader)["ok"], true);
+    assert_eq!(host.0.load(Ordering::SeqCst), 1);
+    handle.publish(json!({"type":"needs_input_resolved","data":{"id":"opaque-1"}}));
+    assert_eq!(recv(&mut reader)["event"]["type"], "needs_input_resolved");
+    send(&mut writer, json!({"type":"call","id":4,"method":"answer_needs_input","params":{"id":"opaque-1","answer":{"decision":"allow"},"reviewed_request":request}}));
+    assert_eq!(recv(&mut reader)["ok"], false);
+    assert_eq!(host.0.load(Ordering::SeqCst), 1);
+}

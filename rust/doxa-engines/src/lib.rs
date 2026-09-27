@@ -2,8 +2,12 @@
 //! only a Codex stdout parser; it does not launch or authenticate a CLI.
 
 pub mod codex;
+pub mod codex_interaction;
+pub mod peer_tools;
 #[cfg(unix)]
 pub mod codex_appserver;
+#[cfg(unix)]
+pub mod codex_compact;
 #[cfg(unix)]
 pub mod codex_driver;
 

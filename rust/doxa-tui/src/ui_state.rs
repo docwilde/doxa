@@ -14,11 +14,14 @@ use doxa_state::{
 use serde_json::{json, Value};
 
 use crate::ui::{App, PaneGroup, Split};
+use crate::ui::panes::{Tree, MAX_DEPTH, MAX_PANES, MAX_TABS};
 use crate::collections::{self, Collection};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LayoutSignature {
-    groups: [(Vec<String>, usize); 2],
+    groups: Vec<(Vec<String>, usize)>,
+    pane_tree: Option<Tree>,
+    fleet_views: Vec<crate::ui::fleet_menu::SavedView>,
     custom_names: Vec<(String, String)>,
     active_group: usize,
     split: Split,
@@ -30,7 +33,9 @@ pub struct LayoutSignature {
 impl LayoutSignature {
     pub fn capture(app: &App) -> Self {
         Self {
-            groups: app.groups.clone().map(|g| (g.tabs, g.active)),
+            groups: app.groups.iter().map(|g| (g.tabs.clone(), g.active)).collect(),
+            pane_tree: app.pane_tree.clone(),
+            fleet_views: app.fleet_views.clone(),
             custom_names: {
                 let mut names: Vec<_> = app.custom_names.iter().map(|(id, name)| (id.clone(), name.clone())).collect();
                 names.sort();
@@ -60,7 +65,7 @@ impl UiStateStore {
         if !*complete.lock().map_err(|_| "live roster guard unavailable")? {
             return Err("live roster incomplete");
         }
-        if !self.writable_layout { return Err("saved layout has more than two panes"); }
+        if !self.writable_layout { return Err("saved layout exceeds supported pane bounds"); }
         if app.has_offline_open_tabs() { return Err("archived tabs are read-only"); }
         if self.record.as_ref().is_some_and(|record| record.tabs.iter().any(|tab|
             !app.groups.iter().any(|group| group.tabs.contains(&tab.session_id)))) {
@@ -127,6 +132,7 @@ impl UiStateStore {
         let Some(record) = &self.record else {
             return false;
         };
+        if let Some(views)=record.raw.get("rust_ui").and_then(|ui|ui.get("fleet_views")).and_then(crate::ui::fleet_menu::SavedView::parse){app.fleet_views=views;}
         let live: HashSet<&str> = live_ids.iter().map(String::as_str).collect();
         let tabs: Vec<_> = record
             .tabs
@@ -135,6 +141,7 @@ impl UiStateStore {
             .collect();
         let ids: Vec<String> = tabs.iter().map(|t| t.session_id.clone()).collect();
         app.collections = collections::from_json(record.raw.get("collections"), &ids.iter().cloned().collect());
+        if tabs.len() > MAX_TABS { app.notice = "Saved tab count exceeds supported bounds".into(); return false; }
         if tabs.is_empty() {
             return false;
         }
@@ -143,11 +150,14 @@ impl UiStateStore {
             .as_deref()
             .filter(|id| ids.iter().any(|s| s == id));
         let layout = record.raw.get("layout");
-        let mut groups = [empty_group(), empty_group()];
+        let mut groups = vec![empty_group(), empty_group()];
+        let mut pane_tree = None;
         let mut split = Split::Vertical;
         let mut percent = 50;
         if let Some(raw) = layout.and_then(|l| l.get("groups")) {
-            if let Some((projected, orientation, weight)) = parse_groups(raw, &ids) {
+            let owned:HashSet<_>=record.tabs.iter().map(|tab|tab.session_id.as_str()).collect();
+            if let Some((projected, orientation, weight, tree)) = tree_ids(raw).iter().all(|id|owned.contains(id)).then(||parse_groups(raw,&ids)).flatten() {
+                pane_tree = tree;
                 groups = projected;
                 split = orientation;
                 percent = weight;
@@ -165,7 +175,7 @@ impl UiStateStore {
             if let Some((projected, orientation, weight)) =
                 chosen.and_then(|tree| parse_legacy_tree(tree, &ids))
             {
-                groups = projected;
+                groups = projected.to_vec();
                 split = orientation;
                 percent = weight;
             } else {
@@ -184,7 +194,7 @@ impl UiStateStore {
                 groups[0].tabs.push(id);
             }
         }
-        if groups[0].tabs.is_empty() && !groups[1].tabs.is_empty() {
+        if pane_tree.is_none() && groups[0].tabs.is_empty() && !groups[1].tabs.is_empty() {
             groups.swap(0, 1);
         }
         if let Some(id) = active {
@@ -196,6 +206,7 @@ impl UiStateStore {
             }
         }
         app.groups = groups;
+        app.pane_tree = pane_tree;
         for tab in &tabs {
             if let Some(name) = tab.pinned_name.as_ref().filter(|name| !name.is_empty()) {
                 app.custom_names.insert(tab.session_id.clone(), name.clone());
@@ -221,7 +232,7 @@ impl UiStateStore {
         if !self.writable_layout {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
-                "saved layout has more than two panes",
+                "saved layout exceeds supported pane bounds",
             ));
         }
         // This UI mounts live daemons only. A saved tab whose daemon is
@@ -239,6 +250,9 @@ impl UiStateStore {
                 io::ErrorKind::Unsupported,
                 "saved layout includes offline tabs",
             ));
+        }
+        if app.groups.len() > MAX_PANES || app.groups.iter().map(|g| g.tabs.len()).sum::<usize>() > MAX_TABS {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "pane/tab bounds exceeded"));
         }
         let mut seen = HashSet::new();
         let mut tabs = Vec::new();
@@ -263,8 +277,9 @@ impl UiStateStore {
                 }
             }
         }
-        if tabs.is_empty() {
-            return Ok(());
+        if tabs.is_empty() && app.fleet_views.is_empty() { return Ok(()); }
+        if app.fleet_views.len()>crate::ui::fleet_menu::MAX_SAVED_VIEWS || app.fleet_views.iter().any(|view|!view.valid()){
+            return Err(io::Error::new(io::ErrorKind::InvalidInput,"invalid saved fleet view"));
         }
         if tabs.len() != app.groups.iter().map(|g| g.tabs.len()).sum::<usize>() {
             return Err(io::Error::new(
@@ -286,7 +301,7 @@ impl UiStateStore {
         record.scope_key = self.scope_key.clone();
         record.active_session_id = active;
         record.tabs = tabs;
-        let groups: Vec<Value> = app.groups.iter().filter(|g| !g.tabs.is_empty()).map(|g| {
+        let groups: Vec<Value> = app.groups.iter().filter(|g| app.pane_tree.is_some() || !g.tabs.is_empty()).map(|g| {
             let leaves: Vec<Value> = g.tabs.iter().map(|id| leaf(&record, id)).collect();
             json!({"kind":"group","active":g.active.min(leaves.len().saturating_sub(1)),"tabs":leaves})
         }).collect();
@@ -295,10 +310,12 @@ impl UiStateStore {
             .iter()
             .filter_map(|g| g.tabs.get(g.active).map(|id| leaf(&record, id)))
             .collect();
-        let group_tree = if groups.len() == 2 {
+        let group_tree = if let Some(tree) = &app.pane_tree {
+            tree.serialize(&groups)
+        } else if groups.len() == 2 {
             json!({"kind":"split","orientation":orientation(app.split),"weights":[app.split_percent.clamp(20,80) as f64 / 100.0, 1.0 - app.split_percent.clamp(20,80) as f64 / 100.0],"children":groups})
         } else {
-            groups[0].clone()
+            groups.first().cloned().unwrap_or_else(||json!({"kind":"group","active":0,"tabs":[]}))
         };
         let layout = record.raw.entry("layout").or_insert_with(|| json!({}));
         let object = layout
@@ -306,10 +323,11 @@ impl UiStateStore {
             .ok_or_else(|| io::Error::new(io::ErrorKind::Unsupported, "unknown layout format"))?;
         object.insert("groups".into(), group_tree);
         object.insert("trees".into(), Value::Array(trees));
-        record.raw.insert(
-            "rust_ui".into(),
-            json!({"rail_visible":app.rail_visible,"rail_width":app.rail_width.clamp(12,44)}),
-        );
+        let rust_ui=record.raw.entry("rust_ui").or_insert_with(||json!({})).as_object_mut()
+            .ok_or_else(||io::Error::new(io::ErrorKind::Unsupported,"unknown native UI metadata"))?;
+        rust_ui.insert("rail_visible".into(),json!(app.rail_visible));
+        rust_ui.insert("rail_width".into(),json!(app.rail_width.clamp(12,44)));
+        if app.fleet_views.is_empty(){rust_ui.remove("fleet_views");}else{rust_ui.insert("fleet_views".into(),serde_json::to_value(&app.fleet_views).map_err(io::Error::other)?);}
         let keep: HashSet<String> = record.tabs.iter().map(|tab| tab.session_id.clone()).collect();
         let collections = collections::to_json(&app.collections, &keep);
         // A legacy empty tabset can carry an empty collection row as inert
@@ -425,6 +443,7 @@ fn weight(raw: &Value) -> u16 {
         .clamp(20, 80)
 }
 fn supported_layout(raw: &serde_json::Map<String, Value>) -> bool {
+    if raw.get("rust_ui").and_then(|ui|ui.get("fleet_views")).is_some_and(|views|crate::ui::fleet_menu::SavedView::parse(views).is_none()){return false;}
     let Some(layout) = raw.get("layout") else {
         return true;
     };
@@ -435,7 +454,9 @@ fn supported_layout(raw: &serde_json::Map<String, Value>) -> bool {
         return false;
     }
     if let Some(groups) = layout.get("groups") {
-        return supported_group_tree(groups);
+        let owned:HashSet<_>=raw.get("tabs").or_else(||layout.get("tabs")).and_then(Value::as_array).into_iter().flatten()
+            .filter_map(|row|row["session_id"].as_str()).collect();
+        return supported_group_tree(groups)&&tree_ids(groups).iter().all(|id|owned.contains(id));
     }
     if let Some(trees) = layout.get("trees").and_then(Value::as_array) {
         // The old tree format can have one split tree for the active tab.
@@ -445,29 +466,25 @@ fn supported_layout(raw: &serde_json::Map<String, Value>) -> bool {
     true
 }
 fn supported_group_tree(node: &Value) -> bool {
-    match node.get("kind").and_then(Value::as_str) {
-        Some("group") => node
-            .get("tabs")
-            .and_then(Value::as_array)
-            .is_some_and(|tabs| {
-                tabs.iter()
-                    .all(|leaf| leaf.get("kind").and_then(Value::as_str) == Some("leaf"))
-            }),
-        Some("split") => {
-            parse_orientation(&node["orientation"]).is_some()
-                && node
-                    .get("children")
-                    .and_then(Value::as_array)
-                    .is_some_and(|children| {
-                        children.len() == 2
-                            && children.iter().all(|child| {
-                                child.get("kind").and_then(Value::as_str) == Some("group")
-                                    && supported_group_tree(child)
-                            })
-                    })
+    fn walk(node: &Value, depth: usize, groups: &mut usize, tabs: &mut usize) -> bool {
+        if depth > MAX_DEPTH { return false; }
+        match node.get("kind").and_then(Value::as_str) {
+            Some("group") => {
+                *groups += 1;
+                let Some(rows) = node.get("tabs").and_then(Value::as_array) else { return false; };
+                *tabs += rows.len();
+                *groups <= MAX_PANES && *tabs <= MAX_TABS && rows.iter().all(|leaf|
+                    leaf["kind"] == "leaf" && leaf["session_id"].as_str().is_some_and(valid_session_id))
+            }
+            Some("split") => {
+                let Some(children) = node["children"].as_array() else { return false; };
+                parse_orientation(&node["orientation"]).is_some() && (2..=MAX_PANES).contains(&children.len())
+                    && children.iter().all(|child| walk(child, depth + 1, groups, tabs))
+            }
+            _ => false,
         }
-        _ => false,
     }
+    walk(node, 0, &mut 0, &mut 0)
 }
 fn supported_legacy_tree(node: &Value) -> bool {
     match node.get("kind").and_then(Value::as_str) {
@@ -512,25 +529,40 @@ fn group_tabs(raw: &Value, live: &[String]) -> Option<PaneGroup> {
     }
     Some(group)
 }
-fn parse_groups(raw: &Value, live: &[String]) -> Option<([PaneGroup; 2], Split, u16)> {
-    if raw.get("kind")?.as_str()? == "group" {
-        return Some(([group_tabs(raw, live)?, empty_group()], Split::Vertical, 50));
+fn parse_groups(raw: &Value, live: &[String]) -> Option<(Vec<PaneGroup>, Split, u16, Option<Tree>)> {
+    if !supported_group_tree(raw) { return None; }
+    fn walk(raw: &Value, live: &[String], groups: &mut Vec<PaneGroup>) -> Option<Tree> {
+        if raw["kind"] == "group" {
+            let index = groups.len();
+            groups.push(group_tabs(raw, live)?);
+            return Some(Tree::Group(index));
+        }
+        let children: Option<Vec<_>> = raw["children"].as_array()?.iter().map(|child| walk(child, live, groups)).collect();
+        let children = children?;
+        let count = children.len();
+        let mut weights: Vec<u16> = raw["weights"].as_array().into_iter().flatten().filter_map(|value| value.as_f64())
+            .filter(|value| value.is_finite() && *value > 0.0 && *value <= 1.0)
+            .map(|value| (value * 10000.0).round().clamp(1.0, 10000.0) as u16).collect();
+        if weights.len() != count { weights = vec![10000 / count as u16; count]; }
+        Some(Tree::Split { orientation: parse_orientation(&raw["orientation"])?, children, weights })
     }
-    if raw.get("kind")?.as_str()? != "split" {
-        return None;
+    let mut groups = Vec::new();
+    let mut tree = walk(raw, live, &mut groups)?;
+    for index in (0..groups.len()).rev() {
+        if groups[index].tabs.is_empty() && groups.len() > 1 {
+            groups.remove(index);
+            tree = tree.without(index)?;
+        }
     }
-    let children = raw.get("children")?.as_array()?;
-    if children.len() != 2 {
-        return None;
-    }
-    Some((
-        [
-            group_tabs(&children[0], live)?,
-            group_tabs(&children[1], live)?,
-        ],
-        parse_orientation(&raw["orientation"])?,
-        weight(raw),
-    ))
+    let (orientation, percent) = match &tree {
+        Tree::Split { orientation, weights, .. } => (*orientation,
+            (u32::from(weights[0]) * 100 / weights.iter().map(|w|u32::from(*w)).sum::<u32>().max(1)) as u16),
+        _ => (Split::Vertical, 50),
+    };
+    if groups.len() <= 2 {
+        while groups.len() < 2 { groups.push(empty_group()); }
+        Some((groups, orientation, percent, None))
+    } else { Some((groups, orientation, percent, Some(tree))) }
 }
 fn parse_legacy_tree(raw: &Value, live: &[String]) -> Option<([PaneGroup; 2], Split, u16)> {
     if raw.get("kind")?.as_str()? != "split" {
@@ -667,4 +699,31 @@ mod tests {
         app.groups[0].tabs.clear();
         assert_eq!(store.clear_preflight(&app, &complete), Err("saved layout includes offline tabs"));
     }
+    #[test]
+    fn nested_three_pane_tree_round_trips_and_bounds_are_strict() {
+        let leaf=|id:&str| json!({"kind":"group","tabs":[{"kind":"leaf","session_id":id}]});
+        let raw=json!({"kind":"split","orientation":"row","weights":[0.4,0.6],"children":[leaf("a"),
+            {"kind":"split","orientation":"column","weights":[0.5,0.5],"children":[leaf("b"),leaf("c")]}]});
+        let (groups,_,_,tree)=parse_groups(&raw,&["a".into(),"b".into(),"c".into()]).unwrap();
+        assert_eq!(groups.len(),3);
+        let tree=tree.unwrap();
+        let saved=tree.serialize(&[leaf("a"),leaf("b"),leaf("c")]);
+        assert!(supported_group_tree(&saved));
+        assert_eq!(parse_groups(&saved,&["a".into(),"b".into(),"c".into()]).unwrap().3,Some(tree));
+        let oversized=json!({"kind":"split","orientation":"row","children":(0..=MAX_PANES).map(|_|leaf("a")).collect::<Vec<_>>()});
+        assert!(!supported_group_tree(&oversized));
+    }
+
+    #[test]
+    fn typed_fleet_views_round_trip_without_synthetic_session_tabs(){
+        let temp=tempfile::tempdir().unwrap();let mut store=UiStateStore::new(temp.path(),"/project","machine").unwrap();
+        let mut app=App::default();app.fleet_views=crate::ui::fleet_menu::SavedView::parse(&json!([{"kind":"fleet","root":"/real/fleet","run_id":"actual-run"}])).unwrap();
+        store.save(&app).unwrap();let raw:Value=serde_json::from_slice(&std::fs::read(store.path()).unwrap()).unwrap();
+        assert_eq!(raw["tabs"],json!([]));assert_eq!(raw["rust_ui"]["fleet_views"][0]["run_id"],"actual-run");
+        let saved=UiStateStore::new(temp.path(),"/project","machine").unwrap();let mut restored=App::default();
+        assert!(!saved.restore(&mut restored,&[]));assert_eq!(restored.fleet_views,app.fleet_views);
+        assert!(restored.groups.iter().all(|group|group.tabs.is_empty()));
+        assert!(crate::ui::fleet_menu::SavedView::parse(&json!([{"kind":"session","root":"/real/fleet","run_id":"actual-run"}])).is_none());
+    }
+
 }

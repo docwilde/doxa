@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::VecDeque;
 use std::fs::{self, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -195,6 +195,62 @@ pub struct Ledger { pub(crate) path: PathBuf, pub(crate) ceiling: u64 }
 impl Ledger {
     pub fn new(path: PathBuf) -> Self { Self { path, ceiling: MAX_LEDGER_BYTES } }
     pub fn with_ceiling(path: PathBuf, ceiling: u64) -> Self { Self { path, ceiling } }
+    /// Read a bounded tail from one private inode. Only messages involving
+    /// this session in the exact project scope are returned. A partial first
+    /// line or concurrently appended incomplete final line is ignored.
+    pub fn history(&self, session: &str, scope: &str, scrubber: &impl Scrubber) -> io::Result<Vec<Message>> {
+        let parent = self.path.parent().ok_or_else(|| invalid("ledger has no parent"))?;
+        let meta = match fs::symlink_metadata(parent) {
+            Ok(meta) => meta,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        if !meta.is_dir() || meta.file_type().is_symlink() || meta.uid() != unsafe { libc::geteuid() }
+            || meta.mode() & 0o077 != 0 { return Err(invalid("unsafe ledger directory")); }
+        let dir = OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC).open(parent)?;
+        let opened_dir = dir.metadata()?;
+        if (opened_dir.dev(), opened_dir.ino()) != (meta.dev(), meta.ino())
+            || opened_dir.uid() != unsafe {libc::geteuid()} || opened_dir.mode() & 0o077 != 0 {
+            return Err(invalid("ledger directory changed during open"));
+        }
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::fd::FromRawFd;
+        let name = CString::new(self.path.file_name().ok_or_else(|| invalid("invalid ledger name"))?.as_bytes())
+            .map_err(|_| invalid("invalid ledger name"))?;
+        let fd = unsafe { libc::openat(dir.as_raw_fd(), name.as_ptr(), libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK) };
+        if fd < 0 {
+            let error = io::Error::last_os_error();
+            return if error.kind() == io::ErrorKind::NotFound { Ok(Vec::new()) } else { Err(error) };
+        }
+        let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+        let meta = file.metadata()?;
+        if !meta.is_file() || meta.uid() != unsafe { libc::geteuid() } || meta.nlink() != 1
+            || meta.mode() & 0o077 != 0 { return Err(invalid("unsafe ledger file")); }
+        const TAIL: u64 = 256 * 1024;
+        let offset = meta.len().saturating_sub(TAIL);
+        file.seek(SeekFrom::Start(offset))?;
+        let mut bytes = Vec::new(); file.take(TAIL).read_to_end(&mut bytes)?;
+        let start = if offset > 0 { bytes.iter().position(|b| *b == b'\n').map(|at| at + 1).unwrap_or(bytes.len()) } else { 0 };
+        let end = bytes.iter().rposition(|b| *b == b'\n').unwrap_or(0);
+        if start >= end { return Ok(Vec::new()); }
+        let mut result = Vec::new(); let mut output_bytes = 0usize;
+        for line in bytes[start..end].split(|b| *b == b'\n').rev() {
+            if line.len() > 32 * 1024 { continue; }
+            let Ok(mut message) = serde_json::from_slice::<Message>(line) else { continue; };
+            if message.sender.repo.as_deref() != Some(scope)
+                || (message.sender.session != session && !message.to.iter().any(|target| target == session)) { continue; }
+            message.body = scrubber.scrub(&message.body);
+            for value in [&mut message.sender.title, &mut message.sender.repo, &mut message.sender.model, &mut message.sender.engine] {
+                *value = value.take().map(|value| scrubber.scrub(&value));
+            }
+            let length = serde_json::to_vec(&message).map_err(io::Error::other)?.len();
+            if output_bytes.saturating_add(length) > 24 * 1024 { break; }
+            output_bytes += length; result.push(message);
+            if result.len() == 20 { break; }
+        }
+        result.reverse(); Ok(result)
+    }
     pub fn append(&self, mut message: Message, scrubber: &impl Scrubber) -> io::Result<Message> {
         if message.to.is_empty() || !matches!(message.kind.as_str(), "direct" | "broadcast") { return Err(invalid("invalid ledger delivery")); }
         message.body_sha256 = format!("{:x}", Sha256::digest(message.body.as_bytes()));

@@ -139,7 +139,8 @@ async def run() -> None:
     emit({"type": "hello", "protocol": PROTOCOL, "version": VERSION,
           "capabilities": ["start", "prompt", "answer", "interrupt", "finalize",
                            "set_model", "set_permission_mode", "list_models",
-                           "reviewed_compact_v1"]})
+                           "reviewed_compact_v1", "context_detail"]
+                          + (["set_effort"] if hasattr(SessionEngine, "set_effort") else [])})
     engine = None
     turn = None
     catalog_task = None
@@ -161,6 +162,7 @@ async def run() -> None:
             available = [m for m in models if m.source != "fallback"]
             return {"models": [m.id for m in available[:100]
                                if isinstance(m.id, str) and 0 < len(m.id) <= 128],
+                    "capabilities": [{"model": m.id, "efforts": ["low", "medium", "high", "xhigh", "max"] if hasattr(SessionEngine, "set_effort") else []} for m in available[:100]],
                     "note": (provider.catalog_note(available) if available else
                              "No verified Claude model catalog available")[:500]}
         except Exception:  # optional catalog discovery must not stop the session
@@ -253,7 +255,8 @@ async def run() -> None:
                     complete = emit({"type": "reply", "id": request_id, "ok": True,
                                      "result": {"event": started.type, "data": started.data,
                                                 "permission_mode": getattr(candidate, "permission_mode", "default"),
-                                                "billing": billing}})
+                                                "billing": billing,
+                                                "peer_tools_ready": getattr(candidate, "peer_host", None) is not None}})
                 except Exception:
                     try:
                         await asyncio.wait_for(candidate.finalize(), timeout=EOF_FINALIZE_TIMEOUT)
@@ -286,6 +289,13 @@ async def run() -> None:
                 applied = await engine.answer_needs_input(params["id"], answer)
                 emit({"type": "reply", "id": request_id, "ok": True,
                       "result": {"applied": applied}})
+            elif method == "context_detail" and engine is not None:
+                from doxa.engine import _scrub_json
+                detail = await asyncio.wait_for(engine.context_usage(), timeout=5.0)
+                if not isinstance(detail, dict):
+                    raise ValueError("context unavailable")
+                emit({"type": "reply", "id": request_id, "ok": True,
+                      "result": {**_scrub_json(detail), "source": "Claude official context_usage"}})
             elif method == "list_models" and engine is not None:
                 result = (catalog_task.result() if catalog_task.done() else
                           {"models": [], "loading": True,
@@ -302,6 +312,16 @@ async def run() -> None:
                 selected = await engine.set_model(model)
                 emit({"type": "reply", "id": request_id, "ok": True,
                       "result": {"model": selected}})
+            elif method == "set_effort" and engine is not None:
+                if turn is not None and not turn.done():
+                    raise ValueError("effort changes require an idle session")
+                effort = params.get("effort")
+                if effort not in ("low", "medium", "high", "xhigh", "max"):
+                    raise ValueError("invalid effort")
+                selected = await engine.set_effort(effort)
+                emit({"type": "reply", "id": request_id, "ok": True,
+                      "result": {"effort": selected,
+                                 "verification_pending": bool(getattr(engine, "_resume_identity_pending", None))}})
             elif method == "set_permission_mode" and engine is not None:
                 mode = params["mode"]
                 if mode not in ("default", "acceptEdits", "plan", "auto", "dontAsk"):
@@ -360,5 +380,35 @@ async def run() -> None:
             pass
 
 
+def plugin_inventory(reload: bool = False) -> str:
+    """No SDK connection: canonical policy, sanitized staging, then LORE scrub."""
+    from doxa import _lore_bootstrap, claude_plugins
+    _lore_bootstrap.ensure_importable()
+    _lore_bootstrap.export_sticky_lore_root()
+    from lore_core.scrub import scrub_secrets
+
+    discovered = claude_plugins.discover()
+    staged = claude_plugins.adopt(discovered) if reload else []
+    text = claude_plugins.report(discovered)
+    if reload:
+        text += (f"\n\nreload-plugins: re-scanned and re-staged {len(staged)} plugin(s). "
+                 "Changes apply to NEW sessions and tabs only; this session's CLI "
+                 "already connected with its original plugin directories.")
+    text = scrub_secrets(text)
+    # Plugin descriptions and paths are untrusted display data, never terminal controls.
+    return "".join(c for c in text if c in "\n\t" or 32 <= ord(c) < 127 or ord(c) >= 160)
+
+
 if __name__ == "__main__":
-    asyncio.run(run())
+    if sys.argv[1:] in (["--plugins-report"], ["--reload-plugins"]):
+        try:
+            text = plugin_inventory(sys.argv[1] == "--reload-plugins")
+            if len(text.encode("utf-8")) > 65536:
+                raise ValueError("inventory too large")
+            print(text)
+        except Exception:
+            # Never disclose exception strings or unsanitized inventory.
+            print("Plugin inventory failed; verify the installed DOXA Python/LORE dependencies.")
+            sys.exit(1)
+    else:
+        asyncio.run(run())

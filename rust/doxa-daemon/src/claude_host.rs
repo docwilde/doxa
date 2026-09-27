@@ -44,8 +44,10 @@ pub struct ClaudeHost {
     closing: AtomicBool,
     admission: Mutex<()>,
     model_control: bool,
+    effort_control: bool,
     permission_control: bool,
     reviewed_compact: bool,
+    peer_tools_ready: bool,
     initial_model: Option<String>,
     initial_permission_mode: String,
     billing: Option<Value>,
@@ -63,6 +65,7 @@ impl ClaudeHost {
         let mut bridge = Bridge::spawn(python, script)
             .map_err(|_| "Claude sidecar could not start".to_owned())?;
         let model_control = bridge.supports("set_model");
+        let effort_control = bridge.supports("set_effort");
         let permission_control = bridge.supports("set_permission_mode");
         let reviewed_compact = bridge.supports("reviewed_compact_v1");
         let params = json!({"cwd":cwd,"session_id":session_id,
@@ -94,6 +97,7 @@ impl ClaudeHost {
                 Err(_) => return Err("Claude sidecar closed during startup".to_owned()),
             }
         };
+        let peer_tools_ready = start["peer_tools_ready"] == true;
         let initial_model = start["data"]["model"].as_str().map(str::to_owned);
         let initial_permission_mode = start["permission_mode"].as_str().unwrap_or("default");
         if !matches!(initial_permission_mode, "default" | "acceptEdits" | "plan" | "auto" | "dontAsk") {
@@ -117,8 +121,10 @@ impl ClaudeHost {
             closing: AtomicBool::new(false),
             admission: Mutex::new(()),
             model_control,
+            effort_control,
             permission_control,
             reviewed_compact,
+            peer_tools_ready,
             initial_model,
             initial_permission_mode,
             billing,
@@ -134,7 +140,7 @@ impl ClaudeHost {
                 reply: tx,
             })
             .map_err(|_| "Claude sidecar closed".to_owned())?;
-        rx.recv_timeout(RPC_TIMEOUT)
+        rx.recv_timeout(if method == "set_effort" { Duration::from_secs(60) } else { RPC_TIMEOUT })
             .map_err(|_| "Claude sidecar did not answer".to_owned())?
     }
 
@@ -164,6 +170,7 @@ impl ClaudeHost {
 }
 
 impl Host for ClaudeHost {
+    fn peer_tools_ready(&self) -> bool { self.peer_tools_ready && !self.closing.load(Ordering::Acquire) }
     fn can_set_model(&self) -> bool { self.model_control }
     fn can_set_permission_mode(&self) -> bool { self.permission_control }
     fn initial_model(&self) -> Option<String> { self.initial_model.clone() }
@@ -238,6 +245,11 @@ impl Host for ClaudeHost {
 
     fn call(&self, method: &str, params: &Value) -> Result<Value, String> {
         match method {
+            "context_detail" => {
+                let result = self.rpc("context_detail", json!({}))?;
+                if !result.is_object() { return Err("Claude context detail is unavailable".into()); }
+                Ok(result)
+            }
             "list_models" => {
                 if !self.model_control { return Err("Claude sidecar does not support set_model".into()); }
                 self.rpc("list_models", json!({}))
@@ -258,6 +270,18 @@ impl Host for ClaudeHost {
                     result["model"].as_str().ok_or("invalid model reply")?
                 };
                 Ok(json!({"model":selected}))
+            }
+            "set_effort" => {
+                let _admission = self.admission.lock().unwrap();
+                if !self.effort_control { return Err("Claude sidecar does not support effort resume".into()); }
+                if self.turn_active() || self.closing.load(Ordering::Acquire) {
+                    return Err("Claude effort changes require an idle session".into());
+                }
+                let effort = params["effort"].as_str().ok_or("effort is required")?;
+                if !matches!(effort, "low" | "medium" | "high" | "xhigh" | "max") {
+                    return Err("unsupported Claude effort".into());
+                }
+                self.rpc("set_effort", json!({"effort":effort}))
             }
             "set_permission_mode" => {
                 if !self.permission_control {

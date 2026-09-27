@@ -24,7 +24,7 @@ peer/session state doxa.config already keeps there::
     worktrees/<repo>-<short>/     the linked worktree itself
     worktrees/.meta/<repo>-<short>.json
                                    sidecar: {main_root, branch, base_ref,
-                                   session_id} -- OUTSIDE the worktree's own
+                                   base_oid, session_id} -- OUTSIDE the worktree's own
                                    tree deliberately, so it can never show
                                    up as an untracked file and make an
                                    otherwise-clean worktree look dirty.
@@ -53,6 +53,11 @@ from __future__ import annotations
 
 import contextlib
 import json
+import fcntl
+import stat
+import threading
+import uuid
+import functools
 import os
 import re
 import subprocess
@@ -94,28 +99,177 @@ def _meta_path(target: Path) -> Path:
     return _meta_dir() / f"{target.name}.json"
 
 
-def _write_meta(target: Path, **fields: str) -> None:
+# Shared with Rust: retain each lock inode and hold it across daemon detach.
+_lifecycle_files: dict[str, int] = {}
+_lifecycle_mutex = threading.RLock()
+
+
+def _serialized_lifecycle(fn):
+    @functools.wraps(fn)
+    def guarded(*args, **kwargs):
+        with _lifecycle_mutex:
+            return fn(*args, **kwargs)
+    return guarded
+
+
+def _acquire_lifecycle(target: Path) -> bool:
+    key = str(target.absolute())
+    with _lifecycle_mutex:
+        if key in _lifecycle_files:
+            return True
+        fd = None
+        try:
+            for directory in (worktrees_root(), _meta_dir()):
+                directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+                st = directory.lstat()
+                if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.geteuid() or st.st_mode & 0o077:
+                    return False
+            path = _meta_dir() / f"{target.name}.lock"
+            fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, 0o600)
+            st, named = os.fstat(fd), path.lstat()
+            if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid() or st.st_mode & 0o077 or (st.st_dev, st.st_ino) != (named.st_dev, named.st_ino):
+                raise OSError("untrusted lifecycle lock")
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            _lifecycle_files[key] = fd
+            return True
+        except OSError:
+            if fd is not None:
+                os.close(fd)
+            return False
+
+
+def release_lifecycle(worktree_path: str) -> None:
+    """Release at session end, never on client detach."""
+    with _lifecycle_mutex:
+        fd = _lifecycle_files.pop(str(Path(worktree_path).absolute()), None)
+        if fd is not None:
+            os.close(fd)
+
+
+def _git_text(cwd: str, *args: str) -> str | None:
     try:
-        _meta_dir().mkdir(parents=True, exist_ok=True)
-        os.chmod(_meta_dir(), 0o700)
-        tmp = _meta_path(target).with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(fields, ensure_ascii=False), encoding="utf-8")
-        os.chmod(tmp, 0o600)
+        proc = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, timeout=10)
+        return proc.stdout.strip() if proc.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _verified_record(path: str, meta: dict | None) -> bool:
+    if not meta or not is_own_record(meta):
+        return False
+    named = record_machine(meta)
+    if named and named != lore_sync_mod.machine_id():
+        return False
+    main, sid = str(meta.get("main_root") or ""), str(meta.get("session_id") or "")
+    branch, pin = str(meta.get("branch") or ""), str(meta.get("base_oid") or "")
+    base = str(meta.get("base_ref") or "")
+    if not base or len(base) > 200 or base.startswith("-") or ".." in base or not re.fullmatch(r"[0-9A-Za-z_./-]+", base):
+        return False
+    try:
+        expected = worktrees_root().resolve() / f"{Path(main).name}-{_short_id(sid)}"
+        if Path(path).resolve() != expected or not sid or branch != f"doxa/{_short_id(sid)}" or meta.get("base_ref") == branch:
+            return False
+        if Path(peers_mod.main_repo_root_of(path) or "").resolve() != Path(main).resolve():
+            return False
+    except OSError:
+        return False
+    return (bool(re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", pin))
+            and _existing_worktree_path(main, branch) == path
+            and _git_text(path, "symbolic-ref", "--quiet", "--short", "HEAD") == branch
+            and _git_text(main, "merge-base", "--is-ancestor", pin, branch) is not None)
+
+
+def managed_record_present(worktree_path: str) -> bool:
+    """Detect a sidecar including unreadable records: startup must fail closed."""
+    path = _meta_path(Path(worktree_path))
+    return path.exists() or path.is_symlink()
+
+
+@_serialized_lifecycle
+def claim_lifecycle(worktree_path: str, session_id: str) -> bool:
+    """Claim a verified existing checkout before a resumed daemon starts.
+
+    False requires the caller to refuse using this managed checkout; a
+    resume must never silently continue after failing its ownership lock.
+    Plain directories are not claims and return False.
+    """
+    target = Path(worktree_path)
+    held = str(target.absolute()) in _lifecycle_files
+    if not _acquire_lifecycle(target):
+        return False
+    meta = read_meta(worktree_path)
+    if meta and meta.get("session_id") == session_id and _verified_record(worktree_path, meta):
+        return True
+    if not held:
+        release_lifecycle(worktree_path)
+    return False
+
+
+@_serialized_lifecycle
+def create(cwd: str, session_name: str, base_branch: str | None = None) -> str | None:
+    main = peers_mod.main_repo_root_of(cwd)
+    if not enabled() or not main:
+        return None
+    target = worktrees_root() / f"{Path(main).name}-{_short_id(session_name)}"
+    held = str(target.absolute()) in _lifecycle_files
+    if not _acquire_lifecycle(target):
+        return None
+    try:
+        result = _create_locked(cwd, session_name, base_branch)
+        if result is not None:
+            return result
+    except BaseException:
+        if not held:
+            release_lifecycle(str(target))
+        raise
+    if not held:
+        release_lifecycle(str(target))
+    return None
+
+
+def _write_meta(target: Path, **fields: str) -> None:
+    tmp = _meta_dir() / f".{target.name}.{uuid.uuid4().hex}.tmp"
+    fd = None
+    try:
+        st = _meta_dir().lstat()
+        if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.geteuid() or st.st_mode & 0o077:
+            return
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            fd = None
+            json.dump(fields, stream, ensure_ascii=False)
+            stream.flush()
+            os.fsync(stream.fileno())
         os.replace(tmp, _meta_path(target))
     except OSError:
-        pass  # best-effort: a missing sidecar just means finalize can't
-        # tell this worktree apart from one the user made by hand, so it
-        # leaves it alone -- "keep" is always the safe default (see
-        # finalize()'s meta-is-None case).
+        pass  # Never remove a checkout whose sidecar could not be verified.
+    finally:
+        if fd is not None:
+            os.close(fd)
+        with contextlib.suppress(OSError):
+            tmp.unlink()
 
 
 def read_meta(worktree_path: str) -> "dict | None":
+    fd = None
     try:
-        data = json.loads(
-            _meta_path(Path(worktree_path)).read_text(encoding="utf-8")
-        )
+        path = _meta_path(Path(worktree_path))
+        named = path.lstat()
+        if not stat.S_ISREG(named.st_mode) or named.st_uid != os.geteuid() or named.st_mode & 0o077 or named.st_size > 65536:
+            return None
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        opened = os.fstat(fd)
+        if (named.st_dev, named.st_ino) != (opened.st_dev, opened.st_ino):
+            return None
+        raw = os.read(fd, 65537)
+        if len(raw) > 65536:
+            return None
+        data = json.loads(raw)
     except (OSError, ValueError):
         return None
+    finally:
+        if fd is not None:
+            os.close(fd)
     return data if isinstance(data, dict) else None
 
 
@@ -283,7 +437,7 @@ def _existing_worktree_path(main_root: str, branch: str) -> "str | None":
     return None
 
 
-def create(
+def _create_locked(
     cwd: str, session_name: str, base_branch: "str | None" = None
 ) -> "str | None":
     """Give a session its own git worktree. Returns the worktree path to
@@ -314,7 +468,11 @@ def create(
 
     existing = _existing_worktree_path(main_root, branch)
     if existing is not None:
-        return existing
+        meta = read_meta(existing)
+        return existing if meta and meta.get("session_id") == str(session_name) and _verified_record(existing, meta) else None
+
+    if _meta_path(target).exists() or _meta_path(target).is_symlink():
+        return None
 
     if base_branch:
         base = resolve_ref(main_root, base_branch)
@@ -340,11 +498,12 @@ def create(
         # A concurrent create (or a previous crashed attempt) may have won
         # the race between our reuse check above and this add -- check
         # once more before reporting failure.
-        return _existing_worktree_path(main_root, branch)
+        return None
 
     fields = {
         "main_root": main_root, "branch": branch, "base_ref": base,
         "session_id": str(session_name),
+        "base_oid": _git_text(str(target), "rev-parse", "HEAD"),
     }
     if lore_sync_mod.worktrees_enabled():
         # sync.md item 2: "the .meta sidecar gains machine_id". Written only
@@ -517,6 +676,7 @@ def commits_ahead(
         return None
 
 
+@_serialized_lifecycle
 def update_base(worktree_path: str, base_ref: str) -> bool:
     """Rewrite the sidecar's ``base_ref`` after a successful ``/branch``
     switch (item S #2) -- same atomic tmp+replace write :func:`_write_meta`
@@ -524,12 +684,24 @@ def update_base(worktree_path: str, base_ref: str) -> bool:
     whether the write succeeded; a failure here just means the tab label
     lags until the sidecar is next touched -- never a reason to undo the
     git side, which has already landed by the time this is called."""
+    held = str(Path(worktree_path).absolute()) in _lifecycle_files
+    if not _acquire_lifecycle(Path(worktree_path)):
+        return False
+    try:
+        return _update_base_locked(worktree_path, base_ref)
+    finally:
+        if not held:
+            release_lifecycle(worktree_path)
+
+
+def _update_base_locked(worktree_path: str, base_ref: str) -> bool:
     meta = read_meta(worktree_path)
-    if meta is None:
+    if not _verified_record(worktree_path, meta):
         return False
     meta["base_ref"] = base_ref
+    meta["base_oid"] = _git_text(worktree_path, "rev-parse", base_ref)
     _write_meta(Path(worktree_path), **meta)
-    return True
+    return read_meta(worktree_path) == meta
 
 
 def branch_status(cwd: str) -> dict:
@@ -561,7 +733,23 @@ def branch_status(cwd: str) -> dict:
     }
 
 
+@_serialized_lifecycle
 def switch_base(worktree_path: str, new_base: str) -> dict:
+    if read_meta(worktree_path) is None:
+        return _switch_base_locked(worktree_path, new_base)
+    held = str(Path(worktree_path).absolute()) in _lifecycle_files
+    if not _acquire_lifecycle(Path(worktree_path)):
+        return {"ok": False, "base": None, "message": "worktree lifecycle lock unavailable"}
+    try:
+        if not _verified_record(worktree_path, read_meta(worktree_path)):
+            return {"ok": False, "base": None, "message": "worktree ownership or pinned base cannot be verified"}
+        return _switch_base_locked(worktree_path, new_base)
+    finally:
+        if not held:
+            release_lifecycle(worktree_path)
+
+
+def _switch_base_locked(worktree_path: str, new_base: str) -> dict:
     """``/branch <name>`` (item S #2): rebase the session's OWN worktree
     branch onto ``new_base``.
 
@@ -666,17 +854,13 @@ def switch_base(worktree_path: str, new_base: str) -> dict:
     }
 
 
-def _remove(main_root: str, worktree_path: str, branch: str) -> None:
-    with contextlib.suppress(OSError, subprocess.SubprocessError):
-        subprocess.run(
-            ["git", "worktree", "remove", "--force", worktree_path],
-            cwd=main_root, capture_output=True, text=True, timeout=30,
-        )
-    with contextlib.suppress(OSError, subprocess.SubprocessError):
-        subprocess.run(
-            ["git", "branch", "-D", branch],
-            cwd=main_root, capture_output=True, text=True, timeout=10,
-        )
+def _remove(main_root: str, worktree_path: str, branch: str) -> bool:
+    before = _git_text(main_root, "rev-parse", "--verify", branch)
+    if not before or _git_text(worktree_path, "status", "--porcelain", "--ignored", "--untracked-files=all") != "":
+        return False
+    if _git_text(main_root, "worktree", "remove", worktree_path) is None:
+        return False
+    return _git_text(main_root, "update-ref", "-d", f"refs/heads/{branch}", before) is not None
 
 
 FINALIZE_RULE = (
@@ -697,7 +881,23 @@ is not matched by an edit HERE breaks a test before it ever reaches the
 model's context, in engine.py or anywhere else that imports this name."""
 
 
+@_serialized_lifecycle
 def finalize(worktree_path: str) -> "str | None":
+    meta = read_meta(worktree_path)
+    if meta is None or not is_own_record(meta):
+        release_lifecycle(worktree_path)
+        return None
+    if not _acquire_lifecycle(Path(worktree_path)):
+        return "worktree lifecycle lock unavailable; kept it"
+    try:
+        if not _verified_record(worktree_path, read_meta(worktree_path)):
+            return f"kept {meta.get("branch") or worktree_path} — merge when ready (ownership or pinned base cannot be verified)"
+        return _finalize_locked(worktree_path)
+    finally:
+        release_lifecycle(worktree_path)
+
+
+def _finalize_locked(worktree_path: str) -> "str | None":
     """A session's REAL end (never a mere detach): clean up its worktree,
     or say why it was kept. See the module docstring for the clean/dirty
     rule. ``None`` means "nothing to report" -- either the worktree was
@@ -744,9 +944,9 @@ def finalize(worktree_path: str) -> "str | None":
         # the work.
         ahead = commits_ahead(worktree_path, base_ref, branch)
     if clean and ahead == 0:
-        _remove(main_root, worktree_path, branch)
-        _drop_meta(target)
-        return None
+        if _remove(main_root, worktree_path, branch):
+            _drop_meta(target)
+            return None
     return f"kept {branch} — merge when ready"
 
 

@@ -1106,8 +1106,9 @@ def effort_level() -> "str | None":
 
     The SDK exposes effort as ``ClaudeAgentOptions.effort`` (the CLI's
     ``--effort`` flag) -- a CONNECT-TIME option. There is no control
-    request for it, unlike set_model, so a session's effort is fixed for
-    its lifetime and this is read exactly once, in _build_options. An
+    request for it, unlike set_model. The initial value is read in
+    _build_options; set_effort resumes the same conversation with an
+    instance override. An
     unknown value is ignored rather than passed through, because an
     invalid --effort is a CLI that refuses to start."""
     value = config_mod.raw("DOXA_EFFORT").strip().lower()
@@ -1572,6 +1573,9 @@ class SessionEngine:
         # chip) -- None until _build_options runs, same as every other
         # connect-time field here (server_info, account).
         self.effort: str | None = None
+        self._effort_override: str | None = None
+        self._resume_identity_pending: str | None = None
+        self._provider_session_seen = bool(self.resume)
         # Permission mode (v0.42.0). Unlike effort beside it, this is NOT
         # connect-time-only: the SDK has a live setter, so this attribute
         # is the running session's CURRENT mode and moves whenever
@@ -1996,13 +2000,30 @@ class SessionEngine:
             return ""
 
     async def _on_pre_compact(self, input_data: dict, tool_use_id, context) -> dict:
-        """PreCompact -- review the transcript-so-far before the harness
-        summarizes it away (see module docstring). Fire-and-forget on a
-        thread executor: worker_run() shells out to a headless `claude -p`
-        call, which must not block the compaction handshake."""
-        loop = asyncio.get_running_loop()
-        loop.run_in_executor(None, self._run_review_sync, True)
-        return {}
+        """Await review before either automatic or manual compaction.
+
+        PreCompact's decision field can refuse the operation; continue_
+        cannot. The matcher deadline exceeds our bounded review worker;
+        review errors and disabled review explicitly refuse compaction.
+        """
+        if not self.lore or stage_disabled("review"):
+            self._compact_preapproved = False
+            return {"decision": "block", "reason": "LORE review is disabled; compaction refused"}
+        if getattr(self, "_compact_preapproved", False):
+            self._compact_preapproved = False
+            return {}
+        async def review() -> bool:
+            if not self.lore or stage_disabled("review"):
+                return False
+            async with self._review_lock:
+                return await asyncio.to_thread(self._review_before_compact_sync)
+        try:
+            completed = await asyncio.wait_for(review(), timeout=185.0)
+        except (Exception, asyncio.CancelledError):
+            completed = False
+        if completed:
+            return {}
+        return {"decision": "block", "reason": "LORE review failed or is disabled; compaction refused"}
 
     async def _on_pre_tool_use(self, input_data: dict, tool_use_id, context) -> dict:
         """PreToolUse -- the tool-gating choke point (PHASE0 redesign item
@@ -2266,8 +2287,7 @@ class SessionEngine:
     async def review_before_compact(self) -> bool:
         """Finish a LORE review before an explicit provider compaction.
 
-        This is deliberately stricter than the best-effort PreCompact hook:
-        a disabled or failed reviewer must leave the provider transcript alone.
+        A disabled or failed reviewer must leave the provider transcript alone.
         The worker runs in a separate process because its progress goes to
         stdout, which is the Rust sidecar's JSON protocol channel.
         """
@@ -2276,7 +2296,9 @@ class SessionEngine:
         async with self._review_lock:
             if self._turn_running:
                 return False
-            return await asyncio.to_thread(self._review_before_compact_sync)
+            completed = await asyncio.to_thread(self._review_before_compact_sync)
+            self._compact_preapproved = bool(completed)
+            return bool(completed)
 
     def _review_before_compact_sync(self) -> bool:
         import tempfile
@@ -2704,13 +2726,12 @@ class SessionEngine:
             # exists, which is a stronger position than refusing it.
             extra=(session_ops_mod.SESSION_OPERATORS,),
         )
-        effort = effort_level()
+        effort = self._effort_override or effort_level()
         # Captured on self (not just the local var) so the status bar's
-        # effort chip (item T) shows what THIS session actually asserted at
-        # connect, not whatever /effort's config says right now -- /effort
-        # is explicit that a mid-session change never reaches the running
-        # session (see its own docstring), and the chip must tell the same
-        # true story. None means no level was asserted -- the CLI default is
+        # effort chip shows what this SDK transport asserted. A live effort
+        # request replaces the transport and keeps the prior verified value
+        # until the resumed init confirms the same provider UUID.
+        # None means no level was asserted -- the CLI default is
         # in force, and the chip hides itself exactly like every other
         # hide-at-zero status-bar chip.
         self.effort = effort
@@ -2767,7 +2788,9 @@ class SessionEngine:
                 else {"session_id": _provider_session_id(self.session_id)}
                 if _is_uuid(self.session_id) else {}
             ),
-            # Connect-time only -- see effort_level(). None leaves the CLI's
+            # Effort is an SDK connect-time option; set_effort resumes this
+            # same provider conversation with a per-instance override.
+            # None leaves the CLI's
             # own default alone rather than asserting a level we made up.
             **({"effort": effort} if effort else {}),
             # Permission mode, asserted UNCONDITIONALLY (no "omit the key
@@ -2807,7 +2830,7 @@ class SessionEngine:
             },
             hooks={
                 "UserPromptSubmit": [HookMatcher(hooks=[self._on_user_prompt_submit])],
-                "PreCompact": [HookMatcher(hooks=[self._on_pre_compact])],
+                "PreCompact": [HookMatcher(hooks=[self._on_pre_compact], timeout=200)],
                 "PreToolUse": [HookMatcher(hooks=[self._on_pre_tool_use])],
             },
             # Interactive permission (queue item 5) -- see the module
@@ -3200,6 +3223,8 @@ class SessionEngine:
             return
         self._turn_running = True
         cancelled = False
+        if prompt.strip() != "/compact":
+            self._compact_preapproved = False
         try:
             async for ev in self._send_turn(prompt):
                 yield ev
@@ -3219,6 +3244,7 @@ class SessionEngine:
             # queue, exactly as SessionDaemon._run_turn does after
             # publishing its error.
             self._turn_running = False
+            self._compact_preapproved = False
             # Cleared with the running flag, never separately: a turn id
             # that outlived its turn would attribute the next idle send
             # to a turn that has ended, in the ledger and in the rate
@@ -3469,6 +3495,16 @@ class SessionEngine:
         last_reasoning_progress = 0.0
 
         async for message in self._client.receive_response():
+            if self._resume_identity_pending is not None:
+                if not isinstance(message, SystemMessage) or message.subtype != "init" or message.data.get("session_id") != self._resume_identity_pending:
+                    self._connected = False
+                    with contextlib.suppress(Exception):
+                        await self._client.__aexit__(None, None, None)
+                    raise RuntimeError("resumed provider identity was not confirmed; output withheld")
+                self._resume_identity_pending = None
+                self.effort = self._effort_override or self.effort
+                yield EngineEvent("effort_verified", {"effort": self.effort, "session_id": self.session_id})
+
             if isinstance(message, StreamEvent):
                 # Subagent trace convention (the trace tree feeds on this):
                 # everything a Task-spawned subagent emits arrives with
@@ -3661,6 +3697,8 @@ class SessionEngine:
                 # Not surfaced as a block -- but the init message names the
                 # ACTUAL model of the session (self.model is None when the
                 # user rides the CLI default), which the status line shows.
+                if message.subtype == "init":
+                    self._provider_session_seen = True
                 if message.subtype == "init" and message.data.get("model"):
                     self.model = str(message.data["model"])
                     # ...and the peer registry learns it at the same
@@ -3767,6 +3805,68 @@ class SessionEngine:
                 self.peer_host.set_model(model)
         return model or "default"
 
+    async def set_effort(self, effort: str) -> str:
+        """Resume the same provider conversation with a new SDK effort option.
+
+        Claude's SDK exposes effort at connect time. The daemon, transcript,
+        tool gates and peer host remain owned by this engine; only its SDK
+        transport is replaced. The resumed init must confirm the same UUID.
+        """
+        if effort not in EFFORT_LEVELS:
+            raise ValueError("unsupported Claude effort")
+        if self._turn_running or self._prompt_queue:
+            raise RuntimeError("effort changes require an idle session with no queued prompts")
+        if not self._connected or self._client is None:
+            raise RuntimeError("session is not connected")
+        if not _is_uuid(self.session_id):
+            raise RuntimeError("effort resume requires a verified provider UUID")
+        expected = _provider_session_id(self.session_id)
+        old_client, old_resume = self._client, self.resume
+        old_override, old_effort = self._effort_override, self.effort
+        self._connected = False
+        try:
+            await asyncio.wait_for(old_client.__aexit__(None, None, None), timeout=3)
+        except Exception:
+            self._client = None
+            raise RuntimeError("previous SDK transport could not close; session stopped before effort change") from None
+        self.resume = self.session_id if self._provider_session_seen or self.num_turns else old_resume
+        self._effort_override = effort
+        candidate = None
+        try:
+            candidate = self._client_factory(self._build_options())
+            await asyncio.wait_for(candidate.__aenter__(), timeout=20)
+            get_info = getattr(candidate, "get_server_info", None)
+            info = await asyncio.wait_for(get_info(), timeout=3) if get_info is not None else None
+            identity = info.get("session_id") if isinstance(info, dict) else None
+            if identity is not None and identity != expected:
+                raise RuntimeError("resumed provider identity changed")
+            self._resume_identity_pending = None if identity == expected else expected
+            if self._resume_identity_pending:
+                self.effort = old_effort
+            self._client = candidate
+            self._connected = True
+            if isinstance(info, dict):
+                self.server_info = info
+            return effort
+        except Exception:
+            if candidate is not None:
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(candidate.__aexit__(None, None, None), timeout=3)
+            self._effort_override, self.effort = old_override, old_effort
+            self.resume = self.session_id if self._provider_session_seen or self.num_turns else old_resume
+            try:
+                replacement = self._client_factory(self._build_options())
+                await asyncio.wait_for(replacement.__aenter__(), timeout=20)
+                self._client = replacement
+                self._connected = True
+                self._resume_identity_pending = expected
+                self.effort = old_effort
+            except Exception:
+                self._client = None
+                self._connected = False
+            self.resume = old_resume
+            raise RuntimeError("effort change failed; previous effort restored if reconnect succeeded") from None
+
     # -- live permission-mode switching (v0.42.0) ---------------------
 
     async def set_permission_mode(self, mode: str) -> str:
@@ -3777,8 +3877,8 @@ class SessionEngine:
         control request (``client.py:284`` -> ``Query.set_permission_mode``),
         not a connect-time option, so the transcript, the daemon, the
         replay ring, the peer presence and every hook survive the change
-        untouched. This is what separates ``/mode`` from ``/effort``, which
-        genuinely cannot do this and says so.
+        untouched. Effort changes use a separate guarded transport resume
+        because the SDK exposes effort only at connect time.
 
         Validation happens HERE rather than only at the callers, because
         this method is what the daemon RPC lands on too: an unknown mode

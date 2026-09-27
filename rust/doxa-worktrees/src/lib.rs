@@ -609,9 +609,9 @@ fn finalize_locked(path: &Path) -> String {
     let Some((record, base, main, base_oid)) = read_record(path) else {
         return "worktree ownership could not be verified; kept it".into();
     };
-    // The Rust lock cannot coordinate with Python 1.19: its lifecycle never
-    // takes that lock. Legacy sidecars have no base_oid, so even a clean tree
-    // and a matching session ID cannot authorize its removal here.
+    // Updated Python and Rust hold this same lifecycle lock. Old Python
+    // records lack a pinned base and its unlocked daemon cannot be proven
+    // idle from a free lock, so unverified old sidecars remain untouched.
     let Some(base_oid) = base_oid else {
         return "legacy worktree owner cannot be verified; kept it".into();
     };
@@ -681,9 +681,9 @@ pub struct OrphanPreview {
 }
 
 fn orphan_state(record: &Record, base: &str, main: &Path, base_oid: Option<&str>) -> OrphanState {
-    // Python 1.19 does not write base_oid or hold the Rust advisory lock.
-    // Its daemon may be starting before registry publication, so those
-    // sidecars are survey-only and never eligible for automated cleanup.
+    // Pre-coordination Python records lack a pinned base. A free lock does
+    // not prove their old daemon idle, so they remain survey-only. Updated
+    // Python records pin base_oid and use the shared lifecycle lock.
     let Some(base_oid) = base_oid else { return OrphanState::Uncertain; };
     if worktree_for_branch(main, &record.branch).as_ref() != Some(&record.path)
         || git_text(&record.path, &["symbolic-ref", "--quiet", "--short", "HEAD"])
@@ -803,6 +803,53 @@ mod tests {
         let mut created = create(&main, "lock0001session").unwrap();
         assert_eq!(created.path(), path);
         assert!(created.finish().is_empty());
+    }
+
+    #[test]
+    fn python_flock_coordinates_rust_creation_and_orphan_cleanup() {
+        use std::io::{BufRead, BufReader};
+        use std::process::Stdio;
+        let _serial = TEST_ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        env::set_var("DOXA_HOME", dir.path().join("home"));
+        env::set_var("DOXA_WORKTREE", "1");
+        let main = dir.path().join("repo");
+        fs::create_dir(&main).unwrap();
+        run_git(&main, &["init", "-q", "-b", "main"]);
+        fs::write(main.join("file"), "base\n").unwrap();
+        run_git(&main, &["add", "file"]);
+        run_git(&main, &["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "test: base"]);
+        let worktrees = ensure_owned_dir(&root().unwrap()).unwrap();
+        ensure_owned_dir(&worktrees.join(".meta")).unwrap();
+        let path = worktrees.join("repo-pylock01");
+        let lock = lock_path(&path).unwrap();
+        drop(lock_worktree(&path).unwrap());
+        let inode = fs::metadata(&lock).unwrap().ino();
+        let mut holder = Command::new("python3").args(["-c",
+            "import fcntl,os,sys; fd=os.open(sys.argv[1],os.O_RDWR); fcntl.flock(fd,fcntl.LOCK_EX); print('ready',flush=True); sys.stdin.read()"])
+            .arg(&lock).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+        let mut ready = String::new();
+        BufReader::new(holder.stdout.take().unwrap()).read_line(&mut ready).unwrap();
+        assert_eq!(ready.trim(), "ready");
+        assert!(create(&main, "pylock01session").is_none());
+        assert!(!path.exists());
+        drop(holder.stdin.take());
+        assert!(holder.wait().unwrap().success());
+        let managed = create(&main, "pylock01session").unwrap();
+        // A Python-formatted record with a pinned base is eligible once
+        // both lifecycles have ended; old unpinned records remain refused.
+        let mut record: serde_json::Value = serde_json::from_slice(&fs::read(meta_path(&path).unwrap()).unwrap()).unwrap();
+        record["python_lifecycle"] = serde_json::json!("shared-flock");
+        fs::write(meta_path(&path).unwrap(), serde_json::to_vec(&record).unwrap()).unwrap();
+        let preview = preview_orphans(&HashSet::new()).into_iter().find(|row| row.record.path == path).unwrap();
+        assert!(matches!(cleanup_orphan(&preview, || Some(HashSet::new())), CleanupResult::Kept(_)));
+        assert!(path.exists());
+        // Simulate a crash without destructor cleanup; release only its fd.
+        let mut managed = managed;
+        managed.created = false;
+        drop(managed);
+        assert_eq!(cleanup_orphan(&preview, || Some(HashSet::new())), CleanupResult::Removed);
+        assert_eq!(fs::metadata(&lock).unwrap().ino(), inode);
     }
 
     #[test]

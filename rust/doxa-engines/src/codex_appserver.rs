@@ -1,5 +1,5 @@
-//! Bounded Codex app-server protocol adapter. Interactive server requests are
-//! explicitly refused until DOXA has a matching approval UI bridge.
+//! Bounded Codex app-server protocol adapter with explicit request routing.
+//! Interactive requests require a host bridge; unknown requests are refused.
 //!
 //! The shapes below come from `codex app-server generate-ts --experimental`
 //! (Codex 0.156.1). Stdio is newline-delimited JSON-RPC without LSP headers.
@@ -19,6 +19,9 @@ use tokio_util::sync::CancellationToken;
 use crate::codex_driver::{valid_thread_id, SandboxMode};
 use crate::codex::CodexJsonlNormalizer;
 use crate::EngineEvent;
+
+#[path = "codex_appserver_compact.rs"]
+mod reviewed_compact;
 
 const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 const MAX_REASONING_BYTES: usize = 256 * 1024;
@@ -50,6 +53,10 @@ impl From<io::Error> for AppServerError {
 pub struct AppServerDriver {
     options: AppServerOptions,
     effort: Option<String>,
+    interactive: bool,
+    peer_tools: bool,
+    compact_gate: Option<crate::codex_compact::CompactGate>,
+    review_items: Vec<Value>,
     scrub: Box<dyn Fn(&str) -> String + Send + Sync>,
     child: Child,
     // Keep the unreaped leader PID reserved until killing this original group.
@@ -68,6 +75,7 @@ pub struct AppServerDriver {
     assistant_bytes: usize,
     assistant_message_emitted: bool,
     usage: Option<Value>,
+    effective_model: Option<String>,
     pending_notifications: VecDeque<(Value, usize)>,
     pending_bytes: usize,
     tool_normalizer: CodexJsonlNormalizer,
@@ -84,7 +92,46 @@ impl AppServerDriver {
         Ok(driver)
     }
 
+    /// Interactive mode uses provider approvals instead of silently running
+    /// commands that need escalation. Catalog discovery never creates a thread.
+    pub async fn spawn_interactive(
+        options: AppServerOptions,
+        scrub: impl Fn(&str) -> String + Send + Sync + 'static,
+    ) -> Result<Self, AppServerError> {
+        Self::spawn_interactive_with_tools(options, scrub, false).await
+    }
+
+    pub async fn spawn_interactive_with_tools(
+        options: AppServerOptions,
+        scrub: impl Fn(&str) -> String + Send + Sync + 'static,
+        peer_tools: bool,
+    ) -> Result<Self, AppServerError> {
+        let mut driver = Self::initialize(options, scrub).await?;
+        driver.interactive = true;
+        driver.peer_tools = peer_tools;
+        driver.start_thread().await?;
+        Ok(driver)
+    }
+
+    pub async fn spawn_protected(
+        options: AppServerOptions,
+        scrub: impl Fn(&str) -> String + Send + Sync + 'static,
+        peer_tools: bool,
+        gate: crate::codex_compact::CompactGate,
+    ) -> Result<Self, AppServerError> {
+        let mut driver = Self::initialize_with_gate(options, scrub, Some(gate)).await?;
+        driver.interactive = true;
+        driver.peer_tools = peer_tools;
+        driver.start_thread().await?;
+        Ok(driver)
+    }
+
     async fn initialize(options: AppServerOptions, scrub: impl Fn(&str) -> String + Send + Sync + 'static) -> Result<Self, AppServerError> {
+        Self::initialize_with_gate(options, scrub, None).await
+    }
+
+    async fn initialize_with_gate(options: AppServerOptions, scrub: impl Fn(&str) -> String + Send + Sync + 'static,
+        compact_gate: Option<crate::codex_compact::CompactGate>) -> Result<Self, AppServerError> {
         if options.resume_thread.as_deref().is_some_and(|id| !valid_thread_id(id)) {
             return Err(AppServerError::Protocol("invalid resume thread ID"));
         }
@@ -92,6 +139,9 @@ impl AppServerDriver {
         command.arg("app-server").arg("--stdio")
             .current_dir(&options.cwd).stdin(Stdio::piped())
             .stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true);
+        if let Some(gate) = &compact_gate {
+            for value in gate.cli_overrides() { command.arg("-c").arg(value); }
+        }
         unsafe {
             command.as_std_mut().pre_exec(|| {
                 if libc::setsid() == -1 { Err(io::Error::last_os_error()) } else { Ok(()) }
@@ -104,26 +154,47 @@ impl AppServerDriver {
         let scrub = std::sync::Arc::new(scrub);
         let tool_scrub = scrub.clone();
         let mut driver = Self {
-            options, effort: None, scrub: Box::new(move |text| scrub(text)), child, process_group, stdin, stdout, next_id: 0,
+            options, effort: None, interactive: false, peer_tools: false, compact_gate, review_items: Vec::new(), scrub: Box::new(move |text| scrub(text)), child, process_group, stdin, stdout, next_id: 0,
             thread_id: None, turn_id: None, reasoning_bytes: 0, reasoning_chars: 0,
             reasoning_buffer: String::new(), reasoning_truncated: false,
-            assistant_buffers: Vec::new(), assistant_bytes: 0, assistant_message_emitted: false, usage: None,
+            assistant_buffers: Vec::new(), assistant_bytes: 0, assistant_message_emitted: false, usage: None, effective_model: None,
             pending_notifications: VecDeque::new(),
             pending_bytes: 0,
             tool_normalizer: CodexJsonlNormalizer::new(move |text| tool_scrub(text)),
         };
-        driver.request("initialize", json!({"clientInfo":{"name":"doxa","title":null,"version":env!("CARGO_PKG_VERSION")},"capabilities":null})).await?;
+        let initialized = driver.request("initialize", json!({"clientInfo":{"name":"doxa","title":null,"version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true}})).await?;
         driver.send(json!({"method":"initialized"})).await?;
+        if driver.compact_gate.is_some() {
+            // The server's build version is authoritative. The client version
+            // in its suffix never becomes proof of the provider hook contract.
+            let version = initialized["userAgent"].as_str().and_then(|agent| agent.split_whitespace().next())
+                .and_then(|prefix| prefix.rsplit_once('/').map(|(_, version)| version));
+            if version != Some(crate::codex_compact::SUPPORTED_VERSION) {
+                return Err(AppServerError::Protocol("Codex build has no verified DOXA compaction hook contract"));
+            }
+            let hooks = driver.request("hooks/list", json!({"cwds":[driver.options.cwd]})).await?;
+            driver.compact_gate.as_mut().unwrap().verify_hooks(&hooks)
+                .map_err(|_| AppServerError::Protocol("DOXA Codex compaction hook is not active with verified trust"))?;
+        }
         Ok(driver)
     }
 
     async fn start_thread(&mut self) -> Result<(), AppServerError> {
         let driver = self;
+        let approval = if driver.interactive { "on-request" } else { "never" };
         let result = if let Some(id) = driver.options.resume_thread.clone() {
-            driver.request("thread/resume", json!({"threadId":id,"cwd":driver.options.cwd,"model":driver.options.model,"approvalPolicy":"never","sandbox":sandbox_name(driver.options.sandbox),"excludeTurns":true})).await?
+            driver.request("thread/resume", json!({"threadId":id,"cwd":driver.options.cwd,"model":driver.options.model,"approvalPolicy":approval,"sandbox":sandbox_name(driver.options.sandbox),"excludeTurns":true})).await?
         } else {
-            driver.request("thread/start", json!({"cwd":driver.options.cwd,"model":driver.options.model,"approvalPolicy":"never","sandbox":sandbox_name(driver.options.sandbox)})).await?
+            let mut params = json!({"cwd":driver.options.cwd,"model":driver.options.model,"approvalPolicy":approval,"sandbox":sandbox_name(driver.options.sandbox)});
+            if driver.peer_tools { params["dynamicTools"] = json!(crate::peer_tools::definitions()); }
+            driver.request("thread/start", params).await?
         };
+        // Protected sessions must establish the requested price/model basis
+        // before any turn can run. Never accept a provider fallback silently.
+        if driver.compact_gate.is_some() && driver.options.model.as_deref()
+            .is_some_and(|expected| result["model"].as_str() != Some(expected)) {
+            return Err(AppServerError::Protocol("Codex returned a different or unverified requested model; no turn started"));
+        }
         let id = result.pointer("/thread/id").and_then(Value::as_str)
             .filter(|id| valid_thread_id(id))
             .ok_or(AppServerError::Protocol("thread response lacks a valid ID"))?;
@@ -131,6 +202,16 @@ impl AppServerDriver {
             return Err(AppServerError::Protocol("resume returned a different thread ID"));
         }
         driver.thread_id = Some(id.to_owned());
+        if let Some(gate) = driver.compact_gate.as_mut() {
+            gate.bind_thread(id).map_err(|_| AppServerError::Protocol("DOXA compaction gate could not bind the actual thread"))?;
+        }
+        // The account catalog default may differ from this thread's profile.
+        // Only the thread/start or thread/resume response identifies its model.
+        if let Some(model) = result["model"].as_str().filter(|value|
+            !value.is_empty() && value.len() <= 128 && !value.chars().any(char::is_control)) {
+            driver.effective_model = Some(model.to_owned());
+            driver.options.model = Some(model.to_owned());
+        }
         Ok(())
     }
 
@@ -166,11 +247,14 @@ impl AppServerDriver {
     }
 
     pub fn set_selection(&mut self, model: Option<String>, effort: Option<String>) {
+        if model != self.options.model { self.effective_model = None; }
         self.options.model = model;
         self.effort = effort;
     }
 
     pub fn thread_id(&self) -> &str { self.thread_id.as_deref().expect("thread start succeeded") }
+
+    pub fn model(&self) -> Option<&str> { self.effective_model.as_deref() }
 
     pub async fn shutdown(&mut self) {
         self.kill_group();
@@ -188,7 +272,17 @@ impl AppServerDriver {
     /// daemon integration will retain the existing incomplete-turn guard.
     pub async fn run_turn(
         &mut self, prompt: &str, cancel: &CancellationToken,
+        emit: impl FnMut(EngineEvent),
+    ) -> Result<(), AppServerError> {
+        self.run_turn_interactive(prompt, cancel, emit, |_| Ok(None)).await
+    }
+
+    /// A host creates a single-use input receiver before the display event is
+    /// emitted. Waiting for a user remains cancellable and time bounded.
+    pub async fn run_turn_interactive(
+        &mut self, prompt: &str, cancel: &CancellationToken,
         mut emit: impl FnMut(EngineEvent),
+        mut request: impl FnMut(&Value) -> Result<Option<(EngineEvent, tokio::sync::oneshot::Receiver<Value>)>, String>,
     ) -> Result<(), AppServerError> {
         if cancel.is_cancelled() { return Err(AppServerError::Cancelled); }
         self.reasoning_bytes = 0;
@@ -199,11 +293,12 @@ impl AppServerDriver {
         self.assistant_bytes = 0;
         self.assistant_message_emitted = false;
         self.usage = None;
+        self.review_items.clear();
         self.tool_normalizer.begin_turn();
         let deadline = tokio::time::Instant::now() + self.options.turn_timeout;
         let thread_id = self.thread_id().to_owned();
         let request_id = self.send_request_bounded("turn/start", json!({"threadId":thread_id,"model":self.options.model,"effort":self.effort,"input":[{"type":"text","text":prompt,"text_elements":[]}]}), Some(cancel), deadline).await?;
-        let response = self.wait_response(request_id, Some(cancel), deadline).await?;
+        let response = self.wait_response(request_id, Some(cancel), deadline, true).await?;
         let turn_id = response.pointer("/turn/id").and_then(Value::as_str)
             .filter(|id| valid_thread_id(id))
             .ok_or(AppServerError::Protocol("turn response lacks a valid ID"))?.to_owned();
@@ -224,7 +319,46 @@ impl AppServerDriver {
             };
             if let Some(method) = frame.get("method").and_then(Value::as_str) {
                 if frame.get("id").is_some() {
-                    self.deny_server_request(&frame, Some(cancel), deadline).await?;
+                    let params = &frame["params"];
+                    if params["threadId"].as_str() != Some(thread_id.as_str())
+                        || params["turnId"].as_str() != Some(turn_id.as_str()) {
+                        self.send_bounded(json!({"id":frame["id"],"error":{"code":-32602,"message":"Request does not belong to the active turn"}}), Some(cancel), deadline).await?;
+                        return Err(AppServerError::Protocol("server request has a different thread or turn"));
+                    }
+                    let mut frame = frame;
+                    if let Some(item) = self.review_items.iter().find(|item| item["id"] == frame["params"]["itemId"]) {
+                        frame["doxa_item"] = item.clone();
+                    }
+                    let pending = request(&frame).map_err(|message| AppServerError::Server((self.scrub)(&message)))?;
+                    if let Some((event, receiver)) = pending {
+                        let request_id = event.data["id"].clone();
+                        let is_peer = frame["method"] == "item/tool/call";
+                        if is_peer {
+                            let input = (self.scrub)(&frame["params"]["arguments"].to_string());
+                            emit(EngineEvent::new("tool_call", json!({"id":frame["params"]["callId"],"name":frame["params"]["tool"],"input":input})));
+                        }
+                        emit(event);
+                        let answer = tokio::select! {
+                            biased;
+                            _ = cancel.cancelled() => Err(AppServerError::Cancelled),
+                            _ = tokio::time::sleep_until(deadline) => Err(AppServerError::TimedOut),
+                            value = receiver => value.map_err(|_| AppServerError::Server("Codex input request was closed".into())),
+                        };
+                        emit(EngineEvent::new("needs_input_resolved", json!({"id":request_id})));
+                        let answer = answer?;
+                        if is_peer {
+                            emit(EngineEvent::new("tool_result", json!({"id":frame["params"]["callId"],"is_error":answer["success"] != true})));
+                            for content in answer["contentItems"].as_array().into_iter().flatten() {
+                                if let Some(text) = content["text"].as_str() {
+                                    let clean = (self.scrub)(text);
+                                    emit(EngineEvent::new("tool_result_detail", json!({"id":frame["params"]["callId"],"text":clean})));
+                                }
+                            }
+                        }
+                        self.send_bounded(json!({"id":frame["id"],"result":answer}), Some(cancel), deadline).await?;
+                    } else {
+                        self.deny_server_request(&frame, Some(cancel), deadline).await?;
+                    }
                     continue;
                 }
                 let params = &frame["params"];
@@ -235,6 +369,25 @@ impl AppServerDriver {
                     continue;
                 }
                 match method {
+                    "hook/started" if params["run"]["eventName"] == "preCompact" => {
+                        emit(EngineEvent::new("lore_review_started", json!({"before":"compaction"})));
+                    }
+                    "hook/completed" => {
+                        if let Some(gate) = self.compact_gate.as_mut() {
+                            match gate.observe_completion(&params["run"]) {
+                                crate::codex_compact::ReviewOutcome::Reviewed => emit(EngineEvent::new("lore_review_completed", json!({"before":"compaction"}))),
+                                crate::codex_compact::ReviewOutcome::Blocked => return Err(AppServerError::Server("LORE review blocked Codex compaction".into())),
+                                crate::codex_compact::ReviewOutcome::Failed => { self.kill_group(); return Err(AppServerError::Protocol("Codex compaction review hook failed; protected session stopped")); }
+                                crate::codex_compact::ReviewOutcome::Unrelated => {},
+                            }
+                        }
+                    }
+                    "model/rerouted" => {
+                        // A reroute invalidates a single-model ceiling even if
+                        // the replacement also happens to have a price row.
+                        self.effective_model = None;
+                        emit(EngineEvent::new("model_changed", json!({"model":null,"message":"Codex rerouted this turn; effective model accounting is unknown"})));
+                    }
                     "item/agentMessage/delta" => {
                         if let (Some(id), Some(delta)) = (params["itemId"].as_str(), params["delta"].as_str()) {
                             if !valid_thread_id(id) { return Err(AppServerError::Protocol("invalid assistant item ID")); }
@@ -277,6 +430,15 @@ impl AppServerDriver {
                         })));
                     }
                     "item/started" | "item/completed" => {
+                        let item = &params["item"];
+                        if item["type"] == "fileChange" {
+                            if let Some(index) = self.review_items.iter().position(|old| old["id"] == item["id"]) {
+                                self.review_items.remove(index);
+                            }
+                            if self.review_items.len() < 32 && serde_json::to_vec(item).is_ok_and(|v| v.len() <= 16 * 1024) {
+                                self.review_items.push(item.clone());
+                            }
+                        }
                         if method == "item/completed" && params["item"]["type"] == "agentMessage" {
                             if let Some(id) = params["item"]["id"].as_str() {
                                 if !valid_thread_id(id) { return Err(AppServerError::Protocol("invalid assistant item ID")); }
@@ -318,6 +480,9 @@ impl AppServerDriver {
                             (window > 0 && used <= window).then_some(100.0 * used as f64 / window as f64));
                         emit(EngineEvent::new("turn_done", json!({
                             "is_error":failed,"error":error,"usage_scope":"session",
+                            "model":self.effective_model,
+                            "model_consistent":self.effective_model.is_some() && self.effective_model == self.options.model,
+                            "usage_complete":total.is_some_and(|u| u["inputTokens"].as_u64().is_some() && u["outputTokens"].as_u64().is_some()),
                             "usage_source":"codex_app_server_token_usage_updated",
                             "input_tokens":total.and_then(|u| u["inputTokens"].as_u64()),
                             "output_tokens":total.and_then(|u| u["outputTokens"].as_u64()),
@@ -354,7 +519,7 @@ impl AppServerDriver {
 
     async fn request(&mut self, method: &str, params: Value) -> Result<Value, AppServerError> {
         let id = self.send_request(method, params).await?;
-        timeout(RPC_TIMEOUT, self.wait_response(id, None, tokio::time::Instant::now() + RPC_TIMEOUT))
+        timeout(RPC_TIMEOUT, self.wait_response(id, None, tokio::time::Instant::now() + RPC_TIMEOUT, false))
             .await.map_err(|_| AppServerError::TimedOut)?
     }
 
@@ -402,7 +567,7 @@ impl AppServerDriver {
         serde_json::from_slice(&line).map_err(|_| AppServerError::Protocol("invalid app-server JSON frame"))
     }
 
-    async fn wait_response(&mut self, id: u64, cancel: Option<&CancellationToken>, deadline: tokio::time::Instant) -> Result<Value, AppServerError> {
+    async fn wait_response(&mut self, id: u64, cancel: Option<&CancellationToken>, deadline: tokio::time::Instant, queue_requests: bool) -> Result<Value, AppServerError> {
         loop {
             let frame = tokio::select! {
                 value = self.read_frame() => value?,
@@ -413,7 +578,7 @@ impl AppServerDriver {
                 if !frame["error"].is_null() { return Err(AppServerError::Server((self.scrub)(&frame["error"].to_string()))); }
                 return Ok(frame["result"].clone());
             }
-            if frame.get("method").is_some() && frame.get("id").is_some() {
+            if frame.get("method").is_some() && frame.get("id").is_some() && !queue_requests {
                 self.deny_server_request(&frame, cancel, deadline).await?;
             } else if frame.get("method").is_some() {
                 let bytes = serde_json::to_vec(&frame).map_err(io::Error::other)?.len();

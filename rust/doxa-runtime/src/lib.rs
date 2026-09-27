@@ -28,6 +28,8 @@ const MAX_CONNECTIONS: usize = 64;
 /// Methods are called from worker threads and must be safe for concurrent calls.
 /// Successful `set_model`, `set_effort`, and `set_permission_mode` calls must
 /// return an object containing the selected `model`, `effort`, or `mode`.
+pub type PeerToolHandler = Arc<dyn Fn(&str, &Value) -> Result<Value, String> + Send + Sync>;
+
 pub trait Host: Send + Sync + 'static {
     fn prompt(&self, text: &str, emit: &mut dyn FnMut(Value));
     fn call(&self, method: &str, params: &Value) -> Result<Value, String>;
@@ -38,6 +40,10 @@ pub trait Host: Send + Sync + 'static {
     fn can_set_model(&self) -> bool { false }
     fn model_change_requires_idle(&self) -> bool { false }
     fn can_set_permission_mode(&self) -> bool { false }
+    /// Called once before prompt admission. Returns true only when the host
+    /// can expose these bounded, same-scope tools to its actual provider.
+    fn set_peer_tool_handler(&self, _: PeerToolHandler) -> bool { false }
+    fn peer_tools_ready(&self) -> bool { false }
     /// Provider-verified billing snapshot; None means unknown.
     fn billing_snapshot(&self) -> Option<Value> { None }
     /// Only the scrub preflight and sticky runtime scrub failure are known.
@@ -71,6 +77,8 @@ pub enum ExternalPrompt {
     Full,
 }
 struct State {
+    pending_inputs: Vec<Value>,
+    pending_inputs_complete: bool,
     next_seq: u64,
     ring: VecDeque<(u64, Vec<u8>)>,
     clients: HashMap<u64, SyncSender<Vec<u8>>>,
@@ -81,6 +89,7 @@ struct State {
     model: Option<String>,
     permission_mode: String,
     effort: Option<String>,
+    pending_effort: Option<String>,
 }
 
 struct Inner {
@@ -148,9 +157,9 @@ impl Daemon {
         listener.set_nonblocking(true)?;
         Ok(Self {
             inner: Arc::new(Inner { state: Mutex::new(State {
-                next_seq: 0, ring: VecDeque::new(), clients: HashMap::new(), busy: false,
+                pending_inputs: Vec::new(), pending_inputs_complete: true, next_seq: 0, ring: VecDeque::new(), clients: HashMap::new(), busy: false,
                 prompts: VecDeque::new(), next_queue_id: 1, next_turn_id: 1,
-                model, permission_mode, effort,
+                model, permission_mode, effort, pending_effort: None,
             }), controls: Mutex::new(()), host, session, stopping: AtomicBool::new(false), next_client_id: AtomicU64::new(1),
                 active_connections: AtomicUsize::new(0) }),
             listener, socket_path, socket_ino,
@@ -249,6 +258,37 @@ fn remove_owned_socket(path: &Path, inode: u64) {
 impl Inner {
     fn publish(&self, turn: Option<&str>, event: Value) {
         let mut state = self.state.lock().unwrap();
+        if event["type"] == "model_changed" {
+            if let Some(model) = event["data"]["model"].as_str().filter(|s| !s.is_empty() && !s.chars().any(char::is_control)) { state.model = Some(model.to_owned()); }
+        }
+        if event["type"] == "effort_verified" {
+            if let Some(effort) = event["data"]["effort"].as_str().filter(|s| !s.is_empty() && !s.chars().any(char::is_control)) { state.effort = Some(effort.to_owned()); state.pending_effort = None; }
+        }
+        match event["type"].as_str() {
+            Some("needs_input") => {
+                let data = &event["data"];
+                if let Some(id) = data["id"].as_str() {
+                    if state.pending_inputs.iter().any(|item| item["id"].as_str() == Some(id) && item != data) {
+                        // A provider reused an answer ID for changed content.
+                        // No client may approve the earlier snapshot.
+                        state.pending_inputs_complete = false;
+                    }
+                    state.pending_inputs.retain(|item| item["id"].as_str() != Some(id));
+                    let bytes = state.pending_inputs.iter().map(|item| item.to_string().len()).sum::<usize>();
+                    if state.pending_inputs.len() < 8 && bytes.saturating_add(data.to_string().len()) <= 48 * 1024 {
+                        state.pending_inputs.push(data.clone());
+                    } else { state.pending_inputs_complete = false; }
+                } else { state.pending_inputs_complete = false; }
+            }
+            Some("needs_input_resolved") => {
+                let id = event["data"]["id"].as_str();
+                state.pending_inputs.retain(|item| item["id"].as_str() != id);
+            }
+            Some("turn_done" | "turn_refused") => {
+                state.pending_inputs.clear(); state.pending_inputs_complete = true;
+            }
+            _ => {},
+        }
         let seq = state.next_seq;
         let Some(next) = seq.checked_add(1) else { return; };
         state.next_seq = next;
@@ -310,6 +350,7 @@ fn handle_client(inner: Arc<Inner>, stream: UnixStream) {
     };
     let can_set_model = inner.host.can_set_model();
     let can_set_permission_mode = inner.host.can_set_permission_mode();
+    let peer_tools_ready = inner.host.peer_tools_ready();
     let lore_scrub = inner.host.lore_scrub_status();
     let billing = inner.host.billing_snapshot();
     let hello = {
@@ -317,12 +358,13 @@ fn handle_client(inner: Arc<Inner>, stream: UnixStream) {
         json!({"type":"hello", "proto":1, "doxa":inner.session.doxa_version,
             "session_id":inner.session.session_id, "model":state.model,
             "permission_mode":state.permission_mode, "bypass_armed":false,
-            "engine":inner.session.engine, "effort":state.effort, "cwd":inner.session.cwd, "next_seq":state.next_seq,
+            "engine":inner.session.engine, "effort":state.effort,"pending_effort":state.pending_effort, "cwd":inner.session.cwd, "next_seq":state.next_seq,
             "transcript_path":transcript.as_ref().map(|(path, _)| path.to_string_lossy().into_owned()),
             "transcript_bytes":transcript.as_ref().map(|(_, size)| *size),
             "running":state.busy,"queued":state.prompts.len(),
+            "pending_inputs":state.pending_inputs,"pending_inputs_complete":state.pending_inputs_complete,
             "can_set_model":can_set_model,
-            "can_set_permission_mode":can_set_permission_mode,
+            "can_set_permission_mode":can_set_permission_mode,"peer_tools_ready":peer_tools_ready,
             "lore_scrub":lore_scrub,"billing":billing})
     };
     if writer.set_write_timeout(Some(Duration::from_secs(2))).is_err() ||
@@ -449,7 +491,17 @@ fn handle_call(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame: &Value) {
     let params = frame.get("params").filter(|v| v.is_object()).cloned().unwrap_or_else(|| json!({}));
     let _control_guard = matches!(method, "set_model" | "set_effort" | "set_permission_mode" | "switch_branch" | "stop_if_idle")
         .then(|| inner.controls.lock().unwrap());
-    let (result, changed) = if method == "queue" {
+    let (result, changed) = if method == "answer_needs_input" {
+        let reviewed = params.get("reviewed_request");
+        let authorized = {
+            let state = inner.state.lock().unwrap();
+            state.pending_inputs_complete && state.pending_inputs.iter().any(|item|
+                item["id"].as_str().is_some() && item["id"].as_str() == params["id"].as_str()
+                && reviewed.is_none_or(|reviewed| reviewed == item))
+        };
+        if authorized { (inner.host.call(method, &params), None) }
+        else { (Err("Input request changed, expired, or cannot be completely reviewed".into()), None) }
+    } else if method == "queue" {
         let state = inner.state.lock().unwrap();
         let queue: Vec<_> = state.prompts.iter().map(|item| json!({
             "id":item.queue_id,"text":item.public_text
@@ -487,17 +539,23 @@ fn handle_call(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame: &Value) {
         drop(state);
         if idle { (inner.host.call("stop", &params), None) }
         else { (Err("clear requires an idle session with no queued prompts".into()), None) }
+    } else if method == "get_state" {
+        let state = inner.state.lock().unwrap();
+        (Ok(json!({"pending_inputs":state.pending_inputs,"pending_inputs_complete":state.pending_inputs_complete,
+            "running":state.busy,"queued":state.prompts.len(),"model":state.model,
+            "effort":state.effort,"pending_effort":state.pending_effort})), None)
     } else if method == "status" {
         let can_set_model = inner.host.can_set_model();
         let can_set_permission_mode = inner.host.can_set_permission_mode();
+        let peer_tools_ready = inner.host.peer_tools_ready();
         let lore_scrub = inner.host.lore_scrub_status();
         let billing = inner.host.billing_snapshot();
         let state = inner.state.lock().unwrap();
         (Ok(json!({"status":{"session_id":inner.session.session_id,"cwd":inner.session.cwd,
             "model":state.model,"permission_mode":state.permission_mode,
-            "engine":inner.session.engine,"effort":state.effort,"running":state.busy,"queued":state.prompts.len(),
+            "engine":inner.session.engine,"effort":state.effort,"pending_effort":state.pending_effort,"running":state.busy,"queued":state.prompts.len(),
             "can_set_model":can_set_model,
-            "can_set_permission_mode":can_set_permission_mode,
+            "can_set_permission_mode":can_set_permission_mode,"peer_tools_ready":peer_tools_ready,
             "lore_scrub":lore_scrub,"billing":billing}})), None)
     } else if method == "switch_branch" {
         let idle = {
@@ -517,8 +575,11 @@ fn handle_call(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame: &Value) {
     } else if method == "set_effort" {
         // Admission and control share the state mutex. A prompt cannot be
         // admitted between the idle check and the host's effort update.
-        let mut state = inner.state.lock().unwrap();
-        if state.busy || !state.prompts.is_empty() || inner.stopping.load(Ordering::Acquire) {
+        let refuse = {
+            let state = inner.state.lock().unwrap();
+            state.busy || !state.prompts.is_empty() || inner.stopping.load(Ordering::Acquire)
+        };
+        if refuse {
             (Err("effort change requires an idle session with no queued prompts".into()), None)
         } else {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(||
@@ -532,8 +593,11 @@ fn handle_call(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame: &Value) {
             });
             let changed = result.as_ref().ok().and_then(|extra| extra["effort"].as_str())
                 .map(|effort| {
-                    state.effort = Some(effort.to_owned());
-                    json!({"type":"effort_changed","data":{"effort":effort}})
+                    let pending = result.as_ref().ok().is_some_and(|extra| extra["verification_pending"] == true);
+                    let mut state = inner.state.lock().unwrap();
+                    if pending { state.pending_effort = Some(effort.to_owned()); }
+                    else { state.effort = Some(effort.to_owned()); state.pending_effort = None; }
+                    json!({"type":if pending { "effort_requested" } else { "effort_changed" },"data":{"effort":effort,"verification_pending":pending}})
                 });
             (result, changed)
         }
@@ -551,7 +615,7 @@ fn handle_call(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame: &Value) {
                 && state.permission_mode != "dontAsk" && (state.busy || !state.prompts.is_empty())
         };
         if refuse_model {
-            (Err("Finish the current response and queued prompts, then change the Codex model for the next turn".into()), None)
+            (Err("Finish the current response and queued prompts, then change the model for the next turn".into()), None)
         } else if refuse_dont_ask {
             (Err("dontAsk requires an idle session with no queued prompts".into()), None)
         } else {

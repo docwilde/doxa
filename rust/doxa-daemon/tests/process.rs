@@ -137,7 +137,9 @@ impl Process {
                 script.to_str().unwrap(),
             ])
             .stdout(Stdio::null())
-            .stderr(Stdio::piped());
+            .stderr(Stdio::piped())
+            .env("DOXA_HOME", runtime.join("home"))
+            .env_remove("DOXA_SESSION_BUDGET_USD");
         if let Some(budget) = budget { command.env("DOXA_SESSION_BUDGET_USD", budget); }
         let child = command.spawn().unwrap();
         let registry = runtime.join("registry/claude-session.json");
@@ -774,7 +776,7 @@ fn rejects_inbound_turn_starting_without_lore_before_binding() {
         .env("DOXA_PEER_INBOUND_TURNS", "yes")
         .output().unwrap();
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("inbound peer turns require Codex or vendor"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("inbound peer turns require an engine with LORE scrub"));
     assert!(!dir.path().join("registry/fleet-slot.json").exists());
 }
 
@@ -792,21 +794,26 @@ fn rejects_invalid_ceiling_before_binding() {
 }
 
 #[test]
-fn rejects_budgeted_codex_until_native_price_basis_exists() {
+fn rejects_budgeted_codex_without_selected_price_basis() {
     let dir = tempfile::tempdir().unwrap();
     let codex = dir.path().join("codex-fixture");
     let python = dir.path().join("lore-fixture");
     executable(&codex, "#!/bin/sh\nexit 0\n");
     fake_scrubber(&python, false);
-    let output = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
-        .args(["--runtime-dir", dir.path().to_str().unwrap(), "--session-id", "fleet-slot",
+    for (model, expected) in [(None, "budgeted Codex session requires a priced model"),
+        (Some("gpt-reserve"), "no native budget price for selected Codex model")] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"));
+        command.args(["--runtime-dir", dir.path().to_str().unwrap(), "--session-id", "fleet-slot",
             "--engine", "codex", "--codex-bin", codex.to_str().unwrap(),
             "--lore-python", python.to_str().unwrap()])
-        .env("DOXA_SESSION_BUDGET_USD", "1.0")
-        .output().unwrap();
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("requires complete priced usage accounting"));
-    assert!(!dir.path().join("registry/fleet-slot.json").exists());
+            .env("DOXA_HOME", dir.path().join("home"))
+            .env("DOXA_SESSION_BUDGET_USD", "1.0");
+        if let Some(model) = model { command.args(["--model", model]); }
+        let output = command.output().unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains(expected));
+        assert!(!dir.path().join("registry/fleet-slot.json").exists());
+    }
 }
 
 #[test]
@@ -2086,6 +2093,7 @@ mod vendor_process {
                 "--vendor-endpoint", &endpoint])
             .env("DEEPSEEK_API_KEY", "test-key-1234")
             .env("DOXA_SESSION_BUDGET_USD", "1.0")
+            .env("DOXA_HOME", dir.path().join("home"))
             .stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
         let registry = dir.path().join("registry/vendor-session.json");
         wait_until(|| registry.exists());
@@ -2129,7 +2137,7 @@ mod vendor_process {
         resume: bool,
         tools: bool,
     ) -> Process {
-        let child = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+        let mut child = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
             .args([
                 "--runtime-dir",
                 runtime.to_str().unwrap(),
@@ -2151,12 +2159,22 @@ mod vendor_process {
             .env("DEEPSEEK_API_KEY", "test-key-1234")
             .env("ZAI_API_KEY", "test-key-1234")
             .env("DOXA_VENDOR_TOOLS", if tools { "workspace-read" } else { "" })
+            .env("DOXA_HOME", runtime.join("home"))
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
         let registry = runtime.join("registry/vendor-session.json");
-        wait_until(|| registry.exists());
+        wait_until(|| {
+            if registry.exists() { return true; }
+            if child.try_wait().unwrap().is_some() {
+                let mut detail=String::new();
+                use std::io::Read;
+                if let Some(stderr)=child.stderr.take(){stderr.take(2048).read_to_string(&mut detail).unwrap();}
+                panic!("vendor fixture exited before registry: {detail}");
+            }
+            false
+        });
         let entry: Value = serde_json::from_slice(&fs::read(&registry).unwrap()).unwrap();
         let socket = PathBuf::from(entry["daemon_socket"].as_str().unwrap());
         Process {
@@ -2215,7 +2233,7 @@ mod vendor_process {
             assert!(unsupported["error"]
                 .as_str()
                 .unwrap()
-                .contains("unavailable"));
+                .contains("model required"));
             send(
                 &mut socket,
                 json!({"type":"call","id":4,"method":"stop","params":{}}),
@@ -2223,7 +2241,9 @@ mod vendor_process {
             assert_eq!(receive(&mut reader)["ok"], true);
             wait_until(|| process.exited());
             let requests = server.join().unwrap();
-            assert!(requests.iter().all(|body| body.get("tools").is_none()));
+            assert!(requests.iter().all(|body| body["tools"].as_array().is_some_and(|tools|
+                tools.len()==3 && tools.iter().all(|tool|tool["function"]["name"].as_str()
+                    .is_some_and(|name|name.starts_with("mcp__doxa__peer_"))))));
             assert_eq!(requests[1]["messages"][1]["content"], "[redacted] answer");
             assert!(!requests[1].to_string().contains("fixture-secret"));
             // The published entry is removed at shutdown. Its private claim
@@ -2278,6 +2298,34 @@ mod vendor_process {
     }
 
     #[test]
+    fn vendor_model_control_preserves_history_and_changes_next_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let lore = dir.path().join("lore-fixture"); fake_scrubber(&lore, false);
+        let (endpoint, server) = fake_vendor(2, "answer");
+        let mut process = start_vendor(dir.path(), "deepseek", &endpoint, &lore);
+        let (mut reader, mut socket) = process.connect();
+        assert_eq!(receive(&mut reader)["can_set_model"], true);
+        send(&mut socket, json!({"type":"attach","cursor":null}));
+        for id in 1..=2 {
+            if id == 2 {
+                send(&mut socket, json!({"type":"call","id":10,"method":"set_model","params":{"model":"deepseek-v4-pro"}}));
+                let reply = receive(&mut reader); assert_eq!(reply["ok"], true); assert_eq!(reply["model"], "deepseek-v4-pro");
+                assert_eq!(receive(&mut reader)["event"]["type"], "model_changed");
+            }
+            send(&mut socket, json!({"type":"prompt","id":id,"text":"hello"}));
+            while receive(&mut reader)["event"]["type"] != "turn_done" {}
+        }
+        send(&mut socket, json!({"type":"call","id":11,"method":"set_model","params":{"model":"unverified-model"}}));
+        assert_eq!(receive(&mut reader)["ok"], false);
+        send(&mut socket, json!({"type":"call","id":12,"method":"stop","params":{}}));
+        assert_eq!(receive(&mut reader)["ok"], true); wait_until(|| process.exited());
+        let requests = server.join().unwrap();
+        assert_eq!(requests[0]["model"], "deepseek-flash");
+        assert_eq!(requests[1]["model"], "deepseek-v4-pro");
+        assert_eq!(requests[1]["messages"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
     fn vendor_workspace_read_is_opt_in_scrubbed_and_turn_local() {
         let dir = tempfile::tempdir().unwrap();
         let lore = dir.path().join("lore-fixture");
@@ -2293,7 +2341,7 @@ mod vendor_process {
         send(&mut socket, json!({"type":"prompt","id":1,"text":"read note"}));
         assert_eq!(receive(&mut reader)["ok"], true);
         let started = receive(&mut reader);
-        assert_eq!(started["event"]["data"]["vendor_tools"], "workspace-read");
+        assert_eq!(started["event"]["data"]["vendor_tools"], "workspace-read, peers");
         assert_eq!(receive(&mut reader)["event"]["data"]["text"], "Final answer");
         assert_eq!(receive(&mut reader)["event"]["data"]["is_error"], false);
         send(&mut socket, json!({"type":"call","id":2,"method":"stop","params":{}}));
@@ -2502,7 +2550,16 @@ mod vendor_process {
             .exists());
         send(&mut socket, json!({"type":"prompt","id":2,"text":"again"}));
         assert_eq!(receive(&mut reader)["ok"], true);
-        let refused = receive(&mut reader);
+        // The prior turn_done can arrive before the runtime worker releases
+        // its running slot, so the second request may briefly queue.
+        let mut refused = receive(&mut reader);
+        for _ in 0..2 {
+            if refused["event"]["type"] == "turn_done" { break; }
+            assert!(matches!(refused["event"]["type"].as_str(),
+                Some("prompt_queued" | "prompt_dequeued")), "{refused}");
+            refused = receive(&mut reader);
+        }
+        assert_eq!(refused["event"]["type"], "turn_done", "{refused}");
         assert_eq!(refused["event"]["data"]["is_error"], true);
         assert!(refused["event"]["data"]["error"]
             .as_str()
@@ -3004,32 +3061,42 @@ fn codex_appserver_default_streams_persists_and_resumes() {
     let log = dir.path().join("methods.log");
     fake_scrubber(&python, false);
     let script = r#"#!/usr/bin/env python3
-import json, sys
+import json, sys, tomllib
 
 def read(): return json.loads(sys.stdin.readline())
 def send(v): print(json.dumps(v),flush=True)
 log = open('__LOG__','a')
 init=read(); assert init['method']=='initialize'
-send({'id':init['id'],'result':{'userAgent':'fake'}})
+send({'id':init['id'],'result':{'userAgent':'codex_cli_rs/0.156.1'}})
 assert read()['method']=='initialized'
 thread=read()
+if thread['method']=='hooks/list':
+    overrides=[sys.argv[i+1] for i,x in enumerate(sys.argv[:-1]) if x=='-c']
+    hooks=next(tomllib.loads(x)['hooks'] for x in overrides if x.startswith('hooks='))
+    key=next(iter(hooks['state']))
+    row={'key':key,'command':hooks['PreCompact'][0]['hooks'][0]['command'],
+         'handlerType':'command','enabled':True,'trustStatus':'trusted',
+         'currentHash':hooks['state'][key]['trusted_hash'],'eventName':'preCompact',
+         'source':'sessionFlags','timeoutSec':240,'async':False}
+    send({'id':thread['id'],'result':{'data':[{'cwd':thread['params']['cwds'][0],'hooks':[row]}],'errors':[]}})
+    thread=read()
 if thread['method']=='model/list':
     send({'id':thread['id'],'result':{'data':[{'model':'gpt-test','hidden':False,'isDefault':True,'supportedReasoningEfforts':[{'reasoningEffort':'low'},{'reasoningEffort':'high'}],'defaultReasoningEffort':'low'}, {'model':'no-reasoning','hidden':False,'supportedReasoningEfforts':[]}, {'model':'hidden-model','hidden':True,'supportedReasoningEfforts':[]}], 'nextCursor':None}})
     sys.exit(0)
 log.write(thread['method']+'\n'); log.flush()
 assert thread['method'] in ('thread/start','thread/resume')
-send({'id':thread['id'],'result':{'thread':{'id':'thread_1'}}})
+send({'id':thread['id'],'result':{'thread':{'id':'thread-1'},'model':'gpt-test'}})
 turn=read(); assert turn['method']=='turn/start'
 assert 'fixture-secret' in turn['params']['input'][0]['text']
 if 'second' in turn['params']['input'][0]['text']:
     assert turn['params']['model']=='gpt-test' and turn['params']['effort']=='high'
 send({'id':turn['id'],'result':{'turn':{'id':'turn_1'}}})
-send({'method':'item/reasoning/textDelta','params':{'threadId':'thread_1','turnId':'turn_1','itemId':'r','delta':'fixture-secret thought'}})
-send({'method':'item/started','params':{'threadId':'thread_1','turnId':'turn_1','item':{'type':'commandExecution','id':'cmd_1','command':'echo fixture-secret'}}})
-send({'method':'item/completed','params':{'threadId':'thread_1','turnId':'turn_1','item':{'type':'commandExecution','id':'cmd_1','command':'echo fixture-secret','status':'completed','aggregatedOutput':'fixture-secret tool output','exitCode':0}}})
-send({'method':'item/agentMessage/delta','params':{'threadId':'thread_1','turnId':'turn_1','itemId':'a','delta':'fixture-secret answer'}})
-send({'method':'thread/tokenUsage/updated','params':{'threadId':'thread_1','turnId':'turn_1','tokenUsage':{'total':{'inputTokens':100,'outputTokens':50,'cachedInputTokens':10},'last':{'totalTokens':20000,'reasoningOutputTokens':7},'modelContextWindow':32000}}})
-send({'method':'turn/completed','params':{'threadId':'thread_1','turn':{'id':'turn_1','status':'completed','error':None}}})
+send({'method':'item/reasoning/textDelta','params':{'threadId':'thread-1','turnId':'turn_1','itemId':'r','delta':'fixture-secret thought'}})
+send({'method':'item/started','params':{'threadId':'thread-1','turnId':'turn_1','item':{'type':'commandExecution','id':'cmd_1','command':'echo fixture-secret'}}})
+send({'method':'item/completed','params':{'threadId':'thread-1','turnId':'turn_1','item':{'type':'commandExecution','id':'cmd_1','command':'echo fixture-secret','status':'completed','aggregatedOutput':'fixture-secret tool output','exitCode':0}}})
+send({'method':'item/agentMessage/delta','params':{'threadId':'thread-1','turnId':'turn_1','itemId':'a','delta':'fixture-secret answer'}})
+send({'method':'thread/tokenUsage/updated','params':{'threadId':'thread-1','turnId':'turn_1','tokenUsage':{'total':{'inputTokens':100,'outputTokens':50,'cachedInputTokens':10},'last':{'totalTokens':20000,'reasoningOutputTokens':7},'modelContextWindow':32000}}})
+send({'method':'turn/completed','params':{'threadId':'thread-1','turn':{'id':'turn_1','status':'completed','error':None}}})
 for line in sys.stdin: pass
 "#.replace("__LOG__", log.to_str().unwrap());
     let (setup, body) = script.split_once("turn=read();").unwrap();
@@ -3077,7 +3144,7 @@ for line in sys.stdin: pass
             let kind = event["type"].as_str().unwrap_or("");
             kinds.push(kind.to_owned());
             if kind == "turn_done" {
-                assert_eq!(event["data"]["is_error"], false);
+                assert_eq!(event["data"]["is_error"], false, "{event}");
                 assert_eq!(event["data"]["ctx_tokens"], 8000);
                 assert_eq!(event["data"]["ctx_percentage"], 40.0);
                 assert!(event["data"]["reasoning_output_tokens"].is_null());
@@ -3188,4 +3255,40 @@ else:
     assert_eq!(thread["transport"], "exec");
     assert_eq!(thread["model"], "account-model");
     assert_eq!(thread["effort"], "high");
+}
+
+#[test]
+fn codex_protected_startup_preserves_authoritative_build_refusal() {
+    let cache = std::env::var_os("TMPDIR").map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join(".cache/doxa-tests"));
+    fs::create_dir_all(&cache).unwrap();
+    let dir=tempfile::tempdir_in(cache).unwrap();
+    let codex=dir.path().join("unsupported-codex");
+    let python=dir.path().join("fake-lore");
+    fake_scrubber(&python,false);
+    executable(&codex,r#"#!/usr/bin/python3
+import json,sys
+init=json.loads(sys.stdin.readline())
+assert init['method']=='initialize'
+print(json.dumps({'id':init['id'],'result':{'userAgent':'codex_cli_rs/0.0.1'}}),flush=True)
+assert json.loads(sys.stdin.readline())['method']=='initialized'
+# A protected startup must refuse before hooks/list or thread/start.
+assert not sys.stdin.readline()
+"#);
+    let mut process=Process::start_codex_appserver(dir.path(),&codex,&python,false);
+    let (mut reader,mut socket)=process.connect();receive(&mut reader);
+    send(&mut socket,json!({"type":"attach","cursor":null}));
+    send(&mut socket,json!({"type":"prompt","id":1,"text":"never delivered to a provider"}));
+    loop {
+        let frame=receive(&mut reader);
+        if frame["event"]["type"]=="turn_done" {
+            assert_eq!(frame["event"]["data"]["is_error"],true);
+            assert_eq!(frame["event"]["data"]["error"],"Codex build has no verified DOXA compaction hook contract");
+            break;
+        }
+    }
+    send(&mut socket,json!({"type":"call","id":2,"method":"stop","params":{}}));
+    loop { let frame=receive(&mut reader);if frame["type"]=="reply"&&frame["id"]==2 {assert_eq!(frame["ok"],true);break;} }
+    wait_until(||process.exited());
+    assert!(!dir.path().join("project/codex-session.codex.json").exists());
 }

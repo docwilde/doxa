@@ -27,11 +27,23 @@ pub struct PeerHost {
     limiter: Mutex<RateLimiter>,
     inbound_limiters: Mutex<HashMap<String, RateLimiter>>,
     ledger: Ledger,
+    ledger_path: PathBuf,
     events: SyncSender<Value>,
     pending: Mutex<VecDeque<Value>>,
 }
 
 impl PeerHost {
+    /// Weak ownership keeps the provider callback from retaining its wrapper
+    /// (and daemon) after shutdown. Expose only peer RPCs, never host controls.
+    pub fn connect_provider_tools(self: &Arc<Self>) -> bool {
+        let weak = Arc::downgrade(self);
+        self.inner.set_peer_tool_handler(Arc::new(move |name, params| {
+            if !matches!(name, "peers" | "msg" | "peer_history") { return Err("Unsupported provider peer method".into()); }
+            let peer = weak.upgrade().ok_or("Peer session is closed")?;
+            if name == "msg" { peer.msg_with_target_mode(params, true) }
+            else { peer.call(name, params) }
+        }))
+    }
     pub fn new(
         inner: Arc<dyn Host>,
         runtime: PathBuf,
@@ -51,6 +63,9 @@ impl PeerHost {
         if !home.is_absolute() {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "DOXA home must be absolute"));
         }
+        let ledger = std::env::var_os("DOXA_PEER_LEDGER").filter(|value| !value.is_empty()).map(PathBuf::from)
+            .unwrap_or_else(|| home.join("peers/messages.jsonl"));
+        if !ledger.is_absolute() { return Err(io::Error::new(io::ErrorKind::InvalidInput, "peer ledger must be absolute")); }
         Ok(Self {
             inner,
             lore: Mutex::new(None),
@@ -62,7 +77,8 @@ impl PeerHost {
             title,
             limiter: Mutex::new(RateLimiter::new(SendLimits::default())),
             inbound_limiters: Mutex::new(HashMap::new()),
-            ledger: Ledger::new(home.join("peers/messages.jsonl")),
+            ledger_path: ledger.clone(),
+            ledger: Ledger::new(ledger),
             events,
             pending: Mutex::new(VecDeque::new()),
         })
@@ -103,6 +119,10 @@ impl PeerHost {
     }
 
     fn msg(&self, params: &Value) -> Result<Value, String> {
+        self.msg_with_target_mode(params, false)
+    }
+
+    fn msg_with_target_mode(&self, params: &Value, exact: bool) -> Result<Value, String> {
         let target = params["target"].as_str().ok_or("invalid peer target")?;
         let body = params["text"].as_str().ok_or("invalid peer message")?;
         if target.is_empty()
@@ -136,7 +156,7 @@ impl PeerHost {
         }
         let matches: Vec<_> = roster
             .iter()
-            .filter(|p| p.session_id.starts_with(target))
+            .filter(|p| target_matches(&p.session_id, target, exact))
             .collect();
         let peer = match matches.as_slice() {
             [peer] => *peer,
@@ -328,6 +348,7 @@ impl PeerHost {
 }
 
 impl Host for PeerHost {
+    fn peer_tools_ready(&self) -> bool { self.inner.peer_tools_ready() }
     fn initial_model(&self) -> Option<String> { self.inner.initial_model() }
     fn initial_effort(&self) -> Option<String> { self.inner.initial_effort() }
     fn initial_permission_mode(&self) -> String { self.inner.initial_permission_mode() }
@@ -374,8 +395,24 @@ impl Host for PeerHost {
     }
     fn call(&self, method: &str, params: &Value) -> Result<Value, String> {
         match method {
+            "peer_tools_status" => Ok(json!({"provider_peer_tools":self.peer_tools_ready(),"ledger_path":self.ledger_path})),
             "peers" => self.peers(),
             "msg" => self.msg(params),
+            "peer_history" => self.with_lore(|lore| {
+                let scope = lore.scrub(&self.scope).map_err(|_| "LORE scrub unavailable")?;
+                let failure = std::sync::atomic::AtomicBool::new(false);
+                let lore = Mutex::new(lore);
+                let messages = self.ledger.history(&self.session_id, &scope, &|text: &str| {
+                    // Scrubber's trait is infallible; poison the whole result
+                    // when any required string could not be scrubbed.
+                    match lore.lock().unwrap().scrub(text) {
+                        Ok(text) => text,
+                        Err(_) => { failure.store(true, std::sync::atomic::Ordering::Relaxed); String::new() }
+                    }
+                }).map_err(|_| "Peer history unavailable")?;
+                if failure.load(std::sync::atomic::Ordering::Relaxed) { return Err("LORE scrub unavailable".into()); }
+                Ok(json!({"messages":messages,"bounded_tail":true,"untrusted_peer_data":true}))
+            }),
             "branch" => {
                 let status = doxa_worktrees::branch_status(&self.cwd)
                     .ok_or_else(|| "branch: no supported Git checkout here".to_owned())?;
@@ -393,5 +430,25 @@ impl Host for PeerHost {
             },
             _ => self.inner.call(method, params),
         }
+    }
+}
+
+/// Provider arguments bind the complete peer identity; interactive CLI callers
+/// retain their documented unambiguous prefix convenience.
+fn target_matches(session_id: &str, target: &str, exact: bool) -> bool {
+    if exact { session_id == target } else { session_id.starts_with(target) }
+}
+
+#[cfg(test)]
+mod provider_target_tests {
+    use super::target_matches;
+    #[test]
+    fn provider_send_cannot_retarget_a_reviewed_prefix_after_roster_change() {
+        assert!(target_matches("peer-original", "peer", false));
+        assert!(target_matches("peer-replacement", "peer", false));
+        assert!(!target_matches("peer-original", "peer", true));
+        assert!(!target_matches("peer-replacement", "peer", true));
+        assert!(target_matches("peer-original", "peer-original", true));
+        assert!(!target_matches("peer-replacement", "peer-original", true));
     }
 }

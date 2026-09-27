@@ -220,15 +220,15 @@ def test_finalize_is_a_noop_for_a_non_doxa_worktree(tmp_path):
     assert plain.exists()
 
 
-def test_finalize_drops_metadata_for_an_already_gone_directory(tmp_path):
+def test_finalize_retains_metadata_for_an_already_gone_directory(tmp_path):
     repo = _repo(tmp_path)
     path = worktrees_mod.create(str(repo), "goneid01")
     assert path is not None
     # Simulate an out-of-band removal (not through finalize/git worktree
     # remove): the directory is just gone.
     shutil.rmtree(path)
-    assert worktrees_mod.finalize(path) is None
-    assert worktrees_mod.read_meta(path) is None  # sidecar cleaned up too
+    assert "cannot be verified" in worktrees_mod.finalize(path)
+    assert worktrees_mod.read_meta(path) is not None  # retain pinned recovery metadata
 
 
 # -- scope-key grouping across worktrees -----------------------------------
@@ -541,7 +541,7 @@ def test_unmerged_work_survives_a_switch_attempt_onto_the_own_branch(tmp_path):
         ["git", "-C", path, "rev-parse", "HEAD"],
         capture_output=True, text=True, check=True,
     ).stdout.strip()
-    assert worktrees_mod.finalize(path) == f"kept {own} — merge when ready"
+    assert f"kept {own} — merge when ready" in worktrees_mod.finalize(path)
     assert own in _branches(repo)
     contains = subprocess.run(
         ["git", "-C", str(repo), "branch", "--contains", sha],
@@ -562,7 +562,7 @@ def test_finalize_keeps_a_sidecar_that_records_its_own_branch_as_base(tmp_path):
     (Path(path) / "work.txt").write_text("unmerged", encoding="utf-8")
     subprocess.run(["git", "-C", path, "add", "-A"], check=True)
     subprocess.run(["git", "-C", path, "commit", "-qm", "real work"], check=True)
-    assert worktrees_mod.finalize(path) == f"kept {own} — merge when ready"
+    assert f"kept {own} — merge when ready" in worktrees_mod.finalize(path)
     assert own in _branches(repo)
 
 
@@ -580,7 +580,7 @@ def test_finalize_keeps_a_sidecar_that_records_its_own_branch_as_base(tmp_path):
 
 
 def _sync_off_sidecar_fields():
-    return {"main_root", "branch", "base_ref", "session_id"}
+    return {"main_root", "branch", "base_ref", "base_oid", "session_id"}
 
 
 @pytest.fixture
@@ -602,9 +602,7 @@ def _claim_machine(monkeypatch, value):
 
 
 def test_sidecar_carries_no_machine_id_with_sync_off(tmp_path):
-    """THE regression bar for item 2: sync off writes exactly what 1.9.2
-    wrote, no extra key, so nothing downstream can start behaving
-    differently on a machine that never opted in."""
+    """Sync off carries a pinned base but no machine identity."""
     repo = _repo(tmp_path)
     path = worktrees_mod.create(str(repo), "syncoff1")
     assert path is not None
@@ -758,7 +756,7 @@ def test_finalize_keeps_work_when_head_moved_off_the_recorded_branch(tmp_path):
 
     note = worktrees_mod.finalize(path)
 
-    assert note == f"kept {branch} — merge when ready"
+    assert f"kept {branch} — merge when ready" in note
     assert Path(path).exists()
     assert branch in _branches(repo)
     still = subprocess.run(
@@ -785,14 +783,153 @@ def test_commits_ahead_counts_the_branch_it_is_given(tmp_path):
     assert worktrees_mod.commits_ahead(path, "trunk") == 0  # HEAD, as before
 
 
-def test_finalize_still_removes_a_worktree_that_really_has_nothing(tmp_path):
-    """The check must not turn every worktree into a kept one."""
+def test_finalize_keeps_even_a_clean_checkout_after_user_detaches_head(tmp_path):
+    """A user-detached checkout is retained even when its tree is clean."""
     repo = _repo(tmp_path)
     path = worktrees_mod.create(str(repo), "emptyid1")
     assert path is not None
     branch = worktrees_mod.read_meta(path)["branch"]
     subprocess.run(["git", "-C", path, "checkout", "-q", "--detach", "trunk"],
                    check=True)
+    assert "cannot be verified" in worktrees_mod.finalize(path)
+    assert Path(path).exists()
+    assert branch in _branches(repo)
+
+
+def test_lifecycle_claim_excludes_other_process_until_finalize(tmp_path):
+    """The OS flock, including the Rust filename convention, lasts past create."""
+    import sys
+    repo = _repo(tmp_path)
+    path = worktrees_mod.create(str(repo), "shared01")
+    assert path
+    lock = worktrees_mod.meta_file_path(path).with_suffix(".lock")
+    probe = "import fcntl,os,sys; fd=os.open(sys.argv[1],os.O_RDWR); fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)"
+    blocked = subprocess.run([sys.executable, "-c", probe, str(lock)], capture_output=True)
+    assert blocked.returncode != 0
+    inode = lock.stat().st_ino
     assert worktrees_mod.finalize(path) is None
-    assert not Path(path).exists()
-    assert branch not in _branches(repo)
+    acquired = subprocess.run([sys.executable, "-c", probe, str(lock)], capture_output=True)
+    assert acquired.returncode == 0
+    assert lock.stat().st_ino == inode  # unlinking defeats existing lock holders
+
+
+def test_other_process_claim_prevents_creation_and_cleanup(tmp_path):
+    import sys
+    repo = _repo(tmp_path)
+    path = worktrees_mod.create(str(repo), "otherp01")
+    assert path
+    worktrees_mod.release_lifecycle(path)  # simulated process exit
+    lock = worktrees_mod.meta_file_path(path).with_suffix(".lock")
+    code = "import fcntl,os,sys; fd=os.open(sys.argv[1],os.O_RDWR); fcntl.flock(fd,fcntl.LOCK_EX); print('ready',flush=True); sys.stdin.read()"
+    holder = subprocess.Popen([sys.executable, "-c", code, str(lock)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    try:
+        assert holder.stdout.readline().strip() == "ready"
+        assert worktrees_mod.create(str(repo), "otherp01") is None
+        assert "lock unavailable" in worktrees_mod.finalize(path)
+        assert Path(path).is_dir()
+    finally:
+        holder.communicate("")
+    assert worktrees_mod.finalize(path) is None
+
+
+def test_unpinned_legacy_record_never_reused_switched_or_removed(tmp_path):
+    repo = _repo(tmp_path)
+    path = worktrees_mod.create(str(repo), "oldmeta1")
+    assert path
+    meta = worktrees_mod.read_meta(path)
+    meta.pop("base_oid")
+    worktrees_mod._write_meta(Path(path), **meta)
+    worktrees_mod.release_lifecycle(path)
+    before = worktrees_mod.meta_file_path(path).read_bytes()
+    assert worktrees_mod.create(str(repo), "oldmeta1") is None
+    assert not worktrees_mod.switch_base(path, "trunk")["ok"]
+    assert "cannot be verified" in worktrees_mod.finalize(path)
+    assert worktrees_mod.meta_file_path(path).read_bytes() == before
+    assert Path(path).exists()
+
+
+def test_ignored_files_and_failed_removal_preserve_branch(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    (repo / ".gitignore").write_text("private\n")
+    subprocess.run(["git", "-C", str(repo), "add", ".gitignore"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "ignore private"], check=True)
+    path = worktrees_mod.create(str(repo), "ignored1")
+    assert path
+    (Path(path) / "private").write_text("user data")
+    assert "kept" in worktrees_mod.finalize(path)
+    assert (Path(path) / "private").read_text() == "user data"
+    (Path(path) / "private").unlink()
+    original = worktrees_mod._git_text
+    monkeypatch.setattr(worktrees_mod, "_git_text", lambda cwd, *args: None if args[:2] == ("worktree", "remove") else original(cwd, *args))
+    assert "kept" in worktrees_mod.finalize(path)
+    assert "doxa/ignored1" in _branches(repo)
+
+
+def test_resume_claim_requires_same_session_and_pinned_ownership(tmp_path):
+    repo = _repo(tmp_path)
+    path = worktrees_mod.create(str(repo), "resume01")
+    assert path
+    worktrees_mod.release_lifecycle(path)
+    assert not worktrees_mod.claim_lifecycle(path, "other")
+    assert worktrees_mod.claim_lifecycle(path, "resume01")
+    assert worktrees_mod.finalize(path) is None
+
+
+
+def test_daemon_resume_claims_managed_checkout_and_refuses_unverified(tmp_path):
+    from doxa.daemon import SessionDaemon
+    from types import SimpleNamespace
+    repo = _repo(tmp_path)
+    path = worktrees_mod.create(str(repo), "daemon01")
+    assert path
+    worktrees_mod.release_lifecycle(path)
+    daemon = SimpleNamespace(cwd=path, session_id="daemon01", resume="daemon01", base_branch=None)
+    SessionDaemon._apply_worktree(daemon)
+    assert str(Path(path).absolute()) in worktrees_mod._lifecycle_files
+    worktrees_mod.release_lifecycle(path)
+    meta = worktrees_mod.read_meta(path)
+    meta.pop("base_oid")
+    worktrees_mod._write_meta(Path(path), **meta)
+    with pytest.raises(RuntimeError, match="resume refused"):
+        SessionDaemon._apply_worktree(daemon)
+    assert Path(path).exists()
+
+
+def test_daemon_creation_failure_refuses_managed_cwd_fallback(tmp_path, monkeypatch):
+    from doxa.daemon import SessionDaemon
+    from types import SimpleNamespace
+    repo = _repo(tmp_path)
+    path = worktrees_mod.create(str(repo), "daemon02")
+    assert path
+    daemon = SimpleNamespace(cwd=path, session_id="newchild", resume=None, base_branch=None)
+    monkeypatch.setattr(worktrees_mod, "create", lambda *args, **kwargs: None)
+    with pytest.raises(RuntimeError, match="startup refused"):
+        SessionDaemon._apply_worktree(daemon)
+    daemon.cwd = str(repo)
+    SessionDaemon._apply_worktree(daemon)
+    assert daemon.cwd == str(repo)
+
+
+
+def test_same_process_short_id_collision_does_not_release_incumbent(tmp_path):
+    repo = _repo(tmp_path)
+    path = worktrees_mod.create(str(repo), "collisio-original")
+    assert path
+    assert worktrees_mod.create(str(repo), "collisio-other") is None
+    assert str(Path(path).absolute()) in worktrees_mod._lifecycle_files
+    assert worktrees_mod.read_meta(path)["session_id"] == "collisio-original"
+    assert worktrees_mod.finalize(path) is None
+
+
+def test_refused_daemon_startup_does_not_unlink_existing_socket(tmp_path):
+    import asyncio
+    from doxa.daemon import SessionDaemon
+    from types import SimpleNamespace
+    existing = tmp_path / "existing.sock"
+    existing.write_text("active daemon socket placeholder")
+    def refuse():
+        raise RuntimeError("lifecycle lock busy")
+    daemon = SimpleNamespace(socket_path=existing, _apply_worktree=refuse)
+    with pytest.raises(RuntimeError, match="lock busy"):
+        asyncio.run(SessionDaemon.serve(daemon))
+    assert existing.read_text() == "active daemon socket placeholder"

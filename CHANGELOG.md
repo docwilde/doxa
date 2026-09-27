@@ -5,6 +5,37 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.29 — 2026-09-27
+
+- Add native setup, explicit provider login/logout and plugin adoption controls,
+  with cancellable login progress and filtering of credential-bearing URLs.
+  Support Codex device login, including its colored, multiline code prompt.
+  Create new LORE stores privately and refuse symlink ancestors.
+- Support nested pane groups, generated command actions, prompt-line session
+  search and scoped LORE memory edits. Restore exact pending questions and
+  require complete review before answering a permission request.
+- Apply supported Claude, Codex and vendor model/effort changes to the next
+  turn of the current session. Report provider context details separately from
+  local measurements.
+- Coordinate native fleet launches, start barriers, reviewed approvals,
+  cancellation and durable resume without repeating ambiguous dispatches.
+  Confirm actual daemon shutdown before recording completion, bound teardown
+  and socket deadlines, and release coordinator locks across process spawning.
+  Persist spend guards and refuse further turns when usage cannot be verified.
+- Register scoped peer tools for native Codex and vendor hosts, with explicit
+  approval before model-initiated actions and bounded, scrubbed peer history.
+- Serve token-protected loopback mesh views with an owned renderer process.
+  Isolate fleet ledgers, reject unsafe files, and prevent project modules from
+  shadowing the renderer's trusted imports.
+- Share worktree lifecycle locks with updated Python sidecars and keep
+  unverifiable legacy ownership protected from cleanup.
+- Review both manual and automatic provider compaction through LORE. Native
+  Codex currently requires the verified 0.156.1 hook contract. Reviewer errors
+  return a blocking decision; Codex's operating system hook failures can still
+  continue compaction before DOXA observes and stops the session.
+- Preserve precise Codex startup errors, bound the full compaction review
+  deadline, and include scrubbed tool commands/results in review snapshots.
+
 ## 2.0.0-alpha.28 — 2026-09-26
 
 - Isolate optional Codex transcript indexing in its own bounded LORE client so

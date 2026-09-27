@@ -27,6 +27,8 @@ _RESOLVE_OP = "resolve_reviewed_v1"
 _INDEX_OP = "index_transcript_v1"
 _SESSION_SEARCH_OP = "session_search_v1"
 _MEMORY_USAGE_OP = "memory_usage_v1"
+_MEMORY_REVIEW_OP = "memory_review_v1"
+_MEMORY_ACTION_OP = "memory_action_v1"
 _BELIEF_REVIEW_OP = "belief_review_v1"
 _BELIEF_ACTION_OP = "belief_action_v1"
 _PENDING_ID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z", re.ASCII)
@@ -101,6 +103,96 @@ def _memory_usage_ops() -> tuple[Any, Any, Any, Any, Any] | None:
         return project_slug, memory_path, read_entries, render_entries, memory_cap
     except Exception:  # noqa: BLE001 -- optional on older LORE builds
         return None
+
+
+def _memory_manage_ops() -> tuple | None:
+    """Require LORE's serialized mutations, gate, and canonical lock together."""
+    try:
+        from lore_core import memory
+        from lore_core.config import ROOT
+        from lore_core.file_lock import locked_paths
+        from lore_core.gate import gate_write
+        # wraps exposes only the canonical mutation body. Hold the very same
+        # LORE lock over our optimistic check and that body, avoiding a nested
+        # non-reentrant flock. Never reimplement writes/provenance/sync here.
+        mutations = tuple(getattr(memory, name).__wrapped__ for name in
+                          ("memory_add", "memory_replace", "memory_remove"))
+        if any(hasattr(fn, "__wrapped__") for fn in mutations):
+            return None  # a future additional decorator must be reviewed first
+        return memory, ROOT, locked_paths, gate_write, mutations
+    except Exception:
+        return None
+
+
+def _memory_identity(req: dict, ops: tuple) -> tuple[str, str, Any]:
+    cwd, scope = req.get("cwd"), req.get("scope")
+    if (not isinstance(cwd, str) or not cwd or len(cwd) > 4096 or "\x00" in cwd
+            or scope not in ("user", "project")):
+        raise ValueError("invalid memory input")
+    memory = ops[0]
+    slug = memory.project_slug(cwd)
+    return scope, slug, memory.memory_path(scope, slug)
+
+
+def _memory_review_locked(scope: str, slug: str, path: Any, ops: tuple, scrub: Any) -> dict:
+    memory = ops[0]
+    if path.exists() and path.stat().st_size > _MAX_MEMORY_SOURCE_BYTES:
+        raise BeliefActionError("memory_incomplete")
+    entries = memory.read_entries(path)
+    body = memory.render_entries(entries)
+    if (len(entries) > 400 or len(body.encode("utf-8")) > 65536
+            or any(scrub(e) != e or any(ord(c) < 32 for c in e) for e in entries)):
+        raise BeliefActionError("memory_incomplete")
+    return {"scope": scope, "key": "user" if scope == "user" else slug,
+            "entries": entries, "chars": len(body), "cap_chars": memory.memory_cap(scope),
+            "sha256": hashlib.sha256(body.encode("utf-8")).hexdigest()}
+
+
+def _memory_review(req: dict, ops: tuple, scrub: Any) -> dict:
+    scope, slug, path = _memory_identity(req, ops)
+    with ops[2](path, lock_root=ops[1]):
+        return _memory_review_locked(scope, slug, path, ops, scrub)
+
+
+def _memory_action(req: dict, ops: tuple, scrub: Any) -> dict:
+    scope, slug, path = _memory_identity(req, ops)
+    action, text, entry = req.get("action"), req.get("text", ""), req.get("entry", "")
+    expected = req.get("expected")
+    if (action not in ("add", "replace", "remove") or not isinstance(text, str)
+            or not isinstance(entry, str) or not isinstance(expected, dict)
+            or set(expected) != {"key", "sha256"}
+            or not isinstance(expected["sha256"], str)
+            or re.fullmatch(r"[0-9a-f]{64}", expected["sha256"]) is None
+            or len(text.encode("utf-8")) > 16384 or len(entry.encode("utf-8")) > 16384
+            or (action != "remove" and (not text.strip() or text != ops[0].one_line(text)))
+            or any(ord(c) < 32 for c in text + entry) or scrub(text) != text):
+        raise BeliefActionError("invalid_request")
+    with ops[2](path, lock_root=ops[1]):
+        review = _memory_review_locked(scope, slug, path, ops, scrub)
+        if expected != {k: review[k] for k in ("key", "sha256")}:
+            raise BeliefActionError("memory_changed")
+        if action != "add":
+            # Canonical LORE mutations match substrings. Refuse if the exact
+            # reviewed entry would match another row rather than guessing.
+            hits = ops[0].match_entries(review["entries"], entry)
+            if len(hits) != 1 or review["entries"][hits[0]] != entry:
+                raise BeliefActionError("memory_ambiguous")
+        item = {"kind": "memory", "action": action, "scope": scope,
+                "project": slug, "match": entry, "text": text}
+        # gate_write prints status for CLI users; the sidecar is framed JSON.
+        import contextlib
+        import io
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            staged = ops[3](item)
+        if staged is not None:
+            return {"status": "staged" if staged == 0 else "refused"}
+        fn = ops[4][("add", "replace", "remove").index(action)]
+        args = (text,) if action == "add" else (entry, text) if action == "replace" else (entry,)
+        error = fn(scope, slug, *args)
+        if error:
+            # Do not echo canonical errors, which may include the whole store.
+            raise BeliefActionError("memory_over_cap" if error.startswith("OVER CAP") else "memory_refused")
+        return {"status": "applied"}
 
 
 def _memory_usage(cwd: str, ops: tuple[Any, Any, Any, Any, Any]) -> dict[str, int]:
@@ -584,6 +676,7 @@ def serve() -> None:
     lore = _lore()
     ext = _extensions() if lore is not None else None
     memory_ops = _memory_usage_ops() if lore is not None else None
+    manage_ops = _memory_manage_ops() if lore is not None else None
     read_ops = _read_ops() if lore is not None else None
     belief_ops = _belief_action_ops() if lore is not None else None
     index_ops = _index_ops() if lore is not None and ext is not None else None
@@ -595,6 +688,7 @@ def serve() -> None:
                              + ([_INDEX_OP] if index_ops is not None else [])
                              + ([_SESSION_SEARCH_OP] if read_ops is not None and ext is not None else [])
                              + ([_MEMORY_USAGE_OP] if memory_ops is not None else [])
+                             + ([_MEMORY_REVIEW_OP, _MEMORY_ACTION_OP] if manage_ops is not None else [])
                              + ([_REVIEW_OP] if review is not None else [])
                              + ([_RESOLVE_OP] if resolver is not None else [])
                              + ([_BELIEF_REVIEW_OP, _BELIEF_ACTION_OP] if belief_ops is not None else [])) if lore is not None else []})
@@ -619,6 +713,11 @@ def serve() -> None:
             continue
         scrub, snapshot = lore
         try:
+            if op in (_MEMORY_REVIEW_OP, _MEMORY_ACTION_OP) and manage_ops is not None:
+                result = (_memory_review(req, manage_ops, scrub) if op == _MEMORY_REVIEW_OP
+                          else _memory_action(req, manage_ops, scrub))
+                _write({"type": "reply", "id": rid, "ok": True, "value": result})
+                continue
             if op == _BELIEF_REVIEW_OP and belief_ops is not None:
                 result = _belief_review(req, belief_ops, scrub)
                 _write({"type": "reply", "id": rid, "ok": True, "value": result})

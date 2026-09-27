@@ -1,59 +1,70 @@
 # Rust 2.0 parity with DOXA 1.19.0
 
-Baseline: the `v1.19.0` Python tag, especially `doxa/commands.py`, its session
-command handlers, and the 1.19 worktree and fleet contracts. This records the
-Rust branch's behavior at `v2.0.0-alpha.28`; it is a release gate, not a
-claim that all Python behavior has been ported.
+Baseline: Python `v1.19.0`, especially its command registry, session actions,
+worktree lifecycle, and fleet contracts. This records the integrated alpha.29
+state. It is a release gate, not a claim of universal provider compatibility.
+Terminal images are explicitly excluded by user preference.
 
-| Area | Rust state | Remaining 1.19 behavior |
+| Area | Implemented in Rust alpha.29 | Remaining boundary |
 | --- | --- | --- |
-| Core sessions | Native daemon, Codex and vendor hosts, Claude SDK sidecar; new, attach, stop, list and restore; TUI `/attach` for live sessions and `/resume` for verified saved Claude/Codex/vendor sessions, including recovery of a missing managed checkout with pinned metadata | Full setup/auth flow; recovery of deleted uncommitted changes is impossible |
-| Window and prompt | Two split panes, persistent named tabs, guarded `/movepane` tab transfer, persistent named collections with foldable rail headings, per-session drafts, mouse selection and resize, inline questions, Markdown with Ctrl+click HTTP(S) links, live and newly restored Claude/Codex tool detail, expandable reasoning, processing spinner inside transcript; active-session repo/worktree chip | More than two pane groups; historic Codex transcripts cannot recover details that were never stored. Like Python 1.19, moving a pane's final tab is deliberately refused. |
-| Commands | Local bare commands, `/msg`, `/mesh`, `/pane 1|2`, sidebar controls, `/dir`, `/cd <path>`, guarded `/clear`, `/attach` and `/rename`; inline autocomplete and scrollable help for the 42 Python 1.19 DOXA command names | Many argument forms and the full generated action palette; see table below |
-| Worktrees and diffs | Managed per-session Git checkout, guarded clean finalization, `new --branch`, idle live base switching, orphan preview and explicit verified Rust-orphan cleanup CLI, guarded missing-checkout recovery, diff pane and tracked-hunk rejection with queued active-turn feedback and a reason; unpinned Python 1.19 sidecars cannot be adopted, switched, or deleted by Rust | Shared lifecycle lock before cleanup of legacy Python sidecars, plus recovery when ownership or pinned Git metadata cannot be verified |
-| LORE | Context/scrub via sidecar, scoped curated memory and up to 20 global beliefs in an inline chip menu, belief/evidence picker, exact belief review and confirm/contradict/stale/retract actions, full proposal review and exact-snapshot approve/reject with LORE 0.58.5 | Older LORE builds remain read only; broader 1.19 memory management screens |
-| Peers and fleets | Peer map and direct message; optional native inbound peer turns; Python fleet start/inspection/attach; validated slot stop; native read-only preflight including supervisor/approval checks, Claude reported-cost ceiling, and priced DeepSeek/GLM ceiling for known models with complete usage | Native Codex priced budget and durable budgeted resume, fleet supervisor/barrier/approval desk, live fleet tab and remote routing |
-| Operational UI | Native doctor and install launcher; CLI `setup`, `auth status`, Claude Code `plugins` inventory, and `settings` read/set/unset for native linger and worktree preferences; inline `/settings` for those preferences; CLI `update`; per-session usage/context detail panels | Broader interactive setup/login/logout/plugin adoption and provider context component breakdown |
+| Sessions | Native Codex/vendor hosts, Claude SDK sidecar; new/attach/stop/list; bounded restore; verified saved-session resume and guarded missing-managed-checkout recovery | Deleted uncommitted files and history never stored cannot be recovered; uncertain ownership/state is refused |
+| Window and prompt | Recursive splits up to 16 groups, 256 session tabs, nested horizontal/vertical divider drag, persistent topology/collections/labels/drafts, tab transfer, keyboard/mouse selection, prompt-line search, generated searchable action palette | Final source tab cannot be moved, matching Python; bounded layout and recovery validation remain mandatory |
+| Questions and permissions | Codex/Claude question choices, free text and Other, stable question IDs, exact pending-request snapshots, full permission-summary read-through and one-request approvals | Secret questions are refused without masked private input; incomplete snapshots need refresh; stale requests cannot be answered |
+| Worktrees and diffs | Managed checkout, pinned base, lifecycle lock, guarded finalize/orphan cleanup/missing-checkout recovery, branch selection/switch, bounded modal/persistent diff and exact tracked-hunk rejection with idle feedback | Legacy unpinned ownership cannot authorize adoption, switching, cleanup, or recovery; staged and whole-file metadata hunks are refused |
+| LORE | Scoped memory browse/add/edit/remove with complete before/after review and canonical exact-snapshot mutation; beliefs/evidence and pending proposal actions | Trust, conflict, pending, detached-store, and atomic-API gates remain authoritative; older APIs stay read only |
+| Context and usage | Official provider usage/window data, Claude reported categories/files/tools/agents and injection metadata; explicit estimates and unknowns | Historic missing detail and unavailable provider component/plan/quota data remain unknown |
+| Fleets and peers | Native controller, startup barrier, supervisor peer tools, approval desk, budget gates, guarded durable resume, manifest views and verified attach; real saved run selection; owned start/resume review controller; local peer messaging/map and CLI private browser mesh | Unsupported native harness options use explicit start-python; incomplete accounting/pricing or legacy private-ledger evidence is refused; TUI browser-mesh argument forms remain unavailable |
+| Operations | CLI/TUI setup, selected CLI login/logout including Codex device flow, cancel/reap, public-only progress; sanitized plugin refresh/adoption; native settings | Wider Python settings require explicit implementation; CLI doctor/update are available but their unsupported slash forms remain drafts |
+| Compaction | Claude LORE review gate; pinned Codex 0.156.1 trusted PreCompact hook verification, manual official compaction and review outcome monitoring | Codex OS hook failures/timeouts/invalid output can fail open before parent observes failure; vendor compaction unavailable |
 
 ## Slash command coverage
 
-“Local” means handled by the Rust frontend and never sent as an agent prompt.
-“Partial” means a narrower Rust form, action, or chip exists. “Bridge” means
-the Rust CLI invokes the current Python fleet harness. Unsupported DOXA
-argument forms stay in the draft with a notice. Unknown provider and plugin
-commands still pass to the active engine.
+Local commands are handled by the frontend. Unsupported DOXA forms remain in
+the draft with a notice; unknown provider/plugin slash commands follow the
+normal engine path. Help and completion describe actual accepted forms.
 
-| Python 1.19 commands | Rust state | Next required behavior |
-| --- | --- | --- |
-| `/split`, `/vsplit`, `/pane`, `/sidebar`, `/detach`, `/dir` | Local | More pane groups and complete sidebar sizing/restore semantics |
-| `/peers`, `/mesh`, `/msg` | Local or partial | Rich peer details, browser mesh and remote peers |
-| `/diff` | Partial | Full 1.19 diff command options and worktree controls |
-| `/fleet` | Bridge or partial; native Claude and known-model vendor per-session spend ceilings | Native supervisor, approval desk, barrier, Codex priced budget, budgeted resume and fleet tab |
-| `/model`, `/engine`, `/mode`, `/effort` | Local picker for bare form; new-session vendor models refresh from account catalogs, with DeepSeek per-model effort and measured GLM fallback; live effort chip reports daemon state; known DeepSeek/GLM models accept idle live effort changes for the next turn; Codex model and effort choices use the account app-server catalog and apply to the next turn on the same thread, including saved exec sessions | Supported argument forms for other engines and newer catalog-only vendor models |
-| `/beliefs`, `/pending` | Belief reading, exact reviewed confirm/contradict/stale/retract actions, and staged approve/reject after complete raw review | Broader 1.19 memory management screens |
-| `/sessions`, `/search`, `/resume`, `/attach` | Debounced live search with grouped, scrubbed LORE index excerpts, exact owned-file loading and bounded scan fallback, verified saved Claude/Codex/vendor resume with guarded missing-checkout recovery, CLI attach/Claude resume and live TUI attach picker with ID/title search | Python-style prompt-line search menu and results from indexed external transcripts that DOXA cannot open |
-| `/usage`, `/context`, `/queue` | Scrollable per-session usage/context panels and queued prompt list/cancel picker | Provider context component breakdown and more detailed usage history |
-| `/help`, `/about` | Scrollable registry of all 42 Python 1.19 command names with Rust forms and support notes; version | Full diagnostics and generated action palette |
-| `/compact` | Explicit Claude command waits for completed LORE review; older sidecars and Codex/vendor compaction are blocked | Review gate for automatic provider compaction and other supported engines |
-| `/movepane`, `/collection`, `/rename`, `/cd`, `/clear` | `/movepane [1|2]` moves an active tab between two groups while retaining a source tab, matching Python's final-tab refusal; named `/collection new|rename|delete|add|remove` orders the rail; `/rename` local; `/cd <path>` opens a verified new-session directory; `/clear` replaces an idle session only after a durable tabset swap | Fresh-session replacement when no writable complete tabset is available |
-| `/branch` | `new --branch`, guarded idle live base switch, branch listing, and inline local branch picker | Python selector filtering and further worktree controls |
-| `/login`, `/logout`, `/settings`, `/setup`, `/doctor`, `/update` | CLI doctor, update, setup report and auth-status probes; native CLI and inline `/settings` read/set/unset for linger and worktree preferences | Broader interactive setup, authentication and settings changes |
-| `/plugins`, `/reload-plugins` | Read-only CLI Claude Code plugin inventory | Plugin adoption policy and refresh |
-| `/img` | Missing | Terminal image capability/reporting if required for stable parity |
+| Python 1.19 commands | Alpha.29 behavior and limits |
+| --- | --- |
+| `/split`, `/vsplit`, `/pane`, `/movepane`, `/sidebar` | Recursive pane groups, numbered focus/move and sidebar size controls; source retains its final tab |
+| `/collection`, `/rename`, `/detach`, `/dir`, `/cd`, `/clear` | Local collections/labels/detach; verified new directory tab; clear requires idle state and durable writable tabset |
+| `/peers`, `/mesh`, `/msg` | Local peer map and same-project messaging; browser mesh is CLI `mesh serve` / `fleet mesh RUN`, not a TUI argument form |
+| `/diff`, `/branch` | Worktree diff and guarded hunk rejection; branch picker or guarded explicit base switch. No unverified extra diff options are advertised |
+| `/fleet` | Runs/status/verified slot attach; exact native start options and resume with full plan review, explicit arming, tracked subprocess and teardown; saved real run views in Ctrl+P |
+| `/model`, `/engine`, `/mode`, `/effort` | Pickers and supported named forms; authoritative capabilities/catalogs, idle/queue guards, and pending Claude effort verification |
+| `/beliefs`, `/pending` | Belief/evidence and exact reviewed actions; proposal complete review and atomic approve/reject. Curated memory actions are available from the memory chip |
+| `/sessions`, `/search`, `/resume`, `/attach` | Prompt-line query/results, scrubbed indexed excerpts and bounded fallback, exact owned-file verification, live attach and saved-session recovery |
+| `/usage`, `/context`, `/queue` | Reported totals/context details and bounded queue preview/cancel; missing provider detail remains unknown |
+| `/help`, `/about` | Scrollable 42-command registry and version; generated Ctrl+P actions from commands, tabs, saved fleet views and session operations |
+| `/compact` | Claude review-gated and protected Codex official compaction; unsupported engines/contracts refused |
+| `/login`, `/logout`, `/setup`, `/settings` | Selected provider login/logout; Codex-only device flag; asynchronous setup and native linger/worktree settings with environment shadows read only |
+| `/plugins`, `/reload-plugins` | Sanitized inventory, adoption controls and refresh through operations menu |
+| `/doctor`, `/update` | Native CLI forms available; unsupported slash forms stay in draft |
+| `/img` | Explicitly excluded by user preference |
 
 ## Stable 2.0 gates
 
-1. Share a lifecycle lock with legacy Python before legacy orphan deletion. Keep the
-   LORE 0.58.5 atomic review boundary covered as later versions are adopted.
-2. Port or explicitly scope every user-facing 1.19 command and window action;
-   ensure DOXA commands never accidentally become model prompts.
-3. Add end-to-end startup, daemon, and terminal tests for the supported hosts,
-   session restore, fleet runs and cross-version attachment.
-4. Re-run the full UI performance benchmarks on the final Rust event loop and
-   update the gallery from the actual binary.
+1. Keep canonical LORE trust/pending/conflict and exact reviewed-snapshot gates
+   covered when its APIs change. Do not make legacy unverified ownership writable.
+2. Resolve or explicitly retain the pinned Codex provider limitation: 0.156.1
+   treats hook infrastructure failures as fail open. DOXA can stop after observing
+   failure, but cannot promise compaction was prevented in that case. Unknown
+   Codex builds must continue to refuse protected startup.
+3. Maintain full startup/daemon/terminal regressions for supported transports,
+   saved state, native fleet approvals/budgets/teardown, and cross-version attach.
+   The UI milestone passed **401 tests across 21 suites**; fixture tests do not
+   substitute for supported live-provider contract validation.
+4. Re-run final Rust event-loop performance checks and regenerate the production
+   gallery from the release build. Gallery fixtures must remain clearly labelled,
+   nonmutating, and unable to launch providers or controllers.
+5. Preserve honest scope for missing historical telemetry, excluded images,
+   wider settings, unsupported native fleet options, and TUI browser-mesh forms.
+   Remote routing and invented diff-option rows are not additional 1.19 gates.
 
-The Rust guide in [`rust/README.md`](../rust/README.md) describes commands
-already available in the preview.
+Existing daemon processes keep their old implementation after upgrading.
+Restart an idle session and resume verified state to use new host behavior.
+Settings changes require an idle session with no queued prompts. Catalog
+capabilities and effective runtime state must agree before showing a change
+as applied; unknown defaults do not justify guessing a model or effort.
 
-Codex settings changes require an idle session with no queued prompts. Existing daemon processes keep their old implementation: stop an idle session after upgrading, then resume its verified saved thread. Selected model and effort are persisted for verified recovery; legacy exec transport remains exec. Catalog discovery initializes a bounded short-lived app-server process without creating a provider thread.
-When the current Codex model is unknown (for example a CLI-configured default), select a model from the verified model picker before choosing effort; DOXA does not guess the running thread's model from the catalog default.
+See the [Rust guide](../rust/README.md) and
+[production-layout gallery](rust-gallery.md) for available commands and images.

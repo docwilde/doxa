@@ -8,6 +8,9 @@ use std::time::{Duration, Instant};
 
 const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 const MAX_RUNS: usize = 1024;
+pub const MAX_NATIVE_SLOTS: usize = 1025;
+const STOP_WORKERS: usize = 8;
+const STOP_TIMEOUT: Duration = Duration::from_secs(60);
 
 fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
@@ -26,9 +29,9 @@ pub fn default_root() -> io::Result<PathBuf> {
 }
 
 fn private_file(path: &Path) -> io::Result<File> {
-    let file = OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(path)?;
+    let file = OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path)?;
     let metadata = file.metadata()?;
-    if !metadata.is_file() || metadata.uid() != unsafe { libc::geteuid() }
+    if !metadata.is_file() || metadata.nlink() != 1 || metadata.uid() != unsafe { libc::geteuid() }
         || metadata.permissions().mode() & 0o077 != 0
         || metadata.len() > MAX_MANIFEST_BYTES {
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, "unsafe fleet manifest"));
@@ -79,6 +82,30 @@ fn run_dirs(root: &Path) -> io::Result<Vec<PathBuf>> {
 
 fn short(value: &str) -> String {
     value.chars().filter(|ch| !ch.is_control()).take(80).collect()
+}
+
+/// Canonical recorded run IDs, newest first. Display truncation is never used
+/// to select a run; manifests must agree with their validated directory name.
+pub fn run_ids(root: &Path) -> io::Result<Vec<String>> {
+    let mut rows = Vec::new();
+    for dir in run_dirs(root)? {
+        let Ok(value) = manifest(&dir) else { continue; };
+        let Some(id) = dir.file_name().and_then(|name| name.to_str()) else { continue; };
+        if value["run_id"].as_str() != Some(id) { continue; }
+        rows.push((value["started_at"].as_str().unwrap_or("").to_owned(), id.to_owned()));
+    }
+    rows.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    Ok(rows.into_iter().map(|(_, id)| id).collect())
+}
+
+/// Read the selected native or legacy manifest from one owned bounded inode.
+pub fn manifest_snapshot(root: &Path, id: &str) -> io::Result<Value> {
+    let run = resolve(root, id)?;
+    let value = manifest(&run)?;
+    if value["run_id"].as_str() != run.file_name().and_then(|name| name.to_str()) {
+        return Err(invalid("fleet manifest identity changed"));
+    }
+    Ok(value)
 }
 
 pub fn runs(root: &Path) -> io::Result<String> {
@@ -189,28 +216,87 @@ pub struct StopReport {
     pub complete: bool,
 }
 
+#[cfg(test)]
 fn stop_one(socket: PathBuf, expected_id: String) -> Result<&'static str, String> {
-    let mut client = crate::transport::DaemonClient::connect(&socket, None)
-        .map_err(|error| error.to_string())?;
-    if client.hello["session_id"] != expected_id {
-        return Err("daemon session identity differs from manifest".into());
-    }
-    let reply = client.call("stop", serde_json::Map::new())
-        .map_err(|error| format!("stop acknowledgement unavailable: {error}"))?;
-    if reply["ok"] != true {
-        return Err("daemon refused stop request".into());
-    }
-    let deadline = Instant::now() + Duration::from_secs(60);
+    stop_one_until(socket, expected_id, Instant::now() + STOP_TIMEOUT)
+}
+// EOF closes the transport before shutdown unlinks the owned socket and
+// registry entry. Completion requires both pathnames to retire; the frontend
+// never removes either artifact and refuses a substituted socket inode.
+fn wait_retirement(socket: &Path, expected_id: &str, identity: Option<(u64, u64)>, deadline: Instant) -> Result<&'static str, String> {
+    if !doxa_state::valid_session_id(expected_id) { return Err("invalid teardown session identity".into()); }
+    let registry = socket.parent().ok_or("socket has no runtime directory")?.join("registry").join(format!("{expected_id}.json"));
     loop {
-        if Instant::now() >= deadline {
-            return Err("stop accepted; daemon close not confirmed within 60 seconds".into());
-        }
-        match client.poll_frame(Duration::from_millis(250)) {
+        let socket_gone = match fs::symlink_metadata(socket) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => true,
+            Err(error) => return Err(format!("socket retirement cannot be verified: {error}")),
+            Ok(metadata) => {
+                if !metadata.file_type().is_socket() || identity.is_none_or(|id| id != (metadata.dev(), metadata.ino())) {
+                    return Err("socket identity changed during retirement; completion withheld".into());
+                }
+                false
+            }
+        };
+        let registry_gone = match fs::symlink_metadata(&registry) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => true,
+            Err(error) => return Err(format!("registry retirement cannot be verified: {error}")),
+            Ok(metadata) => {
+                if !metadata.is_file() || metadata.uid() != unsafe { libc::geteuid() } || metadata.permissions().mode() & 0o077 != 0 {
+                    return Err("unsafe registry artifact during retirement; completion withheld".into());
+                }
+                false
+            }
+        };
+        if socket_gone && registry_gone { return Ok("daemon socket and registry retired"); }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() { return Err("daemon EOF observed; socket or registry retirement not confirmed before fleet deadline".into()); }
+        std::thread::sleep(remaining.min(Duration::from_millis(10)));
+    }
+}
+fn stop_one_until(socket: PathBuf, expected_id: String, deadline: Instant) -> Result<&'static str, String> {
+    let identity = match fs::symlink_metadata(&socket) {
+        Ok(metadata) => Some((metadata.dev(), metadata.ino())),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return wait_retirement(&socket, &expected_id, None, deadline),
+        Err(error) => return Err(error.to_string()),
+    };
+    // Transport bounds hello at10s and reply at15s; reserve both before
+    // starting another task so the bounded pool cannot overrun its deadline.
+    if deadline.saturating_duration_since(Instant::now()) < Duration::from_secs(25) {
+        return Err("fleet stop deadline exhausted before admission".into());
+    }
+    let mut client = match crate::transport::DaemonClient::connect_until(&socket, None, deadline) {
+        Ok(client) => client,
+        Err(_) if fs::symlink_metadata(&socket).is_err_and(|e| e.kind() == io::ErrorKind::NotFound) => return wait_retirement(&socket, &expected_id, identity, deadline),
+        Err(error) => return Err(error.to_string()),
+    };
+    if client.hello["session_id"] != expected_id { return Err("daemon session identity differs from manifest".into()); }
+    let reply = client.call("stop", serde_json::Map::new()).map_err(|error| format!("stop acknowledgement unavailable: {error}"))?;
+    if reply["ok"] != true { return Err("daemon refused stop request".into()); }
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() { return Err("stop accepted; daemon close not confirmed before fleet deadline".into()); }
+        match client.poll_frame(remaining.min(Duration::from_millis(250))) {
             Ok(Some(_)) | Ok(None) => {}
-            Err(crate::transport::TransportError::Closed) => return Ok("daemon connection closed"),
+            Err(crate::transport::TransportError::Closed) => return wait_retirement(&socket, &expected_id, identity, deadline),
             Err(error) => return Err(format!("stop accepted; daemon close unconfirmed: {error}")),
         }
     }
+}
+/// Stop only caller-verified identities with one deadline and a bounded pool.
+pub(crate) fn teardown(targets: Vec<(usize, PathBuf, String)>) -> Vec<(usize, Result<&'static str, String>)> {
+    let deadline = Instant::now() + STOP_TIMEOUT;
+    let tasks = std::sync::Mutex::new(std::collections::VecDeque::from(targets));
+    let results = std::sync::Mutex::new(Vec::new());
+    std::thread::scope(|scope| {
+        for _ in 0..STOP_WORKERS {
+            scope.spawn(|| loop {
+                let Some((index, socket, id)) = tasks.lock().unwrap().pop_front() else { break; };
+                let result = stop_one_until(socket, id, deadline);
+                results.lock().unwrap().push((index, result));
+            });
+        }
+    });
+    results.into_inner().unwrap()
 }
 
 /// Request stop on each live slot that still has a socket. All readable socket
@@ -218,11 +304,20 @@ fn stop_one(socket: PathBuf, expected_id: String) -> Result<&'static str, String
 pub fn stop(root: &Path, prefix: &str) -> io::Result<StopReport> {
     let run = resolve(root, prefix)?;
     let value = manifest(&run)?;
+    if value["native_version"] == 1 {
+        let id = run.file_name().and_then(|name| name.to_str()).ok_or_else(|| invalid("invalid native run ID"))?;
+        return crate::fleet_control::stop(root, id);
+    }
+    stop_slots(root, prefix, false)
+}
+pub(crate) fn stop_slots(root: &Path, prefix: &str, native: bool) -> io::Result<StopReport> {
+    let run = resolve(root, prefix)?;
+    let value = manifest(&run)?;
     if value["live"] != true {
         return Err(invalid("fleet manifest is not live"));
     }
     let slots = value["slots"].as_array().ok_or_else(|| invalid("fleet manifest has no slots"))?;
-    if slots.is_empty() || slots.len() > 64 {
+    if slots.is_empty() || slots.len() > MAX_NATIVE_SLOTS {
         return Err(invalid("fleet slot count is out of bounds"));
     }
     let mut targets = Vec::new();
@@ -245,37 +340,32 @@ pub fn stop(root: &Path, prefix: &str) -> io::Result<StopReport> {
         }
         match slot_socket(root, prefix, index) {
             Ok((socket, id)) => targets.push((index, socket, id)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound && native => {
+                let socket = PathBuf::from(slot["socket_path"].as_str().unwrap());
+                let id = slot["session_id"].as_str().filter(|id| doxa_state::valid_session_id(id)).ok_or_else(|| invalid("fleet slot has no valid session ID"))?;
+                if socket.parent().and_then(|parent| parent.canonicalize().ok()) != Some(run.join("rt").canonicalize()?) { return Err(invalid("fleet socket is outside run runtime")); }
+                targets.push((index, socket, id.to_owned()));
+            }
             Err(error) if error.kind() == io::ErrorKind::NotFound => missing.push(index),
             Err(error) => return Err(error),
         }
     }
-    if targets.is_empty() {
+    if targets.is_empty() && !(native && missing.len() == slots.len()) {
         return Err(invalid("fleet has no live slot sockets to stop"));
     }
-    // Concurrent requests match v1.19 teardown's per-slot fanout and keep a
-    // single slow finalize from delaying the other stop requests.
-    let handles: Vec<_> = targets.into_iter().map(|(index, socket, id)| {
-        std::thread::spawn(move || (index, stop_one(socket, id)))
-    }).collect();
+    let results = teardown(targets);
     let mut lines = Vec::new();
-    let mut complete = missing.is_empty();
+    let mut complete = missing.is_empty() || native;
     for index in missing {
         lines.push((index, format!("slot {index}: no live socket recorded")));
     }
     for index in not_spawned {
         lines.push((index, format!("slot {index}: was not spawned")));
     }
-    for handle in handles {
-        match handle.join() {
-            Ok((index, Ok(state))) => lines.push((index, format!("slot {index}: {state}"))),
-            Ok((index, Err(error))) => {
-                complete = false;
-                lines.push((index, format!("slot {index}: {}", short(&error))));
-            }
-            Err(_) => {
-                complete = false;
-                lines.push((usize::MAX, "slot worker failed".into()));
-            }
+    for (index, result) in results {
+        match result {
+            Ok(state) => lines.push((index, format!("slot {index}: {state}"))),
+            Err(error) => { complete = false; lines.push((index, format!("slot {index}: {}", short(&error)))); }
         }
     }
     lines.sort_by_key(|(index, _)| *index);
@@ -288,6 +378,22 @@ mod tests {
     use super::*;
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixListener;
+
+    #[test]
+    fn manifest_rejects_fifo_without_waiting_for_a_writer_and_hard_links() {
+        let temp = tempfile::Builder::new().prefix("doxa-fleet-audit-")
+            .tempdir().unwrap();
+        let fifo = temp.path().join("manifest.json");
+        let name = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        assert!(private_file(&fifo).is_err());
+        fs::remove_file(&fifo).unwrap();
+        fs::write(&fifo, "{}").unwrap();
+        fs::set_permissions(&fifo, fs::Permissions::from_mode(0o600)).unwrap();
+        let alias = temp.path().join("alias.json");
+        fs::hard_link(&fifo, &alias).unwrap();
+        assert!(private_file(&fifo).is_err());
+    }
 
     #[test]
     fn reads_python_manifest_and_refuses_ambiguous_or_unsafe_attach() {
@@ -335,6 +441,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("daemon.sock");
         let listener = UnixListener::bind(&path).unwrap();
+        let retired_path = path.clone();
         let server = std::thread::spawn(move || {
             let (mut socket, _) = listener.accept().unwrap();
             writeln!(socket, "{}", serde_json::json!({"type":"hello", "proto":1,
@@ -348,9 +455,44 @@ mod tests {
             let call: Value = serde_json::from_str(&line).unwrap();
             assert_eq!(call["method"], "stop");
             writeln!(socket, "{}", serde_json::json!({"type":"reply", "id":call["id"], "ok":true})).unwrap();
+            drop(reader); drop(socket); drop(listener); fs::remove_file(retired_path).unwrap();
         });
-        assert_eq!(stop_one(path, "sess-123".into()).unwrap(), "daemon connection closed");
+        assert_eq!(stop_one(path, "sess-123".into()).unwrap(), "daemon socket and registry retired");
         server.join().unwrap();
+    }
+
+    #[test]
+    fn teardown_does_not_finish_at_acknowledgement() {
+        let temp = tempfile::tempdir().unwrap(); let path = temp.path().join("delayed.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let (ack_sender, ack_receiver) = std::sync::mpsc::channel();
+        let (release_sender, release_receiver) = std::sync::mpsc::channel();
+        let (eof_sender, eof_receiver) = std::sync::mpsc::channel();
+        let (retire_sender, retire_receiver) = std::sync::mpsc::channel();
+        let retired_path = path.clone(); let registry = temp.path().join("registry");
+        fs::create_dir(&registry).unwrap(); let entry = registry.join("delayed.json");
+        fs::write(&entry, "{}").unwrap(); fs::set_permissions(&entry, fs::Permissions::from_mode(0o600)).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            writeln!(socket, "{}", serde_json::json!({"type":"hello","proto":1,"session_id":"delayed","cwd":"/fixture","engine":"fixture","next_seq":0})).unwrap();
+            let mut reader = BufReader::new(socket.try_clone().unwrap()); let mut line = String::new();
+            reader.read_line(&mut line).unwrap(); line.clear(); reader.read_line(&mut line).unwrap();
+            let command: Value = serde_json::from_str(&line).unwrap();
+            writeln!(socket, "{}", serde_json::json!({"type":"reply","id":command["id"],"ok":true})).unwrap();
+            ack_sender.send(()).unwrap(); release_receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+            drop(reader); drop(socket); eof_sender.send(()).unwrap();
+            retire_receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+            drop(listener); fs::remove_file(retired_path).unwrap(); fs::remove_file(entry).unwrap();
+        });
+        let (result_sender, result_receiver) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || { let _ = result_sender.send(teardown(vec![(0, path, "delayed".into())])); });
+        ack_receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(matches!(result_receiver.recv_timeout(Duration::from_millis(100)), Err(std::sync::mpsc::RecvTimeoutError::Timeout)));
+        release_sender.send(()).unwrap(); eof_receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(matches!(result_receiver.recv_timeout(Duration::from_millis(100)), Err(std::sync::mpsc::RecvTimeoutError::Timeout)));
+        retire_sender.send(()).unwrap();
+        let results = result_receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(results[0].1.is_ok()); worker.join().unwrap(); server.join().unwrap();
     }
 
     #[test]
@@ -392,6 +534,7 @@ mod tests {
         fs::write(&path, serde_json::json!({"run_id":"20260925T100000-abcd", "live":true,
             "slots":[{"index":0,"session_id":"sess-123","socket_path":socket}]}).to_string()).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let retired_path = socket.clone();
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             writeln!(stream, "{}", serde_json::json!({"type":"hello", "proto":1,
@@ -404,10 +547,26 @@ mod tests {
             let call: Value = serde_json::from_str(&line).unwrap();
             assert_eq!(call["method"], "stop");
             writeln!(stream, "{}", serde_json::json!({"type":"reply", "id":call["id"], "ok":true})).unwrap();
+            drop(reader); drop(stream); drop(listener); fs::remove_file(retired_path).unwrap();
         });
         let report = stop(root, "20260925T100000").unwrap();
         assert!(report.complete);
-        assert!(report.text.contains("slot 0: daemon connection closed"));
+        assert!(report.text.contains("slot 0: daemon socket and registry retired"));
         server.join().unwrap();
     }
+    #[test]
+    fn retirement_refuses_replaced_socket_and_unretired_registry() {
+        let dir = tempfile::tempdir().unwrap(); let socket = dir.path().join("owned.sock");
+        let original = UnixListener::bind(&socket).unwrap(); let metadata = fs::symlink_metadata(&socket).unwrap();
+        let identity = Some((metadata.dev(), metadata.ino()));
+        fs::remove_file(&socket).unwrap(); let replacement = UnixListener::bind(&socket).unwrap();
+        assert!(wait_retirement(&socket, "owned", identity, Instant::now() + Duration::from_millis(50)).is_err());
+        drop(replacement); fs::remove_file(&socket).unwrap(); drop(original);
+        fs::create_dir(dir.path().join("registry")).unwrap(); let entry = dir.path().join("registry/owned.json");
+        fs::write(&entry, "{}").unwrap(); fs::set_permissions(&entry, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(wait_retirement(&socket, "owned", None, Instant::now() + Duration::from_millis(50)).is_err());
+        fs::remove_file(entry).unwrap();
+        assert!(wait_retirement(&socket, "owned", None, Instant::now() + Duration::from_millis(50)).is_ok());
+    }
+
 }

@@ -43,6 +43,8 @@ pub struct CodexJsonlNormalizer {
     started_bytes: usize,
     usage: TokenUsage,
     usage_observed: bool,
+    turn_usage_start: TokenUsage,
+    turn_usage_complete: bool,
     bad_frames: usize,
     bad_sample: String,
     closed: bool,
@@ -53,12 +55,14 @@ impl CodexJsonlNormalizer {
     pub fn new(scrub: impl Fn(&str) -> String + Send + Sync + 'static) -> Self {
         Self {
             scrub: Box::new(scrub), pending: Vec::new(), thread_id: None,
-            started: HashMap::new(), started_bytes: 0, usage: TokenUsage::default(), usage_observed: false,
+            started: HashMap::new(), started_bytes: 0, usage: TokenUsage::default(), usage_observed: false, turn_usage_start: TokenUsage::default(), turn_usage_complete: false,
             bad_frames: 0, bad_sample: String::new(), closed: false, num_turns: 0,
         }
     }
 
     pub fn begin_turn(&mut self) {
+        self.turn_usage_start = self.usage.clone();
+        self.turn_usage_complete = false;
         self.pending.clear();
         self.started.clear();
         self.started_bytes = 0;
@@ -272,6 +276,8 @@ impl CodexJsonlNormalizer {
             || usage.get("output_tokens").and_then(Value::as_u64).is_some() {
             self.usage_observed = true;
         }
+        self.turn_usage_complete = usage.get("input_tokens").and_then(Value::as_u64).is_some()
+            && usage.get("output_tokens").and_then(Value::as_u64).is_some();
         for (key, total) in [
             ("input_tokens", &mut self.usage.input_tokens),
             ("output_tokens", &mut self.usage.output_tokens),
@@ -286,6 +292,9 @@ impl CodexJsonlNormalizer {
         if self.usage_observed {
             data["input_tokens"] = json!(self.usage.input_tokens);
             data["output_tokens"] = json!(self.usage.output_tokens);
+            data["turn_input_tokens"] = json!(self.usage.input_tokens.saturating_sub(self.turn_usage_start.input_tokens));
+            data["turn_output_tokens"] = json!(self.usage.output_tokens.saturating_sub(self.turn_usage_start.output_tokens));
+            data["usage_complete"] = json!(self.turn_usage_complete && self.bad_frames == 0);
             data["usage_scope"] = json!("session");
             data["usage_source"] = json!("codex_cli_turn_completed");
         }

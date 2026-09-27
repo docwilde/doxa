@@ -1,4 +1,4 @@
-//! Read-only setup checks. Provider CLIs own their credentials; only probe
+//! Native setup and provider authentication operations. Provider CLIs own their credentials; only probe
 //! exit status is observed, and their output is never captured or displayed.
 
 use std::io;
@@ -88,6 +88,261 @@ pub fn auth_status(name: Option<&str>) -> io::Result<String> {
     } else { PROVIDERS.iter().collect() };
     Ok(selected.into_iter().map(|provider| format!("{}: {}", provider.label,
         state_text(provider_state(provider)))).collect::<Vec<_>>().join("\n"))
+}
+
+/// Only public browser/device authentication is supported; credentials remain
+/// in the provider CLI. No raw extra argument can reach that subprocess.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AuthRequest {
+    pub provider: &'static str,
+    pub action: &'static str,
+    pub device_auth: bool,
+}
+
+pub fn parse_auth_request(action: &str, arguments: &str) -> io::Result<Option<AuthRequest>> {
+    let action = match action { "login" => "login", "logout" => "logout", _ => return Err(io::Error::other("auth action must be login or logout")) };
+    let words: Vec<_> = arguments.split_whitespace().collect();
+    if words.is_empty() { return Ok(None); }
+    let provider = match words[0].to_ascii_lowercase().as_str() {
+        "claude" => "claude", "codex" => "codex",
+        _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, "choose claude or codex explicitly")),
+    };
+    let device_auth = match words.as_slice() {
+        [_] => false,
+        [_, "--device-auth"] if provider == "codex" && action == "login" => true,
+        _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, "use login claude|codex [--device-auth (Codex only)] or logout claude|codex")),
+    };
+    Ok(Some(AuthRequest { provider, action, device_auth }))
+}
+
+/// Run the chosen provider's supported browser login/logout command. Only
+/// allowlisted public login progress reaches callers, never arbitrary output.
+pub fn auth_action(name: &str, action: &str, progress: impl FnMut(String)) -> io::Result<String> {
+    auth_action_cancellable(name, action, progress, &std::sync::atomic::AtomicBool::new(false))
+}
+
+pub fn auth_action_cancellable(name: &str, action: &str, progress: impl FnMut(String), cancel: &std::sync::atomic::AtomicBool) -> io::Result<String> {
+    let request = parse_auth_request(action, name)?.ok_or_else(|| io::Error::other("choose claude or codex explicitly"))?;
+    auth_action_request(request, progress, cancel)
+}
+
+pub fn auth_action_request(request: AuthRequest, mut progress: impl FnMut(String), cancel: &std::sync::atomic::AtomicBool) -> io::Result<String> {
+    let provider = PROVIDERS.iter().find(|p| p.name == request.provider).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "choose claude or codex explicitly"))?;
+    let args: &[&str] = match (request.provider, request.action, request.device_auth) {
+        ("claude", "login", false) => &["auth", "login"],
+        ("claude", "logout", false) => &["auth", "logout"],
+        ("codex", "login", false) => &["login"],
+        ("codex", "login", true) => &["login", "--device-auth"],
+        ("codex", "logout", false) => &["logout"],
+        _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, "unsupported provider authentication option")),
+    };
+    let binary = locate(provider.binary).ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "provider CLI not installed"))?;
+    run_auth_cancellable(&binary, args, Duration::from_secs(900), &mut progress, cancel)?;
+    Ok(format!("{} {} completed; {}", provider.label, request.action, state_text(provider_state(provider))))
+}
+
+fn secret_auth_parameter(url: &str) -> bool {
+    // OAuth URLs commonly percent-encode redirect_uri and scope values.
+    // Decode parameter names only, preventing encoded secret keys from
+    // bypassing the output filter while retaining usable public login URLs.
+    for query in url.split(['?', '#']).skip(1) {
+        for pair in query.split('&') {
+            let key = pair.split('=').next().unwrap_or_default();
+            let mut decoded = Vec::new(); let mut bytes = key.bytes();
+            while let Some(byte) = bytes.next() {
+                if byte == b'%' {
+                    let Some(high) = bytes.next().and_then(|b| (b as char).to_digit(16)) else { return true };
+                    let Some(low) = bytes.next().and_then(|b| (b as char).to_digit(16)) else { return true };
+                    decoded.push((high * 16 + low) as u8);
+                } else { decoded.push(byte); }
+            }
+            let Ok(key) = String::from_utf8(decoded) else { return true };
+            let key = key.to_ascii_lowercase();
+            if ["api_key", "code", "password", "passwd", "authorization", "bearer", "jwt", "key"].contains(&key.as_str())
+                || ["token", "secret", "credential"].iter().any(|word| key.contains(word)) { return true; }
+        }
+    }
+    false
+}
+
+fn strip_auth_ansi(line: &str) -> Option<String> {
+    let mut output = String::new(); let mut chars = line.chars().peekable();
+    while let Some(character) = chars.next() {
+        if character == '\u{1b}' {
+            match chars.next()? {
+                '[' => {
+                    let mut ended = false;
+                    for value in chars.by_ref() { if ('@'..='~').contains(&value) { ended = true; break; } }
+                    if !ended { return None; }
+                }
+                ']' => {
+                    let mut ended = false;
+                    while let Some(value) = chars.next() {
+                        if value == '\u{7}' { ended = true; break; }
+                        if value == '\u{1b}' { if chars.next()? != '\\' { return None; } ended = true; break; }
+                    }
+                    if !ended { return None; }
+                }
+                _ => return None,
+            }
+        } else if character.is_control() && character != '\t' { return None; }
+        else { output.push(character); }
+    }
+    Some(output)
+}
+
+#[derive(Default)]
+struct AuthProgress { next_device_code: bool, blank_lines_left: u8 }
+impl AuthProgress {
+    fn line(&mut self, line: &str) -> Option<String> {
+        let clean = match strip_auth_ansi(line) { Some(clean) => clean, None => { self.next_device_code = false; return None; } };
+        let code = clean.trim();
+        // A PTY's CRLF delimiter can produce one empty line between chunks.
+        // Preserve the exact next-line prompt context only across that gap.
+        if code.is_empty() && self.next_device_code && self.blank_lines_left > 0 {
+            self.blank_lines_left -= 1; return None;
+        }
+        let expected = std::mem::take(&mut self.next_device_code);
+        // Official Codex0.156.1 prints the public code on the line after this
+        // exact prompt. Never capture unrelated standalone CLI output.
+        if expected && (4..=32).contains(&code.len()) && code.bytes().all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'-') {
+            return Some(format!("Device code: {code}"));
+        }
+        let report = public_auth_progress(&clean);
+        self.next_device_code = report.is_none() && clean.to_ascii_lowercase().contains("enter this one-time code");
+        self.blank_lines_left = u8::from(self.next_device_code);
+        report
+    }
+}
+
+fn public_auth_progress(line: &str) -> Option<String> {
+    let clean = strip_auth_ansi(line)?; let line = clean.as_str();
+    for word in line.split_whitespace() {
+        let url = word.trim_end_matches(['.', ',', ')']);
+        let Some(rest) = url.strip_prefix("https://") else { continue };
+        let host = rest.split(['/', '?', '#']).next()?;
+        if !["auth.openai.com", "chatgpt.com", "claude.ai", "console.anthropic.com", "platform.openai.com"].contains(&host) { continue; }
+        let lower = url.to_ascii_lowercase();
+        if url.chars().any(char::is_control) || lower.contains("token") || lower.contains("api_key") || lower.contains("code=") || secret_auth_parameter(url) { continue; }
+        return Some(format!("Open in your browser: {url}"));
+    }
+    let lower = line.to_ascii_lowercase();
+    if ["device code", "verification code", "one-time code"].iter().any(|key| lower.contains(key)) {
+        if let Some(code) = line.split_whitespace().last().filter(|code| code.len() >= 4 && code.len() <= 32 && code.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'-')) {
+            return Some(format!("Device code: {code}"));
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+fn run_auth(binary: &Path, args: &[&str], timeout: Duration, progress: &mut impl FnMut(String)) -> io::Result<()> {
+    run_auth_cancellable(binary, args, timeout, progress, &std::sync::atomic::AtomicBool::new(false))
+}
+
+fn run_auth_cancellable(binary: &Path, args: &[&str], timeout: Duration, progress: &mut impl FnMut(String), cancel: &std::sync::atomic::AtomicBool) -> io::Result<()> {
+    use std::os::fd::FromRawFd;
+    if cancel.load(std::sync::atomic::Ordering::Acquire) { return Err(io::Error::new(io::ErrorKind::Interrupted, "provider authentication cancelled")); }
+    let (mut master, mut slave) = (-1, -1);
+    if unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null(), std::ptr::null()) } != 0 { return Err(io::Error::last_os_error()); }
+    let mut reader = unsafe { std::fs::File::from_raw_fd(master) };
+    let terminal = unsafe { std::fs::File::from_raw_fd(slave) };
+    unsafe {
+        libc::fcntl(master, libc::F_SETFL, libc::O_NONBLOCK);
+        libc::fcntl(master, libc::F_SETFD, libc::FD_CLOEXEC);
+        libc::fcntl(slave, libc::F_SETFD, libc::FD_CLOEXEC);
+    }
+    let mut child = Command::new(binary).args(args).stdin(terminal.try_clone()?).stdout(terminal.try_clone()?).stderr(terminal).process_group(0).spawn()?;
+    let deadline = Instant::now() + timeout;
+    let mut pending = String::new();
+    let mut reports = AuthProgress::default();
+    loop {
+        let mut bytes = [0u8; 4096];
+        if let Ok(count) = reader.read(&mut bytes) {
+            pending.push_str(&String::from_utf8_lossy(&bytes[..count]));
+            while let Some(end) = pending.find(['\n', '\r']) {
+                let line = pending[..end].to_owned();
+                pending.drain(..=end);
+                if let Some(value) = reports.line(&line) { progress(value); }
+            }
+            if pending.len() > 8192 { pending.clear(); }
+        }
+        if let Some(status) = child.try_wait()? {
+            if status.success() { return Ok(()); }
+            return Err(io::Error::other("provider authentication command failed; credentials remain owned by its CLI"));
+        }
+        if Instant::now() >= deadline || cancel.load(std::sync::atomic::Ordering::Acquire) {
+            unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL); }
+            let _ = child.wait();
+            return Err(if cancel.load(std::sync::atomic::Ordering::Acquire) { io::Error::new(io::ErrorKind::Interrupted, "provider authentication cancelled") }
+                else { io::Error::new(io::ErrorKind::TimedOut, "provider authentication timed out") });
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
+pub fn setup_choose_store(shared: bool) -> io::Result<String> {
+    if std::env::var("LORE_ROOT").ok().is_some_and(|s| !s.trim().is_empty()) { return Err(io::Error::new(io::ErrorKind::PermissionDenied, "LORE_ROOT overrides the stored choice")); }
+    let home = doxa_home()?;
+    let path = if shared {
+        let path = PathBuf::from(std::env::var_os("HOME").ok_or_else(|| io::Error::other("HOME unset"))?).join(".claude/lore");
+        if !path.is_dir() { return Err(io::Error::new(io::ErrorKind::NotFound, "Claude LORE store not found")); }
+        path
+    } else { home.join("lore") };
+    if std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) { return Err(io::Error::other("LORE store must not be a symlink")); }
+    if !shared {
+        let directory = create_private_store(&path)?;
+        use std::os::unix::fs::PermissionsExt;
+        directory.set_permissions(std::fs::Permissions::from_mode(0o700))?;
+        let opened = directory.metadata()?;
+        let current = std::fs::symlink_metadata(&path)?;
+        if (opened.dev(), opened.ino()) != (current.dev(), current.ino()) {
+            return Err(io::Error::other("DOXA LORE store changed during setup"));
+        }
+    }
+    doxa_state::update_config(&home.join("config.toml"), |config| { config.insert("lore_root".into(), toml::Value::String(path.display().to_string())); Ok(()) })?;
+    Ok(format!("LORE store selected: {}. New sessions use this store.", safe_report_value(&path.display().to_string())))
+}
+
+/// Anchor each component to its opened parent, creating private directories.
+/// A symlink in an existing ancestor is refused before any descendant changes.
+fn create_private_store(path: &Path) -> io::Result<std::fs::File> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+    if !path.is_absolute() { return Err(io::Error::other("DOXA LORE store must be absolute")); }
+    let mut directory = std::fs::OpenOptions::new().read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW).open("/")?;
+    for component in path.components() {
+        let name = match component {
+            std::path::Component::RootDir => continue,
+            std::path::Component::Normal(name) => std::ffi::CString::new(name.as_bytes())
+                .map_err(|_| io::Error::other("invalid LORE directory name"))?,
+            _ => return Err(io::Error::other("LORE store path must not contain relative components")),
+        };
+        let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+        let mut fd = unsafe { libc::openat(directory.as_raw_fd(), name.as_ptr(), flags) };
+        if fd < 0 && io::Error::last_os_error().kind() == io::ErrorKind::NotFound {
+            if unsafe { libc::mkdirat(directory.as_raw_fd(), name.as_ptr(), 0o700) } != 0
+                && io::Error::last_os_error().kind() != io::ErrorKind::AlreadyExists {
+                return Err(io::Error::last_os_error());
+            }
+            fd = unsafe { libc::openat(directory.as_raw_fd(), name.as_ptr(), flags) };
+        }
+        if fd < 0 { return Err(io::Error::last_os_error()); }
+        directory = unsafe { std::fs::File::from_raw_fd(fd) };
+    }
+    if directory.metadata()?.uid() != unsafe { libc::geteuid() } {
+        return Err(io::Error::other("DOXA LORE store must be owned by this user"));
+    }
+    Ok(directory)
+}
+
+pub fn setup_default(key: &str, value: Option<&str>) -> io::Result<String> {
+    let env = match key { "model" => "DOXA_MODEL", "effort" => "DOXA_EFFORT", _ => return Err(io::Error::other("default must be model or effort")) };
+    if std::env::var(env).ok().is_some_and(|s| !s.trim().is_empty()) { return Err(io::Error::other(format!("{env} overrides this preference"))); }
+    if value.is_some_and(|v| v.is_empty() || v.len() > 200 || v.chars().any(char::is_control)) { return Err(io::Error::other("enter a nonempty default without control characters")); }
+    doxa_state::update_config(&doxa_home()?.join("config.toml"), |config| { if let Some(value) = value { config.insert(key.into(), toml::Value::String(value.into())); } else { config.remove(key); } Ok(()) })?;
+    Ok(format!("{key} default updated for new sessions"))
 }
 
 fn doxa_home() -> io::Result<PathBuf> {
@@ -244,6 +499,7 @@ fn safe_plugin_name(name: &str) -> bool {
         && name.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"._-@".contains(&byte))
 }
 
+#[cfg(test)]
 fn plugin_rows(installed: &serde_json::Value, settings: &serde_json::Value) -> Vec<String> {
     let enabled = settings.get("enabledPlugins").and_then(serde_json::Value::as_object);
     let mut rows = installed.get("plugins").and_then(serde_json::Value::as_object)
@@ -260,6 +516,86 @@ fn plugin_rows(installed: &serde_json::Value, settings: &serde_json::Value) -> V
     rows
 }
 
+pub fn plugins_change(value: bool) -> io::Result<String> {
+    if std::env::var("DOXA_ADOPT_PLUGINS").ok().is_some_and(|s| !s.trim().is_empty()) { return Err(io::Error::new(io::ErrorKind::PermissionDenied, "DOXA_ADOPT_PLUGINS overrides config.toml")); }
+    doxa_state::update_config(&doxa_home()?.join("config.toml"), |config| { config.insert("adopt_plugins".into(), toml::Value::Boolean(value)); Ok(()) })?;
+    Ok(format!("Claude plugin adoption {} for new sessions; hooks, MCP servers and lore@lore remain refused", if value { "enabled" } else { "disabled" }))
+}
+
+fn adoption_enabled() -> io::Result<bool> {
+    let config = doxa_state::load_config_checked(&doxa_home()?.join("config.toml"))?;
+    let value = std::env::var("DOXA_ADOPT_PLUGINS").ok().filter(|v| !v.trim().is_empty());
+    Ok(if let Some(value) = value { !matches!(value.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off") } else { match config.get("adopt_plugins") { Some(toml::Value::Boolean(v)) => *v, Some(toml::Value::String(v)) => !v.trim().is_empty() && !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off"), _ => false } })
+}
+
+fn content_count(path: &Path, skills: bool) -> usize {
+    std::fs::read_dir(path).into_iter().flatten().filter_map(Result::ok).take(10000).filter(|entry| {
+        entry.file_type().is_ok_and(|t| if skills { t.is_dir() && entry.path().join("SKILL.md").is_file() } else { t.is_file() && entry.path().extension().is_some_and(|s| s == "md") })
+    }).count()
+}
+
+fn detailed_plugin_rows(installed: &serde_json::Value, settings: &serde_json::Value, on: bool) -> Vec<String> {
+    let enabled = settings.get("enabledPlugins").and_then(serde_json::Value::as_object);
+    let mut rows = Vec::new();
+    for (name, entries) in installed.get("plugins").and_then(serde_json::Value::as_object).into_iter().flat_map(|m| m.iter()) {
+        if !safe_plugin_name(name) || name.contains("..") { continue; }
+        let Some(entry) = entries.as_array().and_then(|v| v.first()) else { continue };
+        let Some(path) = entry.get("installPath").and_then(serde_json::Value::as_str).filter(|v| !v.is_empty()).map(PathBuf::from) else { continue };
+        let counts = [content_count(&path.join("commands"), false), content_count(&path.join("skills"), true), content_count(&path.join("agents"), false)];
+        let refusal = if name == "lore@lore" { Some("LORE already runs inside DOXA; duplicate carrier blocked") } else if enabled.and_then(|m| m.get(name)) != Some(&serde_json::Value::Bool(true)) { Some("disabled in Claude Code") } else if counts.iter().sum::<usize>() == 0 { Some("no commands, skills or agents") } else { None };
+        let status = refusal.unwrap_or(if on { "adopted by new Claude sessions" } else { "would adopt when enabled" });
+        rows.push(format!("{name}: {status}\n  {} commands · {} skills · {} agents; hooks and MCP always excluded", counts[0], counts[1], counts[2]));
+        if refusal.is_none() {
+            let plugin = name.split('@').next().unwrap_or(name);
+            let mut commands = std::fs::read_dir(path.join("commands")).into_iter().flatten().filter_map(Result::ok).filter(|e| e.file_type().is_ok_and(|t| t.is_file())).filter_map(|e| { let p = e.path(); (p.extension().is_some_and(|s| s == "md")).then(|| p.file_stem().and_then(|s| s.to_str()).map(str::to_owned)).flatten() }).filter(|s| safe_plugin_name(s)).collect::<Vec<_>>();
+            commands.sort();
+            for command in commands { rows.push(format!("  /{plugin}:{command}")); }
+        }
+    }
+    rows.sort();
+    rows
+}
+
+/// Run the installed canonical plugin policy without creating an SDK session.
+pub fn plugins_reload() -> io::Result<String> {
+    plugins_bridge(true)
+}
+
+pub fn plugins_bridge(reload: bool) -> io::Result<String> {
+    let (python, script) = crate::launch::claude_dependencies(&Default::default())?;
+    let mut child = Command::new(python).arg("-I").arg(script)
+        .arg(if reload { "--reload-plugins" } else { "--plugins-report" })
+        .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null())
+        .process_group(0).spawn()?;
+    let stdout = child.stdout.take().unwrap();
+    let reader = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stdout.take(65537).read_to_end(&mut bytes).map(|_| bytes)
+    });
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(Some(status)),
+            Ok(None) => {},
+            Err(error) => break Err(error),
+        }
+        if Instant::now() >= deadline {
+            unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL); }
+            let _ = child.wait(); break Ok(None);
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
+    // Kill descendants before joining a reader: a leftover inherited stdout
+    // must not hold this operation open after its leader exits.
+    unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL); }
+    let _ = child.wait();
+    let bytes = reader.join().map_err(|_| io::Error::other("Plugin inventory reader failed"))??;
+    let status = status?;
+    if status.is_none() { return Err(io::Error::new(io::ErrorKind::TimedOut, "Plugin inventory timed out")); }
+    if !status.unwrap().success() || bytes.len() > 65536 { return Err(io::Error::other("Plugin inventory failed; verify installed Python/LORE dependencies")); }
+    String::from_utf8(bytes).map_err(|_| io::Error::other("Invalid plugin inventory response"))
+}
+
 pub fn plugins_report() -> io::Result<String> {
     let base = std::env::var_os("CLAUDE_CONFIG_DIR").filter(|value| !value.is_empty())
         .map(PathBuf::from)
@@ -269,9 +605,10 @@ pub fn plugins_report() -> io::Result<String> {
         .unwrap_or(serde_json::Value::Null);
     let settings = read_claude_json(&base.join("settings.json"))
         .unwrap_or(serde_json::Value::Null);
-    let rows = plugin_rows(&installed, &settings);
-    if rows.is_empty() { Ok("no Claude Code plugins found".into()) }
-    else { Ok(format!("Claude Code plugins (inventory only)\n{}", rows.join("\n"))) }
+    let on = adoption_enabled()?;
+    let rows = detailed_plugin_rows(&installed, &settings, on);
+    if rows.is_empty() { Ok(format!("Claude plugin adoption: {} · no Claude Code plugins found", if on { "ON" } else { "OFF" })) }
+    else { Ok(format!("Claude plugin adoption: {} · refreshed from CLI registry\n{}\n\nChanges apply to new sessions; the sidecar rebuilds sanitized copies at launch.", if on { "ON" } else { "OFF" }, rows.join("\n"))) }
 }
 
 #[cfg(test)]
@@ -302,6 +639,74 @@ mod tests {
         let start = Instant::now();
         assert_eq!(probe(Path::new("/bin/sh"), &[script.to_str().unwrap()], Duration::from_millis(10)), AuthState::TimedOut);
         assert!(start.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn explicit_auth_request_accepts_only_browser_and_codex_device_forms() {
+        assert_eq!(parse_auth_request("login", "CODEX --device-auth").unwrap(), Some(AuthRequest { provider:"codex", action:"login", device_auth:true }));
+        assert_eq!(parse_auth_request("logout", "claude").unwrap(), Some(AuthRequest { provider:"claude", action:"logout", device_auth:false }));
+        assert_eq!(parse_auth_request("login", "").unwrap(), None);
+        for (action, args) in [("login", "unknown"), ("login", "claude --device-auth"), ("logout", "codex --device-auth"), ("login", "codex --with-access-token"), ("login", "codex --device-auth extra")] {
+            assert!(parse_auth_request(action, args).is_err());
+        }
+    }
+    #[test]
+    fn codex_official_device_prompt_reveals_only_public_url_and_labeled_next_code() {
+        let mut report = AuthProgress::default();
+        assert_eq!(report.line("   \u{1b}[34mhttps://auth.openai.com/codex/device\u{1b}[0m"), Some("Open in your browser: https://auth.openai.com/codex/device".into()));
+        assert_eq!(report.line("2. Enter this one-time code \u{1b}[90m(expires in 15 minutes)\u{1b}[0m"), None);
+        assert_eq!(report.line(""), None);
+        assert_eq!(report.line("   \u{1b}[34mABCD-EFGH\u{1b}[0m"), Some("Device code: ABCD-EFGH".into()));
+        assert_eq!(report.line("UNRELATED-PRIVATE"), None);
+        assert_eq!(report.line("\u{1b}[34mhttps://auth.openai.com/login?client_secret=PRIVATE\u{1b}[0m"), None);
+    }
+    #[test]
+    fn auth_progress_rejects_secrets_and_untrusted_urls() {
+        assert_eq!(public_auth_progress("secret credential"), None);
+        assert_eq!(public_auth_progress("https://evil.test/login"), None);
+        assert_eq!(public_auth_progress("https://auth.openai.com/login?access_token=SECRET"), None);
+        assert_eq!(public_auth_progress("https://auth.openai.com/login?%63ode=SECRET"), None);
+        assert_eq!(public_auth_progress("https://auth.openai.com/login?client_secret=PRIVATE"), None);
+        assert_eq!(public_auth_progress("https://auth.openai.com/login?%63lient_secret=PRIVATE"), None);
+        assert_eq!(public_auth_progress("https://auth.openai.com/login?password=PRIVATE"), None);
+        assert_eq!(public_auth_progress("https://auth.openai.com/login?state=public"), Some("Open in your browser: https://auth.openai.com/login?state=public".into()));
+        assert_eq!(public_auth_progress("https://claude.ai/login?redirect_uri=http%3A%2F%2Flocalhost&scope=user%3Ainference"), Some("Open in your browser: https://claude.ai/login?redirect_uri=http%3A%2F%2Flocalhost&scope=user%3Ainference".into()));
+        assert_eq!(public_auth_progress("Device code: ABCD-EFGH"), Some("Device code: ABCD-EFGH".into()));
+    }
+
+    #[test]
+    fn auth_private_pty_filters_output_and_times_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.sh");
+        fs::write(&path, "printf 'secret credential\\nhttps://claude.ai/login\\n'\nsleep 0.1\n").unwrap();
+        let mut messages = Vec::new();
+        run_auth(Path::new("/bin/sh"), &[path.to_str().unwrap()], Duration::from_secs(2), &mut |s| messages.push(s)).unwrap();
+        assert_eq!(messages, vec!["Open in your browser: https://claude.ai/login"]);
+        fs::write(&path, "sleep 5\n").unwrap();
+        let cancel = std::sync::atomic::AtomicBool::new(true);
+        assert_eq!(run_auth_cancellable(Path::new("/bin/sh"), &[path.to_str().unwrap()], Duration::from_secs(30), &mut |_| {}, &cancel).unwrap_err().kind(), io::ErrorKind::Interrupted);
+        assert_eq!(run_auth(Path::new("/bin/sh"), &[path.to_str().unwrap()], Duration::from_millis(20), &mut |_| {}).unwrap_err().kind(), io::ErrorKind::TimedOut);
+    }
+
+    #[test]
+    fn plugin_preview_keeps_lore_blocked_and_disabled_plugins_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("commands")).unwrap();
+        fs::write(dir.path().join("commands/run.md"), "example").unwrap();
+        let installed = serde_json::json!({"plugins": {
+            "safe@market": [{"installPath": dir.path()}],
+            "lore@lore": [{"installPath": dir.path()}],
+            "disabled@market": [{"installPath": dir.path()}],
+            "unsafe..@market": [{"installPath": dir.path()}]
+        }});
+        let settings = serde_json::json!({"enabledPlugins": {"safe@market": true, "lore@lore": true}});
+        let rows = detailed_plugin_rows(&installed, &settings, true).join("\n");
+        assert!(rows.contains("safe@market: adopted by new Claude sessions"));
+        assert!(rows.contains("/safe:run"));
+        assert!(rows.contains("duplicate carrier blocked"));
+        assert!(rows.contains("disabled in Claude Code"));
+        assert!(!rows.contains("/lore:run"));
+        assert!(!rows.contains("unsafe.."));
     }
 
     #[test]
@@ -352,4 +757,26 @@ mod tests {
         let settings = serde_json::json!({"enabledPlugins": {"safe@market": true}});
         assert_eq!(plugin_rows(&installed, &settings), vec!["safe@market: enabled in Claude Code"]);
     }
+}
+
+pub fn setup_interactive() -> io::Result<()> {
+    use std::io::{IsTerminal, Write};
+    println!("{}", setup_report()?);
+    if !io::stdin().is_terminal() { return Ok(()); }
+    fn ask(question: &str) -> io::Result<String> {
+        print!("{question} "); io::stdout().flush()?;
+        let mut answer = String::new(); io::stdin().read_line(&mut answer)?;
+        Ok(answer.trim().to_owned())
+    }
+    match ask("LORE store: [d] create DOXA store, [s] share existing Claude store, Enter skip:")?.as_str() {
+        "d" => println!("{}", setup_choose_store(false)?),
+        "s" => println!("{}", setup_choose_store(true)?),
+        _ => {}
+    }
+    for key in ["model", "effort"] {
+        let value = ask(&format!("{key} default (Enter keeps current):"))?;
+        if !value.is_empty() { println!("{}", setup_default(key, Some(&value))?); }
+    }
+    println!("setup complete\n{}", setup_report()?);
+    Ok(())
 }

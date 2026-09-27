@@ -1,4 +1,10 @@
 //! Terminal shell for the Rust frontend. Daemon adapters can feed [`App::apply_update`].
+mod operations_menu;
+pub(crate) mod fleet_menu;
+mod fleet_process;
+pub(crate) mod panes;
+mod actions;
+
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::cell::{Cell, RefCell};
 use std::io::{self, IsTerminal, Stdout, Write};
@@ -56,22 +62,7 @@ const MAX_ANSWER_BYTES: usize = 10 * 1024;
 // Reserve metadata wrapping even in a narrow review modal. This is also the
 // number used by the read-through gate, so it never credits hidden raw rows.
 const REVIEW_BODY_RESERVE: u16 = 10;
-const ACTIONS: [(&str, &str); 14] = [
-    ("Peer map", "Ctrl+M"),
-    ("Tool activity", "Ctrl+T"),
-    ("Open selected session", "rail selection"),
-    ("Previous tab", "active pane"),
-    ("Next tab", "active pane"),
-    ("Switch pane", "Shift+Tab"),
-    ("Session history", "Ctrl+R"),
-    ("LORE beliefs", "Alt+L"),
-    ("Worktree diff", "F2"),
-    ("Engine for new session", "Alt+E"),
-    ("Session model", "Alt+M"),
-    ("Claude permissions", "Alt+P"),
-    ("Stop active session", "Alt+X"),
-    ("Move tab to other pane", "/movepane"),
-];
+
 struct CommandHelp { name: &'static str, form: &'static str,
     summary: &'static str, support: &'static str }
 
@@ -82,28 +73,28 @@ const COMMANDS: &[CommandHelp] = &[
     CommandHelp { name: "/split", form: "/split", summary: "Stacked pane split", support: "local" },
     CommandHelp { name: "/vsplit", form: "/vsplit", summary: "Side-by-side pane split", support: "local" },
     CommandHelp { name: "/diff", form: "/diff", summary: "Worktree diff", support: "local · active worktree" },
-    CommandHelp { name: "/pane", form: "/pane [1|2]", summary: "Switch pane", support: "local · two panes" },
-    CommandHelp { name: "/movepane", form: "/movepane [1|2]", summary: "Move active tab", support: "local · two panes" },
+    CommandHelp { name: "/pane", form: "/pane [number]", summary: "Switch pane", support: "local · numbered pane groups" },
+    CommandHelp { name: "/movepane", form: "/movepane [number]", summary: "Move active tab", support: "local · source retains its final tab" },
     CommandHelp { name: "/sidebar", form: "/sidebar [on|off|wider|narrower|width N]", summary: "Session rail", support: "local" },
     CommandHelp { name: "/collection", form: "/collection [action] [name]", summary: "Organize sessions", support: "local · list/new/rename/delete/add/remove" },
     CommandHelp { name: "/msg", form: "/msg <peer> <text>", summary: "Message a peer", support: "local · same project" },
-    CommandHelp { name: "/fleet", form: "/fleet ...", summary: "Fleet control", support: "unavailable in Rust" },
+    CommandHelp { name: "/fleet", form: "/fleet [runs|status RUN|attach RUN INDEX|start OPTIONS|resume RUN]", summary: "Fleet manifests and slots", support: "local · verified slot attachment" },
     CommandHelp { name: "/mesh", form: "/mesh", summary: "Peer map", support: "local · arguments unavailable" },
     CommandHelp { name: "/img", form: "/img [path]", summary: "Image support", support: "unavailable in Rust" },
-    CommandHelp { name: "/login", form: "/login [provider]", summary: "Provider login", support: "unavailable in Rust" },
-    CommandHelp { name: "/logout", form: "/logout [provider]", summary: "Provider logout", support: "unavailable in Rust" },
+    CommandHelp { name: "/login", form: "/login [claude|codex] [--device-auth]", summary: "Provider login", support: "local · selectable operations menu" },
+    CommandHelp { name: "/logout", form: "/logout [claude|codex]", summary: "Provider logout", support: "local · selectable operations menu" },
     CommandHelp { name: "/settings", form: "/settings", summary: "Native settings", support: "local · linger and worktree for new sessions" },
-    CommandHelp { name: "/setup", form: "/setup", summary: "Setup checks", support: "CLI only · doxa setup" },
+    CommandHelp { name: "/setup", form: "/setup", summary: "Setup checks", support: "local · auth checks, LORE store, defaults" },
     CommandHelp { name: "/doctor", form: "/doctor", summary: "Health checks", support: "unavailable in Rust" },
-    CommandHelp { name: "/plugins", form: "/plugins", summary: "Plugin inventory", support: "unavailable in Rust" },
-    CommandHelp { name: "/reload-plugins", form: "/reload-plugins", summary: "Refresh plugins", support: "unavailable in Rust" },
-    CommandHelp { name: "/model", form: "/model", summary: "Select session model", support: "local · picker; name argument unavailable" },
-    CommandHelp { name: "/engine", form: "/engine", summary: "Engine for new sessions", support: "local · picker; ID argument unavailable" },
+    CommandHelp { name: "/plugins", form: "/plugins", summary: "Plugin inventory", support: "local · selectable operations menu" },
+    CommandHelp { name: "/reload-plugins", form: "/reload-plugins", summary: "Refresh plugins", support: "local · selectable operations menu" },
+    CommandHelp { name: "/model", form: "/model [name]", summary: "Select session model", support: "local · reported choices or new-session form" },
+    CommandHelp { name: "/engine", form: "/engine [name]", summary: "Engine for new sessions", support: "local · new-session engine form" },
     CommandHelp { name: "/branch", form: "/branch [name]", summary: "Switch base branch", support: "local · active session" },
-    CommandHelp { name: "/mode", form: "/mode", summary: "Permission mode", support: "local · picker; name argument unavailable" },
-    CommandHelp { name: "/effort", form: "/effort", summary: "Reasoning effort", support: "local · picker; level argument unavailable" },
+    CommandHelp { name: "/mode", form: "/mode [name]", summary: "Permission mode", support: "local · reported choices or new-session form" },
+    CommandHelp { name: "/effort", form: "/effort [name]", summary: "Reasoning effort", support: "local · authoritative per-model effort choices" },
     CommandHelp { name: "/usage", form: "/usage", summary: "Session usage", support: "local · reported totals only" },
-    CommandHelp { name: "/context", form: "/context", summary: "Context window", support: "local · measured totals; no component breakdown" },
+    CommandHelp { name: "/context", form: "/context", summary: "Context window", support: "local · official telemetry and reported context details" },
     CommandHelp { name: "/queue", form: "/queue", summary: "Queued prompts", support: "local · cancel selected item with X" },
     CommandHelp { name: "/clear", form: "/clear", summary: "Fresh session in this tab", support: "local · idle session and writable tabset required" },
     CommandHelp { name: "/detach", form: "/detach", summary: "Leave session running", support: "local" },
@@ -112,6 +103,7 @@ const COMMANDS: &[CommandHelp] = &[
     CommandHelp { name: "/rename", form: "/rename [name]", summary: "Name active tab", support: "local" },
     CommandHelp { name: "/dir", form: "/dir", summary: "Session directory", support: "local" },
     CommandHelp { name: "/cd", form: "/cd <path>", summary: "Open directory", support: "local · new tab" },
+    CommandHelp { name: "/memory", form: "/memory", summary: "LORE curated memory", support: "local · scoped entries; M to add/edit/remove" },
     CommandHelp { name: "/beliefs", form: "/beliefs", summary: "LORE beliefs", support: "local · requires LORE" },
     CommandHelp { name: "/pending", form: "/pending", summary: "LORE proposals", support: "local · requires LORE" },
     CommandHelp { name: "/search", form: "/search [terms]", summary: "Search saved sessions", support: "local · LORE index then bounded transcript scan" },
@@ -885,15 +877,16 @@ pub enum Split {
 enum DragTarget {
     Rail,
     Pane(Split),
+    NestedPane(panes::Divider),
     Chooser,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct PaneLayout {
     outer: Rect,
     rail: Option<Rect>,
     body: Rect,
-    panes: Option<[Rect; 2]>,
+    panes: Option<Vec<Rect>>,
 }
 
 #[derive(Clone, Debug)]
@@ -904,6 +897,8 @@ pub struct QuestionOption {
 
 #[derive(Clone, Debug)]
 pub struct InputQuestion {
+    pub id: Option<String>,
+    pub is_other: bool,
     pub question: String,
     pub header: String,
     pub options: Vec<QuestionOption>,
@@ -913,6 +908,7 @@ pub struct InputQuestion {
 pub struct InputRequest {
     pub session_id: String,
     pub id: String,
+    original_payload: serde_json::Value,
     pub kind: String,
     pub heading: String,
     pub questions: Vec<InputQuestion>,
@@ -921,6 +917,12 @@ pub struct InputRequest {
     pub answers: serde_json::Map<String, serde_json::Value>,
     pub sending: bool,
     pub allow_armed: bool,
+    pub require_full_review: bool,
+    review_available: bool,
+    review_seen: Cell<usize>,
+    review_complete: Cell<bool>,
+    pub free_text: String,
+    pub free_cursor: usize,
     pub scroll: u16,
 }
 
@@ -962,12 +964,16 @@ impl InputRequest {
         };
         let questions = if kind == "ask_user" {
             let items = data["questions"].as_array()?;
-            if items.len() > 32 {
+            if items.is_empty() || items.len() > 32 || items.iter().any(|q| q["isSecret"] == true
+                || q["id"].as_str().is_some_and(|id| id.is_empty() || id.len() > 200 || id.chars().any(char::is_control))
+                || q["options"].as_array().is_some_and(|options| options.len() > 64)) {
                 return None;
             }
             items
                 .iter()
                 .map(|q| InputQuestion {
+                    id: q["id"].as_str().map(str::to_owned),
+                    is_other: q["isOther"] == true || q["is_other"] == true,
                     question: q["question"].as_str().unwrap_or("").to_owned(),
                     header: q["header"].as_str().unwrap_or("").to_owned(),
                     options: q["options"]
@@ -995,6 +1001,7 @@ impl InputRequest {
         Some(Self {
             session_id: session_id.into(),
             id,
+            original_payload: data.clone(),
             kind: kind.into(),
             heading,
             questions,
@@ -1003,14 +1010,23 @@ impl InputRequest {
             answers: serde_json::Map::new(),
             sending: false,
             allow_armed: false,
+            require_full_review: data["require_full_review"] == true,
+            review_available: data["input_summary"].as_str().is_some() && data["input_summary_truncated"] != true,
+            review_seen: Cell::new(0), review_complete: Cell::new(false),
+            free_text: String::new(), free_cursor: 0,
             scroll: 0,
         })
+    }
+
+    fn freeform(&self) -> bool {
+        self.kind == "ask_user" && self.questions.get(self.step).is_some_and(|question|
+            question.options.is_empty() || question.is_other && self.selected > question.options.len())
     }
 
     fn option_count(&self) -> usize {
         self.questions
             .get(self.step)
-            .map(|q| q.options.len())
+            .map(|q| q.options.len() + usize::from(q.is_other && !q.options.is_empty()))
             .unwrap_or(0)
     }
 }
@@ -1025,7 +1041,7 @@ fn input_request_body(request: &InputRequest, title_width: usize) -> (String, Op
                 body.push_str(&markdown::sanitize(&question.header));
                 body.push('\n');
             }
-            if !clipped_title(&question.question, title_width).1 {
+            if question.question.chars().count() > title_width {
                 body.push_str(&markdown::sanitize(&question.question));
                 body.push_str("\n\n");
             }
@@ -1044,6 +1060,13 @@ fn input_request_body(request: &InputRequest, title_width: usize) -> (String, Op
                     body.push('\n');
                 }
             }
+            if question.is_other && !question.options.is_empty() {
+                option_rows.push(body.lines().count());
+                let index = question.options.len() + 1;
+                if request.selected == index { selected_row = Some(body.lines().count()); }
+                body.push_str(&format!("{} {index}. Other · type in prompt below\n", if request.selected == index { "▸" } else { " " }));
+            }
+            if request.freeform() { body.push_str("Type your answer in the prompt below · Enter submit · Esc decline\n"); }
         } else {
             body.push_str("Question unavailable\n");
         }
@@ -1193,7 +1216,8 @@ enum RailRow {
 pub struct App {
     pub sessions: Vec<Session>,
     pub collections: Vec<crate::collections::Collection>,
-    pub groups: [PaneGroup; 2],
+    pub groups: Vec<PaneGroup>,
+    pub(crate) pane_tree: Option<panes::Tree>,
     pub active_group: usize,
     pub split: Split,
     pub split_percent: u16,
@@ -1209,6 +1233,8 @@ pub struct App {
     session_identity: HashMap<String, (Option<String>, Option<String>)>,
     session_efforts: HashMap<String, String>,
     catalog_efforts: HashMap<(String, String), Vec<String>>,
+    effort_catalog_pending: Option<(String, String, String)>,
+    requested_argument: Option<(String, &'static str, String)>,
     next_efforts: HashMap<String, String>,
     pub(crate) custom_names: HashMap<String, String>,
     session_telemetry: HashMap<String, SessionTelemetry>,
@@ -1217,11 +1243,18 @@ pub struct App {
     memory_cache: HashMap<String, (Option<doxa_lore::MemoryUsage>, Instant)>,
     memory_pending: Option<(String, String, Receiver<Option<(doxa_lore::MemoryUsage, bool)>>)>,
     memory_repo: HashMap<String, bool>,
+    memory_manager: Option<crate::memory_menu::Manager>,
+    operations_menu: Option<operations_menu::Menu>,
+    fleet_menu: Option<fleet_menu::Menu>,
+    pub(crate) fleet_views: Vec<fleet_menu::SavedView>,
+    fleet_review: Option<fleet_process::Prepared>,
+    fleet_controller: Option<fleet_process::Controller>,
+    fleet_quit_pending: bool,
     memory_menu_pending: Option<(String, String, Receiver<Result<Vec<String>, &'static str>>)>,
     repo_cache: HashMap<String, (Option<doxa_worktrees::RepoStatus>, Instant)>,
     repo_pending: Option<(String, PathBuf, u64, Receiver<Option<doxa_worktrees::RepoStatus>>)>,
     repo_epoch: HashMap<String, u64>,
-    chip_offsets: [usize; 2],
+    chip_offsets: Vec<usize>,
     chip_hover: Option<ChipHit>,
     link_hover: Option<String>,
     visible_links: RefCell<Vec<(Rect, String)>>,
@@ -1288,12 +1321,15 @@ pub struct App {
     map_modal: bool,
     action_menu: bool,
     action_selected: usize,
+    action_query: String,
+    action_draft: Option<((usize,String),String, usize)>,
     slash_selected: usize,
     slash_dismissed: bool,
     history_modal: bool,
     history_resume: bool,
     history_explicit: bool,
     history_query: String,
+    history_query_cursor: usize,
     history_selected: usize,
     history_pending: Option<Receiver<Vec<history::OfflineSession>>>,
     history_scan_query: Option<String>,
@@ -1333,7 +1369,7 @@ impl Default for App {
         Self {
             sessions: Vec::new(),
             collections: Vec::new(),
-            groups: [
+            groups: vec![
                 PaneGroup {
                     tabs: vec![],
                     active: 0,
@@ -1345,6 +1381,7 @@ impl Default for App {
                     scroll: 0,
                 },
             ],
+            pane_tree: None,
             active_group: 0,
             split: Split::Vertical,
             split_percent: 50,
@@ -1360,6 +1397,8 @@ impl Default for App {
             session_identity: HashMap::new(),
             session_efforts: HashMap::new(),
             catalog_efforts: HashMap::new(),
+            effort_catalog_pending: None,
+            requested_argument: None,
             next_efforts: HashMap::new(),
             custom_names: HashMap::new(),
             session_telemetry: HashMap::new(),
@@ -1367,10 +1406,17 @@ impl Default for App {
             memory_pending: None,
             memory_repo: HashMap::new(),
             memory_menu_pending: None,
+            memory_manager: None,
+            operations_menu: None,
+            fleet_menu: None,
+            fleet_views: Vec::new(),
+            fleet_review: None,
+            fleet_controller: None,
+            fleet_quit_pending: false,
             repo_cache: HashMap::new(),
             repo_pending: None,
             repo_epoch: HashMap::new(),
-            chip_offsets: [0, 0],
+            chip_offsets: vec![0; panes::MAX_PANES],
             chip_hover: None,
             link_hover: None,
             visible_links: RefCell::new(Vec::new()),
@@ -1435,12 +1481,15 @@ impl Default for App {
             map_modal: false,
             action_menu: false,
             action_selected: 0,
+            action_query: String::new(),
+            action_draft: None,
             slash_selected: 0,
             slash_dismissed: false,
             history_modal: false,
             history_resume: false,
             history_explicit: false,
             history_query: String::new(),
+            history_query_cursor: 0,
             history_selected: 0,
             history_pending: None,
             history_scan_query: None,
@@ -1554,6 +1603,34 @@ impl App {
 
     /// Apply one versioned daemon frame after transport decoding. Returns whether
     /// visible state changed. Unknown frames are ignored for forward compatibility.
+    fn restore_pending_inputs(&mut self, session: &str, frame: &serde_json::Value) {
+        if frame.get("pending_inputs_complete").is_none() { return; }
+        let complete = frame["pending_inputs_complete"] == true;
+        let mut restored = Vec::new();
+        let mut unchanged = HashSet::new();
+        let mut ids = HashSet::new();
+        let valid = complete && frame["pending_inputs"].as_array().is_some_and(|rows| {
+            if rows.len() > MAX_INPUT_REQUESTS { return false; }
+            for row in rows {
+                let Some(mut request) = InputRequest::from_event(session, row) else { return false; };
+                if !ids.insert(request.id.clone()) { return false; }
+                if let Some(old) = self.input_requests.iter().find(|old| old.session_id == session && old.id == request.id
+                    && old.original_payload == request.original_payload) {
+                    unchanged.insert(request.id.clone()); request = old.clone();
+                }
+                restored.push(request);
+            }
+            true
+        });
+        self.input_requests.retain(|request| request.session_id != session);
+        self.pending_answers.retain(|(owner, id, _)| owner != session || valid && unchanged.contains(id));
+        if valid && self.input_requests.len() + restored.len() <= MAX_INPUT_REQUESTS {
+            self.input_requests.extend(restored);
+        } else {
+            self.notice = "Pending input snapshot incomplete; reconnect or refresh session before answering".into();
+        }
+    }
+
     pub fn apply_daemon_frame(&mut self, frame: &serde_json::Value) -> bool {
         let Some(kind) = frame.get("type").and_then(|v| v.as_str()) else {
             return false;
@@ -1626,7 +1703,7 @@ impl App {
                 if !self.attaching_ids.remove(reply_id) { return false; }
                 if frame["ok"] == true {
                     if let Some(id) = frame["session_id"].as_str().filter(|id| crate::discovery::valid_id(id)) {
-                        let target = frame["group"].as_u64().filter(|group| *group < 2)
+                        let target = frame["group"].as_u64().filter(|group| *group < self.groups.len() as u64)
                             .map(|group| group as usize).unwrap_or(self.active_group);
                         if target != 0 {
                             if let Some(index) = self.groups[0].tabs.iter().position(|tab| tab == id) {
@@ -1688,7 +1765,7 @@ impl App {
                 if frame["ok"] == true {
                     if let Some(id) = frame["session_id"].as_str().filter(|id| crate::discovery::valid_id(id)) {
                         self.offline_ids.remove(id);
-                        let target = frame["group"].as_u64().filter(|group| *group < 2)
+                        let target = frame["group"].as_u64().filter(|group| *group < self.groups.len() as u64)
                             .map(|group| group as usize).unwrap_or(self.active_group);
                         // A newly attached daemon may send hello before this reply.
                         // Upsert places the first observed session in group zero;
@@ -1720,6 +1797,7 @@ impl App {
                 let Some(id) = frame.get("session_id").and_then(|v| v.as_str()) else {
                     return false;
                 };
+                self.restore_pending_inputs(id, frame);
                 let model = frame.get("model").and_then(|v| v.as_str()).map(safe_label).filter(|s| !s.is_empty());
                 let engine = frame.get("engine").and_then(|v| v.as_str()).map(safe_label).filter(|s| !s.is_empty());
                 self.session_identity.insert(id.to_owned(), (engine, model.clone()));
@@ -1821,10 +1899,14 @@ impl App {
                         }
                         true
                     }
-                    "effort_changed" => {
+                    "effort_changed" | "effort_verified" => {
                         if let Some(effort) = data["effort"].as_str().filter(|effort| !effort.is_empty()) {
                             self.session_efforts.insert(id, safe_label(effort));
                         }
+                        true
+                    }
+                    "effort_requested" => {
+                        self.notice = format!("Requested effort {} · awaiting provider verification", safe_label(data["effort"].as_str().unwrap_or("unknown")));
                         true
                     }
                     "permission_mode_changed" => {
@@ -1898,6 +1980,12 @@ impl App {
                     }
                     "needs_input" => {
                         if let Some(request) = InputRequest::from_event(&id, data) {
+                            if let Some(position) = self.input_requests.iter().position(|old| old.session_id == id && old.id == request.id) {
+                                if self.input_requests[position].original_payload != request.original_payload {
+                                    self.pending_answers.retain(|(owner, request_id, _)| owner != &id || request_id != &request.id);
+                                    self.input_requests[position] = request.clone();
+                                }
+                            }
                             if !self
                                 .input_requests
                                 .iter()
@@ -2013,16 +2101,42 @@ impl App {
                 }
                 true
             }
+            "context_detail" => {
+                let Some(id) = frame["session_id"].as_str() else { return false; };
+                if self.groups[self.active_group].active_id() != Some(id) { return false; }
+                let Some(info) = self.chip_info.as_mut().filter(|info| info.kind == "context"
+                    && info.owner.as_ref().is_some_and(|owner| owner.0 == id)) else { return false; };
+                info.lines.retain(|line| line != "Loading reported context details…");
+                if frame["ok"] != true {
+                    info.lines.push("Detailed context metadata not reported by this engine".into());
+                    return true;
+                }
+                info.lines.extend(context_detail_lines(&frame["detail"]));
+                true
+            }
             "models_reply" => {
                 let Some(id) = frame.get("session_id").and_then(|v| v.as_str()) else { return false; };
-                if frame["ok"] == true && self.session_identity.get(id).is_some_and(|identity| identity.0.as_deref() == Some("codex")) {
+                if frame["ok"] == true {
+                    let engine = self.session_identity.get(id).and_then(|identity| identity.0.as_deref()).unwrap_or("");
                     for row in frame["capabilities"].as_array().into_iter().flatten().take(100) {
                         if let Some(model) = row["model"].as_str().filter(|model| !model.is_empty() && model.len() <= 128 && !model.chars().any(char::is_control)) {
                             let levels = row["efforts"].as_array().into_iter().flatten().filter_map(serde_json::Value::as_str)
                                 .filter(|level| !level.is_empty() && level.len() <= 32 && level.bytes().all(|b| b.is_ascii_alphanumeric()))
                                 .take(16).map(str::to_owned).collect();
-                            self.catalog_efforts.insert(("codex".into(), model.into()), levels);
+                            self.catalog_efforts.insert((engine.into(), model.into()), levels);
                         }
+                    }
+                }
+                if self.effort_catalog_pending.as_ref().is_some_and(|pending| pending.0 == id)
+                    && frame["loading"] != true {
+                    let (owner, engine, model) = self.effort_catalog_pending.take().unwrap();
+                    if self.groups[self.active_group].active_id() == Some(owner.as_str())
+                        && self.session_identity.get(&owner).is_some_and(|identity|
+                            identity.0.as_deref() == Some(engine.as_str()) && identity.1.as_deref() == Some(model.as_str())) {
+                        self.model_picker = None;
+                        if frame["ok"] == true && self.catalog_efforts.contains_key(&(engine, model)) { self.open_effort_picker(); self.apply_requested_argument(); }
+                        else { self.notice = "Live effort capability unavailable from this engine".into(); }
+                        return true;
                     }
                 }
                 if let Some(picker) = self.model_picker.as_mut().filter(|picker| picker.session_id == id) {
@@ -2040,6 +2154,7 @@ impl App {
                         format!("Catalog unavailable: {}", safe_label(frame["error"].as_str().unwrap_or("unknown error")))
                     };
                     picker.selected = 0;
+                    self.apply_requested_argument();
                     return true;
                 }
                 false
@@ -2355,14 +2470,20 @@ impl App {
         let before = (self.active_group, self.groups[self.active_group].active_id().unwrap_or("").to_owned());
         let changed = match event {
             Event::Resize(w, h) => {
+                if let Some(manager) = &mut self.memory_manager { manager.reset_review_visibility(); }
+                for request in &mut self.input_requests {
+                    request.review_seen.set(0); request.review_complete.set(false); request.allow_armed = false; request.scroll = 0;
+                }
                 self.size = Rect::new(0, 0, w, h);
                 self.drag = None;
                 self.chip_hover = None;
                 self.link_hover = None;
                 self.visible_links.borrow_mut().clear();
                 *self.rendered_chip_hits.borrow_mut() = None;
+                if let Some(review)=&mut self.fleet_review{review.seen.set(0);review.complete.set(false);review.armed=false;if let Some(info)=&mut self.chip_info{info.scroll=0;}}
                 if self.chip_info.is_some() && self.active_chooser_rect().is_none() {
                     self.chip_info = None;
+                    self.fleet_review = None;
                 }
                 if self.history_modal && self.active_chooser_rect().is_none() {
                     self.history_modal = false;
@@ -2423,7 +2544,7 @@ impl App {
             self.branch_picker = None;
             let moved_active_tab = std::mem::take(&mut self.moved_active_tab)
                 && !before.1.is_empty() && before.1 == after.1
-                && !self.groups[before.0].tabs.contains(&before.1)
+                && !self.groups.get(before.0).is_some_and(|group| group.tabs.contains(&before.1))
                 && self.groups[after.0].tabs.contains(&after.1);
             if moved_active_tab {
                 // The draft follows its tab rather than remaining under the
@@ -2431,18 +2552,29 @@ impl App {
                 self.input_drafts.remove(&before);
                 self.input_drafts.remove(&after);
             } else {
-                self.input_drafts
-                    .insert(before, (std::mem::take(&mut self.input), self.input_cursor));
+                if self.groups.get(before.0).is_some_and(|group| before.1.is_empty() || group.tabs.contains(&before.1)) {
+                    self.input_drafts.insert(before, (std::mem::take(&mut self.input), self.input_cursor));
+                } else { self.input.clear(); self.input_cursor = 0; }
                 (self.input, self.input_cursor) = self.input_drafts.remove(&after).unwrap_or_default();
             }
             self.slash_selected = 0;
             self.slash_dismissed = false;
+        }
+        if self.input.is_empty() && self.action_draft.is_some() {
+            let (owner,draft,cursor)=self.action_draft.take().unwrap();if owner==(self.active_group,self.groups[self.active_group].active_id().unwrap_or("").to_owned()){self.input=draft;self.input_cursor=cursor;}else{self.input_drafts.insert(owner,(draft,cursor));}
         }
         self.sync_chooser_state();
         changed
     }
 
     fn paste(&mut self, text: &str) -> bool {
+        if let Some(index) = self.active_request_index().filter(|&index| self.input_requests[index].freeform() && !self.input_requests[index].sending) {
+            let clean: String = text.chars().filter(|c| !unsafe_input_char(*c)).collect();
+            let request = &mut self.input_requests[index];
+            if request.free_text.len() + clean.len() > MAX_ANSWER_BYTES / 2 { self.notice = "Answer paste exceeds limit".into(); return true; }
+            request.free_text.insert_str(request.free_cursor, &clean); request.free_cursor += clean.len();
+            return true;
+        }
         if self.diff_reject_confirm.is_some() {
             for ch in text.chars() {
                 self.append_reject_reason(if ch.is_whitespace() { ' ' } else { ch });
@@ -2567,24 +2699,20 @@ impl App {
             | "/vsplit" | "/pane" | "/sidebar" | "/detach" | "/dir") {
             return false;
         }
+        if !args.is_empty() && matches!(name, "/model" | "/effort" | "/mode" | "/engine") { return false; }
         if !args.is_empty() && !matches!(name, "/pane" | "/sidebar") {
             self.notice = format!("{name} arguments are not available in Rust yet");
             return true;
         }
         let pane_target = if name == "/pane" && !args.is_empty() {
             match args.as_slice() {
-                ["1"] => Some(0),
-                ["2"] => Some(1),
-                _ => {
-                    self.notice = "Usage: /pane [1|2]".into();
-                    return true;
-                }
+                [number] => match number.parse::<usize>() {
+                    Ok(index) if index > 0 && index <= self.pane_count() => Some(index - 1),
+                    _ => { self.notice = format!("Choose pane 1–{}", self.pane_count()); return true; }
+                },
+                _ => { self.notice = "Usage: /pane [number]".into(); return true; }
             }
         } else { None };
-        if pane_target == Some(1) && !self.pane_group_two_exists() {
-            self.notice = "There is only one pane group · /split or /vsplit makes a second".into();
-            return true;
-        }
         let sidebar = if name == "/sidebar" && !args.is_empty() {
             match args.as_slice() {
                 ["on"] => Some((true, None)),
@@ -2628,12 +2756,10 @@ impl App {
                 );
             }
             "/split" => {
-                self.split = Split::Horizontal;
-                self.split_requested = true;
+                self.split_active_pane(Split::Horizontal);
             }
             "/vsplit" => {
-                self.split = Split::Vertical;
-                self.split_requested = true;
+                self.split_active_pane(Split::Vertical);
             }
             "/pane" => {
                 if let Some(target) = pane_target {
@@ -2641,7 +2767,7 @@ impl App {
                     self.focus = Focus::Prompt;
                 } else {
                     self.notice = if self.pane_group_two_exists() {
-                        "2 pane groups, numbered 1 and 2 · /pane <n> to focus one".into()
+                        format!("{} pane groups · /pane <n> to focus one", self.pane_count())
                     } else {
                         "One pane group · /split or /vsplit makes a second".into()
                     };
@@ -2670,6 +2796,11 @@ impl App {
     fn key(&mut self, key: KeyEvent) -> bool {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
+        if ctrl && matches!(key.code,KeyCode::Char('q'|'c')) && self.fleet_controller.is_some(){
+            self.fleet_controller.as_mut().unwrap().cancel();
+            self.fleet_quit_pending |= key.code==KeyCode::Char('q');
+            self.notice="Cancelling fleet controller; waiting for slot teardown and process reaping".into();return true;
+        }
         if key.code == KeyCode::Char('q') && ctrl {
             if !self.diff_reject_queue.is_empty() || self.diff_reject_active.is_some()
                 || self.diff_reject_feedback.is_some() {
@@ -2679,6 +2810,7 @@ impl App {
             self.should_quit = true;
             return true;
         }
+        if self.fleet_review.is_some(){return self.fleet_review_key(key);}
         if key.code == KeyCode::Char('w') && ctrl {
             self.detach_active_tab();
             return true;
@@ -2688,6 +2820,39 @@ impl App {
         }
         if self.stop_confirmation.is_some() { return self.stop_confirmation_key(key); }
         if self.chip_info.is_some() {
+            if self.fleet_menu.is_some() {
+                if key.code == KeyCode::Esc { self.fleet_menu=None;self.chip_info=None;return true; }
+                if matches!(key.code,KeyCode::PageUp|KeyCode::PageDown){let info=self.chip_info.as_mut().unwrap();info.scroll=if key.code==KeyCode::PageUp{info.scroll.saturating_sub(8)}else{info.scroll.saturating_add(8).min(info.lines.len().saturating_sub(1))};return true;}
+                let menu=self.fleet_menu.as_mut().unwrap();menu.key(key);
+                self.chip_info.as_mut().unwrap().lines=menu.display();return true;
+            }
+            if let Some(menu) = &mut self.operations_menu {
+                menu.key(key);
+                if menu.closed() { self.operations_menu = None; self.chip_info = None; }
+                else if let Some(info) = &mut self.chip_info { info.lines = menu.lines(usize::from(self.size.width)); }
+                return true;
+            }
+            if self.memory_manager.is_some() {
+                let current = self.groups[self.active_group].active_id().and_then(|id|
+                    self.session_cwds.get(id).and_then(|p| p.to_str()).map(|cwd| (id, cwd)));
+                let manager = self.memory_manager.as_mut().unwrap();
+                if current != Some((manager.owner.0.as_str(), manager.owner.1.as_str())) {
+                    self.memory_manager = None; self.chip_info = None;
+                    self.notice = "Session changed; reopen memory".into();
+                    return true;
+                }
+                if key.code == KeyCode::Esc && !manager.editing() {
+                    self.memory_manager = None; self.chip_info = None; return true;
+                }
+                return manager.key(key);
+            }
+            if key.code == KeyCode::Char('m') && self.chip_info.as_ref().is_some_and(|i| i.kind == "memory") {
+                if let Some(owner) = self.chip_info.as_ref().and_then(|i| i.owner.clone()) {
+                    self.memory_menu_pending = None;
+                    self.memory_manager = Some(crate::memory_menu::Manager::new(owner));
+                }
+                return true;
+            }
             if key.code == KeyCode::Esc {
                 self.chip_info = None;
                 self.memory_menu_pending = None;
@@ -2725,6 +2890,9 @@ impl App {
         if self.branch_picker.is_some() { return self.branch_picker_key(key); }
         if self.diff_modal {
             return self.diff_key(key);
+        }
+        if key.code == KeyCode::Esc && self.action_draft.is_some() {
+            let (owner,draft,cursor)=self.action_draft.take().unwrap();if owner==(self.active_group,self.groups[self.active_group].active_id().unwrap_or("").to_owned()){self.input=draft;self.input_cursor=cursor;}else{self.input_drafts.insert(owner,(draft,cursor));}return true;
         }
         if self.diff_pane && self.diff_reject_confirm.is_some() {
             return self.diff_key(key);
@@ -2781,6 +2949,7 @@ impl App {
         if key.code == KeyCode::Char('p') && ctrl {
             self.action_menu = true;
             self.action_selected = 0;
+            self.action_query.clear();
             self.drag = None;
             return true;
         }
@@ -2799,6 +2968,7 @@ impl App {
             return true;
         }
         if key.code == KeyCode::F(4) {
+            if self.pane_tree.is_some() { self.open_diff(); return true; }
             if self.diff_pane {
                 if self.rejections_for_target() > 0 {
                     self.notice = "Wait for queued hunk rejections before closing this diff".into();
@@ -2860,7 +3030,7 @@ impl App {
             }
             KeyCode::BackTab | KeyCode::Tab if key.code == KeyCode::BackTab
                 || key.modifiers.contains(KeyModifiers::SHIFT) => {
-                self.active_group = 1 - self.active_group;
+                self.active_group = (self.active_group + 1) % if self.pane_tree.is_some() { self.pane_count() } else { 2 };
                 self.split_requested = true;
                 self.focus = Focus::Prompt;
                 true
@@ -2878,13 +3048,11 @@ impl App {
                 true
             }
             KeyCode::Char('h') if alt => {
-                self.split = Split::Horizontal;
-                self.split_requested = true;
+                self.split_active_pane(Split::Horizontal);
                 true
             }
             KeyCode::Char('v') if alt => {
-                self.split = Split::Vertical;
-                self.split_requested = true;
+                self.split_active_pane(Split::Vertical);
                 true
             }
             KeyCode::Up if alt && self.focus == Focus::Prompt => {
@@ -3062,6 +3230,56 @@ impl App {
         let line = self.input.trim().to_owned();
         let (command, args) = line.split_once(char::is_whitespace).unwrap_or((line.as_str(), ""));
         match command {
+            "/model" | "/effort" | "/mode" | "/engine" if !args.trim().is_empty() => {
+                let target = args.trim();
+                if target.split_whitespace().count() != 1 || target.len() > 128 || target.chars().any(unsafe_input_char) {
+                    self.notice = format!("Usage: {command} <name>"); return true;
+                }
+                if command == "/engine" {
+                    if let Some(index) = ENGINE_CHOICES.iter().position(|engine| engine.eq_ignore_ascii_case(target)) {
+                        self.engine_selected = index; self.select_new_engine();
+                        self.input.clear(); self.input_cursor = 0;
+                    } else { self.notice = "Unknown engine · choose claude, codex, deepseek or glm".into(); }
+                    return true;
+                }
+                if command == "/mode" {
+                    if let Some(index) = permission_index(target) {
+                        self.open_permission_picker();
+                        if let Some(picker) = &mut self.permission_picker { picker.1 = index; self.select_permission_mode(); self.input.clear(); self.input_cursor = 0; }
+                    } else { self.notice = "Unknown permission mode · /mode opens supported choices".into(); }
+                    return true;
+                }
+                let Some(id) = self.groups[self.active_group].active_id().map(str::to_owned) else { self.notice = "Select a session first".into(); return true; };
+                self.requested_argument = Some((id, if command == "/model" { "model" } else { "effort" }, target.into()));
+                if command == "/model" { self.open_model_picker(); } else { self.open_effort_picker(); self.apply_requested_argument(); }
+                true
+            }
+            "/setup" | "/login" | "/logout" | "/plugins" | "/reload-plugins" if args.trim().is_empty() || matches!(command, "/login" | "/logout") => {
+                let kind = &command[1..];
+                let menu = if matches!(command, "/login" | "/logout") { operations_menu::Menu::with_auth_args(kind, args) }
+                    else if matches!(command, "/plugins" | "/reload-plugins") { Ok(operations_menu::Menu::with_plugin_report(command == "/reload-plugins")) }
+                    else { Ok(operations_menu::Menu::new(kind)) };
+                let menu = match menu { Ok(menu) => menu, Err(error) => { self.notice = format!("{command}: {error}"); return true; } };
+                self.input.clear(); self.input_cursor = 0;
+                self.memory_menu_pending = None;
+                self.memory_manager = None;
+                self.operations_menu = Some(menu);
+                self.chip_info = Some(ChipInfo { kind: "operations", label: String::new(),
+                    lines: self.operations_menu.as_ref().unwrap().lines(usize::from(self.size.width)),
+                    scroll: 0, owner: None });
+                if self.active_chooser_rect().is_none() {
+                    self.operations_menu = None; self.chip_info = None;
+                    self.notice = "Enlarge pane to open operations".into();
+                } else if let Some(menu) = &mut self.operations_menu {
+                    menu.start_requested();
+                    if let Some(info) = &mut self.chip_info { info.lines = menu.lines(usize::from(self.size.width)); }
+                }
+                true
+            }
+            "/memory" if args.trim().is_empty() => {
+                self.input.clear(); self.input_cursor = 0;
+                self.open_memory_menu(self.active_group); true
+            }
             "/pending" if args.trim().is_empty() => {
                 self.input.clear();
                 self.input_cursor = 0;
@@ -3128,10 +3346,9 @@ impl App {
             "/msg" => { self.local_message(args); true }
             "/movepane" => {
                 let target = match args.split_whitespace().collect::<Vec<_>>().as_slice() {
-                    [] => 1 - self.active_group,
-                    ["1"] => 0,
-                    ["2"] => 1,
-                    _ => { self.notice = "Usage: /movepane [1|2]".into(); return true; }
+                    [] => (self.active_group + 1) % if self.pane_tree.is_some() { self.pane_count() } else { 2 },
+                    [number] if number.parse::<usize>().is_ok_and(|n| n > 0 && n <= self.groups.len()) => number.parse::<usize>().unwrap() - 1,
+                    _ => { self.notice = "Usage: /movepane [number]".into(); return true; }
                 };
                 if self.move_active_tab(target) {
                     self.input.clear();
@@ -3146,8 +3363,9 @@ impl App {
                 true
             }
             "/settings" => { self.notice = "Usage: /settings · edit native preferences in the menu".into(); true }
-            "/setup" => { self.notice = "Run `doxa setup` in a shell for auth and store checks".into(); true }
-            "/fleet" | "/img" | "/login"
+            "/setup" => { self.notice = "Usage: /setup · use the selectable setup menu".into(); true }
+            "/fleet" => { self.local_fleet(args);true }
+            "/img" | "/login"
             | "/logout" | "/doctor" | "/plugins"
             | "/reload-plugins" | "/effort"
             | "/update" => {
@@ -3164,6 +3382,81 @@ impl App {
             }
             _ => false, // Unknown provider and plugin slash commands remain available.
         }
+    }
+
+    fn local_fleet(&mut self,args:&str){
+        let parts=match fleet_process::words(args){Ok(parts)=>parts,Err(error)=>{self.notice=safe_label(&error.to_string());return;}};
+        let start=parts.first().is_some_and(|part|part=="start");
+        let mut command_words=Vec::new();let mut custom_root=None;let mut index=0;
+        while index<parts.len(){
+            if !start && parts[index]=="--root"{
+                index+=1;let Some(path)=parts.get(index)else{self.notice="Fleet --root requires an absolute path".into();return;};
+                let path=PathBuf::from(path);if !path.is_absolute()||custom_root.is_some(){self.notice="Fleet requires one absolute --root path".into();return;}custom_root=Some(path);
+            }else{command_words.push(parts[index].as_str());}index+=1;
+        }
+        let root=match custom_root.map(Ok).unwrap_or_else(crate::fleet_view::default_root){Ok(root)=>root,Err(error)=>{self.notice=safe_label(&error.to_string());return;}};
+        let words=command_words;
+        if words.first().is_some_and(|word|matches!(*word,"start"|"resume")){
+            if self.fleet_controller.is_some(){self.notice="Wait for the current fleet controller to finish or Ctrl+C cancel it".into();return;}
+            let prepared=match words.as_slice(){
+                ["start",..]=>fleet_process::Prepared::start(parts[1..].to_vec(),self.groups[self.active_group].active_id().and_then(|id|self.session_cwds.get(id)).map(PathBuf::as_path)),
+                ["resume",id]=>fleet_process::Prepared::resume(root,id),
+                _=>{self.notice="Usage: /fleet resume RUN".into();return;}
+            };
+            match prepared{
+                Ok(prepared)=>{let lines=prepared.lines.clone();self.fleet_review=Some(prepared);self.fleet_menu=None;
+                    self.chip_info=Some(ChipInfo{kind:"fleet_review",label:String::new(),lines,scroll:0,owner:None});
+                    if self.active_chooser_rect().is_none(){self.fleet_review=None;self.chip_info=None;self.notice="Enlarge terminal before reviewing fleet launch".into();}
+                    else{self.input.clear();self.input_cursor=0;}
+                },Err(error)=>self.notice=format!("Fleet: {}",safe_label(&error.to_string()))
+            }
+            return;
+        }
+        match words.as_slice(){
+            []|["runs"]=>self.open_fleet(root,None),
+            ["status",id]if doxa_state::valid_session_id(id)=>self.open_fleet(root,Some((*id).into())),
+            ["attach",id,index]=>match index.parse::<usize>().ok().and_then(|index|crate::fleet_view::slot_socket(&root,id,index).ok()){
+                Some((_,session))=>self.attach_selected(&session),None=>self.notice="Fleet slot attachment refused; verify run and live slot".into()},
+            _=>self.notice="Usage: /fleet [runs|status RUN|attach RUN INDEX|start OPTIONS|resume RUN]".into()
+        }
+    }
+    fn fleet_review_key(&mut self,key:KeyEvent)->bool{
+        let review=self.fleet_review.as_mut().unwrap();
+        match key.code{
+            KeyCode::Esc=>{self.fleet_review=None;self.chip_info=None;},
+            KeyCode::Up|KeyCode::PageUp=>{let info=self.chip_info.as_mut().unwrap();info.scroll=info.scroll.saturating_sub(if key.code==KeyCode::Up{1}else{8});},
+            KeyCode::Down|KeyCode::PageDown=>{let info=self.chip_info.as_mut().unwrap();info.scroll=info.scroll.saturating_add(if key.code==KeyCode::Down{1}else{8});},
+            KeyCode::Char('A')if key.modifiers==KeyModifiers::SHIFT=>{
+                if review.complete.get(){review.armed=true;self.notice="Fleet launch armed · Shift+Y confirms".into();}else{self.notice="Read the complete fleet plan before arming".into();}
+            },
+            KeyCode::Char('Y')if key.modifiers==KeyModifiers::SHIFT=>{
+                if review.armed&&review.complete.get(){let prepared=self.fleet_review.take().unwrap();let result=std::env::current_exe().and_then(|exe|prepared.launch(&exe));
+                    match result{Ok(controller)=>{let root=controller.root.clone();let id=controller.id.clone();self.fleet_controller=Some(controller);self.open_fleet(root,Some(id));self.notice="Native fleet controller started · Ctrl+C cancels with teardown".into();},Err(error)=>{self.chip_info=None;self.notice=format!("Fleet launch refused: {}",safe_label(&error.to_string()));}}
+                }
+            },_=>{}
+        }true
+    }
+    fn open_fleet(&mut self,root:PathBuf,run:Option<String>){
+        self.fleet_menu=Some(fleet_menu::Menu::new(root,run));
+        self.chip_info=Some(ChipInfo{kind:"fleet",label:"Fleet".into(),lines:vec!["Loading fleet…".into()],scroll:0,owner:None});
+        self.input.clear();self.input_cursor=0;
+    }
+    fn poll_fleet(&mut self)->bool{
+        let mut changed=false;
+        if let Some(controller)=self.fleet_controller.as_mut(){
+            match controller.poll(){
+                Ok(Some(success))=>{let root=controller.root.clone();let id=controller.id.clone();self.fleet_controller=None;
+                    if self.fleet_menu.is_some()||self.chip_info.is_none(){self.open_fleet(root,Some(id));}self.notice=if success{"Fleet controller exited; showing actual manifest status".into()}else{"Fleet controller exited unsuccessfully; inspect actual manifest status".into()};
+                    if self.fleet_quit_pending{self.should_quit=true;}changed=true;},
+                Err(_)=>{controller.cancel();self.notice="Fleet controller wait failed; cancelling and retaining ownership until reaped".into();},_=>{}
+            }
+        }
+        let Some(menu)=self.fleet_menu.as_mut() else{return changed;};
+        if self.chip_info.as_ref().is_none_or(|info|info.kind!="fleet"){self.fleet_menu=None;return changed;}
+        let polled=menu.poll();if polled{
+            self.chip_info.as_mut().unwrap().lines=menu.display();
+            if let Some(view)=menu.verified_view(){if self.fleet_views.len()<fleet_menu::MAX_SAVED_VIEWS&&!self.fleet_views.contains(&view){self.fleet_views.push(view);}}
+        }changed||polled
     }
 
     fn local_message(&mut self, args: &str) {
@@ -3576,6 +3869,27 @@ impl App {
         self.input_cursor = 0;
     }
 
+    fn apply_requested_argument(&mut self) {
+        let Some((owner, kind, target)) = self.requested_argument.clone() else { return; };
+        if self.groups[self.active_group].active_id() != Some(owner.as_str()) { self.requested_argument = None; return; }
+        let chosen = if kind == "model" {
+            self.model_picker.as_ref().filter(|picker| picker.session_id == owner && !picker.loading)
+                .map(|picker| picker.models.iter().position(|model| model == &target))
+        } else {
+            self.effort_picker.as_ref().filter(|picker| picker.session_id == owner)
+                .map(|picker| picker.levels.iter().position(|level| level == &target))
+        };
+        let Some(chosen) = chosen else { return; };
+        self.requested_argument = None;
+        if let Some(index) = chosen {
+            if kind == "model" { self.model_picker.as_mut().unwrap().selected = index; self.model_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)); }
+            else { self.effort_picker.as_mut().unwrap().selected = index; self.select_effort(); }
+            self.input.clear(); self.input_cursor = 0;
+        } else {
+            self.notice = format!("{target} is not in this session's reported {kind} choices");
+        }
+    }
+
     fn open_model_picker(&mut self) {
         if self.size.width > 0 && (self.size.width < 29 || self.size.height < 11) {
             self.notice = "Enlarge terminal to open model picker".into();
@@ -3608,14 +3922,18 @@ impl App {
             self.notice = "Effort capability is unknown for this session".into();
             return;
         };
-        if engine == "codex" && !self.catalog_efforts.contains_key(&(engine.clone(), model.clone())) {
-            self.open_model_picker();
-            self.notice = "Loading Codex model capabilities; select a model, then choose effort".into();
+        if matches!(engine.as_str(), "codex" | "claude") && !self.catalog_efforts.contains_key(&(engine.clone(), model.clone())) {
+            self.effort_catalog_pending = Some((id.clone(), engine.clone(), model.clone()));
+            self.model_picker = Some(ModelPicker { session_id: id.clone(), models: Vec::new(),
+                selected: 0, note: "Loading effort capabilities for the current model…".into(),
+                loading: true, catalog_pending: true });
+            self.pending_model_queries.push(id);
+            self.notice = "Loading current model effort capabilities…".into();
             return;
         }
         let known = effort_choices(engine, model);
         let levels = self.catalog_efforts.get(&(engine.clone(), model.clone()))
-            .map(|levels| levels.iter().filter(|level| engine == "codex" || known.contains(&level.as_str())).cloned().collect())
+            .map(|levels| levels.clone())
             .unwrap_or_else(|| known.iter().map(|level| (*level).to_owned()).collect::<Vec<_>>());
         if levels.is_empty() {
             self.notice = "Live effort change is unavailable for this session model".into();
@@ -3634,7 +3952,7 @@ impl App {
         let Some(chosen) = picker.levels.get(picker.selected) else { return; };
         let known = effort_choices(engine, model);
         let allowed = self.catalog_efforts.get(&(engine.clone(), model.clone()))
-            .map(|levels| levels.iter().filter(|level| engine == "codex" || known.contains(&level.as_str())).cloned().collect())
+            .map(|levels| levels.clone())
             .unwrap_or_else(|| known.iter().map(|level| (*level).to_owned()).collect::<Vec<_>>());
         if !allowed.contains(chosen) { return; }
         self.pending_effort_changes.push((picker.session_id, chosen.clone()));
@@ -3644,7 +3962,7 @@ impl App {
     fn effort_picker_key(&mut self, key: KeyEvent) -> bool {
         let Some(picker) = self.effort_picker.as_mut() else { return false; };
         match key.code {
-            KeyCode::Esc => self.effort_picker = None,
+            KeyCode::Esc => { self.effort_picker = None; self.requested_argument = None; },
             KeyCode::Up => picker.selected = picker.selected.saturating_sub(1),
             KeyCode::Down => picker.selected = (picker.selected + 1).min(picker.levels.len().saturating_sub(1)),
             KeyCode::Enter => self.select_effort(),
@@ -3705,7 +4023,7 @@ impl App {
     fn model_picker_key(&mut self, key: KeyEvent) -> bool {
         let picker = self.model_picker.as_mut().unwrap();
         match key.code {
-            KeyCode::Esc => self.model_picker = None,
+            KeyCode::Esc => { self.model_picker = None; self.effort_catalog_pending = None; self.requested_argument = None; },
             KeyCode::Up => picker.selected = picker.selected.saturating_sub(1),
             KeyCode::Down => picker.selected = (picker.selected + 1).min(picker.models.len().saturating_sub(1)),
             KeyCode::Char('r' | 'R') if !picker.loading => {
@@ -4012,6 +4330,7 @@ impl App {
         self.history_scan_query = None;
         self.history_query_due = None;
         self.history_query.clear();
+        self.history_query_cursor = 0;
         self.history_selected = 0;
         if self.active_chooser_rect().is_none() {
             self.history_modal = false;
@@ -4041,6 +4360,7 @@ impl App {
         self.open_history();
         if self.history_modal {
             self.history_query = query.to_owned();
+        self.history_query_cursor = self.history_query.len();
             self.schedule_history_query(Instant::now());
         }
     }
@@ -4140,6 +4460,7 @@ impl App {
         self.history_resume = true;
         self.history_explicit = !query.is_empty();
         self.history_query = query.to_owned();
+        self.history_query_cursor = self.history_query.len();
         // Explicit IDs search the full bounded transcript inventory rather
         // than only the recent-history window.
         if !query.is_empty() {
@@ -4357,6 +4678,31 @@ impl App {
         self.memory_menu_pending = None;
     }
 
+    /// Render a curated-memory fixture through the production manager and reducer.
+    #[doc(hidden)]
+    pub fn show_memory_manager_fixture(&mut self,group:usize,scope:&'static str,review:serde_json::Value)->Result<(),String>{
+        if group>=self.groups.len(){return Err("Fixture pane missing".into());}
+        let id=self.groups[group].active_id().ok_or("Fixture session missing")?.to_owned();
+        let cwd=self.session_cwds.get(&id).and_then(|path|path.to_str()).ok_or("Fixture directory missing")?.to_owned();
+        self.active_group=group;
+        self.memory_manager=Some(crate::memory_menu::Manager::from_fixture_review((id.clone(),cwd.clone()),scope,review)?);
+        self.chip_info=Some(ChipInfo{kind:"memory",label:String::new(),lines:Vec::new(),scroll:0,owner:Some((id,cwd))});Ok(())
+    }
+    /// Render an immutable fleet plan; confirmation cannot start a controller.
+    #[doc(hidden)]
+    pub fn show_fleet_review_fixture(&mut self,review:&serde_json::Value)->Result<(),String>{
+        let prepared=fleet_process::Prepared::from_fixture_review(review).map_err(|error|error.to_string())?;
+        self.chip_info=Some(ChipInfo{kind:"fleet_review",label:String::new(),lines:prepared.lines.clone(),scroll:0,owner:None});
+        self.fleet_review=Some(prepared);Ok(())
+    }
+    /// Render a manifest-status fixture without disk access or saved run state.
+    #[doc(hidden)]
+    pub fn show_fleet_view_fixture(&mut self,id:&str,lines:&[&str]){
+        let lines=lines.iter().map(|line|(*line).to_owned()).collect::<Vec<_>>();
+        self.fleet_menu=Some(fleet_menu::Menu::from_fixture(PathBuf::from("/demo/fleet"),id,lines.clone()));
+        self.chip_info=Some(ChipInfo{kind:"fleet",label:"Fixture fleet".into(),lines,scroll:0,owner:None});
+    }
+
     fn poll_memory(&mut self) -> bool {
         let mut changed = false;
         if let Some((id, cwd, receiver)) = self.memory_pending.take() {
@@ -4384,7 +4730,7 @@ impl App {
         if self.memory_pending.is_some() { return changed; }
         // Query the active pane first. The other pane is refreshed once the
         // first query completes; neither query blocks input or redraw.
-        for group in [self.active_group, 1 - self.active_group] {
+        for group in std::iter::once(self.active_group).chain((0..self.groups.len()).filter(|group| *group != self.active_group)) {
             let Some(id) = self.groups[group].active_id().map(str::to_owned) else { continue; };
             if self.offline_ids.contains(&id) { continue; }
             let Some(cwd) = self.session_cwds.get(&id).and_then(|path| path.to_str()).map(str::to_owned) else { continue; };
@@ -4429,7 +4775,7 @@ impl App {
             }
         }
         if self.repo_pending.is_some() { return changed; }
-        for group in [self.active_group, 1 - self.active_group] {
+        for group in std::iter::once(self.active_group).chain((0..self.groups.len()).filter(|group| *group != self.active_group)) {
             let Some(id) = self.groups[group].active_id().map(str::to_owned) else { continue; };
             if self.offline_ids.contains(&id) { continue; }
             let Some(cwd) = self.session_cwds.get(&id).cloned() else { continue; };
@@ -4446,7 +4792,28 @@ impl App {
     }
 
     fn poll_memory_menu(&mut self) -> bool {
-        let Some((id, cwd, receiver)) = self.memory_menu_pending.take() else { return false; };
+        let mut changed = false;
+        if let Some(manager) = &mut self.memory_manager {
+            let current = self.groups[self.active_group].active_id().and_then(|id|
+                self.session_cwds.get(id).and_then(|path| path.to_str()).map(|cwd| (id, cwd)));
+            if current == Some((manager.owner.0.as_str(), manager.owner.1.as_str())) {
+                changed |= manager.poll();
+                if manager.refresh_scope.take().is_some() { self.memory_cache.clear(); }
+            } else {
+                self.memory_manager = None;
+                if let Some(info) = &mut self.chip_info { info.lines = vec!["Session changed; reopen memory".into()]; }
+                changed = true;
+            }
+        }
+        if let Some(menu) = &mut self.operations_menu {
+            menu.poll();
+            if let Some(info) = &mut self.chip_info {
+                let lines = menu.lines(usize::from(self.size.width));
+                if info.lines != lines { info.lines = lines; changed = true; }
+            }
+        }
+
+        let Some((id, cwd, receiver)) = self.memory_menu_pending.take() else { return changed; };
         match receiver.try_recv() {
             Ok(result) => {
                 if self.groups[self.active_group].active_id() != Some(id.as_str())
@@ -4455,7 +4822,7 @@ impl App {
                 }
                 if let Some(info) = self.chip_info.as_mut().filter(|info| info.kind == "memory") {
                     info.lines = match result {
-                        Ok(lines) => lines,
+                        Ok(mut lines) => { lines.insert(0, "M manage curated entries · /beliefs and /pending for reviews".into()); lines },
                         Err(message) => vec![message.to_owned()],
                     };
                     info.scroll = 0;
@@ -4942,6 +5309,7 @@ impl App {
         self.history_modal = true;
         self.history_resume = false;
         self.history_query = query.to_owned();
+        self.history_query_cursor = self.history_query.len();
         self.history_selected = 0;
         self.cancel_history_query();
         for entry in entries {
@@ -4956,6 +5324,8 @@ impl App {
     }
 
     fn history_key(&mut self, key: KeyEvent) -> bool {
+        self.history_query_cursor = self.history_query_cursor.min(self.history_query.len());
+        while !self.history_query.is_char_boundary(self.history_query_cursor) { self.history_query_cursor -= 1; }
         match key.code {
             KeyCode::Esc | KeyCode::Char('r') if key.code == KeyCode::Esc || key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.history_modal = false;
@@ -4964,11 +5334,36 @@ impl App {
             }
             KeyCode::Up => self.history_selected = self.history_selected.saturating_sub(1),
             KeyCode::Down => self.history_selected = (self.history_selected + 1).min(self.history_matches().len().saturating_sub(1)),
-            KeyCode::Backspace => { self.history_query.pop(); self.history_selected = 0;
-                self.schedule_history_query(Instant::now()); }
+            KeyCode::Left => {
+                self.history_query_cursor = self.history_query[..self.history_query_cursor].char_indices().next_back().map_or(0, |(index, _)| index);
+            }
+            KeyCode::Right => {
+                if let Some(c) = self.history_query[self.history_query_cursor..].chars().next() { self.history_query_cursor += c.len_utf8(); }
+            }
+            KeyCode::Home => self.history_query_cursor = 0,
+            KeyCode::End => self.history_query_cursor = self.history_query.len(),
+            KeyCode::Backspace => {
+                if let Some((index, _)) = self.history_query[..self.history_query_cursor].char_indices().next_back() {
+                    self.history_query.drain(index..self.history_query_cursor);
+                    self.history_query_cursor = index;
+                    self.history_selected = 0;
+                    self.schedule_history_query(Instant::now());
+                }
+            }
+            KeyCode::Delete => {
+                if let Some(c) = self.history_query[self.history_query_cursor..].chars().next() {
+                    self.history_query.drain(self.history_query_cursor..self.history_query_cursor + c.len_utf8());
+                    self.history_selected = 0;
+                    self.schedule_history_query(Instant::now());
+                }
+            }
             KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
-                if self.history_query.len() + c.len_utf8() <= 200 { self.history_query.push(c); self.history_selected = 0;
-                    self.schedule_history_query(Instant::now()); }
+                if !unsafe_input_char(c) && self.history_query.len() + c.len_utf8() <= 200 {
+                    self.history_query.insert(self.history_query_cursor, c);
+                    self.history_query_cursor += c.len_utf8();
+                    self.history_selected = 0;
+                    self.schedule_history_query(Instant::now());
+                }
             }
             KeyCode::Enter => {
                 self.open_selected_history();
@@ -5383,57 +5778,48 @@ impl App {
         true
     }
 
+    fn action_rows(&self) -> Vec<actions::Entry> { actions::entries(self, &self.action_query) }
+
     fn action_key(&mut self, key: KeyEvent) -> bool {
+        let rows = self.action_rows();
         match key.code {
-            KeyCode::Esc | KeyCode::Char('p')
-                if key.code == KeyCode::Esc || key.modifiers.contains(KeyModifiers::CONTROL) =>
-            {
-                self.action_menu = false;
-            }
-            KeyCode::Up => {
-                self.action_selected = (self.action_selected + ACTIONS.len() - 1) % ACTIONS.len();
-            }
-            KeyCode::Down => {
-                self.action_selected = (self.action_selected + 1) % ACTIONS.len();
+            KeyCode::Esc | KeyCode::Char('p') if key.code == KeyCode::Esc || key.modifiers.contains(KeyModifiers::CONTROL) => self.action_menu = false,
+            KeyCode::Up => self.action_selected = self.action_selected.saturating_sub(1),
+            KeyCode::Down => self.action_selected = (self.action_selected + 1).min(rows.len().saturating_sub(1)),
+            KeyCode::PageUp => self.action_selected = self.action_selected.saturating_sub(8),
+            KeyCode::PageDown => self.action_selected = (self.action_selected + 8).min(rows.len().saturating_sub(1)),
+            KeyCode::Backspace => { self.action_query.pop(); self.action_selected = 0; },
+            KeyCode::Char(c) if !unsafe_input_char(c) && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+                if self.action_query.len() + c.len_utf8() <= 200 { self.action_query.push(c); self.action_selected = 0; }
             }
             KeyCode::Enter => {
-                self.action_menu = false;
-                match self.action_selected {
-                    0 => {
-                        self.map_modal = true;
-                        self.peer_map.selected = 0;
-                        self.pending_peer_refresh = Some(
-                            self.groups[self.active_group]
-                                .active_id()
-                                .unwrap_or("")
-                                .to_owned(),
-                        );
+                let Some(entry) = rows.get(self.action_selected) else { return true; };
+                let action = entry.action.clone(); self.action_menu = false;
+                match action {
+                    actions::Action::New => self.open_engine_picker(),
+                    actions::Action::Fleet(view) => self.open_fleet(view.root,Some(view.run_id)),
+                    actions::Action::Tab(pane, tab) => { if self.groups.get(pane).is_some_and(|g| tab < g.tabs.len()) { self.active_group = pane; self.groups[pane].active = tab; self.focus = Focus::Prompt; } },
+                    actions::Action::Stop => self.open_stop_confirmation(),
+                    actions::Action::Tools => { self.tool_modal = true; self.tool_scroll = 0; self.tool_selected = self.active_tool_cards().len().saturating_sub(1); },
+                    actions::Action::Close => self.detach_active_tab(),
+                    actions::Action::NextPane => { self.active_group = (self.active_group + 1) % if self.pane_tree.is_some() { self.pane_count() } else { 2 }; self.focus = Focus::Prompt; },
+                    actions::Action::Command(command) => {
+                        // Argument-bearing operations prepare the user's prompt
+                        // for editing; bare forms use the same local dispatcher.
+                        if matches!(command, "/msg" | "/collection" | "/cd" | "/fleet" | "/img") {
+                            self.action_draft = Some(((self.active_group,self.groups[self.active_group].active_id().unwrap_or("").to_owned()),self.input.clone(), self.input_cursor));
+                            self.input = format!("{command} "); self.input_cursor = self.input.len(); self.focus = Focus::Prompt;
+                        } else {
+                            let saved = (self.input.clone(), self.input_cursor);
+                            self.input = command.into(); self.input_cursor = self.input.len();
+                            if !self.dispatch_prompt_command() { self.submit_local_command(); }
+                            // Palette commands do not consume a conversation draft.
+                            self.input = saved.0; self.input_cursor = saved.1;
+                        }
                     }
-                    1 => {
-                        self.tool_modal = true;
-                        self.tool_scroll = 0;
-                        self.tool_selected = self.active_tool_cards().len().saturating_sub(1);
-                    }
-                    2 => self.open_selected(),
-                    3 => self.previous_tab(),
-                    4 => self.next_tab(),
-                    5 => {
-                        self.active_group = 1 - self.active_group;
-                        self.split_requested = true;
-                        self.focus = Focus::Prompt;
-                    }
-                    6 => self.open_history(),
-                    7 => self.open_lore_picker(),
-                    8 => self.open_diff(),
-                    9 => self.open_engine_picker(),
-                    10 => self.open_model_picker(),
-                    11 => self.open_permission_picker(),
-                    12 => self.open_stop_confirmation(),
-                    13 => { self.move_active_tab(1 - self.active_group); }
-                    _ => unreachable!("fixed action list"),
                 }
             }
-            _ => {}
+            _ => return false,
         }
         true
     }
@@ -5484,6 +5870,30 @@ impl App {
             self.notice = "Answer already sent · awaiting resolution".into();
             return true;
         }
+        if self.input_requests[index].freeform() {
+            let request = &mut self.input_requests[index];
+            match key.code {
+                KeyCode::Char(c) if !unsafe_input_char(c) && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+                    if request.free_text.len() + c.len_utf8() <= MAX_ANSWER_BYTES / 2 {
+                        request.free_text.insert(request.free_cursor, c); request.free_cursor += c.len_utf8();
+                    }
+                    return true;
+                }
+                KeyCode::Left => { request.free_cursor = request.free_text[..request.free_cursor].char_indices().next_back().map_or(0, |(i,_)|i); return true; }
+                KeyCode::Right => { if let Some(c) = request.free_text[request.free_cursor..].chars().next() { request.free_cursor += c.len_utf8(); } return true; }
+                KeyCode::Home => { request.free_cursor = 0; return true; }
+                KeyCode::End => { request.free_cursor = request.free_text.len(); return true; }
+                KeyCode::Backspace => {
+                    if let Some((i,_)) = request.free_text[..request.free_cursor].char_indices().next_back() { request.free_text.drain(i..request.free_cursor); request.free_cursor = i; }
+                    return true;
+                }
+                KeyCode::Delete => {
+                    if let Some(c) = request.free_text[request.free_cursor..].chars().next() { request.free_text.drain(request.free_cursor..request.free_cursor + c.len_utf8()); }
+                    return true;
+                }
+                _ => {}
+            }
+        }
         let kind = self.input_requests[index].kind.clone();
         if kind != "ask_user" {
             if !matches!(key.code, KeyCode::Char('A' | 'Y'))
@@ -5518,7 +5928,7 @@ impl App {
         let answer = if kind == "ask_user" {
             let count = self.input_requests[index].option_count();
             match key.code {
-                KeyCode::Esc => Some(serde_json::json!({"declined":true})),
+                KeyCode::Esc => Some(serde_json::json!({"declined":true,"cancelled":true})),
                 KeyCode::Up if count > 0 => {
                     let r = &mut self.input_requests[index];
                     r.selected = if r.selected <= 1 {
@@ -5553,7 +5963,7 @@ impl App {
                     self.input_requests[index].selected = c as usize - '0' as usize;
                     self.choose_question(index)
                 }
-                KeyCode::Enter if count > 0 => self.choose_question(index),
+                KeyCode::Enter if count > 0 || self.input_requests[index].freeform() => self.choose_question(index),
                 _ => None,
             }
         } else {
@@ -5567,12 +5977,17 @@ impl App {
                 KeyCode::Char('A')
                     if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
                 {
+                    if self.input_requests[index].require_full_review
+                        && (!self.input_requests[index].review_available || !self.input_requests[index].review_complete.get()) {
+                        self.notice = "Read the complete input summary (↓/PgDn) before allowing".into(); return true;
+                    }
                     self.input_requests[index].allow_armed = true;
                     self.notice = "Approval armed · press Shift+Y to confirm".into();
                     return true;
                 }
                 KeyCode::Char('Y')
                     if self.input_requests[index].allow_armed
+                        && (!self.input_requests[index].require_full_review || self.input_requests[index].review_complete.get() && self.input_requests[index].review_available)
                         && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT) =>
                 {
                     Some(serde_json::json!({"decision":"allow"}))
@@ -5597,19 +6012,18 @@ impl App {
     fn choose_question(&mut self, index: usize) -> Option<serde_json::Value> {
         let request = &mut self.input_requests[index];
         let question = request.questions.get(request.step)?;
-        let choice = question
-            .options
-            .get(request.selected.checked_sub(1)?)?
-            .label
-            .clone();
-        request
-            .answers
-            .insert(question.question.clone(), serde_json::Value::String(choice));
+        let choice = if request.freeform() {
+            if request.free_text.trim().is_empty() { self.notice = "Type an answer before submitting".into(); return None; }
+            request.free_text.clone()
+        } else { question.options.get(request.selected.checked_sub(1)?)?.label.clone() };
+        let key = question.id.as_ref().unwrap_or(&question.question).clone();
+        request.answers.insert(key, serde_json::Value::String(choice));
         if request.step + 1 == request.questions.len() {
             Some(serde_json::json!({"answers": request.answers}))
         } else {
             request.step += 1;
             request.selected = 1;
+            request.free_text.clear(); request.free_cursor = 0;
             request.scroll = 0;
             None
         }
@@ -5673,6 +6087,9 @@ impl App {
     /// Remove only the active tab. Its daemon and rail entry remain available
     /// for reattachment; closing the final tab exits the otherwise empty UI.
     fn detach_active_tab(&mut self) {
+        if self.launching || !self.attaching_ids.is_empty() || self.clear_pending.is_some() {
+            self.notice = "Wait for session launch/attach/clear before closing a pane".into(); return;
+        }
         let group = &mut self.groups[self.active_group];
         if group.active >= group.tabs.len() {
             self.notice = "No active tab to detach".into();
@@ -5685,6 +6102,14 @@ impl App {
 
         if self.groups.iter().all(|group| group.tabs.is_empty()) {
             self.should_quit = true;
+        } else if self.pane_tree.is_some() && self.groups[self.active_group].tabs.is_empty() {
+            let removed = self.active_group;
+            self.groups.remove(removed);
+            self.pane_tree = self.pane_tree.take().and_then(|tree| tree.without(removed));
+            self.active_group = removed.min(self.groups.len() - 1);
+            self.input_drafts = std::mem::take(&mut self.input_drafts).into_iter().filter_map(|((index, id), draft)|
+                (index != removed).then_some(((index - usize::from(index > removed), id), draft))).collect();
+            if self.groups.len() == 1 { self.groups.push(PaneGroup { tabs: Vec::new(), active: 0, scroll: 0 }); self.pane_tree = None; self.split_requested = false; }
         } else if self.groups[0].tabs.is_empty() {
             self.groups.swap(0, 1);
             for id in self.groups[0].tabs.clone() {
@@ -5704,8 +6129,8 @@ impl App {
     /// Move the active session tab to the opposite group. Keep a source tab
     /// so moving never implicitly closes a pane group.
     fn move_active_tab(&mut self, target: usize) -> bool {
-        if target > 1 || target == self.active_group {
-            self.notice = "Choose the other pane group (1 or 2)".into();
+        if target >= self.groups.len() || target == self.active_group {
+            self.notice = "Choose another existing pane group".into();
             return false;
         }
         let source = self.active_group;
@@ -5751,8 +6176,35 @@ impl App {
         p.scroll = 0;
     }
 
+    fn pane_count(&self) -> usize {
+        if self.pane_tree.is_some() { self.groups.len() }
+        else if self.split_requested || self.active_group > 0 || self.groups.iter().skip(1).any(|g| !g.tabs.is_empty()) { 2 }
+        else { 1 }
+    }
+
+    fn split_active_pane(&mut self, orientation: Split) {
+        if self.pane_tree.is_none() && self.groups[1].tabs.is_empty() {
+            self.split = orientation; self.split_requested = true; return;
+        }
+        if self.groups.len() >= panes::MAX_PANES { self.notice = format!("Pane limit is {}", panes::MAX_PANES); return; }
+        let layout = self.layout(self.size);
+        let Some(regions) = layout.panes else { self.notice = "Enlarge terminal before splitting a pane".into(); return; };
+        let pane = regions[self.active_group];
+        if (orientation == Split::Vertical && pane.width < MIN_PANE_WIDTH * 2)
+            || (orientation == Split::Horizontal && pane.height < MIN_PANE_HEIGHT * 2) {
+            self.notice = "Enlarge this pane before splitting it".into(); return;
+        }
+        let mut tree = self.pane_tree.clone().unwrap_or_else(|| panes::Tree::pair(self.split, self.split_percent));
+        let next = self.groups.len();
+        if !tree.split(self.active_group, next, orientation, 0) { self.notice = "Pane nesting limit reached".into(); return; }
+        self.groups.push(PaneGroup { tabs: Vec::new(), active: 0, scroll: 0 });
+        self.pane_tree = Some(tree);
+        self.split_requested = true;
+        self.notice = format!("Pane {} created · /pane {} to focus it", next + 1, next + 1);
+    }
+
     fn pane_group_two_exists(&self) -> bool {
-        self.split_requested || self.active_group == 1 || !self.groups[1].tabs.is_empty()
+        self.pane_tree.is_some() || self.split_requested || self.active_group > 0 || self.groups.iter().skip(1).any(|group| !group.tabs.is_empty())
     }
 
     fn layout(&self, area: Rect) -> PaneLayout {
@@ -5783,6 +6235,11 @@ impl App {
         } else {
             body.height >= MIN_PANE_HEIGHT * 2
         };
+        if let Some(tree) = &self.pane_tree {
+            let regions = tree.rects(body, self.groups.len());
+            let panes = regions.iter().all(|rect| rect.width >= MIN_PANE_WIDTH && rect.height >= MIN_PANE_HEIGHT).then_some(regions);
+            return PaneLayout { outer: area, rail, body, panes };
+        }
         let panes = (min_ok && (self.split_requested || self.active_group == 1
             || !self.groups[1].tabs.is_empty() || self.diff_pane)).then(|| {
             let desired = self.pane_rects(body, self.split_percent);
@@ -5799,13 +6256,13 @@ impl App {
                 }
             };
             if size(desired[0]) >= minimum && size(desired[1]) >= minimum {
-                desired
+                desired.to_vec()
             } else {
                 (0..=100)
                     .map(|percent| self.pane_rects(body, percent))
                     .filter(|pair| size(pair[0]) >= minimum && size(pair[1]) >= minimum)
                     .min_by_key(|pair| size(pair[0]).abs_diff(size(desired[0])))
-                    .unwrap_or(desired)
+                    .unwrap_or(desired).to_vec()
             }
         });
         PaneLayout {
@@ -5870,9 +6327,13 @@ impl App {
                 (if rows <= 2 { 4 + rows } else { 7 + rows }).clamp(5, 19) as u16
             }
         } else if self.action_menu {
-            (ACTIONS.len() + 2).min(15) as u16
+            (self.action_rows().len() + 3).clamp(5, 15) as u16
+        } else if self.memory_manager.is_some() {
+            19
+        } else if let Some(menu) = &self.operations_menu {
+            (menu.lines(usize::from(pane.width)).len() + 2).clamp(7, 19) as u16
         } else if self.chip_info.is_some() {
-            self.chip_info.as_ref().map_or(5, |info| if matches!(info.kind, "memory" | "usage" | "context" | "help") {
+            self.chip_info.as_ref().map_or(5, |info| if matches!(info.kind, "memory" | "usage" | "context" | "help" | "fleet" | "fleet_review") {
                 (info.lines.len() + 2).clamp(7, 19) as u16
             } else { 5 })
         } else if self.history_modal {
@@ -6067,7 +6528,7 @@ impl App {
         // Before the first paint, tests and synthetic input may still use
         // the current size. Interactive input always uses painted regions.
         let layout = self.layout(self.size);
-        let panes = layout.panes.map(|panes| vec![(0, panes[0]), (1, panes[1])])
+        let panes = layout.panes.map(|panes| panes.into_iter().enumerate().collect::<Vec<_>>())
             .unwrap_or_else(|| vec![(self.active_group, layout.body)]);
         for (group, pane) in panes {
             if self.diff_pane && group != self.active_group { continue; }
@@ -6118,6 +6579,8 @@ impl App {
     }
 
     fn open_chip_info(&mut self, kind: &'static str, group: usize) {
+        self.memory_manager = None;
+        self.operations_menu = None;
         if matches!(kind, "context" | "cost") {
             self.active_group = group;
             self.open_diagnostic(if kind == "cost" { "usage" } else { "context" });
@@ -6198,8 +6661,12 @@ impl App {
         }
         if kind == "context" {
             lines.push(String::new());
-            lines.push("Component breakdown unavailable in this view".into());
-            lines.push("No token counts are estimated here".into());
+            lines.push("Loading reported context details…".into());
+            if let Some((Some(usage), _)) = self.memory_cache.get(&id) {
+                lines.push(format!("Curated project memory: {} / {} Unicode chars (LORE cap)", usage.project_chars, usage.project_cap_chars));
+                lines.push(format!("Curated user memory: {} / {} Unicode chars (LORE cap)", usage.user_chars, usage.user_cap_chars));
+            }
+            self.pending_queue_commands.push(crate::bridge::WorkerCommand::ContextDetail(id.clone()));
         }
         self.chip_info = Some(ChipInfo { kind, label: String::new(), lines, scroll: 0,
             owner: Some((id, String::new())) });
@@ -6210,9 +6677,11 @@ impl App {
     }
 
     fn open_memory_menu(&mut self, group: usize) {
+        self.memory_manager = None;
+        self.operations_menu = None;
         self.open_chip_info("memory", group);
         let Some(info) = self.chip_info.as_mut() else { return; };
-        info.lines = vec!["Loading LORE memory…".into()];
+        info.lines = vec!["Loading LORE memory… · M manage curated entries".into()];
         let Some(id) = self.groups[group].active_id().map(str::to_owned) else {
             info.lines = vec!["No active session".into()];
             return;
@@ -6328,10 +6797,11 @@ impl App {
             let count = if picker.proposal_mode { picker.proposals.len() } else { picker.rows.len() };
             if index < count && picker.selected != index { picker.selected = index; return true; }
         } else if self.action_menu {
-            let visible = usize::from(menu.height.saturating_sub(2)).max(1);
+            if row < menu.y + 2 { return false; }
+            let visible = usize::from(menu.height.saturating_sub(3)).max(1);
             let start = chooser_visible_start(&self.chooser_view_start, self.action_selected, visible);
-            let index = start + usize::from(row - menu.y - 1);
-            if index < ACTIONS.len() && self.action_selected != index { self.action_selected = index; return true; }
+            let index = start + usize::from(row - menu.y - 2);
+            if index < self.action_rows().len() && self.action_selected != index { self.action_selected = index; return true; }
         } else if !self.slash_suggestions().is_empty() {
             let visible = usize::from(menu.height.saturating_sub(2)).max(1);
             let start = chooser_visible_start(&self.chooser_view_start, self.slash_selected, visible);
@@ -6342,6 +6812,15 @@ impl App {
     }
 
     fn mouse(&mut self, mouse: MouseEvent) -> bool {
+        if self.fleet_review.is_some(){
+            if let Some(area)=self.active_chooser_rect(){
+                if area.contains(ratatui::layout::Position::new(mouse.column,mouse.row)){
+                    match mouse.kind{MouseEventKind::ScrollUp=>return self.fleet_review_key(KeyEvent::new(KeyCode::Up,KeyModifiers::NONE)),MouseEventKind::ScrollDown=>return self.fleet_review_key(KeyEvent::new(KeyCode::Down,KeyModifiers::NONE)),_=>return true}
+                }
+                if mouse.kind==MouseEventKind::Down(MouseButton::Left){self.fleet_review=None;self.chip_info=None;return true;}
+            }
+            return false;
+        }
         if self.drag == Some(DragTarget::Chooser) {
             match mouse.kind {
                 MouseEventKind::Drag(MouseButton::Left) => {
@@ -6452,6 +6931,58 @@ impl App {
             return false;
         }
         if self.chip_info.is_some() {
+            let area = self.active_chooser_rect();
+            if let Some(menu) = &mut self.operations_menu {
+                if let Some(area) = area {
+                    let inside = mouse.column > area.x && mouse.column < area.right().saturating_sub(1)
+                        && mouse.row > area.y && mouse.row < area.bottom().saturating_sub(1);
+                    if inside && matches!(mouse.kind, MouseEventKind::Moved | MouseEventKind::Down(MouseButton::Left)) {
+                        let choice_row = usize::from(mouse.row - area.y - 1);
+                        let choice = menu.choice_at(choice_row);
+                        menu.hover(choice_row);
+                        if choice && mouse.kind == MouseEventKind::Down(MouseButton::Left) { menu.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)); }
+                        if let Some(info) = &mut self.chip_info { info.lines = menu.lines(usize::from(area.width)); }
+                        return true;
+                    }
+                    if !area.contains(ratatui::layout::Position::new(mouse.column, mouse.row))
+                        && mouse.kind == MouseEventKind::Down(MouseButton::Left) && !menu.busy() {
+                        self.operations_menu = None; self.chip_info = None;
+                    }
+                }
+                return true;
+            }
+            if let Some(menu)=&mut self.fleet_menu {
+                if let Some(area)=area {
+                    let inside=mouse.column>area.x && mouse.column<area.right().saturating_sub(1) && mouse.row>area.y && mouse.row<area.bottom().saturating_sub(1);
+                    if inside && matches!(mouse.kind,MouseEventKind::Moved|MouseEventKind::Down(MouseButton::Left)) {
+                        let scroll=self.chip_info.as_ref().unwrap().scroll;
+                        if menu.hover(usize::from(mouse.row-area.y-1)+scroll) && mouse.kind==MouseEventKind::Down(MouseButton::Left){menu.key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));}
+                        self.chip_info.as_mut().unwrap().lines=menu.display();return true;
+                    }
+                    if !inside && mouse.kind==MouseEventKind::Down(MouseButton::Left){self.fleet_menu=None;self.chip_info=None;return true;}
+                }
+            }
+            if let Some(manager) = &mut self.memory_manager {
+                if let Some(area) = area {
+                    let inside = mouse.column > area.x && mouse.column < area.right().saturating_sub(1)
+                        && mouse.row >= area.y + 2 && mouse.row < area.bottom().saturating_sub(2);
+                    if inside {
+                        match mouse.kind {
+                            MouseEventKind::Moved | MouseEventKind::Down(MouseButton::Left) => {
+                                return manager.hover(usize::from(mouse.row - area.y - 2), usize::from(area.height.saturating_sub(4)));
+                            }
+                            MouseEventKind::ScrollUp => return manager.key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
+                            MouseEventKind::ScrollDown => return manager.key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+                            _ => {}
+                        }
+                    }
+                    if !area.contains(ratatui::layout::Position::new(mouse.column, mouse.row))
+                        && mouse.kind == MouseEventKind::Down(MouseButton::Left) && !manager.busy() {
+                        self.memory_manager = None; self.chip_info = None;
+                    }
+                }
+                return true;
+            }
             let inside_menu = self.active_chooser_rect().is_some_and(|area| area.contains(
                 ratatui::layout::Position::new(mouse.column, mouse.row)));
             if let Some(info) = self.chip_info.as_mut().filter(|info| info.kind == "memory") {
@@ -6800,6 +7331,24 @@ impl App {
             }
             return true;
         }
+        if self.action_menu {
+            if let Some(area) = self.active_chooser_rect() {
+                match mouse.kind {
+                    MouseEventKind::Down(MouseButton::Left) if !area.contains(ratatui::layout::Position::new(mouse.column, mouse.row)) => { self.action_menu = false; return true; }
+                    MouseEventKind::Down(MouseButton::Left) if mouse.column > area.x && mouse.column < area.right().saturating_sub(1)
+                        && mouse.row >= area.y + 2 && mouse.row < area.bottom().saturating_sub(1) => {
+                        let visible = usize::from(area.height.saturating_sub(3)).max(1);
+                        let start = chooser_visible_start(&self.chooser_view_start, self.action_selected, visible);
+                        let index = start + usize::from(mouse.row - area.y - 2);
+                        if index < self.action_rows().len() { self.action_selected = index; return self.action_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)); }
+                    }
+                    MouseEventKind::ScrollUp => return self.action_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
+                    MouseEventKind::ScrollDown => return self.action_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+                    _ => {}
+                }
+            }
+            return false;
+        }
         if self.active_request_index().is_some()
             || self.tool_modal
             || self.map_modal
@@ -6820,23 +7369,15 @@ impl App {
             // A request belongs to its session, not the whole terminal. Let
             // the user focus the other pane and keep working while this one
             // waits for an answer. The request stays visible in its own pane.
-            if self.active_request_index().is_some()
-                && mouse.kind == MouseEventKind::Down(MouseButton::Left)
-                && self.layout(self.size).panes.is_some_and(|panes| {
-                    panes[1 - self.active_group].contains(
-                        ratatui::layout::Position::new(mouse.column, mouse.row))
-                })
-            {
-                let other = 1 - self.active_group;
-                let pane = self.layout(self.size).panes.unwrap()[other];
-                let prompt = self.pane_regions(other, pane)[4];
-                self.active_group = other;
-                self.focus = if prompt.contains(ratatui::layout::Position::new(mouse.column, mouse.row)) {
-                    Focus::Prompt
-                } else {
-                    Focus::Transcript
-                };
-                return true;
+            if self.active_request_index().is_some() && mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                if let Some((other, pane)) = self.layout(self.size).panes.and_then(|regions|
+                    regions.into_iter().enumerate().find(|(index, pane)| *index != self.active_group
+                        && pane.contains(ratatui::layout::Position::new(mouse.column, mouse.row)))) {
+                    let prompt = self.pane_regions(other, pane)[4];
+                    self.active_group = other;
+                    self.focus = if prompt.contains(ratatui::layout::Position::new(mouse.column, mouse.row)) { Focus::Prompt } else { Focus::Transcript };
+                    return true;
+                }
             }
             self.drag = None;
             return false;
@@ -6865,7 +7406,7 @@ impl App {
         }
         if self.diff_pane {
             if let Some(panes) = self.layout(self.size).panes {
-                let pane = panes[1 - self.active_group];
+                let pane = panes[(self.active_group + 1) % panes.len()];
                 if mouse.column > pane.x && mouse.column < pane.right().saturating_sub(1)
                     && mouse.row > pane.y && mouse.row < pane.bottom().saturating_sub(1) {
                     match mouse.kind {
@@ -6924,7 +7465,10 @@ impl App {
                     })
                 {
                     self.drag = Some(DragTarget::Rail);
-                } else if let Some([first, second]) = layout.panes {
+                } else if let Some(divider)=self.pane_tree.as_ref().filter(|_|layout.panes.is_some()).and_then(|tree|tree.divider_at(layout.body,mouse.column,mouse.row)) {
+                    self.drag=Some(DragTarget::NestedPane(divider));
+                } else if let Some(panes) = layout.panes.as_ref().filter(|panes| panes.len() == 2 && self.pane_tree.is_none()) {
+                    let (first, second) = (panes[0], panes[1]);
                     let on_divider = if self.split == Split::Vertical {
                         mouse.row >= layout.body.y
                             && mouse.row < layout.body.bottom()
@@ -6941,7 +7485,7 @@ impl App {
                     }
                 }
                 if self.drag.is_none() {
-                        let pane_hits = layout.panes.map(|panes| vec![(0, panes[0]), (1, panes[1])])
+                        let pane_hits = layout.panes.map(|panes| panes.into_iter().enumerate().collect::<Vec<_>>())
                             .unwrap_or_else(|| vec![(self.active_group, layout.body)]);
                         for (index, pane) in pane_hits.iter().copied() {
                             if mouse.column >= pane.x && mouse.column < pane.right()
@@ -6990,6 +7534,9 @@ impl App {
                             .column
                             .saturating_sub(layout.outer.x)
                             .clamp(MIN_RAIL_WIDTH, max.max(MIN_RAIL_WIDTH));
+                    }
+                    DragTarget::NestedPane(divider) if layout.panes.is_some() => {
+                        if let Some(tree)=self.pane_tree.as_mut(){tree.resize_divider(layout.body,divider,mouse.column,mouse.row,MIN_PANE_WIDTH,MIN_PANE_HEIGHT);}
                     }
                     DragTarget::Pane(split) if split == self.split && layout.panes.is_some() => {
                         let (axis, length, minimum) = if split == Split::Vertical {
@@ -7069,10 +7616,9 @@ impl App {
         if let Some(panes) = layout.panes {
             if self.diff_pane {
                 self.draw_group(frame, panes[self.active_group], self.active_group);
-                self.draw_diff_pane(frame, panes[1 - self.active_group]);
+                self.draw_diff_pane(frame, panes[(self.active_group + 1) % panes.len()]);
             } else {
-                self.draw_group(frame, panes[0], 0);
-                self.draw_group(frame, panes[1], 1);
+                for (index, pane) in panes.iter().enumerate() { self.draw_group(frame, *pane, index); }
             }
         } else {
             self.draw_group(frame, layout.body, self.active_group);
@@ -7277,7 +7823,29 @@ impl App {
     }
 
     fn draw_chip_info(&self, frame: &mut Frame, area: Rect) {
+        if let Some(manager) = &self.memory_manager {
+            manager.draw(frame, area); return;
+        }
+        if let Some(menu) = &self.operations_menu {
+            frame.render_widget(Paragraph::new(menu.lines(usize::from(area.width.saturating_sub(2))).join("\n"))
+                .block(Block::default().title(" DOXA operations ").borders(Borders::ALL))
+                .style(Style::default().fg(theme::TEXT).bg(theme::RAISED)), area);
+            return;
+        }
         let Some(info) = &self.chip_info else { return; };
+        if let Some(review)=&self.fleet_review{
+            let lines=info.lines.iter().flat_map(|line|crate::memory_menu::wrap_review(line,usize::from(area.width.saturating_sub(2)).max(1))).collect::<Vec<_>>();
+            let visible=usize::from(area.height.saturating_sub(2));let start=info.scroll.min(lines.len().saturating_sub(visible));let end=start+visible;
+            if start<=review.seen.get(){review.seen.set(review.seen.get().max(end));review.complete.set(end>=lines.len());}
+            frame.render_widget(Paragraph::new(lines.join("\n")).scroll((start.min(u16::MAX as usize)as u16,0))
+                .block(Block::default().title(" Native fleet launch review ").borders(Borders::ALL))
+                .style(Style::default().fg(theme::TEXT).bg(theme::RAISED)),area);return;
+        }
+        if info.kind=="fleet" {
+            frame.render_widget(Paragraph::new(info.lines.join("\n")).scroll((info.scroll.min(u16::MAX as usize) as u16,0))
+                .block(Block::default().title(" Fleet · PgUp/PgDn scroll ").borders(Borders::ALL))
+                .style(Style::default().fg(theme::TEXT).bg(theme::RAISED)),area);return;
+        }
         if matches!(info.kind, "memory" | "usage" | "context" | "help") {
             let current = self.groups[self.active_group].active_id().and_then(|id|
                 self.session_cwds.get(id).and_then(|cwd| cwd.to_str()).map(|cwd| (id, cwd)));
@@ -7312,7 +7880,7 @@ impl App {
     fn draw_history(&self, frame: &mut Frame, area: Rect) {
         if !self.history_modal { return; }
         let matches = self.history_matches();
-        let mut lines = vec![Line::from(format!(" Search: {}", safe_label(&self.history_query)))];
+        let mut lines = vec![Line::from(if self.history_resume { " Select a session to resume" } else { " Type search terms in the prompt below" })];
         if matches.is_empty() { lines.push(Line::from(if self.history_pending.is_some() || self.history_query_due.is_some() { " Finding saved transcripts…" } else { " No matching sessions" })); }
         let visible = usize::from(area.height.saturating_sub(3)).max(1);
         for (position, header, label) in self.history_rows(visible) {
@@ -7625,50 +8193,18 @@ impl App {
     }
 
     fn draw_actions(&self, frame: &mut Frame, area: Rect) {
-        if !self.action_menu {
-            return;
-        }
-        let height = area.height;
-        let modal = area;
-        let visible = usize::from(height.saturating_sub(2));
+        if !self.action_menu { return; }
+        let rows = self.action_rows();
+        let visible = usize::from(area.height.saturating_sub(3)).max(1);
         let start = chooser_visible_start(&self.chooser_view_start, self.action_selected, visible);
-        let rows: Vec<Line> = ACTIONS
-            .iter()
-            .enumerate()
-            .skip(start)
-            .take(visible)
-            .map(|(index, (label, hint))| {
-                let style = if index == self.action_selected {
-                    Style::default()
-                        .fg(theme::ACCENT)
-                        .bg(theme::HIGHLIGHT)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(theme::SECONDARY)
-                };
-                Line::from(format!(
-                    " {} {:<28} {}",
-                    if index == self.action_selected {
-                        '›'
-                    } else {
-                        ' '
-                    },
-                    label,
-                    hint
-                ))
-                .style(style)
-            })
-            .collect();
-        frame.render_widget(
-            Paragraph::new(rows).block(
-                Block::default()
-                    .title(" Actions · ↑/↓ choose · Enter open · Esc close ")
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(theme::ACCENT))
-                    .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)),
-            ),
-            modal,
-        );
+        let mut lines = vec![Line::from(format!(" Filter: {}", safe_label(&self.action_query)))];
+        if rows.is_empty() { lines.push(Line::from(" No matching actions")); }
+        for (index, row) in rows.iter().enumerate().skip(start).take(visible) {
+            let label = clipped_title(&format!(" {} {} · {}", if index == self.action_selected { '›' } else { ' ' }, row.label, row.help), usize::from(area.width.saturating_sub(2))).0;
+            lines.push(Line::styled(label, if index == self.action_selected { Style::default().fg(theme::ACCENT).bg(theme::HIGHLIGHT).add_modifier(Modifier::BOLD) } else { Style::default().fg(theme::SECONDARY) }));
+        }
+        frame.render_widget(Paragraph::new(lines).block(Block::default().title(" Actions · type filter · Enter select · Esc close ").borders(Borders::ALL)
+            .border_style(Style::default().fg(theme::ACCENT))).style(Style::default().bg(theme::RAISED)), area);
     }
 
     fn draw_tool_cards(&self, frame: &mut Frame, area: Rect) {
@@ -7748,6 +8284,21 @@ impl App {
         let (body, selected_row, _) = input_request_body(request,
             usize::from(modal.width.saturating_sub(4)));
         let question = request.questions.get(request.step);
+        let reviewed_body;
+        let mut scroll = request.scroll;
+        let body = if request.require_full_review {
+            reviewed_body = body.lines().flat_map(|line| crate::memory_menu::wrap_review(line, usize::from(modal.width.saturating_sub(2)).max(1))).collect::<Vec<_>>().join("\n");
+            let total = reviewed_body.lines().count();
+            let start = usize::from(request.scroll).min(total.saturating_sub(usize::from(modal.height.saturating_sub(2))));
+            scroll = start as u16;
+            let seen = request.review_seen.get();
+            let end = start + usize::from(modal.height.saturating_sub(2));
+            if start <= seen {
+                request.review_seen.set(seen.max(end));
+                request.review_complete.set(request.review_available && end >= total);
+            }
+            reviewed_body.as_str()
+        } else { body.as_str() };
         let lines: Vec<Line> = body.lines().enumerate().map(|(index, text)| {
             if Some(index) == selected_row {
                 let padding = usize::from(modal.width.saturating_sub(2)).saturating_sub(text.width());
@@ -7761,19 +8312,16 @@ impl App {
                 .unwrap_or_else(|| " Choose an answer ".into())
         } else { format!(" Input required · {} ", request.kind) };
         if !inline { frame.render_widget(Clear, modal); }
-        frame.render_widget(
-            Paragraph::new(lines)
-                .wrap(Wrap { trim: false })
-                .scroll((request.scroll, 0))
+        let widget = Paragraph::new(lines).scroll((scroll, 0))
                 .block(
                     Block::default()
                         .title(title)
                         .borders(Borders::ALL)
                         .border_style(Style::default().fg(theme::ACCENT))
                         .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)),
-                ),
-            modal,
-        );
+                );
+        let widget = if request.require_full_review { widget } else { widget.wrap(Wrap { trim: false }) };
+        frame.render_widget(widget, modal);
     }
 
     fn draw_rail(&self, frame: &mut Frame, area: Rect) {
@@ -7828,7 +8376,12 @@ impl App {
             .and_then(|id| self.sessions.iter().find(|s| s.id == id));
         let active = self.active_group == index;
         let (draft, cursor) = group.active_id().map(|id| {
-            if active { (self.input.as_str(), self.input_cursor) }
+            if active && self.active_request_index().is_some_and(|index| self.input_requests[index].freeform()) {
+                let request = &self.input_requests[self.active_request_index().unwrap()];
+                (request.free_text.as_str(), request.free_cursor)
+            }
+            else if active && self.history_modal { (self.history_query.as_str(), self.history_query_cursor.min(self.history_query.len())) }
+            else if active { (self.input.as_str(), self.input_cursor) }
             else { self.input_drafts.get(&(index, id.to_owned()))
                 .map(|(text, cursor)| (text.as_str(), *cursor)).unwrap_or(("", 0)) }
         }).unwrap_or(("", 0));
@@ -8008,7 +8561,7 @@ impl App {
                 .scroll((scroll_y as u16, scroll_x as u16))
                 .style(Style::default().fg(theme::TEXT).bg(theme::RAISED))
                 .block(Block::default()
-                    .title(if active && self.focus == Focus::Prompt { " Prompt ● " } else { " Prompt " })
+                    .title(if active && self.active_request_index().is_some_and(|index| self.input_requests[index].freeform()) { " Answer question ● " } else if active && self.history_modal { " Search sessions ● " } else if active && self.focus == Focus::Prompt { " Prompt ● " } else { " Prompt " })
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(if active && self.focus == Focus::Prompt { theme::ACCENT } else { theme::BORDER }))),
             inner[4],
@@ -8022,6 +8575,60 @@ impl App {
             Rect { height: 1, ..inner[5] },
         );
     }
+}
+
+/// Official provider component tokens stay distinct from DOXA snapshot chars.
+fn context_detail_lines(detail: &serde_json::Value) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(source) = detail["source"].as_str() {
+        lines.push(format!("Source: {}", safe_label(source)));
+    }
+    if let Some(categories) = detail["categories"].as_array() {
+        lines.push("## Reported context components (tokens)".into());
+        for row in categories.iter().take(64) {
+            if let (Some(name), Some(tokens)) = (row["name"].as_str(), row["tokens"].as_u64()) {
+                lines.push(format!("{}: {tokens}", clipped_title(&safe_label(name), 160).0));
+            }
+        }
+    }
+    if let Some(files) = detail["memory_files"].as_array() {
+        lines.push("## Reported memory files (tokens)".into());
+        for row in files.iter().take(64) {
+            if let (Some(path), Some(tokens)) = (row["path"].as_str(), row["tokens"].as_u64()) {
+                lines.push(format!("{} · {}: {tokens}", clipped_title(&safe_label(path), 200).0,
+                    safe_label(row["type"].as_str().unwrap_or("file"))));
+            }
+        }
+    }
+    for field in ["mcp_tools", "agents"] {
+        if let Some(rows) = detail[field].as_array() {
+            lines.push(format!("## Reported {}", field.replace('_', " ")));
+            for row in rows.iter().take(64) {
+                if let Some(name) = row.as_str().or_else(|| row["name"].as_str()).or_else(|| row["agent_type"].as_str()) {
+                    let count = row["tokens"].as_u64().map(|tokens| format!(": {tokens} tokens")).unwrap_or_default();
+                    lines.push(format!("{}{count}", clipped_title(&safe_label(name), 160).0));
+                }
+            }
+        }
+    }
+    for (key, label) in [("total_tokens", "Reported total"), ("max_tokens", "Reported context window"),
+        ("raw_max_tokens", "Raw context window"), ("autocompact_threshold", "Auto compact threshold")] {
+        if let Some(tokens) = detail[key].as_u64() { lines.push(format!("{label}: {tokens} tokens")); }
+    }
+    if let Some(enabled) = detail["autocompact_enabled"].as_bool() { lines.push(format!("Auto compact enabled: {enabled}")); }
+    for key in ["adopted_skills", "adopted_skill_plugins"] {
+        if let Some(count) = detail[key].as_u64() { lines.push(format!("{}: {count} (DOXA count)", key.replace('_', " "))); }
+    }
+    if let Some(object) = detail.as_object() {
+        let mut counters: Vec<_> = object.iter().filter(|(key, value)| key.ends_with("_chars") && value.as_u64().is_some()).collect();
+        counters.sort_by_key(|(key, _)| *key);
+        if !counters.is_empty() { lines.push("## DOXA local snapshot metadata (characters; not token counts)".into()); }
+        for (key, value) in counters.into_iter().take(32) {
+            lines.push(format!("{}: {} chars", safe_label(key).replace('_', " "), value));
+        }
+    }
+    if lines.is_empty() { lines.push("No detailed context metadata reported".into()); }
+    lines
 }
 
 fn transcript_window(
@@ -8218,6 +8825,7 @@ fn run_loop(
                 changed = true;
             }
         }
+        changed |= app.poll_fleet();
         changed |= app.poll_diff();
         changed |= app.poll_history();
         changed |= app.poll_resume();
@@ -9304,7 +9912,7 @@ for line in sys.stdin:
         app.groups[0].tabs = vec!["unknown".into()];
         app.open_effort_picker();
         assert!(app.effort_picker.is_none());
-        assert!(app.notice.contains("Loading Codex model capabilities"));
+        assert!(app.notice.contains("Loading current model effort capabilities"));
 
         app.engine_selected = 2;
         app.select_new_engine();
@@ -10100,7 +10708,7 @@ for line in sys.stdin:
                 "permission" => assert!(app.permission_picker.is_some()),
                 "engine" => assert!(app.engine_picker),
                 "model" => assert!(app.model_picker.is_some()),
-                "effort" => assert!(app.notice.contains("Live effort change is unavailable")),
+                "effort" => assert!(app.model_picker.is_some() && app.effort_catalog_pending.is_some()),
                 "beliefs" => assert!(app.lore_picker.is_some()),
                 _ => {
                     assert_eq!(app.chip_info.as_ref().map(|info| info.kind), Some(kind));
@@ -10356,7 +10964,7 @@ for line in sys.stdin:
         app.input_cursor = app.input.len();
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert_eq!(app.input, "/model opus");
-        assert!(app.notice.contains("arguments are not available"));
+        assert!(app.requested_argument.is_some() || app.notice.contains("model"));
         assert!(app.pending_prompts.is_empty());
 
         app.input = "/compact".into();
@@ -10389,14 +10997,14 @@ for line in sys.stdin:
         let mut app = App::default();
         app.groups[0].tabs.push("s".into());
         app.handle(Event::Resize(100, 30));
-        assert_eq!(COMMANDS.len(), 42);
+        assert_eq!(COMMANDS.len(), 43);
         let mut names = std::collections::HashSet::new();
         for row in COMMANDS { assert!(names.insert(row.name)); }
         app.open_help();
         let info = app.chip_info.as_ref().unwrap();
         assert_eq!(info.kind, "help");
         for form in ["/collection [action] [name]", "/usage", "/context", "/compact",
-            "/fleet ...", "/help"] {
+            "/fleet [runs|status RUN|attach RUN INDEX|start OPTIONS|resume RUN]", "/help"] {
             assert!(info.lines.iter().any(|line| line.starts_with(form)), "missing {form}");
         }
         assert!(info.lines.iter().any(|line| line.contains("unavailable in Rust")));
@@ -10414,12 +11022,14 @@ for line in sys.stdin:
         let mut app = App::default();
         app.groups[0].tabs.push("s".into());
         app.handle(Event::Resize(100, 30));
-        for command in ["/fleet", "/doctor", "/clear", "/update", "/plugins",
+        for command in ["/doctor", "/clear", "/update", "/plugins",
             "/help\nignore", "/msg\t"] {
             app.input = command.into();
             app.input_cursor = app.input.len();
             app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
             assert!(app.pending_prompts.is_empty(), "forwarded {command}");
+            app.chip_info = None;
+            app.operations_menu = None;
         }
         app.input = "/provider-command".into();
         app.input_cursor = app.input.len();
@@ -10574,7 +11184,7 @@ for line in sys.stdin:
         assert_eq!(app.input, "/pane 2");
         assert_eq!(app.active_group, 0);
         assert!(app.layout(app.size).panes.is_none());
-        assert!(app.notice.contains("only one pane group"));
+        assert!(app.notice.contains("Choose pane"));
         app.input = "/vsplit".into();
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
 
@@ -10598,7 +11208,7 @@ for line in sys.stdin:
         app.input = "/pane 3".into();
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert_eq!(app.input, "/pane 3");
-        assert!(app.notice.contains("Usage: /pane"));
+        assert!(app.notice.contains("Choose pane"));
     }
 
     #[test]
@@ -10907,7 +11517,7 @@ for line in sys.stdin:
         ];
         app.apply_daemon_frame(&json!({"type":"event", "session_id":"third",
             "event":{"type":"needs_input", "data":{"id":"req", "kind":"ask_user",
-                "title":"Choose", "questions":[]}}}));
+                "title":"Choose", "questions":[{"question":"Choose freely","options":[]}]}}}));
         // Two collection headings precede the third session's row. Keep the
         // rail narrow enough to clip titles while retaining the attention cue.
         let mut terminal = Terminal::new(TestBackend::new(12, 9)).unwrap();
@@ -12500,4 +13110,235 @@ for line in sys.stdin:
         assert!(app.lore_picker.as_ref().unwrap().pending.is_none());
         assert!(!app.lore_picker.as_ref().unwrap().resolving);
     }
+}
+
+impl std::fmt::Debug for operations_menu::Menu {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OperationsMenu").field("busy", &self.busy()).finish()
+    }
+}
+
+#[cfg(test)]
+mod parity_tests {
+    use super::*;
+    use serde_json::json;
+    fn paint(app: &App) -> String {
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(app.size.width, app.size.height)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        terminal.backend().buffer().content.iter().map(|cell| cell.symbol()).collect()
+    }
+    fn click(app: &mut App, column: u16, row: u16) {
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column, row, modifiers: KeyModifiers::NONE }));
+    }
+    #[test]
+    fn search_edits_actual_prompt_query_and_restores_saved_draft() {
+        let mut app = App::default();
+        app.size = Rect::new(0, 0, 100, 28);
+        app.groups[0].tabs = vec!["s".into()];
+        app.input = "unsent draft".into();
+        app.input_cursor = app.input.len();
+        app.show_history_fixture("find", Vec::new());
+        app.history_pending = None;
+        let screen = paint(&app);
+        assert!(screen.contains("Search sessions ●"));
+        assert!(screen.contains("> find▏"));
+        assert!(!screen.contains("> unsent draft"));
+        app.history_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert_eq!(app.history_query, "findx");
+        app.history_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.input, "unsent draft");
+        assert!(paint(&app).contains("> unsent draft▏"));
+    }
+    #[test]
+    fn context_details_keep_provider_tokens_separate_from_local_chars_and_ignore_other_owner() {
+        let mut app = App::default();
+        app.size = Rect::new(0, 0, 100, 28);
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"s","engine":"claude","model":"sonnet","cwd":"/fixture"}));
+        app.groups[0].tabs = vec!["s".into()];
+        app.open_diagnostic("context");
+        let original = app.chip_info.as_ref().unwrap().lines.clone();
+        assert!(!app.apply_daemon_frame(&json!({"type":"context_detail","session_id":"other","ok":true,
+            "detail":{"categories":[{"name":"fake","tokens":3}]}})));
+        assert_eq!(app.chip_info.as_ref().unwrap().lines, original);
+        assert!(app.apply_daemon_frame(&json!({"type":"context_detail","session_id":"s","ok":true,
+            "detail":{"source":"Claude official context_usage","categories":[{"name":"system prompt","tokens":123},{"name":"missing"}],
+                "memory_files":[{"path":"MEMORY.md","tokens":17}], "agents":[{"agent_type":"reviewer","tokens":12}],
+                "lore_snapshot_chars":321,"max_tokens":1000}})));
+        let text = app.chip_info.as_ref().unwrap().lines.join("\n");
+        assert!(text.contains("system prompt: 123"));
+        assert!(text.contains("reviewer: 12 tokens"));
+        assert!(text.contains("lore snapshot chars: 321 chars"));
+        assert!(!text.contains("missing:"));
+        assert!(!text.contains("321 tokens"));
+    }
+    #[test]
+    fn claude_effort_chip_loads_current_capability_without_model_change_and_waits_for_verification() {
+        let mut app = App::default();
+        app.size = Rect::new(0, 0, 220, 32);
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"s","engine":"claude","model":"account-model",
+            "effort":"high","can_set_model":true,"cwd":"/fixture"}));
+        app.groups[0].tabs = vec!["s".into()];
+        paint(&app);
+        let hit = app.rendered_chip_hits.borrow().as_ref().unwrap().iter().find(|hit| hit.kind == "effort").unwrap().clone();
+        click(&mut app, hit.rect.x + 1, hit.rect.y);
+        assert_eq!(app.pending_model_queries, vec!["s"]);
+        assert!(app.pending_model_changes.is_empty());
+        app.apply_daemon_frame(&json!({"type":"models_reply","session_id":"s","ok":true,"models":["account-model"],
+            "capabilities":[{"model":"account-model","efforts":["low","high","max"]}]}));
+        assert!(app.model_picker.is_none());
+        assert_eq!(app.effort_picker.as_ref().unwrap().levels, ["low", "high", "max"]);
+        let menu = app.active_chooser_rect().unwrap();
+        click(&mut app, menu.x + 2, menu.y + 3);
+        assert_eq!(app.pending_effort_changes, vec![("s".into(), "low".into())]);
+        assert_eq!(app.session_efforts.get("s").map(String::as_str), Some("high"));
+        app.apply_daemon_frame(&json!({"type":"event","session_id":"s","event":{"type":"effort_requested","data":{"effort":"low"}}}));
+        assert_eq!(app.session_efforts.get("s").map(String::as_str), Some("high"));
+        app.apply_daemon_frame(&json!({"type":"event","session_id":"s","event":{"type":"effort_verified","data":{"effort":"low"}}}));
+        assert_eq!(app.session_efforts.get("s").map(String::as_str), Some("low"));
+    }
+    #[test]
+    fn prompt_search_cursor_edits_utf8_without_touching_draft() {
+        let mut app = App::default();
+        app.history_modal = true;
+        app.history_query = "aü界".into();
+        app.history_query_cursor = app.history_query.len();
+        app.input = "draft".into();
+        app.history_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        app.history_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(app.history_query, "a界");
+        app.history_key(KeyEvent::new(KeyCode::Char('ß'), KeyModifiers::NONE));
+        assert_eq!(app.history_query, "aß界");
+        app.history_key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+        assert_eq!(app.history_query, "aß");
+        assert_eq!(app.input, "draft");
+    }
+    #[test]
+    fn cancelled_effort_catalog_does_not_reopen_on_async_reply() {
+        let mut app = App::default();
+        app.size = Rect::new(0, 0, 100, 28);
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"s","engine":"codex","model":"m","effort":"high"}));
+        app.groups[0].tabs = vec!["s".into()];
+        app.open_effort_picker();
+        app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        app.apply_daemon_frame(&json!({"type":"models_reply","session_id":"s","ok":true,"models":["m"],
+            "capabilities":[{"model":"m","efforts":["high"]}]}));
+        assert!(app.effort_picker.is_none());
+        assert!(app.model_picker.is_none());
+    }
+    #[test]
+    fn operations_menu_opens_above_prompt_and_border_click_does_not_start_login() {
+        let mut app = App::default();
+        app.size = Rect::new(0, 0, 100, 28);
+        app.groups[0].tabs = vec!["s".into()];
+        app.input = "/login".into();
+        app.submit_local_command();
+        let area = app.active_chooser_rect().unwrap();
+        assert!(paint(&app).contains("Claude (Anthropic)"));
+        click(&mut app, area.x, area.y + 2);
+        click(&mut app, area.x + 2, area.y + 1);
+        assert!(!app.operations_menu.as_ref().unwrap().busy());
+        app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.operations_menu.is_none());
+    }
+    #[test]
+    fn free_text_uses_stable_question_id_and_preserves_session_draft() {
+        let mut app = App::default();
+        app.groups[0].tabs = vec!["s".into()];
+        app.input = "saved draft".into();
+        let data = json!({"id":"r","kind":"ask_user","questions":[{"id":"stable","question":"What?","options":[]}]});
+        app.input_requests.push(InputRequest::from_event("s", &data).unwrap());
+        app.handle(Event::Paste("héllo".into()));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.input, "saved draft");
+        assert_eq!(app.pending_answers[0].2["answers"]["stable"], "héllo");
+    }
+
+    #[test]
+    fn hello_snapshot_preserves_only_exact_pending_request() {
+        let mut app = App::default();
+        let data = json!({"id":"r","kind":"ask_user","questions":[{"id":"q","question":"What?","options":[]}]});
+        let mut request = InputRequest::from_event("s", &data).unwrap();
+        request.free_text = "draft".into(); request.sending = true;
+        app.input_requests.push(request);
+        app.restore_pending_inputs("s", &json!({"pending_inputs_complete":true,"pending_inputs":[data.clone()]}));
+        assert_eq!(app.input_requests[0].free_text, "draft");
+        assert!(app.input_requests[0].sending);
+        let mut changed = data; changed["questions"][0]["question"] = json!("Changed?");
+        app.restore_pending_inputs("s", &json!({"pending_inputs_complete":true,"pending_inputs":[changed]}));
+        assert!(app.input_requests[0].free_text.is_empty());
+        assert!(!app.input_requests[0].sending);
+        app.restore_pending_inputs("s", &json!({"pending_inputs_complete":false,"pending_inputs":[]}));
+        assert!(app.input_requests.is_empty());
+    }
+
+    #[test]
+    fn full_permission_review_cannot_be_armed_before_complete_or_when_truncated() {
+        let mut app = App::default(); app.groups[0].tabs = vec!["s".into()];
+        let data = json!({"id":"r","kind":"permission","title":"Review","input_summary":"long review","require_full_review":true});
+        app.input_requests.push(InputRequest::from_event("s", &data).unwrap());
+        app.request_key(KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT));
+        assert!(!app.input_requests[0].allow_armed);
+        app.input_requests[0].review_complete.set(true);
+        app.request_key(KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT));
+        assert!(app.input_requests[0].allow_armed);
+        app.input_requests[0].review_available = false;
+        app.request_key(KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::SHIFT));
+        assert!(app.pending_answers.is_empty());
+    }
+
+    #[test]
+    fn recursive_panes_focus_and_resize_preserve_tree_and_tabs() {
+        let mut app = App::default(); app.rail_visible = false;
+        app.handle(Event::Resize(180, 70));
+        app.groups[0].tabs = vec!["a".into(),"c".into()]; app.groups[1].tabs = vec!["b".into()];
+        app.split_active_pane(Split::Horizontal);
+        assert_eq!(app.groups.len(), 3);
+        let regions = app.layout(app.size).panes.unwrap();
+        assert_eq!(regions.len(), 3);
+        let rect = regions[2];
+        app.handle(Event::Mouse(MouseEvent {kind:MouseEventKind::Down(MouseButton::Left),column:rect.x+2,row:rect.y+2,modifiers:KeyModifiers::NONE}));
+        assert_eq!(app.active_group, 2);
+        let tree = app.pane_tree.clone();
+        app.handle(Event::Resize(30, 10));
+        assert_eq!(app.pane_tree, tree);
+        assert_eq!(app.groups[0].tabs, vec!["a","c"]);
+        app.handle(Event::Resize(180,70));
+        assert_eq!(app.layout(app.size).panes.unwrap().len(),3);
+    }
+
+    #[test]
+    fn nested_mouse_dividers_resize_both_axes_and_keep_drafts(){
+        let mut app=App::default();app.rail_visible=false;app.handle(Event::Resize(180,80));
+        app.groups[0].tabs=vec!["a".into()];app.groups[1].tabs=vec!["b".into()];app.active_group=1;
+        app.split_active_pane(Split::Horizontal);app.input="keep draft".into();
+        let body=app.layout(app.size).body;let regions=app.layout(app.size).panes.unwrap();let x=regions[1].x+10;let boundary=regions[1].bottom();
+        app.handle(Event::Mouse(MouseEvent{kind:MouseEventKind::Down(MouseButton::Left),column:x,row:boundary,modifiers:KeyModifiers::NONE}));
+        assert!(matches!(app.drag,Some(DragTarget::NestedPane(_))));
+        app.handle(Event::Mouse(MouseEvent{kind:MouseEventKind::Drag(MouseButton::Left),column:x,row:boundary+10,modifiers:KeyModifiers::NONE}));
+        app.handle(Event::Mouse(MouseEvent{kind:MouseEventKind::Up(MouseButton::Left),column:x,row:boundary+10,modifiers:KeyModifiers::NONE}));
+        assert!(app.layout(app.size).panes.unwrap()[1].height>regions[1].height);assert_eq!(app.input,"keep draft");
+        let boundary=regions[0].right();let y=body.y+10;
+        app.handle(Event::Mouse(MouseEvent{kind:MouseEventKind::Down(MouseButton::Left),column:boundary,row:y,modifiers:KeyModifiers::NONE}));
+        app.handle(Event::Mouse(MouseEvent{kind:MouseEventKind::Drag(MouseButton::Left),column:boundary-15,row:y,modifiers:KeyModifiers::NONE}));
+        app.handle(Event::Mouse(MouseEvent{kind:MouseEventKind::Up(MouseButton::Left),column:boundary-15,row:y,modifiers:KeyModifiers::NONE}));
+        assert!(app.layout(app.size).panes.unwrap()[0].width<regions[0].width);assert_eq!(app.input,"keep draft");
+    }
+
+    #[test]
+    fn gallery_fixture_menus_never_write_spawn_or_save_fake_runs(){
+        let mut app=App::default();app.handle(Event::Resize(126,31));
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"gallery","engine":"codex","cwd":"/gallery"}));
+        app.show_memory_manager_fixture(0,"project",json!({"scope":"project","key":"/gallery","sha256":"f".repeat(64),"entries":["fixture fact"],"chars":12,"cap_chars":8800})).unwrap();
+        app.key(KeyEvent::new(KeyCode::Char('e'),KeyModifiers::NONE));app.key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
+        let mut terminal=Terminal::new(ratatui::backend::TestBackend::new(126,31)).unwrap();terminal.draw(|frame|app.draw(frame)).unwrap();
+        app.key(KeyEvent::new(KeyCode::Char('Y'),KeyModifiers::SHIFT));
+        assert!(app.memory_manager.as_ref().unwrap().fixture);assert!(!app.memory_manager.as_ref().unwrap().busy());
+        app.memory_manager=None;app.chip_info=None;
+        app.show_fleet_review_fixture(&json!({"run_id":"gallery-run","root":"/gallery/fleet","mode":"symmetric","sessions":1})).unwrap();
+        app.fleet_review.as_mut().unwrap().complete.set(true);app.fleet_review.as_mut().unwrap().armed=true;
+        app.key(KeyEvent::new(KeyCode::Char('Y'),KeyModifiers::SHIFT));assert!(app.fleet_controller.is_none());assert!(app.notice.contains("fixture cannot launch"));
+        app.show_fleet_view_fixture("gallery-run",&["Fixture status"]);assert!(!app.poll_fleet());assert!(app.fleet_views.is_empty());
+    }
+
 }

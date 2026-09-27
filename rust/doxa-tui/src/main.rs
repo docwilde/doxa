@@ -1,4 +1,4 @@
-use doxa_tui::{bridge, discovery, fleet_plan, fleet_view, launch, operations, ui_state};
+use doxa_tui::{bridge, discovery, fleet_control, fleet_plan, fleet_view, launch, mesh_control, operations, ui_state};
 use std::collections::HashSet;
 use std::io::{self, Write};
 use serde_json::{Map, Value};
@@ -37,13 +37,17 @@ Commands:
   worktrees cleanup FULL_ID --confirm
                        Remove one verified clean Rust orphan
   doctor               Check provider and launcher dependencies
-  setup                Inspect authentication, LORE store, and stored preferences
+  setup                Interactive authentication, LORE store, and defaults wizard
   settings             Show native settings and their effective sources
   settings set KEY VALUE | unset KEY
                        Persist linger_secs or worktree_per_session for new sessions
   auth status [NAME]   Check Claude or Codex CLI authentication without showing CLI output
-  plugins              List names and enabled flags from Claude Code's plugin registry
-  fleet ...            Inspect or start Python-backed fleet runs
+  auth login NAME [--device-auth (Codex only)] | auth logout NAME
+                       Run the explicitly selected provider authentication
+  plugins [refresh | adopt on|off]
+                       Discover plugins or change sanitized adoption for new sessions
+  fleet ...            Inspect or start native fleet runs
+  mesh serve           Serve the private peer graph until Ctrl-C
 
 Run doxa without a command to restore this project's live sessions or start
 a native Codex session. Pass --engine or --model to start a new session.
@@ -58,7 +62,7 @@ DeepSeek/GLM: --effort low|high|max (DeepSeek also none).
 Use --lore-python PATH for the LORE sidecar; API keys come from provider env vars.
 
 Fleet: doxa fleet preflight --sessions N --run-budget USD [--supervisor ENGINE[:MODEL]] [--approve none|peer|all] [--approval-grace SECONDS] [--root PATH]
-       doxa fleet start [Python fleet options]
+       doxa fleet start --pool ENGINE:MODEL --prompt TEXT -n N --run-budget USD
        doxa fleet runs | status RUN_ID | stop RUN_ID | attach RUN_ID SLOT
 
 Run doxa doctor --engine NAME to check a provider; doxa --version shows the build.
@@ -122,7 +126,7 @@ fn run(args: &[String]) -> io::Result<()> {
             }
             "setup" => {
                 if args.len() != 1 { return Err(invalid("setup takes no arguments")); }
-                println!("{}", operations::setup_report()?);
+                operations::setup_interactive()?;
                 return Ok(());
             }
             "settings" => {
@@ -137,21 +141,38 @@ fn run(args: &[String]) -> io::Result<()> {
                 return Ok(());
             }
             "auth" => {
-                let name = match args {
-                    [_, status] if status == "status" => None,
-                    [_, status, name] if status == "status" => Some(name.as_str()),
-                    _ => return Err(invalid("usage: doxa auth status [claude|codex]")),
-                };
-                println!("{}", operations::auth_status(name)?);
+                match args {
+                    [_, action] if action == "status" => println!("{}", operations::auth_status(None)?),
+                    [_, action, name] if action == "status" => println!("{}", operations::auth_status(Some(name))?),
+                    [_, action, name] if action == "login" || action == "logout" => println!("{}", operations::auth_action(name, action, |message| println!("{message}"))?),
+                    [_, action, name, option] if action == "login" && option == "--device-auth" => {
+                        let request = operations::parse_auth_request(action, &format!("{name} {option}"))?.ok_or_else(|| invalid("choose a provider explicitly"))?;
+                        println!("{}", operations::auth_action_request(request, |message| println!("{message}"), &std::sync::atomic::AtomicBool::new(false))?);
+                    },
+                    _ => return Err(invalid("usage: doxa auth status [claude|codex] | auth login claude|codex [--device-auth (Codex only)] | auth logout claude|codex")),
+                }
                 return Ok(());
             }
             "plugins" => {
-                if args.len() != 1 { return Err(invalid("plugins takes no arguments")); }
-                println!("{}", operations::plugins_report()?);
+                match args {
+                    [_] => println!("{}", operations::plugins_report()?),
+                    [_, action] if action == "refresh" => println!("{}", operations::plugins_reload()?),
+                    [_, action, value] if action == "adopt" && (value == "on" || value == "off") => println!("{}", operations::plugins_change(value == "on")?),
+                    _ => return Err(invalid("usage: doxa plugins [refresh | adopt on|off]")),
+                }
                 return Ok(());
             }
             _ => {}
         }
+    }
+    if args.first().is_some_and(|arg| arg == "mesh") {
+        let ledger = match &args[1..] {
+            [] => mesh_control::default_ledger()?,
+            [mode] if mode == "serve" => mesh_control::default_ledger()?,
+            [mode, flag, path] if mode == "serve" && flag == "--ledger" => PathBuf::from(path),
+            _ => return Err(invalid("usage: doxa mesh serve [--ledger ABSOLUTE_PATH] | doxa fleet mesh RUN_ID [--root ROOT]")),
+        };
+        return mesh_control::serve(&ledger);
     }
     if args.first().is_some_and(|arg| arg == "fleet") {
         return fleet(&args[1..]);
@@ -503,6 +524,9 @@ fn worktrees(args: &[String]) -> io::Result<()> {
 
 fn fleet(args: &[String]) -> io::Result<()> {
     if args.first().is_some_and(|arg| arg == "start") {
+        return fleet_control::start(&args[1..]);
+    }
+    if args.first().is_some_and(|arg| arg == "start-python") {
         return fleet_start_compat(&args[1..]);
     }
     if args.first().is_some_and(|arg| arg == "preflight") {
@@ -525,8 +549,20 @@ fn fleet(args: &[String]) -> io::Result<()> {
     }
     let root = match root { Some(root) => root, None => fleet_view::default_root()? };
     match words.as_slice() {
+        ["mesh", run] => return mesh_control::serve(&mesh_control::run_ledger(&root, run)?),
         ["runs"] => println!("{}", fleet_view::runs(&root)?),
         ["status", run] => println!("{}", fleet_view::status(&root, run)?),
+        ["resume", run] => return fleet_control::resume(&root, run),
+        ["review", run, slot, request] => {
+            let slot = slot.parse().map_err(|_| invalid("fleet slot must be a number"))?;
+            let reviewed = fleet_control::review(&root, run, slot, request)?;
+            println!("{}\nReview token: {}", serde_json::to_string_pretty(&reviewed.request)?, reviewed.token);
+        },
+        ["answer", run, slot, request, token, answer] => {
+            let slot = slot.parse().map_err(|_| invalid("fleet slot must be a number"))?;
+            let answer: serde_json::Value = serde_json::from_str(answer).map_err(|_| invalid("fleet answer must be a JSON object"))?;
+            println!("{}", fleet_control::answer(&root, run, slot, request, token, answer)?);
+        },
         ["stop", run] => {
             let report = fleet_view::stop(&root, run)?;
             println!("{}", report.text);
@@ -539,7 +575,7 @@ fn fleet(args: &[String]) -> io::Result<()> {
             let (socket, session_id) = fleet_view::slot_socket(&root, run, slot)?;
             return bridge::run_socket_expected(socket, Some(&session_id));
         }
-        _ => return Err(invalid("usage: doxa fleet start PYTHON_FLEET_OPTIONS|preflight --sessions N --run-budget USD [--supervisor ENGINE[:MODEL]] [--approve none|peer|all] [--approval-grace SECONDS] [--root ABSOLUTE_PATH]|runs|status RUN_ID|stop RUN_ID|attach RUN_ID SLOT [--root ABSOLUTE_PATH]")),
+        _ => return Err(invalid("usage: doxa fleet start --pool ENGINE:MODEL --prompt TEXT -n N --run-budget USD|start-python PYTHON_FLEET_OPTIONS|preflight --sessions N --run-budget USD [--supervisor ENGINE[:MODEL]] [--approve none|peer|all] [--approval-grace SECONDS] [--root ABSOLUTE_PATH]|runs|status RUN_ID|stop RUN_ID|attach RUN_ID SLOT [--root ABSOLUTE_PATH]")),
     }
     Ok(())
 }
@@ -599,3 +635,7 @@ mod tests {
         assert!(script.contains("main \"$@\""));
     }
 }
+
+#[cfg(test)]
+#[path = "ui/operations_menu.rs"]
+mod operations_menu_test;
