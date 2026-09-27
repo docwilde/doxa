@@ -12,9 +12,10 @@ pub struct Owner {
 }
 #[derive(Clone,Debug,PartialEq,Eq)]
 pub struct Display {pub subject:String,pub claim:String,pub complete:bool}
+#[derive(Debug)]
 struct Hover {owner:Owner,since:Instant,visible:bool,requested:bool,display:Option<Display>,failed:bool,
     pending:Option<Receiver<Result<Value,()>>>}
-#[derive(Default)]
+#[derive(Default,Debug)]
 pub struct Preview {hover:Option<Hover>}
 
 impl Preview {
