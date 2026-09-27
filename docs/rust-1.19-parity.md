@@ -2,7 +2,9 @@
 
 Baseline: Python `v1.19.0` production consumers, rather than planned APIs or
 unused transport helpers. Alpha.31 closes the audited functional gaps below.
-Alpha.32 adds the subsequent source-audit ownership and deadline corrections.
+Alpha.32/33 add the subsequent source-audit ownership, deadline and durability
+corrections. Alpha.34 integrates canonical LORE 0.61.0 in Rust, including the
+retained SDK/MCP adapter paths, detached review and reconciliation.
 Terminal images remain excluded by user preference. Provider capabilities,
 trust gates and unavailable historical data retain their documented limits.
 
@@ -60,7 +62,7 @@ postpones restart. Existing daemons outside this window retain their implementat
 ## Release verification
 
 Run `./task test` for Rust regressions. Rust CI also tests the installed locked
-Python SDK/LORE seams against disposable stores and local provider fixtures.
+Python SDK adapters and native LORE seams against disposable stores and local provider fixtures.
 Alpha.31 supplied the event-loop benchmark measurements. Production gallery captures
 are labelled by their rendered package version;
 see the [benchmark](rust-ui-benchmark-2026-09-27.md) and

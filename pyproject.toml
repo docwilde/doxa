@@ -1,6 +1,6 @@
 [project]
 name = "doxa"
-version = "2.0.0a33"
+version = "2.0.0a34"
 description = "Internal Claude SDK adapters for the native DOXA terminal."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -49,7 +49,7 @@ remote = [
 [dependency-groups]
 dev = [
     # Canonical Python APIs remain an interoperability oracle, never a runtime backend.
-    "lore-core @ git+https://github.com/docwilde/LORE@v0.58.5",
+    "lore-core @ git+https://github.com/docwilde/LORE@0b3ef55e575c4375db8e79a24521a7d64778b428",
     "pytest>=8",
     "pytest-asyncio>=0.24",
 ]

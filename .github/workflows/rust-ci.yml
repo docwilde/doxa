@@ -13,6 +13,7 @@ permissions:
 # concurrency regressions explicitly start their own threads and processes.
 env:
   RUST_TEST_THREADS: "1"
+  DOXA_LORE_RS: ${{ github.workspace }}/target/debug/lore-rs
 
 jobs:
   rust:
@@ -27,7 +28,9 @@ jobs:
         run: cargo +stable test --locked --manifest-path rust/doxa-tui/Cargo.toml
       - name: Test Codex event normalization
         run: cargo +stable test --locked --manifest-path rust/doxa-engines/Cargo.toml
-      - name: Test external LORE bridge
+      - name: Build native LORE carrier
+        run: cargo +stable build --locked --package lore-core --bin lore-rs
+      - name: Test native LORE integration
         run: cargo +stable test --locked --manifest-path rust/doxa-lore/Cargo.toml
       - name: Test peer registry compatibility
         run: cargo +stable test --locked --manifest-path rust/doxa-peers/Cargo.toml
@@ -52,8 +55,12 @@ jobs:
           sh -n scripts/install.sh task
           ./task help
           uv run pytest tests/test_install_rust.py tests/test_mesh_wheel.py -q
-      - name: Test native LORE sidecar boundary
+      - name: Test native LORE adapter and compatibility fixtures
         run: uv run pytest tests/test_lore_bridge.py tests/test_settings_graph.py tests/test_native_agent_tools.py tests/test_lore_capacity.py tests/test_claude_quota.py -q
+      - name: Test native LORE SDK carrier and diagnostics
+        env:
+          DOXA_TEST_LORE_RS: ${{ github.workspace }}/target/debug/lore-rs
+        run: uv run pytest tests/test_native_lore_carrier.py tests/test_native_lore_interop.py tests/test_native_lore_diagnostics.py tests/test_lore_dependency.py -q
       - name: Test native plugin inventory and sanitized reload
         run: uv run pytest tests/test_native_plugin_inventory.py tests/test_native_plugin_commands.py -q
       - name: Test native Claude identity and peer ownership
@@ -94,8 +101,9 @@ jobs:
             sh scripts/install.sh HEAD
           (cd / && "$smoke_dir/bin/doxa" --version)
           doctor_output=$(cd / && "$smoke_dir/bin/doxa" doctor --engine deepseek || true)
-          printf '%s\n' "$doctor_output" | grep -F "ok lore python: $smoke_dir/home/sidecars/$smoke_sha/bin/python"
+          printf '%s\n' "$doctor_output" | grep -F "ok daemon:"
           (cd / && "$smoke_dir/home/sidecars/$smoke_sha/bin/python" \
-            -c 'import doxa.lore_bridge, doxa.engine, lore_core, claude_agent_sdk')
+            -I -c 'import doxa.native_lore, doxa.engine, claude_agent_sdk; import importlib.util; assert importlib.util.find_spec("lore_core") is None')
+          HOME="$smoke_dir/owned-home" "$smoke_dir/bin/lore-rs" memory show
       - name: Test vendor chat adapter
         run: cargo +stable test --locked --features local-test-server --manifest-path rust/doxa-vendors/Cargo.toml

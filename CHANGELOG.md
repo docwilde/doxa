@@ -5,6 +5,23 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.34 — 2026-09-27
+
+- Integrate canonical LORE 0.61.0 as a Rust module for memory, file maps, beliefs,
+  evidence/graphs, context, session history/indexing, pending review and local
+  signed sync records. Existing stores remain compatible.
+- Route retained Claude SDK/MCP memory tools and detached review through the
+  native carrier; remove Python LORE from installed runtime dependencies.
+  Preserve it as a development interoperability oracle.
+- Use exact transcript proofs and frozen engine identity for native review and
+  reconciliation. Promotions stay pending; landed partial failures remain visible.
+- Install the native `lore-rs` carrier atomically beside frontend and daemon;
+  diagnose its actual version, store and source through native read-only APIs.
+- Preserve nullable remote session metadata and canonical indexing reply fields;
+  honor configured zero memory caps while retaining read/removal access.
+- Release as the official latest GitHub release, retaining alpha maturity in the
+  version name. The Greek ΔΟΞΑ wordmark and concise README feature bullets remain.
+
 ## 2.0.0-alpha.33 — 2026-09-27
 
 - Fix Claude initialization with group-writable `uv` interpreters protected by

@@ -93,7 +93,8 @@ fn glm_uses_its_own_configured_model_and_doctor_checks_key_without_printing_it()
         String::from_utf8_lossy(&doctor.stderr)
     );
     let summary = String::from_utf8_lossy(&doctor.stdout);
-    assert!(summary.contains("ok lore python:"));
+    assert!(summary.contains("ok daemon:"));
+    assert!(!summary.contains("lore python"));
     assert!(summary.contains("ok ZAI_API_KEY: set"));
     assert!(!summary.contains("secret-vendor-key"));
     assert!(!summary.contains("codex:"));

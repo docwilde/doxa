@@ -365,15 +365,6 @@ fn run(args: &[String]) -> io::Result<()> {
                                 .unwrap_or(std::path::Path::new("codex")),
                         ),
                     ));
-                    checks.push((
-                        "lore python",
-                        launch::python_executable(
-                            options
-                                .lore_python
-                                .as_deref()
-                                .unwrap_or(std::path::Path::new("python3")),
-                        ),
-                    ));
                 }
                 launch::Engine::Claude => {
                     checks.push((
@@ -392,15 +383,6 @@ fn run(args: &[String]) -> io::Result<()> {
                 }
                 launch::Engine::Fixture => {}
                 launch::Engine::DeepSeek | launch::Engine::Glm => {
-                    checks.push((
-                        "lore python",
-                        launch::python_executable(
-                            options
-                                .lore_python
-                                .as_deref()
-                                .unwrap_or(std::path::Path::new("python3")),
-                        ),
-                    ));
                     if let Err(error) = launch::vendor_effort(&options) {
                         println!("missing vendor effort: {error}");
                         missing = true;
