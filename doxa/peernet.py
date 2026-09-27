@@ -79,6 +79,8 @@ operator's own logins on their own tailnet.
 
 from __future__ import annotations
 
+from collections import deque
+
 import asyncio
 import contextlib
 import fcntl
@@ -333,6 +335,11 @@ def listen_decision() -> policy_mod.Decision:
 # -- the listener ------------------------------------------------------
 
 
+MAX_REFUSAL_HISTORY = 128
+MAX_REFUSAL_CHARS = 512
+MAX_REFUSAL_COUNT = (1 << 64) - 1
+
+
 class PeerNetServer:
     """The bridge: a minimal HTTP listener that answers three ops.
 
@@ -381,7 +388,15 @@ class PeerNetServer:
         # an identity header into policy.
         self._trusted_proxy = trusted_proxy or self._is_tailscaled_peer
         self._server: "asyncio.AbstractServer | None" = None
-        self.refusals: "list[str]" = []
+        self.refusals: deque[str] = deque(maxlen=MAX_REFUSAL_HISTORY)
+        self.refusal_count = 0
+
+    def _record_refusal(self, reason: str) -> None:
+        # Keep recent diagnostic context; the wire response still carries
+        # the exact policy reason. Rejected traffic cannot retain its lifetime
+        # payload in this long-lived bridge.
+        self.refusals.append(reason[:MAX_REFUSAL_CHARS])
+        self.refusal_count = min(MAX_REFUSAL_COUNT, self.refusal_count + 1)
 
     @property
     def listening(self) -> bool:
@@ -399,7 +414,7 @@ class PeerNetServer:
         that rejects -- no socket."""
         decision = listen_decision()
         if not decision.allowed:
-            self.refusals.append(decision.reason)
+            self._record_refusal(decision.reason)
             return decision
         if self.socket_path is not None:
             # Do not unlink an existing name.  Another daemon may own the
@@ -509,7 +524,7 @@ class PeerNetServer:
         kind = OP_KINDS.get(op)
         if kind is None:
             reason = f"{op!r} is not an operation this bridge serves"
-            self.refusals.append(reason)
+            self._record_refusal(reason)
             return 400, {"ok": False, "reason": reason}
         decision = self._evaluate(kind, login=login, from_loopback=from_loopback)
         if not decision.allowed:
@@ -518,7 +533,7 @@ class PeerNetServer:
             # refused can say what it refused and why. A refusal only the
             # refuser knows about is the silent failure remote.md's testing
             # bar exists to prevent.
-            self.refusals.append(decision.reason)
+            self._record_refusal(decision.reason)
             return 403, {"ok": False, "reason": decision.reason}
         handler = self.handlers.get(op)
         if handler is None:
