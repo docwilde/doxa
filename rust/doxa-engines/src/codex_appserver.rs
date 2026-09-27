@@ -189,6 +189,12 @@ impl AppServerDriver {
             if driver.peer_tools { params["dynamicTools"] = json!(crate::peer_tools::definitions()); }
             driver.request("thread/start", params).await?
         };
+        // Protected sessions must establish the requested price/model basis
+        // before any turn can run. Never accept a provider fallback silently.
+        if driver.compact_gate.is_some() && driver.options.model.as_deref()
+            .is_some_and(|expected| result["model"].as_str() != Some(expected)) {
+            return Err(AppServerError::Protocol("Codex returned a different or unverified requested model; no turn started"));
+        }
         let id = result.pointer("/thread/id").and_then(Value::as_str)
             .filter(|id| valid_thread_id(id))
             .ok_or(AppServerError::Protocol("thread response lacks a valid ID"))?;

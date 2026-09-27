@@ -39,6 +39,9 @@ thread=read(); assert thread['method']=='thread/start'
 assert thread['params']['approvalPolicy']=='on-request'
 if mode.startswith('peer'): assert {x['name'] for x in thread['params']['dynamicTools']}=={'mcp__doxa__peer_list','mcp__doxa__peer_send','mcp__doxa__peer_history'}
 send({'id':thread['id'],'result':{'thread':{'id':'thread-actual'},'model':'gpt-5.5'}})
+if mode=='model':
+    if sys.stdin.readline(): Path('unsafe-model-turn').write_text('request')
+    sys.exit(0)
 operation=read()
 if mode.startswith('peer'):
     assert operation['method']=='turn/start'
@@ -80,6 +83,18 @@ async fn authoritative_version_and_hook_hash_refuse_before_thread_creation() {
         let (dir, options, gate) = fixture(mode);
         assert!(AppServerDriver::spawn_protected(options, str::to_owned, false, gate).await.is_err());
         assert!(!dir.path().join(format!("unsafe-after-{mode}")).exists());
+    }
+}
+
+#[tokio::test]
+async fn protected_initial_model_is_verified_before_any_turn() {
+    for requested in ["gpt-5.5", "gpt-6-astra"] {
+        let (dir, mut options, gate)=fixture("model");
+        options.model=Some(requested.into());
+        let result=AppServerDriver::spawn_protected(options,str::to_owned,false,gate).await;
+        assert_eq!(result.is_ok(),requested=="gpt-5.5");
+        if let Ok(mut driver)=result {driver.shutdown().await;}
+        assert!(!dir.path().join("unsafe-model-turn").exists());
     }
 }
 
