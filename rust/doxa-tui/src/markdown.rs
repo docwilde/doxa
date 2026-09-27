@@ -7,10 +7,50 @@ use pulldown_cmark::{Alignment, Event, Options, Parser, Tag, TagEnd};
 use ratatui::{style::{Modifier, Style}, text::{Line, Span}};
 use unicode_width::UnicodeWidthChar;
 use crate::theme;
+use std::sync::Arc;
+
+/// A destination belongs to these rendered cells, independent of label text
+/// and terminal styling. Rows and columns already include wrapping/table layout.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LinkRegion {
+    pub row: usize,
+    pub start: usize,
+    pub end: usize,
+    pub url: Arc<str>,
+}
+
+#[derive(Default)]
+pub struct RenderedMarkdown {
+    pub lines: Vec<Line<'static>>,
+    pub links: Vec<LinkRegion>,
+}
+
+#[derive(Clone)]
+struct Part {
+    span: Span<'static>,
+    url: Option<Arc<str>>,
+}
+impl std::ops::Deref for Part {
+    type Target = Span<'static>;
+    fn deref(&self) -> &Self::Target { &self.span }
+}
+impl std::ops::DerefMut for Part {
+    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.span }
+}
+impl Part {
+    fn raw(text: impl Into<String>) -> Self {
+        let text: String = text.into();
+        Self { span: Span::raw(text), url: None }
+    }
+    fn styled(text: impl Into<String>, style: Style, url: Option<Arc<str>>) -> Self {
+        let text: String = text.into();
+        Self { span: Span::styled(text, style), url }
+    }
+}
 
 #[derive(Default)]
 struct Block {
-    spans: Vec<Span<'static>>,
+    spans: Vec<Part>,
     prefix: String,
     continuation: String,
     code: bool,
@@ -25,31 +65,35 @@ struct List {
 #[derive(Default)]
 struct Table {
     alignments: Vec<Alignment>,
-    rows: Vec<Vec<Vec<Span<'static>>>>,
-    row: Vec<Vec<Span<'static>>>,
-    cell: Vec<Span<'static>>,
+    rows: Vec<Vec<Vec<Part>>>,
+    row: Vec<Vec<Part>>,
+    cell: Vec<Part>,
     in_cell: bool,
     header_rows: usize,
 }
 
 struct Renderer {
     lines: Vec<Line<'static>>,
+    regions: Vec<LinkRegion>,
     block: Option<Block>,
     lists: Vec<List>,
     quote_depth: usize,
     style: Style,
     styles: Vec<Style>,
-    links: Vec<String>,
+    links: Vec<Arc<str>>,
     table: Option<Table>,
     width: usize,
 }
 
-/// Render CommonMark and GFM tables to styled terminal lines. Link destinations
-/// are visible text; the UI derives click coordinates from the rendered lines. Model supplied
-/// control characters are replaced so they cannot become terminal commands.
+/// Render CommonMark/GFM with label-only links. Model supplied control
+/// characters are replaced so they cannot become terminal commands.
 pub fn render(source: &str, width: u16) -> Vec<Line<'static>> {
+    render_with_links(source, width).lines
+}
+
+pub fn render_with_links(source: &str, width: u16) -> RenderedMarkdown {
     let mut renderer = Renderer {
-        lines: Vec::new(), block: None, lists: Vec::new(), quote_depth: 0,
+        lines: Vec::new(), regions: Vec::new(), block: None, lists: Vec::new(), quote_depth: 0,
         style: Style::default(), styles: Vec::new(), links: Vec::new(),
         table: None, width: usize::from(width.max(1)),
     };
@@ -60,10 +104,30 @@ pub fn render(source: &str, width: u16) -> Vec<Line<'static>> {
     while renderer.lines.last().is_some_and(|line| line.spans.is_empty()) {
         renderer.lines.pop();
     }
-    renderer.lines
+    RenderedMarkdown { lines: renderer.lines, links: renderer.regions }
 }
 
 impl Renderer {
+    fn line(&mut self, parts: Vec<Part>) {
+        let row = self.lines.len();
+        let mut col = 0;
+        for part in &parts {
+            let end = col + cell_width(&part.content);
+            if end > col {
+                if let Some(url) = &part.url {
+                    if let Some(last) = self.regions.last_mut().filter(|last|
+                        last.row == row && last.end == col && last.url == *url) {
+                        last.end = end;
+                    } else {
+                        self.regions.push(LinkRegion { row, start: col, end, url: url.clone() });
+                    }
+                }
+            }
+            col = end;
+        }
+        self.lines.push(Line::from(parts.into_iter().map(|part| part.span).collect::<Vec<_>>()));
+    }
+
     fn start(&mut self, code: bool) {
         self.flush();
         let mut prefix = "│ ".repeat(self.quote_depth);
@@ -88,12 +152,12 @@ impl Renderer {
         if clean.is_empty() { return; }
         if let Some(table) = self.table.as_mut() {
             if table.in_cell {
-                table.cell.push(Span::styled(clean, self.style));
+                table.cell.push(Part::styled(clean, self.style, self.links.last().cloned()));
                 return;
             }
         }
         if self.block.is_none() { self.start(false); }
-        self.block.as_mut().unwrap().spans.push(Span::styled(clean, self.style));
+        self.block.as_mut().unwrap().spans.push(Part::styled(clean, self.style, self.links.last().cloned()));
     }
 
     fn enter(&mut self, style: Style) {
@@ -138,7 +202,7 @@ impl Renderer {
                 Tag::Strong => self.enter(Style::default().add_modifier(Modifier::BOLD)),
                 Tag::Strikethrough => self.enter(Style::default().add_modifier(Modifier::CROSSED_OUT)),
                 Tag::Link { dest_url, .. } | Tag::Image { dest_url, .. } => {
-                    self.links.push(sanitize(&dest_url).replace('\n', " "));
+                    self.links.push(Arc::from(sanitize(&dest_url).replace('\n', " ")));
                     self.enter(Style::default().fg(theme::ACCENT).add_modifier(Modifier::UNDERLINED));
                 }
                 Tag::Table(alignments) => {
@@ -161,9 +225,7 @@ impl Renderer {
                 TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough => self.leave(),
                 TagEnd::Link | TagEnd::Image => {
                     self.leave();
-                    if let Some(url) = self.links.pop() {
-                        if !url.is_empty() { self.push(&format!(" ({url})")); }
-                    }
+                    self.links.pop();
                 }
                 TagEnd::TableCell => { if let Some(table) = self.table.as_mut() {
                     table.in_cell = false;
@@ -200,21 +262,21 @@ impl Renderer {
     }
 
     fn wrap(&mut self, block: Block) {
-        let mut output: Vec<Span<'static>> = Vec::new();
+        let mut output: Vec<Part> = Vec::new();
         let mut prefix = visible_prefix(&block.prefix, self.width);
         let mut col = 0;
         add_prefix(&mut output, &mut col, prefix);
         for part in block.spans {
             for (index, segment) in part.content.split('\n').enumerate() {
                 if index > 0 {
-                    self.lines.push(Line::from(std::mem::take(&mut output)));
+                    self.line(std::mem::take(&mut output));
                     prefix = visible_prefix(&block.continuation, self.width);
                     col = 0;
                     add_prefix(&mut output, &mut col, prefix);
                 }
                 for word in words(segment) {
                     if !block.code && col > cell_width(prefix) && col + cell_width(word) > self.width {
-                        self.lines.push(Line::from(std::mem::take(&mut output)));
+                        self.line(std::mem::take(&mut output));
                         prefix = visible_prefix(&block.continuation, self.width);
                         col = 0;
                         add_prefix(&mut output, &mut col, prefix);
@@ -226,26 +288,26 @@ impl Renderer {
                         } else { ch };
                         let size = UnicodeWidthChar::width(ch).unwrap_or(0);
                         if col > cell_width(prefix) && col + size > self.width {
-                            self.lines.push(Line::from(std::mem::take(&mut output)));
+                            self.line(std::mem::take(&mut output));
                             prefix = visible_prefix(&block.continuation, self.width);
                             col = 0;
                             add_prefix(&mut output, &mut col, prefix);
                         }
                         if let Some(last) = output.last_mut() {
-                            if last.style == part.style {
+                            if last.style == part.style && last.url == part.url {
                                 last.content.to_mut().push(ch);
                             } else {
-                                output.push(Span::styled(ch.to_string(), part.style));
+                                output.push(Part::styled(ch.to_string(), part.style, part.url.clone()));
                             }
                         } else {
-                            output.push(Span::styled(ch.to_string(), part.style));
+                            output.push(Part::styled(ch.to_string(), part.style, part.url.clone()));
                         }
                         col += size;
                     }
                 }
             }
         }
-        if !output.is_empty() { self.lines.push(Line::from(output)); }
+        if !output.is_empty() { self.line(output); }
     }
 
     fn table_lines(&mut self, table: Table) {
@@ -255,12 +317,12 @@ impl Renderer {
         // viewport is narrower, use the ordinary bounded line wrapper.
         if columns.saturating_mul(4).saturating_add(1) > self.width {
             for row in table.rows {
-                let mut spans = vec![Span::raw("│ ")];
+                let mut spans = vec![Part::raw("│ ")];
                 for (column, cell) in row.into_iter().enumerate() {
-                    if column > 0 { spans.push(Span::raw(" │ ")); }
+                    if column > 0 { spans.push(Part::raw(" │ ")); }
                     spans.extend(cell);
                 }
-                spans.push(Span::raw(" │"));
+                spans.push(Part::raw(" │"));
                 self.wrap(Block { spans, ..Block::default() });
             }
             return;
@@ -297,14 +359,14 @@ impl Renderer {
         }
 
         for (index, row) in table.rows.into_iter().enumerate() {
-            let cells: Vec<Vec<Vec<Span<'static>>>> = (0..columns).map(|column| {
+            let cells: Vec<Vec<Vec<Part>>> = (0..columns).map(|column| {
                 wrap_cell(row.get(column).map(Vec::as_slice).unwrap_or(&[]), widths[column])
             }).collect();
             let height = cells.iter().map(Vec::len).max().unwrap_or(1);
             for line_index in 0..height {
-                let mut spans = vec![Span::raw("│ ")];
+                let mut spans = vec![Part::raw("│ ")];
                 for column in 0..columns {
-                    if column > 0 { spans.push(Span::raw(" │ ")); }
+                    if column > 0 { spans.push(Part::raw(" │ ")); }
                     let cell_line = cells[column].get(line_index).map(Vec::as_slice).unwrap_or(&[]);
                     let used = cell_line.iter().map(|span| cell_width(&span.content)).sum::<usize>();
                     let padding = widths[column] - used;
@@ -314,12 +376,12 @@ impl Renderer {
                         Alignment::Center => padding / 2,
                         _ => 0,
                     };
-                    if left > 0 { spans.push(Span::raw(" ".repeat(left))); }
+                    if left > 0 { spans.push(Part::raw(" ".repeat(left))); }
                     spans.extend(cell_line.iter().cloned());
-                    if padding > left { spans.push(Span::raw(" ".repeat(padding - left))); }
+                    if padding > left { spans.push(Part::raw(" ".repeat(padding - left))); }
                 }
-                spans.push(Span::raw(" │"));
-                self.lines.push(Line::from(spans));
+                spans.push(Part::raw(" │"));
+                self.line(spans);
             }
             if index + 1 == table.header_rows {
                 let mut rule = String::from("├");
@@ -334,7 +396,7 @@ impl Renderer {
     }
 }
 
-fn cell_natural_width(cell: &[Span<'_>], cap: usize) -> usize {
+fn cell_natural_width(cell: &[Part], cap: usize) -> usize {
     let (mut line, mut widest) = (0usize, 0usize);
     for span in cell {
         for ch in span.content.chars() {
@@ -349,8 +411,8 @@ fn cell_natural_width(cell: &[Span<'_>], cap: usize) -> usize {
     widest.max(line).max(1)
 }
 
-fn wrap_cell(cell: &[Span<'static>], width: usize) -> Vec<Vec<Span<'static>>> {
-    let mut lines: Vec<Vec<Span<'static>>> = vec![Vec::new()];
+fn wrap_cell(cell: &[Part], width: usize) -> Vec<Vec<Part>> {
+    let mut lines: Vec<Vec<Part>> = vec![Vec::new()];
     let mut used = 0;
     for span in cell {
         for ch in span.content.chars() {
@@ -367,13 +429,13 @@ fn wrap_cell(cell: &[Span<'static>], width: usize) -> Vec<Vec<Span<'static>>> {
             }
             let line = lines.last_mut().unwrap();
             if let Some(last) = line.last_mut() {
-                if last.style == span.style {
+                if last.style == span.style && last.url == span.url {
                     last.content.to_mut().push(ch);
                 } else {
-                    line.push(Span::styled(ch.to_string(), span.style));
+                    line.push(Part::styled(ch.to_string(), span.style, span.url.clone()));
                 }
             } else {
-                line.push(Span::styled(ch.to_string(), span.style));
+                line.push(Part::styled(ch.to_string(), span.style, span.url.clone()));
             }
             used += size;
         }
@@ -381,9 +443,9 @@ fn wrap_cell(cell: &[Span<'static>], width: usize) -> Vec<Vec<Span<'static>>> {
     lines
 }
 
-fn add_prefix(spans: &mut Vec<Span<'static>>, col: &mut usize, prefix: &str) {
+fn add_prefix(spans: &mut Vec<Part>, col: &mut usize, prefix: &str) {
     if !prefix.is_empty() {
-        spans.push(Span::raw(prefix.to_owned()));
+        spans.push(Part::raw(prefix.to_owned()));
         *col = cell_width(prefix);
     }
 }

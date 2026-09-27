@@ -1198,6 +1198,7 @@ struct RenderedTranscript {
     cards_revision: u64,
     lines: Vec<Line<'static>>,
     sections: Vec<transcript_tools::Section>,
+    links: Vec<markdown::LinkRegion>,
     turn_start: Option<usize>,
     prefix_lines: usize,
 }
@@ -1235,7 +1236,7 @@ fn streamed_turn_start(source: &str) -> Option<usize> {
 impl RenderedTranscript {
     fn render(pane: usize, id: &str, source: &str, width: u16, expanded: Option<&HashSet<usize>>,
               selected: Option<usize>, cards_revision: u64, cards: &[tool_cards::ToolCard]) -> Self {
-        let (lines, sections) = transcript_tools::render_with_cards(source, width, expanded, selected, cards);
+        let (lines, sections, links) = transcript_tools::render_with_links(source, width, expanded, selected, cards);
         let mut turn_start = None;
         let mut prefix_lines = 0;
         if let Some(start) = streamed_turn_start(source) {
@@ -1254,7 +1255,7 @@ impl RenderedTranscript {
         }
         Self { pane, id: id.to_owned(), source: source.to_owned(), width,
             expanded: expanded.cloned(), selected, cards_revision,
-            lines, sections, turn_start, prefix_lines }
+            lines, sections, links, turn_start, prefix_lines }
     }
 
     fn update(&mut self, source: &str, width: u16, expanded: Option<&HashSet<usize>>,
@@ -1266,8 +1267,11 @@ impl RenderedTranscript {
                 if streamed_turn_start(source) == Some(start) {
                     let tail = &source[start..];
                     if !tail.contains("Tool: ") && !tail.contains(transcript_tools::REASONING_PREFIX) && !tail.contains(transcript_tools::SHELL_PREFIX) {
-                        let (tail_lines, tail_sections) = transcript_tools::render(tail, width, None, None);
+                        let (tail_lines, tail_sections, mut tail_links) = transcript_tools::render_with_links(tail, width, None, None, &[]);
                         if tail_sections.is_empty() {
+                            self.links.retain(|link| link.row < self.prefix_lines);
+                            for link in &mut tail_links { link.row += self.prefix_lines + 1; }
+                            self.links.extend(tail_links);
                             self.lines.truncate(self.prefix_lines);
                             self.lines.push(Line::default());
                             self.lines.extend(tail_lines);
@@ -1369,6 +1373,7 @@ pub struct App {
     chip_hover_started: Option<(ChipHit, Instant)>,
     chip_tooltip_visible: bool,
     link_hover: Option<String>,
+    link_hover_position: Option<(u16, u16)>,
     visible_links: RefCell<Vec<(Rect, String)>>,
     pending_open_urls: Vec<String>,
     chip_info: Option<ChipInfo>,
@@ -1561,6 +1566,7 @@ impl Default for App {
             chip_hover_started: None,
             chip_tooltip_visible: false,
             link_hover: None,
+            link_hover_position: None,
             visible_links: RefCell::new(Vec::new()),
             pending_open_urls: Vec::new(),
             chip_info: None,
@@ -7781,8 +7787,11 @@ impl App {
             let link = (!overlay).then(|| self.link_at(mouse.column, mouse.row)).flatten();
             let changed = belief_hover_changed || self.chip_hover != chip || self.link_hover != link;
             self.chip_hover = chip;
+            let position = link.as_ref().map(|_| (mouse.column, mouse.row));
+            let moved = self.link_hover_position != position;
+            self.link_hover_position = position;
             self.link_hover = link;
-            return changed;
+            return changed || moved;
         }
         if mouse.kind == MouseEventKind::Down(MouseButton::Left)
             && self.active_chooser_rect().is_some_and(|area|
@@ -8592,6 +8601,7 @@ impl App {
             self.draw_request(frame, area, false);
         }
         self.draw_chip_tooltip(frame);
+        self.draw_link_tooltip(frame);
         self.transcript_selection.borrow_mut().finish_paint(frame.buffer_mut());
         if self.preferences.value("background")=="transparent" {for cell in &mut frame.buffer_mut().content {if matches!(cell.bg,theme::BASE|theme::RAISED|theme::RAIL) {cell.bg=Color::Reset;}}}
     }
@@ -8618,6 +8628,22 @@ impl App {
             return true;
         }
         false
+    }
+
+    fn draw_link_tooltip(&self, frame: &mut Frame) {
+        if self.link_interaction_blocked() { return; }
+        let (Some(url), Some((column, row))) = (&self.link_hover, self.link_hover_position) else { return; };
+        // Revalidate against this paint: scrolling/folding may have replaced
+        // the row under a stationary mouse since the last motion event.
+        if self.link_at(column, row).as_ref() != Some(url) { return; }
+        let screen = frame.area();
+        let hint = format!(" {url} · Ctrl-click to open ");
+        let width = hint.width().min(usize::from(screen.width)) as u16;
+        let x = column.min(screen.right().saturating_sub(width)).max(screen.x);
+        let y = if row > screen.y { row - 1 } else { row.saturating_add(1).min(screen.bottom().saturating_sub(1)) };
+        let text = clipped_title(&hint, usize::from(width)).0;
+        frame.render_widget(Paragraph::new(text).style(Style::default()
+            .fg(theme::ACCENT).bg(theme::HIGHLIGHT)), Rect::new(x, y, width, 1));
     }
 
     fn draw_chip_tooltip(&self, frame: &mut Frame) {
@@ -9448,7 +9474,7 @@ impl App {
         } else if self.activity_label(id) == Some("Queued") {
             Some(Line::styled(" Queued", Style::default().fg(theme::SECONDARY)))
         } else { None };
-        let (lines, sections, top) = if content.trim().is_empty() {
+        let (lines, sections, link_regions, top) = if content.trim().is_empty() {
             let identity = self.session_identity.get(id);
             let state = if session.is_some() {
                 crate::welcome::State::Ready {engine:identity.and_then(|value|value.0.as_deref()),
@@ -9457,7 +9483,7 @@ impl App {
             else if self.awaiting_initial_attach || group.active_id().is_some() { crate::welcome::State::Connecting }
             else { crate::welcome::State::Empty {reason:self.startup_recovery.as_deref()} };
             (crate::welcome::lines(state,self.persist_preferences && self.preferences.on("boot_banner"),
-                inner[1].width.saturating_sub(2),inner[1].height),Vec::new(),0)
+                inner[1].width.saturating_sub(2),inner[1].height),Vec::new(),Vec::new(),0)
         } else {
             let mut cache = self.rendered_transcripts.borrow_mut();
             let position = cache.iter().position(|entry| entry.pane == index && entry.id == id);
@@ -9478,7 +9504,9 @@ impl App {
                 cards_revision, self.tool_cards.for_session(id));
             let (window, top) = transcript_window(&cache[position].lines,
                 inner[1].height, group.scroll, activity_line);
-            (window, cache[position].sections.clone(), top)
+            (window, cache[position].sections.clone(), cache[position].links.iter()
+                .filter(|link| link.row >= top && link.row < top + usize::from(inner[1].height))
+                .cloned().map(|mut link| { link.row -= top; link }).collect::<Vec<_>>(), top)
         };
         for section in sections {
             if section.line >= top && section.line < top + usize::from(inner[1].height) {
@@ -9492,7 +9520,16 @@ impl App {
         }
         let content_width = usize::from(inner[1].width.saturating_sub(2));
         let mut visible_links = self.visible_links.borrow_mut();
-        for hit in links::hits(&lines, content_width) {
+        let explicit: Vec<links::LinkHit> = link_regions.into_iter()
+            .filter(|link| links::safe_url(&link.url) && link.start < content_width)
+            .map(|link| links::LinkHit { row: link.row, start: link.start,
+                end: link.end.min(content_width), url: link.url.to_string() }).collect();
+        let mut hitboxes = explicit.clone();
+        // A label may itself look like a bare URL. Its explicit destination
+        // wins; never derive a second destination from those painted cells.
+        hitboxes.extend(links::hits(&lines, content_width).into_iter().filter(|hit|
+            !explicit.iter().any(|label| label.row == hit.row && label.start < hit.end && hit.start < label.end)));
+        for hit in hitboxes {
             if hit.end > hit.start {
                 visible_links.push((
                     Rect::new(inner[1].x.saturating_add(1).saturating_add(hit.start as u16),
@@ -12293,6 +12330,69 @@ for line in sys.stdin:
             column: permission.rect.x + 1, row: permission.rect.y,
             modifiers: KeyModifiers::NONE }));
         assert!(app.permission_picker.is_some());
+    }
+
+    #[test]
+    fn duplicate_wrapped_link_labels_hover_tooltip_and_click_exact_destination_after_folding() {
+        let mut app = App::default();
+        app.rail_visible = false;
+        app.handle(Event::Resize(44, 32));
+        let reasoning = format!("{}{}", transcript_tools::REASONING_PREFIX,
+            json!({"text":"[same **bold** label](https://hidden.example)", "tokens":12, "streaming":false}));
+        app.apply_update(DaemonUpdate::Upsert(Session {
+            id: "links".into(), title: "links".into(), collection: "repo".into(),
+            transcript: format!("**You:**\n\n[User label](https://user.example)\n\n**Assistant:**\n\n{reasoning}\n\n[same **bold** label](https://one.example/path) and [same **bold** label](https://two.example/path)"),
+            status: "Idle".into(),
+        }));
+        app.groups[0].tabs = vec!["links".into()];
+        let mut terminal = Terminal::new(TestBackend::new(44, 32)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let text = painted_at(&app, 44, 32);
+        assert!(!text.contains("https://"), "destinations must not be appended to labels");
+        assert!(!app.visible_links.borrow().iter().any(|(_, url)| url == "https://hidden.example"));
+        for url in ["https://one.example/path", "https://two.example/path", "https://user.example"] {
+            let rects: Vec<Rect> = app.visible_links.borrow().iter()
+                .filter(|(_, target)| target == url).map(|(rect, _)| *rect).collect();
+            assert!(!rects.is_empty());
+            for rect in rects {
+                app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Moved,
+                    column: rect.x, row: rect.y, modifiers: KeyModifiers::NONE }));
+                assert_eq!(app.link_hover.as_deref(), Some(url));
+                terminal.draw(|frame| app.draw(frame)).unwrap();
+                let tooltip = terminal.backend().buffer();
+                let tooltip_text = (0..32).map(|y| (0..44).map(|x|
+                    tooltip[(x, y)].symbol()).collect::<String>()).collect::<Vec<_>>().join("\n");
+                assert!(tooltip_text.contains(url), "URL must appear in the hover tooltip");
+                app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+                    column: rect.x, row: rect.y, modifiers: KeyModifiers::NONE }));
+                assert!(app.pending_open_urls.is_empty());
+                app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+                    column: rect.x, row: rect.y, modifiers: KeyModifiers::CONTROL }));
+                assert_eq!(app.pending_open_urls.pop().as_deref(), Some(url));
+            }
+        }
+        app.expanded_tool_sections.insert("links".into(), HashSet::from([0]));
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert!(app.visible_links.borrow().iter().any(|(_, url)| url == "https://hidden.example"));
+        let cached = app.rendered_transcripts.borrow().iter().find(|entry| entry.id == "links").unwrap().links.clone();
+        assert!(cached.iter().any(|link| link.url.as_ref() == "https://hidden.example"));
+    }
+
+    #[test]
+    fn streamed_link_metadata_preserves_prefix_and_replaces_only_new_tail_cells() {
+        let source = "**You:**\n\n[earlier](https://earlier.example)\n\n**Assistant:**\n\nRead [same](https://one.example/a";
+        let mut cached = RenderedTranscript::render(0, "s", source, 20, None, None, 0, &[]);
+        assert!(cached.turn_start.is_some());
+        let prefix = cached.links.clone();
+        assert_eq!(prefix.len(), 1);
+        let extended = format!("{source}/b) and [same](https://two.example)");
+        cached.update(&extended, 20, None, None, 0, &[]);
+        assert_eq!(cached.links[0], prefix[0]);
+        assert!(cached.links.iter().any(|link| link.url.as_ref() == "https://one.example/a/b"));
+        assert!(cached.links.iter().any(|link| link.url.as_ref() == "https://two.example"));
+        let full = RenderedTranscript::render(0, "s", &extended, 20, None, None, 0, &[]);
+        assert_eq!(cached.links, full.links);
+        assert_eq!(cached.lines, full.lines);
     }
 
     #[test]

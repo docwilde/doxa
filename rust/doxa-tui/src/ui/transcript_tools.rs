@@ -97,14 +97,21 @@ fn plain_detail(lines: &mut Vec<Line<'static>>, label: &str, value: &str, width:
     }
 }
 
+fn append_markdown(lines: &mut Vec<Line<'static>>, links: &mut Vec<markdown::LinkRegion>,
+                   mut rendered: markdown::RenderedMarkdown) {
+    for link in &mut rendered.links { link.row += lines.len(); }
+    links.extend(rendered.links);
+    lines.extend(rendered.lines);
+}
+
 fn render_turn(blocks: &mut Vec<Block<'_>>, lines: &mut Vec<Line<'static>>,
-               sections: &mut Vec<Section>, width: u16,
+               sections: &mut Vec<Section>, links: &mut Vec<markdown::LinkRegion>, width: u16,
                expanded: Option<&HashSet<usize>>, selected: Option<usize>, cards: &[ToolCard]) {
     let mut prose = String::new();
     let mut speaker = None;
-    let flush_prose = |prose: &mut String, lines: &mut Vec<Line<'static>>, speaker| {
+    let flush_prose = |prose: &mut String, lines: &mut Vec<Line<'static>>, links: &mut Vec<markdown::LinkRegion>, speaker| {
         if !prose.is_empty() {
-            lines.extend(transcript_roles::render(prose, width, speaker));
+            append_markdown(lines, links, transcript_roles::render_with_links(prose, width, speaker));
             prose.clear();
         }
     };
@@ -131,7 +138,7 @@ fn render_turn(blocks: &mut Vec<Block<'_>>, lines: &mut Vec<Line<'static>>,
     for (block, section_index) in ordered {
         match block {
             Block::Heading(paragraph) => {
-                flush_prose(&mut prose, lines, speaker);
+                flush_prose(&mut prose, lines, links, speaker);
                 if !lines.is_empty() && !lines.last().is_some_and(|line| line.spans.is_empty()) {
                     lines.push(Line::default());
                 }
@@ -144,7 +151,7 @@ fn render_turn(blocks: &mut Vec<Block<'_>>, lines: &mut Vec<Line<'static>>,
                 prose.push_str(paragraph);
             }
             Block::Tools(tools) => {
-                flush_prose(&mut prose, lines, speaker);
+                flush_prose(&mut prose, lines, links, speaker);
                 speaker = Some(Speaker::Assistant);
                 let index = section_index.expect("foldable blocks have an identity");
                 sections.push(Section { index, line: lines.len() });
@@ -180,14 +187,14 @@ fn render_turn(blocks: &mut Vec<Block<'_>>, lines: &mut Vec<Line<'static>>,
                                 lines.push(Line::styled(format!("  {status}"), Style::default().fg(theme::ACCENT)));
                                 plain_detail(lines, label, &detail, width);
                             } else {
-                                lines.extend(markdown::render(display, width));
+                                append_markdown(lines, links, markdown::render_with_links(display, width));
                             }
                         }
                     }
                 }
             }
             Block::Shell(result) => {
-                flush_prose(&mut prose, lines, speaker);
+                flush_prose(&mut prose, lines, links, speaker);
                 let index = section_index.expect("shell blocks have an identity");
                 sections.push(Section { index, line: lines.len() });
                 let open = expanded.is_some_and(|set| set.contains(&index));
@@ -201,7 +208,7 @@ fn render_turn(blocks: &mut Vec<Block<'_>>, lines: &mut Vec<Line<'static>>,
                 if result.dropped_bytes > 0 { lines.push(Line::styled(format!("  {} output bytes omitted", result.dropped_bytes), Style::default().fg(theme::SECONDARY))); }
             }
             Block::Reasoning { text, tokens, streaming, exact } => {
-                flush_prose(&mut prose, lines, speaker);
+                flush_prose(&mut prose, lines, links, speaker);
                 speaker = Some(Speaker::Assistant);
                 let index = section_index.expect("foldable blocks have an identity");
                 sections.push(Section { index, line: lines.len() });
@@ -222,13 +229,13 @@ fn render_turn(blocks: &mut Vec<Block<'_>>, lines: &mut Vec<Line<'static>>,
                             "  Reasoning content unavailable"
                         }, Style::default().fg(theme::SECONDARY)));
                     } else {
-                        lines.extend(markdown::render(&text, width));
+                        append_markdown(lines, links, markdown::render_with_links(&text, width));
                     }
                 }
             }
         }
     }
-    flush_prose(&mut prose, lines, speaker);
+    flush_prose(&mut prose, lines, links, speaker);
 }
 
 pub(super) fn render(
@@ -247,8 +254,17 @@ pub(super) fn render_with_cards(
     selected: Option<usize>,
     cards: &[ToolCard],
 ) -> (Vec<Line<'static>>, Vec<Section>) {
+    let (lines, sections, _) = render_with_links(source, width, expanded, selected, cards);
+    (lines, sections)
+}
+
+pub(super) fn render_with_links(
+    source: &str, width: u16, expanded: Option<&HashSet<usize>>,
+    selected: Option<usize>, cards: &[ToolCard],
+) -> (Vec<Line<'static>>, Vec<Section>, Vec<markdown::LinkRegion>) {
     let mut lines = Vec::new();
     let mut sections = Vec::new();
+    let mut links = Vec::new();
     let mut blocks = Vec::new();
     let mut tool_index: Option<usize> = None;
     let mut fence: Option<&str> = None;
@@ -257,12 +273,12 @@ pub(super) fn render_with_cards(
         if paragraph.is_empty() { continue; }
         if fence.is_none() && matches!(paragraph, "**You:**" | "**Assistant:**") {
             if paragraph == "**You:**" {
-                render_turn(&mut blocks, &mut lines, &mut sections, width, expanded, selected, cards);
+                render_turn(&mut blocks, &mut lines, &mut sections, &mut links, width, expanded, selected, cards);
                 tool_index = None;
             }
             blocks.push(Block::Heading(paragraph));
         } else if fence.is_none() && paragraph.starts_with(SHELL_PREFIX) {
-            render_turn(&mut blocks, &mut lines, &mut sections, width, expanded, selected, cards);
+            render_turn(&mut blocks, &mut lines, &mut sections, &mut links, width, expanded, selected, cards);
             tool_index = None;
             if let Ok(result) = serde_json::from_str(paragraph.strip_prefix(SHELL_PREFIX).unwrap()) { blocks.push(Block::Shell(result)); }
             else { blocks.push(Block::Prose("Local shell output unavailable")); }
@@ -290,8 +306,8 @@ pub(super) fn render_with_cards(
             }
         }
     }
-    render_turn(&mut blocks, &mut lines, &mut sections, width, expanded, selected, cards);
-    (lines, sections)
+    render_turn(&mut blocks, &mut lines, &mut sections, &mut links, width, expanded, selected, cards);
+    (lines, sections, links)
 }
 
 #[cfg(test)]

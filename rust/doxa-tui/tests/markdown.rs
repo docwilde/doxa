@@ -37,7 +37,7 @@ fn lists_quotes_rules_and_links_survive_streamed_reparse() {
     let after = plain(&format!("{first}{more}"), 80);
     assert_eq!(after[0], before[0]);
     assert_eq!(after[1], "•  second item");
-    assert!(after.iter().any(|line| line.contains("│ quoted source (https://example.com)")));
+    assert!(after.iter().any(|line| line.contains("│ quoted source")));
     assert!(after.iter().any(|line| line.starts_with('─')));
 }
 
@@ -134,11 +134,39 @@ fn long_table_cell_stays_bounded_by_viewport() {
 }
 
 #[test]
-fn link_destination_is_visible_and_sanitized_in_table_cell() {
+fn link_label_is_visible_without_destination_in_table_cell() {
     let source = "| Ref |\n| --- |\n| [go](https://example.com/x) |";
     let lines = plain(source, 40).join("\n");
-    assert!(lines.contains("go (https://example.com/x)"));
+    assert!(lines.contains("go"));
+    assert!(!lines.contains("https://"));
     let lines = plain("| Ref |\n| --- |\n| [go](https://example.com/\u{1b}]8;;evil\u{7}) |", 28).join("\n");
     assert!(!lines.contains('\u{1b}'));
     assert!(!lines.contains('\u{7}'));
+}
+
+#[test]
+fn link_cells_track_duplicate_labels_emphasis_wrapping_and_table_alignment() {
+    use doxa_tui::markdown::{render_with_links, LinkRegion};
+    let source = "[same **bold** label](https://one.example/path) and [same **bold** label](https://two.example/path)";
+    let rendered = render_with_links(source, 12);
+    let shown = rendered.lines.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
+    assert!(!shown.contains("https://"));
+    for url in ["https://one.example/path", "https://two.example/path"] {
+        let regions: Vec<&LinkRegion> = rendered.links.iter().filter(|link| link.url.as_ref() == url).collect();
+        assert!(regions.len() > 1, "long labels must retain multiple rendered rows");
+        let cells = regions.iter().map(|link| {
+            let row = rendered.lines[link.row].to_string();
+            assert!(link.end <= UnicodeWidthStr::width(row.as_str()));
+            row.chars().skip(link.start).take(link.end - link.start).collect::<String>()
+        }).collect::<String>();
+        assert_eq!(cells, "same bold label");
+    }
+    assert!(rendered.lines.iter().flat_map(|line| &line.spans).any(|span|
+        span.content.contains("bold") && span.style.add_modifier.contains(Modifier::BOLD)
+            && span.style.add_modifier.contains(Modifier::UNDERLINED)));
+    let table = render_with_links("| Ref |\n| ---: |\n| [界界 same](https://table.example) |", 12);
+    assert!(table.links.len() > 1);
+    assert!(table.links.iter().all(|link| link.start >= 2 && link.end <= 10
+        && link.url.as_ref() == "https://table.example"));
+    assert!(table.lines.iter().all(|line| line.width() <= 12));
 }
