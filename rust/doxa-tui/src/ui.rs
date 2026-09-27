@@ -12837,7 +12837,7 @@ for line in sys.stdin:
         picker.rows = (1..=30).map(|id| lore_picker::Belief { id, subject: "subject".into(),
             claim: "claim".into(), truncated: false, confidence: 0.8, evidence_count: Some(1) }).collect();
         let menu = app.active_chooser_rect().unwrap();
-        let footer = menu.y + 6 + menu.height.saturating_sub(8);
+        let footer = menu.bottom().saturating_sub(1);
         app.mouse(MouseEvent { kind: MouseEventKind::Moved,
             column: menu.x + 2, row: footer, modifiers: KeyModifiers::NONE });
         assert_eq!(app.lore_picker.as_ref().unwrap().selected, 0);
