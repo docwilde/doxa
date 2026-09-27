@@ -354,8 +354,7 @@ fn resume_plan_in(entry: &OfflineSession, expected_root: &Path, claude_root: &Pa
     let root = if missing {
         expected_root.to_path_buf()
     } else {
-        let mut lore = doxa_lore::LoreClient::open(Duration::from_secs(3))
-            .map_err(|_| "LORE unavailable for resume verification")?;
+        let mut lore = open_lore().map_err(|_| "LORE unavailable for resume verification")?;
         let (root, slug) = lore.transcript_identity(&cwd.to_string_lossy())
             .map_err(|_| "cannot verify session project")?;
         if root != expected_root || slug != entry.project {

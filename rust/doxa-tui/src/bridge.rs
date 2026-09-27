@@ -17,7 +17,6 @@ use crate::history;
 use crate::ui;
 use crate::discovery::Session;
 use crate::launch::{self, LaunchOptions};
-use std::path::PathBuf;
 
 #[derive(Debug)]
 pub enum WorkerCommand {

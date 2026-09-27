@@ -22,3 +22,17 @@ fn native_backend_retains_protocol_request_bounds_without_python() {
     assert!(client.scrub(&"x".repeat(doxa_lore::MAX_FRAME_BYTES)).is_err());
     assert!(!root.exists());
 }
+
+
+#[test]
+fn native_transcript_identity_uses_canonical_projects_key_without_store_io() {
+    let owned = tempfile::tempdir().unwrap();
+    let root = owned.path().join("store");
+    let config = lore_core::config::Config::for_root(root.clone());
+    let projects = config.projects.clone();
+    let mut client = LoreClient::open_config(config, Duration::from_secs(1)).unwrap();
+    let (returned, slug) = client.transcript_identity(owned.path().to_str().unwrap()).unwrap();
+    assert_eq!(returned, projects);
+    assert!(!slug.is_empty());
+    assert!(!root.exists());
+}

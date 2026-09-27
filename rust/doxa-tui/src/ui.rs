@@ -5165,7 +5165,6 @@ impl App {
         let Some(id)=picker.rows.get(picker.selected).map(|row|row.id) else{return;};
         if self.belief_graph_lines.as_ref().is_some_and(|(selected,_)|*selected==id){self.belief_graph_lines=None;return;}
         let cwd=picker.cwd.clone();let browser=self.preferences.value("graph_view")!="ascii";
-        let python=std::env::var_os("DOXA_LORE_PYTHON").map(PathBuf::from).unwrap_or_else(||PathBuf::from("python3"));
         let(tx,rx)=mpsc::sync_channel(1);self.belief_graph_pending=Some((id,cwd.clone(),browser,rx));
         self.lore_picker.as_mut().unwrap().status="Loading LORE belief neighbourhood…".into();
         std::thread::spawn(move||{let result=doxa_lore::LoreClient::open(Duration::from_secs(3)).and_then(|mut client|client.belief_graph(&cwd,id,browser));let _=tx.send(result);});
@@ -5495,8 +5494,6 @@ impl App {
             if self.memory_cache.get(&id).is_some_and(|(_, checked)| checked.elapsed() < Duration::from_secs(60)) {
                 continue;
             }
-            let python = std::env::var_os("DOXA_LORE_PYTHON")
-                .map(PathBuf::from).unwrap_or_else(|| PathBuf::from("python3"));
             let (tx, rx) = mpsc::sync_channel(1);
             self.memory_pending = Some((id, cwd.clone(), rx));
             std::thread::spawn(move || {
