@@ -33,3 +33,6 @@ pub mod shell;
 pub mod startup_restore;
 pub mod first_run;
 pub mod installation;
+
+pub mod selection;
+pub mod clipboard;

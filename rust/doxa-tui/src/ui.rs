@@ -1423,6 +1423,9 @@ pub struct App {
     tool_cards: ToolCards,
     tool_cards_revision: HashMap<String, u64>,
     rendered_transcripts: RefCell<Vec<RenderedTranscript>>,
+    transcript_selection: RefCell<crate::selection::Selection>,
+    pending_clipboard_copy: Option<Vec<u8>>,
+    clipboard_job: Option<crate::clipboard::Job>,
     tool_modal: bool,
     tool_selected: usize,
     tool_scroll: u16,
@@ -1605,6 +1608,9 @@ impl Default for App {
             tool_cards: ToolCards::default(),
             tool_cards_revision: HashMap::new(),
             rendered_transcripts: RefCell::new(Vec::new()),
+            transcript_selection: RefCell::new(crate::selection::Selection::default()),
+            pending_clipboard_copy: None,
+            clipboard_job: None,
             tool_modal: false,
             tool_selected: 0,
             tool_scroll: 0,
@@ -2671,6 +2677,7 @@ impl App {
 
     pub fn handle(&mut self, event: Event) -> bool {
         let before = (self.active_group, self.groups[self.active_group].active_id().unwrap_or("").to_owned());
+        let selection_view=(self.size,self.groups[self.active_group].scroll);
         let changed = match event {
             Event::Resize(w, h) => {
                 if let Some(manager) = &mut self.memory_manager { manager.reset_review_visibility(); }
@@ -2745,6 +2752,8 @@ impl App {
             _ => false,
         };
         let after = (self.active_group, self.groups[self.active_group].active_id().unwrap_or("").to_owned());
+        let selection_owner=crate::selection::Owner {pane:self.active_group,session:after.1.clone()};
+        if selection_view.0!=self.size || (before==after && selection_view.1!=self.groups[self.active_group].scroll) || (before!=after && !self.transcript_selection.borrow().belongs_to(&selection_owner)) {self.transcript_selection.borrow_mut().clear();}
         if before != after {
             self.branch_picker = None;
             let moved_active_tab = std::mem::take(&mut self.moved_active_tab)
@@ -2773,6 +2782,25 @@ impl App {
             self.focus = Focus::Prompt;
         }
         changed
+    }
+
+    fn clipboard_target(&self)->crate::clipboard::Target {
+        crate::clipboard::Target {pane:self.active_group,session:self.groups[self.active_group].active_id().unwrap_or("").to_owned(),draft:self.input.clone(),cursor:self.input_cursor}
+    }
+    fn poll_clipboard(&mut self)->bool {
+        let Some(result)=self.clipboard_job.as_ref().and_then(crate::clipboard::Job::poll) else{return false;};
+        let target=self.clipboard_job.take().unwrap().target.clone();
+        let text=match result {Ok(text)=>text,Err(_)=>{self.notice="Clipboard read failed · use terminal Ctrl+Shift+V".into();return true;}};
+        let exists=self.groups.get(target.pane).is_some_and(|group|if target.session.is_empty(){group.tabs.is_empty()}else{group.tabs.contains(&target.session)});
+        if !exists || self.input_requests.iter().any(|request|request.session_id==target.session) {self.notice="Clipboard paste discarded · original prompt is no longer available".into();return true;}
+        let active=self.active_group==target.pane && self.groups[self.active_group].active_id().unwrap_or("")==target.session;
+        let(draft,cursor)=if active {(&mut self.input,&mut self.input_cursor)}else {let entry=self.input_drafts.entry((target.pane,target.session)).or_default();(&mut entry.0,&mut entry.1)};
+        if *draft!=target.draft || *cursor!=target.cursor || !draft.is_char_boundary(*cursor) {self.notice="Clipboard paste discarded · prompt draft changed while reading".into();return true;}
+        let available=MAX_INPUT_BYTES.saturating_sub(draft.len());let mut clean=String::new();let mut chars=text.chars().peekable();let mut truncated=false;
+        while let Some(ch)=chars.next(){let ch=if ch=='\r'{if chars.peek()==Some(&'\n'){chars.next();}'\n'}else if ch=='\t'{' '}else{ch};if unsafe_input_char(ch)&&ch!='\n'{continue;}if clean.len()+ch.len_utf8()>available{truncated=true;break;}clean.push(ch);}
+        draft.insert_str(*cursor,&clean);*cursor+=clean.len();
+        if active {self.slash_selected=0;self.slash_dismissed=false;}
+        self.notice=if truncated {"Clipboard pasted into original draft · prompt limit reached"}else{"Clipboard pasted into original draft"}.into();true
     }
 
     fn paste(&mut self, text: &str) -> bool {
@@ -3017,6 +3045,26 @@ impl App {
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         if self.restart_job.is_some() || self.restart_waiting {
             self.notice = "Finalizing idle sessions for restart; saved tabs will be restored".into(); return true;
+        }
+        if ctrl && matches!(key.code, KeyCode::Char('c' | 'C')) && !self.link_interaction_blocked() {
+            let owner=crate::selection::Owner {pane:self.active_group,session:self.groups[self.active_group].active_id().unwrap_or("").to_owned()};
+            let selected=self.transcript_selection.borrow().text(&owner);
+            if let Some(text)=selected.filter(|text|!text.is_empty()) {
+                self.pending_clipboard_copy=Some(crate::clipboard::osc52(&text));
+                self.notice="Clipboard copy queued for terminal · OSC52 support required".into();return true;
+            }
+            if key.modifiers.contains(KeyModifiers::SHIFT) || key.code==KeyCode::Char('C') {
+                self.notice="Drag to select transcript text before copying".into();return true;
+            }
+        }
+        if key.code==KeyCode::Esc && !self.link_interaction_blocked() && self.transcript_selection.borrow_mut().clear() {return true;}
+        if ctrl && matches!(key.code,KeyCode::Char('v'|'V')) && self.focus==Focus::Prompt && !self.link_interaction_blocked() {
+            self.clipboard_job=None;
+            match crate::clipboard::Job::start(self.clipboard_target()) {
+                Ok(job)=>{self.clipboard_job=Some(job);self.notice="Reading clipboard into this prompt draft…".into();}
+                Err(_)=>self.notice="Clipboard reader unavailable · use terminal Ctrl+Shift+V".into(),
+            }
+            return true;
         }
         if ctrl && key.code == KeyCode::Char('c') {
             let id = self.groups[self.active_group].active_id();
@@ -7360,6 +7408,8 @@ impl App {
         lines.push("Tab / Shift+Tab: focus prompt, tab headers, transcript, visible chips, sidebar".into());
         lines.push("Focused chip: Enter opens · tab headers: ←/→ select, Enter prompt · Alt+Tab next pane".into());
         lines.push("Alt+P or /mode: permission picker".into());
+        lines.push("Drag transcript text to select · Ctrl+C / Ctrl+Shift+C copy · Esc clears · Ctrl+V paste into prompt".into());
+        lines.push("Terminal fallback: Shift+drag, Ctrl+Shift+C / Ctrl+Shift+V; OSC52 support required for native copy".into());
         for row in COMMANDS {
             lines.push(format!("{} · {}", row.form, row.summary));
             lines.push(format!("  {}", row.support));
@@ -7568,6 +7618,24 @@ impl App {
     }
 
     fn mouse(&mut self, mouse: MouseEvent) -> bool {
+        if !self.link_interaction_blocked() && self.drag.is_none() {
+            let point=ratatui::layout::Position::new(mouse.column,mouse.row);
+            if matches!(mouse.kind,MouseEventKind::Drag(MouseButton::Left)|MouseEventKind::Up(MouseButton::Left)) {
+                let handled=self.transcript_selection.borrow_mut().drag(point);if handled{return true;}
+            }
+            match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left)=>{
+                    let interactive=self.link_at(mouse.column,mouse.row).is_some() || self.visible_tool_sections.borrow().iter().any(|(rect,_,_,_)|rect.contains(point));
+                    self.transcript_selection.borrow_mut().clear();
+                    if !interactive || mouse.modifiers.contains(KeyModifiers::SHIFT) {
+                        let owner=self.transcript_selection.borrow_mut().start(point);
+                        if let Some(owner)=owner {self.active_group=owner.pane;self.focus=Focus::Transcript;self.chip_hover=None;self.link_hover=None;return true;}
+                    }
+                }
+                _=>{}
+            }
+        }
+
         if self.fleet_review.is_some(){
             if let Some(area)=self.active_chooser_rect(){
                 if area.contains(ratatui::layout::Position::new(mouse.column,mouse.row)){
@@ -8372,6 +8440,8 @@ impl App {
 
     pub fn draw(&self, frame: &mut Frame) {
         let area = frame.area();
+        self.transcript_selection.borrow_mut().begin_frame();
+        if self.link_interaction_blocked() || area.width<20 || area.height<5 {self.transcript_selection.borrow_mut().clear();}
         self.visible_tool_sections.borrow_mut().clear();
         self.visible_links.borrow_mut().clear();
         *self.rendered_chip_hits.borrow_mut() = Some(Vec::new());
@@ -8426,6 +8496,7 @@ impl App {
             self.draw_request(frame, area, false);
         }
         self.draw_chip_tooltip(frame);
+        self.transcript_selection.borrow_mut().finish_frame();
         if self.preferences.value("background")=="transparent" {for cell in &mut frame.buffer_mut().content {if matches!(cell.bg,theme::BASE|theme::RAISED|theme::RAIL) {cell.bg=Color::Reset;}}}
     }
 
@@ -9302,6 +9373,10 @@ impl App {
                     } else { theme::BORDER }))),
             inner[1],
         );
+        if !self.link_interaction_blocked() {
+            self.transcript_selection.borrow_mut().capture(crate::selection::Owner {pane:index,session:id.to_owned()},
+                Rect::new(inner[1].x.saturating_add(1),inner[1].y,inner[1].width.saturating_sub(2),inner[1].height),frame.buffer_mut());
+        }
         if active && chooser_height > 0 {
             if self.active_request_index().is_some_and(|index| self.input_requests[index].kind == "ask_user") {
                 self.draw_request(frame, inner[2], true);
@@ -9668,6 +9743,11 @@ fn run_loop(
         changed |= app.poll_repo();
         changed |= app.poll_memory_menu();
         changed |= app.poll_shell();
+        changed |= app.poll_clipboard();
+        if let Some(bytes)=app.pending_clipboard_copy.take(){
+            let mut out=io::stdout();
+            app.notice=if out.write_all(&bytes).and_then(|_|out.flush()).is_err(){"Clipboard copy failed · use terminal selection and Ctrl+Shift+C"}else{"Selection sent to terminal clipboard · OSC52 support required"}.into();changed=true;
+        }
         changed |= app.poll_plugin_commands();
         changed |= app.poll_vendor_catalog();
         changed |= app.poll_model_catalog(Instant::now());
@@ -14306,6 +14386,42 @@ mod parity_tests {
         app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
             column, row, modifiers: KeyModifiers::NONE }));
     }
+    #[test]
+    fn native_selection_keyboard_copy_only_exports_visible_selected_cells_and_escape_clears() {
+        let mut app=App::default();app.size=Rect::new(0,0,100,28);app.rail_visible=false;
+        app.sessions.push(Session{id:"s".into(),title:"fixture".into(),transcript:"plain alpha 界 beta\nnext line".into(),collection:String::new(),status:String::new()});app.groups[0].tabs=vec!["s".into()];
+        let _=paint(&app);let pane=app.layout(app.size).body;let rect=app.pane_regions(0,pane)[1];
+        let start=ratatui::layout::Position::new(rect.x+1,rect.y);let end=ratatui::layout::Position::new(rect.x+5,rect.y);
+        app.handle(Event::Mouse(MouseEvent{kind:MouseEventKind::Down(MouseButton::Left),column:start.x,row:start.y,modifiers:KeyModifiers::NONE}));
+        app.handle(Event::Mouse(MouseEvent{kind:MouseEventKind::Drag(MouseButton::Left),column:end.x,row:end.y,modifiers:KeyModifiers::NONE}));
+        let owner=crate::selection::Owner{pane:0,session:"s".into()};let text=app.transcript_selection.borrow().text(&owner).unwrap();assert_eq!(text,"plain");
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('c'),KeyModifiers::CONTROL)));assert_eq!(app.pending_clipboard_copy.take(),Some(crate::clipboard::osc52("plain")));assert!(!app.should_quit);assert!(app.pending_prompts.is_empty());
+        let _=paint(&app);app.handle(Event::Key(KeyEvent::new(KeyCode::Esc,KeyModifiers::NONE)));assert!(app.transcript_selection.borrow().text(&owner).is_none());
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('C'),KeyModifiers::CONTROL|KeyModifiers::SHIFT)));assert!(app.pending_clipboard_copy.is_none());
+    }
+    #[test]
+    fn selection_in_second_pane_keeps_exact_owner_and_prompt_click_still_types() {
+        let mut app=App::default();app.size=Rect::new(0,0,180,40);app.rail_visible=false;
+        for id in ["a","b"]{app.sessions.push(Session{id:id.into(),title:id.into(),collection:String::new(),transcript:format!("{id} visible line"),status:String::new()});}
+        app.groups[0].tabs=vec!["a".into()];app.groups[1].tabs=vec!["b".into()];let _=paint(&app);
+        let pane=app.layout(app.size).panes.unwrap()[1];let regions=app.pane_regions(1,pane);let rect=regions[1];
+        for(kind,column)in[(MouseEventKind::Down(MouseButton::Left),rect.x+1),(MouseEventKind::Drag(MouseButton::Left),rect.x+3)]{app.handle(Event::Mouse(MouseEvent{kind,column,row:rect.y,modifiers:KeyModifiers::NONE}));}
+        assert_eq!(app.active_group,1);assert_eq!(app.transcript_selection.borrow().text(&crate::selection::Owner{pane:1,session:"b".into()}).as_deref(),Some("b v"));
+        app.handle(Event::Mouse(MouseEvent{kind:MouseEventKind::Down(MouseButton::Left),column:regions[4].x+2,row:regions[4].y+1,modifiers:KeyModifiers::NONE}));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('x'),KeyModifiers::NONE)));assert_eq!(app.input,"x");assert_eq!(app.focus,Focus::Prompt);
+    }
+
+    #[test]
+    fn clipboard_paste_targets_original_draft_without_submission_or_control_sequences() {
+        let mut app=App::default();app.groups[0].tabs=vec!["a".into()];app.groups[1].tabs=vec!["b".into()];app.input="left".into();app.input_cursor=2;
+        let target=app.clipboard_target();app.clipboard_job=Some(crate::clipboard::Job::fixture(target,Ok("X\r\nY\u{1b}\u{7}".into())));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Tab,KeyModifiers::ALT)));assert_eq!(app.active_group,1);
+        app.input="right".into();app.input_cursor=5;assert!(app.poll_clipboard());assert_eq!(app.input,"right");assert_eq!(app.input_drafts[&(0,"a".into())].0,"leX\nYft");assert!(app.pending_prompts.is_empty());
+        let target=app.clipboard_target();app.clipboard_job=Some(crate::clipboard::Job::fixture(target,Ok("stale".into())));app.input.push('!');app.input_cursor+=1;
+        app.poll_clipboard();assert_eq!(app.input,"right!");assert!(app.notice.contains("discarded"));
+        let target=app.clipboard_target();app.clipboard_job=Some(crate::clipboard::Job::fixture(target,Ok("closed".into())));app.groups[1].tabs.clear();app.poll_clipboard();assert!(!app.input.contains("closed"));assert!(app.pending_prompts.is_empty());
+    }
+
     #[test]
     fn engine_form_defaults_use_effective_engine_config_without_reusing_live_identity() {
         let config = "model='claude-own'\neffort='max'\n[models]\ncodex='codex-own'\ndeepseek='deepseek-flash'\n".parse::<toml::Table>().unwrap();
