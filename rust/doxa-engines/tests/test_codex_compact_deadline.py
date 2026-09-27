@@ -4,6 +4,7 @@ from pathlib import Path
 import sys
 import types
 import pytest
+from unittest import mock
 
 PATH = Path(__file__).parents[1] / "codex_compact_hook.py"
 spec = importlib.util.spec_from_file_location("codex_compact_deadline_hook", PATH)
@@ -14,17 +15,21 @@ spec.loader.exec_module(hook)
 def test_whole_review_deadline_interrupt_reaps_worker_before_blocking(monkeypatch):
     class Process:
         pid = 456
-        def __init__(self): self.waits = 0
+        def __init__(self):
+            self.waits = 0
+            self.stdin = mock.Mock()
         def wait(self, timeout=None):
             self.waits += 1
-            if timeout is not None: raise TimeoutError("review deadline")
+            if self.waits == 1: raise TimeoutError("review deadline")
             return -9
     process = Process(); killed = []
     monkeypatch.setattr(hook.subprocess, "Popen", lambda *a, **k: process)
     monkeypatch.setattr(hook.os, "killpg", lambda *a: killed.append(a))
+    monkeypatch.setattr(hook, "REVIEW_SUPERVISOR_SOURCE", "verified source", raising=False)
     with pytest.raises(TimeoutError):
         hook.run_worker(Path("fixture"), Path("fixture"))
-    assert killed == [(456, hook.signal.SIGKILL)]
+    assert killed == []
+    process.stdin.close.assert_called_once()
     assert process.waits == 2
 
 

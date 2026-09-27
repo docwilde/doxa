@@ -14,6 +14,7 @@ pub const HOOK_TIMEOUT: u64 = 240;
 pub const HOOK_KEY: &str = "/<session-flags>/config.toml:pre_compact:0:0";
 const MATCHER: &str = "^(auto|manual)$";
 const SCRIPT: &str = include_str!("../codex_compact_hook.py");
+const REVIEW_SUPERVISOR: &str = include_str!("../../../doxa/review_worker.py");
 // This command itself is part of the trusted hash. It verifies the embedded
 // source digest before compile/exec, including syntax/import failure handling.
 const BOOTSTRAP: &str = "import sys,json,hashlib,os,stat,contextlib; result={'continue':False,'suppressOutput':True,'stopReason':'DOXA LORE review unavailable; compaction blocked'}\ntry:\n fd=os.open(sys.argv[1],os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK); st=os.fstat(fd); assert stat.S_ISREG(st.st_mode) and st.st_uid==os.getuid() and st.st_nlink==1 and st.st_size<65536; data=os.read(fd,65536); os.close(fd); assert hashlib.sha256(data).hexdigest()==sys.argv[2]\n with open(os.devnull,'w') as sink,contextlib.redirect_stdout(sink),contextlib.redirect_stderr(sink):\n  ns={'__name__':'doxa_compact_hook'}; exec(compile(data,sys.argv[1],'exec'),ns); sys.argv=[sys.argv[1],sys.argv[3]]; result=ns['main']()\nexcept BaseException: pass\nprint(json.dumps(result,separators=(',',':')))";
@@ -58,7 +59,10 @@ impl CompactGate {
         let directory_identity = (directory_meta.dev(), directory_meta.ino());
         let source = directory.join("precompact.py");
         let manifest = directory.join("compact-session.json");
-        let command = [python.display().to_string(), "-I".into(), "-c".into(), BOOTSTRAP.into(), source.display().to_string(), digest(SCRIPT.as_bytes()), manifest.display().to_string()]
+        // Pin the canonical supervisor in the same source digest as the hook.
+        // Neither process resolves DOXA code through the workspace/import path.
+        let script = format!("REVIEW_SUPERVISOR_SOURCE = {}\n{}", string(REVIEW_SUPERVISOR), SCRIPT);
+        let command = [python.display().to_string(), "-I".into(), "-c".into(), BOOTSTRAP.into(), source.display().to_string(), digest(script.as_bytes()), manifest.display().to_string()]
             .iter().map(|s| shell_quote(s)).collect::<Vec<_>>().join(" ");
         let normalized = json!({"event_name":"pre_compact","matcher":MATCHER,"hooks":[{
             "type":"command","command":command,"timeout":HOOK_TIMEOUT,"async":false
@@ -67,7 +71,7 @@ impl CompactGate {
         let descriptor = json!({"version":SUPPORTED_VERSION,"provider_thread":null,"doxa_session":session_id,
             "codex_home":codex_home,"cwd":cwd,"lore_enabled":lore_enabled});
         let descriptor_bytes = serde_json::to_vec(&descriptor)?;
-        write_new(&source, SCRIPT.as_bytes())?;
+        write_new(&source, script.as_bytes())?;
         if let Err(error) = write_new(&manifest, &descriptor_bytes) {
             let _ = fs::remove_file(source); return Err(error);
         }
@@ -174,5 +178,19 @@ mod tests {
         assert_eq!(result["continue"], false);
         fs::write(dir.path().join("keep"), "unknown content").unwrap();
         drop(gate); assert!(!source.exists()); assert!(dir.path().join("keep").exists());
+    }
+    #[test]
+    fn pinned_bootstrap_covers_canonical_review_supervisor_bytes() {
+        let dir = tempfile::tempdir().unwrap(); let gate = prepare(dir.path());
+        let source = dir.path().join("precompact.py");
+        let bytes = fs::read_to_string(&source).unwrap();
+        assert_eq!(bytes, format!("REVIEW_SUPERVISOR_SOURCE = {}\n{}", string(REVIEW_SUPERVISOR), SCRIPT));
+        // A syntactically valid replacement cannot weaken the worker's owner
+        // contract while retaining the Codex-approved hook command/hash.
+        fs::write(&source, format!("REVIEW_SUPERVISOR_SOURCE = 'changed supervisor'\n{}", SCRIPT)).unwrap();
+        let output = std::process::Command::new("/bin/sh").args(["-c", &gate.command]).output().unwrap();
+        assert!(output.status.success());
+        let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(result["continue"], false);
     }
 }

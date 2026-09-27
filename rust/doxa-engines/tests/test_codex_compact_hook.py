@@ -81,20 +81,31 @@ def test_review_rejects_wrong_identity_unknown_version_and_outside_source(tmp_pa
     assert not hook.review(manifest, {**event,"transcript_path":str(link)}, worker=lambda *_: True)
 
 
-def test_worker_timeout_kills_and_reaps_process_group(monkeypatch):
+def test_worker_timeout_closes_supervisor_control_and_waits(monkeypatch):
     class Process:
         pid = 123
-        def __init__(self): self.waits = 0
+        def __init__(self):
+            self.waits = 0
+            self.stdin = mock.Mock()
         def wait(self, timeout=None):
             self.waits += 1
-            if timeout is not None: raise hook.subprocess.TimeoutExpired("fixture", timeout)
+            if self.waits == 1: raise hook.subprocess.TimeoutExpired("fixture", timeout)
             return -9
     process = Process(); calls = []
     monkeypatch.setattr(hook.subprocess, "Popen", lambda *a, **k: process)
     monkeypatch.setattr(hook.os, "killpg", lambda *a: calls.append(a))
+    monkeypatch.setattr(hook, "REVIEW_SUPERVISOR_SOURCE", "verified source", raising=False)
     assert not hook.run_worker(Path("fixture"), Path("fixture"), timeout=0.01)
-    assert calls == [(123, hook.signal.SIGKILL)]
+    assert calls == []  # The hook never signals a detached group by numeric PID.
+    process.stdin.close.assert_called_once()
     assert process.waits == 2
+
+
+def test_worker_without_digest_verified_supervisor_cannot_launch(monkeypatch):
+    monkeypatch.delattr(hook, "REVIEW_SUPERVISOR_SOURCE", raising=False)
+    with mock.patch.object(hook.subprocess, "Popen") as launch:
+        assert not hook.run_worker(Path("fixture"), Path("fixture"))
+        launch.assert_not_called()
 
 
 def test_review_keeps_scrubbed_tool_commands_and_results_without_binary_payloads():
