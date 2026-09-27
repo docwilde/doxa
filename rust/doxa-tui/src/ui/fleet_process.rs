@@ -93,6 +93,12 @@ fn review_lines(title:&str,value:&Value)->Vec<String>{
 #[derive(Debug)]
 pub struct Controller {child:Option<Child>,pub root:PathBuf,pub id:String,pub cancelling:bool}
 impl Controller{
+    /// Detach only this window's owned controller. Its existing budgets and
+    /// approval deadlines keep running; closing the TUI no longer cancels it.
+    pub fn detach(mut self)->(PathBuf,String){
+        if let Some(mut child)=self.child.take(){std::thread::spawn(move||{let _=child.wait();});}
+        (self.root.clone(),self.id.clone())
+    }
     pub fn cancel(&mut self){if !self.cancelling{if let Some(child)=&self.child{unsafe{libc::kill(child.id() as i32,libc::SIGINT);}}self.cancelling=true;}}
     pub fn poll(&mut self)->io::Result<Option<bool>>{let Some(child)=&mut self.child else{return Ok(Some(true));};match child.try_wait()?{Some(status)=>{self.child=None;Ok(Some(status.success()))},None=>Ok(None)}}
 }

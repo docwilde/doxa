@@ -78,7 +78,7 @@ const COMMANDS: &[CommandHelp] = &[
     CommandHelp { name: "/sidebar", form: "/sidebar [on|off|wider|narrower|width N]", summary: "Session rail", support: "local" },
     CommandHelp { name: "/collection", form: "/collection [action] [name]", summary: "Organize sessions", support: "local · list/new/rename/delete/add/remove" },
     CommandHelp { name: "/msg", form: "/msg <peer> <text>", summary: "Message a peer", support: "local · same project" },
-    CommandHelp { name: "/fleet", form: "/fleet [runs|status RUN|attach RUN INDEX|start OPTIONS|resume RUN]", summary: "Fleet manifests and slots", support: "local · verified slot attachment" },
+    CommandHelp { name: "/fleet", form: "/fleet [runs|status [RUN]|stop|detach|attach [RUN] INDEX|mesh [RUN]|start OPTIONS|resume RUN]", summary: "Fleet manifests and slots", support: "local · verified slot attachment" },
     CommandHelp { name: "/mesh", form: "/mesh [RUN|stop]", summary: "Browser peer graph", support: "local · private loopback ledger" },
     CommandHelp { name: "/img", form: "/img [path]", summary: "Image support", support: "unavailable in Rust" },
     CommandHelp { name: "/login", form: "/login [claude|codex] [--device-auth]", summary: "Provider login", support: "local · selectable operations menu" },
@@ -3477,7 +3477,44 @@ impl App {
     }
 
     fn local_fleet(&mut self,args:&str){
+        let current = self.fleet_controller.as_ref().map(|controller| (controller.root.clone(), controller.id.clone()))
+            .or_else(|| self.fleet_menu.as_ref().and_then(|menu| menu.verified_view()).map(|view| (view.root, view.run_id)));
+        match args.trim() {
+            "stop" => {
+                if let Some(controller) = self.fleet_controller.as_mut() {
+                    controller.cancel(); self.input.clear(); self.input_cursor=0;
+                    self.notice="Stopping owned fleet; waiting for slot teardown".into();
+                } else { self.notice="No controller owned by this window; use doxa fleet stop RUN for a verified saved run".into(); }
+                return;
+            }
+            "detach" => {
+                if let Some(controller) = self.fleet_controller.take() {
+                    let (root,id)=controller.detach(); self.fleet_quit_pending=false; self.open_fleet(root,Some(id));
+                    self.notice="Fleet detached; it keeps running with its existing budget and approval limits".into();
+                    self.input.clear(); self.input_cursor=0;
+                } else { self.notice="No live controller owned by this window".into(); }
+                return;
+            }
+            "status" | "mesh" => {
+                if let Some((root,id))=current {
+                    if args.trim()=="mesh" { self.local_mesh(&id,Some(root)); }
+                    else { self.open_fleet(root,Some(id)); self.input.clear(); self.input_cursor=0; }
+                } else { self.notice="Select a live fleet run first, or specify its RUN ID".into(); }
+                return;
+            }
+            _ => {}
+        }
         let parts=match fleet_process::words(args){Ok(parts)=>parts,Err(error)=>{self.notice=safe_label(&error.to_string());return;}};
+        if let [verb,slot]=parts.as_slice() {
+            if verb=="attach" && slot.parse::<usize>().is_ok() {
+                if let Some((root,id))=current {
+                    if let Ok((_,session))=crate::fleet_view::slot_socket(&root,&id,slot.parse().unwrap()) {
+                        self.attach_selected(&session);
+                    } else { self.notice="Fleet slot attachment refused; verify run and live slot".into(); }
+                } else { self.notice="Choose a current fleet, or use /fleet attach RUN INDEX".into(); }
+                return;
+            }
+        }
         let start=parts.first().is_some_and(|part|part=="start");
         let mut command_words=Vec::new();let mut custom_root=None;let mut index=0;
         while index<parts.len(){

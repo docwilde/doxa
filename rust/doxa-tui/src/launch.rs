@@ -269,6 +269,7 @@ pub fn spawn(options: &LaunchOptions) -> io::Result<Session> {
 /// Fleet-scoped child environment without changing the frontend process.
 pub fn spawn_fleet(options: &LaunchOptions, runtime: &Path, budget: Option<f64>, inbound: bool, lore: bool) -> io::Result<Session> {
     let mut environment = vec![("DOXA_RUNTIME_DIR", runtime.to_string_lossy().into_owned()),
+        ("DOXA_AGENT_PEER_SEND", "1".into()),
         ("DOXA_PEER_INBOUND_TURNS", if inbound { "1" } else { "0" }.into())];
     environment.push(("DOXA_LORE", if lore { "1" } else { "0" }.into()));
     environment.push(("DOXA_SESSION_BUDGET_USD", budget.map(|value| value.to_string()).unwrap_or_default()));
