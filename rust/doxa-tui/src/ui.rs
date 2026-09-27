@@ -6815,12 +6815,13 @@ impl App {
 
     fn open_selected(&mut self) {
         let selected = self.rail_order().get(self.rail_selected).copied();
-        if let Some(session) = selected.and_then(|index| self.sessions.get(index)) {
+        if let Some(id) = selected.and_then(|index| self.sessions.get(index)).map(|session| session.id.clone()) {
+            if !self.groups[self.active_group].tabs.contains(&id) && !self.manual_tab_available() { return; }
             let tabs = &mut self.groups[self.active_group];
-            if let Some(index) = tabs.tabs.iter().position(|id| id == &session.id) {
+            if let Some(index) = tabs.tabs.iter().position(|tab| tab == &id) {
                 tabs.active = index;
             } else {
-                tabs.tabs.push(session.id.clone());
+                tabs.tabs.push(id);
                 tabs.active = tabs.tabs.len() - 1;
             }
             tabs.scroll = 0;
@@ -11296,6 +11297,30 @@ for line in sys.stdin:
         // is discarded because that tab no longer exists, never applied right.
         assert_eq!(app.input_cursor,5);
         assert!(app.pending_prompts.is_empty());
+    }
+
+    #[test]
+    fn rail_open_uses_manual_slot_admission_but_can_focus_existing_tabs() {
+        let mut app = App::default();
+        app.sidebar_auto = false; app.rail_visible = true;
+        app.sessions = (0..=panes::MAX_TABS).map(|index| Session {
+            id:format!("slot-{index}"), title:String::new(), collection:String::new(),
+            transcript:String::new(), status:"Ready".into(),
+        }).collect();
+        app.groups[0].tabs = app.sessions[..panes::MAX_TABS].iter().map(|session|session.id.clone()).collect();
+        app.handle(Event::Resize(120,32)); app.focus = Focus::Rail;
+        app.rail_selected = panes::MAX_TABS;
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE)));
+        assert_eq!(app.groups[0].tabs.len(),panes::MAX_TABS);
+        assert!(app.notice.contains("256 tab slots occupied"));
+        app.focus = Focus::Rail; app.rail_selected = 2;
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE)));
+        assert_eq!(app.groups[0].active_id(),Some("slot-2"));
+        app.groups[0].tabs.pop(); app.focus = Focus::Rail; app.rail_selected = panes::MAX_TABS;
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE)));
+        assert_eq!(app.groups[0].active_id(),Some("slot-256"));
+        assert_eq!(app.groups[0].tabs.len(),panes::MAX_TABS);
+        assert!(app.pending_attaches.is_empty()); assert!(app.pending_launches.is_empty());
     }
 
     #[test]
