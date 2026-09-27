@@ -15,6 +15,9 @@ the stable 2.0 release has not been cut.
   Preserve it as a development interoperability oracle.
 - Use exact transcript proofs and frozen engine identity for native review and
   reconciliation. Promotions stay pending; landed partial failures remain visible.
+- Enforce the same strict memory-tool schema across vendor, app-server and
+  exec MCP routes; reject forged metadata before staging. Preserve complete
+  belief pagination in retained SDK adapters.
 - Install the native `lore-rs` carrier atomically beside frontend and daemon;
   diagnose its actual version, store and source through native read-only APIs.
 - Preserve nullable remote session metadata and canonical indexing reply fields;
