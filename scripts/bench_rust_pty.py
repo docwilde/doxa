@@ -77,7 +77,8 @@ def run_once() -> dict:
         path = str(Path(temp) / "frames.sock")
         master, slave = pty.openpty()
         winsize(slave, 160, 48)
-        env = {**os.environ, "TERM": "xterm-256color", "DOXA_HOME": str(Path(temp) / "home")}
+        env = {**os.environ, "TERM": "xterm-256color", "DOXA_HOME": str(Path(temp) / "home"),
+               "DOXA_SKIP_FIRST_RUN": "1", "DOXA_SKIP_UPDATE_CHECK": "1"}
         started = time.perf_counter()
         proc = subprocess.Popen([str(BINARY), path], stdin=slave, stdout=slave, stderr=slave,
                                 cwd=temp, env=env, start_new_session=True)
@@ -159,9 +160,14 @@ def run_once() -> dict:
 
 
 def main() -> None:
+    global BINARY
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--runs", type=int, default=3)
+    parser.add_argument("--binary", type=Path, default=BINARY, help="Explicit compiled frontend path")
     args = parser.parse_args()
+    BINARY = args.binary.resolve()
+    if not BINARY.is_file():
+        parser.error(f"release binary missing: {BINARY}")
     if args.runs < 1:
         parser.error("--runs must be positive")
     raw = [run_once() for _ in range(args.runs)]

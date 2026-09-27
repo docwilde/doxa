@@ -7119,6 +7119,8 @@ impl App {
             lines.push(format!("{} · {}", row.form, row.summary));
             lines.push(format!("  {}", row.support));
         }
+        lines.push("Local keyboard shell: !<command> · current session directory; output is neither sent nor saved".into());
+        for (command, description) in FLEET_ACTIONS { lines.push(format!("{command} · {description}")); }
         self.chip_info = Some(ChipInfo { kind: "help", label: String::new(), lines,
             scroll: 0, owner: None });
         if self.active_chooser_rect().is_none() {

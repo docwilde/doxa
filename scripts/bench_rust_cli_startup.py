@@ -45,7 +45,8 @@ def sample(width: int, height: int, timeout: float) -> dict[str, float]:
     with tempfile.TemporaryDirectory(prefix="doxa-cli-startup-") as temp:
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", height, width, 0, 0))
-        env = {**os.environ, "TERM": "xterm-256color", "DOXA_HOME": str(Path(temp) / "home")}
+        env = {**os.environ, "TERM": "xterm-256color", "DOXA_HOME": str(Path(temp) / "home"),
+               "DOXA_SKIP_FIRST_RUN": "1", "DOXA_SKIP_UPDATE_CHECK": "1"}
         started = time.perf_counter()
         proc = subprocess.Popen(
             [str(BINARY), "--demo"], stdin=slave, stdout=slave, stderr=slave,
@@ -89,10 +90,15 @@ def sample(width: int, height: int, timeout: float) -> dict[str, float]:
 
 
 def main() -> None:
+    global BINARY
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--runs", type=int, default=50)
     parser.add_argument("--timeout", type=float, default=2.0)
+    parser.add_argument("--binary", type=Path, default=BINARY, help="Explicit compiled frontend path")
     args = parser.parse_args()
+    BINARY = args.binary.resolve()
+    if not BINARY.is_file():
+        parser.error(f"release binary missing: {BINARY}")
     if args.runs < 1 or args.timeout <= 0:
         parser.error("--runs and --timeout must be positive")
     if not BINARY.is_file():

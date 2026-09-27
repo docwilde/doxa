@@ -40,7 +40,7 @@ fn run(id: u64, command: String, cwd: &Path, cancel: &AtomicBool, timeout: Durat
             .stderr(Stdio::from(OwnedFd::from(writer))).process_group(0).spawn()?;
         let pid = child.id() as i32;
         let mut raw = Vec::new(); let mut dropped = 0u64; let mut buffer = [0u8; 8192];
-        let mut exited = None; let mut eof = false; let mut exit_at = None; let mut killed = None;
+        let mut exited = None; let mut eof = false; let mut kill_at = None; let mut killed = None;
         let outcome = loop {
             // Keep draining after the cap. A bounded burst also gives process
             // cancellation a turn when a command emits without stopping.
@@ -55,7 +55,7 @@ fn run(id: u64, command: String, cwd: &Path, cancel: &AtomicBool, timeout: Durat
             }
             if exited.is_none() {
                 match child.try_wait() {
-                    Ok(Some(status)) => { exited = Some(status); exit_at = Some(Instant::now()); },
+                    Ok(Some(status)) => { exited = Some(status); },
                     Ok(None) => {},
                     Err(_) => { unsafe { libc::kill(-pid, libc::SIGKILL); } let _ = child.wait(); break "process status unavailable".into(); },
                 }
@@ -63,11 +63,12 @@ fn run(id: u64, command: String, cwd: &Path, cancel: &AtomicBool, timeout: Durat
             if cancel.load(Ordering::Acquire) || started.elapsed() >= timeout {
                 if killed.is_none() {
                     unsafe { libc::kill(-pid, libc::SIGKILL); }
+                    kill_at = Some(Instant::now());
                     killed = Some(if cancel.load(Ordering::Acquire) { "cancelled" } else { "timeout" });
                 }
             }
             if exited.is_some() && eof { break killed.map(str::to_owned).unwrap_or_else(|| format!("exit {}", exited.unwrap().code().map_or("signal".into(), |code| code.to_string()))); }
-            if exit_at.is_some_and(|at| at.elapsed() >= Duration::from_secs(2)) {
+            if kill_at.is_some_and(|at| at.elapsed() >= Duration::from_secs(2)) {
                 unsafe { libc::kill(-pid, libc::SIGKILL); }
                 break format!("{} · output pipe remained open", killed.unwrap_or("process exited"));
             }
