@@ -905,10 +905,10 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"sk-owned
     }
     let argv = fs::read_to_string(args).unwrap();
     assert!(argv.contains("exec\nresume\nthread_1\n"));
-    assert_eq!(
-        fs::read_to_string(prompt).unwrap(),
-        "sk-ownedCanonicalFixtureSecret1234567890 first promptsecond prompt"
-    );
+    let provider_stdin=fs::read_to_string(prompt).unwrap();
+    assert!(provider_stdin.starts_with("[DOXA MEMORY -- not typed by the user]"));
+    assert!(provider_stdin.ends_with("[END OF MEMORY]\n\nsk-ownedCanonicalFixtureSecret1234567890 first promptsecond prompt"));
+    assert_eq!(provider_stdin.matches("[DOXA MEMORY -- not typed by the user]").count(),1);
     send(
         &mut socket,
         json!({"type":"call","id":3,"method":"stop","params":{}}),
@@ -924,7 +924,9 @@ fn codex_host_indexes_completed_turn_and_finalized_transcript() {
     executable(&codex,"#!/bin/sh\ncat >/dev/null\necho '{\"type\":\"thread.started\",\"thread_id\":\"thread_1\"}'\necho '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"answer\"}}'\n");
     native_memory_fixture(dir.path(),"- poisoned optional context\n");
     let source=dir.path().join("native-lore/USER.md");fs::remove_file(&source).unwrap();
-    std::os::unix::fs::symlink(dir.path().join("unused-context-target"),&source).unwrap();
+    let target=dir.path().join("unused-context-target");
+    fs::write(&target,"- owned context must never be followed\n").unwrap();
+    std::os::unix::fs::symlink(&target,&source).unwrap();
     let mut lock=NativeWriterLock::acquire(dir.path());
     let mut process=Process::start_codex(dir.path(),&codex,python);
     let (mut reader,mut socket)=process.connect();receive(&mut reader);
@@ -945,7 +947,9 @@ fn blocked_codex_index_does_not_delay_scrubbing_or_disable_later_turns() {
     executable(&codex,"#!/bin/sh\ncat >/dev/null\necho '{\"type\":\"thread.started\",\"thread_id\":\"thread_1\"}'\necho '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"sk-ownedCanonicalFixtureSecret1234567890 answer\"}}'\n");
     native_memory_fixture(dir.path(),"- poisoned optional context\n");
     let source=dir.path().join("native-lore/USER.md");fs::remove_file(&source).unwrap();
-    std::os::unix::fs::symlink(dir.path().join("unused-context-target"),&source).unwrap();
+    let target=dir.path().join("unused-context-target");
+    fs::write(&target,"- owned context must never be followed\n").unwrap();
+    std::os::unix::fs::symlink(&target,&source).unwrap();
     let mut lock=NativeWriterLock::acquire(dir.path());
     let mut process=Process::start_codex(dir.path(),&codex,Path::new("/usr/bin/python3"));
     let (mut reader,mut socket)=process.connect();receive(&mut reader);send(&mut socket,json!({"type":"attach","cursor":null}));
@@ -1060,7 +1064,9 @@ fn unavailable_lore_snapshot_does_not_block_a_scrubbable_codex_turn() {
     let captured = dir.path().join("stdin.txt");
     native_memory_fixture(dir.path(), "- unused memory\n");
     let source=dir.path().join("native-lore/USER.md");fs::remove_file(&source).unwrap();
-    std::os::unix::fs::symlink(dir.path().join("outside-memory"),&source).unwrap();
+    let target=dir.path().join("outside-memory");
+    fs::write(&target,"- outside memory must never be followed\n").unwrap();
+    std::os::unix::fs::symlink(&target,&source).unwrap();
     executable(
         &codex,
         &format!(
@@ -1183,7 +1189,7 @@ fn codex_clean_checkpoint_failure_overrides_success_and_preserves_dirty_resume_g
     let codex = dir.path().join("codex-fixture");
     let python = Path::new("/usr/bin/python3");
     let ready=dir.path().join("checkpoint-ready");let release=dir.path().join("checkpoint-release");
-    executable(&codex,&format!("#!/bin/sh\ncat >/dev/null\necho '{{\"type\":\"thread.started\",\"thread_id\":\"thread_1\"}}'\necho '{{\"type\":\"item.completed\",\"item\":{{\"type\":\"agent_message\",\"text\":\"answer\"}}}}'\ntouch '{}'\nattempt=0\nwhile [ ! -e '{}' ]; do attempt=$((attempt+1)); [ $attempt -le 1000 ] || exit 1; sleep .01; done\n",ready.display(),release.display()));
+    executable(&codex,&format!("#!/bin/sh\ncat >/dev/null\necho '{{\"type\":\"thread.started\",\"thread_id\":\"thread_1\"}}'\ntouch '{}'\nattempt=0\nwhile [ ! -e '{}' ]; do attempt=$((attempt+1)); [ $attempt -le 1000 ] || exit 1; sleep .01; done\n",ready.display(),release.display()));
     let mut process = Process::start_codex(dir.path(), &codex, &python);
     let (mut reader, mut socket) = process.connect();
     receive(&mut reader);
@@ -1191,7 +1197,12 @@ fn codex_clean_checkpoint_failure_overrides_success_and_preserves_dirty_resume_g
     send(&mut socket, json!({"type":"prompt","id":1,"text":"owned prompt"}));
     assert_eq!(receive(&mut reader)["ok"], true);
     let transcript=native_transcript(dir.path(),"codex-session.jsonl");
-    wait_until(||ready.exists()&&native_role_count(&transcript,"assistant")==1);
+    // The host buffers assistant output until EOF. A successful empty answer
+    // isolates the clean checkpoint from the separately tested append failure.
+    let thread_path=native_transcript(dir.path(),"codex-session.codex.json");
+    wait_until(||ready.exists()&&native_role_count(&transcript,"user")==1
+        &&fs::read(&thread_path).ok().and_then(|bytes|serde_json::from_slice::<Value>(&bytes).ok())
+            .is_some_and(|state|state["turn_incomplete"]==true));
     fs::rename(&transcript,dir.path().join("saved-complete.jsonl")).unwrap();
     fs::write(dir.path().join("checkpoint-fault"),"owned checkpoint fault").unwrap();fs::write(&release,"").unwrap();
     loop {
@@ -2287,9 +2298,12 @@ mod vendor_process {
             assert_eq!(receive(&mut reader)["ok"], true);
             wait_until(|| process.exited());
             let requests = server.join().unwrap();
-            assert!(requests.iter().all(|body| body["tools"].as_array().is_some_and(|tools|
-                tools.len()==3 && tools.iter().all(|tool|tool["function"]["name"].as_str()
-                    .is_some_and(|name|name.starts_with("mcp__doxa__peer_"))))));
+            for request in &requests {
+                let mut names:Vec<_>=request["tools"].as_array().unwrap().iter()
+                    .map(|tool|tool["function"]["name"].as_str().unwrap()).collect();
+                names.sort_unstable();
+                assert_eq!(names,["mcp__doxa__lore_belief_neighbours", "mcp__doxa__lore_belief_search", "mcp__doxa__lore_belief_show", "mcp__doxa__lore_memory_list", "mcp__doxa__lore_remember", "mcp__doxa__lore_session_search", "mcp__doxa__peer_history", "mcp__doxa__peer_list", "mcp__doxa__peer_send"]);
+            }
             assert_eq!(requests[1]["messages"][2]["content"], "[REDACTED:api-key] answer");
             assert!(!requests[1].to_string().contains("sk-ownedCanonicalFixtureSecret1234567890"));
             // The published entry is removed at shutdown. Its private claim
@@ -2560,9 +2574,8 @@ mod vendor_process {
         assert_eq!(receive(&mut reader)["ok"], true);
         wait_until(|| process.exited());
         assert_eq!(server.join().unwrap().len(), 1);
-        let transcript=fs::read_to_string(native_transcript(dir.path(), "vendor-session.jsonl")).unwrap();
-        assert_eq!(native_role_count(&native_transcript(dir.path(),"vendor-session.jsonl"),"assistant"),0);
-        assert!(!transcript.contains("sk-ownedCanonicalFixtureSecret1234567890"));
+        assert!(!native_transcript(dir.path(),"vendor-session.jsonl").exists(),
+            "failed provider streams must not commit partial turns");
         assert!(!native_transcript(dir.path(), "vendor-session.messages.json")
             .exists());
     }
@@ -2824,7 +2837,7 @@ fn native_msg_sends_scrubbed_frame_records_ledger_and_denies_other_scope() {
     let ledger = fs::read_to_string(dir.path().join("home/peers/messages.jsonl")).unwrap();
     assert!(ledger.contains("[REDACTED:api-key] hello"));
     assert!(!ledger.contains("sk-ownedCanonicalFixtureSecret1234567890"));
-    assert!(ledger.contains("637f5a69d3b12d04bc0050df9189dc19816f42fad4163fe35770a2c33559f152"));
+    assert!(ledger.contains("66e50b5e76495eb415cb9d9d3c5e02327f188673a0f393df258fad21d6a33470"));
     send(
         &mut socket,
         json!({"type":"call","id":3,"method":"stop","params":{}}),
