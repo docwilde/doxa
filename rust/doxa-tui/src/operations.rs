@@ -556,6 +556,46 @@ fn detailed_plugin_rows(installed: &serde_json::Value, settings: &serde_json::Va
     rows
 }
 
+/// Run the installed canonical plugin policy without creating an SDK session.
+pub fn plugins_reload() -> io::Result<String> {
+    plugins_bridge(true)
+}
+
+pub fn plugins_bridge(reload: bool) -> io::Result<String> {
+    let (python, script) = crate::launch::claude_dependencies(&Default::default())?;
+    let mut child = Command::new(python).arg("-I").arg(script)
+        .arg(if reload { "--reload-plugins" } else { "--plugins-report" })
+        .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null())
+        .process_group(0).spawn()?;
+    let stdout = child.stdout.take().unwrap();
+    let reader = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stdout.take(65537).read_to_end(&mut bytes).map(|_| bytes)
+    });
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(Some(status)),
+            Ok(None) => {},
+            Err(error) => break Err(error),
+        }
+        if Instant::now() >= deadline {
+            unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL); }
+            let _ = child.wait(); break Ok(None);
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
+    // Kill descendants before joining a reader: a leftover inherited stdout
+    // must not hold this operation open after its leader exits.
+    unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL); }
+    let _ = child.wait();
+    let bytes = reader.join().map_err(|_| io::Error::other("Plugin inventory reader failed"))??;
+    let status = status?;
+    if status.is_none() { return Err(io::Error::new(io::ErrorKind::TimedOut, "Plugin inventory timed out")); }
+    if !status.unwrap().success() || bytes.len() > 65536 { return Err(io::Error::other("Plugin inventory failed; verify installed Python/LORE dependencies")); }
+    String::from_utf8(bytes).map_err(|_| io::Error::other("Invalid plugin inventory response"))
+}
+
 pub fn plugins_report() -> io::Result<String> {
     let base = std::env::var_os("CLAUDE_CONFIG_DIR").filter(|value| !value.is_empty())
         .map(PathBuf::from)

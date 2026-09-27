@@ -5,7 +5,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 
 #[derive(Clone)]
-enum Action { Report, Store(bool), Plugins(bool), Auth(crate::operations::AuthRequest), Skip }
+enum Action { Report, Store(bool), Plugins(bool), Auth(crate::operations::AuthRequest), Reload, Skip }
 
 pub struct Menu {
     kind: String,
@@ -38,10 +38,17 @@ impl Menu {
         }
         Ok(menu)
     }
+    pub fn with_plugin_report(reload: bool) -> Self {
+        let mut menu = Self::new(if reload { "reload-plugins" } else { "plugins" });
+        menu.rows[0].1 = if reload { Action::Reload } else { Action::Report };
+        menu.requested = true;
+        menu
+    }
     pub fn start_requested(&mut self) {
         if self.requested && !self.busy() && !self.closed {
             self.requested = false;
             self.apply();
+            if matches!(self.kind.as_str(), "plugins" | "reload-plugins") { self.rows[0].1 = Action::Reload; }
         }
     }
     fn prepare(&mut self) {
@@ -59,7 +66,7 @@ impl Menu {
                 1 => vec![("Create separate DOXA LORE store".into(), Action::Store(false)), ("Share existing Claude LORE store".into(), Action::Store(true)), ("Skip store selection".into(), Action::Skip)],
                 _ => vec![("Edit model default".into(), Action::Report), ("Edit effort default".into(), Action::Report), ("Finish setup".into(), Action::Skip)],
             },
-            _ => vec![("Refresh discovered Claude plugins".into(), Action::Report), ("Enable adoption for new sessions".into(), Action::Plugins(true)), ("Disable adoption for new sessions".into(), Action::Plugins(false))],
+            _ => vec![("Refresh discovered Claude plugins".into(), Action::Reload), ("Enable adoption for new sessions".into(), Action::Plugins(true)), ("Disable adoption for new sessions".into(), Action::Plugins(false))],
         };
     }
     pub fn poll(&mut self) {
@@ -80,7 +87,7 @@ impl Menu {
             format!("{} · Esc cancel · PgUp/PgDn report", self.kind)
         } else { format!("{} · ↑↓ choose · Enter apply · Esc close · PgUp/PgDn report", self.kind) }];
         if self.busy() { lines.push("Operation running…".into()); }
-        else if self.requested { lines.push("Authentication requested…".into()); }
+        else if self.requested { lines.push("Operation requested…".into()); }
         if let Some(key) = self.editing { lines.push(format!("{key}: {}", self.input)); }
         else { lines.extend(self.rows.iter().enumerate().map(|(i, (label, _))| format!("{} {label}", if i == self.selected { "›" } else { " " }))); }
         let mut report = Vec::new();
@@ -138,11 +145,12 @@ impl Menu {
                 let _ = sender.send((true, result.unwrap_or_else(|error| error.to_string())));
             }); return;
         }
-        if matches!(action, Action::Report) && !(self.kind == "setup" && self.step >= 2) {
+        if matches!(action, Action::Report | Action::Reload) && !(self.kind == "setup" && self.step >= 2) {
             let setup = self.kind == "setup";
+            let reload = matches!(action, Action::Reload);
             let (sender, receiver) = mpsc::channel(); self.worker = Some(receiver);
             std::thread::spawn(move || {
-                let result = if setup { crate::operations::setup_report() } else { crate::operations::plugins_report() };
+                let result = if setup { crate::operations::setup_report() } else { crate::operations::plugins_bridge(reload) };
                 let _ = sender.send((true, result.unwrap_or_else(|e| e.to_string())));
             });
             if setup { self.step += 1; self.prepare(); }
@@ -155,6 +163,7 @@ impl Menu {
             Action::Store(shared) => crate::operations::setup_choose_store(shared),
             Action::Plugins(on) => crate::operations::plugins_change(on),
             Action::Report => if self.kind == "setup" { crate::operations::setup_report() } else { crate::operations::plugins_report() },
+            Action::Reload => crate::operations::plugins_reload(),
             Action::Skip => Ok("Skipped".into()),
             Action::Auth(_) => unreachable!(),
         };
@@ -172,6 +181,18 @@ impl Drop for Menu {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn plugin_commands_queue_the_correct_initial_operation_without_side_effects() {
+        let report = Menu::with_plugin_report(false);
+        assert!(report.requested && !report.busy());
+        assert!(matches!(report.rows[0].1, Action::Report));
+        assert!(!report.choice_at(1));
+        let reload = Menu::with_plugin_report(true);
+        assert!(reload.requested && !reload.busy());
+        assert!(matches!(reload.rows[0].1, Action::Reload));
+        assert!(matches!(reload.rows[1].1, Action::Plugins(true)));
+        assert!(matches!(reload.rows[2].1, Action::Plugins(false)));
+    }
     #[test]
     fn explicit_auth_argument_selection_is_pure_until_popup_is_visible() {
         let browser = Menu::with_auth_args("login", "claude").unwrap();

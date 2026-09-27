@@ -156,7 +156,7 @@ fn run(args: &[String]) -> io::Result<()> {
             "plugins" => {
                 match args {
                     [_] => println!("{}", operations::plugins_report()?),
-                    [_, action] if action == "refresh" => println!("{}", operations::plugins_report()?),
+                    [_, action] if action == "refresh" => println!("{}", operations::plugins_reload()?),
                     [_, action, value] if action == "adopt" && (value == "on" || value == "off") => println!("{}", operations::plugins_change(value == "on")?),
                     _ => return Err(invalid("usage: doxa plugins [refresh | adopt on|off]")),
                 }

@@ -380,5 +380,35 @@ async def run() -> None:
             pass
 
 
+def plugin_inventory(reload: bool = False) -> str:
+    """No SDK connection: canonical policy, sanitized staging, then LORE scrub."""
+    from doxa import _lore_bootstrap, claude_plugins
+    _lore_bootstrap.ensure_importable()
+    _lore_bootstrap.export_sticky_lore_root()
+    from lore_core.scrub import scrub_secrets
+
+    discovered = claude_plugins.discover()
+    staged = claude_plugins.adopt(discovered) if reload else []
+    text = claude_plugins.report(discovered)
+    if reload:
+        text += (f"\n\nreload-plugins: re-scanned and re-staged {len(staged)} plugin(s). "
+                 "Changes apply to NEW sessions and tabs only; this session's CLI "
+                 "already connected with its original plugin directories.")
+    text = scrub_secrets(text)
+    # Plugin descriptions and paths are untrusted display data, never terminal controls.
+    return "".join(c for c in text if c in "\n\t" or 32 <= ord(c) < 127 or ord(c) >= 160)
+
+
 if __name__ == "__main__":
-    asyncio.run(run())
+    if sys.argv[1:] in (["--plugins-report"], ["--reload-plugins"]):
+        try:
+            text = plugin_inventory(sys.argv[1] == "--reload-plugins")
+            if len(text.encode("utf-8")) > 65536:
+                raise ValueError("inventory too large")
+            print(text)
+        except Exception:
+            # Never disclose exception strings or unsanitized inventory.
+            print("Plugin inventory failed; verify the installed DOXA Python/LORE dependencies.")
+            sys.exit(1)
+    else:
+        asyncio.run(run())

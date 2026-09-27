@@ -3255,8 +3255,9 @@ impl App {
                 true
             }
             "/setup" | "/login" | "/logout" | "/plugins" | "/reload-plugins" if args.trim().is_empty() || matches!(command, "/login" | "/logout") => {
-                let kind = if command == "/reload-plugins" { "plugins" } else { &command[1..] };
+                let kind = &command[1..];
                 let menu = if matches!(command, "/login" | "/logout") { operations_menu::Menu::with_auth_args(kind, args) }
+                    else if matches!(command, "/plugins" | "/reload-plugins") { Ok(operations_menu::Menu::with_plugin_report(command == "/reload-plugins")) }
                     else { Ok(operations_menu::Menu::new(kind)) };
                 let menu = match menu { Ok(menu) => menu, Err(error) => { self.notice = format!("{command}: {error}"); return true; } };
                 self.input.clear(); self.input_cursor = 0;
