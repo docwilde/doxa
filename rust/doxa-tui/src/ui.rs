@@ -9521,6 +9521,11 @@ impl App {
         }
         let content_width = usize::from(inner[1].width.saturating_sub(2));
         let mut visible_links = self.visible_links.borrow_mut();
+        // Every explicit label reserves its cells, including labels whose
+        // destination is refused. They must never fall back to a URL-looking
+        // label's text and acquire a different destination.
+        let label_cells: Vec<_> = link_regions.iter()
+            .map(|link| (link.row, link.start, link.end)).collect();
         let explicit: Vec<links::LinkHit> = link_regions.into_iter()
             .filter(|link| links::safe_url(&link.url) && link.start < content_width)
             .map(|link| links::LinkHit { row: link.row, start: link.start,
@@ -9529,7 +9534,7 @@ impl App {
         // A label may itself look like a bare URL. Its explicit destination
         // wins; never derive a second destination from those painted cells.
         hitboxes.extend(links::hits(&lines, content_width).into_iter().filter(|hit|
-            !explicit.iter().any(|label| label.row == hit.row && label.start < hit.end && hit.start < label.end)));
+            !label_cells.iter().any(|&(row, start, end)| row == hit.row && start < hit.end && hit.start < end)));
         for hit in hitboxes {
             if hit.end > hit.start {
                 visible_links.push((
@@ -12334,6 +12339,40 @@ for line in sys.stdin:
             column: permission.rect.x + 1, row: permission.rect.y,
             modifiers: KeyModifiers::NONE }));
         assert!(app.permission_picker.is_some());
+    }
+
+    #[test]
+    fn refused_explicit_link_destinations_never_fall_back_to_url_looking_labels() {
+        let mut app = App::default();
+        app.rail_visible = false;
+        app.handle(Event::Resize(100, 30));
+        let oversized = format!("https://example.org/{}", "x".repeat(2048));
+        app.apply_update(DaemonUpdate::Upsert(Session {
+            id: "links".into(), title: "links".into(), collection: "repo".into(),
+            transcript: format!("**Assistant:**\n\n[https://file-label.example](file:///fixture)\n\n[https://script-label.example](javascript:alert(1))\n\n[https://large-label.example]({oversized})\n\nBare https://bare.example and [https://safe-label.example](https://destination.example)."),
+            status: "Idle".into(),
+        }));
+        app.groups[0].tabs = vec!["links".into()];
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let visible: Vec<String> = app.visible_links.borrow().iter().map(|(_, url)| url.clone()).collect();
+        assert!(visible.contains(&"https://bare.example".to_owned()));
+        assert!(visible.contains(&"https://destination.example".to_owned()));
+        assert!(!visible.contains(&"https://safe-label.example".to_owned()));
+        for label in ["https://file-label.example", "https://script-label.example", "https://large-label.example"] {
+            let buffer = terminal.backend().buffer();
+            let (row, column) = (0..30).find_map(|y| {
+                let text = (0..100).map(|x| buffer[(x, y)].symbol()).collect::<String>();
+                text.find(label).map(|x| (y, x as u16))
+            }).expect("refused label remains painted");
+            assert!(app.link_at(column, row).is_none());
+            app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Moved,
+                column, row, modifiers: KeyModifiers::NONE }));
+            assert!(app.link_hover.is_none());
+            app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+                column, row, modifiers: KeyModifiers::CONTROL }));
+            assert!(app.pending_open_urls.is_empty());
+        }
     }
 
     #[test]
