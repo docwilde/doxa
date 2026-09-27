@@ -353,6 +353,7 @@ impl PeerHost {
 }
 
 impl Host for PeerHost {
+    fn has_active_work(&self) -> bool { self.inner.has_active_work() }
     fn peer_tools_ready(&self) -> bool { self.agent_tools_enabled && self.inner.peer_tools_ready() }
     fn initial_model(&self) -> Option<String> { self.inner.initial_model() }
     fn initial_effort(&self) -> Option<String> { self.inner.initial_effort() }

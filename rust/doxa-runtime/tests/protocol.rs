@@ -852,3 +852,119 @@ fn pending_input_snapshots_survive_replay_overflow_and_require_exact_review() {
     assert_eq!(recv(&mut reader)["ok"], false);
     assert_eq!(host.0.load(Ordering::SeqCst), 1);
 }
+
+struct LingerWork {
+    permits: Mutex<usize>,
+    released: Condvar,
+    entered: AtomicUsize,
+    provider_work: AtomicBool,
+}
+impl LingerWork {
+    fn new() -> Self { Self { permits: Mutex::new(0), released: Condvar::new(), entered: AtomicUsize::new(0), provider_work: AtomicBool::new(false) } }
+    fn release(&self, count: usize) { *self.permits.lock().unwrap() += count; self.released.notify_all(); }
+}
+impl Host for LingerWork {
+    fn has_active_work(&self) -> bool { self.provider_work.load(Ordering::Acquire) }
+    fn prompt(&self, _: &str, emit: &mut dyn FnMut(Value)) {
+        self.entered.fetch_add(1, Ordering::Release);
+        let mut permits = self.permits.lock().unwrap();
+        while *permits == 0 { permits = self.released.wait(permits).unwrap(); }
+        *permits -= 1;
+        emit(json!({"type":"turn_done","data":{}}));
+    }
+    fn call(&self, _: &str, _: &Value) -> Result<Value, String> { Ok(json!({})) }
+}
+fn linger_wait(mut condition: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !condition() { assert!(Instant::now() < deadline, "linger fixture state did not settle"); std::thread::sleep(Duration::from_millis(2)); }
+}
+fn linger_reply(reader: &mut BufReader<UnixStream>, id: u64) -> Value {
+    loop { let frame = recv(reader); if frame["type"] == "reply" && frame["id"] == id { return frame; } }
+}
+
+#[test]
+fn detached_linger_preserves_running_and_queued_socket_work_then_closes_admission() {
+    let dir = tempfile::tempdir().unwrap();
+    let work = Arc::new(LingerWork::new());
+    let mut handle = Daemon::bind(dir.path(), session(), work.clone()).unwrap().start();
+    let (mut reader, mut writer) = connect(handle.socket_path()); recv(&mut reader);
+    send(&mut writer, json!({"type":"attach","cursor":null}));
+    send(&mut writer, json!({"type":"prompt","id":1,"text":"first"}));
+    assert_eq!(linger_reply(&mut reader, 1)["ok"], true);
+    linger_wait(|| work.entered.load(Ordering::Acquire) == 1);
+    send(&mut writer, json!({"type":"prompt","id":2,"text":"queued"}));
+    assert_eq!(linger_reply(&mut reader, 2)["queued"], true);
+    writer.shutdown(std::net::Shutdown::Both).unwrap(); drop(reader); drop(writer);
+    linger_wait(|| handle.attached_clients() == 0);
+    assert!(handle.has_active_work()); assert!(!handle.expire_if_detached_idle());
+    work.release(1); linger_wait(|| work.entered.load(Ordering::Acquire) == 2);
+    assert!(!handle.expire_if_detached_idle(), "queued work became the next running turn");
+    work.release(1); linger_wait(|| !handle.has_active_work());
+    assert!(handle.expire_if_detached_idle()); assert!(handle.is_stopping());
+    assert!(handle.enqueue_peer_prompt("late peer work".into(), "peer-exact").is_err());
+    handle.shutdown();
+}
+
+#[test]
+fn detached_linger_refuses_hidden_provider_work_and_reattached_clients() {
+    let dir = tempfile::tempdir().unwrap(); let work = Arc::new(LingerWork::new());
+    work.provider_work.store(true, Ordering::Release);
+    let mut handle = Daemon::bind(dir.path(), session(), work.clone()).unwrap().start();
+    assert!(handle.has_active_work()); assert!(!handle.expire_if_detached_idle());
+    let (mut reader, mut writer) = connect(handle.socket_path()); recv(&mut reader);
+    send(&mut writer, json!({"type":"attach","cursor":null}));
+    send(&mut writer, json!({"type":"call","id":1,"method":"stop_if_idle","params":{}}));
+    assert_eq!(linger_reply(&mut reader, 1)["ok"], false);
+    work.provider_work.store(false, Ordering::Release);
+    assert!(!handle.expire_if_detached_idle(), "reattached client owns the session");
+    writer.shutdown(std::net::Shutdown::Both).unwrap(); drop(reader); drop(writer);
+    linger_wait(|| handle.attached_clients() == 0);
+    assert!(handle.expire_if_detached_idle()); handle.shutdown();
+}
+
+#[test]
+fn detached_linger_and_peer_admission_have_one_atomic_winner() {
+    for _ in 0..16 {
+        let dir = tempfile::tempdir().unwrap(); let work = Arc::new(LingerWork::new());
+        let mut handle = Arc::new(Daemon::bind(dir.path(), session(), work.clone()).unwrap().start());
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let expiring = handle.clone(); let expiry_barrier = barrier.clone();
+        let expiry = std::thread::spawn(move || { expiry_barrier.wait(); expiring.expire_if_detached_idle() });
+        let admitting = handle.clone(); let admission_barrier = barrier.clone();
+        let admission = std::thread::spawn(move || { admission_barrier.wait(); admitting.enqueue_peer_prompt("fixture work".into(), "peer-exact") });
+        barrier.wait(); let expired = expiry.join().unwrap(); let admitted = admission.join().unwrap();
+        assert_eq!(admitted.is_ok(), !expired, "expiration and provider admission both won");
+        if !expired { linger_wait(|| work.entered.load(Ordering::Acquire) == 1); work.release(1); linger_wait(|| !handle.has_active_work()); }
+        Arc::get_mut(&mut handle).unwrap().shutdown();
+    }
+}
+
+#[test]
+fn detached_linger_keeps_slow_provider_controls_without_blocking_the_clock() {
+    struct Maintenance(LingerWork);
+    impl Host for Maintenance {
+        fn prompt(&self, _: &str, _: &mut dyn FnMut(Value)) {}
+        fn call(&self, method: &str, params: &Value) -> Result<Value, String> {
+            assert_eq!(method, "set_effort");
+            self.0.entered.fetch_add(1, Ordering::Release);
+            let mut permits = self.0.permits.lock().unwrap();
+            while *permits == 0 { permits = self.0.released.wait(permits).unwrap(); }
+            Ok(json!({"effort":params["effort"]}))
+        }
+    }
+    let dir = tempfile::tempdir().unwrap(); let work = Arc::new(Maintenance(LingerWork::new()));
+    let mut handle = Daemon::bind(dir.path(), session(), work.clone()).unwrap().start();
+    let (mut reader, mut writer) = connect(handle.socket_path()); recv(&mut reader);
+    send(&mut writer, json!({"type":"attach","cursor":null}));
+    send(&mut writer, json!({"type":"call","id":1,"method":"set_effort","params":{"effort":"high"}}));
+    linger_wait(|| work.0.entered.load(Ordering::Acquire) == 1);
+    writer.shutdown(std::net::Shutdown::Both).unwrap(); drop(reader); drop(writer);
+    // Publishing removes the failed attached writer while its RPC is still
+    // waiting inside the host, so attachment alone cannot protect this work.
+    linger_wait(|| { handle.publish(json!({"type":"notice","data":{}})); handle.attached_clients() == 0 });
+    let started = Instant::now();
+    assert!(handle.has_active_work()); assert!(!handle.expire_if_detached_idle());
+    assert!(started.elapsed() < Duration::from_millis(100), "provider control blocked the linger clock");
+    work.0.release(1); linger_wait(|| !handle.has_active_work());
+    assert!(handle.expire_if_detached_idle()); handle.shutdown();
+}

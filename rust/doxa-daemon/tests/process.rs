@@ -3467,3 +3467,55 @@ fn native_broadcast_reply_and_history_filters_follow_the_owned_delivery_path() {
     send(&mut socket,json!({"type":"call","id":6,"method":"stop","params":{}}));
     let mut stop=receive(&mut reader);while stop["id"]!=6 { stop=receive(&mut reader); }assert_eq!(stop["ok"],true);wait_until(||process.exited());
 }
+
+#[test]
+fn detached_claude_work_survives_linger_and_gets_a_full_idle_interval() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("linger-claude.py");
+    fs::write(&script, r#"import json,sys,time
+from pathlib import Path
+root=Path(__file__).parent
+print(json.dumps({'type':'hello','protocol':'doxa-claude-sidecar','version':1,'capabilities':[]}),flush=True)
+for line in sys.stdin:
+ frame=json.loads(line); method=frame['method']
+ print(json.dumps({'type':'reply','id':frame['id'],'ok':True,'result':{'lore_enabled':False} if method=='start' else {}}),flush=True)
+ if method=='prompt':
+  root.joinpath('started').write_text('owned fixture work')
+  while not root.joinpath('release').exists(): time.sleep(0.005)
+  print(json.dumps({'type':'event','event':'turn_done','data':{}}),flush=True)
+  root.joinpath('completed').write_text('finished')
+ if method=='interrupt': root.joinpath('interrupted').write_text('unexpected cancellation')
+ if method=='finalize': break
+"#).unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+        .args(["--runtime-dir", dir.path().to_str().unwrap(), "--cwd", dir.path().to_str().unwrap(),
+            "--session-id", "linger-claude", "--engine", "claude", "--claude-python", "/usr/bin/python3",
+            "--claude-script", script.to_str().unwrap(), "--linger", "0.7"])
+        .env("DOXA_HOME", dir.path().join("home")).env("LORE_ROOT",dir.path().join("lore"))
+        .env("LORE_PROJECTS_DIR",dir.path().join("projects")).env("DOXA_LORE","0")
+        .env_remove("DOXA_SESSION_BUDGET_USD").env("DOXA_AGENT_PEER_SEND","0")
+        .stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
+    let registry=dir.path().join("registry/linger-claude.json");
+    let mut process=Process { child, registry, socket:PathBuf::new() };
+    wait_until(|| {
+        if let Some(status) = process.child.try_wait().unwrap() {
+            let mut stderr = String::new(); process.child.stderr.take().unwrap().read_to_string(&mut stderr).unwrap();
+            panic!("owned fixture daemon exited {status}: {stderr}");
+        }
+        process.registry.exists()
+    });
+    process.socket=process.entry()["daemon_socket"].as_str().unwrap().into();
+    let (mut reader,mut socket)=process.connect(); receive(&mut reader);
+    send(&mut socket,json!({"type":"attach","cursor":null}));
+    wait_until(||process.entry()["clients"]==1);
+    send(&mut socket,json!({"type":"prompt","id":1,"text":"owned fixture turn"}));
+    assert_eq!(receive(&mut reader)["ok"],true); wait_until(||dir.path().join("started").exists());
+    drop(reader); drop(socket); wait_until(||process.entry()["clients"]==0);
+    thread::sleep(Duration::from_millis(1000));
+    assert!(!process.exited(), "detached running work was expired");
+    fs::write(dir.path().join("release"),"finish").unwrap(); wait_until(||dir.path().join("completed").exists());
+    thread::sleep(Duration::from_millis(200));
+    assert!(!process.exited(),"work completion needs a full idle linger interval");
+    assert!(!dir.path().join("interrupted").exists(),"automatic linger interrupted a running provider");
+    wait_until(||process.exited()); assert!(!process.registry.exists());
+}

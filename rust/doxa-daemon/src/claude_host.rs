@@ -208,6 +208,7 @@ impl ClaudeHost {
 }
 
 impl Host for ClaudeHost {
+    fn has_active_work(&self) -> bool { self.turn_active() }
     fn lore_enabled(&self) -> Option<bool> { self.lore_enabled }
     fn peer_tools_ready(&self) -> bool { self.peer_tools_ready && !self.closing.load(Ordering::Acquire) }
     fn can_set_model(&self) -> bool { self.model_control }
