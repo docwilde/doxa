@@ -970,11 +970,19 @@ function setConn(state, text) {
 async function connect() {
   let offset = 0;
   try {
-    const res = await fetch("ledger", { credentials: "omit" });
-    if (!res.ok) throw new Error(`ledger ${res.status}`);
-    const data = await res.json();
-    for (const record of data.records) ingest(record, true);
-    offset = data.offset || 0;
+    let snapshotEnd = null;
+    for (;;) {
+      const boundary = snapshotEnd === null ? "" : `&until=${snapshotEnd}`;
+      const res = await fetch(`ledger?from=${offset}${boundary}`, { credentials: "omit" });
+      if (!res.ok) throw new Error(`ledger ${res.status}`);
+      const data = await res.json();
+      for (const record of data.records) ingest(record, true);
+      const next = data.offset || 0;
+      if (snapshotEnd === null && Number.isSafeInteger(data.snapshot_end)) snapshotEnd = data.snapshot_end;
+      const more = data.more && next > offset;
+      offset = next;
+      if (!more) break;
+    }
     if (nodes.size) { wake(); needsFit = true; }
   } catch (err) {
     setConn("conn-dead", "ledger unavailable");

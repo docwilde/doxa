@@ -33,6 +33,7 @@ pull in opposite directions, which is why they are pinned together:
 from __future__ import annotations
 
 import json
+import os
 import socket
 import threading
 import time
@@ -823,3 +824,137 @@ def test_a_non_ascii_request_path_is_answered_not_raised(server):
     assert response.startswith(b"HTTP/1.1 404")
     # And the server is still serving, on the real capability path.
     assert get(server, "")[0] == 200
+
+
+def test_batches_cap_records_and_bytes_preserve_every_cursor(ledger):
+    total = meshgraph.MAX_BATCH_RECORDS * 2 + 3
+    for index in range(total):
+        append(ledger, record(body=str(index)))
+    offset = 0
+    bodies = []
+    for _ in range(4):
+        batch, next_offset = meshgraph.read_batch(ledger, offset)
+        assert len(batch) <= meshgraph.MAX_BATCH_RECORDS
+        assert next_offset - offset <= meshgraph.MAX_BATCH_BYTES
+        assert all(offset < position <= next_offset for _, position in batch)
+        bodies.extend(item["body"] for item, _ in batch)
+        if next_offset == offset:
+            break
+        offset = next_offset
+    assert bodies == list(map(str, range(total)))
+    assert offset == ledger.stat().st_size
+    ledger.write_text("")
+    for index in range(10):
+        append(ledger, record(body=str(index) + "x" * (meshgraph.MAX_LINE_BYTES // 2)))
+    batch, end = meshgraph.read_batch(ledger)
+    assert 0 < len(batch) < 10
+    assert end <= meshgraph.MAX_BATCH_BYTES
+    rest, final = meshgraph.read_batch(ledger, end)
+    assert len(batch) + len(rest) == 10
+    assert final == ledger.stat().st_size
+
+
+def test_snapshot_pagination_keeps_fixed_end_and_partial_tail(server, ledger):
+    for index in range(meshgraph.MAX_BATCH_RECORDS + 2):
+        append(ledger, record(body=str(index)))
+    first = get_json(server, "ledger")
+    assert first["more"] is True
+    boundary = first["snapshot_end"]
+    append(ledger, record(body="later"))
+    second = get_json(server, f"ledger?from={first['offset']}&until={boundary}")
+    assert [item["body"] for item in second["records"]] == [str(meshgraph.MAX_BATCH_RECORDS), str(meshgraph.MAX_BATCH_RECORDS + 1)]
+    assert second["offset"] == boundary
+    assert not second.get("more")
+    more, _ = meshgraph.read_records(ledger, boundary)
+    assert [item["body"] for item in more] == ["later"]
+    with ledger.open("ab") as handle:
+        handle.write(b'{"partial":')
+    tail = get_json(server, f"ledger?from={ledger.stat().st_size - 11}")
+    assert not tail.get("more")
+
+
+def test_mesh_rejects_fifo_links_and_oversized_ledger_without_reading(tmp_path):
+    fifo = tmp_path / "fifo"
+    os.mkfifo(fifo)
+    start = time.monotonic()
+    assert meshgraph.read_batch(fifo) == ([], 0)
+    assert time.monotonic() - start < 0.5
+    huge = tmp_path / "huge"
+    with huge.open("wb") as handle:
+        handle.truncate(meshgraph.MAX_LEDGER_BYTES + 1)
+    with pytest.raises(meshgraph.LedgerReadLimit):
+        meshgraph.read_batch(huge)
+    symlink = tmp_path / "symlink"
+    symlink.symlink_to(huge)
+    assert meshgraph.read_batch(symlink) == ([], 0)
+
+
+def test_header_deadline_is_absolute_under_slow_drip(tmp_path, monkeypatch):
+    monkeypatch.setattr(meshgraph, "HEADER_DEADLINE_SECS", 0.15)
+    with meshgraph.MeshServer(path=tmp_path / "ledger") as mesh:
+        with socket.create_connection((mesh.host, mesh.port), timeout=1) as sock:
+            sock.sendall(b"G")
+            sock.setblocking(False)
+            start = time.monotonic()
+            closed = False
+            for _ in range(20):
+                time.sleep(0.02)
+                try:
+                    sock.sendall(b"E")
+                    if sock.recv(1, socket.MSG_DONTWAIT) == b"":
+                        closed = True
+                        break
+                except BlockingIOError:
+                    pass
+                except (BrokenPipeError, ConnectionResetError):
+                    closed = True
+                    break
+            assert closed and time.monotonic() - start < 0.8
+        assert get(mesh, "")[0] == 200
+
+
+def test_connection_admission_and_shutdown_have_finite_bounds(tmp_path, monkeypatch):
+    monkeypatch.setattr(meshgraph, "MAX_HTTP_CONNECTIONS", 3)
+    mesh = meshgraph.MeshServer(path=tmp_path / "ledger")
+    sockets = []
+    try:
+        for _ in range(3):
+            sockets.append(socket.create_connection((mesh.host, mesh.port), timeout=1))
+        deadline = time.monotonic() + 1
+        while len(mesh._server.connections) < 3 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert len(mesh._server.connections) == 3
+        with socket.create_connection((mesh.host, mesh.port), timeout=1) as refused:
+            refused.settimeout(0.5)
+            assert refused.recv(1) == b""
+        assert len(mesh._server.connections) <= 3
+        start = time.monotonic()
+        mesh.stop()
+        while mesh._server.connections and time.monotonic() - start < 1:
+            time.sleep(0.01)
+        assert not mesh._server.connections
+        assert time.monotonic() - start < 1
+    finally:
+        for sock in sockets:
+            sock.close()
+        mesh.stop()
+
+
+def test_total_header_bytes_are_bounded(server):
+    with socket.create_connection((server.host, server.port), timeout=1) as sock:
+        sock.settimeout(1)
+        sock.sendall(f"GET /{server.token}/ HTTP/1.1\r\nX-Large: ".encode() + b"x" * meshgraph.MAX_HEADER_BYTES + b"\r\n\r\n")
+        response = sock.recv(1024)
+        assert b"431" in response or not response
+    assert get(server, "")[0] == 200
+
+
+def test_large_recipient_list_deduplicates_in_linear_pass():
+    recipients = [f"peer-{index}" for index in range(10_000)]
+    raw = record()
+    raw["to"] = recipients + recipients
+    start = time.monotonic()
+    parsed = meshgraph.parse_record(json.dumps(raw))
+    assert parsed["to"] == recipients
+    assert len(parsed["edges"]) == len(recipients)
+    assert time.monotonic() - start < 2
