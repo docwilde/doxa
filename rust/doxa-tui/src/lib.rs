@@ -4,6 +4,7 @@ pub mod markdown;
 pub mod bridge;
 pub mod history;
 pub mod lore_picker;
+pub mod lore_table;
 pub mod memory_menu;
 pub mod diff_view;
 pub mod discovery;

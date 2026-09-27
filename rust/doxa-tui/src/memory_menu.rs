@@ -82,6 +82,49 @@ pub fn fetch(python: &Path, cwd: &Path) -> Result<Vec<String>, &'static str> {
     Ok(rows)
 }
 
+/// Display facts are scrubbed canonical read rows. They are never reused as
+/// entry keys or replacement text by the separate exact-review write manager.
+#[derive(Clone,Debug,PartialEq,Eq)]
+pub struct Fact {pub scope:String,pub text:String,pub source:Option<String>,pub redacted:bool}
+
+pub fn parse_facts(rows:Vec<serde_json::Value>,scope:&str)->Result<Vec<Fact>,&'static str> {
+    if rows.len()>400 {return Err("Too many curated memory entries");}
+    let mut bytes=0;
+    rows.into_iter().map(|row|{
+        let text=row["text"].as_str().filter(|text|text.len()<=64*1024).ok_or("Invalid memory fact")?.to_owned();
+        let source=match row.get("source") {None|Some(serde_json::Value::Null)=>None,
+            Some(value)=>Some(value.as_str().filter(|source|source.len()<=512).ok_or("Invalid memory source")?.to_owned())};
+        let redacted=row["redacted"].as_bool().ok_or("Invalid memory redaction metadata")?;
+        bytes+=text.len()+source.as_ref().map_or(0,String::len);
+        if bytes>64*1024 {return Err("Curated memory entries too large");}
+        Ok(Fact {scope:scope.into(),text,source,redacted})
+    }).collect()
+}
+
+pub fn fetch_facts(python:&Path,cwd:&Path)->Result<Vec<Fact>,&'static str> {
+    let (project,is_repo)=scope_path(cwd);
+    let mut lore=doxa_lore::LoreClient::spawn(python,Duration::from_secs(3)).map_err(|_|"LORE unavailable")?;
+    let user=lore.memory_entries(cwd.to_str().ok_or("Invalid session directory")?,"user").map_err(|_|"User facts unavailable")?;
+    let project=lore.memory_entries(project.to_str().ok_or("Invalid scope directory")?,"project").map_err(|_|"Scoped facts unavailable")?;
+    let mut facts=parse_facts(user,"user")?;
+    facts.extend(parse_facts(project,if is_repo {"project"} else {"folder"})?);
+    if facts.len()>400 || facts.iter().map(|fact|fact.text.len()+fact.source.as_ref().map_or(0,String::len)).sum::<usize>()>64*1024 {
+        return Err("Curated memory entries exceed menu limit");
+    }
+    Ok(facts)
+}
+
+#[derive(Debug)]
+pub struct List {pub owner:Option<(String,String)>,pub facts:Vec<Fact>,pub query:String}
+impl List {
+    pub fn indices(&self)->Vec<usize> {
+        let query=self.query.to_lowercase();
+        self.facts.iter().enumerate().filter(|(_,fact)|query.is_empty()||fact.text.to_lowercase().contains(&query)
+            ||fact.scope.to_lowercase().contains(&query)||fact.source.as_ref().is_some_and(|source|source.to_lowercase().contains(&query)))
+            .map(|(index,_)|index).collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -111,6 +154,18 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn structured_facts_keep_actual_provenance_and_filter_without_markdown() {
+        let facts=parse_facts(vec![serde_json::json!({"text":"# Literal fact with \nline","source":"codex","redacted":false}),
+            serde_json::json!({"text":"[redacted]","source":null,"redacted":true})],"user").unwrap();
+        assert_eq!(facts[0].text,"# Literal fact with \nline");
+        assert_eq!(facts[1].source,None);
+        assert!(facts[1].redacted);
+        let list=List {owner:None,facts,query:"codex".into()};
+        assert_eq!(list.indices(),vec![0]);
+        assert!(parse_facts(vec![serde_json::json!({"text":"safe","source":17,"redacted":false})],"user").is_err());
+    }
+
+    #[test]
     fn extracts_only_rendered_entries_and_belief_hint() {
         let user = "LORE MEMORY\n## User memory (12/100 chars)\n- likes short replies\n\nRules:\n- unrelated\n";
         let project = "LORE MEMORY\n## Project memory (20/100 chars) — repo\n- run task test\n\nFile map: 2 entries\n\nBelief store: 3 active beliefs (derived, uncurated).\nRules:\n";
@@ -132,7 +187,7 @@ for line in sys.stdin:
         assert!(rows[1].chars().count() <= 401);
         let beliefs = belief_lines(vec![crate::lore_picker::Belief {
             id: 4, subject: "all\nusers".into(), claim: format!("safe\u{1b}[31m{}", "x".repeat(2000)),
-            truncated: false, confidence: 0.9, evidence_count: Some(2),
+            truncated: false, confidence: 0.9, evidence_count: Some(2), recency:None,
         }]);
         assert!(beliefs[0].starts_with("## Global active LORE beliefs"));
         assert!(beliefs[1].starts_with("- all users: safe�[31m"));

@@ -399,7 +399,7 @@ fn belief_review_buttons(area: Rect, picker: &LorePicker) -> Vec<(Rect, &'static
         if picker.retract_armed { &[("[Confirm reject]", KeyCode::Char('y')), ("[Cancel]", KeyCode::Esc)] }
         else { &[("[Apply]", KeyCode::Enter), ("[Cancel]", KeyCode::Esc)] }
     } else {
-        &[("[Accept A]", KeyCode::Char('a')), ("[Reject D]", KeyCode::Char('d')),
+        &[("[Accept A]", KeyCode::Char('A')), ("[Reject R]", KeyCode::Char('R')),
           ("[Contradicted X]", KeyCode::Char('x')), ("[Stale S]", KeyCode::Char('s'))]
     };
     belief_buttons(area, area.y.saturating_add(5), buttons)
@@ -1345,6 +1345,7 @@ pub struct App {
     memory_pending: Option<(String, String, Receiver<Option<(doxa_lore::MemoryUsage, bool)>>)>,
     memory_repo: HashMap<String, bool>,
     memory_manager: Option<crate::memory_menu::Manager>,
+    memory_list: Option<crate::memory_menu::List>,
     operations_menu: Option<operations_menu::Menu>,
     window_mesh: Option<crate::mesh_control::WindowMesh>,
     restart_executable: Option<PathBuf>,
@@ -1362,7 +1363,7 @@ pub struct App {
     fleet_review: Option<fleet_process::Prepared>,
     fleet_controller: Option<fleet_process::Controller>,
     fleet_quit_pending: bool,
-    memory_menu_pending: Option<(String, String, Receiver<Result<Vec<String>, &'static str>>)>,
+    memory_menu_pending: Option<(String, String, Receiver<Result<Vec<crate::memory_menu::Fact>, &'static str>>)>,
     repo_cache: HashMap<String, (Option<doxa_worktrees::RepoStatus>, Instant)>,
     repo_pending: Option<(String, PathBuf, u64, Receiver<Option<doxa_worktrees::RepoStatus>>)>,
     repo_epoch: HashMap<String, u64>,
@@ -1412,6 +1413,9 @@ pub struct App {
     chooser_view_start: Cell<usize>,
     chooser_owner: RefCell<Option<String>>,
     lore_picker: Option<LorePicker>,
+    belief_filter_due: Option<Instant>,
+    belief_filter_request: Option<(String,u16)>,
+    belief_fixture_rows: Vec<lore_picker::Belief>,
     engine_picker: bool,
     engine_selected: usize,
     new_session: Option<NewSession>,
@@ -1539,6 +1543,7 @@ impl Default for App {
             memory_repo: HashMap::new(),
             memory_menu_pending: None,
             memory_manager: None,
+            memory_list: None,
             operations_menu: None,
             window_mesh: None,
             restart_executable: None,
@@ -1603,6 +1608,9 @@ impl Default for App {
             chooser_view_start: Cell::new(0),
             chooser_owner: RefCell::new(None),
             lore_picker: None,
+            belief_filter_due: None,
+            belief_filter_request: None,
+            belief_fixture_rows: Vec::new(),
             engine_picker: false,
             engine_selected: 0,
             new_session: None,
@@ -2860,6 +2868,27 @@ impl App {
     }
 
     fn paste(&mut self, text: &str) -> bool {
+        if let Some(picker)=self.lore_picker.as_mut().filter(|picker|!picker.proposal_mode && picker.belief_review.is_none()
+            && picker.evidence.is_none() && !picker.resolving) {
+            for ch in text.chars().filter(|ch|!unsafe_input_char(*ch)||ch.is_whitespace()) {
+                let ch=if ch.is_whitespace(){' '}else{ch};
+                if picker.query.len()+ch.len_utf8()>512 {break;}
+                picker.query.push(ch);
+            }
+            picker.offset=0;picker.selected=0;self.belief_filter_due=Some(Instant::now());
+            return true;
+        }
+        if self.memory_manager.is_none() && self.chip_info.as_ref().is_some_and(|info|info.kind=="memory") {
+            if let Some(list)=self.memory_list.as_mut() {
+                if list.owner.as_ref().is_some_and(|(id,cwd)|self.groups[self.active_group].active_id()!=Some(id.as_str())
+                    ||self.session_cwds.get(id).and_then(|path|path.to_str())!=Some(cwd.as_str())) {return false;}
+                for ch in text.chars().filter(|ch|!unsafe_input_char(*ch)||ch.is_whitespace()) {
+                    let ch=if ch.is_whitespace(){' '}else{ch};
+                    if list.query.len()+ch.len_utf8()>512 {break;}list.query.push(ch);
+                }
+                self.chip_info.as_mut().unwrap().scroll=0;return true;
+            }
+        }
         if let Some(index) = self.active_request_index().filter(|&index| self.input_requests[index].freeform() && !self.input_requests[index].sending) {
             let clean: String = text.chars().filter(|c| !unsafe_input_char(*c)).collect();
             let request = &mut self.input_requests[index];
@@ -3179,7 +3208,8 @@ impl App {
                 }
                 return manager.key(key);
             }
-            if key.code == KeyCode::Char('m') && self.chip_info.as_ref().is_some_and(|i| i.kind == "memory") {
+            if self.chip_info.as_ref().is_some_and(|i|i.kind=="memory") && key.code!=KeyCode::Char('M') && self.edit_memory_filter(key) {return true;}
+            if key.code == KeyCode::Char('M') && self.chip_info.as_ref().is_some_and(|i| i.kind == "memory") {
                 if let Some(owner) = self.chip_info.as_ref().and_then(|i| i.owner.clone()) {
                     self.memory_menu_pending = None;
                     self.memory_manager = Some(crate::memory_menu::Manager::new(owner));
@@ -3192,13 +3222,14 @@ impl App {
                 self.memory_menu_pending = None;
                 return true;
             }
+            let memory_rows=self.memory_list.as_ref().map(|list|list.indices().len());
             if let Some(info) = self.chip_info.as_mut().filter(|info|
                 matches!(info.kind, "memory" | "usage" | "context" | "help" | "sessions" | "about")) {
                 match key.code {
                     KeyCode::Up => info.scroll = info.scroll.saturating_sub(1),
-                    KeyCode::Down => info.scroll = info.scroll.saturating_add(1).min(info.lines.len().saturating_sub(1)),
+                    KeyCode::Down => info.scroll = info.scroll.saturating_add(1).min(if info.kind=="memory" {memory_rows.unwrap_or(info.lines.len()).saturating_sub(1)}else{info.lines.len().saturating_sub(1)}),
                     KeyCode::PageUp => info.scroll = info.scroll.saturating_sub(8),
-                    KeyCode::PageDown => info.scroll = info.scroll.saturating_add(8).min(info.lines.len().saturating_sub(1)),
+                    KeyCode::PageDown => info.scroll = info.scroll.saturating_add(8).min(if info.kind=="memory" {memory_rows.unwrap_or(info.lines.len()).saturating_sub(1)}else{info.lines.len().saturating_sub(1)}),
                     _ => return false,
                 }
                 return true;
@@ -5288,6 +5319,9 @@ impl App {
 
     fn open_lore_picker_mode(&mut self, proposal_mode: bool) {
         self.belief_browser_fixture = false;
+        self.belief_filter_due = None;
+        self.belief_filter_request = None;
+        self.belief_fixture_rows.clear();
         let cwd = self.groups[self.active_group].active_id()
             .and_then(|id| self.session_cwds.get(id))
             .map(|path| path.to_string_lossy().into_owned())
@@ -5316,7 +5350,7 @@ impl App {
             session_id: None, query: String::new(),
             rows: rows.iter().map(|&(id, subject, claim)| lore_picker::Belief {
                 id, subject: subject.into(), claim: claim.into(), truncated: false,
-                confidence: 0.8, evidence_count: Some(1),
+                confidence: 0.8, evidence_count: Some(1), recency:None,
             }).collect(), selected: 0, offset: 0, proposals: Vec::new(), proposal_mode: false,
             review: None, review_scroll: 0, review_seen: 0, review_width: 0,
             armed_resolution: None, can_resolve: false, resolving: false, cwd: String::new(),
@@ -5324,6 +5358,17 @@ impl App {
             belief_note: String::new(), retract_armed: false, belief_acting: false,
             result_status: None, evidence: None, status: "Active beliefs · Accept/Reject review the exact claim".into(), pending: None,
         });
+        self.belief_fixture_rows = self.lore_picker.as_ref().unwrap().rows.clone();
+    }
+
+    #[doc(hidden)]
+    pub fn show_belief_browser_timed_fixture(&mut self, group:usize, rows:&[(u64,&str,&str,Option<&str>)]) {
+        let plain=rows.iter().map(|row|(row.0,row.1,row.2)).collect::<Vec<_>>();
+        self.show_belief_browser_fixture(group,&plain);
+        if let Some(picker)=&mut self.lore_picker {
+            for (belief,row) in picker.rows.iter_mut().zip(rows) {belief.recency=row.3.map(str::to_owned);}
+            self.belief_fixture_rows=picker.rows.clone();
+        }
     }
 
     fn load_lore(&mut self, query: lore_picker::Query) {
@@ -5332,6 +5377,12 @@ impl App {
             return;
         }
         let Some(picker) = &mut self.lore_picker else { return; };
+        self.belief_filter_request = match &query {
+            lore_picker::Query::Beliefs(offset) => Some((String::new(),*offset)),
+            lore_picker::Query::FilteredBeliefs(offset,query) => Some((query.clone(),*offset)),
+            _ => None,
+        };
+        self.belief_filter_due = None;
         picker.resolving = matches!(&query, lore_picker::Query::Resolve(..) | lore_picker::Query::BeliefAction(..));
         picker.belief_acting = matches!(&query, lore_picker::Query::BeliefAction(..));
         picker.status = if picker.belief_acting { "Applying belief action with LORE…" }
@@ -5371,14 +5422,11 @@ impl App {
         let Some(info) = self.chip_info.as_mut() else { return; };
         info.owner = self.groups[group].active_id().and_then(|id|
             self.session_cwds.get(id).and_then(|cwd| cwd.to_str()).map(|cwd| (id.to_owned(), cwd.to_owned())));
-        let mut lines = vec!["## User memory".to_owned()];
-        lines.extend(user.iter().take(8).map(|line| clipped_title(line, 120).0));
-        lines.extend([String::new(), "## Project memory".to_owned()]);
-        lines.extend(project.iter().take(8).map(|line| clipped_title(line, 120).0));
-        lines.extend([String::new(), "## Global active LORE beliefs · retrieved on demand".to_owned()]);
-        lines.extend(beliefs.iter().take(8).map(|line| clipped_title(line, 120).0));
-        info.lines = lines;
-        info.scroll = 0;
+        let facts=user.iter().take(8).map(|text|crate::memory_menu::Fact {scope:"user".into(),text:(*text).into(),source:None,redacted:false})
+            .chain(project.iter().take(8).map(|text|crate::memory_menu::Fact {scope:"project".into(),text:(*text).into(),source:None,redacted:false})).collect();
+        let _=beliefs; // Beliefs have their own review menu, never curated entries.
+        self.memory_list=Some(crate::memory_menu::List {owner:info.owner.clone(),facts,query:String::new()});
+        info.lines=vec!["No curated facts".into()];info.scroll=0;
         self.memory_menu_pending = None;
     }
 
@@ -5579,7 +5627,11 @@ impl App {
                 }
                 if let Some(info) = self.chip_info.as_mut().filter(|info| info.kind == "memory") {
                     info.lines = match result {
-                        Ok(mut lines) => { lines.insert(0, "M manage curated entries · /beliefs and /pending for reviews".into()); lines },
+                        Ok(facts) => {
+                            let query=self.memory_list.take().map(|list|list.query).unwrap_or_default();
+                            self.memory_list=Some(crate::memory_menu::List {owner:Some((id.clone(),cwd.clone())),facts,query});
+                            vec!["No matching curated facts".into()]
+                        },
                         Err(message) => vec![message.to_owned()],
                     };
                     info.scroll = 0;
@@ -5615,6 +5667,9 @@ impl App {
             Err(TryRecvError::Disconnected) => Err("LORE worker unavailable"),
         };
         picker.pending = None;
+        if self.belief_filter_request.take().is_some_and(|(query,offset)|picker.query!=query || picker.offset!=offset) {
+            return true;
+        }
         let was_resolving = picker.resolving;
         let was_belief_acting = picker.belief_acting;
         picker.resolving = false;
@@ -5637,7 +5692,7 @@ impl App {
                 picker.rows = hit.map(|hit| lore_picker::Belief {
                     id: hit.id, subject: "Search match".into(), claim: hit.claim,
                     truncated: hit.claim_truncated, confidence: hit.confidence,
-                    evidence_count: None,
+                    evidence_count: None, recency:None,
                 }).into_iter().collect();
                 picker.selected = 0;
                 picker.evidence = None;
@@ -5752,8 +5807,60 @@ impl App {
         true
     }
 
+    fn edit_memory_filter(&mut self,key:KeyEvent)->bool {
+        let Some(list)=self.memory_list.as_mut() else {return false;};
+        if list.owner.as_ref().is_some_and(|(id,cwd)|self.groups[self.active_group].active_id()!=Some(id.as_str())
+            ||self.session_cwds.get(id).and_then(|path|path.to_str())!=Some(cwd.as_str())) {return false;}
+        match key.code {
+            KeyCode::Backspace if !key.modifiers.intersects(KeyModifiers::CONTROL|KeyModifiers::ALT)=>{list.query.pop();}
+            KeyCode::Char('u') if key.modifiers==KeyModifiers::CONTROL=>list.query.clear(),
+            KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL|KeyModifiers::ALT)
+                && !unsafe_input_char(c) && list.query.len()+c.len_utf8()<=512=>list.query.push(c),
+            _=>return false,
+        }
+        if let Some(info)=&mut self.chip_info {info.scroll=0;}
+        true
+    }
+
+    fn edit_belief_filter(&mut self, key:KeyEvent) -> bool {
+        let Some(picker)=self.lore_picker.as_mut().filter(|picker|!picker.proposal_mode && picker.belief_review.is_none()
+            && picker.evidence.is_none() && !picker.resolving) else {return false;};
+        let before=picker.query.clone();
+        match key.code {
+            KeyCode::Backspace if !key.modifiers.intersects(KeyModifiers::CONTROL|KeyModifiers::ALT)=>{picker.query.pop();}
+            KeyCode::Char('u') if key.modifiers==KeyModifiers::CONTROL=>picker.query.clear(),
+            KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL|KeyModifiers::ALT)
+                && !matches!(c,'A'|'R'|'P') && !unsafe_input_char(c) && picker.query.len()+c.len_utf8()<=512=>picker.query.push(c),
+            _=>return false,
+        }
+        if before!=picker.query {
+            picker.selected=0;picker.offset=0;
+            self.belief_filter_due=Some(Instant::now());
+        }
+        true
+    }
+
+    fn poll_belief_filter(&mut self, now:Instant)->bool {
+        let Some(due)=self.belief_filter_due else {return false;};
+        let Some(picker)=self.lore_picker.as_ref().filter(|picker|!picker.proposal_mode && picker.belief_review.is_none()) else {
+            self.belief_filter_due=None;return false;
+        };
+        if now.saturating_duration_since(due)<Duration::from_millis(200) {return false;}
+        self.belief_filter_due=None;
+        let (offset,query)=(picker.offset,picker.query.clone());
+        if self.belief_browser_fixture {
+            let picker=self.lore_picker.as_mut().unwrap();
+            let query=query.to_lowercase();
+            picker.rows=self.belief_fixture_rows.iter().filter(|row|query.is_empty()
+                ||row.subject.to_lowercase().contains(&query)||row.claim.to_lowercase().contains(&query)).cloned().collect();
+            picker.status=if picker.rows.is_empty(){"No matching beliefs"}else{"Filtered beliefs"}.into();
+        } else {self.load_lore(lore_picker::Query::FilteredBeliefs(offset,query));}
+        true
+    }
+
     fn lore_picker_key(&mut self, key: KeyEvent) -> bool {
-        if key.code==KeyCode::Char('g') && !key.modifiers.intersects(KeyModifiers::CONTROL|KeyModifiers::ALT) && self.lore_picker.as_ref().is_some_and(|p|!p.proposal_mode && p.query.is_empty()) {self.open_belief_graph();return true;}
+        if self.belief_graph_lines.is_none() && self.edit_belief_filter(key) {return true;}
+        if key.code==KeyCode::Char('g') && key.modifiers==KeyModifiers::ALT && self.lore_picker.as_ref().is_some_and(|p|!p.proposal_mode && p.query.is_empty()) {self.open_belief_graph();return true;}
         if key.code==KeyCode::Esc && self.belief_graph_lines.take().is_some(){return true;}
         if let Some((_,lines))=&self.belief_graph_lines {
             match key.code {KeyCode::Up=>self.belief_graph_scroll=self.belief_graph_scroll.saturating_sub(1),KeyCode::Down=>self.belief_graph_scroll=(self.belief_graph_scroll+1).min(lines.len().saturating_sub(1)),KeyCode::PageDown=>self.belief_graph_scroll=(self.belief_graph_scroll+10).min(lines.len().saturating_sub(1)),KeyCode::PageUp=>self.belief_graph_scroll=self.belief_graph_scroll.saturating_sub(10),_=>{}}return true;
@@ -5762,7 +5869,8 @@ impl App {
         let review_area = self.active_chooser_rect();
         let picker = self.lore_picker.as_mut().unwrap();
         if picker.resolving { return true; }
-        if picker.pending.is_some() { return true; }
+        if picker.pending.is_some() && key.code!=KeyCode::Esc { return true; }
+        if self.belief_filter_due.is_some() && key.code!=KeyCode::Esc {return true;}
         // Dismissal must remain possible when a split or resized pane cannot
         // show the review, and when an exact-selection guard has invalidated it.
         if key.code == KeyCode::Esc {
@@ -5899,13 +6007,13 @@ impl App {
                 picker.review_seen = picker.review_seen.max(picker.review_scroll.saturating_add(visible)).min(total);
             }
             let max_scroll = total.saturating_sub(visible);
-            if picker.belief_action.is_none() && matches!(key.code, KeyCode::Char('a' | 'A' | 'd' | 'D'))
+            if picker.belief_action.is_none() && matches!(key.code, KeyCode::Char('A' | 'R'))
                 && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
                 if !picker.can_act_on_beliefs || picker.review_seen != total {
                     picker.status = "Read the complete writable belief before choosing an action".into();
                     return true;
                 }
-                let reject = matches!(key.code, KeyCode::Char('d' | 'D'));
+                let reject = matches!(key.code, KeyCode::Char('R'));
                 picker.belief_action = Some(if reject { doxa_lore::BeliefAction::Retract } else { doxa_lore::BeliefAction::Confirmed });
                 picker.belief_note = if reject { "Rejected by user in DOXA belief browser" } else { "Accepted by user in DOXA belief browser" }.into();
                 picker.retract_armed = false;
@@ -5987,9 +6095,9 @@ impl App {
             }
             KeyCode::Up if picker.evidence.is_none() => picker.selected = picker.selected.saturating_sub(1),
             KeyCode::Down if picker.evidence.is_none() => picker.selected = (picker.selected + 1).min(picker.rows.len().saturating_sub(1)),
-            KeyCode::Char(c @ ('A' | 'D')) if picker.evidence.is_none() && picker.query.is_empty()
+            KeyCode::Char(c @ ('A' | 'R')) if picker.evidence.is_none()
                 && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
-                picker.belief_intent = Some(if matches!(c, 'd' | 'D') { doxa_lore::BeliefAction::Retract } else { doxa_lore::BeliefAction::Confirmed });
+                picker.belief_intent = Some(if matches!(c, 'R') { doxa_lore::BeliefAction::Retract } else { doxa_lore::BeliefAction::Confirmed });
                 if let Some(id) = picker.rows.get(picker.selected).map(|row| row.id) {
                     let cwd = picker.cwd.clone();
                     self.load_lore(lore_picker::Query::BeliefReview(cwd, id));
@@ -6000,44 +6108,26 @@ impl App {
                     self.load_lore(lore_picker::Query::Evidence(id));
                 }
             }
-            KeyCode::Enter if picker.evidence.is_none() && picker.query.is_empty() => {
+            KeyCode::Enter if picker.evidence.is_none() => {
                 picker.belief_intent = None;
                 if let Some(id) = picker.rows.get(picker.selected).map(|row| row.id) {
                     let cwd = picker.cwd.clone();
                     self.load_lore(lore_picker::Query::BeliefReview(cwd, id));
                 }
             }
-            KeyCode::Backspace if picker.evidence.is_none() => { picker.query.pop(); },
-            KeyCode::Char('p' | 'P') if picker.evidence.is_none() && picker.query.is_empty() => {
-                picker.proposal_mode = true;
-                picker.offset = 0;
-                picker.selected = 0;
-                let cwd = picker.cwd.clone();
-                self.load_lore(lore_picker::Query::Proposals(cwd, 0));
+            KeyCode::Char('P') if picker.evidence.is_none() => {
+                picker.proposal_mode=true;picker.offset=0;picker.selected=0;
+                let cwd=picker.cwd.clone();self.load_lore(lore_picker::Query::Proposals(cwd,0));
             }
-            KeyCode::F(5) if picker.evidence.is_none() => {
-                picker.query.clear();
-                let offset = picker.offset;
-                self.load_lore(lore_picker::Query::Beliefs(offset));
+            KeyCode::F(5) if picker.evidence.is_none()=>{
+                let (offset,query)=(picker.offset,picker.query.clone());
+                self.load_lore(lore_picker::Query::FilteredBeliefs(offset,query));
             }
-            KeyCode::Char(c) if picker.evidence.is_none() && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
-                if picker.query.len() + c.len_utf8() <= 512 { picker.query.push(c); }
-            }
-            KeyCode::Enter if picker.evidence.is_none() => {
-                if !picker.query.trim().is_empty() {
-                    let query = picker.query.clone();
-                    self.load_lore(lore_picker::Query::Search(query));
-                }
-            }
-            KeyCode::PageDown if picker.evidence.is_none() && picker.query.is_empty() => {
-                picker.offset = picker.offset.saturating_add(lore_picker::PAGE_SIZE as u16).min(10000);
-                let offset = picker.offset;
-                self.load_lore(lore_picker::Query::Beliefs(offset));
-            }
-            KeyCode::PageUp if picker.evidence.is_none() && picker.query.is_empty() => {
-                picker.offset = picker.offset.saturating_sub(lore_picker::PAGE_SIZE as u16);
-                let offset = picker.offset;
-                self.load_lore(lore_picker::Query::Beliefs(offset));
+            KeyCode::PageDown|KeyCode::PageUp if picker.evidence.is_none()=>{
+                picker.offset=if key.code==KeyCode::PageDown {picker.offset.saturating_add(lore_picker::PAGE_SIZE as u16).min(10000)}
+                    else {picker.offset.saturating_sub(lore_picker::PAGE_SIZE as u16)};
+                let (offset,query)=(picker.offset,picker.query.clone());
+                self.load_lore(lore_picker::Query::FilteredBeliefs(offset,query));
             }
             KeyCode::Enter if picker.evidence.is_some() => picker.evidence = None,
             _ => return false,
@@ -7148,7 +7238,7 @@ impl App {
                 (if rows <= 4 { 4 + rows } else { 7 + rows }).clamp(5, 19) as u16
             } else {
                 let rows = picker.rows.len();
-                (if rows <= 2 { 4 + rows } else { 7 + rows }).clamp(5, 19) as u16
+                (3 + rows).clamp(5, 19) as u16
             }
         } else if self.action_menu {
             (self.action_rows().len() + 3).clamp(5, 15) as u16
@@ -7156,6 +7246,8 @@ impl App {
             19
         } else if let Some(menu) = &self.operations_menu {
             (menu.lines(usize::from(pane.width)).len() + 2).clamp(7, 19) as u16
+        } else if self.chip_info.as_ref().is_some_and(|info|info.kind=="memory") && self.memory_list.is_some() {
+            (self.memory_list.as_ref().unwrap().indices().len()+3).clamp(7,19) as u16
         } else if self.chip_info.is_some() {
             self.chip_info.as_ref().map_or(5, |info| if matches!(info.kind, "memory" | "usage" | "context" | "help" | "sessions" | "about" | "fleet" | "fleet_review") {
                 (info.lines.len() + 2).clamp(7, 19) as u16
@@ -7595,7 +7687,8 @@ impl App {
         self.retire_operations();
         self.open_chip_info("memory", group);
         let Some(info) = self.chip_info.as_mut() else { return; };
-        info.lines = vec!["Loading LORE memory… · M manage curated entries".into()];
+        info.lines = vec!["Loading curated facts…".into()];
+        self.memory_list=Some(crate::memory_menu::List {owner:None,facts:Vec::new(),query:String::new()});
         let Some(id) = self.groups[group].active_id().map(str::to_owned) else {
             info.lines = vec!["No active session".into()];
             return;
@@ -7605,12 +7698,13 @@ impl App {
             return;
         };
         info.owner = Some((id.clone(), cwd.clone()));
+        self.memory_list.as_mut().unwrap().owner=info.owner.clone();
         let python = std::env::var_os("DOXA_LORE_PYTHON")
             .map(PathBuf::from).unwrap_or_else(|| PathBuf::from("python3"));
         let (tx, rx) = mpsc::sync_channel(1);
         self.memory_menu_pending = Some((id, cwd.clone(), rx));
         std::thread::spawn(move || {
-            let result = crate::memory_menu::fetch(&python, Path::new(&cwd));
+            let result = crate::memory_menu::fetch_facts(&python, Path::new(&cwd));
             let _ = tx.send(result);
         });
     }
@@ -7698,11 +7792,10 @@ impl App {
             }
         } else if let Some(picker) = self.lore_picker.as_mut() {
             if picker.review.is_some() || picker.belief_review.is_some() || picker.evidence.is_some()
-                || picker.pending.is_some() { return false; }
-            let compact = menu.height < 10;
-            let first = if picker.proposal_mode { menu.y + 4 } else { menu.y + if compact { 3 } else { 6 } };
+                || picker.pending.is_some() || self.belief_filter_due.is_some() { return false; }
+            let first = if picker.proposal_mode { menu.y + 4 } else { menu.y + 2 };
             if row < first { return false; }
-            let reserve = if picker.proposal_mode { 6 } else if compact { 4 } else { 7 };
+            let reserve = if picker.proposal_mode { 6 } else { 3 };
             let visible = usize::from(menu.height.saturating_sub(reserve)).max(1);
             if usize::from(row - first) >= visible { return false; }
             let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
@@ -7933,6 +8026,7 @@ impl App {
             }
             let inside_menu = self.active_chooser_rect().is_some_and(|area| area.contains(
                 ratatui::layout::Position::new(mouse.column, mouse.row)));
+            let memory_rows=self.memory_list.as_ref().map(|list|list.indices().len());
             if let Some(info) = self.chip_info.as_mut().filter(|info| info.kind == "memory") {
                 if inside_menu {
                     match mouse.kind {
@@ -7941,7 +8035,7 @@ impl App {
                             return true;
                         }
                         MouseEventKind::ScrollDown => {
-                            info.scroll = info.scroll.saturating_add(3).min(info.lines.len().saturating_sub(1));
+                            info.scroll = info.scroll.saturating_add(3).min(memory_rows.unwrap_or(info.lines.len()).saturating_sub(1));
                             return true;
                         }
                         _ => {}
@@ -8126,7 +8220,7 @@ impl App {
             let Some(menu) = self.active_chooser_rect() else { return false; };
             if !menu.contains(ratatui::layout::Position::new(mouse.column, mouse.row)) { return true; }
             let picker = self.lore_picker.as_mut().unwrap();
-            if picker.pending.is_some() || picker.resolving { return true; }
+            if picker.pending.is_some() || picker.resolving || self.belief_filter_due.is_some() { return true; }
             if picker.belief_review.is_some() && mouse.kind == MouseEventKind::Down(MouseButton::Left) {
                 if let Some((_, _, key)) = belief_review_buttons(menu, picker).into_iter()
                     .find(|(rect, _, _)| rect.contains(ratatui::layout::Position::new(mouse.column, mouse.row))) {
@@ -8185,19 +8279,18 @@ impl App {
             }
             match mouse.kind {
                 MouseEventKind::Down(MouseButton::Left) => {
-                    let compact = menu.height < 10;
-                    let first = menu.y.saturating_add(if compact { 3 } else { 6 });
-                    let visible = usize::from(menu.height.saturating_sub(if compact { 4 } else { 7 })).max(1);
+                    let first = menu.y.saturating_add(2);
+                    let visible = usize::from(menu.height.saturating_sub(3)).max(1);
                     let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
                     if mouse.row >= first && mouse.row < first.saturating_add(visible as u16) {
                         let index = start + usize::from(mouse.row - first);
                         if let Some(id) = picker.rows.get(index).map(|row| row.id) {
-                            let action_clicked = belief_buttons(menu, mouse.row,
-                                &[("[Accept]", KeyCode::Char('A')), ("[Reject]", KeyCode::Char('D'))]).into_iter()
+                            let action_clicked = crate::lore_table::BeliefColumns::new(usize::from(menu.width.saturating_sub(2))).actions.then(||belief_buttons(menu, mouse.row,
+                                &[("[Accept]", KeyCode::Char('A')), ("[Reject]", KeyCode::Char('R'))]).into_iter()
                                 .find(|(rect, _, _)| rect.contains(ratatui::layout::Position::new(mouse.column, mouse.row)))
-                                .map(|(_, _, key)| key);
+                                .map(|(_, _, key)| key)).flatten();
                             if picker.selected == index || action_clicked.is_some() {
-                                picker.belief_intent = action_clicked.map(|key| if key == KeyCode::Char('D') {
+                                picker.belief_intent = action_clicked.map(|key| if key == KeyCode::Char('R') {
                                     doxa_lore::BeliefAction::Retract
                                 } else { doxa_lore::BeliefAction::Confirmed });
                                 picker.selected = index;
@@ -8855,6 +8948,28 @@ impl App {
                 .block(Block::default().title(" Fleet · PgUp/PgDn scroll ").borders(Borders::ALL))
                 .style(Style::default().fg(theme::TEXT).bg(theme::RAISED)),area);return;
         }
+        if info.kind=="memory" {
+            if let Some(list)=&self.memory_list {
+                let current=self.groups[self.active_group].active_id().and_then(|id|self.session_cwds.get(id)
+                    .and_then(|cwd|cwd.to_str()).map(|cwd|(id,cwd)));
+                let matches=list.owner.as_ref().is_none_or(|(id,cwd)|current==Some((id.as_str(),cwd.as_str())));
+                let width=usize::from(area.width.saturating_sub(2));
+                let mut lines=vec![Line::styled(crate::lore_table::memory_header(width),Style::default().fg(theme::TEXT).add_modifier(Modifier::BOLD))];
+                if matches {
+                    let indices=list.indices();let visible=usize::from(area.height.saturating_sub(3));
+                    let start=info.scroll.min(indices.len().saturating_sub(visible));
+                    for index in indices.iter().skip(start).take(visible) {
+                        let fact=&list.facts[*index];
+                        lines.push(Line::from(crate::lore_table::memory_row(&fact.scope,&fact.text,
+                            fact.source.as_deref().unwrap_or("—"),width)));
+                    }
+                    if indices.is_empty() {lines.push(Line::from(crate::lore_table::cell(info.lines.first().map(String::as_str).unwrap_or("No matching curated facts"),width)));}
+                }else{lines.push(Line::from("Session changed; reopen memory"));}
+                frame.render_widget(Paragraph::new(lines).block(Block::default().title(" Curated memory · Shift+M manage · Esc close ")
+                    .borders(Borders::ALL).border_style(Style::default().fg(theme::ACCENT)))
+                    .style(Style::default().fg(theme::TEXT).bg(theme::RAISED)),area);return;
+            }
+        }
         if matches!(info.kind, "memory" | "usage" | "context" | "help" | "sessions" | "about") {
             let current = self.groups[self.active_group].active_id().and_then(|id|
                 self.session_cwds.get(id).and_then(|cwd| cwd.to_str()).map(|cwd| (id, cwd)));
@@ -9069,7 +9184,7 @@ impl App {
             let mut lines = vec![Line::from(format!(" {}", clipped_title(&picker.status, width).0))];
             lines.push(Line::from(format!(" Exact belief #{} · complete LORE review", review.id())));
             lines.push(Line::from(clipped_title(if picker.can_act_on_beliefs {
-                " ↓/PgDn read all · A accept · D reject · C/X/S/R detailed note · Esc back"
+                " ↓/PgDn read all · Shift+A accept · Shift+R reject · C/X/S/R detailed note · Esc back"
             } else { " Read only with this LORE version · Esc back" }, width).0));
             if let Some(action) = picker.belief_action {
                 let label = match action {
@@ -9082,8 +9197,8 @@ impl App {
                 lines.push(Line::from(""));
             } else {
                 lines.push(Line::from(match picker.belief_intent {
-                    Some(doxa_lore::BeliefAction::Confirmed) => " Accept selected: read all, then A or click Accept to confirm",
-                    Some(doxa_lore::BeliefAction::Retract) => " Reject selected: read all, then D or click Reject to retract",
+                    Some(doxa_lore::BeliefAction::Confirmed) => " Accept selected: read all, then Shift+A or click Accept to confirm",
+                    Some(doxa_lore::BeliefAction::Retract) => " Reject selected: read all, then Shift+R or click Reject to retract",
                     _ => " Accept records confirmation; Reject retracts active belief, keeping history",
                 }));
                 lines.push(Line::from(""));
@@ -9109,59 +9224,30 @@ impl App {
             let lines=std::iter::once(Line::from(format!(" Belief {id} · g/Esc back"))).chain(graph.iter().skip(self.belief_graph_scroll).take(usize::from(area.height.saturating_sub(3))).map(|line|Line::from(safe_label(line)))).collect::<Vec<_>>();
             frame.render_widget(Paragraph::new(lines).wrap(Wrap{trim:false}).block(Block::default().title(" LORE graph neighbourhood ").borders(Borders::ALL).border_style(Style::default().fg(theme::ACCENT))).style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)),area);return;
         }
-        let height = area.height;
-        let modal = area;
-        let compact = height < 10;
-        let mut lines = vec![Line::from(format!(" Search: {}", safe_label(&picker.query)))];
-        if !compact {
-            lines.push(Line::from(format!(" {}", picker.status)));
-            lines.push(Line::from(" Shift+A accept · Shift+D reject · g graph · → evidence"));
-            lines.push(Line::from(""));
-        }
+        let width = usize::from(area.width.saturating_sub(2));
+        let mut lines = Vec::new();
         if let Some((id, evidence)) = &picker.evidence {
             lines.push(Line::from(format!(" Belief #{id} · {} evidence rows", evidence.len())));
-            let trail_notice = evidence.last().is_some_and(|row| row.trail_truncated);
-            let reserve = if compact { 4 } else { 9 } + u16::from(trail_notice);
-            for row in evidence.iter().take(usize::from(height.saturating_sub(reserve) / 2)) {
+            for row in evidence.iter().take(usize::from(area.height.saturating_sub(4) / 2)) {
                 lines.push(Line::from(format!(" {} · {} · {}{}", safe_label(&row.created), safe_label(&row.project), safe_label(&row.session_id),
-                    row.source_engine.as_ref().map(|engine| format!(" · {}", safe_label(engine))).unwrap_or_default())));
-                lines.push(Line::from(format!("   {}{}", safe_label(&row.note), if row.truncated { "…" } else { "" })));
+                    row.source_engine.as_ref().map(|engine|format!(" · {}",safe_label(engine))).unwrap_or_default())));
+                lines.push(Line::from(format!(" {}{}", safe_label(&row.note),if row.truncated {"…"} else {""})));
             }
-            if trail_notice {
-                lines.push(Line::from(" More evidence exists in LORE"));
-            }
+            if evidence.last().is_some_and(|row|row.trail_truncated) {lines.push(Line::from(" More evidence exists in LORE"));}
         } else {
-            lines.push(Line::from(format!(" Page offset {} · {} rows", picker.offset, picker.rows.len())));
-            let visible = usize::from(height.saturating_sub(if compact { 4 } else { 7 })).max(1);
-            let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
-            for (index, row) in picker.rows.iter().enumerate().skip(start).take(visible) {
-                let button_text = belief_buttons(area, area.y + 1, &[("[Accept]", KeyCode::Char('A')), ("[Reject]", KeyCode::Char('D'))])
-                    .iter().map(|(_, label, _)| *label).collect::<Vec<_>>().join(" ");
-                let label = format!("{button_text} {} #{} · {} · {:.0}% · {}{}{}", if index == picker.selected { '›' } else { ' ' }, row.id,
-                    safe_label(&row.subject), row.confidence * 100.0, safe_label(&row.claim),
-                    row.evidence_count.map(|count| format!(" · {count} evidence")).unwrap_or_default(),
-                    if row.truncated { " · claim clipped" } else { "" });
-                lines.push(Line::styled(label, chooser_row_style(index == picker.selected)));
+            let columns = crate::lore_table::BeliefColumns::new(width);
+            lines.push(Line::styled(columns.header(),Style::default().fg(theme::TEXT).add_modifier(Modifier::BOLD)));
+            let visible = usize::from(area.height.saturating_sub(3)).max(1);
+            let start = chooser_visible_start(&self.chooser_view_start,picker.selected,visible);
+            for (index,row) in picker.rows.iter().enumerate().skip(start).take(visible) {
+                lines.push(Line::styled(columns.belief(row.id,&row.subject,&row.claim,row.confidence,row.evidence_count,row.recency.as_deref()),
+                    chooser_row_style(index==picker.selected)));
             }
-        }
-        if picker.evidence.is_none() {
-            lines = chooser_list_lines(lines, usize::from(area.width.saturating_sub(2)));
+            if picker.rows.is_empty() {lines.push(Line::from(safe_label(&picker.status)));}
         }
         frame.render_widget(Paragraph::new(lines)
-            .block(Block::default().title(" LORE beliefs · Enter review/search · → evidence · P proposals · PgUp/PgDn page · Esc close ")
-            .borders(Borders::ALL).border_style(Style::default().fg(theme::ACCENT)))
-            .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)).wrap(Wrap { trim: false }), modal);
-        if picker.evidence.is_none() {
-            let first = area.y.saturating_add(if compact { 3 } else { 6 });
-            let visible = usize::from(height.saturating_sub(if compact { 4 } else { 7 })).max(1);
-            let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
-            for (offset, index) in (start..picker.rows.len()).take(visible).enumerate() {
-                for (rect, label, _) in belief_buttons(area, first.saturating_add(offset as u16),
-                    &[("[Accept]", KeyCode::Char('A')), ("[Reject]", KeyCode::Char('D'))]) {
-                    frame.render_widget(Paragraph::new(label).style(chooser_row_style(index == picker.selected)), rect);
-                }
-            }
-        }
+            .block(Block::default().title(" LORE beliefs ").borders(Borders::ALL).border_style(Style::default().fg(theme::ACCENT)))
+            .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)),area);
     }
 
     fn draw_diff(&self, frame: &mut Frame, area: Rect) {
@@ -9417,6 +9503,11 @@ impl App {
             else { self.input_drafts.get(&(index, id.to_owned()))
                 .map(|(text, cursor)| (text.as_str(), *cursor)).unwrap_or(("", 0)) }
         }).unwrap_or(("", 0));
+        let (draft,cursor)=if active {self.lore_picker.as_ref().filter(|picker|!picker.proposal_mode && picker.belief_review.is_none() && picker.evidence.is_none())
+            .map(|picker|(picker.query.as_str(),picker.query.len())).unwrap_or((draft,cursor))}else{(draft,cursor)};
+        let (draft,cursor)=if active && self.memory_manager.is_none() && self.chip_info.as_ref().is_some_and(|info|info.kind=="memory") {
+            self.memory_list.as_ref().map(|list|(list.query.as_str(),list.query.len())).unwrap_or((draft,cursor))
+        }else{(draft,cursor)};
         let inner = self.pane_regions(index, area);
         let chooser_height = inner[2].height;
         let titles: Vec<Line> = group
@@ -9633,7 +9724,7 @@ impl App {
                 .scroll((scroll_y as u16, scroll_x as u16))
                 .style(Style::default().fg(theme::TEXT).bg(theme::RAISED))
                 .block(Block::default()
-                    .title(if active && self.active_request_index().is_some_and(|index| self.input_requests[index].freeform()) { " Answer question ● " } else if active && self.history_modal { " Search sessions ● " } else if active && self.focus == Focus::Prompt { " Prompt ● " } else { " Prompt " })
+                    .title(if active && self.active_request_index().is_some_and(|index| self.input_requests[index].freeform()) { " Answer question ● " } else if active && self.history_modal { " Search sessions ● " } else if active && self.memory_manager.is_none() && self.chip_info.as_ref().is_some_and(|info|info.kind=="memory") {" Filter memory ● "} else if active && self.lore_picker.as_ref().is_some_and(|picker|!picker.proposal_mode && picker.belief_review.is_none() && picker.evidence.is_none()) {" Filter beliefs ● "} else if active && self.focus == Focus::Prompt { " Prompt ● " } else { " Prompt " })
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(if active && self.focus == Focus::Prompt { theme::ACCENT } else { theme::BORDER }))),
             inner[4],
@@ -9944,6 +10035,7 @@ fn run_loop(
         changed |= app.poll_auto_diff();
         changed |= app.poll_history();
         changed |= app.poll_resume();
+        changed |= app.poll_belief_filter(Instant::now());
         changed |= app.poll_lore();
         changed |= app.poll_belief_graph();
         changed |= app.poll_memory();
@@ -10516,7 +10608,7 @@ for line in sys.stdin:
         let picker = app.lore_picker.as_mut().unwrap();
         picker.pending = None;
         picker.rows = vec![lore_picker::Belief { id: 7, subject: "Fixture subject".into(),
-            claim: "clipped list text".into(), truncated: true, confidence: 0.8, evidence_count: Some(1) }];
+            claim: "clipped list text".into(), truncated: true, confidence: 0.8, evidence_count: Some(1), recency:None }];
         let (tx, rx) = mpsc::sync_channel(1);
         picker.pending = Some(rx);
         tx.send(Ok(lore_picker::ResultPage::BeliefReview(belief_review_fixture(), true))).unwrap();
@@ -10777,8 +10869,8 @@ for line in sys.stdin:
         assert!(menu.bottom() < pane.bottom());
         let (tx, rx) = mpsc::sync_channel(1);
         app.memory_menu_pending = Some(("right".into(), "/tmp/right".into(), rx));
-        tx.send(Ok(vec!["## User memory".into(), "- verified user fact".into(),
-            "## Folder memory".into(), "- verified folder fact".into()])).unwrap();
+        tx.send(Ok(vec![crate::memory_menu::Fact {scope:"user".into(),text:"verified user fact".into(),source:None,redacted:false},
+            crate::memory_menu::Fact {scope:"folder".into(),text:"verified folder fact".into(),source:None,redacted:false}])).unwrap();
         assert!(app.poll_memory_menu());
         let rendered = painted_at(&app, 160, 32);
         assert!(rendered.contains("verified user fact"), "{rendered}");
@@ -10786,7 +10878,7 @@ for line in sys.stdin:
         let (tx, rx) = mpsc::sync_channel(1);
         app.memory_menu_pending = Some(("right".into(), "/tmp/right".into(), rx));
         app.apply_daemon_frame(&json!({"type":"hello","session_id":"right","cwd":"/tmp/moved"}));
-        tx.send(Ok(vec!["- stale secret".into()])).unwrap();
+        tx.send(Ok(vec![crate::memory_menu::Fact {scope:"user".into(),text:"stale secret".into(),source:None,redacted:false}])).unwrap();
         assert!(!app.poll_memory_menu());
         assert!(!painted_at(&app, 160, 32).contains("stale secret"));
         let rendered = painted_at(&app, 160, 32);
@@ -10795,7 +10887,7 @@ for line in sys.stdin:
     }
 
     #[test]
-    fn memory_gallery_fixture_renders_curated_and_global_sections_without_lore_worker() {
+    fn memory_gallery_fixture_renders_only_singular_curated_facts_without_lore_worker() {
         let mut app = App::default();
         app.handle(Event::Resize(120, 32));
         app.apply_daemon_frame(&json!({"type":"hello","session_id":"gallery","cwd":"/demo/project"}));
@@ -10804,8 +10896,27 @@ for line in sys.stdin:
         let rendered = painted_at(&app, 120, 32);
         assert!(rendered.contains("User entry"), "{rendered}");
         assert!(rendered.contains("Project entry"), "{rendered}");
-        assert!(rendered.contains("Global active LORE beliefs"), "{rendered}");
-        assert!(rendered.contains("Global belief"), "{rendered}");
+        assert!(rendered.contains("Scope") && rendered.contains("Fact") && rendered.contains("Source"), "{rendered}");
+        assert!(!rendered.contains("Global belief") && !rendered.contains("## User memory"));
+    }
+
+    #[test]
+    fn curated_memory_prompt_filters_singular_facts_without_touching_draft() {
+        let mut app=App::default();app.handle(Event::Resize(120,32));
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"s","cwd":"/demo"}));
+        app.input="Private draft".into();app.input_cursor=app.input.len();
+        app.show_memory_menu_fixture(0,&["Prefer concise replies"],&["Run cargo test"],&[]);
+        for ch in "cargo".chars(){app.handle(Event::Key(KeyEvent::new(KeyCode::Char(ch),KeyModifiers::NONE)));}
+        let filtered=painted_at(&app,120,32);
+        assert!(filtered.contains("Filter memory") && filtered.contains("Run cargo test"));
+        assert!(!filtered.contains("Prefer concise replies") && !filtered.contains("##"));
+        assert_eq!(app.input,"Private draft");
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('u'),KeyModifiers::CONTROL)));
+        app.handle(Event::Paste("concise".into()));
+        assert!(painted_at(&app,120,32).contains("Prefer concise replies"));
+        assert_eq!(app.input,"Private draft");
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Esc,KeyModifiers::NONE)));
+        assert_eq!(app.input,"Private draft");assert!(app.pending_prompts.is_empty());
     }
 
     #[test]
@@ -11888,7 +11999,7 @@ for line in sys.stdin:
             session_id: None,
                 rows: (1..=2).map(|id| lore_picker::Belief { id, subject: format!("belief-{id}"),
                     claim: "long claim ".repeat(80), truncated: false, confidence: 0.9,
-                    evidence_count: None }).collect(),
+                    evidence_count: None, recency:None }).collect(),
                 proposals: (1..=2).map(|id| lore_picker::Proposal { pid: format!("proposal-{id}"),
                     kind: "belief".into(), action: "add".into(), scope: "project".into(),
                     summary: "long summary ".repeat(80) }).collect(),
@@ -12244,7 +12355,7 @@ for line in sys.stdin:
                 "beliefs" => assert!(app.lore_picker.is_some()),
                 _ => {
                     assert_eq!(app.chip_info.as_ref().map(|info| info.kind), Some(kind));
-                    if kind == "memory" { assert!(painted_at(&app, 220, 32).contains("Loading LORE memory")); }
+                    if kind == "memory" { assert!(painted_at(&app, 220, 32).contains("Loading curated facts")); }
                 }
             }
             app.handle(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
@@ -14314,7 +14425,7 @@ for line in sys.stdin:
         app.lore_picker.as_mut().unwrap().pending = Some(rx);
         tx.send(Ok(lore_picker::ResultPage::Beliefs(vec![lore_picker::Belief {
             id: 7, subject: "user".into(), claim: "safe".into(), truncated: false,
-            confidence: 0.8, evidence_count: Some(1),
+            confidence: 0.8, evidence_count: Some(1), recency:None,
         }]))).unwrap();
         assert!(app.poll_lore());
         assert_eq!(app.lore_picker.as_ref().unwrap().rows[0].id, 7);
@@ -14442,7 +14553,7 @@ for line in sys.stdin:
         let picker = app.lore_picker.as_mut().unwrap();
         picker.belief_review = None;
         picker.rows = (1..=30).map(|id| lore_picker::Belief { id, subject: "subject".into(),
-            claim: "claim".into(), truncated: false, confidence: 0.8, evidence_count: Some(1) }).collect();
+            claim: "claim".into(), truncated: false, confidence: 0.8, evidence_count: Some(1), recency:None }).collect();
         let menu = app.active_chooser_rect().unwrap();
         let footer = menu.bottom().saturating_sub(1);
         app.mouse(MouseEvent { kind: MouseEventKind::Moved,
@@ -14521,7 +14632,7 @@ for line in sys.stdin:
         app.lore_picker.as_mut().unwrap().resolving = false;
         app.lore_picker.as_mut().unwrap().belief_acting = false;
         app.lore_picker.as_mut().unwrap().rows.push(lore_picker::Belief { id: 8, subject: "other".into(),
-            claim: "other".into(), truncated: false, confidence: 0.7, evidence_count: Some(0) });
+            claim: "other".into(), truncated: false, confidence: 0.7, evidence_count: Some(0), recency:None });
         app.lore_picker.as_mut().unwrap().selected = 1;
         app.lore_picker_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
         assert!(!app.lore_picker.as_ref().unwrap().can_act_on_beliefs);
@@ -14533,7 +14644,7 @@ for line in sys.stdin:
 
     #[test]
     fn belief_buttons_have_only_complete_rendered_hit_targets() {
-        let buttons = [("[Accept]", KeyCode::Char('A')), ("[Reject]", KeyCode::Char('D'))];
+        let buttons = [("[Accept]", KeyCode::Char('A')), ("[Reject]", KeyCode::Char('R'))];
         for width in 2..24 {
             let area = Rect::new(3, 4, width, 10);
             let hits = belief_buttons(area, 7, &buttons);
@@ -14553,7 +14664,7 @@ for line in sys.stdin:
         app.belief_browser_fixture = true;
         let menu = app.active_chooser_rect().unwrap();
         let reject = belief_review_buttons(menu, app.lore_picker.as_ref().unwrap()).into_iter()
-            .find(|(_, _, key)| *key == KeyCode::Char('d')).unwrap().0;
+            .find(|(_, _, key)| *key == KeyCode::Char('R')).unwrap().0;
         let mouse = |kind| MouseEvent { kind, column: reject.x, row: reject.y, modifiers: KeyModifiers::NONE };
         app.mouse(mouse(MouseEventKind::Moved));
         assert_eq!(app.belief_button_hover, Some(reject));
@@ -14576,7 +14687,7 @@ for line in sys.stdin:
     }
 
     #[test]
-    fn belief_list_uses_last_interior_row_for_third_entry_actions() {
+    fn belief_table_third_row_actions_use_the_same_painted_geometry() {
         let mut app = App::default();
         app.size = Rect::new(0, 0, 100, 40);
         app.show_belief_browser_fixture(0, &[(7, "first", "claim"), (8, "second", "claim"), (9, "third", "claim")]);
@@ -14584,8 +14695,7 @@ for line in sys.stdin:
         app.chooser_height_override.set(Some(10));
         let menu = app.active_chooser_rect().unwrap();
         assert_eq!(menu.height, 10);
-        let third_y = menu.y + 8;
-        assert_eq!(third_y, menu.bottom() - 2);
+        let third_y = menu.y + 4;
         let rendered = painted_at(&app, 100, 40);
         let row = rendered.lines().nth(usize::from(third_y)).unwrap();
         assert!(row.contains("#9") && row.contains("[Accept] [Reject]"), "{row}");
@@ -14593,7 +14703,7 @@ for line in sys.stdin:
             row: third_y, modifiers: KeyModifiers::NONE });
         assert_eq!(app.lore_picker.as_ref().unwrap().rows[app.lore_picker.as_ref().unwrap().selected].id, 9);
         let reject = belief_buttons(menu, third_y,
-            &[("[Accept]", KeyCode::Char('A')), ("[Reject]", KeyCode::Char('D'))])[1].0;
+            &[("[Accept]", KeyCode::Char('A')), ("[Reject]", KeyCode::Char('R'))])[1].0;
         app.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: reject.x,
             row: reject.y, modifiers: KeyModifiers::NONE });
         let picker = app.lore_picker.as_ref().unwrap();
@@ -14602,6 +14712,44 @@ for line in sys.stdin:
         assert!(picker.pending.is_none());
         for c in "agent".chars() { app.lore_picker_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)); }
         assert_eq!(app.lore_picker.as_ref().unwrap().query, "agent");
+    }
+
+    #[test]
+    fn belief_prompt_filter_keeps_session_draft_and_exact_review_selection() {
+        let mut app=App::default();app.size=Rect::new(0,0,120,40);
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"s","engine":"codex","model":"gpt-6-sol"}));
+        app.input="Private unsent draft".into();app.input_cursor=app.input.len();
+        app.show_belief_browser_fixture(0,&[(100,"project","old unrelated"),(7,"user","recent project preference")]);
+        for ch in "project preference".chars() {app.handle(Event::Key(KeyEvent::new(KeyCode::Char(ch),KeyModifiers::NONE)));}
+        let due=app.belief_filter_due.unwrap();
+        assert!(!app.poll_belief_filter(due+Duration::from_millis(199)));
+        assert!(app.poll_belief_filter(due+Duration::from_millis(200)));
+        assert_eq!(app.lore_picker.as_ref().unwrap().rows.iter().map(|row|row.id).collect::<Vec<_>>(),vec![7]);
+        let painted=painted_at(&app,120,40);
+        assert!(painted.contains("Filter beliefs") && painted.contains("project preference"));
+        assert!(!painted.contains("Search:") && !painted.contains("Shift+A accept"));
+        assert_eq!(app.input,"Private unsent draft");
+        app.lore_picker_key(KeyEvent::new(KeyCode::Char('R'),KeyModifiers::SHIFT));
+        let picker=app.lore_picker.as_ref().unwrap();
+        assert_eq!(picker.rows[picker.selected].id,7);
+        assert_eq!(picker.belief_intent,Some(doxa_lore::BeliefAction::Retract));
+        assert!(app.pending_prompts.is_empty());
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Esc,KeyModifiers::NONE)));
+        assert_eq!(app.input,"Private unsent draft");
+    }
+
+    #[test]
+    fn stale_belief_filter_result_cannot_replace_current_query_rows() {
+        let mut app=App::default();app.size=Rect::new(0,0,120,40);
+        app.show_belief_browser_fixture(0,&[(7,"user","current")]);
+        app.belief_filter_request=Some(("old".into(),0));
+        let (tx,rx)=mpsc::sync_channel(1);
+        app.lore_picker.as_mut().unwrap().pending=Some(rx);
+        tx.send(Ok(lore_picker::ResultPage::Beliefs(Vec::new()))).unwrap();
+        app.lore_picker.as_mut().unwrap().query="current".into();
+        assert!(app.poll_lore());
+        assert_eq!(app.lore_picker.as_ref().unwrap().rows[0].id,7);
+        assert_eq!(app.lore_picker.as_ref().unwrap().query,"current");
     }
 
     #[test]
@@ -14628,9 +14776,9 @@ for line in sys.stdin:
         app.size = Rect::new(0, 0, 100, 40);
         app.show_belief_browser_fixture(0, &[(7, "first", "claim"), (8, "second", "claim")]);
         let menu = app.active_chooser_rect().unwrap();
-        let first = menu.y + if menu.height < 10 { 3 } else { 6 };
+        let first = menu.y + 2;
         let button = belief_buttons(menu, first + 1,
-            &[("[Accept]", KeyCode::Char('A')), ("[Reject]", KeyCode::Char('D'))])[1].0;
+            &[("[Accept]", KeyCode::Char('A')), ("[Reject]", KeyCode::Char('R'))])[1].0;
         app.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: button.x,
             row: button.y, modifiers: KeyModifiers::NONE });
         let picker = app.lore_picker.as_ref().unwrap();
@@ -14650,9 +14798,9 @@ for line in sys.stdin:
         picker.pending = None;
         picker.rows = [7, 8].into_iter().map(|id| lore_picker::Belief { id,
             subject: "fixture".into(), claim: "list text".into(), truncated: false,
-            confidence: 0.8, evidence_count: Some(0) }).collect();
+            confidence: 0.8, evidence_count: Some(0), recency:None }).collect();
         let menu = app.active_chooser_rect().unwrap();
-        let first = menu.y + if menu.height < 10 { 3 } else { 6 };
+        let first = menu.y + 2;
         let click = |row| MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
             column: menu.x + 22, row, modifiers: KeyModifiers::NONE };
         assert!(app.mouse(click(first + 1)));
