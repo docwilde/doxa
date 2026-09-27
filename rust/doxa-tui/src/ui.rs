@@ -1772,6 +1772,18 @@ impl App {
     }
 
     pub fn apply_daemon_frame(&mut self, frame: &serde_json::Value) -> bool {
+        let before = self.prompt_owner();
+        let changed = self.apply_daemon_frame_inner(frame);
+        let owner_changed = before != self.prompt_owner();
+        self.finish_prompt_owner_transition(before);
+        if owner_changed {
+            self.transcript_selection.borrow_mut().clear();
+            self.sync_chooser_state();
+        }
+        changed || owner_changed
+    }
+
+    fn apply_daemon_frame_inner(&mut self, frame: &serde_json::Value) -> bool {
         let Some(kind) = frame.get("type").and_then(|v| v.as_str()) else {
             return false;
         };
@@ -2754,6 +2766,26 @@ impl App {
         let after = (self.active_group, self.groups[self.active_group].active_id().unwrap_or("").to_owned());
         let selection_owner=crate::selection::Owner {pane:self.active_group,session:after.1.clone()};
         if selection_view.0!=self.size || (before==after && selection_view.1!=self.groups[self.active_group].scroll) || (before!=after && !self.transcript_selection.borrow().belongs_to(&selection_owner)) {self.transcript_selection.borrow_mut().clear();}
+        self.finish_prompt_owner_transition(before);
+        if self.input.is_empty() && self.action_draft.is_some() {
+            let (owner,draft,cursor)=self.action_draft.take().unwrap();if owner==(self.active_group,self.groups[self.active_group].active_id().unwrap_or("").to_owned()){self.input=draft;self.input_cursor=cursor;}else{self.input_drafts.insert(owner,(draft,cursor));}
+        }
+        self.sync_chooser_state();
+        if matches!(self.focus, Focus::Chip(_) | Focus::Rail) && !self.focus_ring().contains(&self.focus) {
+            self.focus = Focus::Prompt;
+        }
+        changed
+    }
+
+    fn prompt_owner(&self) -> (usize, String) {
+        (self.active_group, self.groups[self.active_group].active_id().unwrap_or("").to_owned())
+    }
+
+    /// Every activation path uses the same draft transaction, including daemon
+    /// replies arriving between keyboard events. Drafts belong to a pane and
+    /// session together; moving a tab deliberately carries its active draft.
+    fn finish_prompt_owner_transition(&mut self, before: (usize, String)) {
+        let after = self.prompt_owner();
         if before != after {
             self.branch_picker = None;
             let moved_active_tab = std::mem::take(&mut self.moved_active_tab)
@@ -2774,14 +2806,6 @@ impl App {
             self.slash_selected = 0;
             self.slash_dismissed = false;
         }
-        if self.input.is_empty() && self.action_draft.is_some() {
-            let (owner,draft,cursor)=self.action_draft.take().unwrap();if owner==(self.active_group,self.groups[self.active_group].active_id().unwrap_or("").to_owned()){self.input=draft;self.input_cursor=cursor;}else{self.input_drafts.insert(owner,(draft,cursor));}
-        }
-        self.sync_chooser_state();
-        if matches!(self.focus, Focus::Chip(_) | Focus::Rail) && !self.focus_ring().contains(&self.focus) {
-            self.focus = Focus::Prompt;
-        }
-        changed
     }
 
     fn clipboard_target(&self)->crate::clipboard::Target {
@@ -11217,6 +11241,61 @@ for line in sys.stdin:
         app.handle(Event::Key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL)));
         assert!(app.should_quit, "failed attach must not veto closing the owned tab");
         bridge.shutdown();
+    }
+
+    #[test]
+    fn asynchronous_launch_and_attach_activation_keep_drafts_with_their_owner() {
+        for kind in ["launch_reply", "attach_reply"] {
+            let mut app = App::default();
+            app.groups[0].tabs.push("a".into());
+            app.input = "private draft for a".into(); app.input_cursor = app.input.len();
+            if kind == "launch_reply" { app.launching = true; }
+            else { app.attaching_ids.insert("b".into()); }
+            assert!(app.apply_daemon_frame(&json!({"type":kind,"ok":true,"session_id":"b","group":0})));
+            assert_eq!(app.groups[0].active_id(), Some("b"));
+            assert!(app.input.is_empty());
+            assert_eq!(app.input_drafts[&(0,"a".into())].0, "private draft for a");
+            app.focus = Focus::Prompt;
+            app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+            assert!(app.pending_prompts.is_empty(), "old draft must never submit to the new session");
+            app.focus = Focus::Tabs;
+            app.handle(Event::Key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)));
+            assert_eq!(app.input, "private draft for a");
+        }
+    }
+
+    #[test]
+    fn background_attach_activation_restores_destination_draft_and_preserves_clipboard_target() {
+        let mut app = App::default();
+        app.groups[0].tabs.push("a".into());
+        app.input = "original".into(); app.input_cursor = app.input.len();
+        let target = app.clipboard_target();
+        app.clipboard_job = Some(crate::clipboard::Job::fixture(target, Ok(" pasted".into())));
+        app.input_drafts.insert((1,"b".into()), ("destination".into(),11));
+        app.attaching_ids.insert("b".into());
+        app.apply_daemon_frame(&json!({"type":"attach_reply","ok":true,"session_id":"b","group":1}));
+        assert_eq!(app.active_group, 1);
+        assert_eq!(app.input, "destination"); assert_eq!(app.input_cursor,11);
+        assert!(app.poll_clipboard());
+        assert_eq!(app.input, "destination");
+        assert_eq!(app.input_drafts[&(0,"a".into())].0, "original pasted");
+        assert!(app.pending_prompts.is_empty());
+    }
+
+    #[test]
+    fn daemon_activation_keeps_same_session_pane_drafts_independent() {
+        let mut app = App::default();
+        app.groups[0].tabs.push("shared".into());
+        app.groups[1].tabs.push("shared".into());
+        app.input = "left".into(); app.input_cursor = 4;
+        app.input_drafts.insert((1,"shared".into()), ("right".into(),5));
+        app.attaching_ids.insert("shared".into());
+        app.apply_daemon_frame(&json!({"type":"attach_reply","ok":true,"session_id":"shared","group":1}));
+        assert_eq!(app.input, "right");
+        // The attach reply moves a provisional group-zero copy. Its old draft
+        // is discarded because that tab no longer exists, never applied right.
+        assert_eq!(app.input_cursor,5);
+        assert!(app.pending_prompts.is_empty());
     }
 
     #[test]
