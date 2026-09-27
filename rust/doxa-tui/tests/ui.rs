@@ -426,6 +426,7 @@ fn subscription_billing_uses_provider_snapshot_and_never_displays_list_price_as_
 #[test]
 fn keyboard_and_rail_select_sessions_into_independent_groups() {
     let mut app = App::default();
+    app.handle(Event::Resize(100, 40)); // Rail focus requires a visible sidebar.
     app.apply_update(doxa_tui::ui::DaemonUpdate::Upsert(session("one", "Work")));
     app.apply_update(doxa_tui::ui::DaemonUpdate::Upsert(session("two", "Work")));
     assert!(app.handle(key(KeyCode::F(3), KeyModifiers::NONE)));
@@ -507,10 +508,12 @@ fn action_menu_opens_views_and_navigates_sessions_without_leaking_keys_to_prompt
     palette(&mut app,"inspect tool");assert!(screen(&app,80,24).contains("Tool activity"));
     app.handle(key(KeyCode::Esc,KeyModifiers::NONE));
     palette(&mut app,"/sessions");
-    app.handle(key(KeyCode::Down,KeyModifiers::NONE));app.handle(key(KeyCode::Enter,KeyModifiers::NONE));
+    // /sessions requests a read-only roster, not a selectable attach/search picker.
+    assert!(app.notice.contains("finding live daemons"));
+    assert_eq!(app.input,"draft");assert!(app.pending_prompts.is_empty());
     assert_eq!(app.groups[0].tabs.len(),2);
     palette(&mut app,"open tab one");assert_eq!(app.groups[0].tabs.get(app.groups[0].active).map(String::as_str),Some("one"));assert_eq!(app.input,"draft");
-    palette(&mut app,"open tab two");assert_eq!(app.groups[0].tabs.get(app.groups[0].active).map(String::as_str),Some("two"));assert_eq!(app.focus,Focus::Prompt);
+    palette(&mut app,"open tab two");assert_eq!(app.groups[0].tabs.get(app.groups[0].active).map(String::as_str),Some("two"));assert_eq!(app.focus,Focus::Prompt);assert!(app.input.is_empty());
     assert!(app.pending_prompts.is_empty());
 }
 
