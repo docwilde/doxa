@@ -5859,7 +5859,7 @@ impl App {
 
     fn lore_picker_key(&mut self, key: KeyEvent) -> bool {
         if self.belief_graph_lines.is_none() && self.edit_belief_filter(key) {return true;}
-        if key.code==KeyCode::Char('g') && key.modifiers==KeyModifiers::ALT && self.lore_picker.as_ref().is_some_and(|p|!p.proposal_mode && p.query.is_empty()) {self.open_belief_graph();return true;}
+        if key.code==KeyCode::Char('g') && key.modifiers==KeyModifiers::ALT && self.lore_picker.as_ref().is_some_and(|p|!p.proposal_mode && p.belief_review.is_none() && p.evidence.is_none() && p.pending.is_none()) && self.belief_filter_due.is_none() {self.open_belief_graph();return true;}
         if key.code==KeyCode::Esc && self.belief_graph_lines.take().is_some(){return true;}
         if let Some((_,lines))=&self.belief_graph_lines {
             match key.code {KeyCode::Up=>self.belief_graph_scroll=self.belief_graph_scroll.saturating_sub(1),KeyCode::Down=>self.belief_graph_scroll=(self.belief_graph_scroll+1).min(lines.len().saturating_sub(1)),KeyCode::PageDown=>self.belief_graph_scroll=(self.belief_graph_scroll+10).min(lines.len().saturating_sub(1)),KeyCode::PageUp=>self.belief_graph_scroll=self.belief_graph_scroll.saturating_sub(10),_=>{}}return true;
@@ -7817,6 +7817,16 @@ impl App {
     }
 
     fn mouse(&mut self, mouse: MouseEvent) -> bool {
+        if mouse.kind==MouseEventKind::Down(MouseButton::Left) && self.active_request_index().is_none()
+            && (self.memory_manager.is_none() && self.chip_info.as_ref().is_some_and(|info|info.kind=="memory") && self.memory_list.is_some()
+                || self.belief_graph_lines.is_none() && self.lore_picker.as_ref().is_some_and(|picker|!picker.proposal_mode
+                    && picker.belief_review.is_none() && picker.evidence.is_none())) {
+            let layout=self.layout(self.size);
+            let pane=layout.panes.map_or(layout.body,|panes|panes[self.active_group]);
+            if self.pane_regions(self.active_group,pane)[4].contains(ratatui::layout::Position::new(mouse.column,mouse.row)) {
+                self.focus=Focus::Prompt;return true;
+            }
+        }
         if !self.link_interaction_blocked() && self.drag.is_none() {
             let point=ratatui::layout::Position::new(mouse.column,mouse.row);
             if matches!(mouse.kind,MouseEventKind::Drag(MouseButton::Left)|MouseEventKind::Up(MouseButton::Left)) {
@@ -10897,6 +10907,28 @@ for line in sys.stdin:
         assert!(rendered.contains("Project entry"), "{rendered}");
         assert!(rendered.contains("Scope") && rendered.contains("Fact") && rendered.contains("Source"), "{rendered}");
         assert!(!rendered.contains("Global belief") && !rendered.contains("## User memory"));
+    }
+
+    #[test]
+    fn clicking_filter_prompt_keeps_both_lore_menus_and_private_draft() {
+        for memory in [false,true] {
+            let mut app=App::default();app.rail_visible=false;app.handle(Event::Resize(120,32));
+            app.apply_daemon_frame(&json!({"type":"hello","session_id":"s","cwd":"/demo"}));
+            app.input="Private draft".into();app.input_cursor=app.input.len();
+            if memory {app.show_memory_menu_fixture(0,&["Fact"],&[],&[]);}
+            else {app.show_belief_browser_fixture(0,&[(7,"user","Fact")]);}
+            app.focus=Focus::Chip("memory");
+            let layout=app.layout(app.size);let pane=layout.panes.map_or(layout.body,|panes|panes[app.active_group]);
+            let prompt=app.pane_regions(app.active_group,pane)[4];
+            app.handle(Event::Mouse(MouseEvent {kind:MouseEventKind::Down(MouseButton::Left),column:prompt.x+2,
+                row:prompt.y+1,modifiers:KeyModifiers::NONE}));
+            assert_eq!(app.focus,Focus::Prompt);
+            assert_eq!(app.input,"Private draft");
+            if memory {assert!(app.chip_info.is_some());}else{assert!(app.lore_picker.is_some());}
+            app.handle(Event::Key(KeyEvent::new(KeyCode::Char('f'),KeyModifiers::NONE)));
+            assert_eq!(app.input,"Private draft");
+            assert!(app.pending_prompts.is_empty());
+        }
     }
 
     #[test]
