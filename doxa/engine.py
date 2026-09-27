@@ -141,8 +141,6 @@ except ImportError:  # older SDKs have no rate-limit event surface
     RateLimitEvent = ()
 
 import lore_core
-from lore_core import store as lore_store
-from lore_core.beliefs import BELIEF_RELATIONS
 from lore_core.config import PROJECTS_DIR, project_slug, stage_disabled
 from .native_lore import scrub as scrub_secrets
 
@@ -846,79 +844,13 @@ def _session_worktree_block(cwd: str) -> "str | None":
     )
 
 
-def _graph_awareness_block() -> "str | None":
-    """The ``[BELIEF GRAPH]`` block ``_build_options`` appends after the
-    LORE snapshot (and the worktree notice, if any) -- one to three
-    sentences telling a session that ``lore_belief_neighbours`` exists and
-    what it is for, a gap the snapshot itself does not close: LORE's own
-    retrieval ladder (``lore_core/context.py``, verbatim inside
-    ``[LORE SNAPSHOT]``) lists five steps -- this snapshot, the file map,
-    the belief store (search/show), the session index, re-derive/measure
-    fresh -- and none of them is "the store also carries typed relations
-    BETWEEN beliefs; traverse them." A session has the tool (it is
-    advertised by its schema like every operator) with no instruction
-    that reaching for it is ever the right move -- this block is that
-    instruction, mechanics rather than documentation, so it stays short.
-
-    HIDE AT ZERO, and checked precisely, not approximately: the live
-    store (2026-08-28 measurement) carries 796 active beliefs, 121
-    structural ``supersedes`` edges and 1038 PROJECTED ``co_derived``
-    pairs, and ZERO of the deriver's five ASSERTED verbs (``depends_on``/
-    ``specializes``/``explains``/``contradicts``/``applies_when``) --
-    those only start landing once a session's deriver runs against LORE
-    0.41.0+. Telling every session about a traversal tool that would find
-    nothing spends the one line this costs on every turn from day one for
-    nothing. So the gate below is the EXACT active-only view
-    ``lore_belief_neighbours`` itself traverses
-    (``lore_core.graph.adjacency``'s default: both endpoints ``status =
-    'active'``) restricted to the five asserted verbs -- "the block is
-    present" and "the tool would find something" can never disagree.
-
-    TWO relations are DELIBERATELY excluded from the check, not omitted
-    by accident:
-
-    * ``co_derived`` is a PROJECTION over one session's beliefs joined
-      pairwise (see ``lore_core.graph``'s own module docstring) -- its
-      presence says a session concluded several things at one sitting,
-      and nothing about whether any two of them are actually related.
-      Pointing a session at a graph whose only edges are coincidence
-      would teach it to read co-occurrence as structure, exactly the
-      confusion the CITE-only/STEER split one level up exists to
-      prevent -- surfacing this tool on the strength of `co_derived`
-      alone would undercut the very honesty rule the tool itself
-      enforces per-belief.
-    * ``supersedes`` is excluded for a narrower, structural reason: a
-      superseded belief is never ``active``, so a `supersedes` edge can
-      never appear in the active-only view either this gate or the tool
-      itself reads -- it could not make the tool find anything even if
-      counted.
-
-    Never raises: a broken store or query is a session with no block,
-    not a failed connect -- the same posture every other read here."""
+def _graph_awareness_block() -> str | None:
+    """Canonical graph presence and traversal guidance, with no Python SQL."""
     try:
-        conn = lore_store.db_connect()
-        placeholders = ",".join("?" * len(BELIEF_RELATIONS))
-        row = conn.execute(
-            "SELECT 1 FROM belief_edges e"
-            " JOIN beliefs s ON s.id = e.src AND s.status = 'active'"
-            " JOIN beliefs d ON d.id = e.dst AND d.status = 'active'"
-            f" WHERE e.rel IN ({placeholders}) LIMIT 1",
-            tuple(BELIEF_RELATIONS),
-        ).fetchone()
-    except Exception:
+        block = native_lore_mod.request("graph_awareness_v1")
+        return block if isinstance(block, str) and len(block) <= 2048 else None
+    except native_lore_mod.NativeLoreError:
         return None
-    if row is None:
-        return None
-    return (
-        "[BELIEF GRAPH] Beyond the five-step ladder above: some beliefs "
-        "here carry typed relations to each other (depends_on, "
-        "specializes, explains, contradicts, applies_when). Once you "
-        "know a belief's id, call lore_belief_neighbours(belief_id) to "
-        "see what it depends on, contradicts or specializes, or the "
-        "confidence-scored path to another belief. Reachability is not "
-        "authority: a belief found by traversal is CITE-only unless it "
-        "earned STEER on its own."
-    )
 
 
 # -- what rides on ONE derive_done event ------------------------------
@@ -1827,7 +1759,7 @@ class SessionEngine:
         isn't human-approved or outcome-calibrated. Never raises: a broken
         store or query is a session without a note, not a failed turn."""
         floor = consult_floor()
-        if floor is None:
+        if not self.lore or floor is None:
             return None
         try:
             hit = native_lore_mod.request("consult", prompt=prompt)
@@ -1868,7 +1800,7 @@ class SessionEngine:
         can be on independently, same as LORE's own ``consult`` and
         ``graph-context`` opt-in stages. Never raises: a broken graph query
         costs this block, never the turn."""
-        if not graph_context_enabled() or stage_disabled("beliefs"):
+        if not self.lore or not graph_context_enabled() or stage_disabled("beliefs"):
             return ""
         try:
             block = native_lore_mod.request("graph_context_v1", cwd=self.cwd, prompt=prompt)

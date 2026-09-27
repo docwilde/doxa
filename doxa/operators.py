@@ -68,7 +68,7 @@ from lore_core import store as lore_store
 from lore_core.config import ROOT, one_line, project_slug, utcnow
 from lore_core.deriver import pending_texts
 from lore_core.memory import memory_cap, memory_path, read_entries, usage_line
-from lore_core.scrub import scrub_secrets
+from .native_lore import scrub as scrub_secrets
 
 from . import peerledger as peerledger_mod
 from . import peers as peers_mod

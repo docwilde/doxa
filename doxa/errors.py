@@ -64,7 +64,7 @@ import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from lore_core.scrub import scrub_secrets
+from .native_lore import scrub as scrub_secrets
 
 # Namespaces that are never the CULPRIT, only the messenger. Textual is the
 # harness every DOXA frame runs inside, asyncio is how it runs them, and
@@ -132,7 +132,10 @@ def scrub(text: str) -> str:
     never exists as a :class:`Failure` field at all -- the same argument
     ``doxa.engine``'s docstring makes for its own choke point, one layer
     up."""
-    return scrub_secrets(text)
+    try:
+        return scrub_secrets(text)
+    except RuntimeError:
+        return "[error details unavailable: native scrub failed]"
 
 
 def _module_of(frame: "Any") -> str:  # noqa: F821 -- frame objects

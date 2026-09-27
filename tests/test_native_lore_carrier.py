@@ -231,3 +231,34 @@ def test_native_sync_state_validates_canonical_counts_without_sql(monkeypatch):
     monkeypatch.setattr(lore_sync.native_lore, "request", lambda *args, **kwargs:
         {"last_pull_age_s":float("inf"),"unpushed":True,"conflicts":0,"unverified":0})
     assert lore_sync.read_state() is None
+
+
+def test_retained_native_context_queries_are_scoped_and_memory_off_is_closed(tmp_path, monkeypatch):
+    from doxa import engine as engine_mod
+    calls = []
+    def invoke(op, **fields):
+        calls.append((op, fields))
+        return "[BELIEF GRAPH] owned fixture" if op == "graph_awareness_v1" else "bounded fixture"
+    monkeypatch.setattr(engine_mod.native_lore_mod, "request", invoke)
+    monkeypatch.setenv("DOXA_GRAPH_CONTEXT", "1")
+    monkeypatch.delenv("LORE_DISABLE_BELIEFS", raising=False)
+    engine = engine_mod.SessionEngine.__new__(engine_mod.SessionEngine)
+    engine.lore, engine.cwd = True, str(tmp_path)
+    assert engine_mod._graph_awareness_block() == "[BELIEF GRAPH] owned fixture"
+    assert engine._graph_context_block("owned prompt") == "bounded fixture"
+    assert calls == [("graph_awareness_v1", {}),
+                     ("graph_context_v1", {"cwd":str(tmp_path), "prompt":"owned prompt"})]
+    engine.lore = False
+    assert engine._graph_context_block("owned prompt") == ""
+    assert engine._consult_note("owned prompt") is None
+    assert len(calls) == 2
+
+
+def test_retained_error_scrub_unavailability_uses_fixed_placeholder(monkeypatch):
+    from doxa import errors
+    def refuse(_):
+        raise NativeLoreError("native_lore_unavailable")
+    monkeypatch.setattr(errors, "scrub_secrets", refuse)
+    result = errors.scrub("fake-secret-not-for-output")
+    assert "fake-secret" not in result
+    assert "unavailable" in result
