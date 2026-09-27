@@ -3292,3 +3292,44 @@ assert not sys.stdin.readline()
     wait_until(||process.exited());
     assert!(!dir.path().join("project/codex-session.codex.json").exists());
 }
+
+#[test]
+fn memory_off_codex_scrubs_and_records_without_snapshot_index_or_compact_review() {
+    for (configured, override_env, enabled) in [("0", None, false), ("1", Some("off"), false)] {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("home")).unwrap();
+        fs::write(dir.path().join("home/config.toml"), format!("lore = '{configured}'\n")).unwrap();
+        let codex = dir.path().join("codex-fixture"); let python = dir.path().join("lore-fixture");
+        let captured = dir.path().join("stdin.txt"); let requests = dir.path().join("requests.jsonl");
+        fake_context_sidecar(&python, true);
+        let source = fs::read_to_string(&python).unwrap().replace("op = frame.get(\"op\")", &format!("op = frame.get(\"op\")\n    with open({:?}, 'a') as log: log.write(op + '\\n')", requests.to_str().unwrap()));
+        // Record sidecar operations at the actual protocol seam.
+        let source = if source.contains("with open(") { source } else {
+            fs::read_to_string(&python).unwrap().replace("op = frame[\"op\"]", &format!("op = frame[\"op\"]\n    with open({:?}, 'a') as log: log.write(op + '\\n')", requests.to_str().unwrap()))
+        };
+        executable(&python, &source);
+        executable(&codex, &format!("#!/bin/sh\ncat > '{}'\necho '{{\"type\":\"thread.started\",\"thread_id\":\"thread_1\"}}'\n", captured.display()));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"));
+        command.args(["--runtime-dir", dir.path().to_str().unwrap(), "--cwd", dir.path().to_str().unwrap(),
+            "--session-id", "codex-session", "--linger", "10", "--engine", "codex", "--codex-bin", codex.to_str().unwrap(), "--lore-python", python.to_str().unwrap()])
+            .env("DOXA_HOME", dir.path().join("home")).env("DOXA_CODEX_APPSERVER", "0").env_remove("DOXA_LORE")
+            .stdout(Stdio::null()).stderr(Stdio::piped());
+        if let Some(value) = override_env { command.env("DOXA_LORE", value); }
+        let child = command.spawn().unwrap(); let registry = dir.path().join("registry/codex-session.json");
+        wait_until(|| registry.exists());
+        let entry: Value = serde_json::from_slice(&fs::read(&registry).unwrap()).unwrap();
+        let mut process = Process { child, registry, socket: PathBuf::from(entry["daemon_socket"].as_str().unwrap()) };
+        let (mut reader, mut socket) = process.connect(); assert_eq!(receive(&mut reader)["lore_enabled"], enabled);
+        send(&mut socket, json!({"type":"attach","cursor":null}));
+        send(&mut socket, json!({"type":"prompt","id":1,"text":"fixture-secret task"}));
+        assert_eq!(receive(&mut reader)["ok"], true);
+        loop { let frame = receive(&mut reader); assert!(!frame.to_string().contains("fixture-secret")); if frame["event"]["type"] == "turn_done" { break; } }
+        send(&mut socket, json!({"type":"call","id":2,"method":"stop","params":{}}));
+        assert_eq!(receive(&mut reader)["ok"], true); wait_until(|| process.exited());
+        let provider = fs::read_to_string(&captured).unwrap();
+        assert!(provider.contains("MEMORY OFF")); assert!(!provider.contains("durable memory"));
+        let calls = fs::read_to_string(&requests).unwrap(); assert!(calls.contains("scrub")); assert!(!calls.contains("snapshot")); assert!(!calls.contains("index_transcript"));
+        let transcript = fs::read_to_string(dir.path().join("project/codex-session.jsonl")).unwrap();
+        assert!(transcript.contains("[redacted] task")); assert!(!transcript.contains("fixture-secret"));
+    }
+}

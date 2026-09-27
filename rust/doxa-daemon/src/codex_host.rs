@@ -51,6 +51,7 @@ pub struct CodexHost {
     peer_tools: Mutex<Option<doxa_runtime::PeerToolHandler>>,
     peer_tools_allowed: bool,
     lore_python: PathBuf,
+    lore_enabled: bool,
     scrub_failed: Arc<AtomicBool>,
     persistence_failed: AtomicBool,
     lore: Arc<Mutex<LoreClient>>,
@@ -101,6 +102,7 @@ impl CodexHost {
         session_id: &str,
         resume: bool,
     ) -> Result<Self, String> {
+        let lore_enabled = doxa_state::lore_enabled_default();
         let mut client = LoreClient::spawn(lore_python, Duration::from_secs(5))
             .map_err(|_| "LORE sidecar is unavailable; Codex session was not started".to_owned())?;
         client
@@ -122,6 +124,10 @@ impl CodexHost {
         let mut saved_transport = None;
         let mut saved_peer_tools = false;
         let previous = if let Some(value) = thread_record {
+            if value["lore_enabled"].as_bool().is_some_and(|recorded| recorded != lore_enabled)
+                || (!lore_enabled && value["lore_enabled"].as_bool().is_none()) {
+                return Err("Codex resume memory policy differs or is unknown; existing provider context cannot be erased".into());
+            }
             if value.get("turn_incomplete") != Some(&Value::Bool(false)) {
                 return Err("Codex transcript is incomplete; refusing to resume the thread".to_owned());
             }
@@ -250,7 +256,7 @@ impl CodexHost {
             peer_tools: Mutex::new(None), peer_tools_allowed, lore_python: lore_python.to_owned(),
             scrub_failed,
             persistence_failed: AtomicBool::new(false),
-            lore,
+            lore, lore_enabled,
             index_tx,
             index_worker: Mutex::new(Some(index_worker)),
             store,
@@ -284,8 +290,8 @@ impl CodexHost {
             .map_err(|_| AppServerError::Protocol("Compact gate clock unavailable"))?.as_nanos();
         let directory = root.join(format!("codex-{}-{generation}", std::process::id()));
         std::fs::DirBuilder::new().mode(0o700).create(&directory)?;
-        match doxa_engines::codex_compact::CompactGate::prepare(&directory, &self.lore_python, &codex_home,
-            Path::new(&self.cwd), &self.session_id, doxa_engines::codex_compact::SUPPORTED_VERSION) {
+        match doxa_engines::codex_compact::CompactGate::prepare_with_memory(&directory, &self.lore_python, &codex_home,
+            Path::new(&self.cwd), &self.session_id, doxa_engines::codex_compact::SUPPORTED_VERSION, self.lore_enabled) {
             Ok(gate) => Ok(gate),
             Err(error) => { let _ = std::fs::remove_dir(directory); Err(AppServerError::Io(error)) }
         }
@@ -322,6 +328,7 @@ impl CodexHost {
         fields.insert("effort".into(), json!(selection.1));
         drop(selection);
         fields.insert("transport".into(), json!(self.transport));
+        fields.insert("lore_enabled".into(), json!(self.lore_enabled));
         fields.insert("peer_tools".into(), json!(self.peer_tools_allowed && self.peer_tools.lock().unwrap().is_some()));
         fields.insert("cwd".into(), json!(self.cwd));
         fields.insert("recorded".into(), json!(crate::iso_now()));
@@ -350,7 +357,7 @@ impl CodexHost {
     }
 
     fn index_transcript(&self) {
-        if self.scrub_failed.load(Ordering::Acquire)
+        if !self.lore_enabled || self.scrub_failed.load(Ordering::Acquire)
             || self.persistence_failed.load(Ordering::Acquire)
         {
             return;
@@ -366,6 +373,7 @@ impl CodexHost {
     /// provider thread; an existing thread already contains its first turn.
     /// Snapshot failure is a memory-less turn, as in Python CodexEngine.
     fn first_turn_prompt(&self, text: &str) -> String {
+        if !self.lore_enabled { return format!("[DOXA MEMORY OFF] This session has memory disabled. Do not use LORE memory tools.\n\n{text}"); }
         let snapshot = self
             .lore
             .lock()
@@ -440,6 +448,7 @@ impl Host for CodexHost {
     fn model_change_requires_idle(&self) -> bool { true }
     fn initial_model(&self) -> Option<String> { self.selection.lock().unwrap().0.clone() }
     fn initial_effort(&self) -> Option<String> { self.selection.lock().unwrap().1.clone() }
+    fn lore_enabled(&self) -> Option<bool> { Some(self.lore_enabled) }
     fn lore_scrub_status(&self) -> Option<&'static str> {
         Some(if self.scrub_failed.load(Ordering::Acquire) { "unavailable" } else { "ready" })
     }

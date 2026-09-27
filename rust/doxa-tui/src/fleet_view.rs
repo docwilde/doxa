@@ -175,6 +175,7 @@ pub fn status(root: &Path, prefix: &str) -> io::Result<String> {
                 short(slot["role"].as_str().unwrap_or("worker")),
                 short(slot["phase"].as_str().unwrap_or("?")),
                 short(slot["session_id"].as_str().unwrap_or("?"))));
+            if let Some(enabled) = slot["lore"].as_bool() { lines.push(format!("    memory {}", if enabled { "on" } else { "off" })); }
             let pending = slot["pending_asks"].as_array().map_or(0, Vec::len);
             if pending > 0 {
                 lines.push(format!("    {pending} permission ask(s) waiting · fleet attach {} {index}", short(id)));

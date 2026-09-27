@@ -46,6 +46,8 @@ pub trait Host: Send + Sync + 'static {
     fn peer_tools_ready(&self) -> bool { false }
     /// Provider-verified billing snapshot; None means unknown.
     fn billing_snapshot(&self) -> Option<Value> { None }
+    /// Effective session memory policy, distinct from required secret scrubbing.
+    fn lore_enabled(&self) -> Option<bool> { None }
     /// Only the scrub preflight and sticky runtime scrub failure are known.
     /// This does not claim that memory indexing or snapshotting succeeded.
     fn lore_scrub_status(&self) -> Option<&'static str> { None }
@@ -365,7 +367,7 @@ fn handle_client(inner: Arc<Inner>, stream: UnixStream) {
             "pending_inputs":state.pending_inputs,"pending_inputs_complete":state.pending_inputs_complete,
             "can_set_model":can_set_model,
             "can_set_permission_mode":can_set_permission_mode,"peer_tools_ready":peer_tools_ready,
-            "lore_scrub":lore_scrub,"billing":billing})
+            "lore_enabled":inner.host.lore_enabled(),"lore_scrub":lore_scrub,"billing":billing})
     };
     if writer.set_write_timeout(Some(Duration::from_secs(2))).is_err() ||
         writer.write_all(&encode_reply(&hello)).is_err() { return; }
@@ -556,7 +558,7 @@ fn handle_call(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame: &Value) {
             "engine":inner.session.engine,"effort":state.effort,"pending_effort":state.pending_effort,"running":state.busy,"queued":state.prompts.len(),
             "can_set_model":can_set_model,
             "can_set_permission_mode":can_set_permission_mode,"peer_tools_ready":peer_tools_ready,
-            "lore_scrub":lore_scrub,"billing":billing}})), None)
+            "lore_enabled":inner.host.lore_enabled(),"lore_scrub":lore_scrub,"billing":billing}})), None)
     } else if method == "switch_branch" {
         let idle = {
             let state = inner.state.lock().unwrap();

@@ -34,6 +34,7 @@ extern "C" fn signal_handler(_: libc::c_int) {
 
 struct FixtureHost;
 impl Host for FixtureHost {
+    fn lore_enabled(&self) -> Option<bool> { Some(doxa_state::lore_enabled_default()) }
     fn prompt(&self, _: &str, emit: &mut dyn FnMut(Value)) {
         emit(json!({"type":"turn_started","data":{}}));
         emit(json!({"type":"text_delta","data":{"text":"Deterministic native fixture response."}}));

@@ -51,6 +51,7 @@ pub struct ClaudeHost {
     initial_model: Option<String>,
     initial_permission_mode: String,
     billing: Option<Value>,
+    lore_enabled: Option<bool>,
 }
 
 impl ClaudeHost {
@@ -69,7 +70,7 @@ impl ClaudeHost {
         let permission_control = bridge.supports("set_permission_mode");
         let reviewed_compact = bridge.supports("reviewed_compact_v1");
         let params = json!({"cwd":cwd,"session_id":session_id,
-            "resume":if resume { Some(session_id) } else { None }, "model":model});
+            "resume":if resume { Some(session_id) } else { None }, "model":model, "lore":doxa_state::lore_enabled_default()});
         let id = bridge
             .request("start", params)
             .map_err(|_| "Claude sidecar start request failed".to_owned())?;
@@ -97,6 +98,10 @@ impl ClaudeHost {
                 Err(_) => return Err("Claude sidecar closed during startup".to_owned()),
             }
         };
+        let lore_enabled = start["lore_enabled"].as_bool();
+        if !doxa_state::lore_enabled_default() && lore_enabled != Some(false) {
+            return Err("Claude sidecar did not verify memory-off; update Python and restart".into());
+        }
         let peer_tools_ready = start["peer_tools_ready"] == true;
         let initial_model = start["data"]["model"].as_str().map(str::to_owned);
         let initial_permission_mode = start["permission_mode"].as_str().unwrap_or("default");
@@ -127,7 +132,7 @@ impl ClaudeHost {
             peer_tools_ready,
             initial_model,
             initial_permission_mode,
-            billing,
+            billing, lore_enabled,
         })
     }
 
@@ -170,6 +175,7 @@ impl ClaudeHost {
 }
 
 impl Host for ClaudeHost {
+    fn lore_enabled(&self) -> Option<bool> { self.lore_enabled }
     fn peer_tools_ready(&self) -> bool { self.peer_tools_ready && !self.closing.load(Ordering::Acquire) }
     fn can_set_model(&self) -> bool { self.model_control }
     fn can_set_permission_mode(&self) -> bool { self.permission_control }

@@ -166,6 +166,8 @@ def review(manifest_path, event, worker=run_worker):
             or not manifest.get("provider_thread")
             or event.get("session_id") != manifest["provider_thread"]):
         return False
+    if manifest.get("lore_enabled") is False:
+        return False  # Memory-off cannot complete the required review; block compaction.
     if os.environ.get("LORE_DISABLE_REVIEW", "").strip():
         return False
     source = Path(event.get("transcript_path") or "")

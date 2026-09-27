@@ -32,6 +32,7 @@ pub struct VendorHost {
     effort: Mutex<String>,
     catalog: Mutex<Option<Vec<doxa_vendors::ModelCapability>>>,
     lore: Mutex<LoreClient>,
+    lore_enabled: bool,
     scrub_failed: AtomicBool,
     history: Mutex<Vec<Value>>,
     store: TranscriptStore,
@@ -127,6 +128,7 @@ impl VendorHost {
             effort: Mutex::new(effort),
             catalog: Mutex::new(None),
             lore: Mutex::new(lore),
+            lore_enabled: doxa_state::lore_enabled_default(),
             scrub_failed: AtomicBool::new(false),
             history: Mutex::new(history),
             store,
@@ -211,6 +213,7 @@ impl Host for VendorHost {
         self.balance.lock().ok().and_then(|value| value.as_ref()
             .map(|label| json!({"mode":"api","balance":label})))
     }
+    fn lore_enabled(&self) -> Option<bool> { Some(self.lore_enabled) }
     fn lore_scrub_status(&self) -> Option<&'static str> {
         Some(if self.scrub_failed.load(Ordering::Acquire) { "unavailable" } else { "ready" })
     }

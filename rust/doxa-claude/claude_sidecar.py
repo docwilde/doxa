@@ -238,7 +238,10 @@ async def run() -> None:
                 model = params.get("model")
                 if model is not None and not isinstance(model, str):
                     raise ValueError("invalid start option")
-                options = {"cwd": cwd, "session_id": session_id, "resume": resume}
+                lore = params.get("lore")
+                if lore is not None and type(lore) is not bool:
+                    raise ValueError("invalid memory policy")
+                options = {"cwd": cwd, "session_id": session_id, "resume": resume, "lore": lore}
                 if model is not None:
                     options["model"] = model
                 candidate = SessionEngine(**session_engine_options(SessionEngine, options))
@@ -256,6 +259,7 @@ async def run() -> None:
                                      "result": {"event": started.type, "data": started.data,
                                                 "permission_mode": getattr(candidate, "permission_mode", "default"),
                                                 "billing": billing,
+                                                "lore_enabled": getattr(candidate, "lore", None),
                                                 "peer_tools_ready": getattr(candidate, "peer_host", None) is not None}})
                 except Exception:
                     try:

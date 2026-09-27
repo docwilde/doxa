@@ -28,7 +28,7 @@ fn has_option(args:&[String],name:&str)->bool{let mut index=0;while index<args.l
 
 pub struct Prepared {
     pub root:PathBuf,pub id:String,pub lines:Vec<String>,args:Vec<String>,resume_snapshot:Option<Value>,
-    pub seen:Cell<usize>,pub complete:Cell<bool>,pub armed:bool,prompt_digest:Option<String>,
+    pub seen:Cell<usize>,pub complete:Cell<bool>,pub armed:bool,prompt_digest:Option<String>,lore_default:Option<bool>,
 }
 impl fmt::Debug for Prepared{fn fmt(&self,f:&mut fmt::Formatter<'_>)->fmt::Result{f.debug_struct("PreparedFleet").field("root",&self.root).field("id",&self.id).finish_non_exhaustive()}}
 impl Prepared {
@@ -37,7 +37,7 @@ impl Prepared {
     pub fn from_fixture_review(review:&Value)->io::Result<Self>{
         let root=PathBuf::from(review["root"].as_str().ok_or_else(||invalid("Fixture root missing"))?);
         let id=review["run_id"].as_str().filter(|id|doxa_state::valid_session_id(id)).ok_or_else(||invalid("Fixture run ID missing"))?.to_owned();
-        Ok(Self{root,id,lines:review_lines("Start native fleet",review),args:Vec::new(),resume_snapshot:None,prompt_digest:None,seen:Cell::new(0),complete:Cell::new(false),armed:false})
+        Ok(Self{root,id,lines:review_lines("Start native fleet",review),args:Vec::new(),resume_snapshot:None,prompt_digest:None,lore_default:review["lore_enabled"].as_bool(),seen:Cell::new(0),complete:Cell::new(false),armed:false})
     }
     pub fn start(mut args:Vec<String>,cwd:Option<&Path>)->io::Result<Self>{
         if !has_option(&args,"--run-id"){
@@ -51,19 +51,20 @@ impl Prepared {
         let id=review["run_id"].as_str().filter(|id|doxa_state::valid_session_id(id)).ok_or_else(||invalid("Fleet review run ID unavailable"))?.to_owned();
         let lines=review_lines("Start native fleet",&review);
         let mut command=vec!["start".into()];command.extend(args);
-        Ok(Self{root,id,lines,args:command,resume_snapshot:None,prompt_digest:review["prompt_sha256"].as_str().map(str::to_owned),seen:Cell::new(0),complete:Cell::new(false),armed:false})
+        Ok(Self{root,id,lines,args:command,resume_snapshot:None,prompt_digest:review["prompt_sha256"].as_str().map(str::to_owned),lore_default:review["lore_enabled"].as_bool(),seen:Cell::new(0),complete:Cell::new(false),armed:false})
     }
     pub fn resume(root:PathBuf,id:&str)->io::Result<Self>{
         let snapshot=crate::fleet_control::snapshot(&root,id)?;
         if snapshot["phase"]!="monitoring"||snapshot["live"]!=true{return Err(invalid("Only a native live monitoring run can resume"));}
-        let review=json!({"run_id":id,"root":root,"cwd":snapshot["spec"]["cwd"],"mode":snapshot["mode"],"sessions":snapshot["spec"]["sessions"],"run_budget_usd":snapshot["spec"]["run_budget_usd"],"allow_unbudgeted":snapshot["spec"]["allow_unbudgeted"],"approval_policy":snapshot["approvals"]["policy"],"approval_grace_s":snapshot["approvals"]["grace_s"],"slots":snapshot["slots"]});
-        Ok(Self{lines:review_lines("Resume native fleet",&review),root:root.clone(),id:id.into(),args:vec!["resume".into(),id.into(),"--root".into(),root.to_string_lossy().into_owned()],resume_snapshot:Some(snapshot),prompt_digest:None,seen:Cell::new(0),complete:Cell::new(false),armed:false})
+        let review=json!({"run_id":id,"root":root,"cwd":snapshot["spec"]["cwd"],"mode":snapshot["mode"],"sessions":snapshot["spec"]["sessions"],"run_budget_usd":snapshot["spec"]["run_budget_usd"],"allow_unbudgeted":snapshot["spec"]["allow_unbudgeted"],"approval_policy":snapshot["approvals"]["policy"],"memory_off":snapshot["spec"]["memory_off"],"lore_enabled":snapshot["spec"]["lore_enabled"],"approval_grace_s":snapshot["approvals"]["grace_s"],"slots":snapshot["slots"]});
+        Ok(Self{lines:review_lines("Resume native fleet",&review),root:root.clone(),id:id.into(),args:vec!["resume".into(),id.into(),"--root".into(),root.to_string_lossy().into_owned()],resume_snapshot:Some(snapshot),prompt_digest:None,lore_default:None,seen:Cell::new(0),complete:Cell::new(false),armed:false})
     }
     pub fn launch(self,exe:&Path)->io::Result<Controller>{
         if self.args.is_empty(){return Err(invalid("Gallery fixture cannot launch a controller"));}
         if !self.armed||!self.complete.get(){return Err(invalid("Read and explicitly confirm the complete fleet review"));}
         if let Some(snapshot)=&self.resume_snapshot{if &crate::fleet_control::snapshot(&self.root,&self.id)?!=snapshot{return Err(invalid("Fleet changed since review; review it again"));}}
         let mut command=Command::new(exe);command.arg("fleet").args(&self.args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).process_group(0);
+        if let Some(enabled)=self.lore_default{command.env("DOXA_LORE",if enabled{"1"}else{"0"});}
         if let Some(digest)=&self.prompt_digest{if digest.len()!=64||!digest.bytes().all(|byte|byte.is_ascii_hexdigit()){return Err(invalid("Fleet review task digest invalid"));}command.env("DOXA_FLEET_REVIEW_PROMPT_SHA256",digest);}
         let child=command.spawn()?;
         Ok(Controller{child:Some(child),root:self.root,id:self.id,cancelling:false})
@@ -80,12 +81,12 @@ fn public_plan_error(error:io::Error)->io::Error{
 }
 fn review_lines(title:&str,value:&Value)->Vec<String>{
     let mut lines=vec![format!("{title} · read all rows, Shift+A arm, Shift+Y launch · Esc cancel")];
-    for (label,key)in [("Run","run_id"),("Root","root"),("Directory","cwd"),("Mode","mode"),("Workers","workers"),("Sessions","sessions"),("Seed","seed"),("Total budget USD","run_budget_usd"),("Allow unbudgeted","allow_unbudgeted"),("Approval policy","approval_policy"),("Approval grace seconds","approval_grace_s"),("Dry run","dry_run"),("Preflight","preflight"),("Task digest","prompt_sha256"),("Quiescence deadline seconds","quiescence_timeout_s"),("Quiescence grace seconds","quiescence_grace_s")]{
+    for (label,key)in [("Run","run_id"),("Root","root"),("Directory","cwd"),("Mode","mode"),("Workers","workers"),("Sessions","sessions"),("Seed","seed"),("Workers with memory off","memory_off"),("Memory default enabled","lore_enabled"),("Total budget USD","run_budget_usd"),("Allow unbudgeted","allow_unbudgeted"),("Approval policy","approval_policy"),("Approval grace seconds","approval_grace_s"),("Dry run","dry_run"),("Preflight","preflight"),("Task digest","prompt_sha256"),("Quiescence deadline seconds","quiescence_timeout_s"),("Quiescence grace seconds","quiescence_grace_s")]{
         if !value[key].is_null(){lines.push(format!("{label}: {}",value[key].as_str().map(str::to_owned).unwrap_or_else(||value[key].to_string())));}
     }
-    let mut counts:BTreeMap<(String,String,String),usize>=BTreeMap::new();
-    for slot in value["slots"].as_array().into_iter().flatten(){let key=(slot["role"].as_str().unwrap_or("worker").into(),slot["engine"].as_str().unwrap_or("unknown").into(),slot["model"].as_str().unwrap_or("provider default").into());*counts.entry(key).or_default()+=1;}
-    for ((role,engine,model),count)in counts{lines.push(format!("Planned {count} × {role}: {engine}:{model}"));}
+    let mut counts:BTreeMap<(String,String,String,String),usize>=BTreeMap::new();
+    for slot in value["slots"].as_array().into_iter().flatten(){let key=(slot["role"].as_str().unwrap_or("worker").into(),slot["engine"].as_str().unwrap_or("unknown").into(),slot["model"].as_str().unwrap_or("provider default").into(),match slot["lore"].as_bool(){Some(true)=>"on",Some(false)=>"off",None=>"unknown"}.into());*counts.entry(key).or_default()+=1;}
+    for ((role,engine,model,lore),count)in counts{lines.push(format!("Planned {count} × {role}: {engine}:{model} · memory {lore}"));}
     lines.push("Task text stays private; controller output is suppressed. Ctrl+C cancels the controller and waits for teardown.".into());
     lines.into_iter().map(|line|crate::markdown::sanitize(&line.replace('\n',"\\n").replace('\t',"\\t"))).collect()
 }
