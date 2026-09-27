@@ -96,9 +96,9 @@ def review(manifest_path, event, worker=run_worker):
     if not source.is_relative_to(root / "sessions") and not source.is_relative_to(root / "archived_sessions"):
         return False
     data, before = safe_read(source, MAX_ROLLOUT)
-    if not data:
+    if not data or any(len(line) > MAX_LINE for line in data.splitlines()):
         return False
-    first = json.loads(data.splitlines()[0])
+    first = json.loads(data.partition(b"\n")[0])
     if first.get("type") != "session_meta" or first.get("payload", {}).get("id") != manifest["provider_thread"]:
         return False
     cwd = manifest.get("cwd")

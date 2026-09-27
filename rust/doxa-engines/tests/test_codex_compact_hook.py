@@ -133,3 +133,12 @@ def test_memory_off_blocks_without_worker(tmp_path):
     worker = mock.Mock()
     assert not hook.review(manifest, event, worker=worker)
     worker.assert_not_called()
+
+
+def test_oversized_rollout_line_blocks_before_native_worker(tmp_path):
+    manifest, source, event = fixture(tmp_path)
+    with source.open('a') as output:
+        output.write('x' * (hook.MAX_LINE + 1) + '\n')
+    worker = mock.Mock()
+    assert not hook.review(manifest, event, worker=worker)
+    worker.assert_not_called()
