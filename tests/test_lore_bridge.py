@@ -644,6 +644,70 @@ def test_belief_actions_use_exact_review_and_canonical_lore_mutators(tmp_path):
     assert len(calls) == 1
 
 
+@pytest.mark.parametrize("action,status,counts", [
+    ("confirmed", "active", (2, 1, 0)),
+    ("retract", "retracted", (1, 1, 0)),
+])
+def test_belief_accept_and_reject_use_canonical_actions_and_keep_history(
+        tmp_path, action, status, counts):
+    db = tmp_path / "reviewed-beliefs.db"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE beliefs(id INTEGER PRIMARY KEY, uid TEXT, subject TEXT, "
+                 "claim TEXT, status TEXT, confidence REAL, writer TEXT, origin TEXT)")
+    original = (1, "reviewed-uid", "project:my-project", "Reviewed fact", "active",
+                0.7, "original-writer", "derived")
+    conn.execute("INSERT INTO beliefs VALUES(?,?,?,?,?,?,?,?)", original)
+    conn.execute("CREATE TABLE outcomes(belief_id INTEGER, event TEXT, source TEXT, note TEXT)")
+    conn.executemany("INSERT INTO outcomes VALUES(1,?,'audit','existing history')",
+                     [("confirmed",), ("contradicted",)])
+    conn.commit()
+    conn.close()
+    calls = []
+
+    def outcome(conn, bid, event, source, *, note):
+        calls.append(("outcome", bid, event, source, note))
+        conn.execute("INSERT INTO outcomes VALUES(?,?,?,?)", (bid, event, source, note))
+
+    def retract(conn, bid, reason):
+        calls.append(("retract", bid, reason))
+        return conn.execute("UPDATE beliefs SET status='retracted' WHERE id=?",
+                            (bid,)).rowcount == 1
+
+    def outcome_counts(conn, bid):
+        return tuple(conn.execute(
+            "SELECT count(*) FROM outcomes WHERE belief_id=? AND event=?", (bid, event)
+        ).fetchone()[0] for event in ("confirmed", "contradicted", "stale"))
+
+    ops = (lambda cwd: "my-project", lambda: sqlite3.connect(db), retract,
+           outcome_counts, outcome)
+    review = lore_bridge._belief_review({"cwd": "/repo", "belief_id": 1}, ops, str)
+    expected = {key: review[key] for key in ("uid", "subject", "claim_sha256")}
+    assert expected == {"uid": original[1], "subject": original[2],
+                        "claim_sha256": hashlib.sha256(original[3].encode()).hexdigest()}
+    request = {"cwd": "/repo", "belief_id": 1, "expected": expected,
+               "action": action, "note": "User reviewed the complete claim"}
+    result = lore_bridge._belief_action(request, ops)
+    assert result == {"status": status, "retired": status != "active",
+                      "confirmed": counts[0], "contradicted": counts[1], "stale": counts[2]}
+    assert calls == ([("outcome", 1, "confirmed", "user", request["note"])]
+                     if action == "confirmed" else [("retract", 1, request["note"])])
+    conn = sqlite3.connect(db)
+    assert conn.execute("SELECT * FROM beliefs").fetchone() == original[:4] + (status,) + original[5:]
+    assert conn.execute("SELECT event,source,note FROM outcomes ORDER BY rowid LIMIT 2").fetchall() == [
+        ("confirmed", "audit", "existing history"),
+        ("contradicted", "audit", "existing history"),
+    ]
+    # An old review cannot authorize a different claim or a retired row.
+    if action == "confirmed":
+        conn.execute("UPDATE beliefs SET claim='Changed after review' WHERE id=1")
+        conn.commit()
+    conn.close()
+    with pytest.raises(lore_bridge.BeliefActionError) as changed:
+        lore_bridge._belief_action(request, ops)
+    assert changed.value.code == "belief_changed"
+    assert len(calls) == 1
+
+
 def test_belief_review_refuses_claim_if_scrub_hides_content(tmp_path):
     db = tmp_path / "beliefs.db"
     conn = sqlite3.connect(db)

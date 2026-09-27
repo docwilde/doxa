@@ -177,6 +177,16 @@ fn scene(name: &str) -> App {
                     {"id":"q7","preview":"Summarize the test failures and proposed fix"}
                 ]}));
         }
+        "beliefs" => {
+            app.groups[0].tabs = vec!["demo-codex-01".into()];
+            app.sessions.iter_mut().for_each(|session| session.transcript.clear());
+            app.show_belief_browser_fixture(0, &[
+                (1, "user", "Prefer concise explanations with evidence."),
+                (2, "project:parser", "Reconnect must preserve the current conversation."),
+                (3, "project:parser", "Run the parser checks before publishing a release."),
+            ]);
+            app.notice = "Fixture · per-belief decisions · writes disabled".into();
+        }
         "memory" => {
             app.groups[0].tabs = vec!["demo-codex-01".into()];
             app.show_memory_menu_fixture(0,
@@ -244,7 +254,7 @@ fn rgb(color: Color) -> [u8; 3] {
 fn main() {
     let name = std::env::args().nth(1).expect("scene name");
     let (width,height) = match name.as_str() {
-        "hero" | "repo-picker" | "claude-session" | "tool-activity" | "tool-expanded" | "restored-tool" | "processing" | "reasoning" | "commands" | "help" | "needs-input" | "permissions" | "effort" | "history" | "queue" | "memory" | "memory-management" | "memory-change" | "fleet-review" | "fleet-view" => (126,31),
+        "hero" | "repo-picker" | "claude-session" | "tool-activity" | "tool-expanded" | "restored-tool" | "processing" | "reasoning" | "commands" | "help" | "needs-input" | "permissions" | "effort" | "history" | "queue" | "beliefs" | "memory" | "memory-management" | "memory-change" | "fleet-review" | "fleet-view" => (126,31),
         _ => panic!("unknown scene"),
     };
     let app = scene(&name);

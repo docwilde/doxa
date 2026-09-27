@@ -5,6 +5,16 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.30 — 2026-09-27
+
+- Add visible Accept and Reject controls to each belief entry in the inline
+  browser, with matching mouse hit targets, hover selection, and keyboard access.
+- Preserve the selected action through complete exact-claim review. Accept
+  records a user confirmation; Reject uses LORE’s canonical retraction and
+  retains the belief’s history. Existing stale and contradiction actions remain.
+- Keep changed, incomplete, hidden, and unsupported belief reviews read only,
+  and refuse writes from gallery fixtures.
+
 ## 2.0.0-alpha.29 — 2026-09-27
 
 - Add native setup, explicit provider login/logout and plugin adoption controls,

@@ -238,6 +238,7 @@ struct LorePicker {
     can_resolve: bool,
     resolving: bool,
     belief_review: Option<doxa_lore::BeliefReview>,
+    belief_intent: Option<doxa_lore::BeliefAction>,
     can_act_on_beliefs: bool,
     belief_action: Option<doxa_lore::BeliefAction>,
     belief_note: String,
@@ -343,6 +344,32 @@ fn chooser_row_style(selected: bool) -> Style {
     } else {
         Style::default().fg(theme::SECONDARY)
     }
+}
+
+// Only complete buttons are rendered and clickable, including in narrow terminals.
+fn belief_buttons(area: Rect, y: u16, buttons: &[(&'static str, KeyCode)]) -> Vec<(Rect, &'static str, KeyCode)> {
+    let mut x = area.x.saturating_add(1);
+    let right = area.right().saturating_sub(1);
+    if y <= area.y || y >= area.bottom().saturating_sub(1) { return Vec::new(); }
+    let mut result = Vec::new();
+    for &(label, key) in buttons {
+        let width = label.len() as u16;
+        if x.saturating_add(width) > right { break; }
+        result.push((Rect::new(x, y, width, 1), label, key));
+        x = x.saturating_add(width + 1);
+    }
+    result
+}
+
+fn belief_review_buttons(area: Rect, picker: &LorePicker) -> Vec<(Rect, &'static str, KeyCode)> {
+    let buttons: &[(&str, KeyCode)] = if picker.belief_action.is_some() {
+        if picker.retract_armed { &[("[Confirm reject]", KeyCode::Char('y')), ("[Cancel]", KeyCode::Esc)] }
+        else { &[("[Apply]", KeyCode::Enter), ("[Cancel]", KeyCode::Esc)] }
+    } else {
+        &[("[Accept A]", KeyCode::Char('a')), ("[Reject D]", KeyCode::Char('d')),
+          ("[Contradicted X]", KeyCode::Char('x')), ("[Stale S]", KeyCode::Char('s'))]
+    };
+    belief_buttons(area, area.y.saturating_add(5), buttons)
 }
 
 fn repo_chip(status: &doxa_worktrees::RepoStatus) -> (&'static str, String) {
@@ -1255,6 +1282,8 @@ pub struct App {
     repo_pending: Option<(String, PathBuf, u64, Receiver<Option<doxa_worktrees::RepoStatus>>)>,
     repo_epoch: HashMap<String, u64>,
     chip_offsets: Vec<usize>,
+    belief_browser_fixture: bool,
+    belief_button_hover: Option<Rect>,
     chip_hover: Option<ChipHit>,
     link_hover: Option<String>,
     visible_links: RefCell<Vec<(Rect, String)>>,
@@ -1417,6 +1446,8 @@ impl Default for App {
             repo_pending: None,
             repo_epoch: HashMap::new(),
             chip_offsets: vec![0; panes::MAX_PANES],
+            belief_browser_fixture: false,
+            belief_button_hover: None,
             chip_hover: None,
             link_hover: None,
             visible_links: RefCell::new(Vec::new()),
@@ -4606,6 +4637,7 @@ impl App {
     }
 
     fn open_lore_picker_mode(&mut self, proposal_mode: bool) {
+        self.belief_browser_fixture = false;
         let cwd = self.groups[self.active_group].active_id()
             .and_then(|id| self.session_cwds.get(id))
             .map(|path| path.to_string_lossy().into_owned())
@@ -4617,7 +4649,7 @@ impl App {
             proposals: Vec::new(), proposal_mode, review: None,
             review_scroll: 0, review_seen: 0, review_width: 0,
             armed_resolution: None, can_resolve: false, resolving: false, cwd: cwd.clone(),
-            belief_review: None, can_act_on_beliefs: false, belief_action: None,
+            belief_review: None, belief_intent: None, can_act_on_beliefs: false, belief_action: None,
             belief_note: String::new(), retract_armed: false, belief_acting: false,
             result_status: None,
             evidence: None, status: String::new(), pending: None,
@@ -4626,7 +4658,29 @@ impl App {
         else { self.load_lore(lore_picker::Query::Beliefs(0)); }
     }
 
+    /// Render-only gallery fixture: all LORE reads and writes are disabled.
+    pub fn show_belief_browser_fixture(&mut self, group: usize, rows: &[(u64, &str, &str)]) {
+        self.active_group = group.min(self.groups.len().saturating_sub(1));
+        self.belief_browser_fixture = true;
+        self.lore_picker = Some(LorePicker {
+            session_id: None, query: String::new(),
+            rows: rows.iter().map(|&(id, subject, claim)| lore_picker::Belief {
+                id, subject: subject.into(), claim: claim.into(), truncated: false,
+                confidence: 0.8, evidence_count: Some(1),
+            }).collect(), selected: 0, offset: 0, proposals: Vec::new(), proposal_mode: false,
+            review: None, review_scroll: 0, review_seen: 0, review_width: 0,
+            armed_resolution: None, can_resolve: false, resolving: false, cwd: String::new(),
+            belief_review: None, belief_intent: None, can_act_on_beliefs: false, belief_action: None,
+            belief_note: String::new(), retract_armed: false, belief_acting: false,
+            result_status: None, evidence: None, status: "Active beliefs · Accept/Reject review the exact claim".into(), pending: None,
+        });
+    }
+
     fn load_lore(&mut self, query: lore_picker::Query) {
+        if self.belief_browser_fixture {
+            if let Some(picker) = &mut self.lore_picker { picker.status = "Gallery fixture · LORE calls disabled".into(); }
+            return;
+        }
         let Some(picker) = &mut self.lore_picker else { return; };
         picker.resolving = matches!(&query, lore_picker::Query::Resolve(..) | lore_picker::Query::BeliefAction(..));
         picker.belief_acting = matches!(&query, lore_picker::Query::BeliefAction(..));
@@ -5136,6 +5190,18 @@ impl App {
                 picker.review_seen = picker.review_seen.max(picker.review_scroll.saturating_add(visible)).min(total);
             }
             let max_scroll = total.saturating_sub(visible);
+            if picker.belief_action.is_none() && matches!(key.code, KeyCode::Char('a' | 'A' | 'd' | 'D'))
+                && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
+                if !picker.can_act_on_beliefs || picker.review_seen != total {
+                    picker.status = "Read the complete writable belief before choosing an action".into();
+                    return true;
+                }
+                let reject = matches!(key.code, KeyCode::Char('d' | 'D'));
+                picker.belief_action = Some(if reject { doxa_lore::BeliefAction::Retract } else { doxa_lore::BeliefAction::Confirmed });
+                picker.belief_note = if reject { "Rejected by user in DOXA belief browser" } else { "Accepted by user in DOXA belief browser" }.into();
+                picker.retract_armed = false;
+                return self.lore_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            }
             if let Some(action) = picker.belief_action {
                 match key.code {
                     KeyCode::Esc => {
@@ -5212,12 +5278,21 @@ impl App {
             }
             KeyCode::Up if picker.evidence.is_none() => picker.selected = picker.selected.saturating_sub(1),
             KeyCode::Down if picker.evidence.is_none() => picker.selected = (picker.selected + 1).min(picker.rows.len().saturating_sub(1)),
+            KeyCode::Char(c @ ('A' | 'D')) if picker.evidence.is_none() && picker.query.is_empty()
+                && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+                picker.belief_intent = Some(if matches!(c, 'd' | 'D') { doxa_lore::BeliefAction::Retract } else { doxa_lore::BeliefAction::Confirmed });
+                if let Some(id) = picker.rows.get(picker.selected).map(|row| row.id) {
+                    let cwd = picker.cwd.clone();
+                    self.load_lore(lore_picker::Query::BeliefReview(cwd, id));
+                }
+            }
             KeyCode::Right if picker.evidence.is_none() => {
                 if let Some(id) = picker.rows.get(picker.selected).map(|row| row.id) {
                     self.load_lore(lore_picker::Query::Evidence(id));
                 }
             }
             KeyCode::Enter if picker.evidence.is_none() && picker.query.is_empty() => {
+                picker.belief_intent = None;
                 if let Some(id) = picker.rows.get(picker.selected).map(|row| row.id) {
                     let cwd = picker.cwd.clone();
                     self.load_lore(lore_picker::Query::BeliefReview(cwd, id));
@@ -6789,7 +6864,7 @@ impl App {
             let compact = menu.height < 10;
             let first = if picker.proposal_mode { menu.y + 4 } else { menu.y + if compact { 3 } else { 6 } };
             if row < first { return false; }
-            let reserve = if picker.proposal_mode { 6 } else if compact { 4 } else { 8 };
+            let reserve = if picker.proposal_mode { 6 } else if compact { 4 } else { 7 };
             let visible = usize::from(menu.height.saturating_sub(reserve)).max(1);
             if usize::from(row - first) >= visible { return false; }
             let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
@@ -6838,6 +6913,19 @@ impl App {
             }
         }
         if mouse.kind == MouseEventKind::Moved {
+            let hover = self.lore_picker.as_ref().filter(|picker| picker.belief_review.is_some()
+                && picker.pending.is_none() && !picker.resolving).and_then(|picker|
+                self.active_chooser_rect().and_then(|area| belief_review_buttons(area, picker).into_iter()
+                    .find(|(rect, _, _)| rect.contains(ratatui::layout::Position::new(mouse.column, mouse.row)))
+                    .map(|(rect, _, _)| rect)));
+            let belief_hover_changed = self.belief_button_hover != hover;
+            self.belief_button_hover = hover;
+            if hover.is_some() {
+                let changed = belief_hover_changed || self.chip_hover.is_some() || self.link_hover.is_some();
+                self.chip_hover = None;
+                self.link_hover = None;
+                return changed;
+            }
             if self.hover_chooser(mouse.column, mouse.row) {
                 self.chip_hover = None;
                 self.link_hover = None;
@@ -6846,7 +6934,7 @@ impl App {
             let overlay = self.link_interaction_blocked();
             let chip = (!overlay).then(|| self.chip_hit_at(mouse.column, mouse.row)).flatten();
             let link = (!overlay).then(|| self.link_at(mouse.column, mouse.row)).flatten();
-            let changed = self.chip_hover != chip || self.link_hover != link;
+            let changed = belief_hover_changed || self.chip_hover != chip || self.link_hover != link;
             self.chip_hover = chip;
             self.link_hover = link;
             return changed;
@@ -7179,6 +7267,12 @@ impl App {
             if !menu.contains(ratatui::layout::Position::new(mouse.column, mouse.row)) { return true; }
             let picker = self.lore_picker.as_mut().unwrap();
             if picker.pending.is_some() || picker.resolving { return true; }
+            if picker.belief_review.is_some() && mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                if let Some((_, _, key)) = belief_review_buttons(menu, picker).into_iter()
+                    .find(|(rect, _, _)| rect.contains(ratatui::layout::Position::new(mouse.column, mouse.row))) {
+                    return self.lore_picker_key(KeyEvent::new(key, KeyModifiers::NONE));
+                }
+            }
             if let Some(review) = &picker.belief_review {
                 let width = usize::from(menu.width.saturating_sub(3)).max(1);
                 let visible = usize::from(menu.height.saturating_sub(REVIEW_BODY_RESERVE));
@@ -7233,12 +7327,20 @@ impl App {
                 MouseEventKind::Down(MouseButton::Left) => {
                     let compact = menu.height < 10;
                     let first = menu.y.saturating_add(if compact { 3 } else { 6 });
-                    let visible = usize::from(menu.height.saturating_sub(if compact { 4 } else { 8 })).max(1);
+                    let visible = usize::from(menu.height.saturating_sub(if compact { 4 } else { 7 })).max(1);
                     let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
                     if mouse.row >= first && mouse.row < first.saturating_add(visible as u16) {
                         let index = start + usize::from(mouse.row - first);
                         if let Some(id) = picker.rows.get(index).map(|row| row.id) {
-                            if picker.selected == index {
+                            let action_clicked = belief_buttons(menu, mouse.row,
+                                &[("[Accept]", KeyCode::Char('A')), ("[Reject]", KeyCode::Char('D'))]).into_iter()
+                                .find(|(rect, _, _)| rect.contains(ratatui::layout::Position::new(mouse.column, mouse.row)))
+                                .map(|(_, _, key)| key);
+                            if picker.selected == index || action_clicked.is_some() {
+                                picker.belief_intent = action_clicked.map(|key| if key == KeyCode::Char('D') {
+                                    doxa_lore::BeliefAction::Retract
+                                } else { doxa_lore::BeliefAction::Confirmed });
+                                picker.selected = index;
                                 let cwd = picker.cwd.clone();
                                 self.load_lore(lore_picker::Query::BeliefReview(cwd, id));
                             } else { picker.selected = index; }
@@ -8060,21 +8162,23 @@ impl App {
             let mut lines = vec![Line::from(format!(" {}", clipped_title(&picker.status, width).0))];
             lines.push(Line::from(format!(" Exact belief #{} · complete LORE review", review.id())));
             lines.push(Line::from(clipped_title(if picker.can_act_on_beliefs {
-                " ↓/PgDn read all · C confirmed · X contradicted · S stale · R retract · Esc back"
+                " ↓/PgDn read all · A accept · D reject · C/X/S/R detailed note · Esc back"
             } else { " Read only with this LORE version · Esc back" }, width).0));
             if let Some(action) = picker.belief_action {
                 let label = match action {
-                    doxa_lore::BeliefAction::Confirmed => "confirmed",
+                    doxa_lore::BeliefAction::Confirmed => "accept (confirmed)",
                     doxa_lore::BeliefAction::Contradicted => "contradicted",
                     doxa_lore::BeliefAction::Stale => "stale",
-                    doxa_lore::BeliefAction::Retract => "retract",
+                    doxa_lore::BeliefAction::Retract => "reject (retract)",
                 };
                 lines.push(Line::from(format!(" {label} note: {}", safe_label(&picker.belief_note))));
-                lines.push(Line::from(if picker.retract_armed { " Press Y to confirm retract · Esc cancel" }
-                    else if action == doxa_lore::BeliefAction::Retract { " Enter to review retract confirmation · Esc cancel" }
-                    else { " Enter apply · Esc cancel" }));
+                lines.push(Line::from(""));
             } else {
-                lines.push(Line::from(" Select an outcome after reading the complete subject and claim"));
+                lines.push(Line::from(match picker.belief_intent {
+                    Some(doxa_lore::BeliefAction::Confirmed) => " Accept selected: read all, then A or click Accept to confirm",
+                    Some(doxa_lore::BeliefAction::Retract) => " Reject selected: read all, then D or click Reject to retract",
+                    _ => " Accept records confirmation; Reject retracts active belief, keeping history",
+                }));
                 lines.push(Line::from(""));
             }
             let full = format!("Subject: {}\nClaim: {}", review.subject(), review.claim());
@@ -8083,11 +8187,15 @@ impl App {
             for line in visual_rows.iter().skip(picker.review_scroll).take(visible) {
                 lines.push(Line::from(line.clone()));
             }
+            lines = chooser_list_lines(lines, usize::from(area.width.saturating_sub(2)));
             frame.render_widget(Paragraph::new(lines)
                 .block(Block::default().title(" LORE belief review ").borders(Borders::ALL)
                     .border_style(Style::default().fg(theme::ACCENT)))
                 .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED))
                 .wrap(Wrap { trim: false }), area);
+            for (rect, label, _) in belief_review_buttons(area, picker) {
+                frame.render_widget(Paragraph::new(label).style(chooser_row_style(self.belief_button_hover == Some(rect))), rect);
+            }
             return;
         }
         let height = area.height;
@@ -8096,7 +8204,7 @@ impl App {
         let mut lines = vec![Line::from(format!(" Search: {}", safe_label(&picker.query)))];
         if !compact {
             lines.push(Line::from(format!(" {}", picker.status)));
-            lines.push(Line::from(" Enter exact review · → evidence · actions require a note"));
+            lines.push(Line::from(" Shift+A accept · Shift+D reject · Accept confirms; Reject retracts with history"));
             lines.push(Line::from(""));
         }
         if let Some((id, evidence)) = &picker.evidence {
@@ -8113,10 +8221,12 @@ impl App {
             }
         } else {
             lines.push(Line::from(format!(" Page offset {} · {} rows", picker.offset, picker.rows.len())));
-            let visible = usize::from(height.saturating_sub(if compact { 4 } else { 8 })).max(1);
+            let visible = usize::from(height.saturating_sub(if compact { 4 } else { 7 })).max(1);
             let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
             for (index, row) in picker.rows.iter().enumerate().skip(start).take(visible) {
-                let label = format!(" {} #{} · {} · {:.0}% · {}{}{}", if index == picker.selected { '›' } else { ' ' }, row.id,
+                let button_text = belief_buttons(area, area.y + 1, &[("[Accept]", KeyCode::Char('A')), ("[Reject]", KeyCode::Char('D'))])
+                    .iter().map(|(_, label, _)| *label).collect::<Vec<_>>().join(" ");
+                let label = format!("{button_text} {} #{} · {} · {:.0}% · {}{}{}", if index == picker.selected { '›' } else { ' ' }, row.id,
                     safe_label(&row.subject), row.confidence * 100.0, safe_label(&row.claim),
                     row.evidence_count.map(|count| format!(" · {count} evidence")).unwrap_or_default(),
                     if row.truncated { " · claim clipped" } else { "" });
@@ -8130,6 +8240,17 @@ impl App {
             .block(Block::default().title(" LORE beliefs · Enter review/search · → evidence · P proposals · PgUp/PgDn page · Esc close ")
             .borders(Borders::ALL).border_style(Style::default().fg(theme::ACCENT)))
             .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)).wrap(Wrap { trim: false }), modal);
+        if picker.evidence.is_none() {
+            let first = area.y.saturating_add(if compact { 3 } else { 6 });
+            let visible = usize::from(height.saturating_sub(if compact { 4 } else { 7 })).max(1);
+            let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
+            for (offset, index) in (start..picker.rows.len()).take(visible).enumerate() {
+                for (rect, label, _) in belief_buttons(area, first.saturating_add(offset as u16),
+                    &[("[Accept]", KeyCode::Char('A')), ("[Reject]", KeyCode::Char('D'))]) {
+                    frame.render_widget(Paragraph::new(label).style(chooser_row_style(index == picker.selected)), rect);
+                }
+            }
+        }
     }
 
     fn draw_diff(&self, frame: &mut Frame, area: Rect) {
@@ -10397,7 +10518,7 @@ for line in sys.stdin:
                 selected: 0, query: String::new(), offset: 0, status: "long status ".repeat(40),
                 evidence: None, pending: None, proposal_mode, review: None, review_scroll: 0,
                 review_seen: 0, review_width: 0, armed_resolution: None, can_resolve: false,
-                resolving: false, cwd: cwd.path().display().to_string(), belief_review: None,
+                resolving: false, cwd: cwd.path().display().to_string(), belief_review: None, belief_intent: None,
                 can_act_on_beliefs: false, belief_action: None, belief_note: String::new(),
                 retract_armed: false, belief_acting: false, result_status: None,
             });
@@ -11422,7 +11543,7 @@ for line in sys.stdin:
             proposals: Vec::new(), proposal_mode: false, review: None, review_scroll: 0,
             review_seen: 0, review_width: 0, armed_resolution: None,
             can_resolve: false, resolving: false, cwd: String::new(),
-            belief_review: None, can_act_on_beliefs: false, belief_action: None,
+            belief_review: None, belief_intent: None, can_act_on_beliefs: false, belief_action: None,
             belief_note: String::new(), retract_armed: false, belief_acting: false,
             result_status: None });
         let lore = app.active_chooser_rect().unwrap();
@@ -12578,7 +12699,7 @@ for line in sys.stdin:
             proposals: Vec::new(), proposal_mode: false, review: None, review_scroll: 0,
             review_seen: 0, review_width: 0, armed_resolution: None,
             can_resolve: false, resolving: false, cwd: String::new(),
-            belief_review: None, can_act_on_beliefs: false, belief_action: None,
+            belief_review: None, belief_intent: None, can_act_on_beliefs: false, belief_action: None,
             belief_note: String::new(), retract_armed: false, belief_acting: false,
             result_status: None,
         });
@@ -12716,7 +12837,7 @@ for line in sys.stdin:
         picker.rows = (1..=30).map(|id| lore_picker::Belief { id, subject: "subject".into(),
             claim: "claim".into(), truncated: false, confidence: 0.8, evidence_count: Some(1) }).collect();
         let menu = app.active_chooser_rect().unwrap();
-        let footer = menu.y + 6 + menu.height.saturating_sub(8);
+        let footer = menu.bottom().saturating_sub(1);
         app.mouse(MouseEvent { kind: MouseEventKind::Moved,
             column: menu.x + 2, row: footer, modifiers: KeyModifiers::NONE });
         assert_eq!(app.lore_picker.as_ref().unwrap().selected, 0);
@@ -12804,6 +12925,115 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn belief_buttons_have_only_complete_rendered_hit_targets() {
+        let buttons = [("[Accept]", KeyCode::Char('A')), ("[Reject]", KeyCode::Char('D'))];
+        for width in 2..24 {
+            let area = Rect::new(3, 4, width, 10);
+            let hits = belief_buttons(area, 7, &buttons);
+            for (rect, label, _) in &hits {
+                assert_eq!(rect.width as usize, label.len());
+                assert!(rect.x > area.x && rect.right() < area.right());
+            }
+            assert_eq!(hits.len(), if width >= 19 { 2 } else if width >= 10 { 1 } else { 0 });
+        }
+        assert!(belief_buttons(Rect::new(0, 0, 40, 5), 5, &buttons).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn belief_reject_button_requires_complete_review_then_explicit_confirmation() {
+        let mut app = app_with_review();
+        app.belief_browser_fixture = true;
+        let menu = app.active_chooser_rect().unwrap();
+        let reject = belief_review_buttons(menu, app.lore_picker.as_ref().unwrap()).into_iter()
+            .find(|(_, _, key)| *key == KeyCode::Char('d')).unwrap().0;
+        let mouse = |kind| MouseEvent { kind, column: reject.x, row: reject.y, modifiers: KeyModifiers::NONE };
+        app.mouse(mouse(MouseEventKind::Moved));
+        assert_eq!(app.belief_button_hover, Some(reject));
+        app.mouse(mouse(MouseEventKind::Down(MouseButton::Left)));
+        assert!(app.lore_picker.as_ref().unwrap().belief_action.is_none());
+        for _ in 0..100 { app.lore_picker_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE)); }
+        app.mouse(mouse(MouseEventKind::Down(MouseButton::Left)));
+        let picker = app.lore_picker.as_ref().unwrap();
+        assert_eq!(picker.belief_action, Some(doxa_lore::BeliefAction::Retract));
+        assert!(picker.retract_armed);
+        assert_eq!(picker.belief_note, "Rejected by user in DOXA belief browser");
+        assert!(picker.pending.is_none());
+        assert!(painted(&app).contains("[Confirm reject]"));
+        app.lore_picker_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.lore_picker.as_ref().unwrap().belief_action.is_none());
+        app.lore_picker.as_mut().unwrap().selected = 1;
+        app.lore_picker_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert!(app.lore_picker.as_ref().unwrap().pending.is_none());
+        assert!(app.lore_picker.as_ref().unwrap().belief_action.is_none());
+    }
+
+    #[test]
+    fn belief_list_uses_last_interior_row_for_third_entry_actions() {
+        let mut app = App::default();
+        app.size = Rect::new(0, 0, 100, 40);
+        app.show_belief_browser_fixture(0, &[(7, "first", "claim"), (8, "second", "claim"), (9, "third", "claim")]);
+        app.sync_chooser_state();
+        app.chooser_height_override.set(Some(10));
+        let menu = app.active_chooser_rect().unwrap();
+        assert_eq!(menu.height, 10);
+        let third_y = menu.y + 8;
+        assert_eq!(third_y, menu.bottom() - 2);
+        let rendered = painted_at(&app, 100, 40);
+        let row = rendered.lines().nth(usize::from(third_y)).unwrap();
+        assert!(row.contains("#9") && row.contains("[Accept] [Reject]"), "{row}");
+        app.mouse(MouseEvent { kind: MouseEventKind::Moved, column: menu.x + 2,
+            row: third_y, modifiers: KeyModifiers::NONE });
+        assert_eq!(app.lore_picker.as_ref().unwrap().rows[app.lore_picker.as_ref().unwrap().selected].id, 9);
+        let reject = belief_buttons(menu, third_y,
+            &[("[Accept]", KeyCode::Char('A')), ("[Reject]", KeyCode::Char('D'))])[1].0;
+        app.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: reject.x,
+            row: reject.y, modifiers: KeyModifiers::NONE });
+        let picker = app.lore_picker.as_ref().unwrap();
+        assert_eq!(picker.rows[picker.selected].id, 9);
+        assert_eq!(picker.belief_intent, Some(doxa_lore::BeliefAction::Retract));
+        assert!(picker.pending.is_none());
+        for c in "agent".chars() { app.lore_picker_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)); }
+        assert_eq!(app.lore_picker.as_ref().unwrap().query, "agent");
+    }
+
+    #[test]
+    fn belief_list_lowercase_action_initials_remain_search_text() {
+        for query in ["agent", "derive"] {
+            let mut app = App::default();
+            app.size = Rect::new(0, 0, 100, 40);
+            app.show_belief_browser_fixture(0, &[(7, "fixture", "claim")]);
+            for c in query.chars() {
+                assert!(app.lore_picker_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)));
+            }
+            let picker = app.lore_picker.as_ref().unwrap();
+            assert_eq!(picker.query, query);
+            assert!(picker.belief_intent.is_none());
+            assert!(picker.belief_review.is_none());
+            assert!(picker.belief_action.is_none());
+            assert!(picker.pending.is_none());
+        }
+    }
+
+    #[test]
+    fn belief_list_buttons_preserve_exact_row_and_intent_in_safe_fixture() {
+        let mut app = App::default();
+        app.size = Rect::new(0, 0, 100, 40);
+        app.show_belief_browser_fixture(0, &[(7, "first", "claim"), (8, "second", "claim")]);
+        let menu = app.active_chooser_rect().unwrap();
+        let first = menu.y + if menu.height < 10 { 3 } else { 6 };
+        let button = belief_buttons(menu, first + 1,
+            &[("[Accept]", KeyCode::Char('A')), ("[Reject]", KeyCode::Char('D'))])[1].0;
+        app.mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: button.x,
+            row: button.y, modifiers: KeyModifiers::NONE });
+        let picker = app.lore_picker.as_ref().unwrap();
+        assert_eq!(picker.rows[picker.selected].id, 8);
+        assert_eq!(picker.belief_intent, Some(doxa_lore::BeliefAction::Retract));
+        assert!(picker.pending.is_none());
+        assert!(picker.belief_action.is_none());
+    }
+
+    #[test]
     fn belief_mouse_selection_only_requests_review_of_exact_clicked_row() {
         let mut app = App::default();
         app.size = Rect::new(0, 0, 100, 40);
@@ -12817,7 +13047,7 @@ for line in sys.stdin:
         let menu = app.active_chooser_rect().unwrap();
         let first = menu.y + if menu.height < 10 { 3 } else { 6 };
         let click = |row| MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
-            column: menu.x + 3, row, modifiers: KeyModifiers::NONE };
+            column: menu.x + 22, row, modifiers: KeyModifiers::NONE };
         assert!(app.mouse(click(first + 1)));
         assert_eq!(app.lore_picker.as_ref().unwrap().selected, 1);
         assert!(app.lore_picker.as_ref().unwrap().pending.is_none());
@@ -12897,7 +13127,7 @@ for line in sys.stdin:
             proposal_mode: true, review: Some(review), review_scroll: 0,
             review_seen: 0, review_width: 0, armed_resolution: None,
             can_resolve, resolving: false, cwd: "/repo".into(),
-            belief_review: None, can_act_on_beliefs: false, belief_action: None,
+            belief_review: None, belief_intent: None, can_act_on_beliefs: false, belief_action: None,
             belief_note: String::new(), retract_armed: false, belief_acting: false,
             result_status: None,
             evidence: None, status: String::new(), pending: None,
