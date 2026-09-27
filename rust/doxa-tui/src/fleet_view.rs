@@ -175,6 +175,7 @@ pub fn status(root: &Path, prefix: &str) -> io::Result<String> {
                 short(slot["role"].as_str().unwrap_or("worker")),
                 short(slot["phase"].as_str().unwrap_or("?")),
                 short(slot["session_id"].as_str().unwrap_or("?"))));
+            if let Some(enabled) = slot["lore"].as_bool() { lines.push(format!("    memory {}", if enabled { "on" } else { "off" })); }
             let pending = slot["pending_asks"].as_array().map_or(0, Vec::len);
             if pending > 0 {
                 lines.push(format!("    {pending} permission ask(s) waiting · fleet attach {} {index}", short(id)));
@@ -223,7 +224,7 @@ fn stop_one(socket: PathBuf, expected_id: String) -> Result<&'static str, String
 // EOF closes the transport before shutdown unlinks the owned socket and
 // registry entry. Completion requires both pathnames to retire; the frontend
 // never removes either artifact and refuses a substituted socket inode.
-fn wait_retirement(socket: &Path, expected_id: &str, identity: Option<(u64, u64)>, deadline: Instant) -> Result<&'static str, String> {
+pub(crate) fn wait_retirement(socket: &Path, expected_id: &str, identity: Option<(u64, u64)>, deadline: Instant) -> Result<&'static str, String> {
     if !doxa_state::valid_session_id(expected_id) { return Err("invalid teardown session identity".into()); }
     let registry = socket.parent().ok_or("socket has no runtime directory")?.join("registry").join(format!("{expected_id}.json"));
     loop {

@@ -37,16 +37,39 @@ if mode=='hash':
     sys.exit(0)
 thread=read(); assert thread['method']=='thread/start'
 assert thread['params']['approvalPolicy']=='on-request'
-if mode.startswith('peer'): assert {x['name'] for x in thread['params']['dynamicTools']}=={'mcp__doxa__peer_list','mcp__doxa__peer_send','mcp__doxa__peer_history'}
+for tool in thread['params'].get('dynamicTools',[]):
+    name=tool['name']
+    if name=='mcp' or name.startswith('mcp__'):
+        send({'id':thread['id'],'error':{'code':-32600,'message':'dynamic tool name is reserved: '+name}})
+        sys.exit(1)
+    assert 0<len(name)<=128 and all(char.isascii() and (char.isalnum() or char in '_-') for char in name)
+assert len({tool['name'] for tool in thread['params'].get('dynamicTools',[])})==len(thread['params'].get('dynamicTools',[]))
+if mode.startswith('peer'): assert {x['name'] for x in thread['params']['dynamicTools']}=={'doxa_peer_list','doxa_peer_send','doxa_peer_history'}
 send({'id':thread['id'],'result':{'thread':{'id':'thread-actual'},'model':'gpt-5.5'}})
 if mode=='model':
     if sys.stdin.readline(): Path('unsafe-model-turn').write_text('request')
     sys.exit(0)
 operation=read()
-if mode.startswith('peer'):
+if mode.startswith('alias'):
+    assert operation['method']=='turn/start'
+    send({'id':operation['id'],'result':{'turn':{'id':'turn-alias'}}})
+    names=[tool['name'] for tool in thread['params']['dynamicTools']]
+    assert len(names)==9
+    assert set(names)=={'doxa_'+name for name in ('peer_list','peer_send','peer_history','lore_belief_search','lore_belief_show','lore_belief_neighbours','lore_memory_list','lore_session_search','lore_remember')}
+    if mode=='alias-forged': names=['mcp__doxa__peer_list']
+    for index,name in enumerate(names):
+        send({'id':100+index,'method':'item/tool/call','params':{'threadId':'thread-actual','turnId':'turn-alias','callId':'alias-'+str(index),'namespace':'foreign' if mode=='alias-namespace' else None,'tool':name,'arguments':{}}})
+        reply=read()
+        if mode!='alias-all':
+            assert reply['error']['code']==-32602
+            break
+        assert reply['id']==100+index and reply['result']['success']
+    Path('alias-replies').write_text('verified')
+    notice('turn/completed',turn={'id':'turn-alias','status':'completed','error':None})
+elif mode.startswith('peer'):
     assert operation['method']=='turn/start'
     send({'id':operation['id'],'result':{'turn':{'id':'turn-peer'}}})
-    send({'id':71,'method':'item/tool/call','params':{'threadId':'thread-actual','turnId':'turn-peer','callId':'peer-call','namespace':None,'tool':'mcp__doxa__peer_send','arguments':{'target':'peer-exact','text':'hello'}}})
+    send({'id':71,'method':'item/tool/call','params':{'threadId':'thread-actual','turnId':'turn-peer','callId':'peer-call','namespace':None,'tool':'doxa_peer_send','arguments':{'target':'peer-exact','text':'hello'}}})
     response=read()
     if mode=='peer-cancel':
         sys.exit(0)
@@ -141,4 +164,40 @@ async fn peer_dynamic_tool_requires_matching_single_use_permission_and_cancels_p
         if mode!="peer-cancel" { assert!(dir.path().join("peer-reply").exists()); }
         inbox.clear(); driver.shutdown().await;
     }
+}
+
+#[tokio::test]
+async fn codex_dynamic_aliases_route_all_canonical_handlers_and_refuse_unadvertised_namespaces() {
+    let names = ["peer_list", "peer_send", "peer_history", "lore_belief_search", "lore_belief_show",
+        "lore_belief_neighbours", "lore_memory_list", "lore_session_search", "lore_remember"];
+    for mode in ["alias-all", "alias-forged", "alias-namespace"] {
+        let (dir, options, gate) = fixture(mode);
+        let definitions = names[3..].iter().map(|name| json!({"type":"function",
+            "name":format!("mcp__doxa__{name}"), "description":"fixture operator",
+            "inputSchema":{"type":"object","properties":{},"additionalProperties":false}})).collect();
+        let mut driver = AppServerDriver::spawn_protected_with_agent_tools(options, str::to_owned, true, gate, definitions).await.unwrap();
+        let mut called = Vec::new();
+        let mut events = Vec::new();
+        let result = driver.run_turn_interactive("fixture", &CancellationToken::new(), |event| events.push(event), |frame| {
+            let canonical = frame["params"]["tool"].as_str().unwrap();
+            assert_eq!(canonical, format!("mcp__doxa__{}", names[called.len()]));
+            called.push(canonical.to_owned());
+            let (sender, receiver) = tokio::sync::oneshot::channel();
+            sender.send(json!({"success":true,"contentItems":[]})).unwrap();
+            Ok(Some((doxa_engines::EngineEvent::new("needs_input", json!({"id":"fixture-gate"})), receiver)))
+        }).await;
+        assert_eq!(result.is_ok(), mode == "alias-all");
+        assert_eq!(called.len(), if mode == "alias-all" { 9 } else { 0 });
+        if mode == "alias-all" {
+            let displayed: Vec<_> = events.iter().filter(|event| event.kind == "tool_call")
+                .map(|event| event.data["name"].as_str().unwrap()).collect();
+            assert_eq!(displayed, called.iter().map(String::as_str).collect::<Vec<_>>());
+        }
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !dir.path().join("alias-replies").exists() { tokio::time::sleep(Duration::from_millis(5)).await; }
+        }).await.expect("fixture received the matching dynamic-tool reply");
+        driver.shutdown().await;
+    }
+    // Shared Claude MCP/vendor handler contracts retain their canonical names.
+    assert_eq!(doxa_engines::peer_tools::definitions()[0]["name"], "mcp__doxa__peer_list");
 }

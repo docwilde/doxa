@@ -134,6 +134,11 @@ from claude_agent_sdk import (
     UserMessage,
 )
 
+try:
+    from claude_agent_sdk import RateLimitEvent
+except ImportError:  # older SDKs have no rate-limit event surface
+    RateLimitEvent = ()
+
 import lore_core
 from lore_core import context as lore_context
 from lore_core import deriver as lore_deriver
@@ -1495,6 +1500,7 @@ class SessionEngine:
         lore: "bool | None" = None,
         detail_events: bool = False,
         peer_presence: bool = True,
+        effort: str | None = None,
     ) -> None:
         self.peer_presence = peer_presence
         self.detail_events = detail_events
@@ -1573,8 +1579,11 @@ class SessionEngine:
         # chip) -- None until _build_options runs, same as every other
         # connect-time field here (server_info, account).
         self.effort: str | None = None
-        self._effort_override: str | None = None
+        if effort is not None and effort not in EFFORT_LEVELS:
+            raise ValueError("unsupported Claude effort")
+        self._effort_override: str | None = effort
         self._resume_identity_pending: str | None = None
+        self._resume_previous_override: str | None = None
         self._provider_session_seen = bool(self.resume)
         # Permission mode (v0.42.0). Unlike effort beside it, this is NOT
         # connect-time-only: the SDK has a live setter, so this attribute
@@ -3228,6 +3237,19 @@ class SessionEngine:
         try:
             async for ev in self._send_turn(prompt):
                 yield ev
+        except Exception:
+            if self._resume_identity_pending is not None:
+                requested = self._effort_override
+                self._resume_identity_pending = None
+                self._effort_override = self._resume_previous_override
+                self._connected = False
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(self._client.__aexit__(None, None, None), timeout=3)
+                yield EngineEvent("effort_verification_failed", {
+                    "effort": self.effort, "requested_effort": requested,
+                    "session_id": self.session_id,
+                })
+            raise
         except (GeneratorExit, asyncio.CancelledError):
             # Cancelled from outside (pane teardown, app shutdown): the
             # queue must NOT advance -- starting another turn on an
@@ -3494,18 +3516,29 @@ class SessionEngine:
         reasoning_kept = 0
         last_reasoning_progress = 0.0
 
+        identity_preamble = 0
         async for message in self._client.receive_response():
             if self._resume_identity_pending is not None:
+                # CLI hooks/status may precede init. Consume only bounded
+                # metadata here; no model content crosses the identity gate.
+                if (isinstance(message, SystemMessage) and message.subtype != "init") or isinstance(message, RateLimitEvent):
+                    identity_preamble += 1
+                    identity = (message.data.get("session_id") if isinstance(message, SystemMessage)
+                                else message.session_id)
+                    if identity_preamble <= 32 and identity in (None, self._resume_identity_pending):
+                        continue
                 if not isinstance(message, SystemMessage) or message.subtype != "init" or message.data.get("session_id") != self._resume_identity_pending:
-                    self._connected = False
-                    with contextlib.suppress(Exception):
-                        await self._client.__aexit__(None, None, None)
                     raise RuntimeError("resumed provider identity was not confirmed; output withheld")
                 self._resume_identity_pending = None
                 self.effort = self._effort_override or self.effort
                 yield EngineEvent("effort_verified", {"effort": self.effort, "session_id": self.session_id})
 
-            if isinstance(message, StreamEvent):
+            if isinstance(message, RateLimitEvent):
+                from .claude_quota import sdk_limit
+                reported = sdk_limit(message)
+                if reported is not None:
+                    yield EngineEvent("rate_limit", reported)
+            elif isinstance(message, StreamEvent):
                 # Subagent trace convention (the trace tree feeds on this):
                 # everything a Task-spawned subagent emits arrives with
                 # parent_tool_use_id = the Task call's own tool_use id --
@@ -3769,6 +3802,9 @@ class SessionEngine:
                 # trigger site (debounced + single-flight inside).
                 self._maybe_schedule_derive()
 
+        if self._resume_identity_pending is not None:
+            raise RuntimeError("resumed provider identity was not confirmed; output withheld")
+
     # -- live model switching ----------------------------------------
 
     async def set_model(self, model: "str | None") -> str:
@@ -3818,6 +3854,8 @@ class SessionEngine:
             raise RuntimeError("effort changes require an idle session with no queued prompts")
         if not self._connected or self._client is None:
             raise RuntimeError("session is not connected")
+        if self._resume_identity_pending is not None:
+            raise RuntimeError("effort change awaits provider identity verification")
         if not _is_uuid(self.session_id):
             raise RuntimeError("effort resume requires a verified provider UUID")
         expected = _provider_session_id(self.session_id)
@@ -3831,6 +3869,7 @@ class SessionEngine:
             raise RuntimeError("previous SDK transport could not close; session stopped before effort change") from None
         self.resume = self.session_id if self._provider_session_seen or self.num_turns else old_resume
         self._effort_override = effort
+        self._resume_previous_override = old_override
         candidate = None
         try:
             candidate = self._client_factory(self._build_options())
@@ -3847,21 +3886,34 @@ class SessionEngine:
             self._connected = True
             if isinstance(info, dict):
                 self.server_info = info
+                self.account = info.get("account")
             return effort
         except Exception:
             if candidate is not None:
                 with contextlib.suppress(Exception):
                     await asyncio.wait_for(candidate.__aexit__(None, None, None), timeout=3)
+            self._resume_identity_pending = None
             self._effort_override, self.effort = old_override, old_effort
             self.resume = self.session_id if self._provider_session_seen or self.num_turns else old_resume
+            replacement = None
             try:
                 replacement = self._client_factory(self._build_options())
                 await asyncio.wait_for(replacement.__aenter__(), timeout=20)
+                get_info = getattr(replacement, "get_server_info", None)
+                info = await asyncio.wait_for(get_info(), timeout=3) if get_info is not None else None
+                identity = info.get("session_id") if isinstance(info, dict) else None
+                if identity is not None and identity != expected:
+                    raise RuntimeError("restored provider identity changed")
                 self._client = replacement
                 self._connected = True
-                self._resume_identity_pending = expected
+                self._resume_identity_pending = None if identity == expected else expected
+                self._resume_previous_override = old_override
                 self.effort = old_effort
             except Exception:
+                if replacement is not None:
+                    with contextlib.suppress(Exception):
+                        await asyncio.wait_for(replacement.__aexit__(None, None, None), timeout=3)
+                self._resume_identity_pending = None
                 self._client = None
                 self._connected = False
             self.resume = old_resume

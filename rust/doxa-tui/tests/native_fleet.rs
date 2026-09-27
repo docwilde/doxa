@@ -178,3 +178,40 @@ fn dead_controller_stop_cleans_verified_slots_and_persists_finished() {
     let manifest = fixture.manifest(); assert_eq!(manifest["phase"], "finished");
     assert_eq!(manifest["live"], false); assert!(sockets_gone(&manifest));
 }
+
+#[test]
+fn legacy_memory_off_and_quiet_dwell_reach_isolated_native_daemons() {
+    let fixture = Fixture::new();
+    let mut child = fixture.command().env("DOXA_LORE", "1")
+        .args(["fleet", "start", "--pool", "fixture", "--prompt", "same bounded fixture task",
+            "-n", "4", "--seed", "19", "--memory-off", "2", "--quiet-dwell", "0.2",
+            "--allow-unbudgeted", "--run-id", "run", "--root", fixture.root.to_str().unwrap()])
+        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::inherit()).spawn().unwrap();
+    let running = fixture.wait_monitoring();
+    assert_eq!(running["spec"]["memory_off"], 2);
+    assert_eq!(running["spec"]["quiet_dwell_s"], 0.2);
+    assert_eq!(running["slots"].as_array().unwrap().iter().filter(|row| row["lore"] == false).count(), 2);
+    for row in running["slots"].as_array().unwrap() {
+        let mut client = DaemonClient::connect(row["socket_path"].as_str().unwrap(), None).unwrap();
+        assert_eq!(client.hello["lore_enabled"], row["lore"]);
+        let state = client.call("peer_tools_status", Default::default()).unwrap();
+        assert_eq!(state["ledger_path"], running["ledger_path"]);
+    }
+    finish(&mut child);
+    assert!(sockets_gone(&fixture.manifest()));
+}
+
+#[test]
+fn resume_refuses_a_changed_memory_policy_without_admitting_another_turn() {
+    let fixture = Fixture::new(); let mut child = fixture.start("30");
+    let mut manifest = fixture.wait_monitoring();
+    unsafe { assert_eq!(libc::kill(child.id() as libc::pid_t, libc::SIGKILL), 0); }
+    child.wait().unwrap();
+    manifest["slots"][0]["lore"] = json!(!manifest["slots"][0]["lore"].as_bool().unwrap());
+    fs::write(fixture.root.join("run/manifest.json"), serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let output = fixture.command().args(["fleet", "resume", "run", "--root", fixture.root.to_str().unwrap()]).output().unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("memory policy"));
+    let client = DaemonClient::connect(manifest["slots"][0]["socket_path"].as_str().unwrap(), None).unwrap();
+    assert_ne!(client.hello["lore_enabled"], manifest["slots"][0]["lore"]);
+}

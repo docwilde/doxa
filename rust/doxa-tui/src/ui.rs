@@ -20,7 +20,7 @@ use crossterm::event::{
 };
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::{
-    event::{DisableMouseCapture, EnableMouseCapture},
+    event::{DisableMouseCapture, EnableMouseCapture,DisableFocusChange,EnableFocusChange},
     execute,
 };
 use ratatui::backend::CrosstermBackend;
@@ -78,14 +78,14 @@ const COMMANDS: &[CommandHelp] = &[
     CommandHelp { name: "/sidebar", form: "/sidebar [on|off|wider|narrower|width N]", summary: "Session rail", support: "local" },
     CommandHelp { name: "/collection", form: "/collection [action] [name]", summary: "Organize sessions", support: "local · list/new/rename/delete/add/remove" },
     CommandHelp { name: "/msg", form: "/msg <peer> <text>", summary: "Message a peer", support: "local · same project" },
-    CommandHelp { name: "/fleet", form: "/fleet [runs|status RUN|attach RUN INDEX|start OPTIONS|resume RUN]", summary: "Fleet manifests and slots", support: "local · verified slot attachment" },
-    CommandHelp { name: "/mesh", form: "/mesh", summary: "Peer map", support: "local · arguments unavailable" },
+    CommandHelp { name: "/fleet", form: "/fleet [runs|status [RUN]|stop|detach|attach [RUN] INDEX|mesh [RUN]|start OPTIONS|resume RUN]", summary: "Fleet manifests and slots", support: "local · verified slot attachment" },
+    CommandHelp { name: "/mesh", form: "/mesh [RUN|stop]", summary: "Browser peer graph", support: "local · private loopback ledger" },
     CommandHelp { name: "/img", form: "/img [path]", summary: "Image support", support: "unavailable in Rust" },
     CommandHelp { name: "/login", form: "/login [claude|codex] [--device-auth]", summary: "Provider login", support: "local · selectable operations menu" },
     CommandHelp { name: "/logout", form: "/logout [claude|codex]", summary: "Provider logout", support: "local · selectable operations menu" },
-    CommandHelp { name: "/settings", form: "/settings", summary: "Native settings", support: "local · linger and worktree for new sessions" },
+    CommandHelp { name: "/settings", form: "/settings", summary: "Native settings", support: "local · preferences, provenance and defaults" },
     CommandHelp { name: "/setup", form: "/setup", summary: "Setup checks", support: "local · auth checks, LORE store, defaults" },
-    CommandHelp { name: "/doctor", form: "/doctor", summary: "Health checks", support: "unavailable in Rust" },
+    CommandHelp { name: "/doctor", form: "/doctor", summary: "Health checks", support: "local · selected provider" },
     CommandHelp { name: "/plugins", form: "/plugins", summary: "Plugin inventory", support: "local · selectable operations menu" },
     CommandHelp { name: "/reload-plugins", form: "/reload-plugins", summary: "Refresh plugins", support: "local · selectable operations menu" },
     CommandHelp { name: "/model", form: "/model [name]", summary: "Select session model", support: "local · reported choices or new-session form" },
@@ -99,7 +99,7 @@ const COMMANDS: &[CommandHelp] = &[
     CommandHelp { name: "/clear", form: "/clear", summary: "Fresh session in this tab", support: "local · idle session and writable tabset required" },
     CommandHelp { name: "/detach", form: "/detach", summary: "Leave session running", support: "local" },
     CommandHelp { name: "/attach", form: "/attach [prefix]", summary: "Attach live session", support: "local · new tab" },
-    CommandHelp { name: "/sessions", form: "/sessions", summary: "Session history", support: "local · history browser; kill unavailable" },
+    CommandHelp { name: "/sessions", form: "/sessions [kill <prefix>|kill-detached]", summary: "Live sessions and stop", support: "local · exact live target or detached from this window" },
     CommandHelp { name: "/rename", form: "/rename [name]", summary: "Name active tab", support: "local" },
     CommandHelp { name: "/dir", form: "/dir", summary: "Session directory", support: "local" },
     CommandHelp { name: "/cd", form: "/cd <path>", summary: "Open directory", support: "local · new tab" },
@@ -109,9 +109,21 @@ const COMMANDS: &[CommandHelp] = &[
     CommandHelp { name: "/search", form: "/search [terms]", summary: "Search saved sessions", support: "local · LORE index then bounded transcript scan" },
     CommandHelp { name: "/resume", form: "/resume [session-id]", summary: "Resume conversation", support: "local · new tab" },
     CommandHelp { name: "/compact", form: "/compact", summary: "Compact transcript", support: "Claude only · completed LORE review required" },
-    CommandHelp { name: "/update", form: "/update [--restart]", summary: "Update DOXA", support: "unavailable in Rust" },
+    CommandHelp { name: "/update", form: "/update [--restart]", summary: "Update DOXA", support: "local · reviewed install" },
     CommandHelp { name: "/help", form: "/help", summary: "Command registry", support: "local" },
-    CommandHelp { name: "/about", form: "/about", summary: "Rust version", support: "local · version only" },
+    CommandHelp { name: "/about", form: "/about", summary: "Version and active session identity", support: "local · measured installation and selected session details" },
+];
+
+/// Source-derived no-argument fleet verbs and argument forms shared by help
+/// and the command palette. No controller action is dispatched by a model.
+const FLEET_ACTIONS: &[(&str, &str)] = &[
+    ("/fleet start", "Prepare a pool, task and reviewed plan"),
+    ("/fleet status", "Inspect current run"),
+    ("/fleet attach", "Choose a current-run slot"),
+    ("/fleet mesh", "Open current run graph"),
+    ("/fleet stop", "Stop this window's controller"),
+    ("/fleet detach", "Continue current controller outside this window"),
+    ("/fleet runs", "Choose saved run"),
 ];
 
 const ENGINE_CHOICES: [&str; 4] = ["codex", "claude", "deepseek", "glm"];
@@ -140,6 +152,17 @@ fn engine_name(engine: launch::Engine) -> &'static str {
     match engine { launch::Engine::Codex => "codex", launch::Engine::Claude => "claude",
         launch::Engine::DeepSeek => "deepseek", launch::Engine::Glm => "glm", launch::Engine::Fixture => "fixture" }
 }
+fn new_session_preferences(engine: launch::Engine, config: &toml::Table, model_override: Option<&str>, effort_override: Option<&str>) -> (String, Option<String>) {
+    let configured_model = crate::settings::raw_from(config, crate::settings::find("model").unwrap(), model_override, engine_name(engine));
+    let model = if configured_model.is_empty() { vendor_default_model(engine).to_owned() } else { configured_model };
+    let configured_effort = crate::settings::raw_from(config, crate::settings::find("effort").unwrap(), effort_override, engine_name(engine));
+    let vendor = !vendor_models(engine).is_empty();
+    let effort = (!configured_effort.is_empty()).then_some(configured_effort)
+        .filter(|level| !vendor || effort_choices(engine_name(engine), &model).contains(&level.as_str()))
+        .or_else(|| vendor.then(|| "high".into()));
+    (model, effort)
+}
+
 const PERMISSION_CHOICES: [(&str, &str); 5] = [
     ("default", "Ask before dangerous calls"),
     ("acceptEdits", "Allow file edits; ask for other calls"),
@@ -298,9 +321,17 @@ struct QueuePicker {
 
 #[derive(Debug)]
 struct SettingsMenu {
-    rows: [(String, bool); 2],
-    selected: usize,
-    linger_draft: Option<String>,
+    rows: Vec<crate::settings::Row>, selected: usize, category: usize,
+    draft: Option<(String, String)>, edits: HashMap<String, Option<String>>, engine: String,
+}
+impl SettingsMenu {
+    fn indices(&self) -> Vec<usize> { self.rows.iter().enumerate().filter(|(_,r)|r.setting.category == crate::settings::CATEGORIES[self.category]).map(|(i,_)|i).collect() }
+    fn visible_indices(&self, height: u16) -> Vec<usize> {
+        let indices=self.indices(); let count=usize::from(height.saturating_sub(if height<12 {5} else {9})).max(1);
+        let position=indices.iter().position(|i|*i==self.selected).unwrap_or(0);
+        let start=position.saturating_sub(count.saturating_sub(1)); indices.into_iter().skip(start).take(count).collect()
+    }
+    fn finish_draft(&mut self) { if let Some((key,value))=self.draft.take() { self.edits.insert(key,Some(value)); } }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -724,6 +755,7 @@ pub struct Session {
 
 #[derive(Clone, Debug, Default)]
 struct SessionTelemetry {
+    account: Option<serde_json::Value>,
     context: Option<String>,
     context_percent: Option<f64>,
     context_tokens: Option<u64>,
@@ -779,8 +811,7 @@ impl SessionTelemetry {
         }
     }
 
-    fn update_status(&mut self, status: &serde_json::Value) {
-        if let Some(billing) = status.get("billing") {
+    fn update_billing(&mut self, billing: &serde_json::Value) {
             self.billing_mode = match billing["mode"].as_str() {
                 Some("api") => Some("api".into()),
                 Some("subscription") => Some("subscription".into()),
@@ -795,7 +826,20 @@ impl SessionTelemetry {
             self.balance = billing["balance"].as_str()
                 .filter(|balance| !balance.is_empty() && balance.len() <= 80 && !balance.chars().any(char::is_control))
                 .map(safe_label);
+    }
+
+    fn update_status(&mut self, status: &serde_json::Value) {
+        if let Some(account) = status.get("account") {
+            let mut fields = serde_json::Map::new();
+            for key in ["email", "organization", "subscriptionType", "apiProvider"] {
+                if let Some(text) = account[key].as_str().filter(|text| !text.trim().is_empty()
+                    && text.len() <= 256 && !text.chars().any(char::is_control)) {
+                    fields.insert(key.into(), serde_json::Value::String(safe_label(text.trim())));
+                }
+            }
+            self.account = (!fields.is_empty()).then_some(serde_json::Value::Object(fields));
         }
+        if let Some(billing) = status.get("billing") { self.update_billing(billing); }
         let context = status["ctx_percentage"].as_f64()
             .filter(|value| value.is_finite() && (0.0..=100.0).contains(value))
             .map(|value| format!("{value:.0}%"));
@@ -848,8 +892,12 @@ impl SessionTelemetry {
                 Some("subscription") => {
                     let tier = self.subscription_type.as_deref().filter(|tier| *tier != "subscription");
                     if tier.is_none() && self.quota.is_none() { return None; }
-                    Some(format!("Sub {} · {}", tier.unwrap_or("?"),
-                        self.quota.as_deref().unwrap_or("quota ?")))
+                    Some(match (tier, self.quota.as_deref()) {
+                        (Some(tier), Some(quota)) => format!("{tier} · {quota}"),
+                        (Some(tier), None) => tier.to_owned(),
+                        (None, Some(quota)) => quota.to_owned(),
+                        (None, None) => return None,
+                    })
                 }
                 _ => None,
             },
@@ -892,6 +940,8 @@ pub enum Focus {
     Prompt,
     Rail,
     Transcript,
+    Tabs,
+    Chip(&'static str),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1188,7 +1238,7 @@ impl RenderedTranscript {
         let mut prefix_lines = 0;
         if let Some(start) = streamed_turn_start(source) {
             let tail = &source[start..];
-            if !tail.contains("Tool: ") && !tail.contains(transcript_tools::REASONING_PREFIX) {
+            if !tail.contains("Tool: ") && !tail.contains(transcript_tools::REASONING_PREFIX) && !tail.contains(transcript_tools::SHELL_PREFIX) {
                 let (tail_lines, tail_sections) = transcript_tools::render(tail, width, None, None);
                 if tail_sections.is_empty() && lines.len() > tail_lines.len() {
                     prefix_lines = lines.len() - tail_lines.len() - 1;
@@ -1213,7 +1263,7 @@ impl RenderedTranscript {
             if let Some(start) = self.turn_start.filter(|_| source.starts_with(&self.source)) {
                 if streamed_turn_start(source) == Some(start) {
                     let tail = &source[start..];
-                    if !tail.contains("Tool: ") && !tail.contains(transcript_tools::REASONING_PREFIX) {
+                    if !tail.contains("Tool: ") && !tail.contains(transcript_tools::REASONING_PREFIX) && !tail.contains(transcript_tools::SHELL_PREFIX) {
                         let (tail_lines, tail_sections) = transcript_tools::render(tail, width, None, None);
                         if tail_sections.is_empty() {
                             self.lines.truncate(self.prefix_lines);
@@ -1241,6 +1291,21 @@ enum RailRow {
 
 #[derive(Debug)]
 pub struct App {
+    preferences: crate::preferences::Preferences,
+    persist_preferences: bool,
+    sidebar_auto: bool,
+    clock_text: String,
+    clock_deadline: Option<Instant>,
+    window_focused: bool,
+    auto_diff_seen: HashSet<String>,
+    auto_diff_baseline: HashMap<String,String>,
+    auto_diff_requests: VecDeque<String>,
+    auto_diff_pending: Option<(String,PathBuf,Receiver<(String,bool)>)>,
+    auto_diff_ready: HashSet<String>,
+    belief_graph_pending: Option<(u64,String,bool,Receiver<Result<doxa_lore::BeliefGraph,doxa_lore::LoreError>>)>,
+    belief_graph_lines: Option<(u64,Vec<String>)>,
+    belief_graph_scroll: usize,
+    belief_graph_server: Option<crate::belief_graph::GraphServer>,
     pub sessions: Vec<Session>,
     pub collections: Vec<crate::collections::Collection>,
     pub groups: Vec<PaneGroup>,
@@ -1257,10 +1322,13 @@ pub struct App {
     input_cursor: usize,
     input_drafts: HashMap<(usize, String), (String, usize)>,
     moved_active_tab: bool,
+    installation: crate::installation::Snapshot,
+    update_notified: bool,
     session_identity: HashMap<String, (Option<String>, Option<String>)>,
     session_efforts: HashMap<String, String>,
     catalog_efforts: HashMap<(String, String), Vec<String>>,
     effort_catalog_pending: Option<(String, String, String)>,
+    model_refresh_after: Option<Instant>,
     requested_argument: Option<(String, &'static str, String)>,
     next_efforts: HashMap<String, String>,
     pub(crate) custom_names: HashMap<String, String>,
@@ -1272,6 +1340,17 @@ pub struct App {
     memory_repo: HashMap<String, bool>,
     memory_manager: Option<crate::memory_menu::Manager>,
     operations_menu: Option<operations_menu::Menu>,
+    window_mesh: Option<crate::mesh_control::WindowMesh>,
+    restart_executable: Option<PathBuf>,
+    restart_after_update: bool,
+    restart_waiting: bool,
+    restart_job: Option<crate::maintenance::Restart>,
+    retired_operations: Vec<operations_menu::Menu>,
+    local_shell_jobs: Vec<crate::shell::Job>,
+    next_shell_id: u64,
+    plugin_commands: Vec<crate::operations::PluginCommand>,
+    plugin_refresh: Option<crate::operations::PluginRefresh>,
+    plugin_refresh_dirty: bool,
     fleet_menu: Option<fleet_menu::Menu>,
     pub(crate) fleet_views: Vec<fleet_menu::SavedView>,
     fleet_review: Option<fleet_process::Prepared>,
@@ -1307,6 +1386,9 @@ pub struct App {
     pending_permission_changes: Vec<(String, String)>,
     stop_confirmation: Option<String>,
     pending_stops: Vec<String>,
+    session_roster_pending: Option<Receiver<io::Result<Vec<crate::discovery::Session>>>>,
+    session_stop_pending: Option<Receiver<crate::sessions::Report>>,
+    pub(crate) killed_this_run: HashSet<String>,
     pending_clear_finalizes: Vec<String>,
     pub(crate) clear_stop_after_save: Vec<String>,
     clear_pending: Option<ClearPending>,
@@ -1332,6 +1414,7 @@ pub struct App {
     pending_model_queries: Vec<String>,
     pending_model_changes: Vec<(String, String)>,
     pending_effort_changes: Vec<(String, String)>,
+    pending_effort_verifications: HashMap<String, String>,
     pub pending_prompts: Vec<(String, String)>,
     pending_peer_messages: Vec<(String, String, String)>,
     pub input_requests: Vec<InputRequest>,
@@ -1340,6 +1423,9 @@ pub struct App {
     tool_cards: ToolCards,
     tool_cards_revision: HashMap<String, u64>,
     rendered_transcripts: RefCell<Vec<RenderedTranscript>>,
+    transcript_selection: RefCell<crate::selection::Selection>,
+    pending_clipboard_copy: Option<Vec<u8>>,
+    clipboard_job: Option<crate::clipboard::Job>,
     tool_modal: bool,
     tool_selected: usize,
     tool_scroll: u16,
@@ -1396,6 +1482,9 @@ pub struct App {
 impl Default for App {
     fn default() -> Self {
         Self {
+            preferences: crate::preferences::Preferences::load(), persist_preferences: false, sidebar_auto:false, clock_text: String::new(), clock_deadline: None,
+            window_focused: true, auto_diff_seen: HashSet::new(), auto_diff_baseline: HashMap::new(),
+            auto_diff_requests: VecDeque::new(),auto_diff_pending: None,auto_diff_ready: HashSet::new(),belief_graph_pending:None,belief_graph_lines:None,belief_graph_scroll:0,belief_graph_server:None,
             sessions: Vec::new(),
             collections: Vec::new(),
             groups: vec![
@@ -1423,10 +1512,12 @@ impl Default for App {
             input_cursor: 0,
             input_drafts: HashMap::new(),
             moved_active_tab: false,
+            installation: crate::installation::Snapshot::default(), update_notified: false,
             session_identity: HashMap::new(),
             session_efforts: HashMap::new(),
             catalog_efforts: HashMap::new(),
             effort_catalog_pending: None,
+            model_refresh_after: None,
             requested_argument: None,
             next_efforts: HashMap::new(),
             custom_names: HashMap::new(),
@@ -1437,6 +1528,17 @@ impl Default for App {
             memory_menu_pending: None,
             memory_manager: None,
             operations_menu: None,
+            window_mesh: None,
+            restart_executable: None,
+            restart_after_update: false,
+            restart_waiting: false,
+            restart_job: None,
+            retired_operations: Vec::new(),
+            local_shell_jobs: Vec::new(),
+            next_shell_id: 1,
+            plugin_commands: Vec::new(),
+            plugin_refresh: None,
+            plugin_refresh_dirty: false,
             fleet_menu: None,
             fleet_views: Vec::new(),
             fleet_review: None,
@@ -1469,6 +1571,9 @@ impl Default for App {
             pending_permission_changes: Vec::new(),
             stop_confirmation: None,
             pending_stops: Vec::new(),
+            session_roster_pending: None,
+            session_stop_pending: None,
+            killed_this_run: HashSet::new(),
             pending_clear_finalizes: Vec::new(),
             clear_stop_after_save: Vec::new(),
             clear_pending: None,
@@ -1494,6 +1599,7 @@ impl Default for App {
             pending_model_queries: Vec::new(),
             pending_model_changes: Vec::new(),
             pending_effort_changes: Vec::new(),
+            pending_effort_verifications: HashMap::new(),
             pending_prompts: Vec::new(),
             pending_peer_messages: Vec::new(),
             input_requests: Vec::new(),
@@ -1502,6 +1608,9 @@ impl Default for App {
             tool_cards: ToolCards::default(),
             tool_cards_revision: HashMap::new(),
             rendered_transcripts: RefCell::new(Vec::new()),
+            transcript_selection: RefCell::new(crate::selection::Selection::default()),
+            pending_clipboard_copy: None,
+            clipboard_job: None,
             tool_modal: false,
             tool_selected: 0,
             tool_scroll: 0,
@@ -1835,6 +1944,7 @@ impl App {
                 if let Some(effort) = frame["effort"].as_str().filter(|effort| !effort.is_empty()) {
                     self.session_efforts.insert(id.to_owned(), safe_label(effort));
                 } else { self.session_efforts.remove(id); }
+                self.update_pending_effort(id, frame);
                 self.session_telemetry.entry(id.to_owned()).or_default().update_status(frame);
                 self.model_capabilities.insert(id.to_owned(), frame["can_set_model"] == true);
                 self.permission_capabilities.insert(id.to_owned(), frame["can_set_permission_mode"] == true);
@@ -1871,6 +1981,7 @@ impl App {
                     .find(|s| s.id == id)
                     .map(|s| s.transcript.clone())
                     .unwrap_or_default();
+                let transcript=if self.persist_preferences && transcript.is_empty() && self.preferences.on("boot_banner") {"       █       \n      ███      \n    ███████    \n   █████████   DOXA\n  ███████████  \n █████████████ \n███████████████\n\n".into()} else {transcript};
                 self.apply_update(DaemonUpdate::Upsert(Session {
                     id: id.into(),
                     title: self.custom_names.get(id).cloned().unwrap_or_else(|| model.clone().unwrap_or_else(|| safe_label(id))),
@@ -1878,6 +1989,7 @@ impl App {
                     transcript,
                     status: "Connected".into(),
                 }));
+                self.request_auto_diff(id);
                 self.notice = format!("Connected · {}", model.as_deref().unwrap_or(&safe_label(id)));
                 true
             }
@@ -1903,13 +2015,29 @@ impl App {
                     }
                     self.peer_map.event(&id, event_type, data);
                 }
+                if event_type=="tool_result" {self.request_auto_diff(&id);}
                 match event_type {
+                    "billing" => {
+                        if !self.sessions.iter().any(|session| session.id == id) { return false; }
+                        self.session_telemetry.entry(id).or_default().update_billing(data);
+                        true
+                    }
                     "tool_result_detail" => tool_updated,
+                    "derive_done"=>{
+                        let count=data["staged"].as_u64().unwrap_or(0);
+                        if count>0 {
+                            let body=format!("{count} proposals staged · {}",data["texts"].as_array().and_then(|r|r.first()).and_then(|v|v.as_str()).unwrap_or("/pending to review"));
+                            if self.preferences.should_notify("notify_staged",self.window_focused) {crate::preferences::notify(self.sessions.iter().find(|s|s.id==id).map(|s|s.title.as_str()).unwrap_or("DOXA memory review"),&body);}
+                            self.notice=safe_label(&body);return true;
+                        } false
+                    },
                     "branch_changed" => {
                         self.invalidate_repo(&id);
                         true
                     }
                     "model_changed" => {
+                        self.pending_effort_verifications.remove(&id);
+                        self.pending_effort_changes.retain(|(owner, _)| owner != &id);
                         if data.get("effort").is_some() {
                             if let Some(effort) = data["effort"].as_str() { self.session_efforts.insert(id.clone(), safe_label(effort)); }
                             else { self.session_efforts.remove(&id); }
@@ -1932,12 +2060,29 @@ impl App {
                     }
                     "effort_changed" | "effort_verified" => {
                         if let Some(effort) = data["effort"].as_str().filter(|effort| !effort.is_empty()) {
-                            self.session_efforts.insert(id, safe_label(effort));
+                            self.session_efforts.insert(id.clone(), safe_label(effort));
+                            self.pending_effort_verifications.remove(&id);
+                            if self.groups[self.active_group].active_id() == Some(id.as_str()) {
+                                self.notice = format!("Effort verified · {}", safe_label(effort));
+                            }
                         }
                         true
                     }
                     "effort_requested" => {
-                        self.notice = format!("Requested effort {} · awaiting provider verification", safe_label(data["effort"].as_str().unwrap_or("unknown")));
+                        if let Some(effort) = data["effort"].as_str().filter(|value| !value.is_empty()) {
+                            self.pending_effort_verifications.insert(id.clone(), safe_label(effort));
+                            if self.groups[self.active_group].active_id() == Some(id.as_str()) {
+                                self.notice = format!("Requested effort {} · awaiting provider verification", safe_label(effort));
+                            }
+                        }
+                        true
+                    }
+                    "effort_verification_failed" => {
+                        self.pending_effort_verifications.remove(&id);
+                        self.pending_effort_changes.retain(|(owner, _)| owner != &id);
+                        if self.groups[self.active_group].active_id() == Some(id.as_str()) {
+                            self.notice = "Effort verification failed · previous verified effort retained".into();
+                        }
                         true
                     }
                     "permission_mode_changed" => {
@@ -1984,6 +2129,10 @@ impl App {
                     }
                     "turn_done" => {
                         self.streaming_text.remove(&id);
+                        if data["is_error"] == true && self.pending_effort_verifications.remove(&id).is_some()
+                            && self.groups[self.active_group].active_id() == Some(id.as_str()) {
+                            self.notice = "Effort verification failed · previous verified effort retained".into();
+                        }
                         if let Some(stream) = self.reasoning_streams.get_mut(&id) {
                             stream.streaming = false;
                             if let Some(tokens) = data["reasoning_output_tokens"].as_u64() {
@@ -2035,6 +2184,7 @@ impl App {
                                         self.blink_on = true;
                                         self.blink_at = Instant::now();
                                     }
+                                    if self.preferences.should_notify("notify_needs_input",self.window_focused) {crate::preferences::notify("DOXA needs input",&format!("{} · {}",self.sessions.iter().find(|s|s.id==id).map(|s|s.title.as_str()).unwrap_or(&id),request.kind));}
                                     self.input_requests.push(request);
                                 } else {
                                     self.notice = "Too many input requests · inspect the session directly".into();
@@ -2143,6 +2293,7 @@ impl App {
                     return true;
                 }
                 info.lines.extend(context_detail_lines(&frame["detail"]));
+                if self.size.width>=65 {info.lines.extend(crate::preferences::context_grid(&frame["detail"],self.preferences.value("context_grid")=="ascii"));}
                 true
             }
             "models_reply" => {
@@ -2171,8 +2322,14 @@ impl App {
                     }
                 }
                 if let Some(picker) = self.model_picker.as_mut().filter(|picker| picker.session_id == id) {
+                    let previous = picker.models.get(picker.selected).cloned()
+                        .or_else(|| self.session_identity.get(id).and_then(|identity| identity.1.clone()));
                     picker.loading = false;
                     picker.catalog_pending = frame["loading"] == true;
+                    self.model_refresh_after = Some(Instant::now() + if picker.catalog_pending {
+                        Duration::from_millis(500)
+                    } else if frame["ok"] != true { Duration::from_secs(5) }
+                    else { Duration::from_secs(30) });
                     picker.models = if frame["ok"] == true {
                         frame["models"].as_array().into_iter().flatten()
                             .filter_map(|value| value.as_str())
@@ -2184,7 +2341,7 @@ impl App {
                     } else {
                         format!("Catalog unavailable: {}", safe_label(frame["error"].as_str().unwrap_or("unknown error")))
                     };
-                    picker.selected = 0;
+                    picker.selected = previous.and_then(|model| picker.models.iter().position(|item| item == &model)).unwrap_or(0);
                     self.apply_requested_argument();
                     return true;
                 }
@@ -2199,13 +2356,21 @@ impl App {
                 true
             }
             "set_effort_reply" => {
-                self.notice = if frame["ok"] == true {
-                    format!("Effort accepted · {} · awaiting session event",
-                        safe_label(frame["effort"].as_str().unwrap_or("unknown")))
-                } else {
-                    format!("Effort change failed · {}",
-                        safe_label(frame["error"].as_str().unwrap_or("unknown error")))
-                };
+                let Some(id) = frame["session_id"].as_str() else { return false; };
+                let Some(requested) = self.pending_effort_verifications.get(id).cloned() else { return false; };
+                if frame["ok"] == true && frame["effort"].as_str() != Some(requested.as_str()) { return false; }
+                let active = self.groups[self.active_group].active_id() == Some(id);
+                if frame["ok"] != true {
+                    self.pending_effort_verifications.remove(id);
+                    if active { self.notice = format!("Effort change failed · {}",
+                        safe_label(frame["error"].as_str().unwrap_or("unknown error"))); }
+                } else if frame["verification_pending"] == false {
+                    self.pending_effort_verifications.remove(id);
+                    self.session_efforts.insert(id.to_owned(), requested.clone());
+                    if active { self.notice = format!("Effort verified · {requested}"); }
+                } else if active {
+                    self.notice = format!("Requested effort {requested} · awaiting provider verification");
+                }
                 true
             }
             "set_permission_mode_reply" => {
@@ -2238,6 +2403,8 @@ impl App {
                     self.session_identity.remove(id);
                     self.session_cwds.remove(id);
                     self.session_efforts.remove(id);
+                    self.pending_effort_verifications.remove(id);
+                    self.pending_effort_changes.retain(|(owner, _)| owner != id);
                     self.next_efforts.remove(id);
                     self.session_telemetry.remove(id);
                     self.memory_cache.remove(id);
@@ -2300,6 +2467,7 @@ impl App {
                                 self.session_efforts.insert(id.to_owned(), safe_label(effort));
                             } else { self.session_efforts.remove(id); }
                         }
+                        self.update_pending_effort(id, status);
                         if let Some(can_set) = status.get("can_set_model").and_then(|v| v.as_bool()) {
                             self.model_capabilities.insert(id.to_owned(), can_set);
                         }
@@ -2453,6 +2621,16 @@ impl App {
         }
     }
 
+    fn update_pending_effort(&mut self, id: &str, status: &serde_json::Value) {
+        if let Some(value) = status.get("pending_effort") {
+            if let Some(effort) = value.as_str().filter(|value| !value.is_empty()) {
+                self.pending_effort_verifications.insert(id.to_owned(), safe_label(effort));
+            } else if value.is_null() {
+                self.pending_effort_verifications.remove(id);
+            }
+        }
+    }
+
     fn append_event(&mut self, id: &str, event_type: &str, data: &serde_json::Value) -> bool {
         let Some(row) = structured_event(event_type, data) else {
             return false;
@@ -2470,7 +2648,7 @@ impl App {
     }
 
     fn append_reasoning(&mut self, id: &str, data: &serde_json::Value, progress: bool) -> bool {
-        if !self.sessions.iter().any(|session| session.id == id) { return false; }
+        if !self.preferences.on("show_reasoning") || !self.sessions.iter().any(|session| session.id == id) { return false; }
         let stream = self.reasoning_streams.entry(id.to_owned()).or_default();
         if let Some(tokens) = data.get("approx_tokens").and_then(|value| value.as_u64()) {
             stream.tokens = stream.tokens.max(tokens);
@@ -2499,6 +2677,7 @@ impl App {
 
     pub fn handle(&mut self, event: Event) -> bool {
         let before = (self.active_group, self.groups[self.active_group].active_id().unwrap_or("").to_owned());
+        let selection_view=(self.size,self.groups[self.active_group].scroll);
         let changed = match event {
             Event::Resize(w, h) => {
                 if let Some(manager) = &mut self.memory_manager { manager.reset_review_visibility(); }
@@ -2566,11 +2745,15 @@ impl App {
             {
                 self.key(key)
             }
+            Event::FocusGained=>{self.window_focused=true;false},
+            Event::FocusLost=>{self.window_focused=false;false},
             Event::Paste(text) => self.paste(&text),
             Event::Mouse(mouse) => self.mouse(mouse),
             _ => false,
         };
         let after = (self.active_group, self.groups[self.active_group].active_id().unwrap_or("").to_owned());
+        let selection_owner=crate::selection::Owner {pane:self.active_group,session:after.1.clone()};
+        if selection_view.0!=self.size || (before==after && selection_view.1!=self.groups[self.active_group].scroll) || (before!=after && !self.transcript_selection.borrow().belongs_to(&selection_owner)) {self.transcript_selection.borrow_mut().clear();}
         if before != after {
             self.branch_picker = None;
             let moved_active_tab = std::mem::take(&mut self.moved_active_tab)
@@ -2595,7 +2778,29 @@ impl App {
             let (owner,draft,cursor)=self.action_draft.take().unwrap();if owner==(self.active_group,self.groups[self.active_group].active_id().unwrap_or("").to_owned()){self.input=draft;self.input_cursor=cursor;}else{self.input_drafts.insert(owner,(draft,cursor));}
         }
         self.sync_chooser_state();
+        if matches!(self.focus, Focus::Chip(_) | Focus::Rail) && !self.focus_ring().contains(&self.focus) {
+            self.focus = Focus::Prompt;
+        }
         changed
+    }
+
+    fn clipboard_target(&self)->crate::clipboard::Target {
+        crate::clipboard::Target {pane:self.active_group,session:self.groups[self.active_group].active_id().unwrap_or("").to_owned(),draft:self.input.clone(),cursor:self.input_cursor}
+    }
+    fn poll_clipboard(&mut self)->bool {
+        let Some(result)=self.clipboard_job.as_ref().and_then(crate::clipboard::Job::poll) else{return false;};
+        let target=self.clipboard_job.take().unwrap().target.clone();
+        let text=match result {Ok(text)=>text,Err(_)=>{self.notice="Clipboard read failed · use terminal Ctrl+Shift+V".into();return true;}};
+        let exists=self.groups.get(target.pane).is_some_and(|group|if target.session.is_empty(){group.tabs.is_empty()}else{group.tabs.contains(&target.session)});
+        if !exists || self.input_requests.iter().any(|request|request.session_id==target.session) {self.notice="Clipboard paste discarded · original prompt is no longer available".into();return true;}
+        let active=self.active_group==target.pane && self.groups[self.active_group].active_id().unwrap_or("")==target.session;
+        let(draft,cursor)=if active {(&mut self.input,&mut self.input_cursor)}else {let entry=self.input_drafts.entry((target.pane,target.session)).or_default();(&mut entry.0,&mut entry.1)};
+        if *draft!=target.draft || *cursor!=target.cursor || !draft.is_char_boundary(*cursor) {self.notice="Clipboard paste discarded · prompt draft changed while reading".into();return true;}
+        let available=MAX_INPUT_BYTES.saturating_sub(draft.len());let mut clean=String::new();let mut chars=text.chars().peekable();let mut truncated=false;
+        while let Some(ch)=chars.next(){let ch=if ch=='\r'{if chars.peek()==Some(&'\n'){chars.next();}'\n'}else if ch=='\t'{' '}else{ch};if unsafe_input_char(ch)&&ch!='\n'{continue;}if clean.len()+ch.len_utf8()>available{truncated=true;break;}clean.push(ch);}
+        draft.insert_str(*cursor,&clean);*cursor+=clean.len();
+        if active {self.slash_selected=0;self.slash_dismissed=false;}
+        self.notice=if truncated {"Clipboard pasted into original draft · prompt limit reached"}else{"Clipboard pasted into original draft"}.into();true
     }
 
     fn paste(&mut self, text: &str) -> bool {
@@ -2671,7 +2876,7 @@ impl App {
         true
     }
 
-    fn slash_suggestions(&self) -> Vec<(&'static str, &'static str)> {
+    fn slash_suggestions(&self) -> Vec<(&str, &str)> {
         if self.focus != Focus::Prompt || self.slash_dismissed
             || self.active_request_index().is_some() || self.stop_confirmation.is_some()
             || self.chip_info.is_some() || self.lore_picker.is_some() || self.settings_menu.is_some()
@@ -2685,13 +2890,15 @@ impl App {
         let query = self.input.as_str();
         if !query.starts_with('/') || query.chars().any(char::is_whitespace) { return Vec::new(); }
         COMMANDS.iter().filter(|row| row.name.starts_with(query))
-            .map(|row| (row.name, row.summary)).collect()
+            .map(|row| (row.name, row.summary))
+            .chain(self.plugin_commands.iter().filter(|row| row.name.starts_with(query)).map(|row| (row.name.as_str(), row.summary.as_str()))).collect()
     }
 
     fn complete_slash(&mut self) -> bool {
         let matches = self.slash_suggestions();
         let Some((command, _)) = matches.get(self.slash_selected.min(matches.len().saturating_sub(1))) else { return false; };
-        self.input = (*command).to_owned();
+        let command = (*command).to_owned();
+        self.input = command;
         self.input_cursor = self.input.len();
         self.slash_dismissed = true;
         true
@@ -2731,6 +2938,14 @@ impl App {
             return false;
         }
         if !args.is_empty() && matches!(name, "/model" | "/effort" | "/mode" | "/engine") { return false; }
+        if name == "/sessions" && !args.is_empty() {
+            let action = crate::sessions::Action::parse(&args);
+            match action {
+                Ok(action) => self.local_sessions_stop(action),
+                Err(error) => self.notice = error.to_string(),
+            }
+            return true;
+        }
         if !args.is_empty() && !matches!(name, "/pane" | "/sidebar") {
             self.notice = format!("{name} arguments are not available in Rust yet");
             return true;
@@ -2770,8 +2985,8 @@ impl App {
             "/help" => {
                 self.open_help();
             }
-            "/about" => self.notice = format!("DOXA Rust {}", env!("CARGO_PKG_VERSION")),
-            "/sessions" => self.open_history(),
+            "/about" => self.open_about(),
+            "/sessions" => self.open_live_sessions(),
             "/settings" => self.open_settings_menu(),
             "/model" => self.open_model_picker(),
             "/effort" => self.open_effort_picker(),
@@ -2811,6 +3026,7 @@ impl App {
                 } else {
                     self.rail_visible = !self.rail_visible;
                 }
+                self.persist_sidebar();
             }
             "/detach" => self.detach_active_tab(),
             "/dir" => {
@@ -2827,6 +3043,36 @@ impl App {
     fn key(&mut self, key: KeyEvent) -> bool {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
+        if self.restart_job.is_some() || self.restart_waiting {
+            self.notice = "Finalizing idle sessions for restart; saved tabs will be restored".into(); return true;
+        }
+        if ctrl && matches!(key.code, KeyCode::Char('c' | 'C')) && !self.link_interaction_blocked() {
+            let owner=crate::selection::Owner {pane:self.active_group,session:self.groups[self.active_group].active_id().unwrap_or("").to_owned()};
+            let selected=self.transcript_selection.borrow().text(&owner);
+            if let Some(text)=selected.filter(|text|!text.is_empty()) {
+                self.pending_clipboard_copy=Some(crate::clipboard::osc52(&text));
+                self.notice="Clipboard copy queued for terminal · OSC52 support required".into();return true;
+            }
+            if key.modifiers.contains(KeyModifiers::SHIFT) || key.code==KeyCode::Char('C') {
+                self.notice="Drag to select transcript text before copying".into();return true;
+            }
+        }
+        if key.code==KeyCode::Esc && !self.link_interaction_blocked() && self.transcript_selection.borrow_mut().clear() {return true;}
+        if ctrl && matches!(key.code,KeyCode::Char('v'|'V')) && self.focus==Focus::Prompt && !self.link_interaction_blocked() {
+            self.clipboard_job=None;
+            match crate::clipboard::Job::start(self.clipboard_target()) {
+                Ok(job)=>{self.clipboard_job=Some(job);self.notice="Reading clipboard into this prompt draft…".into();}
+                Err(_)=>self.notice="Clipboard reader unavailable · use terminal Ctrl+Shift+V".into(),
+            }
+            return true;
+        }
+        if ctrl && key.code == KeyCode::Char('c') {
+            let id = self.groups[self.active_group].active_id();
+            if self.local_shell_jobs.iter().any(|job| Some(job.session.as_str()) == id) {
+                for job in &self.local_shell_jobs { if Some(job.session.as_str()) == id { job.cancel(); } }
+                self.notice = "Cancelling local shell command".into(); return true;
+            }
+        }
         if ctrl && matches!(key.code,KeyCode::Char('q'|'c')) && self.fleet_controller.is_some(){
             self.fleet_controller.as_mut().unwrap().cancel();
             self.fleet_quit_pending |= key.code==KeyCode::Char('q');
@@ -2859,7 +3105,7 @@ impl App {
             }
             if let Some(menu) = &mut self.operations_menu {
                 menu.key(key);
-                if menu.closed() { self.operations_menu = None; self.chip_info = None; }
+                if menu.closed() { self.retire_operations(); self.chip_info = None; }
                 else if let Some(info) = &mut self.chip_info { info.lines = menu.lines(usize::from(self.size.width)); }
                 return true;
             }
@@ -2884,13 +3130,14 @@ impl App {
                 }
                 return true;
             }
-            if key.code == KeyCode::Esc {
+            if key.code == KeyCode::Esc || (self.chip_info.as_ref().is_some_and(|info| info.kind == "about")
+                && matches!(key.code, KeyCode::Enter | KeyCode::Char('q'))) {
                 self.chip_info = None;
                 self.memory_menu_pending = None;
                 return true;
             }
             if let Some(info) = self.chip_info.as_mut().filter(|info|
-                matches!(info.kind, "memory" | "usage" | "context" | "help")) {
+                matches!(info.kind, "memory" | "usage" | "context" | "help" | "sessions" | "about")) {
                 match key.code {
                     KeyCode::Up => info.scroll = info.scroll.saturating_sub(1),
                     KeyCode::Down => info.scroll = info.scroll.saturating_add(1).min(info.lines.len().saturating_sub(1)),
@@ -3057,23 +3304,26 @@ impl App {
         match key.code {
             KeyCode::F(3) => {
                 self.rail_visible = !self.rail_visible;
+                self.persist_sidebar();
                 true
             }
-            KeyCode::BackTab | KeyCode::Tab if key.code == KeyCode::BackTab
-                || key.modifiers.contains(KeyModifiers::SHIFT) => {
+            KeyCode::Tab if alt => {
                 self.active_group = (self.active_group + 1) % if self.pane_tree.is_some() { self.pane_count() } else { 2 };
                 self.split_requested = true;
                 self.focus = Focus::Prompt;
                 true
             }
-            KeyCode::Tab => {
-                self.focus = match self.focus {
-                    Focus::Prompt => Focus::Transcript,
-                    Focus::Transcript => Focus::Rail,
-                    Focus::Rail => Focus::Prompt,
-                };
+            KeyCode::BackTab | KeyCode::Tab => {
+                self.cycle_focus(key.code == KeyCode::BackTab || key.modifiers.contains(KeyModifiers::SHIFT));
                 true
             }
+            KeyCode::Enter if matches!(self.focus, Focus::Chip(_)) => {
+                if let Focus::Chip(kind) = self.focus { self.activate_chip(kind, self.active_group); }
+                true
+            }
+            KeyCode::Left if self.focus == Focus::Tabs => { self.previous_tab(); true }
+            KeyCode::Right if self.focus == Focus::Tabs => { self.next_tab(); true }
+            KeyCode::Enter if self.focus == Focus::Tabs => { self.focus = Focus::Prompt; true }
             KeyCode::Esc => {
                 self.focus = Focus::Prompt;
                 true
@@ -3210,6 +3460,7 @@ impl App {
                         self.notice = "DOXA commands must be a single line".into();
                         return true;
                     }
+                    if self.input.starts_with('!') { self.submit_keyboard_shell(); return true; }
                     if self.dispatch_prompt_command() { return true; }
                     if self.submit_local_command() { return true; }
                     if let Some(id) = self.groups[self.active_group].active_id() {
@@ -3254,6 +3505,42 @@ impl App {
         }
     }
 
+    // This single call site is the prompt Enter handler, never the command
+    // registry, daemon frames, remote messages or model tool callbacks.
+    fn submit_keyboard_shell(&mut self) {
+        let Some(id) = self.groups[self.active_group].active_id().map(str::to_owned) else { self.notice = "Select a session before running a local shell".into(); return; };
+        if self.offline_ids.contains(&id) { self.notice = "Archived transcript is read-only".into(); return; }
+        let Some(cwd) = self.session_cwds.get(&id).cloned() else { self.notice = "Session directory unavailable".into(); return; };
+        let command = self.input[1..].trim().to_owned();
+        if command.is_empty() { self.notice = "!<command> runs locally in the session directory; output is not sent to the model or saved".into(); return; }
+        if self.local_shell_jobs.len() >= 4 { self.notice = "Wait for a local shell command to finish".into(); return; }
+        let shell_id = self.next_shell_id; self.next_shell_id = self.next_shell_id.saturating_add(1);
+        let initial = crate::shell::Result { id: shell_id, command: command.clone(), output: String::new(), status: "running · Ctrl+C cancel".into(), running: true, dropped_bytes: 0 };
+        if let Some(session) = self.sessions.iter_mut().find(|session| session.id == id) {
+            append_transcript(session, &format!("\n\n{}{}\n\n", transcript_tools::SHELL_PREFIX, serde_json::to_string(&initial).unwrap()));
+        }
+        self.local_shell_jobs.push(crate::shell::Job::start(id, shell_id, command, &cwd));
+        self.input.clear(); self.input_cursor = 0; self.notice = "Local shell running · output stays in this window".into();
+    }
+    fn poll_shell(&mut self) -> bool {
+        let mut changed = false; let mut index = 0;
+        while index < self.local_shell_jobs.len() {
+            if let Some(result) = self.local_shell_jobs[index].poll() {
+                let job = self.local_shell_jobs.remove(index);
+                if let Some(session) = self.sessions.iter_mut().find(|session| session.id == job.session) {
+                    let prefix = format!("{}{{\"id\":{},", transcript_tools::SHELL_PREFIX, job.id);
+                    if let Some(start) = session.transcript.find(&prefix) {
+                        let end = session.transcript[start..].find("\n\n").map_or(session.transcript.len(), |end| start + end);
+                        session.transcript.replace_range(start..end, &format!("{}{}", transcript_tools::SHELL_PREFIX, serde_json::to_string(&result).unwrap()));
+                        if session.transcript.len() > MAX_TRANSCRIPT_BYTES { session.transcript = transcript_tail(&session.transcript).to_owned(); }
+                        changed = true;
+                    }
+                }
+            } else { index += 1; }
+        }
+        changed
+    }
+
     fn submit_local_command(&mut self) -> bool {
         if !self.input.trim_start().starts_with('/') || self.input.contains('\n') {
             return false;
@@ -3261,6 +3548,18 @@ impl App {
         let line = self.input.trim().to_owned();
         let (command, args) = line.split_once(char::is_whitespace).unwrap_or((line.as_str(), ""));
         match command {
+            "/doctor" if args.trim().is_empty() => {
+                let engine = self.groups[self.active_group].active_id().and_then(|id| self.session_identity.get(id)).and_then(|id| id.0.clone());
+                self.open_operations(operations_menu::Menu::maintenance("doctor", engine, false)); true
+            }
+            "/update" if matches!(args.trim(), "" | "--restart") => {
+                if self.fleet_controller.is_some() || self.groups.iter().flat_map(|g| &g.tabs).any(|id|
+                    self.session_activity.get(id).is_none_or(|(running, queued)| *running || *queued > 0)) {
+                    self.notice = "Wait for idle sessions and an idle fleet controller before updating".into(); return true;
+                }
+                self.restart_executable = if args.trim() == "--restart" { std::env::current_exe().ok() } else { None };
+                self.open_operations(operations_menu::Menu::maintenance("update", None, args.trim() == "--restart")); true
+            }
             "/model" | "/effort" | "/mode" | "/engine" if !args.trim().is_empty() => {
                 let target = args.trim();
                 if target.split_whitespace().count() != 1 || target.len() > 128 || target.chars().any(unsafe_input_char) {
@@ -3362,16 +3661,8 @@ impl App {
                 };
                 true
             }
-            "/mesh" if !args.trim().is_empty() => {
-                self.notice = "Local command unavailable: /mesh arguments".into(); true
-            }
             "/mesh" => {
-                self.map_modal = true;
-                self.peer_map.selected = 0;
-                self.pending_peer_refresh = Some(
-                    self.groups[self.active_group].active_id().unwrap_or("").to_owned());
-                self.input.clear();
-                self.input_cursor = 0;
+                self.local_mesh(args, None);
                 true
             }
             "/msg" => { self.local_message(args); true }
@@ -3415,8 +3706,93 @@ impl App {
         }
     }
 
+    fn offer_first_run(&mut self) -> bool {
+        if self.operations_menu.is_some() || self.chip_info.is_some() || self.settings_menu.is_some() || self.history_modal { return false; }
+        self.operations_menu=Some(operations_menu::Menu::new("setup"));
+        self.chip_info=Some(ChipInfo {kind:"operations",label:String::new(),
+            lines:self.operations_menu.as_ref().unwrap().lines(usize::from(self.size.width)),scroll:0,owner:None});
+        if self.active_chooser_rect().is_none() {self.operations_menu=None;self.chip_info=None;return false;}
+        // Mark when offered; Escape must not cause another automatic offer.
+        let marked=crate::first_run::mark_seen();
+        if matches!(marked,Ok(false)) {self.operations_menu=None;self.chip_info=None;return true;}
+        self.operations_menu.as_mut().unwrap().start_requested();
+        true
+    }
+
+    fn open_operations(&mut self, menu: operations_menu::Menu) {
+        self.memory_menu_pending = None; self.memory_manager = None;
+        self.retire_operations();
+        self.operations_menu = Some(menu);
+        self.chip_info = Some(ChipInfo { kind: "operations", label: String::new(),
+            lines: self.operations_menu.as_ref().unwrap().lines(usize::from(self.size.width)), scroll: 0, owner: None });
+        if self.active_chooser_rect().is_none() {
+            self.operations_menu = None; self.chip_info = None;
+            self.notice = "Enlarge pane to open operations".into();
+        } else {
+            self.input.clear(); self.input_cursor = 0;
+            self.operations_menu.as_mut().unwrap().start_requested();
+        }
+    }
+
+    fn retire_operations(&mut self) {
+        if let Some(mut menu) = self.operations_menu.take() {
+            menu.cancel();
+            if menu.busy() { self.retired_operations.push(menu); }
+        }
+    }
+
+    fn local_mesh(&mut self, args: &str, root: Option<PathBuf>) {
+        let args = args.trim();
+        if !args.is_empty() && (args.len() > 200 || !args.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))) {
+            self.notice = "Usage: /mesh [RUN|stop]".into(); return;
+        }
+        let handle = self.window_mesh.get_or_insert_with(crate::mesh_control::WindowMesh::new).handle();
+        self.open_operations(operations_menu::Menu::mesh(handle.clone()));
+        if self.operations_menu.is_some() {
+            if args.eq_ignore_ascii_case("stop") { handle.stop(); }
+            else { handle.start((!args.is_empty()).then(|| args.to_owned()), root); }
+        }
+    }
+
     fn local_fleet(&mut self,args:&str){
+        let current = self.fleet_controller.as_ref().map(|controller| (controller.root.clone(), controller.id.clone()))
+            .or_else(|| self.fleet_menu.as_ref().and_then(|menu| menu.verified_view()).map(|view| (view.root, view.run_id)));
+        match args.trim() {
+            "stop" => {
+                if let Some(controller) = self.fleet_controller.as_mut() {
+                    controller.cancel(); self.input.clear(); self.input_cursor=0;
+                    self.notice="Stopping owned fleet; waiting for slot teardown".into();
+                } else { self.notice="No controller owned by this window; use doxa fleet stop RUN for a verified saved run".into(); }
+                return;
+            }
+            "detach" => {
+                if let Some(controller) = self.fleet_controller.take() {
+                    let (root,id)=controller.detach(); self.fleet_quit_pending=false; self.open_fleet(root,Some(id));
+                    self.notice="Fleet detached; it keeps running with its existing budget and approval limits".into();
+                    self.input.clear(); self.input_cursor=0;
+                } else { self.notice="No live controller owned by this window".into(); }
+                return;
+            }
+            "status" | "mesh" => {
+                if let Some((root,id))=current {
+                    if args.trim()=="mesh" { self.local_mesh(&id,Some(root)); }
+                    else { self.open_fleet(root,Some(id)); self.input.clear(); self.input_cursor=0; }
+                } else { self.notice="Select a live fleet run first, or specify its RUN ID".into(); }
+                return;
+            }
+            _ => {}
+        }
         let parts=match fleet_process::words(args){Ok(parts)=>parts,Err(error)=>{self.notice=safe_label(&error.to_string());return;}};
+        if let [verb,slot]=parts.as_slice() {
+            if verb=="attach" && slot.parse::<usize>().is_ok() {
+                if let Some((root,id))=current {
+                    if let Ok((_,session))=crate::fleet_view::slot_socket(&root,&id,slot.parse().unwrap()) {
+                        self.attach_selected(&session);
+                    } else { self.notice="Fleet slot attachment refused; verify run and live slot".into(); }
+                } else { self.notice="Choose a current fleet, or use /fleet attach RUN INDEX".into(); }
+                return;
+            }
+        }
         let start=parts.first().is_some_and(|part|part=="start");
         let mut command_words=Vec::new();let mut custom_root=None;let mut index=0;
         while index<parts.len(){
@@ -3444,11 +3820,12 @@ impl App {
             return;
         }
         match words.as_slice(){
+            ["mesh",id]=>self.local_mesh(id,Some(root)),
             []|["runs"]=>self.open_fleet(root,None),
             ["status",id]if doxa_state::valid_session_id(id)=>self.open_fleet(root,Some((*id).into())),
             ["attach",id,index]=>match index.parse::<usize>().ok().and_then(|index|crate::fleet_view::slot_socket(&root,id,index).ok()){
                 Some((_,session))=>self.attach_selected(&session),None=>self.notice="Fleet slot attachment refused; verify run and live slot".into()},
-            _=>self.notice="Usage: /fleet [runs|status RUN|attach RUN INDEX|start OPTIONS|resume RUN]".into()
+            _=>self.notice="Usage: /fleet [runs|status [RUN]|stop|detach|attach [RUN] INDEX|mesh [RUN]|start OPTIONS|resume RUN]".into()
         }
     }
     fn fleet_review_key(&mut self,key:KeyEvent)->bool{
@@ -3508,6 +3885,80 @@ impl App {
             self.input_cursor = 0;
             self.notice = "Peer message queued".into();
         }
+    }
+
+    fn open_live_sessions(&mut self) {
+        if self.session_roster_pending.is_some() { self.notice = "sessions: discovery pending".into(); return; }
+        let (tx, rx) = mpsc::sync_channel(1);
+        match std::thread::Builder::new().name("session-roster".into()).spawn(move || {
+            let _ = tx.send(crate::discovery::sessions());
+        }) {
+            Ok(_) => { self.session_roster_pending = Some(rx); self.notice = "sessions: finding live daemons…".into(); }
+            Err(error) => self.notice = format!("sessions: {}", safe_label(&error.to_string())),
+        }
+    }
+
+    fn poll_sessions_roster(&mut self) -> bool {
+        let Some(receiver) = self.session_roster_pending.as_ref() else { return false; };
+        let result = match receiver.try_recv() {
+            Ok(result) => result,
+            Err(TryRecvError::Empty) => return false,
+            Err(TryRecvError::Disconnected) => Err(io::Error::other("discovery worker disconnected")),
+        };
+        self.session_roster_pending = None;
+        let rows = match result { Ok(rows) => rows, Err(error) => {
+            self.notice = format!("sessions: {}", safe_label(&error.to_string())); return true;
+        } };
+        let mut lines = rows.iter().map(|row| {
+            let attached = self.groups.iter().any(|group| group.tabs.contains(&row.id));
+            format!("{}  {}  ·  {}", safe_label(&row.id), safe_label(self.custom_names.get(&row.id).unwrap_or(&row.title)),
+                if attached { "attached here" } else { "detached" })
+        }).collect::<Vec<_>>();
+        if lines.is_empty() { lines.push("sessions: none live".into()); }
+        lines.push(String::new());
+        lines.push("/sessions kill <prefix> · /sessions kill-detached".into());
+        lines.push("/search · saved session history".into());
+        self.chip_info = Some(ChipInfo { kind:"sessions",label:String::new(),lines,scroll:0,owner:None });
+        self.notice.clear();
+        true
+    }
+
+    fn local_sessions_stop(&mut self, action: crate::sessions::Action) {
+        if self.session_stop_pending.is_some() {
+            self.notice = "sessions: stop already pending".into();
+            return;
+        }
+        let attached = self.groups.iter().flat_map(|group| group.tabs.iter().cloned()).collect();
+        match crate::sessions::start(action, attached) {
+            Ok(receiver) => {
+                self.session_stop_pending = Some(receiver);
+                self.notice = "sessions: checking live targets…".into();
+            }
+            Err(error) => self.notice = format!("sessions: {}", safe_label(&error.to_string())),
+        }
+    }
+
+    fn poll_sessions_stop(&mut self) -> bool {
+        let Some(receiver) = self.session_stop_pending.as_ref() else { return false; };
+        let report = match receiver.try_recv() {
+            Ok(report) => report,
+            Err(TryRecvError::Empty) => return false,
+            Err(TryRecvError::Disconnected) => {
+                self.session_stop_pending = None;
+                self.notice = "sessions: stop worker disconnected".into();
+                return true;
+            }
+        };
+        self.session_stop_pending = None;
+        for id in report.stopped.iter().chain(report.requested.iter()) {
+            self.killed_this_run.insert(id.clone());
+            self.offline_ids.insert(id.clone());
+            self.input_requests.retain(|request| request.session_id != *id);
+            self.pending_answers.retain(|(session, _, _)| session != id);
+            self.apply_update(DaemonUpdate::Status { id: id.clone(), text: if report.stopped.contains(id) { "Stopped" } else { "Stopping" }.into() });
+        }
+        self.notice = safe_label(&report.text());
+        true
     }
 
     fn local_attach(&mut self, args: &str) {
@@ -3634,11 +4085,17 @@ impl App {
             self.notice = format!("Already attaching · {}", safe_label(id));
             return;
         }
+        if !self.manual_tab_available() {return;}
         self.attaching_ids.insert(id.to_owned());
         self.pending_attaches.push((id.to_owned(), self.active_group));
         self.input.clear();
         self.input_cursor = 0;
         self.notice = format!("Attaching · {}", safe_label(id));
+    }
+
+    pub(crate) fn has_unverified_archived_tabs(&self) -> bool {
+        self.groups.iter().any(|group|group.tabs.iter().any(|id|
+            self.offline_ids.contains(id) && !self.killed_this_run.contains(id) && !self.history_entries.contains_key(id)))
     }
 
     pub(crate) fn has_offline_open_tabs(&self) -> bool {
@@ -3934,10 +4391,27 @@ impl App {
             self.notice = "This session cannot change models".into();
             return;
         }
+        self.model_refresh_after = None;
         self.model_picker = Some(ModelPicker { session_id: id.clone(), models: Vec::new(),
             selected: 0, note: "Loading this engine's model catalog…".into(),
             loading: true, catalog_pending: false });
         self.pending_model_queries.push(id);
+    }
+
+    fn poll_model_catalog(&mut self, now: Instant) -> bool {
+        let Some(picker) = self.model_picker.as_mut() else {
+            self.model_refresh_after = None;
+            return false;
+        };
+        if self.groups[self.active_group].active_id() != Some(picker.session_id.as_str()) {
+            self.model_refresh_after = None;
+            return false;
+        }
+        if picker.loading || self.model_refresh_after.is_none_or(|due| now < due) { return false; }
+        self.model_refresh_after = None;
+        picker.loading = true;
+        self.pending_model_queries.push(picker.session_id.clone());
+        true
     }
 
     fn open_effort_picker(&mut self) {
@@ -3949,6 +4423,10 @@ impl App {
             self.notice = "Select a session to inspect its effort".into();
             return;
         };
+        if let Some(effort) = self.pending_effort_verifications.get(&id) {
+            self.notice = format!("Requested effort {effort} · awaiting provider verification");
+            return;
+        }
         let Some((Some(engine), Some(model))) = self.session_identity.get(&id) else {
             self.notice = "Effort capability is unknown for this session".into();
             return;
@@ -3978,6 +4456,10 @@ impl App {
 
     fn select_effort(&mut self) {
         let Some(picker) = self.effort_picker.take() else { return; };
+        if let Some(effort) = self.pending_effort_verifications.get(&picker.session_id) {
+            self.notice = format!("Requested effort {effort} · awaiting provider verification");
+            return;
+        }
         let Some((Some(engine), Some(model))) = self.session_identity.get(&picker.session_id) else { return; };
         if engine != &picker.engine || model != &picker.model { return; }
         let Some(chosen) = picker.levels.get(picker.selected) else { return; };
@@ -3986,6 +4468,7 @@ impl App {
             .map(|levels| levels.clone())
             .unwrap_or_else(|| known.iter().map(|level| (*level).to_owned()).collect::<Vec<_>>());
         if !allowed.contains(chosen) { return; }
+        self.pending_effort_verifications.insert(picker.session_id.clone(), chosen.clone());
         self.pending_effort_changes.push((picker.session_id, chosen.clone()));
         self.notice = format!("Requesting {engine} effort {chosen} for this session…");
     }
@@ -4061,7 +4544,7 @@ impl App {
                 picker.loading = true;
                 picker.catalog_pending = false;
                 picker.note = "Refreshing this engine's model catalog…".into();
-                picker.models.clear();
+                self.model_refresh_after = None;
                 self.pending_model_queries.push(picker.session_id.clone());
             }
             KeyCode::Enter if !picker.loading => {
@@ -4076,14 +4559,23 @@ impl App {
         true
     }
 
+    fn manual_tab_available(&mut self)->bool {
+        if self.groups.iter().map(|group|group.tabs.len()).sum::<usize>()
+            + self.attaching_ids.len() + usize::from(self.launching) >= panes::MAX_TABS {
+            self.notice="256 tab slots occupied · detach a tab before opening another".into();false
+        }else{true}
+    }
+
     fn open_engine_picker(&mut self) {
+        if !self.manual_tab_available() {return;}
         if self.size.width > 0 && (self.size.width < 29 || self.size.height < 11) {
             self.notice = "Enlarge terminal to open engine picker".into();
             return;
         }
         let engine = self.groups[self.active_group].active_id()
             .and_then(|id| self.session_identity.get(id)).and_then(|identity| identity.0.as_deref());
-        self.engine_selected = engine.and_then(|engine| ENGINE_CHOICES.iter().position(|name| *name == engine)).unwrap_or(0);
+        let configured=engine_name(launch::configured_engine());
+        self.engine_selected = engine.and_then(|engine| ENGINE_CHOICES.iter().position(|name| *name == engine)).or_else(||ENGINE_CHOICES.iter().position(|name|*name==configured)).unwrap_or(1);
         self.engine_picker = true;
     }
 
@@ -4101,6 +4593,7 @@ impl App {
     }
 
     fn select_new_engine(&mut self) {
+        if !self.manual_tab_available() {self.engine_picker=false;return;}
         let engine = match self.engine_selected {
             0 => launch::Engine::Codex,
             1 => launch::Engine::Claude,
@@ -4109,16 +4602,18 @@ impl App {
         };
         self.engine_picker = false;
         let models = vendor_models(engine);
-        let model = vendor_default_model(engine).to_owned();
         let engine_id = engine_name(engine);
+        let config = crate::settings::config_path().map(|path| doxa_state::load_config(&path)).unwrap_or_default();
+        let (model, configured_effort) = new_session_preferences(engine, &config,
+            std::env::var("DOXA_MODEL").ok().as_deref(), std::env::var("DOXA_EFFORT").ok().as_deref());
         // A previous account-scoped catalog must not survive a vendor
         // re-selection when a later lookup fails or the credential changes.
         self.catalog_efforts.retain(|(name, _), _| name != engine_id);
         let model_efforts = models.iter().map(|name| ((*name).to_owned(),
             effort_choices(engine_id, name).iter().map(|level| (*level).to_owned()).collect())).collect::<HashMap<_, _>>();
-        let effort = self.next_efforts.get(engine_id)
-            .filter(|level| effort_choices(engine_id, &model).contains(&level.as_str()))
-            .cloned().or_else(|| (!models.is_empty()).then(|| "high".to_owned()));
+        let effort = self.next_efforts.get(engine_id).cloned().or(configured_effort)
+            .filter(|level| models.is_empty() || effort_choices(engine_id, &model).contains(&level.as_str()))
+            .or_else(|| (!models.is_empty()).then(|| "high".to_owned()));
         self.vendor_catalog_pending = None;
         let mut catalog_pending = false;
         if let Some(vendor) = match engine {
@@ -4553,79 +5048,148 @@ impl App {
         self.notice = "Cancelling selected queued prompt…".into();
     }
 
+    fn open_belief_graph(&mut self) {
+        if self.belief_browser_fixture {if let Some(picker)=&mut self.lore_picker {picker.status="Gallery fixture · LORE calls disabled".into();}return;}
+        let Some(picker)=&self.lore_picker else{return;};
+        if picker.proposal_mode || picker.pending.is_some() || self.belief_graph_pending.is_some(){return;}
+        let Some(id)=picker.rows.get(picker.selected).map(|row|row.id) else{return;};
+        if self.belief_graph_lines.as_ref().is_some_and(|(selected,_)|*selected==id){self.belief_graph_lines=None;return;}
+        let cwd=picker.cwd.clone();let browser=self.preferences.value("graph_view")!="ascii";
+        let python=std::env::var_os("DOXA_LORE_PYTHON").map(PathBuf::from).unwrap_or_else(||PathBuf::from("python3"));
+        let(tx,rx)=mpsc::sync_channel(1);self.belief_graph_pending=Some((id,cwd.clone(),browser,rx));
+        self.lore_picker.as_mut().unwrap().status="Loading LORE belief neighbourhood…".into();
+        std::thread::spawn(move||{let result=doxa_lore::LoreClient::spawn(&python,Duration::from_secs(3)).and_then(|mut client|client.belief_graph(&cwd,id,browser));let _=tx.send(result);});
+    }
+    fn poll_belief_graph(&mut self)->bool {
+        let Some((id,cwd,browser,rx))=self.belief_graph_pending.take() else{return false;};
+        let result=match rx.try_recv(){Ok(result)=>result,Err(TryRecvError::Empty)=>{self.belief_graph_pending=Some((id,cwd,browser,rx));return false;},Err(TryRecvError::Disconnected)=>Err(doxa_lore::LoreError::Remote("graph_unavailable"))};
+        let Some(picker)=self.lore_picker.as_mut().filter(|p|!p.proposal_mode && p.cwd==cwd && p.rows.get(p.selected).is_some_and(|r|r.id==id)) else{return false;};
+        match result {
+            Ok(graph) if graph.id==id=>{
+                if browser {if let Some(html)=graph.html {
+                    let result=crate::operations::doxa_home().and_then(|home|crate::belief_graph::write_page(&home,id,&html)).and_then(|path|{
+                        let directory=path.parent().unwrap().to_path_buf();
+                        if !self.belief_graph_server.as_ref().is_some_and(|s|s.matches(&directory)){self.belief_graph_server=Some(crate::belief_graph::GraphServer::start(directory)?);}
+                        Ok((path,self.belief_graph_server.as_ref().unwrap().url(id)))
+                    });
+                    match result {Ok((path,url))=>{picker.status=format!("{} · {}",safe_label(&graph.note),safe_label(&path.display().to_string()));self.pending_open_urls.push(url);},Err(error)=>picker.status=format!("Graph page unavailable: {}",safe_label(&error.to_string()))}
+                } else {picker.status=safe_label(&graph.note);self.belief_graph_lines=Some((id,graph.lines));self.belief_graph_scroll=0;}}
+                else {picker.status=safe_label(&graph.note);self.belief_graph_lines=Some((id,graph.lines));self.belief_graph_scroll=0;}
+            },
+            _=>picker.status="Belief graph unavailable from this LORE version or scope".into(),
+        } true
+    }
+    fn request_auto_diff(&mut self,id:&str) {
+        if self.preferences.on("auto_diff") && !self.auto_diff_seen.contains(id) && !self.auto_diff_requests.iter().any(|v|v==id) && self.auto_diff_requests.len()<128 {self.auto_diff_requests.push_back(id.into());}
+    }
+    fn poll_auto_diff(&mut self)->bool {
+        if !self.preferences.on("auto_diff") {self.auto_diff_requests.clear();self.auto_diff_ready.clear();return false;}
+        if let Some((id,cwd,receiver))=self.auto_diff_pending.take() {
+            match receiver.try_recv() {
+                Ok((digest,changed)) if self.session_cwds.get(&id)==Some(&cwd)=>{
+                    if let Some(baseline)=self.auto_diff_baseline.get(&id) {if baseline!=&digest && changed {self.auto_diff_ready.insert(id.clone());}}
+                    else {self.auto_diff_baseline.insert(id,digest);}
+                },
+                Err(TryRecvError::Empty)=>self.auto_diff_pending=Some((id,cwd,receiver)),_=>{}
+            }
+        }
+        if self.auto_diff_pending.is_none() {
+            if let Some(id)=self.auto_diff_requests.pop_front() {
+                if let Some(cwd)=self.session_cwds.get(&id).cloned() {
+                    let (tx,rx)=mpsc::sync_channel(1);self.auto_diff_pending=Some((id,cwd.clone(),rx));
+                    std::thread::spawn(move||{use sha2::Digest;let snapshot=diff_view::read(&cwd);let changed=!snapshot.files.is_empty() || snapshot.text.contains("Untracked files (names only");let digest=format!("{:x}",sha2::Sha256::digest(snapshot.text.as_bytes()));let _=tx.send((digest,changed));});
+                }
+            }
+        }
+        let Some(id)=self.groups[self.active_group].active_id().map(str::to_owned).filter(|id|self.auto_diff_ready.contains(id)) else {return false;};
+        self.auto_diff_ready.remove(&id);self.auto_diff_seen.insert(id);
+        if self.diff_pane || self.diff_modal {return false;}
+        if self.pane_tree.is_some() {self.notice="Worktree changed · /diff opens the live diff".into();return true;}
+        self.diff_pane=true;
+        if self.layout(self.size).panes.is_none() {self.diff_pane=false;self.notice="Worktree changed; terminal too narrow to auto-open diff · /diff".into();}
+        else {self.load_diff();self.notice="Live diff opened after this session changed its worktree".into();} true
+    }
+    fn refresh_clock(&mut self) {
+        let now=std::time::SystemTime::now();self.clock_text=self.preferences.clock(now);
+        self.clock_deadline=self.preferences.clock_delay(now).map(|delay|Instant::now()+delay);
+    }
+    fn tick_clock(&mut self,now:Instant)->bool {
+        if self.clock_deadline.is_some_and(|deadline|now>=deadline) {let old=self.clock_text.clone();self.refresh_clock();return old!=self.clock_text;} false
+    }
+    pub fn notify_update_available(&self,body:&str) {
+        if self.preferences.should_notify("notify_update",self.window_focused) {crate::preferences::notify("DOXA update available",body);}
+    }
+    fn persist_sidebar(&mut self) {
+        self.sidebar_auto=false;
+        if self.persist_preferences {self.rail_width=self.rail_width.clamp(22,41);}
+        if !self.persist_preferences {return;}
+        let edits=vec![("sidebar".into(),Some(if self.rail_visible {"1"} else {"0"}.into())),("sidebar_width".into(),Some(self.rail_width.to_string()))];
+        if let Err(error)=crate::settings::config_path().and_then(|p|crate::settings::save(&p,&edits,"claude")) {self.notice=format!("Sidebar changed for this window; preference unchanged: {}",safe_label(&error.to_string()));}
+    }
     fn open_settings_menu(&mut self) {
-        match crate::operations::native_settings() {
+        let identity=self.groups[self.active_group].active_id().and_then(|id|self.session_identity.get(id));
+        let engine=identity.and_then(|s|s.0.clone()).unwrap_or_else(||"claude".into());
+        let model=identity.and_then(|s|s.1.as_deref());
+        match crate::settings::rows(&engine,model) {
             Ok(rows) => {
-                self.settings_menu = Some(SettingsMenu { rows, selected: 0, linger_draft: None });
-                if self.active_chooser_rect().is_none() {
-                    self.settings_menu = None;
-                    self.notice = "Enlarge active pane to edit settings".into();
-                }
+                self.settings_menu = Some(SettingsMenu { rows, selected: 0, category: 0, draft: None, edits: HashMap::new(), engine });
+                if self.active_chooser_rect().is_none() { self.settings_menu=None; self.notice="Enlarge active pane to edit settings".into(); }
             }
-            Err(error) => self.notice = format!("Settings unavailable: {}", safe_label(&error.to_string())),
+            Err(error) => self.notice=format!("Settings unavailable: {}",safe_label(&error.to_string())),
         }
     }
-
-    fn settings_change(&mut self, key: &str, value: Option<&str>) {
-        match crate::operations::settings_change(key, value) {
-            Ok(message) => {
-                self.notice = message;
-                match crate::operations::native_settings() {
-                    Ok(rows) => if let Some(menu) = &mut self.settings_menu {
-                        menu.rows = rows;
-                        menu.linger_draft = None;
-                    },
-                    Err(error) => {
-                        self.settings_menu = None;
-                        self.notice = format!("Setting saved; refresh failed: {}", safe_label(&error.to_string()));
-                    }
+    fn save_settings_menu(&mut self) {
+        let Some(menu)=&mut self.settings_menu else { return; };
+        menu.finish_draft();
+        let edits=menu.edits.iter().map(|(k,v)|(k.clone(),v.clone())).collect::<Vec<_>>();
+        let engine=menu.engine.clone();
+        let result=crate::settings::config_path().and_then(|p|crate::settings::save(&p,&edits,&engine));
+        match result {
+            Ok(()) => {
+                let auto_diff_was_on=self.preferences.on("auto_diff");
+                self.preferences=crate::preferences::Preferences::load();
+                if !auto_diff_was_on && self.preferences.on("auto_diff") {for id in self.sessions.iter().map(|s|s.id.clone()).collect::<Vec<_>>() {self.request_auto_diff(&id);}}
+                self.sidebar_auto=self.preferences.value("sidebar").is_empty();
+                self.rail_width=self.preferences.sidebar_width();
+                self.rail_visible=match self.preferences.value("sidebar") { ""=>self.sessions.len()>1 || !self.collections.is_empty(),"0"|"false"|"off"|"no"=>false,_=>true };
+                self.refresh_clock();
+                match crate::settings::rows(&engine,None) {
+                    Ok(rows)=>{let menu=self.settings_menu.as_mut().unwrap();menu.rows=rows;menu.edits.clear();self.notice="Settings saved · session defaults apply to new sessions".into();},
+                    Err(error)=>self.notice=format!("Settings saved; refresh failed: {}",safe_label(&error.to_string())),
                 }
             }
-            Err(error) => self.notice = format!("Setting unchanged: {}", safe_label(&error.to_string())),
+            Err(error)=>self.notice=format!("Settings unchanged: {}",safe_label(&error.to_string())),
         }
     }
-
-    fn settings_menu_key(&mut self, key: KeyEvent) -> bool {
-        let Some(menu) = self.settings_menu.as_mut() else { return false; };
-        if let Some(draft) = &mut menu.linger_draft {
-            match key.code {
-                KeyCode::Esc => menu.linger_draft = None,
-                KeyCode::Backspace => { draft.pop(); },
-                KeyCode::Char(ch) if (ch.is_ascii_digit() || ch == '.') && draft.len() < 24 => draft.push(ch),
-                KeyCode::Enter => {
-                    let value = draft.clone();
-                    self.settings_change("linger_secs", Some(&value));
-                }
-                _ => {}
-            }
-            return true;
+    fn settings_menu_key(&mut self,key:KeyEvent)->bool {
+        let Some(menu)=self.settings_menu.as_mut() else { return false; };
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code==KeyCode::Char('s') { self.save_settings_menu();return true; }
+        if key.modifiers.contains(KeyModifiers::SHIFT) && matches!(key.code,KeyCode::Left|KeyCode::Right) {
+            menu.finish_draft();menu.category=if key.code==KeyCode::Right {(menu.category+1)%crate::settings::CATEGORIES.len()} else {(menu.category+crate::settings::CATEGORIES.len()-1)%crate::settings::CATEGORIES.len()};
+            menu.selected=menu.indices().first().copied().unwrap_or(0);return true;
+        }
+        if let Some((_,draft))=&mut menu.draft {
+            match key.code { KeyCode::Esc=>menu.draft=None,KeyCode::Backspace=>{draft.pop();},KeyCode::Char(ch) if !key.modifiers.intersects(KeyModifiers::CONTROL|KeyModifiers::ALT) && !ch.is_control() && draft.len()<4096=>draft.push(ch),KeyCode::Enter=>{menu.finish_draft();self.save_settings_menu();},_=>{} } return true;
         }
         match key.code {
-            KeyCode::Esc => self.settings_menu = None,
-            KeyCode::Up | KeyCode::BackTab => menu.selected = menu.selected.saturating_sub(1),
-            KeyCode::Down | KeyCode::Tab => menu.selected = (menu.selected + 1).min(1),
-            KeyCode::Char('u') | KeyCode::Delete => {
-                let selected = menu.selected;
-                if menu.rows[selected].1 {
-                    self.notice = "Environment override is active; unset it before editing".into();
-                } else {
-                    self.settings_change(if selected == 0 { "linger_secs" } else { "worktree_per_session" }, None);
+            KeyCode::Esc=>self.settings_menu=None,
+            KeyCode::Up|KeyCode::Down|KeyCode::Tab|KeyCode::BackTab=>{
+                let indices=menu.indices();if let Some(position)=indices.iter().position(|i|*i==menu.selected) {
+                    let next=if matches!(key.code,KeyCode::Up|KeyCode::BackTab) {position.saturating_sub(1)} else {(position+1).min(indices.len().saturating_sub(1))};menu.selected=indices[next];
                 }
             }
-            KeyCode::Enter | KeyCode::Char(' ') => {
-                let selected = menu.selected;
-                if menu.rows[selected].1 {
-                    self.notice = "Environment override is active; unset it before editing".into();
-                } else if selected == 0 {
-                    menu.linger_draft = Some(menu.rows[0].0.split(' ').next().unwrap_or("120").to_owned());
-                } else {
-                    let on = menu.rows[1].0.starts_with("on ");
-                    self.settings_change("worktree_per_session", Some(if on { "off" } else { "on" }));
-                }
+            KeyCode::Char('u')|KeyCode::Delete|KeyCode::Enter|KeyCode::Char(' ')=>{
+                let Some(row)=menu.rows.get(menu.selected) else {return true;};
+                if row.shadowed {self.notice=format!("Environment override is active; unset {} before editing",row.setting.env);}
+                else if row.setting.read_only || row.setting.key.is_empty() {self.notice=format!("{} is read-only. {}",row.setting.label,row.setting.note);}
+                else if matches!(key.code,KeyCode::Char('u')|KeyCode::Delete) {menu.edits.insert(row.setting.key.into(),None);}
+                else if matches!(row.setting.kind,crate::settings::Kind::Bool|crate::settings::Kind::BoolOn) {
+                    let current=menu.edits.get(row.setting.key).and_then(|v|v.as_deref()).unwrap_or(&row.value);
+                    let on=matches!(current,"on"|"1"|"true"|"yes");menu.edits.insert(row.setting.key.into(),Some(if on {"off"} else {"on"}.into()));
+                } else {let value=menu.edits.get(row.setting.key).and_then(|v|v.as_deref()).unwrap_or(&row.stored);menu.draft=Some((row.setting.key.into(),if value.is_empty() {row.setting.default.into()} else {value.into()}));}
             }
-            _ => {}
-        }
-        true
+            _=>{}
+        } true
     }
 
     fn open_lore_picker(&mut self) {
@@ -4845,7 +5409,58 @@ impl App {
         changed
     }
 
+    fn restart_after_install(&mut self, state: &mut Option<(crate::ui_state::UiStateStore, Vec<String>, Arc<Mutex<bool>>)>) -> bool {
+        if self.restart_waiting {
+            self.restart_waiting = false;
+            if self.fleet_controller.is_some() || !self.local_shell_jobs.is_empty()
+                || self.launching || !self.pending_prompts.is_empty() || !self.pending_launches.is_empty() || !self.attaching_ids.is_empty()
+                || self.groups.iter().flat_map(|g| &g.tabs).filter(|id| !self.offline_ids.contains(*id))
+                    .any(|id| self.session_activity.get(id).is_none_or(|(running, queued)| *running || *queued > 0)) {
+                self.notice = "Update installed; restart postponed because sessions became busy".into(); return true;
+            }
+            let Some((store, _, complete)) = state else { self.notice = "Update installed; restart needs a durable saved tabset".into(); return true; };
+            if !matches!(store.save_if_complete(self, complete), Ok(true)) {
+                self.notice = "Update installed; restart postponed because the tabset could not be saved".into(); return true;
+            }
+            let mut ids = self.groups.iter().flat_map(|g| &g.tabs).filter(|id| !self.offline_ids.contains(*id)).cloned().collect::<Vec<_>>();
+            ids.sort(); ids.dedup();
+            match crate::maintenance::Restart::start(ids) {
+                Ok(worker) => { self.restart_job = Some(worker); self.notice = "Finalizing idle sessions for restart; saved tabs will be restored".into(); },
+                Err(_) => { self.notice = "Update installed; restart postponed because a target is no longer live".into(); },
+            }
+            return true;
+        }
+        if let Some(report) = self.restart_job.as_ref().and_then(|worker| worker.poll()) {
+            self.restart_job = None;
+            for id in report.stopped { self.offline_ids.insert(id.clone()); self.session_activity.remove(&id); self.input_requests.retain(|request| request.session_id != id); }
+            if let Some(error) = report.error { self.notice = error.into(); }
+            else { self.restart_after_update = true; self.should_quit = true; }
+            return true;
+        }
+        false
+    }
+
+    fn poll_plugin_commands(&mut self) -> bool {
+        let mut changed = false;
+        if let Some(result) = self.plugin_refresh.as_ref().and_then(|worker| worker.poll()) {
+            self.plugin_refresh = None;
+            if !self.plugin_refresh_dirty {
+                let mut rows = result.unwrap_or_default();
+                rows.retain(|row| !COMMANDS.iter().any(|builtin| builtin.name == row.name));
+                rows.sort_by(|left, right| left.name.cmp(&right.name)); rows.dedup_by(|left, right| left.name == right.name);
+                self.plugin_commands = rows; changed = true;
+            }
+        }
+        if self.plugin_refresh_dirty && self.plugin_refresh.is_none() {
+            self.plugin_refresh_dirty = false; self.plugin_commands.clear();
+            self.plugin_refresh = Some(crate::operations::PluginRefresh::start()); changed = true;
+        }
+        changed
+    }
+
     fn poll_memory_menu(&mut self) -> bool {
+        for menu in &mut self.retired_operations { menu.poll(); }
+        self.retired_operations.retain(|menu| menu.busy());
         let mut changed = false;
         if let Some(manager) = &mut self.memory_manager {
             let current = self.groups[self.active_group].active_id().and_then(|id|
@@ -4861,6 +5476,8 @@ impl App {
         }
         if let Some(menu) = &mut self.operations_menu {
             menu.poll();
+            if menu.take_plugins_changed() { self.plugin_refresh_dirty = true; }
+            if menu.take_restart() { self.restart_waiting = true; changed = true; }
             if let Some(info) = &mut self.chip_info {
                 let lines = menu.lines(usize::from(self.size.width));
                 if info.lines != lines { info.lines = lines; changed = true; }
@@ -5050,6 +5667,12 @@ impl App {
     }
 
     fn lore_picker_key(&mut self, key: KeyEvent) -> bool {
+        if key.code==KeyCode::Char('g') && !key.modifiers.intersects(KeyModifiers::CONTROL|KeyModifiers::ALT) && self.lore_picker.as_ref().is_some_and(|p|!p.proposal_mode && p.query.is_empty()) {self.open_belief_graph();return true;}
+        if key.code==KeyCode::Esc && self.belief_graph_lines.take().is_some(){return true;}
+        if let Some((_,lines))=&self.belief_graph_lines {
+            match key.code {KeyCode::Up=>self.belief_graph_scroll=self.belief_graph_scroll.saturating_sub(1),KeyCode::Down=>self.belief_graph_scroll=(self.belief_graph_scroll+1).min(lines.len().saturating_sub(1)),KeyCode::PageDown=>self.belief_graph_scroll=(self.belief_graph_scroll+10).min(lines.len().saturating_sub(1)),KeyCode::PageUp=>self.belief_graph_scroll=self.belief_graph_scroll.saturating_sub(10),_=>{}}return true;
+        }
+
         let review_area = self.active_chooser_rect();
         let picker = self.lore_picker.as_mut().unwrap();
         if picker.resolving { return true; }
@@ -5336,6 +5959,22 @@ impl App {
         true
     }
 
+    pub(crate) fn recorded_session_cwd(&self, id: &str) -> Option<&Path> {
+        self.session_cwds.get(id).map(PathBuf::as_path)
+            .or_else(|| self.history_entries.get(id).and_then(|entry| entry.cwd.as_deref()))
+    }
+
+    pub(crate) fn restore_archive(&mut self, entry: &history::OfflineSession, note: &str) {
+        self.history_entries.insert(entry.id.clone(), entry.clone());
+        self.offline_ids.insert(entry.id.clone());
+        let session = Session { id: entry.id.clone(), title: entry.id.clone(),
+            collection: safe_label(&entry.project), transcript: transcript_tail(&entry.markdown).to_owned(),
+            status: if note.is_empty() { "Archived · read-only".into() }
+                else { format!("Archived · read-only · {}", safe_label(note)) } };
+        if let Some(old) = self.sessions.iter_mut().find(|old| old.id == entry.id) { *old = session; }
+        else { self.sessions.push(session); }
+    }
+
     fn poll_history(&mut self) -> bool {
         let started = self.start_due_history_query(Instant::now());
         let Some(receiver) = &self.history_pending else { return false; };
@@ -5469,6 +6108,7 @@ impl App {
                     self.attach_selected(&id);
                     return;
                 }
+                if !self.manual_tab_available() {return;}
                 let Some(entry) = self.history_entries.get(&id).cloned() else {
                     self.notice = "Resume unavailable: no saved transcript for this session".into();
                     return;
@@ -5481,6 +6121,7 @@ impl App {
                 self.notice = "Checking saved conversation…".into();
                 return;
             }
+            if !self.groups[self.active_group].tabs.contains(&id) && !self.manual_tab_available() {return;}
             let tabs = &mut self.groups[self.active_group];
             if let Some(index) = tabs.tabs.iter().position(|tab| tab == &id) { tabs.active = index; }
             else { tabs.tabs.push(id); tabs.active = tabs.tabs.len() - 1; }
@@ -5871,6 +6512,10 @@ impl App {
                 let Some(entry) = rows.get(self.action_selected) else { return true; };
                 let action = entry.action.clone(); self.action_menu = false;
                 match action {
+                    actions::Action::Plugin(command) => {
+                        self.action_draft = Some(((self.active_group,self.groups[self.active_group].active_id().unwrap_or("").to_owned()),self.input.clone(), self.input_cursor));
+                        self.input = format!("{command} "); self.input_cursor = self.input.len(); self.focus = Focus::Prompt;
+                    }
                     actions::Action::New => self.open_engine_picker(),
                     actions::Action::Fleet(view) => self.open_fleet(view.root,Some(view.run_id)),
                     actions::Action::Tab(pane, tab) => { if self.groups.get(pane).is_some_and(|g| tab < g.tabs.len()) { self.active_group = pane; self.groups[pane].active = tab; self.focus = Focus::Prompt; } },
@@ -5881,7 +6526,7 @@ impl App {
                     actions::Action::Command(command) => {
                         // Argument-bearing operations prepare the user's prompt
                         // for editing; bare forms use the same local dispatcher.
-                        if matches!(command, "/msg" | "/collection" | "/cd" | "/fleet" | "/img") {
+                        if matches!(command, "/msg" | "/collection" | "/cd" | "/fleet" | "/fleet start" | "/fleet attach" | "/img") {
                             self.action_draft = Some(((self.active_group,self.groups[self.active_group].active_id().unwrap_or("").to_owned()),self.input.clone(), self.input_cursor));
                             self.input = format!("{command} "); self.input_cursor = self.input.len(); self.focus = Focus::Prompt;
                         } else {
@@ -6171,6 +6816,7 @@ impl App {
             return;
         }
         let id = group.tabs.remove(group.active);
+        for job in &self.local_shell_jobs { if job.session == id { job.cancel(); } }
         group.active = group.active.min(group.tabs.len().saturating_sub(1));
         group.scroll = 0;
         self.notice = format!("Tab detached · {id} remains available in sessions");
@@ -6288,7 +6934,8 @@ impl App {
         } else {
             MIN_PANE_WIDTH
         };
-        let rail_width = if self.rail_visible && area.width >= 70 {
+        let visible=if self.sidebar_auto {self.sessions.len()>1 || !self.collections.is_empty()} else {self.rail_visible};
+        let rail_width = if visible && area.width >= 70 {
             self.rail_width.clamp(
                 MIN_RAIL_WIDTH,
                 area.width.saturating_sub(min_body).max(MIN_RAIL_WIDTH),
@@ -6408,7 +7055,7 @@ impl App {
         } else if let Some(menu) = &self.operations_menu {
             (menu.lines(usize::from(pane.width)).len() + 2).clamp(7, 19) as u16
         } else if self.chip_info.is_some() {
-            self.chip_info.as_ref().map_or(5, |info| if matches!(info.kind, "memory" | "usage" | "context" | "help" | "fleet" | "fleet_review") {
+            self.chip_info.as_ref().map_or(5, |info| if matches!(info.kind, "memory" | "usage" | "context" | "help" | "sessions" | "about" | "fleet" | "fleet_review") {
                 (info.lines.len() + 2).clamp(7, 19) as u16
             } else { 5 })
         } else if self.history_modal {
@@ -6449,9 +7096,9 @@ impl App {
         // Permission mode (including the classifier-backed `auto` mode) is
         // independent of the provider running this session.
         if let Some(mode) = id.and_then(|id| self.permission_modes.get(id)) {
-            chips.push(("permission", format!("Permissions {mode}")));
+            chips.push(("permission", mode.clone()));
         } else if id.is_some_and(|id| self.permission_capabilities.get(id).copied().unwrap_or(false)) {
-            chips.push(("permission", "Permissions ?".to_owned()));
+            chips.push(("permission", "?".to_owned()));
         }
         if let Some(engine) = identity.and_then(|pair| pair.0.as_deref()) {
             chips.push(("engine", engine.to_owned()));
@@ -6467,9 +7114,11 @@ impl App {
         chips.push(("effort", effort.to_owned()));
         if let Some(status) = id.and_then(|id| self.repo_cache.get(id))
             .and_then(|(status, _)| status.as_ref()) {
-            chips.push(repo_chip(status));
+            let (kind,label)=repo_chip(status);chips.push((kind,if self.preferences.on("nerd_font") {label.replace("⎇","\u{e0a0}")} else {label}));
         }
-        chips.push(("context", format!("Ctx {}", telemetry.and_then(|value| value.context.as_deref()).unwrap_or("?"))));
+        let context=telemetry.and_then(|value|value.context_percent).map(|v|format!("{v:.0}%")).unwrap_or_else(||"?".into());
+        let absolute=if self.preferences.on("ctx_absolute") && self.size.width>=100 {telemetry.and_then(|v|v.context_tokens).map(|used|format!(" {used}/{}",telemetry.and_then(|v|v.context_limit).map(|n|n.to_string()).unwrap_or_else(||"?".into()))).unwrap_or_default()} else {String::new()};
+        chips.push(("context",format!("Ctx {context}{absolute}")));
         let memory = self.memory_cache.get(id.unwrap_or("")).and_then(|(usage, _)| *usage)
             .map(|usage| format!("{} {}%/u {}%",
                 if self.memory_repo.get(id.unwrap_or("")).copied().unwrap_or(false) { "p" } else { "f" },
@@ -6503,7 +7152,8 @@ impl App {
 
     fn activity_label(&self, id: &str) -> Option<&'static str> {
         let (running, queued) = self.session_activity.get(id).copied().unwrap_or_default();
-        if running { Some("Processing") }
+        if self.local_shell_jobs.iter().any(|job| job.session == id) { Some("Local shell") }
+        else if running { Some("Processing") }
         else if queued > 0 { Some("Queued") }
         else { None }
     }
@@ -6544,6 +7194,43 @@ impl App {
             if x >= pane.right() { break; }
         }
         None
+    }
+
+    fn focus_ring(&self) -> Vec<Focus> {
+        let layout = self.layout(self.size);
+        let pane = layout.panes.as_ref().and_then(|panes| panes.get(self.active_group)).copied().unwrap_or(layout.body);
+        let mut ring = vec![Focus::Prompt, Focus::Tabs, Focus::Transcript];
+        ring.extend(self.chip_window(self.active_group, usize::from(self.pane_regions(self.active_group, pane)[3].width))
+            .into_iter().map(|(kind, _)| Focus::Chip(kind)));
+        if layout.rail.is_some() { ring.push(Focus::Rail); }
+        ring
+    }
+
+    fn cycle_focus(&mut self, reverse: bool) {
+        let ring = self.focus_ring();
+        let current = ring.iter().position(|focus| *focus == self.focus).unwrap_or(0);
+        let next = if reverse { (current + ring.len() - 1) % ring.len() } else { (current + 1) % ring.len() };
+        self.focus = ring[next];
+    }
+
+    fn activate_chip(&mut self, kind: &'static str, group: usize) {
+        match kind {
+            "permission" => self.open_permission_picker(),
+            "engine" => self.open_engine_picker(),
+            "model" => self.open_model_picker(),
+            "effort" => self.open_effort_picker(),
+            "beliefs" => self.open_lore_picker(),
+            "repo" | "directory" => self.open_repo_picker(group),
+            "memory" => self.open_memory_menu(group),
+            "more" => {
+                let layout = self.layout(self.size);
+                let pane = layout.panes.as_ref().and_then(|panes| panes.get(group)).copied().unwrap_or(layout.body);
+                let visible = self.chip_window(group, usize::from(self.pane_regions(group, pane)[3].width));
+                let count = visible.len().saturating_sub(1).max(1);
+                self.chip_offsets[group] = (self.chip_offsets[group] + count) % self.chips(group).len();
+            }
+            kind => self.open_chip_info(kind, group),
+        }
     }
 
     fn chip_window(&self, index: usize, width: usize) -> Vec<(&'static str, String)> {
@@ -6655,7 +7342,7 @@ impl App {
 
     fn open_chip_info(&mut self, kind: &'static str, group: usize) {
         self.memory_manager = None;
-        self.operations_menu = None;
+        self.retire_operations();
         if matches!(kind, "context" | "cost") {
             self.active_group = group;
             self.open_diagnostic(if kind == "cost" { "usage" } else { "context" });
@@ -6677,14 +7364,59 @@ impl App {
         }
     }
 
+    fn apply_installation(&mut self, snapshot: crate::installation::Snapshot) {
+        let available = snapshot.update == crate::installation::Update::Available;
+        self.installation = snapshot;
+        if available && !self.update_notified {
+            self.update_notified = true;
+            self.notify_update_available("Configured main differs from this installation · /update");
+        }
+        if self.chip_info.as_ref().is_some_and(|info| info.kind == "about") { self.open_about(); }
+    }
+
+    fn open_about(&mut self) {
+        let id = self.groups[self.active_group].active_id();
+        let mut lines = vec![format!("DOXA Rust {}", env!("CARGO_PKG_VERSION"))];
+        lines.extend(self.installation.rows.iter().cloned());
+        lines.push(format!("Update · {}", self.installation.update.label()));
+        lines.push(String::new());
+        if let Some(id) = id {
+            lines.push(format!("Active session · {}", safe_label(id)));
+            if let Some((engine, model)) = self.session_identity.get(id) {
+                if let Some(engine) = engine { lines.push(format!("Engine · {engine}")); }
+                if let Some(model) = model { lines.push(format!("Model · {model}")); }
+            }
+            if let Some(account) = self.session_telemetry.get(id).and_then(|state| state.account.as_ref()) {
+                for (key, label) in [("email", "Account"), ("organization", "Organization"),
+                    ("subscriptionType", "Subscription"), ("apiProvider", "API provider")] {
+                    if let Some(text) = account[key].as_str() { lines.push(format!("{label} · {text}")); }
+                }
+            } else { lines.push("Account identity unavailable for this connected session".into()); }
+        } else { lines.push("No active session".into()); }
+        self.chip_info = Some(ChipInfo { kind: "about", label: String::new(), lines,
+            scroll: 0, owner: id.map(|id| (id.to_owned(), String::new())) });
+        if self.active_chooser_rect().is_none() {
+            self.chip_info = None;
+            self.notice = "Enlarge active pane to open about".into();
+        }
+    }
+
     fn open_help(&mut self) {
         let mut lines = vec!["Rust DOXA commands · forms shown below".to_owned(),
             "Unavailable commands stay local; unknown provider commands pass through".to_owned(),
             String::new()];
+        lines.push("Tab / Shift+Tab: focus prompt, tab headers, transcript, visible chips, sidebar".into());
+        lines.push("Focused chip: Enter opens · tab headers: ←/→ select, Enter prompt · Alt+Tab next pane".into());
+        lines.push("Alt+P or /mode: permission picker".into());
+        lines.push("Drag transcript text to select · Ctrl+C / Ctrl+Shift+C copy · Esc clears · Ctrl+V paste into prompt".into());
+        lines.push("Terminal fallback: Shift+drag, Ctrl+Shift+C / Ctrl+Shift+V; OSC52 support required for native copy".into());
         for row in COMMANDS {
             lines.push(format!("{} · {}", row.form, row.summary));
             lines.push(format!("  {}", row.support));
         }
+        for command in &self.plugin_commands { lines.push(format!("{} · {} · {} plugin passthrough", if command.usage.is_empty() { &command.name } else { &command.usage }, command.summary, command.plugin)); }
+        lines.push("Local keyboard shell: !<command> · current session directory; output is neither sent nor saved".into());
+        for (command, description) in FLEET_ACTIONS { lines.push(format!("{command} · {description}")); }
         self.chip_info = Some(ChipInfo { kind: "help", label: String::new(), lines,
             scroll: 0, owner: None });
         if self.active_chooser_rect().is_none() {
@@ -6753,7 +7485,7 @@ impl App {
 
     fn open_memory_menu(&mut self, group: usize) {
         self.memory_manager = None;
-        self.operations_menu = None;
+        self.retire_operations();
         self.open_chip_info("memory", group);
         let Some(info) = self.chip_info.as_mut() else { return; };
         info.lines = vec!["Loading LORE memory… · M manage curated entries".into()];
@@ -6795,10 +7527,9 @@ impl App {
         let visible = usize::from(menu.height.saturating_sub(3)).max(1);
         let attach_len = self.attach_picker.as_ref().map(|_| self.attach_matches().len());
         if let Some(settings) = self.settings_menu.as_mut() {
-            if (menu.y + 3..menu.y + 5).contains(&row) {
-                let index = usize::from(row - menu.y - 3);
-                if settings.selected != index { settings.selected = index; return true; }
-            }
+            if row >= menu.y + 3 { if let Some(index)=settings.visible_indices(menu.height).get(usize::from(row-menu.y-3)).copied() {
+                if settings.selected != index { settings.selected=index;return true; }
+            }}
         } else if let Some(picker) = self.branch_picker.as_mut() {
             if row < menu.y + 2 { return false; }
             let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
@@ -6887,6 +7618,24 @@ impl App {
     }
 
     fn mouse(&mut self, mouse: MouseEvent) -> bool {
+        if !self.link_interaction_blocked() && self.drag.is_none() {
+            let point=ratatui::layout::Position::new(mouse.column,mouse.row);
+            if matches!(mouse.kind,MouseEventKind::Drag(MouseButton::Left)|MouseEventKind::Up(MouseButton::Left)) {
+                let handled=self.transcript_selection.borrow_mut().drag(point);if handled{return true;}
+            }
+            match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left)=>{
+                    let interactive=self.link_at(mouse.column,mouse.row).is_some() || self.visible_tool_sections.borrow().iter().any(|(rect,_,_,_)|rect.contains(point));
+                    self.transcript_selection.borrow_mut().clear();
+                    if !interactive || mouse.modifiers.contains(KeyModifiers::SHIFT) {
+                        let owner=self.transcript_selection.borrow_mut().start(point);
+                        if let Some(owner)=owner {self.active_group=owner.pane;self.focus=Focus::Transcript;self.chip_hover=None;self.link_hover=None;return true;}
+                    }
+                }
+                _=>{}
+            }
+        }
+
         if self.fleet_review.is_some(){
             if let Some(area)=self.active_chooser_rect(){
                 if area.contains(ratatui::layout::Position::new(mouse.column,mouse.row)){
@@ -7003,8 +7752,9 @@ impl App {
             if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
                 if let Some(area) = menu.filter(|area| area.contains(
                     ratatui::layout::Position::new(mouse.column, mouse.row))) {
-                    let index = usize::from(mouse.row.saturating_sub(area.y.saturating_add(3)));
-                    if (area.y + 3..area.y + 5).contains(&mouse.row) {
+                    let offset=usize::from(mouse.row.saturating_sub(area.y.saturating_add(3)));
+                    let index=self.settings_menu.as_ref().unwrap().visible_indices(area.height).get(offset).copied();
+                    if let Some(index)=index.filter(|_|mouse.row>=area.y+3) {
                         let current = self.settings_menu.as_ref().unwrap().selected;
                         self.settings_menu.as_mut().unwrap().selected = index;
                         if current == index {
@@ -7488,21 +8238,8 @@ impl App {
             if let Some(hit) = self.chip_hit_at(mouse.column, mouse.row) {
                 self.chip_hover = None;
                 self.active_group = hit.group;
-                match hit.kind {
-                    "permission" => self.open_permission_picker(),
-                    "engine" => self.open_engine_picker(),
-                    "model" => self.open_model_picker(),
-                    "effort" => self.open_effort_picker(),
-                    "beliefs" => self.open_lore_picker(),
-                    "repo" | "directory" => self.open_repo_picker(hit.group),
-                    "memory" => self.open_memory_menu(hit.group),
-                    "more" => {
-                        let visible = self.chip_window(hit.group, usize::from(self.pane_regions(hit.group, hit.pane)[3].width));
-                        let count = visible.len().saturating_sub(1).max(1);
-                        self.chip_offsets[hit.group] = (self.chip_offsets[hit.group] + count) % self.chips(hit.group).len();
-                    }
-                    kind => self.open_chip_info(kind, hit.group),
-                }
+                self.focus = Focus::Chip(hit.kind);
+                self.activate_chip(hit.kind, hit.group);
                 return true;
             }
         }
@@ -7703,6 +8440,8 @@ impl App {
 
     pub fn draw(&self, frame: &mut Frame) {
         let area = frame.area();
+        self.transcript_selection.borrow_mut().begin_frame();
+        if self.link_interaction_blocked() || area.width<20 || area.height<5 {self.transcript_selection.borrow_mut().clear();}
         self.visible_tool_sections.borrow_mut().clear();
         self.visible_links.borrow_mut().clear();
         *self.rendered_chip_hits.borrow_mut() = Some(Vec::new());
@@ -7757,6 +8496,8 @@ impl App {
             self.draw_request(frame, area, false);
         }
         self.draw_chip_tooltip(frame);
+        self.transcript_selection.borrow_mut().finish_paint(frame.buffer_mut());
+        if self.preferences.value("background")=="transparent" {for cell in &mut frame.buffer_mut().content {if matches!(cell.bg,theme::BASE|theme::RAISED|theme::RAIL) {cell.bg=Color::Reset;}}}
     }
 
     fn draw_chip_tooltip(&self, frame: &mut Frame) {
@@ -7824,7 +8565,7 @@ impl App {
                     " Blank model uses configured engine default."
                 } else { " Left/Right choose vendor model and effort." }));
                 lines.push(Line::from(if vendor_models(form.engine).is_empty() {
-                    "".to_owned()
+                    format!(" Effort preference: {} · new session only", safe_label(form.effort.as_deref().unwrap_or("provider default")))
                 } else { format!(" {}", safe_label(&form.catalog_note)) }));
             }
             lines.push(Line::styled(format!(" {} Model: {}", if form.field == 0 { '›' } else { ' ' },
@@ -7877,7 +8618,7 @@ impl App {
             lines.push(Line::from(format!(" {}", picker.note)));
             lines.push(Line::from(""));
             if picker.catalog_pending {
-                lines.push(Line::from(" Catalog probe in progress · press R to retry"));
+                lines.push(Line::from(" Catalog probe in progress · refreshes automatically"));
             } else if !picker.loading && picker.models.is_empty() {
                 lines.push(Line::from(" No verified models available for this session"));
             }
@@ -7893,35 +8634,34 @@ impl App {
             .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)), modal);
     }
 
-    fn draw_settings_menu(&self, frame: &mut Frame, area: Rect) {
-        let Some(menu) = &self.settings_menu else { return; };
-        let mut lines = vec![
-            Line::from(" env > config.toml > default"),
-            Line::from(""),
-        ];
-        for (index, key) in ["linger_secs", "worktree_per_session"].iter().enumerate() {
-            let (value, shadowed) = &menu.rows[index];
-            let shown = if index == 0 { menu.linger_draft.as_deref().unwrap_or(value) } else { value };
-            let suffix = if *shadowed {
-                if index == 0 { " · DOXA_LINGER_SECS overrides config" }
-                else { " · DOXA_WORKTREE overrides config" }
-            } else { "" };
-            lines.push(Line::styled(format!(" {} {}: {}{}", if menu.selected == index { '›' } else { ' ' },
-                key, safe_label(shown), suffix),
-                Style::default().fg(if menu.selected == index { theme::TEXT } else { theme::SECONDARY })
-                    .bg(if menu.selected == index { theme::HIGHLIGHT } else { theme::RAISED })));
+    fn draw_settings_menu(&self,frame:&mut Frame,area:Rect) {
+        let Some(menu)=&self.settings_menu else {return;};
+        let mut lines=vec![Line::from(" env > config.toml > default"),Line::styled(format!(" {} · shift+←/→ categories · {} unsaved",crate::settings::CATEGORIES[menu.category],menu.edits.len()+usize::from(menu.draft.is_some())),Style::default().fg(theme::ACCENT))];
+        for index in menu.visible_indices(area.height) {
+            let row=&menu.rows[index];
+            let draft=menu.draft.as_ref().filter(|(k,_)|k==row.setting.key).map(|(_,v)|v.as_str());
+            let edited=menu.edits.get(row.setting.key);
+            let shown=draft.or_else(||edited.and_then(|v|v.as_deref())).unwrap_or(if edited==Some(&None) {"(default after save)"} else if row.value.is_empty() {"(unset)"} else {&row.value});
+            lines.push(Line::styled(format!(" {} {}: {} ({}){}",if menu.selected==index {'›'} else {' '},row.setting.label,safe_label(shown),row.source,if row.shadowed {" · set by env"} else if row.setting.read_only {" · read-only"} else if edited.is_some() {" *"} else {""}),Style::default().fg(if row.shadowed {theme::MUTED} else if menu.selected==index {theme::TEXT} else {theme::SECONDARY}).bg(if menu.selected==index {theme::HIGHLIGHT} else {theme::RAISED})));
         }
-        lines.push(Line::from(""));
-        lines.push(Line::from(if menu.linger_draft.is_some() {
-            " Enter save seconds · Esc cancel edit"
-        } else {
-            " Enter edit/toggle · U unset · Esc close"
-        }));
-        lines.push(Line::from(" Changes apply to new sessions; running sessions keep launch settings."));
-        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false })
-            .block(Block::default().title(" Native settings ").borders(Borders::ALL)
-                .border_style(Style::default().fg(theme::ACCENT)))
-            .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)), area);
+        if let Some(row)=menu.rows.get(menu.selected).filter(|r|r.setting.category==crate::settings::CATEGORIES[menu.category]) {
+            lines.push(Line::from(""));lines.push(Line::from(format!(" {}",row.setting.help)));
+            if !row.setting.choices.is_empty() {lines.push(Line::from(format!(" Choices: {}",row.setting.choices.iter().filter(|s|!s.is_empty()).copied().collect::<Vec<_>>().join(" | "))));}
+            if ["derive_secs","consult_floor","graph_context"].contains(&row.setting.key) {lines.push(Line::from(" Claude session memory control; Codex/vendor use their engine's snapshot policy."));}
+            if row.setting.key=="session_budget_usd" && menu.engine!="claude" {lines.push(Line::from(" This engine reports no session dollar cost; ceiling cannot be enforced."));}
+            if !row.setting.note.is_empty() {lines.push(Line::from(format!(" {}",row.setting.note)));}
+        }
+        if crate::settings::CATEGORIES[menu.category]=="Paths" {if let Ok(path)=crate::settings::config_path() {lines.push(Line::from(format!(" config file: {} (resolved; 0600)",path.display())));}}
+        if crate::settings::CATEGORIES[menu.category]=="About" {
+            lines.push(Line::from(format!(" DOXA Rust {} · /about build · /update refresh",env!("CARGO_PKG_VERSION"))));
+            if let Some(telemetry)=self.groups[self.active_group].active_id().and_then(|id|self.session_telemetry.get(id)) {
+                if let Some(tier)=&telemetry.subscription_type {lines.push(Line::from(format!(" plan: {} (reported by session)",safe_label(tier))));}
+            }
+        }
+        // Keep the action hint visible even when a setting has a long caveat.
+        lines.truncate(usize::from(area.height.saturating_sub(3)));
+        lines.push(Line::from(if menu.draft.is_some() {" Enter/Ctrl+S save · Esc cancel edit"} else {" Enter edit/toggle · U unset · Ctrl+S save · Esc discard/close"}));
+        frame.render_widget(Paragraph::new(lines).block(Block::default().title(" Settings ").borders(Borders::ALL).border_style(Style::default().fg(theme::ACCENT))).style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)),area);
     }
 
     fn draw_chip_info(&self, frame: &mut Frame, area: Rect) {
@@ -7929,7 +8669,14 @@ impl App {
             manager.draw(frame, area); return;
         }
         if let Some(menu) = &self.operations_menu {
-            frame.render_widget(Paragraph::new(menu.lines(usize::from(area.width.saturating_sub(2))).join("\n"))
+            let width = usize::from(area.width.saturating_sub(2));
+            let lines = menu.lines(width).into_iter().map(|text| {
+                if text.starts_with('›') {
+                    let padding = " ".repeat(width.saturating_sub(text.width()));
+                    Line::from(format!("{text}{padding}")).style(Style::default().fg(theme::TEXT).bg(theme::HIGHLIGHT))
+                } else { Line::from(text) }
+            }).collect::<Vec<_>>();
+            frame.render_widget(Paragraph::new(lines)
                 .block(Block::default().title(" DOXA operations ").borders(Borders::ALL))
                 .style(Style::default().fg(theme::TEXT).bg(theme::RAISED)), area);
             return;
@@ -7948,7 +8695,7 @@ impl App {
                 .block(Block::default().title(" Fleet · PgUp/PgDn scroll ").borders(Borders::ALL))
                 .style(Style::default().fg(theme::TEXT).bg(theme::RAISED)),area);return;
         }
-        if matches!(info.kind, "memory" | "usage" | "context" | "help") {
+        if matches!(info.kind, "memory" | "usage" | "context" | "help" | "sessions" | "about") {
             let current = self.groups[self.active_group].active_id().and_then(|id|
                 self.session_cwds.get(id).and_then(|cwd| cwd.to_str()).map(|cwd| (id, cwd)));
             let owner_matches = info.owner.as_ref().is_some_and(|(id, cwd)| {
@@ -8198,13 +8945,17 @@ impl App {
             }
             return;
         }
+        if let Some((id,graph))=self.belief_graph_lines.as_ref().filter(|(id,_)|picker.rows.get(picker.selected).is_some_and(|r|r.id==*id)) {
+            let lines=std::iter::once(Line::from(format!(" Belief {id} · g/Esc back"))).chain(graph.iter().skip(self.belief_graph_scroll).take(usize::from(area.height.saturating_sub(3))).map(|line|Line::from(safe_label(line)))).collect::<Vec<_>>();
+            frame.render_widget(Paragraph::new(lines).wrap(Wrap{trim:false}).block(Block::default().title(" LORE graph neighbourhood ").borders(Borders::ALL).border_style(Style::default().fg(theme::ACCENT))).style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)),area);return;
+        }
         let height = area.height;
         let modal = area;
         let compact = height < 10;
         let mut lines = vec![Line::from(format!(" Search: {}", safe_label(&picker.query)))];
         if !compact {
             lines.push(Line::from(format!(" {}", picker.status)));
-            lines.push(Line::from(" Shift+A accept · Shift+D reject · Accept confirms; Reject retracts with history"));
+            lines.push(Line::from(" Shift+A accept · Shift+D reject · g graph · → evidence"));
             lines.push(Line::from(""));
         }
         if let Some((id, evidence)) = &picker.evidence {
@@ -8524,6 +9275,8 @@ impl App {
                 Line::styled(name.to_owned(), style)
             })
             .collect();
+        let clock_width=if index==self.active_group && !self.clock_text.is_empty() { (self.clock_text.width()+2).min(usize::from(inner[0].width.saturating_sub(15))) as u16 } else {0};
+        let tabs_area=Rect::new(inner[0].x,inner[0].y,inner[0].width.saturating_sub(clock_width),inner[0].height);
         let tabs = Tabs::new(if titles.is_empty() {
             vec![Line::from("Empty")]
         } else {
@@ -8538,7 +9291,9 @@ impl App {
                 .title(format!(
                     " Pane {}{} ",
                     index + 1,
-                    if self.active_group == index {
+                    if self.active_group == index && self.focus == Focus::Tabs {
+                        " ● tabs"
+                    } else if self.active_group == index {
                         " ●"
                     } else {
                         ""
@@ -8547,9 +9302,10 @@ impl App {
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(if group.active_id().is_some_and(|id| self.waiting_for_input(id)) && self.blink_on {
                     theme::ERROR
-                } else { theme::BORDER })),
+                } else if self.active_group == index && self.focus == Focus::Tabs { theme::ACCENT } else { theme::BORDER })),
         );
-        frame.render_widget(tabs.style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)), inner[0]);
+        frame.render_widget(tabs.style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)), tabs_area);
+        if clock_width>0 {frame.render_widget(Paragraph::new(self.clock_text.as_str()).style(Style::default().fg(theme::MUTED).bg(theme::RAISED)),Rect::new(inner[0].right()-clock_width,inner[0].y+1,clock_width,1));}
         let content = session
             .map(|s| s.transcript.as_str())
             .unwrap_or("No session open. Select one in the rail and press Enter.");
@@ -8617,6 +9373,10 @@ impl App {
                     } else { theme::BORDER }))),
             inner[1],
         );
+        if !self.link_interaction_blocked() {
+            self.transcript_selection.borrow_mut().register(crate::selection::Owner {pane:index,session:id.to_owned()},
+                Rect::new(inner[1].x.saturating_add(1),inner[1].y,inner[1].width.saturating_sub(2),inner[1].height));
+        }
         if active && chooser_height > 0 {
             if self.active_request_index().is_some_and(|index| self.input_requests[index].kind == "ask_user") {
                 self.draw_request(frame, inner[2], true);
@@ -8659,7 +9419,8 @@ impl App {
             chip_x = end.saturating_add(1);
             chip_spans.push(Span::styled(text,
                 Style::default().fg(if matches!(kind, "engine" | "more") { theme::ACCENT } else { theme::TEXT })
-                    .bg(theme::HIGHLIGHT)));
+                    .bg(theme::HIGHLIGHT)
+                    .add_modifier(if active && self.focus == Focus::Chip(kind) { Modifier::BOLD | Modifier::UNDERLINED | Modifier::REVERSED } else { Modifier::empty() })));
         }
         frame.render_widget(Paragraph::new(Line::from(chip_spans))
             .style(Style::default().bg(theme::RAISED)), inner[3]);
@@ -8773,6 +9534,18 @@ fn transcript_window(
     (window, top)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KeyboardProtocol { Legacy, Kitty, Unknown }
+fn selected_keyboard_protocol(override_value: Option<&str>) -> KeyboardProtocol {
+    // Startup never asks the terminal to respond before its first visible frame.
+    // Legacy is a selected compatibility mode, not measured lack of support.
+    match override_value {
+        Some("kitty") => KeyboardProtocol::Kitty,
+        Some("unknown") => KeyboardProtocol::Unknown,
+        _ => KeyboardProtocol::Legacy,
+    }
+}
+
 /// Owns terminal modes so every return path, including I/O errors, restores the screen.
 struct TerminalGuard {
     out: Stdout,
@@ -8780,6 +9553,8 @@ struct TerminalGuard {
     alternate: bool,
     mouse: bool,
     paste: bool,
+    keyboard: bool,
+    keyboard_protocol: KeyboardProtocol,
 }
 impl TerminalGuard {
     fn enter() -> io::Result<Self> {
@@ -8789,12 +9564,15 @@ impl TerminalGuard {
             alternate: false,
             mouse: false,
             paste: false,
+            keyboard: false,keyboard_protocol:KeyboardProtocol::Legacy,
         };
         terminal::enable_raw_mode()?;
         guard.raw = true;
+        guard.keyboard_protocol=selected_keyboard_protocol(std::env::var("DOXA_KEYBOARD_PROTOCOL").ok().as_deref());
+        if guard.keyboard_protocol==KeyboardProtocol::Kitty {execute!(guard.out,crossterm::event::PushKeyboardEnhancementFlags(crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES))?;guard.keyboard=true;}
         execute!(guard.out, EnterAlternateScreen)?;
         guard.alternate = true;
-        execute!(guard.out, EnableMouseCapture)?;
+        execute!(guard.out, EnableMouseCapture,EnableFocusChange)?;
         guard.mouse = true;
         execute!(guard.out, EnableBracketedPaste)?;
         guard.paste = true;
@@ -8809,11 +9587,12 @@ impl Drop for TerminalGuard {
             let _ = execute!(self.out, DisableBracketedPaste);
         }
         if self.mouse {
-            let _ = execute!(self.out, DisableMouseCapture);
+            let _ = execute!(self.out, DisableMouseCapture,DisableFocusChange);
         }
         if self.alternate {
             let _ = execute!(self.out, LeaveAlternateScreen);
         }
+        if self.keyboard {let _=execute!(self.out,crossterm::event::PopKeyboardEnhancementFlags);}
         if self.raw {
             let _ = terminal::disable_raw_mode();
         }
@@ -8906,14 +9685,31 @@ fn run_loop(
             .map(|s| Rect::new(0, 0, s.width, s.height))?,
         ..Default::default()
     };
+    app.persist_preferences=true;
+    app.plugin_refresh_dirty=true;
+    app.sidebar_auto=app.preferences.value("sidebar").is_empty();
+    app.rail_width=app.preferences.sidebar_width();
+    app.rail_visible=match app.preferences.value("sidebar") {""=>app.sessions.len()>1 || !app.collections.is_empty(),"0"|"false"|"off"|"no"=>false,_=>true};
     if let Some((store, live_ids, _)) = &state {
         store.restore(&mut app, live_ids);
+    }
+    app.refresh_clock();
+    if app.preferences.on("key_notice") && guard.keyboard_protocol==KeyboardProtocol::Legacy {
+        let keys="Legacy key mode: Ctrl+, → /settings · Shift+Enter → Ctrl+J · Ctrl+Enter → /msg";
+        if app.notice.is_empty(){app.notice=keys.into();}else{app.notice.push_str(" · ");app.notice.push_str(keys);}
     }
     let mut saved_layout = crate::ui_state::LayoutSignature::capture(&app);
     terminal.draw(|frame| app.draw(frame))?;
     let mut pointer_on_link = false;
+    let mut first_run_pending=crate::first_run::needed();
+    let mut installation_worker = crate::installation::Worker::start().ok();
+    if installation_worker.is_none() { app.installation.update = crate::installation::Update::Unknown; }
     while !app.should_quit {
         let mut changed = false;
+        if first_run_pending && app.offer_first_run() {first_run_pending=false;changed=true;}
+        if let Some(snapshot) = installation_worker.as_ref().and_then(crate::installation::Worker::poll) {
+            app.apply_installation(snapshot); installation_worker = None; changed = true;
+        }
         // Bound work per tick so a busy daemon cannot starve keyboard input.
         for _ in 0..64 {
             match receiver.try_recv() {
@@ -8946,17 +9742,30 @@ fn run_loop(
                 changed = true;
             }
         }
+        changed |= app.poll_sessions_roster();
+        changed |= app.poll_sessions_stop();
         changed |= app.poll_fleet();
         changed |= app.poll_diff();
+        changed |= app.poll_auto_diff();
         changed |= app.poll_history();
         changed |= app.poll_resume();
         changed |= app.poll_lore();
+        changed |= app.poll_belief_graph();
         changed |= app.poll_memory();
         changed |= app.poll_repo();
         changed |= app.poll_memory_menu();
+        changed |= app.poll_shell();
+        changed |= app.poll_clipboard();
+        if let Some(bytes)=app.pending_clipboard_copy.take(){
+            let mut out=io::stdout();
+            app.notice=if out.write_all(&bytes).and_then(|_|out.flush()).is_err(){"Clipboard copy failed · use terminal selection and Ctrl+Shift+C"}else{"Selection sent to terminal clipboard · OSC52 support required"}.into();changed=true;
+        }
+        changed |= app.poll_plugin_commands();
         changed |= app.poll_vendor_catalog();
+        changed |= app.poll_model_catalog(Instant::now());
         changed |= app.tick_blink(Instant::now());
         changed |= app.tick_spinner(Instant::now());
+        changed |= app.tick_clock(Instant::now());
         if prompt_sender.is_none() {
             if let Some(id) = app.pending_peer_refresh.take() {
                 changed |= app.peer_map.roster(&id, &serde_json::json!({"ok":false}));
@@ -9021,6 +9830,10 @@ fn run_loop(
         // Retry an unsaved layout on later ticks, including ticks with no new
         // UI event (for example when the live roster becomes complete).
         if let Some((store, _, complete)) = &mut state {
+            if let Err(error) = store.forget_sessions(&app.killed_this_run) {
+                app.notice = format!("sessions: stopped; tabset veto save failed · {}", safe_label(&error.to_string()));
+                changed = true;
+            }
             changed |= save_layout_if_changed(&mut app, store, complete, &mut saved_layout);
         } else {
             saved_layout = crate::ui_state::LayoutSignature::capture(&app);
@@ -9033,12 +9846,23 @@ fn run_loop(
                 changed = true;
             }
         }
+        changed |= app.restart_after_install(&mut state);
         if changed {
             terminal.draw(|frame| app.draw(frame))?;
         }
     }
     drop(terminal);
     drop(guard);
+    if app.restart_after_update {
+        if let Some(executable) = app.restart_executable.take() {
+            // Capture before update replaces the binary. Owned idle daemons
+            // have finalized; startup restores only verified provider state.
+            app.window_mesh = None;
+            app.local_shell_jobs.clear();
+            use std::os::unix::process::CommandExt;
+            return Err(std::process::Command::new(executable).exec());
+        }
+    }
     Ok(())
 }
 
@@ -9150,16 +9974,15 @@ fn save_layout_if_changed(
 ) -> bool {
     let layout = crate::ui_state::LayoutSignature::capture(app);
     if layout == *saved_layout {
-        if !app.has_offline_open_tabs() && app.notice == "Layout save skipped · archived tabs are read-only" {
+        if !app.has_unverified_archived_tabs() && app.notice.starts_with("Layout save skipped ·") {
             app.notice.clear();
             return true;
         }
         return false;
     }
-    if app.groups.iter().any(|group| group.tabs.iter().any(|id| app.offline_ids.contains(id))) {
-        if app.notice != "Layout save skipped · archived tabs are read-only" {
-            app.notice = "Layout save skipped · archived tabs are read-only".into();
-            return true;
+    if app.has_unverified_archived_tabs() {
+        if app.notice != "Layout save skipped · unverified archived tabs" {
+            app.notice = "Layout save skipped · unverified archived tabs".into();return true;
         }
         return false;
     }
@@ -9287,6 +10110,7 @@ fn dispatch_model_controls(app: &mut App, sender: &SyncSender<crate::bridge::Wor
                 break;
             }
             Err(TrySendError::Disconnected(_)) => {
+                app.pending_effort_verifications.clear();
                 app.notice = "Daemon unavailable for effort change".into();
                 return true;
             }
@@ -9360,16 +10184,84 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn reserved_startup_slot_does_not_raise_manual_tab_capacity() {
+        let mut app=App::default();app.groups[0].tabs=(0..panes::MAX_TABS).map(|index|format!("saved-{index}")).collect();
+        app.open_engine_picker();assert!(!app.engine_picker);
+        app.attach_selected("new");assert!(app.pending_attaches.is_empty());
+        app.engine_selected=1;app.select_new_engine();assert!(app.new_session.is_none());
+        assert!(app.notice.contains("256"));assert!(app.pending_launches.is_empty());
+    }
+
+    #[test]
+    fn empty_startup_window_keeps_setup_and_engine_controls_available() {
+        let mut app=App {size:Rect::new(0,0,80,24),..Default::default()};
+        assert!(app.sessions.is_empty());
+        app.input="/engine".into();app.input_cursor=app.input.len();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE)));assert!(app.engine_picker);
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Esc,KeyModifiers::NONE)));
+        app.input="/setup".into();app.input_cursor=app.input.len();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE)));
+        assert!(app.operations_menu.is_some());assert!(app.pending_prompts.is_empty());
+        assert!(app.pending_launches.is_empty());assert!(!app.launching);
+    }
+
+    #[test]
+    fn settings_category_switch_keeps_unsaved_edits_and_escape_discards_them() {
+        let mut app=App::default();app.input="keep prompt".into();
+        let rows=crate::settings::SETTINGS.iter().map(|setting|crate::settings::Row {setting,value:setting.default.into(),stored:setting.default.into(),source:"default".into(),shadowed:false}).collect::<Vec<_>>();
+        let selected=rows.iter().position(|r|r.setting.key=="linger_secs").unwrap();
+        app.settings_menu=Some(SettingsMenu{rows,selected,category:0,draft:None,edits:HashMap::new(),engine:"claude".into()});
+        app.settings_menu_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
+        app.settings_menu_key(KeyEvent::new(KeyCode::Char('9'),KeyModifiers::NONE));
+        app.settings_menu_key(KeyEvent::new(KeyCode::Right,KeyModifiers::SHIFT));
+        let menu=app.settings_menu.as_ref().unwrap();assert_eq!(menu.category,1);assert_eq!(menu.edits["linger_secs"].as_deref(),Some("1209"));assert!(menu.draft.is_none());
+        app.settings_menu_key(KeyEvent::new(KeyCode::Left,KeyModifiers::SHIFT));assert_eq!(app.settings_menu.as_ref().unwrap().edits.len(),1);
+        app.settings_menu_key(KeyEvent::new(KeyCode::Esc,KeyModifiers::NONE));assert!(app.settings_menu.is_none());assert_eq!(app.input,"keep prompt");
+    }
+    #[test]
+    fn frontend_preferences_change_actual_context_chips_and_background() {
+        let mut app=App::default();app.size=Rect::new(0,0,140,30);app.rail_visible=false;
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"s","cwd":"/repo","engine":"claude","model":"model","ctx_percentage":25,"ctx_tokens":250,"ctx_max_tokens":1000}));
+        assert_eq!(app.chips(0).iter().find(|(k,_)|*k=="context").unwrap().1,"Ctx 25%");
+        app.preferences.set_test("ctx_absolute","1");assert_eq!(app.chips(0).iter().find(|(k,_)|*k=="context").unwrap().1,"Ctx 25% 250/1000");
+        app.size.width=90;assert_eq!(app.chips(0).iter().find(|(k,_)|*k=="context").unwrap().1,"Ctx 25%");
+        app.preferences.set_test("background","transparent");let mut terminal=Terminal::new(ratatui::backend::TestBackend::new(90,30)).unwrap();terminal.draw(|f|app.draw(f)).unwrap();assert_eq!(terminal.backend().buffer().cell((1,1)).unwrap().bg,Color::Reset);
+    }
+    #[test]
+    fn graph_reply_checks_selected_identity_and_ascii_expansion_keeps_prompt() {
+        let mut app=App::default();app.size=Rect::new(0,0,140,32);app.show_belief_browser_fixture(0,&[(1,"user","first"),(2,"user","second")]);app.input="private draft".into();
+        let(tx,rx)=mpsc::sync_channel(1);app.belief_graph_pending=Some((1,String::new(),false,rx));app.lore_picker.as_mut().unwrap().selected=1;
+        tx.send(Ok(doxa_lore::BeliefGraph{id:1,lines:vec!["stale relation".into()],html:None,note:"old".into()})).unwrap();assert!(!app.poll_belief_graph());assert!(app.belief_graph_lines.is_none());assert!(app.pending_open_urls.is_empty());
+        let(tx,rx)=mpsc::sync_channel(1);app.belief_graph_pending=Some((2,String::new(),false,rx));
+        tx.send(Ok(doxa_lore::BeliefGraph{id:2,lines:vec!["--depends_on--> [1] first".into()],html:None,note:"scoped".into()})).unwrap();assert!(app.poll_belief_graph());assert!(painted_at(&app,140,32).contains("depends_on"));
+        app.lore_picker_key(KeyEvent::new(KeyCode::Esc,KeyModifiers::NONE));assert!(app.belief_graph_lines.is_none());assert_eq!(app.input,"private draft");
+    }
+    #[test]
+    fn auto_diff_has_no_idle_probe_and_opens_once_without_moving_focus() {
+        let mut app=App::default();app.size=Rect::new(0,0,160,40);app.rail_visible=false;app.preferences.set_test("auto_diff","1");
+        app.apply_update(DaemonUpdate::Upsert(Session{id:"s".into(),title:"session".into(),collection:String::new(),transcript:String::new(),status:"Ready".into()}));
+        let cwd=PathBuf::from("/owned/repo");app.session_cwds.insert("s".into(),cwd.clone());assert!(!app.poll_auto_diff());assert!(app.auto_diff_pending.is_none());
+        app.auto_diff_baseline.insert("s".into(),"before".into());let(tx,rx)=mpsc::sync_channel(1);app.auto_diff_pending=Some(("s".into(),cwd,rx));tx.send(("after".into(),true)).unwrap();
+        let group=app.active_group;let focus=app.focus;assert!(app.poll_auto_diff());assert!(app.diff_pane);assert_eq!(app.active_group,group);assert_eq!(app.focus,focus);assert!(app.auto_diff_seen.contains("s"));
+        app.diff_pane=false;app.request_auto_diff("s");assert!(app.auto_diff_requests.is_empty());
+    }
+    fn settings_test_rows(linger:&str,shadowed:bool)->Vec<crate::settings::Row> {
+        ["linger_secs","worktree_per_session"].into_iter().map(|key|crate::settings::Row {
+            setting:crate::settings::find(key).unwrap(), value:if key=="linger_secs" {linger.into()} else {"on".into()},
+            stored:if key=="linger_secs" {linger.into()} else {"1".into()},source:if shadowed && key=="linger_secs" {"environment".into()} else {"default".into()},shadowed:shadowed && key=="linger_secs"
+        }).collect()
+    }
+    #[test]
     fn settings_menu_protects_env_shadowed_rows_and_keeps_prompt() {
         let mut app = App::default();
         app.input = "draft prompt".into();
         app.settings_menu = Some(SettingsMenu {
-            rows: [("90 (environment)".into(), true), ("on (default)".into(), false)],
+            rows: settings_test_rows("90",true),
             selected: 0,
-            linger_draft: None,
+            draft: None, category: 0, edits: HashMap::new(), engine: "claude".into(),
         });
         app.settings_menu_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(app.settings_menu.as_ref().unwrap().linger_draft.is_none());
+        assert!(app.settings_menu.as_ref().unwrap().draft.is_none());
         assert!(app.notice.contains("Environment override"));
         app.settings_menu_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE));
         assert!(app.settings_menu.is_some());
@@ -9382,16 +10274,16 @@ mod tests {
     fn settings_linger_editor_cancels_without_writing() {
         let mut app = App::default();
         app.settings_menu = Some(SettingsMenu {
-            rows: [("120 (default)".into(), false), ("on (default)".into(), false)],
+            rows: settings_test_rows("120",false),
             selected: 0,
-            linger_draft: None,
+            draft: None, category: 0, edits: HashMap::new(), engine: "claude".into(),
         });
         app.settings_menu_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(app.settings_menu.as_ref().unwrap().linger_draft.as_deref(), Some("120"));
+        assert_eq!(app.settings_menu.as_ref().unwrap().draft.as_ref().map(|(_,v)|v.as_str()), Some("120"));
         app.settings_menu_key(KeyEvent::new(KeyCode::Char('9'), KeyModifiers::NONE));
         app.settings_menu_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        assert!(app.settings_menu.as_ref().unwrap().linger_draft.is_none());
-        assert_eq!(app.settings_menu.as_ref().unwrap().rows[0].0, "120 (default)");
+        assert!(app.settings_menu.as_ref().unwrap().draft.is_none());
+        assert_eq!(app.settings_menu.as_ref().unwrap().rows[0].value, "120");
     }
 
     #[cfg(unix)]
@@ -9615,7 +10507,7 @@ for line in sys.stdin:
         app.groups[0].tabs = vec!["claude-1".into()];
 
         let chips = app.chips(0);
-        assert_eq!(chips[0], ("permission", "Permissions auto".into()));
+        assert_eq!(chips[0], ("permission", "auto".into()));
         assert_eq!(chips[1], ("engine", "claude".into()));
         assert_eq!(chips[2], ("model", "sonnet".into()));
         assert_eq!(chips[3], ("effort", "?".into()));
@@ -9732,7 +10624,7 @@ for line in sys.stdin:
         let visible = app.chip_window(0, usize::from(pane.width));
         assert_eq!(visible.iter().take(4).map(|(kind, _)| *kind).collect::<Vec<_>>(),
             vec!["permission", "engine", "model", "effort"]);
-        assert_eq!(visible[0].1, "Permissions default");
+        assert_eq!(visible[0].1, "default");
         assert_eq!(visible[1].1, "claude");
         assert_eq!(visible[2].1, "claude-sonnet-4");
         assert_eq!(visible[3].1, "?");
@@ -9841,11 +10733,64 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn live_claude_billing_event_updates_only_its_chip_and_keeps_context() {
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"s","engine":"claude",
+            "ctx_percentage":42,"billing":{"mode":"subscription","type":"Max"}}));
+        assert!(app.apply_daemon_frame(&json!({"type":"event","session_id":"s",
+            "event":{"type":"billing","data":{"mode":"subscription","type":"Max",
+                "quota":"5h 35% · week 21%"}}})));
+        assert!(app.chips(0).iter().any(|(kind,label)|*kind=="cost" && label=="Max · 5h 35% · week 21%"));
+        assert_eq!(app.session_telemetry["s"].context.as_deref(),Some("42%"));
+        assert!(!app.apply_daemon_frame(&json!({"type":"event","session_id":"unknown",
+            "event":{"type":"billing","data":{"mode":"subscription","quota":"5h 99%"}}})));
+        assert!(!app.session_telemetry.contains_key("unknown"));
+    }
+
+    #[test]
+    fn subscription_chip_only_shows_reported_plan_and_quota() {
+        let mut telemetry = SessionTelemetry::default();
+        telemetry.update_status(&json!({"billing":{"mode":"subscription","type":"Max"}}));
+        assert_eq!(telemetry.billing_label(Some("claude")).as_deref(), Some("Max"));
+        telemetry.update_status(&json!({"billing":{"mode":"subscription","quota":"5h 42% · week 25%"}}));
+        assert_eq!(telemetry.billing_label(Some("claude")).as_deref(), Some("5h 42% · week 25%"));
+        telemetry.update_status(&json!({"billing":{"mode":"subscription"}}));
+        assert!(telemetry.billing_label(Some("claude")).is_none());
+    }
+
+    #[test]
+    fn model_picker_refreshes_pending_catalog_and_preserves_selection() {
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"s",
+            "engine":"claude", "model":"second", "can_set_model":true}));
+        app.open_model_picker();
+        app.pending_model_queries.clear();
+        app.apply_daemon_frame(&json!({"type":"models_reply", "session_id":"s",
+            "ok":true, "loading":true, "models":[]}));
+        let due = app.model_refresh_after.unwrap();
+        assert!(!app.poll_model_catalog(due - Duration::from_millis(1)));
+        assert!(app.poll_model_catalog(due));
+        assert!(!app.poll_model_catalog(due + Duration::from_secs(1)));
+        assert_eq!(app.pending_model_queries, vec!["s"]);
+        app.pending_model_queries.clear();
+        app.apply_daemon_frame(&json!({"type":"models_reply", "session_id":"s",
+            "ok":true, "models":["first", "second"]}));
+        assert_eq!(app.model_picker.as_ref().unwrap().selected, 1);
+        let due = app.model_refresh_after.unwrap();
+        assert!(app.poll_model_catalog(due));
+        app.apply_daemon_frame(&json!({"type":"models_reply", "session_id":"s",
+            "ok":true, "models":["second", "first"]}));
+        assert_eq!(app.model_picker.as_ref().unwrap().selected, 0);
+        app.model_picker = None;
+        assert!(!app.poll_model_catalog(due + Duration::from_secs(60)));
+        assert!(app.model_refresh_after.is_none());
+    }
+
+    #[test]
     fn engine_picker_labels_new_session_scope() {
         assert!(!ENGINE_CHOICES.contains(&"fixture"));
         let mut app = App::default();
         app.open_engine_picker();
-        app.handle(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert!(!app.engine_picker);
         assert_eq!(app.new_session.as_ref().unwrap().engine, launch::Engine::Claude);
@@ -9869,6 +10814,10 @@ for line in sys.stdin:
         app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
             column: form.x + 2, row: first, modifiers: KeyModifiers::NONE }));
         assert_eq!(app.new_session.as_ref().unwrap().field, 0);
+        // Replace the displayed configured default deliberately.
+        while !app.new_session.as_ref().unwrap().model.is_empty() {
+            app.handle(Event::Key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)));
+        }
         for c in "sonnet".chars() {
             app.handle(Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)));
         }
@@ -9889,7 +10838,6 @@ for line in sys.stdin:
         let mut app = App::default();
         app.handle(Event::Resize(100, 28));
         app.open_engine_picker();
-        app.handle(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
         app.handle(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert_eq!(app.new_session.as_ref().unwrap().model, "deepseek-flash");
@@ -10693,8 +11641,8 @@ for line in sys.stdin:
             column: menu.x + 2, row: menu.y + 3, modifiers: KeyModifiers::NONE }));
         assert_eq!(app.branch_picker.as_ref().unwrap().selected, 1);
         app.branch_picker = None;
-        app.settings_menu = Some(SettingsMenu { rows: [("120".into(), false), ("false".into(), false)],
-            selected: 0, linger_draft: None });
+        app.settings_menu = Some(SettingsMenu { rows: settings_test_rows("120",false),
+            selected: 0, draft: None, category: 0, edits: HashMap::new(), engine: "claude".into() });
         let menu = app.active_chooser_rect().unwrap();
         assert!(app.mouse(MouseEvent { kind: MouseEventKind::Moved,
             column: menu.x + 2, row: menu.y + 4, modifiers: KeyModifiers::NONE }));
@@ -11114,6 +12062,94 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn successful_update_never_stops_busy_or_unsaved_sessions_to_restart() {
+        let mut app = App::default(); app.apply_daemon_frame(&json!({"type":"hello", "session_id":"restart-session"}));
+        app.session_activity.insert("restart-session".into(), (true, 0));
+        app.restart_waiting = true; let mut state = None;
+        assert!(app.restart_after_install(&mut state)); assert!(app.restart_job.is_none()); assert!(!app.should_quit);
+        assert!(app.notice.contains("busy"));
+        app.session_activity.insert("restart-session".into(), (false, 0)); app.restart_waiting = true;
+        assert!(app.restart_after_install(&mut state)); assert!(app.notice.contains("durable"));
+        assert!(app.restart_job.is_none()); assert!(!app.restart_after_update);
+    }
+
+    #[test]
+    fn adopted_plugin_commands_share_completion_help_and_palette_without_execution() {
+        let mut app = App::default(); app.handle(Event::Resize(100, 30));
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"plugin-session", "engine":"claude"}));
+        app.plugin_commands = vec![crate::operations::PluginCommand { name: "/example:check".into(), summary: "Inspect changes".into(), usage: "/example:check [path]".into(), plugin: "example".into() }];
+        app.input = "/example".into(); assert_eq!(app.slash_suggestions(), vec![("/example:check", "Inspect changes")]);
+        app.complete_slash(); assert_eq!(app.input, "/example:check"); assert!(app.pending_prompts.is_empty());
+        app.open_help(); assert!(app.chip_info.as_ref().unwrap().lines.iter().any(|line| line.contains("/example:check [path]")));
+        app.chip_info = None; app.input = "draft".into();
+        let rows = actions::entries(&app, "example:check"); assert_eq!(rows.len(), 1); assert!(matches!(&rows[0].action, actions::Action::Plugin(name) if name == "/example:check"));
+        assert_eq!(app.input, "draft"); assert!(app.pending_prompts.is_empty());
+        app.input = "/example:check folder".into(); app.input_cursor = app.input.len();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.pending_prompts, [("plugin-session".into(), "/example:check folder".into())]);
+    }
+
+    #[test]
+    fn shell_is_keyboard_only_and_never_provider_or_command_dispatch() {
+        let root = tempfile::tempdir().unwrap(); let proof = root.path().join("proof");
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"shell-session", "cwd":root.path()}));
+        app.groups[0].tabs = vec!["shell-session".into()]; app.focus = Focus::Prompt;
+        let command = format!("!printf keyboard > '{}'", proof.display());
+        app.input = command.clone(); assert!(!app.submit_local_command()); assert!(!proof.exists());
+        app.apply_daemon_frame(&json!({"type":"event", "session_id":"shell-session", "event":{"type":"text_delta", "text":command}}));
+        assert!(!proof.exists()); assert!(app.local_shell_jobs.is_empty());
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(app.pending_prompts.is_empty()); assert_eq!(app.local_shell_jobs.len(), 1);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !app.local_shell_jobs.is_empty() && Instant::now() < deadline { app.poll_shell(); std::thread::sleep(Duration::from_millis(5)); }
+        assert!(app.local_shell_jobs.is_empty()); assert_eq!(std::fs::read_to_string(proof).unwrap(), "keyboard");
+        assert!(app.sessions[0].transcript.contains("DOXA_LOCAL_SHELL:"));
+        assert!(!COMMANDS.iter().any(|row| row.name == "/shell" || row.name == "!"));
+    }
+
+    #[test]
+    fn about_renders_cached_installation_and_advisory_without_starting_work() {
+        let mut app = App::default(); app.handle(Event::Resize(100, 30));
+        app.apply_installation(crate::installation::Snapshot { rows:vec!["Installed commit · measured".into()], update:crate::installation::Update::Unknown });
+        app.open_about();
+        let info = app.chip_info.as_ref().unwrap();
+        assert!(info.lines.iter().any(|line| line == "Installed commit · measured"));
+        assert!(info.lines.iter().any(|line| line == "Update · check unavailable"));
+        assert!(!app.update_notified); assert!(app.pending_launches.is_empty()); assert!(app.pending_prompts.is_empty());
+        app.installation.update = crate::installation::Update::Skipped; app.open_about();
+        assert!(app.chip_info.as_ref().unwrap().lines.iter().any(|line| line == "Update · check skipped"));
+    }
+
+    #[test]
+    fn about_uses_only_selected_session_account_and_clears_missing_identity() {
+        let mut app = App::default();
+        app.handle(Event::Resize(100, 30));
+        for (id, email) in [("first", "first@example.test"), ("second", "second@example.test")] {
+            app.apply_daemon_frame(&json!({"type":"hello","session_id":id,"engine":"claude",
+                "model":"sonnet","cwd":"/project","account":{"email":email,
+                    "organization":"SDK org","accessToken":"secret"}}));
+        }
+        app.groups[0].active = app.groups[0].tabs.iter().position(|id| id == "first").unwrap();
+        app.input = "draft unchanged".into();
+        app.open_about();
+        let info = app.chip_info.as_ref().unwrap();
+        assert!(info.lines.iter().any(|line| line.contains("first@example.test")));
+        assert!(info.lines.iter().any(|line| line.contains("SDK org")));
+        assert!(!info.lines.iter().any(|line| line.contains("second@example.test") || line.contains("secret")));
+        assert_eq!(app.input, "draft unchanged");
+        assert!(app.pending_prompts.is_empty());
+        app.apply_daemon_frame(&json!({"type":"telemetry_status","session_id":"first",
+            "status":{"account":null}}));
+        app.open_about();
+        assert!(app.chip_info.as_ref().unwrap().lines.iter().any(|line| line.contains("unavailable")));
+        assert!(!app.chip_info.as_ref().unwrap().lines.iter().any(|line| line.contains("first@example.test")));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)));
+        assert!(app.chip_info.is_none());
+        assert_eq!(app.input, "draft unchanged");
+    }
+
+    #[test]
     fn help_lists_full_python_registry_with_rust_capabilities() {
         let mut app = App::default();
         app.groups[0].tabs.push("s".into());
@@ -11125,7 +12161,7 @@ for line in sys.stdin:
         let info = app.chip_info.as_ref().unwrap();
         assert_eq!(info.kind, "help");
         for form in ["/collection [action] [name]", "/usage", "/context", "/compact",
-            "/fleet [runs|status RUN|attach RUN INDEX|start OPTIONS|resume RUN]", "/help"] {
+            "/fleet [runs|status [RUN]|stop|detach|attach [RUN] INDEX|mesh [RUN]|start OPTIONS|resume RUN]", "/help"] {
             assert!(info.lines.iter().any(|line| line.starts_with(form)), "missing {form}");
         }
         assert!(info.lines.iter().any(|line| line.contains("unavailable in Rust")));
@@ -11353,15 +12389,15 @@ for line in sys.stdin:
         app.groups[1].tabs.push("b".into());
         app.handle(Event::Paste("a\nb".into()));
         app.handle(Event::Key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)));
-        app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT)));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::ALT)));
         app.handle(Event::Paste("other".into()));
         app.action_menu = true;
         assert!(!app.handle(Event::Paste("ignored".into())));
         app.action_menu = false;
-        app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT)));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::ALT)));
         app.handle(Event::Key(KeyEvent::new(KeyCode::Char('!'), KeyModifiers::NONE)));
         assert_eq!(app.input, "a\n!b");
-        app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT)));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::ALT)));
         assert_eq!(app.input, "other");
     }
 
@@ -11383,7 +12419,7 @@ for line in sys.stdin:
 
         app.groups[1].tabs.clear();
         assert!(app.layout(app.size).panes.is_none());
-        app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT)));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::ALT)));
         assert_eq!(app.active_group, 1);
         assert!(app.layout(app.size).panes.is_some());
 
@@ -11963,7 +12999,7 @@ for line in sys.stdin:
         assert_eq!(app.groups[0].active_id(), Some("beta"));
         assert!(app.input.is_empty());
         app.input = "beta draft".into();
-        app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT)));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::ALT)));
         assert!(app.input.is_empty());
         app.input = "second pane draft".into();
         let first = app.layout(app.size).panes.unwrap()[0];
@@ -11974,7 +13010,7 @@ for line in sys.stdin:
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert_eq!(app.groups[0].active_id(), Some("alpha"));
         assert_eq!(app.input, "alpha draft");
-        app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT)));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::ALT)));
         assert_eq!(app.input, "second pane draft");
     }
 
@@ -12439,11 +13475,11 @@ for line in sys.stdin:
         assert_eq!(app.input, "draft for a");
         app.handle(Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT)));
         assert_eq!(app.input, "draft for a");
-        app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT)));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::ALT)));
         assert!(app.input.is_empty());
         app.handle(Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT)));
         assert_eq!(app.input, "draft for b");
-        app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT)));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::ALT)));
         assert_eq!(app.input, "draft for a");
     }
 
@@ -13304,7 +14340,7 @@ for line in sys.stdin:
 
     #[test]
     fn rename_pins_label_until_cleared_and_slash_commands_never_queue_prompts() {
-        let mut app = App::default();
+        let mut app = App::default(); app.handle(Event::Resize(100, 30));
         app.apply_daemon_frame(&json!({"type":"hello", "session_id":"s", "model":"old"}));
         app.input = "/rename A useful name".into();
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
@@ -13320,7 +14356,8 @@ for line in sys.stdin:
         for command in ["/attach bad/id", "/doctor", "/pending unsupported"] {
             app.input = command.into();
             app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
-            assert!(app.notice.contains("attach:") || app.notice.contains("unavailable"));
+            if command == "/doctor" { assert!(app.operations_menu.is_some()); app.retire_operations(); app.chip_info = None; }
+            else { assert!(app.notice.contains("attach:") || app.notice.contains("unavailable")); }
             assert!(app.pending_prompts.is_empty());
         }
     }
@@ -13361,6 +14398,154 @@ mod parity_tests {
         app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
             column, row, modifiers: KeyModifiers::NONE }));
     }
+    #[test]
+    fn startup_defaults_to_selected_legacy_and_preserves_explicit_protocol_overrides() {
+        assert_eq!(selected_keyboard_protocol(None),KeyboardProtocol::Legacy);
+        assert_eq!(selected_keyboard_protocol(Some("legacy")),KeyboardProtocol::Legacy);
+        assert_eq!(selected_keyboard_protocol(Some("kitty")),KeyboardProtocol::Kitty);
+        assert_eq!(selected_keyboard_protocol(Some("unknown")),KeyboardProtocol::Unknown);
+        assert_eq!(selected_keyboard_protocol(Some("")),KeyboardProtocol::Legacy);
+        assert_eq!(selected_keyboard_protocol(Some("unrecognized")),KeyboardProtocol::Legacy);
+    }
+
+    #[test]
+    fn native_selection_keyboard_copy_only_exports_visible_selected_cells_and_escape_clears() {
+        let mut app=App::default();app.size=Rect::new(0,0,100,28);app.rail_visible=false;
+        app.sessions.push(Session{id:"s".into(),title:"fixture".into(),transcript:"plain alpha 界 beta\nnext line".into(),collection:String::new(),status:String::new()});app.groups[0].tabs=vec!["s".into()];
+        let _=paint(&app);let pane=app.layout(app.size).body;let rect=app.pane_regions(0,pane)[1];
+        let start=ratatui::layout::Position::new(rect.x+1,rect.y);let end=ratatui::layout::Position::new(rect.x+5,rect.y);
+        app.handle(Event::Mouse(MouseEvent{kind:MouseEventKind::Down(MouseButton::Left),column:start.x,row:start.y,modifiers:KeyModifiers::NONE}));
+        app.handle(Event::Mouse(MouseEvent{kind:MouseEventKind::Drag(MouseButton::Left),column:end.x,row:end.y,modifiers:KeyModifiers::NONE}));
+        let owner=crate::selection::Owner{pane:0,session:"s".into()};let text=app.transcript_selection.borrow().text(&owner).unwrap();assert_eq!(text,"plain");
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('c'),KeyModifiers::CONTROL)));assert_eq!(app.pending_clipboard_copy.take(),Some(crate::clipboard::osc52("plain")));assert!(!app.should_quit);assert!(app.pending_prompts.is_empty());
+        let _=paint(&app);app.handle(Event::Key(KeyEvent::new(KeyCode::Esc,KeyModifiers::NONE)));assert!(app.transcript_selection.borrow().text(&owner).is_none());
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('C'),KeyModifiers::CONTROL|KeyModifiers::SHIFT)));assert!(app.pending_clipboard_copy.is_none());
+    }
+    #[test]
+    fn selection_in_second_pane_keeps_exact_owner_and_prompt_click_still_types() {
+        let mut app=App::default();app.size=Rect::new(0,0,180,40);app.rail_visible=false;
+        for id in ["a","b"]{app.sessions.push(Session{id:id.into(),title:id.into(),collection:String::new(),transcript:format!("{id} visible line"),status:String::new()});}
+        app.groups[0].tabs=vec!["a".into()];app.groups[1].tabs=vec!["b".into()];let _=paint(&app);
+        let pane=app.layout(app.size).panes.unwrap()[1];let regions=app.pane_regions(1,pane);let rect=regions[1];
+        for(kind,column)in[(MouseEventKind::Down(MouseButton::Left),rect.x+1),(MouseEventKind::Drag(MouseButton::Left),rect.x+3)]{app.handle(Event::Mouse(MouseEvent{kind,column,row:rect.y,modifiers:KeyModifiers::NONE}));}
+        assert_eq!(app.active_group,1);assert_eq!(app.transcript_selection.borrow().text(&crate::selection::Owner{pane:1,session:"b".into()}).as_deref(),Some("b v"));
+        app.handle(Event::Mouse(MouseEvent{kind:MouseEventKind::Down(MouseButton::Left),column:regions[4].x+2,row:regions[4].y+1,modifiers:KeyModifiers::NONE}));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('x'),KeyModifiers::NONE)));assert_eq!(app.input,"x");assert_eq!(app.focus,Focus::Prompt);
+    }
+
+    #[test]
+    fn clipboard_paste_targets_original_draft_without_submission_or_control_sequences() {
+        let mut app=App::default();app.groups[0].tabs=vec!["a".into()];app.groups[1].tabs=vec!["b".into()];app.input="left".into();app.input_cursor=2;
+        let target=app.clipboard_target();app.clipboard_job=Some(crate::clipboard::Job::fixture(target,Ok("X\r\nY\u{1b}\u{7}".into())));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Tab,KeyModifiers::ALT)));assert_eq!(app.active_group,1);
+        app.input="right".into();app.input_cursor=5;assert!(app.poll_clipboard());assert_eq!(app.input,"right");assert_eq!(app.input_drafts[&(0,"a".into())].0,"leX\nYft");assert!(app.pending_prompts.is_empty());
+        let target=app.clipboard_target();app.clipboard_job=Some(crate::clipboard::Job::fixture(target,Ok("stale".into())));app.input.push('!');app.input_cursor+=1;
+        app.poll_clipboard();assert_eq!(app.input,"right!");assert!(app.notice.contains("discarded"));
+        let target=app.clipboard_target();app.clipboard_job=Some(crate::clipboard::Job::fixture(target,Ok("closed".into())));app.groups[1].tabs.clear();app.poll_clipboard();assert!(!app.input.contains("closed"));assert!(app.pending_prompts.is_empty());
+    }
+
+    #[test]
+    fn engine_form_defaults_use_effective_engine_config_without_reusing_live_identity() {
+        let config = "model='claude-own'\neffort='max'\n[models]\ncodex='codex-own'\ndeepseek='deepseek-flash'\n".parse::<toml::Table>().unwrap();
+        assert_eq!(new_session_preferences(launch::Engine::Claude, &config, None, None), ("claude-own".into(), Some("max".into())));
+        assert_eq!(new_session_preferences(launch::Engine::Codex, &config, None, None), ("codex-own".into(), Some("max".into())));
+        assert_eq!(new_session_preferences(launch::Engine::Claude, &config, Some("env-model"), Some("low")), ("env-model".into(), Some("low".into())));
+        assert_eq!(new_session_preferences(launch::Engine::DeepSeek, &config, None, Some("xhigh")), ("deepseek-flash".into(), Some("high".into())));
+        assert_eq!(new_session_preferences(launch::Engine::Codex, &toml::Table::new(), None, None), ("".into(), None));
+    }
+
+    #[test]
+    fn tab_focus_visits_visible_chips_headers_and_reverses_without_switching_pane() {
+        let mut app = App::default();
+        app.size = Rect::new(0, 0, 220, 32);
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"s","engine":"claude","model":"sonnet","effort":"high"}));
+        app.groups[0].tabs = vec!["s".into(), "second".into()];
+        app.input = "unsent draft".into(); app.input_cursor = app.input.len();
+        let ring = app.focus_ring();
+        assert!(ring.contains(&Focus::Tabs)); assert!(ring.contains(&Focus::Chip("engine")));
+        for expected in ring.iter().cycle().skip(1).take(ring.len()) {
+            app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+            assert_eq!(&app.focus, expected);
+            assert_eq!(app.active_group, 0); assert_eq!(app.input, "unsent draft");
+        }
+        for expected in ring.iter().rev() {
+            app.handle(Event::Key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT)));
+            assert_eq!(&app.focus, expected);
+        }
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT)));
+        assert_eq!(app.focus, *ring.last().unwrap());
+        app.focus = Focus::Tabs;
+        assert!(paint(&app).contains("● tabs"));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)));
+        assert_eq!(app.groups[0].active_id(), Some("second"));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.focus, Focus::Prompt);
+        app.focus = Focus::Chip("engine");
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(app.engine_picker); assert!(app.pending_prompts.is_empty());
+        let previous = app.focus;
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+        assert_eq!(app.focus, previous); // modal owns Tab
+    }
+
+    #[test]
+    fn focus_ring_skips_hidden_sidebar_and_clipped_chips() {
+        let mut app = App::default(); app.size = Rect::new(0, 0, 70, 24); app.rail_visible = false;
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"s","engine":"claude","model":"sonnet","effort":"high"}));
+        app.groups[0].tabs = vec!["s".into()];
+        let _ = paint(&app);
+        let visible = app.rendered_chip_hits.borrow().as_ref().unwrap().iter().map(|hit| Focus::Chip(hit.kind)).collect::<Vec<_>>();
+        let ring = app.focus_ring();
+        assert!(!ring.contains(&Focus::Rail));
+        assert_eq!(ring.iter().copied().filter(|focus| matches!(focus, Focus::Chip(_))).collect::<Vec<_>>(), visible);
+        let focused = visible[0]; app.focus = focused;
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(70, 24)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let hit = app.rendered_chip_hits.borrow().as_ref().unwrap()[0].clone();
+        assert!(terminal.backend().buffer()[(hit.rect.x, hit.rect.y)].modifier.contains(Modifier::UNDERLINED));
+    }
+
+    #[test]
+    fn attached_pending_effort_prevents_a_second_transaction_until_authoritative_clear() {
+        let mut app = App::default(); app.size = Rect::new(0, 0, 150, 32);
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"s","engine":"claude","model":"sonnet","effort":"high","pending_effort":"low"}));
+        app.groups[0].tabs = vec!["s".into()];
+        app.open_effort_picker(); assert!(app.effort_picker.is_none()); assert!(app.notice.contains("awaiting"));
+        app.apply_daemon_frame(&json!({"type":"reply","status":{"session_id":"s","effort":"low","pending_effort":null}}));
+        assert!(!app.pending_effort_verifications.contains_key("s")); assert_eq!(app.session_efforts["s"], "low");
+    }
+
+    #[test]
+    fn effort_replies_and_failures_belong_to_requesting_session() {
+        let mut app = App::default(); app.size = Rect::new(0, 0, 150, 32);
+        for id in ["a", "b"] { app.apply_daemon_frame(&json!({"type":"hello","session_id":id,"engine":"claude","model":"sonnet","effort":"high"})); }
+        app.groups[0].tabs = vec!["a".into()];
+        app.pending_effort_verifications.insert("b".into(), "low".into());
+        app.notice = "active pane notice".into();
+        app.apply_daemon_frame(&json!({"type":"set_effort_reply","session_id":"b","ok":true,"effort":"low","verification_pending":true}));
+        assert_eq!(app.notice, "active pane notice"); assert_eq!(app.session_efforts["b"], "high");
+        app.pending_effort_verifications.insert("a".into(), "low".into());
+        app.open_effort_picker(); assert!(app.effort_picker.is_none()); assert!(app.pending_effort_changes.is_empty());
+        app.apply_daemon_frame(&json!({"type":"set_effort_reply","session_id":"a","ok":true,"effort":"max","verification_pending":false}));
+        assert_eq!(app.session_efforts["a"], "high");
+        app.apply_daemon_frame(&json!({"type":"set_effort_reply","session_id":"a","ok":true,"effort":"low","verification_pending":true}));
+        assert!(app.notice.contains("awaiting provider"));
+        app.apply_daemon_frame(&json!({"type":"event","session_id":"a","event":{"type":"effort_verification_failed","data":{"effort":"high","requested_effort":"low"}}}));
+        assert_eq!(app.session_efforts["a"], "high"); assert!(!app.pending_effort_verifications.contains_key("a"));
+        assert!(!app.notice.contains("awaiting"));
+        // A delayed reply cannot resurrect the failed request.
+        app.apply_daemon_frame(&json!({"type":"set_effort_reply","session_id":"a","ok":true,"effort":"low","verification_pending":true}));
+        assert!(!app.notice.contains("awaiting"));
+        app.pending_effort_verifications.insert("a".into(), "max".into());
+        app.apply_daemon_frame(&json!({"type":"set_effort_reply","session_id":"a","ok":true,"effort":"max","verification_pending":false}));
+        assert_eq!(app.session_efforts["a"], "max"); assert!(app.notice.contains("verified"));
+        app.apply_daemon_frame(&json!({"type":"set_effort_reply","session_id":"a","ok":true,"effort":"max","verification_pending":true}));
+        assert!(!app.notice.contains("awaiting"));
+        app.pending_effort_verifications.insert("a".into(), "low".into());
+        app.apply_daemon_frame(&json!({"type":"event","session_id":"a","event":{"type":"turn_done","data":{"is_error":true}}}));
+        assert!(!app.pending_effort_verifications.contains_key("a")); assert_eq!(app.session_efforts["a"], "max");
+    }
+
     #[test]
     fn search_edits_actual_prompt_query_and_restores_saved_draft() {
         let mut app = App::default();
@@ -13569,6 +14754,42 @@ mod parity_tests {
         app.fleet_review.as_mut().unwrap().complete.set(true);app.fleet_review.as_mut().unwrap().armed=true;
         app.key(KeyEvent::new(KeyCode::Char('Y'),KeyModifiers::SHIFT));assert!(app.fleet_controller.is_none());assert!(app.notice.contains("fixture cannot launch"));
         app.show_fleet_view_fixture("gallery-run",&["Fixture status"]);assert!(!app.poll_fleet());assert!(app.fleet_views.is_empty());
+    }
+
+    #[test]
+    fn session_kill_completion_preserves_active_prompt_and_layout() {
+        let mut app = App::default();
+        app.apply_update(DaemonUpdate::Upsert(Session { id:"current".into(), title:"Current".into(), collection:String::new(), transcript:String::new(), status:"Idle".into() }));
+        app.groups[0].tabs = vec!["current".into()];
+        app.input = "/sessions kill current".into(); app.input_cursor = 7;
+        let before = app.groups.clone();
+        let (tx, rx) = mpsc::sync_channel(1);
+        app.session_stop_pending = Some(rx);
+        tx.send(crate::sessions::Report { stopped:vec!["current".into()],requested:Vec::new(),failed:Vec::new(),error:None }).unwrap();
+        assert!(app.poll_sessions_stop());
+        assert_eq!(app.groups[0].tabs, before[0].tabs);
+        assert_eq!(app.groups[0].active, before[0].active);
+        assert_eq!(app.input, "/sessions kill current"); assert_eq!(app.input_cursor, 7);
+        assert!(app.killed_this_run.contains("current"));
+        assert!(app.offline_ids.contains("current"));
+        assert!(app.notice.contains("stopped: current"));
+        let (tx, rx) = mpsc::sync_channel(1); app.session_stop_pending = Some(rx);
+        tx.send(crate::sessions::Report { stopped:Vec::new(),requested:vec!["current".into()],failed:Vec::new(),error:None }).unwrap();
+        assert!(app.poll_sessions_stop());
+        assert!(app.killed_this_run.contains("current"));
+        assert_eq!(app.input, "/sessions kill current"); assert_eq!(app.input_cursor, 7);
+        assert!(app.notice.contains("teardown unconfirmed"));
+        assert!(!app.notice.contains("stopped:"));
+    }
+
+    #[test]
+    fn malformed_session_kill_form_never_reaches_agent_or_clears_prompt() {
+        let mut app = App::default();
+        app.input = "/sessions kill one two".into(); app.input_cursor = app.input.len();
+        assert!(app.dispatch_prompt_command());
+        assert!(app.notice.contains("usage:"));
+        assert_eq!(app.input, "/sessions kill one two");
+        assert!(app.session_stop_pending.is_none());
     }
 
 }

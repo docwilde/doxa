@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
 
+const MAX_CONTEXT_BYTES: usize = 64 * 1024;
 const EVENT_TEXT_CHUNK_BYTES: usize = 8 * 1024;
 
 fn emit_content_chunks(kind: &str, content: &str, approx_tokens: u64, emit: &mut dyn FnMut(Value)) {
@@ -32,6 +33,12 @@ pub struct VendorHost {
     effort: Mutex<String>,
     catalog: Mutex<Option<Vec<doxa_vendors::ModelCapability>>>,
     lore: Mutex<LoreClient>,
+    lore_enabled: bool,
+    agent_tools: Option<Arc<crate::agent_tools::AgentTools>>,
+    context: Mutex<Option<LoreClient>>,
+    lore_python: PathBuf,
+    session_id: String,
+    finalized: AtomicBool,
     scrub_failed: AtomicBool,
     history: Mutex<Vec<Value>>,
     store: TranscriptStore,
@@ -121,12 +128,17 @@ impl VendorHost {
                 .scrub(content)
                 .map_err(|_| { "LORE scrub failed for saved vendor message" })?);
         }
+        let lore_enabled = doxa_state::lore_enabled_default();
+        let agent_tools = crate::agent_tools::AgentTools::new(lore_python, &cwd, session_id, vendor.engine_id(), lore_enabled);
         let host = Self {
             vendor,
             model: Mutex::new(model),
             effort: Mutex::new(effort),
             catalog: Mutex::new(None),
             lore: Mutex::new(lore),
+            lore_enabled, agent_tools,
+            context: Mutex::new(None), lore_python: lore_python.to_owned(),
+            session_id: session_id.to_owned(), finalized: AtomicBool::new(false),
             scrub_failed: AtomicBool::new(false),
             history: Mutex::new(history),
             store,
@@ -170,9 +182,42 @@ impl VendorHost {
         result
     }
 
+    /// Python vendors rebuild this system message every turn. Its memory is
+    /// provider context only: never put the snapshot in replay or transcripts.
+    fn system_message(&self) -> Value {
+        let header = format!("You are a DOXA session running on {}. The working directory is {}.",
+            match self.vendor { Vendor::DeepSeek => "DeepSeek", Vendor::Glm => "GLM (Z.ai)" }, self.cwd);
+        let snapshot = if self.lore_enabled {
+            // Optional context reads get their own bounded client. A missing
+            // snapshot cannot disable mandatory scrubbing or transcript writes.
+            let mut context = self.context.lock().unwrap();
+            if context.is_none() { *context = LoreClient::spawn(&self.lore_python, Duration::from_secs(5)).ok(); }
+            let snapshot = context.as_mut().and_then(|client| client.snapshot(&self.cwd, "all").ok())
+                .filter(|text| text.len() <= MAX_CONTEXT_BYTES).unwrap_or_default();
+            if context.as_ref().is_some_and(|client| !client.is_alive()) { *context = None; }
+            snapshot
+        } else { String::new() };
+        json!({"role":"system","content":if snapshot.is_empty() { header } else { format!("{header}\n\n{snapshot}") }})
+    }
+
     pub fn shutdown(&self) {
+        if self.finalized.swap(true, Ordering::AcqRel) { return; }
         self.closing.store(true, Ordering::Release);
         self.cancel();
+        if let Some(tools) = &self.agent_tools { tools.close(); }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while self.active.lock().unwrap().is_some() {
+            if Instant::now() >= deadline { return; }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // Match Python's final indexing through LORE's descriptor-based API.
+        // Off agents still keep transcripts but never write them into memory.
+        if self.lore_enabled && self.committed_bytes.load(Ordering::Acquire) > 0
+            && !self.storage_uncertain.load(Ordering::Acquire) && !self.scrub_failed.load(Ordering::Acquire) {
+            if let Ok(mut client) = LoreClient::spawn(&self.lore_python, Duration::from_secs(5)) {
+                let _ = client.index_transcript(&self.cwd, &self.session_id);
+            }
+        }
     }
 
     fn cancel(&self) {
@@ -211,6 +256,8 @@ impl Host for VendorHost {
         self.balance.lock().ok().and_then(|value| value.as_ref()
             .map(|label| json!({"mode":"api","balance":label})))
     }
+    fn lore_enabled(&self) -> Option<bool> { Some(self.lore_enabled) }
+    fn lore_status(&self) -> Option<Value> { self.agent_tools.as_ref()?.status() }
     fn lore_scrub_status(&self) -> Option<&'static str> {
         Some(if self.scrub_failed.load(Ordering::Acquire) { "unavailable" } else { "ready" })
     }
@@ -254,26 +301,35 @@ impl Host for VendorHost {
         let selected_model = self.model.lock().unwrap().clone();
         let peer = self.peer_tools.lock().unwrap().clone();
         emit(json!({"type":"turn_started","data":{"prompt":prompt,
-            "vendor_tools":match (self.workspace_read, peer.is_some()) {
-                (true, true) => "workspace-read, peers", (true, false) => "workspace-read",
-                (false, true) => "peers", (false, false) => "none"
+            "vendor_tools":match (self.workspace_read, peer.is_some(), self.agent_tools.is_some()) {
+                (true, true, true) => "workspace-read, peers, lore", (true, false, true) => "workspace-read, lore",
+                (false, true, true) => "peers, lore", (false, false, true) => "lore",
+                (true, true, false) => "workspace-read, peers", (true, false, false) => "workspace-read",
+                (false, true, false) => "peers", (false, false, false) => "none"
             }}}));
         let mut history = self.history.lock().unwrap().clone();
         let saved_history = history.clone();
+        history.insert(0, self.system_message());
         let scrub_tool = |value: &str| self.scrub(value);
-        let tools_enabled = self.workspace_read || peer.is_some();
+        let tools_enabled = self.workspace_read || peer.is_some() || self.agent_tools.is_some();
         let output = std::cell::RefCell::new(&mut *emit);
         let tool_events = Arc::new(Mutex::new(Vec::new()));
-        let emit_tool = |event: Value| (output.borrow_mut())(event);
+        let emit_tool = |event: Value| {
+            if event["type"] == "tool_result" { if let Some(tools)=&self.agent_tools {
+                for disabled in tools.take_disabled_events() { (output.borrow_mut())(disabled); }
+            } }
+            (output.borrow_mut())(event)
+        };
         let mut gate = NativeVendorGate::new(Path::new(&self.cwd), self.workspace_read, peer,
             self.peer_desk.clone(), &scrub_tool, &emit_tool, tool_events.clone());
+        if let Some(tools) = &self.agent_tools { gate = gate.with_agent(tools.vendor_definitions(), tools.vendor_handler()); }
         let gate = if tools_enabled { Some(&mut gate as &mut dyn doxa_vendors::ToolGate) } else { None };
         let mut reasoning_chars = 0u64;
         let mut reported_tokens = 0u64;
         let mut last_progress = Instant::now();
         let mut on_delta = |delta: Delta| {
             if let Ok(mut events) = tool_events.lock() {
-                for event in events.drain(..) { (output.borrow_mut())(event); }
+                for event in events.drain(..) { emit_tool(event); }
             }
             if let Delta::Reasoning(text) = delta {
                 reasoning_chars = reasoning_chars.saturating_add(text.chars().count() as u64);
@@ -335,6 +391,7 @@ impl Host for VendorHost {
             Err(_) => Err(Error::Transport),
         };
         drop(output);
+        if let Some(tools)=&self.agent_tools { for event in tools.take_disabled_events() { emit(event); } }
         if let Ok(mut events) = tool_events.lock() { for event in events.drain(..) { emit(event); } }
         if reasoning_chars > 0 && reasoning_chars.div_ceil(4) > reported_tokens {
             emit(json!({"type":"reasoning_progress","data":{"approx_tokens":reasoning_chars.div_ceil(4)}}));

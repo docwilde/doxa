@@ -114,12 +114,18 @@ launch() {
     esac
   done
   [ "$expect_engine" -eq 0 ] || fail 'missing value for --engine'
-  if [ "$engine" = claude ]; then
+  if [ "$engine" != fixture ]; then
+    # The Rust launcher owns configured-engine selection. Supply both adapter
+    # interpreters so plain startup and later engine switches use the same env.
+    selected_python=$(python_bin)
+    PATH=${selected_python%/*}:$PATH
+    export PATH
     if [ "$has_claude" -eq 0 ]; then
-      set -- "$@" --claude-python "$(python_bin)"
+      set -- "$@" --claude-python "$selected_python"
     fi
-  elif [ "$engine" != fixture ] && [ "$has_lore" -eq 0 ]; then
-    set -- "$@" --lore-python "$(python_bin)"
+    if [ "$has_lore" -eq 0 ]; then
+      set -- "$@" --lore-python "$selected_python"
+    fi
   fi
 
   case $verb in

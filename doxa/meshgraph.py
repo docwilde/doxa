@@ -429,12 +429,8 @@ def assets_dir() -> Path:
     the same way and for the same reason: one copy in git, mapped into the
     wheel at build time rather than duplicated under ``doxa/``.
 
-    NOTE for packaging: ``pyproject.toml``'s
-    ``[tool.hatch.build.targets.wheel.force-include]`` currently maps
-    ``assets/icon.png`` and ``assets/logo.png`` only. Until it also maps
-    this directory, the page is a source-checkout feature and an installed
-    DOXA finds nothing here -- which :meth:`MeshServer` reports as a plain
-    404 naming the directory it looked in, rather than a blank page."""
+    The wheel force-includes the mesh directory under this package; the
+    source checkout remains the single tracked copy of these assets."""
     try:
         import importlib.resources
 

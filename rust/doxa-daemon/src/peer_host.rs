@@ -17,6 +17,7 @@ const PENDING_CAPACITY: usize = 8;
 
 pub struct PeerHost {
     inner: Arc<dyn Host>,
+    agent_tools_enabled: bool,
     lore: Mutex<Option<LoreClient>>,
     lore_python: Option<PathBuf>,
     runtime: PathBuf,
@@ -36,11 +37,13 @@ impl PeerHost {
     /// Weak ownership keeps the provider callback from retaining its wrapper
     /// (and daemon) after shutdown. Expose only peer RPCs, never host controls.
     pub fn connect_provider_tools(self: &Arc<Self>) -> bool {
+        if !self.agent_tools_enabled { return false; }
         let weak = Arc::downgrade(self);
         self.inner.set_peer_tool_handler(Arc::new(move |name, params| {
             if !matches!(name, "peers" | "msg" | "peer_history") { return Err("Unsupported provider peer method".into()); }
             let peer = weak.upgrade().ok_or("Peer session is closed")?;
             if name == "msg" { peer.msg_with_target_mode(params, true) }
+            else if name == "peers" && params.as_object().is_some_and(|rows|rows.is_empty()) { peer.call(name,&json!({"limit":25})) }
             else { peer.call(name, params) }
         }))
     }
@@ -63,11 +66,15 @@ impl PeerHost {
         if !home.is_absolute() {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "DOXA home must be absolute"));
         }
+        let config = doxa_state::load_config(&home.join("config.toml"));
+        let agent_tools_enabled = explicit_opt_in(&doxa_state::raw_setting(
+            std::env::var("DOXA_AGENT_PEER_SEND").ok().as_deref(), &config, "agent_peer_send"));
         let ledger = std::env::var_os("DOXA_PEER_LEDGER").filter(|value| !value.is_empty()).map(PathBuf::from)
             .unwrap_or_else(|| home.join("peers/messages.jsonl"));
         if !ledger.is_absolute() { return Err(io::Error::new(io::ErrorKind::InvalidInput, "peer ledger must be absolute")); }
         Ok(Self {
             inner,
+            agent_tools_enabled,
             lore: Mutex::new(None),
             lore_python: lore_python.map(Path::to_path_buf),
             runtime,
@@ -107,15 +114,21 @@ impl PeerHost {
     }
 
     fn roster(&self, lore: &mut LoreClient) -> Result<Vec<presence::DisplayPeer>, String> {
-        presence::list_scoped_readonly(&self.runtime, &self.scope, &self.session_id, |text| {
+        presence::list_scoped_readonly_limit(&self.runtime, &self.scope, &self.session_id, doxa_peers::MAX_REGISTRY_ENTRIES, |text| {
             lore.scrub(text)
                 .map_err(|_| io::Error::other("LORE scrub unavailable"))
         })
         .map_err(|_| "peer discovery unavailable or LORE scrub failed".to_owned())
     }
 
-    fn peers(&self) -> Result<Value, String> {
-        self.with_lore(|lore| Ok(json!({"peers":self.roster(lore)?})))
+    fn peers(&self, params: &Value) -> Result<Value, String> {
+        if params.as_object().is_none_or(|rows|rows.keys().any(|key|key!="limit")) { return Err("invalid peer roster limit".into()); }
+        let limit=params.get("limit").map(|value|value.as_u64().ok_or("invalid peer roster limit")).transpose()?.unwrap_or(presence::MAX_DISPLAY_PEERS as u64);
+        if !(1..=100).contains(&limit) { return Err("invalid peer roster limit".into()); }
+        self.with_lore(|lore| {
+            let rows=self.roster(lore)?; let total=rows.len();
+            Ok(json!({"peers":rows.into_iter().take(limit as usize).collect::<Vec<_>>(),"count":total.min(limit as usize),"total_count":total,"bounded":total>limit as usize,"trust":PEER_UNTRUSTED_INTRO,"untrusted_peer_data":true}))
+        })
     }
 
     fn msg(&self, params: &Value) -> Result<Value, String> {
@@ -123,16 +136,16 @@ impl PeerHost {
     }
 
     fn msg_with_target_mode(&self, params: &Value, exact: bool) -> Result<Value, String> {
-        let target = params["target"].as_str().ok_or("invalid peer target")?;
-        let body = params["text"].as_str().ok_or("invalid peer message")?;
-        if target.is_empty()
-            || target.len() > 128
-            || !target
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
-            || body.trim().is_empty()
-            || body.chars().count() > delivery::MAX_BODY_CHARS
-        {
+        if (params.get("target").is_some()&&params.get("to").is_some()) || (params.get("text").is_some()&&params.get("body").is_some()) {
+            return Err("ambiguous peer arguments".into());
+        }
+        let target=params.get("target").or_else(||params.get("to")).map(|value|value.as_str().ok_or("invalid peer target")).transpose()?.unwrap_or("");
+        let body=params.get("text").or_else(||params.get("body")).and_then(Value::as_str).ok_or("invalid peer message")?;
+        let broadcast=params.get("broadcast").map(|value|value.as_bool().ok_or("invalid peer broadcast")).transpose()?.unwrap_or(false);
+        let in_reply_to=params.get("in_reply_to").filter(|value|!value.is_null()).map(|value|value.as_str().ok_or("invalid peer reply reference")).transpose()?;
+        if (broadcast && !target.is_empty()) || (!broadcast && target.is_empty())
+            || target.len()>128 || !target.bytes().all(|byte|byte.is_ascii_alphanumeric()||byte==b'-')
+            || body.trim().is_empty() || body.chars().count()>delivery::MAX_BODY_CHARS {
             return Err("invalid peer target or message".into());
         }
         let (roster, clean_body, clean_title, clean_scope) = self.with_lore(|lore| {
@@ -154,32 +167,21 @@ impl PeerHost {
         if clean_body.chars().count() > delivery::MAX_BODY_CHARS {
             return Err("message too long after scrubbing".into());
         }
-        let matches: Vec<_> = roster
-            .iter()
-            .filter(|p| target_matches(&p.session_id, target, exact))
-            .collect();
-        let peer = match matches.as_slice() {
-            [peer] => *peer,
-            [] => return Err("no live same-scope peer matches target".into()),
-            _ => return Err("peer target is ambiguous".into()),
-        };
-        let registry = Registry::open(&self.runtime).map_err(|_| "peer registry unavailable")?;
-        let mut peer_info = registry
-            .scoped(
-                &self.scope,
-                Some(&self.session_id),
-                &|s: &str| s.to_owned(),
-                true,
-            )
-            .map_err(|_| "peer registry unavailable")?
-            .into_iter()
-            .find(|p| p.session_id == peer.session_id)
-            .ok_or("peer is no longer live")?;
+        let matches:Vec<_>=roster.iter().filter(|peer|broadcast||target_matches(&peer.session_id,target,exact)).collect();
+        if matches.is_empty() { return Err(if broadcast { "no live same-scope peers to broadcast to" } else { "no live same-scope peer matches target" }.into()); }
+        if !broadcast && matches.len()!=1 { return Err("peer target is ambiguous".into()); }
+        let recipients:Vec<String>=matches.iter().map(|peer|peer.session_id.clone()).collect();
+        if recipients.iter().map(|id|id.len()+4).sum::<usize>()>40*1024 { return Err("broadcast recipient evidence exceeds the reply bound; nothing was sent".into()); }
+        let registry=Registry::open(&self.runtime).map_err(|_|"peer registry unavailable")?;
+        let mut peer_infos:Vec<_>=registry.scoped(&self.scope,Some(&self.session_id),&|text:&str|text.to_owned(),true)
+            .map_err(|_|"peer registry unavailable")?.into_iter().filter(|peer|recipients.contains(&peer.session_id)).collect();
+        if peer_infos.len()!=recipients.len() { return Err("a peer is no longer live; nothing was sent".into()); }
         self.with_lore(|lore| {
             let clean = |lore: &mut LoreClient, value: &str| {
                 lore.scrub(value)
                     .map_err(|_| "LORE scrub unavailable".to_owned())
             };
+            for peer_info in peer_infos.iter_mut().filter(|_|!broadcast) {
             peer_info.title = clean(lore, &peer_info.title)?;
             peer_info.cwd = clean(lore, &peer_info.cwd)?;
             peer_info.socket_path = clean(lore, &peer_info.socket_path)?;
@@ -215,6 +217,7 @@ impl PeerHost {
                 .as_deref()
                 .map(|s| clean(lore, s))
                 .transpose()?;
+            }
             Ok(())
         })?;
         let sender = PeerRecord {
@@ -236,13 +239,15 @@ impl PeerHost {
         };
         let scope = self.scope.clone();
         let raw_body = body.to_owned();
-        let result = delivery::deliver(
+        let kind=if broadcast { "broadcast" } else { "direct" };
+        let result = delivery::deliver_with_reply(
             &registry,
             &sender,
-            std::slice::from_ref(&peer.session_id),
+            &recipients,
             body,
-            "direct",
+            kind,
             None,
+            in_reply_to,
             &self.limiter,
             &self.ledger,
             &move |text: &str| {
@@ -257,9 +262,9 @@ impl PeerHost {
         )
         .map_err(|_| "peer delivery failed".to_owned())?;
         let _ = self.events.try_send(json!({"type":"peer_sent","data":{
-            "to":result.delivered,"kind":"direct",
+            "to":result.delivered,"kind":kind,"in_reply_to":in_reply_to,
             "message_id":result.record.as_ref().map(|r| r.id.as_str())}}));
-        Ok(json!({"peer":peer_info,
+        Ok(json!({"peer":if broadcast { None } else { peer_infos.first() },"peer_count":recipients.len(),"kind":kind,"in_reply_to":in_reply_to,"trust":PEER_UNTRUSTED_INTRO,"untrusted_peer_data":true,
             "delivered_to":result.delivered,"failed":result.failed,
             "message_id":result.record.as_ref().map(|r| r.id.as_str()),
             "ledger_error":result.ledger_error}))
@@ -348,13 +353,16 @@ impl PeerHost {
 }
 
 impl Host for PeerHost {
-    fn peer_tools_ready(&self) -> bool { self.inner.peer_tools_ready() }
+    fn peer_tools_ready(&self) -> bool { self.agent_tools_enabled && self.inner.peer_tools_ready() }
     fn initial_model(&self) -> Option<String> { self.inner.initial_model() }
     fn initial_effort(&self) -> Option<String> { self.inner.initial_effort() }
     fn initial_permission_mode(&self) -> String { self.inner.initial_permission_mode() }
     fn can_set_model(&self) -> bool { self.inner.can_set_model() }
     fn can_set_permission_mode(&self) -> bool { self.inner.can_set_permission_mode() }
+    fn account_snapshot(&self) -> Option<Value> { self.inner.account_snapshot() }
     fn billing_snapshot(&self) -> Option<Value> { self.inner.billing_snapshot() }
+    fn lore_enabled(&self) -> Option<bool> { self.inner.lore_enabled() }
+    fn lore_status(&self) -> Option<Value> { self.inner.lore_status() }
     fn lore_scrub_status(&self) -> Option<&'static str> { self.inner.lore_scrub_status() }
     fn transcript_snapshot(&self) -> io::Result<Option<(PathBuf, u64)>> {
         self.inner.transcript_snapshot()
@@ -396,13 +404,17 @@ impl Host for PeerHost {
     fn call(&self, method: &str, params: &Value) -> Result<Value, String> {
         match method {
             "peer_tools_status" => Ok(json!({"provider_peer_tools":self.peer_tools_ready(),"ledger_path":self.ledger_path})),
-            "peers" => self.peers(),
+            "peers" => self.peers(params),
             "msg" => self.msg(params),
             "peer_history" => self.with_lore(|lore| {
+                if params.as_object().is_none_or(|rows|rows.keys().any(|key|!matches!(key.as_str(),"direction"|"limit"))) { return Err("invalid peer history filter".into()); }
+                let direction=params.get("direction").map(|value|value.as_str().ok_or("invalid peer history direction")).transpose()?.unwrap_or("both");
+                let limit=params.get("limit").map(|value|value.as_u64().ok_or("invalid peer history limit")).transpose()?.unwrap_or(20);
+                if !matches!(direction,"both"|"sent"|"received") || !(1..=100).contains(&limit) { return Err("invalid peer history filter".into()); }
                 let scope = lore.scrub(&self.scope).map_err(|_| "LORE scrub unavailable")?;
                 let failure = std::sync::atomic::AtomicBool::new(false);
                 let lore = Mutex::new(lore);
-                let messages = self.ledger.history(&self.session_id, &scope, &|text: &str| {
+                let messages = self.ledger.history_filtered(&self.session_id, &scope, direction,limit as usize,&|text: &str| {
                     // Scrubber's trait is infallible; poison the whole result
                     // when any required string could not be scrubbed.
                     match lore.lock().unwrap().scrub(text) {
@@ -411,7 +423,9 @@ impl Host for PeerHost {
                     }
                 }).map_err(|_| "Peer history unavailable")?;
                 if failure.load(std::sync::atomic::Ordering::Relaxed) { return Err("LORE scrub unavailable".into()); }
-                Ok(json!({"messages":messages,"bounded_tail":true,"untrusted_peer_data":true}))
+                let sent=messages.iter().filter(|row|row.sender.session==self.session_id).count();
+                let received=messages.iter().filter(|row|row.to.contains(&self.session_id)).count();
+                Ok(json!({"messages":messages,"sent_count":sent,"received_count":received,"direction":direction,"limit":limit,"bounded_tail":true,"trust":PEER_UNTRUSTED_INTRO,"untrusted_peer_data":true}))
             }),
             "branch" => {
                 let status = doxa_worktrees::branch_status(&self.cwd)
@@ -435,6 +449,11 @@ impl Host for PeerHost {
 
 /// Provider arguments bind the complete peer identity; interactive CLI callers
 /// retain their documented unambiguous prefix convenience.
+fn explicit_opt_in(value: &str) -> bool {
+    let value = value.trim();
+    !value.is_empty() && !matches!(value.to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off")
+}
+
 fn target_matches(session_id: &str, target: &str, exact: bool) -> bool {
     if exact { session_id == target } else { session_id.starts_with(target) }
 }
@@ -451,4 +470,39 @@ mod provider_target_tests {
         assert!(target_matches("peer-original", "peer-original", true));
         assert!(!target_matches("peer-replacement", "peer-original", true));
     }
+    #[test]
+    fn model_peer_tools_are_off_by_default_and_freeze_the_host_setting() {
+        use super::*;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Recorder(AtomicUsize);
+        impl Host for Recorder {
+            fn prompt(&self, _: &str, _: &mut dyn FnMut(Value)) {}
+            fn call(&self, _: &str, _: &Value) -> Result<Value, String> { Ok(json!({})) }
+            fn peer_tools_ready(&self) -> bool { true }
+            fn set_peer_tool_handler(&self, _: doxa_runtime::PeerToolHandler) -> bool {
+                self.0.fetch_add(1, Ordering::Relaxed); true
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let host = Arc::new(Recorder(AtomicUsize::new(0)));
+        let (tx, _) = std::sync::mpsc::sync_channel(1);
+        let mut peer = PeerHost::new(host.clone(), dir.path().to_path_buf(), dir.path(),
+            "session".into(), "session".into(), None, tx).unwrap();
+        peer.agent_tools_enabled = false;
+        let peer = Arc::new(peer);
+        assert!(!peer.connect_provider_tools());
+        assert!(!peer.peer_tools_ready());
+        assert_eq!(host.0.load(Ordering::Relaxed), 0);
+        // Manual commands still reach their ordinary scrub/identity gates.
+        assert_eq!(peer.call("peers", &json!({})).unwrap_err(), "LORE scrub unavailable");
+        let mut peer = Arc::try_unwrap(peer).ok().unwrap();
+        peer.agent_tools_enabled = true;
+        let peer = Arc::new(peer);
+        assert!(peer.connect_provider_tools());
+        assert!(peer.peer_tools_ready());
+        assert_eq!(host.0.load(Ordering::Relaxed), 1);
+        for value in ["", "0", "false", "no", "off", " FALSE "] { assert!(!explicit_opt_in(value)); }
+        for value in ["1", "true", "yes", "on"] { assert!(explicit_opt_in(value)); }
+    }
+
 }

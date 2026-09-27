@@ -9,6 +9,25 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
+/// Resolve the session memory switch with Python's env > config precedence.
+/// Empty environment values fall back to the config row; only explicit false
+/// values disable memory. Scrubbing and transcripts remain available.
+pub fn lore_enabled_default() -> bool {
+    let raw = std::env::var("DOXA_LORE").ok().filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            let home = std::env::var_os("DOXA_HOME").filter(|value| !value.is_empty()).map(PathBuf::from)
+                .or_else(|| std::env::var_os("HOME").map(|value| PathBuf::from(value).join(".doxa")))?;
+            let table = load_config(&home.join("config.toml"));
+            table.get("lore").and_then(|value| match value {
+                toml::Value::String(value) => Some(value.clone()),
+                toml::Value::Boolean(value) => Some(value.to_string()),
+                toml::Value::Integer(value) => Some(value.to_string()),
+                _ => None,
+            })
+        }).unwrap_or_default();
+    !matches!(raw.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off")
+}
+
 pub const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 pub const MAX_TABSET_BYTES: u64 = 8 * 1024 * 1024;
 pub const MAX_MACHINE_ID_BYTES: u64 = 256;

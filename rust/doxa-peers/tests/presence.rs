@@ -156,5 +156,9 @@ fn roster_and_display_titles_have_fixed_limits() {
     let rows = list_scoped_readonly(&runtime, "/scope", "self", |text| Ok(text.into())).unwrap();
     assert_eq!(rows.len(), 32);
     assert!(rows.iter().all(|row| row.title.chars().count() == 64));
+    let all=doxa_peers::presence::list_scoped_readonly_limit(&runtime,"/scope","self",4096,|text|Ok(text.into())).unwrap();
+    assert_eq!(all.len(),40);
+    assert!(all.iter().any(|row|row.session_id=="peer-39"));
+    assert!(doxa_peers::presence::list_scoped_readonly_limit(&runtime,"/scope","self",4097,|text|Ok(text.into())).is_err());
     drop(listeners);
 }

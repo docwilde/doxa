@@ -46,6 +46,12 @@ pub trait Host: Send + Sync + 'static {
     fn peer_tools_ready(&self) -> bool { false }
     /// Provider-verified billing snapshot; None means unknown.
     fn billing_snapshot(&self) -> Option<Value> { None }
+    /// Effective session memory policy, distinct from required secret scrubbing.
+    fn lore_enabled(&self) -> Option<bool> { None }
+    /// Display metadata asserted by this connected provider; never credentials.
+    fn account_snapshot(&self) -> Option<Value> { None }
+    /// Cached canonical LORE counts/containment state; this must never block on a tool.
+    fn lore_status(&self) -> Option<Value> { None }
     /// Only the scrub preflight and sticky runtime scrub failure are known.
     /// This does not claim that memory indexing or snapshotting succeeded.
     fn lore_scrub_status(&self) -> Option<&'static str> { None }
@@ -82,6 +88,7 @@ struct State {
     next_seq: u64,
     ring: VecDeque<(u64, Vec<u8>)>,
     clients: HashMap<u64, SyncSender<Vec<u8>>>,
+    remote_clients: HashMap<u64, String>,
     busy: bool,
     prompts: VecDeque<Prompt>,
     next_queue_id: u64,
@@ -135,7 +142,7 @@ impl Daemon {
         let hello = json!({"type":"hello","proto":1,"doxa":session.doxa_version,
             "session_id":session.session_id,"model":model,"engine":session.engine,
             "permission_mode":permission_mode,"bypass_armed":false,
-            "cwd":session.cwd,"next_seq":0,"billing":host.billing_snapshot()});
+            "cwd":session.cwd,"next_seq":0,"billing":host.billing_snapshot(),"account":host.account_snapshot()});
         if serde_json::to_vec(&hello).map_err(io::Error::other)?.len() + 1 > MAX_FRAME_BYTES {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "hello frame too large"));
         }
@@ -157,7 +164,7 @@ impl Daemon {
         listener.set_nonblocking(true)?;
         Ok(Self {
             inner: Arc::new(Inner { state: Mutex::new(State {
-                pending_inputs: Vec::new(), pending_inputs_complete: true, next_seq: 0, ring: VecDeque::new(), clients: HashMap::new(), busy: false,
+                pending_inputs: Vec::new(), pending_inputs_complete: true, next_seq: 0, ring: VecDeque::new(), clients: HashMap::new(), remote_clients: HashMap::new(), busy: false,
                 prompts: VecDeque::new(), next_queue_id: 1, next_turn_id: 1,
                 model, permission_mode, effort, pending_effort: None,
             }), controls: Mutex::new(()), host, session, stopping: AtomicBool::new(false), next_client_id: AtomicU64::new(1),
@@ -264,6 +271,7 @@ impl Inner {
         if event["type"] == "effort_verified" {
             if let Some(effort) = event["data"]["effort"].as_str().filter(|s| !s.is_empty() && !s.chars().any(char::is_control)) { state.effort = Some(effort.to_owned()); state.pending_effort = None; }
         }
+        if event["type"] == "effort_verification_failed" { state.pending_effort = None; }
         match event["type"].as_str() {
             Some("needs_input") => {
                 let data = &event["data"];
@@ -315,8 +323,11 @@ impl Inner {
                 inner.publish(Some(&turn), json!({"type":"turn_done", "data":{}}));
             }
             let next = {
+                let _admission = inner.controls.lock().unwrap();
                 let mut state = inner.state.lock().unwrap();
-                if let Some(prompt) = state.prompts.pop_front() {
+                if inner.stopping.load(Ordering::Acquire) {
+                    state.prompts.clear(); state.busy = false; None
+                } else if let Some(prompt) = state.prompts.pop_front() {
                     let turn = format!("{}r{:011}", if prompt.peer_origin.is_some() { "peer-" } else { "" }, state.next_turn_id);
                     state.next_turn_id += 1;
                     Some((prompt, turn))
@@ -353,6 +364,7 @@ fn handle_client(inner: Arc<Inner>, stream: UnixStream) {
     let peer_tools_ready = inner.host.peer_tools_ready();
     let lore_scrub = inner.host.lore_scrub_status();
     let billing = inner.host.billing_snapshot();
+    let lore_status = inner.host.lore_status();
     let hello = {
         let state = inner.state.lock().unwrap();
         json!({"type":"hello", "proto":1, "doxa":inner.session.doxa_version,
@@ -361,11 +373,13 @@ fn handle_client(inner: Arc<Inner>, stream: UnixStream) {
             "engine":inner.session.engine, "effort":state.effort,"pending_effort":state.pending_effort, "cwd":inner.session.cwd, "next_seq":state.next_seq,
             "transcript_path":transcript.as_ref().map(|(path, _)| path.to_string_lossy().into_owned()),
             "transcript_bytes":transcript.as_ref().map(|(_, size)| *size),
-            "running":state.busy,"queued":state.prompts.len(),
+            "running":state.busy,"queued":state.prompts.len(),"remote_driver":remote_identity(&state),
             "pending_inputs":state.pending_inputs,"pending_inputs_complete":state.pending_inputs_complete,
             "can_set_model":can_set_model,
             "can_set_permission_mode":can_set_permission_mode,"peer_tools_ready":peer_tools_ready,
-            "lore_scrub":lore_scrub,"billing":billing})
+            "belief_count":lore_status.as_ref().and_then(|value|value["belief_count"].as_u64()),
+            "disabled_tools":lore_status.as_ref().and_then(|value|value["disabled_tools"].as_array().cloned()),
+            "lore_enabled":inner.host.lore_enabled(),"lore_scrub":lore_scrub,"billing":billing,"account":inner.host.account_snapshot()})
     };
     if writer.set_write_timeout(Some(Duration::from_secs(2))).is_err() ||
         writer.write_all(&encode_reply(&hello)).is_err() { return; }
@@ -393,7 +407,13 @@ fn handle_client(inner: Arc<Inner>, stream: UnixStream) {
             Some("attach") => {
                 let cursor = if frame["cursor"].is_null() { None } else { frame["cursor"].as_u64() };
                 if !frame["cursor"].is_null() && cursor.is_none() { break; }
-                if !attach_client(&inner, id, cursor, &tx) { break; }
+                // This advisory identity comes from the same-user bridge.
+                // It never authorizes a call or replaces remote_policy's gates.
+                let remote_login = frame.get("remote_login").and_then(Value::as_str)
+                    .map(str::trim).filter(|login| !login.is_empty() && login.len() <= 256
+                        && !login.chars().any(char::is_control));
+                if frame.get("remote_login").is_some_and(|login| !login.is_null()) && remote_login.is_none() { break; }
+                if !attach_client_with_identity(&inner, id, cursor, &tx, remote_login) { break; }
             }
             Some("prompt") | Some("call") if !inner.state.lock().unwrap().clients.contains_key(&id) => {
                 send(&tx, json!({"type":"reply","id":frame["id"],"ok":false,"error":"attach required"}));
@@ -403,12 +423,32 @@ fn handle_client(inner: Arc<Inner>, stream: UnixStream) {
             _ => {}
         }
     }
-    inner.state.lock().unwrap().clients.remove(&id);
+    detach_client(&inner, id);
     drop(tx);
     let _ = writer_thread.join();
 }
 
+fn remote_identity(state: &State) -> Option<String> {
+    let mut identities: Vec<_> = state.remote_clients.iter().filter(|(id, _)| state.clients.contains_key(id))
+        .map(|(_, login)| login.as_str()).collect();
+    identities.sort(); identities.dedup();
+    if identities.is_empty() { return None; }
+    let label = identities.iter().take(3).copied().collect::<Vec<_>>().join(", ");
+    Some(if identities.len() > 3 { format!("{label} (+{})", identities.len() - 3) } else { label })
+}
+fn detach_client(inner: &Inner, id: u64) {
+    let mut state = inner.state.lock().unwrap();
+    state.clients.remove(&id);
+    let changed = state.remote_clients.remove(&id).is_some();
+    let identity = remote_identity(&state);
+    drop(state);
+    if changed { inner.publish(None, json!({"type":"remote_driver_changed","data":{"identity":identity}})); }
+}
+#[cfg(test)]
 fn attach_client(inner: &Inner, id: u64, cursor: Option<u64>, tx: &SyncSender<Vec<u8>>) -> bool {
+    attach_client_with_identity(inner, id, cursor, tx, None)
+}
+fn attach_client_with_identity(inner: &Inner, id: u64, cursor: Option<u64>, tx: &SyncSender<Vec<u8>>, login: Option<&str>) -> bool {
     let mut state = inner.state.lock().unwrap();
     // Replay and registration are one atomic operation with publish.
     if let (Some(requested), Some((oldest, _))) = (cursor, state.ring.front()) {
@@ -424,6 +464,13 @@ fn attach_client(inner: &Inner, id: u64, cursor: Option<u64>, tx: &SyncSender<Ve
     if replay.len() > CLIENT_QUEUE_CAPACITY { return false; }
     if replay.into_iter().any(|bytes| tx.try_send(bytes).is_err()) { return false; }
     state.clients.insert(id, tx.clone());
+    let before = remote_identity(&state);
+    let previous = state.remote_clients.remove(&id);
+    if let Some(login) = login { state.remote_clients.insert(id, login.to_owned()); }
+    let identity = remote_identity(&state);
+    let changed = before != identity || previous.as_deref() != login;
+    drop(state);
+    if changed { inner.publish(None, json!({"type":"remote_driver_changed","data":{"identity":identity}})); }
     true
 }
 
@@ -489,7 +536,7 @@ fn handle_call(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame: &Value) {
     let Some(req_id) = frame["id"].as_u64() else { return; };
     let Some(method) = frame["method"].as_str() else { return; };
     let params = frame.get("params").filter(|v| v.is_object()).cloned().unwrap_or_else(|| json!({}));
-    let _control_guard = matches!(method, "set_model" | "set_effort" | "set_permission_mode" | "switch_branch" | "stop_if_idle")
+    let _control_guard = matches!(method, "set_model" | "set_effort" | "set_permission_mode" | "switch_branch" | "stop" | "stop_if_idle")
         .then(|| inner.controls.lock().unwrap());
     let (result, changed) = if method == "answer_needs_input" {
         let reviewed = params.get("reviewed_request");
@@ -550,13 +597,16 @@ fn handle_call(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame: &Value) {
         let peer_tools_ready = inner.host.peer_tools_ready();
         let lore_scrub = inner.host.lore_scrub_status();
         let billing = inner.host.billing_snapshot();
+        let lore_status = inner.host.lore_status();
         let state = inner.state.lock().unwrap();
         (Ok(json!({"status":{"session_id":inner.session.session_id,"cwd":inner.session.cwd,
             "model":state.model,"permission_mode":state.permission_mode,
-            "engine":inner.session.engine,"effort":state.effort,"pending_effort":state.pending_effort,"running":state.busy,"queued":state.prompts.len(),
+            "engine":inner.session.engine,"effort":state.effort,"pending_effort":state.pending_effort,"running":state.busy,"queued":state.prompts.len(),"remote_driver":remote_identity(&state),
             "can_set_model":can_set_model,
             "can_set_permission_mode":can_set_permission_mode,"peer_tools_ready":peer_tools_ready,
-            "lore_scrub":lore_scrub,"billing":billing}})), None)
+            "belief_count":lore_status.as_ref().and_then(|value|value["belief_count"].as_u64()),
+            "disabled_tools":lore_status.as_ref().and_then(|value|value["disabled_tools"].as_array().cloned()),
+            "lore_enabled":inner.host.lore_enabled(),"lore_scrub":lore_scrub,"billing":billing,"account":inner.host.account_snapshot()}})), None)
     } else if method == "switch_branch" {
         let idle = {
             let state = inner.state.lock().unwrap();
@@ -757,6 +807,23 @@ mod tests {
     }
 
     #[test]
+    fn failed_effort_verification_clears_pending_but_preserves_verified_effort() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = Daemon::bind(dir.path(), Session {
+            session_id: "effort-test".into(), cwd: "/fixture".into(), model: None,
+            engine: "claude".into(), doxa_version: "test".into(),
+        }, Arc::new(NoopHost)).unwrap();
+        {
+            let mut state = daemon.inner.state.lock().unwrap();
+            state.effort = Some("low".into()); state.pending_effort = Some("high".into());
+        }
+        daemon.inner.publish(None, json!({"type":"effort_verification_failed","data":{"effort":"low","requested_effort":"high"}}));
+        let state = daemon.inner.state.lock().unwrap();
+        assert_eq!(state.effort.as_deref(), Some("low"));
+        assert!(state.pending_effort.is_none());
+    }
+
+    #[test]
     fn failed_replay_does_not_register_client() {
         let dir = tempfile::tempdir().unwrap();
         let daemon = Daemon::bind(dir.path(), Session {
@@ -785,4 +852,24 @@ mod tests {
         assert_eq!(handle.inner.state.lock().unwrap().prompts.len(), PROMPT_QUEUE_CAPACITY);
         handle.shutdown();
     }
+    #[test]
+    fn remote_browser_identity_is_visible_and_removed_on_disconnect() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = Daemon::bind(dir.path(), Session { session_id:"remote-test".into(),cwd:"/repo".into(),
+            model:None,engine:"test".into(),doxa_version:"test".into() }, Arc::new(StopHost(AtomicUsize::new(0)))).unwrap();
+        let (tx, rx) = mpsc::sync_channel(CLIENT_QUEUE_CAPACITY);
+        assert!(attach_client_with_identity(&daemon.inner, 1, None, &tx, Some("owner@example.com")));
+        assert_eq!(remote_identity(&daemon.inner.state.lock().unwrap()), Some("owner@example.com".into()));
+        let frame: Value = serde_json::from_slice(&rx.try_recv().unwrap()).unwrap();
+        assert_eq!(frame["event"]["type"], "remote_driver_changed");
+        assert_eq!(frame["event"]["data"]["identity"], "owner@example.com");
+        assert!(attach_client_with_identity(&daemon.inner, 2, Some(1), &tx, Some("second@example.com")));
+        assert_eq!(remote_identity(&daemon.inner.state.lock().unwrap()), Some("owner@example.com, second@example.com".into()));
+        detach_client(&daemon.inner, 1);
+        assert_eq!(remote_identity(&daemon.inner.state.lock().unwrap()), Some("second@example.com".into()));
+        detach_client(&daemon.inner, 2);
+        assert_eq!(remote_identity(&daemon.inner.state.lock().unwrap()), None);
+        assert!(daemon.inner.state.lock().unwrap().remote_clients.is_empty());
+    }
+
 }

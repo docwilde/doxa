@@ -37,7 +37,9 @@ use `./task install`. `doxa help` lists CLI forms and options.
 
 ## Sessions and worktrees
 
-Bare `doxa` restores this project's sessions or starts Codex. `new` always
+Bare `doxa` restores this project's saved tabs or starts the configured engine
+(default Claude). Safe saved conversations resume without a prompt; others remain
+read only with a reason. `restore_tabs` and `resume_restored` control this behavior. `new` always
 starts a session; `attach`, `stop`, and `list` manage live sessions. Select
 `--engine codex|claude|deepseek|glm`, `--model`, and supported `--effort` values.
 Claude needs the Claude Agent SDK; vendors use `DEEPSEEK_API_KEY` or
@@ -122,8 +124,8 @@ and raw authentication output do not enter transcripts. Closing authentication
 cancels and reaps its worker. `auth status` checks CLI exit status.
 `plugins [refresh|adopt on|off]` and `/plugins` / `/reload-plugins` discover and
 control sanitized Claude plugin adoption for future sessions. Native settings
-and `/settings` edit `linger_secs` and `worktree_per_session`; environment
-shadows remain read only. Wider Python settings are not silently accepted.
+and `/settings` edit the full categorized preference catalog; environment
+shadows remain read only. Settings are validated against the categorized catalog before they are saved.
 
 ## Fleets and peers
 
@@ -147,11 +149,12 @@ Arguments are passed directly, without shell evaluation. Task text and child
 output stay private. Ctrl+C cancels a controller; Ctrl+Q waits for teardown
 before exiting. Controller completion refreshes actual manifest state.
 
-`/peers`, bare `/mesh`, and Ctrl+M open the peer map. `/msg PEER TEXT` sends
+`/peers` and Ctrl+M open the native peer map. `/msg PEER TEXT` sends
 same-project scrubbed messages. Native inbound turns use bounded queues;
 supervisor peer tools are capability gated. CLI `mesh serve` and `fleet mesh RUN`
 serve the private graph with an owned, stoppable Python browser-mesh child.
-The TUI `/mesh` remains the map; browser arguments are not implemented there.
+TUI `/mesh [RUN|stop]` opens or stops a browser graph owned by this window.
+`/fleet status`, `stop`, `detach`, `attach INDEX` and `mesh` use the current run.
 Old manifests lacking a verified private ledger are refused for browser serving.
 Remote routing is not claimed as a Python 1.19 parity requirement.
 
@@ -173,10 +176,10 @@ See [engine contracts](doxa-engines/README.md) for transport and review details.
 
 ## Verification and gallery
 
-The alpha.29 UI milestone passed 401 tests across 21 suites, including recursive
-layout, divider drag, review gates, saved views, and controller lifecycle.
-Subsequent auth and mesh fixtures cover cancellation, device login, protected
-store refusal, private ledgers, and malformed manifests without live providers.
+The alpha.31 release verifies the full Rust workspace and the installed Python
+SDK/LORE seams using disposable stores and local provider fixtures. Coverage
+includes layout, review gates, restoration, current-session controls, cancellation,
+interactive fleets, device login, private ledgers and malformed manifests.
 Run `./task test` for the current full suite. Alpha tests do not establish live
 provider compatibility beyond the explicitly verified contracts.
 

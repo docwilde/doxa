@@ -110,7 +110,7 @@ fn candidate_order(a: &Candidate, b: &Candidate) -> std::cmp::Ordering {
 
 fn read_offline(mut file: File, uid: u32) -> Option<String> {
     let meta = file.metadata().ok()?;
-    if !meta.is_file() || meta.uid() != uid { return None; }
+    if !meta.is_file() || meta.uid() != uid || meta.nlink() > 1 { return None; }
     let start = meta.len().saturating_sub(MAX_FILE_BYTES);
     let starts_on_line = if start > 0 {
         file.seek(SeekFrom::Start(start - 1)).ok()?;
@@ -151,6 +151,29 @@ fn recorded_cwd(file: &mut File) -> Option<PathBuf> {
 pub fn discover() -> Vec<OfflineSession> {
     let Some(root) = projects_dir() else { return Vec::new(); };
     discover_in(&root, None, None)
+}
+
+/// Resolve a saved tab through canonical project identity, then open only its
+/// exact owned transcript. A missing managed checkout can use its recorded cwd.
+pub fn saved_session(id: &str, cwd: &Path, python: &Path) -> Option<OfflineSession> {
+    if !crate::discovery::valid_id(id) || !cwd.is_absolute() { return None; }
+    let root = projects_dir()?;
+    if let Ok(mut lore) = LoreClient::spawn(python, Duration::from_secs(3)) {
+        if let Ok((canonical_root, project)) = lore.transcript_identity(&cwd.to_string_lossy()) {
+            if canonical_root == root {
+                let mut entries = indexed_hits_in(&root, vec![SessionSearchHit {
+                    session_id: id.into(), project, snippet: String::new(),
+                }]);
+                if let Some(entry) = entries.pop() { return Some(entry); }
+            }
+        }
+    }
+    // Do not guess another project's identity when a checkout is present.
+    if !fs::symlink_metadata(cwd).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound) { return None; }
+    let mut entries = discover_prefix(id).into_iter().filter(|entry|
+        entry.id == id && entry.cwd.as_deref() == Some(cwd));
+    let entry = entries.next()?;
+    entries.next().is_none().then_some(entry)
 }
 
 pub fn discover_prefix(prefix: &str) -> Vec<OfflineSession> {
@@ -204,7 +227,7 @@ fn indexed_hits_in(root: &Path, hits: Vec<SessionSearchHit>) -> Vec<OfflineSessi
         if !owned_dir(&dir, uid) { continue; }
         let name = format!("{}.jsonl", hit.session_id);
         let Some(mut file) = open_at(&dir, OsStr::new(&name), libc::O_RDONLY | libc::O_NONBLOCK) else { continue; };
-        if !file.metadata().is_ok_and(|meta| meta.is_file() && meta.uid() == uid) { continue; }
+        if !file.metadata().is_ok_and(|meta| meta.is_file() && meta.uid() == uid && meta.nlink() == 1) { continue; }
         let cwd = recorded_cwd(&mut file);
         if let Some(markdown) = read_offline(file, uid) {
             let snippet = if hit.snippet.is_empty() { Vec::new() } else { vec![hit.snippet] };

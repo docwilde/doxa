@@ -46,6 +46,8 @@ fn explicit_engine_and_model_start_new_session_with_existing_live_session() {
         .env("DOXA_DAEMON_BIN", &daemon)
         .env("DOXA_CAPTURE_ARGS", &capture)
         .env("DOXA_RUNTIME_DIR", &runtime)
+        .env("DOXA_HOME", dir.path().join("home"))
+        .env("DOXA_ENGINE", "codex")
         .env("DEEPSEEK_API_KEY", "test-key")
         .current_dir(dir.path())
         .output().unwrap();
@@ -57,7 +59,7 @@ fn explicit_engine_and_model_start_new_session_with_existing_live_session() {
 }
 
 #[test]
-fn model_alone_starts_codex_and_invalid_vendor_does_not_start_daemon() {
+fn model_alone_uses_configured_engine_and_invalid_vendor_does_not_start_daemon() {
     let dir = tempfile::tempdir().unwrap();
     let runtime = dir.path().join("runtime");
     let _listener = live_session(&runtime, dir.path());
@@ -71,6 +73,8 @@ fn model_alone_starts_codex_and_invalid_vendor_does_not_start_daemon() {
         .env("DOXA_DAEMON_BIN", &daemon)
         .env("DOXA_CAPTURE_ARGS", &capture)
         .env("DOXA_RUNTIME_DIR", &runtime)
+        .env("DOXA_HOME", dir.path().join("home"))
+        .env("DOXA_ENGINE", "codex")
         .current_dir(dir.path())
         .output().unwrap();
     assert!(!output.status.success());
@@ -84,6 +88,8 @@ fn model_alone_starts_codex_and_invalid_vendor_does_not_start_daemon() {
         .env("DOXA_DAEMON_BIN", &daemon)
         .env("DOXA_CAPTURE_ARGS", &capture)
         .env("DOXA_RUNTIME_DIR", &runtime)
+        .env("DOXA_HOME", dir.path().join("home"))
+        .env("DOXA_ENGINE", "codex")
         .current_dir(dir.path())
         .output().unwrap();
     assert!(!output.status.success());
@@ -95,6 +101,8 @@ fn model_alone_starts_codex_and_invalid_vendor_does_not_start_daemon() {
         .env("DOXA_DAEMON_BIN", &daemon)
         .env("DOXA_CAPTURE_ARGS", &capture)
         .env("DOXA_RUNTIME_DIR", &runtime)
+        .env("DOXA_HOME", dir.path().join("home"))
+        .env("DOXA_ENGINE", "codex")
         .env_remove("DEEPSEEK_API_KEY")
         .current_dir(dir.path())
         .output().unwrap();
@@ -107,6 +115,8 @@ fn model_alone_starts_codex_and_invalid_vendor_does_not_start_daemon() {
         .env("DOXA_DAEMON_BIN", &daemon)
         .env("DOXA_CAPTURE_ARGS", &capture)
         .env("DOXA_RUNTIME_DIR", &runtime)
+        .env("DOXA_HOME", dir.path().join("home"))
+        .env("DOXA_ENGINE", "codex")
         .current_dir(dir.path())
         .output().unwrap();
     assert!(!output.status.success());

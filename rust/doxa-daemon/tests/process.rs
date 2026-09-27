@@ -2158,6 +2158,8 @@ mod vendor_process {
             ])
             .env("DEEPSEEK_API_KEY", "test-key-1234")
             .env("ZAI_API_KEY", "test-key-1234")
+            .env_remove("DOXA_LORE")
+            .env("DOXA_AGENT_PEER_SEND", "1")
             .env("DOXA_VENDOR_TOOLS", if tools { "workspace-read" } else { "" })
             .env("DOXA_HOME", runtime.join("home"))
             .stdout(Stdio::null())
@@ -2181,6 +2183,58 @@ mod vendor_process {
             child,
             registry,
             socket,
+        }
+    }
+
+    #[test]
+    fn native_vendor_refreshes_private_system_memory_and_indexes_only_on_finalization() {
+        for enabled in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            fs::create_dir(dir.path().join("home")).unwrap();
+            fs::write(dir.path().join("home/config.toml"), format!("lore = '{}'\n", if enabled { "1" } else { "0" })).unwrap();
+            let lore = dir.path().join("lore-fixture"); let calls = dir.path().join("lore-calls.jsonl");
+            executable(&lore, &format!(r#"#!/usr/bin/env python3
+import json,sys,os
+print(json.dumps({{"type":"hello","proto":1,"capabilities":["scrub","snapshot","transcript_identity","index_transcript_v1"]}}),flush=True)
+for line in sys.stdin:
+    frame=json.loads(line); op=frame["op"]
+    with open({calls:?}, "a") as log: log.write(json.dumps(frame)+"\n")
+    if op == "transcript_identity": reply={{"value":{{"projects_dir":frame["cwd"],"slug":"project"}}}}
+    elif op == "snapshot":
+        with open({calls:?}) as log: count=sum(json.loads(row)["op"] == "snapshot" for row in log)
+        reply={{"text":"PRIVATE-DURABLE-MEMORY-"+str(count)}}
+    elif op == "index_transcript_v1": reply={{"value":{{"indexed":4,"consumed":4}}}}
+    else: reply={{"text":frame.get("text","").replace("fixture-secret","[redacted]")}}
+    print(json.dumps({{"type":"reply","id":frame["id"],"ok":True,**reply}}),flush=True)
+"#, calls=calls.to_str().unwrap()));
+            let (endpoint, server) = fake_vendor(2, "answer");
+            let mut process = start_vendor(dir.path(), "deepseek", &endpoint, &lore);
+            let (mut reader, mut socket) = process.connect();
+            assert_eq!(receive(&mut reader)["lore_enabled"], enabled);
+            send(&mut socket, json!({"type":"attach","cursor":null}));
+            for id in 1..=2 {
+                send(&mut socket, json!({"type":"prompt","id":id,"text":"fixture-secret question"}));
+                loop { let frame=receive(&mut reader); assert!(!frame.to_string().contains("PRIVATE-DURABLE-MEMORY")); if frame["event"]["type"] == "turn_done" { assert_eq!(frame["event"]["data"]["is_error"],false); break; } }
+            }
+            let before: Vec<Value> = fs::read_to_string(&calls).unwrap().lines().map(|row|serde_json::from_str(row).unwrap()).collect();
+            assert!(!before.iter().any(|row|row["op"] == "index_transcript_v1"));
+            send(&mut socket, json!({"type":"call","id":3,"method":"stop","params":{}}));
+            assert_eq!(receive(&mut reader)["ok"], true); wait_until(|| process.exited());
+            let requests = server.join().unwrap();
+            for (index, body) in requests.iter().enumerate() {
+                assert_eq!(body["messages"][0]["role"],"system");
+                assert!(body["messages"][0]["content"].as_str().unwrap().contains("DOXA session"));
+                if enabled { assert!(body["messages"][0]["content"].as_str().unwrap().contains(&format!("PRIVATE-DURABLE-MEMORY-{}",index+1))); }
+                else { assert!(!body.to_string().contains("PRIVATE-DURABLE-MEMORY")); }
+            }
+            let after: Vec<Value> = fs::read_to_string(&calls).unwrap().lines().map(|row|serde_json::from_str(row).unwrap()).collect();
+            assert_eq!(after.iter().filter(|row|row["op"] == "snapshot").count(),if enabled {2}else{0});
+            assert_eq!(after.iter().filter(|row|row["op"] == "index_transcript_v1").count(),usize::from(enabled));
+            for file in ["vendor-session.jsonl","vendor-session.messages.json"] {
+                let stored=fs::read_to_string(dir.path().join("project").join(file)).unwrap();
+                assert!(!stored.contains("PRIVATE-DURABLE-MEMORY")); assert!(!stored.contains("DOXA session"));
+                assert!(!stored.contains("fixture-secret")); assert!(stored.contains("[redacted] question"));
+            }
         }
     }
 
@@ -2244,7 +2298,7 @@ mod vendor_process {
             assert!(requests.iter().all(|body| body["tools"].as_array().is_some_and(|tools|
                 tools.len()==3 && tools.iter().all(|tool|tool["function"]["name"].as_str()
                     .is_some_and(|name|name.starts_with("mcp__doxa__peer_"))))));
-            assert_eq!(requests[1]["messages"][1]["content"], "[redacted] answer");
+            assert_eq!(requests[1]["messages"][2]["content"], "[redacted] answer");
             assert!(!requests[1].to_string().contains("fixture-secret"));
             // The published entry is removed at shutdown. Its private claim
             // inode remains so a later daemon cannot bypass an active flock by
@@ -2322,7 +2376,7 @@ mod vendor_process {
         let requests = server.join().unwrap();
         assert_eq!(requests[0]["model"], "deepseek-flash");
         assert_eq!(requests[1]["model"], "deepseek-v4-pro");
-        assert_eq!(requests[1]["messages"].as_array().unwrap().len(), 3);
+        assert_eq!(requests[1]["messages"].as_array().unwrap().len(), 4);
     }
 
     #[test]
@@ -2349,7 +2403,7 @@ mod vendor_process {
         wait_until(|| process.exited());
         let requests = server.join().unwrap();
         assert_eq!(requests[0]["tools"][0]["function"]["name"], "workspace_read");
-        let result = requests[1]["messages"][2]["content"].as_str().unwrap();
+        let result = requests[1]["messages"][3]["content"].as_str().unwrap();
         assert!(result.contains("[redacted] workspace note"));
         assert!(!requests[1].to_string().contains("fixture-secret"));
         let saved: Value = serde_json::from_slice(&fs::read(dir.path().join("project/vendor-session.messages.json")).unwrap()).unwrap();
@@ -2432,9 +2486,9 @@ mod vendor_process {
             assert_eq!(receive(&mut reader)["ok"], true);
             wait_until(|| second.exited());
             let requests = second_server.join().unwrap();
-            assert_eq!(requests[0]["messages"][0]["content"], "[redacted] prompt");
-            assert_eq!(requests[0]["messages"][1]["content"], "[redacted] first");
-            assert_eq!(requests[0]["messages"][2]["content"], "continue");
+            assert_eq!(requests[0]["messages"][1]["content"], "[redacted] prompt");
+            assert_eq!(requests[0]["messages"][2]["content"], "[redacted] first");
+            assert_eq!(requests[0]["messages"][3]["content"], "continue");
             let records: Vec<Value> = fs::read_to_string(&transcript)
                 .unwrap()
                 .lines()
@@ -3291,4 +3345,125 @@ assert not sys.stdin.readline()
     loop { let frame=receive(&mut reader);if frame["type"]=="reply"&&frame["id"]==2 {assert_eq!(frame["ok"],true);break;} }
     wait_until(||process.exited());
     assert!(!dir.path().join("project/codex-session.codex.json").exists());
+}
+
+#[test]
+fn memory_off_codex_scrubs_and_records_without_snapshot_index_or_compact_review() {
+    for (configured, override_env, enabled) in [("0", None, false), ("1", Some("off"), false)] {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("home")).unwrap();
+        fs::write(dir.path().join("home/config.toml"), format!("lore = '{configured}'\n")).unwrap();
+        let codex = dir.path().join("codex-fixture"); let python = dir.path().join("lore-fixture");
+        let captured = dir.path().join("stdin.txt"); let requests = dir.path().join("requests.jsonl");
+        fake_context_sidecar(&python, true);
+        let source = fs::read_to_string(&python).unwrap().replace("op = frame.get(\"op\")", &format!("op = frame.get(\"op\")\n    with open({:?}, 'a') as log: log.write(op + '\\n')", requests.to_str().unwrap()));
+        // Record sidecar operations at the actual protocol seam.
+        let source = if source.contains("with open(") { source } else {
+            fs::read_to_string(&python).unwrap().replace("op = frame[\"op\"]", &format!("op = frame[\"op\"]\n    with open({:?}, 'a') as log: log.write(op + '\\n')", requests.to_str().unwrap()))
+        };
+        executable(&python, &source);
+        executable(&codex, &format!("#!/bin/sh\ncat > '{}'\necho '{{\"type\":\"thread.started\",\"thread_id\":\"thread_1\"}}'\n", captured.display()));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"));
+        command.args(["--runtime-dir", dir.path().to_str().unwrap(), "--cwd", dir.path().to_str().unwrap(),
+            "--session-id", "codex-session", "--linger", "10", "--engine", "codex", "--codex-bin", codex.to_str().unwrap(), "--lore-python", python.to_str().unwrap()])
+            .env("DOXA_HOME", dir.path().join("home")).env("DOXA_CODEX_APPSERVER", "0").env_remove("DOXA_LORE")
+            .stdout(Stdio::null()).stderr(Stdio::piped());
+        if let Some(value) = override_env { command.env("DOXA_LORE", value); }
+        let child = command.spawn().unwrap(); let registry = dir.path().join("registry/codex-session.json");
+        wait_until(|| registry.exists());
+        let entry: Value = serde_json::from_slice(&fs::read(&registry).unwrap()).unwrap();
+        let mut process = Process { child, registry, socket: PathBuf::from(entry["daemon_socket"].as_str().unwrap()) };
+        let (mut reader, mut socket) = process.connect(); assert_eq!(receive(&mut reader)["lore_enabled"], enabled);
+        send(&mut socket, json!({"type":"attach","cursor":null}));
+        send(&mut socket, json!({"type":"prompt","id":1,"text":"fixture-secret task"}));
+        assert_eq!(receive(&mut reader)["ok"], true);
+        loop { let frame = receive(&mut reader); assert!(!frame.to_string().contains("fixture-secret")); if frame["event"]["type"] == "turn_done" { break; } }
+        send(&mut socket, json!({"type":"call","id":2,"method":"stop","params":{}}));
+        assert_eq!(receive(&mut reader)["ok"], true); wait_until(|| process.exited());
+        let provider = fs::read_to_string(&captured).unwrap();
+        assert!(provider.contains("MEMORY OFF")); assert!(!provider.contains("durable memory"));
+        let calls = fs::read_to_string(&requests).unwrap(); assert!(calls.contains("scrub")); assert!(!calls.contains("snapshot")); assert!(!calls.contains("index_transcript"));
+        let transcript = fs::read_to_string(dir.path().join("project/codex-session.jsonl")).unwrap();
+        assert!(transcript.contains("[redacted] task")); assert!(!transcript.contains("fixture-secret"));
+    }
+}
+
+#[test]
+fn native_child_keeps_parent_identity_and_starts_task_without_an_attachment() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = dir.path();
+    let child = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+        .args(["--runtime-dir", runtime.to_str().unwrap(), "--cwd", runtime.to_str().unwrap(),
+            "--session-id", "native-child", "--linger", "10", "--spawn-depth", "2",
+            "--parent-session-id", "native-parent", "--task", "perform the approved task"])
+        .env("DOXA_HOME", runtime.join("home")).env("DOXA_WORKTREE", "0")
+        .stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
+    let registry = runtime.join("registry/native-child.json");
+    wait_until(|| registry.exists());
+    let row: Value = serde_json::from_slice(&fs::read(&registry).unwrap()).unwrap();
+    assert_eq!(row["parent_session_id"], "native-parent");
+    assert_eq!(row["pid"], child.id());
+    assert!(row.get("spawn_depth").is_none());
+    let socket = PathBuf::from(row["daemon_socket"].as_str().unwrap());
+    assert_eq!(socket.file_name().unwrap().to_str().unwrap(), format!("daemon-native-c-{}.sock", child.id()));
+    let mut process = Process { child, registry, socket };
+    let mut stream = UnixStream::connect(&process.socket).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    let mut reader = BufReader::new(stream.try_clone().unwrap());
+    let mut line = String::new(); reader.read_line(&mut line).unwrap();
+    writeln!(stream, "{}", json!({"type":"attach","cursor":null})).unwrap();
+    loop {
+        line.clear(); reader.read_line(&mut line).unwrap();
+        let frame: Value = serde_json::from_str(&line).unwrap();
+        if frame["event"]["type"] == "turn_done" { break; }
+    }
+    writeln!(stream, "{}", json!({"type":"call","id":1,"method":"stop","params":{}})).unwrap();
+    wait_until(|| process.child.try_wait().unwrap().is_some());
+}
+
+#[test]
+fn native_broadcast_reply_and_history_filters_follow_the_owned_delivery_path() {
+    let dir=tempfile::tempdir().unwrap();let codex=dir.path().join("codex-fixture");let python=dir.path().join("lore-fixture");
+    fake_scrubber(&python,false);executable(&codex,"#!/bin/sh\nexit 0\n");
+    let (first,_)=registry_peer(dir.path(),"first",dir.path().to_str().unwrap(),"first teammate");
+    let (second,_)=registry_peer(dir.path(),"second",dir.path().to_str().unwrap(),"second teammate");
+    let (foreign,_)=registry_peer(dir.path(),"foreign","/other-project","outsider");
+    let receive_body=|listener:UnixListener|thread::spawn(move|| {
+        listener.set_nonblocking(true).unwrap();let deadline=Instant::now()+Duration::from_secs(5);
+        loop {
+            match listener.accept() {
+                Ok((mut stream,_))=>{stream.set_read_timeout(Some(Duration::from_millis(500))).unwrap();let mut body=String::new();stream.read_to_string(&mut body).unwrap();if !body.is_empty() { return serde_json::from_str::<Value>(&body).unwrap(); }},
+                Err(error) if error.kind()==std::io::ErrorKind::WouldBlock=>{assert!(Instant::now()<deadline);thread::sleep(Duration::from_millis(5));},
+                Err(error)=>panic!("{error}"),
+            }
+        }
+    });
+    let first=receive_body(first);let second=receive_body(second);
+    let mut process=Process::start_codex(dir.path(),&codex,&python);let (mut reader,mut socket)=process.connect();
+    receive(&mut reader);send(&mut socket,json!({"type":"attach","cursor":null}));
+    let reply="0123456789abcdef0123456789abcdef";
+    send(&mut socket,json!({"type":"call","id":1,"method":"msg","params":{"body":"fixture-secret broadcast","broadcast":true,"in_reply_to":reply}}));
+    let mut result=receive(&mut reader);while result["id"]!=1 { result=receive(&mut reader); }
+    assert_eq!(result["ok"],true);assert_eq!(result["peer_count"],2);assert_eq!(result["kind"],"broadcast");
+    let mut delivered:Vec<_>=result["delivered_to"].as_array().unwrap().iter().map(|id|id.as_str().unwrap()).collect();delivered.sort();assert_eq!(delivered,vec!["first","second"]);
+    for worker in [first,second] { let frame=worker.join().unwrap();assert_eq!(frame["body"],"[redacted] broadcast");assert_eq!(frame["kind"],"broadcast"); }
+    send(&mut socket,json!({"type":"call","id":2,"method":"peer_history","params":{"direction":"sent","limit":1}}));
+    let mut history=receive(&mut reader);while history["id"]!=2 { history=receive(&mut reader); }
+    assert_eq!(history["ok"],true);assert_eq!(history["messages"].as_array().unwrap().len(),1);assert_eq!(history["messages"][0]["in_reply_to"],reply);
+    assert_eq!(history["messages"][0]["id"],result["message_id"]);assert!(!history.to_string().contains("fixture-secret"));
+    send(&mut socket,json!({"type":"call","id":3,"method":"peer_history","params":{"direction":"received","limit":100}}));
+    let mut empty=receive(&mut reader);while empty["id"]!=3 { empty=receive(&mut reader); }
+    assert_eq!(empty["messages"].as_array().unwrap().len(),0);
+    for (id,params) in [(4,json!({"to":"first","body":"bad","broadcast":true})),(5,json!({"body":"bad","broadcast":true,"in_reply_to":"../foreign"}))] {
+        send(&mut socket,json!({"type":"call","id":id,"method":"msg","params":params}));
+        let mut error=receive(&mut reader);while error["id"]!=id { error=receive(&mut reader); }assert_eq!(error["ok"],false);
+    }
+    assert_eq!(fs::read_to_string(dir.path().join("home/peers/messages.jsonl")).unwrap().lines().count(),1);
+    foreign.set_nonblocking(true).unwrap();
+    while let Ok((mut stream,_))=foreign.accept() {
+        stream.set_read_timeout(Some(Duration::from_millis(500))).unwrap();let mut body=String::new();stream.read_to_string(&mut body).unwrap();
+        assert!(body.is_empty(),"foreign scope received a message rather than an empty discovery probe");
+    }
+    send(&mut socket,json!({"type":"call","id":6,"method":"stop","params":{}}));
+    let mut stop=receive(&mut reader);while stop["id"]!=6 { stop=receive(&mut reader); }assert_eq!(stop["ok"],true);wait_until(||process.exited());
 }

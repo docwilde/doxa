@@ -121,7 +121,7 @@ impl PeerDesk {
         let generation = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|_| ())?.as_nanos();
         let id = format!("vendor-peer-{}-{generation}-{}", std::process::id(), self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
         let (sender, receiver) = tokio::sync::oneshot::channel();
-        let request = json!({"id":id,"kind":"permission","title":"Approve this peer tool once?",
+        let request = json!({"id":id,"kind":"permission","title":if tool.starts_with("lore_") { "Approve this LORE tool once?" } else { "Approve this peer tool once?" },
             "tool_name":tool,"input_summary":summary,"require_full_review":true});
         *pending = Some(PeerPending { id, sender });
         Ok((request, receiver))
@@ -155,6 +155,7 @@ impl Drop for ResolvePeer {
 pub struct NativeVendorGate<'a> {
     workspace: Option<WorkspaceReadGate<'a>>,
     peer: Option<doxa_runtime::PeerToolHandler>,
+    agent: Option<(Vec<Value>, doxa_runtime::PeerToolHandler)>,
     desk: std::sync::Arc<PeerDesk>,
     scrub: &'a (dyn Fn(&str) -> Result<String, ()> + Sync),
     emit: &'a dyn Fn(Value),
@@ -164,7 +165,10 @@ impl<'a> NativeVendorGate<'a> {
     pub fn new(root: &'a Path, workspace: bool, peer: Option<doxa_runtime::PeerToolHandler>,
         desk: std::sync::Arc<PeerDesk>, scrub: &'a (dyn Fn(&str) -> Result<String, ()> + Sync),
         emit: &'a dyn Fn(Value), events: std::sync::Arc<std::sync::Mutex<Vec<Value>>>) -> Self {
-        Self { workspace:workspace.then(|| WorkspaceReadGate::new(root, scrub)), peer, desk, scrub, emit, events }
+        Self { workspace:workspace.then(|| WorkspaceReadGate::new(root, scrub)), peer, agent:None, desk, scrub, emit, events }
+    }
+    pub fn with_agent(mut self, definitions: Vec<Value>, handler: doxa_runtime::PeerToolHandler) -> Self {
+        self.agent = Some((definitions, handler)); self
     }
 }
 impl ToolGate for NativeVendorGate<'_> {
@@ -175,6 +179,7 @@ impl ToolGate for NativeVendorGate<'_> {
                 json!({"type":"function","function":{"name":definition["name"],"description":definition["description"],"parameters":definition["inputSchema"]}})
             }));
         }
+        if let Some((rows, _)) = &self.agent { definitions.extend(rows.clone()); }
         definitions
     }
     fn execute<'a>(&'a mut self, call: &'a ToolCall) -> BoxFuture<'a, Result<Value, ()>> {
@@ -183,9 +188,11 @@ impl ToolGate for NativeVendorGate<'_> {
             return Box::pin(async move { result });
         }
         let start = (|| {
-            let peer = self.peer.clone().ok_or(())?;
             let arguments: Value = serde_json::from_str(&(self.scrub)(&Value::Object(call.arguments.clone()).to_string())?).map_err(|_| ())?;
-            let method = doxa_engines::peer_tools::rpc(&call.name, &arguments).map_err(|_| ())?;
+            let (peer, method) = if let Some((_, handler)) = self.agent.as_ref().filter(|(rows, _)|
+                rows.iter().any(|row| row["function"]["name"] == call.name)) {
+                (handler.clone(), call.name.clone())
+            } else { (self.peer.clone().ok_or(())?, doxa_engines::peer_tools::rpc(&call.name, &arguments).map_err(|_| ())?.to_owned()) };
             let (request, reply) = self.desk.begin(&call.name, &arguments)?;
             let guard = ResolvePeer { desk:self.desk.clone(), id:request["id"].clone(), events:self.events.clone() };
             (self.emit)(json!({"type":"tool_call","data":{"id":call.id,"name":call.name,"input":arguments}}));
@@ -198,12 +205,22 @@ impl ToolGate for NativeVendorGate<'_> {
         Box::pin(async move {
             let (peer, method, arguments, reply, _guard) = start?;
             let allowed = reply.await.map_err(|_| ())?;
-            let result = if allowed { peer(method, &arguments).map_err(|_| ())? }
-                else { json!({"error":"Peer tool permission was denied; no peer action was taken"}) };
+            // A peer refusal is an ordinary operator result (unknown target,
+            // rate limit, unavailable ledger), so the model can recover. It
+            // is not a canonical backend strike and must not end the turn.
+            // Canonical LORE bridge failures retain their uncertain-outcome
+            // boundary rather than inviting an automatic write retry.
+            let result = if allowed { match peer(&method, &arguments) {
+                Ok(result) => result,
+                Err(reason) if matches!(method.as_str(), "peers" | "msg" | "peer_history") =>
+                    json!({"error":format!("{}: {reason}",tool_name.strip_prefix("mcp__doxa__").unwrap_or(&tool_name))}),
+                Err(_) => return Err(()),
+            } }
+                else { json!({"error":"Tool permission was denied; no action was taken"}) };
             let text = scrub(&result.to_string())?;
             if let Ok(mut events) = events.lock() {
                 events.push(json!({"type":"tool_result","data":{"id":call_id,"name":tool_name,
-                    "result_summary":text.chars().take(1000).collect::<String>(),"is_error":!allowed}}));
+                    "result_summary":text.chars().take(1000).collect::<String>(),"is_error":!allowed || result["error"].is_string()}}));
                 let mut start = 0; let limit = text.len().min(64 * 1024);
                 while start < limit {
                     let mut end = (start + 8192).min(limit); while !text.is_char_boundary(end) { end -= 1; }
@@ -223,6 +240,29 @@ mod peer_tests {
     use std::{cell::RefCell, sync::{Arc, Mutex, atomic::{AtomicUsize, Ordering}}};
     fn peer_call(name: &str, arguments: Value) -> ToolCall {
         ToolCall { id:"provider-call".into(), name:name.into(), arguments:arguments.as_object().unwrap().clone() }
+    }
+    #[test]
+    fn canonical_lore_calls_are_available_without_peer_opt_in_and_never_without_approval() {
+        let dir=tempfile::tempdir().unwrap(); let calls=Arc::new(AtomicUsize::new(0)); let called=calls.clone();
+        let handler: doxa_runtime::PeerToolHandler=Arc::new(move |name,args| {
+            assert_eq!(name,"lore_remember"); assert_eq!(args["text"],"proposal");
+            called.fetch_add(1,Ordering::SeqCst); Ok(json!({"staged":true}))
+        });
+        let desk=Arc::new(PeerDesk::default()); let displayed=RefCell::new(Vec::new());
+        let emit=|event|displayed.borrow_mut().push(event); let scrub=|text:&str|Ok(text.to_owned());
+        let mut gate=NativeVendorGate::new(dir.path(),false,None,desk.clone(),&scrub,&emit,Arc::new(Mutex::new(Vec::new())))
+            .with_agent(vec![json!({"type":"function","function":{"name":"lore_remember","parameters":{"type":"object"}}})],handler);
+        assert_eq!(gate.definitions().len(),1); assert_eq!(gate.definitions()[0]["function"]["name"],"lore_remember");
+        let call=peer_call("lore_remember",json!({"text":"proposal"}));
+        let execution=gate.execute(&call); assert_eq!(calls.load(Ordering::SeqCst),0);
+        let ask=displayed.borrow().iter().find(|event|event["type"]=="needs_input").unwrap()["data"].clone();
+        assert!(ask["title"].as_str().unwrap().contains("LORE"));
+        desk.answer(ask["id"].as_str().unwrap(),&json!({"decision":"allow"})).unwrap();
+        let runtime=tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        assert_eq!(runtime.block_on(execution).unwrap()["staged"],true); assert_eq!(calls.load(Ordering::SeqCst),1);
+        assert!(runtime.block_on(gate.execute(&peer_call("stop",json!({})))).is_err());
+        let execution=gate.execute(&call); desk.clear(); assert!(runtime.block_on(execution).is_err());
+        assert_eq!(calls.load(Ordering::SeqCst),1);
     }
     #[test]
     fn peer_action_waits_for_one_shot_permission_and_scrubs_return_value() {
@@ -252,6 +292,39 @@ mod peer_tests {
         assert_eq!(runtime.block_on(execution).unwrap()["result"], "[redacted] reply");
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert!(events.lock().unwrap().iter().any(|event| event["type"] == "needs_input_resolved"));
+    }
+    #[test]
+    fn retryable_peer_refusals_are_scrubbed_results_and_do_not_disable_the_tool() {
+        let dir=tempfile::tempdir().unwrap(); let calls=Arc::new(AtomicUsize::new(0)); let called=calls.clone();
+        let handler:doxa_runtime::PeerToolHandler=Arc::new(move |method,_| {
+            assert_eq!(method,"msg");
+            match called.fetch_add(1,Ordering::SeqCst) {
+                0=>Err("no live same-scope peer matches secret target".into()),
+                1=>Err("peer target is ambiguous".into()),
+                _=>Ok(json!({"delivered_to":["fixture"]})),
+            }
+        });
+        let desk=Arc::new(PeerDesk::default()); let displayed=RefCell::new(Vec::new());
+        let emit=|event|displayed.borrow_mut().push(event); let scrub=|text:&str|Ok(text.replace("secret","[redacted]"));
+        let events=Arc::new(Mutex::new(Vec::new()));
+        let mut gate=NativeVendorGate::new(dir.path(),false,Some(handler),desk.clone(),&scrub,&emit,events.clone());
+        let call=peer_call(doxa_engines::peer_tools::SEND,json!({"target":"fixture","text":"bounded message"}));
+        let runtime=tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        for index in 0..3 {
+            displayed.borrow_mut().clear();
+            let execution=gate.execute(&call);
+            let ask=displayed.borrow().iter().find(|row|row["type"]=="needs_input").unwrap()["data"].clone();
+            desk.answer(ask["id"].as_str().unwrap(),&json!({"decision":"allow"})).unwrap();
+            let result=runtime.block_on(execution).unwrap();
+            if index<2 { assert!(result["error"].as_str().unwrap().starts_with("peer_send: ")); }
+            else { assert_eq!(result["delivered_to"],json!(["fixture"])); }
+            assert!(!result.to_string().contains("secret"));
+            assert!(gate.definitions().iter().any(|row|row["function"]["name"]==doxa_engines::peer_tools::SEND));
+        }
+        assert_eq!(calls.load(Ordering::SeqCst),3);
+        let rows=events.lock().unwrap();
+        assert_eq!(rows.iter().filter(|row|row["type"]=="tool_result"&&row["data"]["is_error"]==true).count(),2);
+        assert!(!rows.iter().any(|row|row["type"]=="tool_disabled"));
     }
     #[test]
     fn denied_cancelled_and_extra_argument_peer_calls_take_no_action() {

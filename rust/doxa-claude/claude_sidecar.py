@@ -25,6 +25,32 @@ TASK_CANCEL_TIMEOUT = 1.0
 COMPACT_REVIEW_DEADLINE = 185.0  # below the Rust host's 195-second acknowledgement deadline
 
 
+def model_effort_capabilities(engine: object, model: str) -> list[str]:
+    """Only connected SDK model metadata proves effort support.
+
+    Claude CLI 2.1.283's model-info schema advertises ``resolvedModel`` as
+    the concrete API ID behind ``value`` aliases. Use that exact mapping;
+    explicit model rows take precedence over alias rows for the same ID.
+    """
+    info = getattr(engine, "server_info", None)
+    rows = info.get("models") if isinstance(info, dict) else None
+    if not isinstance(rows, list) or not callable(getattr(engine, "set_effort", None)):
+        return []
+    rows = [row for row in rows[:100] if isinstance(row, dict)]
+    candidates = [row for row in rows if row.get("value", row.get("id")) == model]
+    if not candidates:
+        candidates = [row for row in rows if row.get("resolvedModel") == model]
+    if not candidates:
+        return []
+    supported = ["low", "medium", "high", "xhigh", "max"]
+    for row in candidates:
+        levels = row.get("supportedEffortLevels")
+        if not isinstance(levels, list) or row.get("supportsEffort") is False:
+            return []
+        supported = [level for level in supported if level in levels]
+    return supported
+
+
 async def reviewed_compact_ready(engine: object, prompt: str,
                                  timeout: float = COMPACT_REVIEW_DEADLINE) -> bool:
     """Only a completed LORE review permits forwarding this exact command."""
@@ -82,6 +108,19 @@ def session_engine_options(engine_type: type, options: dict) -> dict:
     return options
 
 
+def account_snapshot(account: object) -> dict | None:
+    """Only bounded display fields from this connected SDK account."""
+    if not isinstance(account, dict):
+        return None
+    snapshot = {}
+    for key in ("email", "organization", "subscriptionType", "apiProvider"):
+        value = account.get(key)
+        if (isinstance(value, str) and value.strip() and len(value.encode()) <= 256
+                and not any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in value)):
+            snapshot[key] = value.strip()
+    return snapshot or None
+
+
 def billing_snapshot(account: object) -> dict | None:
     """Use SDK subscription auth; add local precision only for the same account."""
     if not isinstance(account, dict):
@@ -102,8 +141,8 @@ def billing_snapshot(account: object) -> dict | None:
     if not tier:
         return None
     usage = identity_mod.usage() if same_account else None
-    return {"mode": "subscription", "type": tier,
-            "quota": usage.chip() if usage else None}
+    from doxa.claude_quota import cached_quota
+    return {"mode": "subscription", "type": tier, **cached_quota(usage)}
 
 
 def emit(frame: dict) -> bool:
@@ -144,8 +183,10 @@ async def run() -> None:
     engine = None
     turn = None
     catalog_task = None
+    catalog_completed = 0.0
+    catalog_cached = {"models": []}
 
-    async def load_catalog() -> dict:
+    async def catalog_snapshot() -> dict:
         """Prepare one account-scoped snapshot off the request path."""
         from doxa.claude_catalog import attempt_cli_catalog_refresh
         from doxa.providers import ClaudeProvider, model_provider
@@ -160,17 +201,41 @@ async def run() -> None:
             models = await provider.list_models()
             # Static aliases are not proof this account can use them.
             available = [m for m in models if m.source != "fallback"]
-            return {"models": [m.id for m in available[:100]
-                               if isinstance(m.id, str) and 0 < len(m.id) <= 128],
-                    "capabilities": [{"model": m.id, "efforts": ["low", "medium", "high", "xhigh", "max"] if hasattr(SessionEngine, "set_effort") else []} for m in available[:100]],
-                    "note": (provider.catalog_note(available) if available else
-                             "No verified Claude model catalog available")[:500]}
+            ids = [m.id for m in available[:100]
+                   if isinstance(m.id, str) and 0 < len(m.id) <= 128]
+            capabilities = [{"model": model, "efforts": model_effort_capabilities(engine, model)}
+                            for model in ids]
+            note = (provider.catalog_note(available) if available else
+                    "No verified Claude model catalog available")
+            if callable(getattr(engine, "set_effort", None)) and any(not row["efforts"] for row in capabilities):
+                note += "; effort support is unknown without SDK model capability metadata"
+            return {"models": ids, "capabilities": capabilities, "note": note[:500]}
+
         except Exception:  # optional catalog discovery must not stop the session
             return {"models": [], "note": "No verified Claude model catalog available"}
+
+    async def load_catalog() -> dict:
+        nonlocal catalog_completed, catalog_cached
+        result = await catalog_snapshot()
+        catalog_cached = result
+        catalog_completed = time.monotonic()
+        return result
+    from doxa.claude_quota import BillingQuota
+    quota = BillingQuota()
 
     async def publish_turn(prompt: str) -> None:
         try:
             async for event in engine.send(prompt):
+                billing = None
+                if event.type == "rate_limit":
+                    billing = quota.update(event.data)
+                elif event.type == "turn_done":
+                    try:
+                        billing = quota.refresh(billing_snapshot(getattr(engine, "account", None)))
+                    except Exception:
+                        pass  # optional cache read cannot fail a completed turn
+                if billing is not None:
+                    emit({"type": "event", "event": "billing", "data": billing})
                 emit({"type": "event", "event": event.type, "data": event.data})
         except asyncio.CancelledError:
             try:
@@ -179,9 +244,14 @@ async def run() -> None:
                 # The parent may have closed stdout along with stdin.
                 pass
             raise
-        except Exception:
+        except Exception as error:
+            # Expose only our fixed identity diagnostic, never SDK exception text.
+            note = ("Claude session identity verification failed; reconnect the session"
+                    if isinstance(error, RuntimeError) and str(error) ==
+                    "resumed provider identity was not confirmed; output withheld"
+                    else "Claude turn failed")
             emit({"type": "event", "event": "turn_done",
-                  "data": {"is_error": True, "error": "Claude turn failed"}})
+                  "data": {"is_error": True, "error": note}})
 
     peer_failed = False
 
@@ -238,17 +308,45 @@ async def run() -> None:
                 model = params.get("model")
                 if model is not None and not isinstance(model, str):
                     raise ValueError("invalid start option")
-                options = {"cwd": cwd, "session_id": session_id, "resume": resume}
+                lore = params.get("lore")
+                if lore is not None and type(lore) is not bool:
+                    raise ValueError("invalid memory policy")
+                depth = params.get("spawn_depth", 0)
+                parent = params.get("parent_session_id")
+                if not isinstance(depth, int) or isinstance(depth, bool) or not 0 <= depth <= 2:
+                    raise ValueError("invalid spawn depth")
+                validate_identity(parent, None)
+                options = {"cwd": cwd, "session_id": session_id, "resume": resume, "lore": lore}
+                parameters = inspect.signature(SessionEngine).parameters
+                if depth or parent:
+                    if "spawn_depth" not in parameters or "parent_session_id" not in parameters:
+                        raise ValueError("native lineage unsupported by Python engine")
+                    options.update(spawn_depth=depth, parent_session_id=parent)
                 if model is not None:
                     options["model"] = model
+                effort = params.get("effort")
+                if effort is not None:
+                    if effort not in ("low", "medium", "high", "xhigh", "max") or "effort" not in parameters:
+                        raise ValueError("startup effort unsupported by Python engine")
+                    options["effort"] = effort
+                native = params.get("native_spawn")
+                launcher = None
+                if native is not None:
+                    from doxa.native_spawn import native_launcher
+                    launcher = native_launcher(native)
+                    os.environ["DOXA_RUNTIME_DIR"] = native["runtime"]
                 candidate = SessionEngine(**session_engine_options(SessionEngine, options))
+                if native is not None:
+                    from dataclasses import replace
+                    candidate.tool_gate.op_ctx = replace(candidate.tool_gate.op_ctx,
+                        spawn_launch=launcher)
                 started = await candidate.start()
                 # Only the SDK account for this connected session can name
                 # its plan. A cached CLI account might belong to another auth
                 # mode, so it is never enough to classify billing here.
                 billing = None
                 try:
-                    billing = billing_snapshot(getattr(candidate, "account", None))
+                    billing = quota.refresh(billing_snapshot(getattr(candidate, "account", None)))
                 except Exception:
                     pass  # optional account data cannot prevent a session
                 try:
@@ -256,6 +354,12 @@ async def run() -> None:
                                      "result": {"event": started.type, "data": started.data,
                                                 "permission_mode": getattr(candidate, "permission_mode", "default"),
                                                 "billing": billing,
+                                                "lore_enabled": getattr(candidate, "lore", None),
+                                                "account": account_snapshot(getattr(candidate, "account", None)),
+                                                "effort": getattr(candidate, "effort", None),
+                                                "spawn_depth": getattr(candidate, "spawn_depth", 0),
+                                                "parent_session_id": getattr(candidate, "parent_session_id", None),
+                                                "native_spawn_ready": launcher is not None,
                                                 "peer_tools_ready": getattr(candidate, "peer_host", None) is not None}})
                 except Exception:
                     try:
@@ -297,9 +401,14 @@ async def run() -> None:
                 emit({"type": "reply", "id": request_id, "ok": True,
                       "result": {**_scrub_json(detail), "source": "Claude official context_usage"}})
             elif method == "list_models" and engine is not None:
+                if catalog_task.done():
+                    cached = catalog_task.result()
+                    ttl = 30.0 if cached.get("models") else 5.0
+                    if time.monotonic() - catalog_completed >= ttl:
+                        catalog_task = asyncio.create_task(load_catalog())
                 result = (catalog_task.result() if catalog_task.done() else
-                          {"models": [], "loading": True,
-                           "note": "Claude model catalog is loading; press R to retry"})
+                          {**catalog_cached, "loading": True,
+                           "note": "Claude model catalog is loading; refreshes automatically"})
                 emit({"type": "reply", "id": request_id, "ok": True,
                       "result": result})
             elif method == "set_model" and engine is not None:
@@ -311,7 +420,8 @@ async def run() -> None:
                     raise ValueError("invalid model")
                 selected = await engine.set_model(model)
                 emit({"type": "reply", "id": request_id, "ok": True,
-                      "result": {"model": selected}})
+                      "result": {"model": selected,
+                                 "account": account_snapshot(getattr(engine, "account", None))}})
             elif method == "set_effort" and engine is not None:
                 if turn is not None and not turn.done():
                     raise ValueError("effort changes require an idle session")
@@ -321,6 +431,7 @@ async def run() -> None:
                 selected = await engine.set_effort(effort)
                 emit({"type": "reply", "id": request_id, "ok": True,
                       "result": {"effort": selected,
+                                 "account": account_snapshot(getattr(engine, "account", None)),
                                  "verification_pending": bool(getattr(engine, "_resume_identity_pending", None))}})
             elif method == "set_permission_mode" and engine is not None:
                 mode = params["mode"]
@@ -399,8 +510,48 @@ def plugin_inventory(reload: bool = False) -> str:
     return "".join(c for c in text if c in "\n\t" or 32 <= ord(c) < 127 or ord(c) >= 160)
 
 
+def plugin_commands() -> list[dict]:
+    """Fresh read-only canonical adopted commands; no SDK, staging or hooks."""
+    import re
+    from doxa import _lore_bootstrap, claude_plugins
+    _lore_bootstrap.ensure_importable()
+    from lore_core.scrub import scrub_secrets
+
+    rows = []
+    seen = set()
+    for plugin, command in claude_plugins.adopted_commands():
+        invocable = command.invocable
+        if not isinstance(invocable, str) or not re.fullmatch(
+                r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}:[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", invocable):
+            continue
+        name = "/" + invocable
+        if name in seen:
+            continue
+        summary = command.summary or f"{plugin.plugin} plugin command"
+        hint = command.argument_hint
+        if (not isinstance(summary, str) or not isinstance(hint, str)
+                or not isinstance(plugin.plugin, str) or len(summary) > 1024 or len(hint) > 512
+                or any(ord(char) < 32 or 127 <= ord(char) < 160 for char in summary + hint)):
+            continue
+        rows.append({"name":name,"summary":scrub_secrets(summary),
+                     "usage":scrub_secrets(f"{name} {hint}") if hint else "",
+                     "plugin":plugin.plugin})
+        seen.add(name)
+        if len(rows) > 100:
+            raise ValueError("command inventory too large")
+    if len(json.dumps(rows, ensure_ascii=False).encode("utf-8")) > 65536:
+        raise ValueError("command inventory too large")
+    return rows
+
+
 if __name__ == "__main__":
-    if sys.argv[1:] in (["--plugins-report"], ["--reload-plugins"]):
+    if sys.argv[1:] == ["--plugin-commands"]:
+        try:
+            print(json.dumps(plugin_commands(), ensure_ascii=False))
+        except Exception:
+            print("Plugin command inventory failed; verify the installed DOXA Python/LORE dependencies.")
+            sys.exit(1)
+    elif sys.argv[1:] in (["--plugins-report"], ["--reload-plugins"]):
         try:
             text = plugin_inventory(sys.argv[1] == "--reload-plugins")
             if len(text.encode("utf-8")) > 65536:

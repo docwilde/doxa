@@ -6,9 +6,9 @@ is involved. Run: python3 scripts/rust_gallery.py [scene ...]
 """
 from __future__ import annotations
 
+import argparse
 import json
 import subprocess
-import sys
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
@@ -48,11 +48,11 @@ def draw_branch_symbol(draw: ImageDraw.ImageDraw, left: int, top: int,
         draw.ellipse((x - 2, y - 2, x + 2, y + 2), fill=color)
 
 
-def capture(name: str) -> None:
-    raw = subprocess.check_output(
-        ["cargo", "run", "--quiet", "--manifest-path", "rust/doxa-tui/Cargo.toml",
-         "--example", "gallery", "--", name], cwd=ROOT
-    )
+def capture(name: str, binary: Path | None = None) -> None:
+    command = [str(binary), name] if binary else [
+        "cargo", "run", "--quiet", "--manifest-path", "rust/doxa-tui/Cargo.toml",
+        "--example", "gallery", "--", name]
+    raw = subprocess.check_output(command, cwd=ROOT)
     frame = json.loads(raw)
     width, height = frame["width"], frame["height"]
     image = Image.new("RGB", (width * CELL_W, height * CELL_H))
@@ -74,8 +74,13 @@ def capture(name: str) -> None:
 
 
 if __name__ == "__main__":
-    names = sys.argv[1:] or SCENES
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--binary", type=Path, help="Use an already compiled production gallery example")
+    parser.add_argument("scenes", nargs="*")
+    args = parser.parse_args()
+    binary = args.binary.resolve() if args.binary else None
+    names = args.scenes or SCENES
     for name in names:
         if name not in SCENES:
             raise SystemExit(f"unknown scene: {name}")
-        capture(name)
+        capture(name, binary)

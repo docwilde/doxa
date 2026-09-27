@@ -159,7 +159,7 @@ fn two_panes_keep_distinct_prompts_and_live_identity_chips_at_80x24() {
     app.apply_daemon_frame(&json!({"type":"hello","session_id":"two","engine":"claude","model":null}));
     app.groups[1].tabs.push("two".into());
     for c in "first draft".chars() { app.handle(key(KeyCode::Char(c), KeyModifiers::NONE)); }
-    app.handle(key(KeyCode::Tab, KeyModifiers::SHIFT));
+    app.handle(key(KeyCode::Tab, KeyModifiers::ALT));
     for c in "second draft".chars() { app.handle(key(KeyCode::Char(c), KeyModifiers::NONE)); }
     let rendered = screen(&app, 80, 24);
     assert!(rendered.contains("> first draft"), "{rendered}");
@@ -175,7 +175,7 @@ fn two_panes_keep_distinct_prompts_and_live_identity_chips_at_80x24() {
     assert!(styled_cells >= 5, "engine/model chips have no visible highlight");
     app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
     assert_eq!(app.take_prompts(), vec![("two".into(), "second draft".into())]);
-    app.handle(key(KeyCode::Tab, KeyModifiers::SHIFT));
+    app.handle(key(KeyCode::Tab, KeyModifiers::ALT));
     assert_eq!(app.input, "first draft");
     app.apply_daemon_frame(&json!({"type":"event","session_id":"one","event":{"type":"model_changed","data":{"model":"astra"}}}));
     let rendered = screen(&app, 160, 24);
@@ -189,12 +189,12 @@ fn same_session_in_two_panes_keeps_independent_drafts() {
     app.apply_daemon_frame(&json!({"type":"hello","session_id":"one","engine":"codex","model":"sol"}));
     app.groups[1].tabs.push("one".into());
     app.handle(key(KeyCode::Char('a'), KeyModifiers::NONE));
-    app.handle(key(KeyCode::Tab, KeyModifiers::SHIFT));
+    app.handle(key(KeyCode::Tab, KeyModifiers::ALT));
     app.handle(key(KeyCode::Char('b'), KeyModifiers::NONE));
     let rendered = screen(&app, 80, 24);
     assert!(rendered.contains("> a"), "{rendered}");
     assert!(rendered.contains("> b"), "{rendered}");
-    app.handle(key(KeyCode::Tab, KeyModifiers::SHIFT));
+    app.handle(key(KeyCode::Tab, KeyModifiers::ALT));
     assert_eq!(app.input, "a");
 }
 
@@ -207,9 +207,9 @@ fn move_tab_command_rehomes_active_session_and_keeps_other_drafts() {
     app.groups[0].tabs = vec!["one".into(), "two".into()];
     app.groups[1].tabs = vec!["three".into()];
     app.input = "first draft".into();
-    app.handle(key(KeyCode::Tab, KeyModifiers::SHIFT));
+    app.handle(key(KeyCode::Tab, KeyModifiers::ALT));
     app.input = "third draft".into();
-    app.handle(key(KeyCode::Tab, KeyModifiers::SHIFT));
+    app.handle(key(KeyCode::Tab, KeyModifiers::ALT));
     assert_eq!(app.input, "first draft");
     app.input = "/movepane 2".into();
     assert!(app.handle(key(KeyCode::Enter, KeyModifiers::NONE)));
@@ -398,15 +398,15 @@ fn subscription_billing_uses_provider_snapshot_and_never_displays_list_price_as_
         "billing":{"mode":"subscription","type":"pro","quota":null}}));
     app.groups[1].tabs.push("known-plan".into());
     let rendered = screen(&app, 300, 24);
-    assert!(rendered.contains("Sub pro · quota ?"), "{rendered}");
+    assert!(rendered.contains(" pro ") && !rendered.contains("quota ?"), "{rendered}");
 
     let mut app = App::default();
     app.apply_daemon_frame(&json!({"type":"hello","session_id":"claude-1","engine":"claude",
-        "billing":{"mode":"subscription","type":"max 20x","quota":"s:9% w:48%~"}}));
+        "billing":{"mode":"subscription","type":"max 20x","quota":"5h:9% week:48%~"}}));
     app.apply_daemon_frame(&json!({"type":"reply","ok":true,"status":{"session_id":"claude-1",
         "total_cost_usd":1.2345}}));
     let rendered = screen(&app, 300, 24);
-    assert!(rendered.contains("Sub max 20x · s:9% w:48%~"), "{rendered}");
+    assert!(rendered.contains("max 20x · 5h:9% week:48%~"), "{rendered}");
     assert!(!rendered.contains("$1.2345"), "{rendered}");
 
     app.apply_daemon_frame(&json!({"type":"hello","session_id":"codex-1","engine":"codex"}));
@@ -426,12 +426,13 @@ fn subscription_billing_uses_provider_snapshot_and_never_displays_list_price_as_
 #[test]
 fn keyboard_and_rail_select_sessions_into_independent_groups() {
     let mut app = App::default();
+    app.handle(Event::Resize(100, 40)); // Rail focus requires a visible sidebar.
     app.apply_update(doxa_tui::ui::DaemonUpdate::Upsert(session("one", "Work")));
     app.apply_update(doxa_tui::ui::DaemonUpdate::Upsert(session("two", "Work")));
     assert!(app.handle(key(KeyCode::F(3), KeyModifiers::NONE)));
     assert!(!app.rail_visible);
     app.handle(key(KeyCode::F(3), KeyModifiers::NONE));
-    app.handle(key(KeyCode::Tab, KeyModifiers::SHIFT));
+    app.handle(key(KeyCode::Tab, KeyModifiers::ALT));
     assert_eq!(app.active_group, 1);
     app.focus = Focus::Rail;
     app.handle(key(KeyCode::Down, KeyModifiers::NONE));
@@ -496,6 +497,7 @@ fn action_menu_opens_views_and_navigates_sessions_without_leaking_keys_to_prompt
     let mut app=App::default();app.handle(Event::Resize(80,24));
     app.apply_update(doxa_tui::ui::DaemonUpdate::Upsert(session("one","Work")));
     app.apply_update(doxa_tui::ui::DaemonUpdate::Upsert(session("two","Work")));
+    app.groups[0].tabs.push("two".into()); // Owned tab: registry-only rows still require verified attach.
     app.input="draft".into();
     app.handle(key(KeyCode::Char('p'),KeyModifiers::CONTROL));
     assert!(screen(&app,80,24).contains("Actions"));
@@ -506,25 +508,33 @@ fn action_menu_opens_views_and_navigates_sessions_without_leaking_keys_to_prompt
     palette(&mut app,"inspect tool");assert!(screen(&app,80,24).contains("Tool activity"));
     app.handle(key(KeyCode::Esc,KeyModifiers::NONE));
     palette(&mut app,"/sessions");
-    app.handle(key(KeyCode::Down,KeyModifiers::NONE));app.handle(key(KeyCode::Enter,KeyModifiers::NONE));
+    // /sessions requests a read-only roster, not a selectable attach/search picker.
+    assert!(app.notice.contains("finding live daemons"));
+    assert_eq!(app.input,"draft");assert!(app.pending_prompts.is_empty());
     assert_eq!(app.groups[0].tabs.len(),2);
     palette(&mut app,"open tab one");assert_eq!(app.groups[0].tabs.get(app.groups[0].active).map(String::as_str),Some("one"));assert_eq!(app.input,"draft");
-    palette(&mut app,"open tab two");assert_eq!(app.groups[0].tabs.get(app.groups[0].active).map(String::as_str),Some("two"));assert_eq!(app.focus,Focus::Prompt);
+    palette(&mut app,"open tab two");assert_eq!(app.groups[0].tabs.get(app.groups[0].active).map(String::as_str),Some("two"));assert_eq!(app.focus,Focus::Prompt);assert!(app.input.is_empty());
     assert!(app.pending_prompts.is_empty());
 }
 
 #[test]
-fn terminal_backtab_switches_panes_and_plain_tab_keeps_focus_navigation() {
+fn terminal_backtab_reverses_focus_and_alt_tab_switches_panes() {
     let mut app = App::default();
+    app.handle(Event::Resize(80, 24));
     app.apply_update(doxa_tui::ui::DaemonUpdate::Upsert(session("one", "Work")));
     app.apply_update(doxa_tui::ui::DaemonUpdate::Upsert(session("two", "Work")));
     assert!(app.handle(key(KeyCode::BackTab, KeyModifiers::NONE)));
-    assert_eq!(app.active_group, 1);
+    assert_eq!(app.active_group, 0);
+    assert_eq!(app.focus, Focus::Rail);
+    assert!(app.handle(key(KeyCode::Tab, KeyModifiers::NONE)));
     assert_eq!(app.focus, Focus::Prompt);
     assert!(app.handle(key(KeyCode::Tab, KeyModifiers::NONE)));
-    assert_eq!(app.focus, Focus::Transcript);
+    assert_eq!(app.focus, Focus::Tabs);
     assert!(app.handle(key(KeyCode::Tab, KeyModifiers::SHIFT)));
     assert_eq!(app.active_group, 0);
+    assert_eq!(app.focus, Focus::Prompt);
+    assert!(app.handle(key(KeyCode::Tab, KeyModifiers::ALT)));
+    assert_eq!(app.active_group, 1);
     assert_eq!(app.focus, Focus::Prompt);
 }
 
@@ -692,6 +702,7 @@ fn tool_activity_folds_in_transcript_and_expands_by_keyboard_or_mouse() {
     assert!(!collapsed.contains("hidden-input"), "{collapsed}");
     assert!(!collapsed.contains("hidden-result"), "{collapsed}");
 
+    app.handle(key(KeyCode::Tab, KeyModifiers::NONE)); // Tab headers.
     app.handle(key(KeyCode::Tab, KeyModifiers::NONE));
     assert!(app.handle(key(KeyCode::Enter, KeyModifiers::NONE)));
     let expanded = screen(&app, 110, 30);
@@ -718,6 +729,7 @@ fn restored_tool_activity_folds_and_expands_by_keyboard_and_mouse() {
     assert!(!collapsed.contains("restored-input"));
     assert!(!collapsed.contains("restored-result"));
 
+    app.handle(key(KeyCode::Tab, KeyModifiers::NONE)); // Tab headers.
     app.handle(key(KeyCode::Tab, KeyModifiers::NONE));
     assert!(app.handle(key(KeyCode::Enter, KeyModifiers::NONE)));
     let expanded = screen(&app, 110, 30);

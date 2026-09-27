@@ -592,7 +592,7 @@ async def _spawn_after_confirm(
         # op_ctx.cwd -- the sidecar -- and never from anything the model wrote.
         child_cwd = scope
         session_id, daemon_socket = await asyncio.to_thread(
-            spawn_daemon,
+            getattr(op_ctx, "spawn_launch", None) or spawn_daemon,
             child_cwd,
             model=model or None,
             base_branch=base_branch or None,

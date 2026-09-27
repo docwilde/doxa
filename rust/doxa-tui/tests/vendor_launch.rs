@@ -109,7 +109,8 @@ fn glm_uses_its_own_configured_model_and_doctor_checks_key_without_printing_it()
         .env("DOXA_CAPTURE_ARGS", &capture)
         .env("DOXA_RUNTIME_DIR", dir.path().join("runtime"))
         .env("DOXA_HOME", &home)
-        .env("DOXA_MODEL", "codex-env-only")
+        .env_remove("DOXA_MODEL")
+        .env_remove("DOXA_EFFORT")
         .env("ZAI_API_KEY", "secret-vendor-key")
         .current_dir(dir.path())
         .output()
@@ -120,6 +121,22 @@ fn glm_uses_its_own_configured_model_and_doctor_checks_key_without_printing_it()
     assert!(args.windows(2).any(|w| w == ["--model", "glm-config"]));
     assert!(!args.iter().any(|arg| arg == "--effort"));
     assert!(!args.join(" ").contains("codex"));
+    // Like Python's model_provenance, the explicit process-wide override
+    // applies to every engine; per-engine config applies when it is absent.
+    let override_launch = Command::new(env!("CARGO_BIN_EXE_doxa-rs"))
+        .args(["new", "--engine", "glm", "--lore-python", "/usr/bin/python3"])
+        .env("DOXA_DAEMON_BIN", &daemon)
+        .env("DOXA_CAPTURE_ARGS", &capture)
+        .env("DOXA_RUNTIME_DIR", dir.path().join("runtime"))
+        .env("DOXA_HOME", &home)
+        .env("DOXA_MODEL", "glm-env-override")
+        .env_remove("DOXA_EFFORT")
+        .env("ZAI_API_KEY", "secret-vendor-key")
+        .current_dir(dir.path())
+        .output().unwrap();
+    assert!(!override_launch.status.success());
+    assert!(argv(&capture).windows(2).any(|w| w == ["--model", "glm-env-override"]));
+    assert!(!String::from_utf8_lossy(&override_launch.stderr).contains("secret-vendor-key"));
 }
 
 #[test]

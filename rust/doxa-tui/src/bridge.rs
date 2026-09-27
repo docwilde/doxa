@@ -138,9 +138,11 @@ impl MultiBridge {
     }
 }
 
-pub fn connect_sessions(sessions: &[Session]) -> io::Result<MultiBridge> {
-    if sessions.is_empty() || sessions.len() > 64 {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "expected 1–64 live sessions"));
+pub fn connect_sessions(sessions: &[Session]) -> io::Result<MultiBridge> { connect_sessions_inner(sessions,false) }
+
+fn connect_sessions_inner(sessions:&[Session],readonly_restore:bool)->io::Result<MultiBridge> {
+    if (sessions.is_empty() && !readonly_restore) || sessions.len() > crate::startup_restore::MAX_STARTUP_TABS {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "expected 1–257 startup sessions"));
     }
     let mut seen = HashSet::new();
     if sessions.iter().any(|s| !crate::discovery::valid_id(&s.id) || !seen.insert(s.id.as_str())) {
@@ -157,7 +159,7 @@ pub fn connect_sessions(sessions: &[Session]) -> io::Result<MultiBridge> {
             Ok(pair) => pair,
             _ => {
                 revoke(&complete);
-                let _ = frame_tx.send(json!({"type":"client_notice", "session_id":session.id,
+                let _ = frame_tx.try_send(json!({"type":"client_notice", "session_id":session.id,
                     "message":"Session unavailable; saved layout is read-only"}));
                 continue;
             }
@@ -166,7 +168,7 @@ pub fn connect_sessions(sessions: &[Session]) -> io::Result<MultiBridge> {
         live_ids.push(session.id.clone());
         workers.push(worker);
     }
-    if live_ids.is_empty() {
+    if live_ids.is_empty() && !readonly_restore {
         drop(command_rx);
         drop(frame_tx);
         for worker in workers { let _ = worker.join(); }
@@ -213,9 +215,9 @@ pub fn connect_sessions(sessions: &[Session]) -> io::Result<MultiBridge> {
                             "session_id":id, "group":group}));
                         continue;
                     }
-                    if routes.len() >= 64 {
+                    if routes.len() >= crate::ui::panes::MAX_TABS {
                         let _ = router_frames.send(json!({"type":"attach_reply", "ok":false,
-                            "message":"64 attached sessions is the limit"}));
+                            "message":"256 attached sessions is the limit"}));
                         continue;
                     }
                     // Re-read the trusted registry at dispatch time. The UI's earlier
@@ -237,9 +239,9 @@ pub fn connect_sessions(sessions: &[Session]) -> io::Result<MultiBridge> {
                     continue;
                 }
                 WorkerCommand::Launch(options, prompt, group) => {
-                    if routes.len().saturating_add(launches_in_flight) >= 64 {
+                    if routes.len().saturating_add(launches_in_flight) >= crate::ui::panes::MAX_TABS {
                         let _ = router_frames.send(json!({"type":"launch_reply", "ok":false,
-                            "message":"64 attached sessions is the limit", "group":group}));
+                            "message":"256 attached sessions is the limit", "group":group}));
                         continue;
                     }
                     launches_in_flight += 1;
@@ -324,7 +326,7 @@ fn rejected(command: WorkerCommand, message: &str) -> Value {
 }
 
 pub fn run_sessions(sessions: &[Session], store: Option<crate::ui_state::UiStateStore>) -> io::Result<()> {
-    let MultiBridge { frames, commands, live_ids, complete, router, workers } = connect_sessions(sessions)?;
+    let MultiBridge { frames, commands, live_ids, complete, router, workers } = connect_sessions_inner(sessions,store.as_ref().is_some_and(|store|!store.startup_archives.is_empty() || !store.startup_notice.is_empty()))?;
     let result = if let Some(store) = store {
         ui::run_with_channels_state_guarded(frames, commands.clone(), store, live_ids, complete)
     } else {
@@ -494,7 +496,7 @@ fn worker_loop(
                     let reply = match result {
                         Ok(reply) => json!({"type":"set_effort_reply", "session_id":id,
                             "ok":reply["ok"] == true, "effort":reply.get("effort"),
-                            "error":reply.get("error")}),
+                            "verification_pending":reply.get("verification_pending"), "error":reply.get("error")}),
                         Err(error) => json!({"type":"set_effort_reply", "session_id":id,
                             "ok":false, "error":error.to_string()}),
                     };
@@ -789,6 +791,46 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static NEXT_SOCKET: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn effort_verification_flag_survives_daemon_worker_bridge() {
+        let path = std::env::temp_dir().join(format!("doxa-effort-{}-{}.sock", std::process::id(), NEXT_SOCKET.fetch_add(1, Ordering::Relaxed)));
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            writeln!(socket, "{}", json!({"type":"hello","proto":1,"session_id":"s","engine":"claude","cwd":"/","next_seq":1})).unwrap();
+            let mut reader = BufReader::new(socket.try_clone().unwrap());
+            let mut line = String::new(); reader.read_line(&mut line).unwrap(); // attach
+            for pending in [true, false] {
+                line.clear(); reader.read_line(&mut line).unwrap();
+                let request: Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(request["method"], "set_effort");
+                writeln!(socket, "{}", json!({"type":"reply","id":request["id"],"ok":true,"effort":"low","verification_pending":pending})).unwrap();
+            }
+        });
+        let (frames, commands, worker) = spawn_worker(DaemonClient::connect(&path, None).unwrap());
+        assert_eq!(frames.recv_timeout(Duration::from_secs(2)).unwrap()["type"], "hello");
+        for pending in [true, false] {
+            commands.send(WorkerCommand::SetEffort("s".into(), "low".into())).unwrap();
+            let reply = frames.recv_timeout(Duration::from_secs(2)).unwrap();
+            assert_eq!(reply["type"], "set_effort_reply"); assert_eq!(reply["session_id"], "s");
+            assert_eq!(reply["verification_pending"], pending);
+        }
+        drop(commands); worker.join().unwrap(); server.join().unwrap(); std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn initial_roster_accepts_256_and_all_failed_notices_cannot_block_mount() {
+        let dir=tempfile::tempdir().unwrap();
+        let rows:Vec<_>=(0..256).map(|i|Session{id:format!("saved-{i}"),title:String::new(),
+            socket:dir.path().join(format!("missing-{i}")),scope_key:String::new(),clients:None,started_at:String::new()}).collect();
+        assert_eq!(connect_sessions(&rows).err().unwrap().kind(),io::ErrorKind::NotConnected);
+        let mut too_many=rows;too_many.push(Session{id:"extra".into(),title:String::new(),socket:dir.path().join("missing"),scope_key:String::new(),clients:None,started_at:String::new()});
+        assert_eq!(connect_sessions(&too_many).err().unwrap().kind(),io::ErrorKind::NotConnected);
+        too_many.push(Session{id:"extra-2".into(),title:String::new(),socket:dir.path().join("missing-2"),scope_key:String::new(),clients:None,started_at:String::new()});
+        assert_eq!(connect_sessions(&too_many).err().unwrap().kind(),io::ErrorKind::InvalidInput);
+        connect_sessions_inner(&[],true).unwrap().shutdown();
+    }
 
     #[test]
     fn intentional_clear_finalization_keeps_complete_roster_gate() {

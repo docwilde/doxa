@@ -2,6 +2,7 @@
 //! exit status is observed, and their output is never captured or displayed.
 
 use std::io;
+use std::sync::atomic::AtomicBool;
 use std::io::Read;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::os::unix::process::CommandExt;
@@ -345,7 +346,7 @@ pub fn setup_default(key: &str, value: Option<&str>) -> io::Result<String> {
     Ok(format!("{key} default updated for new sessions"))
 }
 
-fn doxa_home() -> io::Result<PathBuf> {
+pub(crate) fn doxa_home() -> io::Result<PathBuf> {
     std::env::var_os("DOXA_HOME").filter(|value| !value.is_empty()).map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|value| PathBuf::from(value).join(".doxa")))
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "DOXA_HOME and HOME are unset"))
@@ -383,100 +384,45 @@ pub fn setup_report() -> io::Result<String> {
         }
     };
     Ok(format!(
-        "auth state\n{}\n\nSign in with the provider CLI: claude auth login or codex login. DOXA never asks for credentials.\n\nLORE store\n{lore}\n\nmodel & effort defaults (stored preferences)\nmodel: {}\neffort: {}\n\nUse `doxa settings` for native linger and worktree preferences; the Python UI manages its wider settings catalog.",
+        "auth state\n{}\n\nSign in with the provider CLI: claude auth login or codex login. DOXA never asks for credentials.\n\nLORE store\n{lore}\n\nmodel & effort defaults (stored preferences)\nmodel: {}\neffort: {}\n\nUse `doxa settings` or /settings for native preferences.",
         auth_status(None)?, preference(&config, "model", "DOXA_MODEL"),
         preference(&config, "effort", "DOXA_EFFORT"),
     ))
 }
 
-fn setting_env(key: &str) -> Option<&'static str> {
-    match key {
-        "linger_secs" => Some("DOXA_LINGER_SECS"),
-        "worktree_per_session" => Some("DOXA_WORKTREE"),
-        _ => None,
-    }
+pub fn native_settings() -> io::Result<Vec<crate::settings::Row>> {
+    crate::settings::rows("claude", None)
 }
-
-fn effective_setting(config: &toml::Table, key: &str) -> String {
-    let env = setting_env(key).expect("validated setting");
-    let override_value = std::env::var(env).ok().filter(|value| !value.trim().is_empty());
-    let (source, value) = if let Some(value) = override_value {
-        ("environment", value)
-    } else if config.contains_key(key) {
-        let value = if key == "worktree_per_session" {
-            match config.get(key) {
-                Some(toml::Value::Boolean(true)) => "on".into(),
-                Some(toml::Value::Boolean(false)) => "off".into(),
-                Some(toml::Value::String(value)) if !value.trim().is_empty() => value.clone(),
-                _ => "on".into(),
-            }
-        } else { doxa_state::raw_setting(None, config, key) };
-        ("config.toml", value)
-    } else {
-        ("default", if key == "linger_secs" { "120".into() } else { "1".into() })
-    };
-    let display = if key == "worktree_per_session" {
-        if matches!(value.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off") { "off" }
-        else { "on" }
-    } else { value.trim() };
-    format!("{} ({source})", safe_report_value(display))
-}
-
-/// Values displayed by the in-app editor. Re-read on every open and after
-/// every write so the menu never presents stale config as the active value.
-pub fn native_settings() -> io::Result<[(String, bool); 2]> {
-    let config = doxa_state::load_config_checked(&doxa_home()?.join("config.toml"))?;
-    Ok(["linger_secs", "worktree_per_session"].map(|key| {
-        let env = setting_env(key).expect("native setting");
-        (effective_setting(&config, key),
-            std::env::var(env).ok().is_some_and(|value| !value.trim().is_empty()))
-    }))
-}
-
 pub fn settings_report() -> io::Result<String> {
-    let config = doxa_state::load_config_checked(&doxa_home()?.join("config.toml"))?;
-    Ok(format!("native settings · environment > config.toml > default (launch flags can override)\nlinger_secs: {}\nworktree_per_session: {}\n\nChange with `doxa settings set KEY VALUE`; remove with `doxa settings unset KEY`. These affect new sessions; running sessions keep their launch settings.",
-        effective_setting(&config, "linger_secs"),
-        effective_setting(&config, "worktree_per_session")))
-}
-
-fn edit_setting(path: &Path, key: &str, value: Option<&str>, env_override: Option<&str>) -> io::Result<()> {
-    let env = setting_env(key).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput,
-        "setting must be linger_secs or worktree_per_session"))?;
-    if env_override.is_some_and(|value| !value.trim().is_empty()) {
-        return Err(io::Error::new(io::ErrorKind::PermissionDenied,
-            format!("{env} overrides config.toml; unset it before changing {key}")));
-    }
-    let parsed = match (key, value) {
-        (_, None) => None,
-        ("linger_secs", Some(value)) => {
-            let seconds: f64 = value.parse().map_err(|_| io::Error::new(io::ErrorKind::InvalidInput,
-                "linger_secs must be a nonnegative finite number"))?;
-            if !seconds.is_finite() || !(0.0..=crate::launch::MAX_LINGER_SECS).contains(&seconds) {
-                return Err(io::Error::new(io::ErrorKind::InvalidInput,
-                    "linger_secs must be a finite number between 0 and 31536000 seconds"));
-            }
-            Some(toml::Value::Float(seconds))
+    let rows = native_settings()?;
+    let mut out = String::from("native settings · environment > config.toml > default (launch flags can override)\n");
+    for category in crate::settings::CATEGORIES {
+        out.push_str(&format!("\n{category}\n"));
+        for row in rows.iter().filter(|r| r.setting.category == *category) {
+            out.push_str(&format!("{}: {} ({}){}\n", row.setting.key, safe_report_value(&row.value), row.source,
+                if row.setting.read_only { " · read-only" } else { "" }));
+            if row.setting.read_only && !row.setting.note.is_empty() { out.push_str(&format!("  {}\n",row.setting.note)); }
         }
-        ("worktree_per_session", Some("on" | "true" | "1")) => Some(toml::Value::Boolean(true)),
-        ("worktree_per_session", Some("off" | "false" | "0")) => Some(toml::Value::Boolean(false)),
-        _ => return Err(io::Error::new(io::ErrorKind::InvalidInput,
-            "worktree_per_session accepts on or off")),
-    };
+        if *category == "Paths" { out.push_str(&format!("config file: {}\n",crate::settings::config_path()?.display())); }
+        if *category == "About" { out.push_str(&format!("DOXA Rust {} · /about reports the build; /update checks for updates\n",env!("CARGO_PKG_VERSION"))); }
+    }
+    out.push_str("\nChange with `doxa settings set KEY VALUE`; remove with `doxa settings unset KEY`. Session defaults affect new sessions; frontend preferences refresh after saving in /settings.");
+    Ok(out)
+}
+#[cfg(test)]
+fn edit_setting(path: &Path, key: &str, value: Option<&str>, env_override: Option<&str>) -> io::Result<()> {
+    let setting = crate::settings::find(key)?;
+    if env_override.is_some_and(|value| !value.trim().is_empty()) {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, format!("{} overrides config.toml; unset it before changing {key}", setting.env)));
+    }
+    let parsed = crate::settings::coerce(setting, value)?;
     doxa_state::update_config(path, |stored| {
-        if let Some(value) = parsed { stored.insert(key.into(), value); }
-        else { stored.remove(key); }
-        Ok(())
+        if let Some(value) = parsed { stored.insert(key.into(),value); } else { stored.remove(key); } Ok(())
     })
 }
-
 pub fn settings_change(key: &str, value: Option<&str>) -> io::Result<String> {
-    let env = setting_env(key).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput,
-        "setting must be linger_secs or worktree_per_session"))?;
-    edit_setting(&doxa_home()?.join("config.toml"), key, value,
-        std::env::var(env).ok().as_deref())?;
-    Ok(format!("{key}: {} for new sessions",
-        if value.is_some() { "stored" } else { "removed from config.toml" }))
+    crate::settings::save(&crate::settings::config_path()?,&[(key.into(),value.map(str::to_owned))],"claude")?;
+    Ok(format!("{key}: {}",if value.is_some() { "stored" } else { "removed from config.toml" }))
 }
 
 fn read_claude_json(path: &Path) -> Option<serde_json::Value> {
@@ -561,10 +507,47 @@ pub fn plugins_reload() -> io::Result<String> {
     plugins_bridge(true)
 }
 
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct PluginCommand { pub name: String, pub summary: String, pub usage: String, pub plugin: String }
+
+pub fn plugin_commands() -> io::Result<Vec<PluginCommand>> { plugin_commands_cancel(&AtomicBool::new(false)) }
+fn plugin_commands_cancel(cancel: &AtomicBool) -> io::Result<Vec<PluginCommand>> {
+    if !adoption_enabled()? { return Ok(Vec::new()); }
+    let text = plugin_bridge_arg_cancel("--plugin-commands", cancel)?;
+    let rows: Vec<PluginCommand> = serde_json::from_str(&text).map_err(|_| io::Error::other("Invalid plugin command inventory"))?;
+    if rows.len() > 100 || rows.iter().any(|row| !row.name.starts_with('/') || row.name.len() < 2 || row.name.len() > 128
+        || !row.name[1..].bytes().all(|c| c.is_ascii_alphanumeric() || b"._:-".contains(&c))
+        || row.summary.len() > 1024 || row.usage.len() > 1024 || row.plugin.len() > 128
+        || [&row.summary, &row.usage, &row.plugin].iter().any(|value| value.chars().any(char::is_control))) {
+        return Err(io::Error::other("Unsafe plugin command inventory"));
+    }
+    Ok(rows)
+}
+
+#[derive(Debug)]
+pub struct PluginRefresh {
+    receiver: std::sync::mpsc::Receiver<io::Result<Vec<PluginCommand>>>,
+    cancel: std::sync::Arc<AtomicBool>, worker: Option<thread::JoinHandle<()>>,
+}
+impl PluginRefresh {
+    pub fn start() -> Self {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let cancel = std::sync::Arc::new(AtomicBool::new(false)); let cancelled = cancel.clone();
+        let worker = thread::spawn(move || { let _ = sender.send(plugin_commands_cancel(&cancelled)); });
+        Self { receiver, cancel, worker: Some(worker) }
+    }
+    pub fn poll(&self) -> Option<io::Result<Vec<PluginCommand>>> { self.receiver.try_recv().ok() }
+}
+impl Drop for PluginRefresh { fn drop(&mut self) { self.cancel.store(true, std::sync::atomic::Ordering::Release); if let Some(worker) = self.worker.take() { let _ = worker.join(); } } }
+
 pub fn plugins_bridge(reload: bool) -> io::Result<String> {
+    plugin_bridge_arg(if reload { "--reload-plugins" } else { "--plugins-report" })
+}
+fn plugin_bridge_arg(argument: &str) -> io::Result<String> { plugin_bridge_arg_cancel(argument, &AtomicBool::new(false)) }
+fn plugin_bridge_arg_cancel(argument: &str, cancel: &AtomicBool) -> io::Result<String> {
     let (python, script) = crate::launch::claude_dependencies(&Default::default())?;
     let mut child = Command::new(python).arg("-I").arg(script)
-        .arg(if reload { "--reload-plugins" } else { "--plugins-report" })
+        .arg(argument)
         .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null())
         .process_group(0).spawn()?;
     let stdout = child.stdout.take().unwrap();
@@ -579,7 +562,7 @@ pub fn plugins_bridge(reload: bool) -> io::Result<String> {
             Ok(None) => {},
             Err(error) => break Err(error),
         }
-        if Instant::now() >= deadline {
+        if Instant::now() >= deadline || cancel.load(std::sync::atomic::Ordering::Acquire) {
             unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL); }
             let _ = child.wait(); break Ok(None);
         }
@@ -727,12 +710,8 @@ mod tests {
         edit_setting(&path, "worktree_per_session", Some("off"), None).unwrap();
         let config = doxa_state::load_config_checked(&path).unwrap();
         assert_eq!(config["linger_secs"].as_float(), Some(42.5));
-        assert_eq!(config["worktree_per_session"].as_bool(), Some(false));
+        assert_eq!(config["worktree_per_session"].as_str(), Some("0"));
         assert_eq!(config["future"].as_str(), Some("keep"));
-        assert_eq!(effective_setting(&config, "worktree_per_session"), "off (config.toml)");
-        let mut malformed = config.clone();
-        malformed.insert("worktree_per_session".into(), toml::Value::Integer(0));
-        assert_eq!(effective_setting(&malformed, "worktree_per_session"), "on (config.toml)");
         assert!(edit_setting(&path, "linger_secs", Some("NaN"), None).is_err());
         assert!(edit_setting(&path, "linger_secs", Some("1e308"), None).is_err());
         assert!(edit_setting(&path, "worktree_per_session", Some("maybe"), None).is_err());

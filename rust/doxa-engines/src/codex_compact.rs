@@ -45,6 +45,10 @@ impl CompactGate {
     /// `directory` is a fresh, private DOXA-owned session directory. Source is
     /// compiled into this binary, never read from a user's plugin directory.
     pub fn prepare(directory: &Path, python: &Path, codex_home: &Path, cwd: &Path, session_id: &str, version: &str) -> io::Result<Self> {
+        Self::prepare_with_memory(directory, python, codex_home, cwd, session_id, version, true)
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_with_memory(directory: &Path, python: &Path, codex_home: &Path, cwd: &Path, session_id: &str, version: &str, lore_enabled: bool) -> io::Result<Self> {
         if version != SUPPORTED_VERSION { return Err(io::Error::other("Codex build has no verified PreCompact hook contract")); }
         if session_id.is_empty() || session_id.len() > 128 || !session_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
             return Err(io::Error::other("invalid DOXA session id"));
@@ -61,7 +65,7 @@ impl CompactGate {
         }]});
         let hash = format!("sha256:{}", digest(&serde_json::to_vec(&normalized)?));
         let descriptor = json!({"version":SUPPORTED_VERSION,"provider_thread":null,"doxa_session":session_id,
-            "codex_home":codex_home,"cwd":cwd});
+            "codex_home":codex_home,"cwd":cwd,"lore_enabled":lore_enabled});
         let descriptor_bytes = serde_json::to_vec(&descriptor)?;
         write_new(&source, SCRIPT.as_bytes())?;
         if let Err(error) = write_new(&manifest, &descriptor_bytes) {

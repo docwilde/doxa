@@ -202,6 +202,32 @@ fn configured_string(key: &str, env_key: &str, config: Option<&toml::Value>) -> 
         .filter(|s| !s.is_empty())
 }
 
+pub fn configured_engine() -> Engine {
+    match configured_string("engine", "DOXA_ENGINE", config().as_ref()).map(|s| s.to_ascii_lowercase()).as_deref() {
+        Some("codex") => Engine::Codex, Some("deepseek") => Engine::DeepSeek, Some("glm") => Engine::Glm,
+        _ => Engine::Claude,
+    }
+}
+
+fn configured_scalar(key: &str, env_key: &str, config: Option<&toml::Value>) -> Option<String> {
+    env::var(env_key).ok().filter(|value| !value.trim().is_empty()).or_else(|| {
+        let value = config?.get(key)?;
+        match value {
+            toml::Value::String(value) => Some(value.clone()),
+            toml::Value::Boolean(value) => Some(if *value { "1" } else { "0" }.into()),
+            toml::Value::Integer(value) => Some(value.to_string()),
+            toml::Value::Float(value) => Some(value.to_string()), _ => None,
+        }
+    })
+}
+
+fn stored_model(engine: Engine, config: Option<&toml::Value>) -> Option<String> {
+    let config = config?;
+    let value = if engine == Engine::Claude { config.get("model") }
+        else { config.get("models").and_then(|models| models.get(engine.model_key())) }?;
+    value.as_str().map(str::trim).filter(|value| !value.is_empty()).map(str::to_owned)
+}
+
 fn random_id() -> io::Result<String> {
     let mut bytes = [0_u8; 16];
     File::open("/dev/urandom")?.read_exact(&mut bytes)?;
@@ -241,9 +267,11 @@ pub fn spawn(options: &LaunchOptions) -> io::Result<Session> {
 }
 
 /// Fleet-scoped child environment without changing the frontend process.
-pub fn spawn_fleet(options: &LaunchOptions, runtime: &Path, budget: Option<f64>, inbound: bool) -> io::Result<Session> {
+pub fn spawn_fleet(options: &LaunchOptions, runtime: &Path, budget: Option<f64>, inbound: bool, lore: bool) -> io::Result<Session> {
     let mut environment = vec![("DOXA_RUNTIME_DIR", runtime.to_string_lossy().into_owned()),
+        ("DOXA_AGENT_PEER_SEND", "1".into()),
         ("DOXA_PEER_INBOUND_TURNS", if inbound { "1" } else { "0" }.into())];
+    environment.push(("DOXA_LORE", if lore { "1" } else { "0" }.into()));
     environment.push(("DOXA_SESSION_BUDGET_USD", budget.map(|value| value.to_string()).unwrap_or_default()));
     let run = runtime.parent().ok_or_else(|| invalid("fleet runtime has no run root"))?;
     let ledger = run.join("home/peers/messages.jsonl");
@@ -259,6 +287,12 @@ pub fn spawn_fleet(options: &LaunchOptions, runtime: &Path, budget: Option<f64>,
 }
 
 fn spawn_inner(options: &LaunchOptions, fleet_runtime: Option<&Path>, environment: &[(&str, String)]) -> io::Result<Session> {
+    let cfg = config();
+    let mut effective = options.clone();
+    if effective.resume.is_none() && effective.engine != Engine::Fixture && effective.effort.is_none() {
+        effective.effort = configured_string("effort", "DOXA_EFFORT", cfg.as_ref());
+    }
+    let options = &effective;
     let requested_cwd = options.cwd.clone().unwrap_or(env::current_dir()?);
     let cwd = match fs::canonicalize(&requested_cwd) {
         Ok(cwd) if cwd.is_dir() => cwd,
@@ -293,25 +327,16 @@ fn spawn_inner(options: &LaunchOptions, fleet_runtime: Option<&Path>, environmen
     if !runtime.is_absolute() {
         return Err(invalid("runtime directory must be absolute"));
     }
-    let cfg = config();
     let model = options
         .model
         .clone()
         .or_else(|| {
-            if options.engine == Engine::Codex && options.resume.is_some() { return None; }
-            if options.engine.vendor_key().is_none() {
-                configured_string("model", "DOXA_MODEL", None)
-            } else {
-                None
-            }
+            if options.resume.is_some() || options.engine == Engine::Fixture { return None; }
+            configured_string("model", "DOXA_MODEL", None)
         })
         .or_else(|| {
             if options.engine == Engine::Codex && options.resume.is_some() { return None; }
-            cfg.as_ref()
-                .and_then(|c| c.get("models"))
-                .and_then(|m| m.get(options.engine.model_key()))
-                .and_then(toml::Value::as_str)
-                .map(str::to_owned)
+            if options.resume.is_some() { None } else { stored_model(options.engine, cfg.as_ref()) }
         });
     let linger = options
         .linger
@@ -364,6 +389,15 @@ fn spawn_inner(options: &LaunchOptions, fleet_runtime: Option<&Path>, environmen
         }
     }
     let mut command = Command::new(daemon);
+    for (key, env_key) in [("peer_inbound_turns", "DOXA_PEER_INBOUND_TURNS"), ("session_budget_usd", "DOXA_SESSION_BUDGET_USD")] {
+        if !environment.iter().any(|(candidate, _)| *candidate == env_key) {
+            if let Some(value) = configured_scalar(key, env_key, cfg.as_ref()) {
+                let value = if key == "session_budget_usd" && value.trim().parse::<f64>().ok() == Some(0.0) { String::new() } else { value };
+                command.env(env_key, value);
+            }
+        }
+    }
+    if let Some(value) = crate::preferences::lore_notify_override() { command.env("LORE_NOTIFY", value); }
     for (key, value) in environment { command.env(key, value); }
     if environment.is_empty() && options.resume.is_some() {
         if let Some(ceiling) = saved_budget(&id)? {
@@ -433,7 +467,6 @@ fn spawn_inner(options: &LaunchOptions, fleet_runtime: Option<&Path>, environmen
             if options.codex_bin.is_some()
                 || options.lore_python.is_some()
                 || options.sandbox.is_some()
-                || options.effort.is_some()
             {
                 return Err(invalid("Codex options require --engine codex"));
             }
@@ -450,6 +483,7 @@ fn spawn_inner(options: &LaunchOptions, fleet_runtime: Option<&Path>, environmen
             if let Some(model) = &model {
                 command.arg("--model").arg(model);
             }
+            if let Some(effort) = &options.effort { command.arg("--effort").arg(effort); }
         }
         Engine::DeepSeek | Engine::Glm => {
             if options.codex_bin.is_some()
@@ -488,7 +522,8 @@ fn spawn_inner(options: &LaunchOptions, fleet_runtime: Option<&Path>, environmen
     }
     // Keep a private startup diagnostic so a failed daemon can tell the TUI
     // why it refused to launch (including worktree safety failures).
-    let stderr_path = env::temp_dir().join(format!(".doxa-daemon-{id}-{}.stderr", random_id()?));
+    let registry = doxa_peers::Registry::open(&runtime)?;
+    let stderr_path = registry.runtime().join(format!(".doxa-daemon-{id}-{}.stderr", random_id()?));
     let stderr_file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -596,6 +631,16 @@ pub fn stop(session: &Session) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn model_preferences_remain_engine_scoped_and_do_not_cross_claude_defaults() {
+        let config: toml::Value = "model = 'sonnet'\n[models]\ncodex = 'codex-model'\ndeepseek = 'deepseek-chat'\nglm = 'glm-model'".parse().unwrap();
+        assert_eq!(stored_model(Engine::Claude, Some(&config)).as_deref(), Some("sonnet"));
+        assert_eq!(stored_model(Engine::Codex, Some(&config)).as_deref(), Some("codex-model"));
+        assert_eq!(stored_model(Engine::DeepSeek, Some(&config)).as_deref(), Some("deepseek-chat"));
+        assert_eq!(stored_model(Engine::Fixture, Some(&config)), None);
+        let legacy: toml::Value = "model = 'sonnet'".parse().unwrap();
+        assert_eq!(stored_model(Engine::Codex, Some(&legacy)), None);
+    }
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::fs::symlink;
     use std::os::unix::net::UnixListener;

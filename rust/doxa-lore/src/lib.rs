@@ -60,6 +60,15 @@ pub struct BeliefReview {
     claim_sha256: String,
 }
 
+#[derive(Clone, PartialEq, Eq)]
+pub struct BeliefGraph { pub id: u64, pub lines: Vec<String>, pub html: Option<String>, pub note: String }
+impl std::fmt::Debug for BeliefGraph {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BeliefGraph").field("id", &self.id).field("lines", &self.lines.len())
+            .field("html_bytes", &self.html.as_ref().map(String::len)).finish()
+    }
+}
+
 impl std::fmt::Debug for BeliefReview {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BeliefReview")
@@ -212,9 +221,16 @@ impl LoreClient {
     /// Launch the sidecar lazily, only when a session requests LORE.
     /// `python` should point at the environment that installed DOXA and LORE.
     pub fn spawn(python: &Path, timeout: Duration) -> Result<Self, LoreError> {
+        Self::spawn_module(python, timeout, "doxa.lore_bridge", &["scrub", "snapshot"])
+    }
+    /// Separate canonical agent operator process; it binds one host identity.
+    pub fn spawn_agent(python: &Path, timeout: Duration) -> Result<Self, LoreError> {
+        Self::spawn_module(python, timeout, "doxa.native_agent_tools", &["agent_catalog_v1", "agent_tool_v1"])
+    }
+    fn spawn_module(python: &Path, timeout: Duration, module: &str, required: &[&str]) -> Result<Self, LoreError> {
         let mut command = Command::new(python);
         command
-            .args(["-m", "doxa.lore_bridge"])
+            .args(["-m", module])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
@@ -284,7 +300,7 @@ impl LoreClient {
         let caps = hello["capabilities"]
             .as_array()
             .ok_or(LoreError::InvalidFrame)?;
-        if !["scrub", "snapshot"]
+        if !required
             .iter()
             .all(|name| caps.iter().any(|cap| cap.as_str() == Some(name)))
         {
@@ -297,6 +313,41 @@ impl LoreClient {
             .map(str::to_owned)
             .collect();
         Ok(client)
+    }
+
+    pub fn agent_catalog(&mut self, identity: &Value) -> Result<Vec<Value>, LoreError> {
+        let value = self.request_value("agent_catalog_v1", json!({"identity":identity}))?;
+        let rows = value.as_array().filter(|rows| rows.len() <= 6).ok_or(LoreError::InvalidFrame)?;
+        let mut seen = HashSet::new();
+        for row in rows {
+            let name = row["name"].as_str().ok_or(LoreError::InvalidFrame)?;
+            if !matches!(name, "lore_belief_search" | "lore_belief_show" | "lore_belief_neighbours" |
+                "lore_memory_list" | "lore_session_search" | "lore_remember") || !seen.insert(name)
+                || row["description"].as_str().is_none_or(|text| text.len() > 8192 || text.chars().any(char::is_control))
+                || row["inputSchema"]["type"] != "object" || !row["inputSchema"].is_object() {
+                return Err(LoreError::InvalidFrame);
+            }
+        }
+        if serde_json::to_vec(rows).map_or(true, |bytes| bytes.len() > 32 * 1024) { return Err(LoreError::InvalidFrame); }
+        Ok(rows.clone())
+    }
+    pub fn agent_status(&mut self, identity: &Value) -> Result<Value, LoreError> {
+        let value = self.request_value("agent_status_v1", json!({"identity":identity}))?;
+        if !value["belief_count"].is_null() && value["belief_count"].as_u64().is_none() { return Err(LoreError::InvalidFrame); }
+        let disabled=value["disabled_tools"].as_array().filter(|rows|rows.len()<=6).ok_or(LoreError::InvalidFrame)?;
+        let mut seen=HashSet::new();
+        for row in disabled {
+            let name=row.as_str().ok_or(LoreError::InvalidFrame)?;
+            if !matches!(name,"lore_belief_search"|"lore_belief_show"|"lore_belief_neighbours"|"lore_memory_list"|"lore_session_search"|"lore_remember")
+                || !seen.insert(name) { return Err(LoreError::InvalidFrame); }
+        }
+        Ok(json!({"belief_count":value["belief_count"],"disabled_tools":disabled}))
+    }
+    pub fn agent_call(&mut self, identity: &Value, name: &str, arguments: &Value) -> Result<Value, LoreError> {
+        if !arguments.is_object() || serde_json::to_vec(arguments).map_or(true, |bytes| bytes.len() > 32 * 1024) {
+            return Err(LoreError::InvalidFrame);
+        }
+        self.request_value("agent_tool_v1", json!({"identity":identity,"name":name,"arguments":arguments}))
     }
 
     pub fn scrub(&mut self, text: &str) -> Result<String, LoreError> {
@@ -567,6 +618,22 @@ impl LoreClient {
 
     /// Fetch a complete, scrubbed belief for a human to review. The private
     /// identity fields are supplied back to LORE for its locked recheck.
+    pub fn belief_graph(&mut self, cwd: &str, belief_id: u64, browser: bool) -> Result<BeliefGraph, LoreError> {
+        if cwd.is_empty() || cwd.len() > 4096 || cwd.contains('\0') || belief_id == 0 || belief_id > i64::MAX as u64 {
+            return Err(LoreError::InvalidFrame);
+        }
+        let value = self.request_value("belief_graph_v1", json!({"cwd":cwd,"belief_id":belief_id,"browser":browser}))?;
+        if value["id"].as_u64() != Some(belief_id) { return Err(LoreError::InvalidFrame); }
+        let lines = value["lines"].as_array().filter(|lines| lines.len() <= 200).ok_or(LoreError::InvalidFrame)?
+            .iter().map(|line| line.as_str().filter(|line| line.len() <= 4096).map(str::to_owned).ok_or(LoreError::InvalidFrame))
+            .collect::<Result<Vec<_>, _>>()?;
+        let html = if value["html"].is_null() { None } else {
+            Some(value["html"].as_str().filter(|html| browser && html.len() <= MAX_FRAME_BYTES).ok_or(LoreError::InvalidFrame)?.to_owned())
+        };
+        let note = value["note"].as_str().filter(|note| note.len() <= 512).ok_or(LoreError::InvalidFrame)?.to_owned();
+        Ok(BeliefGraph { id: belief_id, lines, html, note })
+    }
+
     pub fn belief_review(&mut self, cwd: &str, belief_id: u64) -> Result<BeliefReview, LoreError> {
         if cwd.is_empty() || cwd.len() > 4096 || cwd.contains('\0')
             || belief_id == 0 || belief_id > i64::MAX as u64 {

@@ -18,6 +18,17 @@ spec.loader.exec_module(sidecar)
 
 
 class IdentityTests(unittest.TestCase):
+    def test_account_snapshot_uses_only_connected_display_fields(self):
+        self.assertEqual(sidecar.account_snapshot({
+            "email": " sdk@example.test ", "organization": "SDK org",
+            "subscriptionType": "pro", "apiProvider": "firstParty",
+            "accessToken": "must never cross bridge", "organizationName": "cached org",
+        }), {"email": "sdk@example.test", "organization": "SDK org",
+             "subscriptionType": "pro", "apiProvider": "firstParty"})
+        self.assertIsNone(sidecar.account_snapshot({"email": "bad\nvalue",
+                                                  "organization": "x" * 257}))
+        self.assertIsNone(sidecar.account_snapshot(None))
+
     def test_session_engine_options_requires_explicit_peer_ownership(self):
         class OlderEngine:
             def __init__(self, cwd, session_id=None, resume=None, model=None):
@@ -106,7 +117,10 @@ class IdentityTests(unittest.TestCase):
                 self.assertEqual(sidecar.billing_snapshot({
                     "email": "PERSON@example.com", "subscriptionType": "Claude Max",
                 }), {"mode": "subscription", "type": expected,
-                     "quota": "s:9% w:48%~"})
+                     "quota": "5h:9% week:48%~",
+                     "quota_limits": {"five_hour": {"percent":9,"stale":True,"source":"claude_cli_cache"},
+                                      "seven_day": {"percent":48,"stale":True,"source":"claude_cli_cache"}},
+                     "quota_source":"claude_cli_cache","quota_stale":True})
 
     def test_billing_snapshot_rejects_foreign_local_tier_and_quota(self):
         from doxa import identity
@@ -117,7 +131,8 @@ class IdentityTests(unittest.TestCase):
         }), mock.patch.object(identity, "usage") as usage:
             self.assertEqual(sidecar.billing_snapshot({
                 "email": "person@example.com", "subscriptionType": "Claude Max",
-            }), {"mode": "subscription", "type": "max", "quota": None})
+            }), {"mode": "subscription", "type": "max", "quota": None,
+                "quota_limits":{},"quota_source":"claude_cli_cache","quota_stale":False})
             usage.assert_not_called()
 
     def test_billing_snapshot_requires_sdk_subscription(self):
@@ -201,7 +216,7 @@ class IdentityTests(unittest.TestCase):
         by_id = {frame["id"]: frame for frame in replies if frame.get("type") == "reply"}
         self.assertEqual(by_id[2]["result"], {
             "models": [], "loading": True,
-            "note": "Claude model catalog is loading; press R to retry"})
+            "note": "Claude model catalog is loading; refreshes automatically"})
         self.assertEqual(by_id[3]["result"]["model"], "verified")
         self.assertEqual(by_id[4]["result"]["models"], ["verified"])
 
@@ -276,6 +291,88 @@ class IdentityTests(unittest.TestCase):
                 self.assertTrue(all(frame["ok"] for frame in catalog_replies))
                 self.assertTrue(all(frame["result"]["models"] == expected for frame in catalog_replies))
                 self.assertTrue(all(frame["result"]["note"] == note for frame in catalog_replies))
+
+    def test_effort_capabilities_require_exact_connected_model_metadata(self):
+        engine = types.SimpleNamespace(set_effort=lambda _: None, server_info={"models": [
+            {"value": "sonnet", "supportedEffortLevels": ["low", "high", "invented"]},
+            {"value": "opus", "supportedEffortLevels": ["high", "xhigh", "max"]},
+            {"value": "disabled", "supportsEffort": False, "supportedEffortLevels": ["low"]},
+        ]})
+        self.assertEqual(sidecar.model_effort_capabilities(engine, "sonnet"), ["low", "high"])
+        self.assertEqual(sidecar.model_effort_capabilities(engine, "opus"), ["high", "xhigh", "max"])
+        self.assertEqual(sidecar.model_effort_capabilities(engine, "disabled"), [])
+        self.assertEqual(sidecar.model_effort_capabilities(engine, "sonnet-other"), [])
+        engine.server_info = {"models": [{"value": "sonnet", "supportsEffort": True}]}
+        self.assertEqual(sidecar.model_effort_capabilities(engine, "sonnet"), [])
+        engine.server_info = None
+        self.assertEqual(sidecar.model_effort_capabilities(engine, "sonnet"), [])
+
+    def test_effort_aliases_use_advertised_resolved_model_and_explicit_id_precedence(self):
+        # Primary CLI 2.1.283 model-info schema/constructor supplies resolvedModel;
+        # an alias's spelling or human-readable description alone proves nothing.
+        engine = types.SimpleNamespace(set_effort=lambda _: None, server_info={"models": [
+            {"value": "opus", "resolvedModel": "claude-opus-4-6",
+             "supportedEffortLevels": ["low", "medium", "high", "xhigh", "max"]},
+            {"value": "sonnet[1m]", "resolvedModel": "claude-sonnet-4-6[1m]",
+             "supportedEffortLevels": ["low", "medium", "high"]},
+        ]})
+        self.assertEqual(sidecar.model_effort_capabilities(engine, "claude-opus-4-6"),
+                         ["low", "medium", "high", "xhigh", "max"])
+        self.assertEqual(sidecar.model_effort_capabilities(engine, "claude-sonnet-4-6[1m]"),
+                         ["low", "medium", "high"])
+        self.assertEqual(sidecar.model_effort_capabilities(engine, "claude-sonnet-4-6"), [])
+        self.assertEqual(sidecar.model_effort_capabilities(engine, "claude-opus-4-6-other"), [])
+        engine.server_info["models"].append({"value": "claude-opus-4-6", "supportedEffortLevels": ["low"]})
+        self.assertEqual(sidecar.model_effort_capabilities(engine, "claude-opus-4-6"), ["low"])
+        engine.server_info["models"][-1]["supportsEffort"] = False
+        self.assertEqual(sidecar.model_effort_capabilities(engine, "claude-opus-4-6"), [])
+
+    def test_catalog_retries_empty_after_five_seconds_and_refreshes_verified_after_thirty(self):
+        from doxa import claude_catalog, providers
+        class FakeEngine:
+            def __init__(self, peer_presence=True, **_options): pass
+            async def start(self): return types.SimpleNamespace(type="started", data={})
+            async def finalize(self): return types.SimpleNamespace(type="finalized", data={})
+            async def peer_events(self):
+                if False: yield None
+        class FakeProvider:
+            def __init__(self, populated): self.populated = populated
+            async def list_models(self):
+                return [types.SimpleNamespace(id="verified", source="cache")] if self.populated else []
+            def catalog_note(self, _models): return "verified cache"
+        engine_module = types.ModuleType("doxa.engine")
+        engine_module.SessionEngine = FakeEngine
+        for populated, ttl in [(False, 5.0), (True, 30.0)]:
+            with self.subTest(populated=populated):
+                clock = [100.0]
+                frames = iter(enumerate([
+                    ("start", {"cwd": str(SIDECAR.parent), "session_id": "catalog"}),
+                    ("list_models", {}), ("list_models", {}),
+                    ("list_models", {}), ("list_models", {}), ("finalize", {}),
+                ], 1))
+                async def read_frame(_reader, _limit):
+                    try: identity, (method, params) = next(frames)
+                    except StopIteration: return b""
+                    if identity == 3: clock[0] = 100.0 + ttl - 0.1
+                    if identity == 4: clock[0] = 100.0 + ttl
+                    await asyncio.sleep(0)
+                    return json.dumps({"type":"request", "id":identity, "method":method, "params":params}).encode()+b"\n"
+                replies = []
+                probe = mock.AsyncMock(return_value="refreshed")
+                with mock.patch.dict(sys.modules, {"doxa.engine": engine_module}), \
+                     mock.patch.object(sidecar.asyncio, "to_thread", read_frame), \
+                     mock.patch.object(sidecar, "time", types.SimpleNamespace(monotonic=lambda:clock[0])), \
+                     mock.patch.object(sidecar, "emit", replies.append), \
+                     mock.patch.object(claude_catalog, "attempt_cli_catalog_refresh", probe), \
+                     mock.patch.object(providers, "model_provider", return_value=FakeProvider(populated)), \
+                     mock.patch.object(providers.ClaudeProvider, "startup_catalog_checked"):
+                    asyncio.run(sidecar.run())
+                self.assertEqual(probe.call_count, 2)
+                by_id = {frame["id"]:frame["result"] for frame in replies if frame.get("type")=="reply"}
+                self.assertNotIn("loading", by_id[3])
+                self.assertTrue(by_id[4]["loading"])
+                self.assertEqual(by_id[4]["models"], ["verified"] if populated else [])
+                self.assertNotIn("loading", by_id[5])
 
     def test_emit_writes_complete_frame_after_partial_write(self):
         parts = []

@@ -841,6 +841,84 @@ async def combined_roster(
 # -- process lifetime ---------------------------------------------------
 
 
+async def ensure_runtime_bridge(state: Any) -> None:
+    """Canonical machine-wide bridge startup for Python and native daemons.
+
+    ``state`` records diagnostics and the detached process for existing callers.
+    The bridge owns its lifetime by watching the shared registry, independently
+    of the session that first requested it.
+    """
+    import errno
+    import subprocess
+
+    decision = listen_decision()
+    if not decision.allowed:
+        return
+    socket_path = runtime_socket_path()
+    lock_path = socket_path.with_name("peernet-start.lock")
+    lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        # flock is deliberately non-blocking: two daemons can start in
+        # one event loop, and a blocking flock while the owner awaits
+        # the child socket would deadlock that loop. The kernel releases
+        # the lock if an owner crashes.
+        while True:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                await asyncio.sleep(0.02)
+        if socket_path.exists():
+            try:
+                _reader, writer = await asyncio.wait_for(
+                    asyncio.open_unix_connection(str(socket_path)), timeout=0.2,
+                )
+                writer.close()
+                with contextlib.suppress(Exception):
+                    await writer.wait_closed()
+                return
+            except asyncio.TimeoutError:
+                # A slow bridge is live enough to own its pathname. Never
+                # unlink a socket merely because a health probe timed out.
+                return
+            except OSError as exc:
+                if exc.errno != errno.ECONNREFUSED:
+                    # Permission and transient errors cannot prove that
+                    # the endpoint is stale. Preserve it and fail safely.
+                    state.peer_net_error = str(exc)
+                    return
+                # ECONNREFUSED is the definitive stale Unix-socket case:
+                # a filesystem node exists but no listener owns it.
+                with contextlib.suppress(OSError):
+                    socket_path.unlink()
+        try:
+            # Detached by design: this daemon might be the first registry
+            # entry to leave, while another remains.  The bridge polls the
+            # shared registry and performs its own idle shutdown.
+            state.peer_net_process = subprocess.Popen(
+                [sys.executable, "-m", "doxa.peernet", "--serve-runtime-bridge"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except OSError as exc:
+            state.peer_net_error = str(exc)
+            return
+        # Do not block daemon readiness on an optional service, but record
+        # whether our child managed to claim the socket for diagnostics and
+        # tests. The lock prevents another daemon from racing this window.
+        for _ in range(10):
+            if socket_path.exists():
+                state.peer_net = socket_path
+                return
+            await asyncio.sleep(0.02)
+    finally:
+        with contextlib.suppress(OSError):
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+
+
 async def serve_runtime_bridge() -> int:
     """Run the one machine-wide peer bridge until the registry is empty.
 
@@ -909,9 +987,14 @@ def main(argv: "list[str] | None" = None) -> int:
     ``python -m doxa.peernet`` from creating a listener.
     """
     args = list(sys.argv[1:] if argv is None else argv)
-    if args != ["--serve-runtime-bridge"]:
-        return 2
-    return asyncio.run(serve_runtime_bridge())
+    if args == ["--ensure-runtime-bridge"]:
+        from types import SimpleNamespace
+        state = SimpleNamespace(peer_net=None, peer_net_process=None, peer_net_error=None)
+        asyncio.run(ensure_runtime_bridge(state))
+        return 1 if state.peer_net_error else 0
+    if args == ["--serve-runtime-bridge"]:
+        return asyncio.run(serve_runtime_bridge())
+    return 2
 
 
 if __name__ == "__main__":  # pragma: no cover - exercised via subprocess

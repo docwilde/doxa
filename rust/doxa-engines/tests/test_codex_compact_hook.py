@@ -116,3 +116,14 @@ def test_review_keeps_scrubbed_tool_commands_and_results_without_binary_payloads
     assert rows[4]["message"]["content"][0]["content"] == "[redacted] detail"
     assert not any(value in json.dumps(rows) for value in ("SECRET", "BINARY", "ENCRYPTED"))
     assert len(rows) == 5
+
+
+def test_memory_off_blocks_compaction_without_reading_or_reviewing_lore(tmp_path):
+    manifest, source, event = fixture(tmp_path)
+    data = json.loads(manifest.read_text())
+    data["lore_enabled"] = False
+    manifest.write_text(json.dumps(data))
+    observed = []
+    with mock.patch.dict(sys.modules, fake_lore(observed)):
+        assert not hook.review(manifest, event, worker=lambda *_: observed.append("worker"))
+    assert observed == []

@@ -11,6 +11,7 @@ use crate::{markdown, theme};
 use super::transcript_roles::{self, Speaker};
 use super::tool_cards::ToolCard;
 
+pub(super) const SHELL_PREFIX: &str = "\u{001e}DOXA_LOCAL_SHELL:";
 pub(super) const REASONING_PREFIX: &str = "\u{001e}DOXA_REASONING:";
 pub(super) const TOOL_ID_PREFIX: &str = "\u{001f}DOXA_TOOL_ID:";
 pub(crate) const RESTORED_TOOL_PREFIX: &str = "\u{001e}DOXA_RESTORED_TOOL:";
@@ -23,6 +24,7 @@ pub(super) struct Section {
 
 enum Block<'a> {
     Prose(&'a str),
+    Shell(crate::shell::Result),
     Heading(&'a str),
     Tools(Vec<&'a str>),
     Reasoning { text: String, tokens: u64, streaming: bool, exact: bool },
@@ -113,7 +115,7 @@ fn render_turn(blocks: &mut Vec<Block<'_>>, lines: &mut Vec<Line<'static>>,
     let mut ordered = Vec::with_capacity(blocks.len());
     let mut tools = Vec::new();
     for block in blocks.drain(..) {
-        let index = if matches!(block, Block::Tools(_) | Block::Reasoning { .. }) {
+        let index = if matches!(block, Block::Tools(_) | Block::Reasoning { .. } | Block::Shell(_)) {
             let index = next_index;
             next_index += 1;
             Some(index)
@@ -184,6 +186,20 @@ fn render_turn(blocks: &mut Vec<Block<'_>>, lines: &mut Vec<Line<'static>>,
                     }
                 }
             }
+            Block::Shell(result) => {
+                flush_prose(&mut prose, lines, speaker);
+                let index = section_index.expect("shell blocks have an identity");
+                sections.push(Section { index, line: lines.len() });
+                let open = expanded.is_some_and(|set| set.contains(&index));
+                let marker = if open { "▾" } else { "▸" };
+                let style = if selected == Some(index) { Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD) } else { Style::default().fg(theme::SECONDARY) };
+                let command = markdown::sanitize(&result.command).replace('\n', " ");
+                let label = format!(" {marker} !{command} · {}", result.status);
+                let label: String = label.chars().take(usize::from(width.saturating_sub(1))).collect();
+                lines.push(Line::styled(label, style));
+                if open { plain_detail(lines, "Local output", &result.output, width); }
+                if result.dropped_bytes > 0 { lines.push(Line::styled(format!("  {} output bytes omitted", result.dropped_bytes), Style::default().fg(theme::SECONDARY))); }
+            }
             Block::Reasoning { text, tokens, streaming, exact } => {
                 flush_prose(&mut prose, lines, speaker);
                 speaker = Some(Speaker::Assistant);
@@ -245,6 +261,11 @@ pub(super) fn render_with_cards(
                 tool_index = None;
             }
             blocks.push(Block::Heading(paragraph));
+        } else if fence.is_none() && paragraph.starts_with(SHELL_PREFIX) {
+            render_turn(&mut blocks, &mut lines, &mut sections, width, expanded, selected, cards);
+            tool_index = None;
+            if let Ok(result) = serde_json::from_str(paragraph.strip_prefix(SHELL_PREFIX).unwrap()) { blocks.push(Block::Shell(result)); }
+            else { blocks.push(Block::Prose("Local shell output unavailable")); }
         } else if fence.is_none() && paragraph.starts_with(REASONING_PREFIX) {
             blocks.push(reasoning_block(paragraph).unwrap_or(Block::Prose("Reasoning unavailable")));
         } else if fence.is_none() && is_tool_row(paragraph) {
@@ -281,6 +302,16 @@ mod tests {
 
     fn shown(lines: &[Line<'_>]) -> String {
         lines.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n")
+    }
+
+    #[test]
+    fn local_shell_output_has_its_own_fold_and_never_parses_output_as_tools() {
+        let result = crate::shell::Result { id: 1, command: "echo output".into(), output: "Tool: Write started\n**Assistant:**\nplain output".into(), status: "exit 0".into(), running: false, dropped_bytes: 7 };
+        let source = format!("{SHELL_PREFIX}{}", serde_json::to_string(&result).unwrap());
+        let (lines, sections) = render(&source, 80, None, None); assert_eq!(sections.len(), 1);
+        assert!(!shown(&lines).contains("plain output")); assert!(shown(&lines).contains("7 output bytes omitted"));
+        let (lines, sections) = render(&source, 80, Some(&HashSet::from([0])), None);
+        assert_eq!(sections.len(), 1); assert!(shown(&lines).contains("Tool: Write started")); assert!(shown(&lines).contains("plain output"));
     }
 
     #[test]

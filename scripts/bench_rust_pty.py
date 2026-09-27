@@ -41,15 +41,18 @@ def winsize(fd: int, width: int, height: int) -> None:
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", height, width, 0, 0))
 
 
-def read_draw(fd: int, started: float, timeout: float = 2.0) -> tuple[float, float, int]:
+def read_draw(fd: int, started: float, timeout: float = 2.0,
+              required_marker: bytes | None = None) -> tuple[float, float, int]:
     first = None
     last = None
     size = 0
+    marker_seen = required_marker is None
+    pending = b""
     deadline = started + timeout
     while time.perf_counter() < deadline:
         wait = min(0.012 if first is not None else 0.1, max(0.0, deadline - time.perf_counter()))
         if not select.select([fd], [], [], wait)[0]:
-            if first is not None:
+            if first is not None and marker_seen:
                 break
             continue
         try:
@@ -63,7 +66,10 @@ def read_draw(fd: int, started: float, timeout: float = 2.0) -> tuple[float, flo
             first = now
         last = now
         size += len(chunk)
-    if first is None or last is None:
+        if required_marker is not None:
+            marker_seen |= required_marker in pending + chunk
+            pending = (pending + chunk)[-len(required_marker):]
+    if first is None or last is None or not marker_seen:
         raise RuntimeError("no terminal redraw observed before timeout")
     return (first - started) * 1000, (last - started) * 1000, size
 
@@ -77,13 +83,15 @@ def run_once() -> dict:
         path = str(Path(temp) / "frames.sock")
         master, slave = pty.openpty()
         winsize(slave, 160, 48)
-        env = {**os.environ, "TERM": "xterm-256color", "DOXA_HOME": str(Path(temp) / "home")}
+        env = {**os.environ, "TERM": "xterm-256color", "DOXA_HOME": str(Path(temp) / "home"),
+               "DOXA_SKIP_FIRST_RUN": "1", "DOXA_SKIP_UPDATE_CHECK": "1"}
+        env.pop("DOXA_KEYBOARD_PROTOCOL", None)
         started = time.perf_counter()
         proc = subprocess.Popen([str(BINARY), path], stdin=slave, stdout=slave, stderr=slave,
                                 cwd=temp, env=env, start_new_session=True)
         os.close(slave)
         try:
-            startup_first, startup_last, _ = read_draw(master, started)
+            startup_first, startup_last, _ = read_draw(master, started, required_marker=b"Prompt")
             sock = socket.socket(socket.AF_UNIX)
             deadline = time.monotonic() + 2
             while True:
@@ -112,7 +120,7 @@ def run_once() -> dict:
                     append_first.append(first)
                     append_last.append(last)
                     append_bytes.append(size)
-                os.write(master, b"\t")  # Prompt -> transcript focus.
+                os.write(master, b"\t\t")  # Prompt -> tab headers -> transcript focus.
                 read_draw(master, time.perf_counter())
 
                 scroll_first, scroll_last, scroll_bytes = [], [], []
@@ -159,9 +167,14 @@ def run_once() -> dict:
 
 
 def main() -> None:
+    global BINARY
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--runs", type=int, default=3)
+    parser.add_argument("--binary", type=Path, default=BINARY, help="Explicit compiled frontend path")
     args = parser.parse_args()
+    BINARY = args.binary.resolve()
+    if not BINARY.is_file():
+        parser.error(f"release binary missing: {BINARY}")
     if args.runs < 1:
         parser.error("--runs must be positive")
     raw = [run_once() for _ in range(args.runs)]

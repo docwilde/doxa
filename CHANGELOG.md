@@ -5,6 +5,30 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.31 — 2026-09-27
+
+- Complete the audited Python 1.19 functional paths: safe saved-tab restoration,
+  full categorized preferences, once-only setup and empty-window recovery,
+  scoped belief graphs, native Codex/vendor LORE tools, canonical remote peers,
+  interactive supervisor briefing and adopted plugin commands.
+- Add private keyboard-only local shell output, verified session retirement,
+  window-owned fleet/browser controls, safe idle update/restart, connected
+  provider details and bounded native installation/update advisories.
+- Populate and refresh the model picker automatically, preserve its selection,
+  simplify the permission chip and show terminal startup progress. Add keyboard
+  focus across tab headers, chips and prompts. Fix Claude effort verification
+  and forward reported 5-hour/weekly subscription usage live.
+- Remove blocking keyboard capability probes from default startup; retain explicit
+  Kitty protocol opt-in and legacy key alternatives.
+- Fix Codex's reserved dynamic tool names at the provider boundary. Include the
+  browser mesh assets in installed wheels, verified through real HTTP requests
+  outside a checkout. Add selection of painted transcript text and explicit
+  clipboard copy/paste with per-pane draft ownership and no automatic submission.
+- Restore bounded peer broadcast, reply references and filtered history options,
+  while verifying complete same-project rosters independently of the display cap.
+- Regenerate the production Rust gallery and rerun draw, scrolling, resize and
+  CLI/event-loop startup benchmarks. Keep provider and trust limits explicit.
+
 ## 2.0.0-alpha.30 — 2026-09-27
 
 - Add visible Accept and Reject controls to each belief entry in the inline

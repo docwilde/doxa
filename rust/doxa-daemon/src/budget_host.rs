@@ -236,6 +236,7 @@ impl Host for BudgetHost {
     fn initial_permission_mode(&self) -> String { self.inner.initial_permission_mode() }
     fn can_set_model(&self) -> bool { self.pricing.is_none() && self.inner.can_set_model() }
     fn can_set_permission_mode(&self) -> bool { self.inner.can_set_permission_mode() }
+    fn account_snapshot(&self) -> Option<Value> { self.inner.account_snapshot() }
     fn billing_snapshot(&self) -> Option<Value> {
         // The prompt holds the accounting lock during provider execution;
         // hello/status must remain responsive so a person can answer asks.
@@ -249,6 +250,8 @@ impl Host for BudgetHost {
             "durable":self.journal.is_some()});
         Some(value)
     }
+    fn lore_enabled(&self) -> Option<bool> { self.inner.lore_enabled() }
+    fn lore_status(&self) -> Option<Value> { self.inner.lore_status() }
     fn lore_scrub_status(&self) -> Option<&'static str> { self.inner.lore_scrub_status() }
     fn public_prompt(&self, text: &str) -> Result<String, String> { self.inner.public_prompt(text) }
     fn transcript_snapshot(&self) -> io::Result<Option<(PathBuf, u64)>> { self.inner.transcript_snapshot() }

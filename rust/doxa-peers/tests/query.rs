@@ -190,3 +190,26 @@ fn provider_history_refuses_public_links_and_fifo_without_blocking() {
     assert!(ledger.history("s-alpha", "/repo/one", &clean).is_err());
     assert!(started.elapsed() < std::time::Duration::from_secs(1));
 }
+
+#[test]
+fn provider_history_direction_applies_before_the_requested_row_limit() {
+    let (_dir,ledger,path)=fixture();
+    let row:serde_json::Value=serde_json::from_slice(include_bytes!("fixtures/python_ledger.jsonl").split(|byte|*byte==b'\n').next().unwrap()).unwrap();
+    let mut bytes=Vec::new();
+    for index in 0..110 {
+        let mut row=row.clone(); row["body"]=serde_json::json!(format!("sent-{index}"));
+        bytes.extend(serde_json::to_vec(&row).unwrap());bytes.push(b'\n');
+    }
+    let received=include_bytes!("fixtures/python_ledger.jsonl").split(|byte|*byte==b'\n').nth(1).unwrap();
+    for _ in 0..25 { bytes.extend_from_slice(received);bytes.push(b'\n'); }
+    fs::write(path,bytes).unwrap();
+    let sent=ledger.history_filtered("s-alpha","/repo/one","sent",50,&|text:&str|text.to_owned()).unwrap();
+    assert_eq!(sent.len(),50); assert_eq!(sent.first().unwrap().body,"sent-60");assert_eq!(sent.last().unwrap().body,"sent-109");
+    let maximum=ledger.history_filtered("s-alpha","/repo/one","sent",100,&|text:&str|text.to_owned()).unwrap();
+    assert_eq!(maximum.len(),100);assert_eq!(maximum.first().unwrap().body,"sent-10");
+    let received=ledger.history_filtered("s-alpha","/repo/one","received",2,&|text:&str|text.to_owned()).unwrap();
+    assert_eq!(received.len(),2);assert!(received.iter().all(|row|row.body=="second"));
+    assert!(ledger.history_filtered("s-alpha","/repo/two","both",100,&|text:&str|text.to_owned()).unwrap().is_empty());
+    assert!(ledger.history_filtered("s-alpha","/repo/one","unknown",1,&|text:&str|text.to_owned()).is_err());
+    assert!(ledger.history_filtered("s-alpha","/repo/one","both",101,&|text:&str|text.to_owned()).is_err());
+}

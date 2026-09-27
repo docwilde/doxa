@@ -1,11 +1,12 @@
 [package]
 name = "doxa-daemon"
-version = "2.0.0-alpha.30"
+version = "2.0.0-alpha.31"
 edition = "2021"
 publish = false
 license = "AGPL-3.0-only"
 
 [dependencies]
+doxa-state = { path = "../doxa-state" }
 doxa-runtime = { path = "../doxa-runtime" }
 doxa-engines = { path = "../doxa-engines" }
 doxa-lore = { path = "../doxa-lore" }

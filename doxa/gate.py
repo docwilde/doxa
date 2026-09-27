@@ -102,6 +102,9 @@ class OperatorContext:
     accepted from model tool arguments, and retained when a different engine
     later approves the proposal."""
 
+    spawn_launch: "Callable[..., tuple[str, str]] | None" = None
+    """Host-only detached launcher seam; native Claude sessions supply their native daemon route."""
+
     spawn_depth: int = 0
     """How deep this session already sits in a spawn chain -- 0 for one a
     human started. Carried on the SIDECAR rather than passed as a tool

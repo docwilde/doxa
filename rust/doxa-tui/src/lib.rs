@@ -7,6 +7,7 @@ pub mod lore_picker;
 pub mod memory_menu;
 pub mod diff_view;
 pub mod discovery;
+pub mod sessions;
 pub mod transport;
 pub mod ui;
 
@@ -23,3 +24,15 @@ pub mod fleet_control;
 pub mod theme;
 
 pub mod mesh_control;
+pub mod maintenance;
+pub mod settings;
+pub mod preferences;
+pub mod belief_graph;
+
+pub mod shell;
+pub mod startup_restore;
+pub mod first_run;
+pub mod installation;
+
+pub mod selection;
+pub mod clipboard;

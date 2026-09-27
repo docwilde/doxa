@@ -69,6 +69,18 @@ async fn fake_cli_receives_stdin_and_resumes_with_safe_argv() {
     assert!(!args.contains(&prompt));
 }
 
+#[test]
+fn frozen_mcp_overrides_repeat_unchanged_on_first_and_resume_turns() {
+    let mut options=DriverOptions::new(PathBuf::from("/workspace"));
+    options.config_overrides=vec!["mcp_servers.doxa.command=\"/safe python\"".into(),
+        "mcp_servers.doxa.env.DOXA_MCP_LORE=\"0\"".into()];
+    for id in [None,Some("thread_1")] {
+        let argv=options.argv(id).unwrap();
+        for value in &options.config_overrides { assert!(argv.windows(2).any(|pair| pair==["-c",value.as_str()])); }
+        assert_eq!(argv.last().unwrap(),"-");
+    }
+}
+
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn executable_busy_during_upgrade_is_retried_within_turn_deadline() {

@@ -27,7 +27,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = ROOT / "rust/doxa-tui/target/release/doxa-rs"
-VISIBLE_MARKER = b"Sessions"
+VISIBLE_MARKER = b"Prompt"
 
 
 def summary(samples: list[float]) -> dict[str, float | int]:
@@ -45,7 +45,9 @@ def sample(width: int, height: int, timeout: float) -> dict[str, float]:
     with tempfile.TemporaryDirectory(prefix="doxa-cli-startup-") as temp:
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", height, width, 0, 0))
-        env = {**os.environ, "TERM": "xterm-256color", "DOXA_HOME": str(Path(temp) / "home")}
+        env = {**os.environ, "TERM": "xterm-256color", "DOXA_HOME": str(Path(temp) / "home"),
+               "DOXA_SKIP_FIRST_RUN": "1", "DOXA_SKIP_UPDATE_CHECK": "1"}
+        env.pop("DOXA_KEYBOARD_PROTOCOL", None)  # Exercise actual default startup.
         started = time.perf_counter()
         proc = subprocess.Popen(
             [str(BINARY), "--demo"], stdin=slave, stdout=slave, stderr=slave,
@@ -68,6 +70,8 @@ def sample(width: int, height: int, timeout: float) -> dict[str, float]:
                 if not chunk:
                     raise RuntimeError("process exited before visible text")
                 received = time.perf_counter()
+                if b"\x1b[?u" in pending + chunk or b"\x1b[c" in pending + chunk:
+                    raise RuntimeError("default startup sent a terminal capability probe")
                 if first_byte is None:
                     first_byte = received
                 if VISIBLE_MARKER in pending + chunk:
@@ -89,14 +93,17 @@ def sample(width: int, height: int, timeout: float) -> dict[str, float]:
 
 
 def main() -> None:
+    global BINARY
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--runs", type=int, default=50)
     parser.add_argument("--timeout", type=float, default=2.0)
+    parser.add_argument("--binary", type=Path, default=BINARY, help="Explicit compiled frontend path")
     args = parser.parse_args()
-    if args.runs < 1 or args.timeout <= 0:
-        parser.error("--runs and --timeout must be positive")
+    BINARY = args.binary.resolve()
     if not BINARY.is_file():
         parser.error(f"release binary missing: {BINARY}")
+    if args.runs < 1 or args.timeout <= 0:
+        parser.error("--runs and --timeout must be positive")
     result = {}
     for width, height in ((160, 48), (80, 24)):
         samples = [sample(width, height, args.timeout) for _ in range(args.runs)]
@@ -104,7 +111,7 @@ def main() -> None:
             metric: summary([row[metric] for row in samples])
             for metric in ("first_byte_ms", "first_visible_ms")
         }
-    print(json.dumps({"binary": str(BINARY), "mode": "--demo", "runs_per_size": args.runs,
+    print(json.dumps({"binary": str(BINARY), "mode": "--demo", "visible_marker": VISIBLE_MARKER.decode(), "runs_per_size": args.runs,
                       "results": result}, indent=2))
 
 
