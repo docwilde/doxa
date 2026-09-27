@@ -2,8 +2,11 @@
 use std::{fs::{self, File, OpenOptions}, io, os::unix::{fs::{DirBuilderExt, MetadataExt, OpenOptionsExt}, io::AsRawFd}, path::Path};
 fn home() -> io::Result<std::path::PathBuf> { crate::operations::doxa_home() }
 pub fn needed() -> bool {
-    if std::env::var("DOXA_SKIP_FIRST_RUN").is_ok_and(|value| !value.trim().is_empty()) { return false; }
-    home().is_ok_and(|home| fs::symlink_metadata(home.join(".setup-done")).is_err_and(|error|error.kind()==io::ErrorKind::NotFound))
+    home().is_ok_and(|home| needed_in(&home, &std::env::var("DOXA_SKIP_FIRST_RUN").unwrap_or_default()))
+}
+fn needed_in(home:&Path, skip:&str) -> bool {
+    skip.trim().is_empty() && fs::symlink_metadata(home.join(".setup-done"))
+        .is_err_and(|error|error.kind()==io::ErrorKind::NotFound)
 }
 pub fn mark_seen() -> io::Result<bool> { mark_in(&home()?) }
 fn mark_in(home:&Path) -> io::Result<bool> {
@@ -25,7 +28,11 @@ fn mark_in(home:&Path) -> io::Result<bool> {
     use super::*;
     #[test] fn first_offer_marks_once_and_uses_private_regular_marker() {
         let dir=tempfile::tempdir().unwrap();
+        assert!(needed_in(dir.path(), ""));
+        assert!(!needed_in(dir.path(), "0")); // Python's test kill switch accepts any nonblank value.
+        assert!(!needed_in(dir.path(), " yes "));
         assert!(mark_in(dir.path()).unwrap());assert!(!mark_in(dir.path()).unwrap());
+        assert!(!needed_in(dir.path(), ""));
         let meta=fs::symlink_metadata(dir.path().join(".setup-done")).unwrap();
         assert!(meta.is_file());assert_eq!(meta.mode()&0o777,0o600);
     }

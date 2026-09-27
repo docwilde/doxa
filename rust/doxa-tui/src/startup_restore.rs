@@ -47,8 +47,8 @@ pub fn prepare(
         if live.is_empty() { live.push(launch::spawn(options)?); }
         return Ok((live, store));
     };
-    if saved.len() > 64 {
-        return Err(io::Error::new(io::ErrorKind::Unsupported, "saved tabset exceeds the native 64-session restore bound; record retained"));
+    if saved.len() > crate::ui::panes::MAX_TABS {
+        return Err(io::Error::new(io::ErrorKind::Unsupported, "saved tabset exceeds the native 256-tab restore bound; record retained"));
     }
     let python = options.lore_python.clone().or_else(|| std::env::var_os("DOXA_LORE_PYTHON").map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from("python3"));

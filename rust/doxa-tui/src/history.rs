@@ -110,7 +110,7 @@ fn candidate_order(a: &Candidate, b: &Candidate) -> std::cmp::Ordering {
 
 fn read_offline(mut file: File, uid: u32) -> Option<String> {
     let meta = file.metadata().ok()?;
-    if !meta.is_file() || meta.uid() != uid { return None; }
+    if !meta.is_file() || meta.uid() != uid || meta.nlink() != 1 { return None; }
     let start = meta.len().saturating_sub(MAX_FILE_BYTES);
     let starts_on_line = if start > 0 {
         file.seek(SeekFrom::Start(start - 1)).ok()?;

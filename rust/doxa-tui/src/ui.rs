@@ -3957,6 +3957,11 @@ impl App {
         self.notice = format!("Attaching · {}", safe_label(id));
     }
 
+    pub(crate) fn has_unverified_archived_tabs(&self) -> bool {
+        self.groups.iter().any(|group|group.tabs.iter().any(|id|
+            self.offline_ids.contains(id) && !self.killed_this_run.contains(id) && !self.history_entries.contains_key(id)))
+    }
+
     pub(crate) fn has_offline_open_tabs(&self) -> bool {
         self.groups.iter().any(|group| group.tabs.iter().any(|id| self.offline_ids.contains(id)))
     }
@@ -9698,16 +9703,15 @@ fn save_layout_if_changed(
 ) -> bool {
     let layout = crate::ui_state::LayoutSignature::capture(app);
     if layout == *saved_layout {
-        if !app.has_offline_open_tabs() && app.notice == "Layout save skipped · archived tabs are read-only" {
+        if !app.has_unverified_archived_tabs() && app.notice.starts_with("Layout save skipped ·") {
             app.notice.clear();
             return true;
         }
         return false;
     }
-    if app.groups.iter().any(|group| group.tabs.iter().any(|id| app.offline_ids.contains(id) && !app.killed_this_run.contains(id))) {
-        if app.notice != "Layout save skipped · archived tabs are read-only" {
-            app.notice = "Layout save skipped · archived tabs are read-only".into();
-            return true;
+    if app.has_unverified_archived_tabs() {
+        if app.notice != "Layout save skipped · unverified archived tabs" {
+            app.notice = "Layout save skipped · unverified archived tabs".into();return true;
         }
         return false;
     }

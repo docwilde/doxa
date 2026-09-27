@@ -139,8 +139,8 @@ impl MultiBridge {
 }
 
 pub fn connect_sessions(sessions: &[Session]) -> io::Result<MultiBridge> {
-    if sessions.is_empty() || sessions.len() > 64 {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "expected 1–64 live sessions"));
+    if sessions.is_empty() || sessions.len() > crate::ui::panes::MAX_TABS {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "expected 1–256 live sessions"));
     }
     let mut seen = HashSet::new();
     if sessions.iter().any(|s| !crate::discovery::valid_id(&s.id) || !seen.insert(s.id.as_str())) {
@@ -157,7 +157,7 @@ pub fn connect_sessions(sessions: &[Session]) -> io::Result<MultiBridge> {
             Ok(pair) => pair,
             _ => {
                 revoke(&complete);
-                let _ = frame_tx.send(json!({"type":"client_notice", "session_id":session.id,
+                let _ = frame_tx.try_send(json!({"type":"client_notice", "session_id":session.id,
                     "message":"Session unavailable; saved layout is read-only"}));
                 continue;
             }
@@ -213,9 +213,9 @@ pub fn connect_sessions(sessions: &[Session]) -> io::Result<MultiBridge> {
                             "session_id":id, "group":group}));
                         continue;
                     }
-                    if routes.len() >= 64 {
+                    if routes.len() >= crate::ui::panes::MAX_TABS {
                         let _ = router_frames.send(json!({"type":"attach_reply", "ok":false,
-                            "message":"64 attached sessions is the limit"}));
+                            "message":"256 attached sessions is the limit"}));
                         continue;
                     }
                     // Re-read the trusted registry at dispatch time. The UI's earlier
@@ -237,9 +237,9 @@ pub fn connect_sessions(sessions: &[Session]) -> io::Result<MultiBridge> {
                     continue;
                 }
                 WorkerCommand::Launch(options, prompt, group) => {
-                    if routes.len().saturating_add(launches_in_flight) >= 64 {
+                    if routes.len().saturating_add(launches_in_flight) >= crate::ui::panes::MAX_TABS {
                         let _ = router_frames.send(json!({"type":"launch_reply", "ok":false,
-                            "message":"64 attached sessions is the limit", "group":group}));
+                            "message":"256 attached sessions is the limit", "group":group}));
                         continue;
                     }
                     launches_in_flight += 1;
@@ -789,6 +789,16 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static NEXT_SOCKET: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn initial_roster_accepts_256_and_all_failed_notices_cannot_block_mount() {
+        let dir=tempfile::tempdir().unwrap();
+        let rows:Vec<_>=(0..256).map(|i|Session{id:format!("saved-{i}"),title:String::new(),
+            socket:dir.path().join(format!("missing-{i}")),scope_key:String::new(),clients:None,started_at:String::new()}).collect();
+        assert_eq!(connect_sessions(&rows).err().unwrap().kind(),io::ErrorKind::NotConnected);
+        let mut too_many=rows;too_many.push(Session{id:"extra".into(),title:String::new(),socket:dir.path().join("missing"),scope_key:String::new(),clients:None,started_at:String::new()});
+        assert_eq!(connect_sessions(&too_many).err().unwrap().kind(),io::ErrorKind::InvalidInput);
+    }
 
     #[test]
     fn intentional_clear_finalization_keeps_complete_roster_gate() {

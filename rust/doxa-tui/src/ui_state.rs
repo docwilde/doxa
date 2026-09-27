@@ -283,6 +283,9 @@ impl UiStateStore {
     /// for old DOXA readers, and the tree and legacy trees describe the same
     /// geometry. A record with more complex groups is never overwritten.
     pub fn save(&mut self, app: &App) -> io::Result<()> {
+        if app.has_unverified_archived_tabs() {
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, "unverified archived tabs cannot be persisted"));
+        }
         let persisted_groups: Vec<PaneGroup> = app.groups.iter().map(|group| {
             let active_id = group.tabs.get(group.active);
             let tabs: Vec<String> = group.tabs.iter().filter(|id| !app.killed_this_run.contains(*id)).cloned().collect();
@@ -830,7 +833,7 @@ mod tests {
         assert_eq!(restored.custom_names.get("archive-c"),Some(&"Saved name".into()));
         assert!(restored.has_offline_open_tabs());
         assert!(restored.sessions.iter().all(|session|session.status.contains("provider history unavailable")));
-        store.save(&restored).unwrap();
+        assert!(store.save_if_complete(&restored,&Mutex::new(true)).unwrap());
         let saved=load_tabset(store.path(),"/project").unwrap();
         assert_eq!(saved.tabs.len(),3);
         assert_eq!(saved.tabs[0].cwd.as_deref(),Some("/project"));
