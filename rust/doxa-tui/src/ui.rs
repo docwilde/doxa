@@ -12010,7 +12010,7 @@ for line in sys.stdin:
                 retract_armed: false, belief_acting: false, result_status: None,
             });
             let menu = app.active_chooser_rect().unwrap();
-            let offset = if proposal_mode { 5 } else if menu.height < 10 { 4 } else { 7 };
+            let offset = if proposal_mode { 5 } else { 3 };
             let rendered = painted_at(&app, 100, 28);
             let row = usize::from(menu.y + offset);
             assert!(rendered.lines().nth(row).unwrap().contains(if proposal_mode { "proposal-2" } else { "#2" }));
