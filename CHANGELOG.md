@@ -5,10 +5,12 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
-## Unreleased — Rust parity work
+## 2.0.0-alpha.29 — 2026-09-27
 
 - Add native setup, explicit provider login/logout and plugin adoption controls,
   with cancellable login progress and filtering of credential-bearing URLs.
+  Support Codex device login, including its colored, multiline code prompt.
+  Create new LORE stores privately and refuse symlink ancestors.
 - Support nested pane groups, generated command actions, prompt-line session
   search and scoped LORE memory edits. Restore exact pending questions and
   require complete review before answering a permission request.
@@ -20,6 +22,9 @@ the stable 2.0 release has not been cut.
   Persist spend guards and refuse further turns when usage cannot be verified.
 - Register scoped peer tools for native Codex and vendor hosts, with explicit
   approval before model-initiated actions and bounded, scrubbed peer history.
+- Serve token-protected loopback mesh views with an owned renderer process.
+  Isolate fleet ledgers, reject unsafe files, and prevent project modules from
+  shadowing the renderer's trusted imports.
 - Share worktree lifecycle locks with updated Python sidecars and keep
   unverifiable legacy ownership protected from cleanup.
 - Review both manual and automatic provider compaction through LORE. Native
