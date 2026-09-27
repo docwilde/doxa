@@ -9474,17 +9474,8 @@ impl App {
         } else if self.activity_label(id) == Some("Queued") {
             Some(Line::styled(" Queued", Style::default().fg(theme::SECONDARY)))
         } else { None };
-        let (lines, sections, link_regions, top) = if content.trim().is_empty() {
-            let identity = self.session_identity.get(id);
-            let state = if session.is_some() {
-                crate::welcome::State::Ready {engine:identity.and_then(|value|value.0.as_deref()),
-                    model:identity.and_then(|value|value.1.as_deref())}
-            } else if self.launching { crate::welcome::State::Starting }
-            else if self.awaiting_initial_attach || group.active_id().is_some() { crate::welcome::State::Connecting }
-            else { crate::welcome::State::Empty {reason:self.startup_recovery.as_deref()} };
-            (crate::welcome::lines(state,self.persist_preferences && self.preferences.on("boot_banner"),
-                inner[1].width.saturating_sub(2),inner[1].height),Vec::new(),Vec::new(),0)
-        } else {
+        let show_welcome = content.trim().is_empty() && activity_line.is_none();
+        let (lines, sections, link_regions, top) = {
             let mut cache = self.rendered_transcripts.borrow_mut();
             let position = cache.iter().position(|entry| entry.pane == index && entry.id == id);
             let position = if let Some(position) = position { position } else {
@@ -9504,9 +9495,19 @@ impl App {
                 cards_revision, self.tool_cards.for_session(id));
             let (window, top) = transcript_window(&cache[position].lines,
                 inner[1].height, group.scroll, activity_line);
-            (window, cache[position].sections.clone(), cache[position].links.iter()
+            if show_welcome {
+                let identity = self.session_identity.get(id);
+                let state = if session.is_some() {
+                    crate::welcome::State::Ready {engine:identity.and_then(|value|value.0.as_deref()),
+                        model:identity.and_then(|value|value.1.as_deref())}
+                } else if self.launching { crate::welcome::State::Starting }
+                else if self.awaiting_initial_attach || group.active_id().is_some() { crate::welcome::State::Connecting }
+                else { crate::welcome::State::Empty {reason:self.startup_recovery.as_deref()} };
+                (crate::welcome::lines(state,self.persist_preferences && self.preferences.on("boot_banner"),
+                    inner[1].width.saturating_sub(2),inner[1].height),Vec::new(),Vec::new(),0)
+            } else { (window, cache[position].sections.clone(), cache[position].links.iter()
                 .filter(|link| link.row >= top && link.row < top + usize::from(inner[1].height))
-                .cloned().map(|mut link| { link.row -= top; link }).collect::<Vec<_>>(), top)
+                .cloned().map(|mut link| { link.row -= top; link }).collect::<Vec<_>>(), top) }
         };
         for section in sections {
             if section.line >= top && section.line < top + usize::from(inner[1].height) {
@@ -11140,6 +11141,9 @@ for line in sys.stdin:
             .find(|hit| hit.kind == "effort").unwrap().clone();
         app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Moved,
             column: effort_hit.rect.x + 1, row: effort_hit.rect.y, modifiers: KeyModifiers::NONE }));
+        let hovered_at = Instant::now();
+        app.tick_chip_hover(hovered_at);
+        app.tick_chip_hover(hovered_at + Duration::from_millis(500));
         assert!(painted_at(&app, 220, 32).contains("Effort · current session"));
         app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
             column: effort_hit.rect.x + 1, row: effort_hit.rect.y, modifiers: KeyModifiers::NONE }));
