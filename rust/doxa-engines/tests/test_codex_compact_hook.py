@@ -1,9 +1,8 @@
-"""Pinned PreCompact review contract tests; no real LORE reviewers/providers."""
+"""Pinned native PreCompact contracts; no LORE stores or provider calls."""
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
-import sys
-import types
 from unittest import mock
 import pytest
 
@@ -13,15 +12,16 @@ hook = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(hook)
 
 
-def fixture(tmp_path):
+def fixture(tmp_path, archived=False):
     home = tmp_path / "codex"
-    sessions = home / "sessions"
+    sessions = home / ("archived_sessions" if archived else "sessions")
     sessions.mkdir(parents=True)
     source = sessions / "rollout.jsonl"
-    rows = [{"type":"session_meta","payload":{"id":"provider-thread"}}]
+    rows = [{"type":"session_meta","payload":{"id":"provider-thread","cwd":str(tmp_path)}}]
     for role in ["user", "assistant"] * 3:
         rows.append({"type":"response_item","payload":{"type":"message","role":role,
-                     "content":[{"type":"input_text" if role == "user" else "output_text","text":"SECRET visible"}]}})
+                     "content":[{"type":"input_text" if role == "user" else "output_text","text":"fixture visible"}]}})
+    rows.append({"type":"response_item","payload":{"type":"custom_tool_call","name":"apply_patch","input":"fixture patch"}})
     source.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
     manifest = tmp_path / "manifest.json"
     manifest.write_text(json.dumps({"version":"0.156.1","provider_thread":"provider-thread",
@@ -31,42 +31,39 @@ def fixture(tmp_path):
     return manifest, source, event
 
 
-def fake_lore(observed):
-    lore = types.ModuleType("lore_core")
-    deriver = types.ModuleType("lore_core.deriver")
-    deriver.__file__ = "/fixture/lore_core/deriver.py"
-    def build(path, slug, **options):
-        observed.append(path.read_text())
-        return {"session_id":path.stem,"project":slug,"prompt":"fixture"}
-    deriver.build_review_job = build
-    lore.deriver = deriver
-    config = types.ModuleType("lore_core.config")
-    config.project_slug = lambda cwd: "project"
-    config.stage_disabled = lambda stage: False
-    scrub = types.ModuleType("lore_core.scrub")
-    scrub.scrub_secrets = lambda text: text.replace("SECRET", "[redacted]")
-    doxa = types.ModuleType("doxa")
-    bootstrap = types.ModuleType("doxa._lore_bootstrap")
-    bootstrap.ensure_importable = lambda: observed.append("bootstrap-source")
-    bootstrap.export_sticky_lore_root = lambda: observed.append("bootstrap-store")
-    doxa._lore_bootstrap = bootstrap
-    return {"doxa":doxa,"doxa._lore_bootstrap":bootstrap,"lore_core":lore,"lore_core.deriver":deriver,"lore_core.config":config,"lore_core.scrub":scrub}
-
-
-def test_review_scrubs_pinned_rollout_before_worker_and_refuses_change(tmp_path, monkeypatch):
+@pytest.mark.parametrize('archived', [False, True])
+def test_review_carries_exact_raw_proof_without_importing_python_lore(tmp_path, monkeypatch, archived):
     monkeypatch.delenv("LORE_DISABLE_REVIEW", raising=False)
-    manifest, source, event = fixture(tmp_path)
+    monkeypatch.delenv("LORE_SKIP", raising=False)
+    manifest, source, event = fixture(tmp_path, archived)
     observed = []
-    with mock.patch.dict(sys.modules, fake_lore(observed)):
-        assert hook.review(manifest, event, worker=lambda *_: True)
-        assert observed[:2] == ["bootstrap-source", "bootstrap-store"]
-        assert "SECRET" not in observed[2]
-        assert "[redacted]" in observed[2]
-        assert not hook.review(manifest, event, worker=lambda *_: False)
-        def changing_worker(*_):
-            source.write_text(source.read_text() + '{}\n')
-            return True
-        assert not hook.review(manifest, event, worker=changing_worker)
+    def worker(metadata):
+        observed.append(metadata)
+        assert metadata['transcript'] == str(source)
+        assert metadata['session_id'] == 'doxa-session'
+        assert metadata['provider_thread'] == 'provider-thread'
+        assert metadata['older'] is True
+        assert 'agent' not in metadata and 'source_engine' not in metadata
+        proof = metadata['expected_source']; st = source.stat()
+        assert proof == {'sha256':hashlib.sha256(source.read_bytes()).hexdigest(),
+                         'inode':st.st_ino,'device':st.st_dev,'size':st.st_size,
+                         'ctime':st.st_ctime_ns//1_000_000_000,'ctime_nsec':st.st_ctime_ns%1_000_000_000}
+        assert 'apply_patch' in source.read_text()
+        return True
+    import builtins
+    original_import = builtins.__import__
+    def guarded_import(name, *args, **kwargs):
+        assert name != 'lore_core' and not name.startswith('lore_core.')
+        assert name != 'doxa' and not name.startswith('doxa.')
+        return original_import(name, *args, **kwargs)
+    with mock.patch.object(builtins, '__import__', guarded_import):
+        assert hook.review(manifest, event, worker=worker)
+    assert len(observed) == 1
+    assert not hook.review(manifest, event, worker=lambda *_: False)
+    def changing_worker(_):
+        source.write_text(source.read_text() + '{}\n')
+        return True
+    assert not hook.review(manifest, event, worker=changing_worker)
 
 
 def test_review_rejects_wrong_identity_unknown_version_and_outside_source(tmp_path):
@@ -79,6 +76,9 @@ def test_review_rejects_wrong_identity_unknown_version_and_outside_source(tmp_pa
     assert not hook.review(manifest, {**event,"transcript_path":str(outside)}, worker=lambda *_: True)
     link = source.parent / "link.jsonl"; link.symlink_to(source)
     assert not hook.review(manifest, {**event,"transcript_path":str(link)}, worker=lambda *_: True)
+    rows = source.read_text().splitlines(); rows[0] = json.dumps({'type':'session_meta','payload':{'id':'different'}})
+    source.write_text('\n'.join(rows))
+    assert not hook.review(manifest, event, worker=lambda *_: True)
 
 
 def test_worker_timeout_closes_supervisor_control_and_waits(monkeypatch):
@@ -95,46 +95,41 @@ def test_worker_timeout_closes_supervisor_control_and_waits(monkeypatch):
     monkeypatch.setattr(hook.subprocess, "Popen", lambda *a, **k: process)
     monkeypatch.setattr(hook.os, "killpg", lambda *a: calls.append(a))
     monkeypatch.setattr(hook, "REVIEW_SUPERVISOR_SOURCE", "verified source", raising=False)
-    assert not hook.run_worker(Path("fixture"), Path("fixture"), timeout=0.01)
-    assert calls == []  # The hook never signals a detached group by numeric PID.
+    assert not hook.run_worker({'session_id':'fixture'}, timeout=0.01)
+    assert calls == []
     process.stdin.close.assert_called_once()
     assert process.waits == 2
 
 
-def test_worker_without_digest_verified_supervisor_cannot_launch(monkeypatch):
+def test_worker_without_verified_supervisor_or_bounded_metadata_cannot_launch(monkeypatch):
     monkeypatch.delattr(hook, "REVIEW_SUPERVISOR_SOURCE", raising=False)
     with mock.patch.object(hook.subprocess, "Popen") as launch:
-        assert not hook.run_worker(Path("fixture"), Path("fixture"))
+        assert not hook.run_worker({})
+        monkeypatch.setattr(hook, "REVIEW_SUPERVISOR_SOURCE", "verified source", raising=False)
+        assert not hook.run_worker({'transcript':'x'*16384})
+        assert not hook.run_worker('fixture')
         launch.assert_not_called()
 
 
-def test_review_keeps_scrubbed_tool_commands_and_results_without_binary_payloads():
-    items = [
-        {"type":"message", "role":"user", "content":[{"type":"input_text", "text":"request"}]},
-        {"type":"function_call", "call_id":"call-1", "name":"exec_command", "arguments":'{"cmd":"SECRET command"}'},
-        {"type":"function_call_output", "call_id":"call-1", "output":"SECRET result"},
-        {"type":"custom_tool_call", "call_id":"call-2", "name":"apply_patch", "input":"SECRET patch"},
-        {"type":"custom_tool_call_output", "call_id":"call-2", "output":[
-            {"type":"input_text", "text":"SECRET detail"}, {"type":"input_image", "image_url":"BINARY"}]},
-        {"type":"reasoning", "encrypted_content":"ENCRYPTED"},
-    ]
-    data = b"\n".join(json.dumps({"type":"response_item", "payload":item}).encode() for item in items)
-    rows = hook.messages_from_rollout(data, lambda text: text.replace("SECRET", "[redacted]"))
-    assert rows[1]["message"]["content"][0] == {
-        "type":"tool_use", "id":"call-1", "name":"exec_command", "input":{"cmd":"[redacted] command"}}
-    assert rows[2]["message"]["content"][0]["content"] == "[redacted] result"
-    assert rows[3]["message"]["content"][0]["input"] == "[redacted] patch"
-    assert rows[4]["message"]["content"][0]["content"] == "[redacted] detail"
-    assert not any(value in json.dumps(rows) for value in ("SECRET", "BINARY", "ENCRYPTED"))
-    assert len(rows) == 5
-
-
-def test_memory_off_blocks_compaction_without_reading_or_reviewing_lore(tmp_path):
+@pytest.mark.parametrize('variable,value', [('LORE_DISABLE_REVIEW','1'),('LORE_SKIP','1')])
+def test_review_disabled_blocks_without_worker(tmp_path, monkeypatch, variable, value):
     manifest, source, event = fixture(tmp_path)
-    data = json.loads(manifest.read_text())
-    data["lore_enabled"] = False
+    monkeypatch.setenv(variable, value)
+    worker = mock.Mock()
+    assert not hook.review(manifest, event, worker=worker)
+    worker.assert_not_called()
+
+
+def test_explicit_review_zero_keeps_native_review_enabled(tmp_path, monkeypatch):
+    manifest, source, event = fixture(tmp_path)
+    monkeypatch.setenv('LORE_DISABLE_REVIEW','0');monkeypatch.delenv('LORE_SKIP',raising=False)
+    assert hook.review(manifest,event,worker=lambda _:True)
+
+
+def test_memory_off_blocks_without_worker(tmp_path):
+    manifest, source, event = fixture(tmp_path)
+    data = json.loads(manifest.read_text()); data['lore_enabled'] = False
     manifest.write_text(json.dumps(data))
-    observed = []
-    with mock.patch.dict(sys.modules, fake_lore(observed)):
-        assert not hook.review(manifest, event, worker=lambda *_: observed.append("worker"))
-    assert observed == []
+    worker = mock.Mock()
+    assert not hook.review(manifest, event, worker=worker)
+    worker.assert_not_called()

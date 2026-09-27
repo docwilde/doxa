@@ -1,5 +1,6 @@
 """Verified Codex hook lifetime with owned fake reviews; no provider calls."""
 import importlib.util
+import json
 import os
 from pathlib import Path
 import select
@@ -20,19 +21,22 @@ spec.loader.exec_module(owned)
 @pytest.mark.skipif(sys.platform != 'linux', reason='Linux stable process handles')
 @pytest.mark.parametrize('completion', ['success', 'deadline', 'owner_killed'])
 def test_pinned_hook_review_descendants_end_with_owner_or_completion(tmp_path, completion):
-    job = owned.fixture(tmp_path)
+    metadata = owned.fixture(tmp_path)
+    binary = tmp_path / 'lore-rs'
+    binary.write_text(binary.read_text().replace("'claude'", "'codex'"))
+    env = dict(os.environ, DOXA_LORE_RS=str(binary))
     # Matches CompactGate's generated source: the supervisor is inside the
     # source bytes whose digest the trusted bootstrap verifies, not imported.
     pinned = tmp_path / 'verified-hook.py'
     pinned.write_text('REVIEW_SUPERVISOR_SOURCE = ' + repr(SUPERVISOR.read_text()) + '\n' + HOOK.read_text())
     script = '''
-import sys
+import json,sys
 namespace={'__name__':'doxa_compact_hook'}
 exec(compile(open(sys.argv[1]).read(),sys.argv[1],'exec'),namespace)
-sys.exit(0 if namespace['run_worker'](sys.argv[2],sys.argv[3],float(sys.argv[4])) else 1)
+sys.exit(0 if namespace['run_worker'](json.loads(sys.argv[2]),float(sys.argv[3])) else 1)
 '''
     timeout = '0.4' if completion == 'deadline' else '30'
-    parent = subprocess.Popen([sys.executable, '-I', '-c', script, str(pinned), str(job), str(tmp_path), timeout])
+    parent = subprocess.Popen([sys.executable, '-I', '-c', script, str(pinned), json.dumps(metadata), timeout], env=env)
     handles = []
     try:
         handles = [owned.pidfd_open(pid) for pid in owned.wait_ready(tmp_path)]

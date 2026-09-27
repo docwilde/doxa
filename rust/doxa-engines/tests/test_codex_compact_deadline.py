@@ -27,7 +27,7 @@ def test_whole_review_deadline_interrupt_reaps_worker_before_blocking(monkeypatc
     monkeypatch.setattr(hook.os, "killpg", lambda *a: killed.append(a))
     monkeypatch.setattr(hook, "REVIEW_SUPERVISOR_SOURCE", "verified source", raising=False)
     with pytest.raises(TimeoutError):
-        hook.run_worker(Path("fixture"), Path("fixture"))
+        hook.run_worker({"session_id":"fixture"})
     assert killed == []
     process.stdin.close.assert_called_once()
     assert process.waits == 2

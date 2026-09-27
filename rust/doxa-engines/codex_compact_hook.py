@@ -13,8 +13,6 @@ import signal
 import stat
 import subprocess
 import sys
-import tempfile
-import time
 
 MAX_INPUT = 64 * 1024
 MAX_ROLLOUT = 32 * 1024 * 1024
@@ -33,7 +31,7 @@ def safe_read(path, limit):
         with os.fdopen(fd, "rb", closefd=False) as file:
             data = file.read(limit + 1)
         after = os.fstat(fd)
-        key = lambda info: (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+        key = lambda info: (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
         if len(data) > limit or key(before) != key(after):
             raise ValueError("review source changed")
         current = os.stat(path, follow_symlinks=False)
@@ -44,106 +42,20 @@ def safe_read(path, limit):
         os.close(fd)
 
 
-def messages_from_rollout(data, scrub):
-    def clean(value):
-        if isinstance(value, str):
-            return scrub(value)
-        if isinstance(value, list):
-            return [clean(item) for item in value]
-        if isinstance(value, dict):
-            return {key: clean(item) for key, item in value.items()}
-        return value
-
-    def record(role, content, source):
-        result = {"type": role, "message": {"role": role, "content": content}, "engine": "codex"}
-        if isinstance(source.get("timestamp"), str):
-            result["timestamp"] = scrub(source["timestamp"])
-        return result
-
-    rows = []
-    for line in data.splitlines():
-        if len(line) > MAX_LINE:
-            raise ValueError("review line too large")
-        if not line:
-            continue
-        row = json.loads(line)
-        if not isinstance(row, dict):
-            raise ValueError("invalid rollout record")
-        if row.get("type") != "response_item":
-            continue
-        item = row.get("payload")
-        if not isinstance(item, dict):
-            continue
-        kind = item.get("type")
-        if kind in ("function_call", "custom_tool_call", "local_shell_call", "tool_search_call", "web_search_call"):
-            # This identifier is used only in the review snapshot. Provider
-            # search records may omit an ID; they cannot authorize an action.
-            call_id = item.get("call_id") or item.get("id") or f"review-tool-{len(rows)}"
-            name = item.get("name") or kind
-            if not isinstance(call_id, str) or not isinstance(name, str):
-                raise ValueError("invalid provider tool identity")
-            arguments = item.get("arguments", item.get("input", item.get("action")))
-            if kind == "function_call":
-                if not isinstance(arguments, str):
-                    raise ValueError("invalid provider tool arguments")
-                try:
-                    arguments = json.loads(arguments)
-                except ValueError:
-                    arguments = {"raw": arguments}
-            rows.append(record("assistant", [
-                {"type": "tool_use", "id": scrub(call_id), "name": scrub(name), "input": clean(arguments)}], row))
-            continue
-        if kind in ("function_call_output", "custom_tool_call_output", "tool_search_output"):
-            call_id = item.get("call_id") or item.get("id") or f"review-result-{len(rows)}"
-            if not isinstance(call_id, str):
-                raise ValueError("invalid provider tool result identity")
-            output = item.get("output", item.get("tools"))
-            if kind == "tool_search_output":
-                output = json.dumps(clean(output), ensure_ascii=False)
-            elif isinstance(output, list):
-                # Preserve text output without copying image/audio payloads or
-                # opaque provider metadata into a reviewer prompt.
-                output = "\n".join(block["text"] for block in output
-                    if isinstance(block, dict) and block.get("type") in ("input_text", "output_text", "text")
-                    and isinstance(block.get("text"), str))
-            if not isinstance(output, str):
-                if kind != "tool_search_output":
-                    raise ValueError("invalid provider tool result")
-                output = json.dumps(output, ensure_ascii=False)
-            rows.append(record("user", [
-                {"type": "tool_result", "tool_use_id": scrub(call_id), "content": scrub(output)}], row))
-            continue
-        if kind != "message":
-            continue
-        role = item.get("role")
-        if role not in ("user", "assistant"):
-            continue
-        content = item.get("content")
-        if not isinstance(content, list):
-            raise ValueError("invalid provider message")
-        texts = []
-        for block in content:
-            if isinstance(block, dict) and block.get("type") in ("input_text", "output_text"):
-                text = block.get("text")
-                if not isinstance(text, str):
-                    raise ValueError("invalid provider text")
-                texts.append(scrub(text))
-        if texts:
-            rows.append(record(role, [{"type": "text", "text": "\n".join(texts)}], row))
-    if not rows:
-        raise ValueError("no reviewable provider messages")
-    return rows
-
-
-def run_worker(job, lore_parent, timeout=REVIEW_TIMEOUT):
+def run_worker(metadata, timeout=REVIEW_TIMEOUT):
     source = globals().get("REVIEW_SUPERVISOR_SOURCE")
     if not isinstance(source, str) or not source:
         return False  # Only the binary's digest-verified supervisor can run.
+    if not isinstance(metadata, dict):
+        return False
+    raw = json.dumps(metadata, ensure_ascii=False, allow_nan=False)
+    if len(raw.encode("utf-8")) + 1 > 16 * 1024:
+        return False
     process = subprocess.Popen(
-        [sys.executable, "-I", "-c", "import sys; namespace={'__name__':'doxa_review_supervisor'}; "
+        [sys.executable, "-I", "-c", "import json,sys; namespace={'__name__':'doxa_review_supervisor'}; "
          "exec(compile(sys.argv[1],'<verified DOXA supervisor>','exec'),namespace); "
-         "sys.exit(namespace['supervise'](sys.argv[2],sys.argv[3],float(sys.argv[4])))",
-         source, str(job), str(lore_parent), str(timeout)],
+         "sys.exit(namespace['supervise'](json.loads(sys.argv[2]),'codex',float(sys.argv[3])))",
+         source, raw, str(timeout)],
         stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL, start_new_session=True,
     )
@@ -172,7 +84,8 @@ def review(manifest_path, event, worker=run_worker):
         return False
     if manifest.get("lore_enabled") is False:
         return False  # Memory-off cannot complete the required review; block compaction.
-    if os.environ.get("LORE_DISABLE_REVIEW", "").strip():
+    if (os.environ.get("LORE_DISABLE_REVIEW", "") not in ("", "0")
+            or os.environ.get("LORE_SKIP", "")):
         return False
     source = Path(event.get("transcript_path") or "")
     if not source.is_absolute() or source.parent == source or source.resolve(strict=True) != source:
@@ -188,44 +101,28 @@ def review(manifest_path, event, worker=run_worker):
     first = json.loads(data.splitlines()[0])
     if first.get("type") != "session_meta" or first.get("payload", {}).get("id") != manifest["provider_thread"]:
         return False
-    # Isolated Python imports DOXA from this interpreter's installed package,
-    # never from the provider cwd. Its canonical bootstrap selects the configured
-    # plugin/package implementation and sticky LORE store before lore_core loads.
-    from doxa import _lore_bootstrap
-    _lore_bootstrap.ensure_importable()
-    _lore_bootstrap.export_sticky_lore_root()
-    from lore_core import deriver
-    from lore_core.config import project_slug, stage_disabled
-    from lore_core.scrub import scrub_secrets
-    if stage_disabled("review"):
+    cwd = manifest.get("cwd")
+    session_id = manifest.get("doxa_session")
+    if (not isinstance(cwd, str) or not Path(cwd).is_absolute()
+            or not isinstance(session_id, str) or not session_id
+            or len(session_id) > 128 or any(not (c.isascii() and (c.isalnum() or c in "-_")) for c in session_id)):
         return False
-    rows = messages_from_rollout(data, scrub_secrets)
-    workspace = Path(manifest_path).parent
-    with tempfile.TemporaryDirectory(prefix="review-", dir=workspace) as directory:
-        snapshot = Path(directory) / (manifest["doxa_session"] + ".jsonl")
-        with snapshot.open("x", encoding="utf-8") as file:
-            for row in rows:
-                file.write(json.dumps(row, ensure_ascii=False) + "\n")
-        snapshot.chmod(0o600)
-        # This immutable copy is what the worker reads, never the live rollout.
-        snapshot_bytes, _ = safe_read(snapshot, MAX_ROLLOUT)
-        snapshot_hash = hashlib.sha256(snapshot_bytes).hexdigest()
-        job = deriver.build_review_job(snapshot, project_slug(manifest["cwd"]),
-                                       cwd_hint=manifest["cwd"], older=True)
-        if job is None:
-            approved = True  # the reviewer's explicit minimum-message rule
-        else:
-            job["source_engine"] = "codex"
-            jobfile = Path(directory) / "job.json"
-            jobfile.write_text(json.dumps(job), encoding="utf-8")
-            jobfile.chmod(0o600)
-            lore_parent = Path(deriver.__file__).resolve().parent.parent
-            approved = worker(jobfile, lore_parent)
-        # A reviewer cannot turn an outdated snapshot into authorization.
-        current_data, current = safe_read(source, MAX_ROLLOUT)
-        unchanged = current == before and hashlib.sha256(current_data).digest() == hashlib.sha256(data).digest()
-        snapshot_now, _ = safe_read(snapshot, MAX_ROLLOUT)
-        return bool(approved and unchanged and hashlib.sha256(snapshot_now).hexdigest() == snapshot_hash)
+    # The native reviewer opens this owned rollout without following any path
+    # symlinks, verifies the provider thread/cwd and this exact proof BEFORE
+    # provider work, then verifies its frozen proof again before any effects.
+    # Python carries metadata only; digest, scrubbing and derivation are native.
+    metadata = {"cwd": cwd, "session_id": session_id,
+                "provider_thread": manifest["provider_thread"],
+                "transcript": str(source), "older": True,
+                "expected_source": {"sha256": hashlib.sha256(data).hexdigest(),
+                    "device": before[0], "inode": before[1], "size": before[2],
+                    "ctime": before[4] // 1_000_000_000,
+                    "ctime_nsec": before[4] % 1_000_000_000}}
+    approved = worker(metadata)
+    # A completed review of an outdated transcript cannot authorize compaction.
+    current_data, current = safe_read(source, MAX_ROLLOUT)
+    return bool(approved and current == before and
+                hashlib.sha256(current_data).digest() == hashlib.sha256(data).digest())
 
 
 def main():
