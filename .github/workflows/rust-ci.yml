@@ -37,8 +37,6 @@ jobs:
         run: cargo +stable test --locked --manifest-path rust/doxa-claude/Cargo.toml
       - name: Check Claude sidecar syntax
         run: python3 -m py_compile rust/doxa-claude/claude_sidecar.py
-      - name: Test Claude sidecar identity checks
-        run: python3 -m unittest discover -s rust/doxa-claude/tests -p 'test_*.py'
       - name: Test Python-compatible transcript store
         run: cargo +stable test --locked --manifest-path rust/doxa-transcript/Cargo.toml
       - name: Test Rust state compatibility
@@ -47,6 +45,8 @@ jobs:
         uses: astral-sh/setup-uv@v10.0.1
       - name: Sync Python client dependencies
         run: uv sync --frozen --python 3.12
+      - name: Test Claude sidecar identity checks
+        run: uv run --frozen python -m unittest discover -s rust/doxa-claude/tests -p 'test_*.py'
       - name: Check release installer and task entry points
         run: |
           sh -n scripts/install.sh task
