@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
 
+const MAX_CONTEXT_BYTES: usize = 64 * 1024;
 const EVENT_TEXT_CHUNK_BYTES: usize = 8 * 1024;
 
 fn emit_content_chunks(kind: &str, content: &str, approx_tokens: u64, emit: &mut dyn FnMut(Value)) {
@@ -33,6 +34,10 @@ pub struct VendorHost {
     catalog: Mutex<Option<Vec<doxa_vendors::ModelCapability>>>,
     lore: Mutex<LoreClient>,
     lore_enabled: bool,
+    context: Mutex<Option<LoreClient>>,
+    lore_python: PathBuf,
+    session_id: String,
+    finalized: AtomicBool,
     scrub_failed: AtomicBool,
     history: Mutex<Vec<Value>>,
     store: TranscriptStore,
@@ -129,6 +134,8 @@ impl VendorHost {
             catalog: Mutex::new(None),
             lore: Mutex::new(lore),
             lore_enabled: doxa_state::lore_enabled_default(),
+            context: Mutex::new(None), lore_python: lore_python.to_owned(),
+            session_id: session_id.to_owned(), finalized: AtomicBool::new(false),
             scrub_failed: AtomicBool::new(false),
             history: Mutex::new(history),
             store,
@@ -172,9 +179,41 @@ impl VendorHost {
         result
     }
 
+    /// Python vendors rebuild this system message every turn. Its memory is
+    /// provider context only: never put the snapshot in replay or transcripts.
+    fn system_message(&self) -> Value {
+        let header = format!("You are a DOXA session running on {}. The working directory is {}.",
+            match self.vendor { Vendor::DeepSeek => "DeepSeek", Vendor::Glm => "GLM (Z.ai)" }, self.cwd);
+        let snapshot = if self.lore_enabled {
+            // Optional context reads get their own bounded client. A missing
+            // snapshot cannot disable mandatory scrubbing or transcript writes.
+            let mut context = self.context.lock().unwrap();
+            if context.is_none() { *context = LoreClient::spawn(&self.lore_python, Duration::from_secs(5)).ok(); }
+            let snapshot = context.as_mut().and_then(|client| client.snapshot(&self.cwd, "all").ok())
+                .filter(|text| text.len() <= MAX_CONTEXT_BYTES).unwrap_or_default();
+            if context.as_ref().is_some_and(|client| !client.is_alive()) { *context = None; }
+            snapshot
+        } else { String::new() };
+        json!({"role":"system","content":if snapshot.is_empty() { header } else { format!("{header}\n\n{snapshot}") }})
+    }
+
     pub fn shutdown(&self) {
+        if self.finalized.swap(true, Ordering::AcqRel) { return; }
         self.closing.store(true, Ordering::Release);
         self.cancel();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while self.active.lock().unwrap().is_some() {
+            if Instant::now() >= deadline { return; }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // Match Python's final indexing through LORE's descriptor-based API.
+        // Off agents still keep transcripts but never write them into memory.
+        if self.lore_enabled && self.committed_bytes.load(Ordering::Acquire) > 0
+            && !self.storage_uncertain.load(Ordering::Acquire) && !self.scrub_failed.load(Ordering::Acquire) {
+            if let Ok(mut client) = LoreClient::spawn(&self.lore_python, Duration::from_secs(5)) {
+                let _ = client.index_transcript(&self.cwd, &self.session_id);
+            }
+        }
     }
 
     fn cancel(&self) {
@@ -263,6 +302,7 @@ impl Host for VendorHost {
             }}}));
         let mut history = self.history.lock().unwrap().clone();
         let saved_history = history.clone();
+        history.insert(0, self.system_message());
         let scrub_tool = |value: &str| self.scrub(value);
         let tools_enabled = self.workspace_read || peer.is_some();
         let output = std::cell::RefCell::new(&mut *emit);

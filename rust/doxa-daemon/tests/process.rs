@@ -2158,6 +2158,7 @@ mod vendor_process {
             ])
             .env("DEEPSEEK_API_KEY", "test-key-1234")
             .env("ZAI_API_KEY", "test-key-1234")
+            .env_remove("DOXA_LORE")
             .env("DOXA_VENDOR_TOOLS", if tools { "workspace-read" } else { "" })
             .env("DOXA_HOME", runtime.join("home"))
             .stdout(Stdio::null())
@@ -2181,6 +2182,58 @@ mod vendor_process {
             child,
             registry,
             socket,
+        }
+    }
+
+    #[test]
+    fn native_vendor_refreshes_private_system_memory_and_indexes_only_on_finalization() {
+        for enabled in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            fs::create_dir(dir.path().join("home")).unwrap();
+            fs::write(dir.path().join("home/config.toml"), format!("lore = '{}'\n", if enabled { "1" } else { "0" })).unwrap();
+            let lore = dir.path().join("lore-fixture"); let calls = dir.path().join("lore-calls.jsonl");
+            executable(&lore, &format!(r#"#!/usr/bin/env python3
+import json,sys,os
+print(json.dumps({{"type":"hello","proto":1,"capabilities":["scrub","snapshot","transcript_identity","index_transcript_v1"]}}),flush=True)
+for line in sys.stdin:
+    frame=json.loads(line); op=frame["op"]
+    with open({calls:?}, "a") as log: log.write(json.dumps(frame)+"\n")
+    if op == "transcript_identity": reply={{"value":{{"projects_dir":frame["cwd"],"slug":"project"}}}}
+    elif op == "snapshot":
+        with open({calls:?}) as log: count=sum(json.loads(row)["op"] == "snapshot" for row in log)
+        reply={{"text":"PRIVATE-DURABLE-MEMORY-"+str(count)}}
+    elif op == "index_transcript_v1": reply={{"value":{{"indexed":4,"consumed":4}}}}
+    else: reply={{"text":frame.get("text","").replace("fixture-secret","[redacted]")}}
+    print(json.dumps({{"type":"reply","id":frame["id"],"ok":True,**reply}}),flush=True)
+"#, calls=calls.to_str().unwrap()));
+            let (endpoint, server) = fake_vendor(2, "answer");
+            let mut process = start_vendor(dir.path(), "deepseek", &endpoint, &lore);
+            let (mut reader, mut socket) = process.connect();
+            assert_eq!(receive(&mut reader)["lore_enabled"], enabled);
+            send(&mut socket, json!({"type":"attach","cursor":null}));
+            for id in 1..=2 {
+                send(&mut socket, json!({"type":"prompt","id":id,"text":"fixture-secret question"}));
+                loop { let frame=receive(&mut reader); assert!(!frame.to_string().contains("PRIVATE-DURABLE-MEMORY")); if frame["event"]["type"] == "turn_done" { assert_eq!(frame["event"]["data"]["is_error"],false); break; } }
+            }
+            let before: Vec<Value> = fs::read_to_string(&calls).unwrap().lines().map(|row|serde_json::from_str(row).unwrap()).collect();
+            assert!(!before.iter().any(|row|row["op"] == "index_transcript_v1"));
+            send(&mut socket, json!({"type":"call","id":3,"method":"stop","params":{}}));
+            assert_eq!(receive(&mut reader)["ok"], true); wait_until(|| process.exited());
+            let requests = server.join().unwrap();
+            for (index, body) in requests.iter().enumerate() {
+                assert_eq!(body["messages"][0]["role"],"system");
+                assert!(body["messages"][0]["content"].as_str().unwrap().contains("DOXA session"));
+                if enabled { assert!(body["messages"][0]["content"].as_str().unwrap().contains(&format!("PRIVATE-DURABLE-MEMORY-{}",index+1))); }
+                else { assert!(!body.to_string().contains("PRIVATE-DURABLE-MEMORY")); }
+            }
+            let after: Vec<Value> = fs::read_to_string(&calls).unwrap().lines().map(|row|serde_json::from_str(row).unwrap()).collect();
+            assert_eq!(after.iter().filter(|row|row["op"] == "snapshot").count(),if enabled {2}else{0});
+            assert_eq!(after.iter().filter(|row|row["op"] == "index_transcript_v1").count(),usize::from(enabled));
+            for file in ["vendor-session.jsonl","vendor-session.messages.json"] {
+                let stored=fs::read_to_string(dir.path().join("project").join(file)).unwrap();
+                assert!(!stored.contains("PRIVATE-DURABLE-MEMORY")); assert!(!stored.contains("DOXA session"));
+                assert!(!stored.contains("fixture-secret")); assert!(stored.contains("[redacted] question"));
+            }
         }
     }
 
@@ -2244,7 +2297,7 @@ mod vendor_process {
             assert!(requests.iter().all(|body| body["tools"].as_array().is_some_and(|tools|
                 tools.len()==3 && tools.iter().all(|tool|tool["function"]["name"].as_str()
                     .is_some_and(|name|name.starts_with("mcp__doxa__peer_"))))));
-            assert_eq!(requests[1]["messages"][1]["content"], "[redacted] answer");
+            assert_eq!(requests[1]["messages"][2]["content"], "[redacted] answer");
             assert!(!requests[1].to_string().contains("fixture-secret"));
             // The published entry is removed at shutdown. Its private claim
             // inode remains so a later daemon cannot bypass an active flock by
@@ -2322,7 +2375,7 @@ mod vendor_process {
         let requests = server.join().unwrap();
         assert_eq!(requests[0]["model"], "deepseek-flash");
         assert_eq!(requests[1]["model"], "deepseek-v4-pro");
-        assert_eq!(requests[1]["messages"].as_array().unwrap().len(), 3);
+        assert_eq!(requests[1]["messages"].as_array().unwrap().len(), 4);
     }
 
     #[test]
@@ -2349,7 +2402,7 @@ mod vendor_process {
         wait_until(|| process.exited());
         let requests = server.join().unwrap();
         assert_eq!(requests[0]["tools"][0]["function"]["name"], "workspace_read");
-        let result = requests[1]["messages"][2]["content"].as_str().unwrap();
+        let result = requests[1]["messages"][3]["content"].as_str().unwrap();
         assert!(result.contains("[redacted] workspace note"));
         assert!(!requests[1].to_string().contains("fixture-secret"));
         let saved: Value = serde_json::from_slice(&fs::read(dir.path().join("project/vendor-session.messages.json")).unwrap()).unwrap();
@@ -2432,9 +2485,9 @@ mod vendor_process {
             assert_eq!(receive(&mut reader)["ok"], true);
             wait_until(|| second.exited());
             let requests = second_server.join().unwrap();
-            assert_eq!(requests[0]["messages"][0]["content"], "[redacted] prompt");
-            assert_eq!(requests[0]["messages"][1]["content"], "[redacted] first");
-            assert_eq!(requests[0]["messages"][2]["content"], "continue");
+            assert_eq!(requests[0]["messages"][1]["content"], "[redacted] prompt");
+            assert_eq!(requests[0]["messages"][2]["content"], "[redacted] first");
+            assert_eq!(requests[0]["messages"][3]["content"], "continue");
             let records: Vec<Value> = fs::read_to_string(&transcript)
                 .unwrap()
                 .lines()
