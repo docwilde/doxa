@@ -1452,7 +1452,7 @@ pub struct App {
     history_search_inflight: Arc<AtomicUsize>,
     history_scanned_matches: HashMap<String, String>,
     history_entries: HashMap<String, history::OfflineSession>,
-    resume_pending: Option<Receiver<(String, Result<launch::LaunchOptions, &'static str>)>>,
+    resume_pending: Option<(usize, Option<String>, Receiver<(String, Result<launch::LaunchOptions, &'static str>)>)>,
     offline_ids: HashSet<String>,
     queue_picker: Option<QueuePicker>,
     settings_menu: Option<SettingsMenu>,
@@ -6140,7 +6140,8 @@ impl App {
                 let python = std::env::var_os("DOXA_LORE_PYTHON")
                     .map(PathBuf::from).unwrap_or_else(|| PathBuf::from("python3"));
                 let (tx, rx) = mpsc::sync_channel(1);
-                self.resume_pending = Some(rx);
+                self.resume_pending = Some((self.active_group,
+                    self.groups[self.active_group].active_id().map(str::to_owned), rx));
                 std::thread::spawn(move || { let result = history::resume_plan(&entry, &python); let _ = tx.send((id, result)); });
                 self.notice = "Checking saved conversation…".into();
                 return;
@@ -6157,22 +6158,34 @@ impl App {
     }
 
     fn poll_resume(&mut self) -> bool {
-        let Some(receiver) = &self.resume_pending else { return false; };
+        let Some((_, _, receiver)) = &self.resume_pending else { return false; };
         let result = match receiver.try_recv() {
             Ok(result) => result,
             Err(TryRecvError::Empty) => return false,
             Err(TryRecvError::Disconnected) => { self.resume_pending = None; return false; }
         };
-        self.resume_pending = None;
+        let (group, anchor, _) = self.resume_pending.take().unwrap();
         let (id, plan) = result;
+        if !self.groups.get(group).is_some_and(|pane| anchor.as_ref()
+            .map_or(pane.tabs.is_empty(), |id| pane.tabs.contains(id))) {
+            self.notice = "Resume cancelled · original pane is no longer available".into();
+            return true;
+        }
         match plan {
             Ok(options) if !self.launching => {
                 // Recheck live registry immediately before dispatch. The daemon
                 // also owns the final uniqueness check on this session ID.
                 if crate::discovery::sessions().is_ok_and(|rows| rows.iter().any(|row| row.id == id)) {
-                    self.attach_selected(&id);
+                    if self.groups.iter().any(|pane| pane.tabs.contains(&id)) {
+                        self.notice = format!("Session already open · {}", safe_label(&id));
+                    } else if !self.attaching_ids.contains(&id) && self.manual_tab_available() {
+                        self.attaching_ids.insert(id.clone());
+                        self.pending_attaches.push((id.clone(), group));
+                        self.notice = format!("Attaching · {}", safe_label(&id));
+                    }
                 } else {
-                    self.pending_launches.push((options, None, self.active_group));
+                    if !self.manual_tab_available() { return true; }
+                    self.pending_launches.push((options, None, group));
                     self.launching = true;
                     self.notice = format!("Resuming · {}", safe_label(&id));
                 }
@@ -11321,6 +11334,36 @@ for line in sys.stdin:
         assert_eq!(app.groups[0].active_id(),Some("slot-256"));
         assert_eq!(app.groups[0].tabs.len(),panes::MAX_TABS);
         assert!(app.pending_attaches.is_empty()); assert!(app.pending_launches.is_empty());
+    }
+
+    #[test]
+    fn saved_resume_completion_keeps_initiating_pane_and_rejects_removed_owner() {
+        const CHILD: &str = "DOXA_TEST_RESUME_OWNER";
+        if std::env::var_os(CHILD).is_none() {
+            let dir = tempfile::tempdir().unwrap();
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "ui::tests::saved_resume_completion_keeps_initiating_pane_and_rejects_removed_owner"])
+                .env(CHILD,"1").env("DOXA_RUNTIME_DIR",dir.path())
+                .env("DOXA_HOME",dir.path().join("home")).env("HOME",dir.path())
+                .status().unwrap(); assert!(status.success()); return;
+        }
+        let mut app = App::default();
+        app.groups[0].tabs.push("a".into()); app.groups[1].tabs.push("b".into());
+        let (tx,rx) = mpsc::sync_channel(1);
+        app.resume_pending = Some((0,Some("a".into()),rx));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Tab,KeyModifiers::ALT)));
+        app.input = "other pane draft".into(); app.input_cursor = app.input.len();
+        tx.send(("saved".into(),Ok(launch::LaunchOptions::default()))).unwrap();
+        assert!(app.poll_resume());
+        assert_eq!(app.pending_launches[0].2,0); assert_eq!(app.active_group,1);
+        assert_eq!(app.input,"other pane draft"); assert!(app.pending_prompts.is_empty());
+        app.pending_launches.clear(); app.launching = false;
+        let (tx,rx) = mpsc::sync_channel(1);
+        app.resume_pending = Some((0,Some("a".into()),rx));
+        app.groups[0].tabs = vec!["replacement".into()];
+        tx.send(("saved".into(),Ok(launch::LaunchOptions::default()))).unwrap();
+        assert!(app.poll_resume()); assert!(app.pending_launches.is_empty());
+        assert!(app.notice.contains("original pane")); assert_eq!(app.input,"other pane draft");
     }
 
     #[test]
