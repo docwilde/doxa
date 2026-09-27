@@ -115,17 +115,18 @@ impl ToolCards {
         {
             card.parent_id = Some(clean_label(parent, 120));
         }
-        match kind {
-            "tool_call" => {
-                if let Some(input) = data.get("input").filter(|value| !value.is_null()) {
-                    let display = if let Some(text) = input.as_str() {
-                        text.to_owned()
-                    } else {
-                        serde_json::to_string_pretty(input).unwrap_or_default()
-                    };
-                    card.input = Some(clean(&display, MAX_DETAIL_CHARS));
-                }
+        if matches!(kind, "tool_call" | "tool_result") {
+            if let Some(input) = data.get("input").filter(|value| !value.is_null()) {
+                let display = if let Some(text) = input.as_str() {
+                    text.to_owned()
+                } else {
+                    serde_json::to_string_pretty(input).unwrap_or_default()
+                };
+                card.input = Some(clean(&display, MAX_DETAIL_CHARS));
             }
+        }
+        match kind {
+            "tool_call" => {}
             "tool_result" => {
                 card.result_detail_started = false;
                 card.result = Some(clean(
@@ -174,6 +175,21 @@ fn clean_label(value: &str, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn completed_provider_request_updates_one_existing_tool_card() {
+        let mut cards = ToolCards::default();
+        cards.record("s", "tool_call", &json!({"id":"web","name":"web_search",
+            "input":{"details":"Request details not yet reported by Codex"}}));
+        cards.record("s", "tool_result", &json!({"id":"web","name":"web_search",
+            "input":{"queries":["weather today"]},"result_summary":"Provider does not expose result content",
+            "duration_ms":12}));
+        assert_eq!(cards.for_session("s").len(),1);
+        let card = &cards.for_session("s")[0];
+        assert!(card.input.as_deref().unwrap().contains("weather today"));
+        assert!(!card.input.as_deref().unwrap().contains("not yet"));
+        assert_eq!(card.status(),"finished · 12 ms");
+    }
     use serde_json::json;
 
     #[test]

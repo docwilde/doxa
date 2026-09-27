@@ -201,6 +201,13 @@ impl CodexJsonlNormalizer {
             self.started_bytes = self.started_bytes.saturating_sub(id.len());
         }
         let mut events = vec![EngineEvent::new("tool_result", json!({"id":display_id,"name":display_name,"result_summary":summary,"is_error":is_error,"duration_ms":duration_ms}))];
+        // App-server search details often arrive only with item/completed.
+        // Update the existing card, rather than fabricating an empty initial
+        // query or recording a second tool invocation with the same identity.
+        if item_kind == "web_search" {
+            let input = self.tool_input(&item_kind, item);
+            if input.get("details").is_none() { events[0].data["input"] = input; }
+        }
         let limit = detail.len().min(MAX_TOOL_DETAIL_BYTES);
         let mut displayed = 0;
         while displayed < limit {
@@ -228,9 +235,38 @@ impl CodexJsonlNormalizer {
             }
             "mcp_tool_call" => json!({"arguments": self.scrub_value(&Value::Object(item.get("arguments").and_then(Value::as_object).cloned().unwrap_or_default()))}),
             "todo_list" => json!({"steps": item.get("items").and_then(Value::as_array).map_or(0, Vec::len)}),
-            "web_search" => json!({"query": (self.scrub)(&string(item.get("query")))}),
+            "web_search" => self.web_input(item),
             _ => json!({}),
         }
+    }
+
+    fn web_input(&self, item: &Map<String, Value>) -> Value {
+        let mut input = Map::new();
+        if let Some(action) = item.get("action").and_then(Value::as_object) {
+            if let Some(kind) = action.get("type").and_then(Value::as_str)
+                .filter(|kind| matches!(*kind, "search" | "openPage" | "findInPage" | "other")) {
+                input.insert("action".into(), json!(kind));
+            }
+            for key in ["query", "url", "pattern"] {
+                if let Some(text) = action.get(key).and_then(Value::as_str).filter(|text| !text.is_empty()) {
+                    input.insert(key.into(), json!(truncate(&(self.scrub)(text), 512)));
+                }
+            }
+            let queries: Vec<String> = action.get("queries").and_then(Value::as_array)
+                .into_iter().flatten().filter_map(Value::as_str).filter(|text| !text.is_empty())
+                .take(8).map(|text| truncate(&(self.scrub)(text), 512)).collect();
+            if !queries.is_empty() { input.insert("queries".into(), json!(queries)); }
+            if action.get("queries").and_then(Value::as_array).is_some_and(|queries| queries.len() > 8) {
+                input.insert("queries_truncated".into(), json!(true));
+            }
+        }
+        if !input.contains_key("query") && !input.contains_key("queries") {
+            if let Some(query) = item.get("query").and_then(Value::as_str).filter(|query| !query.is_empty()) {
+                input.insert("query".into(), json!(truncate(&(self.scrub)(query), 512)));
+            }
+        }
+        if input.is_empty() { json!({"details":"Request details not yet reported by Codex"}) }
+        else { Value::Object(input) }
     }
 
     fn scrub_value(&self, value: &Value) -> Value {
@@ -265,6 +301,8 @@ impl CodexJsonlNormalizer {
                 let done = rows.into_iter().flatten().filter(|row| row.get("completed").and_then(Value::as_bool) == Some(true)).count();
                 format!("{done}/{} done", rows.map_or(0, Vec::len))
             }
+            "web_search" => format!("Web request completed.\nRequest: {}\nPage/search result content is not exposed by Codex in this tool event.",
+                serde_json::to_string_pretty(&self.web_input(item)).unwrap_or_default()),
             _ => (self.scrub)(&Value::Object(item.clone()).to_string()),
         };
         (summary, failed)

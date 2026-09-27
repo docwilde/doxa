@@ -692,9 +692,35 @@ fn normalize_tool_item(item: &Value) -> Option<Value> {
         }),
         "webSearch" => json!({
             "type":"web_search","id":id,"query":item["query"],
-            "status":item["status"]
+            "action":item["action"],"status":item["status"]
         }),
         _ => return None,
     };
     Some(value)
+}
+
+#[cfg(test)]
+mod web_item_tests {
+    use super::*;
+
+    #[test]
+    fn generated_codex_web_search_actions_survive_adapter_and_completion() {
+        let mut normalizer = CodexJsonlNormalizer::new(|text| text.replace("fixture-secret","[redacted]"));
+        let start = normalize_tool_item(&json!({"type":"webSearch","id":"web_1","query":"","action":null})).unwrap();
+        let events = normalizer.push_bytes(format!("{}\n",json!({"type":"item.started","item":start})).as_bytes()).unwrap();
+        assert!(events[0].data["input"].get("query").is_none());
+        let item = normalize_tool_item(&json!({"type":"webSearch","id":"web_1","query":"",
+            "action":{"type":"search","queries":["weather fixture-secret","forecast today"]}})).unwrap();
+        let events = normalizer.push_bytes(format!("{}\n",json!({"type":"item.completed","item":item})).as_bytes()).unwrap();
+        assert_eq!(events[0].kind,"tool_result");
+        assert_eq!(events[0].data["input"]["queries"],json!(["weather [redacted]","forecast today"]));
+        assert!(events[0].data["result_summary"].as_str().unwrap().contains("not exposed by Codex"));
+        assert!(!serde_json::to_string(&events.iter().map(|event|&event.data).collect::<Vec<_>>()).unwrap().contains("fixture-secret"));
+        for action in [json!({"type":"openPage","url":"https://example.com"}),
+            json!({"type":"findInPage","url":"https://example.com","pattern":"forecast"})] {
+            let item = normalize_tool_item(&json!({"type":"webSearch","id":"web_2","action":action})).unwrap();
+            let events = normalizer.push_bytes(format!("{}\n",json!({"type":"item.completed","item":item})).as_bytes()).unwrap();
+            assert_eq!(events[0].data["input"]["url"],"https://example.com");
+        }
+    }
 }
