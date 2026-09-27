@@ -123,10 +123,10 @@ impl MeshServer {
 }
 impl Drop for MeshServer { fn drop(&mut self) { let _ = self.stop(); } }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct WindowSnapshot { pub revision: u64, pub running: bool, pub busy: bool, pub url: String, pub report: String }
 enum WindowCommand { Start(Option<String>, Option<PathBuf>), Stop, Open, Close }
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct WindowHandle { sender: mpsc::Sender<WindowCommand>, snapshot: std::sync::Arc<std::sync::Mutex<WindowSnapshot>> }
 impl WindowHandle {
     pub fn snapshot(&self) -> WindowSnapshot { self.snapshot.lock().unwrap_or_else(|p| p.into_inner()).clone() }
@@ -136,6 +136,7 @@ impl WindowHandle {
 }
 /// Window ownership outlives the popup. All renderer startup, switching and
 /// teardown happens on one worker; shutdown joins it after leaving the TUI.
+#[derive(Debug)]
 pub struct WindowMesh { handle: WindowHandle, worker: Option<std::thread::JoinHandle<()>> }
 impl WindowMesh {
     pub fn new() -> Self {

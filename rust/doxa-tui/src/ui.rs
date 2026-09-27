@@ -13761,7 +13761,7 @@ for line in sys.stdin:
 
     #[test]
     fn rename_pins_label_until_cleared_and_slash_commands_never_queue_prompts() {
-        let mut app = App::default();
+        let mut app = App::default(); app.handle(Event::Resize(100, 30));
         app.apply_daemon_frame(&json!({"type":"hello", "session_id":"s", "model":"old"}));
         app.input = "/rename A useful name".into();
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
@@ -13777,7 +13777,8 @@ for line in sys.stdin:
         for command in ["/attach bad/id", "/doctor", "/pending unsupported"] {
             app.input = command.into();
             app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
-            assert!(app.notice.contains("attach:") || app.notice.contains("unavailable"));
+            if command == "/doctor" { assert!(app.operations_menu.is_some()); app.retire_operations(); app.chip_info = None; }
+            else { assert!(app.notice.contains("attach:") || app.notice.contains("unavailable")); }
             assert!(app.pending_prompts.is_empty());
         }
     }

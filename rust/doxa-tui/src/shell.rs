@@ -9,6 +9,7 @@ pub struct Result {
     pub id: u64, pub command: String, pub output: String, pub status: String,
     pub running: bool, pub dropped_bytes: u64,
 }
+#[derive(Debug)]
 pub struct Job {
     pub session: String, pub id: u64,
     receiver: mpsc::Receiver<Result>, cancel: Arc<AtomicBool>, thread: Option<JoinHandle<()>>,
