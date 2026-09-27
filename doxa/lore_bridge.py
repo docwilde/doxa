@@ -31,6 +31,7 @@ _MEMORY_ENTRIES_OP = "memory_entries_v1"
 _MEMORY_REVIEW_OP = "memory_review_v1"
 _MEMORY_ACTION_OP = "memory_action_v1"
 _BELIEF_REVIEW_OP = "belief_review_v1"
+_BELIEF_DISPLAY_OP = "belief_display_v1"
 _BELIEF_ACTION_OP = "belief_action_v1"
 _BELIEF_GRAPH_OP = "belief_graph_v1"
 _PENDING_ID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z", re.ASCII)
@@ -459,6 +460,45 @@ def _belief_review(req: dict[str, Any], ops: tuple[Any, Any, Any, Any, Any],
             "claim_sha256": hashlib.sha256(claim.encode("utf-8")).hexdigest()}
 
 
+def _belief_display(req: dict[str, Any], read_ops: tuple[Any, Any], scrub: Any) -> dict:
+    """Read-only tooltip visibility matches the global active belief list.
+
+    No review identity or mutation proof is produced. Fetch only bounded source
+    text; an omitted, scrubbed, or unsafe claim is honestly incomplete.
+    """
+    cwd, bid = req.get("cwd"), req.get("belief_id")
+    if (not isinstance(cwd, str) or not cwd or len(cwd) > 4096 or "\x00" in cwd
+            or type(bid) is not int or not 0 < bid <= 2**63 - 1):
+        raise BeliefActionError("invalid_request")
+    conn = read_ops[0]()
+    try:
+        conn.execute("PRAGMA query_only=ON")
+        row = conn.execute(
+            "SELECT CASE WHEN length(CAST(subject AS BLOB)) <= 4096 THEN subject END, "
+            "CASE WHEN length(CAST(claim AS BLOB)) <= 65536 THEN claim END "
+            "FROM beliefs WHERE id = ? AND status = 'active'", (bid,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if row is None or not isinstance(row[0], str):
+        raise BeliefActionError("belief_unavailable")
+    subject = scrub(row[0])
+    if (not isinstance(subject, str) or len(subject.encode("utf-8")) > 4096
+            or any(ord(c) < 32 or 127 <= ord(c) < 160 for c in subject)):
+        raise BeliefActionError("belief_incomplete")
+    claim = scrub(row[1]) if isinstance(row[1], str) else ""
+    if not isinstance(claim, str):
+        raise BeliefActionError("belief_incomplete")
+    redacted = subject != row[0] or (isinstance(row[1], str) and claim != row[1])
+    complete = isinstance(row[1], str) and not redacted
+    if any((ord(c) < 32 and c != "\n") or 127 <= ord(c) < 160 for c in claim):
+        claim, complete, redacted = "", False, True
+    if len(subject.encode("utf-8")) + len(claim.encode("utf-8")) > 65536:
+        claim, complete = "", False
+    return {"id": bid, "subject": subject, "claim": claim,
+            "complete": complete, "redacted": redacted}
+
+
 def _belief_action(req: dict[str, Any], ops: tuple[Any, Any, Any, Any, Any]) -> dict[str, Any]:
     bid, slug = _belief_identity(req, ops, require_expected=True)
     action, note = req.get("action"), req.get("note", "")
@@ -833,6 +873,7 @@ def serve() -> None:
     _write({"type": "hello", "proto": PROTOCOL_VERSION,
             "capabilities": (list(_OPS if ext is not None else _OPS[:2])
                              + (list(_READ_OPS) if read_ops is not None else [])
+                             + ([_BELIEF_DISPLAY_OP] if read_ops is not None else [])
                              + ([_INDEX_OP] if index_ops is not None else [])
                              + ([_SESSION_SEARCH_OP] if read_ops is not None and ext is not None else [])
                              + ([_MEMORY_USAGE_OP] if memory_ops is not None else [])
@@ -863,6 +904,10 @@ def serve() -> None:
             continue
         scrub, snapshot = lore
         try:
+            if op == _BELIEF_DISPLAY_OP and read_ops is not None:
+                result = _belief_display(req, read_ops, scrub)
+                _write({"type": "reply", "id": rid, "ok": True, "value": result})
+                continue
             if op == _MEMORY_ENTRIES_OP and entry_ops is not None:
                 result = _memory_entries(req, entry_ops, scrub)
                 _write({"type": "reply", "id": rid, "ok": True, "value": result})

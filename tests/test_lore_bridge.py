@@ -477,6 +477,9 @@ def test_read_connections_close_on_success_and_query_failure():
     assert lore_bridge._evidence(1, 0, 1, (connect, None), str) == []
     with pytest.raises(sqlite3.OperationalError):
         lore_bridge._beliefs(0, 1, (lambda: connect(True), None), str)
+    with pytest.raises(sqlite3.OperationalError):
+        lore_bridge._belief_display({"cwd": "/repo", "belief_id": 1},
+                                    (lambda: connect(True), None), str)
     assert closed == made
 
 
@@ -622,13 +625,14 @@ def test_consult_beliefs_and_evidence_are_bounded_scrubbed_and_cite_only(monkeyp
         {"id": 5, "op": "consult", "prompt": "SECRET" * 9000},
         {"id": 7, "op": "beliefs_filtered_v1", "query": "FACT", "limit": 1},
         {"id": 8, "op": "beliefs_filtered_v1", "query": False, "limit": 1},
+        {"id": 9, "op": "belief_display_v1", "cwd": "/repo", "belief_id": 1},
     ]
     output = io.BytesIO()
     monkeypatch.setattr(lore_bridge.sys, "stdin", types.SimpleNamespace(buffer=io.BytesIO(b"".join(map(lore_bridge._frame, requests)))))
     monkeypatch.setattr(lore_bridge.sys, "stdout", types.SimpleNamespace(buffer=output))
     lore_bridge.serve()
     frames = [json.loads(line) for line in output.getvalue().splitlines()]
-    assert frames[0]["capabilities"] == ["scrub", "snapshot", "consult", "beliefs", "evidence", "beliefs_filtered_v1"]
+    assert frames[0]["capabilities"] == ["scrub", "snapshot", "consult", "beliefs", "evidence", "beliefs_filtered_v1", "belief_display_v1"]
     assert frames[1]["value"]["citation_status"] == "cite_only"
     assert frames[1]["value"]["claim"] == "[redacted] fact"
     assert frames[2]["value"][0]["evidence_count"] == 3
@@ -641,6 +645,8 @@ def test_consult_beliefs_and_evidence_are_bounded_scrubbed_and_cite_only(monkeyp
     assert frames[5]["error"] == frames[6]["error"] == "operation_failed"
     assert frames[7]["value"][0]["recency"] == "2026-01-01"
     assert frames[8]["error"] == "operation_failed"
+    assert frames[9]["value"] == {"id": 1, "subject": "user", "claim": "[redacted] fact",
+                                  "complete": False, "redacted": True}
     assert b"SECRET" not in output.getvalue()
 
 
@@ -676,6 +682,52 @@ def test_belief_filter_uses_visible_unicode_text_and_actual_recency_before_pagin
     from contextlib import closing
     with closing(sqlite3.connect(db)) as conn:
         assert conn.execute("SELECT count(*) FROM beliefs").fetchone()[0] == 5
+
+
+def test_belief_display_is_global_active_read_only_full_bounded_and_scrubbed(tmp_path):
+    db = tmp_path / "display.db"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE beliefs(id INTEGER, subject TEXT, claim TEXT, status TEXT)")
+    full = "complete paragraph\n" + "ü" * 5000
+    conn.executemany("INSERT INTO beliefs VALUES(?,?,?,?)", [
+        (1, "project:another-checkout", full, "active"),
+        (2, "user-model", "SECRET claim", "active"),
+        (3, "user", "unsafe\x1b[31m claim", "active"),
+        (4, "user", "ü" * 32769, "active"),
+        (5, "user", "retired", "retracted"),
+    ])
+    conn.commit(); conn.close()
+    opened = []
+    def connect():
+        conn = sqlite3.connect(db)
+        opened.append(conn)
+        return conn
+    ops = (connect, None)
+    scrub = lambda text: text.replace("SECRET", "[redacted]")
+    req = {"cwd": "/current-checkout", "belief_id": 1}
+    reply = lore_bridge._belief_display(req, ops, scrub)
+    assert reply == {"id": 1, "subject": "project:another-checkout", "claim": full,
+                     "complete": True, "redacted": False}
+    assert "uid" not in reply and "claim_sha256" not in reply
+    redacted = lore_bridge._belief_display({**req, "belief_id": 2}, ops, scrub)
+    assert redacted["claim"] == "[redacted] claim"
+    assert redacted["complete"] is False and redacted["redacted"] is True
+    unsafe = lore_bridge._belief_display({**req, "belief_id": 3}, ops, scrub)
+    assert unsafe["claim"] == "" and unsafe["complete"] is False and unsafe["redacted"] is True
+    oversized = lore_bridge._belief_display({**req, "belief_id": 4}, ops, scrub)
+    assert oversized["claim"] == "" and oversized["complete"] is False
+    for bid in (5, 999):
+        with pytest.raises(lore_bridge.BeliefActionError) as error:
+            lore_bridge._belief_display({**req, "belief_id": bid}, ops, scrub)
+        assert error.value.code == "belief_unavailable"
+    for bid in (True, 0, -1, 2**63):
+        with pytest.raises(lore_bridge.BeliefActionError) as error:
+            lore_bridge._belief_display({**req, "belief_id": bid}, ops, scrub)
+        assert error.value.code == "invalid_request"
+    for conn in opened:
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            conn.execute("SELECT 1")
+    assert len(lore_bridge._frame({"type": "reply", "id": 1, "ok": True, "value": reply})) < lore_bridge.MAX_FRAME_BYTES
 
 
 def test_curated_memory_read_view_preserves_facts_and_canonical_provenance(tmp_path):

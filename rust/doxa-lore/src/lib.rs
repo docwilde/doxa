@@ -766,6 +766,27 @@ impl LoreClient {
         self.beliefs_request(if query.is_empty() { "beliefs" } else { "beliefs_filtered_v1" }, offset, limit, query)
     }
 
+    /// Bounded full display of an active list row. This grants no mutation
+    /// review identity; redacted/omitted source text is explicitly incomplete.
+    pub fn belief_display(&mut self, cwd: &str, belief_id: u64) -> Result<Value, LoreError> {
+        if cwd.is_empty() || cwd.len() > 4096 || cwd.contains('\0')
+            || belief_id == 0 || belief_id > i64::MAX as u64 {
+            return Err(LoreError::InvalidFrame);
+        }
+        let value = self.request_value("belief_display_v1", json!({"cwd":cwd,"belief_id":belief_id}))?;
+        let subject = value["subject"].as_str().ok_or(LoreError::InvalidFrame)?;
+        let claim = value["claim"].as_str().ok_or(LoreError::InvalidFrame)?;
+        let complete = value["complete"].as_bool().ok_or(LoreError::InvalidFrame)?;
+        let redacted = value["redacted"].as_bool().ok_or(LoreError::InvalidFrame)?;
+        if value["id"].as_u64() != Some(belief_id) || subject.len() > 4096
+            || subject.chars().any(char::is_control) || subject.len() + claim.len() > 65536
+            || claim.chars().any(|c| c.is_control() && c != '\n') || (complete && redacted)
+            || value.get("claim_sha256").is_some() || value.get("uid").is_some() {
+            return Err(LoreError::InvalidFrame);
+        }
+        Ok(value)
+    }
+
     fn beliefs_request(&mut self, op: &str, offset: u16, limit: u8, query: &str) -> Result<Vec<Value>, LoreError> {
         if offset > 10000 || limit > 50 || query.chars().count() > 200 || query.len() > 1024
             || query.chars().any(char::is_control) {

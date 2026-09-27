@@ -436,6 +436,41 @@ for line in sys.stdin:
 }
 
 #[test]
+fn belief_display_is_bounded_read_only_and_checks_reply_identity_and_completeness() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = fake(dir.path(), r#"
+import json, sys
+print(json.dumps({'type':'hello','proto':1,'capabilities':['scrub','snapshot','belief_display_v1']}), flush=True)
+for line in sys.stdin:
+    req = json.loads(line)
+    assert req['op'] == 'belief_display_v1' and req['cwd'] == '/current-checkout'
+    assert 'expected' not in req
+    bid = req['belief_id']
+    value = {'id':bid,'subject':'project:another-checkout','claim':'full\n' + 'ü'*5000,'complete':True,'redacted':False}
+    if bid == 2: value.update(claim='[redacted]', complete=False, redacted=True)
+    if bid == 3: value['id'] = 999
+    if bid == 4: value.update(complete=True, redacted=True)
+    if bid == 5: value['claim'] = 'unsafe\x1b[31m'
+    if bid == 6: value['claim'] = 'ü'*32769
+    if bid == 7: value['claim_sha256'] = 'a'*64
+    print(json.dumps({'type':'reply','id':req['id'],'ok':True,'value':value}), flush=True)
+"#);
+    let mut client = LoreClient::spawn(&path, Duration::from_secs(2)).unwrap();
+    let full = client.belief_display("/current-checkout", 1).unwrap();
+    assert!(full["claim"].as_str().unwrap().contains('\n'));
+    assert!(full["claim"].as_str().unwrap().len() > 4096);
+    assert_eq!(full["complete"], true);
+    assert_eq!(client.belief_display("/current-checkout", 2).unwrap()["complete"], false);
+    for bid in 3..=7 {
+        assert!(matches!(client.belief_display("/current-checkout", bid), Err(LoreError::InvalidFrame)));
+    }
+    assert!(matches!(client.belief_display("/current-checkout", 0), Err(LoreError::InvalidFrame)));
+    let old = fake(dir.path(), "print('{\"type\":\"hello\",\"proto\":1,\"capabilities\":[\"scrub\",\"snapshot\"]}', flush=True)");
+    let mut older = LoreClient::spawn(&old, Duration::from_secs(2)).unwrap();
+    assert!(matches!(older.belief_display("/current-checkout", 1), Err(LoreError::Unavailable)));
+}
+
+#[test]
 fn curated_entry_reads_validate_complete_rows_and_require_canonical_capability() {
     let dir = tempfile::tempdir().unwrap();
     let path = fake(dir.path(), r#"
