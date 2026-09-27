@@ -27,11 +27,12 @@ pub struct Menu {
     restart_complete: Option<Arc<AtomicBool>>,
     mesh: Option<crate::mesh_control::WindowHandle>,
     mesh_revision: u64,
+    plugins_changed: bool,
 }
 impl Menu {
     pub fn new(kind: &str) -> Self {
         let mut menu = Self { kind: kind.into(), rows: Vec::new(), selected: 0, messages: Vec::new(), worker: None, closed: false, step: 0, editing: None, input: String::new(), scroll: 0, cancel: None, requested: false,
-            engine: None, restart_ready: false, restart_complete: None, mesh: None, mesh_revision: 0, worker_thread: None };
+            engine: None, restart_ready: false, restart_complete: None, mesh: None, mesh_revision: 0, worker_thread: None, plugins_changed: false };
         menu.prepare(); menu
     }
     /// Parsing/selection is pure. The UI calls start_requested only after the
@@ -61,6 +62,7 @@ impl Menu {
     pub fn mesh(handle: crate::mesh_control::WindowHandle) -> Self {
         let mut menu = Self::new("mesh"); menu.mesh = Some(handle); menu
     }
+    pub fn take_plugins_changed(&mut self) -> bool { std::mem::take(&mut self.plugins_changed) }
     pub fn take_restart(&mut self) -> bool { std::mem::take(&mut self.restart_ready) }
     pub fn cancel(&mut self) { if let Some(cancel) = &self.cancel { cancel.store(true, Ordering::Release); } }
     pub fn start_requested(&mut self) {
@@ -105,6 +107,7 @@ impl Menu {
             for (done, message) in results {
                 self.messages.push(message);
                 if done {
+                    self.plugins_changed |= matches!(self.kind.as_str(), "plugins" | "reload-plugins");
                     self.restart_ready = self.restart_complete.take().is_some_and(|flag| flag.load(Ordering::Acquire));
                     self.worker = None; self.cancel = None; break;
                 }
@@ -217,7 +220,7 @@ impl Menu {
             Action::Auth(_) => unreachable!(),
             Action::Maintenance(_, _) | Action::MeshOpen | Action::MeshStop => unreachable!(),
         };
-        let success = result.is_ok(); self.messages.push(result.unwrap_or_else(|e| e.to_string()));
+        let success = result.is_ok(); self.plugins_changed |= success && matches!(self.kind.as_str(), "plugins" | "reload-plugins"); self.messages.push(result.unwrap_or_else(|e| e.to_string()));
         if self.kind == "setup" && success {
             if self.step >= 2 { self.closed = true; } else { self.step += 1; self.prepare(); }
         }

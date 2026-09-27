@@ -506,10 +506,47 @@ pub fn plugins_reload() -> io::Result<String> {
     plugins_bridge(true)
 }
 
+#[derive(Clone, Debug, serde::Deserialize)]
+pub struct PluginCommand { pub name: String, pub summary: String, pub usage: String, pub plugin: String }
+
+pub fn plugin_commands() -> io::Result<Vec<PluginCommand>> { plugin_commands_cancel(&AtomicBool::new(false)) }
+fn plugin_commands_cancel(cancel: &AtomicBool) -> io::Result<Vec<PluginCommand>> {
+    if !adoption_enabled()? { return Ok(Vec::new()); }
+    let text = plugin_bridge_arg_cancel("--plugin-commands", cancel)?;
+    let rows: Vec<PluginCommand> = serde_json::from_str(&text).map_err(|_| io::Error::other("Invalid plugin command inventory"))?;
+    if rows.len() > 100 || rows.iter().any(|row| !row.name.starts_with('/') || row.name.len() < 2 || row.name.len() > 128
+        || !row.name[1..].bytes().all(|c| c.is_ascii_alphanumeric() || b"._:-".contains(&c))
+        || row.summary.len() > 1024 || row.usage.len() > 1024 || row.plugin.len() > 128
+        || [&row.summary, &row.usage, &row.plugin].iter().any(|value| value.chars().any(char::is_control))) {
+        return Err(io::Error::other("Unsafe plugin command inventory"));
+    }
+    Ok(rows)
+}
+
+#[derive(Debug)]
+pub struct PluginRefresh {
+    receiver: std::sync::mpsc::Receiver<io::Result<Vec<PluginCommand>>>,
+    cancel: std::sync::Arc<AtomicBool>, worker: Option<thread::JoinHandle<()>>,
+}
+impl PluginRefresh {
+    pub fn start() -> Self {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let cancel = std::sync::Arc::new(AtomicBool::new(false)); let cancelled = cancel.clone();
+        let worker = thread::spawn(move || { let _ = sender.send(plugin_commands_cancel(&cancelled)); });
+        Self { receiver, cancel, worker: Some(worker) }
+    }
+    pub fn poll(&self) -> Option<io::Result<Vec<PluginCommand>>> { self.receiver.try_recv().ok() }
+}
+impl Drop for PluginRefresh { fn drop(&mut self) { self.cancel.store(true, std::sync::atomic::Ordering::Release); if let Some(worker) = self.worker.take() { let _ = worker.join(); } } }
+
 pub fn plugins_bridge(reload: bool) -> io::Result<String> {
+    plugin_bridge_arg(if reload { "--reload-plugins" } else { "--plugins-report" })
+}
+fn plugin_bridge_arg(argument: &str) -> io::Result<String> { plugin_bridge_arg_cancel(argument, &AtomicBool::new(false)) }
+fn plugin_bridge_arg_cancel(argument: &str, cancel: &AtomicBool) -> io::Result<String> {
     let (python, script) = crate::launch::claude_dependencies(&Default::default())?;
     let mut child = Command::new(python).arg("-I").arg(script)
-        .arg(if reload { "--reload-plugins" } else { "--plugins-report" })
+        .arg(argument)
         .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null())
         .process_group(0).spawn()?;
     let stdout = child.stdout.take().unwrap();
@@ -524,7 +561,7 @@ pub fn plugins_bridge(reload: bool) -> io::Result<String> {
             Ok(None) => {},
             Err(error) => break Err(error),
         }
-        if Instant::now() >= deadline {
+        if Instant::now() >= deadline || cancel.load(std::sync::atomic::Ordering::Acquire) {
             unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL); }
             let _ = child.wait(); break Ok(None);
         }

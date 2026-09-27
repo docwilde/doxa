@@ -1326,6 +1326,9 @@ pub struct App {
     retired_operations: Vec<operations_menu::Menu>,
     local_shell_jobs: Vec<crate::shell::Job>,
     next_shell_id: u64,
+    plugin_commands: Vec<crate::operations::PluginCommand>,
+    plugin_refresh: Option<crate::operations::PluginRefresh>,
+    plugin_refresh_dirty: bool,
     fleet_menu: Option<fleet_menu::Menu>,
     pub(crate) fleet_views: Vec<fleet_menu::SavedView>,
     fleet_review: Option<fleet_process::Prepared>,
@@ -1505,6 +1508,9 @@ impl Default for App {
             retired_operations: Vec::new(),
             local_shell_jobs: Vec::new(),
             next_shell_id: 1,
+            plugin_commands: Vec::new(),
+            plugin_refresh: None,
+            plugin_refresh_dirty: false,
             fleet_menu: None,
             fleet_views: Vec::new(),
             fleet_review: None,
@@ -2757,7 +2763,7 @@ impl App {
         true
     }
 
-    fn slash_suggestions(&self) -> Vec<(&'static str, &'static str)> {
+    fn slash_suggestions(&self) -> Vec<(&str, &str)> {
         if self.focus != Focus::Prompt || self.slash_dismissed
             || self.active_request_index().is_some() || self.stop_confirmation.is_some()
             || self.chip_info.is_some() || self.lore_picker.is_some() || self.settings_menu.is_some()
@@ -2771,13 +2777,15 @@ impl App {
         let query = self.input.as_str();
         if !query.starts_with('/') || query.chars().any(char::is_whitespace) { return Vec::new(); }
         COMMANDS.iter().filter(|row| row.name.starts_with(query))
-            .map(|row| (row.name, row.summary)).collect()
+            .map(|row| (row.name, row.summary))
+            .chain(self.plugin_commands.iter().filter(|row| row.name.starts_with(query)).map(|row| (row.name.as_str(), row.summary.as_str()))).collect()
     }
 
     fn complete_slash(&mut self) -> bool {
         let matches = self.slash_suggestions();
         let Some((command, _)) = matches.get(self.slash_selected.min(matches.len().saturating_sub(1))) else { return false; };
-        self.input = (*command).to_owned();
+        let command = (*command).to_owned();
+        self.input = command;
         self.input_cursor = self.input.len();
         self.slash_dismissed = true;
         true
@@ -5241,6 +5249,24 @@ impl App {
         false
     }
 
+    fn poll_plugin_commands(&mut self) -> bool {
+        let mut changed = false;
+        if let Some(result) = self.plugin_refresh.as_ref().and_then(|worker| worker.poll()) {
+            self.plugin_refresh = None;
+            if !self.plugin_refresh_dirty {
+                let mut rows = result.unwrap_or_default();
+                rows.retain(|row| !COMMANDS.iter().any(|builtin| builtin.name == row.name));
+                rows.sort_by(|left, right| left.name.cmp(&right.name)); rows.dedup_by(|left, right| left.name == right.name);
+                self.plugin_commands = rows; changed = true;
+            }
+        }
+        if self.plugin_refresh_dirty && self.plugin_refresh.is_none() {
+            self.plugin_refresh_dirty = false; self.plugin_commands.clear();
+            self.plugin_refresh = Some(crate::operations::PluginRefresh::start()); changed = true;
+        }
+        changed
+    }
+
     fn poll_memory_menu(&mut self) -> bool {
         for menu in &mut self.retired_operations { menu.poll(); }
         self.retired_operations.retain(|menu| menu.busy());
@@ -5259,6 +5285,7 @@ impl App {
         }
         if let Some(menu) = &mut self.operations_menu {
             menu.poll();
+            if menu.take_plugins_changed() { self.plugin_refresh_dirty = true; }
             if menu.take_restart() { self.restart_waiting = true; changed = true; }
             if let Some(info) = &mut self.chip_info {
                 let lines = menu.lines(usize::from(self.size.width));
@@ -6276,6 +6303,10 @@ impl App {
                 let Some(entry) = rows.get(self.action_selected) else { return true; };
                 let action = entry.action.clone(); self.action_menu = false;
                 match action {
+                    actions::Action::Plugin(command) => {
+                        self.action_draft = Some(((self.active_group,self.groups[self.active_group].active_id().unwrap_or("").to_owned()),self.input.clone(), self.input_cursor));
+                        self.input = format!("{command} "); self.input_cursor = self.input.len(); self.focus = Focus::Prompt;
+                    }
                     actions::Action::New => self.open_engine_picker(),
                     actions::Action::Fleet(view) => self.open_fleet(view.root,Some(view.run_id)),
                     actions::Action::Tab(pane, tab) => { if self.groups.get(pane).is_some_and(|g| tab < g.tabs.len()) { self.active_group = pane; self.groups[pane].active = tab; self.focus = Focus::Prompt; } },
@@ -7119,6 +7150,7 @@ impl App {
             lines.push(format!("{} · {}", row.form, row.summary));
             lines.push(format!("  {}", row.support));
         }
+        for command in &self.plugin_commands { lines.push(format!("{} · {} · {} plugin passthrough", if command.usage.is_empty() { &command.name } else { &command.usage }, command.summary, command.plugin)); }
         lines.push("Local keyboard shell: !<command> · current session directory; output is neither sent nor saved".into());
         for (command, description) in FLEET_ACTIONS { lines.push(format!("{command} · {description}")); }
         self.chip_info = Some(ChipInfo { kind: "help", label: String::new(), lines,
@@ -9366,6 +9398,7 @@ fn run_loop(
         store.restore(&mut app, live_ids);
     }
     app.persist_preferences=true;
+    app.plugin_refresh_dirty=true;
     app.sidebar_auto=app.preferences.value("sidebar").is_empty();
     app.rail_width=app.preferences.sidebar_width();
     app.rail_visible=match app.preferences.value("sidebar") {""=>app.sessions.len()>1 || !app.collections.is_empty(),"0"|"false"|"off"|"no"=>false,_=>true};
@@ -9421,6 +9454,7 @@ fn run_loop(
         changed |= app.poll_repo();
         changed |= app.poll_memory_menu();
         changed |= app.poll_shell();
+        changed |= app.poll_plugin_commands();
         changed |= app.poll_vendor_catalog();
         changed |= app.tick_blink(Instant::now());
         changed |= app.tick_spinner(Instant::now());
