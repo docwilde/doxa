@@ -276,7 +276,7 @@ struct LorePicker {
     pending: Option<Receiver<Result<lore_picker::ResultPage, &'static str>>>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct NewSession {
     engine: launch::Engine,
     model: String,
@@ -284,6 +284,8 @@ struct NewSession {
     model_efforts: HashMap<String, Vec<String>>,
     catalog_note: String,
     catalog_pending: bool,
+    launch_error: Option<String>,
+    retry_allowed: bool,
     effort: Option<String>,
     prompt: String,
     field: usize,
@@ -1949,6 +1951,18 @@ impl App {
                 } else {
                     format!("Session launch failed · {}", safe_label(frame["message"].as_str().unwrap_or("unknown error")))
                 };
+                if frame["ok"] == true {
+                    self.new_session = None;
+                } else {
+                    if let Some(form) = self.new_session.as_mut() {
+                        form.launch_error = Some(self.notice.clone());
+                        form.retry_allowed = frame["started"] != true;
+                    }
+                    if self.sessions.is_empty() {
+                        self.awaiting_initial_attach = false;
+                        self.startup_recovery = Some(self.notice.clone());
+                    }
+                }
                 true
             }
             "hello" => {
@@ -4681,7 +4695,7 @@ impl App {
             model_efforts,
             catalog_note: if catalog_pending { "Checking vendor model catalog…".into() }
                 else { "Static fallback; vendor catalog unavailable".into() },
-            catalog_pending, effort, prompt: String::new(), field: 0 });
+            catalog_pending, launch_error:None, retry_allowed:true, effort, prompt: String::new(), field: 0 });
     }
 
     fn poll_vendor_catalog(&mut self) -> bool {
@@ -4748,7 +4762,21 @@ impl App {
         true
     }
 
+    fn retain_launch_failure(&mut self) {
+        if let Some(form) = self.new_session.as_mut() {
+            form.launch_error = Some(self.notice.clone());
+        }
+        if self.sessions.is_empty() {
+            self.awaiting_initial_attach = false;
+            self.startup_recovery = Some(self.notice.clone());
+        }
+    }
+
     fn new_session_key(&mut self, key: KeyEvent) -> bool {
+        if self.launching {
+            if key.code == KeyCode::Esc { self.new_session = None; }
+            return true;
+        }
         let form = self.new_session.as_mut().unwrap();
         let vendor = !vendor_models(form.engine).is_empty();
         let fields = if vendor { 3 } else { 2 };
@@ -4804,8 +4832,9 @@ impl App {
                     self.notice = "No verified models with effort capability are available".into();
                     return true;
                 }
+                if !form.retry_allowed { return true; }
                 if !self.manual_tab_available() { return true; }
-                let form = self.new_session.take().unwrap();
+                let form = self.new_session.as_ref().unwrap().clone();
                 let mut options = launch::LaunchOptions { engine: form.engine, ..Default::default() };
                 if !form.model.trim().is_empty() { options.model = Some(form.model.trim().to_owned()); }
                 if vendor {
@@ -4822,8 +4851,9 @@ impl App {
                 }
                 let prompt = if form.prompt.trim().is_empty() { None } else { Some(form.prompt) };
                 self.pending_launches.push((options, prompt, self.active_group));
+                self.new_session.as_mut().unwrap().launch_error = None;
                 self.launching = true;
-                self.notice = format!("Starting {} session…", ENGINE_CHOICES[self.engine_selected]);
+                self.notice = format!("Starting {} session…", engine_name(form.engine));
             }
             _ => return false,
         }
@@ -8620,8 +8650,16 @@ impl App {
             title = " New session · Tab field · Enter continue/start · Esc close ";
             let name = match form.engine { launch::Engine::Codex => "codex", launch::Engine::Claude => "claude",
                 launch::Engine::DeepSeek => "deepseek", launch::Engine::Glm => "glm", launch::Engine::Fixture => "fixture" };
-            lines.push(Line::from(format!(" Engine: {name}")));
-            if height >= 8 {
+            if height < 8 && form.launch_error.is_some() {
+                lines.push(Line::styled(clipped_title(form.launch_error.as_deref().unwrap(), usize::from(area.width.saturating_sub(2))).0,
+                    Style::default().fg(theme::ERROR)));
+            } else { lines.push(Line::from(format!(" Engine: {name}"))); }
+            if height >= 8 && form.launch_error.is_some() {
+                lines.push(Line::styled(clipped_title(form.launch_error.as_deref().unwrap(), usize::from(area.width.saturating_sub(2))).0,
+                    Style::default().fg(theme::ERROR)));
+                lines.push(Line::from(if form.retry_allowed { " Esc close · /setup checks authentication · Enter retry" }
+                    else { " Session exists; use doxa-rs attach · Esc close" }));
+            } else if height >= 8 {
                 lines.push(Line::from(if vendor_models(form.engine).is_empty() {
                     " Blank model uses configured engine default."
                 } else { " Left/Right choose vendor model and effort." }));
@@ -8640,8 +8678,8 @@ impl App {
             }
             lines.push(Line::styled(format!(" {} First prompt: {}", if form.field == prompt_field { '›' } else { ' ' }, safe_label(&form.prompt)),
                 chooser_row_style(form.field == prompt_field)));
-            lines.push(Line::styled(" [ Start session ]",
-                chooser_row_style(form.field == prompt_field + 1)));
+            lines.push(Line::styled(if self.launching { " Starting session… · waiting for launch result" }
+                else { " [ Start session ]" }, chooser_row_style(form.field == prompt_field + 1)));
         } else if let Some((id, selected)) = &self.permission_picker {
             title = " Claude permissions · this session · Enter select · Esc close ";
             if height >= 10 {
@@ -9851,6 +9889,7 @@ fn run_loop(
                 app.launching = false;
                 app.clear_pending = None;
                 app.notice = "Session launch unavailable · daemon connection closed".into();
+                app.retain_launch_failure();
                 changed = true;
             }
             if !app.pending_attaches.is_empty() {
@@ -9956,6 +9995,7 @@ fn dispatch_launches(app: &mut App, sender: &SyncSender<crate::bridge::WorkerCom
                 app.launching = false;
                 app.clear_pending = None;
                 app.notice = "Session launch unavailable".into();
+                app.retain_launch_failure();
                 return true;
             }
             Err(_) => unreachable!(),
@@ -10901,7 +10941,7 @@ for line in sys.stdin:
         assert!(rendered.contains("Start session"));
         app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
             column: form.x + 2, row: first + 2, modifiers: KeyModifiers::NONE }));
-        assert!(app.new_session.is_none());
+        assert!(app.new_session.is_some());
         let (options, prompt, _) = app.pending_launches.pop().unwrap();
         assert_eq!(options.engine, launch::Engine::Claude);
         assert_eq!(options.model.as_deref(), Some("sonnet"));
@@ -10931,7 +10971,36 @@ for line in sys.stdin:
         assert_eq!(prompt.as_deref(), Some("Explain this"));
         assert_eq!(group, 0);
         assert!(app.launching);
+        assert!(app.new_session.is_some());
+    }
+
+    #[test]
+    fn failed_new_session_keeps_form_and_error_after_old_session_updates() {
+        let mut app = App::default();
+        app.rail_visible = false;
+        app.handle(Event::Resize(110, 36));
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"old","engine":"codex","model":"gpt-6-sol"}));
+        app.open_engine_picker();
+        app.engine_selected = 1; // Claude
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.new_session.as_ref().unwrap().engine, launch::Engine::Claude);
+        app.new_session.as_mut().unwrap().field = 1;
+        app.new_session.as_mut().unwrap().prompt = "Private first prompt".into();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(app.launching && app.new_session.is_some());
+        assert!(painted_at(&app, 110, 36).contains("waiting for launch result"));
+        app.apply_daemon_frame(&json!({"type":"launch_reply","ok":false,"message":"Claude dependency unavailable"}));
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"old","engine":"codex","model":"gpt-6-sol"}));
+        let form = app.new_session.as_ref().unwrap();
+        assert_eq!(form.prompt, "Private first prompt");
+        assert!(form.launch_error.as_deref().unwrap().contains("Claude dependency unavailable"));
+        assert_eq!(app.groups[0].tabs, vec!["old"]);
+        assert!(painted_at(&app, 110, 36).contains("Claude dependency unavailable"));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(app.launching && app.new_session.as_ref().unwrap().launch_error.is_none());
+        app.apply_daemon_frame(&json!({"type":"launch_reply","ok":true,"session_id":"fresh","group":0}));
         assert!(app.new_session.is_none());
+        assert_eq!(app.groups[0].active_id(), Some("fresh"));
     }
 
     #[test]
@@ -11424,7 +11493,7 @@ for line in sys.stdin:
         // A form opened earlier must also recheck admission at submission.
         app.killed_this_run.clear();
         app.new_session = Some(NewSession { engine:launch::Engine::Codex,model:"model".into(),models:Vec::new(),
-            model_efforts:HashMap::new(),catalog_note:String::new(),catalog_pending:false,effort:None,prompt:String::new(),field:1 });
+            model_efforts:HashMap::new(),catalog_note:String::new(),catalog_pending:false,launch_error:None,retry_allowed:true,effort:None,prompt:String::new(),field:1 });
         app.new_session_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
         assert!(app.pending_launches.is_empty()); assert!(app.new_session.is_some());
     }
