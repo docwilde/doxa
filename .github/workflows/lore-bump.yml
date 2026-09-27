@@ -116,7 +116,9 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
-          cargo +stable update --package lore-core
+          # Resolve through a stable workspace package: changing the git rev
+          # removes the old lore-core package ID before cargo update can select it.
+          cargo +stable check --package doxa-lore
           git --no-pager diff --stat -- rust/doxa-lore/Cargo.toml Cargo.lock pyproject.toml uv.lock
 
       # Idempotency, part one: has a human already said no to this exact

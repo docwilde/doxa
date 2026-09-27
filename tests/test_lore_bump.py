@@ -238,7 +238,8 @@ def test_python_only_release_is_not_native_installable(monkeypatch):
 
 def test_upgrade_workflow_tracks_native_pin_and_carrier():
     workflow = (REPO_ROOT / '.github/workflows/lore-bump.yml').read_text()
-    assert 'cargo +stable update --package lore-core' in workflow
+    assert 'cargo +stable check --package doxa-lore' in workflow
+    assert 'cargo +stable update --package lore-core' not in workflow
     assert 'build --locked --package lore-core --bin lore-rs' in workflow
     assert 'test --locked --workspace --all-features' in workflow
     assert 'DOXA_TEST_LORE_RS:' in workflow
