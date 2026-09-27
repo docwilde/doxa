@@ -54,7 +54,7 @@ jobs:
         run: |
           sh -n scripts/install.sh task
           ./task help
-          uv run pytest tests/test_install_rust.py tests/test_mesh_wheel.py -q
+          uv run pytest tests/test_install_rust.py tests/test_mesh_wheel.py tests/test_task_native.py tests/test_lore_bump.py -q
       - name: Test native LORE adapter and compatibility fixtures
         run: uv run pytest tests/test_lore_bridge.py tests/test_settings_graph.py tests/test_native_agent_tools.py tests/test_lore_capacity.py tests/test_claude_quota.py -q
       - name: Test native LORE SDK carrier and diagnostics

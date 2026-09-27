@@ -32,7 +32,7 @@ Usage: ./task COMMAND [arguments]
 
 DOXA_TASK_TARGET_DIR defaults to <repo>/target/rust-task.
 DOXA_TASK_PROFILE=release selects release binaries for run/new/doctor.
-DOXA_LORE_PYTHON selects the LORE/Claude Python interpreter; otherwise
+DOXA_LORE_PYTHON selects the retained SDK/review helper interpreter; otherwise
 <repo>/.venv/bin/python is used when present, then python3 on PATH.
 DOXA_RUST_BIN_DIR defaults to ~/.local/bin. install uses the locked sidecar
 dependencies and writes the Rust doxa launcher from committed HEAD.

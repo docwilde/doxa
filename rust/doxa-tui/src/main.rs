@@ -69,7 +69,8 @@ Codex: --sandbox read-only|workspace-write|danger-full-access, --codex-bin PATH.
 Claude: --claude-python PATH, --claude-script ABSOLUTE_PATH, --effort low|medium|high|max.
 Codex: --effort uses account model capabilities.
 DeepSeek/GLM: --effort low|high|max (DeepSeek also none).
-Use --lore-python PATH for the LORE sidecar; API keys come from provider env vars.
+LORE memory runs in Rust. --lore-python PATH selects the retained SDK/review helper.
+API keys come from provider environment variables.
 
 Fleet: doxa fleet preflight --sessions N --run-budget USD [--supervisor ENGINE[:MODEL]] [--approve none|peer|all] [--approval-grace SECONDS] [--root PATH]
        doxa fleet start --pool ENGINE:MODEL --prompt TEXT -n N --run-budget USD

@@ -178,3 +178,9 @@ Native worker fixtures verify descendant cleanup on success, error and timeout.
 Standalone LORE plugin administration and network transport services retain
 their Python compatibility entrypoints. The native module covers DOXA's active
 memory semantics; those standalone tools are not described as Rust ports.
+
+Checkout task commands now build and select the native carrier explicitly. The
+LORE upgrade workflow moves both native and development-oracle pins and locks
+to the same immutable commit. Retained adapter pagination uses the canonical
+50-row page size and preserves caller windows; a 600-belief socket fixture
+checks that it does not stop after the first page.
