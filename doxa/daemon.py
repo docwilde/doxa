@@ -254,21 +254,11 @@ def encode_frame(frame: dict) -> bytes:
 # cap costs the whole reply (encode_frame replaces it with an error), while
 # undershooting costs one extra round trip on a click-only call.
 BELIEF_PAGE_OVERHEAD_BYTES = 2048
-# Row ceiling per page. Deliberately NOT tuned to fill a frame: measured
-# against the reporting operator's live store, a full belief row averages
-# ~472 bytes (avg claim 201 chars, max 300), so ~139 rows would fit 64KB
-# exactly -- 100 leaves real headroom for a store whose claims run longer
-# than that one's without ever depending on the byte budget below to save
-# it. That budget stays as the backstop for genuinely long claims;
-# whichever ceiling binds first ends the page. Cost of a smaller page is
-# one more round trip on a local unix socket, on a click-only call.
-BELIEF_PAGE_ROWS = 100
-# Row ceiling for one page of STAGED PROPOSALS (the `pending` RPC, item 3
-# of the v0.31.0 deriver-notification work). Same discipline as
-# BELIEF_PAGE_ROWS and a smaller number for the same reason it is smaller
-# than the belief cap: a proposal is a whole sentence or three of free
-# text, materially longer than a belief claim, so fewer of them fit a
-# frame comfortably. The byte backstop below still has the last word.
+# Canonical native reads admit fifty rows per request. The daemon must use
+# the same window when deciding whether to advertise a continuation; asking
+# for one hundred would mistake a full native page for the end of the store.
+# The byte budget remains the backstop for large claims and proposals.
+BELIEF_PAGE_ROWS = 50
 PENDING_PAGE_ROWS = 50
 
 

@@ -25,7 +25,7 @@ main() {
     }
   done
   python3 -c 'import sys; sys.exit(sys.version_info < (3, 11))' || {
-    printf 'doxa-install: Python 3.11 or newer is required for the LORE and Claude sidecars\n' >&2; exit 1;
+    printf 'doxa-install: Python 3.11 or newer is required for the Claude SDK sidecar\n' >&2; exit 1;
   }
   host_target=$(rustc -vV | sed -n 's/^host: //p')
   [ -n "$host_target" ] || { printf 'doxa-install: cannot determine Rust host target\n' >&2; exit 1; }
@@ -45,7 +45,7 @@ main() {
     trap - EXIT HUP INT TERM
     if [ "$installing" -eq 1 ]; then
       restore_failed=0
-      for name in doxa doxa-rs doxa-daemon-rs doxa-claude-sidecar.py .doxa-sidecar-current; do
+      for name in doxa doxa-rs doxa-daemon-rs lore-rs doxa-claude-sidecar.py .doxa-sidecar-current; do
         rm -f "$bin_dir/$name" || { restore_failed=1; continue; }
         if [ -e "$stage/backup/$name" ] || [ -L "$stage/backup/$name" ]; then
           mv "$stage/backup/$name" "$bin_dir/$name" || restore_failed=1
@@ -80,11 +80,13 @@ main() {
   printf 'doxa-install: building Rust frontend and daemon\n'
   CARGO_TARGET_DIR="$checkout/target" cargo build --release --locked --target "$host_target" --manifest-path "$tui_manifest" --bin doxa-rs || exit 1
   CARGO_TARGET_DIR="$checkout/target" cargo build --release --locked --target "$host_target" --manifest-path "$daemon_manifest" || exit 1
+  CARGO_TARGET_DIR="$checkout/target" cargo build --release --locked --target "$host_target" --manifest-path "$tui_manifest" --package lore-core --bin lore-rs || exit 1
+  lore_bin="$checkout/target/$host_target/release/lore-rs"
   tui_bin="$checkout/target/$host_target/release/doxa-rs"
   daemon_bin="$checkout/target/$host_target/release/doxa-daemon-rs"
   [ -f "$daemon_bin" ] || daemon_bin="$checkout/target/$host_target/release/doxa-daemon"
-  [ -f "$tui_bin" ] && [ -f "$daemon_bin" ] || {
-    printf 'doxa-install: Rust build produced no frontend or daemon\n' >&2; exit 1;
+  [ -f "$tui_bin" ] && [ -f "$daemon_bin" ] && [ -f "$lore_bin" ] || {
+    printf 'doxa-install: Rust build produced no frontend, daemon or native LORE carrier\n' >&2; exit 1;
   }
 
   # The Python package remains private to this versioned environment. The
@@ -101,7 +103,7 @@ main() {
   [ ! -L "$sidecar_env" ] || { printf 'doxa-install: sidecar environment must not be a symlink\n' >&2; exit 1; }
   sidecar_ready() {
     [ -d "$1" ] && [ ! -L "$1" ] &&
-      "$1/bin/python" -I -c 'import doxa.lore_bridge, doxa.engine, lore_core, claude_agent_sdk' >/dev/null 2>&1
+      "$1/bin/python" -I -c 'import doxa.native_lore, doxa.engine, claude_agent_sdk' >/dev/null 2>&1
   }
   if [ -e "$sidecar_env" ]; then
     [ -d "$sidecar_env" ] || {
@@ -147,14 +149,15 @@ main() {
   fi
 
   mkdir -p "$bin_dir" || exit 1
-  for name in doxa doxa-rs doxa-daemon-rs doxa-claude-sidecar.py .doxa-sidecar-current; do
+  for name in doxa doxa-rs doxa-daemon-rs lore-rs doxa-claude-sidecar.py .doxa-sidecar-current; do
     [ ! -d "$bin_dir/$name" ] || [ -L "$bin_dir/$name" ] || { printf 'doxa-install: %s is a directory\n' "$bin_dir/$name" >&2; exit 1; }
   done
   stage=$(mktemp -d "$bin_dir/.doxa-install.XXXXXXXX") || exit 1
   cp "$tui_bin" "$stage/doxa-rs" || exit 1
   cp "$daemon_bin" "$stage/doxa-daemon-rs" || exit 1
+  cp "$lore_bin" "$stage/lore-rs" || exit 1
   cp "$claude_script" "$stage/doxa-claude-sidecar.py" || exit 1
-  chmod 755 "$stage/doxa-rs" "$stage/doxa-daemon-rs" || exit 1
+  chmod 755 "$stage/doxa-rs" "$stage/doxa-daemon-rs" "$stage/lore-rs" || exit 1
   chmod 644 "$stage/doxa-claude-sidecar.py" || exit 1
   cat > "$stage/doxa" <<'SH'
 #!/bin/sh
@@ -162,20 +165,21 @@ bin_dir=$(CDPATH= cd "$(dirname "$0")" && pwd) || exit 1
 sidecar_bin=$(readlink "$bin_dir/.doxa-sidecar-current") || exit 1
 PATH="$sidecar_bin:$PATH"
 DOXA_LORE_PYTHON="$sidecar_bin/python3"
-export PATH DOXA_LORE_PYTHON
+DOXA_LORE_RS="$bin_dir/lore-rs"
+export PATH DOXA_LORE_PYTHON DOXA_LORE_RS
 exec "$bin_dir/doxa-rs" "$@"
 SH
   chmod 755 "$stage/doxa" || exit 1
   ln -s "$sidecar_env/bin" "$stage/.doxa-sidecar-current" || exit 1
   mkdir "$stage/backup" || exit 1
-  for name in doxa doxa-rs doxa-daemon-rs doxa-claude-sidecar.py .doxa-sidecar-current; do
+  for name in doxa doxa-rs doxa-daemon-rs lore-rs doxa-claude-sidecar.py .doxa-sidecar-current; do
     if [ -e "$bin_dir/$name" ] || [ -L "$bin_dir/$name" ]; then
       cp -Pp "$bin_dir/$name" "$stage/backup/$name" || exit 1
     fi
   done
 
   installing=1
-  for name in doxa-rs doxa-daemon-rs doxa-claude-sidecar.py .doxa-sidecar-current doxa; do
+  for name in doxa-rs doxa-daemon-rs lore-rs doxa-claude-sidecar.py .doxa-sidecar-current doxa; do
     # mv can treat a symlink to a directory as the destination directory,
     # leaving the old launcher pointer in place and writing inside its target.
     if [ -L "$bin_dir/$name" ]; then

@@ -5,8 +5,7 @@ use doxa_transcript::TranscriptStore;
 use doxa_vendors::{Delta, Error, Vendor, MAX_TURN_DURATION};
 use crate::vendor_tools::{NativeVendorGate, PeerDesk};
 use serde_json::{json, Value};
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -36,7 +35,6 @@ pub struct VendorHost {
     lore_enabled: bool,
     agent_tools: Option<Arc<crate::agent_tools::AgentTools>>,
     context: Mutex<Option<LoreClient>>,
-    lore_python: PathBuf,
     session_id: String,
     finalized: AtomicBool,
     scrub_failed: AtomicBool,
@@ -83,7 +81,7 @@ impl VendorHost {
         };
         doxa_vendors::request_body(vendor, &model, &[], &effort)
             .map_err(|_| "invalid vendor effort".to_owned())?;
-        let mut lore = LoreClient::spawn(lore_python, Duration::from_secs(5)).map_err(|_| {
+        let mut lore = LoreClient::open(Duration::from_secs(5)).map_err(|_| {
             "LORE sidecar is unavailable; vendor session was not started".to_owned()
         })?;
         lore.scrub("DOXA scrub preflight").map_err(|_| {
@@ -137,7 +135,7 @@ impl VendorHost {
             catalog: Mutex::new(None),
             lore: Mutex::new(lore),
             lore_enabled, agent_tools,
-            context: Mutex::new(None), lore_python: lore_python.to_owned(),
+            context: Mutex::new(None),
             session_id: session_id.to_owned(), finalized: AtomicBool::new(false),
             scrub_failed: AtomicBool::new(false),
             history: Mutex::new(history),
@@ -191,7 +189,7 @@ impl VendorHost {
             // Optional context reads get their own bounded client. A missing
             // snapshot cannot disable mandatory scrubbing or transcript writes.
             let mut context = self.context.lock().unwrap();
-            if context.is_none() { *context = LoreClient::spawn(&self.lore_python, Duration::from_secs(5)).ok(); }
+            if context.is_none() { *context = LoreClient::open(Duration::from_secs(5)).ok(); }
             let snapshot = context.as_mut().and_then(|client| client.snapshot(&self.cwd, "all").ok())
                 .filter(|text| text.len() <= MAX_CONTEXT_BYTES).unwrap_or_default();
             if context.as_ref().is_some_and(|client| !client.is_alive()) { *context = None; }
@@ -214,7 +212,7 @@ impl VendorHost {
         // Off agents still keep transcripts but never write them into memory.
         if self.lore_enabled && self.committed_bytes.load(Ordering::Acquire) > 0
             && !self.storage_uncertain.load(Ordering::Acquire) && !self.scrub_failed.load(Ordering::Acquire) {
-            if let Ok(mut client) = LoreClient::spawn(&self.lore_python, Duration::from_secs(5)) {
+            if let Ok(mut client) = LoreClient::open(Duration::from_secs(5)) {
                 let _ = client.index_transcript(&self.cwd, &self.session_id);
             }
         }

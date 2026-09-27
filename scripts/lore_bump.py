@@ -14,10 +14,9 @@ production.
     python3 scripts/lore_bump.py --repo docwilde/doxa --pin v0.30.0   # what-if
 
 Why this exists at all: `lore-core` is pinned to an immutable git ref
-(pyproject.toml), so a bare install and CI are frozen at that ref until a
-human edits the file. Nothing in the project noticed a LORE release; CI's
-`LORE_REF: main` leg is a canary that reports breakage, never staleness. This
-script is the half that reports staleness.
+(rust/doxa-lore/Cargo.toml), so installs and CI are frozen at that ref until a
+human approves an upgrade. The Python dev dependency remains a compatibility
+oracle and moves to the same immutable commit.
 
 Network access is `gh api` only -- gh is preinstalled and already
 authenticated both on a runner (GH_TOKEN) and on a maintainer's machine, so
@@ -38,6 +37,7 @@ import re
 import subprocess
 import sys
 import tomllib
+from urllib.parse import quote
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -72,8 +72,7 @@ class Pin:
 class RefState:
     """What a git ref of the dependency repo looks like to a packager.
 
-    `packaged` is the load-bearing bit: no pyproject.toml means `uv` cannot
-    install that ref as `lore-core` at all, whatever else is true of it.
+    `packaged` admits the native crate/CLI plus the Python dev oracle.
     `version` can be None even when packaged -- a version this script could
     not read is a reason to be careful, not a reason to call the ref broken.
     """
@@ -115,6 +114,29 @@ def rewrite_pin(pyproject_text: str, new_ref: str) -> str:
         pyproject_text,
         count=1,
     )
+
+
+def parse_native_pin(manifest: str) -> Pin:
+    try:
+        dependency = tomllib.loads(manifest)["dependencies"]["lore-core"]
+        match = re.fullmatch(r"https://github\.com/([^/]+)/([^/]+)", dependency["git"])
+        ref = dependency["rev"]
+        if not match or not isinstance(ref, str) or not re.fullmatch(r"[0-9a-f]{40}", ref):
+            raise ValueError("expected immutable git rev")
+        return Pin(match[1], match[2], ref)
+    except (KeyError, TypeError, ValueError, tomllib.TOMLDecodeError) as error:
+        raise SystemExit("native lore-core must have one GitHub git dependency with a 40-hex rev") from error
+
+
+def rewrite_native_pin(manifest: str, commit: str) -> str:
+    parse_native_pin(manifest)
+    if not re.fullmatch(r"[0-9a-f]{40}", commit):
+        raise SystemExit("invalid native LORE commit")
+    pattern = r'(?m)(^lore-core\s*=\s*\{[^\n}]*\brev\s*=\s*")[^"]+("[^\n}]*\})'
+    rewritten, count = re.subn(pattern, lambda m: m[1] + commit + m[2], manifest)
+    if count != 1:
+        raise SystemExit("native lore-core inline dependency shape changed; refusing partial pin update")
+    return rewritten
 
 
 def version_of(tag: str) -> tuple[int, int, int] | None:
@@ -170,7 +192,7 @@ def decide(
         # failed upgrade would blame the wrong repo.
         return Decision(
             "none",
-            f"the newest {slug} tag {newest} carries no pyproject.toml, so it "
+            f"the newest {slug} tag {newest} carries no native/oracle packaging, so it "
             f"cannot be installed as lore-core at all. Packaging is not in a "
             f"tagged release yet -- nothing to propose until it is.",
             tag=newest,
@@ -275,49 +297,28 @@ def fetch_text(slug: str, path: str, ref: str) -> str | None:
     return base64.b64decode(blob["content"]).decode("utf-8")  # type: ignore[index]
 
 
-def fetch_ref_state(slug: str, ref: str) -> RefState:
-    """Is this ref installable, and what version does it call itself?
+def fetch_commit(slug: str, ref: str) -> str:
+    value = gh_api(f"repos/{slug}/commits/{quote(ref, safe='')}")
+    commit = value.get("sha") if isinstance(value, dict) else None
+    if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
+        raise SystemExit("LORE release did not resolve to an immutable commit")
+    return commit
 
-    Checked BEFORE any checkout or `uv lock`, deliberately. A tag without
-    packaging is a LORE gap, not a DOXA incompatibility, and letting uv
-    discover it would spend a runner on a resolve whose failure text is
-    locale-dependent (measured: `Konnte Remote-Referenz ... nicht finden`)
-    and indistinguishable from the signal this whole workflow exists to
-    produce -- "DOXA cannot take this LORE". Two API calls keep the two
-    apart, and keep a LORE packaging gap from opening a red PR against DOXA.
 
-    LORE declares `dynamic = ["version"]` and sources it from
-    `.claude-plugin/plugin.json` via `[tool.hatch.version]`, so the static
-    `[project] version` is genuinely absent there; following the hatch
-    `path`/`pattern` indirection is what reads a real number rather than
-    guessing one.
-    """
-    text = fetch_text(slug, "pyproject.toml", ref)
-    if text is None:
+def fetch_native_state(slug: str, ref: str) -> RefState:
+    manifest = fetch_text(slug, "rust/lore-core/Cargo.toml", ref)
+    if manifest is None:
         return RefState(packaged=False)
     try:
-        data = tomllib.loads(text)
+        package = tomllib.loads(manifest).get("package", {})
     except tomllib.TOMLDecodeError:
-        return RefState(packaged=True)
-
-    static = data.get("project", {}).get("version")
-    if isinstance(static, str):
-        return RefState(packaged=True, version=static)
-
-    hatch = data.get("tool", {}).get("hatch", {}).get("version", {})
-    source_path = hatch.get("path")
-    if not isinstance(source_path, str):
-        return RefState(packaged=True)
-
-    source = fetch_text(slug, source_path, ref)
-    if source is None:
-        return RefState(packaged=True)
-    # hatchling's own default when no pattern is given.
-    pattern = hatch.get("pattern") or r"""(?i)^__version__\s*=\s*['"](?P<version>[^'"]+)"""
-    match = re.search(pattern, source, re.MULTILINE)
-    if match is None:
-        return RefState(packaged=True)
-    return RefState(packaged=True, version=match.group("version"))
+        return RefState(packaged=False)
+    if (package.get("name") != "lore-core"
+            or fetch_text(slug, "rust/lore-core/src/bin/lore-rs.rs", ref) is None
+            or fetch_text(slug, "pyproject.toml", ref) is None):
+        return RefState(packaged=False)
+    version = package.get("version")
+    return RefState(packaged=True, version=version if isinstance(version, str) else None)
 
 
 # --------------------------------------------------------------------------
@@ -325,14 +326,15 @@ def fetch_ref_state(slug: str, ref: str) -> RefState:
 
 def _describe(state: RefState) -> str:
     if not state.packaged:
-        return "no pyproject.toml -- not installable as lore-core"
-    return f"packaged, version {state.version or '(unreadable)'}"
+        return "native crate/CLI or Python oracle packaging missing"
+    return f"native CLI and Python oracle packaged, version {state.version or '(unreadable)'}"
 
 
 def main(argv: list[str] | None = None) -> int:
     repo_root = Path(__file__).resolve().parent.parent
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--pyproject", type=Path, default=repo_root / "pyproject.toml")
+    parser.add_argument("--native-manifest", type=Path, default=repo_root / "rust/doxa-lore/Cargo.toml")
     parser.add_argument(
         "--write",
         action="store_true",
@@ -344,7 +346,13 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     text = args.pyproject.read_text(encoding="utf-8")
-    pin = parse_pin(text)
+    manifest = args.native_manifest.read_text(encoding="utf-8")
+    pin = parse_native_pin(manifest)
+    oracle = parse_pin(text)
+    if oracle.slug != pin.slug:
+        raise SystemExit("native LORE and Python compatibility oracle name different repositories")
+    if args.write and args.repo and args.repo != pin.slug:
+        raise SystemExit("--repo is read-only for a different dependency repository")
     if args.repo:
         owner, _, repo = args.repo.partition("/")
         pin = Pin(owner, repo, pin.ref)
@@ -357,8 +365,8 @@ def main(argv: list[str] | None = None) -> int:
     newest = newest_tag(tags)
     print(f"tags:    {len(tags)} found, newest vX.Y.Z is {newest or '(none)'}")
 
-    pinned = fetch_ref_state(pin.slug, pin.ref)
-    candidate = fetch_ref_state(pin.slug, newest) if newest else RefState(packaged=False)
+    pinned = fetch_native_state(pin.slug, pin.ref)
+    candidate = fetch_native_state(pin.slug, newest) if newest else RefState(packaged=False)
     print(f"at pin:      {_describe(pinned)}")
     print(f"at {newest or '(none)'}: {_describe(candidate)}")
 
@@ -369,11 +377,21 @@ def main(argv: list[str] | None = None) -> int:
         candidate=candidate,
         slug=pin.slug,
     )
+    commit = fetch_commit(pin.slug, decision.tag) if decision.action == "propose" else ""
+    if commit and fetch_native_state(pin.slug, commit) != candidate:
+        raise SystemExit("release metadata changed while resolving its immutable commit")
+    if commit == pin.ref:
+        decision = Decision("none", "native LORE is already pinned to this release commit", tag=decision.tag,
+                            tag_version=decision.tag_version, pinned_version=decision.pinned_version)
     print(f"\ndecision: {decision.action}\nreason:   {decision.reason}")
 
     if decision.action == "propose" and args.write:
-        args.pyproject.write_text(rewrite_pin(text, decision.tag), encoding="utf-8")
-        print(f"\nrewrote {args.pyproject} pin -> {decision.tag}")
+        # Validate both rewrites before changing either file; locks are regenerated by CI.
+        new_manifest = rewrite_native_pin(manifest, commit)
+        new_oracle = rewrite_pin(text, commit)
+        args.native_manifest.write_text(new_manifest, encoding="utf-8")
+        args.pyproject.write_text(new_oracle, encoding="utf-8")
+        print(f"\nrewrote native and Python oracle pins -> {commit} ({decision.tag})")
 
     out = os.environ.get("GITHUB_OUTPUT")
     if out:
@@ -386,6 +404,7 @@ def main(argv: list[str] | None = None) -> int:
         with open(out, "a", encoding="utf-8") as handle:
             handle.write(line("action", decision.action))
             handle.write(line("tag", decision.tag))
+            handle.write(line("commit", commit))
             handle.write(line("tag_version", decision.tag_version))
             handle.write(line("pinned_ref", pin.ref))
             handle.write(line("pinned_version", decision.pinned_version))

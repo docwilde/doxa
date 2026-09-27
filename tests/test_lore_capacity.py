@@ -35,7 +35,15 @@ def test_shared_capacity_settings_are_allowlisted_and_explicit_environment_wins(
         key:value for key,value in before.items() if key not in KEYS}
 
 
-@pytest.mark.parametrize('invalid', [0, True, None, '-5', '0', '1.5', 'x', '1048577', '9'*50])
+def test_shared_zero_capacity_is_preserved_and_explicit_environment_wins(tmp_path, monkeypatch):
+    configure(tmp_path, monkeypatch, {'env':{key:'0' for key in KEYS}})
+    monkeypatch.setenv('LORE_USER_CAP', '15000')
+    _lore_bootstrap.export_shared_memory_caps()
+    assert {key:os.environ[key] for key in KEYS} == {
+        'LORE_MEMORY_CAP':'0', 'LORE_USER_CAP':'15000', 'LORE_MACHINE_CAP':'0'}
+
+
+@pytest.mark.parametrize('invalid', [0, True, None, '-5', '1.5', 'x', '1048577', '9'*50])
 def test_invalid_configured_capacity_is_not_exported(tmp_path, monkeypatch, invalid):
     configure(tmp_path, monkeypatch, {'env':{'LORE_MEMORY_CAP':invalid}})
     _lore_bootstrap.export_shared_memory_caps()

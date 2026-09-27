@@ -329,6 +329,8 @@ async def test_memory_tab_shows_the_shared_lore_store_read_only(
     monkeypatch, tmp_path
 ):
     monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "rt"))
+    native_root = str(tmp_path / "native-store")
+    monkeypatch.setattr("doxa.version.native_lore_info", lambda: {"root":native_root})
     monkeypatch.setattr("doxa.app.SessionEngine", lambda cwd, model=None: FakeEngine([]))
     app = DoxaApp(cwd=str(tmp_path))
     async with app.run_test() as pilot:
@@ -341,10 +343,8 @@ async def test_memory_tab_shows_the_shared_lore_store_read_only(
         notes = " ".join(str(n.renderable) for n in pane.query(".setting-note"))
         assert "Shared with the Claude Code LORE plugin" in notes
         assert "LORE_ROOT" in notes
-        import lore_core
-
         values = " | ".join(str(n.renderable) for n in pane.query(".setting-value"))
-        assert str(lore_core.ROOT) in values
+        assert native_root in values
 
 
 @pytest.mark.asyncio

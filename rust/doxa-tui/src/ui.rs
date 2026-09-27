@@ -911,7 +911,12 @@ impl SessionTelemetry {
 
 // LORE owns both curated-memory lengths and their separate scope caps.
 fn memory_fill_percent(chars: u64, cap_chars: u64) -> u64 {
+    if cap_chars == 0 { return 0; }
     chars.saturating_mul(100).saturating_add(cap_chars / 2) / cap_chars
+}
+fn memory_fill_label(chars: u64, cap_chars: u64) -> String {
+    if cap_chars == 0 { format!("{chars}/0") }
+    else { format!("{}%", memory_fill_percent(chars, cap_chars)) }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -5165,10 +5170,9 @@ impl App {
         let Some(id)=picker.rows.get(picker.selected).map(|row|row.id) else{return;};
         if self.belief_graph_lines.as_ref().is_some_and(|(selected,_)|*selected==id){self.belief_graph_lines=None;return;}
         let cwd=picker.cwd.clone();let browser=self.preferences.value("graph_view")!="ascii";
-        let python=std::env::var_os("DOXA_LORE_PYTHON").map(PathBuf::from).unwrap_or_else(||PathBuf::from("python3"));
         let(tx,rx)=mpsc::sync_channel(1);self.belief_graph_pending=Some((id,cwd.clone(),browser,rx));
         self.lore_picker.as_mut().unwrap().status="Loading LORE belief neighbourhood…".into();
-        std::thread::spawn(move||{let result=doxa_lore::LoreClient::spawn(&python,Duration::from_secs(3)).and_then(|mut client|client.belief_graph(&cwd,id,browser));let _=tx.send(result);});
+        std::thread::spawn(move||{let result=doxa_lore::LoreClient::open(Duration::from_secs(3)).and_then(|mut client|client.belief_graph(&cwd,id,browser));let _=tx.send(result);});
     }
     fn poll_belief_graph(&mut self)->bool {
         let Some((id,cwd,browser,rx))=self.belief_graph_pending.take() else{return false;};
@@ -5495,13 +5499,11 @@ impl App {
             if self.memory_cache.get(&id).is_some_and(|(_, checked)| checked.elapsed() < Duration::from_secs(60)) {
                 continue;
             }
-            let python = std::env::var_os("DOXA_LORE_PYTHON")
-                .map(PathBuf::from).unwrap_or_else(|| PathBuf::from("python3"));
             let (tx, rx) = mpsc::sync_channel(1);
             self.memory_pending = Some((id, cwd.clone(), rx));
             std::thread::spawn(move || {
                 let (scope, repo) = crate::memory_menu::scope_path(Path::new(&cwd));
-                let usage = scope.to_str().and_then(|scope| doxa_lore::LoreClient::spawn(&python, Duration::from_secs(2))
+                let usage = scope.to_str().and_then(|scope| doxa_lore::LoreClient::open(Duration::from_secs(2))
                     .and_then(|mut lore| lore.memory_usage(scope)).ok())
                     .map(|usage| (usage, repo));
                 let _ = tx.send(usage);
@@ -5741,8 +5743,10 @@ impl App {
                 picker.status = match resolution {
                     doxa_lore::PendingResolution::Approved => "Proposal approved and archived".into(),
                     doxa_lore::PendingResolution::Rejected => "Proposal rejected and archived".into(),
+                    doxa_lore::PendingResolution::Indeterminate { code } =>
+                        { urgent_resolution = true; format!("Proposal may have applied ({code}); recovery required, do not retry automatically") },
                     doxa_lore::PendingResolution::Refused { code, applied: true } =>
-                        { urgent_resolution = true; format!("Applied, but archive failed ({code}); do not retry automatically") },
+                        { urgent_resolution = true; format!("Applied; finalization failed ({code}); do not retry automatically") },
                     doxa_lore::PendingResolution::Refused { code, applied: false } =>
                         format!("Resolution refused: {code}"),
                 };
@@ -7320,10 +7324,10 @@ impl App {
         let absolute=if self.preferences.on("ctx_absolute") && self.size.width>=100 {telemetry.and_then(|v|v.context_tokens).map(|used|format!(" {used}/{}",telemetry.and_then(|v|v.context_limit).map(|n|n.to_string()).unwrap_or_else(||"?".into()))).unwrap_or_default()} else {String::new()};
         chips.push(("context",format!("Ctx {context}{absolute}")));
         let memory = self.memory_cache.get(id.unwrap_or("")).and_then(|(usage, _)| *usage)
-            .map(|usage| format!("{} {}%/u {}%",
+            .map(|usage| format!("{} {}/u {}",
                 if self.memory_repo.get(id.unwrap_or("")).copied().unwrap_or(false) { "p" } else { "f" },
-                memory_fill_percent(usage.project_chars, usage.project_cap_chars),
-                memory_fill_percent(usage.user_chars, usage.user_cap_chars)))
+                memory_fill_label(usage.project_chars, usage.project_cap_chars),
+                memory_fill_label(usage.user_chars, usage.user_cap_chars)))
             .unwrap_or_else(|| "u ? · scope ?".to_owned());
         chips.push(("memory", memory));
         let beliefs = telemetry.and_then(|value| value.lore.as_deref())
@@ -10660,7 +10664,7 @@ for line in sys.stdin:
         let mut permissions = std::fs::metadata(&sidecar).unwrap().permissions();
         permissions.set_mode(0o700);
         std::fs::set_permissions(&sidecar, permissions).unwrap();
-        let lore_picker::ResultPage::BeliefReview(review, true) = lore_picker::fetch(&sidecar,
+        let lore_picker::ResultPage::BeliefReview(review, true) = lore_picker::fetch_fixture(&sidecar,
             lore_picker::Query::BeliefReview("/repo".into(), 7)).unwrap() else { panic!("review") };
         review
     }
@@ -10951,6 +10955,25 @@ for line in sys.stdin:
         assert!(!app.memory_cache.contains_key("s"));
         assert_eq!(app.chips(0).iter().find(|(kind, _)| *kind == "memory").unwrap().1,
             "u ? · scope ?");
+    }
+
+    #[test]
+    fn zero_capacity_memory_chip_shows_explicit_usage_and_never_divides_by_zero() {
+        assert_eq!(memory_fill_percent(0,0),0);
+        assert_eq!(memory_fill_percent(16,0),0);
+        assert_eq!(memory_fill_percent(u64::MAX,0),0);
+        let mut app=App::default();
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"s","cwd":"/repo"}));
+        for (project_chars,project_cap,user_chars,user_cap,label) in [
+            (16,0,12,0,"p 16/0/u 12/0"),
+            (0,0,0,0,"p 0/0/u 0/0"),
+            (0,0,80,200,"p 0/0/u 40%"),
+            (401,1000,12,0,"p 40%/u 12/0"),
+            (401,1000,80,200,"p 40%/u 40%"),
+        ] {
+            app.set_lore_memory_usage("s",project_chars,project_cap,user_chars,user_cap);
+            assert_eq!(app.chips(0).iter().find(|(kind,_)|*kind=="memory").unwrap().1,label);
+        }
     }
 
     #[test]
@@ -15130,7 +15153,7 @@ for line in sys.stdin:
         let mut permissions = std::fs::metadata(&sidecar).unwrap().permissions();
         permissions.set_mode(0o700);
         std::fs::set_permissions(&sidecar, permissions).unwrap();
-        let lore_picker::ResultPage::Review(review, can_resolve) = lore_picker::fetch(&sidecar,
+        let lore_picker::ResultPage::Review(review, can_resolve) = lore_picker::fetch_fixture(&sidecar,
             lore_picker::Query::Review("/repo".into(), "one".into())).unwrap() else { panic!("review") };
         assert!(can_resolve);
         let mut app = App::default();
@@ -15340,6 +15363,24 @@ for line in sys.stdin:
             else { assert!(app.notice.contains("attach:") || app.notice.contains("unavailable")); }
             assert!(app.pending_prompts.is_empty());
         }
+    }
+
+    #[test]
+    fn indeterminate_lore_resolution_disarms_review_and_requires_recovery() {
+        let mut app = App::default();
+        app.open_pending_picker();
+        let (tx, rx) = mpsc::sync_channel(1);
+        let picker = app.lore_picker.as_mut().unwrap();
+        picker.pending = Some(rx);
+        picker.resolving = true;
+        tx.send(Ok(lore_picker::ResultPage::Resolved(
+            doxa_lore::PendingResolution::Indeterminate { code: "archive_failed".into() }))).unwrap();
+        assert!(app.poll_lore());
+        assert!(app.notice.contains("may have applied"));
+        assert!(app.notice.contains("recovery required"));
+        let picker = app.lore_picker.as_ref().unwrap();
+        assert!(picker.pending.is_none() && picker.review.is_none() && picker.armed_resolution.is_none());
+        assert!(picker.proposals.is_empty() && !picker.resolving);
     }
 
     #[test]

@@ -62,7 +62,7 @@ from pathlib import Path
 
 from . import _lore_bootstrap  # noqa: F401 -- sys.path shim, see that module
 
-from lore_core.config import PROJECTS_DIR, project_slug
+from . import native_lore
 
 from .identity import valid_session_id
 
@@ -148,7 +148,14 @@ def transcript_path(session_id: str, cwd: str) -> "Path | None":
     if not valid_session_id(session_id):
         return None
     try:
-        return PROJECTS_DIR / project_slug(cwd or ".") / f"{session_id}.jsonl"
+        directory = Path(cwd or ".").absolute()
+        identity = native_lore.request("transcript_identity", cwd=str(directory))
+        root, slug = Path(identity["projects_dir"]), identity["slug"]
+        if (not root.is_absolute() or not isinstance(slug, str) or not slug
+                or len(slug) > 255 or slug in (".", "..")
+                or "/" in slug or "\\" in slug or any(ord(char) < 32 for char in slug)):
+            return None
+        return root / slug / f"{session_id}.jsonl"
     except Exception:  # noqa: BLE001 -- a path we cannot build is "no transcript"
         return None
 

@@ -28,6 +28,7 @@ has not gone away: a run with no interactive terminal to ask.
 from __future__ import annotations
 
 import json
+from contextlib import closing
 import os
 import re
 import subprocess
@@ -211,19 +212,29 @@ def _cli_isolation_check() -> Check:
 
 
 def _lore_store_check() -> Check:
-    try:
-        import lore_core
-        from lore_core import store as lore_store
+    from . import _lore_bootstrap
+    from .native_lore import Carrier, NativeLoreError
 
-        root = lore_core.ROOT
-        conn = lore_store.db_connect()
-        count = conn.execute(
-            "SELECT count(*) FROM beliefs WHERE status = 'active'"
-        ).fetchone()[0]
-    except Exception as exc:  # noqa: BLE001 -- a broken store is information
+    try:
+        _lore_bootstrap.export_sticky_lore_root()
+        with closing(Carrier(timeout=1.0)) as client:
+            value = client.request("store_status_v1")
+            if not isinstance(value, dict):
+                raise NativeLoreError("invalid_native_frame")
+            root = value.get("root")
+            count = value.get("active_beliefs")
+            version = value.get("version")
+            if (not isinstance(root, str) or not 0 < len(root) <= 4096
+                    or not Path(root).is_absolute()
+                    or any(ord(char) < 32 or ord(char) == 127 for char in root)
+                    or type(count) is not int or not 0 <= count < 2**64
+                    or not isinstance(version, str) or not 0 < len(version) <= 128
+                    or any(ord(char) < 32 or ord(char) == 127 for char in version)):
+                raise NativeLoreError("invalid_native_frame")
+    except Exception:  # diagnostic failures never display backend exception data
         return Check(
             id="lore-store", title="LORE store", status=STATUS_FAIL,
-            detail=f"could not open the store: {type(exc).__name__}: {exc}",
+            detail="native LORE store unavailable",
             fix="run /setup to choose or create a LORE store",
         )
     return Check(

@@ -38,22 +38,20 @@ def kill_handle(handle):
 
 
 def fixture(tmp_path):
-    package = tmp_path / "lore_core"
-    package.mkdir()
-    (package / "__init__.py").write_text("")
-    (package / "deriver.py").write_text('''
-import json, os, subprocess, sys, time
-def worker_run(path):
-    job = json.loads(path.read_text())
-    child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
-    from pathlib import Path
-    Path(job['ready']).write_text(json.dumps([os.getpid(), child.pid]))
-    while not Path(job['release']).exists(): time.sleep(.01)
-    return 0
+    binary = tmp_path / "lore-rs"
+    binary.write_text(f"#!{sys.executable}\n" + '''import json, os, subprocess, sys, time
+from pathlib import Path
+assert sys.argv[1:] == ['review-worker', '--engine', 'claude']
+metadata = json.loads(sys.stdin.readline())
+assert metadata['session_id'] == 'owned'
+assert 'agent' not in metadata and 'source_engine' not in metadata
+child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
+root = Path(metadata['cwd'])
+(root / 'ready').write_text(json.dumps([os.getpid(), child.pid]))
+while not (root / 'release').exists(): time.sleep(.01)
 ''')
-    job = tmp_path / "job.json"
-    job.write_text(json.dumps({"ready": str(tmp_path / "ready"), "release": str(tmp_path / "release")}))
-    return job
+    binary.chmod(0o700)
+    return {"cwd":str(tmp_path), "session_id":"owned", "transcript":str(tmp_path / "owned.jsonl"), "older":True}
 
 
 def wait_ready(tmp_path):
@@ -68,18 +66,19 @@ def wait_ready(tmp_path):
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux stable process handles")
 @pytest.mark.parametrize("abrupt_parent_death", [False, True])
-def test_review_worker_and_provider_end_with_owner_or_success(tmp_path, abrupt_parent_death):
-    job = fixture(tmp_path)
+def test_review_worker_and_provider_end_with_owner_or_success(tmp_path, monkeypatch, abrupt_parent_death):
+    metadata = fixture(tmp_path)
+    monkeypatch.setenv("DOXA_LORE_RS", str(tmp_path / "lore-rs"))
     # This parent holds the supervisor's private control writer. SIGKILL
     # closes it without running Python finally/atexit, like a killed sidecar.
     script = '''
 import subprocess, sys
-p = subprocess.Popen([sys.executable, '-I', sys.argv[1], sys.argv[2], sys.argv[3]],
+p = subprocess.Popen([sys.executable, '-I', sys.argv[1], 'claude', sys.argv[2]],
     stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     start_new_session=True)
 sys.exit(p.wait())
 '''
-    parent = subprocess.Popen([sys.executable, "-I", "-c", script, str(SUPERVISOR), str(job), str(tmp_path)])
+    parent = subprocess.Popen([sys.executable, "-I", "-c", script, str(SUPERVISOR), json.dumps(metadata)])
     handles = []
     try:
         handles = [pidfd_open(pid) for pid in wait_ready(tmp_path)]
@@ -98,6 +97,43 @@ sys.exit(p.wait())
             parent.kill()
             parent.wait()
         for handle in handles:
+            if not select.select([handle], [], [], 0)[0]:
+                kill_handle(handle)
+            os.close(handle)
+
+
+def test_review_supervisor_bounds_blocked_metadata_writer(tmp_path, monkeypatch):
+    binary = tmp_path / "lore-rs"
+    binary.write_text(f"#!{sys.executable}\n" + '''import os, sys, time
+from pathlib import Path
+Path(os.environ['OWNED_READY']).write_text(str(os.getpid()))
+time.sleep(30)
+''')
+    binary.chmod(0o700)
+    monkeypatch.setenv("DOXA_LORE_RS", str(binary))
+    monkeypatch.setenv("OWNED_READY", str(tmp_path / "ready"))
+    code = '''import json, sys
+from doxa.review_worker import supervise
+sys.exit(supervise(json.loads(sys.argv[1]), 'claude', timeout=.15))
+'''
+    metadata = {"cwd":str(tmp_path), "session_id":"owned", "transcript":"x" * 12000}
+    started = time.monotonic()
+    process = subprocess.Popen([sys.executable, "-c", code, json.dumps(metadata)],
+        stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    handle = None
+    try:
+        deadline = time.monotonic()+2
+        while not (tmp_path / "ready").exists() and time.monotonic()<deadline:
+            time.sleep(.005)
+        handle = pidfd_open(int((tmp_path / "ready").read_text()))
+        assert process.wait(timeout=2) == 1
+        assert time.monotonic()-started < 2
+        assert select.select([handle], [], [], .5)[0]
+    finally:
+        process.stdin.close()
+        if process.poll() is None:
+            process.kill(); process.wait()
+        if handle is not None:
             if not select.select([handle], [], [], 0)[0]:
                 kill_handle(handle)
             os.close(handle)

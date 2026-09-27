@@ -143,9 +143,9 @@ from typing import Any, Callable, Protocol
 
 from . import _lore_bootstrap  # noqa: F401 -- sys.path shim, see that module
 
-from lore_core import store as lore_store
-from lore_core.config import PROJECTS_DIR, project_slug
-from lore_core.scrub import scrub_secrets
+
+from . import native_lore as native_lore_mod
+from .native_lore import scrub as scrub_secrets
 
 from . import budget as budget_mod
 from . import peerdelivery as peerdelivery_mod
@@ -721,20 +721,20 @@ def operator_tools(ctx: "dict | None" = None) -> "list[dict]":
     every import."""
     from .operators import OPERATORS, WRITE_OPERATORS, configured_names
 
+    from .native_lore import LORE_TOOLS
     allowed = configured_names(ctx) if ctx is not None else None
-    return [
-        {
-            "type": "function",
-            "function": {
-                "name": op.name,
-                "description": f"{op.description} [cost: {op.cost}]"
+    native = ctx.get("native_lore") if ctx is not None else None
+    rows = [{"type":"function", "function":{"name":row["name"],
+        "description":row["description"], "parameters":row["inputSchema"]}}
+        for row in native.tools()] if native is not None else []
+    rows.extend({
+        "type":"function", "function":{"name":op.name,
+            "description":f"{op.description} [cost: {op.cost}]"
                 + ("" if op.read_only else f" [write: {op.write_note}]"),
-                "parameters": op.parameters,
-            },
-        }
+            "parameters":op.parameters}}
         for op in list(OPERATORS.values()) + list(WRITE_OPERATORS.values())
-        if allowed is None or op.name in allowed
-    ]
+        if (allowed is None or op.name in allowed) and (ctx is None or op.name not in LORE_TOOLS))
+    return rows
 
 
 # -- the transport -----------------------------------------------------
@@ -1061,7 +1061,7 @@ class ChatApiEngine:
         # attach to, and spawn_daemon would time out waiting for a field
         # that was never going to appear. None in-process.
         self.daemon_socket = daemon_socket or None
-        self.slug = project_slug(self.cwd)
+        self._projects_dir, self.slug = native_lore_mod.transcript_identity(self.cwd)
         # NO environment is captured here, and that is the guarantee, not
         # an omission: an injectable env dict would be a credential stored
         # on the handle, reachable from vars(), a repr or a pickle. The
@@ -1182,9 +1182,10 @@ class ChatApiEngine:
         self._gate: Any = None
         self._tools: "list[dict]" = []
         self._finalized = False
+        self._native_belief_count = 0
         self._started = False
 
-        transcript_dir = PROJECTS_DIR / self.slug
+        transcript_dir = self._projects_dir / self.slug
         transcript_dir.mkdir(parents=True, exist_ok=True)
         self.transcript_path = transcript_dir / f"{self.session_id}.jsonl"
         #: The conversation, verbatim, beside the transcript. The LORE
@@ -1285,6 +1286,7 @@ class ChatApiEngine:
         # keeps what it returns.
         self._started = True
 
+        self._native_agent = None
         # The tool surface. Imported lazily (it pulls claude_agent_sdk),
         # and a failure narrows this HANDLE's capability map rather than
         # leaving the class-level map promising a surface this session
@@ -1293,13 +1295,17 @@ class ChatApiEngine:
         try:
             from .gate import OperatorContext, ToolGate, repo_root_of
 
+            from .native_lore import Agent
+            self._native_agent = Agent(session_id=self.session_id, cwd=self.cwd,
+                engine=self.spec.engine_id, spawn_depth=self.spawn_depth) if self.lore else None
             self._gate = ToolGate(
                 allowed=None,
                 op_ctx=OperatorContext(
                     session_id=self.session_id,
                     cwd=self.cwd,
                     repo_root=repo_root_of(self.cwd),
-                    belief_store=lore_store.db_connect,
+                    belief_store=None,
+                    native_lore=self._native_lore_tool,
                     source_engine=self.spec.engine_id,
                     spawn_depth=self.spawn_depth,
                     # No channel to ask a human on and no spawn from this
@@ -1321,8 +1327,8 @@ class ChatApiEngine:
             # is a tool the model cannot call.
             ctx: dict = {"peer_send": self._peer_delivery.tool_send}
             if self.lore:
-                ctx["belief_store"] = lore_store.db_connect
-                ctx["lore_root"] = self.lore_root
+                self._native_agent.tools()
+                ctx["native_lore"] = self._native_agent
             self._tools = operator_tools(ctx)
             # The gate executes only what the model was offered: a lore_*
             # name the model produces from training rather than from the
@@ -1385,15 +1391,20 @@ class ChatApiEngine:
                 pass
             self.peer_host = None
         indexed = 0
-        try:
-            conn = lore_store.db_connect()
-            added, _consumed = lore_store.index_live(conn, self.transcript_path)
-            indexed = added
-        except Exception:  # noqa: BLE001 -- an index failure never blocks quit
-            pass
+        if self.lore:
+            try:
+                result = native_lore_mod.request("index_transcript_v1", cwd=self.cwd,
+                    session_id=self.session_id)
+                indexed = int(result.get("indexed", 0))
+            except Exception:  # noqa: BLE001 -- an index failure never blocks quit
+                pass
+        belief_count = self.belief_count()
+        if self._native_agent is not None:
+            self._native_agent.carrier.close()
+            self._native_agent = None
         return EngineEvent("session_done", {
             "indexed": indexed,
-            "belief_count": self.belief_count(),
+            "belief_count": belief_count,
             "review": "skipped -- the LORE review is not wired for this engine",
         })
 
@@ -1409,12 +1420,10 @@ class ChatApiEngine:
         snapshot current as a conversation runs -- is done by rebuilding
         this message on every turn instead, which is strictly fresher than
         the throttled refresh the hook performs."""
-        from lore_core import context as lore_context
-
         snapshot = ""
         if self.lore:
             try:
-                snapshot = lore_context.build_context(self.cwd) or ""
+                snapshot = native_lore_mod.request("snapshot", cwd=self.cwd, scope="all")
             except Exception:  # noqa: BLE001 -- a LORE store that cannot be read
                 # is a session without memory, not a session that cannot run.
                 snapshot = ""
@@ -1862,6 +1871,16 @@ class ChatApiEngine:
             result = await result
         return result if isinstance(result, dict) else {"result": result}
 
+    async def _native_lore_tool(self, name: str, arguments: dict) -> Any:
+        from .native_lore import NativeLoreError
+        agent = getattr(self, "_native_agent", None)
+        if not self.lore or agent is None:
+            return {"error": "LORE memory is unavailable in this session"}
+        try:
+            return await asyncio.to_thread(agent.call, name, arguments)
+        except NativeLoreError:
+            return {"error": f"{name} failed: native LORE unavailable"}
+
     def _on_tool_disabled(self, name: str, reason: str) -> None:
         """The two-strikes tracker removed a tool. Out-of-band, because it
         fires from inside a tool execution rather than at a yield point."""
@@ -2090,16 +2109,14 @@ class ChatApiEngine:
         }
 
     def belief_count(self) -> int:
-        """The same COUNT(*) SessionEngine runs. The belief store is the
-        PROJECT's, not the engine's, so this tab's chip shows the real
-        number rather than a zero that would read as "this session has no
-        memory"."""
+        if not self.lore:
+            return 0
+        if self._native_agent is None:
+            return getattr(self, "_native_belief_count", 0)
         try:
-            conn = lore_store.db_connect()
-            return conn.execute(
-                "SELECT count(*) FROM beliefs WHERE status = 'active'"
-            ).fetchone()[0]
-        except Exception:  # noqa: BLE001
+            self._native_belief_count = self._native_agent.status().get("belief_count") or 0
+            return self._native_belief_count
+        except native_lore_mod.NativeLoreError:
             return 0
 
     def disabled_tools(self) -> "list[str]":
@@ -2389,6 +2406,4 @@ def _peer_title(prompt: str) -> str:
 def lore_root_path() -> str:
     """Where LORE keeps its store, for the ``lore_root`` attribute the
     status surfaces read off any engine handle."""
-    from lore_core.config import ROOT
-
-    return str(ROOT)
+    return native_lore_mod.root_path()

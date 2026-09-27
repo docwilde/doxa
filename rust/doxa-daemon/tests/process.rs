@@ -9,6 +9,75 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+struct NativeDaemonCommand(Command);
+fn daemon_command() -> NativeDaemonCommand {
+    NativeDaemonCommand(Command::new(env!("CARGO_BIN_EXE_doxa-daemon")))
+}
+impl NativeDaemonCommand {
+    fn args<I,S>(&mut self,args:I)->&mut Self where I:IntoIterator<Item=S>,S:AsRef<std::ffi::OsStr> {self.0.args(args);self}
+    fn env<K,V>(&mut self,key:K,value:V)->&mut Self where K:AsRef<std::ffi::OsStr>,V:AsRef<std::ffi::OsStr> {self.0.env(key,value);self}
+    fn env_remove<K:AsRef<std::ffi::OsStr>>(&mut self,key:K)->&mut Self {self.0.env_remove(key);self}
+    fn stdout(&mut self,value:Stdio)->&mut Self {self.0.stdout(value);self}
+    fn stderr(&mut self,value:Stdio)->&mut Self {self.0.stderr(value);self}
+    fn current_dir<P:AsRef<Path>>(&mut self,path:P)->&mut Self {self.0.current_dir(path);self}
+    fn isolate(&mut self) {
+        let args:Vec<_>=self.0.get_args().map(|s|s.to_os_string()).collect();
+        let position=args.iter().position(|arg|arg=="--runtime-dir").expect("owned runtime argument");
+        let runtime=PathBuf::from(&args[position+1]);
+        for (key,value) in [("HOME",runtime.join("fixture-home")),("DOXA_HOME",runtime.join("home")),
+            ("CLAUDE_CONFIG_DIR",runtime.join("fixture-claude")),("CODEX_HOME",runtime.join("fixture-codex")),
+            ("LORE_ROOT",runtime.join("native-lore")),("LORE_PROJECTS_DIR",runtime.join("native-projects")),
+            ("LORE_CODEX_SESSIONS_DIR",runtime.join("native-codex-sessions")),("LORE_SKILLS_DIR",runtime.join("native-skills"))] {
+            if !self.0.get_envs().any(|(name,_)|name==key) {self.0.env(key,value);}
+        }
+        self.0.env("LORE_DISABLE_SYNC","1").env("LORE_DISABLE_REVIEW","1");
+    }
+    fn spawn(&mut self)->std::io::Result<Child> {self.isolate();self.0.spawn()}
+    fn output(&mut self)->std::io::Result<std::process::Output> {self.isolate();self.0.output()}
+}
+fn native_transcript_dir(runtime:&Path)->PathBuf {
+    // These Codex/vendor fixtures have deliberately non-Git cwd equal to their
+    // owned runtime. The canonical native project identity is that literal cwd.
+    let slug:String=runtime.to_string_lossy().chars().map(|c|if c.is_ascii_alphanumeric(){c}else{'-'}).collect();
+    runtime.join("native-projects").join(slug)
+}
+fn native_transcript(runtime:&Path,name:&str)->PathBuf {native_transcript_dir(runtime).join(name)}
+fn native_memory_fixture(runtime:&Path,body:&str) {
+    let root=runtime.join("native-lore");fs::create_dir_all(&root).unwrap();
+    fs::set_permissions(&root,fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(root.join("USER.md"),body).unwrap();
+    fs::set_permissions(root.join("USER.md"),fs::Permissions::from_mode(0o600)).unwrap();
+}
+fn native_role_count(path:&Path,role:&str)->usize {
+    fs::read_to_string(path).unwrap_or_default().lines().filter_map(|line|serde_json::from_str::<Value>(line).ok()).filter(|row|row["type"]==role).count()
+}
+fn native_db_rows(runtime:&Path)->usize {
+    let output=Command::new("/usr/bin/python3").args(["-c",r#"import sqlite3,sys
+try:
+ c=sqlite3.connect('file:'+sys.argv[1]+'?mode=ro',uri=True,timeout=.2)
+ print(c.execute('SELECT count(*) FROM msg').fetchone()[0])
+except sqlite3.Error: print(0)
+"#]).arg(runtime.join("native-lore/state.db")).output().unwrap();
+    assert!(output.status.success());String::from_utf8(output.stdout).unwrap().trim().parse().unwrap()
+}
+struct NativeWriterLock(Child);
+impl NativeWriterLock {
+    fn acquire(runtime:&Path)->Self {
+        let root=runtime.join("native-lore");fs::create_dir_all(&root).unwrap();
+        fs::set_permissions(&root,fs::Permissions::from_mode(0o700)).unwrap();
+        let ready=runtime.join("native-writer-ready");
+        let child=Command::new("/usr/bin/python3").args(["-c",r#"import sqlite3,sys,pathlib
+c=sqlite3.connect(sys.argv[1]);c.execute('PRAGMA journal_mode=WAL');c.execute('BEGIN IMMEDIATE')
+pathlib.Path(sys.argv[2]).write_text('locked')
+sys.stdin.readline();c.rollback();c.close()
+"#]).arg(root.join("state.db")).arg(&ready).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
+        let lock=Self(child);
+        wait_until(||ready.exists());lock
+    }
+    fn release(&mut self) {self.0.stdin.take();wait_until(||self.0.try_wait().unwrap().is_some());}
+}
+impl Drop for NativeWriterLock {fn drop(&mut self){let _=self.0.kill();let _=self.0.wait();}}
+
 #[track_caller]
 fn wait_until(mut predicate: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -27,10 +96,10 @@ struct Process {
 }
 impl Process {
     fn start(runtime: &Path, linger: &str) -> Self {
-        Self::start_in(runtime, Path::new("/tmp"), linger)
+        Self::start_in(runtime, runtime, linger)
     }
     fn start_in(runtime: &Path, cwd: &Path, linger: &str) -> Self {
-        let child = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+        let child = daemon_command()
             .args([
                 "--runtime-dir",
                 runtime.to_str().unwrap(),
@@ -63,7 +132,7 @@ impl Process {
         Self::start_codex_with_inbound(runtime, codex, python, false)
     }
     fn start_codex_appserver(runtime: &Path, codex: &Path, python: &Path, resume: bool) -> Self {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"));
+        let mut command = daemon_command();
         command.args([
             "--runtime-dir", runtime.to_str().unwrap(), "--cwd", runtime.to_str().unwrap(),
             "--session-id", "codex-session", "--linger", "10", "--engine", "codex",
@@ -80,7 +149,7 @@ impl Process {
         Self { child, registry, socket: PathBuf::from(entry["daemon_socket"].as_str().unwrap()) }
     }
     fn start_codex_with_inbound(runtime: &Path, codex: &Path, python: &Path, inbound: bool) -> Self {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"));
+        let mut command = daemon_command();
         command
             .args([
                 "--runtime-dir",
@@ -118,7 +187,7 @@ impl Process {
         Self::start_claude_with_budget(runtime, script, None)
     }
     fn start_claude_with_budget(runtime: &Path, script: &Path, budget: Option<&str>) -> Self {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"));
+        let mut command = daemon_command();
         command
             .args([
                 "--runtime-dir",
@@ -234,7 +303,7 @@ fn daemon_runs_in_managed_worktree_and_cleans_it_on_real_exit() {
     fs::write(main.join("README"), "seed\n").unwrap();
     git(&["add", "README"]);
     git(&["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "test: seed"]);
-    let mut child = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+    let mut child = daemon_command()
         .args(["--runtime-dir", runtime.to_str().unwrap(), "--cwd", main.to_str().unwrap(),
             "--session-id", "session123", "--linger", "10"])
         .env("DOXA_HOME", &home).env("DOXA_WORKTREE", "1")
@@ -252,7 +321,7 @@ fn daemon_runs_in_managed_worktree_and_cleans_it_on_real_exit() {
     assert!(!home.join("worktrees/.meta/repo-session1.json").exists());
     assert!(!registry.exists());
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+    let mut child = daemon_command()
         .args(["--runtime-dir", runtime.to_str().unwrap(), "--cwd", main.to_str().unwrap(),
             "--session-id", "session234", "--linger", "10"])
         .env("DOXA_HOME", &home).env("DOXA_WORKTREE", "1")
@@ -289,7 +358,7 @@ fn requested_base_branch_is_honored_and_invalid_requests_never_fall_back() {
     git(&["checkout", "-q", "main"]);
     let args = ["--runtime-dir", runtime.to_str().unwrap(), "--cwd", main.to_str().unwrap(),
         "--session-id", "branch123", "--linger", "10", "--base-branch", "feature"];
-    let mut child = Command::new(env!("CARGO_BIN_EXE_doxa-daemon")).args(args)
+    let mut child = daemon_command().args(args)
         .env("DOXA_HOME", &home).env("DOXA_WORKTREE", "1")
         .stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
     let registry = runtime.join("registry/branch123.json");
@@ -303,14 +372,14 @@ fn requested_base_branch_is_honored_and_invalid_requests_never_fall_back() {
     wait_until(|| child.try_wait().unwrap().is_some());
 
     for bad in ["missing", "--output=/tmp/unsafe"] {
-        let result = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+        let result = daemon_command()
             .args(["--runtime-dir", runtime.to_str().unwrap(), "--cwd", main.to_str().unwrap(),
                 "--session-id", "badbranch", "--base-branch", bad])
             .env("DOXA_HOME", &home).env("DOXA_WORKTREE", "1").output().unwrap();
         assert!(!result.status.success());
         assert!(!runtime.join("registry/badbranch.json").exists());
     }
-    let disabled = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+    let disabled = daemon_command()
         .args(["--runtime-dir", runtime.to_str().unwrap(), "--cwd", main.to_str().unwrap(),
             "--session-id", "badbranch", "--base-branch", "feature"])
         .env("DOXA_HOME", &home).env("DOXA_WORKTREE", "0").output().unwrap();
@@ -336,7 +405,7 @@ fn managed_worktree_conflict_refuses_to_start_in_original_checkout() {
 
     let args = ["--runtime-dir", runtime.to_str().unwrap(), "--cwd", main.to_str().unwrap(),
         "--session-id", "conflict123", "--linger", "10"];
-    let rejected = Command::new(env!("CARGO_BIN_EXE_doxa-daemon")).args(args)
+    let rejected = daemon_command().args(args)
         .env("DOXA_HOME", &home).env("DOXA_WORKTREE", "1").output().unwrap();
     assert!(!rejected.status.success());
     assert!(String::from_utf8_lossy(&rejected.stderr).contains("managed worktree unavailable"));
@@ -344,7 +413,7 @@ fn managed_worktree_conflict_refuses_to_start_in_original_checkout() {
     assert_eq!(fs::read_to_string(main.join("README")).unwrap(), "seed\n");
 
     // Explicitly disabling managed worktrees still permits the launch directory.
-    let mut allowed = Command::new(env!("CARGO_BIN_EXE_doxa-daemon")).args(args)
+    let mut allowed = daemon_command().args(args)
         .env("DOXA_HOME", &home).env("DOXA_WORKTREE", "0")
         .stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
     let registry = runtime.join("registry/conflict123.json");
@@ -357,7 +426,7 @@ fn managed_worktree_conflict_refuses_to_start_in_original_checkout() {
     // A plain directory has no Git checkout to isolate, so it remains usable.
     let plain = dir.path().join("plain");
     fs::create_dir(&plain).unwrap();
-    let mut non_git = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+    let mut non_git = daemon_command()
         .args(["--runtime-dir", runtime.to_str().unwrap(), "--cwd", plain.to_str().unwrap(),
             "--session-id", "nogit123", "--linger", "10"])
         .env("DOXA_HOME", &home).env("DOXA_WORKTREE", "1")
@@ -375,55 +444,6 @@ fn executable(path: &Path, body: &str) {
     perms.set_mode(0o700);
     fs::set_permissions(path, perms).unwrap();
 }
-fn fake_scrubber(path: &Path, fail: bool) {
-    let mode = if fail { "True" } else { "False" };
-    executable(
-        path,
-        &format!(
-            r#"#!/usr/bin/env python3
-import json, sys
-print(json.dumps({{"type":"hello","proto":1,"capabilities":["scrub","snapshot","transcript_identity"]}}), flush=True)
-for line in sys.stdin:
-    frame = json.loads(line)
-    if frame.get("op") == "transcript_identity":
-        print(json.dumps({{"type":"reply","id":frame["id"],"ok":True,"value":{{"projects_dir":frame["cwd"],"slug":"project"}}}}), flush=True)
-    elif {mode} and "fixture-secret" in frame.get("text", ""):
-        print(json.dumps({{"type":"reply","id":frame["id"],"ok":False,"error":"operation_failed"}}), flush=True)
-    else:
-        print(json.dumps({{"type":"reply","id":frame["id"],"ok":True,"text":frame.get("text", "").replace("fixture-secret", "[redacted]")}}), flush=True)
-"#
-        ),
-    );
-}
-
-fn fake_context_sidecar(path: &Path, snapshot_available: bool) {
-    let snapshot_reply = if snapshot_available {
-        r#"{"ok":True,"text":"fixture-secret durable memory"}"#
-    } else {
-        r#"{"ok":False,"error":"operation_failed"}"#
-    };
-    executable(
-        path,
-        &format!(
-            r#"#!/usr/bin/env python3
-import json, sys
-print(json.dumps({{"type":"hello","proto":1,"capabilities":["scrub","snapshot","transcript_identity"]}}), flush=True)
-for line in sys.stdin:
-    frame = json.loads(line)
-    op = frame.get("op")
-    if op == "transcript_identity":
-        reply = {{"ok":True,"value":{{"projects_dir":frame["cwd"],"slug":"project"}}}}
-    elif op == "snapshot":
-        assert frame["scope"] == "all"
-        reply = {snapshot_reply}
-    else:
-        reply = {{"ok":True,"text":frame.get("text", "").replace("fixture-secret", "[redacted]")}}
-    print(json.dumps({{"type":"reply","id":frame["id"],**reply}}), flush=True)
-"#
-        ),
-    );
-}
-
 fn registry_peer(runtime: &Path, id: &str, scope: &str, title: &str) -> (UnixListener, PathBuf) {
     let socket = runtime.join(format!("{id}.sock"));
     let listener = UnixListener::bind(&socket).unwrap();
@@ -533,8 +553,8 @@ fn concurrent_process_cannot_claim_same_session_and_lock_survives_restart() {
     let dir = tempfile::tempdir().unwrap();
     let mut first = Process::start(dir.path(), "10");
     let owner = first.entry();
-    let second = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
-        .args(["--runtime-dir", dir.path().to_str().unwrap(), "--cwd", "/tmp",
+    let second = daemon_command()
+        .args(["--runtime-dir", dir.path().to_str().unwrap(), "--cwd", dir.path().to_str().unwrap(),
             "--session-id", "fixture-session", "--linger", "10"])
         .env("DOXA_HOME", dir.path().join("home"))
         .output().unwrap();
@@ -572,7 +592,7 @@ fn legacy_registry_entry_blocks_resume_before_claude_host_starts() {
     let sidecar = dir.path().join("claude-sidecar.py");
     fs::write(&sidecar, format!("from pathlib import Path\nPath({}).write_text('opened')\n",
         serde_json::to_string(marker.to_str().unwrap()).unwrap())).unwrap();
-    let run_resume = || Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+    let run_resume = || daemon_command()
         .args(["--runtime-dir", dir.path().join("runtime").to_str().unwrap(),
             "--cwd", dir.path().to_str().unwrap(), "--session-id", "legacy-session",
             "--engine", "claude", "--claude-python", "/usr/bin/python3",
@@ -603,7 +623,7 @@ fn missing_unowned_resume_directory_refuses_before_claude_host_starts() {
     let sidecar = dir.path().join("claude-sidecar.py");
     fs::write(&sidecar, format!("from pathlib import Path\nPath({}).write_text('opened')\n",
         serde_json::to_string(marker.to_str().unwrap()).unwrap())).unwrap();
-    let result = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+    let result = daemon_command()
         .args(["--runtime-dir", dir.path().join("runtime").to_str().unwrap(),
             "--cwd", missing.to_str().unwrap(), "--session-id", "saved-session",
             "--engine", "claude", "--claude-python", "/usr/bin/python3",
@@ -652,7 +672,7 @@ for line in sys.stdin:
     print(json.dumps({'type':'reply','id':request['id'],'ok':True,
         'result':{'data':{'model':'fixture'},'permission_mode':'default'}}), flush=True)
 "#).unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+    let mut child = daemon_command()
         .args(["--runtime-dir", runtime.to_str().unwrap(), "--cwd", checkout.to_str().unwrap(),
             "--session-id", "saved123-session", "--engine", "claude",
             "--claude-python", "/usr/bin/python3", "--claude-script", script.to_str().unwrap(),
@@ -739,7 +759,7 @@ fn stop_during_rearmed_linger_exits_once() {
 #[test]
 fn rejects_traversal_and_existing_registry() {
     let dir = tempfile::tempdir().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+    let output = daemon_command()
         .args([
             "--runtime-dir",
             dir.path().to_str().unwrap(),
@@ -751,7 +771,7 @@ fn rejects_traversal_and_existing_registry() {
     assert!(!output.status.success());
     assert!(!dir.path().join("bad.json").exists());
     let mut process = Process::start(dir.path(), "10");
-    let output = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+    let output = daemon_command()
         .args([
             "--runtime-dir",
             dir.path().to_str().unwrap(),
@@ -771,7 +791,7 @@ fn rejects_traversal_and_existing_registry() {
 #[test]
 fn rejects_inbound_turn_starting_without_lore_before_binding() {
     let dir = tempfile::tempdir().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+    let output = daemon_command()
         .args(["--runtime-dir", dir.path().to_str().unwrap(), "--session-id", "fleet-slot"])
         .env("DOXA_PEER_INBOUND_TURNS", "yes")
         .output().unwrap();
@@ -784,7 +804,7 @@ fn rejects_inbound_turn_starting_without_lore_before_binding() {
 fn rejects_invalid_ceiling_before_binding() {
     let dir = tempfile::tempdir().unwrap();
     for value in ["NaN", "-2", "not-a-number"] {
-        let output = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+        let output = daemon_command()
             .args(["--runtime-dir", dir.path().to_str().unwrap(), "--session-id", "fleet-slot"])
             .env("DOXA_SESSION_BUDGET_USD", value)
             .output().unwrap();
@@ -797,12 +817,11 @@ fn rejects_invalid_ceiling_before_binding() {
 fn rejects_budgeted_codex_without_selected_price_basis() {
     let dir = tempfile::tempdir().unwrap();
     let codex = dir.path().join("codex-fixture");
-    let python = dir.path().join("lore-fixture");
+    let python = Path::new("/usr/bin/python3");
     executable(&codex, "#!/bin/sh\nexit 0\n");
-    fake_scrubber(&python, false);
     for (model, expected) in [(None, "budgeted Codex session requires a priced model"),
         (Some("gpt-reserve"), "no native budget price for selected Codex model")] {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"));
+        let mut command = daemon_command();
         command.args(["--runtime-dir", dir.path().to_str().unwrap(), "--session-id", "fleet-slot",
             "--engine", "codex", "--codex-bin", codex.to_str().unwrap(),
             "--lore-python", python.to_str().unwrap()])
@@ -819,9 +838,8 @@ fn rejects_budgeted_codex_without_selected_price_basis() {
 #[test]
 fn rejects_unpriced_vendor_budget_before_binding() {
     let dir = tempfile::tempdir().unwrap();
-    let python = dir.path().join("lore-fixture");
-    fake_scrubber(&python, false);
-    let output = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+    let python = Path::new("/usr/bin/python3");
+    let output = daemon_command()
         .args(["--runtime-dir", dir.path().to_str().unwrap(), "--session-id", "fleet-slot",
             "--engine", "glm", "--model", "glm-5-turbo", "--lore-python", python.to_str().unwrap()])
         .env("DOXA_SESSION_BUDGET_USD", "1.0")
@@ -835,10 +853,9 @@ fn rejects_unpriced_vendor_budget_before_binding() {
 fn codex_host_resumes_and_scrubs_provider_events() {
     let dir = tempfile::tempdir().unwrap();
     let codex = dir.path().join("codex-fixture");
-    let python = dir.path().join("lore-fixture");
+    let python = Path::new("/usr/bin/python3");
     let args = dir.path().join("argv.txt");
     let prompt = dir.path().join("prompt.txt");
-    fake_scrubber(&python, false);
     executable(
         &codex,
         &format!(
@@ -847,7 +864,7 @@ printf '%s\n' "$@" >> '{}'
 echo END >> '{}'
 cat >> '{}'
 echo '{{"type":"thread.started","thread_id":"thread_1"}}'
-echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"fixture-secret answer"}}}}'
+echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"sk-ownedCanonicalFixtureSecret1234567890 answer"}}}}'
 "#,
             args.display(),
             args.display(),
@@ -859,13 +876,13 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"fixture-
     let (mut reader, mut socket) = process.connect();
     assert_eq!(receive(&mut reader)["engine"], "codex");
     send(&mut socket, json!({"type":"attach","cursor":null}));
-    for (id, text) in [(1, "fixture-secret first prompt"), (2, "second prompt")] {
+    for (id, text) in [(1, "sk-ownedCanonicalFixtureSecret1234567890 first prompt"), (2, "second prompt")] {
         send(&mut socket, json!({"type":"prompt","id":id,"text":text}));
         assert_eq!(receive(&mut reader)["ok"], true);
         let mut kinds = Vec::new();
         loop {
             let frame = receive(&mut reader);
-            assert!(!frame.to_string().contains("fixture-secret"));
+            assert!(!frame.to_string().contains("sk-ownedCanonicalFixtureSecret1234567890"));
             let event = &frame["event"];
             if event["type"] != "prompt_dequeued" {
                 kinds.push(event["type"].as_str().unwrap().to_owned());
@@ -873,11 +890,11 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"fixture-
             if event["type"] == "turn_started" {
                 assert_eq!(
                     event["data"]["prompt"],
-                    text.replace("fixture-secret", "[redacted]")
+                    text.replace("sk-ownedCanonicalFixtureSecret1234567890", "[REDACTED:api-key]")
                 );
             }
             if event["type"] == "text_delta" {
-                assert_eq!(event["data"]["text"], "[redacted] answer");
+                assert_eq!(event["data"]["text"], "[REDACTED:api-key] answer");
             }
             if event["type"] == "turn_done" {
                 assert_eq!(event["data"]["is_error"], false);
@@ -888,10 +905,10 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"fixture-
     }
     let argv = fs::read_to_string(args).unwrap();
     assert!(argv.contains("exec\nresume\nthread_1\n"));
-    assert_eq!(
-        fs::read_to_string(prompt).unwrap(),
-        "fixture-secret first promptsecond prompt"
-    );
+    let provider_stdin=fs::read_to_string(prompt).unwrap();
+    assert!(provider_stdin.starts_with("[DOXA MEMORY -- not typed by the user]"));
+    assert!(provider_stdin.ends_with("[END OF MEMORY]\n\nsk-ownedCanonicalFixtureSecret1234567890 first promptsecond prompt"));
+    assert_eq!(provider_stdin.matches("[DOXA MEMORY -- not typed by the user]").count(),1);
     send(
         &mut socket,
         json!({"type":"call","id":3,"method":"stop","params":{}}),
@@ -902,140 +919,63 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"fixture-
 
 #[test]
 fn codex_host_indexes_completed_turn_and_finalized_transcript() {
-    let dir = tempfile::tempdir().unwrap();
-    let codex = dir.path().join("codex-fixture");
-    let python = dir.path().join("lore-fixture");
-    let index_log = dir.path().join("index-requests.jsonl");
-    let index_done = dir.path().join("index-done");
-    executable(
-        &python,
-        &format!(
-            r#"#!/usr/bin/env python3
-import json, sys, time
-print(json.dumps({{"type":"hello","proto":1,"capabilities":["scrub","snapshot","transcript_identity","index_transcript_v1"]}}), flush=True)
-for line in sys.stdin:
-    frame = json.loads(line)
-    op = frame["op"]
-    if op == "transcript_identity":
-        value = {{"projects_dir":frame["cwd"],"slug":"project"}}
-        reply = {{"value":value}}
-    elif op == "index_transcript_v1":
-        with open({:?}, "a") as out:
-            out.write(json.dumps(frame) + "\n")
-        time.sleep(0.8)
-        open({:?}, "w").close()
-        reply = {{"value":{{"indexed":2,"consumed":2}}}}
-    else:
-        reply = {{"text":frame.get("text", "")}}
-    print(json.dumps({{"type":"reply","id":frame["id"],"ok":True,**reply}}), flush=True)
-"#,
-            index_log.to_str().unwrap(),
-            index_done.to_str().unwrap()
-        ),
-    );
-    executable(
-        &codex,
-        "#!/bin/sh\ncat >/dev/null\necho '{\"type\":\"thread.started\",\"thread_id\":\"thread_1\"}'\necho '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"answer\"}}'\n",
-    );
-    let mut process = Process::start_codex(dir.path(), &codex, &python);
-    let (mut reader, mut socket) = process.connect();
-    receive(&mut reader);
-    send(&mut socket, json!({"type":"attach","cursor":null}));
-    send(&mut socket, json!({"type":"prompt","id":1,"text":"hello"}));
-    assert_eq!(receive(&mut reader)["ok"], true);
-    loop {
-        if receive(&mut reader)["event"]["type"] == "turn_done" {
-            break;
-        }
-    }
-    wait_until(|| index_log.exists());
-    // The sidecar is still indexing. Completion must already be visible to
-    // the runtime rather than keeping the session busy for its round trip.
-    send(&mut socket, json!({"type":"call","id":3,"method":"status","params":{}}));
-    assert_eq!(receive(&mut reader)["status"]["running"], false);
-    assert!(!index_done.exists(), "turn completion waited for LORE indexing");
-    send(&mut socket, json!({"type":"call","id":2,"method":"stop","params":{}}));
-    assert_eq!(receive(&mut reader)["ok"], true);
-    wait_until(|| process.exited());
-    let rows: Vec<Value> = fs::read_to_string(index_log)
-        .unwrap()
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
-    assert_eq!(rows.len(), 2);
-    for row in rows {
-        assert_eq!(row["op"], "index_transcript_v1");
-        assert_eq!(row["cwd"], dir.path().to_str().unwrap());
-        assert_eq!(row["session_id"], "codex-session");
-        assert!(row.get("path").is_none());
-    }
+    let dir=tempfile::tempdir().unwrap();let codex=dir.path().join("codex-fixture");
+    let python=Path::new("/usr/bin/python3");
+    executable(&codex,"#!/bin/sh\ncat >/dev/null\necho '{\"type\":\"thread.started\",\"thread_id\":\"thread_1\"}'\necho '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"answer\"}}'\n");
+    native_memory_fixture(dir.path(),"- poisoned optional context\n");
+    let source=dir.path().join("native-lore/USER.md");fs::remove_file(&source).unwrap();
+    let target=dir.path().join("unused-context-target");
+    fs::write(&target,"- owned context must never be followed\n").unwrap();
+    std::os::unix::fs::symlink(&target,&source).unwrap();
+    let mut lock=NativeWriterLock::acquire(dir.path());
+    let mut process=Process::start_codex(dir.path(),&codex,python);
+    let (mut reader,mut socket)=process.connect();receive(&mut reader);
+    send(&mut socket,json!({"type":"attach","cursor":null}));
+    send(&mut socket,json!({"type":"prompt","id":1,"text":"hello"}));assert_eq!(receive(&mut reader)["ok"],true);
+    loop {let frame=receive(&mut reader);if frame["event"]["type"]=="turn_done" {assert_eq!(frame["event"]["data"]["is_error"],false);break;}}
+    send(&mut socket,json!({"type":"call","id":3,"method":"status","params":{}}));
+    assert_eq!(receive(&mut reader)["status"]["running"],false);
+    assert_eq!(native_db_rows(dir.path()),0,"held native writer must block indexing, not turn completion");
+    lock.release();wait_until(||native_db_rows(dir.path())==2);
+    send(&mut socket,json!({"type":"call","id":2,"method":"stop","params":{}}));assert_eq!(receive(&mut reader)["ok"],true);wait_until(||process.exited());
+    assert_eq!(native_db_rows(dir.path()),2,"finalization must not duplicate native indexed messages");
 }
 
 #[test]
 fn blocked_codex_index_does_not_delay_scrubbing_or_disable_later_turns() {
-    let dir = tempfile::tempdir().unwrap();
-    let codex = dir.path().join("codex-fixture");
-    let python = dir.path().join("lore-fixture");
-    let index_pid = dir.path().join("index-pid");
-    executable(&python, &format!(r#"#!/usr/bin/env python3
-import json, os, sys, time
-print(json.dumps({{"type":"hello","proto":1,"capabilities":["scrub","snapshot","transcript_identity","index_transcript_v1"]}}), flush=True)
-for line in sys.stdin:
-    frame = json.loads(line)
-    if frame["op"] == "transcript_identity":
-        reply = {{"value":{{"projects_dir":frame["cwd"],"slug":"project"}}}}
-    elif frame["op"] == "index_transcript_v1":
-        open({:?}, "w").write(str(os.getpid()))
-        time.sleep(30)
-        reply = {{"value":{{"indexed":1,"consumed":1}}}}
-    else:
-        reply = {{"text":frame.get("text", "").replace("fixture-secret", "[redacted]")}}
-    print(json.dumps({{"type":"reply","id":frame["id"],"ok":True,**reply}}), flush=True)
-"#, index_pid.to_str().unwrap()));
-    executable(&codex, "#!/bin/sh\ncat >/dev/null\necho '{\"type\":\"thread.started\",\"thread_id\":\"thread_1\"}'\necho '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"fixture-secret answer\"}}'\n");
-    let mut process = Process::start_codex(dir.path(), &codex, &python);
-    let (mut reader, mut socket) = process.connect();
-    receive(&mut reader);
-    send(&mut socket, json!({"type":"attach","cursor":null}));
-    let mut turn = |id| {
-        let started = Instant::now();
-        send(&mut socket, json!({"type":"prompt","id":id,"text":"fixture-secret hello"}));
-        assert_eq!(receive(&mut reader)["ok"], true);
-        loop {
-            let frame = receive(&mut reader);
-            assert!(!frame.to_string().contains("fixture-secret"), "unscrubbed display event");
-            if frame["event"]["type"] == "turn_done" {
-                assert_eq!(frame["event"]["data"]["is_error"], false, "{frame}");
-                break;
-            }
-        }
-        assert!(started.elapsed() < Duration::from_secs(2), "optional index delayed mandatory scrub");
+    let dir=tempfile::tempdir().unwrap();let codex=dir.path().join("codex-fixture");
+    executable(&codex,"#!/bin/sh\ncat >/dev/null\necho '{\"type\":\"thread.started\",\"thread_id\":\"thread_1\"}'\necho '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"sk-ownedCanonicalFixtureSecret1234567890 answer\"}}'\n");
+    native_memory_fixture(dir.path(),"- poisoned optional context\n");
+    let source=dir.path().join("native-lore/USER.md");fs::remove_file(&source).unwrap();
+    let target=dir.path().join("unused-context-target");
+    fs::write(&target,"- owned context must never be followed\n").unwrap();
+    std::os::unix::fs::symlink(&target,&source).unwrap();
+    let mut lock=NativeWriterLock::acquire(dir.path());
+    let mut process=Process::start_codex(dir.path(),&codex,Path::new("/usr/bin/python3"));
+    let (mut reader,mut socket)=process.connect();receive(&mut reader);send(&mut socket,json!({"type":"attach","cursor":null}));
+    let mut turn=|id| {
+        let start=Instant::now();send(&mut socket,json!({"type":"prompt","id":id,"text":"sk-ownedCanonicalFixtureSecret1234567890 hello"}));assert_eq!(receive(&mut reader)["ok"],true);
+        loop {let frame=receive(&mut reader);assert!(!frame.to_string().contains("sk-ownedCanonicalFixtureSecret1234567890"));if frame["event"]["type"]=="turn_done" {assert_eq!(frame["event"]["data"]["is_error"],false,"{frame}");break;}}
+        assert!(start.elapsed()<Duration::from_secs(2),"optional native indexing delayed mandatory scrub");
     };
-    turn(1);
-    wait_until(|| index_pid.exists());
-    let pid: i32 = fs::read_to_string(&index_pid).unwrap().parse().unwrap();
-    // This turn scrubs and persists while the index sidecar is blocked.
-    turn(2);
-    // The bounded index request must time out and reap only its own sidecar.
-    wait_until(|| unsafe { libc::kill(pid, 0) } == -1);
-    turn(3);
-    drop(turn);
-    let transcript = fs::read_to_string(dir.path().join("project/codex-session.jsonl")).unwrap();
-    assert!(!transcript.contains("fixture-secret"));
-    assert_eq!(transcript.lines().filter(|line| line.contains("\"type\":\"user\"")).count(), 3);
-    send(&mut socket, json!({"type":"call","id":4,"method":"stop","params":{}}));
-    assert_eq!(receive(&mut reader)["ok"], true);
-    wait_until(|| process.exited());
+    turn(1);turn(2);assert_eq!(native_db_rows(dir.path()),0);
+    // The native SQLite busy deadline must expire while the provider/scrub
+    // paths remain available; there is no Python child to kill anymore.
+    thread::sleep(Duration::from_secs(6));turn(3);drop(turn);
+    lock.release();wait_until(||native_db_rows(dir.path())==6);
+    let transcript=fs::read_to_string(native_transcript(dir.path(),"codex-session.jsonl")).unwrap();
+    assert!(!transcript.contains("sk-ownedCanonicalFixtureSecret1234567890"));assert_eq!(native_role_count(&native_transcript(dir.path(),"codex-session.jsonl"),"user"),3);
+    send(&mut socket,json!({"type":"call","id":4,"method":"stop","params":{}}));assert_eq!(receive(&mut reader)["ok"],true);wait_until(||process.exited());
 }
 
 #[test]
 fn codex_memory_reaches_only_first_provider_stdin_and_not_transcript() {
     let dir = tempfile::tempdir().unwrap();
     let codex = dir.path().join("codex-fixture");
-    let python = dir.path().join("lore-fixture");
+    let python = Path::new("/usr/bin/python3");
     let first = dir.path().join("first-prompt.txt");
     let resumed = dir.path().join("resumed-prompts.txt");
-    fake_context_sidecar(&python, true);
+    native_memory_fixture(dir.path(), "- durable memory\n");
     executable(
         &codex,
         &format!(
@@ -1058,16 +998,16 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"answer"}
     let (mut reader, mut socket) = process.connect();
     receive(&mut reader);
     send(&mut socket, json!({"type":"attach","cursor":null}));
-    for (id, prompt) in [(1, "fixture-secret first"), (2, "second")] {
+    for (id, prompt) in [(1, "sk-ownedCanonicalFixtureSecret1234567890 first"), (2, "second")] {
         send(&mut socket, json!({"type":"prompt","id":id,"text":prompt}));
         assert_eq!(receive(&mut reader)["ok"], true);
         loop {
             let frame = receive(&mut reader);
-            assert!(!frame.to_string().contains("fixture-secret"));
+            assert!(!frame.to_string().contains("sk-ownedCanonicalFixtureSecret1234567890"));
             if frame["event"]["type"] == "turn_started" {
                 assert_eq!(
                     frame["event"]["data"]["prompt"],
-                    prompt.replace("fixture-secret", "[redacted]")
+                    prompt.replace("sk-ownedCanonicalFixtureSecret1234567890", "[REDACTED:api-key]")
                 );
             }
             if frame["event"]["type"] == "turn_done" {
@@ -1102,26 +1042,31 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"answer"}
 
     let first_text = fs::read_to_string(first).unwrap();
     assert!(first_text.starts_with("[DOXA MEMORY -- not typed by the user]"));
+    assert!(first_text.contains("durable memory"));
     assert!(first_text
-        .contains("fixture-secret durable memory\n[END OF MEMORY]\n\nfixture-secret first"));
+        .ends_with("[END OF MEMORY]\n\nsk-ownedCanonicalFixtureSecret1234567890 first"));
     assert_eq!(
         fs::read_to_string(resumed).unwrap(),
         "second\nEND\nthird\nEND\n"
     );
-    let transcript = fs::read_to_string(dir.path().join("project/codex-session.jsonl")).unwrap();
+    let transcript = fs::read_to_string(native_transcript(dir.path(), "codex-session.jsonl")).unwrap();
     assert!(!transcript.contains("DOXA MEMORY"));
     assert!(!transcript.contains("durable memory"));
-    assert!(!transcript.contains("fixture-secret"));
-    assert!(transcript.contains("[redacted] first"));
+    assert!(!transcript.contains("sk-ownedCanonicalFixtureSecret1234567890"));
+    assert!(transcript.contains("[REDACTED:api-key] first"));
 }
 
 #[test]
 fn unavailable_lore_snapshot_does_not_block_a_scrubbable_codex_turn() {
     let dir = tempfile::tempdir().unwrap();
     let codex = dir.path().join("codex-fixture");
-    let python = dir.path().join("lore-fixture");
+    let python = Path::new("/usr/bin/python3");
     let captured = dir.path().join("stdin.txt");
-    fake_context_sidecar(&python, false);
+    native_memory_fixture(dir.path(), "- unused memory\n");
+    let source=dir.path().join("native-lore/USER.md");fs::remove_file(&source).unwrap();
+    let target=dir.path().join("outside-memory");
+    fs::write(&target,"- outside memory must never be followed\n").unwrap();
+    std::os::unix::fs::symlink(&target,&source).unwrap();
     executable(
         &codex,
         &format!(
@@ -1135,12 +1080,12 @@ fn unavailable_lore_snapshot_does_not_block_a_scrubbable_codex_turn() {
     send(&mut socket, json!({"type":"attach","cursor":null}));
     send(
         &mut socket,
-        json!({"type":"prompt","id":1,"text":"fixture-secret prompt"}),
+        json!({"type":"prompt","id":1,"text":"sk-ownedCanonicalFixtureSecret1234567890 prompt"}),
     );
     assert_eq!(receive(&mut reader)["ok"], true);
     loop {
         let event = receive(&mut reader);
-        assert!(!event.to_string().contains("fixture-secret"));
+        assert!(!event.to_string().contains("sk-ownedCanonicalFixtureSecret1234567890"));
         if event["event"]["type"] == "turn_done" {
             assert_eq!(event["event"]["data"]["is_error"], false);
             break;
@@ -1148,7 +1093,7 @@ fn unavailable_lore_snapshot_does_not_block_a_scrubbable_codex_turn() {
     }
     assert_eq!(
         fs::read_to_string(captured).unwrap(),
-        "fixture-secret prompt"
+        "sk-ownedCanonicalFixtureSecret1234567890 prompt"
     );
     send(
         &mut socket,
@@ -1162,9 +1107,8 @@ fn unavailable_lore_snapshot_does_not_block_a_scrubbable_codex_turn() {
 fn codex_transcript_and_thread_survive_daemon_restart() {
     let dir = tempfile::tempdir().unwrap();
     let codex = dir.path().join("codex-fixture");
-    let python = dir.path().join("lore-fixture");
+    let python = Path::new("/usr/bin/python3");
     let args = dir.path().join("argv.txt");
-    fake_scrubber(&python, false);
     executable(
         &codex,
         &format!(
@@ -1172,7 +1116,7 @@ fn codex_transcript_and_thread_survive_daemon_restart() {
 printf '%s\n' "$@" >> '{}'
 cat >/dev/null
 echo '{{"type":"thread.started","thread_id":"thread_1"}}'
-echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"fixture-secret answer"}}}}'
+echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"sk-ownedCanonicalFixtureSecret1234567890 answer"}}}}'
 "#,
             args.display()
         ),
@@ -1185,8 +1129,7 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"fixture-
         if index == 1 {
             assert_eq!(
                 hello["transcript_path"],
-                dir.path()
-                    .join("project/codex-session.jsonl")
+                native_transcript(dir.path(), "codex-session.jsonl")
                     .to_str()
                     .unwrap()
             );
@@ -1195,7 +1138,7 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"fixture-
         send(&mut socket, json!({"type":"attach","cursor":null}));
         send(
             &mut socket,
-            json!({"type":"prompt","id":1,"text":format!("fixture-secret prompt {index}")}),
+            json!({"type":"prompt","id":1,"text":format!("sk-ownedCanonicalFixtureSecret1234567890 prompt {index}")}),
         );
         assert_eq!(receive(&mut reader)["ok"], true);
         loop {
@@ -1210,31 +1153,31 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"fixture-
         assert_eq!(receive(&mut reader)["ok"], true);
         wait_until(|| process.exited());
     }
-    let records: Vec<Value> = fs::read_to_string(dir.path().join("project/codex-session.jsonl"))
+    let records: Vec<Value> = fs::read_to_string(native_transcript(dir.path(), "codex-session.jsonl"))
         .unwrap()
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
     assert_eq!(records.len(), 4);
     assert_eq!(records[0]["type"], "user");
-    assert_eq!(records[0]["message"]["content"], "[redacted] prompt 0");
+    assert_eq!(records[0]["message"]["content"], "[REDACTED:api-key] prompt 0");
     assert_eq!(records[1]["type"], "assistant");
     assert_eq!(
         records[1]["message"]["content"][0]["text"],
-        "[redacted] answer"
+        "[REDACTED:api-key] answer"
     );
     assert!(records.iter().all(
-        |record| record["engine"] == "codex" && !record.to_string().contains("fixture-secret")
+        |record| record["engine"] == "codex" && !record.to_string().contains("sk-ownedCanonicalFixtureSecret1234567890")
     ));
     let thread: Value = serde_json::from_slice(
-        &fs::read(dir.path().join("project/codex-session.codex.json")).unwrap(),
+        &fs::read(native_transcript(dir.path(), "codex-session.codex.json")).unwrap(),
     )
     .unwrap();
     assert_eq!(thread["thread_id"], "thread_1");
     assert_eq!(thread["session_id"], "codex-session");
     assert_eq!(thread["turn_incomplete"], false);
     assert_eq!(thread["transcript_bytes"].as_u64(), Some(
-        fs::metadata(dir.path().join("project/codex-session.jsonl")).unwrap().len()));
+        fs::metadata(native_transcript(dir.path(), "codex-session.jsonl")).unwrap().len()));
     assert!(fs::read_to_string(args)
         .unwrap()
         .contains("exec\nresume\nthread_1\n"));
@@ -1244,35 +1187,24 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"fixture-
 fn codex_clean_checkpoint_failure_overrides_success_and_preserves_dirty_resume_guard() {
     let dir = tempfile::tempdir().unwrap();
     let codex = dir.path().join("codex-fixture");
-    let python = dir.path().join("lore-fixture");
-    executable(&codex, "#!/bin/sh\ncat >/dev/null\necho '{\"type\":\"thread.started\",\"thread_id\":\"thread_1\"}'\necho '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"answer\"}}'\n");
-    executable(&python, r#"#!/usr/bin/env python3
-import json, sys
-from pathlib import Path
-root = Path(__file__).parent
-transcript = root / 'project/codex-session.jsonl'
-fault = root / 'checkpoint-fault'
-print(json.dumps({'type':'hello','proto':1,'capabilities':['scrub','snapshot','transcript_identity']}), flush=True)
-for line in sys.stdin:
-    frame = json.loads(line)
-    if frame.get('op') == 'transcript_identity':
-        reply = {'ok':True,'value':{'projects_dir':frame['cwd'],'slug':'project'}}
-    else:
-        # Assistant persistence is finished before clean metadata scrubbing.
-        # Remove that owned file only at the checkpoint boundary: append
-        # succeeded, but the clean commit must still verify and sync its data.
-        if not fault.exists() and transcript.exists() and '"type":"assistant"' in transcript.read_text():
-            transcript.rename(root / 'saved-complete.jsonl')
-            fault.write_text('owned checkpoint fault')
-        reply = {'ok':True,'text':frame.get('text','')}
-    print(json.dumps({'type':'reply','id':frame['id'],**reply}), flush=True)
-"#);
+    let python = Path::new("/usr/bin/python3");
+    let ready=dir.path().join("checkpoint-ready");let release=dir.path().join("checkpoint-release");
+    executable(&codex,&format!("#!/bin/sh\ncat >/dev/null\necho '{{\"type\":\"thread.started\",\"thread_id\":\"thread_1\"}}'\ntouch '{}'\nattempt=0\nwhile [ ! -e '{}' ]; do attempt=$((attempt+1)); [ $attempt -le 1000 ] || exit 1; sleep .01; done\n",ready.display(),release.display()));
     let mut process = Process::start_codex(dir.path(), &codex, &python);
     let (mut reader, mut socket) = process.connect();
     receive(&mut reader);
     send(&mut socket, json!({"type":"attach","cursor":null}));
     send(&mut socket, json!({"type":"prompt","id":1,"text":"owned prompt"}));
     assert_eq!(receive(&mut reader)["ok"], true);
+    let transcript=native_transcript(dir.path(),"codex-session.jsonl");
+    // The host buffers assistant output until EOF. A successful empty answer
+    // isolates the clean checkpoint from the separately tested append failure.
+    let thread_path=native_transcript(dir.path(),"codex-session.codex.json");
+    wait_until(||ready.exists()&&native_role_count(&transcript,"user")==1
+        &&fs::read(&thread_path).ok().and_then(|bytes|serde_json::from_slice::<Value>(&bytes).ok())
+            .is_some_and(|state|state["turn_incomplete"]==true));
+    fs::rename(&transcript,dir.path().join("saved-complete.jsonl")).unwrap();
+    fs::write(dir.path().join("checkpoint-fault"),"owned checkpoint fault").unwrap();fs::write(&release,"").unwrap();
     loop {
         let frame = receive(&mut reader);
         if frame["event"]["type"] == "turn_done" {
@@ -1283,17 +1215,17 @@ for line in sys.stdin:
     }
     assert!(dir.path().join("checkpoint-fault").exists());
     let thread: Value = serde_json::from_slice(&fs::read(
-        dir.path().join("project/codex-session.codex.json")).unwrap()).unwrap();
+        native_transcript(dir.path(), "codex-session.codex.json")).unwrap()).unwrap();
     assert_eq!(thread["turn_incomplete"], true);
     assert!(thread.get("transcript_bytes").is_none());
     // Even after the complete content reappears, the failed checkpoint must
     // not become a clean/resumable turn or permit another provider execution.
     fs::rename(dir.path().join("saved-complete.jsonl"),
-               dir.path().join("project/codex-session.jsonl")).unwrap();
+               native_transcript(dir.path(), "codex-session.jsonl")).unwrap();
     send(&mut socket, json!({"type":"call","id":2,"method":"stop","params":{}}));
     assert_eq!(receive(&mut reader)["ok"], true);
     wait_until(|| process.exited());
-    let restart = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+    let restart = daemon_command()
         .args(["--runtime-dir", dir.path().to_str().unwrap(), "--cwd", dir.path().to_str().unwrap(),
             "--session-id", "codex-session", "--engine", "codex", "--codex-bin", codex.to_str().unwrap(),
             "--lore-python", python.to_str().unwrap(), "--resume", "true"])
@@ -1306,12 +1238,11 @@ for line in sys.stdin:
 fn codex_resume_refuses_changed_clean_checkpoint_before_provider_execution() {
     let dir = tempfile::tempdir().unwrap();
     let codex = dir.path().join("codex-fixture");
-    let python = dir.path().join("lore-fixture");
+    let python = Path::new("/usr/bin/python3");
     let marker = dir.path().join("unexpected-provider-start");
-    fake_scrubber(&python, false);
     executable(&codex, &format!("#!/bin/sh\ntouch '{}'\n", marker.display()));
-    let project = dir.path().join("project");
-    fs::create_dir(&project).unwrap();
+    let project = native_transcript_dir(dir.path());
+    fs::create_dir_all(&project).unwrap();
     let transcript = project.join("codex-session.jsonl");
     let original = b"{\"type\":\"user\"}\n{\"type\":\"assistant\"}\n";
     fs::write(&transcript, original).unwrap();
@@ -1321,7 +1252,7 @@ fn codex_resume_refuses_changed_clean_checkpoint_before_provider_execution() {
     }).to_string()).unwrap();
     for changed in [original[..original.len()-1].to_vec(), [original.as_slice(), b"{}\n"].concat()] {
         fs::write(&transcript, changed).unwrap();
-        let output = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+        let output = daemon_command()
             .args(["--runtime-dir", dir.path().to_str().unwrap(), "--cwd", dir.path().to_str().unwrap(),
                 "--session-id", "codex-session", "--engine", "codex", "--codex-bin", codex.to_str().unwrap(),
                 "--lore-python", python.to_str().unwrap(), "--resume", "true"])
@@ -1337,15 +1268,14 @@ fn codex_resume_refuses_changed_clean_checkpoint_before_provider_execution() {
 fn codex_prompt_append_failure_withholds_provider_execution() {
     let dir = tempfile::tempdir().unwrap();
     let codex = dir.path().join("codex-fixture");
-    let python = dir.path().join("lore-fixture");
+    let python = Path::new("/usr/bin/python3");
     let invoked = dir.path().join("provider-invoked");
-    fake_scrubber(&python, false);
     executable(&codex, &format!("#!/bin/sh\ntouch '{}'\n", invoked.display()));
     let mut process = Process::start_codex(dir.path(), &codex, &python);
     let (mut reader, mut socket) = process.connect();
     receive(&mut reader);
     send(&mut socket, json!({"type":"attach","cursor":null}));
-    let transcript = dir.path().join("project/codex-session.jsonl");
+    let transcript = native_transcript(dir.path(), "codex-session.jsonl");
     std::os::unix::fs::symlink("/dev/full", &transcript).unwrap();
     send(&mut socket, json!({"type":"prompt","id":1,"text":"hello"}));
     assert_eq!(receive(&mut reader)["ok"], true);
@@ -1380,9 +1310,8 @@ fn codex_prompt_append_failure_withholds_provider_execution() {
 fn codex_thread_write_failure_reports_turn_error_and_stops_session() {
     let dir = tempfile::tempdir().unwrap();
     let codex = dir.path().join("codex-fixture");
-    let python = dir.path().join("lore-fixture");
+    let python = Path::new("/usr/bin/python3");
     let invoked = dir.path().join("provider-invoked");
-    fake_scrubber(&python, false);
     executable(
         &codex,
         &format!(
@@ -1394,7 +1323,7 @@ fn codex_thread_write_failure_reports_turn_error_and_stops_session() {
     let (mut reader, mut socket) = process.connect();
     receive(&mut reader);
     send(&mut socket, json!({"type":"attach","cursor":null}));
-    fs::create_dir(dir.path().join("project/codex-session.codex.json")).unwrap();
+    fs::create_dir(native_transcript(dir.path(), "codex-session.codex.json")).unwrap();
     send(&mut socket, json!({"type":"prompt","id":1,"text":"hello"}));
     assert_eq!(receive(&mut reader)["ok"], true);
     loop {
@@ -1427,10 +1356,9 @@ fn codex_thread_write_failure_reports_turn_error_and_stops_session() {
 fn codex_assistant_append_failure_overrides_successful_provider_turn() {
     let dir = tempfile::tempdir().unwrap();
     let codex = dir.path().join("codex-fixture");
-    let python = dir.path().join("lore-fixture");
+    let python = Path::new("/usr/bin/python3");
     let ready = dir.path().join("provider-ready");
     let release = dir.path().join("provider-release");
-    fake_scrubber(&python, false);
     executable(
         &codex,
         &format!(
@@ -1446,8 +1374,8 @@ fn codex_assistant_append_failure_overrides_successful_provider_turn() {
     send(&mut socket, json!({"type":"prompt","id":1,"text":"hello"}));
     assert_eq!(receive(&mut reader)["ok"], true);
     wait_until(|| ready.exists());
-    let transcript = dir.path().join("project/codex-session.jsonl");
-    let saved = dir.path().join("project/saved-user.jsonl");
+    let transcript = native_transcript(dir.path(), "codex-session.jsonl");
+    let saved = native_transcript(dir.path(), "saved-user.jsonl");
     fs::rename(&transcript, &saved).unwrap();
     std::os::unix::fs::symlink("/dev/full", &transcript).unwrap();
     fs::write(&release, "").unwrap();
@@ -1464,7 +1392,7 @@ fn codex_assistant_append_failure_overrides_successful_provider_turn() {
     }
     assert!(fs::read_to_string(saved).unwrap().contains("hello"));
     let thread: Value = serde_json::from_slice(
-        &fs::read(dir.path().join("project/codex-session.codex.json")).unwrap(),
+        &fs::read(native_transcript(dir.path(), "codex-session.codex.json")).unwrap(),
     )
     .unwrap();
     assert_eq!(thread["thread_id"], "thread_1");
@@ -1472,7 +1400,7 @@ fn codex_assistant_append_failure_overrides_successful_provider_turn() {
     send(&mut socket, json!({"type":"call","id":2,"method":"stop","params":{}}));
     assert_eq!(receive(&mut reader)["ok"], true);
     wait_until(|| process.exited());
-    let restart = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+    let restart = daemon_command()
         .args([
             "--runtime-dir",
             dir.path().to_str().unwrap(),
@@ -1496,16 +1424,15 @@ fn codex_assistant_append_failure_overrides_successful_provider_turn() {
 fn existing_transcript_without_thread_id_refuses_new_codex_thread() {
     let dir = tempfile::tempdir().unwrap();
     let codex = dir.path().join("codex-fixture");
-    let python = dir.path().join("lore-fixture");
-    fake_scrubber(&python, false);
+    let python = Path::new("/usr/bin/python3");
     executable(&codex, "#!/bin/sh\necho started > should-not-start\n");
-    fs::create_dir(dir.path().join("project")).unwrap();
+    fs::create_dir_all(native_transcript_dir(dir.path())).unwrap();
     fs::write(
-        dir.path().join("project/codex-session.jsonl"),
+        native_transcript(dir.path(), "codex-session.jsonl"),
         "{\"type\":\"user\",\"engine\":\"codex\"}\n",
     )
     .unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+    let output = daemon_command()
         .args([
             "--runtime-dir",
             dir.path().to_str().unwrap(),
@@ -1531,14 +1458,13 @@ fn existing_transcript_without_thread_id_refuses_new_codex_thread() {
 fn explicit_codex_resume_requires_matching_thread_metadata() {
     let dir = tempfile::tempdir().unwrap();
     let codex = dir.path().join("codex-fixture");
-    let python = dir.path().join("lore-fixture");
-    fake_scrubber(&python, false);
+    let python = Path::new("/usr/bin/python3");
     executable(&codex, "#!/bin/sh\necho started > should-not-start\n");
-    let project = dir.path().join("project");
-    fs::create_dir(&project).unwrap();
+    let project = native_transcript_dir(dir.path());
+    fs::create_dir_all(&project).unwrap();
     let transcript = project.join("codex-session.jsonl");
     let thread = project.join("codex-session.codex.json");
-    let run = || Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+    let run = || daemon_command()
         .args(["--runtime-dir", dir.path().to_str().unwrap(),
             "--cwd", dir.path().to_str().unwrap(), "--session-id", "codex-session",
             "--engine", "codex", "--codex-bin", codex.to_str().unwrap(),
@@ -1561,7 +1487,7 @@ fn explicit_codex_resume_requires_matching_thread_metadata() {
     }
     fs::write(&thread, json!({"thread_id":"thread_1","session_id":"codex-session",
         "cwd":dir.path(),"model":null,"turn_incomplete":false}).to_string()).unwrap();
-    let mut resumed = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+    let mut resumed = daemon_command()
         .args(["--runtime-dir", dir.path().to_str().unwrap(),
             "--cwd", dir.path().to_str().unwrap(), "--session-id", "codex-session",
             "--engine", "codex", "--codex-bin", codex.to_str().unwrap(),
@@ -1577,8 +1503,7 @@ fn explicit_codex_resume_requires_matching_thread_metadata() {
 fn thread_identity_is_durable_before_turn_completes() {
     let dir = tempfile::tempdir().unwrap();
     let codex = dir.path().join("codex-fixture");
-    let python = dir.path().join("lore-fixture");
-    fake_scrubber(&python, false);
+    let python = Path::new("/usr/bin/python3");
     executable(&codex, "#!/bin/sh\ncat >/dev/null\necho '{\"type\":\"thread.started\",\"thread_id\":\"thread_early\"}'\nsleep 10\n");
     let mut process = Process::start_codex(dir.path(), &codex, &python);
     let (mut reader, mut socket) = process.connect();
@@ -1586,7 +1511,7 @@ fn thread_identity_is_durable_before_turn_completes() {
     send(&mut socket, json!({"type":"attach","cursor":null}));
     send(&mut socket, json!({"type":"prompt","id":1,"text":"hello"}));
     assert_eq!(receive(&mut reader)["ok"], true);
-    let path = dir.path().join("project/codex-session.codex.json");
+    let path = native_transcript(dir.path(), "codex-session.codex.json");
     wait_until(|| path.exists());
     let thread: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
     assert_eq!(thread["thread_id"], "thread_early");
@@ -1822,9 +1747,12 @@ for line in sys.stdin:
 fn scrub_failure_withholds_provider_content_and_fails_turn() {
     let dir = tempfile::tempdir().unwrap();
     let codex = dir.path().join("codex-fixture");
-    let python = dir.path().join("lore-fixture");
-    fake_scrubber(&python, true);
-    executable(&codex, "#!/bin/sh\ncat >/dev/null\necho '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"fixture-secret answer\"}}'\n");
+    let python = Path::new("/usr/bin/python3");
+    executable(&codex,r#"#!/usr/bin/python3
+import sys,json
+sys.stdin.read()
+print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':'sk-ownedCanonicalFixtureSecret1234567890 '+('x'*1100000)}}),flush=True)
+"#);
     let mut process = Process::start_codex(dir.path(), &codex, &python);
     let (mut reader, mut socket) = process.connect();
     receive(&mut reader);
@@ -1834,16 +1762,16 @@ fn scrub_failure_withholds_provider_content_and_fails_turn() {
     let mut frames = Vec::new();
     loop {
         let frame = receive(&mut reader);
-        assert!(!frame.to_string().contains("fixture-secret"));
+        assert!(!frame.to_string().contains("sk-ownedCanonicalFixtureSecret1234567890"));
         let done = frame["event"]["type"] == "turn_done";
         frames.push(frame);
         if done {
             break;
         }
     }
-    assert_eq!(frames.len(), 2);
-    assert_eq!(frames[1]["event"]["data"]["is_error"], true);
-    assert!(frames[1]["event"]["data"]["error"]
+    let done=frames.last().unwrap();
+    assert_eq!(done["event"]["data"]["is_error"], true);
+    assert!(done["event"]["data"]["error"]
         .as_str()
         .unwrap()
         .contains("scrub failed"));
@@ -1859,9 +1787,8 @@ fn scrub_failure_withholds_provider_content_and_fails_turn() {
 fn interrupt_reaps_codex_process_group() {
     let dir = tempfile::tempdir().unwrap();
     let codex = dir.path().join("codex-fixture");
-    let python = dir.path().join("lore-fixture");
+    let python = Path::new("/usr/bin/python3");
     let marker = dir.path().join("survived");
-    fake_scrubber(&python, false);
     executable(
         &codex,
         &format!(
@@ -1876,7 +1803,7 @@ fn interrupt_reaps_codex_process_group() {
     send(&mut socket, json!({"type":"prompt","id":1,"text":"hello"}));
     assert_eq!(receive(&mut reader)["ok"], true);
     assert_eq!(receive(&mut reader)["event"]["type"], "turn_started");
-    let thread_path = dir.path().join("project/codex-session.codex.json");
+    let thread_path = native_transcript(dir.path(), "codex-session.codex.json");
     wait_until(|| thread_path.exists());
     send(
         &mut socket,
@@ -1906,7 +1833,7 @@ fn interrupt_reaps_codex_process_group() {
     );
     assert_eq!(receive(&mut reader)["ok"], true);
     wait_until(|| process.exited());
-    let restart = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+    let restart = daemon_command()
         .args([
             "--runtime-dir", dir.path().to_str().unwrap(),
             "--cwd", dir.path().to_str().unwrap(),
@@ -1920,13 +1847,13 @@ fn interrupt_reaps_codex_process_group() {
 }
 
 #[test]
-fn missing_lore_sidecar_rejects_session_before_socket_or_registry() {
+fn invalid_native_lore_capacity_rejects_session_before_socket_or_registry() {
     let dir = tempfile::tempdir().unwrap();
     let codex = dir.path().join("codex-fixture");
-    let python = dir.path().join("broken-python");
+    let python = Path::new("/usr/bin/python3");
     executable(&codex, "#!/bin/sh\nexit 0\n");
-    executable(&python, "#!/bin/sh\nexit 1\n");
-    let output = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+
+    let output = daemon_command()
         .args([
             "--runtime-dir",
             dir.path().to_str().unwrap(),
@@ -1941,6 +1868,7 @@ fn missing_lore_sidecar_rejects_session_before_socket_or_registry() {
             "--lore-python",
             python.to_str().unwrap(),
         ])
+        .env("LORE_USER_CAP", "invalid-native-capacity")
         .output()
         .unwrap();
     assert!(!output.status.success());
@@ -1978,7 +1906,7 @@ for line in sys.stdin:
     print(json.dumps({'type':'reply','id':request['id'],'ok':True,
         'result':{'data':{'model':'fixture'},'permission_mode':'default'}}), flush=True)
 "#).unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+    let mut child = daemon_command()
         .args(["--runtime-dir", dir.path().to_str().unwrap(),
             "--cwd", dir.path().to_str().unwrap(),
             "--session-id", "venv-claude", "--engine", "claude",
@@ -2004,8 +1932,7 @@ for line in sys.stdin:
 fn queued_codex_prompt_is_scrubbed_for_other_clients() {
     let dir = tempfile::tempdir().unwrap();
     let codex = dir.path().join("codex-fixture");
-    let python = dir.path().join("lore-fixture");
-    fake_scrubber(&python, false);
+    let python = Path::new("/usr/bin/python3");
     executable(&codex, "#!/bin/sh\ncat >/dev/null\nsleep 1\necho '{\"type\":\"thread.started\",\"thread_id\":\"thread_1\"}'\n");
     let mut process = Process::start_codex(dir.path(), &codex, &python);
     let (mut first, mut first_socket) = process.connect();
@@ -2026,14 +1953,14 @@ fn queued_codex_prompt_is_scrubbed_for_other_clients() {
     wait_until(|| process.entry()["clients"] == 2);
     send(
         &mut first_socket,
-        json!({"type":"prompt","id":2,"text":"fixture-secret queued"}),
+        json!({"type":"prompt","id":2,"text":"sk-ownedCanonicalFixtureSecret1234567890 queued"}),
     );
     let reply = receive(&mut first);
     assert_eq!(reply["queued"], true);
     let event = receive(&mut second);
     assert_eq!(event["event"]["type"], "prompt_queued");
-    assert_eq!(event["event"]["data"]["text"], "[redacted] queued");
-    assert!(!event.to_string().contains("fixture-secret"));
+    assert_eq!(event["event"]["data"]["text"], "[REDACTED:api-key] queued");
+    assert!(!event.to_string().contains("sk-ownedCanonicalFixtureSecret1234567890"));
     send(
         &mut first_socket,
         json!({"type":"call","id":3,"method":"stop","params":{}}),
@@ -2046,10 +1973,9 @@ fn queued_codex_prompt_is_scrubbed_for_other_clients() {
 fn sigterm_reaps_active_codex_process_group() {
     let dir = tempfile::tempdir().unwrap();
     let codex = dir.path().join("codex-fixture");
-    let python = dir.path().join("lore-fixture");
+    let python = Path::new("/usr/bin/python3");
     let ready = dir.path().join("ready");
     let marker = dir.path().join("survived");
-    fake_scrubber(&python, false);
     executable(&codex, &format!("#!/bin/sh\ncat >/dev/null\necho ready > {}\nsh -c 'sleep 1; echo leaked > {}' &\nwait\n", ready.display(), marker.display()));
     let mut process = Process::start_codex(dir.path(), &codex, &python);
     let (mut reader, mut socket) = process.connect();
@@ -2074,10 +2000,9 @@ fn sigterm_reaps_active_codex_process_group() {
 fn registry_write_failure_reaps_active_codex_process_group() {
     let dir = tempfile::tempdir().unwrap();
     let codex = dir.path().join("codex-fixture");
-    let python = dir.path().join("lore-fixture");
+    let python = Path::new("/usr/bin/python3");
     let ready = dir.path().join("ready");
     let marker = dir.path().join("survived");
-    fake_scrubber(&python, false);
     executable(&codex, &format!("#!/bin/sh\ncat >/dev/null\necho ready > {}\nsh -c 'sleep 1; echo leaked > {}' &\nwait\n", ready.display(), marker.display()));
     let mut process = Process::start_codex(dir.path(), &codex, &python);
     let (mut reader, mut socket) = process.connect();
@@ -2117,7 +2042,7 @@ mod vendor_process {
     use super::*;
     use std::net::TcpListener;
 
-    fn fake_vendor(count: usize, answer: &'static str) -> (String, thread::JoinHandle<Vec<Value>>) {
+    fn fake_vendor(count: usize, answer: &str) -> (String, thread::JoinHandle<Vec<Value>>) {
         let body = format!("data: {{\"model\":\"resolved-model\",\"choices\":[{{\"finish_reason\":\"stop\",\"delta\":{{\"content\":\"{answer}\"}}}}],\"usage\":{{\"prompt_tokens\":3,\"completion_tokens\":4}}}}\n\ndata: [DONE]\n\n");
         fake_vendor_frames(vec![body; count])
     }
@@ -2177,11 +2102,10 @@ mod vendor_process {
     #[test]
     fn priced_vendor_budget_blocks_the_next_socket_prompt() {
         let dir = tempfile::tempdir().unwrap();
-        let lore = dir.path().join("lore-fixture");
-        fake_scrubber(&lore, false);
+        let lore = Path::new("/usr/bin/python3");
         let body = "data: {\"model\":\"deepseek-flash\",\"choices\":[{\"finish_reason\":\"stop\",\"delta\":{\"content\":\"answer\"}}],\"usage\":{\"prompt_tokens\":1000000,\"completion_tokens\":1000000}}\n\ndata: [DONE]\n\n";
         let (endpoint, server) = fake_vendor_frames(vec![body.to_owned()]);
-        let child = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+        let child = daemon_command()
             .args(["--runtime-dir", dir.path().to_str().unwrap(), "--cwd", dir.path().to_str().unwrap(),
                 "--session-id", "vendor-session", "--linger", "10", "--engine", "deepseek",
                 "--model", "deepseek-flash", "--lore-python", lore.to_str().unwrap(),
@@ -2232,7 +2156,7 @@ mod vendor_process {
         resume: bool,
         tools: bool,
     ) -> Process {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+        let mut child = daemon_command()
             .args([
                 "--runtime-dir",
                 runtime.to_str().unwrap(),
@@ -2287,32 +2211,19 @@ mod vendor_process {
             let dir = tempfile::tempdir().unwrap();
             fs::create_dir(dir.path().join("home")).unwrap();
             fs::write(dir.path().join("home/config.toml"), format!("lore = '{}'\n", if enabled { "1" } else { "0" })).unwrap();
-            let lore = dir.path().join("lore-fixture"); let calls = dir.path().join("lore-calls.jsonl");
-            executable(&lore, &format!(r#"#!/usr/bin/env python3
-import json,sys,os
-print(json.dumps({{"type":"hello","proto":1,"capabilities":["scrub","snapshot","transcript_identity","index_transcript_v1"]}}),flush=True)
-for line in sys.stdin:
-    frame=json.loads(line); op=frame["op"]
-    with open({calls:?}, "a") as log: log.write(json.dumps(frame)+"\n")
-    if op == "transcript_identity": reply={{"value":{{"projects_dir":frame["cwd"],"slug":"project"}}}}
-    elif op == "snapshot":
-        with open({calls:?}) as log: count=sum(json.loads(row)["op"] == "snapshot" for row in log)
-        reply={{"text":"PRIVATE-DURABLE-MEMORY-"+str(count)}}
-    elif op == "index_transcript_v1": reply={{"value":{{"indexed":4,"consumed":4}}}}
-    else: reply={{"text":frame.get("text","").replace("fixture-secret","[redacted]")}}
-    print(json.dumps({{"type":"reply","id":frame["id"],"ok":True,**reply}}),flush=True)
-"#, calls=calls.to_str().unwrap()));
+            let lore=Path::new("/usr/bin/python3");
+            native_memory_fixture(dir.path(), "- PRIVATE-DURABLE-MEMORY-1\n");
             let (endpoint, server) = fake_vendor(2, "answer");
             let mut process = start_vendor(dir.path(), "deepseek", &endpoint, &lore);
             let (mut reader, mut socket) = process.connect();
             assert_eq!(receive(&mut reader)["lore_enabled"], enabled);
             send(&mut socket, json!({"type":"attach","cursor":null}));
             for id in 1..=2 {
-                send(&mut socket, json!({"type":"prompt","id":id,"text":"fixture-secret question"}));
+                native_memory_fixture(dir.path(), &format!("- PRIVATE-DURABLE-MEMORY-{id}\n"));
+                send(&mut socket, json!({"type":"prompt","id":id,"text":"sk-ownedCanonicalFixtureSecret1234567890 question"}));
                 loop { let frame=receive(&mut reader); assert!(!frame.to_string().contains("PRIVATE-DURABLE-MEMORY")); if frame["event"]["type"] == "turn_done" { assert_eq!(frame["event"]["data"]["is_error"],false); break; } }
             }
-            let before: Vec<Value> = fs::read_to_string(&calls).unwrap().lines().map(|row|serde_json::from_str(row).unwrap()).collect();
-            assert!(!before.iter().any(|row|row["op"] == "index_transcript_v1"));
+            assert_eq!(native_db_rows(dir.path()),0, "vendor indexing must wait for finalization");
             send(&mut socket, json!({"type":"call","id":3,"method":"stop","params":{}}));
             assert_eq!(receive(&mut reader)["ok"], true); wait_until(|| process.exited());
             let requests = server.join().unwrap();
@@ -2322,13 +2233,11 @@ for line in sys.stdin:
                 if enabled { assert!(body["messages"][0]["content"].as_str().unwrap().contains(&format!("PRIVATE-DURABLE-MEMORY-{}",index+1))); }
                 else { assert!(!body.to_string().contains("PRIVATE-DURABLE-MEMORY")); }
             }
-            let after: Vec<Value> = fs::read_to_string(&calls).unwrap().lines().map(|row|serde_json::from_str(row).unwrap()).collect();
-            assert_eq!(after.iter().filter(|row|row["op"] == "snapshot").count(),if enabled {2}else{0});
-            assert_eq!(after.iter().filter(|row|row["op"] == "index_transcript_v1").count(),usize::from(enabled));
+            assert_eq!(native_db_rows(dir.path()),if enabled {4}else{0});
             for file in ["vendor-session.jsonl","vendor-session.messages.json"] {
-                let stored=fs::read_to_string(dir.path().join("project").join(file)).unwrap();
+                let stored=fs::read_to_string(native_transcript_dir(dir.path()).join(file)).unwrap();
                 assert!(!stored.contains("PRIVATE-DURABLE-MEMORY")); assert!(!stored.contains("DOXA session"));
-                assert!(!stored.contains("fixture-secret")); assert!(stored.contains("[redacted] question"));
+                assert!(!stored.contains("sk-ownedCanonicalFixtureSecret1234567890")); assert!(stored.contains("[REDACTED:api-key] question"));
             }
         }
     }
@@ -2337,9 +2246,8 @@ for line in sys.stdin:
     fn native_vendor_chat_preserves_scrubbed_history_usage_and_model() {
         for vendor in ["deepseek", "glm"] {
             let dir = tempfile::tempdir().unwrap();
-            let lore = dir.path().join("lore-fixture");
-            fake_scrubber(&lore, false);
-            let (endpoint, server) = fake_vendor(2, "fixture-secret answer");
+            let lore = Path::new("/usr/bin/python3");
+            let (endpoint, server) = fake_vendor(2, "sk-ownedCanonicalFixtureSecret1234567890 answer");
             let mut process = start_vendor(dir.path(), vendor, &endpoint, &lore);
             assert_eq!(process.entry()["engine"], vendor);
             let (mut reader, mut socket) = process.connect();
@@ -2357,14 +2265,14 @@ for line in sys.stdin:
             for id in 1..=2 {
                 send(
                     &mut socket,
-                    json!({"type":"prompt","id":id,"text":"fixture-secret prompt"}),
+                    json!({"type":"prompt","id":id,"text":"sk-ownedCanonicalFixtureSecret1234567890 prompt"}),
                 );
                 assert_eq!(receive(&mut reader)["ok"], true);
                 let started = receive(&mut reader);
                 assert_eq!(started["event"]["type"], "turn_started");
-                assert_eq!(started["event"]["data"]["prompt"], "[redacted] prompt");
+                assert_eq!(started["event"]["data"]["prompt"], "[REDACTED:api-key] prompt");
                 let text = receive(&mut reader);
-                assert_eq!(text["event"]["data"]["text"], "[redacted] answer", "{text}");
+                assert_eq!(text["event"]["data"]["text"], "[REDACTED:api-key] answer", "{text}");
                 let done = receive(&mut reader);
                 assert_eq!(done["event"]["type"], "turn_done");
                 assert_eq!(done["event"]["data"]["is_error"], false);
@@ -2390,11 +2298,14 @@ for line in sys.stdin:
             assert_eq!(receive(&mut reader)["ok"], true);
             wait_until(|| process.exited());
             let requests = server.join().unwrap();
-            assert!(requests.iter().all(|body| body["tools"].as_array().is_some_and(|tools|
-                tools.len()==3 && tools.iter().all(|tool|tool["function"]["name"].as_str()
-                    .is_some_and(|name|name.starts_with("mcp__doxa__peer_"))))));
-            assert_eq!(requests[1]["messages"][2]["content"], "[redacted] answer");
-            assert!(!requests[1].to_string().contains("fixture-secret"));
+            for request in &requests {
+                let mut names:Vec<_>=request["tools"].as_array().unwrap().iter()
+                    .map(|tool|tool["function"]["name"].as_str().unwrap()).collect();
+                names.sort_unstable();
+                assert_eq!(names,["lore_belief_neighbours", "lore_belief_search", "lore_belief_show", "lore_memory_list", "lore_remember", "lore_session_search", "mcp__doxa__peer_history", "mcp__doxa__peer_list", "mcp__doxa__peer_send"]);
+            }
+            assert_eq!(requests[1]["messages"][2]["content"], "[REDACTED:api-key] answer");
+            assert!(!requests[1].to_string().contains("sk-ownedCanonicalFixtureSecret1234567890"));
             // The published entry is removed at shutdown. Its private claim
             // inode remains so a later daemon cannot bypass an active flock by
             // racing a lockfile unlink/recreation.
@@ -2416,8 +2327,7 @@ for line in sys.stdin:
     fn vendor_effort_control_changes_the_next_turn_request() {
         for vendor in ["deepseek", "glm"] {
             let dir = tempfile::tempdir().unwrap();
-            let lore = dir.path().join("lore-fixture");
-            fake_scrubber(&lore, false);
+            let lore = Path::new("/usr/bin/python3");
             let (endpoint, server) = fake_vendor(2, "answer");
             let mut process = start_vendor(dir.path(), vendor, &endpoint, &lore);
             let (mut reader, mut socket) = process.connect();
@@ -2449,7 +2359,7 @@ for line in sys.stdin:
     #[test]
     fn vendor_model_control_preserves_history_and_changes_next_request() {
         let dir = tempfile::tempdir().unwrap();
-        let lore = dir.path().join("lore-fixture"); fake_scrubber(&lore, false);
+        let lore = Path::new("/usr/bin/python3");
         let (endpoint, server) = fake_vendor(2, "answer");
         let mut process = start_vendor(dir.path(), "deepseek", &endpoint, &lore);
         let (mut reader, mut socket) = process.connect();
@@ -2477,9 +2387,8 @@ for line in sys.stdin:
     #[test]
     fn vendor_workspace_read_is_opt_in_scrubbed_and_turn_local() {
         let dir = tempfile::tempdir().unwrap();
-        let lore = dir.path().join("lore-fixture");
-        fake_scrubber(&lore, false);
-        fs::write(dir.path().join("note.txt"), "fixture-secret workspace note").unwrap();
+        let lore = Path::new("/usr/bin/python3");
+        fs::write(dir.path().join("note.txt"), "sk-ownedCanonicalFixtureSecret1234567890 workspace note").unwrap();
         let tool = "data: {\"choices\":[{\"finish_reason\":\"tool_calls\",\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-1\",\"function\":{\"name\":\"workspace_read\",\"arguments\":\"{\\\"path\\\":\\\"note.txt\\\"}\"}}]}}]}\n\ndata: [DONE]\n\n";
         let answer = "data: {\"choices\":[{\"finish_reason\":\"stop\",\"delta\":{\"content\":\"Final answer\"}}]}\n\ndata: [DONE]\n\n";
         let (endpoint, server) = fake_vendor_frames(vec![tool.into(), answer.into()]);
@@ -2490,7 +2399,7 @@ for line in sys.stdin:
         send(&mut socket, json!({"type":"prompt","id":1,"text":"read note"}));
         assert_eq!(receive(&mut reader)["ok"], true);
         let started = receive(&mut reader);
-        assert_eq!(started["event"]["data"]["vendor_tools"], "workspace-read, peers");
+        assert_eq!(started["event"]["data"]["vendor_tools"], "workspace-read, peers, lore");
         assert_eq!(receive(&mut reader)["event"]["data"]["text"], "Final answer");
         assert_eq!(receive(&mut reader)["event"]["data"]["is_error"], false);
         send(&mut socket, json!({"type":"call","id":2,"method":"stop","params":{}}));
@@ -2499,9 +2408,9 @@ for line in sys.stdin:
         let requests = server.join().unwrap();
         assert_eq!(requests[0]["tools"][0]["function"]["name"], "workspace_read");
         let result = requests[1]["messages"][3]["content"].as_str().unwrap();
-        assert!(result.contains("[redacted] workspace note"));
-        assert!(!requests[1].to_string().contains("fixture-secret"));
-        let saved: Value = serde_json::from_slice(&fs::read(dir.path().join("project/vendor-session.messages.json")).unwrap()).unwrap();
+        assert!(result.contains("[REDACTED:api-key] workspace note"));
+        assert!(!requests[1].to_string().contains("sk-ownedCanonicalFixtureSecret1234567890"));
+        let saved: Value = serde_json::from_slice(&fs::read(native_transcript(dir.path(), "vendor-session.messages.json")).unwrap()).unwrap();
         assert_eq!(saved["messages"].as_array().unwrap().len(), 2);
         assert_eq!(saved["messages"][1]["content"], "Final answer");
     }
@@ -2510,16 +2419,15 @@ for line in sys.stdin:
     fn vendor_restart_replays_scrubbed_history_and_rejects_corrupt_state() {
         for vendor in ["deepseek", "glm"] {
             let dir = tempfile::tempdir().unwrap();
-            let lore = dir.path().join("lore-fixture");
-            fake_scrubber(&lore, false);
-            let (endpoint, first_server) = fake_vendor(1, "fixture-secret first");
+            let lore = Path::new("/usr/bin/python3");
+            let (endpoint, first_server) = fake_vendor(1, "sk-ownedCanonicalFixtureSecret1234567890 first");
             let mut first = start_vendor(dir.path(), vendor, &endpoint, &lore);
             let (mut reader, mut socket) = first.connect();
             receive(&mut reader);
             send(&mut socket, json!({"type":"attach","cursor":null}));
             send(
                 &mut socket,
-                json!({"type":"prompt","id":1,"text":"fixture-secret prompt"}),
+                json!({"type":"prompt","id":1,"text":"sk-ownedCanonicalFixtureSecret1234567890 prompt"}),
             );
             assert_eq!(receive(&mut reader)["ok"], true);
             for _ in 0..3 {
@@ -2532,26 +2440,26 @@ for line in sys.stdin:
             assert_eq!(receive(&mut reader)["ok"], true);
             wait_until(|| first.exited());
             first_server.join().unwrap();
-            let state = dir.path().join("project/vendor-session.messages.json");
-            let transcript = dir.path().join("project/vendor-session.jsonl");
+            let state = native_transcript(dir.path(), "vendor-session.messages.json");
+            let transcript = native_transcript(dir.path(), "vendor-session.jsonl");
             let records: Vec<Value> = fs::read_to_string(&transcript)
                 .unwrap()
                 .lines()
                 .map(|line| serde_json::from_str(line).unwrap())
                 .collect();
             assert_eq!(records.len(), 2);
-            assert_eq!(records[0]["message"]["content"], "[redacted] prompt");
+            assert_eq!(records[0]["message"]["content"], "[REDACTED:api-key] prompt");
             assert_eq!(
                 records[1]["message"]["content"][0]["text"],
-                "[redacted] first"
+                "[REDACTED:api-key] first"
             );
             assert!(records.iter().all(|record| record["engine"] == vendor));
             let saved: Value = serde_json::from_slice(&fs::read(&state).unwrap()).unwrap();
             assert_eq!(saved["engine"], vendor);
             assert_eq!(saved["session_id"], "vendor-session");
-            assert_eq!(saved["messages"][0]["content"], "[redacted] prompt");
-            assert_eq!(saved["messages"][1]["content"], "[redacted] first");
-            assert!(!saved.to_string().contains("fixture-secret"));
+            assert_eq!(saved["messages"][0]["content"], "[REDACTED:api-key] prompt");
+            assert_eq!(saved["messages"][1]["content"], "[REDACTED:api-key] first");
+            assert!(!saved.to_string().contains("sk-ownedCanonicalFixtureSecret1234567890"));
 
             let (endpoint, second_server) = fake_vendor(1, "second");
             let mut second = start_vendor_resume(dir.path(), vendor, &endpoint, &lore, true);
@@ -2581,8 +2489,8 @@ for line in sys.stdin:
             assert_eq!(receive(&mut reader)["ok"], true);
             wait_until(|| second.exited());
             let requests = second_server.join().unwrap();
-            assert_eq!(requests[0]["messages"][1]["content"], "[redacted] prompt");
-            assert_eq!(requests[0]["messages"][2]["content"], "[redacted] first");
+            assert_eq!(requests[0]["messages"][1]["content"], "[REDACTED:api-key] prompt");
+            assert_eq!(requests[0]["messages"][2]["content"], "[REDACTED:api-key] first");
             assert_eq!(requests[0]["messages"][3]["content"], "continue");
             let records: Vec<Value> = fs::read_to_string(&transcript)
                 .unwrap()
@@ -2595,7 +2503,7 @@ for line in sys.stdin:
 
             let good_transcript = fs::read(&transcript).unwrap();
             fs::write(&transcript, b"{broken\n").unwrap();
-            let output = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+            let output = daemon_command()
                 .args([
                     "--runtime-dir",
                     dir.path().to_str().unwrap(),
@@ -2618,7 +2526,7 @@ for line in sys.stdin:
             assert!(!dir.path().join("registry/vendor-session.json").exists());
             fs::write(&transcript, good_transcript).unwrap();
             fs::write(&state, b"{broken").unwrap();
-            let output = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+            let output = daemon_command()
                 .args([
                     "--runtime-dir",
                     dir.path().to_str().unwrap(),
@@ -2643,11 +2551,11 @@ for line in sys.stdin:
     }
 
     #[test]
-    fn vendor_scrub_failure_withholds_provider_text() {
+    fn native_vendor_oversized_provider_text_is_withheld_without_history_commit() {
         let dir = tempfile::tempdir().unwrap();
-        let lore = dir.path().join("lore-fixture");
-        fake_scrubber(&lore, true);
-        let (endpoint, server) = fake_vendor(1, "fixture-secret answer");
+        let lore = Path::new("/usr/bin/python3");
+        let oversized=format!("sk-ownedCanonicalFixtureSecret1234567890 {}","x".repeat(1100000));
+        let (endpoint, server) = fake_vendor(1, &oversized);
         let mut process = start_vendor(dir.path(), "deepseek", &endpoint, &lore);
         let (mut reader, mut socket) = process.connect();
         receive(&mut reader);
@@ -2658,7 +2566,7 @@ for line in sys.stdin:
         let done = receive(&mut reader);
         assert_eq!(done["event"]["type"], "turn_done");
         assert_eq!(done["event"]["data"]["is_error"], true);
-        assert!(!done.to_string().contains("fixture-secret"));
+        assert!(!done.to_string().contains("sk-ownedCanonicalFixtureSecret1234567890"));
         send(
             &mut socket,
             json!({"type":"call","id":2,"method":"stop","params":{}}),
@@ -2666,18 +2574,16 @@ for line in sys.stdin:
         assert_eq!(receive(&mut reader)["ok"], true);
         wait_until(|| process.exited());
         assert_eq!(server.join().unwrap().len(), 1);
-        assert!(!dir.path().join("project/vendor-session.jsonl").exists());
-        assert!(!dir
-            .path()
-            .join("project/vendor-session.messages.json")
+        assert!(!native_transcript(dir.path(),"vendor-session.jsonl").exists(),
+            "failed provider streams must not commit partial turns");
+        assert!(!native_transcript(dir.path(), "vendor-session.messages.json")
             .exists());
     }
 
     #[test]
     fn vendor_transcript_write_failure_poisoned_session_without_history_commit() {
         let dir = tempfile::tempdir().unwrap();
-        let lore = dir.path().join("lore-fixture");
-        fake_scrubber(&lore, false);
+        let lore = Path::new("/usr/bin/python3");
         let (endpoint, server) = fake_vendor(1, "answer");
         let mut process = start_vendor(dir.path(), "deepseek", &endpoint, &lore);
         let (mut reader, mut socket) = process.connect();
@@ -2685,7 +2591,7 @@ for line in sys.stdin:
         send(&mut socket, json!({"type":"attach","cursor":null}));
         let target = dir.path().join("outside");
         fs::write(&target, b"untouched").unwrap();
-        let transcript = dir.path().join("project/vendor-session.jsonl");
+        let transcript = native_transcript(dir.path(), "vendor-session.jsonl");
         std::os::unix::fs::symlink(&target, &transcript).unwrap();
         send(&mut socket, json!({"type":"prompt","id":1,"text":"hello"}));
         assert_eq!(receive(&mut reader)["ok"], true);
@@ -2693,9 +2599,7 @@ for line in sys.stdin:
         let done = receive(&mut reader);
         assert_eq!(done["event"]["data"]["is_error"], true);
         assert_eq!(fs::read(&target).unwrap(), b"untouched");
-        assert!(!dir
-            .path()
-            .join("project/vendor-session.messages.json")
+        assert!(!native_transcript(dir.path(), "vendor-session.messages.json")
             .exists());
         send(&mut socket, json!({"type":"prompt","id":2,"text":"again"}));
         assert_eq!(receive(&mut reader)["ok"], true);
@@ -2726,8 +2630,7 @@ for line in sys.stdin:
     #[test]
     fn vendor_interrupt_cancels_active_request() {
         let dir = tempfile::tempdir().unwrap();
-        let lore = dir.path().join("lore-fixture");
-        fake_scrubber(&lore, false);
+        let lore = Path::new("/usr/bin/python3");
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let endpoint = format!("http://{}/chat/completions", listener.local_addr().unwrap());
@@ -2770,9 +2673,8 @@ for line in sys.stdin:
     #[test]
     fn vendor_missing_credential_rejects_session_before_socket() {
         let dir = tempfile::tempdir().unwrap();
-        let lore = dir.path().join("lore-fixture");
-        fake_scrubber(&lore, false);
-        let output = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+        let lore = Path::new("/usr/bin/python3");
+        let output = daemon_command()
             .args([
                 "--runtime-dir",
                 dir.path().to_str().unwrap(),
@@ -2798,20 +2700,19 @@ for line in sys.stdin:
 fn native_peers_rpc_returns_only_scrubbed_same_scope_live_peers() {
     let dir = tempfile::tempdir().unwrap();
     let codex = dir.path().join("codex-fixture");
-    let python = dir.path().join("lore-fixture");
-    fake_scrubber(&python, false);
+    let python = Path::new("/usr/bin/python3");
     executable(&codex, "#!/bin/sh\nexit 0\n");
     let (_same_listener, same_path) = registry_peer(
         dir.path(),
         "same",
         dir.path().to_str().unwrap(),
-        "fixture-secret teammate",
+        "sk-ownedCanonicalFixtureSecret1234567890 teammate",
     );
     let (_other_listener, _) = registry_peer(
         dir.path(),
         "other",
         "/other-project",
-        "fixture-secret outsider",
+        "sk-ownedCanonicalFixtureSecret1234567890 outsider",
     );
     let before = fs::read(&same_path).unwrap();
     let mut process = Process::start_codex(dir.path(), &codex, &python);
@@ -2826,8 +2727,8 @@ fn native_peers_rpc_returns_only_scrubbed_same_scope_live_peers() {
     assert_eq!(reply["ok"], true);
     assert_eq!(reply["peers"].as_array().unwrap().len(), 1);
     assert_eq!(reply["peers"][0]["session_id"], "same");
-    assert_eq!(reply["peers"][0]["title"], "[redacted] teammate");
-    assert!(!reply.to_string().contains("fixture-secret"));
+    assert_eq!(reply["peers"][0]["title"], "[REDACTED:api-key] teammate");
+    assert!(!reply.to_string().contains("sk-ownedCanonicalFixtureSecret1234567890"));
     assert!(!reply.to_string().contains(dir.path().to_str().unwrap()));
     assert!(reply["peers"][0].get("pid").is_none());
     assert_eq!(fs::read(&same_path).unwrap(), before);
@@ -2840,79 +2741,28 @@ fn native_peers_rpc_returns_only_scrubbed_same_scope_live_peers() {
 }
 
 #[test]
-fn peers_rpc_fails_closed_without_lore_or_when_scrub_fails() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut fixture = Process::start(dir.path(), "10");
-    let (mut reader, mut socket) = fixture.connect();
-    receive(&mut reader);
-    send(&mut socket, json!({"type":"attach","cursor":null}));
-    send(
-        &mut socket,
-        json!({"type":"call","id":1,"method":"peers","params":{}}),
-    );
-    let reply = receive(&mut reader);
-    assert_eq!(reply["ok"], false);
-    assert!(reply.get("peers").is_none());
-    send(
-        &mut socket,
-        json!({"type":"call","id":2,"method":"stop","params":{}}),
-    );
-    assert_eq!(receive(&mut reader)["ok"], true);
-    wait_until(|| fixture.exited());
-
-    let codex = dir.path().join("codex-fixture");
-    let python = dir.path().join("lore-fixture");
-    fake_scrubber(&python, true);
-    executable(&codex, "#!/bin/sh\nexit 0\n");
-    let (listener, peer_entry) = registry_peer(
-        dir.path(),
-        "same",
-        dir.path().to_str().unwrap(),
-        "fixture-secret title",
-    );
-    let mut process = Process::start_codex(dir.path(), &codex, &python);
-    let (mut reader, mut socket) = process.connect();
-    receive(&mut reader);
-    send(&mut socket, json!({"type":"attach","cursor":null}));
-    send(
-        &mut socket,
-        json!({"type":"call","id":1,"method":"peers","params":{}}),
-    );
-    let reply = receive(&mut reader);
-    assert_eq!(reply["ok"], false);
-    assert!(reply.get("peers").is_none());
-    assert!(!reply.to_string().contains("fixture-secret"));
-    let mut clean_peer: Value = serde_json::from_slice(&fs::read(&peer_entry).unwrap()).unwrap();
-    clean_peer["title"] = json!("safe title");
-    fs::write(&peer_entry, serde_json::to_vec(&clean_peer).unwrap()).unwrap();
-    send(
-        &mut socket,
-        json!({"type":"call","id":3,"method":"msg",
-        "params":{"target":"same","text":"fixture-secret message"}}),
-    );
-    let rejected = receive(&mut reader);
-    assert_eq!(rejected["ok"], false);
-    assert!(!dir.path().join("home/peers/messages.jsonl").exists());
-    listener.set_nonblocking(true).unwrap();
-    while let Ok((mut connection, _)) = listener.accept() {
-        let mut bytes = Vec::new();
-        connection.read_to_end(&mut bytes).unwrap();
-        assert!(bytes.is_empty(), "scrub failure must not send a peer frame");
+fn peers_rpc_fails_closed_when_native_configuration_is_invalid() {
+    let dir=tempfile::tempdir().unwrap();
+    let (listener,_)=registry_peer(dir.path(),"same",dir.path().to_str().unwrap(),"sk-ownedCanonicalFixtureSecret1234567890 title");
+    let child=daemon_command().args(["--runtime-dir",dir.path().to_str().unwrap(),"--cwd",dir.path().to_str().unwrap(),"--session-id","fixture-session","--linger","10"])
+        .env("LORE_USER_CAP","not-a-capacity").stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
+    let registry=dir.path().join("registry/fixture-session.json");wait_until(||registry.exists());
+    let row:Value=serde_json::from_slice(&fs::read(&registry).unwrap()).unwrap();let mut process=Process{child,registry,socket:PathBuf::from(row["daemon_socket"].as_str().unwrap())};
+    let (mut reader,mut socket)=process.connect();receive(&mut reader);send(&mut socket,json!({"type":"attach","cursor":null}));
+    for (id,method,params) in [(1,"peers",json!({})),(3,"msg",json!({"target":"same","text":"sk-ownedCanonicalFixtureSecret1234567890 message"}))] {
+        send(&mut socket,json!({"type":"call","id":id,"method":method,"params":params}));let reply=receive(&mut reader);
+        assert_eq!(reply["ok"],false);assert!(reply.get("peers").is_none());assert!(!reply.to_string().contains("sk-ownedCanonicalFixtureSecret1234567890"));
     }
-    send(
-        &mut socket,
-        json!({"type":"call","id":2,"method":"stop","params":{}}),
-    );
-    assert_eq!(receive(&mut reader)["ok"], true);
-    wait_until(|| process.exited());
+    assert!(!dir.path().join("home/peers/messages.jsonl").exists());listener.set_nonblocking(true).unwrap();
+    while let Ok((mut stream,_))=listener.accept(){let mut bytes=Vec::new();stream.read_to_end(&mut bytes).unwrap();assert!(bytes.is_empty(),"native admission refusal must not deliver peer data");}
+    send(&mut socket,json!({"type":"call","id":2,"method":"stop","params":{}}));assert_eq!(receive(&mut reader)["ok"],true);wait_until(||process.exited());
 }
 
 #[test]
 fn native_msg_sends_scrubbed_frame_records_ledger_and_denies_other_scope() {
     let dir = tempfile::tempdir().unwrap();
     let codex = dir.path().join("codex-fixture");
-    let python = dir.path().join("lore-fixture");
-    fake_scrubber(&python, false);
+    let python = Path::new("/usr/bin/python3");
     executable(&codex, "#!/bin/sh\nexit 0\n");
     let (same_listener, _) =
         registry_peer(dir.path(), "same", dir.path().to_str().unwrap(), "teammate");
@@ -2925,7 +2775,7 @@ fn native_msg_sends_scrubbed_frame_records_ledger_and_denies_other_scope() {
     send(
         &mut socket,
         json!({"type":"call","id":1,"method":"msg",
-        "params":{"target":"other","text":"fixture-secret"}}),
+        "params":{"target":"other","text":"sk-ownedCanonicalFixtureSecret1234567890"}}),
     );
     let denied = receive(&mut reader);
     assert_eq!(denied["ok"], false);
@@ -2956,7 +2806,7 @@ fn native_msg_sends_scrubbed_frame_records_ledger_and_denies_other_scope() {
     send(
         &mut socket,
         json!({"type":"call","id":2,"method":"msg",
-        "params":{"target":"same","text":"fixture-secret hello"}}),
+        "params":{"target":"same","text":"sk-ownedCanonicalFixtureSecret1234567890 hello"}}),
     );
     let mut reply = Value::Null;
     let mut saw_sent = false;
@@ -2980,14 +2830,14 @@ fn native_msg_sends_scrubbed_frame_records_ledger_and_denies_other_scope() {
     assert_eq!(reply["peer"]["session_id"], "same");
     assert!(reply["peer"]["pid"].is_number());
     assert!(reply["peer"]["socket_path"].is_string());
-    assert!(!reply.to_string().contains("fixture-secret"));
+    assert!(!reply.to_string().contains("sk-ownedCanonicalFixtureSecret1234567890"));
     let wire = worker.join().unwrap();
-    assert!(wire.contains("[redacted] hello"));
-    assert!(!wire.contains("fixture-secret"));
+    assert!(wire.contains("[REDACTED:api-key] hello"));
+    assert!(!wire.contains("sk-ownedCanonicalFixtureSecret1234567890"));
     let ledger = fs::read_to_string(dir.path().join("home/peers/messages.jsonl")).unwrap();
-    assert!(ledger.contains("[redacted] hello"));
-    assert!(!ledger.contains("fixture-secret"));
-    assert!(ledger.contains("637f5a69d3b12d04bc0050df9189dc19816f42fad4163fe35770a2c33559f152"));
+    assert!(ledger.contains("[REDACTED:api-key] hello"));
+    assert!(!ledger.contains("sk-ownedCanonicalFixtureSecret1234567890"));
+    assert!(ledger.contains("66e50b5e76495eb415cb9d9d3c5e02327f188673a0f393df258fad21d6a33470"));
     send(
         &mut socket,
         json!({"type":"call","id":3,"method":"stop","params":{}}),
@@ -3005,8 +2855,7 @@ fn native_msg_sends_scrubbed_frame_records_ledger_and_denies_other_scope() {
 fn native_inbox_emits_scrubbed_peer_message_and_cleans_socket() {
     let dir = tempfile::tempdir().unwrap();
     let codex = dir.path().join("codex-fixture");
-    let python = dir.path().join("lore-fixture");
-    fake_scrubber(&python, false);
+    let python = Path::new("/usr/bin/python3");
     executable(&codex, "#!/bin/sh\nexit 0\n");
     let (_sender_listener, _) =
         registry_peer(dir.path(), "sender", dir.path().to_str().unwrap(), "sender");
@@ -3019,9 +2868,9 @@ fn native_inbox_emits_scrubbed_peer_message_and_cleans_socket() {
         &peer_socket,
         &doxa_peers::delivery::PeerFrame {
             from_id: "sender".into(),
-            from_title: "fixture-secret title".into(),
+            from_title: "sk-ownedCanonicalFixtureSecret1234567890 title".into(),
             sent_at: peer_now(),
-            body: "fixture-secret body".into(),
+            body: "sk-ownedCanonicalFixtureSecret1234567890 body".into(),
             from_repo: Some(dir.path().display().to_string()),
             kind: None,
         },
@@ -3029,8 +2878,8 @@ fn native_inbox_emits_scrubbed_peer_message_and_cleans_socket() {
     .unwrap();
     let event = receive(&mut reader);
     assert_eq!(event["event"]["type"], "peer_message");
-    assert_eq!(event["event"]["data"]["body"], "[redacted] body");
-    assert!(!event.to_string().contains("fixture-secret"));
+    assert_eq!(event["event"]["data"]["body"], "[REDACTED:api-key] body");
+    assert!(!event.to_string().contains("sk-ownedCanonicalFixtureSecret1234567890"));
     send(
         &mut socket,
         json!({"type":"call","id":4,"method":"stop","params":{}}),
@@ -3044,9 +2893,8 @@ fn native_inbox_emits_scrubbed_peer_message_and_cleans_socket() {
 fn inbound_direct_peer_starts_scrubbed_turn_but_broadcast_does_not() {
     let dir = tempfile::tempdir().unwrap();
     let codex = dir.path().join("codex-fixture");
-    let python = dir.path().join("lore-fixture");
+    let python = Path::new("/usr/bin/python3");
     let captured = dir.path().join("captured-prompt");
-    fake_scrubber(&python, false);
     executable(&codex, &format!(r#"#!/bin/sh
 cat >> '{}'
 echo '{{"type":"thread.started","thread_id":"thread_1"}}'
@@ -3059,7 +2907,7 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}
     receive(&mut reader);
     send(&mut socket, json!({"type":"attach","cursor":null}));
     let frame = |kind, body: &str| doxa_peers::delivery::PeerFrame {
-        from_id: "sender".into(), from_title: "fixture-secret title".into(),
+        from_id: "sender".into(), from_title: "sk-ownedCanonicalFixtureSecret1234567890 title".into(),
         sent_at: peer_now(), body: body.into(),
         from_repo: Some(dir.path().display().to_string()), kind,
     };
@@ -3069,7 +2917,7 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}
     let status = receive(&mut reader);
     assert_eq!(status["status"]["running"], false);
     assert_eq!(status["status"]["queued"], 0);
-    doxa_peers::delivery::send(&peer_socket, &frame(Some("direct".into()), "fixture-secret body")).unwrap();
+    doxa_peers::delivery::send(&peer_socket, &frame(Some("direct".into()), "sk-ownedCanonicalFixtureSecret1234567890 body")).unwrap();
     assert_eq!(receive(&mut reader)["event"]["type"], "peer_message");
     let mut started = false;
     loop {
@@ -3082,17 +2930,17 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}
             let prompt = event["event"]["data"]["prompt"].as_str().unwrap();
             assert!(prompt.starts_with("[PEER-STARTED TURN]"));
             assert!(prompt.contains("[PEER MESSAGES -- UNTRUSTED]"));
-            assert!(prompt.contains("[redacted] body"));
-            assert!(!prompt.contains("fixture-secret"));
+            assert!(prompt.contains("[REDACTED:api-key] body"));
+            assert!(!prompt.contains("sk-ownedCanonicalFixtureSecret1234567890"));
         }
         if event["event"]["type"] == "turn_done" { break; }
     }
     assert!(started);
     let provider_prompt = fs::read_to_string(captured).unwrap();
     assert!(provider_prompt.contains("[PEER-STARTED TURN]"));
-    assert!(provider_prompt.contains("[redacted] body"));
+    assert!(provider_prompt.contains("[REDACTED:api-key] body"));
     assert!(provider_prompt.contains("broadcast note"));
-    assert!(!provider_prompt.contains("fixture-secret"));
+    assert!(!provider_prompt.contains("sk-ownedCanonicalFixtureSecret1234567890"));
     send(&mut socket, json!({"type":"call","id":2,"method":"stop","params":{}}));
     assert_eq!(receive(&mut reader)["ok"], true);
     wait_until(|| process.exited());
@@ -3102,9 +2950,8 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}
 fn inbound_peer_uses_typed_prompt_queue_while_turn_runs() {
     let dir = tempfile::tempdir().unwrap();
     let codex = dir.path().join("codex-fixture");
-    let python = dir.path().join("lore-fixture");
+    let python = Path::new("/usr/bin/python3");
     let release = dir.path().join("release-first");
-    fake_scrubber(&python, false);
     executable(&codex, &format!(r#"#!/bin/sh
 cat >/dev/null
 if [ ! -f '{}' ]; then
@@ -3155,10 +3002,9 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}
 fn native_daemon_queue_rpc_scrubs_and_cancels_before_turn_starts() {
     let dir = tempfile::tempdir().unwrap();
     let codex = dir.path().join("codex-fixture");
-    let python = dir.path().join("lore-fixture");
+    let python = Path::new("/usr/bin/python3");
     let ready = dir.path().join("provider-ready");
     let release = dir.path().join("provider-release");
-    fake_scrubber(&python, false);
     executable(&codex, &format!(r#"#!/bin/sh
 cat >/dev/null
 touch '{}'
@@ -3174,17 +3020,17 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}
     assert_eq!(receive(&mut reader)["ok"], true);
     assert_eq!(receive(&mut reader)["event"]["type"], "turn_started");
     wait_until(|| ready.exists());
-    send(&mut socket, json!({"type":"prompt","id":2,"text":"fixture-secret queued"}));
+    send(&mut socket, json!({"type":"prompt","id":2,"text":"sk-ownedCanonicalFixtureSecret1234567890 queued"}));
     assert_eq!(receive(&mut reader)["queue_id"], "q1");
     send(&mut socket, json!({"type":"call","id":3,"method":"queue","params":{}}));
     let queued = receive(&mut reader);
-    assert_eq!(queued["queue"], json!([{"id":"q1","text":"[redacted] queued"}]));
-    assert!(!queued.to_string().contains("fixture-secret"));
+    assert_eq!(queued["queue"], json!([{"id":"q1","text":"[REDACTED:api-key] queued"}]));
+    assert!(!queued.to_string().contains("sk-ownedCanonicalFixtureSecret1234567890"));
     send(&mut socket, json!({"type":"call","id":4,"method":"cancel_queued","params":{"id":"q1"}}));
     assert_eq!(receive(&mut reader)["ok"], true);
     let cancelled = receive(&mut reader);
     assert_eq!(cancelled["event"]["type"], "prompt_cancelled");
-    assert_eq!(cancelled["event"]["data"]["text"], "[redacted] queued");
+    assert_eq!(cancelled["event"]["data"]["text"], "[REDACTED:api-key] queued");
     send(&mut socket, json!({"type":"call","id":5,"method":"queue","params":{}}));
     assert_eq!(receive(&mut reader)["queue"], json!([]));
     fs::write(&release, "go").unwrap();
@@ -3206,9 +3052,8 @@ fn codex_appserver_default_streams_persists_and_resumes() {
     std::fs::create_dir_all(&cache).unwrap();
     let dir = tempfile::tempdir_in(cache).unwrap();
     let codex = dir.path().join("codex-appserver-fixture");
-    let python = dir.path().join("lore-fixture");
+    let python = Path::new("/usr/bin/python3");
     let log = dir.path().join("methods.log");
-    fake_scrubber(&python, false);
     let script = r#"#!/usr/bin/env python3
 import json, sys, tomllib
 
@@ -3236,14 +3081,14 @@ log.write(thread['method']+'\n'); log.flush()
 assert thread['method'] in ('thread/start','thread/resume')
 send({'id':thread['id'],'result':{'thread':{'id':'thread-1'},'model':'gpt-test'}})
 turn=read(); assert turn['method']=='turn/start'
-assert 'fixture-secret' in turn['params']['input'][0]['text']
+assert 'sk-ownedCanonicalFixtureSecret1234567890' in turn['params']['input'][0]['text']
 if 'second' in turn['params']['input'][0]['text']:
     assert turn['params']['model']=='gpt-test' and turn['params']['effort']=='high'
 send({'id':turn['id'],'result':{'turn':{'id':'turn_1'}}})
-send({'method':'item/reasoning/textDelta','params':{'threadId':'thread-1','turnId':'turn_1','itemId':'r','delta':'fixture-secret thought'}})
-send({'method':'item/started','params':{'threadId':'thread-1','turnId':'turn_1','item':{'type':'commandExecution','id':'cmd_1','command':'echo fixture-secret'}}})
-send({'method':'item/completed','params':{'threadId':'thread-1','turnId':'turn_1','item':{'type':'commandExecution','id':'cmd_1','command':'echo fixture-secret','status':'completed','aggregatedOutput':'fixture-secret tool output','exitCode':0}}})
-send({'method':'item/agentMessage/delta','params':{'threadId':'thread-1','turnId':'turn_1','itemId':'a','delta':'fixture-secret answer'}})
+send({'method':'item/reasoning/textDelta','params':{'threadId':'thread-1','turnId':'turn_1','itemId':'r','delta':'sk-ownedCanonicalFixtureSecret1234567890 thought'}})
+send({'method':'item/started','params':{'threadId':'thread-1','turnId':'turn_1','item':{'type':'commandExecution','id':'cmd_1','command':'echo sk-ownedCanonicalFixtureSecret1234567890'}}})
+send({'method':'item/completed','params':{'threadId':'thread-1','turnId':'turn_1','item':{'type':'commandExecution','id':'cmd_1','command':'echo sk-ownedCanonicalFixtureSecret1234567890','status':'completed','aggregatedOutput':'sk-ownedCanonicalFixtureSecret1234567890 tool output','exitCode':0}}})
+send({'method':'item/agentMessage/delta','params':{'threadId':'thread-1','turnId':'turn_1','itemId':'a','delta':'sk-ownedCanonicalFixtureSecret1234567890 answer'}})
 send({'method':'thread/tokenUsage/updated','params':{'threadId':'thread-1','turnId':'turn_1','tokenUsage':{'total':{'inputTokens':100,'outputTokens':50,'cachedInputTokens':10},'last':{'totalTokens':20000,'reasoningOutputTokens':7},'modelContextWindow':32000}}})
 send({'method':'turn/completed','params':{'threadId':'thread-1','turn':{'id':'turn_1','status':'completed','error':None}}})
 for line in sys.stdin: pass
@@ -3280,7 +3125,7 @@ for line in sys.stdin: pass
                 }
             }
         }
-        send(&mut socket, json!({"type":"prompt","id":prompt_id,"text":if prompt_id == 2 { "fixture-secret second" } else { "fixture-secret prompt" }}));
+        send(&mut socket, json!({"type":"prompt","id":prompt_id,"text":if prompt_id == 2 { "sk-ownedCanonicalFixtureSecret1234567890 second" } else { "sk-ownedCanonicalFixtureSecret1234567890 prompt" }}));
         loop {
             let reply = receive(&mut reader);
             if reply["type"] == "reply" && reply["id"] == prompt_id { assert_eq!(reply["ok"], true); break; }
@@ -3288,7 +3133,7 @@ for line in sys.stdin: pass
         let mut kinds = Vec::new();
         loop {
             let frame = receive(&mut reader);
-            assert!(!frame.to_string().contains("fixture-secret"));
+            assert!(!frame.to_string().contains("sk-ownedCanonicalFixtureSecret1234567890"));
             let event = &frame["event"];
             let kind = event["type"].as_str().unwrap_or("");
             kinds.push(kind.to_owned());
@@ -3311,14 +3156,14 @@ for line in sys.stdin: pass
         wait_until(|| process.exited());
     }
     assert_eq!(fs::read_to_string(log).unwrap(), "thread/start\nthread/resume\n");
-    let thread: Value = serde_json::from_slice(&fs::read(dir.path().join("project/codex-session.codex.json")).unwrap()).unwrap();
+    let thread: Value = serde_json::from_slice(&fs::read(native_transcript(dir.path(), "codex-session.codex.json")).unwrap()).unwrap();
     assert_eq!(thread["transport"], "app-server");
     assert_eq!(thread["turn_incomplete"], false);
     assert_eq!(thread["model"], "gpt-test");
     assert_eq!(thread["effort"], "high");
-    let transcript = fs::read_to_string(dir.path().join("project/codex-session.jsonl")).unwrap();
-    assert!(!transcript.contains("fixture-secret"));
-    assert!(transcript.contains("[redacted] answer"));
+    let transcript = fs::read_to_string(native_transcript(dir.path(), "codex-session.jsonl")).unwrap();
+    assert!(!transcript.contains("sk-ownedCanonicalFixtureSecret1234567890"));
+    assert!(transcript.contains("[REDACTED:api-key] answer"));
 }
 
 #[test]
@@ -3331,9 +3176,8 @@ fn stopping_codex_during_unanswered_appserver_initialization_is_prompt() {
     std::fs::create_dir_all(&cache).unwrap();
     let dir = tempfile::tempdir_in(cache).unwrap();
     let codex = dir.path().join("codex-never-initializes");
-    let python = dir.path().join("lore-fixture");
+    let python = Path::new("/usr/bin/python3");
     let marker = dir.path().join("initialization-received");
-    fake_scrubber(&python, false);
     executable(&codex, &format!("#!/usr/bin/env python3\nimport sys,time\nsys.stdin.readline()\nopen({:?},'w').write('ready')\ntime.sleep(30)\n", marker.to_str().unwrap()));
     let mut process = Process::start_codex_appserver(dir.path(), &codex, &python, false);
     let (mut reader, mut socket) = process.connect();
@@ -3359,9 +3203,8 @@ fn stopping_codex_during_unanswered_appserver_initialization_is_prompt() {
 fn saved_exec_codex_settings_preserve_transport_and_resume_thread() {
     let dir = tempfile::tempdir().unwrap();
     let codex = dir.path().join("codex-fixture");
-    let python = dir.path().join("lore-fixture");
+    let python = Path::new("/usr/bin/python3");
     let args = dir.path().join("args.log");
-    fake_scrubber(&python, false);
     executable(&codex, &format!(r#"#!/usr/bin/env python3
 import json, sys
 if sys.argv[1]=='app-server':
@@ -3400,7 +3243,7 @@ else:
     for call in &calls { assert!(call.as_array().unwrap().contains(&json!("account-model"))); assert!(call.as_array().unwrap().contains(&json!("model_reasoning_effort=\"high\""))); }
     assert_eq!(calls[1][1], "resume");
     assert_eq!(calls[1][2], "thread_legacy");
-    let thread: Value = serde_json::from_slice(&fs::read(dir.path().join("project/codex-session.codex.json")).unwrap()).unwrap();
+    let thread: Value = serde_json::from_slice(&fs::read(native_transcript(dir.path(), "codex-session.codex.json")).unwrap()).unwrap();
     assert_eq!(thread["transport"], "exec");
     assert_eq!(thread["model"], "account-model");
     assert_eq!(thread["effort"], "high");
@@ -3413,8 +3256,7 @@ fn codex_protected_startup_preserves_authoritative_build_refusal() {
     fs::create_dir_all(&cache).unwrap();
     let dir=tempfile::tempdir_in(cache).unwrap();
     let codex=dir.path().join("unsupported-codex");
-    let python=dir.path().join("fake-lore");
-    fake_scrubber(&python,false);
+    let python = Path::new("/usr/bin/python3");
     executable(&codex,r#"#!/usr/bin/python3
 import json,sys
 init=json.loads(sys.stdin.readline())
@@ -3439,7 +3281,7 @@ assert not sys.stdin.readline()
     send(&mut socket,json!({"type":"call","id":2,"method":"stop","params":{}}));
     loop { let frame=receive(&mut reader);if frame["type"]=="reply"&&frame["id"]==2 {assert_eq!(frame["ok"],true);break;} }
     wait_until(||process.exited());
-    assert!(!dir.path().join("project/codex-session.codex.json").exists());
+    assert!(!native_transcript(dir.path(), "codex-session.codex.json").exists());
 }
 
 #[test]
@@ -3448,17 +3290,11 @@ fn memory_off_codex_scrubs_and_records_without_snapshot_index_or_compact_review(
         let dir = tempfile::tempdir().unwrap();
         fs::create_dir(dir.path().join("home")).unwrap();
         fs::write(dir.path().join("home/config.toml"), format!("lore = '{configured}'\n")).unwrap();
-        let codex = dir.path().join("codex-fixture"); let python = dir.path().join("lore-fixture");
-        let captured = dir.path().join("stdin.txt"); let requests = dir.path().join("requests.jsonl");
-        fake_context_sidecar(&python, true);
-        let source = fs::read_to_string(&python).unwrap().replace("op = frame.get(\"op\")", &format!("op = frame.get(\"op\")\n    with open({:?}, 'a') as log: log.write(op + '\\n')", requests.to_str().unwrap()));
-        // Record sidecar operations at the actual protocol seam.
-        let source = if source.contains("with open(") { source } else {
-            fs::read_to_string(&python).unwrap().replace("op = frame[\"op\"]", &format!("op = frame[\"op\"]\n    with open({:?}, 'a') as log: log.write(op + '\\n')", requests.to_str().unwrap()))
-        };
-        executable(&python, &source);
+        let codex = dir.path().join("codex-fixture"); let python = Path::new("/usr/bin/python3");
+        let captured = dir.path().join("stdin.txt");
+        native_memory_fixture(dir.path(),"- durable memory\n");
         executable(&codex, &format!("#!/bin/sh\ncat > '{}'\necho '{{\"type\":\"thread.started\",\"thread_id\":\"thread_1\"}}'\n", captured.display()));
-        let mut command = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"));
+        let mut command = daemon_command();
         command.args(["--runtime-dir", dir.path().to_str().unwrap(), "--cwd", dir.path().to_str().unwrap(),
             "--session-id", "codex-session", "--linger", "10", "--engine", "codex", "--codex-bin", codex.to_str().unwrap(), "--lore-python", python.to_str().unwrap()])
             .env("DOXA_HOME", dir.path().join("home")).env("DOXA_CODEX_APPSERVER", "0").env_remove("DOXA_LORE")
@@ -3470,16 +3306,17 @@ fn memory_off_codex_scrubs_and_records_without_snapshot_index_or_compact_review(
         let mut process = Process { child, registry, socket: PathBuf::from(entry["daemon_socket"].as_str().unwrap()) };
         let (mut reader, mut socket) = process.connect(); assert_eq!(receive(&mut reader)["lore_enabled"], enabled);
         send(&mut socket, json!({"type":"attach","cursor":null}));
-        send(&mut socket, json!({"type":"prompt","id":1,"text":"fixture-secret task"}));
+        send(&mut socket, json!({"type":"prompt","id":1,"text":"sk-ownedCanonicalFixtureSecret1234567890 task"}));
         assert_eq!(receive(&mut reader)["ok"], true);
-        loop { let frame = receive(&mut reader); assert!(!frame.to_string().contains("fixture-secret")); if frame["event"]["type"] == "turn_done" { break; } }
+        loop { let frame = receive(&mut reader); assert!(!frame.to_string().contains("sk-ownedCanonicalFixtureSecret1234567890")); if frame["event"]["type"] == "turn_done" { break; } }
         send(&mut socket, json!({"type":"call","id":2,"method":"stop","params":{}}));
         assert_eq!(receive(&mut reader)["ok"], true); wait_until(|| process.exited());
         let provider = fs::read_to_string(&captured).unwrap();
         assert!(provider.contains("MEMORY OFF")); assert!(!provider.contains("durable memory"));
-        let calls = fs::read_to_string(&requests).unwrap(); assert!(calls.contains("scrub")); assert!(!calls.contains("snapshot")); assert!(!calls.contains("index_transcript"));
-        let transcript = fs::read_to_string(dir.path().join("project/codex-session.jsonl")).unwrap();
-        assert!(transcript.contains("[redacted] task")); assert!(!transcript.contains("fixture-secret"));
+        assert!(!dir.path().join("native-lore/state.db").exists());
+        assert_eq!(fs::read_to_string(dir.path().join("native-lore/USER.md")).unwrap(),"- durable memory\n");
+        let transcript = fs::read_to_string(native_transcript(dir.path(), "codex-session.jsonl")).unwrap();
+        assert!(transcript.contains("[REDACTED:api-key] task")); assert!(!transcript.contains("sk-ownedCanonicalFixtureSecret1234567890"));
     }
 }
 
@@ -3487,7 +3324,7 @@ fn memory_off_codex_scrubs_and_records_without_snapshot_index_or_compact_review(
 fn native_child_keeps_parent_identity_and_starts_task_without_an_attachment() {
     let dir = tempfile::tempdir().unwrap();
     let runtime = dir.path();
-    let child = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+    let child = daemon_command()
         .args(["--runtime-dir", runtime.to_str().unwrap(), "--cwd", runtime.to_str().unwrap(),
             "--session-id", "native-child", "--linger", "10", "--spawn-depth", "2",
             "--parent-session-id", "native-parent", "--task", "perform the approved task"])
@@ -3518,8 +3355,7 @@ fn native_child_keeps_parent_identity_and_starts_task_without_an_attachment() {
 
 #[test]
 fn native_broadcast_reply_and_history_filters_follow_the_owned_delivery_path() {
-    let dir=tempfile::tempdir().unwrap();let codex=dir.path().join("codex-fixture");let python=dir.path().join("lore-fixture");
-    fake_scrubber(&python,false);executable(&codex,"#!/bin/sh\nexit 0\n");
+    let dir=tempfile::tempdir().unwrap();let codex=dir.path().join("codex-fixture");let python = Path::new("/usr/bin/python3");executable(&codex,"#!/bin/sh\nexit 0\n");
     let (first,_)=registry_peer(dir.path(),"first",dir.path().to_str().unwrap(),"first teammate");
     let (second,_)=registry_peer(dir.path(),"second",dir.path().to_str().unwrap(),"second teammate");
     let (foreign,_)=registry_peer(dir.path(),"foreign","/other-project","outsider");
@@ -3537,15 +3373,15 @@ fn native_broadcast_reply_and_history_filters_follow_the_owned_delivery_path() {
     let mut process=Process::start_codex(dir.path(),&codex,&python);let (mut reader,mut socket)=process.connect();
     receive(&mut reader);send(&mut socket,json!({"type":"attach","cursor":null}));
     let reply="0123456789abcdef0123456789abcdef";
-    send(&mut socket,json!({"type":"call","id":1,"method":"msg","params":{"body":"fixture-secret broadcast","broadcast":true,"in_reply_to":reply}}));
+    send(&mut socket,json!({"type":"call","id":1,"method":"msg","params":{"body":"sk-ownedCanonicalFixtureSecret1234567890 broadcast","broadcast":true,"in_reply_to":reply}}));
     let mut result=receive(&mut reader);while result["id"]!=1 { result=receive(&mut reader); }
     assert_eq!(result["ok"],true);assert_eq!(result["peer_count"],2);assert_eq!(result["kind"],"broadcast");
     let mut delivered:Vec<_>=result["delivered_to"].as_array().unwrap().iter().map(|id|id.as_str().unwrap()).collect();delivered.sort();assert_eq!(delivered,vec!["first","second"]);
-    for worker in [first,second] { let frame=worker.join().unwrap();assert_eq!(frame["body"],"[redacted] broadcast");assert_eq!(frame["kind"],"broadcast"); }
+    for worker in [first,second] { let frame=worker.join().unwrap();assert_eq!(frame["body"],"[REDACTED:api-key] broadcast");assert_eq!(frame["kind"],"broadcast"); }
     send(&mut socket,json!({"type":"call","id":2,"method":"peer_history","params":{"direction":"sent","limit":1}}));
     let mut history=receive(&mut reader);while history["id"]!=2 { history=receive(&mut reader); }
     assert_eq!(history["ok"],true);assert_eq!(history["messages"].as_array().unwrap().len(),1);assert_eq!(history["messages"][0]["in_reply_to"],reply);
-    assert_eq!(history["messages"][0]["id"],result["message_id"]);assert!(!history.to_string().contains("fixture-secret"));
+    assert_eq!(history["messages"][0]["id"],result["message_id"]);assert!(!history.to_string().contains("sk-ownedCanonicalFixtureSecret1234567890"));
     send(&mut socket,json!({"type":"call","id":3,"method":"peer_history","params":{"direction":"received","limit":100}}));
     let mut empty=receive(&mut reader);while empty["id"]!=3 { empty=receive(&mut reader); }
     assert_eq!(empty["messages"].as_array().unwrap().len(),0);
@@ -3582,7 +3418,7 @@ for line in sys.stdin:
  if method=='interrupt': root.joinpath('interrupted').write_text('unexpected cancellation')
  if method=='finalize': break
 "#).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+    let child = daemon_command()
         .args(["--runtime-dir", dir.path().to_str().unwrap(), "--cwd", dir.path().to_str().unwrap(),
             "--session-id", "linger-claude", "--engine", "claude", "--claude-python", "/usr/bin/python3",
             "--claude-script", script.to_str().unwrap(), "--linger", "0.7"])
@@ -3630,7 +3466,8 @@ fn claude_initialization_past_ten_seconds_survives_real_frontend_launch() {
     }
     let mut environment=Environment(Vec::new());
     for (key,value) in [("DOXA_DAEMON_BIN",PathBuf::from(env!("CARGO_BIN_EXE_doxa-daemon"))),
-        ("DOXA_HOME",dir.path().join("home")),("LORE_ROOT",dir.path().join("lore")),
+        ("HOME",dir.path().join("fixture-home")),("DOXA_HOME",dir.path().join("home")),("LORE_ROOT",dir.path().join("lore")),
+        ("LORE_PROJECTS_DIR",dir.path().join("projects")),("CODEX_HOME",dir.path().join("codex")),("LORE_CODEX_SESSIONS_DIR",dir.path().join("codex-sessions")),
         ("CLAUDE_CONFIG_DIR",dir.path().join("claude"))] {
         environment.0.push((key,std::env::var_os(key))); std::env::set_var(key,value);
     }

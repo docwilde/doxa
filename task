@@ -21,7 +21,7 @@ usage() {
   cat <<'EOF'
 Usage: ./task COMMAND [arguments]
 
-  build [--release]     Build the Rust frontend and daemon (debug by default)
+  build [--release]     Build the frontend, daemon and native LORE (debug by default)
   install               Build and install committed HEAD as the Rust doxa launcher
   run [doxa args]       Build and run the frontend in the current directory
   new [doxa args]       Build and start a new session in the current directory
@@ -32,7 +32,7 @@ Usage: ./task COMMAND [arguments]
 
 DOXA_TASK_TARGET_DIR defaults to <repo>/target/rust-task.
 DOXA_TASK_PROFILE=release selects release binaries for run/new/doctor.
-DOXA_LORE_PYTHON selects the LORE/Claude Python interpreter; otherwise
+DOXA_LORE_PYTHON selects the retained SDK/review helper interpreter; otherwise
 <repo>/.venv/bin/python is used when present, then python3 on PATH.
 DOXA_RUST_BIN_DIR defaults to ~/.local/bin. install uses the locked sidecar
 dependencies and writes the Rust doxa launcher from committed HEAD.
@@ -55,13 +55,15 @@ build() {
   mkdir -p "$target_dir"
   : > "$target_dir/.doxa-task-build"
   if [ "$mode" = release ]; then
-    info 'building release frontend and daemon'
+    info 'building release frontend, daemon and native LORE'
     cargo build --release --locked --manifest-path "$tui_manifest" --bin doxa-rs
     cargo build --release --locked --manifest-path "$daemon_manifest" --bin doxa-daemon
+    cargo build --release --locked --manifest-path "$tui_manifest" --package lore-core --bin lore-rs
   else
-    info 'building debug frontend and daemon'
+    info 'building debug frontend, daemon and native LORE'
     cargo build --locked --manifest-path "$tui_manifest" --bin doxa-rs
     cargo build --locked --manifest-path "$daemon_manifest" --bin doxa-daemon
+    cargo build --locked --manifest-path "$tui_manifest" --package lore-core --bin lore-rs
   fi
 }
 
@@ -93,7 +95,9 @@ launch() {
   build "$profile"
   binary=$target_dir/$profile/doxa-rs
   daemon=$target_dir/$profile/doxa-daemon
-  [ -x "$binary" ] && [ -x "$daemon" ] || fail 'Cargo produced no runnable frontend or daemon'
+  lore=$target_dir/$profile/lore-rs
+  [ -x "$binary" ] && [ -x "$daemon" ] && [ -x "$lore" ] || fail 'Cargo produced no runnable frontend, daemon or native LORE'
+  export DOXA_LORE_RS=$lore
   export DOXA_DAEMON_BIN=$daemon
   export DOXA_CLAUDE_SCRIPT=$sidecar
 
@@ -160,6 +164,9 @@ case $command in
     command -v cargo >/dev/null 2>&1 || fail 'cargo is required (install Rust first)'
     mkdir -p "$target_dir"
     : > "$target_dir/.doxa-task-build"
+    cargo build --locked --manifest-path "$tui_manifest" --package lore-core --bin lore-rs
+    export DOXA_LORE_RS=$target_dir/debug/lore-rs
+    [ -x "$DOXA_LORE_RS" ] || fail 'Cargo produced no native LORE executable'
     for crate in doxa-tui doxa-engines doxa-lore doxa-peers doxa-protocol \
       doxa-claude doxa-transcript doxa-state doxa-runtime doxa-daemon \
       doxa-worktrees doxa-vendors; do

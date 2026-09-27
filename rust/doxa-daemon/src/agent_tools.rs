@@ -6,10 +6,10 @@ use std::{path::Path, sync::{Arc,Mutex}, time::Duration};
 
 pub struct AgentTools { client: Mutex<Option<LoreClient>>, identity: Value, definitions: Vec<Value>, status:Mutex<Option<Value>>, disabled_events:Mutex<Vec<Value>> }
 impl AgentTools {
-    pub fn new(python: &Path, cwd: &str, session_id: &str, engine: &str, enabled: bool) -> Option<Arc<Self>> {
+    pub fn new(_python: &Path, cwd: &str, session_id: &str, engine: &str, enabled: bool) -> Option<Arc<Self>> {
         if !enabled { return None; }
         let identity = json!({"cwd":cwd,"session_id":session_id,"source_engine":engine,"spawn_depth":0,"lore":true});
-        let mut client = LoreClient::spawn_agent(python, Duration::from_secs(5)).ok()?;
+        let mut client = LoreClient::open_agent(Duration::from_secs(5)).ok()?;
         let rows = client.agent_catalog(&identity).ok()?;
         if rows.is_empty() { return None; }
         let definitions = rows.into_iter().map(|row| json!({"type":"function",

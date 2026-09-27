@@ -104,7 +104,7 @@ impl CodexHost {
         resume: bool,
     ) -> Result<Self, String> {
         let lore_enabled = doxa_state::lore_enabled_default();
-        let mut client = LoreClient::spawn(lore_python, Duration::from_secs(5))
+        let mut client = LoreClient::open(Duration::from_secs(5))
             .map_err(|_| "LORE sidecar is unavailable; Codex session was not started".to_owned())?;
         client
             .scrub("DOXA scrub preflight")
@@ -209,7 +209,6 @@ impl CodexHost {
             .map_err(|_| "Codex runtime could not start".to_owned())?;
         let lore = Arc::new(Mutex::new(client));
         let (index_tx, index_rx) = mpsc::sync_channel(1);
-        let index_python = lore_python.to_owned();
         let index_cwd = cwd.clone();
         let index_session_id = session_id.to_owned();
         let index_worker = thread::spawn(move || {
@@ -226,7 +225,7 @@ impl CodexHost {
                 // final pass is queued before shutdown joins the worker.
                 if !index_started {
                     index_started = true;
-                    index_lore = LoreClient::spawn(&index_python, Duration::from_secs(5)).ok();
+                    index_lore = LoreClient::open(Duration::from_secs(5)).ok();
                 }
                 let result = match index_lore.as_mut() {
                     Some(client) => client.index_transcript(&index_cwd, &index_session_id),

@@ -79,7 +79,7 @@ from typing import TYPE_CHECKING, Any
 
 from . import _lore_bootstrap  # noqa: F401 -- sys.path shim, see that module
 
-from lore_core.scrub import scrub_secrets
+from .native_lore import scrub as scrub_secrets
 
 from . import config as config_mod
 from . import peers as peers_mod

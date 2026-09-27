@@ -211,21 +211,19 @@ def test_a_live_session_reads_as_running_not_as_resumable(tmp_path, monkeypatch)
 
 @pytest.fixture
 def projects_dir(monkeypatch, tmp_path):
-    """This test's own ``PROJECTS_DIR``, holding one project directory.
-
-    Points lore_core's module attribute rather than the env var: the
-    constant is read from the environment at IMPORT time, so by the time a
-    test runs, setenv is too late -- but doxa.history._beside_transcript
-    imports the name inside the call, which resolves the attribute fresh
-    every time. conftest's suite-wide projects tree is shared, and an
-    artefact seeded there would outlive the test that wrote it."""
-    import lore_core.config as lore_config
-
+    """Each native carrier snapshots its own disposable projects root."""
+    from doxa import native_lore
     root = tmp_path / "projects"
     project = root / "-work"
     project.mkdir(parents=True)
-    monkeypatch.setattr(lore_config, "PROJECTS_DIR", root)
-    return project
+    monkeypatch.setenv("LORE_PROJECTS_DIR", str(root))
+    monkeypatch.setenv("LORE_ROOT", str(tmp_path / "lore"))
+    carrier = native_lore.Carrier()
+    monkeypatch.setattr(native_lore, "_default", carrier)
+    try:
+        yield project
+    finally:
+        carrier.close()
 
 
 def _codex_record(projects_dir: Path, session_id: str, thread_id: "str | None"):

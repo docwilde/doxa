@@ -100,7 +100,7 @@ def test_todays_state_the_newest_tag_carries_no_packaging():
     # until that changes, and it is a success.
     decision = decide()
     assert decision.action == "none"
-    assert "no pyproject.toml" in decision.reason
+    assert "no native/oracle packaging" in decision.reason
     assert decision.tag == "v0.35.0"
 
 
@@ -186,3 +186,85 @@ def test_the_workflow_keeps_write_permission_scoped_to_its_one_job():
     assert "contents: write" not in top
     assert "contents: write" in jobs
     assert "pull-requests: write" in jobs
+
+
+def test_native_pin_is_authoritative_and_rewrite_preserves_manifest():
+    original = (REPO_ROOT / 'rust/doxa-lore/Cargo.toml').read_text()
+    pin = lore_bump.parse_native_pin(original)
+    assert pin.slug == 'docwilde/LORE'
+    rewritten = lore_bump.rewrite_native_pin(original, 'a' * 40)
+    assert lore_bump.parse_native_pin(rewritten).ref == 'a' * 40
+    assert len([(a, b) for a, b in zip(original.splitlines(), rewritten.splitlines()) if a != b]) == 1
+
+
+@pytest.mark.parametrize('manifest', [
+    '[dependencies]\nlore-core = { path = "../lore" }',
+    '[dependencies]\nlore-core = { git = "https://github.com/docwilde/LORE", rev = "main" }',
+    '[dependencies]\nlore-core = { git = "https://evil.example/LORE", rev = "' + 'a' * 40 + '" }',
+])
+def test_native_pin_refuses_unpinned_or_unrecognized_sources(manifest):
+    with pytest.raises(SystemExit):
+        lore_bump.parse_native_pin(manifest)
+
+
+def test_bump_moves_both_pins_to_same_commit_and_does_not_repeat(monkeypatch, tmp_path):
+    oracle = tmp_path / 'pyproject.toml'
+    manifest = tmp_path / 'Cargo.toml'
+    output = tmp_path / 'outputs'
+    original = (REPO_ROOT / 'rust/doxa-lore/Cargo.toml').read_text()
+    old = lore_bump.parse_native_pin(original).ref
+    commit = 'b' * 40
+    oracle.write_text((REPO_ROOT / 'pyproject.toml').read_text())
+    manifest.write_text(original)
+    monkeypatch.setenv('GITHUB_OUTPUT', str(output))
+    monkeypatch.delenv('GITHUB_STEP_SUMMARY', raising=False)
+    monkeypatch.setattr(lore_bump, 'fetch_tags', lambda slug: ['v9.9.9'])
+    monkeypatch.setattr(lore_bump, 'fetch_native_state', lambda slug, ref: lore_bump.RefState(True, '1.0.0' if ref == old else '9.9.9'))
+    monkeypatch.setattr(lore_bump, 'fetch_commit', lambda slug, ref: commit)
+    args = ['--pyproject', str(oracle), '--native-manifest', str(manifest), '--write']
+    assert lore_bump.main(args) == 0
+    assert lore_bump.parse_pin(oracle.read_text()).ref == commit
+    assert lore_bump.parse_native_pin(manifest.read_text()).ref == commit
+    assert f'commit={commit}' in output.read_text()
+    output.unlink()
+    assert lore_bump.main(args) == 0
+    assert 'action=none' in output.read_text()
+
+
+def test_python_only_release_is_not_native_installable(monkeypatch):
+    monkeypatch.setattr(lore_bump, 'fetch_text', lambda slug, path, ref: '[project]\nversion="1.0.0"' if path == 'pyproject.toml' else None)
+    assert not lore_bump.fetch_native_state('docwilde/LORE', 'v1.0.0').packaged
+
+
+def test_upgrade_workflow_tracks_native_pin_and_carrier():
+    workflow = (REPO_ROOT / '.github/workflows/lore-bump.yml').read_text()
+    assert 'cargo +stable check --package doxa-lore' in workflow
+    assert 'cargo +stable update --package lore-core' not in workflow
+    assert 'build --locked --package lore-core --bin lore-rs' in workflow
+    assert 'test --locked --workspace --all-features' in workflow
+    assert 'DOXA_TEST_LORE_RS:' in workflow
+    assert 'git add rust/doxa-lore/Cargo.toml Cargo.lock pyproject.toml uv.lock' in workflow
+    assert 'resolved_source()' not in workflow
+
+
+def test_release_commit_rejects_missing_or_malformed_github_response(monkeypatch):
+    for response in (None, {'sha': 'main'}, {'sha': 'A' * 40}):
+        monkeypatch.setattr(lore_bump, 'gh_api', lambda path, value=response: value)
+        with pytest.raises(SystemExit):
+            lore_bump.fetch_commit('docwilde/LORE', 'v1.0.0')
+
+
+def test_changed_release_metadata_never_rewrites_either_pin(monkeypatch, tmp_path):
+    oracle = tmp_path / 'pyproject.toml'
+    manifest = tmp_path / 'Cargo.toml'
+    original = '[dependencies]\nlore-core = { git = "https://github.com/docwilde/LORE", rev = "' + 'a' * 40 + '" }\n'
+    oracle_original = '"lore-core @ git+https://github.com/docwilde/LORE@v1.0.0"'
+    manifest.write_text(original)
+    oracle.write_text(oracle_original)
+    monkeypatch.setattr(lore_bump, 'fetch_tags', lambda slug: ['v2.0.0'])
+    monkeypatch.setattr(lore_bump, 'fetch_native_state', lambda slug, ref: lore_bump.RefState(True, '2.0.0' if ref == 'v2.0.0' else '1.0.0'))
+    monkeypatch.setattr(lore_bump, 'fetch_commit', lambda slug, ref: 'b' * 40)
+    with pytest.raises(SystemExit, match='metadata changed'):
+        lore_bump.main(['--pyproject', str(oracle), '--native-manifest', str(manifest), '--write'])
+    assert manifest.read_text() == original
+    assert oracle.read_text() == oracle_original

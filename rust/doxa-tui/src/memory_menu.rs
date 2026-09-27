@@ -28,9 +28,9 @@ pub fn parse_facts(rows:Vec<serde_json::Value>,scope:&str)->Result<Vec<Fact>,&'s
     }).collect()
 }
 
-pub fn fetch_facts(python:&Path,cwd:&Path)->Result<Vec<Fact>,&'static str> {
+pub fn fetch_facts(_python:&Path,cwd:&Path)->Result<Vec<Fact>,&'static str> {
     let (project,is_repo)=scope_path(cwd);
-    let mut lore=doxa_lore::LoreClient::spawn(python,Duration::from_secs(3)).map_err(|_|"LORE unavailable")?;
+    let mut lore=doxa_lore::LoreClient::open(Duration::from_secs(3)).map_err(|_|"LORE unavailable")?;
     let user=lore.memory_entries(cwd.to_str().ok_or("Invalid session directory")?,"user").map_err(|_|"User facts unavailable")?;
     let project=lore.memory_entries(project.to_str().ok_or("Invalid scope directory")?,"project").map_err(|_|"Scoped facts unavailable")?;
     let mut facts=parse_facts(user,"user")?;
@@ -68,6 +68,20 @@ mod tests {
         let list=List {owner:None,facts,query:"codex".into()};
         assert_eq!(list.indices(),vec![0]);
         assert!(parse_facts(vec![serde_json::json!({"text":"safe","source":17,"redacted":false})],"user").is_err());
+    }
+
+    #[test]
+    fn memory_action_keeps_landed_and_uncertain_effects_visible() {
+        use serde_json::json;
+        let partial = ActionOutcome::decode(json!({"status":"refused","applied":true,"error":"io"})).unwrap();
+        assert_eq!(partial, ActionOutcome::Partial);
+        assert!(partial.refresh_usage());
+        assert!(partial.notice().contains("Memory changed"));
+        let uncertain = ActionOutcome::decode(json!({"status":"refused","applied":null,"may_have_applied":true,"error":"io"})).unwrap();
+        assert_eq!(uncertain, ActionOutcome::Indeterminate);
+        assert!(uncertain.refresh_usage());
+        assert!(uncertain.notice().contains("may have changed"));
+        assert!(ActionOutcome::decode(json!({"status":"refused","applied":false,"may_have_applied":true})).is_err());
     }
 
     #[test]
@@ -121,7 +135,37 @@ struct Draft {
     seen: std::cell::Cell<usize>,
 }
 
-enum Reply { Review(serde_json::Value), Action(String) }
+enum Reply { Review(serde_json::Value), Action(ActionOutcome) }
+
+#[derive(Debug, PartialEq)]
+enum ActionOutcome { Applied, Staged, Refused, Partial, Indeterminate }
+
+impl ActionOutcome {
+    fn decode(value: serde_json::Value) -> Result<Self, doxa_lore::LoreError> {
+        match value["status"].as_str() {
+            Some("applied") => Ok(Self::Applied),
+            Some("staged") => Ok(Self::Staged),
+            Some("refused") if value["applied"] == true => Ok(Self::Partial),
+            Some("refused") if value["applied"].is_null() && value["may_have_applied"] == true => Ok(Self::Indeterminate),
+            Some("refused") if value["may_have_applied"].is_null() || value["may_have_applied"] == false => Ok(Self::Refused),
+            _ => Err(doxa_lore::LoreError::InvalidFrame),
+        }
+    }
+
+    fn refresh_usage(&self) -> bool {
+        matches!(self, Self::Applied | Self::Partial | Self::Indeterminate)
+    }
+
+    fn notice(&self) -> &'static str {
+        match self {
+            Self::Applied => "Saved by LORE",
+            Self::Staged => "Staged by LORE write gate; review in /pending",
+            Self::Refused => "LORE refused action",
+            Self::Partial => "Memory changed, but LORE finalization failed; inspect refreshed entries before retrying",
+            Self::Indeterminate => "Memory may have changed; inspect refreshed entries before retrying",
+        }
+    }
+}
 
 impl Manager {
     pub fn new(owner: (String, String)) -> Self {
@@ -140,10 +184,6 @@ impl Manager {
         manager.accept_review(value)?;Ok(manager)
     }
 
-    fn python() -> PathBuf {
-        std::env::var_os("DOXA_LORE_PYTHON").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("python3"))
-    }
-
     fn load(&mut self) {
         self.review = None;
         self.entries.clear();
@@ -153,12 +193,11 @@ impl Manager {
         self.status = "Loading complete curated entries…".into();
         let cwd = scope_path(Path::new(&self.owner.1)).0;
         let scope = self.scope;
-        let python = Self::python();
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         self.pending = Some(rx);
         if self.fixture { self.pending = None; return; }
         std::thread::spawn(move || {
-            let result = doxa_lore::LoreClient::spawn(&python, Duration::from_secs(3))
+            let result = doxa_lore::LoreClient::open(Duration::from_secs(3))
                 .and_then(|mut client| client.memory_review(&cwd.to_string_lossy(), scope))
                 .map(Reply::Review).map_err(|error| format!("LORE refused memory review: {error}"));
             let _ = tx.send(result);
@@ -171,7 +210,7 @@ impl Manager {
         if value["scope"] != self.scope || value["key"].as_str().is_none()
             || digest.len() != 64 || !digest.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
             || entries.len() > 400 || value["chars"].as_u64().is_none()
-            || value["cap_chars"].as_u64().is_none_or(|cap| cap == 0 || cap > 1024 * 1024) {
+            || value["cap_chars"].as_u64().is_none_or(|cap| cap > 1024 * 1024) {
             return Err("Invalid memory review".into());
         }
         let rows: Result<Vec<_>, _> = entries.iter().map(|row| row.as_str()
@@ -197,14 +236,10 @@ impl Manager {
                 if let Err(error) = self.accept_review(value) { self.status = error; self.review = None; }
             }
             Ok(Reply::Action(status)) => {
-                if status == "applied" { self.refresh_scope = Some(self.scope); }
+                if status.refresh_usage() { self.refresh_scope = Some(self.scope); }
                 self.draft = None;
                 self.load();
-                self.last_action = Some(match status.as_str() {
-                    "applied" => "Saved by LORE",
-                    "staged" => "Staged by LORE write gate; review in /pending",
-                    _ => "LORE refused action",
-                }.into());
+                self.last_action = Some(status.notice().into());
             }
             Err(error) => { self.status = error; self.draft = None; self.review = None; }
         }
@@ -270,13 +305,12 @@ impl Manager {
             "expected":{"key":review["key"],"sha256":review["sha256"]}});
         self.status = "Applying through LORE…".into();
         let cwd = scope_path(Path::new(&self.owner.1)).0;
-        let python = Self::python();
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
         self.pending = Some(rx);
         std::thread::spawn(move || {
-            let result = doxa_lore::LoreClient::spawn(&python, Duration::from_secs(3))
+            let result = doxa_lore::LoreClient::open(Duration::from_secs(3))
                 .and_then(|mut client| client.memory_action(&cwd.to_string_lossy(), request))
-                .and_then(|value| value["status"].as_str().map(str::to_owned).ok_or(doxa_lore::LoreError::InvalidFrame))
+                .and_then(ActionOutcome::decode)
                 .map(Reply::Action).map_err(|error| format!("LORE refused memory change: {error}; R refresh"));
             let _ = tx.send(result);
         });
@@ -396,6 +430,33 @@ mod manager_tests {
         assert_eq!(manager.status, "Gallery fixture: memory writes disabled", "complete review and uppercase confirmation reached submit");
     }
     #[test]
+    fn zero_capacity_keeps_empty_and_existing_exact_memory_review_available() {
+        for (entries, chars) in [(Vec::<&str>::new(), 0), (vec!["existing fact"], 16)] {
+            let manager=Manager::from_fixture_review(("session".into(),"/fixture".into()),"user",
+                serde_json::json!({"scope":"user","key":"user","sha256":"a".repeat(64),"entries":entries,"chars":chars,"cap_chars":0})).unwrap();
+            assert!(manager.review.is_some());
+            let mut terminal=ratatui::Terminal::new(ratatui::backend::TestBackend::new(80,12)).unwrap();
+            terminal.draw(|frame|manager.draw(frame,frame.area())).unwrap();
+            let screen=terminal.backend().buffer().content.iter().map(|cell|cell.symbol()).collect::<String>();
+            assert!(screen.contains(&format!("{chars} / 0 chars")));
+        }
+    }
+    #[test]
+    fn zero_capacity_existing_entry_can_reach_exact_removal_confirmation() {
+        let mut manager=Manager::from_fixture_review(("session".into(),"/fixture".into()),"user",
+            serde_json::json!({"scope":"user","key":"user","sha256":"a".repeat(64),"entries":["existing fact"],"chars":16,"cap_chars":0})).unwrap();
+        manager.key(key(KeyCode::Char('d')));manager.key(key(KeyCode::Enter));
+        assert_eq!(manager.draft.as_ref().unwrap().action,"remove");
+        assert_eq!(manager.draft.as_ref().unwrap().entry,"existing fact");
+        manager.key(key(KeyCode::Char('Y')));
+        assert_ne!(manager.status,"Gallery fixture: memory writes disabled","unseen exact removal cannot submit");
+        let mut terminal=ratatui::Terminal::new(ratatui::backend::TestBackend::new(80,12)).unwrap();
+        terminal.draw(|frame|manager.draw(frame,frame.area())).unwrap();
+        manager.key(key(KeyCode::Char('Y')));
+        assert_eq!(manager.status,"Gallery fixture: memory writes disabled","complete exact removal reaches guarded submit at cap zero");
+        assert!(manager.pending.is_none(),"fixture never mutates LORE");
+    }
+    #[test]
     fn cancelling_edit_and_scope_switch_discard_draft_and_old_receiver() {
         let mut manager = fixture();
         manager.key(key(KeyCode::Char('e')));
@@ -408,7 +469,7 @@ mod manager_tests {
         manager.pending = None; // completed worker before choosing another scope
         manager.key(key(KeyCode::Tab));
         assert_eq!(manager.scope, "project");
-        assert!(tx.send(Ok(Reply::Action("applied".into()))).is_err());
+        assert!(tx.send(Ok(Reply::Action(ActionOutcome::Applied))).is_err());
         assert!(manager.review.is_none());
     }
     #[test]

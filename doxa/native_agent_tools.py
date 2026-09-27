@@ -109,7 +109,7 @@ def serve() -> None:
                         request.get("name"), request.get("arguments")))
                 else:
                     raise ValueError("unsupported operation")
-                from lore_core.scrub import scrub_secrets
+                from .native_lore import scrub as scrub_secrets
                 # Results and errors cross the same secret boundary as native
                 # transcripts, while JSON shape and numeric identities survive.
                 def clean(value):
@@ -128,4 +128,5 @@ def serve() -> None:
 
 
 if __name__ == "__main__":
-    serve()
+    from .native_lore import executable
+    os.execv(executable(), [executable(), "agent-bridge"])

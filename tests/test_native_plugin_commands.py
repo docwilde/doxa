@@ -28,7 +28,8 @@ def installed(tmp_path):
 
 
 def inventory(tmp_path, base, enabled):
-    env = {"PATH":os.environ.get("PATH",""), "HOME":str(tmp_path),
+    from doxa.native_lore import executable
+    env = {"DOXA_LORE_RS":executable(), "PATH":os.environ.get("PATH",""), "HOME":str(tmp_path),
            "DOXA_HOME":str(tmp_path / "doxa"),"CLAUDE_CONFIG_DIR":str(base),
            "DOXA_ADOPT_PLUGINS":"1" if enabled else "0",
            "LORE_ROOT":str(tmp_path / "lore"),

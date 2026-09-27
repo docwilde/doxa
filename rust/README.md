@@ -2,8 +2,10 @@
 
 Rust is the main DOXA frontend. The installer exposes `doxa`; the compiled
 frontend is `doxa-rs`. This alpha uses native Codex and vendor hosts plus a
-Python Claude SDK sidecar. Python also provides the bridge to external LORE,
-which remains the authority for memory, reviews, indexing, and secret scrubbing.
+Python Claude SDK sidecar. Canonical LORE 0.61 is integrated as a Rust library
+for memory, reviews, indexing, and secret scrubbing. Retained SDK adapters use
+the installed `lore-rs` carrier and native review worker; they have no Python
+LORE backend fallback.
 The [parity tracker](../docs/rust-1.19-parity.md) records stable release gates.
 
 ## Build and install
@@ -21,7 +23,10 @@ cargo build --locked
 `target`. `./task build --release` selects a release build. `./task install`
 installs committed HEAD, including a locked Python sidecar environment.
 Working-tree changes must be committed first. Set `DOXA_LORE_PYTHON` or pass
-`--lore-python` / `--claude-python` to choose an interpreter for source builds.
+`--claude-python` to choose the Claude SDK interpreter for source builds.
+`DOXA_LORE_RS` selects the native carrier used by retained SDK adapters; the
+installer builds and installs it alongside the frontend and daemon. Python
+`lore-core` is a development interoperability oracle, not a runtime dependency.
 
 The POSIX installer builds `main` by default:
 
@@ -105,8 +110,9 @@ The curated-memory chip browses project/user scopes with their own capacity
 percentages. Add, edit, and remove use full before/after review and exact snapshot
 checks before invoking canonical LORE mutations. Pending, conflict, trust, and
 detached-store gates remain authoritative. Beliefs and `/pending` use complete
-review and atomic exact-snapshot actions; older LORE without those APIs stays
-read only. DOXA does not implement a separate memory store.
+review and atomic exact-snapshot actions through the integrated canonical core.
+A missing native carrier is an explicit availability failure. DOXA does not
+implement a separate memory store.
 
 `/context` shows available official provider telemetry and reported snapshot
 metadata. Claude can report categories, memory files, tools, agents, and local
@@ -164,7 +170,7 @@ Protected app-server startup requires the verified **Codex 0.156.1** hook
 contract and checks DOXA's trusted synchronous `PreCompact` hook hash. An
 unsupported build or missing trusted hook refuses startup. The hook binds the
 provider thread and owned rollout, prepares a scrubbed private snapshot, and
-waits for LORE review. Manual `/compact` uses the official compaction request;
+waits for the native LORE review worker. Manual `/compact` uses the official compaction request;
 Claude compaction also waits for LORE review. Vendor compaction is unavailable.
 
 Codex 0.156.1 can continue compaction when the OS cannot spawn a hook, or the
@@ -177,7 +183,7 @@ See [engine contracts](doxa-engines/README.md) for transport and review details.
 ## Verification and gallery
 
 The alpha.31 release verifies the full Rust workspace and the installed Python
-SDK/LORE seams using disposable stores and local provider fixtures. Coverage
+SDK/native LORE seams using disposable stores and local provider fixtures. Coverage
 includes layout, review gates, restoration, current-session controls, cancellation,
 interactive fleets, device login, private ledgers and malformed manifests.
 Run `./task test` for the current full suite. Alpha tests do not establish live

@@ -19,6 +19,7 @@ import time
 import pytest
 
 from doxa.native_agent_tools import LORE_TOOLS
+from doxa.native_lore import executable
 
 BINARY = os.environ.get("DOXA_NATIVE_DAEMON")
 pytestmark = pytest.mark.skipif(not BINARY, reason="requires DOXA_NATIVE_DAEMON fixture binary")
@@ -41,6 +42,7 @@ def fixture_env(home, broken_pending=False, peer_enabled=False):
         "PYTHONPATH":str(Path(__file__).resolve().parents[1]),
         "LORE_ROOT":str(root), "LORE_PROJECTS_DIR":str(home / "projects"),
         "DOXA_HOME":str(home / "doxa"), "CODEX_HOME":str(home / "codex"),
+        "DOXA_LORE_RS":executable(),
         "DOXA_AGENT_PEER_SEND":"1" if peer_enabled else "0", "DOXA_VENDOR_TOOLS":"", "DEEPSEEK_API_KEY":"isolated-local-fixture"}
 
 
@@ -104,7 +106,7 @@ def drive_turn(send, read, allow, title="LORE"):
             send({"type":"call","id":2,"method":"answer_needs_input","params":{
                 "id":event["data"]["id"],"answer":{"decision":"allow" if allow else "deny"}}})
         if event.get("type") == "turn_done":
-            assert event["data"]["is_error"] is False, event
+            assert event["data"]["is_error"] is False, events
             return approved, events
 
 
@@ -130,12 +132,16 @@ def test_native_vendor_canonical_lore_catalog_and_pending_gate(native_home, enab
         def do_POST(self):
             request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             requests.append(request)
-            if enabled and len(requests) == 1:
+            if enabled and len(requests) <= 2:
                 names = {row["function"]["name"] for row in request["tools"]}
                 assert {name for name in names if name.startswith("lore_")} == LORE_TOOLS
-                args = {"text":"native isolated durable proposal","scope":"project",
-                        "op_ctx":{"session_id":"forged","cwd":"/spoofed","source_engine":"forged"}}
-                delta = {"tool_calls":[{"index":0,"id":"tool-1","function":{
+                args = {"text":"native isolated durable proposal","scope":"project"}
+                if len(requests) == 1:
+                    args["op_ctx"] = {"session_id":"forged","cwd":"/spoofed","source_engine":"forged"}
+                else:
+                    # The malformed request must leave no proposal before the valid call.
+                    assert_pending(native_home,"deepseek",False)
+                delta = {"tool_calls":[{"index":0,"id":f"tool-{len(requests)}","function":{
                     "name":"lore_remember","arguments":json.dumps(args)}}]}
                 reason = "tool_calls"
             else:
@@ -158,10 +164,16 @@ def test_native_vendor_canonical_lore_catalog_and_pending_gate(native_home, enab
             approved,_ = drive_turn(send,read,allow)
             assert approved is enabled
             assert_pending(native_home,"deepseek", enabled and allow)
-        assert len(requests) == 1 + int(enabled)
+        assert len(requests) == 1 + 2 * int(enabled)
         if enabled:
-            result = json.loads(requests[1]["messages"][-1]["content"])
+            forged = json.loads(requests[1]["messages"][-1]["content"])
+            assert forged.get("error") and not forged.get("staged")
+            if allow:
+                assert forged["error"] == "lore_remember: invalid arguments"
+            result = json.loads(requests[2]["messages"][-1]["content"])
             assert bool(result.get("staged")) is allow
+            if not allow:
+                assert result.get("error")
     finally:
         provider.shutdown()
         worker.join(timeout=5)
@@ -172,7 +184,7 @@ def test_native_vendor_canonical_lore_catalog_and_pending_gate(native_home, enab
 def test_native_codex_canonical_lore_catalog_and_pending_gate(native_home, enabled, allow):
     script = native_home / "codex-fixture"
     script.write_text(r'''#!/usr/bin/env python3
-import json,sys,tomllib
+import json,os,pathlib,sys,tomllib
 read=lambda:json.loads(sys.stdin.readline())
 def send(value): print(json.dumps(value),flush=True)
 init=read();send({'id':init['id'],'result':{'userAgent':'codex_cli_rs/0.156.1'}})
@@ -197,7 +209,23 @@ send({'id':thread['id'],'result':{'thread':{'id':'thread-1'}}})
 turn=read();send({'id':turn['id'],'result':{'turn':{'id':'turn_1'}}})
 if __ENABLED__:
  send({'id':500,'method':'item/tool/call','params':{'threadId':'thread-1','turnId':'turn_1','callId':'call_1','tool':'doxa_lore_remember','arguments':{'text':'native isolated durable proposal','scope':'project','op_ctx':{'session_id':'forged','cwd':'/spoofed','source_engine':'forged'}}}})
- reply=read();assert reply['id']==500 and reply['result']['success']==__ALLOW__
+ reply=read();assert reply['id']==500 and reply['result']['success'] is False
+ text=reply['result']['contentItems'][0]['text']
+ if __ALLOW__:
+  marker,payload=text.split('\n',1)
+  assert marker=='[DOXA LORE DATA -- UNTRUSTED]'
+  result=json.loads(payload)
+  assert result.get('error')=='lore_remember: invalid arguments' and not result.get('staged')
+ else: assert text=='Tool was declined or unavailable'
+ assert not list((pathlib.Path(os.environ['LORE_ROOT'])/'pending').glob('*.json'))
+ send({'id':501,'method':'item/tool/call','params':{'threadId':'thread-1','turnId':'turn_1','callId':'call_2','tool':'doxa_lore_remember','arguments':{'text':'native isolated durable proposal','scope':'project'}}})
+ reply=read();assert reply['id']==501 and reply['result']['success']==__ALLOW__
+ text=reply['result']['contentItems'][0]['text']
+ if __ALLOW__:
+  marker,payload=text.split('\n',1)
+  assert marker=='[DOXA LORE DATA -- UNTRUSTED]'
+  assert json.loads(payload)['staged']
+ else: assert text=='Tool was declined or unavailable'
 send({'method':'item/agentMessage/delta','params':{'threadId':'thread-1','turnId':'turn_1','itemId':'answer','delta':'local fixture answer'}})
 send({'method':'turn/completed','params':{'threadId':'thread-1','turn':{'id':'turn_1','status':'completed','error':None}}})
 for line in sys.stdin: pass
@@ -213,7 +241,7 @@ for line in sys.stdin: pass
 def test_native_codex_exec_registers_canonical_mcp_with_frozen_memory_policy(native_home, enabled):
     script = native_home / "codex-exec-fixture"
     script.write_text(r'''#!/usr/bin/env python3
-import json,os,subprocess,sys,tomllib
+import json,os,pathlib,subprocess,sys,tomllib
 sys.stdin.read()
 overrides=[sys.argv[i+1] for i,x in enumerate(sys.argv[:-1]) if x=='-c']
 config={}
@@ -240,7 +268,13 @@ try:
  assert names==expected|{'peer_list','peer_history'} if __ENABLED__ else names=={'peer_list','peer_history'}
  if __ENABLED__:
   result=rpc(3,'tools/call',{'name':'lore_remember','arguments':{'text':'native isolated durable proposal','scope':'project','op_ctx':{'session_id':'forged','source_engine':'forged','cwd':'/spoofed'}}})
-  assert 'staged' in result['content'][0]['text']
+  assert result['isError'] is True
+  forged=json.loads(result['content'][0]['text'])
+  assert forged.get('error')=='lore_remember: invalid arguments' and not forged.get('staged')
+  assert not list((pathlib.Path(os.environ['LORE_ROOT'])/'pending').glob('*.json'))
+  result=rpc(4,'tools/call',{'name':'lore_remember','arguments':{'text':'native isolated durable proposal','scope':'project'}})
+  assert result.get('isError',False) is False
+  assert json.loads(result['content'][0]['text'])['staged']
 finally:
  server.stdin.close();server.wait(timeout=5)
 print(json.dumps({'type':'thread.started','thread_id':'thread-1'}))

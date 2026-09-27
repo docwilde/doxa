@@ -110,23 +110,14 @@ def test_about_text_is_the_same_string_the_rows_describe():
 
 
 def test_lore_version_degrades_to_nothing_rather_than_guessing(monkeypatch, tmp_path):
-    """A machine with no ``lore_core`` at all and no plugin manifest to
-    read gets None, and the row is left out -- never a plausible-looking
-    constant.
-
-    WHICH of the two carriers the version comes from (the package's own
-    ``__version__``, since LORE 0.35.1; the plugin manifest for anything
-    older) is tested in ``tests/test_lore_dependency.py``, next to the
-    ``lore from`` row that names the source."""
-    import sys
-
-    monkeypatch.setitem(sys.modules, "lore_core", None)
+    """An unavailable native carrier cannot fall back to a plugin manifest."""
+    monkeypatch.setattr(version_mod, "native_lore_info", lambda: None)
     monkeypatch.setenv("DOXA_LORE_CORE_PATH", str(tmp_path))
     assert version_mod.lore_core_version() is None
     manifest = tmp_path / ".claude-plugin" / "plugin.json"
     manifest.parent.mkdir(parents=True)
     manifest.write_text('{"name": "lore", "version": "9.9.9"}', encoding="utf-8")
-    assert version_mod.lore_core_version() == "9.9.9"
+    assert version_mod.lore_core_version() is None
 
 
 # -- the command reaches every surface -----------------------------------

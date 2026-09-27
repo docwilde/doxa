@@ -49,79 +49,142 @@ def _repo(tmp_path, name="repo", branch="trunk"):
     return repo
 
 
-@pytest.mark.asyncio
-async def test_explicit_compact_requires_completed_lore_review(monkeypatch, tmp_path):
-    from doxa import engine as engine_mod
+@pytest.fixture
+def native_compact(monkeypatch, tmp_path):
+    """Real native proof/worker gate with one owned executable, never a provider."""
+    import sys
+    from doxa import native_lore
 
-    engine = SessionEngine(cwd=str(tmp_path))
     monkeypatch.delenv("LORE_DISABLE_REVIEW", raising=False)
-    calls = []
-    monkeypatch.setattr(engine_mod.lore_deriver, "build_review_job",
-                        lambda *args, **kwargs: {"session_id": engine.session_id,
-                                                 "project": engine.slug, "prompt": "review"})
+    monkeypatch.delenv("LORE_SKIP", raising=False)
+    for key, folder in (("HOME", "home"), ("LORE_ROOT", "lore"),
+                        ("LORE_PROJECTS_DIR", "projects"), ("DOXA_HOME", "doxa"),
+                        ("CLAUDE_CONFIG_DIR", "claude-config")):
+        path = tmp_path / folder
+        path.mkdir()
+        monkeypatch.setenv(key, str(path))
+    monkeypatch.setenv("LORE_DEFER_DREAM", "1")
+    monkeypatch.setenv("LORE_DISABLE_SYNC", "1")
+    monkeypatch.setenv("LORE_DERIVER_MODEL", "owned-model")
+    provider = tmp_path / "owned-provider"
+    provider.write_text(f"#!{sys.executable}\n" + '''import json, os, sys, time
+from pathlib import Path
+assert sys.argv[1:] == ["--bare", "-p", "--model", "owned-model", "--allowedTools", ""]
+assert os.environ["LORE_SKIP"] == "1" and os.environ["LORE_DISABLE_REVIEW"] == "1"
+prompt = sys.stdin.read()
+assert "owned compaction message" in prompt
+root = Path(os.environ["OWNED_COMPACT_ROOT"])
+mode = os.environ.get("OWNED_COMPACT_MODE", "success")
+with (root / "calls").open("a") as output: output.write(mode + "\\n")
+if mode == "wait":
+    (root / "ready").write_text("ready")
+    deadline = time.monotonic() + 3
+    while not (root / "release").exists() and time.monotonic() < deadline: time.sleep(.005)
+    if not (root / "release").exists(): sys.exit(7)
+if mode == "error": sys.exit(7)
+if mode == "changed_source": Path(os.environ["OWNED_COMPACT_SOURCE"]).write_text("changed owned source\\n")
+print(json.dumps({"memory":[], "filemap":[], "skills":[], "skill_outcomes":[], "conclusions":[]}))
+''')
+    provider.chmod(0o700)
+    monkeypatch.setenv("LORE_CLAUDE_BIN", str(provider))
+    monkeypatch.setenv("OWNED_COMPACT_ROOT", str(tmp_path))
+    carrier = native_lore.Carrier()
+    monkeypatch.setattr(native_lore, "_default", carrier)
+    engine = SessionEngine(cwd=str(tmp_path), lore=True)
+    monkeypatch.setenv("OWNED_COMPACT_SOURCE", str(engine.transcript_path))
+    try:
+        yield engine, carrier
+    finally:
+        (tmp_path / "release").touch()
+        carrier.close()
 
-    def worker(jobfile):
-        calls.append(jobfile)
-        return True
 
-    monkeypatch.setattr(SessionEngine, "_review_worker", staticmethod(worker))
-    assert not await engine.review_before_compact()  # missing is not "short"
-    engine.transcript_path.write_text('{"type":"user"}\n', encoding="utf-8")
+def _compact_transcript(engine):
+    engine.transcript_path.write_text("".join(json.dumps({
+        "type":"user", "message":{"content":f"owned compaction message {index}"}
+    }) + "\n" for index in range(3)), encoding="utf-8")
+    engine.transcript_path.chmod(0o600)
+
+
+def _compact_calls(tmp_path):
+    path = tmp_path / "calls"
+    return path.read_text().splitlines() if path.exists() else []
+
+
+@pytest.mark.asyncio
+async def test_explicit_compact_requires_completed_lore_review(native_compact, monkeypatch, tmp_path):
+    engine, carrier = native_compact
+    assert not await engine.review_before_compact()  # Missing source cannot be reviewed.
+    assert not _compact_calls(tmp_path)
+    _compact_transcript(engine)
     assert await engine.review_before_compact()
-    assert len(calls) == 1
-    assert not calls[0].exists()
+    assert _compact_calls(tmp_path) == ["success"]
 
-    monkeypatch.setattr(SessionEngine, "_review_worker", staticmethod(lambda jobfile: False))
+    monkeypatch.setenv("OWNED_COMPACT_MODE", "error")
     assert not await engine.review_before_compact()
+    assert not engine._compact_preapproved
+    assert _compact_calls(tmp_path) == ["success", "error"]
+
+    monkeypatch.setenv("OWNED_COMPACT_MODE", "changed_source")
+    assert not await engine.review_before_compact()  # Native job rechecks frozen bytes before effects.
+    assert not engine._compact_preapproved
+    assert _compact_calls(tmp_path) == ["success", "error", "changed_source"]
+    assert not list((tmp_path / "lore").glob("pending/*.json"))
+
     monkeypatch.setenv("LORE_DISABLE_REVIEW", "1")
+    carrier.close()  # A new native carrier observes the new process configuration.
     assert not await engine.review_before_compact()
-    assert len(calls) == 1
+    assert _compact_calls(tmp_path) == ["success", "error", "changed_source"]
 
 
 @pytest.mark.asyncio
-async def test_automatic_compact_waits_for_review_and_blocks_failure(monkeypatch, tmp_path):
-    import threading
-    engine = SessionEngine(cwd=str(tmp_path))
-    monkeypatch.delenv("LORE_DISABLE_REVIEW", raising=False)
-    started, finish = threading.Event(), threading.Event()
-    def review():
-        started.set()
-        assert finish.wait(2)
-        return True
-    monkeypatch.setattr(engine, "_review_before_compact_sync", review)
-    engine._turn_running = True  # automatic compaction happens inside a turn
-    task = asyncio.create_task(engine._on_pre_compact({"trigger": "auto"}, None, {}))
-    for _ in range(100):
-        if started.is_set():
-            break
-        await asyncio.sleep(0.01)
-    assert started.is_set() and not task.done()
-    finish.set()
-    assert await task == {}
-    monkeypatch.setattr(engine, "_review_before_compact_sync", lambda: False)
-    refused = await engine._on_pre_compact({"trigger": "auto"}, None, {})
+async def test_automatic_compact_waits_for_review_and_blocks_failure(native_compact, monkeypatch, tmp_path):
+    engine, carrier = native_compact
+    _compact_transcript(engine)
+    monkeypatch.setenv("OWNED_COMPACT_MODE", "wait")
+    engine._turn_running = True  # Automatic compaction happens inside a turn.
+    task = asyncio.create_task(engine._on_pre_compact({"trigger":"auto"}, None, {}))
+    try:
+        async with asyncio.timeout(5):
+            while not (tmp_path / "ready").exists():
+                assert not task.done(), "compaction must await the native reviewer"
+                await asyncio.sleep(.005)
+        assert not task.done()
+    finally:
+        (tmp_path / "release").touch()
+        completed = await asyncio.wait_for(task, 5)
+    assert completed == {}
+    assert _compact_calls(tmp_path) == ["wait"]
+
+    monkeypatch.setenv("OWNED_COMPACT_MODE", "error")
+    refused = await engine._on_pre_compact({"trigger":"auto"}, None, {})
     assert refused["decision"] == "block"
-    assert "continue_" not in refused  # Claude discards this field for PreCompact
+    assert "continue_" not in refused  # Claude discards this field for PreCompact.
     monkeypatch.setenv("LORE_DISABLE_REVIEW", "1")
-    assert (await engine._on_pre_compact({"trigger": "auto"}, None, {}))["decision"] == "block"
+    carrier.close()
+    assert (await engine._on_pre_compact({"trigger":"auto"}, None, {}))["decision"] == "block"
+    assert _compact_calls(tmp_path) == ["wait", "error"]
 
 
 @pytest.mark.asyncio
-async def test_explicit_compact_review_permit_is_consumed_once(monkeypatch, tmp_path):
-    engine = SessionEngine(cwd=str(tmp_path))
-    monkeypatch.delenv("LORE_DISABLE_REVIEW", raising=False)
-    monkeypatch.setattr(engine, "_review_before_compact_sync", lambda: True)
+async def test_explicit_compact_review_permit_is_consumed_once(native_compact, monkeypatch, tmp_path):
+    engine, carrier = native_compact
+    _compact_transcript(engine)
     assert await engine.review_before_compact()
-    monkeypatch.setattr(engine, "_review_before_compact_sync", lambda: False)
-    assert await engine._on_pre_compact({"trigger": "manual"}, None, {}) == {}
-    assert (await engine._on_pre_compact({"trigger": "manual"}, None, {}))["decision"] == "block"
+    monkeypatch.setenv("OWNED_COMPACT_MODE", "error")
+    assert await engine._on_pre_compact({"trigger":"manual"}, None, {}) == {}
+    assert _compact_calls(tmp_path) == ["success"]  # Completed explicit review supplies one permit.
+    assert (await engine._on_pre_compact({"trigger":"manual"}, None, {}))["decision"] == "block"
+    assert _compact_calls(tmp_path) == ["success", "error"]
     assert engine._build_options().hooks["PreCompact"][0].timeout == 200
 
-    monkeypatch.setattr(engine, "_review_before_compact_sync", lambda: True)
+    monkeypatch.setenv("OWNED_COMPACT_MODE", "success")
     assert await engine.review_before_compact()
     monkeypatch.setenv("LORE_DISABLE_REVIEW", "1")
-    assert (await engine._on_pre_compact({"trigger": "manual"}, None, {}))["decision"] == "block"
+    carrier.close()
+    assert (await engine._on_pre_compact({"trigger":"manual"}, None, {}))["decision"] == "block"
     assert not engine._compact_preapproved
+    assert _compact_calls(tmp_path) == ["success", "error", "success"]
 
 
 def _script_one_turn_with_tool_call() -> list:

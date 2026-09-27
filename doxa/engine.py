@@ -100,6 +100,7 @@ from . import config as config_mod
 from . import gate as gate_mod
 from . import images as images_mod
 from . import operators as operators_mod
+from . import native_lore as native_lore_mod
 from . import peerdelivery as peerdelivery_mod
 from . import peerledger as peerledger_mod
 from . import peers as peers_mod
@@ -139,14 +140,8 @@ try:
 except ImportError:  # older SDKs have no rate-limit event surface
     RateLimitEvent = ()
 
-import lore_core
-from lore_core import context as lore_context
-from lore_core import deriver as lore_deriver
-from lore_core import pending as lore_pending
-from lore_core import store as lore_store
-from lore_core.beliefs import BELIEF_RELATIONS
-from lore_core.config import PROJECTS_DIR, project_slug, stage_disabled
-from lore_core.scrub import scrub_secrets
+from .native_lore import stage_disabled
+from .native_lore import scrub as scrub_secrets
 
 DEFAULT_MODEL: str | None = None  # None = whatever the CLI/session default is
 
@@ -582,91 +577,18 @@ def _accepts_via(func: "Any") -> bool:
     return "via" in params
 
 
+def _native_capability_state(name: str) -> dict:
+    try:
+        capable = name in native_lore_mod.capabilities()
+    except native_lore_mod.NativeLoreError:
+        capable = False
+    return {"capable": capable, "version": None, "source": "native",
+            "reason": "" if capable else "native LORE operation unavailable; actions disabled"}
+
+
 def lore_write_state() -> dict:
-    """Whether approve/reject may run against the ``lore_core`` THIS
-    process loaded, and -- when they may not -- the sentence the picker
-    prints instead.
-
-    Item V's mandatory degradation. LORE 0.36.0 shipped the write gate and
-    the provenance ledger (issue #43); before it, an approved write left
-    no record of having been approved. DOXA holds lore_core in-process, so
-    it is not gated by that CLI-layer classifier at all -- what makes an
-    approve from this picker defensible is that it is a human acting in a
-    UI, recorded as such. On a copy that cannot record it, the picker
-    goes READ-ONLY and says why, rather than writing into the model's
-    context with no honest label on it.
-
-    Measured three ways, all of which must hold:
-
-    * ``lore_core.gate`` imports -- the module 0.36.0 added, and the one
-      that owns ``record_entry``/``writer_class``.
-    * ``lore_core.pending`` still exposes the approve path DOXA drives
-      (``load_pending``/``apply_item``/``archive``). DOXA does not
-      reimplement any of it; it calls LORE's own functions so the label is
-      LORE's own.
-    * the writers those functions call accept ``via=`` (see
-      :func:`_accepts_via`).
-
-    A version STRING is reported but never decided on: the plugin checkout
-    wins over the pinned wheel (see :mod:`doxa._lore_bootstrap`), so what
-    is loaded on a given machine is not what ``pyproject.toml`` says, and
-    a capability read off a number would be a guess where a measurement
-    was available.
-
-    Reported the same way ``/about`` reports the carrier -- version and
-    source come from :mod:`doxa.version` and :mod:`doxa._lore_bootstrap`,
-    so a user chasing a difference reads one story in two places."""
-    from . import _lore_bootstrap
-    from . import version as version_mod
-
-    version = version_mod.lore_core_version()
-    source = _lore_bootstrap.resolved_source()
-    where = f"{source[0]} at {source[1]}" if source else "unknown source"
-    state = {
-        "capable": False,
-        "version": version,
-        "source": source[0] if source else None,
-        "location": source[1] if source else None,
-        "reason": "",
-    }
-    try:
-        from lore_core import gate as lore_gate  # noqa: F401
-        from lore_core import pending as lore_pending
-    except Exception:  # noqa: BLE001 -- an absent module is a reason, not a crash
-        state["reason"] = (
-            f"lore_core {version or 'of unknown version'} ({where}) has no write "
-            "gate or provenance ledger — approving here would write into the "
-            "model's context with no record that a human approved it. Approve "
-            "and reject are disabled; LORE 0.36.0 or newer enables them."
-        )
-        return state
-    missing = [
-        name for name in ("load_pending", "apply_item", "archive")
-        if not callable(getattr(lore_pending, name, None))
-    ]
-    if missing:
-        state["reason"] = (
-            f"lore_core {version or 'of unknown version'} ({where}) is missing "
-            f"{', '.join(missing)} — DOXA drives LORE's own approve path rather "
-            "than reimplementing it, so there is nothing here to drive. Approve "
-            "and reject are disabled."
-        )
-        return state
-    try:
-        from lore_core.beliefs import belief_insert
-        from lore_core.memory import memory_add
-    except Exception:  # noqa: BLE001
-        belief_insert = memory_add = None  # type: ignore[assignment]
-    if not (_accepts_via(belief_insert) and _accepts_via(memory_add)):
-        state["reason"] = (
-            f"lore_core {version or 'of unknown version'} ({where}) cannot label a "
-            "write as approved (its belief/memory writers take no `via`) — so an "
-            "approval from here would be indistinguishable from any other write. "
-            "Approve and reject are disabled."
-        )
-        return state
-    state["capable"] = True
-    return state
+    """Measure the installed canonical carrier's atomic review capability."""
+    return _native_capability_state("resolve_reviewed_v1")
 
 
 #: The three verdicts a human can record against a belief from DOXA, and
@@ -697,51 +619,8 @@ def pending_visible(item: dict, slug: "str | None") -> bool:
 
 
 def belief_action_state() -> dict:
-    """Whether this ``lore_core`` lets a human record an outcome against a
-    belief, or retract one -- measured off the API, never off a version.
-
-    A NARROWER check than :func:`lore_write_state`, deliberately, and the
-    two are not interchangeable. That one gates approving a staged
-    PROPOSAL and requires LORE 0.36.0, because approving writes a new
-    entry and an entry with no ``via`` label is the thing it exists to
-    prevent. These actions write somewhere else:
-
-    * an outcome is a row in ``belief_outcomes``, which already carries
-      its own provenance in the ``source`` and ``agent`` columns and has
-      done since the ledger landed -- well before 0.36.0.
-    * a retract is a status transition on a row that already exists. It
-      creates nothing, so there is nothing for a provenance column to
-      label.
-
-    Gating these on 0.36.0 would refuse a perfectly recordable outcome on
-    a store that can record it, which is a different dishonesty from the
-    one that gate prevents. So this asks the only question that matters:
-    are ``record_outcome`` and ``belief_supersede`` here to be called."""
-    from . import _lore_bootstrap
-    from . import version as version_mod
-
-    version = version_mod.lore_core_version()
-    source = _lore_bootstrap.resolved_source()
-    where = f"{source[0]} at {source[1]}" if source else "unknown source"
-    state = {"capable": False, "version": version,
-             "source": source[0] if source else None, "reason": ""}
-    try:
-        from lore_core.beliefs import belief_supersede, record_outcome
-    except Exception:  # noqa: BLE001 -- an absent API is a reason, not a crash
-        belief_supersede = record_outcome = None  # type: ignore[assignment]
-    missing = [name for name, func in (("record_outcome", record_outcome),
-                                       ("belief_supersede", belief_supersede))
-               if not callable(func)]
-    if missing:
-        state["reason"] = (
-            f"lore_core {version or 'of unknown version'} ({where}) is missing "
-            f"{', '.join(missing)} — DOXA drives LORE's own outcome ledger "
-            "rather than reimplementing it, so there is nothing here to drive. "
-            "Recording an outcome and retracting are disabled."
-        )
-        return state
-    state["capable"] = True
-    return state
+    """Only the installed canonical reviewed writer grants human actions."""
+    return _native_capability_state("belief_action_v1")
 
 
 # -- /context (item K): the breakdown, normalized ----------------------
@@ -964,79 +843,13 @@ def _session_worktree_block(cwd: str) -> "str | None":
     )
 
 
-def _graph_awareness_block() -> "str | None":
-    """The ``[BELIEF GRAPH]`` block ``_build_options`` appends after the
-    LORE snapshot (and the worktree notice, if any) -- one to three
-    sentences telling a session that ``lore_belief_neighbours`` exists and
-    what it is for, a gap the snapshot itself does not close: LORE's own
-    retrieval ladder (``lore_core/context.py``, verbatim inside
-    ``[LORE SNAPSHOT]``) lists five steps -- this snapshot, the file map,
-    the belief store (search/show), the session index, re-derive/measure
-    fresh -- and none of them is "the store also carries typed relations
-    BETWEEN beliefs; traverse them." A session has the tool (it is
-    advertised by its schema like every operator) with no instruction
-    that reaching for it is ever the right move -- this block is that
-    instruction, mechanics rather than documentation, so it stays short.
-
-    HIDE AT ZERO, and checked precisely, not approximately: the live
-    store (2026-08-28 measurement) carries 796 active beliefs, 121
-    structural ``supersedes`` edges and 1038 PROJECTED ``co_derived``
-    pairs, and ZERO of the deriver's five ASSERTED verbs (``depends_on``/
-    ``specializes``/``explains``/``contradicts``/``applies_when``) --
-    those only start landing once a session's deriver runs against LORE
-    0.41.0+. Telling every session about a traversal tool that would find
-    nothing spends the one line this costs on every turn from day one for
-    nothing. So the gate below is the EXACT active-only view
-    ``lore_belief_neighbours`` itself traverses
-    (``lore_core.graph.adjacency``'s default: both endpoints ``status =
-    'active'``) restricted to the five asserted verbs -- "the block is
-    present" and "the tool would find something" can never disagree.
-
-    TWO relations are DELIBERATELY excluded from the check, not omitted
-    by accident:
-
-    * ``co_derived`` is a PROJECTION over one session's beliefs joined
-      pairwise (see ``lore_core.graph``'s own module docstring) -- its
-      presence says a session concluded several things at one sitting,
-      and nothing about whether any two of them are actually related.
-      Pointing a session at a graph whose only edges are coincidence
-      would teach it to read co-occurrence as structure, exactly the
-      confusion the CITE-only/STEER split one level up exists to
-      prevent -- surfacing this tool on the strength of `co_derived`
-      alone would undercut the very honesty rule the tool itself
-      enforces per-belief.
-    * ``supersedes`` is excluded for a narrower, structural reason: a
-      superseded belief is never ``active``, so a `supersedes` edge can
-      never appear in the active-only view either this gate or the tool
-      itself reads -- it could not make the tool find anything even if
-      counted.
-
-    Never raises: a broken store or query is a session with no block,
-    not a failed connect -- the same posture every other read here."""
+def _graph_awareness_block() -> str | None:
+    """Canonical graph presence and traversal guidance, with no Python SQL."""
     try:
-        conn = lore_store.db_connect()
-        placeholders = ",".join("?" * len(BELIEF_RELATIONS))
-        row = conn.execute(
-            "SELECT 1 FROM belief_edges e"
-            " JOIN beliefs s ON s.id = e.src AND s.status = 'active'"
-            " JOIN beliefs d ON d.id = e.dst AND d.status = 'active'"
-            f" WHERE e.rel IN ({placeholders}) LIMIT 1",
-            tuple(BELIEF_RELATIONS),
-        ).fetchone()
-    except Exception:
+        block = native_lore_mod.request("graph_awareness_v1")
+        return block if isinstance(block, str) and len(block) <= 2048 else None
+    except native_lore_mod.NativeLoreError:
         return None
-    if row is None:
-        return None
-    return (
-        "[BELIEF GRAPH] Beyond the five-step ladder above: some beliefs "
-        "here carry typed relations to each other (depends_on, "
-        "specializes, explains, contradicts, applies_when). Once you "
-        "know a belief's id, call lore_belief_neighbours(belief_id) to "
-        "see what it depends on, contradicts or specializes, or the "
-        "confidence-scored path to another belief. Reachability is not "
-        "authority: a belief found by traversal is CITE-only unless it "
-        "earned STEER on its own."
-    )
 
 
 # -- what rides on ONE derive_done event ------------------------------
@@ -1546,11 +1359,12 @@ class SessionEngine:
         # Lineage only, never enforcement -- see peers.PeerInfo.
         # parent_session_id. Threaded to the PeerHost at start().
         self.parent_session_id = parent_session_id or None
-        self.slug = project_slug(cwd)
+        self._projects_dir, self.slug = native_lore_mod.transcript_identity(cwd)
         self._client_factory = client_factory
         self._client: Any = None
         self._connected = False
         self._finalized = False
+        self._native_belief_count = 0
         self._last_refresh = time.monotonic()
         self._tool_names: dict[str, str] = {}  # tool_use_id -> name
         self._tool_started: dict[str, float] = {}  # tool_use_id -> monotonic start
@@ -1622,9 +1436,8 @@ class SessionEngine:
         #     _maybe_schedule_derive), no session index (finalize), no
         #     belief outcome or retraction, no proposal approved.
         #
-        # What OFF does NOT mean: lore_core is still imported and still
-        # used for scrub_secrets on every persisted line, for project_slug
-        # and for PROJECTS_DIR. The transcript is still written -- it is
+        # The native carrier still supplies pure scrubbing and transcript
+        # identity when memory is off. The transcript is still written -- it is
         # DOXA's own session record, and /resume and the transcript pane
         # depend on it. What stops is DOXA putting anything INTO the store
         # or taking anything OUT of it.
@@ -1689,7 +1502,7 @@ class SessionEngine:
         # guessed, empty when the SDK/CLI doesn't provide them.
         self.server_info: dict[str, Any] | None = None
         self.account: dict[str, Any] = {}
-        self.lore_root = str(lore_core.ROOT)
+        self.lore_root = native_lore_mod.root_path()
 
         # Peer layer (doxa/peers.py): the host lives on the engine, not the
         # TUI, so the presence entry follows whoever hosts the engine when
@@ -1764,13 +1577,16 @@ class SessionEngine:
         # in _build_options) because its state must span the whole session,
         # not one options object. The sidecar carries only HOST-resolved
         # values; nothing model-supplied ever lands in it.
+        self._native_agent = native_lore_mod.Agent(session_id=self.session_id, cwd=self.cwd,
+            engine="claude", spawn_depth=self.spawn_depth) if self.lore else None
         self.tool_gate = gate_mod.ToolGate(
             allowed=allowed_tools,
             op_ctx=gate_mod.OperatorContext(
                 session_id=self.session_id,
                 cwd=self.cwd,
                 repo_root=gate_mod.repo_root_of(self.cwd),
-                belief_store=lore_store.db_connect,
+                belief_store=None,
+                native_lore=self._native_lore_tool,
                 source_engine="claude",
                 # Both HOST-resolved, like everything else on this
                 # sidecar: the depth came in on this process's argv, and
@@ -1817,7 +1633,7 @@ class SessionEngine:
         self._derive_task: "asyncio.Task | None" = None
         self._last_derive = time.monotonic()
 
-        transcript_dir = PROJECTS_DIR / self.slug
+        transcript_dir = self._projects_dir / self.slug
         transcript_dir.mkdir(parents=True, exist_ok=True)
         self.transcript_path = transcript_dir / f"{self.session_id}.jsonl"
 
@@ -1903,12 +1719,12 @@ class SessionEngine:
         if not self.lore:
             return {}
         parts: list[str] = []
-        interval = lore_context.refresh_interval()
+        interval = native_lore_mod.request("refresh_interval")
         if interval is not None:
             now = time.monotonic()
             if now - self._last_refresh >= interval:
                 self._last_refresh = now
-                snapshot = lore_context.build_context(self.cwd)
+                snapshot = native_lore_mod.request("snapshot", cwd=self.cwd, scope="all")
                 parts.append(
                     "LORE MEMORY REFRESH -- current as of now; supersedes any "
                     "earlier lore snapshot in this conversation.\n\n" + snapshot
@@ -1941,23 +1757,13 @@ class SessionEngine:
         isn't human-approved or outcome-calibrated. Never raises: a broken
         store or query is a session without a note, not a failed turn."""
         floor = consult_floor()
-        if floor is None:
+        if not self.lore or floor is None:
             return None
         try:
-            expr = lore_store.fts_expr(prompt, " OR ")
-            if not expr:
+            hit = native_lore_mod.request("consult", prompt=prompt)
+            if hit is None or hit.get("citation_status") != "cite_only":
                 return None
-            conn = lore_store.db_connect()
-            row = conn.execute(
-                "SELECT b.id, b.claim, b.confidence, bm25(belief_fts)"
-                " FROM beliefs b JOIN belief_fts f ON b.id = f.belief_id"
-                " WHERE belief_fts MATCH ? AND b.status = 'active'"
-                " ORDER BY bm25(belief_fts) LIMIT 1",
-                (expr,),
-            ).fetchone()
-            if row is None:
-                return None
-            bid, claim, confidence, score = row
+            bid, claim, confidence, score = hit["id"], hit["claim"], hit["confidence"], hit["score"]
             if -float(score) < floor:
                 return None
             claim_line = " ".join(_scrub_text(claim).split())[:240]
@@ -1992,20 +1798,12 @@ class SessionEngine:
         can be on independently, same as LORE's own ``consult`` and
         ``graph-context`` opt-in stages. Never raises: a broken graph query
         costs this block, never the turn."""
-        if not graph_context_enabled() or stage_disabled("beliefs"):
+        if not self.lore or not graph_context_enabled() or stage_disabled("beliefs"):
             return ""
         try:
-            from lore_core import graph as lore_graph
-            from lore_core.beliefs import belief_subject
-
-            conn = lore_store.db_connect()
-            slug = project_slug(self.cwd)
-            subjects = [belief_subject("user", slug), "user-model",
-                       belief_subject("project", slug)]
-            rows = lore_graph.context_candidates(conn, prompt, subjects)
-            block, _chosen = lore_graph.render_context_block(rows)
-            return block
-        except Exception:
+            block = native_lore_mod.request("graph_context_v1", cwd=self.cwd, prompt=prompt)
+            return block if isinstance(block, str) else ""
+        except native_lore_mod.NativeLoreError:
             return ""
 
     async def _on_pre_compact(self, input_data: dict, tool_use_id, context) -> dict:
@@ -2045,6 +1843,14 @@ class SessionEngine:
         one stage) everything passes -- the calling convention is what a
         future stage model plugs into."""
         return self.tool_gate.pre_tool_use(input_data)
+
+    async def _native_lore_tool(self, name: str, arguments: dict) -> Any:
+        if not self.lore or self._native_agent is None:
+            return {"error": "LORE memory is unavailable in this session"}
+        try:
+            return await asyncio.to_thread(self._native_agent.call, name, arguments)
+        except native_lore_mod.NativeLoreError:
+            return {"error": f"{name} failed: native LORE unavailable"}
 
     def _on_tool_disabled(self, name: str, reason: str) -> None:
         """Two-strikes disable fired from inside the gate (during SDK tool
@@ -2265,33 +2071,17 @@ class SessionEngine:
         return True
 
     def _run_review_sync(self, older: bool) -> None:
-        """Blocking: build the deriver job for the transcript so far and run
-        it. Called off the event loop (see _on_pre_compact / finalize).
-
-        Both call sites here are automatic paths (PreCompact hook,
-        host-driven finalize) -- the equivalent of a hook firing in
-        lore_core.deriver.cmd_review, not an explicit `lore review` command
-        -- so this honors LORE_DISABLE_REVIEW the same way cmd_review's hook
-        branch does: skip silently, never block the session over it."""
+        """Native verified derivation; session-end failure never blocks teardown."""
         if not self.lore or stage_disabled("review"):
             return
         try:
-            job = lore_deriver.build_review_job(
-                self.transcript_path, self.slug, cwd_hint=self.cwd, older=older,
-            )
-            if job is None:
-                return
-            job["source_engine"] = "claude"
-            tmp = lore_core.ROOT / "tmp"
-            tmp.mkdir(parents=True, exist_ok=True)
-            jobfile = tmp / f"review-{job['session_id']}.json"
-            jobfile.write_text(json.dumps(job), encoding="utf-8")
-            self._review_worker(jobfile)
+            self._review_worker(self._review_metadata(older))
         except Exception:
-            # A review failure must never take the session down with it --
-            # same posture as cmd_review's hook path ("never block session
-            # end"/"never block the prompt loop").
             pass
+
+    def _review_metadata(self, older: bool) -> dict:
+        return {"cwd":self.cwd, "session_id":self.session_id,
+                "transcript":str(self.transcript_path), "older":bool(older)}
 
     async def review_before_compact(self) -> bool:
         """Finish a LORE review before an explicit provider compaction.
@@ -2310,62 +2100,30 @@ class SessionEngine:
             return bool(completed)
 
     def _review_before_compact_sync(self) -> bool:
-        import tempfile
-        import stat
-
+        if not self.lore or stage_disabled("review"):
+            return False
         try:
-            # LORE's parser returns an empty transcript on open failure. A
-            # missing file must not be mistaken for its short-session rule.
-            with self.transcript_path.open("rb") as source:
-                before = os.fstat(source.fileno())
-                if not stat.S_ISREG(before.st_mode) or before.st_size == 0:
-                    return False
-            job = lore_deriver.build_review_job(
-                self.transcript_path, self.slug, cwd_hint=self.cwd, older=True,
-            )
-            after = self.transcript_path.stat()
-            if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
-                after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns
-            ):
-                return False
-            if job is None:
-                return True  # LORE's minimum-message rule: nothing to derive.
-            job["source_engine"] = "claude"
-            directory = lore_core.ROOT / "tmp"
-            directory.mkdir(parents=True, exist_ok=True)
-            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", suffix=".json",
-                                             prefix="compact-review-", dir=directory,
-                                             delete=False) as file:
-                json.dump(job, file)
-                jobfile = Path(file.name)
-            try:
-                return self._review_worker(jobfile)
-            finally:
-                jobfile.unlink(missing_ok=True)
+            return self._review_worker(self._review_metadata(True))
         except Exception:
             return False
 
     @staticmethod
-    def _review_worker(jobfile: Path) -> bool:
+    def _review_worker(metadata: dict) -> bool:
         import subprocess
         import sys
-
-        # The parent may have selected a Claude plugin checkout over the
-        # installed wheel. A fresh interpreter must use that same source.
-        lore_parent = str(Path(lore_core.__file__).resolve().parent.parent)
+        raw = json.dumps(metadata, ensure_ascii=False, allow_nan=False)
+        if len(raw.encode()) > 16 * 1024:
+            return False
         process = subprocess.Popen(
             [sys.executable, "-I", str(Path(__file__).with_name("review_worker.py")),
-             str(jobfile), lore_parent],
-            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL, start_new_session=True,
-        )
+             "claude", raw], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, start_new_session=True)
         try:
             return process.wait(timeout=185) == 0
         except subprocess.TimeoutExpired:
             return False
         finally:
-            # The supervisor owns the worker PG and kills/reaps it on EOF.
-            # The OS also closes this pipe if the SDK parent is SIGKILLed.
+            # EOF makes the supervisor kill its native worker/provider PG.
             process.stdin.close()
             try:
                 process.wait(timeout=3)
@@ -2376,17 +2134,7 @@ class SessionEngine:
     # -- streaming deriver -------------------------------------------
 
     def _pending_texts(self) -> list[str]:
-        """Staged proposals visible to this project's reviews, as TEXT --
-        lore_core's own pending list, scoped the way build_review_job scopes
-        it. Raw here on purpose: the two consumers scrub at their own
-        boundary (:func:`staged_event_payload` for the event,
-        :meth:`list_pending` for the picker), and scrubbing twice would
-        make the before/after diff in :meth:`_derive_once` compare scrubbed
-        text against scrubbed text for no gain."""
-        try:
-            return [str(text) for text in lore_deriver.pending_texts(self.slug)]
-        except Exception:
-            return []
+        return [str(row.get("text") or row.get("claim") or "") for row in self._pending_records()]
 
     def _pending_count(self) -> int:
         """Staged proposals visible to this project's reviews -- the number
@@ -2416,190 +2164,52 @@ class SessionEngine:
                 fresh.append(text)
         return fresh
 
-    def _pending_records(self) -> list[dict]:
-        """Every staged proposal this project's reviews can see, as the
-        RECORD lore_core wrote rather than the text the deriver would
-        repeat.
-
-        v0.31.0 read ``lore_deriver.pending_texts``, which returns
-        ``item["text"]`` and nothing else -- enough to LIST a proposal,
-        never enough to say what approving it would do, and with no id to
-        approve it BY. Item V reads ``lore_core.pending.load_pending``
-        instead: the same files, whole, with their pending id. The project
-        scoping is pending_texts' own, replicated exactly (a project-scoped
-        proposal for another project is destined for a different memory
-        file and says nothing about this one), so ``/pending`` still shows
-        the same set it always did.
-
-        Scrubbed at this boundary, like every other persistence-adjacent
-        surface here -- and field by field rather than wholesale, because
-        the record's structural fields (kind, action, scope, ids) are what
-        the verdict is computed from and must survive intact."""
-        try:
-            items = lore_pending.load_pending()
-        except Exception:  # noqa: BLE001 -- an unreadable spool is an empty one
-            return []
-        try:
-            cross_note = lore_pending.cross_project_note
-        except AttributeError:  # pre-0.35 lore_core
-            cross_note = lambda _item: None  # noqa: E731
-        out: list[dict] = []
-        for pid, item in items:
-            if not isinstance(item, dict):
-                continue
-            if not pending_visible(item, self.slug):
-                continue
-            record = {"pid": pid}
-            for key in ("kind", "action", "scope", "project", "subject", "id",
-                        "confidence", "session_id", "derived_by", "created",
-                        "writer", "origin_project", "subject_unresolved", "to"):
-                if item.get(key) is not None:
-                    record[key] = item[key]
-            for key in ("text", "claim", "match", "path", "purpose", "name",
-                        "description", "evidence", "reason", "writer_evidence"):
-                if item.get(key):
-                    record[key] = _scrub_text(item[key])
-            try:
-                note = cross_note(item)
-            except Exception:  # noqa: BLE001
-                note = None
-            if note:
-                record["cross_project_note"] = _scrub_text(note)
-            out.append(record)
-        return out
-
-    async def list_pending(
-        self, limit: int = PENDING_LIST_LIMIT, offset: int = 0
-    ) -> list[dict]:
-        """Staged proposals for ``/pending`` and the beliefs picker, as
-        RECORDS -- pending id, kind, action, target scope, what it would
-        supersede, when it was staged, and the proposal's own text.
-
-        v0.31.0 returned bare strings and shipped no approve/reject, both
-        for the same reason: the write path into curated memory was under
-        security review (docs/plans/plugin-api.md §6, LORE issue #43). That
-        review concluded in LORE 0.36.0, which shipped the write gate and
-        the provenance ledger, so item V does two things v0.31.0 could
-        not. It says what each proposal WOULD DO if approved -- a row that
-        does not is not reviewable -- and it can approve one, through
-        :meth:`approve_pending`, which drives LORE's own approve path so
-        the write carries LORE's own ``via="approved"`` label.
-
-        The shape change is the wire's too (the daemon's ``pending`` RPC
-        now serves records). A row that arrives as bare text -- from a
-        daemon still running the older build, which an upgrade does not
-        restart -- still renders: see ``doxa.ui.labels.as_proposal``.
-
-        async, and ``offset``, for the same two reasons
-        :meth:`list_beliefs` has them: symmetry with the other "list, then
-        let the surface render it" calls the app awaits, and the daemon's
-        ``pending`` RPC, which cannot put an unbounded list of free text in
-        a single 64KB wire frame and therefore serves it in pages."""
+    def _pending_records(self, limit: int = PENDING_LIST_LIMIT, offset: int = 0) -> list[dict]:
         if not self.lore:
             return []
-        records = self._pending_records()
-        return records[max(0, offset) : max(0, offset) + max(0, limit)]
+        try:
+            rows = native_lore_mod.request_rows("pending", cwd=self.cwd,
+                limit=max(0, min(10000, int(limit))), offset=max(0, int(offset)))
+            return rows if isinstance(rows, list) else []
+        except (native_lore_mod.NativeLoreError, ValueError, TypeError):
+            return []
+
+    async def list_pending(self, limit: int = PENDING_LIST_LIMIT, offset: int = 0) -> list[dict]:
+        return await asyncio.to_thread(self._pending_records, limit, offset)
 
     def lore_write_state(self) -> dict:
-        """Whether this engine may approve or reject -- see the module
-        function :func:`lore_write_state`. A method as well, because the
-        picker reaches its engine through the same ``getattr(engine, ...)``
-        it reaches every other capability through, and EngineClient has to
-        be able to answer for the DAEMON's lore_core rather than for the
-        client process's own."""
-        return lore_write_state()
+        return lore_write_state() if self.lore else {"capable":False, "reason":"memory is off"}
 
-    async def approve_pending(self, pid: str) -> "str | None":
-        """Apply ONE staged proposal, by its pending id. Returns None on
-        success, or the sentence to show the user.
-
-        Every line of the actual write is LORE's:
-        ``lore_core.pending.apply_item`` performs it and passes
-        ``via="approved"`` into ``memory_add``/``memory_replace``/
-        ``filemap_add``/``filemap_replace``/``belief_insert``, and
-        ``lore_core.pending.archive`` moves the proposal to
-        ``pending/archive/`` with ``status: "approved"``. DOXA reimplements
-        neither. That is the whole provenance condition: the label on an
-        approved entry is the label LORE puts there for an approval, not a
-        scheme DOXA invented that happens to look like one.
-
-        ONE id, never a list. There is no bulk form of this method and
-        there is deliberately nothing to add one to: the gate exists
-        because a human looked at THIS proposal, and an API taking a
-        sequence is the first half of an "approve all" button.
-
-        Off-loop (``asyncio.to_thread``) -- it writes SQLite rows, markdown
-        files and a JSON ledger, and the UI must stay live while it does."""
+    async def review_pending(self, pid: str) -> dict:
+        """Fetch exact raw contents; the caller must render these before acting."""
         if not self.lore:
-            return (
-                "this session runs with memory off (--no-lore): DOXA "
-                "neither reads nor writes the LORE store here"
-            )
-        state = lore_write_state()
-        if not state.get("capable"):
-            return state.get("reason") or "approving is not available here"
-        pid = str(pid or "").strip()
-        if not pid:
-            return "no proposal id"
-
-        def _apply() -> "str | None":
-            items = dict(lore_pending.load_pending())
-            item = items.get(pid)
-            if item is None:
-                return (
-                    f"{pid} is no longer staged — it was approved or rejected "
-                    "somewhere else while this list was open"
-                )
-            err = lore_pending.apply_item(pid, item, False)
-            if err:
-                return f"{pid}: NOT applied — {err}"
-            lore_pending.archive(pid, "approved")
-            return None
-
+            return {"error":"memory is off"}
         try:
-            return await asyncio.to_thread(_apply)
-        except Exception as exc:  # noqa: BLE001 -- a refusal is information
-            return f"{pid}: {type(exc).__name__}: {exc}"
+            return await asyncio.to_thread(native_lore_mod.request, "pending_review_v1", cwd=self.cwd, pid=pid)
+        except native_lore_mod.NativeLoreError:
+            return {"error":"native pending review unavailable"}
 
-    async def reject_pending(self, pid: str) -> "str | None":
-        """Discard ONE staged proposal, by its pending id. Returns None on
-        success, or the sentence to show the user.
-
-        ``lore_core.pending.archive(pid, "rejected")`` -- the same call
-        ``lore reject`` makes, which moves the file into
-        ``pending/archive/`` with its status recorded. It is not a delete:
-        a rejected proposal stays on disk, which is what makes rejecting
-        the cheaper of the two actions to get wrong.
-
-        Gated by the SAME capability check approve is, deliberately. A
-        DOXA that cannot honestly record an approval should not be quietly
-        emptying the queue the approval path reads from either -- read-only
-        means read-only."""
+    async def _resolve_pending(self, pid: str, decision: str, expected: dict | None) -> str | None:
         if not self.lore:
-            return (
-                "this session runs with memory off (--no-lore): DOXA "
-                "neither reads nor writes the LORE store here"
-            )
-        state = lore_write_state()
-        if not state.get("capable"):
-            return state.get("reason") or "rejecting is not available here"
-        pid = str(pid or "").strip()
-        if not pid:
-            return "no proposal id"
-
-        def _reject() -> "str | None":
-            if pid not in {p for p, _item in lore_pending.load_pending()}:
-                return (
-                    f"{pid} is no longer staged — it was approved or rejected "
-                    "somewhere else while this list was open"
-                )
-            lore_pending.archive(pid, "rejected")
-            return None
-
+            return "memory is off"
+        if expected is None:
+            return "native-review-required: render the exact native proposal snapshot before resolving"
         try:
-            return await asyncio.to_thread(_reject)
-        except Exception as exc:  # noqa: BLE001
-            return f"{pid}: {type(exc).__name__}: {exc}"
+            result = await asyncio.to_thread(native_lore_mod.request, "resolve_reviewed_v1",
+                cwd=self.cwd, pid=pid, decision=decision, expected=expected)
+            if result.get("status") == ("approved" if decision == "approve" else "rejected"):
+                return None
+            if result.get("may_have_applied") is True or result.get("applied") is True:
+                return "proposal may have applied; recovery required, do not retry automatically"
+            return "native proposal resolution refused"
+        except native_lore_mod.NativeLoreError:
+            return "native proposal resolution unavailable; refresh the exact review"
+
+    async def approve_pending(self, pid: str, expected: dict | None = None) -> str | None:
+        return await self._resolve_pending(pid, "approve", expected)
+
+    async def reject_pending(self, pid: str, expected: dict | None = None) -> str | None:
+        return await self._resolve_pending(pid, "reject", expected)
 
     def _maybe_schedule_derive(self) -> None:
         """Turn-done hook for the streaming deriver: schedule ONE background
@@ -2656,7 +2266,7 @@ class SessionEngine:
         # so nothing to append and nothing to report a length for. Building
         # it and then discarding it would still read the store, which on a
         # fleet run is the very access the switch exists to prevent.
-        snapshot = lore_context.build_context(self.cwd) if self.lore else ""
+        snapshot = native_lore_mod.request("snapshot", cwd=self.cwd, scope="all") if self.lore else ""
         # /context reports this length verbatim -- see lore_snapshot_chars.
         self.lore_snapshot_chars = len(snapshot)
         # Second (optional) system-prompt appendix -- see
@@ -2694,10 +2304,13 @@ class SessionEngine:
         # deliberate -- lore_remember only STAGES a pending proposal, so the
         # review gate is what keeps the write path safe, not its absence.
         # The configuredness ctx names the seams this engine actually wired.
+        if self._native_agent is not None:
+            self._native_agent.tools()  # Freeze canonical host identity before exposing tools.
         native_tools = operators_mod.to_sdk_tools(
             self.tool_gate.execute,
             allowed=self.tool_gate.allowed,
             include_write=True,
+            native_lore=self._native_agent.tools() if self._native_agent is not None else [],
             ctx={
                 # The two LORE seams, named ONLY when this session has
                 # memory. Absence here is what makes every lore_* operator
@@ -2708,8 +2321,8 @@ class SessionEngine:
                 # a refusal it can retry.
                 **(
                     {
-                        "belief_store": lore_store.db_connect,
-                        "lore_root": str(lore_core.ROOT),
+                        "native_lore": self._native_agent,
+                        "lore_root": native_lore_mod.root_path(),
                     }
                     if self.lore
                     else {}
@@ -4122,374 +3735,72 @@ class SessionEngine:
         )
 
     def belief_count(self) -> int:
-        """Active belief count for the status bar -- same query
-        lore_core.context.build_context uses to decide whether to mention
-        the belief store."""
+        """Canonical native status, with no Python store fallback."""
         if not self.lore:
             return 0
+        if self._native_agent is None:
+            return getattr(self, "_native_belief_count", 0)
         try:
-            conn = lore_store.db_connect()
-            return conn.execute(
-                "SELECT count(*) FROM beliefs WHERE status = 'active'"
-            ).fetchone()[0]
-        except Exception:
+            self._native_belief_count = self._native_agent.status().get("belief_count") or 0
+            return self._native_belief_count
+        except native_lore_mod.NativeLoreError:
             return 0
 
-    async def list_beliefs(
-        self, limit: int = BELIEF_LIST_LIMIT, offset: int = 0
-    ) -> list[dict]:
-        """Active belief BODIES -- the beliefs chip's picker (item 3), never
-        the status bar refresh: :meth:`belief_count` above is the cheap
-        COUNT(*) that runs on every refresh, this is the heavier SELECT of
-        the actual claim text, called lazily on click only. async for
-        symmetry with :meth:`switch_branch` (also a "list, then let the
-        picker render it" call the app awaits from a chip's open_* method) --
-        the query itself is a fast local sqlite read, same un-threaded
-        posture as belief_count's own call.
-
-        ``subject`` is lore_core's own belief-store vocabulary (beliefs.py:
-        ``belief_subject``) -- ``"user"``, ``"user-model"``, or
-        ``"project:<slug>"`` -- there is no separate ``scope`` column; the
-        chip's grouping (doxa.app._belief_scope_label) derives the group
-        from this string so a future subject prefix (LORE issue #41's
-        proposed ``machine:<id>``) slots in without a code change here.
-
-        ``offset`` (v0.28.0) exists for ONE caller: the daemon's ``beliefs``
-        RPC, which cannot put an unbounded belief list in a single 64KB wire
-        frame and therefore serves the same query in pages (see
-        doxa.daemon's handler and EngineClient.list_beliefs, which
-        reassembles them). The ORDER BY gained an explicit ``id`` tiebreak
-        in the same change, which paging needs and a single unpaged SELECT
-        never did: without a total order, two windows over rows sharing an
-        ``updated`` timestamp can repeat or skip a belief. With it, the
-        pages concatenate to exactly the list one unpaged call returns --
-        the parity EngineClient.list_beliefs has to keep with this
-        method.
-
-        ITEM V widened the SELECT. Four columns joined the four that were
-        already here, and each is a question the picker exists to answer
-        at a glance:
-
-        ``created``          when the belief entered the store -- the only
-                             one of the three timestamps that never moves,
-                             and what "how old is this belief" means read
-                             literally.
-        ``last_referenced``/ how long since anything CITED the belief.
-        ``updated``          v0.40.0 painted this as the staleness column
-                             and v0.46.0 took it off the row: being read
-                             back to the agent is not evidence a claim is
-                             still true. It survives for the tooltip. The
-                             staleness signal is the outcome ledger --
-                             see :meth:`_outcome_index`.
-        ``via``              provenance (LORE 0.36.0, issue #43): derived /
-                             dream / direct / approved, NULL on anything
-                             older. Selected THROUGH a column probe below,
-                             because DOXA can be pointed at a store an
-                             older lore_core migrated and a hard reference
-                             to a missing column fails the whole query --
-                             which would take the picker down with it.
-
-        ``evidence_count`` is a correlated count, not the trail itself: the
-        trail is unbounded and is fetched per belief, on demand, by
-        :meth:`belief_evidence`. A picker over 600 beliefs must not put
-        600 evidence trails through a 64KB frame, and this is how it
-        doesn't."""
+    async def list_beliefs(self, limit: int = BELIEF_LIST_LIMIT, offset: int = 0) -> list[dict]:
         if not self.lore:
             return []
         try:
-            conn = lore_store.db_connect()
-            have = {
-                str(row[1]) for row in
-                conn.execute("PRAGMA table_info(beliefs)").fetchall()
-            }
-            optional = [c for c in ("created", "updated", "last_referenced", "via",
-                                    "source_engine")
-                        if c in have]
-            columns = ", ".join(
-                ["b.id", "b.subject", "b.claim", "b.confidence"]
-                + [f"b.{c}" for c in optional]
-            )
-            rows = conn.execute(
-                f"SELECT {columns}, (SELECT count(*) FROM belief_evidence e "
-                "WHERE e.belief_id = b.id) FROM beliefs b "
-                "WHERE b.status = 'active' ORDER BY b.updated DESC, b.id "
-                "LIMIT ? OFFSET ?",
-                (limit, offset),
-            ).fetchall()
-        except Exception:
+            rows = await asyncio.to_thread(native_lore_mod.request_rows, "beliefs",
+                limit=max(0, min(10000, int(limit))), offset=max(0, int(offset)))
+            return rows if isinstance(rows, list) else []
+        except (native_lore_mod.NativeLoreError, ValueError, TypeError):
             return []
-        outcomes = self._outcome_index(conn)
-        out: list[dict] = []
-        for r in rows:
-            belief = {
-                "id": r[0], "subject": r[1], "claim": r[2], "confidence": r[3],
-                "evidence_count": r[-1],
-            }
-            for index, name in enumerate(optional, start=4):
-                if r[index] is not None:
-                    belief[name] = r[index]
-            if outcomes is not None:
-                belief.update(outcomes.get(r[0]) or {"outcomes": 0})
-            out.append(belief)
-        return out
-
-    @staticmethod
-    def _outcome_index(conn: "Any") -> "dict[int, dict] | None":
-        """Every ACTIVE belief's outcome ledger, keyed by belief id --
-        DOXA's staleness signal (v0.46.0).
-
-        WHY THIS IS THE SIGNAL. Through v0.40.0 the browser measured
-        staleness as ``coalesce(last_referenced, updated)``, which moves
-        when a belief is merely injected or cited. Being read back to the
-        agent is not evidence a claim is still true; ``belief_outcomes`` --
-        one append-only row per verdict, ``event`` CHECK-constrained by
-        lore_core.store to 'confirmed'/'contradicted'/'stale' -- is where
-        reality actually gets recorded, and it is what this returns.
-
-        TWO SET QUERIES, NOT 2N. The obvious shape is
-        ``lore_core.beliefs.outcome_counts(conn, bid)`` per row, which
-        DOXA already calls once per hit in ``doxa.operators``. It is the
-        wrong shape HERE: ``belief_outcomes`` carries no index on
-        ``belief_id``, so that is a full scan per belief, and this method
-        serves up to BELIEF_LIST_LIMIT of them on one click. So the counts
-        are computed set-wise instead -- with the SAME
-        ``sum(event = ...)`` expressions ``outcome_counts`` uses, and a
-        test (`test_the_page_wide_counts_equal_lore_s_own_outcome_counts`)
-        pins this function's per-belief answer equal to
-        ``outcome_counts``' for every belief in the store. Reuse of the
-        definition, without 2N scans of a growing table.
-
-        NO BOUND PARAMETERS, so no SQLITE_MAX_VARIABLE_NUMBER cliff on an
-        ``IN`` list of two thousand ids: both queries restrict by joining
-        the active beliefs themselves.
-
-        AND IT RIDES IN THE PAGE, deliberately -- unlike the evidence
-        trail, which is fetched per belief on expand. An outcome summary
-        is five short fixed-size fields where a trail is unbounded, so it
-        belongs inside the shared ``_fit_page`` byte budget where it can
-        be measured rather than outside it where it cannot. It is also
-        nearly free in practice: measured on this operator's store, 31
-        outcome rows against 628 active beliefs, so ~95% of rows carry
-        only the single ``outcomes: 0`` field.
-
-        ``outcomes`` is ALWAYS present (0 when the ledger is empty) and is
-        what makes "never tested" distinguishable from "this record came
-        from something that predates the column" -- a zero is a
-        measurement, an absent key is an admission. Returns None if the
-        ledger cannot be read at all, which renders as no column rather
-        than as a guess."""
-        try:
-            counts = conn.execute(
-                "SELECT o.belief_id,"
-                " coalesce(sum(o.event = 'confirmed'), 0),"
-                " coalesce(sum(o.event = 'contradicted'), 0),"
-                " coalesce(sum(o.event = 'stale'), 0)"
-                " FROM belief_outcomes o JOIN beliefs b ON b.id = o.belief_id"
-                " WHERE b.status = 'active' GROUP BY o.belief_id"
-            ).fetchall()
-            # The LATEST verdict per belief. Ordered by (created, id) so a
-            # tie on the timestamp -- two outcomes recorded inside the same
-            # second, which utcnow()'s one-second resolution makes real --
-            # resolves to the row that was actually inserted last.
-            latest = conn.execute(
-                "SELECT o.belief_id, o.event, o.created, o.source"
-                " FROM belief_outcomes o JOIN beliefs b ON b.id = o.belief_id"
-                " WHERE b.status = 'active' AND o.id = ("
-                "  SELECT i.id FROM belief_outcomes i WHERE i.belief_id = o.belief_id"
-                "  ORDER BY i.created DESC, i.id DESC LIMIT 1)"
-            ).fetchall()
-        except Exception:  # noqa: BLE001 -- an unreadable ledger is no column
-            return None
-        index: "dict[int, dict]" = {}
-        for bid, confirmed, contradicted, stale in counts:
-            record = {"outcomes": int(confirmed) + int(contradicted) + int(stale)}
-            for name, value in (("confirmed", confirmed),
-                                ("contradicted", contradicted), ("stale", stale)):
-                if int(value):
-                    # Emitted only when non-zero: three always-present
-                    # zeroes per row is payload spent saying nothing, on a
-                    # call whose whole design constraint is the frame cap.
-                    record[f"outcome_{name}s"] = int(value)
-            index[int(bid)] = record
-        for bid, event, created, source in latest:
-            record = index.setdefault(int(bid), {"outcomes": 0})
-            record["outcome_event"] = event
-            record["outcome_at"] = created
-            if source:
-                record["outcome_source"] = source
-        return index
 
     def belief_action_state(self) -> dict:
-        """Whether this engine can record outcomes and retract -- see the
-        module function :func:`belief_action_state`. A method as well, for
-        the same reason :meth:`lore_write_state` is one: the surfaces reach
-        their engine through ``getattr`` and a detached session has to be
-        able to answer for the DAEMON's lore_core, not the client's."""
-        return belief_action_state()
+        return belief_action_state() if self.lore else {"capable":False, "reason":"memory is off"}
 
-    async def record_belief_outcome(
-        self, belief_id: int, event: str, note: "str | None" = None,
-    ) -> "str | None":
-        """What reality actually did to one belief. None on success, or the
-        sentence to show the user.
-
-        The single highest-value action in this product, on the numbers:
-        97.6% of the live working set has never been tested by anything, so
-        the calibration curve every ``calibrated_confidence`` reads is
-        running on almost no evidence. This is the one-keystroke way to
-        give it some.
-
-        ``source="user"`` is not a label DOXA chose. It is exactly what
-        ``lore_core.beliefs.cmd_outcome`` -- LORE's own "manual/pushback
-        path: the user (or the agent relaying the user's correction)
-        records what actually happened to a cited belief" -- passes, and a
-        human selecting a verdict in a DOXA row IS that path. The write
-        itself is ``record_outcome``, so the dormancy trigger it carries
-        (``CONTRADICTIONS_TO_DORMANT`` contradictions retire a claim from
-        the working set) fires here exactly as it does from the CLI. That
-        is why this returns the resulting counts to the caller: a
-        contradiction that just retired a belief must say so.
-
-        ONE belief and ONE event per call, no list form -- the same rule
-        :meth:`approve_pending` follows and for the same reason."""
+    async def review_belief(self, belief_id: int) -> dict:
+        """Fetch the exact native belief snapshot for full human review."""
         if not self.lore:
-            return (
-                "this session runs with memory off (--no-lore): DOXA "
-                "neither reads nor writes the LORE store here"
-            )
-        state = belief_action_state()
-        if not state.get("capable"):
-            return state.get("reason") or "recording an outcome is not available here"
+            return {"error":"memory is off"}
+        try:
+            return await asyncio.to_thread(native_lore_mod.request, "belief_review_v1",
+                cwd=self.cwd, belief_id=belief_id)
+        except native_lore_mod.NativeLoreError:
+            return {"error":"native belief review unavailable"}
+
+    async def _belief_action(self, belief_id: int, action: str, note: str | None, expected: dict | None) -> str | None:
+        if not self.lore:
+            return "memory is off"
+        if expected is None:
+            return "native-review-required: render the exact native belief snapshot before acting"
+        try:
+            result = await asyncio.to_thread(native_lore_mod.request, "belief_action_v1",
+                cwd=self.cwd, belief_id=belief_id, action=action, note=note or "",
+                expected=expected)
+            return f"recorded; belief is now {result['status']}" if result.get("retired") else None
+        except native_lore_mod.NativeLoreError:
+            return "native belief action refused; refresh the exact review"
+
+    async def record_belief_outcome(self, belief_id: int, event: str, note: str | None = None,
+                                  expected: dict | None = None) -> str | None:
         if event not in BELIEF_OUTCOME_EVENTS:
-            return f"{event!r} is not one of {', '.join(BELIEF_OUTCOME_EVENTS)}"
+            return "invalid belief outcome"
+        return await self._belief_action(belief_id, event, note, expected)
 
-        def _record() -> "str | None":
-            from lore_core.beliefs import outcome_counts, record_outcome
+    async def retract_belief(self, belief_id: int, reason: str = "retracted from DOXA",
+                            expected: dict | None = None) -> str | None:
+        return await self._belief_action(belief_id, "retract", reason, expected)
 
-            conn = lore_store.db_connect()
-            row = conn.execute(
-                "SELECT status FROM beliefs WHERE id = ?", (int(belief_id),)
-            ).fetchone()
-            if row is None:
-                return f"no belief {belief_id} — nothing to record against"
-            record_outcome(conn, int(belief_id), event, "user",
-                           session_id=self.session_id,
-                           note=_scrub_text(note) if note else None)
-            conn.commit()
-            after = conn.execute(
-                "SELECT status FROM beliefs WHERE id = ?", (int(belief_id),)
-            ).fetchone()
-            if row[0] == "active" and after and after[0] != "active":
-                confirms, contradicts, _stales = outcome_counts(conn, int(belief_id))
-                return (
-                    f"recorded — and belief {belief_id} is now {after[0]}: "
-                    f"{contradicts} contradictions retire a claim from the "
-                    f"working set (confirms {confirms})"
-                )
-            return None
-
-        try:
-            return await asyncio.to_thread(_record)
-        except Exception as exc:  # noqa: BLE001 -- a refusal is information
-            return f"{belief_id}: {type(exc).__name__}: {exc}"
-
-    async def retract_belief(
-        self, belief_id: int, reason: str = "retracted from DOXA",
-    ) -> "str | None":
-        """End one belief. None on success, or the sentence to show.
-
-        The transition is LORE's, copied from the branch
-        ``lore_core.pending.apply_item`` runs for an approved ``retract``
-        proposal -- ``belief_supersede(conn, bid, None, reason)`` then
-        ``status = 'retracted'`` -- so a retraction from DOXA and a
-        retraction from ``lore approve`` leave the store in the same shape,
-        resolution text and all. DOXA invents no second way to end a
-        belief.
-
-        The default ``reason`` matches :meth:`EngineClient.retract_belief`
-        and ``doxa.daemon``'s own fallback (both ``"retracted from
-        DOXA"``) -- one string, on-process or over the socket, rather than
-        this path writing something different into the same ledger
-        column. (v0.69.0: it used to say "the DOXA beliefs browser"; that
-        tab is gone, and a resolution string that outlives the UI that
-        wrote it should not name one.)
-
-        This is the destructive one, and the surface treats it that way:
-        the picker's inline row action arms on the first press and fires
-        on the second, and its own per-row action menu makes retracting a
-        second, separately-named selection. Not irreversible in the sense
-        of lost data -- the row survives with `status='retracted'` and its
-        evidence and outcome ledger intact -- but it is out of the working
-        set and out of the model's context, which is the whole point."""
-        if not self.lore:
-            return (
-                "this session runs with memory off (--no-lore): DOXA "
-                "neither reads nor writes the LORE store here"
-            )
-        state = belief_action_state()
-        if not state.get("capable"):
-            return state.get("reason") or "retracting is not available here"
-
-        def _retract() -> "str | None":
-            from lore_core.beliefs import belief_supersede
-
-            conn = lore_store.db_connect()
-            row = conn.execute(
-                "SELECT status FROM beliefs WHERE id = ?", (int(belief_id),)
-            ).fetchone()
-            if row is None:
-                return f"no belief {belief_id} — nothing to retract"
-            if row[0] == "retracted":
-                return f"belief {belief_id} was already retracted"
-            belief_supersede(conn, int(belief_id), None, _scrub_text(reason))
-            conn.execute("UPDATE beliefs SET status = 'retracted' WHERE id = ?",
-                         (int(belief_id),))
-            conn.commit()
-            return None
-
-        try:
-            return await asyncio.to_thread(_retract)
-        except Exception as exc:  # noqa: BLE001
-            return f"{belief_id}: {type(exc).__name__}: {exc}"
-
-    async def belief_evidence(
-        self, belief_id: int, limit: int = BELIEF_EVIDENCE_LIMIT
-    ) -> list[dict]:
-        """One belief's EVIDENCE TRAIL: what it was derived from.
-
-        ``belief_evidence`` is lore_core's own table (belief_id, session_id,
-        project, note, created) -- one row per time the deriver concluded
-        this claim, plus whatever the dreamer moved onto it when it
-        superseded a source belief. Item V shows it because a belief
-        without its trail is an assertion, and the whole premise of a
-        store you can audit is that you can see where a claim came from.
-
-        Lazy, one belief at a time, and capped -- see
-        :data:`BELIEF_EVIDENCE_LIMIT`. ``limit + 1`` rows are read so the
-        caller can be told the trail was cut without a second COUNT(*)."""
+    async def belief_evidence(self, belief_id: int, limit: int = BELIEF_EVIDENCE_LIMIT) -> list[dict]:
         if not self.lore:
             return []
         try:
-            conn = lore_store.db_connect()
-            have_engine = any(r[1] == "source_engine" for r in conn.execute(
-                "PRAGMA table_info(belief_evidence)").fetchall())
-            rows = conn.execute(
-                "SELECT session_id, project, note, created, "
-                f"{'source_engine' if have_engine else 'NULL'} FROM belief_evidence "
-                "WHERE belief_id = ? ORDER BY created, rowid LIMIT ?",
-                (int(belief_id), max(1, limit) + 1),
-            ).fetchall()
-        except Exception:
+            rows = await asyncio.to_thread(native_lore_mod.request, "evidence",
+                belief_id=belief_id, limit=max(0, min(50, int(limit))))
+            return rows if isinstance(rows, list) else []
+        except (native_lore_mod.NativeLoreError, ValueError, TypeError):
             return []
-        trail = [
-            {"session_id": r[0], "project": r[1],
-             "note": _scrub_text(str(r[2] or "")), "created": r[3],
-             **({"source_engine": r[4]} if r[4] else {})}
-            for r in rows[:limit]
-        ]
-        if len(rows) > limit and trail:
-            trail[-1] = dict(trail[-1], trail_truncated=True)
-        return trail
 
     async def finalize(self) -> EngineEvent:
         """Host-driven session-end finalization (PHASE0 redesign item 1 --
@@ -4544,8 +3855,9 @@ class SessionEngine:
         # close.
         if self.lore:
             try:
-                conn = lore_store.db_connect()
-                added, _consumed = lore_store.index_live(conn, self.transcript_path)
+                result = native_lore_mod.request("index_transcript_v1", cwd=self.cwd,
+                    session_id=self.session_id)
+                added = int(result.get("indexed", 0))
                 indexed = added
             except Exception:
                 pass
@@ -4561,7 +3873,11 @@ class SessionEngine:
                 pass
             self._connected = False
 
+        belief_count = self.belief_count()
+        if self._native_agent is not None:
+            self._native_agent.carrier.close()
+            self._native_agent = None
         return EngineEvent("session_done", {
             "indexed": indexed,
-            "belief_count": self.belief_count(),
+            "belief_count": belief_count,
         })

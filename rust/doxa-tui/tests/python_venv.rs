@@ -45,8 +45,11 @@ fn frontend_passes_venv_symlink_to_daemon_and_doctor() {
     fs::set_permissions(&daemon, fs::Permissions::from_mode(0o700)).unwrap();
     let path = format!("{}:{}", python.parent().unwrap().display(), std::env::var("PATH").unwrap());
 
+    let sidecar = dir.path().join("sidecar.py");
+    fs::write(&sidecar, "# Claude sidecar fixture\n").unwrap();
     let doctor = Command::new(env!("CARGO_BIN_EXE_doxa-rs"))
-        .args(["doctor", "--engine", "deepseek"])
+        .args(["doctor", "--engine", "claude"])
+        .arg("--claude-script").arg(&sidecar)
         .env("DOXA_DAEMON_BIN", &daemon)
         .env("DOXA_HOME", dir.path().join("home"))
         .env_remove("DOXA_EFFORT")
@@ -57,7 +60,7 @@ fn frontend_passes_venv_symlink_to_daemon_and_doctor() {
         .output()
         .unwrap();
     assert!(doctor.status.success(), "{}", String::from_utf8_lossy(&doctor.stderr));
-    assert!(String::from_utf8_lossy(&doctor.stdout).contains(&format!("ok lore python: {}", python.display())));
+    assert!(String::from_utf8_lossy(&doctor.stdout).contains(&format!("ok claude python: {}", python.display())));
 
     let vendor = Command::new(env!("CARGO_BIN_EXE_doxa-rs"))
         .args(["new", "--engine", "deepseek"])
@@ -74,8 +77,6 @@ fn frontend_passes_venv_symlink_to_daemon_and_doctor() {
     assert!(!vendor.status.success()); // fake daemon exits before registering
     assert_eq!(captured_python(&fs::read_to_string(&capture).unwrap(), "--lore-python"), python.to_str().unwrap());
 
-    let sidecar = dir.path().join("sidecar.py");
-    fs::write(&sidecar, "# Claude sidecar fixture\n").unwrap();
     let claude = Command::new(env!("CARGO_BIN_EXE_doxa-rs"))
         .args(["new", "--engine", "claude"])
         .arg("--claude-script")

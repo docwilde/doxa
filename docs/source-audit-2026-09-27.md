@@ -151,3 +151,36 @@ Rust workspace, Python sidecar/authentication gates, CI results and installed
 launcher smoke check. The gallery is regenerated from the alpha.32 production renderer. Performance
 figures dated 2026-09-27 originate from alpha.31; they are measurements of that
 version, not new alpha.32 benchmarks.
+
+
+## Native LORE integration in alpha.34
+
+Canonical LORE 0.61.0 now owns DOXA memory, belief/evidence/graph reads,
+exact reviewed mutations, context refresh, session indexing/history, local sync
+records and detached review/reconciliation in Rust. The native frontend and
+host call the library in-process; retained SDK/MCP adapters call `lore-rs`.
+The installed Python package does not depend on Python LORE. Its development
+copy remains only as an interoperability oracle and explicit legacy fixture seam.
+
+The integration audit corrected valid signed proposal refusals, transcript
+index reply fields and nullable remote session metadata. Python/native replay
+preserves original verified belief, memory and file-map provenance. Native
+review freezes engine/session identity and exact transcript proof; changed
+sources cannot apply model output, and promotions remain pending.
+
+Resource gates now reject oversized database fields before owned allocation,
+limit aggregate loader working data, and bound provider pipes and metadata.
+Pinned directory descriptors confine private writes and locks as well as reads.
+Landed writes followed by sync or reconciliation failures report partial or
+`may_have_applied`, so a retry cannot claim the earlier effects were absent.
+Native worker fixtures verify descendant cleanup on success, error and timeout.
+
+Standalone LORE plugin administration and network transport services retain
+their Python compatibility entrypoints. The native module covers DOXA's active
+memory semantics; those standalone tools are not described as Rust ports.
+
+Checkout task commands now build and select the native carrier explicitly. The
+LORE upgrade workflow moves both native and development-oracle pins and locks
+to the same immutable commit. Retained adapter pagination uses the canonical
+50-row page size and preserves caller windows; a 600-belief socket fixture
+checks that it does not stop after the first page.

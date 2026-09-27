@@ -1,8 +1,9 @@
-//! Bounded client for DOXA's external LORE sidecar.
-//!
-//! LORE itself remains authoritative for scrubbing and context. This crate
-//! never opens LORE's SQLite database or stores memory. A failed sidecar
-//! returns an error; callers must not silently persist unsanitized text.
+//! Bounded client for canonical native LORE. Production uses an in-process
+//! Core; explicitly selected sidecars remain available for protocol fixtures.
+//! LORE owns memory, authority, locks and scrubbing. DOXA retains its result
+//! validation and never silently persists unsanitized text.
+
+mod native_config;
 
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -118,6 +119,8 @@ pub enum PendingResolution {
     Approved,
     Rejected,
     Refused { code: String, applied: bool },
+    /// The locked writer may have applied the proposal; recovery must decide.
+    Indeterminate { code: String },
 }
 
 impl PendingReview {
@@ -193,11 +196,18 @@ enum ReadResult {
     Io,
 }
 
+enum Backend {
+    Native { core: lore_core::Core, agent: bool },
+    Sidecar {
+        child: Child,
+        stdin: ChildStdin,
+        rx: Receiver<ReadResult>,
+        reader: Option<JoinHandle<()>>,
+    },
+}
+
 pub struct LoreClient {
-    child: Child,
-    stdin: ChildStdin,
-    rx: Receiver<ReadResult>,
-    reader: Option<JoinHandle<()>>,
+    backend: Backend,
     timeout: Duration,
     next_id: u64,
     alive: bool,
@@ -205,6 +215,37 @@ pub struct LoreClient {
 }
 
 impl LoreClient {
+    /// Lazy native human-review carrier. Construction does not open a store;
+    /// memory-off sessions can use the pure scrub operation safely.
+    pub fn open(timeout: Duration) -> Result<Self, LoreError> {
+        Self::native(native_config::resolve(timeout)?, timeout, false)
+    }
+
+    /// The model carrier starts unbound. Only agent_catalog_v1 may freeze the
+    /// host identity; subsequent JSON cannot choose authority or change it.
+    pub fn open_agent(timeout: Duration) -> Result<Self, LoreError> {
+        Self::native(native_config::resolve(timeout)?, timeout, true)
+    }
+
+    /// Explicit isolated configuration for embedders and owned fixtures.
+    pub fn open_config(config: lore_core::config::Config, timeout: Duration) -> Result<Self, LoreError> {
+        Self::native(config, timeout, false)
+    }
+
+    fn native(mut config: lore_core::config::Config, timeout: Duration, agent: bool) -> Result<Self, LoreError> {
+        if timeout.is_zero() { return Err(LoreError::InvalidFrame); }
+        config.timeout = timeout;
+        let authority = if agent {
+            lore_core::gate::Authority::Model { agent: "doxa".into(), engine: "unbound".into(), session_id: String::new() }
+        } else {
+            lore_core::gate::Authority::HumanReview { agent: "doxa-ui".into(), engine: "human".into() }
+        };
+        let capabilities = if agent { vec!["agent_catalog_v1", "agent_tool_v1", "agent_status_v1"] }
+            else { lore_core::Core::capabilities().to_vec() };
+        Ok(Self { backend: Backend::Native { core: lore_core::Core::new(config, authority), agent },
+            timeout, next_id: 1, alive: true,
+            capabilities: capabilities.into_iter().map(str::to_owned).collect() })
+    }
     pub fn is_alive(&self) -> bool {
         self.alive
     }
@@ -283,10 +324,7 @@ impl LoreClient {
         let (tx, rx) = mpsc::channel();
         let reader = thread::spawn(move || read_frames(stdout, tx));
         let mut client = Self {
-            child,
-            stdin,
-            rx,
-            reader: Some(reader),
+            backend: Backend::Sidecar { child, stdin, rx, reader: Some(reader) },
             timeout,
             next_id: 1,
             alive: true,
@@ -377,8 +415,8 @@ impl LoreClient {
         let project_cap_chars = value["project_cap_chars"].as_u64().ok_or(LoreError::InvalidFrame)?;
         let user_cap_chars = value["user_cap_chars"].as_u64().ok_or(LoreError::InvalidFrame)?;
         if project_chars > MAX_MEMORY_CHARS || user_chars > MAX_MEMORY_CHARS
-            || !(1..=MAX_MEMORY_CHARS).contains(&project_cap_chars)
-            || !(1..=MAX_MEMORY_CHARS).contains(&user_cap_chars) {
+            || project_cap_chars > MAX_MEMORY_CHARS
+            || user_cap_chars > MAX_MEMORY_CHARS {
             return Err(LoreError::InvalidFrame);
         }
         Ok(MemoryUsage { project_chars, user_chars, project_cap_chars, user_cap_chars })
@@ -418,7 +456,7 @@ impl LoreClient {
         let mut body = String::new();
         if entries.len() > 400 || value["scope"] != scope
             || value["key"].as_str().is_none_or(|key| key.is_empty() || key.len() > 4096 || key.chars().any(char::is_control))
-            || value["cap_chars"].as_u64().is_none_or(|cap| cap == 0 || cap > MAX_MEMORY_CHARS) {
+            || value["cap_chars"].as_u64().is_none_or(|cap| cap > MAX_MEMORY_CHARS) {
             return Err(LoreError::InvalidFrame);
         }
         for entry in entries {
@@ -632,8 +670,13 @@ impl LoreClient {
                 let code = value["error"].as_str().filter(|s| !s.is_empty() && s.len() <= 64
                     && s.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'))
                     .ok_or(LoreError::InvalidFrame)?;
+                if value.get("applied") == Some(&Value::Null) && value["may_have_applied"] == true {
+                    return Ok(PendingResolution::Indeterminate { code: code.to_owned() });
+                }
+                if !value["may_have_applied"].is_null() && value["may_have_applied"] != false {
+                    return Err(LoreError::InvalidFrame);
+                }
                 let applied = value["applied"].as_bool().ok_or(LoreError::InvalidFrame)?;
-                if applied && code != "archive_failed" { return Err(LoreError::InvalidFrame); }
                 Ok(PendingResolution::Refused { code: code.to_owned(), applied })
             }
             _ => Err(LoreError::InvalidFrame),
@@ -899,6 +942,19 @@ impl LoreClient {
         self.next_id = id.checked_add(1).ok_or(LoreError::InvalidFrame)?;
         frame["id"] = json!(id);
         let bytes = encode(&frame)?;
+        if let Backend::Native { core, agent } = &mut self.backend {
+            if *agent && bytes.len() > 64 * 1024 { return Err(LoreError::FrameTooLarge); }
+            let result = if *agent { core.agent_execute(&frame) } else { core.execute(&frame) }
+                .map_err(|error| native_error(frame["op"].as_str().unwrap_or(""), error))?;
+            let reply = if matches!(frame["op"].as_str(), Some("scrub" | "snapshot")) {
+                json!({"type":"reply", "id":id, "ok":true, "text":result})
+            } else { json!({"type":"reply", "id":id, "ok":true, "value":result}) };
+            // The native path crosses the same finite frame boundary before
+            // typed result validators consume it, with no trusted fast path.
+            let response = encode(&reply)?;
+            if *agent && response.len() > 64 * 1024 { return Err(LoreError::FrameTooLarge); }
+            return Ok(reply);
+        }
         let started = Instant::now();
         let mut offset = 0;
         while offset < bytes.len() {
@@ -906,7 +962,11 @@ impl LoreClient {
                 self.disable();
                 return Err(LoreError::Timeout);
             }
-            match self.stdin.write(&bytes[offset..]) {
+            let write = match &mut self.backend {
+                Backend::Sidecar { stdin, .. } => stdin.write(&bytes[offset..]),
+                Backend::Native { .. } => unreachable!(),
+            };
+            match write {
                 Ok(0) => {
                     self.disable();
                     return Err(LoreError::Closed);
@@ -959,7 +1019,11 @@ impl LoreClient {
     }
 
     fn receive(&mut self, timeout: Duration) -> Result<Value, LoreError> {
-        match self.rx.recv_timeout(timeout) {
+        let received = match &self.backend {
+            Backend::Sidecar { rx, .. } => rx.recv_timeout(timeout),
+            Backend::Native { .. } => return Err(LoreError::InvalidFrame),
+        };
+        match received {
             Ok(ReadResult::Line(bytes)) => serde_json::from_slice::<Value>(&bytes)
                 .ok()
                 .filter(Value::is_object)
@@ -993,12 +1057,12 @@ impl LoreClient {
     fn disable(&mut self) {
         if self.alive {
             self.alive = false;
-            #[cfg(unix)]
-            unsafe {
-                libc::kill(-(self.child.id() as i32), libc::SIGKILL);
+            if let Backend::Sidecar { child, .. } = &mut self.backend {
+                #[cfg(unix)]
+                unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL); }
+                let _ = child.kill();
+                let _ = child.wait();
             }
-            let _ = self.child.kill();
-            let _ = self.child.wait();
         }
     }
 }
@@ -1008,7 +1072,11 @@ impl Drop for LoreClient {
         self.disable();
         // A malicious descendant could keep stdout open after its parent is
         // killed; never make drop wait indefinitely for that pipe.
-        if let Some(reader) = self.reader.take() {
+        let reader = match &mut self.backend {
+            Backend::Sidecar { reader, .. } => reader.take(),
+            Backend::Native { .. } => None,
+        };
+        if let Some(reader) = reader {
             for _ in 0..20 {
                 if reader.is_finished() {
                     let _ = reader.join();
@@ -1018,6 +1086,21 @@ impl Drop for LoreClient {
             }
         }
     }
+}
+
+fn native_error(op: &str, error: lore_core::Error) -> LoreError {
+    let code = match (op, error) {
+        ("pending_review_v1" | "resolve_reviewed_v1", lore_core::Error::Changed) => "pending_changed",
+        ("belief_review_v1" | "belief_action_v1", lore_core::Error::Changed) => "belief_changed",
+        ("memory_review_v1" | "memory_action_v1", lore_core::Error::Changed) => "memory_changed",
+        ("pending_review_v1", lore_core::Error::TooLarge) => "pending_incomplete",
+        ("belief_review_v1", lore_core::Error::TooLarge) => "belief_incomplete",
+        ("memory_review_v1", lore_core::Error::TooLarge) => "memory_incomplete",
+        ("memory_action_v1", lore_core::Error::OverCap) => "memory_over_cap",
+        ("memory_action_v1", lore_core::Error::Untrusted) => "memory_refused",
+        (_, error) => error.code(),
+    };
+    LoreError::Remote(code)
 }
 
 fn encode(value: &Value) -> Result<Vec<u8>, LoreError> {

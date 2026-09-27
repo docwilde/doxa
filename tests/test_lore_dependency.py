@@ -1,32 +1,20 @@
 # SPDX-License-Identifier: AGPL-3.0-only
-"""v0.37.0: lore_core is a declared dependency, and DOXA says which one it loaded.
+"""Native runtime declaration and explicit legacy Python interoperability seams.
 
-The defect this file exists to prevent from returning: ``lore_core`` was
-imported by ``doxa.engine``, ``doxa.peers``, ``doxa.operators`` and
-``doxa.transcript`` while being declared nowhere. It resolved only because
-``doxa/_lore_bootstrap.py`` reached into a LORE Claude Code plugin checkout
-on the machine. On a bare clone there is no such checkout, and 41 of the 52
-test modules failed at COLLECTION -- the suite could not even report the
-problem as a failure, because it never got as far as running.
-
-So the first test here reads ``pyproject.toml`` and asserts the
-requirement is written down. Everything after it is about the consequence:
-there are now two places a ``lore_core`` can come from, the plugin
-checkout still wins when there is one (it and DOXA share a mutable SQLite
-store, and the plugin is the busier writer -- see
-``doxa._lore_bootstrap``'s docstring), and therefore ``/about`` has to
-NAME the source. A version number alone stopped being enough to identify
-what is running the moment there were two carriers.
+Installed DOXA uses canonical Rust LORE. The Python package is development-only;
+its bootstrap fixture functions remain available to tests when called explicitly.
+About/version rows describe the selected native carrier and never substitute a
+plugin checkout or Python package when native metadata is unavailable.
 """
 
 from __future__ import annotations
 
+import importlib
 import sys
 import tomllib
 import types
 from pathlib import Path
 
-import pytest
 
 from doxa import _lore_bootstrap
 from doxa import version as version_mod
@@ -34,10 +22,13 @@ from doxa import version as version_mod
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
-def _requirements() -> list[str]:
+def _manifest() -> dict:
     with (REPO_ROOT / "pyproject.toml").open("rb") as fh:
-        data = tomllib.load(fh)
-    return list(data["project"]["dependencies"])
+        return tomllib.load(fh)
+
+
+def _requirement_names(requirements: list[str]) -> list[str]:
+    return [req.split("@")[0].split("[")[0].strip().lower() for req in requirements]
 
 
 def _fake_checkout(root: Path) -> Path:
@@ -53,44 +44,33 @@ def _fake_checkout(root: Path) -> Path:
 # -- the declaration itself ----------------------------------------------
 
 
-def test_lore_core_is_a_declared_dependency():
-    """The whole point. Written down in pyproject, so `uv sync` on a bare
-    clone installs it and every module that imports it collects."""
-    names = [req.split("@")[0].split("[")[0].strip().lower() for req in _requirements()]
-    assert "lore-core" in names, (
-        "lore_core is imported by doxa.engine/peers/operators/transcript but is "
-        "not in pyproject's dependencies -- a bare clone will fail at collection"
-    )
+def test_python_lore_is_a_development_oracle_and_not_a_runtime_dependency():
+    manifest = _manifest()
+    assert "lore-core" not in _requirement_names(manifest["project"]["dependencies"])
+    assert "lore-core" in _requirement_names(manifest["dependency-groups"]["dev"])
 
 
-def test_the_lore_dependency_is_pinned_to_an_immutable_ref():
-    """Neither project is on PyPI, so this is a git URL. A git URL with no
-    ``@rev`` -- or one naming a BRANCH -- re-resolves to whatever that
-    branch is on the day someone syncs, which is not a dependency, it is a
-    subscription."""
-    requirement = next(r for r in _requirements() if r.lower().startswith("lore-core"))
+def test_the_development_oracle_is_pinned_to_an_immutable_ref():
+    requirement = next(req for req in _manifest()["dependency-groups"]["dev"]
+                       if req.lower().startswith("lore-core"))
     assert "git+https://github.com/docwilde/LORE" in requirement
-    rev = requirement.split("git+", 1)[1].rpartition("@")[2].strip()
-    assert rev, "the lore-core git dependency names no revision"
-    assert rev not in ("main", "master", "HEAD"), (
-        f"lore-core is pinned to the moving ref {rev!r}"
-    )
+    revision = requirement.split("git+", 1)[1].rpartition("@")[2].strip()
+    assert revision and revision not in ("main", "master", "HEAD")
 
 
-def test_lore_core_is_installed_as_a_distribution():
-    """The bare-clone property, asserted in-process: the environment has a
-    ``lore-core`` distribution, whether or not this machine has the LORE
-    plugin. This is what makes `import lore_core` work with an empty
-    sys.path shim."""
-    from importlib.metadata import PackageNotFoundError, version
+def test_runtime_bootstrap_does_not_implicitly_import_or_inject_python_lore(monkeypatch, tmp_path):
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    checkout = _fake_checkout(tmp_path / "plugin")
+    monkeypatch.setenv("DOXA_LORE_CORE_PATH", str(checkout))
+    monkeypatch.delenv("DOXA_LORE_SOURCE", raising=False)
+    monkeypatch.setitem(sys.modules, "lore_core", None)
+    before = list(sys.path)
+    importlib.reload(_lore_bootstrap)
+    assert sys.path == before
+    assert sys.modules["lore_core"] is None
 
-    try:
-        assert version("lore-core")
-    except PackageNotFoundError:  # pragma: no cover -- a broken environment
-        pytest.fail("lore-core is not installed; run `uv sync`")
 
-
-# -- precedence ----------------------------------------------------------
+# -- explicitly requested legacy compatibility bootstrap -----------------
 
 
 def test_a_plugin_checkout_wins_over_the_installed_package(monkeypatch, tmp_path):
@@ -182,62 +162,49 @@ def test_resolved_source_is_none_when_there_is_no_lore_core(monkeypatch):
     assert _lore_bootstrap.resolved_source() is None
 
 
-def test_about_names_the_source_it_loaded(monkeypatch, tmp_path):
-    """A user debugging a LORE-behaviour difference must not have to guess
-    which copy DOXA is running."""
+def _native_info(root: Path, *, version: str = "0.61.0", source: str = "lore-rs") -> dict:
+    return {"root":str(root / "store"), "projects_dir":str(root / "projects"),
+            "version":version, "source":str(root / source), "disabled_stages":[]}
+
+
+def test_about_names_the_native_source_it_loaded(monkeypatch, tmp_path):
+    info = _native_info(tmp_path)
+    monkeypatch.setattr(version_mod, "native_lore_info", lambda:info)
     rows = dict(version_mod.about_rows())
-    assert "lore from" in rows, "/about does not say where lore_core came from"
-    kind, _, location = rows["lore from"].partition("  ")
-    assert kind in ("plugin", "package")
-    assert location.strip(), "/about names a source with no location"
+    assert rows["lore from"] == f"native  {info['source']}"
+    assert rows["lore"] == f"0.61.0  {info['root']}"
 
 
-def test_about_source_row_follows_the_precedence(monkeypatch, tmp_path):
-    """Not a restatement of the previous test: this one MOVES the source
-    and checks the row moves with it."""
-    monkeypatch.setattr(sys, "path", list(sys.path))
-    checkout = _fake_checkout(tmp_path / "plugin")
-    monkeypatch.setenv("DOXA_LORE_CORE_PATH", str(checkout))
-    monkeypatch.delenv("DOXA_LORE_SOURCE", raising=False)
+def test_about_source_row_tracks_native_carrier_not_python_plugin_precedence(monkeypatch, tmp_path):
+    info = _native_info(tmp_path)
     fake = types.ModuleType("lore_core")
-    fake.__file__ = str(checkout / "lore_core" / "__init__.py")
-    fake.ROOT = tmp_path / "store"
+    fake.__file__ = str(tmp_path / "plugin/lore_core/__init__.py")
+    fake.__version__ = "9.9.9"
     monkeypatch.setitem(sys.modules, "lore_core", fake)
-
-    assert dict(version_mod.about_rows())["lore from"] == f"plugin  {checkout}"
-
-    monkeypatch.setenv("DOXA_LORE_SOURCE", "package")
-    assert dict(version_mod.about_rows())["lore from"] == f"package  {checkout}"
-
-
-# -- the version, across both carriers ------------------------------------
+    monkeypatch.setattr(version_mod, "native_lore_info", lambda:info)
+    for preference in ("plugin", "package"):
+        monkeypatch.setenv("DOXA_LORE_SOURCE", preference)
+        assert dict(version_mod.about_rows())["lore from"] == f"native  {info['source']}"
+    info = _native_info(tmp_path, source="other-native-carrier")
+    assert dict(version_mod.about_rows())["lore from"] == f"native  {info['source']}"
 
 
-def test_the_version_comes_from_the_copy_that_was_loaded(monkeypatch, tmp_path):
-    """LORE 0.35.1 and later carry ``__version__``, and it already resolves
-    itself correctly for whichever carrier it arrived in -- so DOXA asks
-    it rather than second-guessing it."""
-    fake = types.ModuleType("lore_core")
-    fake.__version__ = "1.2.3"
-    monkeypatch.setitem(sys.modules, "lore_core", fake)
-    monkeypatch.setenv("DOXA_LORE_CORE_PATH", str(tmp_path / "nowhere"))
+def test_the_version_comes_from_native_runtime_metadata(monkeypatch, tmp_path):
+    info = _native_info(tmp_path, version="1.2.3")
+    monkeypatch.setattr(version_mod, "native_lore_info", lambda:info)
     assert version_mod.lore_core_version() == "1.2.3"
 
 
-def test_a_pre_0_35_1_plugin_still_reports_its_manifest_version(
-    monkeypatch, tmp_path,
-):
-    """Every LORE before 0.35.1 shipped only inside the plugin and carried
-    no version attribute at all. Those installs are still on machines, and
-    the manifest beside the package is the only file that declares a
-    version for them."""
-    fake = types.ModuleType("lore_core")  # no __version__, like 0.34.0
-    fake.__file__ = str(tmp_path / "lore_core" / "__init__.py")
+def test_missing_native_metadata_does_not_fall_back_to_python_or_plugin_manifest(monkeypatch, tmp_path):
+    fake = types.ModuleType("lore_core")
+    fake.__version__ = "0.34.0"
+    fake.__file__ = str(tmp_path / "lore_core/__init__.py")
     monkeypatch.setitem(sys.modules, "lore_core", fake)
     monkeypatch.setenv("DOXA_LORE_CORE_PATH", str(tmp_path))
-
-    assert version_mod.lore_core_version() is None
-    manifest = tmp_path / ".claude-plugin" / "plugin.json"
+    manifest = tmp_path / ".claude-plugin/plugin.json"
     manifest.parent.mkdir(parents=True)
-    manifest.write_text('{"name": "lore", "version": "0.34.0"}', encoding="utf-8")
-    assert version_mod.lore_core_version() == "0.34.0"
+    manifest.write_text('{"name":"lore","version":"0.34.0"}')
+    monkeypatch.setattr(version_mod, "native_lore_info", lambda:None)
+    assert version_mod.lore_core_version() is None
+    rows = dict(version_mod.about_rows())
+    assert "lore" not in rows and "lore from" not in rows

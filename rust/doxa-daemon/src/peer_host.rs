@@ -19,7 +19,6 @@ pub struct PeerHost {
     inner: Arc<dyn Host>,
     agent_tools_enabled: bool,
     lore: Mutex<Option<LoreClient>>,
-    lore_python: Option<PathBuf>,
     runtime: PathBuf,
     cwd: PathBuf,
     scope: String,
@@ -53,7 +52,7 @@ impl PeerHost {
         cwd: &Path,
         session_id: String,
         title: String,
-        lore_python: Option<&Path>,
+        _lore_python: Option<&Path>,
         events: SyncSender<Value>,
     ) -> io::Result<Self> {
         let scope = scope_for_cwd(cwd)?;
@@ -76,7 +75,6 @@ impl PeerHost {
             inner,
             agent_tools_enabled,
             lore: Mutex::new(None),
-            lore_python: lore_python.map(Path::to_path_buf),
             runtime,
             cwd: cwd.to_path_buf(),
             scope,
@@ -95,14 +93,10 @@ impl PeerHost {
         &self,
         work: impl FnOnce(&mut LoreClient) -> Result<T, String>,
     ) -> Result<T, String> {
-        let python = self
-            .lore_python
-            .as_deref()
-            .ok_or("LORE scrub unavailable")?;
         let mut guard = self.lore.lock().map_err(|_| "LORE scrub unavailable")?;
         if guard.is_none() {
             *guard = Some(
-                LoreClient::spawn(python, Duration::from_secs(5))
+                LoreClient::open(Duration::from_secs(5))
                     .map_err(|_| "LORE scrub unavailable")?,
             );
         }
@@ -495,7 +489,7 @@ mod provider_target_tests {
         assert!(!peer.peer_tools_ready());
         assert_eq!(host.0.load(Ordering::Relaxed), 0);
         // Manual commands still reach their ordinary scrub/identity gates.
-        assert_eq!(peer.call("peers", &json!({})).unwrap_err(), "LORE scrub unavailable");
+        assert_eq!(peer.call("peers", &json!({})).unwrap_err(), "peer discovery unavailable or LORE scrub failed");
         let mut peer = Arc::try_unwrap(peer).ok().unwrap();
         peer.agent_tools_enabled = true;
         let peer = Arc::new(peer);

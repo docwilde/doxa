@@ -174,12 +174,13 @@ def export_shared_memory_caps() -> None:
             value = configured.get(key)
             if (key not in os.environ and isinstance(value, str)
                     and value.isascii() and value.isdecimal() and len(value) <= 7
-                    and 0 < int(value) <= 1024 * 1024):
+                    and 0 <= int(value) <= 1024 * 1024):
                 os.environ[key] = value
     except (OSError, ValueError):
         return
 
 
-ensure_importable()
+# The native runtime never injects a Python LORE checkout. Compatibility
+# callers must request that retired adapter explicitly.
 export_sticky_lore_root()
 export_shared_memory_caps()

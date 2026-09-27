@@ -31,9 +31,9 @@ def _source_repo(tmp_path: Path) -> Path:
     (assets / "icon.svg").write_text("<svg/>")
     package = repo / "doxa"
     package.mkdir()
-    for name in ("__init__", "lore_bridge", "engine"):
+    for name in ("__init__", "native_lore", "engine"):
         (package / f"{name}.py").write_text(f"# fixture {name}\n")
-    for name in ("lore_core", "claude_agent_sdk"):
+    for name in ("claude_agent_sdk",):
         folder = repo / name
         folder.mkdir()
         (folder / "__init__.py").write_text("# fixture\n")
@@ -70,15 +70,20 @@ def _run(tmp_path: Path, repo: Path, *args: str, fail_install_name: str | None =
             "while [ \"$#\" -gt 0 ]; do\n"
             "  if [ \"$1\" = --manifest-path ]; then manifest=$2; fi\n"
             "  if [ \"$1\" = --target ]; then target=$2; fi\n"
+            "  if [ \"$1\" = --bin ]; then binary=$2; fi\n"
             "  shift\n"
             "done\n"
             "dir=${manifest%/*}\n"
             "mkdir -p \"$CARGO_TARGET_DIR/$target/release\"\n"
+            "if [ \"$binary\" = lore-rs ]; then\n"
+            "  printf '#!/bin/sh\\nexit 0\\n' > \"$CARGO_TARGET_DIR/$target/release/lore-rs\"\n"
+            "  exit 0\n"
+            "fi\n"
             "case $dir in\n"
             "  */doxa-tui) cat > \"$CARGO_TARGET_DIR/$target/release/doxa-rs\" <<'SH'\n"
             "#!/bin/sh\n"
             "[ \"$(command -v python3)\" = \"$DOXA_LORE_PYTHON\" ] || exit 19\n"
-            "python3 -c 'import doxa.lore_bridge, doxa.engine, lore_core, claude_agent_sdk' || exit 20\n"
+            "python3 -c 'import doxa.native_lore, doxa.engine, claude_agent_sdk' || exit 20\n"
             "printf 'rust frontend\\n'\n"
             "SH\n"
             "    ;;\n"
@@ -96,7 +101,7 @@ def _run(tmp_path: Path, repo: Path, *args: str, fail_install_name: str | None =
         "  sync)\n"
         "    [ \"${DOXA_TEST_FAIL_SYNC:-0}\" != 1 ] || exit 74\n"
         "    site=$(\"$VIRTUAL_ENV/bin/python\" -c 'import site; print(site.getsitepackages()[0])')\n"
-        "    cp -R \"$7/doxa\" \"$7/lore_core\" \"$7/claude_agent_sdk\" \"$site/\" || exit 1\n"
+        "    cp -R \"$7/doxa\" \"$7/claude_agent_sdk\" \"$site/\" || exit 1\n"
         "    printf '#!%s/bin/python\\nimport doxa.engine\\n' \"$VIRTUAL_ENV\" > \"$VIRTUAL_ENV/bin/fixture-entrypoint\"\n"
         "    chmod 755 \"$VIRTUAL_ENV/bin/fixture-entrypoint\" ;;\n"
         "esac\n"
@@ -134,6 +139,8 @@ def test_default_installs_rust_doxa_and_importable_sidecars(tmp_path):
     assert (bin_dir / "doxa").is_file()
     assert (bin_dir / "doxa-rs").is_file()
     assert (bin_dir / "doxa-daemon-rs").is_file()
+    assert (bin_dir / "lore-rs").is_file()
+    assert "--package lore-core --bin lore-rs" in log.read_text()
     assert (bin_dir / "doxa-claude-sidecar.py").is_file()
     assert (bin_dir / ".doxa-sidecar-current").is_symlink()
     assert "rust/doxa-tui/Cargo.toml --bin doxa-rs" in log.read_text()
@@ -291,7 +298,7 @@ def test_failed_repair_preserves_existing_pointer_and_binaries(tmp_path, failure
     original_bin = Path(os.readlink(pointer))
     site = subprocess.check_output([str(original_bin / "python"), "-c", "import site; print(site.getsitepackages()[0])"], text=True).strip()
     shutil.rmtree(Path(site) / "claude_agent_sdk")
-    old_files = {name: (bin_dir / name).read_bytes() for name in ("doxa", "doxa-rs", "doxa-daemon-rs", "doxa-claude-sidecar.py")}
+    old_files = {name: (bin_dir / name).read_bytes() for name in ("doxa", "doxa-rs", "doxa-daemon-rs", "lore-rs", "doxa-claude-sidecar.py")}
     options = {"DOXA_TEST_FAIL_SYNC": "1"} if failure == "sync" else {"DOXA_TEST_KILL_AFTER_VENV": "1"} if failure == "kill" else {}
     failed, _, _ = _run(tmp_path, repo, fail_install_name="doxa" if failure == "install" else None, env_overrides=options)
     assert failed.returncode != 0

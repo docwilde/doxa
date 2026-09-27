@@ -282,15 +282,13 @@ class OperatorSurface:
         # the same mechanism doxa.engine uses, and for the same reason:
         # absence is what makes every lore_* operator ABSENT from
         # tools/list rather than present and refusing.
-        belief_store: "Callable[[], Any] | None" = None
+        from .native_lore import Agent
+        self.native_agent = Agent(session_id=identity.session_id, cwd=identity.cwd,
+            engine=identity.source_engine or "codex", spawn_depth=identity.spawn_depth) if identity.lore else None
+        belief_store = None
         ctx: dict = {}
-        if identity.lore:
-            from lore_core import store as lore_store
-            from lore_core.config import ROOT as LORE_STORE_ROOT
-
-            belief_store = lore_store.db_connect
-            ctx["belief_store"] = belief_store
-            ctx["lore_root"] = str(LORE_STORE_ROOT)
+        if self.native_agent is not None:
+            ctx["native_lore"] = self.native_agent
         if delivery is not None:
             # Named for the same reason: operators._peer_send_configured
             # wants the SETTING and a real outbound path, and a host with
@@ -305,6 +303,7 @@ class OperatorSurface:
                 cwd=identity.cwd,
                 repo_root=repo_root_of(identity.cwd),
                 belief_store=belief_store,
+                native_lore=self._native_lore_call,
                 source_engine=identity.source_engine,
                 spawn_depth=identity.spawn_depth,
                 # No human to ask and no spawn from this surface -- Codex
@@ -315,6 +314,16 @@ class OperatorSurface:
             ),
             on_disable=on_disable or self._note_disabled,
         )
+
+    async def _native_lore_call(self, name: str, arguments: dict) -> Any:
+        import asyncio
+        from .native_lore import NativeLoreError
+        if self.native_agent is None:
+            return {"error": "LORE memory is unavailable in this session"}
+        try:
+            return await asyncio.to_thread(self.native_agent.call, name, arguments)
+        except NativeLoreError:
+            return {"error": f"{name} failed: native LORE unavailable"}
 
     def tools(self) -> "list[dict]":
         """The configured operators as MCP tool definitions, recomputed on
@@ -330,8 +339,12 @@ class OperatorSurface:
         from .operators import OPERATORS, WRITE_OPERATORS, configured_names
 
         allowed = configured_names(self.ctx)
-        out: "list[dict]" = []
+        from .native_lore import LORE_TOOLS
+        out: "list[dict]" = [row for row in (self.native_agent.tools() if self.native_agent else [])
+            if row["name"] in allowed and row["name"] not in self.gate.disabled]
         for op in list(OPERATORS.values()) + list(WRITE_OPERATORS.values()):
+            if op.name in LORE_TOOLS:
+                continue
             if op.name not in allowed or op.name in self.gate.disabled:
                 continue
             out.append({

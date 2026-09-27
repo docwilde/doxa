@@ -213,9 +213,9 @@ from typing import Any, Callable
 
 from . import _lore_bootstrap  # noqa: F401 -- sys.path shim, see that module
 
-from lore_core import store as lore_store
-from lore_core.config import PROJECTS_DIR, project_slug
-from lore_core.scrub import scrub_secrets
+from . import native_lore as native_lore_mod
+
+from .native_lore import scrub as scrub_secrets
 
 from . import budget as budget_mod
 from . import codex_account as codex_account_mod
@@ -727,7 +727,7 @@ class CodexEngine:
         # attach to, and spawn_daemon would time out waiting for a field
         # that was never going to appear. None in-process.
         self.daemon_socket = daemon_socket or None
-        self.slug = project_slug(self.cwd)
+        self._projects_dir, self.slug = native_lore_mod.transcript_identity(self.cwd)
         wanted = str(sandbox or os.environ.get("DOXA_CODEX_SANDBOX", "")).strip()
         self.sandbox = wanted if wanted in SANDBOX_MODES else DEFAULT_SANDBOX
         self._exec_factory = exec_factory or asyncio.create_subprocess_exec
@@ -863,6 +863,8 @@ class CodexEngine:
         self.engine_control_error: "str | None" = None
         self._disabled: list[str] = []
         self._finalized = False
+        self._native_status_agent = None
+        self._native_belief_count = 0
         self._started = False
         self._proc: Any = None
         # Set only after the child proves it owns the process group created
@@ -877,7 +879,7 @@ class CodexEngine:
         self._bad_sample = ""
         self._tool_started: "dict[str, float]" = {}
 
-        transcript_dir = PROJECTS_DIR / self.slug
+        transcript_dir = self._projects_dir / self.slug
         transcript_dir.mkdir(parents=True, exist_ok=True)
         self.transcript_path = transcript_dir / f"{self.session_id}.jsonl"
         #: Codex's conversation id, beside the transcript, under DOXA's
@@ -1067,15 +1069,20 @@ class CodexEngine:
         except Exception:  # noqa: BLE001
             pass
         indexed = 0
-        try:
-            conn = lore_store.db_connect()
-            added, _consumed = lore_store.index_live(conn, self.transcript_path)
-            indexed = added
-        except Exception:  # noqa: BLE001 -- an index failure never blocks quit
-            pass
+        if self.lore:
+            try:
+                result = native_lore_mod.request("index_transcript_v1", cwd=self.cwd,
+                    session_id=self.session_id)
+                indexed = int(result.get("indexed", 0))
+            except native_lore_mod.NativeLoreError:
+                pass
+        belief_count = self.belief_count()
+        if self._native_status_agent is not None:
+            self._native_status_agent.carrier.close()
+            self._native_status_agent = None
         return EngineEvent("session_done", {
             "indexed": indexed,
-            "belief_count": self.belief_count(),
+            "belief_count": belief_count,
             "review": "skipped -- the LORE review is not wired for this engine",
         })
 
@@ -1299,9 +1306,7 @@ class CodexEngine:
         snapshot = ""
         if self.lore:
             try:
-                from lore_core import context as lore_context
-
-                snapshot = lore_context.build_context(self.cwd) or ""
+                snapshot = native_lore_mod.request("snapshot", cwd=self.cwd, scope="all")
             except Exception:  # noqa: BLE001 -- a LORE store that cannot be
                 # read is a session without memory, not one that cannot run.
                 snapshot = ""
@@ -2004,17 +2009,18 @@ class CodexEngine:
         }
 
     def belief_count(self) -> int:
-        """The same COUNT(*) SessionEngine runs. The belief store is not
-        the engine's -- it is the project's -- so a Codex tab's chip shows
-        the real number rather than a zero that would read as "this
-        session has no memory"."""
-        try:
-            conn = lore_store.db_connect()
-            return conn.execute(
-                "SELECT count(*) FROM beliefs WHERE status = 'active'"
-            ).fetchone()[0]
-        except Exception:  # noqa: BLE001
+        if not self.lore:
             return 0
+        if self._finalized:
+            return self._native_belief_count
+        try:
+            if self._native_status_agent is None:
+                self._native_status_agent = native_lore_mod.Agent(session_id=self.session_id,
+                    cwd=self.cwd, engine=CODEX_ENGINE_ID, spawn_depth=self.spawn_depth)
+            self._native_belief_count = self._native_status_agent.status().get("belief_count") or 0
+        except native_lore_mod.NativeLoreError:
+            pass
+        return self._native_belief_count
 
     def disabled_tools(self) -> "list[str]":
         """Always empty, and structurally so -- but for a NARROWER reason
@@ -2240,9 +2246,7 @@ def _peer_title(prompt: str) -> str:
 def lore_root_path() -> str:
     """Where LORE keeps its store, for the ``lore_root`` attribute the
     status surfaces read off any engine handle."""
-    from lore_core.config import ROOT
-
-    return str(ROOT)
+    return native_lore_mod.root_path()
 
 
 def _git_write_enabled() -> bool:

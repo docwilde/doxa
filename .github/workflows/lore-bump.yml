@@ -1,33 +1,8 @@
 name: LORE bump
 
-# Proposes -- never applies -- an upgrade of the pinned `lore-core`
-# dependency, and does it as a pull request a human merges.
-#
-# Three different "in sync with LORE" exist in this project and only one of
-# them maintains itself:
-#
-#   1. A machine with the LORE Claude Code plugin installed runs the PLUGIN's
-#      lore_core, which wins over the pinned package on purpose (see
-#      doxa/_lore_bootstrap.py -- one shared ~/.claude/lore store, and the
-#      plugin is its busier writer). That copy self-syncs via the plugin
-#      marketplace and can drift in either direction from the pin.
-#   2. A bare install -- `uv tool install git+...doxa`, or CI -- is frozen at
-#      the pinned ref forever, until a human edits pyproject.toml and re-locks.
-#   3. ci.yml's plugin matrix leg checks LORE out at `main`. That leg is a
-#      CANARY: it reports that a LORE change BROKE DOXA. It cannot report
-#      that a LORE release exists and DOXA has not taken it.
-#
-# So nothing proposed the upgrade, and a LORE release could sit unadopted
-# indefinitely. This is the missing half: staleness, not breakage.
-#
-# What a run means:
-#   * green run, no PR -- no LORE release is newer than the pin. The normal
-#     weekly outcome, and a success.
-#   * green PR waiting  -- the upgrade locks and the full suite passes on it.
-#     Safe to merge whenever a human gets to it.
-#   * red PR waiting    -- LORE moved in a way DOXA cannot take yet. This is
-#     precisely what the canary leg cannot tell you, because the canary only
-#     goes red once main breaks, and a release you never adopted never does.
+# Proposes an immutable native LORE upgrade for human review. Cargo is the
+# runtime pin; the Python dev dependency is the interoperability oracle.
+# Both pins and locks move together. This workflow never merges a proposal.
 
 on:
   schedule:
@@ -66,11 +41,8 @@ jobs:
   propose:
     name: Propose a LORE upgrade
     runs-on: ubuntu-latest
-    # The no-upgrade path is a checkout and three API calls -- seconds. The
-    # upgrade path is a lock plus the full suite, measured at ~9 minutes
-    # locally and slower on a runner. 30 gives that ~2x headroom (ci.yml
-    # uses 25 for the suite alone) without letting a wedged run burn an hour.
-    timeout-minutes: 30
+    # Native builds and the workspace fixtures run only for a new release.
+    timeout-minutes: 45
 
     permissions:
       # Push the proposal branch...
@@ -92,7 +64,7 @@ jobs:
 
       # Runs on the runner's system python3 -- stdlib only, before uv exists,
       # so the ordinary "nothing to do" answer costs no dependency sync.
-      # --write rewrites the pin in pyproject.toml only when the answer is
+      # --write rewrites both pins only when the answer is
       # `propose`; on `none` it changes nothing at all.
       - name: Decide whether a newer LORE tag exists
         id: decide
@@ -117,6 +89,10 @@ jobs:
           enable-cache: true
           cache-dependency-glob: uv.lock
 
+      - name: Select stable Rust
+        if: steps.decide.outputs.action == 'propose'
+        run: rustup toolchain install stable --profile minimal
+
       - name: Re-lock against the proposed LORE tag
         if: steps.decide.outputs.action == 'propose'
         env:
@@ -140,7 +116,10 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
-          git --no-pager diff --stat -- pyproject.toml uv.lock
+          # Resolve through a stable workspace package: changing the git rev
+          # removes the old lore-core package ID before cargo update can select it.
+          cargo +stable check --package doxa-lore
+          git --no-pager diff --stat -- rust/doxa-lore/Cargo.toml Cargo.lock pyproject.toml uv.lock
 
       # Idempotency, part one: has a human already said no to this exact
       # proposal? A closed (not merged) PR with this tag's title is a
@@ -168,7 +147,7 @@ jobs:
           echo "pr=$open_pr" >> "$GITHUB_OUTPUT"
 
           # Idempotency, part two: is the branch already carrying exactly
-          # this pyproject.toml and uv.lock? Then the suite has already run
+          # these native/oracle manifests and locks? Then the suite has already run
           # against it and its verdict is already in the PR body. Re-running
           # nine minutes of tests to reach the same answer is the cost this
           # check exists to avoid -- and it is checked BEFORE the suite, not
@@ -182,58 +161,40 @@ jobs:
           git fetch --no-tags origin \
             "+refs/heads/${BUMP_BRANCH}:refs/remotes/origin/${BUMP_BRANCH}" || true
           if git rev-parse --verify -q "origin/$BUMP_BRANCH" >/dev/null \
-             && git diff --quiet "origin/$BUMP_BRANCH" -- pyproject.toml uv.lock \
+             && git diff --quiet "origin/$BUMP_BRANCH" -- rust/doxa-lore/Cargo.toml Cargo.lock pyproject.toml uv.lock \
              && [ -n "$open_pr" ]; then
             echo "::notice::PR #$open_pr already proposes exactly this change; nothing to do."
             echo "skip=unchanged" >> "$GITHUB_OUTPUT"
           fi
 
-      # Same deselect-and-retry shape as ci.yml, deliberately reusing that
-      # pattern rather than inventing a second one. The flaky test is
-      # tests/test_tab_status.py::test_done_unseen... -- a diagnosed
-      # mount-time focus race, ~5% standalone, and its fix is a separate
-      # queued decision.
-      #
-      # ONE leg, not ci.yml's three. The plugin leg would prove nothing here:
-      # when a LORE plugin checkout is present it WINS over the pinned
-      # package, so it does not exercise the pin this PR changes. 3.12 is
-      # .python-version and what releases run.
-      - name: Run the full suite against the proposed pin
+      - name: Test native runtime and interoperability against the proposed pin
         if: steps.decide.outputs.action == 'propose' && steps.existing.outputs.skip == ''
         id: suite
         continue-on-error: true
+        env:
+          CARGO_BUILD_JOBS: "2"
+          RUST_TEST_THREADS: "1"
+          DOXA_LORE_RS: ${{ github.workspace }}/target/debug/lore-rs
+          DOXA_TEST_LORE_RS: ${{ github.workspace }}/target/debug/lore-rs
         run: |
           set -euo pipefail
           uv sync --frozen --python 3.12
-
-          # Prove the bump actually took: on a bare runner there is no plugin
-          # checkout, so lore_core must come from the pinned package. A leg
-          # that quietly tested the wrong copy would be green and meaningless.
-          uv run --no-sync python - <<'PY'
-          import sys
-          from doxa import _lore_bootstrap, version
-          print(version.about_text())
-          source = _lore_bootstrap.resolved_source()
-          if source is None:
-              sys.exit("::error::no lore_core could be imported at all")
-          kind, location = source
-          if kind != "package":
-              sys.exit(f"::error::expected the pinned package, got {kind} at {location}")
-          PY
-
-          set -o pipefail
+          export DOXA_LORE_PYTHON="$GITHUB_WORKSPACE/.venv/bin/python"
+          export DOXA_CLAUDE_PYTHON="$DOXA_LORE_PYTHON"
+          export PATH="$GITHUB_WORKSPACE/.venv/bin:$PATH"
+          cargo +stable build --locked --package lore-core --bin lore-rs
+          native_tests=$(mktemp -d "$RUNNER_TEMP/lore-upgrade-XXXXXX")
+          trap 'rm -rf "$native_tests"' EXIT
+          export TMPDIR="$native_tests"
+          HOME="$native_tests/home" "$DOXA_LORE_RS" memory show
+          cargo +stable test --locked --workspace --all-features 2>&1 | tee native-tests.log
           uv run --no-sync python -m pytest -q -rf --tb=short \
-            --deselect "tests/test_tab_status.py::test_done_unseen_marks_a_background_tab_and_clears_on_activation" \
-            2>&1 | tee pytest.log
-
-          test_id="tests/test_tab_status.py::test_done_unseen_marks_a_background_tab_and_clears_on_activation"
-          for attempt in 1 2 3; do
-            if uv run --no-sync python -m pytest -q -rf --tb=short "$test_id"; then
-              exit 0
-            fi
-          done
-          echo "::error::known-flaky tab-status test failed 3/3 attempts"
-          exit 1
+            tests/test_native_lore_carrier.py tests/test_native_lore_interop.py \
+            tests/test_native_lore_diagnostics.py tests/test_native_provider_lore.py \
+            tests/test_native_agent_tools.py tests/test_lore_capacity.py \
+            tests/test_review_worker.py tests/test_install_rust.py \
+            tests/test_lore_bump.py tests/test_task_native.py \
+            --basetemp="$native_tests/pytest" 2>&1 | tee pytest.log
 
       - name: Open or update the proposal
         if: steps.decide.outputs.action == 'propose' && steps.existing.outputs.skip == ''
@@ -249,10 +210,10 @@ jobs:
           set -euo pipefail
 
           if [ "$SUITE" = "success" ]; then
-            verdict="**The full suite passes on this pin.** Safe to merge."
+            verdict="**Native workspace and interoperability gates pass on this pin.**"
             tally="$(grep -E '(passed|failed|error)' pytest.log | tail -n 1 || echo 'see the run log')"
           else
-            verdict="**The suite does NOT pass on this pin.** LORE moved in a way DOXA cannot take yet -- do not merge until that is understood."
+            verdict="**The native upgrade gates do NOT pass on this pin.** LORE moved in a way DOXA cannot take yet -- do not merge until that is understood."
             tally="$(grep -E '(passed|failed|error)' pytest.log | tail -n 1 || echo 'the suite did not get far enough to report a tally')"
           fi
 
@@ -277,10 +238,9 @@ jobs:
             echo
             echo "---"
             echo
-            echo "Two things worth knowing before merging:"
+            echo "The native Cargo pin and Python dev interoperability oracle both use the same immutable release commit."
             echo
-            echo "- **This does not change what a machine with the LORE Claude Code plugin runs.** That plugin checkout wins over the pinned package by design (\`doxa/_lore_bootstrap.py\`). This pin is what a bare install and CI get, which is exactly the population that has no other way to move."
-            echo "- **The suite result above was produced by the workflow that opened this PR, not by \`ci.yml\`.** Pull requests opened with \`GITHUB_TOKEN\` do not trigger further workflow runs, so this PR will show no CI checks of its own. Push any commit to the branch as yourself and \`ci.yml\` runs normally."
+            echo 'These gates were run by the proposal workflow. GITHUB_TOKEN PRs do not trigger additional rust-ci.yml runs; a maintainer push triggers normal PR CI.'
             echo
             echo "Opened by \`.github/workflows/lore-bump.yml\`. It never merges anything."
           } > pr-body.md
@@ -297,7 +257,7 @@ jobs:
           # the reviewer; the title and the table above always name the tag
           # currently proposed.
           git checkout -b "$BUMP_BRANCH"
-          git add pyproject.toml uv.lock
+          git add rust/doxa-lore/Cargo.toml Cargo.lock pyproject.toml uv.lock
           # Identity passed per-command rather than written into the repo's
           # git config -- nothing here should outlive the step.
           git -c user.name="github-actions[bot]" \
