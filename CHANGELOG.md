@@ -5,6 +5,21 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.35 — 2026-09-27
+
+- Separate frontend session reduction, telemetry, rendering, input, layout,
+  navigation, history, LORE review, diff, model and operation controllers.
+  Keep the coordinator focused on shared state and preserve frontend entrypoints.
+- Generate help, completion, palette and typed local command dispatch from one
+  registry. Preserve malformed drafts, provider passthrough and keyboard-only
+  private shell execution.
+- Carry typed, owner-qualified lifecycle and command results through bounded
+  worker channels. Reduce model, permission and effort results directly through
+  the shared control reducer; keep one compatibility adapter for legacy frames.
+- Retain terminal ownership, scheduling, replay cursors, backpressure and shutdown
+  bounds without adding relay threads or queues. Keep interaction regression and
+  parity contracts alongside their extracted controllers.
+
 ## 2.0.0-alpha.34 — 2026-09-27
 
 - Integrate canonical LORE 0.61.0 as a Rust module for memory, file maps, beliefs,

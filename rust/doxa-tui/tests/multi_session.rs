@@ -1,5 +1,6 @@
 use doxa_tui::bridge::{connect_sessions, WorkerCommand};
 use doxa_tui::discovery::Session;
+use doxa_tui::worker_frames::WorkerFrame;
 use doxa_tui::ui::App;
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
@@ -25,11 +26,11 @@ fn read_request(socket: &UnixStream) -> Value {
     serde_json::from_str(&line).unwrap()
 }
 
-fn until(frames: &mpsc::Receiver<Value>, pred: impl Fn(&Value) -> bool) -> Value {
+fn until(frames: &mpsc::Receiver<WorkerFrame>, pred: impl Fn(&Value) -> bool) -> Value {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
-        let frame = frames.recv_timeout(remaining).unwrap();
+        let frame = frames.recv_timeout(remaining).unwrap().into_legacy_value();
         if pred(&frame) { return frame; }
     }
 }
@@ -79,7 +80,7 @@ fn two_sockets_route_events_prompts_and_reconnect_from_each_cursor() {
     assert!(*bridge.complete.lock().unwrap());
     let mut app = App::default();
     for _ in 0..4 {
-        let frame = bridge.frames.recv_timeout(Duration::from_secs(5)).unwrap();
+        let frame = bridge.frames.recv_timeout(Duration::from_secs(5)).unwrap().into_legacy_value();
         app.apply_daemon_frame(&frame);
     }
     assert_eq!(app.sessions.iter().find(|s| s.id == "session-a").unwrap().transcript, "**Assistant:**\n\nA1");

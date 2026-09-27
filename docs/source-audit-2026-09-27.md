@@ -119,15 +119,14 @@ failed. The release installation is checked again after publication.
 
 ## Remaining work and boundaries
 
-The owner reducer, shared capability policy and registry reader address the
-specific demonstrated structural failures. Other menu/job JSON protocols and
-the large frontend coordinator remain candidates for gradual extraction with
-preserved behavioral contracts. Provider adapters retain distinct transports.
+Alpha.35 separates the frontend coordinator into controllers and carries typed
+worker outcomes through bounded channels. Provider wire payloads retain their
+native JSON schemas; legacy consumers use one compatibility adapter. Provider
+adapters retain distinct transports.
 
-Native LORE integration is in progress in the canonical LORE repository. The
-current alpha.33 still uses its external LORE carrier; it does not claim that
-the native memory port has shipped. Live provider/account compatibility and
-macOS/Windows behavior remain outside the local fixture evidence.
+Canonical native LORE shipped in alpha.34. Standalone LORE administration and
+network services retain Python compatibility entrypoints. Live provider/account
+compatibility and macOS/Windows behavior remain outside the local fixture evidence.
 
 The optional retained browser remote adapter is deliberately unavailable until
 its transport can prove proxy identity. Codex protected compaction remains pinned
@@ -184,3 +183,34 @@ LORE upgrade workflow moves both native and development-oracle pins and locks
 to the same immutable commit. Retained adapter pagination uses the canonical
 50-row page size and preserves caller windows; a 600-belief socket fixture
 checks that it does not stop after the first page.
+
+## Engineering cleanup in alpha.35
+
+The frontend state definitions and defaults stay in `ui.rs`. Controllers own
+input, layout, session navigation, archived history, LORE review, diffs, model
+selection and explicit operations. Session-event reduction, transcript events,
+telemetry, rendering and the terminal loop have their own modules. Existing
+frontend entrypoints, state types and interaction contracts remain compatible.
+
+One command registry now generates typed local command identity, help,
+completion and palette entries. Unknown commands retain provider passthrough;
+malformed reserved forms remain drafts. Private shell execution remains reachable
+only from explicit keyboard submission.
+
+Bridge routing and worker channels carry `WorkerFrame` variants with target
+session, pane group, request and delivery identities. Real daemon payloads stay
+opaque at the wire boundary. Model, permission and effort outcomes go directly
+through the same owner-qualified reducer as decoded wire replies. Other legacy
+frame consumers use one conversion adapter. The native terminal loop receives
+both legacy and typed sources without a relay thread or extra queue, preserving
+its 64-frame tick budget and existing 32/128 channel bounds.
+
+Independent source comparisons checked preserved function bodies, public APIs,
+command forms, owner binding and null/absent-field compatibility. Local fixtures
+exercise malformed provider replies, superseded effort results, target refusal,
+exact unsent drafts, backpressure and owned router shutdown. Release CI retains
+the installed native-carrier and SDK adapter checks.
+
+`MultiBridge.frames` now yields `WorkerFrame`; direct bridge consumers can
+handle those variants or call `into_legacy_value` during migration. Legacy
+`run_with_frames` and JSON channel entrypoints remain available without relays.
