@@ -9,9 +9,14 @@ struct Surface { owner: Owner, rect: Rect, cells: Vec<Option<String>> }
 #[derive(Clone, Debug)]
 struct Range { surface: Surface, anchor: Position, end: Position, dragged: bool }
 #[derive(Debug, Default)]
-pub struct Selection { surfaces: Vec<Surface>, range: Option<Range> }
+pub struct Selection { surfaces: Vec<Surface>, regions:Vec<(Owner,Rect)>, range: Option<Range> }
 impl Selection {
-    pub fn begin_frame(&mut self) { self.surfaces.clear(); }
+    pub fn begin_frame(&mut self) { self.surfaces.clear(); self.regions.clear(); }
+    pub fn register(&mut self,owner:Owner,rect:Rect) {self.regions.push((owner,rect));}
+    pub fn finish_paint(&mut self,buffer:&mut Buffer) {
+        for(owner,rect)in std::mem::take(&mut self.regions){self.capture(owner,rect,buffer);}
+        self.finish_frame();
+    }
     pub fn capture(&mut self, owner: Owner, rect: Rect, buffer: &mut Buffer) {
         let count = usize::from(rect.width) * usize::from(rect.height);
         if count == 0 || count > CELL_CAP || self.surfaces.iter().map(|s|s.cells.len()).sum::<usize>() + count > CELL_CAP { return; }
@@ -80,6 +85,14 @@ fn endpoints(range:&Range)->((u16,u16),(u16,u16)) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn final_paint_snapshot_includes_overlay_text_and_geometry_changes_clear_selection() {
+        let owner=Owner{pane:0,session:"s".into()};let rect=Rect::new(1,1,8,1);let mut buffer=Buffer::empty(Rect::new(0,0,20,8));
+        let mut state=Selection::default();state.begin_frame();state.register(owner.clone(),rect);
+        buffer.set_string(1,1,"tooltip",ratatui::style::Style::default());state.finish_paint(&mut buffer);
+        state.start(Position::new(1,1));state.drag(Position::new(7,1));assert_eq!(state.text(&owner).as_deref(),Some("tooltip"));
+        state.begin_frame();state.register(owner.clone(),Rect::new(2,1,7,1));state.finish_paint(&mut buffer);assert!(state.text(&owner).is_none());
+    }
     #[test]
     fn selection_uses_painted_wide_cells_and_line_breaks_and_invalidates_changed_surface() {
         let owner=Owner {pane:1,session:"s".into()};let rect=Rect::new(4,2,8,2);let mut buffer=Buffer::empty(Rect::new(0,0,20,8));

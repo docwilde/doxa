@@ -8496,7 +8496,7 @@ impl App {
             self.draw_request(frame, area, false);
         }
         self.draw_chip_tooltip(frame);
-        self.transcript_selection.borrow_mut().finish_frame();
+        self.transcript_selection.borrow_mut().finish_paint(frame.buffer_mut());
         if self.preferences.value("background")=="transparent" {for cell in &mut frame.buffer_mut().content {if matches!(cell.bg,theme::BASE|theme::RAISED|theme::RAIL) {cell.bg=Color::Reset;}}}
     }
 
@@ -9374,8 +9374,8 @@ impl App {
             inner[1],
         );
         if !self.link_interaction_blocked() {
-            self.transcript_selection.borrow_mut().capture(crate::selection::Owner {pane:index,session:id.to_owned()},
-                Rect::new(inner[1].x.saturating_add(1),inner[1].y,inner[1].width.saturating_sub(2),inner[1].height),frame.buffer_mut());
+            self.transcript_selection.borrow_mut().register(crate::selection::Owner {pane:index,session:id.to_owned()},
+                Rect::new(inner[1].x.saturating_add(1),inner[1].y,inner[1].width.saturating_sub(2),inner[1].height));
         }
         if active && chooser_height > 0 {
             if self.active_request_index().is_some_and(|index| self.input_requests[index].kind == "ask_user") {
