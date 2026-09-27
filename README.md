@@ -41,60 +41,19 @@ account data are used. The fixtures and renderer live in
 
 ## What you get
 
-Launch and reattach [four engines](rust/README.md), work
-across grouped tabs and nested splits with separate prompts, move an active
-tab with `/movepane`, inspect bounded
-worktree diffs and tool cards, change supported models, reasoning effort and permissions, and
-browse LORE beliefs and peer activity. Accept or reject a belief from its
-inline browser after reviewing the exact claim. The [Rust guide](rust/README.md)
-describes its current capabilities and limits. Managed worktrees, diff hunk
-rejection, explicit clean Rust-orphan cleanup, guarded session checkout recovery,
-reviewed LORE belief actions,
-LORE proposal review, and native fleet coordination are in the alpha. Fleets
-include start barriers, explicit approval policies, durable spend guards and
-verified resume without repeating ambiguous dispatches. The Python fleet
-harness remains available through `fleet start-python`.
-`/cd <path>` opens a new tab rooted in a different directory. Explicit
-Claude and protected Codex `/compact` wait for completed LORE review.
-The native Codex hook contract currently requires CLI 0.156.1; provider hook
-infrastructure failures remain a [documented limitation](rust/doxa-engines/README.md#compaction-review).
-Known Codex, DeepSeek and GLM models can use dated-price native spend ceilings
-when every request reports complete token usage. `doxa setup` offers interactive
-setup, `doxa auth login|logout claude|codex` runs the provider login flow,
-and `doxa plugins` shows plugin inventory. `doxa settings` and `/settings` edit
-categorized session, memory, appearance, notification and remote preferences,
-including their effective sources. First launch offers setup once; plain `doxa`
-restores saved tabs and safely resumes recorded conversations. `!<command>` runs
-locally in the session directory without saving output or sending it to the model.
-Tab cycles through tab headers, visible chips and the prompt; Shift+Tab reverses it.
-Open menus and slash completion retain their own Tab behavior.
-Drag transcript text to select it, then press Ctrl+C or Ctrl+Shift+C to send it
-to the terminal clipboard (requires OSC52 support). Ctrl+V pastes into the prompt
-when a supported clipboard reader is installed; terminal Ctrl+Shift+V also works.
-Default startup skips terminal capability probes. On a terminal with Kitty
-keyboard protocol support, set `DOXA_KEYBOARD_PROTOCOL=kitty` for enhanced keys;
-legacy alternatives are shown in `/help`.
-`/branch` opens a local branch picker for a managed session.
-Clicking the repo chip opens a directory picker above the prompt; its top
-border can be dragged to show more entries. Selectable rows highlight under
-the pointer. Codex sessions now show current context usage when DOXA can
-receive official app-server token usage; legacy CLI sessions use their verified owned rollout. New Codex sessions use app-server, with live estimated reasoning counts. Saved CLI sessions retain their existing transport.
-`/usage` and `/context` open per-session detail panels, and `/collection`
-organizes the session rail. `/fleet start` reviews the exact native plan before
-launch, and saved fleet views track real run manifests separately from session
-tabs. `/login codex --device-auth` supports the provider device login flow.
-`/help` lists Rust support for all 42 DOXA 1.19 commands. `/search` consults
-LORE's existing session index before its bounded transcript scan and shows
-grouped, scrubbed excerpts above the prompt as you type. The memory chip
-browses user/project entries and opens reviewed memory edits. Guarded `/clear` starts a fresh
-session in the same tab after verifying a writable
-tabset.
-Processing appears inside each transcript; reasoning is folded behind a live
-token counter. Codex reasoning content is scrubbed as a whole before becoming available to expand; its live count remains an estimate. Expanded tool activity shows scrubbed result detail.
-Restored Claude and newly persisted Codex sessions keep expandable tool details in the bounded transcript
-view. User turns are highlighted without visible role headings. Transcript
-HTTP(S) links open in the browser with Ctrl+left click and show a pointer cursor
-in supporting terminals.
+- **Four engines:** Run Claude, Codex, DeepSeek or GLM, with supported model, reasoning effort and permission changes during a session.
+- **Flexible workspace:** Group tabs, split panes horizontally or vertically, and drag dividers; each pane has its own prompt.
+- **Session recovery:** Restore saved tabs, drafts and layouts, safely resume recorded conversations, or reattach to running daemons.
+- **Clear conversations:** Follow a processing spinner and live reasoning count, expand thinking or tool details, and open links with Ctrl+click.
+- **Shared memory:** Browse and filter LORE's individual user/project memories, inspect belief evidence, and accept or reject exact reviewed claims.
+- **Repo and worktree tools:** Browse folders, switch branches, inspect diffs, reject tracked hunks and perform guarded checkout recovery or cleanup.
+- **Fleets and peers:** Review multi-agent plans, coordinate supervised runs, enforce reported spend limits and inspect peer activity in the TUI or browser mesh.
+- **Usage at a glance:** Inspect reported context, plan, quota and API balance details; unavailable values stay unknown.
+- **Keyboard and mouse:** Navigate tabs, chips and prompts with Tab, use slash completion, and select/copy text or paste into the prompt where supported.
+- **Setup and customization:** Use interactive login, plugin management, categorized settings, help and updates; run private local shell commands with `!`.
+
+See the [Rust guide](rust/README.md) for engine capabilities, shortcuts and
+[compaction boundaries](rust/doxa-engines/README.md#compaction-review).
 
 ## Gallery
 
