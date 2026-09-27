@@ -68,10 +68,8 @@ def test_indexed_session_search_is_project_first_bounded_and_scrubbed():
                                     (lambda cwd: "project", None, None, None), lambda x: x)
 
 
-def test_reviewed_resolve_with_pinned_lore_rejects_one_exact_snapshot(tmp_path):
-    source = os.environ.get("DOXA_TEST_LORE_API_PATH")
-    if source and not (Path(source) / "lore_core" / "pending.py").is_file():
-        pytest.fail("DOXA_TEST_LORE_API_PATH does not contain LORE's pending API")
+def test_native_reviewed_resolve_rejects_one_exact_snapshot(tmp_path):
+    from doxa.native_lore import executable
     root = tmp_path / "lore"
     pending = root / "pending"
     pending.mkdir(parents=True)
@@ -86,14 +84,9 @@ def test_reviewed_resolve_with_pinned_lore_rejects_one_exact_snapshot(tmp_path):
         {"id": 3, "op": "resolve_reviewed_v1", "cwd": str(tmp_path), "pid": "one",
          "decision": "reject", "expected": expected},
     ]
-    env = dict(os.environ, LORE_ROOT=str(root),
+    env = dict(os.environ, HOME=str(tmp_path), DOXA_LORE_RS=executable(), LORE_ROOT=str(root),
                LORE_SKILLS_DIR=str(tmp_path / "skills"),
                LORE_PROJECTS_DIR=str(tmp_path / "projects"))
-    if source:
-        env["DOXA_LORE_CORE_PATH"] = source
-    else:
-        env.pop("DOXA_LORE_CORE_PATH", None)
-        env["DOXA_LORE_SOURCE"] = "package"
     result = subprocess.run([sys.executable, "-m", "doxa.lore_bridge"],
                             input=b"".join(map(lore_bridge._frame, requests)),
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -102,7 +95,7 @@ def test_reviewed_resolve_with_pinned_lore_rejects_one_exact_snapshot(tmp_path):
     frames = [json.loads(line) for line in result.stdout.splitlines()]
     assert "resolve_reviewed_v1" in frames[0]["capabilities"]
     assert frames[1]["value"]["sha256"] == expected["sha256"]
-    assert frames[2]["error"] == "pending_changed"
+    assert frames[2]["error"] == "review_changed"
     assert frames[3]["value"] == {"status": "rejected"}
     assert not proposal.exists()
     assert len(list((pending / "archive").glob("*.json"))) == 1
@@ -423,7 +416,7 @@ def test_memory_usage_sidecar_counts_only_curated_entries_for_each_scope(tmp_pat
     assert frames[2]["value"] == {"project_chars": len("- βeta\n"),
                                   "user_chars": len("- user 🌍\n"),
                                   "project_cap_chars": 5000, "user_cap_chars": 7000}
-    assert frames[3] == {"type": "reply", "id": 3, "ok": False, "error": "operation_failed"}
+    assert frames[3] == {"type": "reply", "id": 3, "ok": False, "error": "invalid_request"}
     assert "café".encode() not in result.stdout and "🌍".encode() not in result.stdout
 
 
@@ -928,16 +921,11 @@ def test_belief_review_and_action_refuse_foreign_missing_and_changed_rows(tmp_pa
 
 def _memory_wire(tmp_path, requests, **extra):
     """Every write targets a disposable pinned LORE store, never live memory."""
-    source = os.environ.get("DOXA_TEST_LORE_API_PATH")
-    env = dict(os.environ, LORE_ROOT=str(tmp_path / "lore"),
+    from doxa.native_lore import executable
+    env = dict(os.environ, HOME=str(tmp_path), DOXA_LORE_RS=executable(), LORE_ROOT=str(tmp_path / "lore"),
                LORE_SKILLS_DIR=str(tmp_path / "skills"), LORE_PROJECTS_DIR=str(tmp_path / "projects"),
                LORE_WRITE_GATE="off")
     env.update(extra)
-    if source:
-        env["DOXA_LORE_CORE_PATH"] = source
-    else:
-        env.pop("DOXA_LORE_CORE_PATH", None)
-        env["DOXA_LORE_SOURCE"] = "package"
     result = subprocess.run([sys.executable, "-m", "doxa.lore_bridge"],
                             input=b"".join(map(lore_bridge._frame, requests)),
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
@@ -963,7 +951,7 @@ def test_curated_memory_actions_use_canonical_lore_and_refuse_stale_review(tmp_p
     ])
     assert frames[0]["value"]["status"] == "applied"
     assert frames[1]["value"]["status"] == "applied"
-    assert frames[2]["error"] == "memory_changed"
+    assert frames[2]["error"] == "review_changed"
     assert frames[3]["value"]["entries"] == ["new fact"]
     assert frames[4]["value"]["status"] == "applied"
     assert (tmp_path / "lore" / "USER.md").read_text() == ""
@@ -978,19 +966,32 @@ def test_curated_memory_ambiguous_match_and_caps_do_not_change_store(tmp_path):
         _memory_req(tmp_path, "remove", entry="fact", body=body),
         _memory_req(tmp_path, "add", "another fact over budget", body=body),
     ], LORE_USER_CAP="30")
-    assert frames[0]["error"] == "memory_ambiguous"
-    assert frames[1]["error"] == "memory_over_cap"
+    assert frames[0]["error"] == "review_changed"
+    assert frames[1]["error"] == "over_cap"
     assert (root / "USER.md").read_text() == body
 
 
-def test_curated_memory_preserves_lore_hook_gate_and_wire_frames(tmp_path):
-    frames = _memory_wire(tmp_path, [_memory_req(tmp_path, "add", "staged fact")],
-                          LORE_WRITE_GATE="on", AI_AGENT="claude-code_test_harness")
-    assert frames[0]["value"] == {"status": "staged"}
-    assert not (tmp_path / "lore" / "USER.md").exists()
-    pending = list((tmp_path / "lore" / "pending").glob("*.json"))
+def test_native_carrier_authority_is_explicit_and_model_writes_only_stage(tmp_path):
+    # Environment hints cannot manufacture or remove human authority. The
+    # dedicated agent carrier always owns Model authority, independently.
+    from tests.test_native_agent_tools import identity, wire
+    root, frames = wire(tmp_path, [
+        {"id":1,"op":"agent_catalog_v1","identity":identity(tmp_path)},
+        {"id":2,"op":"agent_tool_v1","identity":identity(tmp_path),
+         "name":"lore_remember","arguments":{"text":"staged fact","scope":"user"}},
+    ])
+    assert frames[2]["value"]["staged"]
+    assert (root / "USER.md").read_text() == "- isolated fixture memory\n"
+    pending = list((root / "pending").glob("*.json"))
     assert len(pending) == 1
-    assert json.loads(pending[0].read_text())["text"] == "staged fact"
+    proposal = json.loads(pending[0].read_text())
+    assert proposal["text"] == "staged fact" and proposal["writer"] == "model"
+    assert proposal["source_engine"] == "codex"
+    frames = _memory_wire(tmp_path, [_memory_req(tmp_path,"add","reviewed human fact",body="- isolated fixture memory\n")],
+                          LORE_WRITE_GATE="on", AI_AGENT="claude-code_test_harness")
+    assert frames[0]["value"] == {"status":"applied"}
+    assert "reviewed human fact" in (root / "USER.md").read_text()
+    assert len(list((root / "pending").glob("*.json"))) == 1
 
 
 def test_curated_memory_secret_or_control_review_cannot_authorize_changes(tmp_path):
@@ -1000,5 +1001,5 @@ def test_curated_memory_secret_or_control_review_cannot_authorize_changes(tmp_pa
     (root / "USER.md").write_text(body)
     frames = _memory_wire(tmp_path, [{"id": 1, "op": "memory_review_v1",
                                     "cwd": str(tmp_path), "scope": "user"}])
-    assert frames[0]["error"] == "memory_incomplete"
+    assert frames[0]["error"] == "output_too_large"
     assert "fact" not in str(frames)

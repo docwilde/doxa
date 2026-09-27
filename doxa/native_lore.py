@@ -213,6 +213,31 @@ def request(op: str, **fields: Any) -> Any:
     return _default.request(op, **fields)
 
 
+def request_rows(op: str, *, limit: int, offset: int = 0, **fields: Any) -> list[dict]:
+    """A bounded caller window across canonical fifty-row native pages."""
+    if (op not in ("beliefs", "pending") or type(limit) is not int or type(offset) is not int
+            or not 0 <= limit <= 10000 or not 0 <= offset <= 10000):
+        raise NativeLoreError("invalid_native_request")
+    rows: list[dict] = []
+    byte_count = 0
+    remaining = min(limit, 10000 - offset)
+    while remaining:
+        count = min(50, remaining)
+        page = request(op, offset=offset, limit=count, **fields)
+        if (not isinstance(page, list) or len(page) > count
+                or any(not isinstance(row, dict) for row in page)):
+            raise NativeLoreError("invalid_native_frame")
+        byte_count += len(json.dumps(page, ensure_ascii=False, allow_nan=False).encode())
+        if byte_count > 16 * MAX_FRAME_BYTES:
+            raise NativeLoreError("native_frame_too_large")
+        rows.extend(page)
+        if len(page) < count:
+            break
+        remaining -= len(page)
+        offset += len(page)
+    return rows
+
+
 def capabilities() -> frozenset[str]:
     # This operation is configuration-only; never initializes a memory store.
     request("refresh_interval")

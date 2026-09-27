@@ -2164,12 +2164,12 @@ class SessionEngine:
                 fresh.append(text)
         return fresh
 
-    def _pending_records(self, limit: int = 50, offset: int = 0) -> list[dict]:
+    def _pending_records(self, limit: int = PENDING_LIST_LIMIT, offset: int = 0) -> list[dict]:
         if not self.lore:
             return []
         try:
-            rows = native_lore_mod.request("pending", cwd=self.cwd,
-                limit=max(0, min(50, int(limit))), offset=max(0, int(offset)))
+            rows = native_lore_mod.request_rows("pending", cwd=self.cwd,
+                limit=max(0, min(10000, int(limit))), offset=max(0, int(offset)))
             return rows if isinstance(rows, list) else []
         except (native_lore_mod.NativeLoreError, ValueError, TypeError):
             return []
@@ -3750,8 +3750,8 @@ class SessionEngine:
         if not self.lore:
             return []
         try:
-            rows = await asyncio.to_thread(native_lore_mod.request, "beliefs",
-                limit=max(0, min(50, int(limit))), offset=max(0, int(offset)))
+            rows = await asyncio.to_thread(native_lore_mod.request_rows, "beliefs",
+                limit=max(0, min(10000, int(limit))), offset=max(0, int(offset)))
             return rows if isinstance(rows, list) else []
         except (native_lore_mod.NativeLoreError, ValueError, TypeError):
             return []
