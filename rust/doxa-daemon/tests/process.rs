@@ -2093,6 +2093,7 @@ mod vendor_process {
                 "--vendor-endpoint", &endpoint])
             .env("DEEPSEEK_API_KEY", "test-key-1234")
             .env("DOXA_SESSION_BUDGET_USD", "1.0")
+            .env("DOXA_HOME", dir.path().join("home"))
             .stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
         let registry = dir.path().join("registry/vendor-session.json");
         wait_until(|| registry.exists());
@@ -2136,7 +2137,7 @@ mod vendor_process {
         resume: bool,
         tools: bool,
     ) -> Process {
-        let child = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+        let mut child = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
             .args([
                 "--runtime-dir",
                 runtime.to_str().unwrap(),
@@ -2158,12 +2159,22 @@ mod vendor_process {
             .env("DEEPSEEK_API_KEY", "test-key-1234")
             .env("ZAI_API_KEY", "test-key-1234")
             .env("DOXA_VENDOR_TOOLS", if tools { "workspace-read" } else { "" })
+            .env("DOXA_HOME", runtime.join("home"))
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
         let registry = runtime.join("registry/vendor-session.json");
-        wait_until(|| registry.exists());
+        wait_until(|| {
+            if registry.exists() { return true; }
+            if child.try_wait().unwrap().is_some() {
+                let mut detail=String::new();
+                use std::io::Read;
+                if let Some(stderr)=child.stderr.take(){stderr.take(2048).read_to_string(&mut detail).unwrap();}
+                panic!("vendor fixture exited before registry: {detail}");
+            }
+            false
+        });
         let entry: Value = serde_json::from_slice(&fs::read(&registry).unwrap()).unwrap();
         let socket = PathBuf::from(entry["daemon_socket"].as_str().unwrap());
         Process {
@@ -2222,7 +2233,7 @@ mod vendor_process {
             assert!(unsupported["error"]
                 .as_str()
                 .unwrap()
-                .contains("unavailable"));
+                .contains("model required"));
             send(
                 &mut socket,
                 json!({"type":"call","id":4,"method":"stop","params":{}}),
@@ -2230,7 +2241,9 @@ mod vendor_process {
             assert_eq!(receive(&mut reader)["ok"], true);
             wait_until(|| process.exited());
             let requests = server.join().unwrap();
-            assert!(requests.iter().all(|body| body.get("tools").is_none()));
+            assert!(requests.iter().all(|body| body["tools"].as_array().is_some_and(|tools|
+                tools.len()==3 && tools.iter().all(|tool|tool["function"]["name"].as_str()
+                    .is_some_and(|name|name.starts_with("mcp__doxa__peer_"))))));
             assert_eq!(requests[1]["messages"][1]["content"], "[redacted] answer");
             assert!(!requests[1].to_string().contains("fixture-secret"));
             // The published entry is removed at shutdown. Its private claim
@@ -2328,7 +2341,7 @@ mod vendor_process {
         send(&mut socket, json!({"type":"prompt","id":1,"text":"read note"}));
         assert_eq!(receive(&mut reader)["ok"], true);
         let started = receive(&mut reader);
-        assert_eq!(started["event"]["data"]["vendor_tools"], "workspace-read");
+        assert_eq!(started["event"]["data"]["vendor_tools"], "workspace-read, peers");
         assert_eq!(receive(&mut reader)["event"]["data"]["text"], "Final answer");
         assert_eq!(receive(&mut reader)["event"]["data"]["is_error"], false);
         send(&mut socket, json!({"type":"call","id":2,"method":"stop","params":{}}));
@@ -2537,7 +2550,16 @@ mod vendor_process {
             .exists());
         send(&mut socket, json!({"type":"prompt","id":2,"text":"again"}));
         assert_eq!(receive(&mut reader)["ok"], true);
-        let refused = receive(&mut reader);
+        // The prior turn_done can arrive before the runtime worker releases
+        // its running slot, so the second request may briefly queue.
+        let mut refused = receive(&mut reader);
+        for _ in 0..2 {
+            if refused["event"]["type"] == "turn_done" { break; }
+            assert!(matches!(refused["event"]["type"].as_str(),
+                Some("prompt_queued" | "prompt_dequeued")), "{refused}");
+            refused = receive(&mut reader);
+        }
+        assert_eq!(refused["event"]["type"], "turn_done", "{refused}");
         assert_eq!(refused["event"]["data"]["is_error"], true);
         assert!(refused["event"]["data"]["error"]
             .as_str()
@@ -3063,7 +3085,7 @@ if thread['method']=='model/list':
     sys.exit(0)
 log.write(thread['method']+'\n'); log.flush()
 assert thread['method'] in ('thread/start','thread/resume')
-send({'id':thread['id'],'result':{'thread':{'id':'thread-1'}}})
+send({'id':thread['id'],'result':{'thread':{'id':'thread-1'},'model':'gpt-test'}})
 turn=read(); assert turn['method']=='turn/start'
 assert 'fixture-secret' in turn['params']['input'][0]['text']
 if 'second' in turn['params']['input'][0]['text']:

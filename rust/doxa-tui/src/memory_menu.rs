@@ -476,14 +476,17 @@ mod manager_tests {
         terminal.draw(|frame| manager.draw(frame, frame.area())).unwrap();
         manager.key(key(KeyCode::Char('Y')));
         assert!(manager.pending.is_none(), "long exact entry was not fully displayed");
+        assert_ne!(manager.status, "Gallery fixture: memory writes disabled", "incomplete review must not reach submit");
         for _ in 0..40 {
             manager.key(key(KeyCode::PageDown));
             terminal.draw(|frame| manager.draw(frame, frame.area())).unwrap();
         }
         manager.key(key(KeyCode::Char('y')));
         assert!(manager.pending.is_none());
+        assert_ne!(manager.status, "Gallery fixture: memory writes disabled", "lowercase confirmation must not reach submit");
         manager.key(key(KeyCode::Char('Y')));
-        assert!(manager.pending.is_some());
+        assert!(manager.pending.is_none(), "render fixtures must never start a LORE worker");
+        assert_eq!(manager.status, "Gallery fixture: memory writes disabled", "complete review and uppercase confirmation reached submit");
     }
     #[test]
     fn cancelling_edit_and_scope_switch_discard_draft_and_old_receiver() {
