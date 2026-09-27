@@ -372,6 +372,7 @@ dependencies = [
 name = "doxa-worktrees"
 version = "2.0.0-alpha.31"
 dependencies = [
+ "doxa-state",
  "libc",
  "serde_json",
  "tempfile",
