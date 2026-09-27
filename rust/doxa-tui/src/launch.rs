@@ -309,6 +309,10 @@ pub fn spawn_fleet(options: &LaunchOptions, runtime: &Path, budget: Option<f64>,
 }
 
 fn spawn_inner(options: &LaunchOptions, fleet_runtime: Option<&Path>, environment: &[(&str, String)]) -> io::Result<Session> {
+    let startup_seconds = if options.engine == Engine::Claude {
+        doxa_state::claude_startup_seconds(env::var("CLAUDE_CODE_STREAM_CLOSE_TIMEOUT").ok().as_deref())
+            .map_err(invalid)?.1
+    } else { 10 };
     let cfg = config();
     let mut effective = options.clone();
     if effective.resume.is_none() && effective.engine != Engine::Fixture && effective.effort.is_none() {
@@ -564,7 +568,7 @@ fn spawn_inner(options: &LaunchOptions, fleet_runtime: Option<&Path>, environmen
             return Err(error);
         }
     };
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(startup_seconds);
     loop {
         let sessions = match discovery::sessions_in(&runtime) {
             Ok(sessions) => sessions,
@@ -629,7 +633,7 @@ fn spawn_inner(options: &LaunchOptions, fleet_runtime: Option<&Path>, environmen
             let _ = fs::remove_file(&stderr_path);
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
-                "native daemon did not register within 10 seconds",
+                format!("native daemon did not register within {startup_seconds} seconds"),
             ));
         }
         thread::sleep(Duration::from_millis(25));

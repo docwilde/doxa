@@ -3519,3 +3519,48 @@ for line in sys.stdin:
     assert!(!dir.path().join("interrupted").exists(),"automatic linger interrupted a running provider");
     wait_until(||process.exited()); assert!(!process.registry.exists());
 }
+
+#[test]
+fn claude_initialization_past_ten_seconds_survives_real_frontend_launch() {
+    use doxa_tui::launch::{self,Engine,LaunchOptions};
+    struct Environment(Vec<(&'static str,Option<std::ffi::OsString>)>);
+    impl Drop for Environment { fn drop(&mut self) {
+        for (key,value) in self.0.drain(..) { match value { Some(value)=>std::env::set_var(key,value), None=>std::env::remove_var(key) } }
+    } }
+    struct OwnedSession(doxa_tui::discovery::Session);
+    impl Drop for OwnedSession { fn drop(&mut self) { let _=launch::stop(&self.0); } }
+    let dir=tempfile::tempdir().unwrap(); let runtime=dir.path().join("runtime");
+    for path in [dir.path().to_owned(),dir.path().join("home"),dir.path().join("home/peers")] {
+        fs::create_dir_all(&path).unwrap(); fs::set_permissions(&path,fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let mut environment=Environment(Vec::new());
+    for (key,value) in [("DOXA_DAEMON_BIN",PathBuf::from(env!("CARGO_BIN_EXE_doxa-daemon"))),
+        ("DOXA_HOME",dir.path().join("home")),("LORE_ROOT",dir.path().join("lore")),
+        ("CLAUDE_CONFIG_DIR",dir.path().join("claude"))] {
+        environment.0.push((key,std::env::var_os(key))); std::env::set_var(key,value);
+    }
+    environment.0.push(("CLAUDE_CODE_STREAM_CLOSE_TIMEOUT",std::env::var_os("CLAUDE_CODE_STREAM_CLOSE_TIMEOUT")));
+    std::env::remove_var("CLAUDE_CODE_STREAM_CLOSE_TIMEOUT");
+    let script=dir.path().join("slow-start.py");
+    fs::write(&script,r#"import json,sys,time
+print(json.dumps({'type':'hello','protocol':'doxa-claude-sidecar','version':1,'capabilities':[]}),flush=True)
+for line in sys.stdin:
+ frame=json.loads(line); method=frame['method']
+ if method=='start': time.sleep(11)
+ result={'lore_enabled':False,'effort':'low','data':{'model':'fixture-claude'}} if method=='start' else {}
+ print(json.dumps({'type':'reply','id':frame['id'],'ok':True,'result':result}),flush=True)
+ if method=='finalize': break
+"#).unwrap();
+    let options=LaunchOptions { engine:Engine::Claude,cwd:Some(dir.path().to_owned()),
+        model:Some("fixture-claude".into()),effort:Some("low".into()),
+        claude_python:Some("/usr/bin/python3".into()),claude_script:Some(script),..LaunchOptions::default() };
+    let started=Instant::now();
+    let owned=OwnedSession(launch::spawn_fleet(&options,&runtime,None,false,false).unwrap());
+    assert!(started.elapsed()>=Duration::from_secs(11));
+    let mut client=doxa_tui::transport::DaemonClient::connect(&owned.0.socket,None).unwrap();
+    assert_eq!(client.hello["session_id"],owned.0.id); assert_eq!(client.hello["engine"],"claude");
+    assert_eq!(client.hello["model"],"fixture-claude");
+    let status=client.call("status",serde_json::Map::new()).unwrap(); assert_eq!(status["ok"],true);
+    drop(client); drop(owned);
+    let registry=runtime.join("registry"); wait_until(||fs::read_dir(&registry).unwrap().next().is_none());
+}

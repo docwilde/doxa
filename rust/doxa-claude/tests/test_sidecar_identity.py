@@ -18,6 +18,48 @@ spec.loader.exec_module(sidecar)
 
 
 class IdentityTests(unittest.TestCase):
+    def test_startup_error_codes_use_sdk_types_and_never_echo_private_details(self):
+        from claude_agent_sdk import CLIConnectionError, CLINotFoundError, CLIJSONDecodeError, ProcessError
+        private = "sk-private prompt account traceback"
+        errors = [
+            (CLINotFoundError(private), "startup_cli_missing"),
+            (PermissionError(private), "startup_permission_denied"),
+            (TimeoutError(private), "startup_timeout"),
+            (Exception("Control request timeout: initialize"), "startup_timeout"),
+            (CLIJSONDecodeError(private, ValueError(private)), "startup_cli_protocol"),
+            (CLIConnectionError(private), "startup_cli_connection"),
+            (ProcessError(private, exit_code=1, stderr=private), "startup_cli_process"),
+            (TypeError(private), "startup_options_invalid"),
+            (RuntimeError(private), "startup_failed"),
+            (ExceptionGroup(private, [RuntimeError(private), TimeoutError(private)]), "startup_timeout"),
+        ]
+        for error, expected in errors:
+            with self.subTest(expected=expected):
+                self.assertEqual(sidecar.startup_error_code(error), expected)
+                self.assertNotIn(private, sidecar.startup_error_code(error))
+
+    def test_startup_reply_exposes_fixed_failure_reason_and_remains_retryable(self):
+        from claude_agent_sdk import ProcessError
+        class FailedEngine:
+            def __init__(self, peer_presence=True, **_options):
+                pass
+            async def start(self):
+                raise ProcessError("sk-private prompt",exit_code=1,stderr="private account")
+        engine_module=types.ModuleType("doxa.engine");engine_module.SessionEngine=FailedEngine
+        requests=iter([{"type":"request","id":1,"method":"start",
+            "params":{"cwd":str(SIDECAR.parent),"session_id":"safe-failure"}}])
+        replies=[]
+        async def read_frame(_reader,_limit):
+            try: return json.dumps(next(requests)).encode()+b"\n"
+            except StopIteration: return b""
+        with mock.patch.dict(sys.modules,{"doxa.engine":engine_module}), \
+             mock.patch.object(sidecar.asyncio,"to_thread",read_frame), \
+             mock.patch.object(sidecar,"emit",replies.append):
+            asyncio.run(sidecar.run())
+        reply=next(frame for frame in replies if frame["type"]=="reply")
+        self.assertEqual(reply,{"type":"reply","id":1,"ok":False,"error":"startup_cli_process"})
+        self.assertNotIn("private",json.dumps(replies))
+
     def test_account_snapshot_uses_only_connected_display_fields(self):
         self.assertEqual(sidecar.account_snapshot({
             "email": " sdk@example.test ", "organization": "SDK org",

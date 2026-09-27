@@ -68,6 +68,20 @@ fn display_account(value: &Value) -> Option<Value> {
     (!result.is_empty()).then_some(Value::Object(result))
 }
 
+fn startup_diagnostic(code: Option<&str>) -> &'static str {
+    match code {
+        Some("startup_cli_missing") => "Claude CLI was not found during SDK initialization; check doxa doctor --engine claude",
+        Some("startup_permission_denied") => "Claude startup could not access its configuration or executable; check owned file permissions",
+        Some("startup_timeout") => "Claude SDK initialization timed out; check doxa auth status claude and try again",
+        Some("startup_cli_protocol") => "Claude CLI returned an invalid initialization frame; update Claude CLI and DOXA",
+        Some("startup_cli_connection") => "Claude SDK could not connect to Claude CLI; check doxa doctor --engine claude",
+        Some("startup_cli_process") => "Claude CLI exited during SDK initialization; check doxa auth status claude and doxa doctor --engine claude",
+        Some("startup_options_invalid") => "Claude startup options or SDK configuration were refused; verify model/effort settings and update DOXA",
+        Some("startup_failed") => "Claude SDK initialization failed; check doxa auth status claude and doxa doctor --engine claude",
+        _ => "Claude sidecar refused session start",
+    }
+}
+
 impl ClaudeHost {
     pub fn new(
         python: &Path,
@@ -81,6 +95,8 @@ impl ClaudeHost {
         spawn_depth: u32,
         parent_session_id: Option<&str>,
     ) -> Result<Self, String> {
+        let (start_seconds, _) = doxa_state::claude_startup_seconds(
+            std::env::var("CLAUDE_CODE_STREAM_CLOSE_TIMEOUT").ok().as_deref()).map_err(str::to_owned)?;
         let mut bridge = Bridge::spawn(python, script)
             .map_err(|_| "Claude sidecar could not start".to_owned())?;
         let model_control = bridge.supports("set_model");
@@ -95,7 +111,7 @@ impl ClaudeHost {
         let id = bridge
             .request("start", params)
             .map_err(|_| "Claude sidecar start request failed".to_owned())?;
-        let deadline = Instant::now() + Duration::from_secs(30);
+        let deadline = Instant::now() + Duration::from_secs(start_seconds);
         let start = loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
@@ -107,7 +123,7 @@ impl ClaudeHost {
                         if frame["error"] == "peer_presence_unsupported_update_python_and_restart" {
                             return Err("Claude Python engine is outdated; run doxa update, then restart DOXA".to_owned());
                         }
-                        return Err("Claude sidecar refused session start".to_owned());
+                        return Err(startup_diagnostic(frame["error"].as_str()).to_owned());
                     }
                     break frame["result"].clone();
                 }
@@ -562,6 +578,14 @@ mod tests {
             "accessToken":"secret","organizationName":"foreign cached org"})),
             Some(json!({"email":"sdk@example.test","organization":"SDK org"})));
         assert!(display_account(&json!({"email":"bad\nvalue","organization":"x".repeat(257)})).is_none());
+    }
+    #[test]
+    fn startup_diagnostics_accept_only_fixed_non_secret_error_codes() {
+        assert!(startup_diagnostic(Some("startup_cli_process")).contains("auth status claude"));
+        assert!(startup_diagnostic(Some("startup_timeout")).contains("timed out"));
+        for code in [None,Some("sk-private startup traceback"),Some("operation_failed")] {
+            assert_eq!(startup_diagnostic(code),"Claude sidecar refused session start");
+        }
     }
 
     fn fixture(script: &str) -> (tempfile::TempDir, Arc<ClaudeHost>) {
