@@ -1,13 +1,13 @@
 # Rust 2.0 parity with DOXA 1.19.0
 
 Baseline: Python `v1.19.0`, especially its command registry, session actions,
-worktree lifecycle, and fleet contracts. This records the integrated alpha.29
+worktree lifecycle, and fleet contracts. This records the integrated alpha.30
 state. It is a release gate, not a claim of universal provider compatibility.
 Terminal images are explicitly excluded by user preference.
 
-| Area | Implemented in Rust alpha.29 | Remaining boundary |
+| Area | Implemented in Rust alpha.30 | Remaining boundary |
 | --- | --- | --- |
-| Sessions | Native Codex/vendor hosts, Claude SDK sidecar; new/attach/stop/list; bounded restore; verified saved-session resume and guarded missing-managed-checkout recovery | Deleted uncommitted files and history never stored cannot be recovered; uncertain ownership/state is refused |
+| Sessions | Native Codex/vendor hosts, Claude SDK sidecar; new/attach/stop/list; bounded restore; verified saved-session resume and guarded missing-managed-checkout recovery | TUI session kill/batch-kill forms remain unavailable; deleted uncommitted files and history never stored cannot be recovered; uncertain ownership/state is refused |
 | Window and prompt | Recursive splits up to 16 groups, 256 session tabs, nested horizontal/vertical divider drag, persistent topology/collections/labels/drafts, tab transfer, keyboard/mouse selection, prompt-line search, generated searchable action palette | Final source tab cannot be moved, matching Python; bounded layout and recovery validation remain mandatory |
 | Questions and permissions | Codex/Claude question choices, free text and Other, stable question IDs, exact pending-request snapshots, full permission-summary read-through and one-request approvals | Secret questions are refused without masked private input; incomplete snapshots need refresh; stale requests cannot be answered |
 | Worktrees and diffs | Managed checkout, pinned base, lifecycle lock, guarded finalize/orphan cleanup/missing-checkout recovery, branch selection/switch, bounded modal/persistent diff and exact tracked-hunk rejection with idle feedback | Legacy unpinned ownership cannot authorize adoption, switching, cleanup, or recovery; staged and whole-file metadata hunks are refused |
@@ -23,7 +23,7 @@ Local commands are handled by the frontend. Unsupported DOXA forms remain in
 the draft with a notice; unknown provider/plugin slash commands follow the
 normal engine path. Help and completion describe actual accepted forms.
 
-| Python 1.19 commands | Alpha.29 behavior and limits |
+| Python 1.19 commands | Alpha.30 behavior and limits |
 | --- | --- |
 | `/split`, `/vsplit`, `/pane`, `/movepane`, `/sidebar` | Recursive pane groups, numbered focus/move and sidebar size controls; source retains its final tab |
 | `/collection`, `/rename`, `/detach`, `/dir`, `/cd`, `/clear` | Local collections/labels/detach; verified new directory tab; clear requires idle state and durable writable tabset |
@@ -31,15 +31,28 @@ normal engine path. Help and completion describe actual accepted forms.
 | `/diff`, `/branch` | Worktree diff and guarded hunk rejection; branch picker or guarded explicit base switch. No unverified extra diff options are advertised |
 | `/fleet` | Runs/status/verified slot attach; exact native start options and resume with full plan review, explicit arming, tracked subprocess and teardown; saved real run views in Ctrl+P |
 | `/model`, `/engine`, `/mode`, `/effort` | Pickers and supported named forms; authoritative capabilities/catalogs, idle/queue guards, and pending Claude effort verification |
-| `/beliefs`, `/pending` | Belief/evidence and exact reviewed actions; proposal complete review and atomic approve/reject. Curated memory actions are available from the memory chip |
-| `/sessions`, `/search`, `/resume`, `/attach` | Prompt-line query/results, scrubbed indexed excerpts and bounded fallback, exact owned-file verification, live attach and saved-session recovery |
+| `/beliefs`, `/pending` | Per-entry Accept/Reject controls, belief/evidence and exact reviewed actions; proposal complete review and atomic approve/reject. Curated memory actions are available from the memory chip |
+| `/sessions`, `/search`, `/resume`, `/attach` | Prompt-line query/results, scrubbed indexed excerpts and bounded fallback, exact owned-file verification, live attach and saved-session recovery; `/sessions kill <prefix>` and `kill-detached` remain unavailable |
 | `/usage`, `/context`, `/queue` | Reported totals/context details and bounded queue preview/cancel; missing provider detail remains unknown |
 | `/help`, `/about` | Scrollable 42-command registry and version; generated Ctrl+P actions from commands, tabs, saved fleet views and session operations |
 | `/compact` | Claude review-gated and protected Codex official compaction; unsupported engines/contracts refused |
-| `/login`, `/logout`, `/setup`, `/settings` | Selected provider login/logout; Codex-only device flag; asynchronous setup and native linger/worktree settings with environment shadows read only |
+| `/login`, `/logout`, `/setup`, `/settings` | Selected provider login/logout; Codex-only device flag; asynchronous setup and native linger/worktree settings with environment shadows read only (wider settings remain unported) |
 | `/plugins`, `/reload-plugins` | Sanitized inventory, adoption controls and refresh through operations menu |
 | `/doctor`, `/update` | Native CLI forms available; unsupported slash forms stay in draft |
 | `/img` | Explicitly excluded by user preference |
+
+## Confirmed remaining feature gaps
+
+- Expand `/settings` beyond the native linger/worktree preferences.
+- Add `/sessions kill <prefix>` and `/sessions kill-detached`.
+- Accept legacy fleet options such as `--memory-off` and `--quiet-dwell`
+  without requiring `fleet start-python`.
+- Expose browser-mesh launch and options inside the TUI; CLI forms exist.
+- Implement `/doctor` and `/update` slash forms; CLI commands exist.
+
+Claude child-session creation still uses the Python sidecar’s canonical
+session-operator launcher. Native parent/depth propagation remains unported.
+This is separate from the working Claude spawn tool.
 
 ## Stable 2.0 gates
 
