@@ -23,6 +23,23 @@ fn tool_activity(app: &mut App) {
     event(app,"demo-codex-01","tool_result_detail",json!({"id":"tool-2","text":"Updated src/parser.rs and src/parser_test.rs; bounds and reconnect checks passed."}));
 }
 
+// These are the normalized events emitted for a Codex webSearch whose
+// action details first become available on item/completed. The gallery drives
+// the production card reducer; it never calls an engine or browser.
+fn completed_web_activity(app: &mut App) {
+    let input = json!({"action":"search","queries":[
+        "Rust parser bounds checks", "Rust reconnect regression tests"
+    ]});
+    let detail = format!("Web request completed.\nRequest: {}\nPage/search result content is not exposed by Codex in this tool event.",
+        serde_json::to_string_pretty(&input).unwrap());
+    let summary: String = detail.chars().take(280).collect();
+    event(app,"demo-codex-01","tool_call",json!({"id":"web-1","name":"web_search",
+        "input":{"details":"Request details not yet reported by Codex"}}));
+    event(app,"demo-codex-01","tool_result",json!({"id":"web-1","name":"web_search",
+        "input":input,"result_summary":summary,"duration_ms":126,"is_error":false}));
+    event(app,"demo-codex-01","tool_result_detail",json!({"id":"web-1","text":detail}));
+}
+
 fn fixture() -> App {
     let mut app = App::default();
     app.handle(Event::Resize(126, 31));
@@ -39,7 +56,7 @@ fn fixture() -> App {
         "demo-claude-02" => "Review tests".into(),
         _ => "Write release notes".into(),
     });
-    event(&mut app,"demo-codex-01","text_delta",json!({"text":"## Parser update\n\nThe boundary is now explicit. Three checks passed:\n\n- Input stays bounded\n- Errors keep their source\n- Reconnect restores the transcript\n\n| Check | Result |\n| --- | --- |\n| Parse | Passed |\n| Restore | Passed |"}));
+    event(&mut app,"demo-codex-01","text_delta",json!({"text":"## Parser update\n\nThe boundary is now explicit. Three checks passed:\n\n- Input stays bounded\n- Errors keep their source\n- Reconnect restores the transcript\n\n| Check | Result |\n| --- | --- |\n| Parse | Passed |\n| Restore | Passed |\n\nRead the [parser guide](https://doc.rust-lang.org/book/ch09-02-recoverable-errors-with-result.html) for the error-handling contract."}));
     event(&mut app,"demo-codex-01","turn_done",json!({"input_tokens":4821,"output_tokens":918,"usage_scope":"session","usage_source":"codex_cli_turn_completed","ctx_percentage":18.0,"session_cost_usd":0.0187}));
     event(&mut app,"demo-claude-02","text_delta",json!({"text":"## Test review\n\nThe new cases cover clipped input and reconnects. One edge case remains in the transport fixture."}));
     event(&mut app,"demo-claude-02","turn_done",json!({"ctx_percentage":9.0,"session_cost_usd":0.0062}));
@@ -87,9 +104,16 @@ fn scene(name: &str) -> App {
             tool_activity(&mut app);
         }
         "tool-expanded" => {
-            tool_activity(&mut app);
+            app.groups[0].tabs = vec!["demo-codex-01".into()];
+            if let Some(session) = app.sessions.iter_mut().find(|session| session.id == "demo-codex-01") {
+                session.transcript.clear();
+            }
+            event(&mut app,"demo-codex-01","text_delta",json!({"text":
+                "## Documentation check\n\nCodex reported the completed search action and its two queries."}));
+            completed_web_activity(&mut app);
             app.focus = Focus::Transcript;
             key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+            app.notice = "Fixture · completed Codex web request · no browser or provider".into();
         }
         "restored-tool" => {
             app.groups[0].tabs = vec!["demo-claude-02".into()];
@@ -180,30 +204,33 @@ fn scene(name: &str) -> App {
         "beliefs" => {
             app.groups[0].tabs = vec!["demo-codex-01".into()];
             app.sessions.iter_mut().for_each(|session| session.transcript.clear());
-            app.show_belief_browser_fixture(0, &[
-                (1, "user", "Prefer concise explanations with evidence."),
-                (2, "project:parser", "Reconnect must preserve the current conversation."),
-                (3, "project:parser", "Run the parser checks before publishing a release."),
+            // The fixture uses canonical newest-first order, independent of
+            // IDs. An unknown timestamp stays unknown, without an invented date.
+            app.show_belief_browser_timed_fixture(0, &[
+                (17, "project:parser", "Reconnect preserves the current conversation.", Some("2026-09-27T12:15:00Z")),
+                (3, "user", "Prefer concise explanations.", Some("2026-09-26T08:40:00Z")),
+                (41, "project:parser", "Run parser checks before release.", None),
             ]);
             app.notice = "Fixture · per-belief decisions · writes disabled".into();
         }
         "memory" => {
             app.groups[0].tabs = vec!["demo-codex-01".into()];
             app.show_memory_menu_fixture(0,
-                &["- Prefer concise explanations [source: codex]", "- Keep test evidence in reports"],
-                &["- Run parser checks before release", "- Keep reconnect behavior stable"],
-                &["- testing: Reconnect must preserve the transcript", "- release: Cite checks before publishing"]);
+                &["Prefer concise explanations.", "Keep test evidence in reports."],
+                &["Run parser checks before release.", "Keep reconnect behavior stable."],
+                &[]);
         }
         "memory-management" | "memory-change" => {
             app.groups[0].tabs=vec!["demo-codex-01".into()];
             app.sessions.iter_mut().for_each(|session|session.transcript.clear());
-            let entries=["Record the check command and result before release", "Keep each pane's draft with its session"];
+            let entries=["Run parser checks before release.", "Keep each pane's draft with its session."];
             let chars=entries.join("\n").chars().count();
             app.set_lore_memory_usage("demo-codex-01",chars as u64,8800,2824,4500);
             app.show_memory_manager_fixture(0,"project",json!({"scope":"project","key":"/demo/project","sha256":"f".repeat(64),"entries":entries,"chars":chars,"cap_chars":8800})).unwrap();
             if name=="memory-change"{
                 key(&mut app,KeyCode::Char('e'),KeyModifiers::NONE);
-                for ch in " and include failures".chars(){key(&mut app,KeyCode::Char(ch),KeyModifiers::NONE);}
+                for _ in entries[0].chars(){key(&mut app,KeyCode::Backspace,KeyModifiers::NONE);}
+                for ch in "Run parser checks before every release.".chars(){key(&mut app,KeyCode::Char(ch),KeyModifiers::NONE);}
                 key(&mut app,KeyCode::Enter,KeyModifiers::NONE);
             }
             app.notice="Fixture · curated memory · writes disabled".into();
