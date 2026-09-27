@@ -3961,6 +3961,7 @@ impl App {
             self.notice = format!("Already attaching · {}", safe_label(id));
             return;
         }
+        if !self.manual_tab_available() {return;}
         self.attaching_ids.insert(id.to_owned());
         self.pending_attaches.push((id.to_owned(), self.active_group));
         self.input.clear();
@@ -4425,7 +4426,15 @@ impl App {
         true
     }
 
+    fn manual_tab_available(&mut self)->bool {
+        if self.groups.iter().map(|group|group.tabs.len()).sum::<usize>()
+            + self.attaching_ids.len() + usize::from(self.launching) >= panes::MAX_TABS {
+            self.notice="256 tab slots occupied · detach a tab before opening another".into();false
+        }else{true}
+    }
+
     fn open_engine_picker(&mut self) {
+        if !self.manual_tab_available() {return;}
         if self.size.width > 0 && (self.size.width < 29 || self.size.height < 11) {
             self.notice = "Enlarge terminal to open engine picker".into();
             return;
@@ -4451,6 +4460,7 @@ impl App {
     }
 
     fn select_new_engine(&mut self) {
+        if !self.manual_tab_available() {self.engine_picker=false;return;}
         let engine = match self.engine_selected {
             0 => launch::Engine::Codex,
             1 => launch::Engine::Claude,
@@ -5963,6 +5973,7 @@ impl App {
                     self.attach_selected(&id);
                     return;
                 }
+                if !self.manual_tab_available() {return;}
                 let Some(entry) = self.history_entries.get(&id).cloned() else {
                     self.notice = "Resume unavailable: no saved transcript for this session".into();
                     return;
@@ -5975,6 +5986,7 @@ impl App {
                 self.notice = "Checking saved conversation…".into();
                 return;
             }
+            if !self.groups[self.active_group].tabs.contains(&id) && !self.manual_tab_available() {return;}
             let tabs = &mut self.groups[self.active_group];
             if let Some(index) = tabs.tabs.iter().position(|tab| tab == &id) { tabs.active = index; }
             else { tabs.tabs.push(id); tabs.active = tabs.tabs.len() - 1; }
@@ -9957,6 +9969,15 @@ mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
     use serde_json::json;
+
+    #[test]
+    fn reserved_startup_slot_does_not_raise_manual_tab_capacity() {
+        let mut app=App::default();app.groups[0].tabs=(0..panes::MAX_TABS).map(|index|format!("saved-{index}")).collect();
+        app.open_engine_picker();assert!(!app.engine_picker);
+        app.attach_selected("new");assert!(app.pending_attaches.is_empty());
+        app.engine_selected=1;app.select_new_engine();assert!(app.new_session.is_none());
+        assert!(app.notice.contains("256"));assert!(app.pending_launches.is_empty());
+    }
 
     #[test]
     fn empty_startup_window_keeps_setup_and_engine_controls_available() {
