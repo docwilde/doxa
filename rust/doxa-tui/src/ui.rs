@@ -800,18 +800,7 @@ impl SessionTelemetry {
         }
     }
 
-    fn update_status(&mut self, status: &serde_json::Value) {
-        if let Some(account) = status.get("account") {
-            let mut fields = serde_json::Map::new();
-            for key in ["email", "organization", "subscriptionType", "apiProvider"] {
-                if let Some(text) = account[key].as_str().filter(|text| !text.trim().is_empty()
-                    && text.len() <= 256 && !text.chars().any(char::is_control)) {
-                    fields.insert(key.into(), serde_json::Value::String(safe_label(text.trim())));
-                }
-            }
-            self.account = (!fields.is_empty()).then_some(serde_json::Value::Object(fields));
-        }
-        if let Some(billing) = status.get("billing") {
+    fn update_billing(&mut self, billing: &serde_json::Value) {
             self.billing_mode = match billing["mode"].as_str() {
                 Some("api") => Some("api".into()),
                 Some("subscription") => Some("subscription".into()),
@@ -826,7 +815,20 @@ impl SessionTelemetry {
             self.balance = billing["balance"].as_str()
                 .filter(|balance| !balance.is_empty() && balance.len() <= 80 && !balance.chars().any(char::is_control))
                 .map(safe_label);
+    }
+
+    fn update_status(&mut self, status: &serde_json::Value) {
+        if let Some(account) = status.get("account") {
+            let mut fields = serde_json::Map::new();
+            for key in ["email", "organization", "subscriptionType", "apiProvider"] {
+                if let Some(text) = account[key].as_str().filter(|text| !text.trim().is_empty()
+                    && text.len() <= 256 && !text.chars().any(char::is_control)) {
+                    fields.insert(key.into(), serde_json::Value::String(safe_label(text.trim())));
+                }
+            }
+            self.account = (!fields.is_empty()).then_some(serde_json::Value::Object(fields));
         }
+        if let Some(billing) = status.get("billing") { self.update_billing(billing); }
         let context = status["ctx_percentage"].as_f64()
             .filter(|value| value.is_finite() && (0.0..=100.0).contains(value))
             .map(|value| format!("{value:.0}%"));
@@ -1993,6 +1995,11 @@ impl App {
                 }
                 if event_type=="tool_result" {self.request_auto_diff(&id);}
                 match event_type {
+                    "billing" => {
+                        if !self.sessions.iter().any(|session| session.id == id) { return false; }
+                        self.session_telemetry.entry(id).or_default().update_billing(data);
+                        true
+                    }
                     "tool_result_detail" => tool_updated,
                     "derive_done"=>{
                         let count=data["staged"].as_u64().unwrap_or(0);
@@ -10524,6 +10531,21 @@ for line in sys.stdin:
         assert!(!app.model_picker.as_ref().unwrap().catalog_pending);
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert_eq!(app.pending_model_changes, vec![("s".into(), "verified".into())]);
+    }
+
+    #[test]
+    fn live_claude_billing_event_updates_only_its_chip_and_keeps_context() {
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"s","engine":"claude",
+            "ctx_percentage":42,"billing":{"mode":"subscription","type":"Max"}}));
+        assert!(app.apply_daemon_frame(&json!({"type":"event","session_id":"s",
+            "event":{"type":"billing","data":{"mode":"subscription","type":"Max",
+                "quota":"5h 35% · week 21%"}}})));
+        assert!(app.chips(0).iter().any(|(kind,label)|*kind=="cost" && label=="Max · 5h 35% · week 21%"));
+        assert_eq!(app.session_telemetry["s"].context.as_deref(),Some("42%"));
+        assert!(!app.apply_daemon_frame(&json!({"type":"event","session_id":"unknown",
+            "event":{"type":"billing","data":{"mode":"subscription","quota":"5h 99%"}}})));
+        assert!(!app.session_telemetry.contains_key("unknown"));
     }
 
     #[test]
