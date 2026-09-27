@@ -415,8 +415,8 @@ impl LoreClient {
         let project_cap_chars = value["project_cap_chars"].as_u64().ok_or(LoreError::InvalidFrame)?;
         let user_cap_chars = value["user_cap_chars"].as_u64().ok_or(LoreError::InvalidFrame)?;
         if project_chars > MAX_MEMORY_CHARS || user_chars > MAX_MEMORY_CHARS
-            || !(1..=MAX_MEMORY_CHARS).contains(&project_cap_chars)
-            || !(1..=MAX_MEMORY_CHARS).contains(&user_cap_chars) {
+            || project_cap_chars > MAX_MEMORY_CHARS
+            || user_cap_chars > MAX_MEMORY_CHARS {
             return Err(LoreError::InvalidFrame);
         }
         Ok(MemoryUsage { project_chars, user_chars, project_cap_chars, user_cap_chars })
@@ -456,7 +456,7 @@ impl LoreClient {
         let mut body = String::new();
         if entries.len() > 400 || value["scope"] != scope
             || value["key"].as_str().is_none_or(|key| key.is_empty() || key.len() > 4096 || key.chars().any(char::is_control))
-            || value["cap_chars"].as_u64().is_none_or(|cap| cap == 0 || cap > MAX_MEMORY_CHARS) {
+            || value["cap_chars"].as_u64().is_none_or(|cap| cap > MAX_MEMORY_CHARS) {
             return Err(LoreError::InvalidFrame);
         }
         for entry in entries {

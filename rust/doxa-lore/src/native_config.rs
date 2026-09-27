@@ -56,7 +56,7 @@ fn shared_caps(path: &Path) -> HashMap<String, usize> {
     ["LORE_MEMORY_CAP", "LORE_USER_CAP", "LORE_MACHINE_CAP"].into_iter().filter_map(|name| {
         let raw = value["env"][name].as_str()?;
         if raw.is_empty() || raw.len() > 7 || !raw.bytes().all(|byte| byte.is_ascii_digit()) { return None; }
-        let cap = raw.parse::<usize>().ok().filter(|cap| (1..=1024*1024).contains(cap))?;
+        let cap = raw.parse::<usize>().ok().filter(|cap| (0..=1024*1024).contains(cap))?;
         Some((name.to_owned(), cap))
     }).collect()
 }
@@ -70,7 +70,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
         fs::write(&path, r#"{"env":{"LORE_USER_CAP":"1234","LORE_MEMORY_CAP":"0","LORE_MACHINE_CAP":9000,"TOKEN":"secret"}}"#).unwrap();
-        assert_eq!(shared_caps(&path), HashMap::from([("LORE_USER_CAP".into(), 1234)]));
+        assert_eq!(shared_caps(&path), HashMap::from([("LORE_USER_CAP".into(), 1234), ("LORE_MEMORY_CAP".into(), 0)]));
         fs::remove_file(&path).unwrap();
         let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
         assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);

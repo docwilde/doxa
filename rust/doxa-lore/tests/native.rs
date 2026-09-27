@@ -55,3 +55,41 @@ fn native_index_transcript_preserves_existing_indexed_and_consumed_contract() {
     let mut client = LoreClient::open_config(config, Duration::from_secs(1)).unwrap();
     assert_eq!(client.index_transcript(owned.path().to_str().unwrap(), "native-owned-1").unwrap(), 1);
 }
+
+#[test]
+fn native_zero_capacity_preserves_usage_review_and_exact_removal() {
+    use std::{fs, os::unix::fs::PermissionsExt};
+    use serde_json::json;
+    let owned = tempfile::tempdir().unwrap();
+    let root = owned.path().join("store");
+    fs::create_dir(&root).unwrap();
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+    let path = root.join("USER.md");
+    fs::write(&path, "- owned existing fact\n").unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    let mut config = lore_core::config::Config::for_root(root.clone());
+    config.project_cap = 0;
+    config.user_cap = 0;
+    config.sync.enabled = false;
+    let mut client = LoreClient::open_config(config, Duration::from_secs(1)).unwrap();
+    let cwd = owned.path().to_str().unwrap();
+    let usage = client.memory_usage(cwd).unwrap();
+    assert_eq!(usage.user_cap_chars, 0);
+    assert_eq!(usage.project_cap_chars, 0);
+    assert_eq!(usage.user_chars, 22);
+    let reviewed = client.memory_review(cwd, "user").unwrap();
+    assert_eq!(reviewed["cap_chars"], 0);
+    assert_eq!(reviewed["entries"], json!(["owned existing fact"]));
+    let expected = json!({"key":reviewed["key"],"sha256":reviewed["sha256"]});
+    let blocked = client.memory_action(cwd, json!({"scope":"user","action":"add",
+        "entry":"","text":"nonempty new fact","expected":expected}));
+    assert!(matches!(blocked, Err(doxa_lore::LoreError::Remote("memory_over_cap"))));
+    assert_eq!(fs::read_to_string(&path).unwrap(), "- owned existing fact\n");
+    let removed = client.memory_action(cwd, json!({"scope":"user","action":"remove",
+        "entry":"owned existing fact","text":"","expected":expected})).unwrap();
+    assert_eq!(removed["applied"], true);
+    assert_eq!(fs::read_to_string(&path).unwrap(), "");
+    assert_eq!(client.memory_usage(cwd).unwrap().user_chars, 0);
+    assert_eq!(client.memory_review(cwd,"user").unwrap()["cap_chars"], 0);
+    assert!(!root.join("state.db").exists());
+}
