@@ -721,20 +721,20 @@ def operator_tools(ctx: "dict | None" = None) -> "list[dict]":
     every import."""
     from .operators import OPERATORS, WRITE_OPERATORS, configured_names
 
+    from .native_lore import LORE_TOOLS
     allowed = configured_names(ctx) if ctx is not None else None
-    return [
-        {
-            "type": "function",
-            "function": {
-                "name": op.name,
-                "description": f"{op.description} [cost: {op.cost}]"
+    native = ctx.get("native_lore") if ctx is not None else None
+    rows = [{"type":"function", "function":{"name":row["name"],
+        "description":row["description"], "parameters":row["inputSchema"]}}
+        for row in native.tools()] if native is not None else []
+    rows.extend({
+        "type":"function", "function":{"name":op.name,
+            "description":f"{op.description} [cost: {op.cost}]"
                 + ("" if op.read_only else f" [write: {op.write_note}]"),
-                "parameters": op.parameters,
-            },
-        }
+            "parameters":op.parameters}}
         for op in list(OPERATORS.values()) + list(WRITE_OPERATORS.values())
-        if allowed is None or op.name in allowed
-    ]
+        if (allowed is None or op.name in allowed) and (ctx is None or op.name not in LORE_TOOLS))
+    return rows
 
 
 # -- the transport -----------------------------------------------------
@@ -1182,6 +1182,7 @@ class ChatApiEngine:
         self._gate: Any = None
         self._tools: "list[dict]" = []
         self._finalized = False
+        self._native_belief_count = 0
         self._started = False
 
         transcript_dir = PROJECTS_DIR / self.slug
@@ -1400,6 +1401,7 @@ class ChatApiEngine:
         belief_count = self.belief_count()
         if self._native_agent is not None:
             self._native_agent.carrier.close()
+            self._native_agent = None
         return EngineEvent("session_done", {
             "indexed": indexed,
             "belief_count": belief_count,
@@ -2107,10 +2109,13 @@ class ChatApiEngine:
         }
 
     def belief_count(self) -> int:
-        if not self.lore or self._native_agent is None:
+        if not self.lore:
             return 0
+        if self._native_agent is None:
+            return getattr(self, "_native_belief_count", 0)
         try:
-            return self._native_agent.status().get("belief_count") or 0
+            self._native_belief_count = self._native_agent.status().get("belief_count") or 0
+            return self._native_belief_count
         except native_lore_mod.NativeLoreError:
             return 0
 

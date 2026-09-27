@@ -213,6 +213,12 @@ def request(op: str, **fields: Any) -> Any:
     return _default.request(op, **fields)
 
 
+def capabilities() -> frozenset[str]:
+    # This operation is configuration-only; never initializes a memory store.
+    request("refresh_interval")
+    return _default.capabilities
+
+
 def scrub(text: str) -> str:
     return request("scrub", text=text)
 

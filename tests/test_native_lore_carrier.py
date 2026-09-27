@@ -153,3 +153,49 @@ def test_native_agent_status_rejects_unbounded_or_malformed_metadata(tmp_path, m
             agent.status()
     finally:
         agent.carrier.close()
+
+
+def test_retained_engine_requires_review_snapshot_and_forwards_only_explicit_tokens(tmp_path, monkeypatch):
+    import asyncio
+    from doxa import engine as engine_mod
+    calls = []
+    def invoke(op, **fields):
+        calls.append((op, fields))
+        if op == "resolve_reviewed_v1":
+            return {"status":"refused", "applied":None, "may_have_applied":True, "error":"archive_failed"}
+        if op == "belief_action_v1":
+            return {"status":"active", "retired":False}
+        return []
+    monkeypatch.setattr(engine_mod.native_lore_mod, "request", invoke)
+    engine = engine_mod.SessionEngine.__new__(engine_mod.SessionEngine)
+    engine.lore, engine.cwd = True, str(tmp_path)
+    async def run():
+        assert "native-review-required" in await engine.approve_pending("one")
+        assert "native-review-required" in await engine.reject_pending("one")
+        assert "native-review-required" in await engine.record_belief_outcome(1, "confirmed", "fixture")
+        assert "native-review-required" in await engine.retract_belief(1)
+        assert not calls
+        expected = {"sha256":"a" * 64, "inode":17}
+        assert "recovery required" in await engine.approve_pending("one", expected)
+        assert calls[-1] == ("resolve_reviewed_v1", {"cwd":str(tmp_path),"pid":"one","decision":"approve","expected":expected})
+        belief = {"uid":"owned", "subject":"user", "claim_sha256":"b" * 64}
+        assert await engine.record_belief_outcome(1, "confirmed", "fixture", belief) is None
+        assert calls[-1][1]["expected"] == belief
+        engine.lore = False
+        before = len(calls)
+        assert await engine.list_beliefs() == []
+        assert await engine.list_pending() == []
+        assert await engine.belief_evidence(1) == []
+        assert "memory is off" in await engine.approve_pending("one", expected)
+        assert len(calls) == before
+    asyncio.run(run())
+
+
+def test_vendor_projection_uses_frozen_native_catalog_for_memory(tmp_path):
+    from doxa.vendors import operator_tools
+    class Native:
+        def tools(self):
+            return [{"name":"lore_memory_list", "description":"canonical fixture schema", "inputSchema":{"type":"object","properties":{"scope":{"enum":["user"]}}}}]
+    rows = operator_tools({"native_lore":Native()})
+    memory = [row["function"] for row in rows if row["function"]["name"].startswith("lore_")]
+    assert memory == [{"name":"lore_memory_list", "description":"canonical fixture schema", "parameters":{"type":"object","properties":{"scope":{"enum":["user"]}}}}]
