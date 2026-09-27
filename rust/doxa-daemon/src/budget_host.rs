@@ -153,6 +153,12 @@ impl Host for BudgetHost {
             }}));
             return;
         }
+        if let (Some(priced), Some(effective)) = (self.priced_model.as_deref(), self.inner.initial_model()) {
+            if effective != priced {
+                emit(json!({"type":"turn_refused","data":{"reason":"budget","message":"Effective model differs from the session price basis; prompt withheld","spent_usd":state.spent,"ceiling_usd":self.ceiling}}));
+                return;
+            }
+        }
         if let Some(journal) = &self.journal {
             let pending = BudgetState { spent: state.spent, unknown: true, input_total: state.input_total, output_total: state.output_total };
             if journal.write(&pending).is_err() {
@@ -400,6 +406,22 @@ mod tests {
             assert_eq!(events[0]["data"]["cost_usd"].is_number(), priced);
             assert_eq!(events[1]["type"] == "turn_refused", !priced);
         }
+    }
+
+    #[test]
+    fn verified_initial_model_mismatch_is_refused_before_provider_admission() {
+        struct InitialModelHost(std::sync::atomic::AtomicUsize);
+        impl Host for InitialModelHost {
+            fn initial_model(&self) -> Option<String> { Some("gpt-5.6-sol".into()) }
+            fn prompt(&self, _: &str, _: &mut dyn FnMut(Value)) { self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
+            fn call(&self, _: &str, _: &Value) -> Result<Value, String> { Ok(json!({})) }
+        }
+        let inner = Arc::new(InitialModelHost(std::sync::atomic::AtomicUsize::new(0)));
+        let host = BudgetHost::new_priced(inner.clone(), 1.0, "codex", "gpt-5.5").unwrap();
+        let mut events = Vec::new(); host.prompt("must not infer", &mut |event| events.push(event));
+        assert_eq!(inner.0.load(std::sync::atomic::Ordering::Relaxed), 0);
+        assert_eq!(events[0]["type"], "turn_refused"); assert_eq!(events[0]["data"]["reason"], "budget");
+        assert_eq!(events[0]["data"]["spent_usd"], 0.0);
     }
 
 }

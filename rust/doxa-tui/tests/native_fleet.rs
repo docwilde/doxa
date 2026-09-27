@@ -152,3 +152,25 @@ fn fleet_mesh_cli_stops_its_owned_loopback_renderer() {
     finish(&mut child);
     assert!(std::net::TcpStream::connect(address).is_err());
 }
+
+#[test]
+fn external_stop_requests_controller_teardown_before_reporting_completion() {
+    let fixture = Fixture::new(); let mut child = fixture.start("30"); fixture.wait_monitoring();
+    let output = fixture.command().args(["fleet", "stop", "run", "--root", fixture.root.to_str().unwrap()]).output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    finish(&mut child);
+    let manifest = fixture.manifest();
+    assert_eq!(manifest["stopped"], true); assert_eq!(manifest["phase"], "finished");
+    assert_eq!(manifest["live"], false); assert!(sockets_gone(&manifest));
+}
+
+#[test]
+fn dead_controller_stop_cleans_verified_slots_and_persists_finished() {
+    let fixture = Fixture::new(); let mut child = fixture.start("30"); fixture.wait_monitoring();
+    unsafe { assert_eq!(libc::kill(child.id() as libc::pid_t, libc::SIGKILL), 0); }
+    child.wait().unwrap();
+    let output = fixture.command().args(["fleet", "stop", "run", "--root", fixture.root.to_str().unwrap()]).output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let manifest = fixture.manifest(); assert_eq!(manifest["phase"], "finished");
+    assert_eq!(manifest["live"], false); assert!(sockets_gone(&manifest));
+}

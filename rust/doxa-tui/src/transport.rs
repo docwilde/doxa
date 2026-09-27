@@ -7,6 +7,8 @@ use std::fs::OpenOptions;
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::os::unix::net::UnixStream;
+use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -61,6 +63,45 @@ impl From<io::Error> for TransportError {
     }
 }
 
+// A full AF_UNIX backlog can block a normal connect indefinitely. This
+// descriptor is nonblocking and CLOEXEC from creation; EAGAIN means no
+// connection was queued, so it must never be treated as a usable stream.
+fn unix_connect_until(path: &Path, deadline: Instant) -> Result<UnixStream, TransportError> {
+    if Instant::now() >= deadline { return Err(TransportError::Timeout); }
+    let bytes = path.as_os_str().as_bytes();
+    let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    if bytes.is_empty() || bytes.contains(&0) || bytes.len() >= address.sun_path.len() { return Err(TransportError::Malformed("invalid Unix socket path")); }
+    address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    for (out, byte) in address.sun_path.iter_mut().zip(bytes) { *out = *byte as libc::c_char; }
+    let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC, 0) };
+    if fd < 0 { return Err(io::Error::last_os_error().into()); }
+    let stream = unsafe { UnixStream::from_raw_fd(fd) };
+    let fd = stream.as_raw_fd();
+    let length = (std::mem::offset_of!(libc::sockaddr_un, sun_path) + bytes.len() + 1) as libc::socklen_t;
+    if unsafe { libc::connect(fd, (&address as *const libc::sockaddr_un).cast(), length) } != 0 {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::EINPROGRESS) { return Err(error.into()); }
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() { return Err(TransportError::Timeout); }
+            let mut poll = libc::pollfd { fd, events:libc::POLLOUT, revents:0 };
+            let milliseconds = remaining.as_millis().saturating_add(1).min(i32::MAX as u128) as i32;
+            let result = unsafe { libc::poll(&mut poll, 1, milliseconds) };
+            if result == 0 { return Err(TransportError::Timeout); }
+            if result < 0 {
+                let error = io::Error::last_os_error();
+                if error.kind() == io::ErrorKind::Interrupted { continue; }
+                return Err(error.into());
+            }
+            if let Some(error) = stream.take_error()? { return Err(error.into()); }
+            stream.peer_addr()?; // A writable unconnected descriptor is not success.
+            break;
+        }
+    }
+    stream.set_nonblocking(false)?;
+    Ok(stream)
+}
+
 /// A synchronous client. `hello` and every frame returned by `next_frame`
 /// remain JSON objects so the UI can consume new daemon fields without
 /// changing transport types.
@@ -81,6 +122,14 @@ impl DaemonClient {
         Self::connect_inner(path, cursor, false).map(|(client, _)| client)
     }
 
+    /// Deadline bounds socket connect, hello and attach together. Used by
+    /// fleet teardown so a blocked listener cannot escape the shared deadline.
+    pub(crate) fn connect_until(path: &Path, cursor: Option<u64>, deadline: Instant) -> Result<Self, TransportError> {
+        let deadline = deadline.min(Instant::now() + HELLO_TIMEOUT);
+        let stream = unix_connect_until(path, deadline)?;
+        Self::handshake(stream, cursor, false, Some(deadline)).map(|(client, _)| client)
+    }
+
     /// Restore the durable local transcript before attaching at the hello
     /// sequence. Old daemons and unreadable files fall back to ring replay.
     pub fn connect_for_restore(path: impl AsRef<Path>) -> Result<(Self, Option<TranscriptSnapshot>), TransportError> {
@@ -89,12 +138,18 @@ impl DaemonClient {
 
     fn connect_inner(path: impl AsRef<Path>, cursor: Option<u64>, restore: bool) -> Result<(Self, Option<TranscriptSnapshot>), TransportError> {
         let stream = UnixStream::connect(path)?;
+        Self::handshake(stream, cursor, restore, None)
+    }
+    fn handshake(stream: UnixStream, cursor: Option<u64>, restore: bool, deadline: Option<Instant>) -> Result<(Self, Option<TranscriptSnapshot>), TransportError> {
+        let remaining = || -> Result<Duration, TransportError> {
+            deadline.map(|at| at.checked_duration_since(Instant::now()).filter(|time| !time.is_zero()).ok_or(TransportError::Timeout)).unwrap_or(Ok(HELLO_TIMEOUT))
+        };
         let writer = stream.try_clone()?;
-        writer.set_write_timeout(Some(REPLY_TIMEOUT))?;
+        writer.set_write_timeout(Some(if deadline.is_some() { remaining()? } else { REPLY_TIMEOUT }))?;
         let mut reader = BufReader::new(stream);
-        reader.get_ref().set_read_timeout(Some(HELLO_TIMEOUT))?;
+        reader.get_ref().set_read_timeout(Some(remaining()?))?;
         let mut pending_bytes = Vec::new();
-        let hello = read_json(&mut reader, &mut pending_bytes)?;
+        let hello = read_json_until(&mut reader, &mut pending_bytes, deadline)?;
         validate_hello(&hello)?;
         reader.get_ref().set_read_timeout(None)?;
         let snapshot = if restore { read_snapshot(&hello) } else { None };
@@ -104,7 +159,9 @@ impl DaemonClient {
             queued: VecDeque::new(),
             pending_bytes,
         };
+        if deadline.is_some() { client.writer.set_write_timeout(Some(remaining()?))?; }
         client.write_json(&json!({"type": "attach", "cursor": attach_cursor}))?;
+        client.writer.set_write_timeout(Some(REPLY_TIMEOUT))?;
         Ok((client, snapshot))
     }
 
@@ -124,7 +181,7 @@ impl DaemonClient {
             return Ok(Some(frame));
         }
         self.reader.get_ref().set_read_timeout(Some(timeout))?;
-        let result = self.read_frame();
+        let result = self.read_frame_until(Some(Instant::now() + timeout));
         self.reader.get_ref().set_read_timeout(None)?;
         match result {
             Err(TransportError::Timeout) => Ok(None),
@@ -161,8 +218,9 @@ impl DaemonClient {
         Ok(())
     }
 
-    fn read_frame(&mut self) -> Result<Value, TransportError> {
-        let frame = read_json(&mut self.reader, &mut self.pending_bytes)?;
+    fn read_frame(&mut self) -> Result<Value, TransportError> { self.read_frame_until(None) }
+    fn read_frame_until(&mut self, deadline: Option<Instant>) -> Result<Value, TransportError> {
+        let frame = read_json_until(&mut self.reader, &mut self.pending_bytes, deadline)?;
         validate_frame(&frame)?;
         if frame["type"] == "event" {
             self.cursor = frame["seq"].as_u64().unwrap().checked_add(1)
@@ -179,7 +237,7 @@ impl DaemonClient {
         let result = (|| loop {
             let remaining = deadline.checked_duration_since(Instant::now()).ok_or(TransportError::Timeout)?;
             self.reader.get_ref().set_read_timeout(Some(remaining))?;
-            let frame = self.read_frame()?;
+            let frame = self.read_frame_until(Some(deadline))?;
             if frame["type"] == "reply" && frame["id"] == id {
                 return Ok(frame);
             }
@@ -217,8 +275,12 @@ fn read_snapshot(hello: &Value) -> Option<TranscriptSnapshot> {
     Some(TranscriptSnapshot { bytes, earlier_bytes_omitted: start > 0 })
 }
 
-fn read_json(reader: &mut BufReader<UnixStream>, pending: &mut Vec<u8>) -> Result<Value, TransportError> {
+fn read_json_until(reader: &mut BufReader<UnixStream>, pending: &mut Vec<u8>, deadline: Option<Instant>) -> Result<Value, TransportError> {
     loop {
+        if let Some(deadline) = deadline {
+            let remaining = deadline.checked_duration_since(Instant::now()).filter(|time| !time.is_zero()).ok_or(TransportError::Timeout)?;
+            reader.get_ref().set_read_timeout(Some(remaining))?;
+        }
         let available = reader.fill_buf()?;
         if available.is_empty() {
             return if pending.is_empty() { Err(TransportError::Closed) }
@@ -260,4 +322,48 @@ fn map_wire_error(error: WireError) -> TransportError {
         WireError::IncompleteFrame => TransportError::Malformed("unterminated frame"),
         WireError::UnknownType => TransportError::Malformed("unknown frame type"),
     }
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+    use std::os::unix::net::UnixListener;
+    #[test]
+    fn full_listener_backlog_never_becomes_a_false_connected_stream() {
+        let dir = tempfile::tempdir().unwrap(); let path = dir.path().join("backlog.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        assert_eq!(unsafe { libc::listen(listener.as_raw_fd(), 1) }, 0);
+        let mut connected = Vec::new(); let started = Instant::now(); let mut full = false;
+        for _ in 0..16 {
+            match unix_connect_until(&path, Instant::now() + Duration::from_millis(100)) {
+                Ok(stream) => {
+                    assert!(stream.peer_addr().is_ok());
+                    assert_ne!(unsafe { libc::fcntl(stream.as_raw_fd(), libc::F_GETFD) } & libc::FD_CLOEXEC, 0);
+                    connected.push(stream);
+                }
+                Err(TransportError::Timeout) => { full = true; break; }
+                Err(error) => panic!("unexpected backlog error: {error}"),
+            }
+        }
+        assert!(full, "listener backlog was not filled");
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(matches!(DaemonClient::connect_until(&path, None, Instant::now() + Duration::from_millis(100)), Err(TransportError::Timeout)));
+    }
+    #[test]
+    fn partial_hello_cannot_reset_the_connection_deadline() {
+        let dir = tempfile::tempdir().unwrap(); let path = dir.path().join("trickle.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            for _ in 0..20 {
+                if stream.write_all(b" ").is_err() { break; }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        });
+        let started = Instant::now();
+        assert!(matches!(DaemonClient::connect_until(&path, None, started + Duration::from_millis(200)), Err(TransportError::Timeout)));
+        assert!(started.elapsed() < Duration::from_millis(800));
+        server.join().unwrap();
+    }
+
 }

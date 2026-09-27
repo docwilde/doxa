@@ -8,6 +8,9 @@ use std::time::{Duration, Instant};
 
 const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 const MAX_RUNS: usize = 1024;
+pub const MAX_NATIVE_SLOTS: usize = 1025;
+const STOP_WORKERS: usize = 8;
+const STOP_TIMEOUT: Duration = Duration::from_secs(60);
 
 fn invalid(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
@@ -213,28 +216,50 @@ pub struct StopReport {
     pub complete: bool,
 }
 
+#[cfg(test)]
 fn stop_one(socket: PathBuf, expected_id: String) -> Result<&'static str, String> {
-    let mut client = crate::transport::DaemonClient::connect(&socket, None)
-        .map_err(|error| error.to_string())?;
-    if client.hello["session_id"] != expected_id {
-        return Err("daemon session identity differs from manifest".into());
+    stop_one_until(socket, expected_id, Instant::now() + STOP_TIMEOUT)
+}
+fn stop_one_until(socket: PathBuf, expected_id: String, deadline: Instant) -> Result<&'static str, String> {
+    if fs::symlink_metadata(&socket).is_err_and(|e| e.kind() == io::ErrorKind::NotFound) { return Ok("verified slot socket already gone"); }
+    // Transport bounds hello at10s and reply at15s; reserve both before
+    // starting another task so the bounded pool cannot overrun its deadline.
+    if deadline.saturating_duration_since(Instant::now()) < Duration::from_secs(25) {
+        return Err("fleet stop deadline exhausted before admission".into());
     }
-    let reply = client.call("stop", serde_json::Map::new())
-        .map_err(|error| format!("stop acknowledgement unavailable: {error}"))?;
-    if reply["ok"] != true {
-        return Err("daemon refused stop request".into());
-    }
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut client = match crate::transport::DaemonClient::connect_until(&socket, None, deadline) {
+        Ok(client) => client,
+        Err(_) if fs::symlink_metadata(&socket).is_err_and(|e| e.kind() == io::ErrorKind::NotFound) => return Ok("verified slot socket already gone"),
+        Err(error) => return Err(error.to_string()),
+    };
+    if client.hello["session_id"] != expected_id { return Err("daemon session identity differs from manifest".into()); }
+    let reply = client.call("stop", serde_json::Map::new()).map_err(|error| format!("stop acknowledgement unavailable: {error}"))?;
+    if reply["ok"] != true { return Err("daemon refused stop request".into()); }
     loop {
-        if Instant::now() >= deadline {
-            return Err("stop accepted; daemon close not confirmed within 60 seconds".into());
-        }
-        match client.poll_frame(Duration::from_millis(250)) {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() { return Err("stop accepted; daemon close not confirmed before fleet deadline".into()); }
+        match client.poll_frame(remaining.min(Duration::from_millis(250))) {
             Ok(Some(_)) | Ok(None) => {}
             Err(crate::transport::TransportError::Closed) => return Ok("daemon connection closed"),
             Err(error) => return Err(format!("stop accepted; daemon close unconfirmed: {error}")),
         }
     }
+}
+/// Stop only caller-verified identities with one deadline and a bounded pool.
+pub(crate) fn teardown(targets: Vec<(usize, PathBuf, String)>) -> Vec<(usize, Result<&'static str, String>)> {
+    let deadline = Instant::now() + STOP_TIMEOUT;
+    let tasks = std::sync::Mutex::new(std::collections::VecDeque::from(targets));
+    let results = std::sync::Mutex::new(Vec::new());
+    std::thread::scope(|scope| {
+        for _ in 0..STOP_WORKERS {
+            scope.spawn(|| loop {
+                let Some((index, socket, id)) = tasks.lock().unwrap().pop_front() else { break; };
+                let result = stop_one_until(socket, id, deadline);
+                results.lock().unwrap().push((index, result));
+            });
+        }
+    });
+    results.into_inner().unwrap()
 }
 
 /// Request stop on each live slot that still has a socket. All readable socket
@@ -242,11 +267,20 @@ fn stop_one(socket: PathBuf, expected_id: String) -> Result<&'static str, String
 pub fn stop(root: &Path, prefix: &str) -> io::Result<StopReport> {
     let run = resolve(root, prefix)?;
     let value = manifest(&run)?;
+    if value["native_version"] == 1 {
+        let id = run.file_name().and_then(|name| name.to_str()).ok_or_else(|| invalid("invalid native run ID"))?;
+        return crate::fleet_control::stop(root, id);
+    }
+    stop_slots(root, prefix, false)
+}
+pub(crate) fn stop_slots(root: &Path, prefix: &str, native: bool) -> io::Result<StopReport> {
+    let run = resolve(root, prefix)?;
+    let value = manifest(&run)?;
     if value["live"] != true {
         return Err(invalid("fleet manifest is not live"));
     }
     let slots = value["slots"].as_array().ok_or_else(|| invalid("fleet manifest has no slots"))?;
-    if slots.is_empty() || slots.len() > 64 {
+    if slots.is_empty() || slots.len() > MAX_NATIVE_SLOTS {
         return Err(invalid("fleet slot count is out of bounds"));
     }
     let mut targets = Vec::new();
@@ -273,33 +307,22 @@ pub fn stop(root: &Path, prefix: &str) -> io::Result<StopReport> {
             Err(error) => return Err(error),
         }
     }
-    if targets.is_empty() {
+    if targets.is_empty() && !(native && missing.len() == slots.len()) {
         return Err(invalid("fleet has no live slot sockets to stop"));
     }
-    // Concurrent requests match v1.19 teardown's per-slot fanout and keep a
-    // single slow finalize from delaying the other stop requests.
-    let handles: Vec<_> = targets.into_iter().map(|(index, socket, id)| {
-        std::thread::spawn(move || (index, stop_one(socket, id)))
-    }).collect();
+    let results = teardown(targets);
     let mut lines = Vec::new();
-    let mut complete = missing.is_empty();
+    let mut complete = missing.is_empty() || native;
     for index in missing {
         lines.push((index, format!("slot {index}: no live socket recorded")));
     }
     for index in not_spawned {
         lines.push((index, format!("slot {index}: was not spawned")));
     }
-    for handle in handles {
-        match handle.join() {
-            Ok((index, Ok(state))) => lines.push((index, format!("slot {index}: {state}"))),
-            Ok((index, Err(error))) => {
-                complete = false;
-                lines.push((index, format!("slot {index}: {}", short(&error))));
-            }
-            Err(_) => {
-                complete = false;
-                lines.push((usize::MAX, "slot worker failed".into()));
-            }
+    for (index, result) in results {
+        match result {
+            Ok(state) => lines.push((index, format!("slot {index}: {state}"))),
+            Err(error) => { complete = false; lines.push((index, format!("slot {index}: {}", short(&error)))); }
         }
     }
     lines.sort_by_key(|(index, _)| *index);
@@ -391,6 +414,30 @@ mod tests {
         });
         assert_eq!(stop_one(path, "sess-123".into()).unwrap(), "daemon connection closed");
         server.join().unwrap();
+    }
+
+    #[test]
+    fn teardown_does_not_finish_at_acknowledgement() {
+        let temp = tempfile::tempdir().unwrap(); let path = temp.path().join("delayed.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let (ack_sender, ack_receiver) = std::sync::mpsc::channel();
+        let (release_sender, release_receiver) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            writeln!(socket, "{}", serde_json::json!({"type":"hello","proto":1,"session_id":"delayed","cwd":"/fixture","engine":"fixture","next_seq":0})).unwrap();
+            let mut reader = BufReader::new(socket.try_clone().unwrap()); let mut line = String::new();
+            reader.read_line(&mut line).unwrap(); line.clear(); reader.read_line(&mut line).unwrap();
+            let command: Value = serde_json::from_str(&line).unwrap();
+            writeln!(socket, "{}", serde_json::json!({"type":"reply","id":command["id"],"ok":true})).unwrap();
+            ack_sender.send(()).unwrap(); release_receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+        });
+        let (result_sender, result_receiver) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || { let _ = result_sender.send(teardown(vec![(0, path, "delayed".into())])); });
+        ack_receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(matches!(result_receiver.recv_timeout(Duration::from_millis(100)), Err(std::sync::mpsc::RecvTimeoutError::Timeout)));
+        release_sender.send(()).unwrap();
+        let results = result_receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(results[0].1.is_ok()); worker.join().unwrap(); server.join().unwrap();
     }
 
     #[test]
