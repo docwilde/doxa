@@ -4111,7 +4111,7 @@ impl App {
             self.notice = format!("Already attaching · {}", safe_label(id));
             return;
         }
-        if !self.manual_tab_available() {return;}
+        if !self.manual_tab_available_for(Some(id)) {return;}
         self.attaching_ids.insert(id.to_owned());
         self.pending_attaches.push((id.to_owned(), self.active_group));
         self.input.clear();
@@ -4586,10 +4586,23 @@ impl App {
     }
 
     fn manual_tab_available(&mut self)->bool {
+        self.manual_tab_available_for(None)
+    }
+
+    fn manual_tab_available_for(&mut self, candidate: Option<&str>)->bool {
         if self.groups.iter().map(|group|group.tabs.len()).sum::<usize>()
             + self.attaching_ids.len() + usize::from(self.launching) >= panes::MAX_TABS {
-            self.notice="256 tab slots occupied · detach a tab before opening another".into();false
-        }else{true}
+            self.notice="256 tab slots occupied · detach a tab before opening another".into();return false;
+        }
+        let retained = self.groups.iter().flat_map(|group|&group.tabs)
+            .chain(self.detached_this_run.iter()).chain(self.attaching_ids.iter())
+            .filter(|id| !self.killed_this_run.contains(*id) && !self.clear_stop_after_save.contains(*id))
+            .collect::<HashSet<_>>();
+        if candidate.is_none_or(|id| !retained.iter().any(|retained| retained.as_str()==id))
+            && retained.len() + usize::from(self.launching) >= panes::MAX_TABS {
+            self.notice="256 retained session records · stop an old session before starting another".into();return false;
+        }
+        true
     }
 
     fn open_engine_picker(&mut self) {
@@ -4786,6 +4799,7 @@ impl App {
                     self.notice = "No verified models with effort capability are available".into();
                     return true;
                 }
+                if !self.manual_tab_available() { return true; }
                 let form = self.new_session.take().unwrap();
                 let mut options = launch::LaunchOptions { engine: form.engine, ..Default::default() };
                 if !form.model.trim().is_empty() { options.model = Some(form.model.trim().to_owned()); }
@@ -6134,7 +6148,7 @@ impl App {
                     self.attach_selected(&id);
                     return;
                 }
-                if !self.manual_tab_available() {return;}
+                if !self.manual_tab_available_for(Some(&id)) {return;}
                 let Some(entry) = self.history_entries.get(&id).cloned() else {
                     self.notice = "Resume unavailable: no saved transcript for this session".into();
                     return;
@@ -6148,7 +6162,7 @@ impl App {
                 self.notice = "Checking saved conversation…".into();
                 return;
             }
-            if !self.groups[self.active_group].tabs.contains(&id) && !self.manual_tab_available() {return;}
+            if !self.groups[self.active_group].tabs.contains(&id) && !self.manual_tab_available_for(Some(&id)) {return;}
             let tabs = &mut self.groups[self.active_group];
             if let Some(index) = tabs.tabs.iter().position(|tab| tab == &id) { tabs.active = index; }
             else { tabs.tabs.push(id); tabs.active = tabs.tabs.len() - 1; }
@@ -6180,13 +6194,13 @@ impl App {
                 if crate::discovery::sessions().is_ok_and(|rows| rows.iter().any(|row| row.id == id)) {
                     if self.groups.iter().any(|pane| pane.tabs.contains(&id)) {
                         self.notice = format!("Session already open · {}", safe_label(&id));
-                    } else if !self.attaching_ids.contains(&id) && self.manual_tab_available() {
+                    } else if !self.attaching_ids.contains(&id) && self.manual_tab_available_for(Some(&id)) {
                         self.attaching_ids.insert(id.clone());
                         self.pending_attaches.push((id.clone(), group));
                         self.notice = format!("Attaching · {}", safe_label(&id));
                     }
                 } else {
-                    if !self.manual_tab_available() { return true; }
+                    if !self.manual_tab_available_for(Some(&id)) { return true; }
                     self.pending_launches.push((options, None, group));
                     self.launching = true;
                     self.notice = format!("Resuming · {}", safe_label(&id));
@@ -6831,7 +6845,7 @@ impl App {
     fn open_selected(&mut self) {
         let selected = self.rail_order().get(self.rail_selected).copied();
         if let Some(id) = selected.and_then(|index| self.sessions.get(index)).map(|session| session.id.clone()) {
-            if !self.groups[self.active_group].tabs.contains(&id) && !self.manual_tab_available() { return; }
+            if !self.groups[self.active_group].tabs.contains(&id) && !self.manual_tab_available_for(Some(&id)) { return; }
             let tabs = &mut self.groups[self.active_group];
             if let Some(index) = tabs.tabs.iter().position(|tab| tab == &id) {
                 tabs.active = index;
@@ -11368,6 +11382,31 @@ for line in sys.stdin:
         tx.send(("saved".into(),Ok(launch::LaunchOptions::default()))).unwrap();
         assert!(app.poll_resume()); assert!(app.pending_launches.is_empty());
         assert!(app.notice.contains("original pane")); assert_eq!(app.input,"other pane draft");
+    }
+
+    #[test]
+    fn closing_tabs_bounds_retained_records_and_reattach_reuses_existing_record() {
+        let mut app = App::default();
+        app.groups[0].tabs = (0..panes::MAX_TABS).map(|index|format!("slot-{index}")).collect();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('w'),KeyModifiers::CONTROL)));
+        assert_eq!(app.groups[0].tabs.len(),panes::MAX_TABS-1);
+        assert_eq!(app.detached_this_run,["slot-0"]);
+        app.open_engine_picker();
+        assert!(!app.engine_picker); assert!(app.notice.contains("256 retained session records"));
+        app.attach_selected("slot-0");
+        assert_eq!(app.pending_attaches,[("slot-0".into(),0)]);
+        app.apply_daemon_frame(&json!({"type":"attach_reply","ok":true,"session_id":"slot-0","group":0}));
+        assert_eq!(app.groups[0].tabs.len(),panes::MAX_TABS);
+        // A confirmed killed ID releases its retained-record reservation.
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('w'),KeyModifiers::CONTROL)));
+        app.killed_this_run.insert("slot-0".into());
+        assert!(app.manual_tab_available());
+        // A form opened earlier must also recheck admission at submission.
+        app.killed_this_run.clear();
+        app.new_session = Some(NewSession { engine:launch::Engine::Codex,model:"model".into(),models:Vec::new(),
+            model_efforts:HashMap::new(),catalog_note:String::new(),catalog_pending:false,effort:None,prompt:String::new(),field:1 });
+        app.new_session_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
+        assert!(app.pending_launches.is_empty()); assert!(app.new_session.is_some());
     }
 
     #[test]
