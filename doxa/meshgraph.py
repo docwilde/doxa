@@ -84,6 +84,8 @@ import time
 from pathlib import Path
 from typing import Any, Iterable
 
+from .identity import valid_session_id
+
 __all__ = [
     "LEDGER_ENV",
     "MeshServer",
@@ -121,6 +123,9 @@ MAX_LINE_BYTES = 1 << 20
 MAX_LEDGER_BYTES = 128 << 20
 MAX_BATCH_BYTES = 4 << 20
 MAX_BATCH_RECORDS = 256
+MAX_BATCH_WIRE_BYTES = 8 << 20
+MAX_RECIPIENTS = 4096
+MAX_SESSION_ID_CHARS = 128
 LEDGER_READ_DEADLINE_SECS = 1.0
 MAX_HTTP_CONNECTIONS = 16
 MAX_HEADER_BYTES = 8192
@@ -212,7 +217,7 @@ def parse_record(line: str) -> "dict[str, Any] | None":
       model. The page falls back to the short session id rather than
       showing the word "null".
 
-    **None rather than a raise, for every kind of bad line**, and that is
+    **None for malformed/schema-invalid lines**, and that is
     the load-bearing decision here rather than laziness about validation.
     This file is read while it is being appended to by a different
     process: a half-flushed line, a line from a future schema version, a
@@ -220,6 +225,9 @@ def parse_record(line: str) -> "dict[str, Any] | None":
     reader, the view would go dark exactly when the fleet got busy --
     which is the moment it exists for. A skipped line is a missing edge;
     a raised exception is a blind operator.
+
+    Availability-limit violations raise LedgerReadLimit, so a bounded view
+    refuses an oversized record rather than quietly omitting its edges.
 
     What a record must have to be drawable at all: a sender session id
     and a list of recipients. Everything else is presentation, and a
@@ -237,6 +245,10 @@ def parse_record(line: str) -> "dict[str, Any] | None":
     session = sender.get("session")
     if not isinstance(session, str) or not session:
         return None
+    if len(session) > MAX_SESSION_ID_CHARS:
+        raise LedgerReadLimit("mesh sender identity exceeds 128 characters")
+    if not valid_session_id(session):
+        return None
 
     # `to` is normalized to a list of non-empty strings here rather than
     # trusted: the page indexes nodes by these values, and a null or a
@@ -248,7 +260,14 @@ def parse_record(line: str) -> "dict[str, Any] | None":
     recipients: "list[str]" = []
     seen_recipients: set[str] = set()
     if isinstance(raw_to, list):
+        if len(raw_to) > MAX_RECIPIENTS:
+            raise LedgerReadLimit("mesh recipient list exceeds 4096 entries")
         for target in raw_to:
+            if isinstance(target, str) and target:
+                if len(target) > MAX_SESSION_ID_CHARS:
+                    raise LedgerReadLimit("mesh recipient identity exceeds 128 characters")
+                if not valid_session_id(target):
+                    return None
             if isinstance(target, str) and target and target not in seen_recipients:
                 recipients.append(target)
                 seen_recipients.add(target)
@@ -356,6 +375,9 @@ def read_batch(
     deadline = time.monotonic() + LEDGER_READ_DEADLINE_SECS
     found: list[tuple[dict[str, Any], int]] = []
     position = offset
+    # Reserve the envelope and per-record cursor/framing bytes too; normalized
+    # edges and markup escaping can expand far beyond the disk line size.
+    wire_bytes = 256
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError:
@@ -392,6 +414,7 @@ def read_batch(
                     break
             if not raw.endswith(b"\n"):
                 break
+            previous = position
             position += size
             if oversized or not raw.strip():
                 continue
@@ -400,6 +423,14 @@ def read_batch(
             except UnicodeDecodeError:
                 continue
             if record is not None:
+                cost = len(json_bytes(record)) + 64
+                if cost + 256 > MAX_BATCH_WIRE_BYTES:
+                    raise LedgerReadLimit("mesh record exceeds normalized JSON byte limit")
+                if wire_bytes + cost > MAX_BATCH_WIRE_BYTES:
+                    # Leave this entire record for the next page/stream poll.
+                    position = previous
+                    break
+                wire_bytes += cost
                 found.append((record, position))
     return found, position
 

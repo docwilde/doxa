@@ -950,7 +950,7 @@ def test_total_header_bytes_are_bounded(server):
 
 
 def test_large_recipient_list_deduplicates_in_linear_pass():
-    recipients = [f"peer-{index}" for index in range(10_000)]
+    recipients = [f"peer-{index}" for index in range(meshgraph.MAX_RECIPIENTS // 2)]
     raw = record()
     raw["to"] = recipients + recipients
     start = time.monotonic()
@@ -958,3 +958,45 @@ def test_large_recipient_list_deduplicates_in_linear_pass():
     assert parsed["to"] == recipients
     assert len(parsed["edges"]) == len(recipients)
     assert time.monotonic() - start < 2
+
+
+def test_normalized_json_budget_preserves_whole_record_cursors(tmp_path, monkeypatch):
+    monkeypatch.setattr(meshgraph, "MAX_BATCH_WIRE_BYTES", 1 << 20)
+    ledger = tmp_path / "ledger"
+    for index in range(5):
+        append(ledger, record(body=str(index) + "<" * 120_000))
+    offset = 0
+    bodies = []
+    for _ in range(5):
+        batch, next_offset = meshgraph.read_batch(ledger, offset)
+        assert len(batch) == 1
+        payload = {"records": [row for row, _ in batch], "offset": next_offset,
+                   "more": True, "snapshot_end": ledger.stat().st_size}
+        assert len(meshgraph.json_bytes(payload)) <= meshgraph.MAX_BATCH_WIRE_BYTES
+        bodies.extend(row["body"][0] for row, _ in batch)
+        assert batch[0][1] == next_offset > offset
+        offset = next_offset
+    assert bodies == list("01234")
+    assert offset == ledger.stat().st_size
+
+
+def test_identity_and_fanout_amplification_are_explicitly_refused(server, ledger):
+    forged = record()
+    forged["from"]["session"] = "s" * (meshgraph.MAX_LINE_BYTES // 2)
+    forged["to"] = [f"peer-{index}" for index in range(1000)]
+    append(ledger, forged)
+    # Never serialize the resulting thousand giant edge labels.
+    status, _ = get(server, "ledger")
+    assert status == 413
+    with pytest.raises(meshgraph.LedgerReadLimit, match="sender identity"):
+        meshgraph.read_batch(ledger)
+    for forged in [record(to=["t" * 129]),
+                   record(to=["target"] * (meshgraph.MAX_RECIPIENTS + 1))]:
+        with pytest.raises(meshgraph.LedgerReadLimit):
+            meshgraph.parse_record(json.dumps(forged))
+
+
+def test_one_normalized_record_over_json_budget_returns_explicit_error(server, ledger, monkeypatch):
+    monkeypatch.setattr(meshgraph, "MAX_BATCH_WIRE_BYTES", 1024)
+    append(ledger, record(body="<" * 200))
+    assert get(server, "ledger")[0] == 413
