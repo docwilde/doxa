@@ -49,6 +49,7 @@ pub struct ClaudeHost {
     reviewed_compact: bool,
     peer_tools_ready: bool,
     initial_model: Option<String>,
+    initial_effort: Option<String>,
     initial_permission_mode: String,
     billing: Option<Value>,
     lore_enabled: Option<bool>,
@@ -62,6 +63,7 @@ impl ClaudeHost {
         session_id: &str,
         resume: bool,
         model: Option<&str>,
+        effort: Option<&str>,
         runtime: &Path,
         spawn_depth: u32,
         parent_session_id: Option<&str>,
@@ -73,7 +75,7 @@ impl ClaudeHost {
         let permission_control = bridge.supports("set_permission_mode");
         let reviewed_compact = bridge.supports("reviewed_compact_v1");
         let params = json!({"cwd":cwd,"session_id":session_id,
-            "resume":if resume { Some(session_id) } else { None }, "model":model, "lore":doxa_state::lore_enabled_default(),
+            "resume":if resume { Some(session_id) } else { None }, "model":model,"effort":effort,"lore":doxa_state::lore_enabled_default(),
             "spawn_depth":spawn_depth,"parent_session_id":parent_session_id,
             "native_spawn":{"daemon_bin":std::env::current_exe().map_err(|_| "native daemon identity unavailable")?,
                 "python":python,"script":script,"runtime":runtime}});
@@ -114,6 +116,10 @@ impl ClaudeHost {
                 || start["native_spawn_ready"] != true) {
             return Err("Claude sidecar did not preserve native child lineage".into());
         }
+        if effort.is_some() && start["effort"].as_str() != effort {
+            return Err("Claude sidecar did not apply requested startup effort".into());
+        }
+        let initial_effort = start["effort"].as_str().map(str::to_owned);
         let peer_tools_ready = start["peer_tools_ready"] == true;
         let initial_model = start["data"]["model"].as_str().map(str::to_owned);
         let initial_permission_mode = start["permission_mode"].as_str().unwrap_or("default");
@@ -143,6 +149,7 @@ impl ClaudeHost {
             reviewed_compact,
             peer_tools_ready,
             initial_model,
+            initial_effort,
             initial_permission_mode,
             billing, lore_enabled,
         })
@@ -192,6 +199,7 @@ impl Host for ClaudeHost {
     fn can_set_model(&self) -> bool { self.model_control }
     fn can_set_permission_mode(&self) -> bool { self.permission_control }
     fn initial_model(&self) -> Option<String> { self.initial_model.clone() }
+    fn initial_effort(&self) -> Option<String> { self.initial_effort.clone() }
     fn initial_permission_mode(&self) -> String { self.initial_permission_mode.clone() }
     fn billing_snapshot(&self) -> Option<Value> { self.billing.clone() }
     fn prompt(&self, text: &str, emit: &mut dyn FnMut(Value)) {
@@ -484,7 +492,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("sidecar.py");
         fs::write(&path, script).unwrap();
-        let host = ClaudeHost::new(Path::new("python3"), &path, dir.path(), "test", false, None, dir.path(), 0, None)
+        let host = ClaudeHost::new(Path::new("python3"), &path, dir.path(), "test", false, None, None, dir.path(), 0, None)
             .unwrap();
         (dir, Arc::new(host))
     }
@@ -574,14 +582,16 @@ for line in sys.stdin:
  r=json.loads(line)
  p=r['params']
  assert p['spawn_depth']==2 and p['parent_session_id']=='parent-123'
+ assert p['effort']=='high'
  assert p['native_spawn']['runtime']=={runtime:?}
  assert p['native_spawn']['daemon_bin'].startswith('/')
- result={{"spawn_depth":{depth},"parent_session_id":"parent-123","native_spawn_ready":True,"permission_mode":"default"}}
+ result={{"spawn_depth":{depth},"parent_session_id":"parent-123","native_spawn_ready":True,"permission_mode":"default","effort":"high"}}
  print(json.dumps({{"type":"reply","id":r['id'],"ok":True,"result":result}}),flush=True)
 "#, runtime=dir.path().to_str().unwrap(),depth=if valid { 2 } else { 0 })).unwrap();
             let result = ClaudeHost::new(Path::new("python3"), &script, dir.path(), "child", false,
-                None, dir.path(), 2, Some("parent-123"));
+                None, Some("high"), dir.path(), 2, Some("parent-123"));
             assert_eq!(result.is_ok(), valid);
+            if let Ok(host) = result { assert_eq!(host.initial_effort(), Some("high".into())); }
         }
     }
 

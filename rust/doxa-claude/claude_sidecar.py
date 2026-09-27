@@ -254,6 +254,11 @@ async def run() -> None:
                     options.update(spawn_depth=depth, parent_session_id=parent)
                 if model is not None:
                     options["model"] = model
+                effort = params.get("effort")
+                if effort is not None:
+                    if effort not in ("low", "medium", "high", "xhigh", "max") or "effort" not in parameters:
+                        raise ValueError("startup effort unsupported by Python engine")
+                    options["effort"] = effort
                 native = params.get("native_spawn")
                 launcher = None
                 if native is not None:
@@ -280,6 +285,7 @@ async def run() -> None:
                                                 "permission_mode": getattr(candidate, "permission_mode", "default"),
                                                 "billing": billing,
                                                 "lore_enabled": getattr(candidate, "lore", None),
+                                                "effort": getattr(candidate, "effort", None),
                                                 "spawn_depth": getattr(candidate, "spawn_depth", 0),
                                                 "parent_session_id": getattr(candidate, "parent_session_id", None),
                                                 "native_spawn_ready": launcher is not None,

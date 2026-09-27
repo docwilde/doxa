@@ -1495,6 +1495,7 @@ class SessionEngine:
         lore: "bool | None" = None,
         detail_events: bool = False,
         peer_presence: bool = True,
+        effort: str | None = None,
     ) -> None:
         self.peer_presence = peer_presence
         self.detail_events = detail_events
@@ -1573,7 +1574,9 @@ class SessionEngine:
         # chip) -- None until _build_options runs, same as every other
         # connect-time field here (server_info, account).
         self.effort: str | None = None
-        self._effort_override: str | None = None
+        if effort is not None and effort not in EFFORT_LEVELS:
+            raise ValueError("unsupported Claude effort")
+        self._effort_override: str | None = effort
         self._resume_identity_pending: str | None = None
         self._provider_session_seen = bool(self.resume)
         # Permission mode (v0.42.0). Unlike effort beside it, this is NOT

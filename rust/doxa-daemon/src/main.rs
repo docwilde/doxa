@@ -97,6 +97,12 @@ struct Options {
     vendor_endpoint: Option<String>,
     sandbox: SandboxMode,
 }
+fn initial_task_prompt(task: &str, parent: Option<&str>) -> String {
+    // Match Python's receiving-side spawn disclosure before admitting a turn.
+    const INTRO: &str = "[SPAWNED SESSION] This session was started by another DOXA session, not by a person typing. The task below was composed by that session's agent and approved, verbatim, by the human who owns both sessions -- so it IS your task, and you should carry it out. This marker is disclosure, not a trust downgrade: it exists so that anyone reading this transcript later can see where the task came from, and so that you can weigh its provenance yourself before doing something genuinely consequential with it -- spending money, running a destructive command, or spawning further sessions of your own.";
+    let origin = parent.map(|id| format!("Spawning session: {}.\n", &id[..id.len().min(8)])).unwrap_or_default();
+    format!("{INTRO}\n{origin}\n--- task ---\n{task}")
+}
 fn valid_parent_id(id: &str) -> bool {
     id.len() <= 128 && id.as_bytes().first().is_some_and(u8::is_ascii_alphanumeric)
         && id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
@@ -252,8 +258,8 @@ fn options() -> io::Result<Options> {
             return Err(invalid("Claude options require --engine claude"));
         }
     } else if engine == Engine::Claude {
-        if effort.is_some() {
-            return Err(invalid("effort requires a vendor engine"));
+        if effort.as_deref().is_some_and(|value| !matches!(value, "low" | "medium" | "high" | "xhigh" | "max")) {
+            return Err(invalid("invalid Claude effort"));
         }
         if resume && !explicit_session_id {
             return Err(invalid("Claude resume needs --session-id"));
@@ -662,6 +668,7 @@ fn run() -> io::Result<()> {
                     &options.session_id,
                     options.resume,
                     options.model.as_deref(),
+                    options.effort.as_deref(),
                     &options.runtime,
                     options.spawn_depth,
                     options.parent_session_id.as_deref(),
@@ -736,7 +743,8 @@ fn run() -> io::Result<()> {
     registry.write(0)?;
     if let Some(task) = &options.task {
         let origin = options.parent_session_id.as_deref().unwrap_or("child-task");
-        if handle.enqueue_peer_prompt(task.clone(), origin).map_err(io::Error::other)? != ExternalPrompt::Started {
+        let framed_task = initial_task_prompt(task, options.parent_session_id.as_deref());
+        if handle.enqueue_peer_prompt(framed_task, origin).map_err(io::Error::other)? != ExternalPrompt::Started {
             return Err(io::Error::other("child task was not admitted"));
         }
     }

@@ -88,3 +88,18 @@ def test_native_host_config_rejects_untrusted_runtime_and_executable(tmp_path):
     Path(cfg["daemon_bin"]).chmod(0o777)
     with pytest.raises(ValueError):
         native_launcher(cfg)
+
+
+def test_native_startup_effort_is_an_explicit_engine_option(tmp_path, monkeypatch):
+    from doxa.engine import SessionEngine
+    from doxa import config as config_mod
+    monkeypatch.setenv("DOXA_EFFORT", "low")
+    config_mod.invalidate()
+    engine = SessionEngine(cwd=str(tmp_path), session_id="effort-fixture", effort="max")
+    assert engine._effort_override == "max"
+    options = engine._build_options()
+    assert options.effort == "max"
+    assert engine.effort == "max"
+    with pytest.raises(ValueError, match="unsupported Claude effort"):
+        SessionEngine(cwd=str(tmp_path), session_id="bad-effort", effort="unrecognized")
+    config_mod.invalidate()

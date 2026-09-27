@@ -3386,3 +3386,36 @@ fn memory_off_codex_scrubs_and_records_without_snapshot_index_or_compact_review(
         assert!(transcript.contains("[redacted] task")); assert!(!transcript.contains("fixture-secret"));
     }
 }
+
+#[test]
+fn native_child_keeps_parent_identity_and_starts_task_without_an_attachment() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = dir.path();
+    let child = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+        .args(["--runtime-dir", runtime.to_str().unwrap(), "--cwd", runtime.to_str().unwrap(),
+            "--session-id", "native-child", "--linger", "10", "--spawn-depth", "2",
+            "--parent-session-id", "native-parent", "--task", "perform the approved task"])
+        .env("DOXA_HOME", runtime.join("home")).env("DOXA_WORKTREE", "0")
+        .stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
+    let registry = runtime.join("registry/native-child.json");
+    wait_until(|| registry.exists());
+    let row: Value = serde_json::from_slice(&fs::read(&registry).unwrap()).unwrap();
+    assert_eq!(row["parent_session_id"], "native-parent");
+    assert_eq!(row["pid"], child.id());
+    assert!(row.get("spawn_depth").is_none());
+    let socket = PathBuf::from(row["daemon_socket"].as_str().unwrap());
+    assert_eq!(socket.file_name().unwrap().to_str().unwrap(), format!("daemon-native-c-{}.sock", child.id()));
+    let mut process = Process { child, registry, socket };
+    let mut stream = UnixStream::connect(&process.socket).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    let mut reader = BufReader::new(stream.try_clone().unwrap());
+    let mut line = String::new(); reader.read_line(&mut line).unwrap();
+    writeln!(stream, "{}", json!({"type":"attach","cursor":null})).unwrap();
+    loop {
+        line.clear(); reader.read_line(&mut line).unwrap();
+        let frame: Value = serde_json::from_str(&line).unwrap();
+        if frame["event"]["type"] == "turn_done" { break; }
+    }
+    writeln!(stream, "{}", json!({"type":"call","id":1,"method":"stop","params":{}})).unwrap();
+    wait_until(|| process.child.try_wait().unwrap().is_some());
+}
