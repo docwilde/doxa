@@ -412,6 +412,58 @@ for line in sys.stdin:
 }
 
 #[test]
+fn filtered_beliefs_forward_query_and_refuse_unadvertised_filtering() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = fake(dir.path(), r#"
+import json, sys
+print(json.dumps({'type':'hello','proto':1,'capabilities':['scrub','snapshot','beliefs','beliefs_filtered_v1']}), flush=True)
+for line in sys.stdin:
+    req = json.loads(line)
+    assert req['op'] == 'beliefs_filtered_v1' and req['offset'] == 20 and req['limit'] == 1
+    value = [{'id':4,'subject':'user','claim':'Straße','claim_truncated':False,'confidence':0.8,'evidence_count':1,
+              'updated':None,'created':'2026-01-01T00:00:00Z','recency':'2026-01-01T00:00:00Z'}]
+    if req['query'] == 'bad': value[0]['recency'] = 42
+    else: assert req['query'] == 'strasse'
+    print(json.dumps({'type':'reply','id':req['id'],'ok':True,'value':value}), flush=True)
+"#);
+    let mut client = LoreClient::spawn(&path, Duration::from_secs(2)).unwrap();
+    assert_eq!(client.beliefs_filtered(20, 1, "strasse").unwrap()[0]["id"], 4);
+    assert!(matches!(client.beliefs_filtered(20, 1, "bad"), Err(LoreError::InvalidFrame)));
+    assert!(matches!(client.beliefs_filtered(20, 1, "line\nbreak"), Err(LoreError::InvalidFrame)));
+    let old = fake(dir.path(), "print('{\"type\":\"hello\",\"proto\":1,\"capabilities\":[\"scrub\",\"snapshot\",\"beliefs\"]}', flush=True)");
+    let mut older = LoreClient::spawn(&old, Duration::from_secs(2)).unwrap();
+    assert!(matches!(older.beliefs_filtered(20, 1, "strasse"), Err(LoreError::Unavailable)));
+}
+
+#[test]
+fn curated_entry_reads_validate_complete_rows_and_require_canonical_capability() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = fake(dir.path(), r#"
+import json, sys
+print(json.dumps({'type':'hello','proto':1,'capabilities':['scrub','snapshot','memory_entries_v1']}), flush=True)
+for line in sys.stdin:
+    req = json.loads(line)
+    assert req['op'] == 'memory_entries_v1' and req['scope'] == 'user'
+    value = [{'text':'individual fact','source':'codex','redacted':False},
+             {'text':'[redacted] fact','source':None,'redacted':True}]
+    if req['cwd'] == '/control': value[0]['text'] = 'fact\x1b'
+    if req['cwd'] == '/many': value = [value[0]] * 401
+    print(json.dumps({'type':'reply','id':req['id'],'ok':True,'value':value}), flush=True)
+"#);
+    let mut client = LoreClient::spawn(&path, Duration::from_secs(2)).unwrap();
+    let rows = client.memory_entries("/repo", "user").unwrap();
+    assert_eq!(rows[0]["source"], "codex");
+    assert_eq!(rows[1]["redacted"], true);
+    for cwd in ["/control", "/many"] {
+        assert!(matches!(client.memory_entries(cwd, "user"), Err(LoreError::InvalidFrame)));
+    }
+    assert!(matches!(client.memory_entries("/repo", "all"), Err(LoreError::InvalidFrame)));
+    let old = fake(dir.path(), "print('{\"type\":\"hello\",\"proto\":1,\"capabilities\":[\"scrub\",\"snapshot\"]}', flush=True)");
+    let mut older = LoreClient::spawn(&old, Duration::from_secs(2)).unwrap();
+    assert!(matches!(older.memory_entries("/repo", "user"), Err(LoreError::Unavailable)));
+}
+
+#[test]
 fn curated_review_checks_exact_unicode_chars_digest_and_rejects_malformed_action() {
     let dir = tempfile::tempdir().unwrap();
     let path = fake(dir.path(), r#"

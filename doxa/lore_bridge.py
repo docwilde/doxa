@@ -21,12 +21,13 @@ from typing import Any
 MAX_FRAME_BYTES = 1024 * 1024
 PROTOCOL_VERSION = 1
 _OPS = ("scrub", "snapshot", "pending", "sync_state", "refresh_interval", "transcript_identity")
-_READ_OPS = ("consult", "beliefs", "evidence")
+_READ_OPS = ("consult", "beliefs", "evidence", "beliefs_filtered_v1")
 _REVIEW_OP = "pending_review_v1"
 _RESOLVE_OP = "resolve_reviewed_v1"
 _INDEX_OP = "index_transcript_v1"
 _SESSION_SEARCH_OP = "session_search_v1"
 _MEMORY_USAGE_OP = "memory_usage_v1"
+_MEMORY_ENTRIES_OP = "memory_entries_v1"
 _MEMORY_REVIEW_OP = "memory_review_v1"
 _MEMORY_ACTION_OP = "memory_action_v1"
 _BELIEF_REVIEW_OP = "belief_review_v1"
@@ -123,6 +124,50 @@ def _memory_manage_ops() -> tuple | None:
         return memory, ROOT, locked_paths, gate_write, mutations
     except Exception:
         return None
+
+
+def _memory_entries_ops() -> tuple | None:
+    """Canonical facts and informational provenance, independent of writers."""
+    try:
+        from lore_core import memory
+        from lore_core.config import ROOT
+        from lore_core.file_lock import locked_paths
+        from lore_core.gate import memory_source_labels
+        return memory, ROOT, locked_paths, memory_source_labels
+    except Exception:
+        return None
+
+
+def _memory_entries(req: dict, ops: tuple, scrub: Any) -> list[dict]:
+    scope, slug, path = _memory_identity(req, ops)
+    memory = ops[0]
+    with ops[2](path, lock_root=ops[1]):
+        if path.exists() and path.stat().st_size > _MAX_MEMORY_SOURCE_BYTES:
+            raise BeliefActionError("memory_incomplete")
+        entries = memory.read_entries(path)
+        body = memory.render_entries(entries)
+        if len(entries) > 400 or len(body.encode("utf-8")) > 65536:
+            raise BeliefActionError("memory_incomplete")
+        sources = ops[3](memory.memory_bucket(scope, slug), entries)
+        if len(sources) != len(entries):
+            raise BeliefActionError("memory_incomplete")
+        rows = []
+        display_bytes = 0
+        for entry, source in zip(entries, sources):
+            text = scrub(entry)
+            # Terminal controls are never facts suitable for this read view.
+            if (not isinstance(text, str) or len(text.encode("utf-8")) > 16384
+                    or any(ord(c) < 32 or 127 <= ord(c) < 160 for c in text)):
+                raise BeliefActionError("memory_incomplete")
+            display_bytes += len(text.encode("utf-8")) + 3
+            if display_bytes > 65536:
+                raise BeliefActionError("memory_incomplete")
+            label = scrub(source) if isinstance(source, str) and source else None
+            if label is not None and (len(label.encode("utf-8")) > 64
+                                     or any(ord(c) < 32 or 127 <= ord(c) < 160 for c in label)):
+                raise BeliefActionError("memory_incomplete")
+            rows.append({"text": text, "source": label, "redacted": text != entry})
+        return rows
 
 
 def _memory_identity(req: dict, ops: tuple) -> tuple[str, str, Any]:
@@ -647,14 +692,42 @@ def _consult(prompt: str, read_ops: tuple[Any, Any], scrub: Any) -> dict | None:
             "citation_status": "cite_only"}
 
 
-def _beliefs(offset: int, limit: int, read_ops: tuple[Any, Any], scrub: Any) -> list[dict]:
+def _beliefs(offset: int, limit: int, read_ops: tuple[Any, Any], scrub: Any,
+             query: str = "") -> list[dict]:
+    if (not isinstance(query, str) or len(query) > 200
+            or len(query.encode("utf-8")) > 1024
+            or any(ord(c) < 32 or 127 <= ord(c) < 160 for c in query)):
+        raise ValueError("invalid belief query")
     conn = read_ops[0]()
     try:
+        conn.execute("PRAGMA query_only=ON")
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(beliefs)").fetchall()}
+        def timestamp(column: str) -> str:
+            if column not in columns:
+                return "NULL"
+            # Canonical LORE writes ISO UTC timestamps. Unknown/legacy rows
+            # have no recency, rather than borrowing identity as a clock.
+            return (f"CASE WHEN length(b.{column}) <= 64 AND "
+                    f"b.{column} GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*' "
+                    f"AND julianday(b.{column}) IS NOT NULL THEN b.{column} END")
+        updated, created = timestamp("updated"), timestamp("created")
+        recency = f"coalesce(({updated}),({created}))"
+        where, params = "", []
+        if query:
+            # Match visible scrubbed text, with Unicode casefold rather than
+            # SQLite's ASCII-only lower/LIKE. Apply before LIMIT/OFFSET.
+            conn.create_function("doxa_visible_casefold", 1,
+                                 lambda value: scrub(str(value or "")).casefold())
+            where = ("AND (instr(doxa_visible_casefold(b.subject), ?) > 0 "
+                     "OR instr(doxa_visible_casefold(b.claim), ?) > 0) ")
+            params = [query.casefold(), query.casefold()]
         rows = conn.execute(
             "SELECT b.id, b.subject, b.claim, b.confidence, "
-            "(SELECT count(*) FROM belief_evidence e WHERE e.belief_id = b.id) "
-            "FROM beliefs b WHERE b.status = 'active' "
-            "ORDER BY b.updated DESC, b.id LIMIT ? OFFSET ?", (limit, offset),
+            "(SELECT count(*) FROM belief_evidence e WHERE e.belief_id = b.id), "
+            f"({updated}), ({created}), {recency} "
+            f"FROM beliefs b WHERE b.status = 'active' {where}"
+            f"ORDER BY julianday({recency}) DESC, b.id LIMIT ? OFFSET ?",
+            (*params, limit, offset),
         ).fetchall()
     finally:
         conn.close()
@@ -663,7 +736,8 @@ def _beliefs(offset: int, limit: int, read_ops: tuple[Any, Any], scrub: Any) -> 
         claim = scrub(str(row[2]))
         result.append({"id": int(row[0]), "subject": scrub(str(row[1])),
                        "claim": claim[:4096], "claim_truncated": len(claim) > 4096,
-                       "confidence": float(row[3]), "evidence_count": int(row[4])})
+                       "confidence": float(row[3]), "evidence_count": int(row[4]),
+                       "updated": row[5], "created": row[6], "recency": row[7]})
     return result
 
 
@@ -749,6 +823,7 @@ def serve() -> None:
     ext = _extensions() if lore is not None else None
     memory_ops = _memory_usage_ops() if lore is not None else None
     manage_ops = _memory_manage_ops() if lore is not None else None
+    entry_ops = _memory_entries_ops() if lore is not None else None
     read_ops = _read_ops() if lore is not None else None
     belief_ops = _belief_action_ops() if lore is not None else None
     graph_ops = _belief_graph_ops() if lore is not None else None
@@ -761,6 +836,7 @@ def serve() -> None:
                              + ([_INDEX_OP] if index_ops is not None else [])
                              + ([_SESSION_SEARCH_OP] if read_ops is not None and ext is not None else [])
                              + ([_MEMORY_USAGE_OP] if memory_ops is not None else [])
+                             + ([_MEMORY_ENTRIES_OP] if entry_ops is not None else [])
                              + ([_MEMORY_REVIEW_OP, _MEMORY_ACTION_OP] if manage_ops is not None else [])
                              + ([_REVIEW_OP] if review is not None else [])
                              + ([_RESOLVE_OP] if resolver is not None else [])
@@ -787,6 +863,10 @@ def serve() -> None:
             continue
         scrub, snapshot = lore
         try:
+            if op == _MEMORY_ENTRIES_OP and entry_ops is not None:
+                result = _memory_entries(req, entry_ops, scrub)
+                _write({"type": "reply", "id": rid, "ok": True, "value": result})
+                continue
             if op == _BELIEF_GRAPH_OP and graph_ops is not None:
                 result = _belief_graph(req, graph_ops, scrub)
                 _write({"type": "reply", "id": rid, "ok": True, "value": result})
@@ -864,9 +944,9 @@ def serve() -> None:
                     if not isinstance(prompt, str):
                         raise ValueError("invalid consult input")
                     result = _consult(prompt, read_ops, scrub)
-                elif op == "beliefs":
+                elif op in ("beliefs", "beliefs_filtered_v1"):
                     offset, limit = _valid_page(req, 50)
-                    result = _beliefs(offset, limit, read_ops, scrub)
+                    result = _beliefs(offset, limit, read_ops, scrub, req.get("query", ""))
                 else:
                     belief_id = req.get("belief_id")
                     if type(belief_id) is not int or not 0 < belief_id <= 2**63 - 1:

@@ -366,6 +366,7 @@ def test_sidecar_scrub_snapshot_and_generic_error(monkeypatch):
     monkeypatch.setattr(lore_bridge, "_extensions", lambda: None)
     monkeypatch.setattr(lore_bridge, "_memory_usage_ops", lambda: None)
     monkeypatch.setattr(lore_bridge, "_memory_manage_ops", lambda: None)
+    monkeypatch.setattr(lore_bridge, "_memory_entries_ops", lambda: None)
     requests = [
         {"id": 1, "op": "scrub", "text": "SECRET"},
         {"id": 2, "op": "snapshot", "cwd": "/repo", "scope": "project"},
@@ -505,6 +506,7 @@ def test_pending_sync_and_refresh_are_bounded_and_scoped(monkeypatch):
         (lambda text: text.replace("SECRET", "[redacted]"), lambda: state)))
     monkeypatch.setattr(lore_bridge, "_memory_usage_ops", lambda: None)
     monkeypatch.setattr(lore_bridge, "_memory_manage_ops", lambda: None)
+    monkeypatch.setattr(lore_bridge, "_memory_entries_ops", lambda: None)
     requests = [
         {"id": 1, "op": "pending", "cwd": "/repo", "limit": 1},
         {"id": 2, "op": "pending", "cwd": "/repo", "offset": 1, "limit": 1},
@@ -609,6 +611,7 @@ def test_consult_beliefs_and_evidence_are_bounded_scrubbed_and_cite_only(monkeyp
     monkeypatch.setattr(lore_bridge, "_extensions", lambda: None)
     monkeypatch.setattr(lore_bridge, "_memory_usage_ops", lambda: None)
     monkeypatch.setattr(lore_bridge, "_memory_manage_ops", lambda: None)
+    monkeypatch.setattr(lore_bridge, "_memory_entries_ops", lambda: None)
     monkeypatch.setattr(lore_bridge, "_read_ops", lambda: (lambda: sqlite3.connect(db_path), lambda text, op: text))
     requests = [
         {"id": 1, "op": "consult", "prompt": "fact"},
@@ -617,13 +620,15 @@ def test_consult_beliefs_and_evidence_are_bounded_scrubbed_and_cite_only(monkeyp
         {"id": 6, "op": "evidence", "belief_id": 1, "offset": 1, "limit": 1},
         {"id": 4, "op": "beliefs", "limit": 51},
         {"id": 5, "op": "consult", "prompt": "SECRET" * 9000},
+        {"id": 7, "op": "beliefs_filtered_v1", "query": "FACT", "limit": 1},
+        {"id": 8, "op": "beliefs_filtered_v1", "query": False, "limit": 1},
     ]
     output = io.BytesIO()
     monkeypatch.setattr(lore_bridge.sys, "stdin", types.SimpleNamespace(buffer=io.BytesIO(b"".join(map(lore_bridge._frame, requests)))))
     monkeypatch.setattr(lore_bridge.sys, "stdout", types.SimpleNamespace(buffer=output))
     lore_bridge.serve()
     frames = [json.loads(line) for line in output.getvalue().splitlines()]
-    assert frames[0]["capabilities"] == ["scrub", "snapshot", "consult", "beliefs", "evidence"]
+    assert frames[0]["capabilities"] == ["scrub", "snapshot", "consult", "beliefs", "evidence", "beliefs_filtered_v1"]
     assert frames[1]["value"]["citation_status"] == "cite_only"
     assert frames[1]["value"]["claim"] == "[redacted] fact"
     assert frames[2]["value"][0]["evidence_count"] == 3
@@ -634,7 +639,90 @@ def test_consult_beliefs_and_evidence_are_bounded_scrubbed_and_cite_only(monkeyp
     assert frames[4]["value"][0]["created"] == "1"
     assert frames[4]["value"][0]["trail_truncated"] is True
     assert frames[5]["error"] == frames[6]["error"] == "operation_failed"
+    assert frames[7]["value"][0]["recency"] == "2026-01-01"
+    assert frames[8]["error"] == "operation_failed"
     assert b"SECRET" not in output.getvalue()
+
+
+def test_belief_filter_uses_visible_unicode_text_and_actual_recency_before_pagination(tmp_path):
+    db = tmp_path / "beliefs.db"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE beliefs(id INTEGER, subject TEXT, claim TEXT, confidence REAL, "
+                 "status TEXT, updated TEXT, created TEXT)")
+    conn.execute("CREATE TABLE belief_evidence(belief_id INTEGER)")
+    conn.executemany("INSERT INTO beliefs VALUES(?,?,?,0.8,?,?,?)", [
+        (90, "project:here", "Straße newest update", "active", "2026-01-01T22:00:00Z", "2025-01-01"),
+        (2, "user", "STRASSE 100% older update", "active", "2026-01-02T00:00:00+03:00", None),
+        (1, "user", "Straße created fallback", "active", "unknown", "2026-01-03T00:00:00Z"),
+        (999, "user", "SECRET hidden", "active", None, None),
+        (3, "user", "STRASSE inactive", "retracted", "2027-01-01", None),
+    ])
+    conn.commit(); conn.close()
+    ops = (lambda: sqlite3.connect(db), None)
+    scrub = lambda text: text.replace("SECRET", "[redacted]")
+    rows = lore_bridge._beliefs(0, 50, ops, scrub)
+    assert [row["id"] for row in rows] == [1, 90, 2, 999]
+    assert rows[0]["updated"] is None
+    assert rows[0]["recency"] == rows[0]["created"] == "2026-01-03T00:00:00Z"
+    assert rows[-1]["recency"] is None
+    assert [row["id"] for row in lore_bridge._beliefs(1, 1, ops, scrub, "strasse")] == [90]
+    assert [row["id"] for row in lore_bridge._beliefs(0, 50, ops, scrub, "PROJECT:HERE")] == [90]
+    assert [row["id"] for row in lore_bridge._beliefs(0, 50, ops, scrub, "%")] == [2]
+    assert lore_bridge._beliefs(0, 50, ops, scrub, "SECRET") == []
+    assert [row["id"] for row in lore_bridge._beliefs(0, 50, ops, scrub, "[REDACTED]")] == [999]
+    for query in (None, "x" * 201, "line\nbreak"):
+        with pytest.raises(ValueError):
+            lore_bridge._beliefs(0, 50, ops, scrub, query)
+    from contextlib import closing
+    with closing(sqlite3.connect(db)) as conn:
+        assert conn.execute("SELECT count(*) FROM beliefs").fetchone()[0] == 5
+
+
+def test_curated_memory_read_view_preserves_facts_and_canonical_provenance(tmp_path):
+    from contextlib import nullcontext
+    path = tmp_path / "MEMORY.md"
+    path.write_text("- first fact\n- SECRET fact\n- [source: codex] is literal fact text\n")
+    entries = ["first fact", "SECRET fact", "[source: codex] is literal fact text"]
+    calls = []
+    memory = types.SimpleNamespace(project_slug=lambda cwd: "canonical-slug",
+        memory_path=lambda scope, slug: path, read_entries=lambda path: entries,
+        render_entries=lambda entries: "".join(f"- {entry}\n" for entry in entries),
+        memory_bucket=lambda scope, slug: f"{scope}:{slug}")
+    def labels(bucket, actual):
+        calls.append((bucket, actual))
+        return ["claude", "codex", ""]
+    ops = (memory, tmp_path, lambda *args, **kwargs: nullcontext(), labels)
+    rows = lore_bridge._memory_entries({"cwd": "/repo", "scope": "project"}, ops,
+                                      lambda text: text.replace("SECRET", "[redacted]"))
+    assert rows == [
+        {"text": "first fact", "source": "claude", "redacted": False},
+        {"text": "[redacted] fact", "source": "codex", "redacted": True},
+        {"text": "[source: codex] is literal fact text", "source": None, "redacted": False},
+    ]
+    assert calls == [("project:canonical-slug", entries)]
+    assert path.read_text() == "- first fact\n- SECRET fact\n- [source: codex] is literal fact text\n"
+    for bad_entries in (["x"] * 401, ["x" * 65536], ["control\x1b"]):
+        memory.read_entries = lambda path, actual=bad_entries: actual
+        with pytest.raises(lore_bridge.BeliefActionError) as error:
+            lore_bridge._memory_entries({"cwd": "/repo", "scope": "project"}, ops, str)
+        assert error.value.code == "memory_incomplete"
+
+
+def test_curated_memory_entries_wire_reads_private_canonical_facts(tmp_path):
+    root = tmp_path / "lore"
+    root.mkdir()
+    body = "- one complete fact\n- another individual fact\n"
+    (root / "USER.md").write_text(body)
+    frames = _memory_wire(tmp_path, [
+        {"id": 1, "op": "memory_entries_v1", "cwd": str(tmp_path), "scope": "user"},
+        {"id": 2, "op": "memory_entries_v1", "cwd": str(tmp_path), "scope": "all"},
+    ])
+    assert frames[0]["value"] == [
+        {"text": "one complete fact", "source": None, "redacted": False},
+        {"text": "another individual fact", "source": None, "redacted": False},
+    ]
+    assert frames[1]["ok"] is False
+    assert (root / "USER.md").read_text() == body
 
 
 def test_belief_actions_use_exact_review_and_canonical_lore_mutators(tmp_path):
