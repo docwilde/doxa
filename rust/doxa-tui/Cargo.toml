@@ -10,6 +10,7 @@ name = "doxa-rs"
 path = "src/main.rs"
 
 [dependencies]
+doxa-engines = { path = "../doxa-engines" }
 doxa-peers = { path = "../doxa-peers" }
 doxa-state = { path = "../doxa-state" }
 doxa-worktrees = { path = "../doxa-worktrees" }

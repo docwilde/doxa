@@ -14,8 +14,8 @@
 > can edit files and run commands with your privileges. Read
 > [Non-goals](#non-goals) before using it on important work.
 
-The current Rust preview is [v2.0.0-alpha.32](https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.32).
-GitHub labels 1.19 as the latest stable release while Rust 2.0 remains a prerelease.
+The official latest GitHub release is [v2.0.0-alpha.32](https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.32).
+Rust 2.0 leads development; its alpha version still indicates that it is evolving.
 Alpha.31 closes the audited Python 1.19 functional gaps: saved-session restoration,
 full preferences, native LORE tools, interactive fleets, plugin commands and local
 shell controls. The subsequent [source audit](docs/source-audit-2026-09-27.md)
