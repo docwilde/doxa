@@ -1,8 +1,8 @@
 <p align="center"><img src="assets/logo.png" width="560" alt="DOXA — belief earning knowledge"></p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Rust%202.0-alpha.30-f59f00" alt="Rust 2.0 alpha.30 is the main frontend">
-  <a href="https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.30"><img src="https://img.shields.io/github/v/release/docwilde/doxa?include_prereleases&amp;sort=semver&amp;label=Rust%20preview&amp;color=e8590c" alt="latest Rust preview release"></a>
+  <img src="https://img.shields.io/badge/Rust%202.0-alpha.31-f59f00" alt="Rust 2.0 alpha.31 is the main frontend">
+  <a href="https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.31"><img src="https://img.shields.io/github/v/release/docwilde/doxa?include_prereleases&amp;sort=semver&amp;label=Rust%20preview&amp;color=e8590c" alt="latest Rust preview release"></a>
   <a href="https://github.com/docwilde/doxa/actions/workflows/rust-ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/docwilde/doxa/rust-ci.yml?branch=main&label=Rust%20CI" alt="Rust CI status"></a>
   <img src="https://img.shields.io/badge/TUI-Ratatui-2f9e44" alt="Rust TUI built with Ratatui">
   <img src="https://img.shields.io/badge/auth-provider%20CLI%20or%20API%20key-2f9e44" alt="authentication follows the selected engine">
@@ -14,10 +14,12 @@
 > can edit files and run commands with your privileges. Read
 > [Non-goals](#non-goals) before using it on important work.
 
-The current Rust preview is [v2.0.0-alpha.30](https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.30).
+The current Rust preview is [v2.0.0-alpha.31](https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.31).
 GitHub labels 1.19 as the latest stable release while Rust 2.0 remains a prerelease.
-Alpha.30 adds per-entry Accept and Reject controls to the belief browser,
-with exact LORE review, confirmation outcomes, and retained retraction history.
+Alpha.31 closes the audited Python 1.19 functional gaps: saved-session restoration,
+full preferences, native LORE tools, interactive fleets, plugin commands and local
+shell controls. See the [parity tracker](docs/rust-1.19-parity.md) for supported
+provider contracts and retained safety boundaries.
 
 **DOXA** is a terminal for coding agents. Development now leads with the
 **Rust 2.0 alpha**, built with Ratatui and a native daemon. Run Claude, Codex,
@@ -40,7 +42,7 @@ account data are used. The fixtures and renderer live in
 Launch and reattach [four engines](rust/README.md), work
 across grouped tabs and nested splits with separate prompts, move an active
 tab with `/movepane`, inspect bounded
-worktree diffs and tool cards, change supported models and permissions, and
+worktree diffs and tool cards, change supported models, reasoning effort and permissions, and
 browse LORE beliefs and peer activity. Accept or reject a belief from its
 inline browser after reviewing the exact claim. The [Rust guide](rust/README.md)
 describes its current capabilities and limits. Managed worktrees, diff hunk
@@ -57,9 +59,19 @@ infrastructure failures remain a [documented limitation](rust/doxa-engines/READM
 Known Codex, DeepSeek and GLM models can use dated-price native spend ceilings
 when every request reports complete token usage. `doxa setup` offers interactive
 setup, `doxa auth login|logout claude|codex` runs the provider login flow,
-and `doxa plugins` shows plugin inventory; `doxa settings` shows and changes native linger and
-worktree preferences for future sessions. `/settings` opens those same
-preferences above the active prompt, including their effective sources.
+and `doxa plugins` shows plugin inventory. `doxa settings` and `/settings` edit
+categorized session, memory, appearance, notification and remote preferences,
+including their effective sources. First launch offers setup once; plain `doxa`
+restores saved tabs and safely resumes recorded conversations. `!<command>` runs
+locally in the session directory without saving output or sending it to the model.
+Tab cycles through tab headers, visible chips and the prompt; Shift+Tab reverses it.
+Open menus and slash completion retain their own Tab behavior.
+Drag transcript text to select it, then press Ctrl+C or Ctrl+Shift+C to send it
+to the terminal clipboard (requires OSC52 support). Ctrl+V pastes into the prompt
+when a supported clipboard reader is installed; terminal Ctrl+Shift+V also works.
+Default startup skips terminal capability probes. On a terminal with Kitty
+keyboard protocol support, set `DOXA_KEYBOARD_PROTOCOL=kitty` for enhanced keys;
+legacy alternatives are shown in `/help`.
 `/branch` opens a local branch picker for a managed session.
 Clicking the repo chip opens a directory picker above the prompt; its top
 border can be dragged to show more entries. Selectable rows highlight under
@@ -84,7 +96,7 @@ in supporting terminals.
 
 ## Gallery
 
-### Rust 2.0 alpha.30
+### Rust 2.0 alpha.31
 
 ![Rust belief browser showing Accept and Reject actions for each entry](assets/shots/rust-beliefs.png)
 
@@ -99,7 +111,7 @@ in a new tab; the upper border can be dragged to show more entries.*
 
 ![Rust command registry opened above the active prompt](assets/shots/rust-help.png)
 
-*`/help` lists the supported Rust forms and calls out unavailable 1.19 commands.*
+*`/help` lists the supported Rust forms and describes local forms and provider boundaries.*
 
 ![Single Rust session pane showing collapsed tool calls below the assistant reply](assets/shots/rust-tool-activity.png)
 
@@ -178,7 +190,7 @@ curl -fsSL https://raw.githubusercontent.com/docwilde/doxa/main/scripts/install.
 
 The installer builds the Rust frontend and daemon from `main` and installs the
 Rust `doxa` command in `~/.local/bin` (or `DOXA_RUST_BIN_DIR`). Pass a tag such
-as `v2.0.0-alpha.30` after `sh -s --` to pin a release. It uses Git, Cargo,
+as `v2.0.0-alpha.31` after `sh -s --` to pin a release. It uses Git, Cargo,
 Python 3.11+, and `uv`; the Python environment it creates is private to the
 LORE and Claude sidecars. No Python frontend command is installed. See the
 [Rust guide](rust/README.md) for provider setup and current limits.
