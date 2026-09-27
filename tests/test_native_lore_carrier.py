@@ -199,3 +199,35 @@ def test_vendor_projection_uses_frozen_native_catalog_for_memory(tmp_path):
     rows = operator_tools({"native_lore":Native()})
     memory = [row["function"] for row in rows if row["function"]["name"].startswith("lore_")]
     assert memory == [{"name":"lore_memory_list", "description":"canonical fixture schema", "parameters":{"type":"object","properties":{"scope":{"enum":["user"]}}}}]
+
+
+def test_native_sync_off_and_read_only_probes_never_mint_identity(monkeypatch):
+    from doxa import lore_sync
+    calls = []
+    def invoke(op, **fields):
+        calls.append((op, fields))
+        return None
+    monkeypatch.setattr(lore_sync.native_lore, "request", invoke)
+    monkeypatch.delenv("LORE_SYNC_URL", raising=False)
+    monkeypatch.delenv("LORE_SYNC_PEER", raising=False)
+    lore_sync.invalidate()
+    assert lore_sync.machine_id(create=True) is None
+    assert lore_sync.read_state() is None
+    assert not calls
+    assert lore_sync.machine_id() is None
+    assert calls == [("sync_machine_v1", {"create":False})]
+    assert lore_sync.machine_id() is None
+    assert len(calls) == 1
+    lore_sync.invalidate()
+
+
+def test_native_sync_state_validates_canonical_counts_without_sql(monkeypatch):
+    from doxa import lore_sync
+    monkeypatch.setenv("LORE_SYNC_URL", "https://owned.invalid")
+    monkeypatch.delenv("LORE_DISABLE_SYNC", raising=False)
+    monkeypatch.setattr(lore_sync.native_lore, "request", lambda *args, **kwargs:
+        {"last_pull_age_s":1.5,"unpushed":2,"conflicts":3,"unverified":4})
+    assert lore_sync.read_state() == lore_sync.SyncState(1.5, 2, 3, 4)
+    monkeypatch.setattr(lore_sync.native_lore, "request", lambda *args, **kwargs:
+        {"last_pull_age_s":float("inf"),"unpushed":True,"conflicts":0,"unverified":0})
+    assert lore_sync.read_state() is None

@@ -1,53 +1,18 @@
 # SPDX-License-Identifier: AGPL-3.0-only
-"""doxa.lore_sync -- the ONE door DOXA asks ``lore_core`` about sync through.
+"""Narrow native LORE sync adapter for retained Python consumers.
 
-LORE's op log, apply engine and project identity ship in lore_core 0.54.0
-(``sync_oplog``, ``sync_apply``, ``sync_projects``); DOXA embeds that
-library in-process, so there is no transport and no network code here --
-LORE owns the wire. What DOXA owns is the three things
-``LORE/docs/plans/sync.md``'s "## DOXA" section assigns it: the tab set
-scope key (:mod:`doxa.tabsets`), the worktree sidecar
-(:mod:`doxa.worktrees`), and the status-bar chip
-(:meth:`doxa.session.chips.PaneChipsMixin._status_chips`). All three need
-the same two answers -- "is sync on for this class" and "which machine am
-I" -- and all three must degrade the same way, so both answers live here
-rather than three times over.
-
-**Sync off is the default, and off must be INVISIBLE.** Not "off shows a
-zero", not "off shows an error": a machine that never turned sync on
-behaves exactly as DOXA 1.9.2 did, byte for byte, and
-``tests/test_tabsets.py`` / ``tests/test_worktrees.py`` are the regression
-bar for that. Three consequences shape every function below:
-
-* :func:`enabled` is the master gate, and it is deliberately STRICTER than
-  ``lore_core.sync_oplog.class_enabled`` alone. sync.md's configuration
-  table is explicit that ``LORE_SYNC_URL`` "unset means sync is off
-  entirely", and the default class set (``memory,filemap,beliefs,pending,
-  skills,sessions``) is ON -- so a 0.54.0 store on a machine that never
-  configured a hub is already growing ``sync_ops`` rows. Gating on the
-  class switch alone would paint an unpushed count on every DOXA in the
-  world. The transport is what makes an op mean anything, so the transport
-  being configured is what turns this on.
-* Nothing here CREATES anything unless a write path asked it to. See
-  :func:`machine_id`'s ``create`` argument -- a read-only probe never mints
-  a machine identity, which is what lets :func:`doxa.tabsets.resolve` ask
-  "is this record mine" on a machine with sync off without leaving a trace
-  in the store.
-* Every function catches ``Exception`` and degrades to None/False. That is
-  not laziness about error types: ``doxa._lore_bootstrap`` PREFERS a plugin
-  checkout over the pinned wheel, so "a lore_core with no ``sync_oplog``
-  module at all" is a real configuration on a real machine right now
-  (``ImportError``), and a store written by an older LORE has no ``sync_*``
-  tables (``sqlite3.OperationalError``). Neither is a bug to crash a
-  terminal over. The same posture :func:`doxa.ui.labels.memory_fill` takes
-  on an unreadable memory file, for the same reason.
+Configuration gates remain local. Canonical machine/project/status reads use
+read-only native operations; only an explicitly configured create requests a
+machine identity. There is no Python database or memory backend fallback.
 """
 
 from __future__ import annotations
 
 import os
+import math
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from . import native_lore
 
 # sync.md's own names for the two classes DOXA owns. Passed to
 # ``sync_oplog.class_enabled`` as CONFIG names (plural), not wire names:
@@ -213,23 +178,11 @@ def machine_id(*, create: bool = False) -> "str | None":
         # but minting an identity would make it a bug on the user's disk.
         return None
     try:
-        from lore_core.store import db_connect
-
-        conn = db_connect()
-        try:
-            if create:
-                from lore_core.sync_oplog import get_or_create_machine
-
-                found, _label = get_or_create_machine(conn)
-                conn.commit()
-            else:
-                row = conn.execute(
-                    "SELECT machine_id FROM sync_machine LIMIT 1"
-                ).fetchone()
-                found = row[0] if row else None
-        finally:
-            conn.close()
-    except Exception:  # noqa: BLE001 -- no sync tables, no op log, no store
+        found = native_lore.request("sync_machine_v1", create=bool(create))
+        if found is not None and (not isinstance(found, str) or not found
+                or len(found) > 128 or any(ord(char) < 32 for char in found)):
+            found = None
+    except native_lore.NativeLoreError:
         found = None
     if found:
         _MACHINE = str(found)
@@ -251,16 +204,12 @@ def project_key(cwd: str) -> "str | None":
     if not cwd:
         return None
     try:
-        from lore_core.config import project_slug
-        from lore_core.store import db_connect
-        from lore_core.sync_oplog import resolve_project_key_for_slug
-
-        conn = db_connect()
-        try:
-            return resolve_project_key_for_slug(conn, project_slug(cwd))
-        finally:
-            conn.close()
-    except Exception:  # noqa: BLE001
+        key = native_lore.request("sync_project_v1", cwd=cwd)
+        if key is not None and (not isinstance(key, str) or not key
+                or len(key) > 128 or any(ord(char) < 32 for char in key)):
+            return None
+        return key
+    except native_lore.NativeLoreError:
         return None
 
 
@@ -329,33 +278,16 @@ def read_state() -> "SyncState | None":
     app already follows."""
     if not enabled():
         return None
-    mine = machine_id()
     try:
-        from lore_core.store import db_connect
-        from lore_core.sync_apply import conflict_rows, unverified_op_count
-        from lore_core.sync_oplog import peer_rows, unpushed_op_count
-
-        conn = db_connect()
-        try:
-            # No machine row yet means nothing local has ever been authored
-            # under sync, so there is nothing of ours to be unpushed.
-            unpushed = unpushed_op_count(conn, mine) if mine else 0
-            ages = [
-                age for age in (_age_seconds(row[4]) for row in peer_rows(conn))
-                if age is not None
-            ]
-            state = SyncState(
-                # The FRESHEST peer wins: with more than one peer configured
-                # (a hub and a tailnet node) the question the chip answers is
-                # "how stale is what I am looking at", and the answer is the
-                # most recent arrival, not the laggard.
-                last_pull_age_s=min(ages) if ages else None,
-                unpushed=int(unpushed),
-                conflicts=len(conflict_rows(conn)),
-                unverified=int(unverified_op_count(conn)),
-            )
-        finally:
-            conn.close()
-    except Exception:  # noqa: BLE001 -- an older store degrades to no chip
+        value = native_lore.request("sync_state")
+        if value is None or not isinstance(value, dict):
+            return None
+        age = value.get("last_pull_age_s")
+        if age is not None and (type(age) not in (int, float) or not math.isfinite(age) or age < 0):
+            return None
+        counts = [value.get(name) for name in ("unpushed", "conflicts", "unverified")]
+        if any(type(count) is not int or not 0 <= count < 2**64 for count in counts):
+            return None
+        return SyncState(age, *counts)
+    except native_lore.NativeLoreError:
         return None
-    return state
