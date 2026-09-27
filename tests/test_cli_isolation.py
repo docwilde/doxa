@@ -54,6 +54,61 @@ def test_ensure_cli_config_dir_is_idempotent_and_repairs_drift(tmp_path):
     assert json.loads(settings_path.read_text(encoding="utf-8")) == {}
 
 
+def test_fixed_temporary_symlinks_cannot_clobber_settings_or_copy_credentials_out(tmp_path):
+    isolated = iso_mod.cli_config_dir()
+    isolated.mkdir(parents=True, mode=0o700)
+    settings_victim = tmp_path / "settings-victim"
+    credentials_victim = tmp_path / "credentials-victim"
+    for victim in [settings_victim, credentials_victim]:
+        victim.write_text("preserve owned fixture data")
+    (isolated / "settings.json.tmp").symlink_to(settings_victim)
+    (isolated / ".credentials.json.tmp").symlink_to(credentials_victim)
+    source = iso_mod.user_credentials_path()
+    source.write_text('{"claudeAiOauth": {"accessToken": "synthetic-only"}}')
+    iso_mod.ensure_cli_config_dir()
+    assert iso_mod.sync_credentials()
+    for victim in [settings_victim, credentials_victim]:
+        assert victim.read_text() == "preserve owned fixture data"
+    assert not (isolated / "settings.json").is_symlink()
+    assert not iso_mod.isolated_credentials_path().is_symlink()
+    assert json.loads(iso_mod.isolated_credentials_path().read_text()) == json.loads(source.read_text())
+    assert iso_mod.isolated_credentials_path().stat().st_mode & 0o777 == 0o600
+
+
+def test_existing_destination_symlinks_are_replaced_without_mutating_targets(tmp_path):
+    isolated = iso_mod.cli_config_dir()
+    isolated.mkdir(parents=True, mode=0o700)
+    settings_victim = tmp_path / "settings-victim"
+    settings_victim.write_text("{}\n")
+    (isolated / "settings.json").symlink_to(settings_victim)
+    source = iso_mod.user_credentials_path()
+    source.write_text('{"claudeAiOauth": {"accessToken": "synthetic-source"}}')
+    credentials_victim = tmp_path / "credentials-victim"
+    credentials_victim.write_text('{"claudeAiOauth": {"accessToken": "synthetic-outside"}}')
+    iso_mod.isolated_credentials_path().symlink_to(credentials_victim)
+    iso_mod.ensure_cli_config_dir()
+    assert iso_mod.sync_credentials()
+    assert settings_victim.read_text() == "{}\n"
+    assert "synthetic-outside" in credentials_victim.read_text()
+    assert not (isolated / "settings.json").is_symlink()
+    assert not iso_mod.isolated_credentials_path().is_symlink()
+
+
+def test_concurrent_provisioning_uses_distinct_private_inodes(tmp_path):
+    import concurrent.futures
+    source = iso_mod.user_credentials_path()
+    source.write_text('{"claudeAiOauth": {"accessToken": "synthetic-source"}}')
+    def provision(_):
+        iso_mod.ensure_cli_config_dir()
+        return iso_mod.sync_credentials(force=True)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as workers:
+        assert all(workers.map(provision, range(8)))
+    isolated = iso_mod.cli_config_dir()
+    assert json.loads((isolated / "settings.json").read_text()) == {}
+    assert iso_mod.isolated_credentials_path().read_bytes() == source.read_bytes()
+    assert not list(isolated.glob("*.tmp"))
+
+
 def test_sync_credentials_copies_from_the_real_user_config(tmp_path):
     source = iso_mod.user_credentials_path()
     source.parent.mkdir(parents=True, exist_ok=True)

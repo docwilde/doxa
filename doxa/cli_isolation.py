@@ -158,7 +158,10 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import stat
+import uuid
 from pathlib import Path
+from typing import BinaryIO, Callable
 
 from . import config as config_mod
 from .identity import valid_session_id
@@ -186,6 +189,38 @@ def cli_config_dir() -> Path:
     return config_mod.doxa_home() / DIR_NAME
 
 
+def _atomic_private_write(path: Path, write: Callable[[BinaryIO], None]) -> None:
+    """Replace one owned CLI file through a unique, private directory inode.
+
+    Fixed temporary names can collide across session starts and can point
+    outside the isolation directory. Open the directory and create/write the
+    temporary inode relative to it; replacement never follows the old target.
+    """
+    directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    temporary = f".{path.name}.{uuid.uuid4().hex}.tmp"
+    created = False
+    try:
+        metadata = os.fstat(directory)
+        if metadata.st_uid != os.geteuid() or metadata.st_mode & 0o077:
+            raise PermissionError("unsafe isolated CLI directory")
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                     0o600, dir_fd=directory)
+        created = True
+        with os.fdopen(fd, "wb") as output:
+            write(output)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, path.name, src_dir_fd=directory, dst_dir_fd=directory)
+        os.fsync(directory)
+    finally:
+        if created:
+            try:
+                os.unlink(temporary, dir_fd=directory)
+            except OSError:
+                pass
+        os.close(directory)
+
+
 def ensure_cli_config_dir() -> Path:
     """Create the directory and write the DOXA-owned ``settings.json`` if
     it is missing or has drifted from :data:`OWNED_SETTINGS`. DOXA is the
@@ -201,20 +236,18 @@ def ensure_cli_config_dir() -> Path:
     settings_path = path / SETTINGS_NAME
     try:
         path.mkdir(parents=True, exist_ok=True)
+        if path.is_symlink() or not stat.S_ISDIR(path.lstat().st_mode):
+            return path
         os.chmod(path, 0o700)
         current = None
-        if settings_path.exists():
+        if settings_path.exists() and not settings_path.is_symlink():
             try:
                 current = json.loads(settings_path.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 current = None
         if current != OWNED_SETTINGS:
-            tmp = settings_path.with_suffix(".json.tmp")
-            tmp.write_text(
-                json.dumps(OWNED_SETTINGS, indent=2) + "\n", encoding="utf-8"
-            )
-            os.chmod(tmp, 0o600)
-            os.replace(tmp, settings_path)
+            body = (json.dumps(OWNED_SETTINGS, indent=2) + "\n").encode("utf-8")
+            _atomic_private_write(settings_path, lambda output: output.write(body))
     except OSError:
         pass  # a provisioning failure costs isolation, not the session --
         # _build_options still passes CLAUDE_CONFIG_DIR either way, so a
@@ -407,18 +440,20 @@ def sync_credentials(force: bool = False) -> bool:
         # module doesn't read (e.g. a Keychain-backed install).
     if not force:
         try:
-            if dest.stat().st_mtime >= source_stat.st_mtime:
+            if not dest.is_symlink() and dest.stat().st_mtime >= source_stat.st_mtime:
                 if _has_oauth_token(dest) or not _has_oauth_token(source):
                     return False
         except OSError:
             pass  # no isolated copy yet: fall through and make one
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
+        if dest.parent.is_symlink() or not stat.S_ISDIR(dest.parent.lstat().st_mode):
+            return False
         os.chmod(dest.parent, 0o700)
-        tmp = dest.with_suffix(".json.tmp")
-        shutil.copyfile(source, tmp)
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, dest)
+        def copy(output: BinaryIO) -> None:
+            with source.open("rb") as incoming:
+                shutil.copyfileobj(incoming, output)
+        _atomic_private_write(dest, copy)
     except OSError:
         return False
     return True
