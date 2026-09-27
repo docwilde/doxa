@@ -339,6 +339,7 @@ version = "2.0.0-alpha.31"
 dependencies = [
  "crossterm",
  "doxa-lore",
+ "doxa-peers",
  "doxa-protocol",
  "doxa-state",
  "doxa-vendors",
