@@ -1309,6 +1309,7 @@ pub struct App {
     session_efforts: HashMap<String, String>,
     catalog_efforts: HashMap<(String, String), Vec<String>>,
     effort_catalog_pending: Option<(String, String, String)>,
+    model_refresh_after: Option<Instant>,
     requested_argument: Option<(String, &'static str, String)>,
     next_efforts: HashMap<String, String>,
     pub(crate) custom_names: HashMap<String, String>,
@@ -1493,6 +1494,7 @@ impl Default for App {
             session_efforts: HashMap::new(),
             catalog_efforts: HashMap::new(),
             effort_catalog_pending: None,
+            model_refresh_after: None,
             requested_argument: None,
             next_efforts: HashMap::new(),
             custom_names: HashMap::new(),
@@ -2264,8 +2266,14 @@ impl App {
                     }
                 }
                 if let Some(picker) = self.model_picker.as_mut().filter(|picker| picker.session_id == id) {
+                    let previous = picker.models.get(picker.selected).cloned()
+                        .or_else(|| self.session_identity.get(id).and_then(|identity| identity.1.clone()));
                     picker.loading = false;
                     picker.catalog_pending = frame["loading"] == true;
+                    self.model_refresh_after = Some(Instant::now() + if picker.catalog_pending {
+                        Duration::from_millis(500)
+                    } else if frame["ok"] != true { Duration::from_secs(5) }
+                    else { Duration::from_secs(30) });
                     picker.models = if frame["ok"] == true {
                         frame["models"].as_array().into_iter().flatten()
                             .filter_map(|value| value.as_str())
@@ -2277,7 +2285,7 @@ impl App {
                     } else {
                         format!("Catalog unavailable: {}", safe_label(frame["error"].as_str().unwrap_or("unknown error")))
                     };
-                    picker.selected = 0;
+                    picker.selected = previous.and_then(|model| picker.models.iter().position(|item| item == &model)).unwrap_or(0);
                     self.apply_requested_argument();
                     return true;
                 }
@@ -4258,10 +4266,27 @@ impl App {
             self.notice = "This session cannot change models".into();
             return;
         }
+        self.model_refresh_after = None;
         self.model_picker = Some(ModelPicker { session_id: id.clone(), models: Vec::new(),
             selected: 0, note: "Loading this engine's model catalog…".into(),
             loading: true, catalog_pending: false });
         self.pending_model_queries.push(id);
+    }
+
+    fn poll_model_catalog(&mut self, now: Instant) -> bool {
+        let Some(picker) = self.model_picker.as_mut() else {
+            self.model_refresh_after = None;
+            return false;
+        };
+        if self.groups[self.active_group].active_id() != Some(picker.session_id.as_str()) {
+            self.model_refresh_after = None;
+            return false;
+        }
+        if picker.loading || self.model_refresh_after.is_none_or(|due| now < due) { return false; }
+        self.model_refresh_after = None;
+        picker.loading = true;
+        self.pending_model_queries.push(picker.session_id.clone());
+        true
     }
 
     fn open_effort_picker(&mut self) {
@@ -4385,7 +4410,7 @@ impl App {
                 picker.loading = true;
                 picker.catalog_pending = false;
                 picker.note = "Refreshing this engine's model catalog…".into();
-                picker.models.clear();
+                self.model_refresh_after = None;
                 self.pending_model_queries.push(picker.session_id.clone());
             }
             KeyCode::Enter if !picker.loading => {
@@ -6924,9 +6949,9 @@ impl App {
         // Permission mode (including the classifier-backed `auto` mode) is
         // independent of the provider running this session.
         if let Some(mode) = id.and_then(|id| self.permission_modes.get(id)) {
-            chips.push(("permission", format!("Permissions {mode}")));
+            chips.push(("permission", mode.clone()));
         } else if id.is_some_and(|id| self.permission_capabilities.get(id).copied().unwrap_or(false)) {
-            chips.push(("permission", "Permissions ?".to_owned()));
+            chips.push(("permission", "?".to_owned()));
         }
         if let Some(engine) = identity.and_then(|pair| pair.0.as_deref()) {
             chips.push(("engine", engine.to_owned()));
@@ -8396,7 +8421,7 @@ impl App {
             lines.push(Line::from(format!(" {}", picker.note)));
             lines.push(Line::from(""));
             if picker.catalog_pending {
-                lines.push(Line::from(" Catalog probe in progress · press R to retry"));
+                lines.push(Line::from(" Catalog probe in progress · refreshes automatically"));
             } else if !picker.loading && picker.models.is_empty() {
                 lines.push(Line::from(" No verified models available for this session"));
             }
@@ -9513,6 +9538,7 @@ fn run_loop(
         changed |= app.poll_shell();
         changed |= app.poll_plugin_commands();
         changed |= app.poll_vendor_catalog();
+        changed |= app.poll_model_catalog(Instant::now());
         changed |= app.tick_blink(Instant::now());
         changed |= app.tick_spinner(Instant::now());
         changed |= app.tick_clock(Instant::now());
@@ -10234,7 +10260,7 @@ for line in sys.stdin:
         app.groups[0].tabs = vec!["claude-1".into()];
 
         let chips = app.chips(0);
-        assert_eq!(chips[0], ("permission", "Permissions auto".into()));
+        assert_eq!(chips[0], ("permission", "auto".into()));
         assert_eq!(chips[1], ("engine", "claude".into()));
         assert_eq!(chips[2], ("model", "sonnet".into()));
         assert_eq!(chips[3], ("effort", "?".into()));
@@ -10351,7 +10377,7 @@ for line in sys.stdin:
         let visible = app.chip_window(0, usize::from(pane.width));
         assert_eq!(visible.iter().take(4).map(|(kind, _)| *kind).collect::<Vec<_>>(),
             vec!["permission", "engine", "model", "effort"]);
-        assert_eq!(visible[0].1, "Permissions default");
+        assert_eq!(visible[0].1, "default");
         assert_eq!(visible[1].1, "claude");
         assert_eq!(visible[2].1, "claude-sonnet-4");
         assert_eq!(visible[3].1, "?");
@@ -10457,6 +10483,34 @@ for line in sys.stdin:
         assert!(!app.model_picker.as_ref().unwrap().catalog_pending);
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert_eq!(app.pending_model_changes, vec![("s".into(), "verified".into())]);
+    }
+
+    #[test]
+    fn model_picker_refreshes_pending_catalog_and_preserves_selection() {
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"s",
+            "engine":"claude", "model":"second", "can_set_model":true}));
+        app.open_model_picker();
+        app.pending_model_queries.clear();
+        app.apply_daemon_frame(&json!({"type":"models_reply", "session_id":"s",
+            "ok":true, "loading":true, "models":[]}));
+        let due = app.model_refresh_after.unwrap();
+        assert!(!app.poll_model_catalog(due - Duration::from_millis(1)));
+        assert!(app.poll_model_catalog(due));
+        assert!(!app.poll_model_catalog(due + Duration::from_secs(1)));
+        assert_eq!(app.pending_model_queries, vec!["s"]);
+        app.pending_model_queries.clear();
+        app.apply_daemon_frame(&json!({"type":"models_reply", "session_id":"s",
+            "ok":true, "models":["first", "second"]}));
+        assert_eq!(app.model_picker.as_ref().unwrap().selected, 1);
+        let due = app.model_refresh_after.unwrap();
+        assert!(app.poll_model_catalog(due));
+        app.apply_daemon_frame(&json!({"type":"models_reply", "session_id":"s",
+            "ok":true, "models":["second", "first"]}));
+        assert_eq!(app.model_picker.as_ref().unwrap().selected, 0);
+        app.model_picker = None;
+        assert!(!app.poll_model_catalog(due + Duration::from_secs(60)));
+        assert!(app.model_refresh_after.is_none());
     }
 
     #[test]

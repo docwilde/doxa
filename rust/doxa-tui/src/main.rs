@@ -2,7 +2,7 @@ use doxa_tui::{bridge, discovery, fleet_control, fleet_plan, fleet_view, launch,
 #[cfg(test)]
 use doxa_tui::maintenance;
 use std::collections::HashSet;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -10,6 +10,14 @@ use std::process::Stdio;
 
 fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message.into())
+}
+
+fn startup_message(message: &str) {
+    if io::stderr().is_terminal() {
+        let mut out = io::stderr().lock();
+        let _ = writeln!(out, "{message}…");
+        let _ = out.flush();
+    }
 }
 
 fn main() -> std::process::ExitCode {
@@ -263,6 +271,7 @@ fn run(args: &[String]) -> io::Result<()> {
         ));
     }
     if let Some(socket) = socket {
+        startup_message("Loading session");
         return bridge::run_socket(socket);
     }
     if options.resume.is_some() && command != Some("new") {
@@ -438,6 +447,7 @@ fn run(args: &[String]) -> io::Result<()> {
             Ok(())
         }
         Some("attach") => {
+            startup_message("Restoring session");
             let sessions = discovery::sessions()?;
             let session = discovery::select(&sessions, prefix)?;
             bridge::run_socket(&session.socket)
@@ -446,21 +456,25 @@ fn run(args: &[String]) -> io::Result<()> {
             if prefix.is_some() {
                 return Err(invalid("new does not accept a session ID"));
             }
+            startup_message("Loading session");
             let session = launch::spawn(&options)?;
             eprintln!("started native session {}", session.id);
             bridge::run_socket(&session.socket)
         }
         None if prefix.is_some() => {
+            startup_message("Restoring session");
             let sessions = discovery::sessions()?;
             let session = discovery::select(&sessions, prefix)?;
             bridge::run_socket(&session.socket)
         }
         None if explicit_launch => {
+            startup_message("Loading session");
             let session = launch::spawn(&options)?;
             eprintln!("started native session {}", session.id);
             bridge::run_socket(&session.socket)
         }
         None => {
+            startup_message("Restoring sessions");
             let scope = discovery::current_scope()?;
             let sessions: Vec<_> = discovery::sessions()?
                 .into_iter()
