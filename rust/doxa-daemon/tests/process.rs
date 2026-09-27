@@ -3561,6 +3561,8 @@ for line in sys.stdin:
     assert_eq!(client.hello["session_id"],owned.0.id); assert_eq!(client.hello["engine"],"claude");
     assert_eq!(client.hello["model"],"fixture-claude");
     let status=client.call("status",serde_json::Map::new()).unwrap(); assert_eq!(status["ok"],true);
+    let record=runtime.join("registry").join(format!("{}.json",owned.0.id));
     drop(client); drop(owned);
-    let registry=runtime.join("registry"); wait_until(||fs::read_dir(&registry).unwrap().next().is_none());
+    // Claim lock files deliberately persist to retain one stable lock inode.
+    wait_until(||!record.exists());
 }
