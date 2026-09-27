@@ -69,6 +69,15 @@ EXPECTED_TURN_TYPES = [
 ]
 
 
+@pytest.fixture(autouse=True)
+def short_daemon_runtime(monkeypatch):
+    """Every daemon fixture uses a private short socket root, even when the
+    pytest basetemp and case names exceed AF_UNIX's pathname limit."""
+    with tempfile.TemporaryDirectory(prefix="dxd-") as runtime:
+        monkeypatch.setenv("DOXA_RUNTIME_DIR", runtime)
+        yield Path(runtime)
+
+
 @contextlib.asynccontextmanager
 async def running_daemon(tmp_path, monkeypatch, linger=30.0, script=None,
                          server_info=None, ctx_usage=None, runtime_dir=None):
@@ -207,10 +216,9 @@ async def test_remote_bridge_probe_timeout_preserves_existing_socket(
 ):
     """A timeout says a bridge may be busy; it is never evidence that its
     pathname is stale. A second daemon must leave that socket alone."""
-    monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "rt"))
     monkeypatch.setenv("DOXA_REMOTE_ENABLED", "1")
     socket_path = peernet_mod.runtime_socket_path()
-    socket_path.parent.mkdir(parents=True)
+    socket_path.parent.mkdir(parents=True, exist_ok=True)
     socket_path.touch()
 
     async def _slow_connect(*args, **kwargs):
@@ -505,7 +513,6 @@ async def test_a_prompt_submitted_mid_turn_is_queued_not_refused(tmp_path, monke
     automatically -- its own turn_started/turn_done -- the instant the
     first turn ends."""
     gate = asyncio.Event()
-    monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "rt"))
     daemon = SessionDaemon(
         cwd=str(tmp_path), linger_secs=30.0,
         engine_factory=lambda cwd, sid, dsock: SessionEngine(
@@ -583,7 +590,6 @@ async def test_several_queued_prompts_start_in_fifo_order(tmp_path, monkeypatch)
     are queued (never refused), and each starts -- and finishes -- in
     the order it was typed, one at a time, with no interleaving."""
     gate = asyncio.Event()
-    monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "rt"))
     daemon = SessionDaemon(
         cwd=str(tmp_path), linger_secs=30.0,
         engine_factory=lambda cwd, sid, dsock: SessionEngine(
@@ -647,7 +653,6 @@ async def test_the_queue_bound_is_enforced_with_a_clear_reply(tmp_path, monkeypa
     from doxa.promptqueue import PROMPT_QUEUE_MAXLEN
 
     gate = asyncio.Event()
-    monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "rt"))
     daemon = SessionDaemon(
         cwd=str(tmp_path), linger_secs=30.0,
         engine_factory=lambda cwd, sid, dsock: SessionEngine(
@@ -693,7 +698,6 @@ async def test_cancelling_a_queued_prompt_is_visible_to_every_client(tmp_path, m
     prompt (it never starts), and the cancellation is broadcast -- every
     attached client, not just whichever one asked, sees it."""
     gate = asyncio.Event()
-    monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "rt"))
     daemon = SessionDaemon(
         cwd=str(tmp_path), linger_secs=30.0,
         engine_factory=lambda cwd, sid, dsock: SessionEngine(
@@ -904,7 +908,6 @@ async def running_daemon_at(cwd, tmp_path, monkeypatch, linger=30.0,
     straight to SessionDaemon's own parameter -- the same wire this
     module's ``spawn_daemon`` uses over a real subprocess, exercised
     in-process here."""
-    monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "rt"))
     monkeypatch.setenv("DOXA_HOME", str(tmp_path / "home"))
     config_mod.invalidate()
     factory, created = factory_with_script(list(TURN_SCRIPT))
@@ -1987,7 +1990,6 @@ async def running_vendor_daemon(tmp_path, monkeypatch, engine_id="deepseek"):
     """A served SessionDaemon whose engine came from the REGISTRY -- no
     engine_factory injected, so _build_engine's non-Claude arm is the code
     under test."""
-    monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "rt"))
     daemon = SessionDaemon(
         cwd=str(tmp_path), linger_secs=30.0, engine_id=engine_id,
     )
@@ -2043,7 +2045,6 @@ async def test_no_lore_on_an_engine_without_a_memory_switch_says_so(
     """--no-lore reaches an engine that has no memory switch and does
     nothing. Said out loud in the daemon's log rather than swallowed, and
     the status reply still reports what the session actually has."""
-    monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "rt"))
     daemon = SessionDaemon(
         cwd=str(tmp_path), linger_secs=30.0, engine_id="deepseek", lore=False,
     )
@@ -2138,7 +2139,6 @@ def test_the_default_engine_is_claude_and_needs_no_flag():
 def _spawn_argv(monkeypatch, tmp_path, **kwargs) -> list:
     """Run spawn_daemon far enough to capture the command line, without
     letting a real daemon start."""
-    monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "rt"))
     captured: list = []
 
     class _Proc:
@@ -2213,7 +2213,6 @@ async def test_a_peer_started_turn_is_reported_running_and_its_queue_is_visible(
     a prompt submitted while it runs lands in the ENGINE's queue -- so a
     session busy answering another agent reported running=false, queued=0,
     and doxa.fleet's is_quiet called it idle."""
-    monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "rt"))
     monkeypatch.setenv(peers.PEER_INBOUND_TURNS_ENV, "1")
     gate = asyncio.Event()
     created: "list[_GatedClient]" = []
@@ -2342,7 +2341,6 @@ async def test_a_gated_mode_is_refused_mid_turn_and_allowed_once_idle(
     monkeypatch.setenv("DOXA_ALLOW_BYPASS", "1")
     config_mod.invalidate()
     gate = asyncio.Event()
-    monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "rt"))
     slow = _slow_script_client_factory(gate)
 
     class SlowSwitchable(slow):
@@ -2410,7 +2408,6 @@ async def test_the_daemon_refuses_a_session_id_that_is_a_path(tmp_path, monkeypa
     registry entry, the peer socket, the daemon log -- so an id that is
     not a name is refused at the door rather than scattering a session's
     files wherever it pointed."""
-    monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "rt"))
     with pytest.raises(ValueError, match=r"invalid session id"):
         SessionDaemon(cwd=str(tmp_path), session_id="../../../../etc/passwd")
     with pytest.raises(ValueError, match=r"invalid resume id"):
@@ -2436,7 +2433,6 @@ async def test_closing_during_a_turn_ends_send_instead_of_hanging_it(
     `turn_done` that a closed socket can never deliver. The one caller it
     hung is the one a user is watching."""
     gate = asyncio.Event()
-    monkeypatch.setenv("DOXA_RUNTIME_DIR", str(tmp_path / "rt"))
     daemon = SessionDaemon(
         cwd=str(tmp_path), linger_secs=30.0,
         engine_factory=lambda cwd, sid, dsock: SessionEngine(
