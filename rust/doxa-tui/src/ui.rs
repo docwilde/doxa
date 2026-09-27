@@ -9490,7 +9490,10 @@ fn run_loop(
         store.restore(&mut app, live_ids);
     }
     app.refresh_clock();
-    if app.preferences.on("key_notice") && guard.measured_keyboard==Some(false) {app.notice="Legacy keys: Ctrl+, → /settings · Shift+Enter → Ctrl+J · Ctrl+Enter → /msg".into();}
+    if app.preferences.on("key_notice") && guard.measured_keyboard==Some(false) {
+        let keys="Legacy keys: Ctrl+, → /settings · Shift+Enter → Ctrl+J · Ctrl+Enter → /msg";
+        if app.notice.is_empty(){app.notice=keys.into();}else{app.notice.push_str(" · ");app.notice.push_str(keys);}
+    }
     let mut saved_layout = crate::ui_state::LayoutSignature::capture(&app);
     terminal.draw(|frame| app.draw(frame))?;
     let mut pointer_on_link = false;
