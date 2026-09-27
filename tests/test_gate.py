@@ -2,8 +2,8 @@
 """Containment tests for doxa.gate.ToolGate: total graceful degradation
 (execute never raises), the conservative two-strikes classifier + disable,
 allowed-set denial at both the hook and the executor, and the
-OperatorContext sidecar contract (stripped from model args always, injected
-only for declaring operators)."""
+OperatorContext sidecar contract (stripped for retained registry calls and
+refused by native strict schemas, injected only for declaring operators)."""
 
 from __future__ import annotations
 
@@ -13,15 +13,15 @@ from doxa import operators as ops
 from doxa.gate import OperatorContext, ToolGate, is_hard_failure
 
 
-def _ctx(tmp_path, belief_store=None) -> OperatorContext:
+def _ctx(tmp_path, belief_store=None, native_lore=None) -> OperatorContext:
     return OperatorContext(
         session_id="sess-gate", cwd=str(tmp_path), repo_root=str(tmp_path),
-        belief_store=belief_store,
+        belief_store=belief_store, native_lore=native_lore,
     )
 
 
-def _broken_store():
-    raise RuntimeError("belief db unavailable")
+def _broken_native(name, arguments):
+    raise RuntimeError("private native transport failure details")
 
 
 # --------------------------------------------------------------------------
@@ -44,9 +44,10 @@ def test_bad_args_become_a_recoverable_result_and_never_a_strike(tmp_path):
 
 
 def test_backend_exception_becomes_the_name_failed_shape(tmp_path):
-    gate = ToolGate(op_ctx=_ctx(tmp_path, belief_store=_broken_store))
+    gate = ToolGate(op_ctx=_ctx(tmp_path, native_lore=_broken_native))
     out = gate.execute("lore_belief_search", {"query": "anything"})
-    assert out["error"].startswith("lore_belief_search failed: RuntimeError:")
+    assert out["error"] == "lore_belief_search failed: native LORE unavailable"
+    assert "private" not in out["error"]
 
 
 # --------------------------------------------------------------------------
@@ -55,7 +56,7 @@ def test_backend_exception_becomes_the_name_failed_shape(tmp_path):
 
 def test_second_hard_failure_disables_and_fires_event_once(tmp_path):
     events: list[tuple[str, str]] = []
-    gate = ToolGate(op_ctx=_ctx(tmp_path, belief_store=_broken_store),
+    gate = ToolGate(op_ctx=_ctx(tmp_path, native_lore=_broken_native),
                     on_disable=lambda n, r: events.append((n, r)))
 
     first = gate.execute("mcp__doxa__lore_belief_search", {"query": "x"})
@@ -75,12 +76,14 @@ def test_second_hard_failure_disables_and_fires_event_once(tmp_path):
 
 
 def test_soft_errors_never_count_toward_disable(tmp_path):
-    gate = ToolGate(op_ctx=_ctx(tmp_path))
+    def refused_native(name, arguments):
+        return {"error": f"{name}: request refused"}
+    gate = ToolGate(op_ctx=_ctx(tmp_path, native_lore=refused_native))
     for _ in range(3):
-        out = gate.execute("lore_belief_search", {"query": "   "})
-        assert out["error"] == "lore_belief_search: empty query"  # single colon
-        miss = gate.execute("lore_belief_show", {"belief_id": 987654321})
-        assert miss["error"].startswith("lore_belief_show: no belief")
+        out = gate.execute("lore_belief_search", {"query": "query"})
+        assert out["error"] == "lore_belief_search: request refused"
+        miss = gate.execute("lore_belief_show", {"id": 987654321})
+        assert miss["error"] == "lore_belief_show: request refused"
     assert gate.disabled_tools() == []
 
 

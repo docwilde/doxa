@@ -35,9 +35,10 @@ Four contracts, all session-scoped state on one ToolGate:
    repo_root, belief-store handle) ride as their OWN kwarg into the
    operators that declare it (operators.OP_CTX_OPERATORS) -- NEVER inside
    the model-writable args dict, and a model-supplied "op_ctx" key is
-   stripped unconditionally before dispatch. args is the one namespace the
-   model writes to; trusting a principal-shaped value there would defeat
-   the point (see the harness's OperatorContext docstring, mirrored here).
+   stripped before retained registry dispatch. Native LORE instead refuses
+   that unknown field through its strict schema and receives host identity
+   through its own frozen channel. args never defines the principal
+   (see the harness's OperatorContext docstring, mirrored here).
 """
 
 from __future__ import annotations
@@ -283,10 +284,11 @@ class ToolGate:
             # never trust the tool call. Counts as hard (see pre_tool_use).
             self._note_hard(name, f"tool not permitted: {name!r}")
             return {"error": f"tool not permitted: {name!r}"}
-        # Contract 4: a model-supplied op_ctx is stripped ALWAYS; the real
-        # sidecar goes into a NEW dict, never a mutation of the caller's
-        # args, and only for operators that declare it.
-        args = {k: v for k, v in dict(args or {}).items() if k != "op_ctx"}
+        # Native LORE owns its strict advertised schema. Forward unknown
+        # fields unchanged so malformed identity arguments are refused rather
+        # than silently turned into a valid staging request. Host identity
+        # remains on the separate, frozen native-agent channel.
+        args = dict(args or {})
         if self.op_ctx is not None and self.op_ctx.native_lore is not None:
             from .native_lore import LORE_TOOLS
             if name in LORE_TOOLS:
@@ -294,6 +296,9 @@ class ToolGate:
                     return self.op_ctx.native_lore(name, args)
                 except Exception:
                     return {"error": f"{name} failed: native LORE unavailable"}
+        # Retained registry operators take their trusted sidecar separately;
+        # model-supplied op_ctx cannot reach it or mutate the caller's args.
+        args = {k: v for k, v in args.items() if k != "op_ctx"}
         kwargs = args
         if self.op_ctx is not None and name in _OP_CTX_NAMES:
             kwargs = dict(args)
