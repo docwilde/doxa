@@ -1,14 +1,16 @@
 //! Own terminal modes, scheduling, bounded command queues and layout persistence.
+use super::{links, safe_label, App};
+use crossterm::event::{
+    self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+    EnableFocusChange, EnableMouseCapture,
+};
+use crossterm::execute;
+use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
+use ratatui::{backend::CrosstermBackend, layout::Rect, Terminal};
 use std::io::{self, IsTerminal, Stdout, Write};
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use crossterm::event::{self, DisableBracketedPaste, EnableBracketedPaste,
-    DisableMouseCapture, EnableMouseCapture, DisableFocusChange, EnableFocusChange};
-use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
-use crossterm::execute;
-use ratatui::{backend::CrosstermBackend, layout::Rect, Terminal};
-use super::{App, safe_label, links};
 
 /// Legacy wire consumers and owned worker results retain their original
 /// channels, without a relay thread or a second queue.
@@ -20,14 +22,22 @@ enum FrameSource {
 impl FrameSource {
     fn try_reduce(&self, app: &mut App) -> Result<bool, TryRecvError> {
         match self {
-            Self::Wire(receiver) => receiver.try_recv().map(|frame| app.apply_daemon_frame(&frame)),
-            Self::Worker(receiver) => receiver.try_recv().map(|frame| app.apply_worker_frame(frame)),
+            Self::Wire(receiver) => receiver
+                .try_recv()
+                .map(|frame| app.apply_daemon_frame(&frame)),
+            Self::Worker(receiver) => receiver
+                .try_recv()
+                .map(|frame| app.apply_worker_frame(frame)),
         }
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum KeyboardProtocol { Legacy, Kitty, Unknown }
+pub(super) enum KeyboardProtocol {
+    Legacy,
+    Kitty,
+    Unknown,
+}
 pub(super) fn selected_keyboard_protocol(override_value: Option<&str>) -> KeyboardProtocol {
     // Startup never asks the terminal to respond before its first visible frame.
     // Legacy is a selected compatibility mode, not measured lack of support.
@@ -56,15 +66,25 @@ impl TerminalGuard {
             alternate: false,
             mouse: false,
             paste: false,
-            keyboard: false,keyboard_protocol:KeyboardProtocol::Legacy,
+            keyboard: false,
+            keyboard_protocol: KeyboardProtocol::Legacy,
         };
         terminal::enable_raw_mode()?;
         guard.raw = true;
-        guard.keyboard_protocol=selected_keyboard_protocol(std::env::var("DOXA_KEYBOARD_PROTOCOL").ok().as_deref());
-        if guard.keyboard_protocol==KeyboardProtocol::Kitty {execute!(guard.out,crossterm::event::PushKeyboardEnhancementFlags(crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES))?;guard.keyboard=true;}
+        guard.keyboard_protocol =
+            selected_keyboard_protocol(std::env::var("DOXA_KEYBOARD_PROTOCOL").ok().as_deref());
+        if guard.keyboard_protocol == KeyboardProtocol::Kitty {
+            execute!(
+                guard.out,
+                crossterm::event::PushKeyboardEnhancementFlags(
+                    crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                )
+            )?;
+            guard.keyboard = true;
+        }
         execute!(guard.out, EnterAlternateScreen)?;
         guard.alternate = true;
-        execute!(guard.out, EnableMouseCapture,EnableFocusChange)?;
+        execute!(guard.out, EnableMouseCapture, EnableFocusChange)?;
         guard.mouse = true;
         execute!(guard.out, EnableBracketedPaste)?;
         guard.paste = true;
@@ -79,12 +99,14 @@ impl Drop for TerminalGuard {
             let _ = execute!(self.out, DisableBracketedPaste);
         }
         if self.mouse {
-            let _ = execute!(self.out, DisableMouseCapture,DisableFocusChange);
+            let _ = execute!(self.out, DisableMouseCapture, DisableFocusChange);
         }
         if self.alternate {
             let _ = execute!(self.out, LeaveAlternateScreen);
         }
-        if self.keyboard {let _=execute!(self.out,crossterm::event::PopKeyboardEnhancementFlags);}
+        if self.keyboard {
+            let _ = execute!(self.out, crossterm::event::PopKeyboardEnhancementFlags);
+        }
         if self.raw {
             let _ = terminal::disable_raw_mode();
         }
@@ -93,23 +115,33 @@ impl Drop for TerminalGuard {
 
 /// OSC 22 is a no-op in terminals without pointer-shape support.
 pub(super) fn pointer_shape(link: bool) -> &'static [u8] {
-    if link { b"\x1b]22;pointer\x1b\\" } else { b"\x1b]22;\x1b\\" }
+    if link {
+        b"\x1b]22;pointer\x1b\\"
+    } else {
+        b"\x1b]22;\x1b\\"
+    }
 }
 
 pub(super) fn open_link(url: &str) -> io::Result<()> {
     if !links::safe_url(url) {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "unsupported link"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "unsupported link",
+        ));
     }
     #[cfg(target_os = "macos")]
     let opener = "open";
     #[cfg(not(target_os = "macos"))]
     let opener = "xdg-open";
-    let mut child = std::process::Command::new(opener).arg(url)
+    let mut child = std::process::Command::new(opener)
+        .arg(url)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()?;
-    std::thread::spawn(move || { let _ = child.wait(); });
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
     Ok(())
 }
 
@@ -199,35 +231,57 @@ fn run_loop(
             .map(|s| Rect::new(0, 0, s.width, s.height))?,
         ..Default::default()
     };
-    app.persist_preferences=true;
-    app.plugin_refresh_dirty=true;
-    app.sidebar_auto=app.preferences.value("sidebar").is_empty();
-    app.rail_width=app.preferences.sidebar_width();
-    app.rail_visible=match app.preferences.value("sidebar") {""=>app.sessions.len()>1 || !app.collections.is_empty(),"0"|"false"|"off"|"no"=>false,_=>true};
-    app.awaiting_initial_attach=prompt_sender.is_some();
+    app.persist_preferences = true;
+    app.plugin_refresh_dirty = true;
+    app.sidebar_auto = app.preferences.value("sidebar").is_empty();
+    app.rail_width = app.preferences.sidebar_width();
+    app.rail_visible = match app.preferences.value("sidebar") {
+        "" => app.sessions.len() > 1 || !app.collections.is_empty(),
+        "0" | "false" | "off" | "no" => false,
+        _ => true,
+    };
+    app.awaiting_initial_attach = prompt_sender.is_some();
     if let Some((store, live_ids, _)) = &state {
-        app.awaiting_initial_attach=!live_ids.is_empty();
+        app.awaiting_initial_attach = !live_ids.is_empty();
         if live_ids.is_empty() && store.startup_failed {
-            app.startup_recovery=store.startup_error.clone().or_else(||Some("Provider startup failed. Check setup, then retry.".into()));
+            app.startup_recovery = store
+                .startup_error
+                .clone()
+                .or_else(|| Some("Provider startup failed. Check setup, then retry.".into()));
         }
         store.restore(&mut app, live_ids);
     }
     app.refresh_clock();
-    if app.preferences.on("key_notice") && guard.keyboard_protocol==KeyboardProtocol::Legacy {
-        let keys="Legacy key mode: Ctrl+, → /settings · Shift+Enter → Ctrl+J · Ctrl+Enter → /msg";
-        if app.notice.is_empty(){app.notice=keys.into();}else{app.notice.push_str(" · ");app.notice.push_str(keys);}
+    if app.preferences.on("key_notice") && guard.keyboard_protocol == KeyboardProtocol::Legacy {
+        let keys = "Legacy key mode: Ctrl+, → /settings · Shift+Enter → Ctrl+J · Ctrl+Enter → /msg";
+        if app.notice.is_empty() {
+            app.notice = keys.into();
+        } else {
+            app.notice.push_str(" · ");
+            app.notice.push_str(keys);
+        }
     }
     let mut saved_layout = crate::ui_state::LayoutSignature::capture(&app);
     terminal.draw(|frame| app.draw(frame))?;
     let mut pointer_on_link = false;
-    let mut first_run_pending=crate::first_run::needed();
+    let mut first_run_pending = crate::first_run::needed();
     let mut installation_worker = crate::installation::Worker::start().ok();
-    if installation_worker.is_none() { app.installation.update = crate::installation::Update::Unknown; }
+    if installation_worker.is_none() {
+        app.installation.update = crate::installation::Update::Unknown;
+    }
     while !app.should_quit {
         let mut changed = false;
-        if first_run_pending && app.offer_first_run() {first_run_pending=false;changed=true;}
-        if let Some(snapshot) = installation_worker.as_ref().and_then(crate::installation::Worker::poll) {
-            app.apply_installation(snapshot); installation_worker = None; changed = true;
+        if first_run_pending && app.offer_first_run() {
+            first_run_pending = false;
+            changed = true;
+        }
+        if let Some(snapshot) = installation_worker
+            .as_ref()
+            .and_then(crate::installation::Worker::poll)
+        {
+            app.apply_installation(snapshot);
+            installation_worker = None;
+            changed = true;
         }
         // Bound work per tick so a busy daemon cannot starve keyboard input.
         for _ in 0..64 {
@@ -242,9 +296,10 @@ fn run_loop(
             terminal.draw(|frame| app.draw(frame))?;
             changed = false;
         }
-        app.clear_preflight_error = state.as_ref()
-            .map_or(Some("persistent tabset unavailable"), |(store, _, complete)|
-                store.clear_preflight(&app, complete).err());
+        app.clear_preflight_error = state.as_ref().map_or(
+            Some("persistent tabset unavailable"),
+            |(store, _, complete)| store.clear_preflight(&app, complete).err(),
+        );
         if event::poll(Duration::from_millis(10))? {
             changed |= app.handle(event::read()?);
         }
@@ -276,9 +331,15 @@ fn run_loop(
         changed |= app.poll_memory_menu();
         changed |= app.poll_shell();
         changed |= app.poll_clipboard();
-        if let Some(bytes)=app.pending_clipboard_copy.take(){
-            let mut out=io::stdout();
-            app.notice=if out.write_all(&bytes).and_then(|_|out.flush()).is_err(){"Clipboard copy failed · use terminal selection and Ctrl+Shift+C"}else{"Selection sent to terminal clipboard · OSC52 support required"}.into();changed=true;
+        if let Some(bytes) = app.pending_clipboard_copy.take() {
+            let mut out = io::stdout();
+            app.notice = if out.write_all(&bytes).and_then(|_| out.flush()).is_err() {
+                "Clipboard copy failed · use terminal selection and Ctrl+Shift+C"
+            } else {
+                "Selection sent to terminal clipboard · OSC52 support required"
+            }
+            .into();
+            changed = true;
         }
         changed |= app.poll_plugin_commands();
         changed |= app.poll_vendor_catalog();
@@ -313,12 +374,14 @@ fn run_loop(
             }
             if !app.clear_stop_after_save.is_empty() {
                 app.clear_stop_after_save.clear();
-                app.notice = "Previous session could not be finalized · daemon connection closed".into();
+                app.notice =
+                    "Previous session could not be finalized · daemon connection closed".into();
                 changed = true;
             }
             if !app.pending_clear_finalizes.is_empty() {
                 app.pending_clear_finalizes.clear();
-                app.notice = "Previous session could not be finalized · daemon connection closed".into();
+                app.notice =
+                    "Previous session could not be finalized · daemon connection closed".into();
                 changed = true;
             }
             if !app.pending_queue_commands.is_empty() {
@@ -329,7 +392,10 @@ fn run_loop(
             }
             if !app.pending_peer_messages.is_empty() {
                 for (id, target, text) in app.pending_peer_messages.drain(..) {
-                    app.rejected_drafts.entry(id).or_default().push(format!("/msg {target} {text}"));
+                    app.rejected_drafts
+                        .entry(id)
+                        .or_default()
+                        .push(format!("/msg {target} {text}"));
                 }
                 app.notice = "Peer delivery unavailable · Alt+Up restores message".into();
                 changed = true;
@@ -354,15 +420,19 @@ fn run_loop(
         // UI event (for example when the live roster becomes complete).
         if let Some((store, _, complete)) = &mut state {
             if let Err(error) = store.forget_sessions(&app.killed_this_run) {
-                app.notice = format!("sessions: stopped; tabset veto save failed · {}", safe_label(&error.to_string()));
+                app.notice = format!(
+                    "sessions: stopped; tabset veto save failed · {}",
+                    safe_label(&error.to_string())
+                );
                 changed = true;
             }
             changed |= save_layout_if_changed(&mut app, store, complete, &mut saved_layout);
         } else {
             saved_layout = crate::ui_state::LayoutSignature::capture(&app);
         }
-        changed |= app.finish_clear_swap(state.is_some()
-            && saved_layout == crate::ui_state::LayoutSignature::capture(&app));
+        changed |= app.finish_clear_swap(
+            state.is_some() && saved_layout == crate::ui_state::LayoutSignature::capture(&app),
+        );
         if let Some(sender) = &prompt_sender {
             if dispatch_stops(&mut app, sender) || dispatch_clear_finalizes(&mut app, sender) {
                 prompt_sender = None;
@@ -389,13 +459,21 @@ fn run_loop(
     Ok(())
 }
 
-pub(super) fn dispatch_launches(app: &mut App, sender: &SyncSender<crate::bridge::WorkerCommand>) -> bool {
+pub(super) fn dispatch_launches(
+    app: &mut App,
+    sender: &SyncSender<crate::bridge::WorkerCommand>,
+) -> bool {
     let mut launches = std::mem::take(&mut app.pending_launches).into_iter();
     while let Some((options, prompt, group)) = launches.next() {
         match sender.try_send(crate::bridge::WorkerCommand::Launch(options, prompt, group)) {
             Ok(()) => {}
-            Err(TrySendError::Full(crate::bridge::WorkerCommand::Launch(options, prompt, group))) => {
-                app.pending_launches.extend(std::iter::once((options, prompt, group)).chain(launches));
+            Err(TrySendError::Full(crate::bridge::WorkerCommand::Launch(
+                options,
+                prompt,
+                group,
+            ))) => {
+                app.pending_launches
+                    .extend(std::iter::once((options, prompt, group)).chain(launches));
                 return false;
             }
             Err(TrySendError::Disconnected(_)) => {
@@ -412,13 +490,17 @@ pub(super) fn dispatch_launches(app: &mut App, sender: &SyncSender<crate::bridge
     false
 }
 
-pub(super) fn dispatch_attaches(app: &mut App, sender: &SyncSender<crate::bridge::WorkerCommand>) -> bool {
+pub(super) fn dispatch_attaches(
+    app: &mut App,
+    sender: &SyncSender<crate::bridge::WorkerCommand>,
+) -> bool {
     let mut attaches = std::mem::take(&mut app.pending_attaches).into_iter();
     while let Some((id, group)) = attaches.next() {
         match sender.try_send(crate::bridge::WorkerCommand::Attach(id, group)) {
             Ok(()) => {}
             Err(TrySendError::Full(crate::bridge::WorkerCommand::Attach(id, group))) => {
-                app.pending_attaches.extend(std::iter::once((id, group)).chain(attaches));
+                app.pending_attaches
+                    .extend(std::iter::once((id, group)).chain(attaches));
                 return false;
             }
             Err(TrySendError::Disconnected(_)) => {
@@ -432,7 +514,10 @@ pub(super) fn dispatch_attaches(app: &mut App, sender: &SyncSender<crate::bridge
     false
 }
 
-pub(super) fn dispatch_stops(app: &mut App, sender: &SyncSender<crate::bridge::WorkerCommand>) -> bool {
+pub(super) fn dispatch_stops(
+    app: &mut App,
+    sender: &SyncSender<crate::bridge::WorkerCommand>,
+) -> bool {
     let mut stops = std::mem::take(&mut app.pending_stops).into_iter();
     while let Some(id) = stops.next() {
         match sender.try_send(crate::bridge::WorkerCommand::Stop(id)) {
@@ -452,17 +537,22 @@ pub(super) fn dispatch_stops(app: &mut App, sender: &SyncSender<crate::bridge::W
     false
 }
 
-pub(super) fn dispatch_clear_finalizes(app: &mut App, sender: &SyncSender<crate::bridge::WorkerCommand>) -> bool {
+pub(super) fn dispatch_clear_finalizes(
+    app: &mut App,
+    sender: &SyncSender<crate::bridge::WorkerCommand>,
+) -> bool {
     let mut pending = std::mem::take(&mut app.pending_clear_finalizes).into_iter();
     while let Some(id) = pending.next() {
         match sender.try_send(crate::bridge::WorkerCommand::FinalizeForClear(id)) {
             Ok(()) => {}
             Err(TrySendError::Full(crate::bridge::WorkerCommand::FinalizeForClear(id))) => {
-                app.pending_clear_finalizes.extend(std::iter::once(id).chain(pending));
+                app.pending_clear_finalizes
+                    .extend(std::iter::once(id).chain(pending));
                 return false;
             }
             Err(TrySendError::Disconnected(_)) => {
-                app.notice = "Previous session could not be finalized · daemon connection closed".into();
+                app.notice =
+                    "Previous session could not be finalized · daemon connection closed".into();
                 return true;
             }
             Err(_) => unreachable!(),
@@ -471,13 +561,17 @@ pub(super) fn dispatch_clear_finalizes(app: &mut App, sender: &SyncSender<crate:
     false
 }
 
-pub(super) fn dispatch_queue_commands(app: &mut App, sender: &SyncSender<crate::bridge::WorkerCommand>) -> bool {
+pub(super) fn dispatch_queue_commands(
+    app: &mut App,
+    sender: &SyncSender<crate::bridge::WorkerCommand>,
+) -> bool {
     let mut commands = std::mem::take(&mut app.pending_queue_commands).into_iter();
     while let Some(command) = commands.next() {
         match sender.try_send(command) {
             Ok(()) => {}
             Err(TrySendError::Full(command)) => {
-                app.pending_queue_commands.extend(std::iter::once(command).chain(commands));
+                app.pending_queue_commands
+                    .extend(std::iter::once(command).chain(commands));
                 return false;
             }
             Err(TrySendError::Disconnected(_)) => {
@@ -506,7 +600,8 @@ pub(super) fn save_layout_if_changed(
     }
     if app.has_unverified_archived_tabs() {
         if app.notice != "Layout save skipped · unverified archived tabs" {
-            app.notice = "Layout save skipped · unverified archived tabs".into();return true;
+            app.notice = "Layout save skipped · unverified archived tabs".into();
+            return true;
         }
         return false;
     }
@@ -532,7 +627,10 @@ pub(super) fn save_layout_if_changed(
 
 /// Move only as many prompts as the bounded worker queue can accept, keeping
 /// the rest in their original order for the next UI tick.
-pub(super) fn dispatch_prompts(app: &mut App, sender: &SyncSender<crate::bridge::WorkerCommand>) -> bool {
+pub(super) fn dispatch_prompts(
+    app: &mut App,
+    sender: &SyncSender<crate::bridge::WorkerCommand>,
+) -> bool {
     let mut prompts = app.take_prompts().into_iter();
     while let Some(prompt) = prompts.next() {
         match sender.try_send(crate::bridge::WorkerCommand::Prompt(prompt.0, prompt.1)) {
@@ -557,7 +655,10 @@ pub(super) fn dispatch_prompts(app: &mut App, sender: &SyncSender<crate::bridge:
     false
 }
 
-pub(super) fn dispatch_answers(app: &mut App, sender: &SyncSender<crate::bridge::WorkerCommand>) -> bool {
+pub(super) fn dispatch_answers(
+    app: &mut App,
+    sender: &SyncSender<crate::bridge::WorkerCommand>,
+) -> bool {
     let mut answers = app.take_answers().into_iter();
     while let Some(answer) = answers.next() {
         match sender.try_send(crate::bridge::WorkerCommand::Answer(
@@ -590,23 +691,38 @@ pub(super) fn dispatch_answers(app: &mut App, sender: &SyncSender<crate::bridge:
 // typed-command failure envelopes as the router, including each original owner.
 pub(super) fn reject_pending_controls(app: &mut App, failed: crate::bridge::WorkerCommand) -> bool {
     use crate::bridge::WorkerCommand;
-    app.apply_daemon_frame(&crate::bridge::rejected(failed, "Daemon unavailable"));
+    app.apply_worker_frame(crate::bridge::rejection_frame(failed, "Daemon unavailable"));
     for id in std::mem::take(&mut app.pending_model_queries) {
-        app.apply_daemon_frame(&crate::bridge::rejected(WorkerCommand::Models(id), "Daemon unavailable"));
+        app.apply_worker_frame(crate::bridge::rejection_frame(
+            WorkerCommand::Models(id),
+            "Daemon unavailable",
+        ));
     }
     for (id, model) in std::mem::take(&mut app.pending_model_changes) {
-        app.apply_daemon_frame(&crate::bridge::rejected(WorkerCommand::SetModel(id, model), "Daemon unavailable"));
+        app.apply_worker_frame(crate::bridge::rejection_frame(
+            WorkerCommand::SetModel(id, model),
+            "Daemon unavailable",
+        ));
     }
     for (id, effort) in std::mem::take(&mut app.pending_effort_changes) {
-        app.apply_daemon_frame(&crate::bridge::rejected(WorkerCommand::SetEffort(id, effort), "Daemon unavailable"));
+        app.apply_worker_frame(crate::bridge::rejection_frame(
+            WorkerCommand::SetEffort(id, effort),
+            "Daemon unavailable",
+        ));
     }
     for (id, mode) in std::mem::take(&mut app.pending_permission_changes) {
-        app.apply_daemon_frame(&crate::bridge::rejected(WorkerCommand::SetPermissionMode(id, mode), "Daemon unavailable"));
+        app.apply_worker_frame(crate::bridge::rejection_frame(
+            WorkerCommand::SetPermissionMode(id, mode),
+            "Daemon unavailable",
+        ));
     }
     true
 }
 
-pub(super) fn dispatch_model_controls(app: &mut App, sender: &SyncSender<crate::bridge::WorkerCommand>) -> bool {
+pub(super) fn dispatch_model_controls(
+    app: &mut App,
+    sender: &SyncSender<crate::bridge::WorkerCommand>,
+) -> bool {
     let mut queries = std::mem::take(&mut app.pending_model_queries).into_iter();
     while let Some(id) = queries.next() {
         match sender.try_send(crate::bridge::WorkerCommand::Models(id)) {
@@ -674,7 +790,10 @@ pub(super) fn dispatch_model_controls(app: &mut App, sender: &SyncSender<crate::
     false
 }
 
-pub(super) fn dispatch_peer_refresh(app: &mut App, sender: &SyncSender<crate::bridge::WorkerCommand>) -> bool {
+pub(super) fn dispatch_peer_refresh(
+    app: &mut App,
+    sender: &SyncSender<crate::bridge::WorkerCommand>,
+) -> bool {
     let Some(id) = app.pending_peer_refresh.take() else {
         return false;
     };
@@ -692,19 +811,33 @@ pub(super) fn dispatch_peer_refresh(app: &mut App, sender: &SyncSender<crate::br
     }
 }
 
-pub(super) fn dispatch_peer_messages(app: &mut App, sender: &SyncSender<crate::bridge::WorkerCommand>) -> bool {
+pub(super) fn dispatch_peer_messages(
+    app: &mut App,
+    sender: &SyncSender<crate::bridge::WorkerCommand>,
+) -> bool {
     let mut messages = std::mem::take(&mut app.pending_peer_messages).into_iter();
     while let Some((id, target, body)) = messages.next() {
         match sender.try_send(crate::bridge::WorkerCommand::Message(id, target, body)) {
             Ok(()) => {}
             Err(TrySendError::Full(crate::bridge::WorkerCommand::Message(id, target, body))) => {
-                app.pending_peer_messages.extend(std::iter::once((id, target, body)).chain(messages));
+                app.pending_peer_messages
+                    .extend(std::iter::once((id, target, body)).chain(messages));
                 return false;
             }
-            Err(TrySendError::Disconnected(crate::bridge::WorkerCommand::Message(id, target, body))) => {
-                app.rejected_drafts.entry(id).or_default().push(format!("/msg {target} {body}"));
+            Err(TrySendError::Disconnected(crate::bridge::WorkerCommand::Message(
+                id,
+                target,
+                body,
+            ))) => {
+                app.rejected_drafts
+                    .entry(id)
+                    .or_default()
+                    .push(format!("/msg {target} {body}"));
                 for (id, target, body) in messages {
-                    app.rejected_drafts.entry(id).or_default().push(format!("/msg {target} {body}"));
+                    app.rejected_drafts
+                        .entry(id)
+                        .or_default()
+                        .push(format!("/msg {target} {body}"));
                 }
                 app.notice = "Peer delivery unavailable · Alt+Up restores message".into();
                 return true;

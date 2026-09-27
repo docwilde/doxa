@@ -1,6 +1,6 @@
 //! Bounded transcript rows and reasoning markers from daemon events.
 
-use super::{Session, MAX_TRANSCRIPT_BYTES, transcript_tools};
+use super::{transcript_tools, Session, MAX_TRANSCRIPT_BYTES};
 use crate::markdown;
 
 const MAX_EVENT_FIELD_CHARS: usize = 320;
@@ -50,9 +50,13 @@ fn event_string(data: &serde_json::Value, key: &str) -> Option<String> {
 }
 
 pub(super) fn transcript_tail(text: &str) -> &str {
-    if text.len() <= MAX_TRANSCRIPT_BYTES { return text; }
+    if text.len() <= MAX_TRANSCRIPT_BYTES {
+        return text;
+    }
     let mut start = text.len() - MAX_TRANSCRIPT_BYTES;
-    while !text.is_char_boundary(start) { start += 1; }
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
     &text[start..]
 }
 
@@ -66,7 +70,9 @@ pub(super) fn append_transcript(session: &mut Session, text: &str) -> bool {
     let clipped = session.transcript.len() > keep_existing;
     if clipped {
         let mut start = session.transcript.len() - keep_existing;
-        while !session.transcript.is_char_boundary(start) { start += 1; }
+        while !session.transcript.is_char_boundary(start) {
+            start += 1;
+        }
         session.transcript.drain(..start);
     }
     session.transcript.push_str(text);
@@ -104,12 +110,17 @@ impl std::fmt::Debug for ReasoningStream {
 }
 
 pub(super) fn set_reasoning_marker(session: &mut Session, stream: &ReasoningStream) {
-    let marker = format!("{}{}", transcript_tools::REASONING_PREFIX,
-        serde_json::json!({"text":stream.text,"tokens":stream.tokens,"streaming":stream.streaming,"exact":stream.exact}));
+    let marker = format!(
+        "{}{}",
+        transcript_tools::REASONING_PREFIX,
+        serde_json::json!({"text":stream.text,"tokens":stream.tokens,"streaming":stream.streaming,"exact":stream.exact})
+    );
     if stream.visible {
         if let Some(start) = session.transcript.rfind(transcript_tools::REASONING_PREFIX) {
-            let end = session.transcript[start..].find("\n\n")
-                .map(|offset| start + offset).unwrap_or(session.transcript.len());
+            let end = session.transcript[start..]
+                .find("\n\n")
+                .map(|offset| start + offset)
+                .unwrap_or(session.transcript.len());
             session.transcript.replace_range(start..end, &marker);
             if session.transcript.len() > MAX_TRANSCRIPT_BYTES {
                 session.transcript = transcript_tail(&session.transcript).to_owned();
@@ -182,12 +193,19 @@ pub(super) fn structured_event(event_type: &str, data: &serde_json::Value) -> Op
         _ => return None,
     };
     let identity = if matches!(event_type, "tool_call" | "tool_result") {
-        data.get("id").and_then(|value| value.as_str())
+        data.get("id")
+            .and_then(|value| value.as_str())
             .filter(|id| !id.is_empty() && id.len() <= 200 && !id.chars().any(char::is_control))
-            .map(|id| format!("{}{}", transcript_tools::TOOL_ID_PREFIX,
-                serde_json::to_string(id).unwrap_or_default()))
+            .map(|id| {
+                format!(
+                    "{}{}",
+                    transcript_tools::TOOL_ID_PREFIX,
+                    serde_json::to_string(id).unwrap_or_default()
+                )
+            })
             .unwrap_or_default()
-    } else { String::new() };
+    } else {
+        String::new()
+    };
     Some(format!("\n\n{row}{identity}\n\n"))
 }
-

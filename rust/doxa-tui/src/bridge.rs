@@ -276,12 +276,6 @@ pub(crate) fn connect_sessions_inner(sessions:&[Session],readonly_restore:bool)-
     Ok(MultiBridge { frames: frame_rx, commands: command_tx, live_ids, complete, router, workers })
 }
 
-/// One owner-preserving failure envelope for router rejection and local queue
-/// disconnection. Callers must not replace its target with the focused session.
-pub(crate) fn rejected(command: WorkerCommand, message: &str) -> Value {
-    rejection_frame(command, message).into_legacy_value()
-}
-
 fn command_frame(session_id: String, result: CommandResult) -> WorkerFrame {
     WorkerFrame::Command { session_id, result }
 }

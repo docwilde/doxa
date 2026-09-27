@@ -1,41 +1,74 @@
 //! Derive pane geometry, focus order and chip hit regions from frontend state.
+use super::{
+    chip_text, clipped_title, input_request_body, memory_fill_label, panes, prompt_height,
+    repo_chip, safe_label, vendor_models, wrapped_rows, App, ChipHit, ChipInfo, Focus, PaneGroup,
+    PaneLayout, RailRow, Split, INPUT_BLINK_INTERVAL, MIN_PANE_HEIGHT, MIN_PANE_WIDTH,
+    MIN_RAIL_WIDTH, SPINNER_FRAMES, SPINNER_INTERVAL,
+};
+use crate::launch;
 use ratatui::layout::Constraint;
 use ratatui::layout::Direction;
-use std::time::Duration;
-use std::collections::HashSet;
-use std::time::Instant;
 use ratatui::layout::Layout;
 use ratatui::layout::Rect;
-use crate::launch;
+use std::collections::HashSet;
+use std::time::Duration;
+use std::time::Instant;
 use unicode_width::UnicodeWidthStr;
-use super::{App, ChipHit, ChipInfo, Focus, INPUT_BLINK_INTERVAL, MIN_PANE_HEIGHT, MIN_PANE_WIDTH, MIN_RAIL_WIDTH, PaneGroup, PaneLayout, RailRow, SPINNER_FRAMES, SPINNER_INTERVAL, Split, chip_text, clipped_title, input_request_body, memory_fill_label, panes, prompt_height, repo_chip, safe_label, vendor_models, wrapped_rows};
 
 impl App {
     pub(super) fn chooser_identity(&self) -> Option<String> {
-        let kind = if let Some(index) = self.active_request_index().filter(|&index|
-            self.input_requests[index].kind == "ask_user") {
-            format!("ask_user:{}:{}", self.input_requests[index].id, self.input_requests[index].step)
-        } else if self.settings_menu.is_some() { "settings".into() }
-        else if self.engine_picker { "engine".into() }
-        else if self.new_session.is_some() { "new_session".into() }
-        else if self.effort_picker.is_some() { "effort".into() }
-        else if self.permission_picker.is_some() { "permission".into() }
-        else if self.model_picker.is_some() { "model".into() }
-        else if self.repo_picker.is_some() { "repo".into() }
-        else if let Some(picker) = &self.lore_picker {
-            format!("lore:{}:{}:{}:{}", picker.proposal_mode, picker.review.is_some(),
-                picker.belief_review.is_some(), picker.evidence.is_some())
-        }
-        else if self.action_menu { "actions".into() }
-        else if let Some(info) = &self.chip_info { format!("chip_info:{}", info.kind) }
-        else if self.history_modal { "history".into() }
-        else if self.queue_picker.is_some() { "queue".into() }
-        else if self.attach_picker.is_some() { "attach".into() }
-        else if self.branch_picker.is_some() { "branch".into() }
-        else if !self.slash_suggestions().is_empty() { "slash".into() }
-        else { return None; };
-        Some(format!("{}:{}:{kind}", self.active_group,
-            self.groups[self.active_group].active_id().unwrap_or("")))
+        let kind = if let Some(index) = self
+            .active_request_index()
+            .filter(|&index| self.input_requests[index].kind == "ask_user")
+        {
+            format!(
+                "ask_user:{}:{}",
+                self.input_requests[index].id, self.input_requests[index].step
+            )
+        } else if self.settings_menu.is_some() {
+            "settings".into()
+        } else if self.engine_picker {
+            "engine".into()
+        } else if self.new_session.is_some() {
+            "new_session".into()
+        } else if self.effort_picker.is_some() {
+            "effort".into()
+        } else if self.permission_picker.is_some() {
+            "permission".into()
+        } else if self.model_picker.is_some() {
+            "model".into()
+        } else if self.repo_picker.is_some() {
+            "repo".into()
+        } else if let Some(picker) = &self.lore_picker {
+            format!(
+                "lore:{}:{}:{}:{}",
+                picker.proposal_mode,
+                picker.review.is_some(),
+                picker.belief_review.is_some(),
+                picker.evidence.is_some()
+            )
+        } else if self.action_menu {
+            "actions".into()
+        } else if let Some(info) = &self.chip_info {
+            format!("chip_info:{}", info.kind)
+        } else if self.history_modal {
+            "history".into()
+        } else if self.queue_picker.is_some() {
+            "queue".into()
+        } else if self.attach_picker.is_some() {
+            "attach".into()
+        } else if self.branch_picker.is_some() {
+            "branch".into()
+        } else if !self.slash_suggestions().is_empty() {
+            "slash".into()
+        } else {
+            return None;
+        };
+        Some(format!(
+            "{}:{}:{kind}",
+            self.active_group,
+            self.groups[self.active_group].active_id().unwrap_or("")
+        ))
     }
 
     pub(super) fn sync_chooser_state(&self) {
@@ -60,11 +93,15 @@ impl App {
             rows.push(RailRow::Heading(heading));
             for id in &item.sessions {
                 if let Some(index) = self.sessions.iter().position(|session| &session.id == id) {
-                    if seen.insert(index) && !item.collapsed { rows.push(RailRow::Session(index)); }
+                    if seen.insert(index) && !item.collapsed {
+                        rows.push(RailRow::Session(index));
+                    }
                 }
             }
         }
-        let loose: Vec<_> = (0..self.sessions.len()).filter(|index| seen.insert(*index)).collect();
+        let loose: Vec<_> = (0..self.sessions.len())
+            .filter(|index| seen.insert(*index))
+            .collect();
         if !loose.is_empty() {
             rows.push(RailRow::LooseHeading);
             rows.extend(loose.into_iter().map(RailRow::Session));
@@ -73,41 +110,78 @@ impl App {
     }
 
     pub(super) fn rail_order(&self) -> Vec<usize> {
-        self.rail_rows().into_iter().filter_map(|row| match row {
-            RailRow::Session(index) => Some(index),
-            _ => None,
-        }).collect()
+        self.rail_rows()
+            .into_iter()
+            .filter_map(|row| match row {
+                RailRow::Session(index) => Some(index),
+                _ => None,
+            })
+            .collect()
     }
 
     pub(super) fn pane_count(&self) -> usize {
-        if self.pane_tree.is_some() { self.groups.len() }
-        else if self.split_requested || self.active_group > 0 || self.groups.iter().skip(1).any(|g| !g.tabs.is_empty()) { 2 }
-        else { 1 }
+        if self.pane_tree.is_some() {
+            self.groups.len()
+        } else if self.split_requested
+            || self.active_group > 0
+            || self.groups.iter().skip(1).any(|g| !g.tabs.is_empty())
+        {
+            2
+        } else {
+            1
+        }
     }
 
     pub(super) fn split_active_pane(&mut self, orientation: Split) {
         if self.pane_tree.is_none() && self.groups[1].tabs.is_empty() {
-            self.split = orientation; self.split_requested = true; return;
+            self.split = orientation;
+            self.split_requested = true;
+            return;
         }
-        if self.groups.len() >= panes::MAX_PANES { self.notice = format!("Pane limit is {}", panes::MAX_PANES); return; }
+        if self.groups.len() >= panes::MAX_PANES {
+            self.notice = format!("Pane limit is {}", panes::MAX_PANES);
+            return;
+        }
         let layout = self.layout(self.size);
-        let Some(regions) = layout.panes else { self.notice = "Enlarge terminal before splitting a pane".into(); return; };
+        let Some(regions) = layout.panes else {
+            self.notice = "Enlarge terminal before splitting a pane".into();
+            return;
+        };
         let pane = regions[self.active_group];
         if (orientation == Split::Vertical && pane.width < MIN_PANE_WIDTH * 2)
-            || (orientation == Split::Horizontal && pane.height < MIN_PANE_HEIGHT * 2) {
-            self.notice = "Enlarge this pane before splitting it".into(); return;
+            || (orientation == Split::Horizontal && pane.height < MIN_PANE_HEIGHT * 2)
+        {
+            self.notice = "Enlarge this pane before splitting it".into();
+            return;
         }
-        let mut tree = self.pane_tree.clone().unwrap_or_else(|| panes::Tree::pair(self.split, self.split_percent));
+        let mut tree = self
+            .pane_tree
+            .clone()
+            .unwrap_or_else(|| panes::Tree::pair(self.split, self.split_percent));
         let next = self.groups.len();
-        if !tree.split(self.active_group, next, orientation, 0) { self.notice = "Pane nesting limit reached".into(); return; }
-        self.groups.push(PaneGroup { tabs: Vec::new(), active: 0, scroll: 0 });
+        if !tree.split(self.active_group, next, orientation, 0) {
+            self.notice = "Pane nesting limit reached".into();
+            return;
+        }
+        self.groups.push(PaneGroup {
+            tabs: Vec::new(),
+            active: 0,
+            scroll: 0,
+        });
         self.pane_tree = Some(tree);
         self.split_requested = true;
         self.notice = format!("Pane {} created · /pane {} to focus it", next + 1, next + 1);
     }
 
     pub(super) fn pane_group_two_exists(&self) -> bool {
-        self.pane_tree.is_some() || self.split_requested || self.active_group > 0 || self.groups.iter().skip(1).any(|group| !group.tabs.is_empty())
+        self.pane_tree.is_some()
+            || self.split_requested
+            || self.active_group > 0
+            || self
+                .groups
+                .iter()
+                .skip(1)
+                .any(|group| !group.tabs.is_empty())
     }
 
     pub(super) fn layout(&self, area: Rect) -> PaneLayout {
@@ -116,7 +190,11 @@ impl App {
         } else {
             MIN_PANE_WIDTH
         };
-        let visible=if self.sidebar_auto {self.sessions.len()>1 || !self.collections.is_empty()} else {self.rail_visible};
+        let visible = if self.sidebar_auto {
+            self.sessions.len() > 1 || !self.collections.is_empty()
+        } else {
+            self.rail_visible
+        };
         let rail_width = if visible && area.width >= 70 {
             self.rail_width.clamp(
                 MIN_RAIL_WIDTH,
@@ -141,34 +219,47 @@ impl App {
         };
         if let Some(tree) = &self.pane_tree {
             let regions = tree.rects(body, self.groups.len());
-            let panes = regions.iter().all(|rect| rect.width >= MIN_PANE_WIDTH && rect.height >= MIN_PANE_HEIGHT).then_some(regions);
-            return PaneLayout { outer: area, rail, body, panes };
+            let panes = regions
+                .iter()
+                .all(|rect| rect.width >= MIN_PANE_WIDTH && rect.height >= MIN_PANE_HEIGHT)
+                .then_some(regions);
+            return PaneLayout {
+                outer: area,
+                rail,
+                body,
+                panes,
+            };
         }
-        let panes = (min_ok && (self.split_requested || self.active_group == 1
-            || !self.groups[1].tabs.is_empty() || self.diff_pane)).then(|| {
-            let desired = self.pane_rects(body, self.split_percent);
-            let minimum = if self.split == Split::Vertical {
-                MIN_PANE_WIDTH
-            } else {
-                MIN_PANE_HEIGHT
-            };
-            let size = |rect: Rect| {
-                if self.split == Split::Vertical {
-                    rect.width
+        let panes = (min_ok
+            && (self.split_requested
+                || self.active_group == 1
+                || !self.groups[1].tabs.is_empty()
+                || self.diff_pane))
+            .then(|| {
+                let desired = self.pane_rects(body, self.split_percent);
+                let minimum = if self.split == Split::Vertical {
+                    MIN_PANE_WIDTH
                 } else {
-                    rect.height
+                    MIN_PANE_HEIGHT
+                };
+                let size = |rect: Rect| {
+                    if self.split == Split::Vertical {
+                        rect.width
+                    } else {
+                        rect.height
+                    }
+                };
+                if size(desired[0]) >= minimum && size(desired[1]) >= minimum {
+                    desired.to_vec()
+                } else {
+                    (0..=100)
+                        .map(|percent| self.pane_rects(body, percent))
+                        .filter(|pair| size(pair[0]) >= minimum && size(pair[1]) >= minimum)
+                        .min_by_key(|pair| size(pair[0]).abs_diff(size(desired[0])))
+                        .unwrap_or(desired)
+                        .to_vec()
                 }
-            };
-            if size(desired[0]) >= minimum && size(desired[1]) >= minimum {
-                desired.to_vec()
-            } else {
-                (0..=100)
-                    .map(|percent| self.pane_rects(body, percent))
-                    .filter(|pair| size(pair[0]) >= minimum && size(pair[1]) >= minimum)
-                    .min_by_key(|pair| size(pair[0]).abs_diff(size(desired[0])))
-                    .unwrap_or(desired).to_vec()
-            }
-        });
+            });
         PaneLayout {
             outer: area,
             rail,
@@ -197,25 +288,39 @@ impl App {
     /// prompt. Reserving this space keeps the transcript and prompt visible.
     pub(super) fn chooser_rect(&self, pane: Rect) -> Option<Rect> {
         self.sync_chooser_state();
-        let wanted = if let Some(index) = self.active_request_index().filter(|&index| self.input_requests[index].kind == "ask_user") {
-            let (body, _, _) = input_request_body(&self.input_requests[index],
-                usize::from(pane.width.saturating_sub(4)));
+        let wanted = if let Some(index) = self
+            .active_request_index()
+            .filter(|&index| self.input_requests[index].kind == "ask_user")
+        {
+            let (body, _, _) = input_request_body(
+                &self.input_requests[index],
+                usize::from(pane.width.saturating_sub(4)),
+            );
             wrapped_rows(&body, usize::from(pane.width.saturating_sub(2)))
-                .saturating_add(2).clamp(6, 18) as u16
+                .saturating_add(2)
+                .clamp(6, 18) as u16
         } else if self.settings_menu.is_some() {
             8
         } else if self.engine_picker {
             7
         } else if let Some(form) = &self.new_session {
-            if !vendor_models(form.engine).is_empty() { 9 }
-            else if form.engine == launch::Engine::Claude { 8 } else { 7 }
+            if !vendor_models(form.engine).is_empty() {
+                9
+            } else if form.engine == launch::Engine::Claude {
+                8
+            } else {
+                7
+            }
         } else if let Some(picker) = &self.effort_picker {
             (4 + picker.levels.len()).clamp(5, 10) as u16
         } else if self.permission_picker.is_some() {
             10
         } else if let Some(picker) = &self.model_picker {
-            (4 + picker.models.len() + usize::from(picker.catalog_pending || !picker.loading && picker.models.is_empty()))
-                .clamp(5, 13) as u16
+            (4 + picker.models.len()
+                + usize::from(
+                    picker.catalog_pending || !picker.loading && picker.models.is_empty(),
+                ))
+            .clamp(5, 13) as u16
         } else if let Some(picker) = &self.repo_picker {
             (picker.paths.len() + 3).clamp(5, 15) as u16
         } else if let Some(picker) = &self.lore_picker {
@@ -236,15 +341,37 @@ impl App {
             19
         } else if let Some(menu) = &self.operations_menu {
             (menu.lines(usize::from(pane.width)).len() + 2).clamp(7, 19) as u16
-        } else if self.chip_info.as_ref().is_some_and(|info|info.kind=="memory") && self.memory_list.is_some() {
-            (self.memory_list.as_ref().unwrap().indices().len()+3).clamp(7,19) as u16
+        } else if self
+            .chip_info
+            .as_ref()
+            .is_some_and(|info| info.kind == "memory")
+            && self.memory_list.is_some()
+        {
+            (self.memory_list.as_ref().unwrap().indices().len() + 3).clamp(7, 19) as u16
         } else if self.chip_info.is_some() {
-            self.chip_info.as_ref().map_or(5, |info| if matches!(info.kind, "memory" | "usage" | "context" | "help" | "sessions" | "about" | "fleet" | "fleet_review") {
-                (info.lines.len() + 2).clamp(7, 19) as u16
-            } else { 5 })
+            self.chip_info.as_ref().map_or(5, |info| {
+                if matches!(
+                    info.kind,
+                    "memory"
+                        | "usage"
+                        | "context"
+                        | "help"
+                        | "sessions"
+                        | "about"
+                        | "fleet"
+                        | "fleet_review"
+                ) {
+                    (info.lines.len() + 2).clamp(7, 19) as u16
+                } else {
+                    5
+                }
+            })
         } else if self.history_modal {
-            let rows: usize = self.history_matches().iter().map(|&index|
-                1 + self.history_snippets(&self.sessions[index].id).len().min(2)).sum();
+            let rows: usize = self
+                .history_matches()
+                .iter()
+                .map(|&index| 1 + self.history_snippets(&self.sessions[index].id).len().min(2))
+                .sum();
             (rows + 3).clamp(5, 15) as u16
         } else if let Some(picker) = &self.queue_picker {
             (picker.rows.len() + 3).clamp(5, 15) as u16
@@ -261,14 +388,27 @@ impl App {
         let draft = group.active_id().map_or("", |_| self.input.as_str());
         let prompt = prompt_height(draft, pane.height);
         let available = pane.height.saturating_sub(3 + prompt + 1 + 1 + 1);
-        let height = self.chooser_height_override.get().unwrap_or(wanted).min(available);
-        if height < 5 || pane.width < 18 { return None; }
-        Some(Rect::new(pane.x, pane.bottom().saturating_sub(prompt + 1 + 1 + height), pane.width, height))
+        let height = self
+            .chooser_height_override
+            .get()
+            .unwrap_or(wanted)
+            .min(available);
+        if height < 5 || pane.width < 18 {
+            return None;
+        }
+        Some(Rect::new(
+            pane.x,
+            pane.bottom().saturating_sub(prompt + 1 + 1 + height),
+            pane.width,
+            height,
+        ))
     }
 
     pub(super) fn active_chooser_rect(&self) -> Option<Rect> {
         let layout = self.layout(self.size);
-        let pane = layout.panes.map_or(layout.body, |panes| panes[self.active_group]);
+        let pane = layout
+            .panes
+            .map_or(layout.body, |panes| panes[self.active_group]);
         self.chooser_rect(pane)
     }
 
@@ -281,7 +421,11 @@ impl App {
         // independent of the provider running this session.
         if let Some(mode) = id.and_then(|id| self.permission_modes.get(id)) {
             chips.push(("permission", mode.clone()));
-        } else if id.is_some_and(|id| self.session_capabilities.get(id).is_some_and(|capabilities| capabilities.permission_modes)) {
+        } else if id.is_some_and(|id| {
+            self.session_capabilities
+                .get(id)
+                .is_some_and(|capabilities| capabilities.permission_modes)
+        }) {
             chips.push(("permission", "?".to_owned()));
         }
         if let Some(engine) = identity.and_then(|pair| pair.0.as_deref()) {
@@ -294,32 +438,82 @@ impl App {
         } else {
             chips.push(("model", "Model".to_owned()));
         }
-        let effort = id.and_then(|id| self.session_efforts.get(id)).map(String::as_str).unwrap_or("?");
+        let effort = id
+            .and_then(|id| self.session_efforts.get(id))
+            .map(String::as_str)
+            .unwrap_or("?");
         chips.push(("effort", effort.to_owned()));
-        if let Some(status) = id.and_then(|id| self.repo_cache.get(id))
-            .and_then(|(status, _)| status.as_ref()) {
-            let (kind,label)=repo_chip(status);chips.push((kind,if self.preferences.on("nerd_font") {label.replace("⎇","\u{e0a0}")} else {label}));
+        if let Some(status) = id
+            .and_then(|id| self.repo_cache.get(id))
+            .and_then(|(status, _)| status.as_ref())
+        {
+            let (kind, label) = repo_chip(status);
+            chips.push((
+                kind,
+                if self.preferences.on("nerd_font") {
+                    label.replace("⎇", "\u{e0a0}")
+                } else {
+                    label
+                },
+            ));
         }
-        let context=telemetry.and_then(|value|value.context_percent).map(|v|format!("{v:.0}%")).unwrap_or_else(||"?".into());
-        let absolute=if self.preferences.on("ctx_absolute") && self.size.width>=100 {telemetry.and_then(|v|v.context_tokens).map(|used|format!(" {used}/{}",telemetry.and_then(|v|v.context_limit).map(|n|n.to_string()).unwrap_or_else(||"?".into()))).unwrap_or_default()} else {String::new()};
-        chips.push(("context",format!("Ctx {context}{absolute}")));
-        let memory = self.memory_cache.get(id.unwrap_or("")).and_then(|(usage, _)| *usage)
-            .map(|usage| format!("{} {}/u {}",
-                if self.memory_repo.get(id.unwrap_or("")).copied().unwrap_or(false) { "p" } else { "f" },
-                memory_fill_label(usage.project_chars, usage.project_cap_chars),
-                memory_fill_label(usage.user_chars, usage.user_cap_chars)))
+        let context = telemetry
+            .and_then(|value| value.context_percent)
+            .map(|v| format!("{v:.0}%"))
+            .unwrap_or_else(|| "?".into());
+        let absolute = if self.preferences.on("ctx_absolute") && self.size.width >= 100 {
+            telemetry
+                .and_then(|v| v.context_tokens)
+                .map(|used| {
+                    format!(
+                        " {used}/{}",
+                        telemetry
+                            .and_then(|v| v.context_limit)
+                            .map(|n| n.to_string())
+                            .unwrap_or_else(|| "?".into())
+                    )
+                })
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        chips.push(("context", format!("Ctx {context}{absolute}")));
+        let memory = self
+            .memory_cache
+            .get(id.unwrap_or(""))
+            .and_then(|(usage, _)| *usage)
+            .map(|usage| {
+                format!(
+                    "{} {}/u {}",
+                    if self
+                        .memory_repo
+                        .get(id.unwrap_or(""))
+                        .copied()
+                        .unwrap_or(false)
+                    {
+                        "p"
+                    } else {
+                        "f"
+                    },
+                    memory_fill_label(usage.project_chars, usage.project_cap_chars),
+                    memory_fill_label(usage.user_chars, usage.user_cap_chars)
+                )
+            })
             .unwrap_or_else(|| "u ? · scope ?".to_owned());
         chips.push(("memory", memory));
-        let beliefs = telemetry.and_then(|value| value.lore.as_deref())
+        let beliefs = telemetry
+            .and_then(|value| value.lore.as_deref())
             .filter(|label| label.ends_with(" beliefs"))
             .unwrap_or("Beliefs");
         chips.push(("beliefs", beliefs.to_owned()));
         let engine = identity.and_then(|pair| pair.0.as_deref());
-        if let Some(label) = telemetry.and_then(|value| value.billing_label(engine))
+        if let Some(label) = telemetry
+            .and_then(|value| value.billing_label(engine))
             .or_else(|| match engine {
                 Some("deepseek" | "glm") => Some("$?".into()),
                 _ => None,
-            }) {
+            })
+        {
             chips.push(("cost", label));
         }
         if engine == Some("deepseek") {
@@ -331,24 +525,37 @@ impl App {
     }
 
     pub(super) fn waiting_for_input(&self, id: &str) -> bool {
-        self.input_requests.iter().any(|request| request.session_id == id && !request.sending)
+        self.input_requests
+            .iter()
+            .any(|request| request.session_id == id && !request.sending)
     }
 
     pub(super) fn activity_label(&self, id: &str) -> Option<&'static str> {
         let (running, queued) = self.session_activity.get(id).copied().unwrap_or_default();
-        if self.local_shell_jobs.iter().any(|job| job.session == id) { Some("Local shell") }
-        else if running { Some("Processing") }
-        else if queued > 0 { Some("Queued") }
-        else { None }
+        if self.local_shell_jobs.iter().any(|job| job.session == id) {
+            Some("Local shell")
+        } else if running {
+            Some("Processing")
+        } else if queued > 0 {
+            Some("Queued")
+        } else {
+            None
+        }
     }
 
     pub(super) fn tick_spinner(&mut self, now: Instant) -> bool {
-        if !self.groups.iter().filter_map(|group| group.active_id())
-            .any(|id| self.activity_label(id).is_some()) {
+        if !self
+            .groups
+            .iter()
+            .filter_map(|group| group.active_id())
+            .any(|id| self.activity_label(id).is_some())
+        {
             self.spinner_at = now;
             return false;
         }
-        if now.duration_since(self.spinner_at) < SPINNER_INTERVAL { return false; }
+        if now.duration_since(self.spinner_at) < SPINNER_INTERVAL {
+            return false;
+        }
         self.spinner_at = now;
         self.spinner_frame = (self.spinner_frame + 1) % SPINNER_FRAMES.len();
         true
@@ -361,7 +568,9 @@ impl App {
             self.blink_at = now;
             return std::mem::replace(&mut self.blink_on, true) == false;
         }
-        if now.duration_since(self.blink_at) < INPUT_BLINK_INTERVAL { return false; }
+        if now.duration_since(self.blink_at) < INPUT_BLINK_INTERVAL {
+            return false;
+        }
         self.blink_at = now;
         self.blink_on = !self.blink_on;
         true
@@ -370,30 +579,58 @@ impl App {
     pub(super) fn tab_at(&self, index: usize, pane: Rect, column: u16) -> Option<usize> {
         let mut x = pane.x.saturating_add(2); // border and left tab padding
         for (position, id) in self.groups[index].tabs.iter().enumerate() {
-            let title = self.sessions.iter().find(|session| &session.id == id)
-                .map(|session| session.title.as_str()).unwrap_or(id);
+            let title = self
+                .sessions
+                .iter()
+                .find(|session| &session.id == id)
+                .map(|session| session.title.as_str())
+                .unwrap_or(id);
             let end = x.saturating_add(title.width() as u16);
-            if column >= x.saturating_sub(1) && column <= end { return Some(position); }
+            if column >= x.saturating_sub(1) && column <= end {
+                return Some(position);
+            }
             x = end.saturating_add(3); // right padding, divider, left padding
-            if x >= pane.right() { break; }
+            if x >= pane.right() {
+                break;
+            }
         }
         None
     }
 
     pub(super) fn focus_ring(&self) -> Vec<Focus> {
         let layout = self.layout(self.size);
-        let pane = layout.panes.as_ref().and_then(|panes| panes.get(self.active_group)).copied().unwrap_or(layout.body);
+        let pane = layout
+            .panes
+            .as_ref()
+            .and_then(|panes| panes.get(self.active_group))
+            .copied()
+            .unwrap_or(layout.body);
         let mut ring = vec![Focus::Prompt, Focus::Tabs, Focus::Transcript];
-        ring.extend(self.chip_window(self.active_group, usize::from(self.pane_regions(self.active_group, pane)[3].width))
-            .into_iter().map(|(kind, _)| Focus::Chip(kind)));
-        if layout.rail.is_some() { ring.push(Focus::Rail); }
+        ring.extend(
+            self.chip_window(
+                self.active_group,
+                usize::from(self.pane_regions(self.active_group, pane)[3].width),
+            )
+            .into_iter()
+            .map(|(kind, _)| Focus::Chip(kind)),
+        );
+        if layout.rail.is_some() {
+            ring.push(Focus::Rail);
+        }
         ring
     }
 
     pub(super) fn cycle_focus(&mut self, reverse: bool) {
         let ring = self.focus_ring();
-        let current = ring.iter().position(|focus| *focus == self.focus).unwrap_or(0);
-        let next = if reverse { (current + ring.len() - 1) % ring.len() } else { (current + 1) % ring.len() };
+        let current = ring
+            .iter()
+            .position(|focus| *focus == self.focus)
+            .unwrap_or(0);
+        let next = if reverse {
+            (current + ring.len() - 1) % ring.len()
+        } else {
+            (current + 1) % ring.len()
+        };
         self.focus = ring[next];
     }
 
@@ -408,10 +645,17 @@ impl App {
             "memory" => self.open_memory_menu(group),
             "more" => {
                 let layout = self.layout(self.size);
-                let pane = layout.panes.as_ref().and_then(|panes| panes.get(group)).copied().unwrap_or(layout.body);
-                let visible = self.chip_window(group, usize::from(self.pane_regions(group, pane)[3].width));
+                let pane = layout
+                    .panes
+                    .as_ref()
+                    .and_then(|panes| panes.get(group))
+                    .copied()
+                    .unwrap_or(layout.body);
+                let visible =
+                    self.chip_window(group, usize::from(self.pane_regions(group, pane)[3].width));
                 let count = visible.len().saturating_sub(1).max(1);
-                self.chip_offsets[group] = (self.chip_offsets[group] + count) % self.chips(group).len();
+                self.chip_offsets[group] =
+                    (self.chip_offsets[group] + count) % self.chips(group).len();
             }
             kind => self.open_chip_info(kind, group),
         }
@@ -419,9 +663,14 @@ impl App {
 
     pub(super) fn chip_window(&self, index: usize, width: usize) -> Vec<(&'static str, String)> {
         let all = self.chips(index);
-        let full_width = all.iter().map(|(kind, label)| chip_text(kind, label).width()).sum::<usize>()
+        let full_width = all
+            .iter()
+            .map(|(kind, label)| chip_text(kind, label).width())
+            .sum::<usize>()
             + all.len().saturating_sub(1);
-        if full_width <= width { return all; }
+        if full_width <= width {
+            return all;
+        }
         let budget = width.saturating_sub(chip_text("more", "+8").width() + 1);
         let mut shown = Vec::new();
         let mut used = 0;
@@ -430,7 +679,9 @@ impl App {
             let (kind, label) = &all[(start + step) % all.len()];
             let gap = usize::from(!shown.is_empty());
             let room = budget.saturating_sub(used + gap);
-            if room < 3 { break; }
+            if room < 3 {
+                break;
+            }
             let text_width = chip_text(kind, label).width();
             if text_width > room {
                 if shown.is_empty() {
@@ -444,48 +695,82 @@ impl App {
             shown.push((*kind, label.clone()));
         }
         let hidden = all.len().saturating_sub(shown.len());
-        if hidden > 0 { shown.push(("more", format!("+{hidden}"))); }
+        if hidden > 0 {
+            shown.push(("more", format!("+{hidden}")));
+        }
         shown
     }
 
     pub(super) fn pane_regions(&self, index: usize, area: Rect) -> [Rect; 6] {
         let group = &self.groups[index];
-        let draft = group.active_id().map(|id| {
-            if self.active_group == index { self.input.as_str() }
-            else { self.input_drafts.get(&(index, id.to_owned()))
-                .map(|(text, _)| text.as_str()).unwrap_or("") }
-        }).unwrap_or("");
+        let draft = group
+            .active_id()
+            .map(|id| {
+                if self.active_group == index {
+                    self.input.as_str()
+                } else {
+                    self.input_drafts
+                        .get(&(index, id.to_owned()))
+                        .map(|(text, _)| text.as_str())
+                        .unwrap_or("")
+                }
+            })
+            .unwrap_or("");
         let chooser_height = if self.active_group == index {
             self.chooser_rect(area).map_or(0, |rect| rect.height)
-        } else { 0 };
-        let regions = Layout::default().direction(Direction::Vertical).constraints([
-            Constraint::Length(3), Constraint::Min(1), Constraint::Length(chooser_height),
-            Constraint::Length(1), Constraint::Length(prompt_height(draft, area.height)),
-            Constraint::Length(1),
-        ]).split(area);
+        } else {
+            0
+        };
+        let regions = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),
+                Constraint::Min(1),
+                Constraint::Length(chooser_height),
+                Constraint::Length(1),
+                Constraint::Length(prompt_height(draft, area.height)),
+                Constraint::Length(1),
+            ])
+            .split(area);
         std::array::from_fn(|index| regions[index])
     }
 
     pub(super) fn chip_hit_at(&self, column: u16, row: u16) -> Option<ChipHit> {
         if let Some(hits) = self.rendered_chip_hits.borrow().as_ref() {
-            return hits.iter().find(|hit| hit.rect.contains(
-                ratatui::layout::Position::new(column, row))).cloned();
+            return hits
+                .iter()
+                .find(|hit| {
+                    hit.rect
+                        .contains(ratatui::layout::Position::new(column, row))
+                })
+                .cloned();
         }
         // Before the first paint, tests and synthetic input may still use
         // the current size. Interactive input always uses painted regions.
         let layout = self.layout(self.size);
-        let panes = layout.panes.map(|panes| panes.into_iter().enumerate().collect::<Vec<_>>())
+        let panes = layout
+            .panes
+            .map(|panes| panes.into_iter().enumerate().collect::<Vec<_>>())
             .unwrap_or_else(|| vec![(self.active_group, layout.body)]);
         for (group, pane) in panes {
-            if self.diff_pane && group != self.active_group { continue; }
+            if self.diff_pane && group != self.active_group {
+                continue;
+            }
             let strip = self.pane_regions(group, pane)[3];
-            if row != strip.y || column < strip.x || column >= strip.right() { continue; }
+            if row != strip.y || column < strip.x || column >= strip.right() {
+                continue;
+            }
             let mut x = strip.x;
             for (kind, label) in self.chip_window(group, usize::from(strip.width)) {
                 let width = chip_text(kind, &label).width() as u16;
                 let end = x.saturating_add(width).min(strip.right());
                 if column >= x && column < end {
-                    return Some(ChipHit { group, kind, rect: Rect::new(x, strip.y, end - x, 1), pane });
+                    return Some(ChipHit {
+                        group,
+                        kind,
+                        rect: Rect::new(x, strip.y, end - x, 1),
+                        pane,
+                    });
                 }
                 x = end.saturating_add(1);
             }
@@ -494,39 +779,71 @@ impl App {
     }
 
     pub(super) fn link_at(&self, column: u16, row: u16) -> Option<String> {
-        self.visible_links.borrow().iter().find(|(rect, _)| rect.contains(
-            ratatui::layout::Position::new(column, row)))
+        self.visible_links
+            .borrow()
+            .iter()
+            .find(|(rect, _)| rect.contains(ratatui::layout::Position::new(column, row)))
             .map(|(_, url)| url.clone())
     }
 
     pub(super) fn pointer_on_link(&self) -> bool {
-        !self.link_interaction_blocked() && self.link_hover_position
-            .is_some_and(|(column, row)| self.link_at(column, row).is_some())
+        !self.link_interaction_blocked()
+            && self
+                .link_hover_position
+                .is_some_and(|(column, row)| self.link_at(column, row).is_some())
     }
 
     pub(super) fn link_interaction_blocked(&self) -> bool {
-        self.active_chooser_rect().is_some() || self.active_request_index().is_some()
-            || self.map_modal || self.diff_modal || self.tool_modal || self.action_menu
-            || self.history_modal || self.queue_picker.is_some() || self.attach_picker.is_some()
-            || self.branch_picker.is_some() || self.lore_picker.is_some()
-            || self.settings_menu.is_some() || self.model_picker.is_some()
-            || self.effort_picker.is_some() || self.permission_picker.is_some()
-            || self.engine_picker || self.new_session.is_some() || self.repo_picker.is_some()
-            || self.chip_info.is_some() || self.stop_confirmation.is_some()
+        self.active_chooser_rect().is_some()
+            || self.active_request_index().is_some()
+            || self.map_modal
+            || self.diff_modal
+            || self.tool_modal
+            || self.action_menu
+            || self.history_modal
+            || self.queue_picker.is_some()
+            || self.attach_picker.is_some()
+            || self.branch_picker.is_some()
+            || self.lore_picker.is_some()
+            || self.settings_menu.is_some()
+            || self.model_picker.is_some()
+            || self.effort_picker.is_some()
+            || self.permission_picker.is_some()
+            || self.engine_picker
+            || self.new_session.is_some()
+            || self.repo_picker.is_some()
+            || self.chip_info.is_some()
+            || self.stop_confirmation.is_some()
     }
 
     pub(super) fn repo_detail(&self, group: usize) -> Option<String> {
         let id = self.groups[group].active_id()?;
-        let (Some(doxa_worktrees::RepoStatus::Repository { base, checked_out, worktree, .. }), _) = self.repo_cache.get(id)? else {
+        let (
+            Some(doxa_worktrees::RepoStatus::Repository {
+                base,
+                checked_out,
+                worktree,
+                ..
+            }),
+            _,
+        ) = self.repo_cache.get(id)?
+        else {
             return None;
         };
         let state = if let Some(worktree) = worktree {
-            if worktree == "linked worktree" { "linked worktree".to_owned() }
-            else { format!("managed worktree {}", safe_label(worktree)) }
-        } else { "main checkout".to_owned() };
-        Some(format!("base {} · HEAD {} · {state}",
+            if worktree == "linked worktree" {
+                "linked worktree".to_owned()
+            } else {
+                format!("managed worktree {}", safe_label(worktree))
+            }
+        } else {
+            "main checkout".to_owned()
+        };
+        Some(format!(
+            "base {} · HEAD {} · {state}",
             safe_label(base.as_deref().unwrap_or("?")),
-            safe_label(checked_out.as_deref().unwrap_or("detached"))))
+            safe_label(checked_out.as_deref().unwrap_or("detached"))
+        ))
     }
 
     pub(super) fn open_chip_info(&mut self, kind: &'static str, group: usize) {
@@ -537,8 +854,12 @@ impl App {
             self.open_diagnostic(if kind == "cost" { "usage" } else { "context" });
             return;
         }
-        let mut label = self.chips(group).into_iter().find(|(candidate, _)| *candidate == kind)
-            .map(|(_, label)| label).unwrap_or_default();
+        let mut label = self
+            .chips(group)
+            .into_iter()
+            .find(|(candidate, _)| *candidate == kind)
+            .map(|(_, label)| label)
+            .unwrap_or_default();
         if kind == "repo" {
             if let Some(detail) = self.repo_detail(group) {
                 label.push_str(" · ");
@@ -546,7 +867,13 @@ impl App {
             }
         }
         self.active_group = group;
-        self.chip_info = Some(ChipInfo { kind, label, lines: Vec::new(), scroll: 0, owner: None });
+        self.chip_info = Some(ChipInfo {
+            kind,
+            label,
+            lines: Vec::new(),
+            scroll: 0,
+            owner: None,
+        });
         if self.active_chooser_rect().is_none() {
             self.chip_info = None;
             self.notice = "Enlarge active pane to inspect chip details".into();
@@ -557,26 +884,31 @@ impl App {
     /// highlight and does not start or extend pointer tooltips.
     pub(super) fn tick_chip_hover(&mut self, now: Instant) -> bool {
         if self.link_interaction_blocked() || self.chip_hover.is_none() {
-            let changed = self.chip_tooltip_visible || (self.link_interaction_blocked() && self.chip_hover.is_some());
+            let changed = self.chip_tooltip_visible
+                || (self.link_interaction_blocked() && self.chip_hover.is_some());
             self.chip_hover = None;
             self.chip_hover_started = None;
             self.chip_tooltip_visible = false;
             return changed;
         }
         let hit = self.chip_hover.as_ref().unwrap();
-        if self.chip_hover_started.as_ref().is_none_or(|(owner,_)|owner != hit) {
+        if self
+            .chip_hover_started
+            .as_ref()
+            .is_none_or(|(owner, _)| owner != hit)
+        {
             self.chip_hover_started = Some((hit.clone(), now));
             let changed = self.chip_tooltip_visible;
             self.chip_tooltip_visible = false;
             return changed;
         }
-        if !self.chip_tooltip_visible && now.saturating_duration_since(self.chip_hover_started.as_ref().unwrap().1) >= Duration::from_millis(500) {
+        if !self.chip_tooltip_visible
+            && now.saturating_duration_since(self.chip_hover_started.as_ref().unwrap().1)
+                >= Duration::from_millis(500)
+        {
             self.chip_tooltip_visible = true;
             return true;
         }
         false
     }
-
-
-
 }

@@ -1,23 +1,67 @@
 //! Local command registry, prompt dispatch and keyboard-only shell execution.
+use super::{
+    actions, append_transcript, operations_menu, permission_index, safe_label, transcript_tail,
+    transcript_tools, unsafe_input_char, App, ChipInfo, Focus, Split, ENGINE_CHOICES,
+    MAX_TRANSCRIPT_BYTES, MIN_RAIL_WIDTH,
+};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use super::{actions, append_transcript, operations_menu, permission_index, safe_label,
-    transcript_tail, transcript_tools, unsafe_input_char, App, ChipInfo, Focus, Split, ENGINE_CHOICES,
-    MAX_TRANSCRIPT_BYTES, MIN_RAIL_WIDTH};
 
 /// Every reserved DOXA slash command has one identity in the registry. Unknown
 /// provider and plugin commands are intentionally absent; `!` is keyboard-only.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum LocalCommand {
-    Peers, Split, Vsplit, Diff, Pane, Movepane, Sidebar, Collection, Msg, Fleet,
-    Mesh, Img, Login, Logout, Settings, Setup, Doctor, Plugins, ReloadPlugins,
-    Model, Engine, Branch, Mode, Effort, Usage, Context, Queue, Clear, Detach,
-    Attach, Sessions, Rename, Dir, Cd, Memory, Beliefs, Pending, Search, Resume,
-    Compact, Update, Help, About,
+    Peers,
+    Split,
+    Vsplit,
+    Diff,
+    Pane,
+    Movepane,
+    Sidebar,
+    Collection,
+    Msg,
+    Fleet,
+    Mesh,
+    Img,
+    Login,
+    Logout,
+    Settings,
+    Setup,
+    Doctor,
+    Plugins,
+    ReloadPlugins,
+    Model,
+    Engine,
+    Branch,
+    Mode,
+    Effort,
+    Usage,
+    Context,
+    Queue,
+    Clear,
+    Detach,
+    Attach,
+    Sessions,
+    Rename,
+    Dir,
+    Cd,
+    Memory,
+    Beliefs,
+    Pending,
+    Search,
+    Resume,
+    Compact,
+    Update,
+    Help,
+    About,
 }
 
 impl LocalCommand {
     fn name(self) -> &'static str {
-        COMMANDS.iter().find(|row| row.kind == self).expect("registered command").name
+        COMMANDS
+            .iter()
+            .find(|row| row.kind == self)
+            .expect("registered command")
+            .name
     }
 }
 
@@ -28,11 +72,16 @@ impl std::fmt::Display for LocalCommand {
 }
 
 #[derive(Debug, PartialEq)]
-struct ParsedCommand<'a> { kind: LocalCommand, args: &'a str }
+struct ParsedCommand<'a> {
+    kind: LocalCommand,
+    args: &'a str,
+}
 
 impl<'a> ParsedCommand<'a> {
     fn parse(input: &'a str) -> Option<Self> {
-        if input.contains('\n') { return None; }
+        if input.contains('\n') {
+            return None;
+        }
         let line = input.trim();
         let (name, args) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
         let kind = COMMANDS.iter().find(|row| row.name == name)?.kind;
@@ -40,8 +89,13 @@ impl<'a> ParsedCommand<'a> {
     }
 }
 
-pub(super) struct CommandHelp { kind: LocalCommand, pub(super) name: &'static str, pub(super) form: &'static str,
-    pub(super) summary: &'static str, pub(super) support: &'static str }
+pub(super) struct CommandHelp {
+    kind: LocalCommand,
+    pub(super) name: &'static str,
+    pub(super) form: &'static str,
+    pub(super) summary: &'static str,
+    pub(super) support: &'static str,
+}
 
 // Names mirror Python 1.19's command registry. Forms and support describe
 // this Rust frontend, including commands the Python frontend alone provides.
@@ -99,32 +153,63 @@ pub(super) const FLEET_ACTIONS: &[(&str, &str)] = &[
     ("/fleet attach", "Choose a current-run slot"),
     ("/fleet mesh", "Open current run graph"),
     ("/fleet stop", "Stop this window's controller"),
-    ("/fleet detach", "Continue current controller outside this window"),
+    (
+        "/fleet detach",
+        "Continue current controller outside this window",
+    ),
     ("/fleet runs", "Choose saved run"),
 ];
 
 impl App {
     pub(super) fn slash_suggestions(&self) -> Vec<(&str, &str)> {
-        if self.focus != Focus::Prompt || self.slash_dismissed
-            || self.active_request_index().is_some() || self.stop_confirmation.is_some()
-            || self.chip_info.is_some() || self.lore_picker.is_some() || self.settings_menu.is_some()
-            || self.new_session.is_some() || self.repo_picker.is_some() || self.model_picker.is_some()
-            || self.effort_picker.is_some() || self.permission_picker.is_some()
-            || self.engine_picker || self.action_menu || self.history_modal
-            || self.queue_picker.is_some() || self.attach_picker.is_some() || self.branch_picker.is_some()
-            || self.diff_modal || self.map_modal || self.tool_modal {
+        if self.focus != Focus::Prompt
+            || self.slash_dismissed
+            || self.active_request_index().is_some()
+            || self.stop_confirmation.is_some()
+            || self.chip_info.is_some()
+            || self.lore_picker.is_some()
+            || self.settings_menu.is_some()
+            || self.new_session.is_some()
+            || self.repo_picker.is_some()
+            || self.model_picker.is_some()
+            || self.effort_picker.is_some()
+            || self.permission_picker.is_some()
+            || self.engine_picker
+            || self.action_menu
+            || self.history_modal
+            || self.queue_picker.is_some()
+            || self.attach_picker.is_some()
+            || self.branch_picker.is_some()
+            || self.diff_modal
+            || self.map_modal
+            || self.tool_modal
+        {
             return Vec::new();
         }
         let query = self.input.as_str();
-        if !query.starts_with('/') || query.chars().any(char::is_whitespace) { return Vec::new(); }
-        COMMANDS.iter().filter(|row| row.name.starts_with(query))
+        if !query.starts_with('/') || query.chars().any(char::is_whitespace) {
+            return Vec::new();
+        }
+        COMMANDS
+            .iter()
+            .filter(|row| row.name.starts_with(query))
             .map(|row| (row.name, row.summary))
-            .chain(self.plugin_commands.iter().filter(|row| row.name.starts_with(query)).map(|row| (row.name.as_str(), row.summary.as_str()))).collect()
+            .chain(
+                self.plugin_commands
+                    .iter()
+                    .filter(|row| row.name.starts_with(query))
+                    .map(|row| (row.name.as_str(), row.summary.as_str())),
+            )
+            .collect()
     }
 
     pub(super) fn complete_slash(&mut self) -> bool {
         let matches = self.slash_suggestions();
-        let Some((command, _)) = matches.get(self.slash_selected.min(matches.len().saturating_sub(1))) else { return false; };
+        let Some((command, _)) =
+            matches.get(self.slash_selected.min(matches.len().saturating_sub(1)))
+        else {
+            return false;
+        };
         let command = (*command).to_owned();
         self.input = command;
         self.input_cursor = self.input.len();
@@ -136,16 +221,45 @@ impl App {
     /// provider and plugin commands still pass through. Known unsupported
     /// forms stay in the draft.
     pub(super) fn dispatch_prompt_command(&mut self) -> bool {
-        let Some(parsed) = ParsedCommand::parse(self.input.trim()) else { return false; };
+        let Some(parsed) = ParsedCommand::parse(self.input.trim()) else {
+            return false;
+        };
         let command = parsed.kind;
         let name = command.name();
         let args: Vec<&str> = parsed.args.split_whitespace().collect();
-        if !matches!(command, LocalCommand::Help | LocalCommand::About | LocalCommand::Sessions | LocalCommand::Settings | LocalCommand::Model | LocalCommand::Effort | LocalCommand::Engine
-            | LocalCommand::Mode | LocalCommand::Beliefs | LocalCommand::Diff | LocalCommand::Peers | LocalCommand::Split
-            | LocalCommand::Vsplit | LocalCommand::Pane | LocalCommand::Sidebar | LocalCommand::Detach | LocalCommand::Dir) {
+        if !matches!(
+            command,
+            LocalCommand::Help
+                | LocalCommand::About
+                | LocalCommand::Sessions
+                | LocalCommand::Settings
+                | LocalCommand::Model
+                | LocalCommand::Effort
+                | LocalCommand::Engine
+                | LocalCommand::Mode
+                | LocalCommand::Beliefs
+                | LocalCommand::Diff
+                | LocalCommand::Peers
+                | LocalCommand::Split
+                | LocalCommand::Vsplit
+                | LocalCommand::Pane
+                | LocalCommand::Sidebar
+                | LocalCommand::Detach
+                | LocalCommand::Dir
+        ) {
             return false;
         }
-        if !args.is_empty() && matches!(command, LocalCommand::Model | LocalCommand::Effort | LocalCommand::Mode | LocalCommand::Engine) { return false; }
+        if !args.is_empty()
+            && matches!(
+                command,
+                LocalCommand::Model
+                    | LocalCommand::Effort
+                    | LocalCommand::Mode
+                    | LocalCommand::Engine
+            )
+        {
+            return false;
+        }
         if command == LocalCommand::Sessions && !args.is_empty() {
             let action = crate::sessions::Action::parse(&args);
             match action {
@@ -162,19 +276,32 @@ impl App {
             match args.as_slice() {
                 [number] => match number.parse::<usize>() {
                     Ok(index) if index > 0 && index <= self.pane_count() => Some(index - 1),
-                    _ => { self.notice = format!("Choose pane 1–{}", self.pane_count()); return true; }
+                    _ => {
+                        self.notice = format!("Choose pane 1–{}", self.pane_count());
+                        return true;
+                    }
                 },
-                _ => { self.notice = "Usage: /pane [number]".into(); return true; }
+                _ => {
+                    self.notice = "Usage: /pane [number]".into();
+                    return true;
+                }
             }
-        } else { None };
+        } else {
+            None
+        };
         let sidebar = if command == LocalCommand::Sidebar && !args.is_empty() {
             match args.as_slice() {
                 ["on"] => Some((true, None)),
                 ["off"] => Some((false, None)),
                 ["wider"] => Some((true, Some(self.rail_width.saturating_add(4).min(80)))),
-                ["narrower"] => Some((true, Some(self.rail_width.saturating_sub(4).max(MIN_RAIL_WIDTH)))),
+                ["narrower"] => Some((
+                    true,
+                    Some(self.rail_width.saturating_sub(4).max(MIN_RAIL_WIDTH)),
+                )),
                 ["width", width] => match width.parse::<u16>() {
-                    Ok(width) if (MIN_RAIL_WIDTH..=80).contains(&width) => Some((true, Some(width))),
+                    Ok(width) if (MIN_RAIL_WIDTH..=80).contains(&width) => {
+                        Some((true, Some(width)))
+                    }
                     _ => {
                         self.notice = "Sidebar width must be 12–80 cells".into();
                         return true;
@@ -185,7 +312,9 @@ impl App {
                     return true;
                 }
             }
-        } else { None };
+        } else {
+            None
+        };
         self.input.clear();
         self.input_cursor = 0;
         match command {
@@ -205,7 +334,10 @@ impl App {
                 self.map_modal = true;
                 self.peer_map.selected = 0;
                 self.pending_peer_refresh = Some(
-                    self.groups[self.active_group].active_id().unwrap_or("").to_owned(),
+                    self.groups[self.active_group]
+                        .active_id()
+                        .unwrap_or("")
+                        .to_owned(),
                 );
             }
             LocalCommand::Split => {
@@ -229,7 +361,9 @@ impl App {
             LocalCommand::Sidebar => {
                 if let Some((visible, width)) = sidebar {
                     self.rail_visible = visible;
-                    if let Some(width) = width { self.rail_width = width; }
+                    if let Some(width) = width {
+                        self.rail_width = width;
+                    }
                 } else {
                     self.rail_visible = !self.rail_visible;
                 }
@@ -237,9 +371,12 @@ impl App {
             }
             LocalCommand::Detach => self.detach_active_tab(),
             LocalCommand::Dir => {
-                self.notice = self.groups[self.active_group].active_id()
+                self.notice = self.groups[self.active_group]
+                    .active_id()
                     .and_then(|id| self.session_cwds.get(id))
-                    .map(|cwd| format!("Session directory · {}", safe_label(&cwd.to_string_lossy())))
+                    .map(|cwd| {
+                        format!("Session directory · {}", safe_label(&cwd.to_string_lossy()))
+                    })
                     .unwrap_or_else(|| "Session directory unavailable".into());
             }
             _ => unreachable!("recognized bare DOXA command"),
@@ -250,36 +387,90 @@ impl App {
     // This single call site is the prompt Enter handler, never the command
     // registry, daemon frames, remote messages or model tool callbacks.
     pub(super) fn submit_keyboard_shell(&mut self) {
-        let Some(id) = self.groups[self.active_group].active_id().map(str::to_owned) else { self.notice = "Select a session before running a local shell".into(); return; };
-        if self.offline_ids.contains(&id) { self.notice = "Archived transcript is read-only".into(); return; }
-        let Some(cwd) = self.session_cwds.get(&id).cloned() else { self.notice = "Session directory unavailable".into(); return; };
-        let command = self.input[1..].trim().to_owned();
-        if command.is_empty() { self.notice = "!<command> runs locally in the session directory; output is not sent to the model or saved".into(); return; }
-        if self.local_shell_jobs.len() >= 4 { self.notice = "Wait for a local shell command to finish".into(); return; }
-        let shell_id = self.next_shell_id; self.next_shell_id = self.next_shell_id.saturating_add(1);
-        let initial = crate::shell::Result { id: shell_id, command: command.clone(), output: String::new(), status: "running · Ctrl+C cancel".into(), running: true, dropped_bytes: 0 };
-        if let Some(session) = self.sessions.iter_mut().find(|session| session.id == id) {
-            append_transcript(session, &format!("\n\n{}{}\n\n", transcript_tools::SHELL_PREFIX, serde_json::to_string(&initial).unwrap()));
+        let Some(id) = self.groups[self.active_group]
+            .active_id()
+            .map(str::to_owned)
+        else {
+            self.notice = "Select a session before running a local shell".into();
+            return;
+        };
+        if self.offline_ids.contains(&id) {
+            self.notice = "Archived transcript is read-only".into();
+            return;
         }
-        self.local_shell_jobs.push(crate::shell::Job::start(id, shell_id, command, &cwd));
-        self.input.clear(); self.input_cursor = 0; self.notice = "Local shell running · output stays in this window".into();
+        let Some(cwd) = self.session_cwds.get(&id).cloned() else {
+            self.notice = "Session directory unavailable".into();
+            return;
+        };
+        let command = self.input[1..].trim().to_owned();
+        if command.is_empty() {
+            self.notice = "!<command> runs locally in the session directory; output is not sent to the model or saved".into();
+            return;
+        }
+        if self.local_shell_jobs.len() >= 4 {
+            self.notice = "Wait for a local shell command to finish".into();
+            return;
+        }
+        let shell_id = self.next_shell_id;
+        self.next_shell_id = self.next_shell_id.saturating_add(1);
+        let initial = crate::shell::Result {
+            id: shell_id,
+            command: command.clone(),
+            output: String::new(),
+            status: "running · Ctrl+C cancel".into(),
+            running: true,
+            dropped_bytes: 0,
+        };
+        if let Some(session) = self.sessions.iter_mut().find(|session| session.id == id) {
+            append_transcript(
+                session,
+                &format!(
+                    "\n\n{}{}\n\n",
+                    transcript_tools::SHELL_PREFIX,
+                    serde_json::to_string(&initial).unwrap()
+                ),
+            );
+        }
+        self.local_shell_jobs
+            .push(crate::shell::Job::start(id, shell_id, command, &cwd));
+        self.input.clear();
+        self.input_cursor = 0;
+        self.notice = "Local shell running · output stays in this window".into();
     }
 
     pub(super) fn poll_shell(&mut self) -> bool {
-        let mut changed = false; let mut index = 0;
+        let mut changed = false;
+        let mut index = 0;
         while index < self.local_shell_jobs.len() {
             if let Some(result) = self.local_shell_jobs[index].poll() {
                 let job = self.local_shell_jobs.remove(index);
-                if let Some(session) = self.sessions.iter_mut().find(|session| session.id == job.session) {
+                if let Some(session) = self
+                    .sessions
+                    .iter_mut()
+                    .find(|session| session.id == job.session)
+                {
                     let prefix = format!("{}{{\"id\":{},", transcript_tools::SHELL_PREFIX, job.id);
                     if let Some(start) = session.transcript.find(&prefix) {
-                        let end = session.transcript[start..].find("\n\n").map_or(session.transcript.len(), |end| start + end);
-                        session.transcript.replace_range(start..end, &format!("{}{}", transcript_tools::SHELL_PREFIX, serde_json::to_string(&result).unwrap()));
-                        if session.transcript.len() > MAX_TRANSCRIPT_BYTES { session.transcript = transcript_tail(&session.transcript).to_owned(); }
+                        let end = session.transcript[start..]
+                            .find("\n\n")
+                            .map_or(session.transcript.len(), |end| start + end);
+                        session.transcript.replace_range(
+                            start..end,
+                            &format!(
+                                "{}{}",
+                                transcript_tools::SHELL_PREFIX,
+                                serde_json::to_string(&result).unwrap()
+                            ),
+                        );
+                        if session.transcript.len() > MAX_TRANSCRIPT_BYTES {
+                            session.transcript = transcript_tail(&session.transcript).to_owned();
+                        }
                         changed = true;
                     }
                 }
-            } else { index += 1; }
+            } else {
+                index += 1;
+            }
         }
         changed
     }
@@ -288,71 +479,171 @@ impl App {
         // Own the draft while dispatch mutates App; malformed known forms remain
         // in self.input until the action has actually been accepted.
         let line = self.input.clone();
-        let Some(parsed) = ParsedCommand::parse(&line) else { return false; };
+        let Some(parsed) = ParsedCommand::parse(&line) else {
+            return false;
+        };
         let command = parsed.kind;
         let args = parsed.args;
         match command {
             LocalCommand::Doctor if args.trim().is_empty() => {
-                let engine = self.groups[self.active_group].active_id().and_then(|id| self.session_identity.get(id)).and_then(|id| id.0.clone());
-                self.open_operations(operations_menu::Menu::maintenance("doctor", engine, false)); true
+                let engine = self.groups[self.active_group]
+                    .active_id()
+                    .and_then(|id| self.session_identity.get(id))
+                    .and_then(|id| id.0.clone());
+                self.open_operations(operations_menu::Menu::maintenance("doctor", engine, false));
+                true
             }
             LocalCommand::Update if matches!(args.trim(), "" | "--restart") => {
-                if self.fleet_controller.is_some() || self.groups.iter().flat_map(|g| &g.tabs).any(|id|
-                    self.session_activity.get(id).is_none_or(|(running, queued)| *running || *queued > 0)) {
-                    self.notice = "Wait for idle sessions and an idle fleet controller before updating".into(); return true;
+                if self.fleet_controller.is_some()
+                    || self.groups.iter().flat_map(|g| &g.tabs).any(|id| {
+                        self.session_activity
+                            .get(id)
+                            .is_none_or(|(running, queued)| *running || *queued > 0)
+                    })
+                {
+                    self.notice =
+                        "Wait for idle sessions and an idle fleet controller before updating"
+                            .into();
+                    return true;
                 }
-                self.restart_executable = if args.trim() == "--restart" { std::env::current_exe().ok() } else { None };
-                self.open_operations(operations_menu::Menu::maintenance("update", None, args.trim() == "--restart")); true
+                self.restart_executable = if args.trim() == "--restart" {
+                    std::env::current_exe().ok()
+                } else {
+                    None
+                };
+                self.open_operations(operations_menu::Menu::maintenance(
+                    "update",
+                    None,
+                    args.trim() == "--restart",
+                ));
+                true
             }
-            LocalCommand::Model | LocalCommand::Effort | LocalCommand::Mode | LocalCommand::Engine if !args.trim().is_empty() => {
+            LocalCommand::Model
+            | LocalCommand::Effort
+            | LocalCommand::Mode
+            | LocalCommand::Engine
+                if !args.trim().is_empty() =>
+            {
                 let target = args.trim();
-                if target.split_whitespace().count() != 1 || target.len() > 128 || target.chars().any(unsafe_input_char) {
-                    self.notice = format!("Usage: {command} <name>"); return true;
+                if target.split_whitespace().count() != 1
+                    || target.len() > 128
+                    || target.chars().any(unsafe_input_char)
+                {
+                    self.notice = format!("Usage: {command} <name>");
+                    return true;
                 }
                 if command == LocalCommand::Engine {
-                    if let Some(index) = ENGINE_CHOICES.iter().position(|engine| engine.eq_ignore_ascii_case(target)) {
-                        self.engine_selected = index; self.select_new_engine();
-                        self.input.clear(); self.input_cursor = 0;
-                    } else { self.notice = "Unknown engine · choose claude, codex, deepseek or glm".into(); }
+                    if let Some(index) = ENGINE_CHOICES
+                        .iter()
+                        .position(|engine| engine.eq_ignore_ascii_case(target))
+                    {
+                        self.engine_selected = index;
+                        self.select_new_engine();
+                        self.input.clear();
+                        self.input_cursor = 0;
+                    } else {
+                        self.notice =
+                            "Unknown engine · choose claude, codex, deepseek or glm".into();
+                    }
                     return true;
                 }
                 if command == LocalCommand::Mode {
                     if let Some(index) = permission_index(target) {
                         self.open_permission_picker();
-                        if let Some(picker) = &mut self.permission_picker { picker.1 = index; self.select_permission_mode(); self.input.clear(); self.input_cursor = 0; }
-                    } else { self.notice = "Unknown permission mode · /mode opens supported choices".into(); }
+                        if let Some(picker) = &mut self.permission_picker {
+                            picker.1 = index;
+                            self.select_permission_mode();
+                            self.input.clear();
+                            self.input_cursor = 0;
+                        }
+                    } else {
+                        self.notice =
+                            "Unknown permission mode · /mode opens supported choices".into();
+                    }
                     return true;
                 }
-                let Some(id) = self.groups[self.active_group].active_id().map(str::to_owned) else { self.notice = "Select a session first".into(); return true; };
-                self.requested_argument = Some((id, if command == LocalCommand::Model { "model" } else { "effort" }, target.into()));
-                if command == LocalCommand::Model { self.open_model_picker(); } else { self.open_effort_picker(); self.apply_requested_argument(); }
+                let Some(id) = self.groups[self.active_group]
+                    .active_id()
+                    .map(str::to_owned)
+                else {
+                    self.notice = "Select a session first".into();
+                    return true;
+                };
+                self.requested_argument = Some((
+                    id,
+                    if command == LocalCommand::Model {
+                        "model"
+                    } else {
+                        "effort"
+                    },
+                    target.into(),
+                ));
+                if command == LocalCommand::Model {
+                    self.open_model_picker();
+                } else {
+                    self.open_effort_picker();
+                    self.apply_requested_argument();
+                }
                 true
             }
-            LocalCommand::Setup | LocalCommand::Login | LocalCommand::Logout | LocalCommand::Plugins | LocalCommand::ReloadPlugins if args.trim().is_empty() || matches!(command, LocalCommand::Login | LocalCommand::Logout) => {
+            LocalCommand::Setup
+            | LocalCommand::Login
+            | LocalCommand::Logout
+            | LocalCommand::Plugins
+            | LocalCommand::ReloadPlugins
+                if args.trim().is_empty()
+                    || matches!(command, LocalCommand::Login | LocalCommand::Logout) =>
+            {
                 let kind = &command.name()[1..];
-                let menu = if matches!(command, LocalCommand::Login | LocalCommand::Logout) { operations_menu::Menu::with_auth_args(kind, args) }
-                    else if matches!(command, LocalCommand::Plugins | LocalCommand::ReloadPlugins) { Ok(operations_menu::Menu::with_plugin_report(command == LocalCommand::ReloadPlugins)) }
-                    else { Ok(operations_menu::Menu::new(kind)) };
-                let menu = match menu { Ok(menu) => menu, Err(error) => { self.notice = format!("{command}: {error}"); return true; } };
-                self.input.clear(); self.input_cursor = 0;
+                let menu = if matches!(command, LocalCommand::Login | LocalCommand::Logout) {
+                    operations_menu::Menu::with_auth_args(kind, args)
+                } else if matches!(command, LocalCommand::Plugins | LocalCommand::ReloadPlugins) {
+                    Ok(operations_menu::Menu::with_plugin_report(
+                        command == LocalCommand::ReloadPlugins,
+                    ))
+                } else {
+                    Ok(operations_menu::Menu::new(kind))
+                };
+                let menu = match menu {
+                    Ok(menu) => menu,
+                    Err(error) => {
+                        self.notice = format!("{command}: {error}");
+                        return true;
+                    }
+                };
+                self.input.clear();
+                self.input_cursor = 0;
                 self.memory_menu_pending = None;
                 self.memory_manager = None;
                 self.operations_menu = Some(menu);
-                self.chip_info = Some(ChipInfo { kind: "operations", label: String::new(),
-                    lines: self.operations_menu.as_ref().unwrap().lines(usize::from(self.size.width)),
-                    scroll: 0, owner: None });
+                self.chip_info = Some(ChipInfo {
+                    kind: "operations",
+                    label: String::new(),
+                    lines: self
+                        .operations_menu
+                        .as_ref()
+                        .unwrap()
+                        .lines(usize::from(self.size.width)),
+                    scroll: 0,
+                    owner: None,
+                });
                 if self.active_chooser_rect().is_none() {
-                    self.operations_menu = None; self.chip_info = None;
+                    self.operations_menu = None;
+                    self.chip_info = None;
                     self.notice = "Enlarge pane to open operations".into();
                 } else if let Some(menu) = &mut self.operations_menu {
                     menu.start_requested();
-                    if let Some(info) = &mut self.chip_info { info.lines = menu.lines(usize::from(self.size.width)); }
+                    if let Some(info) = &mut self.chip_info {
+                        info.lines = menu.lines(usize::from(self.size.width));
+                    }
                 }
                 true
             }
             LocalCommand::Memory if args.trim().is_empty() => {
-                self.input.clear(); self.input_cursor = 0;
-                self.open_memory_menu(self.active_group); true
+                self.input.clear();
+                self.input_cursor = 0;
+                self.open_memory_menu(self.active_group);
+                true
             }
             LocalCommand::Pending if args.trim().is_empty() => {
                 self.input.clear();
@@ -360,39 +651,69 @@ impl App {
                 self.open_pending_picker();
                 true
             }
-            LocalCommand::Pending => { self.notice = "Local command unavailable: /pending arguments".into(); true }
-            LocalCommand::Attach => { self.local_attach(args); true }
+            LocalCommand::Pending => {
+                self.notice = "Local command unavailable: /pending arguments".into();
+                true
+            }
+            LocalCommand::Attach => {
+                self.local_attach(args);
+                true
+            }
             LocalCommand::Branch => {
                 let target = args.trim();
-                if target.split_whitespace().count() > 1 || target.len() > 200
-                    || target.chars().any(unsafe_input_char) {
+                if target.split_whitespace().count() > 1
+                    || target.len() > 200
+                    || target.chars().any(unsafe_input_char)
+                {
                     self.notice = "Usage: /branch [local-or-remote-name]".into();
                 } else if let Some(id) = self.groups[self.active_group].active_id() {
-                    self.pending_queue_commands.push(crate::bridge::WorkerCommand::Branch(
-                        id.to_owned(), (!target.is_empty()).then(|| target.to_owned())));
+                    self.pending_queue_commands
+                        .push(crate::bridge::WorkerCommand::Branch(
+                            id.to_owned(),
+                            (!target.is_empty()).then(|| target.to_owned()),
+                        ));
                     self.input.clear();
                     self.input_cursor = 0;
                     self.notice = "Checking branch…".into();
-                } else { self.notice = "Select a session before switching branch".into(); }
+                } else {
+                    self.notice = "Select a session before switching branch".into();
+                }
                 true
             }
-            LocalCommand::Rename => { self.local_rename(args); true }
-            LocalCommand::Clear => { self.local_clear(args); true }
+            LocalCommand::Rename => {
+                self.local_rename(args);
+                true
+            }
+            LocalCommand::Clear => {
+                self.local_clear(args);
+                true
+            }
             LocalCommand::Usage | LocalCommand::Context => {
                 if !args.trim().is_empty() {
                     self.notice = format!("Usage: {command}");
                 } else {
-                    let kind = if command == LocalCommand::Usage { "usage" } else { "context" };
+                    let kind = if command == LocalCommand::Usage {
+                        "usage"
+                    } else {
+                        "context"
+                    };
                     self.input.clear();
                     self.input_cursor = 0;
                     self.open_diagnostic(kind);
                 }
                 true
             }
-            LocalCommand::Collection => { self.local_collection(args); true }
-            LocalCommand::Cd => { self.local_cd(args); true }
+            LocalCommand::Collection => {
+                self.local_collection(args);
+                true
+            }
+            LocalCommand::Cd => {
+                self.local_cd(args);
+                true
+            }
             LocalCommand::Compact => {
-                let engine = self.groups[self.active_group].active_id()
+                let engine = self.groups[self.active_group]
+                    .active_id()
                     .and_then(|id| self.session_identity.get(id))
                     .and_then(|identity| identity.0.as_deref());
                 if args.trim().is_empty() && engine == Some("claude") {
@@ -409,12 +730,31 @@ impl App {
                 self.local_mesh(args, None);
                 true
             }
-            LocalCommand::Msg => { self.local_message(args); true }
+            LocalCommand::Msg => {
+                self.local_message(args);
+                true
+            }
             LocalCommand::Movepane => {
                 let target = match args.split_whitespace().collect::<Vec<_>>().as_slice() {
-                    [] => (self.active_group + 1) % if self.pane_tree.is_some() { self.pane_count() } else { 2 },
-                    [number] if number.parse::<usize>().is_ok_and(|n| n > 0 && n <= self.groups.len()) => number.parse::<usize>().unwrap() - 1,
-                    _ => { self.notice = "Usage: /movepane [number]".into(); return true; }
+                    [] => {
+                        (self.active_group + 1)
+                            % if self.pane_tree.is_some() {
+                                self.pane_count()
+                            } else {
+                                2
+                            }
+                    }
+                    [number]
+                        if number
+                            .parse::<usize>()
+                            .is_ok_and(|n| n > 0 && n <= self.groups.len()) =>
+                    {
+                        number.parse::<usize>().unwrap() - 1
+                    }
+                    _ => {
+                        self.notice = "Usage: /movepane [number]".into();
+                        return true;
+                    }
                 };
                 if self.move_active_tab(target) {
                     self.input.clear();
@@ -428,20 +768,45 @@ impl App {
                 self.open_settings_menu();
                 true
             }
-            LocalCommand::Settings => { self.notice = "Usage: /settings · edit native preferences in the menu".into(); true }
-            LocalCommand::Setup => { self.notice = "Usage: /setup · use the selectable setup menu".into(); true }
-            LocalCommand::Fleet => { self.local_fleet(args);true }
-            LocalCommand::Img | LocalCommand::Login
-            | LocalCommand::Logout | LocalCommand::Doctor | LocalCommand::Plugins
-            | LocalCommand::ReloadPlugins | LocalCommand::Effort
+            LocalCommand::Settings => {
+                self.notice = "Usage: /settings · edit native preferences in the menu".into();
+                true
+            }
+            LocalCommand::Setup => {
+                self.notice = "Usage: /setup · use the selectable setup menu".into();
+                true
+            }
+            LocalCommand::Fleet => {
+                self.local_fleet(args);
+                true
+            }
+            LocalCommand::Img
+            | LocalCommand::Login
+            | LocalCommand::Logout
+            | LocalCommand::Doctor
+            | LocalCommand::Plugins
+            | LocalCommand::ReloadPlugins
+            | LocalCommand::Effort
             | LocalCommand::Update => {
                 self.notice = format!("Local command unavailable: {}", safe_label(command.name()));
                 true
             }
-            LocalCommand::Search => { self.local_search(args); true }
-            LocalCommand::Resume => { self.local_resume(args); true }
-            LocalCommand::Queue if args.trim().is_empty() => { self.open_queue(); true }
-            LocalCommand::Queue => { self.notice = "queue: open the picker and use X to cancel a selected item".into(); true }
+            LocalCommand::Search => {
+                self.local_search(args);
+                true
+            }
+            LocalCommand::Resume => {
+                self.local_resume(args);
+                true
+            }
+            LocalCommand::Queue if args.trim().is_empty() => {
+                self.open_queue();
+                true
+            }
+            LocalCommand::Queue => {
+                self.notice = "queue: open the picker and use X to cancel a selected item".into();
+                true
+            }
             _ => {
                 self.notice = format!("Local command unavailable: {}", safe_label(command.name()));
                 true
@@ -450,67 +815,163 @@ impl App {
     }
 
     pub(super) fn apply_requested_argument(&mut self) {
-        let Some((owner, kind, target)) = self.requested_argument.clone() else { return; };
-        if self.groups[self.active_group].active_id() != Some(owner.as_str()) { self.requested_argument = None; return; }
+        let Some((owner, kind, target)) = self.requested_argument.clone() else {
+            return;
+        };
+        if self.groups[self.active_group].active_id() != Some(owner.as_str()) {
+            self.requested_argument = None;
+            return;
+        }
         let chosen = if kind == "model" {
-            self.model_picker.as_ref().filter(|picker| picker.session_id == owner && !picker.loading)
+            self.model_picker
+                .as_ref()
+                .filter(|picker| picker.session_id == owner && !picker.loading)
                 .map(|picker| picker.models.iter().position(|model| model == &target))
         } else {
-            self.effort_picker.as_ref().filter(|picker| picker.session_id == owner)
+            self.effort_picker
+                .as_ref()
+                .filter(|picker| picker.session_id == owner)
                 .map(|picker| picker.levels.iter().position(|level| level == &target))
         };
-        let Some(chosen) = chosen else { return; };
+        let Some(chosen) = chosen else {
+            return;
+        };
         self.requested_argument = None;
         if let Some(index) = chosen {
-            if kind == "model" { self.model_picker.as_mut().unwrap().selected = index; self.model_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)); }
-            else { self.effort_picker.as_mut().unwrap().selected = index; self.select_effort(); }
-            self.input.clear(); self.input_cursor = 0;
+            if kind == "model" {
+                self.model_picker.as_mut().unwrap().selected = index;
+                self.model_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+            } else {
+                self.effort_picker.as_mut().unwrap().selected = index;
+                self.select_effort();
+            }
+            self.input.clear();
+            self.input_cursor = 0;
         } else {
             self.notice = format!("{target} is not in this session's reported {kind} choices");
         }
     }
 
-    pub(super) fn action_rows(&self) -> Vec<actions::Entry> { actions::entries(self, &self.action_query) }
+    pub(super) fn action_rows(&self) -> Vec<actions::Entry> {
+        actions::entries(self, &self.action_query)
+    }
 
     pub(super) fn action_key(&mut self, key: KeyEvent) -> bool {
         let rows = self.action_rows();
         match key.code {
-            KeyCode::Esc | KeyCode::Char('p') if key.code == KeyCode::Esc || key.modifiers.contains(KeyModifiers::CONTROL) => self.action_menu = false,
+            KeyCode::Esc | KeyCode::Char('p')
+                if key.code == KeyCode::Esc || key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.action_menu = false
+            }
             KeyCode::Up => self.action_selected = self.action_selected.saturating_sub(1),
-            KeyCode::Down => self.action_selected = (self.action_selected + 1).min(rows.len().saturating_sub(1)),
+            KeyCode::Down => {
+                self.action_selected = (self.action_selected + 1).min(rows.len().saturating_sub(1))
+            }
             KeyCode::PageUp => self.action_selected = self.action_selected.saturating_sub(8),
-            KeyCode::PageDown => self.action_selected = (self.action_selected + 8).min(rows.len().saturating_sub(1)),
-            KeyCode::Backspace => { self.action_query.pop(); self.action_selected = 0; },
-            KeyCode::Char(c) if !unsafe_input_char(c) && !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
-                if self.action_query.len() + c.len_utf8() <= 200 { self.action_query.push(c); self.action_selected = 0; }
+            KeyCode::PageDown => {
+                self.action_selected = (self.action_selected + 8).min(rows.len().saturating_sub(1))
+            }
+            KeyCode::Backspace => {
+                self.action_query.pop();
+                self.action_selected = 0;
+            }
+            KeyCode::Char(c)
+                if !unsafe_input_char(c)
+                    && !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                if self.action_query.len() + c.len_utf8() <= 200 {
+                    self.action_query.push(c);
+                    self.action_selected = 0;
+                }
             }
             KeyCode::Enter => {
-                let Some(entry) = rows.get(self.action_selected) else { return true; };
-                let action = entry.action.clone(); self.action_menu = false;
+                let Some(entry) = rows.get(self.action_selected) else {
+                    return true;
+                };
+                let action = entry.action.clone();
+                self.action_menu = false;
                 match action {
                     actions::Action::Plugin(command) => {
-                        self.action_draft = Some(((self.active_group,self.groups[self.active_group].active_id().unwrap_or("").to_owned()),self.input.clone(), self.input_cursor));
-                        self.input = format!("{command} "); self.input_cursor = self.input.len(); self.focus = Focus::Prompt;
+                        self.action_draft = Some((
+                            (
+                                self.active_group,
+                                self.groups[self.active_group]
+                                    .active_id()
+                                    .unwrap_or("")
+                                    .to_owned(),
+                            ),
+                            self.input.clone(),
+                            self.input_cursor,
+                        ));
+                        self.input = format!("{command} ");
+                        self.input_cursor = self.input.len();
+                        self.focus = Focus::Prompt;
                     }
                     actions::Action::New => self.open_engine_picker(),
-                    actions::Action::Fleet(view) => self.open_fleet(view.root,Some(view.run_id)),
-                    actions::Action::Tab(pane, tab) => { if self.groups.get(pane).is_some_and(|g| tab < g.tabs.len()) { self.active_group = pane; self.groups[pane].active = tab; self.focus = Focus::Prompt; } },
+                    actions::Action::Fleet(view) => self.open_fleet(view.root, Some(view.run_id)),
+                    actions::Action::Tab(pane, tab) => {
+                        if self.groups.get(pane).is_some_and(|g| tab < g.tabs.len()) {
+                            self.active_group = pane;
+                            self.groups[pane].active = tab;
+                            self.focus = Focus::Prompt;
+                        }
+                    }
                     actions::Action::Stop => self.open_stop_confirmation(),
-                    actions::Action::Tools => { self.tool_modal = true; self.tool_scroll = 0; self.tool_selected = self.active_tool_cards().len().saturating_sub(1); },
+                    actions::Action::Tools => {
+                        self.tool_modal = true;
+                        self.tool_scroll = 0;
+                        self.tool_selected = self.active_tool_cards().len().saturating_sub(1);
+                    }
                     actions::Action::Close => self.detach_active_tab(),
-                    actions::Action::NextPane => { self.active_group = (self.active_group + 1) % if self.pane_tree.is_some() { self.pane_count() } else { 2 }; self.focus = Focus::Prompt; },
+                    actions::Action::NextPane => {
+                        self.active_group = (self.active_group + 1)
+                            % if self.pane_tree.is_some() {
+                                self.pane_count()
+                            } else {
+                                2
+                            };
+                        self.focus = Focus::Prompt;
+                    }
                     actions::Action::Command(command) => {
                         // Argument-bearing operations prepare the user's prompt
                         // for editing; bare forms use the same local dispatcher.
-                        if matches!(command, "/msg" | "/collection" | "/cd" | "/fleet" | "/fleet start" | "/fleet attach" | "/img") {
-                            self.action_draft = Some(((self.active_group,self.groups[self.active_group].active_id().unwrap_or("").to_owned()),self.input.clone(), self.input_cursor));
-                            self.input = format!("{command} "); self.input_cursor = self.input.len(); self.focus = Focus::Prompt;
+                        if matches!(
+                            command,
+                            "/msg"
+                                | "/collection"
+                                | "/cd"
+                                | "/fleet"
+                                | "/fleet start"
+                                | "/fleet attach"
+                                | "/img"
+                        ) {
+                            self.action_draft = Some((
+                                (
+                                    self.active_group,
+                                    self.groups[self.active_group]
+                                        .active_id()
+                                        .unwrap_or("")
+                                        .to_owned(),
+                                ),
+                                self.input.clone(),
+                                self.input_cursor,
+                            ));
+                            self.input = format!("{command} ");
+                            self.input_cursor = self.input.len();
+                            self.focus = Focus::Prompt;
                         } else {
                             let saved = (self.input.clone(), self.input_cursor);
-                            self.input = command.into(); self.input_cursor = self.input.len();
-                            if !self.dispatch_prompt_command() { self.submit_local_command(); }
+                            self.input = command.into();
+                            self.input_cursor = self.input.len();
+                            if !self.dispatch_prompt_command() {
+                                self.submit_local_command();
+                            }
                             // Palette commands do not consume a conversation draft.
-                            self.input = saved.0; self.input_cursor = saved.1;
+                            self.input = saved.0;
+                            self.input_cursor = saved.1;
                         }
                     }
                 }
@@ -521,11 +982,18 @@ impl App {
     }
 
     pub(super) fn open_help(&mut self) {
-        let mut lines = vec!["Rust DOXA commands · forms shown below".to_owned(),
+        let mut lines = vec![
+            "Rust DOXA commands · forms shown below".to_owned(),
             "Unavailable commands stay local; unknown provider commands pass through".to_owned(),
-            String::new()];
-        lines.push("Tab / Shift+Tab: focus prompt, tab headers, transcript, visible chips, sidebar".into());
-        lines.push("Focused chip: Enter opens · tab headers: ←/→ select, Enter prompt · Alt+Tab next pane".into());
+            String::new(),
+        ];
+        lines.push(
+            "Tab / Shift+Tab: focus prompt, tab headers, transcript, visible chips, sidebar".into(),
+        );
+        lines.push(
+            "Focused chip: Enter opens · tab headers: ←/→ select, Enter prompt · Alt+Tab next pane"
+                .into(),
+        );
         lines.push("Alt+P or /mode: permission picker".into());
         lines.push("Drag transcript text to select · Ctrl+C / Ctrl+Shift+C copy · Esc clears · Ctrl+V paste into prompt".into());
         lines.push("Terminal fallback: Shift+drag, Ctrl+Shift+C / Ctrl+Shift+V; OSC52 support required for native copy".into());
@@ -533,11 +1001,29 @@ impl App {
             lines.push(format!("{} · {}", row.form, row.summary));
             lines.push(format!("  {}", row.support));
         }
-        for command in &self.plugin_commands { lines.push(format!("{} · {} · {} plugin passthrough", if command.usage.is_empty() { &command.name } else { &command.usage }, command.summary, command.plugin)); }
+        for command in &self.plugin_commands {
+            lines.push(format!(
+                "{} · {} · {} plugin passthrough",
+                if command.usage.is_empty() {
+                    &command.name
+                } else {
+                    &command.usage
+                },
+                command.summary,
+                command.plugin
+            ));
+        }
         lines.push("Local keyboard shell: !<command> · current session directory; output is neither sent nor saved".into());
-        for (command, description) in FLEET_ACTIONS { lines.push(format!("{command} · {description}")); }
-        self.chip_info = Some(ChipInfo { kind: "help", label: String::new(), lines,
-            scroll: 0, owner: None });
+        for (command, description) in FLEET_ACTIONS {
+            lines.push(format!("{command} · {description}"));
+        }
+        self.chip_info = Some(ChipInfo {
+            kind: "help",
+            label: String::new(),
+            lines,
+            scroll: 0,
+            owner: None,
+        });
         if self.active_chooser_rect().is_none() {
             self.chip_info = None;
             self.notice = "Enlarge active pane to open help".into();
@@ -559,11 +1045,26 @@ mod tests {
     fn malformed_reserved_forms_keep_the_draft_and_never_queue_provider_work() {
         let mut app = App::default();
         app.groups[0].tabs.push("session".into());
-        for draft in ["/help extra", "/pane 0", "/pane 1 2", "/sidebar width 11",
-            "/sidebar wider extra", "/model one two", "/effort one two", "/engine unknown",
-            "/mode unknown", "/branch one two", "/compact extra", "/update --force",
-            "/login codex --unexpected", "/pending extra", "/img reference.png",
-            "/sessions kill one two", "/help\nextra", "/help\n"] {
+        for draft in [
+            "/help extra",
+            "/pane 0",
+            "/pane 1 2",
+            "/sidebar width 11",
+            "/sidebar wider extra",
+            "/model one two",
+            "/effort one two",
+            "/engine unknown",
+            "/mode unknown",
+            "/branch one two",
+            "/compact extra",
+            "/update --force",
+            "/login codex --unexpected",
+            "/pending extra",
+            "/img reference.png",
+            "/sessions kill one two",
+            "/help\nextra",
+            "/help\n",
+        ] {
             enter(&mut app, draft);
             assert_eq!(app.input, draft, "consumed {draft:?}");
             assert_eq!(app.input_cursor, draft.len());
@@ -578,10 +1079,20 @@ mod tests {
     fn unknown_provider_and_plugin_forms_preserve_exact_prompt_bytes() {
         let mut app = App::default();
         app.groups[0].tabs.push("session".into());
-        for draft in ["/provider-command --flag value", " /plugin-command\tvalue  ",
-            "/helpful", "/modelx opus", "/shell echo text", "/HELP", "/provider\ntext"] {
+        for draft in [
+            "/provider-command --flag value",
+            " /plugin-command\tvalue  ",
+            "/helpful",
+            "/modelx opus",
+            "/shell echo text",
+            "/HELP",
+            "/provider\ntext",
+        ] {
             enter(&mut app, draft);
-            assert_eq!(app.pending_prompts.pop(), Some(("session".into(), draft.into())));
+            assert_eq!(
+                app.pending_prompts.pop(),
+                Some(("session".into(), draft.into()))
+            );
             assert!(app.input.is_empty());
             assert!(app.local_shell_jobs.is_empty());
         }
@@ -593,7 +1104,8 @@ mod tests {
             let mut app = App::default();
             app.groups[0].tabs.push("session".into());
             if let Some(engine) = engine {
-                app.session_identity.insert("session".into(), (Some(engine.into()), None));
+                app.session_identity
+                    .insert("session".into(), (Some(engine.into()), None));
             }
             enter(&mut app, "/compact");
             if engine == Some("claude") {
