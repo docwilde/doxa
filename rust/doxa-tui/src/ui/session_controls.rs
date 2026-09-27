@@ -1,6 +1,30 @@
 //! Session control replies are reduced independently of focus and presentation.
 //! Only the owning App applies the transition and decides whether to show it.
 use serde_json::Value;
+use doxa_engines::ModelCatalog;
+
+/// A catalog belongs to a connected session and engine. Unavailable/loading
+/// replies revoke previous metadata without authorizing a static fallback.
+#[derive(Debug)]
+pub(super) struct SessionCatalog {
+    engine: String,
+    models: Option<ModelCatalog>,
+}
+
+impl SessionCatalog {
+    pub(super) fn decode(engine: &str, frame: &Value) -> Self {
+        Self { engine: engine.to_owned(), models: (frame["ok"] == true && frame["loading"] != true)
+            .then(|| ModelCatalog::decode(&frame["capabilities"])) }
+    }
+
+    pub(super) fn reported_for(&self, engine: &str) -> bool {
+        self.engine == engine && self.models.is_some()
+    }
+
+    pub(super) fn efforts(&self, engine: &str, model: &str) -> Option<&[String]> {
+        (self.engine == engine).then(|| self.models.as_ref().map(|models| models.efforts(model)).unwrap_or(&[]))
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct SessionOwner<'a>(&'a str);
