@@ -26,8 +26,10 @@ fn mark_in(home:&Path) -> io::Result<bool> {
 }
 #[cfg(test)] mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
     #[test] fn first_offer_marks_once_and_uses_private_regular_marker() {
         let dir=tempfile::tempdir().unwrap();
+        fs::set_permissions(dir.path(),fs::Permissions::from_mode(0o700)).unwrap();
         assert!(needed_in(dir.path(), ""));
         assert!(!needed_in(dir.path(), "0")); // Python's test kill switch accepts any nonblank value.
         assert!(!needed_in(dir.path(), " yes "));
@@ -37,7 +39,7 @@ fn mark_in(home:&Path) -> io::Result<bool> {
         assert!(meta.is_file());assert_eq!(meta.mode()&0o777,0o600);
     }
     #[test] fn symlink_home_or_marker_never_changes_target() {
-        let dir=tempfile::tempdir().unwrap();let target=dir.path().join("target");fs::create_dir(&target).unwrap();
+        let dir=tempfile::tempdir().unwrap();let target=dir.path().join("target");fs::create_dir(&target).unwrap();fs::set_permissions(&target,fs::Permissions::from_mode(0o700)).unwrap();
         let alias=dir.path().join("alias");std::os::unix::fs::symlink(&target,&alias).unwrap();
         assert!(mark_in(&alias).is_err());assert!(!target.join(".setup-done").exists());
         fs::write(target.join("keep"),"unchanged").unwrap();

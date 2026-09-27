@@ -11712,6 +11712,7 @@ for line in sys.stdin:
     #[test]
     fn successful_update_never_stops_busy_or_unsaved_sessions_to_restart() {
         let mut app = App::default(); app.apply_daemon_frame(&json!({"type":"hello", "session_id":"restart-session"}));
+        app.session_activity.insert("restart-session".into(), (true, 0));
         app.restart_waiting = true; let mut state = None;
         assert!(app.restart_after_install(&mut state)); assert!(app.restart_job.is_none()); assert!(!app.should_quit);
         assert!(app.notice.contains("busy"));
