@@ -9986,8 +9986,11 @@ mod tests {
     fn empty_startup_window_keeps_setup_and_engine_controls_available() {
         let mut app=App {size:Rect::new(0,0,80,24),..Default::default()};
         assert!(app.sessions.is_empty());
-        app.open_engine_picker();assert!(app.engine_picker);app.engine_picker=false;
-        app.open_operations(operations_menu::Menu::new("setup"));
+        app.input="/engine".into();app.input_cursor=app.input.len();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE)));assert!(app.engine_picker);
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Esc,KeyModifiers::NONE)));
+        app.input="/setup".into();app.input_cursor=app.input.len();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE)));
         assert!(app.operations_menu.is_some());assert!(app.pending_prompts.is_empty());
         assert!(app.pending_launches.is_empty());assert!(!app.launching);
     }
