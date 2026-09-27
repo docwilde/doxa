@@ -793,6 +793,33 @@ mod tests {
     static NEXT_SOCKET: AtomicUsize = AtomicUsize::new(0);
 
     #[test]
+    fn effort_verification_flag_survives_daemon_worker_bridge() {
+        let path = std::env::temp_dir().join(format!("doxa-effort-{}-{}.sock", std::process::id(), NEXT_SOCKET.fetch_add(1, Ordering::Relaxed)));
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            writeln!(socket, "{}", json!({"type":"hello","proto":1,"session_id":"s","engine":"claude","cwd":"/","next_seq":1})).unwrap();
+            let mut reader = BufReader::new(socket.try_clone().unwrap());
+            let mut line = String::new(); reader.read_line(&mut line).unwrap(); // attach
+            for pending in [true, false] {
+                line.clear(); reader.read_line(&mut line).unwrap();
+                let request: Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(request["method"], "set_effort");
+                writeln!(socket, "{}", json!({"type":"reply","id":request["id"],"ok":true,"effort":"low","verification_pending":pending})).unwrap();
+            }
+        });
+        let (frames, commands, worker) = spawn_worker(DaemonClient::connect(&path, None).unwrap());
+        assert_eq!(frames.recv_timeout(Duration::from_secs(2)).unwrap()["type"], "hello");
+        for pending in [true, false] {
+            commands.send(WorkerCommand::SetEffort("s".into(), "low".into())).unwrap();
+            let reply = frames.recv_timeout(Duration::from_secs(2)).unwrap();
+            assert_eq!(reply["type"], "set_effort_reply"); assert_eq!(reply["session_id"], "s");
+            assert_eq!(reply["verification_pending"], pending);
+        }
+        drop(commands); worker.join().unwrap(); server.join().unwrap(); std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn initial_roster_accepts_256_and_all_failed_notices_cannot_block_mount() {
         let dir=tempfile::tempdir().unwrap();
         let rows:Vec<_>=(0..256).map(|i|Session{id:format!("saved-{i}"),title:String::new(),

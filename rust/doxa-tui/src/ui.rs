@@ -152,6 +152,17 @@ fn engine_name(engine: launch::Engine) -> &'static str {
     match engine { launch::Engine::Codex => "codex", launch::Engine::Claude => "claude",
         launch::Engine::DeepSeek => "deepseek", launch::Engine::Glm => "glm", launch::Engine::Fixture => "fixture" }
 }
+fn new_session_preferences(engine: launch::Engine, config: &toml::Table, model_override: Option<&str>, effort_override: Option<&str>) -> (String, Option<String>) {
+    let configured_model = crate::settings::raw_from(config, crate::settings::find("model").unwrap(), model_override, engine_name(engine));
+    let model = if configured_model.is_empty() { vendor_default_model(engine).to_owned() } else { configured_model };
+    let configured_effort = crate::settings::raw_from(config, crate::settings::find("effort").unwrap(), effort_override, engine_name(engine));
+    let vendor = !vendor_models(engine).is_empty();
+    let effort = (!configured_effort.is_empty()).then_some(configured_effort)
+        .filter(|level| !vendor || effort_choices(engine_name(engine), &model).contains(&level.as_str()))
+        .or_else(|| vendor.then(|| "high".into()));
+    (model, effort)
+}
+
 const PERMISSION_CHOICES: [(&str, &str); 5] = [
     ("default", "Ask before dangerous calls"),
     ("acceptEdits", "Allow file edits; ask for other calls"),
@@ -1927,6 +1938,7 @@ impl App {
                 if let Some(effort) = frame["effort"].as_str().filter(|effort| !effort.is_empty()) {
                     self.session_efforts.insert(id.to_owned(), safe_label(effort));
                 } else { self.session_efforts.remove(id); }
+                self.update_pending_effort(id, frame);
                 self.session_telemetry.entry(id.to_owned()).or_default().update_status(frame);
                 self.model_capabilities.insert(id.to_owned(), frame["can_set_model"] == true);
                 self.permission_capabilities.insert(id.to_owned(), frame["can_set_permission_mode"] == true);
@@ -2385,6 +2397,8 @@ impl App {
                     self.session_identity.remove(id);
                     self.session_cwds.remove(id);
                     self.session_efforts.remove(id);
+                    self.pending_effort_verifications.remove(id);
+                    self.pending_effort_changes.retain(|(owner, _)| owner != id);
                     self.next_efforts.remove(id);
                     self.session_telemetry.remove(id);
                     self.memory_cache.remove(id);
@@ -2447,6 +2461,7 @@ impl App {
                                 self.session_efforts.insert(id.to_owned(), safe_label(effort));
                             } else { self.session_efforts.remove(id); }
                         }
+                        self.update_pending_effort(id, status);
                         if let Some(can_set) = status.get("can_set_model").and_then(|v| v.as_bool()) {
                             self.model_capabilities.insert(id.to_owned(), can_set);
                         }
@@ -2600,6 +2615,16 @@ impl App {
         }
     }
 
+    fn update_pending_effort(&mut self, id: &str, status: &serde_json::Value) {
+        if let Some(value) = status.get("pending_effort") {
+            if let Some(effort) = value.as_str().filter(|value| !value.is_empty()) {
+                self.pending_effort_verifications.insert(id.to_owned(), safe_label(effort));
+            } else if value.is_null() {
+                self.pending_effort_verifications.remove(id);
+            }
+        }
+    }
+
     fn append_event(&mut self, id: &str, event_type: &str, data: &serde_json::Value) -> bool {
         let Some(row) = structured_event(event_type, data) else {
             return false;
@@ -2744,6 +2769,9 @@ impl App {
             let (owner,draft,cursor)=self.action_draft.take().unwrap();if owner==(self.active_group,self.groups[self.active_group].active_id().unwrap_or("").to_owned()){self.input=draft;self.input_cursor=cursor;}else{self.input_drafts.insert(owner,(draft,cursor));}
         }
         self.sync_chooser_state();
+        if matches!(self.focus, Focus::Chip(_) | Focus::Rail) && !self.focus_ring().contains(&self.focus) {
+            self.focus = Focus::Prompt;
+        }
         changed
     }
 
@@ -4347,6 +4375,10 @@ impl App {
             self.notice = "Select a session to inspect its effort".into();
             return;
         };
+        if let Some(effort) = self.pending_effort_verifications.get(&id) {
+            self.notice = format!("Requested effort {effort} · awaiting provider verification");
+            return;
+        }
         let Some((Some(engine), Some(model))) = self.session_identity.get(&id) else {
             self.notice = "Effort capability is unknown for this session".into();
             return;
@@ -4376,6 +4408,10 @@ impl App {
 
     fn select_effort(&mut self) {
         let Some(picker) = self.effort_picker.take() else { return; };
+        if let Some(effort) = self.pending_effort_verifications.get(&picker.session_id) {
+            self.notice = format!("Requested effort {effort} · awaiting provider verification");
+            return;
+        }
         let Some((Some(engine), Some(model))) = self.session_identity.get(&picker.session_id) else { return; };
         if engine != &picker.engine || model != &picker.model { return; }
         let Some(chosen) = picker.levels.get(picker.selected) else { return; };
@@ -4520,16 +4556,14 @@ impl App {
         let models = vendor_models(engine);
         let engine_id = engine_name(engine);
         let config = crate::settings::config_path().map(|path| doxa_state::load_config(&path)).unwrap_or_default();
-        let configured = crate::settings::find("model").ok().map(|setting|
-            crate::settings::raw_from(&config, setting, std::env::var(setting.env).ok().as_deref(), engine_id)).unwrap_or_default();
-        let model = if configured.is_empty() { vendor_default_model(engine).to_owned() } else { configured };
-        let configured_effort = crate::settings::raw("effort");
+        let (model, configured_effort) = new_session_preferences(engine, &config,
+            std::env::var("DOXA_MODEL").ok().as_deref(), std::env::var("DOXA_EFFORT").ok().as_deref());
         // A previous account-scoped catalog must not survive a vendor
         // re-selection when a later lookup fails or the credential changes.
         self.catalog_efforts.retain(|(name, _), _| name != engine_id);
         let model_efforts = models.iter().map(|name| ((*name).to_owned(),
             effort_choices(engine_id, name).iter().map(|level| (*level).to_owned()).collect())).collect::<HashMap<_, _>>();
-        let effort = self.next_efforts.get(engine_id).cloned().or_else(|| (!configured_effort.is_empty()).then_some(configured_effort))
+        let effort = self.next_efforts.get(engine_id).cloned().or(configured_effort)
             .filter(|level| models.is_empty() || effort_choices(engine_id, &model).contains(&level.as_str()))
             .or_else(|| (!models.is_empty()).then(|| "high".to_owned()));
         self.vendor_catalog_pending = None;
@@ -8460,7 +8494,7 @@ impl App {
                     " Blank model uses configured engine default."
                 } else { " Left/Right choose vendor model and effort." }));
                 lines.push(Line::from(if vendor_models(form.engine).is_empty() {
-                    format!(" Effort preference: {} · verified at connect", safe_label(form.effort.as_deref().unwrap_or("provider default")))
+                    format!(" Effort preference: {} · new session only", safe_label(form.effort.as_deref().unwrap_or("provider default")))
                 } else { format!(" {}", safe_label(&form.catalog_note)) }));
             }
             lines.push(Line::styled(format!(" {} Model: {}", if form.field == 0 { '›' } else { ' ' },
@@ -10688,6 +10722,10 @@ for line in sys.stdin:
         app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
             column: form.x + 2, row: first, modifiers: KeyModifiers::NONE }));
         assert_eq!(app.new_session.as_ref().unwrap().field, 0);
+        // Replace the displayed configured default deliberately.
+        while !app.new_session.as_ref().unwrap().model.is_empty() {
+            app.handle(Event::Key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)));
+        }
         for c in "sonnet".chars() {
             app.handle(Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)));
         }
@@ -14269,6 +14307,16 @@ mod parity_tests {
             column, row, modifiers: KeyModifiers::NONE }));
     }
     #[test]
+    fn engine_form_defaults_use_effective_engine_config_without_reusing_live_identity() {
+        let config = "model='claude-own'\neffort='max'\n[models]\ncodex='codex-own'\ndeepseek='deepseek-flash'\n".parse::<toml::Table>().unwrap();
+        assert_eq!(new_session_preferences(launch::Engine::Claude, &config, None, None), ("claude-own".into(), Some("max".into())));
+        assert_eq!(new_session_preferences(launch::Engine::Codex, &config, None, None), ("codex-own".into(), Some("max".into())));
+        assert_eq!(new_session_preferences(launch::Engine::Claude, &config, Some("env-model"), Some("low")), ("env-model".into(), Some("low".into())));
+        assert_eq!(new_session_preferences(launch::Engine::DeepSeek, &config, None, Some("xhigh")), ("deepseek-flash".into(), Some("high".into())));
+        assert_eq!(new_session_preferences(launch::Engine::Codex, &toml::Table::new(), None, None), ("".into(), None));
+    }
+
+    #[test]
     fn tab_focus_visits_visible_chips_headers_and_reverses_without_switching_pane() {
         let mut app = App::default();
         app.size = Rect::new(0, 0, 220, 32);
@@ -14320,6 +14368,16 @@ mod parity_tests {
     }
 
     #[test]
+    fn attached_pending_effort_prevents_a_second_transaction_until_authoritative_clear() {
+        let mut app = App::default(); app.size = Rect::new(0, 0, 150, 32);
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"s","engine":"claude","model":"sonnet","effort":"high","pending_effort":"low"}));
+        app.groups[0].tabs = vec!["s".into()];
+        app.open_effort_picker(); assert!(app.effort_picker.is_none()); assert!(app.notice.contains("awaiting"));
+        app.apply_daemon_frame(&json!({"type":"reply","status":{"session_id":"s","effort":"low","pending_effort":null}}));
+        assert!(!app.pending_effort_verifications.contains_key("s")); assert_eq!(app.session_efforts["s"], "low");
+    }
+
+    #[test]
     fn effort_replies_and_failures_belong_to_requesting_session() {
         let mut app = App::default(); app.size = Rect::new(0, 0, 150, 32);
         for id in ["a", "b"] { app.apply_daemon_frame(&json!({"type":"hello","session_id":id,"engine":"claude","model":"sonnet","effort":"high"})); }
@@ -14329,6 +14387,7 @@ mod parity_tests {
         app.apply_daemon_frame(&json!({"type":"set_effort_reply","session_id":"b","ok":true,"effort":"low","verification_pending":true}));
         assert_eq!(app.notice, "active pane notice"); assert_eq!(app.session_efforts["b"], "high");
         app.pending_effort_verifications.insert("a".into(), "low".into());
+        app.open_effort_picker(); assert!(app.effort_picker.is_none()); assert!(app.pending_effort_changes.is_empty());
         app.apply_daemon_frame(&json!({"type":"set_effort_reply","session_id":"a","ok":true,"effort":"max","verification_pending":false}));
         assert_eq!(app.session_efforts["a"], "high");
         app.apply_daemon_frame(&json!({"type":"set_effort_reply","session_id":"a","ok":true,"effort":"low","verification_pending":true}));
