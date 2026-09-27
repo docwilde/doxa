@@ -46,7 +46,8 @@ def sample(width: int, height: int, timeout: float) -> dict[str, float]:
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", height, width, 0, 0))
         env = {**os.environ, "TERM": "xterm-256color", "DOXA_HOME": str(Path(temp) / "home"),
-               "DOXA_SKIP_FIRST_RUN": "1", "DOXA_SKIP_UPDATE_CHECK": "1"}
+               "DOXA_SKIP_FIRST_RUN": "1", "DOXA_SKIP_UPDATE_CHECK": "1",
+               "DOXA_SIDEBAR": "1"}
         started = time.perf_counter()
         proc = subprocess.Popen(
             [str(BINARY), "--demo"], stdin=slave, stdout=slave, stderr=slave,
@@ -101,8 +102,6 @@ def main() -> None:
         parser.error(f"release binary missing: {BINARY}")
     if args.runs < 1 or args.timeout <= 0:
         parser.error("--runs and --timeout must be positive")
-    if not BINARY.is_file():
-        parser.error(f"release binary missing: {BINARY}")
     result = {}
     for width, height in ((160, 48), (80, 24)):
         samples = [sample(width, height, args.timeout) for _ in range(args.runs)]
@@ -110,7 +109,7 @@ def main() -> None:
             metric: summary([row[metric] for row in samples])
             for metric in ("first_byte_ms", "first_visible_ms")
         }
-    print(json.dumps({"binary": str(BINARY), "mode": "--demo", "runs_per_size": args.runs,
+    print(json.dumps({"binary": str(BINARY), "mode": "--demo", "sidebar": "forced visible for historical Sessions marker", "runs_per_size": args.runs,
                       "results": result}, indent=2))
 
 
