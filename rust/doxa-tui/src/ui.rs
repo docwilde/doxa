@@ -911,7 +911,12 @@ impl SessionTelemetry {
 
 // LORE owns both curated-memory lengths and their separate scope caps.
 fn memory_fill_percent(chars: u64, cap_chars: u64) -> u64 {
+    if cap_chars == 0 { return 0; }
     chars.saturating_mul(100).saturating_add(cap_chars / 2) / cap_chars
+}
+fn memory_fill_label(chars: u64, cap_chars: u64) -> String {
+    if cap_chars == 0 { format!("{chars}/0") }
+    else { format!("{}%", memory_fill_percent(chars, cap_chars)) }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -7319,10 +7324,10 @@ impl App {
         let absolute=if self.preferences.on("ctx_absolute") && self.size.width>=100 {telemetry.and_then(|v|v.context_tokens).map(|used|format!(" {used}/{}",telemetry.and_then(|v|v.context_limit).map(|n|n.to_string()).unwrap_or_else(||"?".into()))).unwrap_or_default()} else {String::new()};
         chips.push(("context",format!("Ctx {context}{absolute}")));
         let memory = self.memory_cache.get(id.unwrap_or("")).and_then(|(usage, _)| *usage)
-            .map(|usage| format!("{} {}%/u {}%",
+            .map(|usage| format!("{} {}/u {}",
                 if self.memory_repo.get(id.unwrap_or("")).copied().unwrap_or(false) { "p" } else { "f" },
-                memory_fill_percent(usage.project_chars, usage.project_cap_chars),
-                memory_fill_percent(usage.user_chars, usage.user_cap_chars)))
+                memory_fill_label(usage.project_chars, usage.project_cap_chars),
+                memory_fill_label(usage.user_chars, usage.user_cap_chars)))
             .unwrap_or_else(|| "u ? · scope ?".to_owned());
         chips.push(("memory", memory));
         let beliefs = telemetry.and_then(|value| value.lore.as_deref())
@@ -10950,6 +10955,25 @@ for line in sys.stdin:
         assert!(!app.memory_cache.contains_key("s"));
         assert_eq!(app.chips(0).iter().find(|(kind, _)| *kind == "memory").unwrap().1,
             "u ? · scope ?");
+    }
+
+    #[test]
+    fn zero_capacity_memory_chip_shows_explicit_usage_and_never_divides_by_zero() {
+        assert_eq!(memory_fill_percent(0,0),0);
+        assert_eq!(memory_fill_percent(16,0),0);
+        assert_eq!(memory_fill_percent(u64::MAX,0),0);
+        let mut app=App::default();
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"s","cwd":"/repo"}));
+        for (project_chars,project_cap,user_chars,user_cap,label) in [
+            (16,0,12,0,"p 16/0/u 12/0"),
+            (0,0,0,0,"p 0/0/u 0/0"),
+            (0,0,80,200,"p 0/0/u 40%"),
+            (401,1000,12,0,"p 40%/u 12/0"),
+            (401,1000,80,200,"p 40%/u 40%"),
+        ] {
+            app.set_lore_memory_usage("s",project_chars,project_cap,user_chars,user_cap);
+            assert_eq!(app.chips(0).iter().find(|(kind,_)|*kind=="memory").unwrap().1,label);
+        }
     }
 
     #[test]

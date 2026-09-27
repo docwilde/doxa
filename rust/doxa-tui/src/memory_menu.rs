@@ -166,7 +166,7 @@ impl Manager {
         if value["scope"] != self.scope || value["key"].as_str().is_none()
             || digest.len() != 64 || !digest.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
             || entries.len() > 400 || value["chars"].as_u64().is_none()
-            || value["cap_chars"].as_u64().is_none_or(|cap| cap == 0 || cap > 1024 * 1024) {
+            || value["cap_chars"].as_u64().is_none_or(|cap| cap > 1024 * 1024) {
             return Err("Invalid memory review".into());
         }
         let rows: Result<Vec<_>, _> = entries.iter().map(|row| row.as_str()
@@ -388,6 +388,33 @@ mod manager_tests {
         manager.key(key(KeyCode::Char('Y')));
         assert!(manager.pending.is_none(), "render fixtures must never start a LORE worker");
         assert_eq!(manager.status, "Gallery fixture: memory writes disabled", "complete review and uppercase confirmation reached submit");
+    }
+    #[test]
+    fn zero_capacity_keeps_empty_and_existing_exact_memory_review_available() {
+        for (entries, chars) in [(Vec::<&str>::new(), 0), (vec!["existing fact"], 16)] {
+            let manager=Manager::from_fixture_review(("session".into(),"/fixture".into()),"user",
+                serde_json::json!({"scope":"user","key":"user","sha256":"a".repeat(64),"entries":entries,"chars":chars,"cap_chars":0})).unwrap();
+            assert!(manager.review.is_some());
+            let mut terminal=ratatui::Terminal::new(ratatui::backend::TestBackend::new(80,12)).unwrap();
+            terminal.draw(|frame|manager.draw(frame,frame.area())).unwrap();
+            let screen=terminal.backend().buffer().content.iter().map(|cell|cell.symbol()).collect::<String>();
+            assert!(screen.contains(&format!("{chars} / 0 chars")));
+        }
+    }
+    #[test]
+    fn zero_capacity_existing_entry_can_reach_exact_removal_confirmation() {
+        let mut manager=Manager::from_fixture_review(("session".into(),"/fixture".into()),"user",
+            serde_json::json!({"scope":"user","key":"user","sha256":"a".repeat(64),"entries":["existing fact"],"chars":16,"cap_chars":0})).unwrap();
+        manager.key(key(KeyCode::Char('d')));manager.key(key(KeyCode::Enter));
+        assert_eq!(manager.draft.as_ref().unwrap().action,"remove");
+        assert_eq!(manager.draft.as_ref().unwrap().entry,"existing fact");
+        manager.key(key(KeyCode::Char('Y')));
+        assert_ne!(manager.status,"Gallery fixture: memory writes disabled","unseen exact removal cannot submit");
+        let mut terminal=ratatui::Terminal::new(ratatui::backend::TestBackend::new(80,12)).unwrap();
+        terminal.draw(|frame|manager.draw(frame,frame.area())).unwrap();
+        manager.key(key(KeyCode::Char('Y')));
+        assert_eq!(manager.status,"Gallery fixture: memory writes disabled","complete exact removal reaches guarded submit at cap zero");
+        assert!(manager.pending.is_none(),"fixture never mutates LORE");
     }
     #[test]
     fn cancelling_edit_and_scope_switch_discard_draft_and_old_receiver() {
