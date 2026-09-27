@@ -2872,8 +2872,7 @@ impl App {
             && picker.evidence.is_none() && !picker.resolving) {
             for ch in text.chars().filter(|ch|!unsafe_input_char(*ch)||ch.is_whitespace()) {
                 let ch=if ch.is_whitespace(){' '}else{ch};
-                if picker.query.len()+ch.len_utf8()>512 {break;}
-                picker.query.push(ch);
+                if !lore_picker::append_filter_char(&mut picker.query,ch) {break;}
             }
             picker.offset=0;picker.selected=0;self.belief_filter_due=Some(Instant::now());
             return true;
@@ -2884,7 +2883,7 @@ impl App {
                     ||self.session_cwds.get(id).and_then(|path|path.to_str())!=Some(cwd.as_str())) {return false;}
                 for ch in text.chars().filter(|ch|!unsafe_input_char(*ch)||ch.is_whitespace()) {
                     let ch=if ch.is_whitespace(){' '}else{ch};
-                    if list.query.len()+ch.len_utf8()>512 {break;}list.query.push(ch);
+                    if !lore_picker::append_filter_char(&mut list.query,ch) {break;}
                 }
                 self.chip_info.as_mut().unwrap().scroll=0;return true;
             }
@@ -5794,7 +5793,7 @@ impl App {
         if urgent_resolution { self.notice = picker.status.clone(); }
         if was_belief_acting && !refresh_after_action { self.notice = picker.status.clone(); }
         if refresh_after_action {
-            let offset = picker.offset;
+            let (offset,query)=(picker.offset,picker.query.clone());
             self.notice = picker.result_status.clone().unwrap_or_default();
             if let Some(id) = picker.session_id.as_ref().filter(|id|
                 self.session_cwds.get(*id).and_then(|path| path.to_str()) == Some(picker.cwd.as_str())) {
@@ -5802,7 +5801,7 @@ impl App {
                 self.session_telemetry.entry(id.clone()).or_default().lore = None;
                 self.pending_queue_commands.push(crate::bridge::WorkerCommand::Status(id.clone()));
             }
-            self.load_lore(lore_picker::Query::Beliefs(offset));
+            self.load_lore(lore_picker::Query::FilteredBeliefs(offset,query));
         }
         true
     }
@@ -5815,7 +5814,7 @@ impl App {
             KeyCode::Backspace if !key.modifiers.intersects(KeyModifiers::CONTROL|KeyModifiers::ALT)=>{list.query.pop();}
             KeyCode::Char('u') if key.modifiers==KeyModifiers::CONTROL=>list.query.clear(),
             KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL|KeyModifiers::ALT)
-                && !unsafe_input_char(c) && list.query.len()+c.len_utf8()<=512=>list.query.push(c),
+                && !unsafe_input_char(c) && lore_picker::append_filter_char(&mut list.query,c)=>{},
             _=>return false,
         }
         if let Some(info)=&mut self.chip_info {info.scroll=0;}
@@ -5830,7 +5829,7 @@ impl App {
             KeyCode::Backspace if !key.modifiers.intersects(KeyModifiers::CONTROL|KeyModifiers::ALT)=>{picker.query.pop();}
             KeyCode::Char('u') if key.modifiers==KeyModifiers::CONTROL=>picker.query.clear(),
             KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL|KeyModifiers::ALT)
-                && !matches!(c,'A'|'R'|'P') && !unsafe_input_char(c) && picker.query.len()+c.len_utf8()<=512=>picker.query.push(c),
+                && !matches!(c,'A'|'R'|'P') && !unsafe_input_char(c) && lore_picker::append_filter_char(&mut picker.query,c)=>{},
             _=>return false,
         }
         if before!=picker.query {

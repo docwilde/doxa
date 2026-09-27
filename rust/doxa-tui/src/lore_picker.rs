@@ -9,6 +9,14 @@ use std::time::Duration;
 pub const PAGE_SIZE: u8 = 20;
 pub const EVIDENCE_LIMIT: u8 = 20;
 
+pub const FILTER_MAX_CHARS:usize=200;
+pub const FILTER_MAX_BYTES:usize=1024;
+
+pub fn append_filter_char(query:&mut String,ch:char)->bool {
+    if query.chars().count()>=FILTER_MAX_CHARS || query.len()+ch.len_utf8()>FILTER_MAX_BYTES {return false;}
+    query.push(ch);true
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Proposal {
     pub pid: String,
@@ -175,6 +183,17 @@ mod tests {
     use serde_json::json;
     #[cfg(unix)]
     use std::{fs, os::unix::fs::PermissionsExt};
+
+    #[test]
+    fn filter_input_matches_canonical_character_and_byte_limits() {
+        for ch in ['x','界','🦀'] {
+            let mut query=String::new();
+            for _ in 0..FILTER_MAX_CHARS {assert!(append_filter_char(&mut query,ch));}
+            assert!(!append_filter_char(&mut query,ch));
+            assert_eq!(query.chars().count(),FILTER_MAX_CHARS);
+            assert!(query.len()<=FILTER_MAX_BYTES);
+        }
+    }
 
     #[test]
     fn parses_bounded_scrubbed_rows() {
