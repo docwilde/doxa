@@ -28,3 +28,5 @@ pub mod maintenance;
 pub mod settings;
 pub mod preferences;
 pub mod belief_graph;
+
+pub mod shell;

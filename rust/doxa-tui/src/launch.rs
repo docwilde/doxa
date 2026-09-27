@@ -397,6 +397,7 @@ fn spawn_inner(options: &LaunchOptions, fleet_runtime: Option<&Path>, environmen
             }
         }
     }
+    if let Some(value) = crate::preferences::lore_notify_override() { command.env("LORE_NOTIFY", value); }
     for (key, value) in environment { command.env(key, value); }
     if environment.is_empty() && options.resume.is_some() {
         if let Some(ceiling) = saved_budget(&id)? {

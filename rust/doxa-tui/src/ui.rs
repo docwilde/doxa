@@ -1196,7 +1196,7 @@ impl RenderedTranscript {
         let mut prefix_lines = 0;
         if let Some(start) = streamed_turn_start(source) {
             let tail = &source[start..];
-            if !tail.contains("Tool: ") && !tail.contains(transcript_tools::REASONING_PREFIX) {
+            if !tail.contains("Tool: ") && !tail.contains(transcript_tools::REASONING_PREFIX) && !tail.contains(transcript_tools::SHELL_PREFIX) {
                 let (tail_lines, tail_sections) = transcript_tools::render(tail, width, None, None);
                 if tail_sections.is_empty() && lines.len() > tail_lines.len() {
                     prefix_lines = lines.len() - tail_lines.len() - 1;
@@ -1221,7 +1221,7 @@ impl RenderedTranscript {
             if let Some(start) = self.turn_start.filter(|_| source.starts_with(&self.source)) {
                 if streamed_turn_start(source) == Some(start) {
                     let tail = &source[start..];
-                    if !tail.contains("Tool: ") && !tail.contains(transcript_tools::REASONING_PREFIX) {
+                    if !tail.contains("Tool: ") && !tail.contains(transcript_tools::REASONING_PREFIX) && !tail.contains(transcript_tools::SHELL_PREFIX) {
                         let (tail_lines, tail_sections) = transcript_tools::render(tail, width, None, None);
                         if tail_sections.is_empty() {
                             self.lines.truncate(self.prefix_lines);
@@ -1299,6 +1299,8 @@ pub struct App {
     restart_executable: Option<PathBuf>,
     restart_after_update: bool,
     retired_operations: Vec<operations_menu::Menu>,
+    local_shell_jobs: Vec<crate::shell::Job>,
+    next_shell_id: u64,
     fleet_menu: Option<fleet_menu::Menu>,
     pub(crate) fleet_views: Vec<fleet_menu::SavedView>,
     fleet_review: Option<fleet_process::Prepared>,
@@ -1474,6 +1476,8 @@ impl Default for App {
             restart_executable: None,
             restart_after_update: false,
             retired_operations: Vec::new(),
+            local_shell_jobs: Vec::new(),
+            next_shell_id: 1,
             fleet_menu: None,
             fleet_views: Vec::new(),
             fleet_review: None,
@@ -2891,6 +2895,13 @@ impl App {
     fn key(&mut self, key: KeyEvent) -> bool {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
+        if ctrl && key.code == KeyCode::Char('c') {
+            let id = self.groups[self.active_group].active_id();
+            if self.local_shell_jobs.iter().any(|job| Some(job.session.as_str()) == id) {
+                for job in &self.local_shell_jobs { if Some(job.session.as_str()) == id { job.cancel(); } }
+                self.notice = "Cancelling local shell command".into(); return true;
+            }
+        }
         if ctrl && matches!(key.code,KeyCode::Char('q'|'c')) && self.fleet_controller.is_some(){
             self.fleet_controller.as_mut().unwrap().cancel();
             self.fleet_quit_pending |= key.code==KeyCode::Char('q');
@@ -3275,6 +3286,7 @@ impl App {
                         self.notice = "DOXA commands must be a single line".into();
                         return true;
                     }
+                    if self.input.starts_with('!') { self.submit_keyboard_shell(); return true; }
                     if self.dispatch_prompt_command() { return true; }
                     if self.submit_local_command() { return true; }
                     if let Some(id) = self.groups[self.active_group].active_id() {
@@ -3317,6 +3329,42 @@ impl App {
             }
             _ => false,
         }
+    }
+
+    // This single call site is the prompt Enter handler, never the command
+    // registry, daemon frames, remote messages or model tool callbacks.
+    fn submit_keyboard_shell(&mut self) {
+        let Some(id) = self.groups[self.active_group].active_id().map(str::to_owned) else { self.notice = "Select a session before running a local shell".into(); return; };
+        if self.offline_ids.contains(&id) { self.notice = "Archived transcript is read-only".into(); return; }
+        let Some(cwd) = self.session_cwds.get(&id).cloned() else { self.notice = "Session directory unavailable".into(); return; };
+        let command = self.input[1..].trim().to_owned();
+        if command.is_empty() { self.notice = "!<command> runs locally in the session directory; output is not sent to the model or saved".into(); return; }
+        if self.local_shell_jobs.len() >= 4 { self.notice = "Wait for a local shell command to finish".into(); return; }
+        let shell_id = self.next_shell_id; self.next_shell_id = self.next_shell_id.saturating_add(1);
+        let initial = crate::shell::Result { id: shell_id, command: command.clone(), output: String::new(), status: "running · Ctrl+C cancel".into(), running: true, dropped_bytes: 0 };
+        if let Some(session) = self.sessions.iter_mut().find(|session| session.id == id) {
+            append_transcript(session, &format!("\n\n{}{}\n\n", transcript_tools::SHELL_PREFIX, serde_json::to_string(&initial).unwrap()));
+        }
+        self.local_shell_jobs.push(crate::shell::Job::start(id, shell_id, command, &cwd));
+        self.input.clear(); self.input_cursor = 0; self.notice = "Local shell running · output stays in this window".into();
+    }
+    fn poll_shell(&mut self) -> bool {
+        let mut changed = false; let mut index = 0;
+        while index < self.local_shell_jobs.len() {
+            if let Some(result) = self.local_shell_jobs[index].poll() {
+                let job = self.local_shell_jobs.remove(index);
+                if let Some(session) = self.sessions.iter_mut().find(|session| session.id == job.session) {
+                    let prefix = format!("{}{{\"id\":{},", transcript_tools::SHELL_PREFIX, job.id);
+                    if let Some(start) = session.transcript.find(&prefix) {
+                        let end = session.transcript[start..].find("\n\n").map_or(session.transcript.len(), |end| start + end);
+                        session.transcript.replace_range(start..end, &format!("{}{}", transcript_tools::SHELL_PREFIX, serde_json::to_string(&result).unwrap()));
+                        if session.transcript.len() > MAX_TRANSCRIPT_BYTES { session.transcript = transcript_tail(&session.transcript).to_owned(); }
+                        changed = true;
+                    }
+                }
+            } else { index += 1; }
+        }
+        changed
     }
 
     fn submit_local_command(&mut self) -> bool {
@@ -3590,7 +3638,7 @@ impl App {
             ["status",id]if doxa_state::valid_session_id(id)=>self.open_fleet(root,Some((*id).into())),
             ["attach",id,index]=>match index.parse::<usize>().ok().and_then(|index|crate::fleet_view::slot_socket(&root,id,index).ok()){
                 Some((_,session))=>self.attach_selected(&session),None=>self.notice="Fleet slot attachment refused; verify run and live slot".into()},
-            _=>self.notice="Usage: /fleet [runs|status RUN|attach RUN INDEX|start OPTIONS|resume RUN]".into()
+            _=>self.notice="Usage: /fleet [runs|status [RUN]|stop|detach|attach [RUN] INDEX|mesh [RUN]|start OPTIONS|resume RUN]".into()
         }
     }
     fn fleet_review_key(&mut self,key:KeyEvent)->bool{
@@ -4299,7 +4347,7 @@ impl App {
         }
         let engine = self.groups[self.active_group].active_id()
             .and_then(|id| self.session_identity.get(id)).and_then(|identity| identity.0.as_deref());
-        let configured=crate::settings::raw("engine");
+        let configured=engine_name(launch::configured_engine());
         self.engine_selected = engine.and_then(|engine| ENGINE_CHOICES.iter().position(|name| *name == engine)).or_else(||ENGINE_CHOICES.iter().position(|name|*name==configured)).unwrap_or(1);
         self.engine_picker = true;
     }
@@ -6466,6 +6514,7 @@ impl App {
             return;
         }
         let id = group.tabs.remove(group.active);
+        for job in &self.local_shell_jobs { if job.session == id { job.cancel(); } }
         group.active = group.active.min(group.tabs.len().saturating_sub(1));
         group.scroll = 0;
         self.notice = format!("Tab detached · {id} remains available in sessions");
@@ -6801,7 +6850,8 @@ impl App {
 
     fn activity_label(&self, id: &str) -> Option<&'static str> {
         let (running, queued) = self.session_activity.get(id).copied().unwrap_or_default();
-        if running { Some("Processing") }
+        if self.local_shell_jobs.iter().any(|job| job.session == id) { Some("Local shell") }
+        else if running { Some("Processing") }
         else if queued > 0 { Some("Queued") }
         else { None }
     }
@@ -9282,6 +9332,7 @@ fn run_loop(
         changed |= app.poll_memory();
         changed |= app.poll_repo();
         changed |= app.poll_memory_menu();
+        changed |= app.poll_shell();
         changed |= app.poll_vendor_catalog();
         changed |= app.tick_blink(Instant::now());
         changed |= app.tick_spinner(Instant::now());
@@ -9377,6 +9428,7 @@ fn run_loop(
             // Capture before update replaces the binary. No providers are
             // relaunched here; normal startup restores verified live tabs.
             app.window_mesh = None;
+            app.local_shell_jobs.clear();
             use std::os::unix::process::CommandExt;
             return Err(std::process::Command::new(executable).exec());
         }
@@ -11500,6 +11552,25 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn shell_is_keyboard_only_and_never_provider_or_command_dispatch() {
+        let root = tempfile::tempdir().unwrap(); let proof = root.path().join("proof");
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"shell-session", "cwd":root.path()}));
+        app.groups[0].tabs = vec!["shell-session".into()]; app.focus = Focus::Prompt;
+        let command = format!("!printf keyboard > '{}'", proof.display());
+        app.input = command.clone(); assert!(!app.submit_local_command()); assert!(!proof.exists());
+        app.apply_daemon_frame(&json!({"type":"event", "session_id":"shell-session", "event":{"type":"text_delta", "text":command}}));
+        assert!(!proof.exists()); assert!(app.local_shell_jobs.is_empty());
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(app.pending_prompts.is_empty()); assert_eq!(app.local_shell_jobs.len(), 1);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !app.local_shell_jobs.is_empty() && Instant::now() < deadline { app.poll_shell(); std::thread::sleep(Duration::from_millis(5)); }
+        assert!(app.local_shell_jobs.is_empty()); assert_eq!(std::fs::read_to_string(proof).unwrap(), "keyboard");
+        assert!(app.sessions[0].transcript.contains("DOXA_LOCAL_SHELL:"));
+        assert!(!COMMANDS.iter().any(|row| row.name == "/shell" || row.name == "!"));
+    }
+
+    #[test]
     fn help_lists_full_python_registry_with_rust_capabilities() {
         let mut app = App::default();
         app.groups[0].tabs.push("s".into());
@@ -11511,7 +11582,7 @@ for line in sys.stdin:
         let info = app.chip_info.as_ref().unwrap();
         assert_eq!(info.kind, "help");
         for form in ["/collection [action] [name]", "/usage", "/context", "/compact",
-            "/fleet [runs|status RUN|attach RUN INDEX|start OPTIONS|resume RUN]", "/help"] {
+            "/fleet [runs|status [RUN]|stop|detach|attach [RUN] INDEX|mesh [RUN]|start OPTIONS|resume RUN]", "/help"] {
             assert!(info.lines.iter().any(|line| line.starts_with(form)), "missing {form}");
         }
         assert!(info.lines.iter().any(|line| line.contains("unavailable in Rust")));
