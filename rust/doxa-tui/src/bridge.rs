@@ -10,11 +10,14 @@ use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value};
+#[cfg(test)]
+use serde_json::json;
 
 use crate::transport::{DaemonClient, TransportError};
 use crate::history;
 use crate::ui;
+use crate::worker_frames::{WorkerFrame, LaunchResult, PromptDelivery, CommandResult, ReplyStatus, QueueRow, wire_string, wire_value};
 use crate::discovery::Session;
 use crate::launch::{self, LaunchOptions};
 
@@ -39,11 +42,11 @@ pub enum WorkerCommand {
     FinalizeForClear(String),
 }
 
-fn safe_queue_rows(reply: &Value) -> Vec<Value> {
+fn safe_queue_rows(reply: &Value) -> Vec<QueueRow> {
     safe_queue_rows_with_client(reply, doxa_lore::LoreClient::open(Duration::from_secs(2)).ok())
 }
 
-fn safe_queue_rows_with_client(reply: &Value, mut lore: Option<doxa_lore::LoreClient>) -> Vec<Value> {
+fn safe_queue_rows_with_client(reply: &Value, mut lore: Option<doxa_lore::LoreClient>) -> Vec<QueueRow> {
     let Some(rows) = reply["queue"].as_array() else { return Vec::new(); };
     rows.iter().take(64).filter_map(|row| {
         let id = row["id"].as_str()?;
@@ -54,11 +57,11 @@ fn safe_queue_rows_with_client(reply: &Value, mut lore: Option<doxa_lore::LoreCl
             .and_then(|text| lore.as_mut()?.scrub(text).ok())
             .map(|text| text.chars().take(160).collect::<String>())
             .unwrap_or_else(|| "[preview unavailable]".into());
-        Some(json!({"id":id,"preview":preview}))
+        Some(QueueRow { id: id.to_owned(), preview })
     }).collect()
 }
 
-fn attach_worker(session: &Session, frames: &SyncSender<Value>, guard: &Arc<Mutex<bool>>)
+fn attach_worker(session: &Session, frames: &SyncSender<WorkerFrame>, guard: &Arc<Mutex<bool>>)
     -> io::Result<(SyncSender<WorkerCommand>, Arc<AtomicBool>, JoinHandle<()>)> {
     let (client, snapshot) = DaemonClient::connect_for_restore(&session.socket).map_err(io::Error::other)?;
     if client.hello["session_id"] != session.id {
@@ -82,17 +85,16 @@ fn attach_worker(session: &Session, frames: &SyncSender<Value>, guard: &Arc<Mute
             if stopped.load(Ordering::Acquire) {
                 if !cleared.load(Ordering::Acquire) { revoke(&guard); }
                 while let Ok(command) = rx.try_recv() {
-                    let _ = frames.send(rejected(command, "Session is stopping"));
+                    let _ = frames.send(rejection_frame(command, "Session is stopping"));
                 }
                 return;
             }
             revoke(&guard);
-            if frames.send(json!({"type":"client_notice", "session_id":id,
-                "message":"Daemon disconnected; reconnecting"})).is_err() { return; }
+            if frames.send(WorkerFrame::Notice { session_id: id.clone(), message: "Daemon disconnected; reconnecting".into() }).is_err() { return; }
             loop {
                 match rx.recv_timeout(Duration::from_millis(250)) {
                     Err(mpsc::RecvTimeoutError::Disconnected) => return,
-                    Ok(command) => { let _ = frames.send(rejected(command, "Daemon reconnecting")); }
+                    Ok(command) => { let _ = frames.send(rejection_frame(command, "Daemon reconnecting")); }
                     Err(mpsc::RecvTimeoutError::Timeout) => {}
                 }
                 match DaemonClient::connect(&path, Some(cursor.load(Ordering::Relaxed))) {
@@ -117,7 +119,7 @@ fn revoke(guard: &Mutex<bool>) {
 /// `complete` becomes false on any failed attach or disconnect and stays
 /// false for this UI lifetime, so a partial roster never rewrites a tabset.
 pub struct MultiBridge {
-    pub frames: Receiver<Value>,
+    pub frames: Receiver<WorkerFrame>,
     pub commands: SyncSender<WorkerCommand>,
     pub live_ids: Vec<String>,
     pub complete: Arc<Mutex<bool>>,
@@ -155,8 +157,7 @@ pub(crate) fn connect_sessions_inner(sessions:&[Session],readonly_restore:bool)-
             Ok(pair) => pair,
             _ => {
                 revoke(&complete);
-                let _ = frame_tx.try_send(json!({"type":"client_notice", "session_id":session.id,
-                    "message":"Session unavailable; saved layout is read-only"}));
+                let _ = frame_tx.try_send(WorkerFrame::Notice { session_id: session.id.clone(), message: "Session unavailable; saved layout is read-only".into() });
                 continue;
             }
         };
@@ -185,18 +186,16 @@ pub(crate) fn connect_sessions_inner(sessions:&[Session],readonly_restore:bool)-
                         let id = session.id.clone();
                         routes.insert(id.clone(), (tx.clone(), connected));
                         added_workers.push(worker);
-                        let _ = router_frames.send(json!({"type":"launch_reply", "ok":true,
-                            "session_id":id, "group":group}));
+                        let _ = router_frames.send(WorkerFrame::Launch { group, result: LaunchResult::Attached { session_id: id.clone() } });
                         if let Some(prompt) = prompt {
                             let _ = tx.send(WorkerCommand::Prompt(id, prompt));
                         }
                     }
-                    Err(error) => { let _ = router_frames.send(json!({"type":"launch_reply", "ok":false,
-                        "started":true, "session_id":session.id, "group":group,
-                        "message":format!("UI attach failed ({error}); use doxa-rs attach {}", session.id)})); }
+                    Err(error) => { let _ = router_frames.send(WorkerFrame::Launch { group, result: LaunchResult::Failed {
+                        message: format!("UI attach failed ({error}); use doxa-rs attach {}", session.id),
+                        started_session: Some(session.id) } }); }
                     },
-                    Err(error) => { let _ = router_frames.send(json!({"type":"launch_reply", "ok":false,
-                        "message":error.to_string(), "group":group})); }
+                    Err(error) => { let _ = router_frames.send(WorkerFrame::Launch { group, result: LaunchResult::Failed { message: error.to_string(), started_session: None } }); }
                 }
             }
             let command = match command_rx.recv_timeout(Duration::from_millis(50)) {
@@ -207,14 +206,11 @@ pub(crate) fn connect_sessions_inner(sessions:&[Session],readonly_restore:bool)-
             let command = match command {
                 WorkerCommand::Attach(id, group) => {
                     if routes.contains_key(&id) {
-                        let _ = router_frames.send(json!({"type":"attach_reply", "ok":true,
-                            "session_id":id, "group":group}));
+                        let _ = router_frames.send(WorkerFrame::Attach { session_id: id, group, result: Ok(()) });
                         continue;
                     }
                     if routes.len() >= crate::ui::panes::MAX_TABS {
-                        let _ = router_frames.send(json!({"type":"attach_reply", "ok":false,
-                            "session_id":id, "group":group,
-                            "message":"256 attached sessions is the limit"}));
+                        let _ = router_frames.send(WorkerFrame::Attach { session_id: id, group, result: Err("256 attached sessions is the limit".into()) });
                         continue;
                     }
                     // Re-read the trusted registry at dispatch time. The UI's earlier
@@ -227,19 +223,15 @@ pub(crate) fn connect_sessions_inner(sessions:&[Session],readonly_restore:bool)-
                         Ok((tx, connected, worker)) => {
                             routes.insert(id.clone(), (tx, connected));
                             added_workers.push(worker);
-                            let _ = router_frames.send(json!({"type":"attach_reply", "ok":true,
-                                "session_id":id, "group":group}));
+                            let _ = router_frames.send(WorkerFrame::Attach { session_id: id, group, result: Ok(()) });
                         }
-                        Err(error) => { let _ = router_frames.send(json!({"type":"attach_reply", "ok":false,
-                            "session_id":id, "group":group,
-                            "message":error.to_string()})); }
+                        Err(error) => { let _ = router_frames.send(WorkerFrame::Attach { session_id: id, group, result: Err(error.to_string()) }); }
                     }
                     continue;
                 }
                 WorkerCommand::Launch(options, prompt, group) => {
                     if routes.len().saturating_add(launches_in_flight) >= crate::ui::panes::MAX_TABS {
-                        let _ = router_frames.send(json!({"type":"launch_reply", "ok":false,
-                            "message":"256 attached sessions is the limit", "group":group}));
+                        let _ = router_frames.send(WorkerFrame::Launch { group, result: LaunchResult::Failed { message: "256 attached sessions is the limit".into(), started_session: None } });
                         continue;
                     }
                     launches_in_flight += 1;
@@ -260,20 +252,20 @@ pub(crate) fn connect_sessions_inner(sessions:&[Session],readonly_restore:bool)-
                 WorkerCommand::Launch(_, _, _) | WorkerCommand::Attach(_, _) => unreachable!(),
             };
             let Some((route, connected)) = routes.get(id) else {
-                let _ = router_frames.send(rejected(command, "Session is not attached"));
+                let _ = router_frames.send(rejection_frame(command, "Session is not attached"));
                 continue;
             };
             if !connected.load(Ordering::Acquire) {
-                let _ = router_frames.send(rejected(command, "Daemon reconnecting"));
+                let _ = router_frames.send(rejection_frame(command, "Daemon reconnecting"));
                 continue;
             }
             match route.try_send(command) {
                 Ok(()) => {}
                 Err(mpsc::TrySendError::Full(command)) => {
-                    let _ = router_frames.send(rejected(command, "Daemon command queue full"));
+                    let _ = router_frames.send(rejection_frame(command, "Daemon command queue full"));
                 }
                 Err(mpsc::TrySendError::Disconnected(command)) => {
-                    let _ = router_frames.send(rejected(command, "Daemon worker unavailable"));
+                    let _ = router_frames.send(rejection_frame(command, "Daemon worker unavailable"));
                 }
             }
         }
@@ -287,50 +279,47 @@ pub(crate) fn connect_sessions_inner(sessions:&[Session],readonly_restore:bool)-
 /// One owner-preserving failure envelope for router rejection and local queue
 /// disconnection. Callers must not replace its target with the focused session.
 pub(crate) fn rejected(command: WorkerCommand, message: &str) -> Value {
+    rejection_frame(command, message).into_legacy_value()
+}
+
+fn command_frame(session_id: String, result: CommandResult) -> WorkerFrame {
+    WorkerFrame::Command { session_id, result }
+}
+
+pub(crate) fn rejection_frame(command: WorkerCommand, message: &str) -> WorkerFrame {
+    let status = ReplyStatus::failed(message);
     match command {
-        WorkerCommand::Launch(_, _, group) => json!({"type":"launch_reply", "ok":false,
-            "message":message, "group":group}),
-        WorkerCommand::Attach(id, group) => json!({"type":"attach_reply", "ok":false,
-            "session_id":id, "message":message, "group":group}),
-        WorkerCommand::Prompt(id, text) => json!({"type":"prompt_rejected", "session_id":id,
-            "text":text, "message":message}),
-        WorkerCommand::Answer(session, request, _) => json!({"type":"answer_reply", "session_id":session,
-            "request_id":request, "ok":false, "message":message}),
-        WorkerCommand::Peers(id) => json!({"type":"peer_roster", "session_id":id,
-            "ok":false, "error":message}),
-        WorkerCommand::Message(id, target, text) => json!({"type":"peer_message_reply", "session_id":id,
-            "ok":false, "uncertain":false, "error":message,
-            "draft":format!("/msg {target} {text}")}),
-        WorkerCommand::Models(id) => json!({"type":"models_reply", "session_id":id,
-            "ok":false, "error":message}),
-        WorkerCommand::ContextDetail(id) => json!({"type":"context_detail", "session_id":id,
-            "ok":false, "error":message}),
-        WorkerCommand::SetModel(id, _) => json!({"type":"set_model_reply", "session_id":id,
-            "ok":false, "error":message}),
-        WorkerCommand::SetEffort(id, _) => json!({"type":"set_effort_reply", "session_id":id,
-            "ok":false, "error":message}),
-        WorkerCommand::SetPermissionMode(id, _) => json!({"type":"set_permission_mode_reply", "session_id":id,
-            "ok":false, "error":message}),
-        WorkerCommand::Branch(id, _) => json!({"type":"branch_reply", "session_id":id,
-            "ok":false, "error":message}),
-        WorkerCommand::QueueList(id) => json!({"type":"queue_list_reply", "session_id":id,
-            "ok":false, "error":message}),
-        WorkerCommand::Status(id) => json!({"type":"telemetry_unavailable", "session_id":id}),
-        WorkerCommand::QueueCancel(id, queue_id) => json!({"type":"queue_cancel_reply", "session_id":id,
-            "queue_id":queue_id, "ok":false, "error":message}),
-        WorkerCommand::Stop(id) => json!({"type":"stop_reply", "session_id":id,
-            "ok":false, "error":message}),
-        WorkerCommand::FinalizeForClear(id) => json!({"type":"clear_finalize_reply", "session_id":id,
-            "ok":false, "error":message}),
+        WorkerCommand::Launch(_, _, group) => WorkerFrame::Launch { group,
+            result: LaunchResult::Failed { message: message.into(), started_session: None } },
+        WorkerCommand::Attach(session_id, group) => WorkerFrame::Attach { session_id, group, result: Err(message.into()) },
+        WorkerCommand::Prompt(session_id, text) => WorkerFrame::PromptFailed { session_id, text,
+            message: message.into(), delivery: PromptDelivery::Rejected },
+        WorkerCommand::Answer(session_id, request_id, _) => command_frame(session_id,
+            CommandResult::Answer { request_id, ok: false, uncertain: None, message: message.into() }),
+        WorkerCommand::Peers(id) => command_frame(id, CommandResult::PeerRoster { status, peers: None }),
+        WorkerCommand::Message(id, target, text) => command_frame(id, CommandResult::PeerMessage { status,
+            uncertain: Some(false), draft: format!("/msg {target} {text}"), peer: None, delivered_to: None, failed: None, ledger_error: None }),
+        WorkerCommand::Models(id) => command_frame(id, CommandResult::Models { status, models: None,
+            note: None, loading: None, capabilities: None }),
+        WorkerCommand::ContextDetail(id) => command_frame(id, CommandResult::ContextDetail { status, detail: None }),
+        WorkerCommand::SetModel(id, _) => command_frame(id, CommandResult::SetModel { status, model: None }),
+        WorkerCommand::SetEffort(id, _) => command_frame(id, CommandResult::SetEffort { status, effort: None, verification_pending: None }),
+        WorkerCommand::SetPermissionMode(id, _) => command_frame(id, CommandResult::SetPermissionMode { status, mode: None }),
+        WorkerCommand::Branch(id, _) => command_frame(id, CommandResult::Branch { status, base: None, branches: None, message: None }),
+        WorkerCommand::QueueList(id) => command_frame(id, CommandResult::QueueList { status, rows: Vec::new() }),
+        WorkerCommand::Status(session_id) => WorkerFrame::TelemetryUnavailable { session_id },
+        WorkerCommand::QueueCancel(id, queue_id) => command_frame(id, CommandResult::QueueCancel { status, queue_id }),
+        WorkerCommand::Stop(id) => command_frame(id, CommandResult::Stop { status, for_clear: false }),
+        WorkerCommand::FinalizeForClear(id) => command_frame(id, CommandResult::Stop { status, for_clear: true }),
     }
 }
 
 pub fn run_sessions(sessions: &[Session], store: Option<crate::ui_state::UiStateStore>) -> io::Result<()> {
     let MultiBridge { frames, commands, live_ids, complete, router, workers } = connect_sessions_inner(sessions,store.as_ref().is_some_and(|store|!store.startup_archives.is_empty() || !store.startup_notice.is_empty()))?;
     let result = if let Some(store) = store {
-        ui::run_with_channels_state_guarded(frames, commands.clone(), store, live_ids, complete)
+        ui::run_with_worker_channels_state_guarded(frames, commands.clone(), store, live_ids, complete)
     } else {
-        ui::run_with_channels(frames, commands.clone())
+        ui::run_with_worker_channels(frames, commands.clone())
     };
     drop(commands);
     let _ = router.join();
@@ -363,12 +352,12 @@ fn as_io_error(error: TransportError) -> io::Error {
 }
 
 #[cfg(test)]
-fn spawn_worker(client: DaemonClient) -> (Receiver<Value>, SyncSender<WorkerCommand>, JoinHandle<()>) {
+fn spawn_worker(client: DaemonClient) -> (Receiver<WorkerFrame>, SyncSender<WorkerCommand>, JoinHandle<()>) {
     spawn_worker_with_snapshot(client, None)
 }
 
 #[cfg(test)]
-fn spawn_worker_with_snapshot(client: DaemonClient, snapshot: Option<crate::transport::TranscriptSnapshot>) -> (Receiver<Value>, SyncSender<WorkerCommand>, JoinHandle<()>) {
+fn spawn_worker_with_snapshot(client: DaemonClient, snapshot: Option<crate::transport::TranscriptSnapshot>) -> (Receiver<WorkerFrame>, SyncSender<WorkerCommand>, JoinHandle<()>) {
     let (frame_tx, frame_rx) = mpsc::sync_channel(128);
     let (prompt_tx, prompt_rx) = mpsc::sync_channel(32);
     let worker = thread::spawn(move || {
@@ -383,7 +372,7 @@ fn spawn_worker_with_snapshot(client: DaemonClient, snapshot: Option<crate::tran
 fn worker_loop(
     mut client: DaemonClient,
     snapshot: Option<crate::transport::TranscriptSnapshot>,
-    frames: &SyncSender<Value>,
+    frames: &SyncSender<WorkerFrame>,
     prompts: &Receiver<WorkerCommand>,
     cursor: &AtomicU64,
     roster_guard: Option<&Mutex<bool>>,
@@ -395,13 +384,12 @@ fn worker_loop(
         .unwrap_or_default()
         .to_owned();
     let live_from_seq = client.hello["next_seq"].as_u64().unwrap_or(u64::MAX);
-    if frames.send(client.hello.clone()).is_err() {
+    if frames.send(WorkerFrame::Daemon { session_id: session_id.clone(), frame: client.hello.clone() }).is_err() {
         return;
     }
     if let Some(snapshot) = snapshot {
         let markdown = history::render(&snapshot);
-        if !markdown.is_empty() && frames.send(json!({"type":"event", "session_id":session_id,
-            "event":{"type":"text_delta", "data":{"text":markdown,"snapshot":true}}})).is_err() {
+        if !markdown.is_empty() && frames.send(WorkerFrame::SnapshotText { session_id: session_id.clone(), markdown }).is_err() {
             return;
         }
     }
@@ -418,10 +406,8 @@ fn worker_loop(
                         WorkerCommand::FinalizeForClear(id) => (id, true),
                         _ => unreachable!(),
                     };
-                    let reply_type = if for_clear { "clear_finalize_reply" } else { "stop_reply" };
                     if id != session_id {
-                        let _ = frames.send(json!({"type":reply_type, "session_id":id,
-                            "ok":false, "error":"Stop target is not attached"}));
+                        let _ = frames.send(command_frame(id, CommandResult::Stop { for_clear, status: ReplyStatus::failed("Stop target is not attached") }));
                         continue;
                     }
                     let result = client.call(if for_clear { "stop_if_idle" } else { "stop" }, Map::new());
@@ -436,8 +422,7 @@ fn worker_loop(
                         if for_clear { cleared.store(true, Ordering::Release); }
                         else if let Some(guard) = roster_guard { revoke(guard); }
                     }
-                    if frames.send(json!({"type":reply_type, "session_id":id,
-                        "ok":accepted, "error":error})).is_err() { return; }
+                    if frames.send(command_frame(id, CommandResult::Stop { for_clear, status: ReplyStatus { ok: accepted, error: Some(error) } })).is_err() { return; }
                     if accepted {
                         return;
                     }
@@ -448,27 +433,23 @@ fn worker_loop(
                     cursor.store(client.cursor, Ordering::Relaxed);
                 }
                 Ok(WorkerCommand::Launch(_, _, group)) => {
-                    let _ = frames.send(json!({"type":"launch_reply", "ok":false,
-                        "message":"Session launch is unavailable on this connection", "group":group}));
+                    let _ = frames.send(WorkerFrame::Launch { group, result: LaunchResult::Failed { message: "Session launch is unavailable on this connection".into(), started_session: None } });
                 }
                 Ok(WorkerCommand::Attach(id, group)) => {
-                    let _ = frames.send(json!({"type":"attach_reply", "ok":false,
-                        "session_id":id, "message":"Session attach is unavailable on this connection", "group":group}));
+                    let _ = frames.send(WorkerFrame::Attach { session_id: id, group, result: Err("Session attach is unavailable on this connection".into()) });
                 }
                 Ok(WorkerCommand::Models(id)) => {
                     let result = if id == session_id { client.call("list_models", Map::new()) }
                         else { Err(TransportError::Malformed("model target is not attached")) };
                     cursor.store(client.cursor, Ordering::Relaxed);
                     let reply = match result {
-                        Ok(reply) => json!({"type":"models_reply", "session_id":id,
-                            "ok":reply["ok"] == true, "models":reply.get("models"),
-                            "note":reply.get("note"), "loading":reply.get("loading"),
-                            "capabilities":reply.get("capabilities"),
-                            "error":reply.get("error")}),
-                        Err(error) => json!({"type":"models_reply", "session_id":id,
-                            "ok":false, "error":error.to_string()}),
+                        Ok(reply) => CommandResult::Models { status: ReplyStatus::from_wire(&reply),
+                            models: wire_value(&reply, "models"), note: wire_string(&reply, "note"),
+                            loading: reply.get("loading").and_then(Value::as_bool), capabilities: wire_value(&reply, "capabilities") },
+                        Err(error) => CommandResult::Models { status: ReplyStatus::failed(error.to_string()),
+                            models: None, note: None, loading: None, capabilities: None },
                     };
-                    if frames.send(reply).is_err() { return; }
+                    if frames.send(command_frame(id, reply)).is_err() { return; }
                 }
                 Ok(WorkerCommand::SetModel(id, model)) => {
                     let result = if id == session_id {
@@ -478,45 +459,37 @@ fn worker_loop(
                     } else { Err(TransportError::Malformed("model target is not attached")) };
                     cursor.store(client.cursor, Ordering::Relaxed);
                     let reply = match result {
-                        Ok(reply) => json!({"type":"set_model_reply", "session_id":id,
-                            "ok":reply["ok"] == true, "model":reply.get("model"),
-                            "error":reply.get("error")}),
-                        Err(error) => json!({"type":"set_model_reply", "session_id":id,
-                            "ok":false, "error":error.to_string()}),
+                        Ok(reply) => CommandResult::SetModel { status: ReplyStatus::from_wire(&reply), model: wire_string(&reply, "model") },
+                        Err(error) => CommandResult::SetModel { status: ReplyStatus::failed(error.to_string()), model: None },
                     };
-                    if frames.send(reply).is_err() { return; }
+                    if frames.send(command_frame(id, reply)).is_err() { return; }
                 }
                 Ok(WorkerCommand::SetEffort(id, effort)) => {
                     let result = if id == session_id {
                         let mut params = Map::new();
                         params.insert("effort".into(), Value::String(effort));
                         client.call("set_effort", params)
-                    } else { Err(TransportError::Malformed("effort target is not attached")) };
+                    } else { Err(TransportError::Malformed("model target is not attached")) };
                     cursor.store(client.cursor, Ordering::Relaxed);
                     let reply = match result {
-                        Ok(reply) => json!({"type":"set_effort_reply", "session_id":id,
-                            "ok":reply["ok"] == true, "effort":reply.get("effort"),
-                            "verification_pending":reply.get("verification_pending"), "error":reply.get("error")}),
-                        Err(error) => json!({"type":"set_effort_reply", "session_id":id,
-                            "ok":false, "error":error.to_string()}),
+                        Ok(reply) => CommandResult::SetEffort { status: ReplyStatus::from_wire(&reply), effort: wire_string(&reply, "effort"),
+                            verification_pending: reply.get("verification_pending").and_then(Value::as_bool) },
+                        Err(error) => CommandResult::SetEffort { status: ReplyStatus::failed(error.to_string()), effort: None, verification_pending: None },
                     };
-                    if frames.send(reply).is_err() { return; }
+                    if frames.send(command_frame(id, reply)).is_err() { return; }
                 }
                 Ok(WorkerCommand::SetPermissionMode(id, mode)) => {
                     let result = if id == session_id {
                         let mut params = Map::new();
                         params.insert("mode".into(), Value::String(mode));
                         client.call("set_permission_mode", params)
-                    } else { Err(TransportError::Malformed("permission target is not attached")) };
+                    } else { Err(TransportError::Malformed("model target is not attached")) };
                     cursor.store(client.cursor, Ordering::Relaxed);
                     let reply = match result {
-                        Ok(reply) => json!({"type":"set_permission_mode_reply", "session_id":id,
-                            "ok":reply["ok"] == true, "mode":reply.get("mode"),
-                            "error":reply.get("error")}),
-                        Err(error) => json!({"type":"set_permission_mode_reply", "session_id":id,
-                            "ok":false, "error":error.to_string()}),
+                        Ok(reply) => CommandResult::SetPermissionMode { status: ReplyStatus::from_wire(&reply), mode: wire_string(&reply, "mode") },
+                        Err(error) => CommandResult::SetPermissionMode { status: ReplyStatus::failed(error.to_string()), mode: None },
                     };
-                    if frames.send(reply).is_err() { return; }
+                    if frames.send(command_frame(id, reply)).is_err() { return; }
                 }
                 Ok(WorkerCommand::Branch(id, target)) => {
                     let result = if id == session_id {
@@ -526,28 +499,22 @@ fn worker_loop(
                     } else { Err(TransportError::Malformed("branch target is not attached")) };
                     cursor.store(client.cursor, Ordering::Relaxed);
                     let reply = match result {
-                        Ok(reply) => json!({"type":"branch_reply", "session_id":id,
-                            "ok":reply["ok"] == true, "base":reply.get("base"),
-                            "branches":reply.get("branches"), "message":reply.get("message"),
-                            "error":reply.get("error")}),
-                        Err(error) => json!({"type":"branch_reply", "session_id":id,
-                            "ok":false, "error":error.to_string()}),
+                        Ok(reply) => CommandResult::Branch { status: ReplyStatus::from_wire(&reply), base: wire_value(&reply, "base"),
+                            branches: wire_value(&reply, "branches"), message: wire_string(&reply, "message") },
+                        Err(error) => CommandResult::Branch { status: ReplyStatus::failed(error.to_string()), base: None, branches: None, message: None },
                     };
-                    if frames.send(reply).is_err() { return; }
+                    if frames.send(command_frame(id, reply)).is_err() { return; }
                 }
                 Ok(WorkerCommand::ContextDetail(id)) => {
                     let result = if id == session_id { client.call("context_detail", Map::new()) }
                         else { Err(TransportError::Malformed("context target is not attached")) };
                     cursor.store(client.cursor, Ordering::Relaxed);
                     let frame = match &result {
-                        Ok(reply) if reply["ok"] == true => json!({"type":"context_detail",
-                            "session_id":id,"ok":true,"detail":reply["result"]}),
-                        Ok(_) => json!({"type":"context_detail","session_id":id,
-                            "ok":false,"error":"Context detail is unavailable for this session"}),
-                        Err(error) => json!({"type":"context_detail","session_id":id,
-                            "ok":false,"error":error.to_string()}),
+                        Ok(reply) if reply["ok"] == true => CommandResult::ContextDetail { status: ReplyStatus { ok: true, error: None }, detail: wire_value(reply, "result") },
+                        Ok(_) => CommandResult::ContextDetail { status: ReplyStatus::failed("Context detail is unavailable for this session"), detail: None },
+                        Err(error) => CommandResult::ContextDetail { status: ReplyStatus::failed(error.to_string()), detail: None },
                     };
-                    if frames.send(frame).is_err() { return; }
+                    if frames.send(command_frame(id, frame)).is_err() { return; }
                     if matches!(result, Err(TransportError::Closed)) { return; }
                 }
                 Ok(WorkerCommand::QueueList(id)) => {
@@ -558,14 +525,11 @@ fn worker_loop(
                         if let Some(guard) = roster_guard { revoke(guard); }
                     }
                     let frame = match &result {
-                        Ok(reply) if reply["ok"] == true => json!({"type":"queue_list_reply",
-                            "session_id":id,"ok":true,"rows":safe_queue_rows(reply)}),
-                        Ok(reply) => json!({"type":"queue_list_reply","session_id":id,
-                            "ok":false,"error":reply["error"].as_str().unwrap_or("Queue unavailable")}),
-                        Err(error) => json!({"type":"queue_list_reply","session_id":id,
-                            "ok":false,"error":error.to_string()}),
+                        Ok(reply) if reply["ok"] == true => CommandResult::QueueList { status: ReplyStatus { ok: true, error: None }, rows: safe_queue_rows(reply) },
+                        Ok(reply) => CommandResult::QueueList { status: ReplyStatus::failed(reply["error"].as_str().unwrap_or("Queue unavailable")), rows: Vec::new() },
+                        Err(error) => CommandResult::QueueList { status: ReplyStatus::failed(error.to_string()), rows: Vec::new() },
                     };
-                    if frames.send(frame).is_err() { return; }
+                    if frames.send(command_frame(id, frame)).is_err() { return; }
                     if matches!(result, Err(TransportError::Closed)) { return; }
                 }
                 Ok(WorkerCommand::QueueCancel(id, queue_id)) => {
@@ -578,20 +542,13 @@ fn worker_loop(
                     if matches!(result, Err(TransportError::Closed)) {
                         if let Some(guard) = roster_guard { revoke(guard); }
                     }
-                    let frame = match &result {
-                        Ok(reply) => json!({"type":"queue_cancel_reply","session_id":id,
-                            "queue_id":queue_id,"ok":reply["ok"] == true,
-                            "error":reply.get("error")}),
-                        Err(error) => json!({"type":"queue_cancel_reply","session_id":id,
-                            "queue_id":queue_id,"ok":false,"error":error.to_string()}),
-                    };
-                    if frames.send(frame).is_err() { return; }
+                    let status = match &result { Ok(reply) => ReplyStatus::from_wire(reply), Err(error) => ReplyStatus::failed(error.to_string()) };
+                    if frames.send(command_frame(id, CommandResult::QueueCancel { status, queue_id })).is_err() { return; }
                     if matches!(result, Err(TransportError::Closed)) { return; }
                 }
                 Ok(WorkerCommand::Answer(session, id, answer)) => {
                     if session != session_id || !answer.is_object() {
-                        let _ = frames.send(json!({"type":"answer_reply", "session_id":session,
-                            "request_id":id, "ok":false, "message":"Invalid answer target or payload"}));
+                        let _ = frames.send(command_frame(session, CommandResult::Answer { request_id: id, ok: false, uncertain: None, message: "Invalid answer target or payload".into() }));
                         continue;
                     }
                     let mut params = Map::new();
@@ -602,16 +559,13 @@ fn worker_loop(
                     if matches!(result, Err(TransportError::Closed)) {
                         if let Some(guard) = roster_guard { revoke(guard); }
                     }
-                    let frame = match result {
-                        Ok(ref reply) => json!({"type":"answer_reply", "session_id":session,
-                            "request_id":id, "ok":reply["ok"] == true,
-                            "message":reply["error"].as_str().unwrap_or("Request no longer pending")}),
-                        Err(ref error) => json!({"type":"answer_reply", "session_id":session,
-                            "request_id":id, "ok":false,
-                            "uncertain":!matches!(error, TransportError::FrameTooLarge | TransportError::RequestIdsExhausted),
-                            "message":error.to_string()}),
+                    let frame = match &result {
+                        Ok(reply) => CommandResult::Answer { request_id: id, ok: reply["ok"] == true, uncertain: None,
+                            message: reply["error"].as_str().unwrap_or("Request no longer pending").to_owned() },
+                        Err(error) => CommandResult::Answer { request_id: id, ok: false,
+                            uncertain: Some(!matches!(error, TransportError::FrameTooLarge | TransportError::RequestIdsExhausted)), message: error.to_string() },
                     };
-                    if frames.send(frame).is_err() {
+                    if frames.send(command_frame(session, frame)).is_err() {
                         return;
                     }
                     if matches!(result, Err(TransportError::Closed)) {
@@ -620,8 +574,7 @@ fn worker_loop(
                 }
                 Ok(WorkerCommand::Peers(id)) => {
                     if id != session_id {
-                        let _ = frames.send(json!({"type":"peer_roster", "session_id":id,
-                            "ok":false, "error":"Peer target is not attached"}));
+                        let _ = frames.send(command_frame(id, CommandResult::PeerRoster { status: ReplyStatus::failed("Peer target is not attached"), peers: None }));
                         continue;
                     }
                     let result = client.call("peers", Map::new());
@@ -629,21 +582,18 @@ fn worker_loop(
                     if matches!(result, Err(TransportError::Closed)) {
                         if let Some(guard) = roster_guard { revoke(guard); }
                     }
-                    let reply = match result {
-                        Ok(ref reply) => json!({"type":"peer_roster", "session_id":id,
-                            "ok":reply["ok"] == true, "peers":reply.get("peers"),
-                            "error":reply.get("error")}),
-                        Err(ref error) => json!({"type":"peer_roster", "session_id":id,
-                            "ok":false, "error":error.to_string()}),
+                    let reply = match &result {
+                        Ok(reply) => CommandResult::PeerRoster { status: ReplyStatus::from_wire(reply), peers: wire_value(reply, "peers") },
+                        Err(error) => CommandResult::PeerRoster { status: ReplyStatus::failed(error.to_string()), peers: None },
                     };
-                    if frames.send(reply).is_err() { return; }
+                    if frames.send(command_frame(id, reply)).is_err() { return; }
                     if matches!(result, Err(TransportError::Closed)) { return; }
                 }
                 Ok(WorkerCommand::Message(id, target, text)) => {
                     let draft = format!("/msg {target} {text}");
                     if id != session_id {
-                        let _ = frames.send(json!({"type":"peer_message_reply", "session_id":id,
-                            "ok":false, "error":"Peer target session is not attached", "draft":draft}));
+                        let _ = frames.send(command_frame(id, CommandResult::PeerMessage { status: ReplyStatus::failed("Peer target session is not attached"), uncertain: None,
+                            draft, peer: None, delivered_to: None, failed: None, ledger_error: None }));
                         continue;
                     }
                     let mut params = Map::new();
@@ -655,24 +605,20 @@ fn worker_loop(
                         if let Some(guard) = roster_guard { revoke(guard); }
                     }
                     let reply = match &result {
-                        Ok(reply) => json!({"type":"peer_message_reply", "session_id":id,
-                            "ok":reply["ok"] == true, "peer":reply.get("peer"),
-                            "delivered_to":reply.get("delivered_to"),
-                            "failed":reply.get("failed"), "ledger_error":reply.get("ledger_error"),
-                            "error":reply.get("error"), "draft":draft}),
-                        Err(error) => json!({"type":"peer_message_reply", "session_id":id,
-                            "ok":false,
-                            "uncertain":!matches!(error, TransportError::FrameTooLarge | TransportError::RequestIdsExhausted),
-                            "error":error.to_string(), "draft":draft}),
+                        Ok(reply) => CommandResult::PeerMessage { status: ReplyStatus::from_wire(reply), uncertain: None,
+                            draft, peer: wire_value(reply, "peer"), delivered_to: wire_value(reply, "delivered_to"),
+                            failed: wire_value(reply, "failed"), ledger_error: wire_value(reply, "ledger_error") },
+                        Err(error) => CommandResult::PeerMessage { status: ReplyStatus::failed(error.to_string()),
+                            uncertain: Some(!matches!(error, TransportError::FrameTooLarge | TransportError::RequestIdsExhausted)),
+                            draft, peer: None, delivered_to: None, failed: None, ledger_error: None },
                     };
-                    if frames.send(reply).is_err() { return; }
+                    if frames.send(command_frame(id, reply)).is_err() { return; }
                     if matches!(result, Err(TransportError::Closed)) { return; }
                 }
                 Ok(WorkerCommand::Prompt(id, text)) => {
                     if id != session_id {
                         if frames
-                            .send(json!({"type":"prompt_rejected", "session_id":id, "text":text,
-                            "message":"Prompt target is not attached"}))
+                            .send(WorkerFrame::PromptFailed { session_id: id, text, message: "Prompt target is not attached".into(), delivery: PromptDelivery::Rejected })
                             .is_err()
                         {
                             return;
@@ -681,14 +627,11 @@ fn worker_loop(
                     }
                     match client.prompt(&text) {
                         Ok(reply) => {
-                            let mut frame = if reply["ok"] == false {
-                                json!({"type":"prompt_rejected", "session_id":id, "text":text,
-                                    "message":reply["error"].as_str().unwrap_or("Prompt refused")})
-                            } else {
-                                reply
-                            };
-                            let rejected = frame["type"] == "prompt_rejected";
-                            frame["session_id"] = Value::String(session_id.clone());
+                            let rejected = reply["ok"] == false;
+                            let frame = if rejected {
+                                WorkerFrame::PromptFailed { session_id: id, text, delivery: PromptDelivery::Rejected,
+                                    message: reply["error"].as_str().unwrap_or("Prompt refused").to_owned() }
+                            } else { WorkerFrame::Daemon { session_id: session_id.clone(), frame: reply } };
                             if frames.send(frame).is_err() {
                                 return;
                             }
@@ -703,23 +646,22 @@ fn worker_loop(
                             // Once bytes may have been written, a missing reply does not
                             // prove that the daemon rejected the prompt. Keep the draft
                             // available, but require a deliberate retry by the user.
-                            let (kind, message) = match error {
+                            let (delivery, message) = match error {
                                 TransportError::FrameTooLarge
                                 | TransportError::RequestIdsExhausted => {
-                                    ("prompt_rejected", "Prompt could not be sent")
+                                    (PromptDelivery::Rejected, "Prompt could not be sent")
                                 }
                                 TransportError::Timeout => {
-                                    ("prompt_uncertain", "Prompt delivery unconfirmed")
+                                    (PromptDelivery::Uncertain, "Prompt delivery unconfirmed")
                                 }
                                 TransportError::Closed => (
-                                    "prompt_uncertain",
+                                    PromptDelivery::Uncertain,
                                     "Daemon disconnected; prompt delivery unconfirmed",
                                 ),
-                                _ => ("prompt_uncertain", "Prompt delivery unconfirmed"),
+                                _ => (PromptDelivery::Uncertain, "Prompt delivery unconfirmed"),
                             };
                             let _ =
-                                frames.send(json!({"type":kind, "session_id":session_id,
-                                    "text":text, "message":message}));
+                                frames.send(WorkerFrame::PromptFailed { session_id: session_id.clone(), text, message: message.into(), delivery });
                             if matches!(error, TransportError::Closed) {
                                 return;
                             }
@@ -732,12 +674,11 @@ fn worker_loop(
             }
         }
         match client.poll_frame(Duration::from_millis(50)) {
-            Ok(Some(mut frame)) => {
+            Ok(Some(frame)) => {
                 let terminal = frame["type"] == "event"
                     && matches!(frame["event"]["type"].as_str(), Some("turn_done" | "turn_refused"))
                     && frame["seq"].as_u64().is_some_and(|seq| seq >= live_from_seq);
-                frame["session_id"] = Value::String(session_id.clone());
-                if frames.send(frame).is_err() {
+                if frames.send(WorkerFrame::Daemon { session_id: session_id.clone(), frame }).is_err() {
                     return;
                 }
                 if terminal && !forward_status(&mut client, frames, &session_id) { return; }
@@ -750,8 +691,7 @@ fn worker_loop(
                     TransportError::FrameTooLarge => "Daemon sent an oversized frame",
                     _ => "Daemon connection failed",
                 };
-                let _ = frames.send(json!({"type":"client_notice", "session_id":session_id,
-                    "message":message}));
+                let _ = frames.send(WorkerFrame::Notice { session_id: session_id.clone(), message: message.into() });
                 return;
             }
         }
@@ -765,21 +705,14 @@ fn worker_loop(
     }
 }
 
-fn forward_status(client: &mut DaemonClient, frames: &SyncSender<Value>, session_id: &str) -> bool {
+fn forward_status(client: &mut DaemonClient, frames: &SyncSender<WorkerFrame>, session_id: &str) -> bool {
     match client.call("status", Map::new()) {
-        Ok(mut reply) if reply["ok"] == true && reply.get("status").is_some() => {
-            // The runtime may publish turn_done before clearing its busy flag.
-            // Keep this internal refresh separate from a user-requested status
-            // reply so it cannot restore stale activity or replace the notice.
-            reply["type"] = Value::String("telemetry_status".into());
-            reply["session_id"] = Value::String(session_id.to_owned());
-            if let Some(status) = reply.get_mut("status").and_then(Value::as_object_mut) {
-                status.insert("session_id".into(), Value::String(session_id.to_owned()));
-            }
-            frames.send(reply).is_ok()
+        Ok(reply) if reply["ok"] == true && reply.get("status").is_some() => {
+            // Do not restore activity from a possibly stale cached status.
+            frames.send(WorkerFrame::Telemetry { session_id: session_id.to_owned(), reply }).is_ok()
         }
         Err(TransportError::Closed) => false,
-        _ => frames.send(json!({"type":"telemetry_unavailable", "session_id":session_id})).is_ok(),
+        _ => frames.send(WorkerFrame::TelemetryUnavailable { session_id: session_id.to_owned() }).is_ok(),
     }
 }
 
@@ -791,6 +724,77 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static NEXT_SOCKET: AtomicUsize = AtomicUsize::new(0);
+
+
+    #[test]
+    fn typed_router_rejections_preserve_each_original_command_owner() {
+        let bridge = connect_sessions_inner(&[], true).unwrap();
+        bridge.commands.send(WorkerCommand::SetEffort("background".into(), "low".into())).unwrap();
+        bridge.commands.send(WorkerCommand::Answer("other".into(), "permission-7".into(), json!({"decision":"deny"}))).unwrap();
+        bridge.commands.send(WorkerCommand::Message("draft-owner".into(), "peer-2".into(), "retain me".into())).unwrap();
+        bridge.commands.send(WorkerCommand::QueueCancel("queue-owner".into(), "queue-4".into())).unwrap();
+        let frame = bridge.frames.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(matches!(frame, WorkerFrame::Command { session_id, result: CommandResult::SetEffort { status, effort: None, verification_pending: None } }
+            if session_id == "background" && !status.ok && status.error.as_deref() == Some("Session is not attached")));
+        let frame = bridge.frames.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(matches!(frame, WorkerFrame::Command { session_id, result: CommandResult::Answer { request_id, ok: false, uncertain: None, .. } }
+            if session_id == "other" && request_id == "permission-7"));
+        let frame = bridge.frames.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(matches!(frame, WorkerFrame::Command { session_id, result: CommandResult::PeerMessage { status, draft, uncertain: Some(false), .. } }
+            if session_id == "draft-owner" && !status.ok && draft == "/msg peer-2 retain me"));
+        let frame = bridge.frames.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(matches!(frame, WorkerFrame::Command { session_id, result: CommandResult::QueueCancel { status, queue_id } }
+            if session_id == "queue-owner" && !status.ok && queue_id == "queue-4"));
+        bridge.shutdown();
+    }
+
+    #[test]
+    fn typed_worker_refuses_malformed_control_fields_and_wrong_session_targets() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("daemon.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            writeln!(socket, "{}", json!({"type":"hello","proto":1,"session_id":"owned","engine":"claude","cwd":"/","next_seq":0})).unwrap();
+            let mut reader = BufReader::new(socket.try_clone().unwrap());
+            let mut line = String::new(); reader.read_line(&mut line).unwrap(); // attach
+            line.clear(); reader.read_line(&mut line).unwrap();
+            let request: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(request["method"], "set_effort");
+            writeln!(socket, "{}", json!({"type":"reply","id":request["id"],"ok":true,"effort":42,"verification_pending":"false","error":false,"session_id":"spoofed"})).unwrap();
+            // No RPC is emitted for the following mismatched owner.
+            line.clear(); assert_eq!(reader.read_line(&mut line).unwrap(), 0);
+        });
+        let (frames, commands, worker) = spawn_worker(DaemonClient::connect(&path, None).unwrap());
+        assert!(matches!(frames.recv_timeout(Duration::from_secs(2)).unwrap(), WorkerFrame::Daemon { session_id, .. } if session_id == "owned"));
+        commands.send(WorkerCommand::SetEffort("owned".into(), "low".into())).unwrap();
+        assert!(matches!(frames.recv_timeout(Duration::from_secs(2)).unwrap(), WorkerFrame::Command { session_id,
+            result: CommandResult::SetEffort { status: ReplyStatus { ok: true, error: None }, effort: None, verification_pending: None } } if session_id == "owned"));
+        commands.send(WorkerCommand::SetEffort("different".into(), "high".into())).unwrap();
+        assert!(matches!(frames.recv_timeout(Duration::from_secs(2)).unwrap(), WorkerFrame::Command { session_id,
+            result: CommandResult::SetEffort { status, effort: None, verification_pending: None } } if session_id == "different" && !status.ok));
+        drop(commands); worker.join().unwrap(); server.join().unwrap();
+    }
+
+    #[test]
+    fn typed_router_command_backpressure_returns_the_unsent_command_without_losing_its_target() {
+        let bridge = connect_sessions_inner(&[], true).unwrap();
+        let mut rejected = None;
+        // Exercise the real router's bounded command channel with its result
+        // receiver undrained; a full queue must return the exact unsent draft.
+        for index in 0..10_000 {
+            let command = WorkerCommand::Prompt(format!("owner-{index}"), format!("draft-{index}"));
+            match bridge.commands.try_send(command) {
+                Ok(()) => {},
+                Err(mpsc::TrySendError::Full(command)) => { rejected = Some((index, command)); break; },
+                Err(mpsc::TrySendError::Disconnected(_)) => panic!("router ended during owned backpressure test"),
+            }
+        }
+        let (index, command) = rejected.expect("bounded queues must reject the unsent command");
+        assert!(matches!(command, WorkerCommand::Prompt(id, text) if id == format!("owner-{index}") && text == format!("draft-{index}")));
+        // Shutdown must join even while there are undrained queued results.
+        bridge.shutdown();
+    }
 
     #[test]
     fn effort_verification_flag_survives_daemon_worker_bridge() {
@@ -809,10 +813,10 @@ mod tests {
             }
         });
         let (frames, commands, worker) = spawn_worker(DaemonClient::connect(&path, None).unwrap());
-        assert_eq!(frames.recv_timeout(Duration::from_secs(2)).unwrap()["type"], "hello");
+        assert_eq!(frames.recv_timeout(Duration::from_secs(2)).unwrap().into_legacy_value()["type"], "hello");
         for pending in [true, false] {
             commands.send(WorkerCommand::SetEffort("s".into(), "low".into())).unwrap();
-            let reply = frames.recv_timeout(Duration::from_secs(2)).unwrap();
+            let reply = frames.recv_timeout(Duration::from_secs(2)).unwrap().into_legacy_value();
             assert_eq!(reply["type"], "set_effort_reply"); assert_eq!(reply["session_id"], "s");
             assert_eq!(reply["verification_pending"], pending);
         }
@@ -855,9 +859,9 @@ mod tests {
         let (frame_tx, frame_rx) = mpsc::sync_channel(16);
         let complete = Arc::new(Mutex::new(true));
         let (commands, _, worker) = attach_worker(&session, &frame_tx, &complete).unwrap();
-        assert_eq!(frame_rx.recv_timeout(Duration::from_secs(2)).unwrap()["type"], "hello");
+        assert_eq!(frame_rx.recv_timeout(Duration::from_secs(2)).unwrap().into_legacy_value()["type"], "hello");
         commands.send(WorkerCommand::FinalizeForClear("old".into())).unwrap();
-        let reply = frame_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let reply = frame_rx.recv_timeout(Duration::from_secs(2)).unwrap().into_legacy_value();
         assert_eq!(reply["type"], "clear_finalize_reply");
         assert_eq!(reply["ok"], true);
         worker.join().unwrap();
@@ -885,12 +889,12 @@ for line in sys.stdin:
             {"id":"q7","text":"my SECRET token"}, {"id":"../unsafe","text":"SECRET"}
         ]}), doxa_lore::LoreClient::spawn(&script, Duration::from_secs(2)).ok());
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0]["id"], "q7");
-        assert_eq!(rows[0]["preview"], "my [redacted] token");
+        assert_eq!(rows[0].id, "q7");
+        assert_eq!(rows[0].preview, "my [redacted] token");
         assert!(!serde_json::to_string(&rows).unwrap().contains("SECRET"));
         let unavailable = safe_queue_rows_with_client(&json!({"queue":[{"id":"q8","text":"SECRET"}]}),
             None);
-        assert_eq!(unavailable[0]["preview"], "[preview unavailable]");
+        assert_eq!(unavailable[0].preview, "[preview unavailable]");
     }
 
     #[test]
@@ -958,25 +962,25 @@ for line in sys.stdin:
         let client = DaemonClient::connect(&path, None).unwrap();
         let (frames, prompts, worker) = spawn_worker(client);
         assert_eq!(
-            frames.recv_timeout(Duration::from_secs(2)).unwrap()["session_id"],
+            frames.recv_timeout(Duration::from_secs(2)).unwrap().into_legacy_value()["session_id"],
             "session-1"
         );
-        let event = frames.recv_timeout(Duration::from_secs(2)).unwrap();
+        let event = frames.recv_timeout(Duration::from_secs(2)).unwrap().into_legacy_value();
         assert_eq!(event["session_id"], "session-1");
         assert_eq!(event["event"]["data"]["text"], "hello");
         prompts
             .send(WorkerCommand::Prompt("session-1".into(), "next".into()))
             .unwrap();
         assert_eq!(
-            frames.recv_timeout(Duration::from_secs(2)).unwrap()["turn"],
+            frames.recv_timeout(Duration::from_secs(2)).unwrap().into_legacy_value()["turn"],
             "turn-1"
         );
         prompts.send(WorkerCommand::Peers("session-1".into())).unwrap();
-        let peers = frames.recv_timeout(Duration::from_secs(2)).unwrap();
+        let peers = frames.recv_timeout(Duration::from_secs(2)).unwrap().into_legacy_value();
         assert_eq!(peers["type"], "peer_roster");
         assert_eq!(peers["peers"][0]["session_id"], "peer-1");
         prompts.send(WorkerCommand::Message("session-1".into(), "peer-1".into(), "hello".into())).unwrap();
-        let sent = frames.recv_timeout(Duration::from_secs(2)).unwrap();
+        let sent = frames.recv_timeout(Duration::from_secs(2)).unwrap().into_legacy_value();
         assert_eq!(sent["type"], "peer_message_reply");
         assert_eq!(sent["delivered_to"], json!(["peer-1"]));
         drop(prompts);
@@ -1009,9 +1013,9 @@ for line in sys.stdin:
         });
         let client = DaemonClient::connect(&path, None).unwrap();
         let (frames, prompts, worker) = spawn_worker(client);
-        assert_eq!(frames.recv_timeout(Duration::from_secs(2)).unwrap()["lore_scrub"], "ready");
-        assert_eq!(frames.recv_timeout(Duration::from_secs(2)).unwrap()["event"]["type"], "turn_done");
-        let status = frames.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(frames.recv_timeout(Duration::from_secs(2)).unwrap().into_legacy_value()["lore_scrub"], "ready");
+        assert_eq!(frames.recv_timeout(Duration::from_secs(2)).unwrap().into_legacy_value()["event"]["type"], "turn_done");
+        let status = frames.recv_timeout(Duration::from_secs(2)).unwrap().into_legacy_value();
         assert_eq!(status["type"], "telemetry_status");
         assert_eq!(status["status"]["lore_scrub"], "unavailable");
         drop(prompts);
@@ -1055,14 +1059,14 @@ for line in sys.stdin:
         });
         let client = DaemonClient::connect(&path, None).unwrap();
         let (frames, prompts, worker) = spawn_worker(client);
-        frames.recv_timeout(Duration::from_secs(2)).unwrap(); // hello
+        frames.recv_timeout(Duration::from_secs(2)).unwrap().into_legacy_value(); // hello
         prompts
             .send(WorkerCommand::Prompt(
                 "session-1".into(),
                 "please retry".into(),
             ))
             .unwrap();
-        let rejected = frames.recv_timeout(Duration::from_secs(2)).unwrap();
+        let rejected = frames.recv_timeout(Duration::from_secs(2)).unwrap().into_legacy_value();
         assert_eq!(rejected["type"], "prompt_rejected");
         assert_eq!(rejected["text"], "please retry");
         assert_eq!(rejected["message"], "queue full");
@@ -1110,7 +1114,7 @@ for line in sys.stdin:
         });
         let client = DaemonClient::connect(&path, None).unwrap();
         let (frames, commands, worker) = spawn_worker(client);
-        frames.recv_timeout(Duration::from_secs(2)).unwrap();
+        frames.recv_timeout(Duration::from_secs(2)).unwrap().into_legacy_value();
         commands
             .send(WorkerCommand::Answer(
                 "session-1".into(),
@@ -1118,7 +1122,7 @@ for line in sys.stdin:
                 json!({"decision":"deny"}),
             ))
             .unwrap();
-        let reply = frames.recv_timeout(Duration::from_secs(2)).unwrap();
+        let reply = frames.recv_timeout(Duration::from_secs(2)).unwrap().into_legacy_value();
         assert_eq!(reply["type"], "answer_reply");
         assert_eq!(reply["ok"], true);
         drop(commands);
