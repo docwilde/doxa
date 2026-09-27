@@ -85,11 +85,22 @@ pub fn prepare(
     Ok((result.sessions, store))
 }
 
+fn safe_startup_error(error: &io::Error) -> String {
+    let message=error.to_string();
+    for code in doxa_state::CLAUDE_STARTUP_CODES {
+        let diagnostic=doxa_state::claude_startup_diagnostic(Some(code));
+        if message.contains(diagnostic) { return diagnostic.to_owned(); }
+    }
+    if error.kind()==io::ErrorKind::TimedOut { return "Session startup timed out. Check /setup and retry with /engine.".into(); }
+    if message.contains("managed worktree unavailable") {return "Managed worktree could not open. Inspect /worktrees and the repository checkout.".into();}
+    "Provider startup failed. Check /setup and retry with /engine.".into()
+}
+
 fn try_start_fresh(store:Option<&mut UiStateStore>,mut spawn:impl FnMut()->io::Result<Session>)->io::Result<Option<Session>> {
     match spawn() {
         Ok(session)=>Ok(Some(session)),
         Err(error)=>match store {
-            Some(store)=>{store.startup_failed=true;store.startup_notice="Fresh session could not start · /setup checks authentication and dependencies; use /engine to retry after setup".into();Ok(None)}
+            Some(store)=>{store.startup_failed=true;store.startup_error=Some(safe_startup_error(&error));store.startup_notice="Fresh session could not start · /setup checks authentication and dependencies; use /engine to retry after setup".into();Ok(None)}
             None=>Err(error),
         }
     }
@@ -186,10 +197,19 @@ mod tests {
         let session=try_start_fresh(Some(&mut store),||Err(io::Error::other("provider unavailable secret-output"))).unwrap();
         assert!(session.is_none());assert!(store.startup_failed);assert!(store.startup_notice.contains("/setup"));assert!(store.startup_notice.contains("/engine"));
         assert!(!store.startup_notice.contains("secret-output"));
+        assert!(!store.startup_error.as_deref().unwrap().contains("secret-output"));
         let mut app=crate::ui::App::default();assert!(!store.restore(&mut app,&[]));
         assert!(app.sessions.is_empty());assert!(app.groups.iter().all(|group|group.tabs.is_empty()));
         assert!(app.notice.contains("/setup"));assert!(store.save(&app).is_err());
         assert!(try_start_fresh(None,||Err(io::Error::other("precise explicit command failure"))).unwrap_err().to_string().contains("precise"));
+    }
+
+    #[test]
+    fn startup_recovery_exposes_only_fixed_diagnostics() {
+        let known=doxa_state::claude_startup_diagnostic(Some("startup_native_launcher"));
+        let raw=io::Error::other(format!("native daemon: {known}; private-session-content"));
+        assert_eq!(safe_startup_error(&raw),known);
+        assert!(!safe_startup_error(&io::Error::other("credential private-session-content")).contains("private-session-content"));
     }
 
 }

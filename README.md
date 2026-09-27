@@ -57,6 +57,13 @@ See the [Rust guide](rust/README.md) for engine capabilities, shortcuts and
 
 ## Gallery
 
+### Greek welcome wordmark · alpha.33
+
+![Greek ΔΟΞΑ wordmark drawn with ASCII strokes in the native opening view](assets/shots/rust-welcome.png)
+
+*The production welcome renderer, shown with fixture provider labels. The
+remaining gallery frames below were captured from alpha.32.*
+
 ### Rust 2.0 alpha.32
 
 ![Rust belief browser showing Accept and Reject actions for each entry](assets/shots/rust-beliefs.png)

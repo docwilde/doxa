@@ -11,6 +11,33 @@ import time
 import uuid
 
 
+class NativeSpawnConfigurationError(ValueError):
+    """A fixed startup category; raw filesystem diagnostics stay private."""
+
+
+def _protected_python(path: Path) -> bool:
+    """uv interpreters can be 0775 inside an owned, private installation tree.
+
+    A 0700 ancestor prevents other users, including group members, from
+    reaching or replacing the interpreter. World-writable files remain refused.
+    """
+    meta = path.stat()
+    if meta.st_uid != os.geteuid() or meta.st_mode & 0o002:
+        return False
+    protected = False
+    # Check the route from the filesystem root. A private leaf underneath an
+    # unprotected writable parent can itself be renamed and replaced.
+    for parent in reversed(path.parents):
+        entry = parent.stat()
+        if not stat.S_ISDIR(entry.st_mode):
+            return False
+        if not protected and (entry.st_uid not in (0, os.geteuid()) or entry.st_mode & 0o022):
+            return False
+        if entry.st_uid == os.geteuid() and stat.S_ISDIR(entry.st_mode) and not entry.st_mode & 0o077:
+            protected = True
+    return protected
+
+
 def native_launcher(config: dict):
     """Freeze daemon-selected executables; tool arguments cannot select a route."""
     if not isinstance(config, dict):
@@ -19,14 +46,16 @@ def native_launcher(config: dict):
     for key in ("daemon_bin", "python", "script", "runtime"):
         value = config.get(key)
         if not isinstance(value, str) or not Path(value).is_absolute():
-            raise ValueError("native spawn paths must be absolute")
+            raise NativeSpawnConfigurationError("native spawn paths must be absolute")
         path = Path(value).resolve(strict=True)
         meta = path.stat()
         if key == "runtime":
             if not stat.S_ISDIR(meta.st_mode) or meta.st_uid != os.geteuid() or meta.st_mode & 0o077:
-                raise ValueError("unsafe native runtime")
-        elif not stat.S_ISREG(meta.st_mode) or meta.st_mode & 0o022 or (key != "script" and not os.access(path, os.X_OK)):
-            raise ValueError("unsafe native spawn executable")
+                raise NativeSpawnConfigurationError("unsafe native runtime")
+        elif (not stat.S_ISREG(meta.st_mode)
+              or (meta.st_mode & 0o022 and not (key == "python" and _protected_python(path)))
+              or (key != "script" and not os.access(path, os.X_OK))):
+            raise NativeSpawnConfigurationError("unsafe native spawn executable")
         paths[key] = value if key == "python" else str(path)
 
     def launch(cwd: str, *, model=None, base_branch=None, spawn_depth=0,

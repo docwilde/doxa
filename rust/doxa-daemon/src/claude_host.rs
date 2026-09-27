@@ -68,19 +68,7 @@ fn display_account(value: &Value) -> Option<Value> {
     (!result.is_empty()).then_some(Value::Object(result))
 }
 
-fn startup_diagnostic(code: Option<&str>) -> &'static str {
-    match code {
-        Some("startup_cli_missing") => "Claude CLI was not found during SDK initialization; check doxa doctor --engine claude",
-        Some("startup_permission_denied") => "Claude startup could not access its configuration or executable; check owned file permissions",
-        Some("startup_timeout") => "Claude SDK initialization timed out; check doxa auth status claude and try again",
-        Some("startup_cli_protocol") => "Claude CLI returned an invalid initialization frame; update Claude CLI and DOXA",
-        Some("startup_cli_connection") => "Claude SDK could not connect to Claude CLI; check doxa doctor --engine claude",
-        Some("startup_cli_process") => "Claude CLI exited during SDK initialization; check doxa auth status claude and doxa doctor --engine claude",
-        Some("startup_options_invalid") => "Claude startup options or SDK configuration were refused; verify model/effort settings and update DOXA",
-        Some("startup_failed") => "Claude SDK initialization failed; check doxa auth status claude and doxa doctor --engine claude",
-        _ => "Claude sidecar refused session start",
-    }
-}
+fn startup_diagnostic(code: Option<&str>) -> &'static str { doxa_state::claude_startup_diagnostic(code) }
 
 impl ClaudeHost {
     pub fn new(

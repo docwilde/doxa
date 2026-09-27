@@ -93,11 +93,14 @@ def startup_error_code(error: BaseException) -> str:
     """Classify known startup failures without exposing SDK strings or stderr."""
     from claude_agent_sdk import (CLIConnectionError, CLIJSONDecodeError,
                                   CLINotFoundError, ProcessError)
+    from doxa.native_spawn import NativeSpawnConfigurationError
     pending = [error]
     for _ in range(32):
         if not pending:
             break
         current = pending.pop(0)
+        if isinstance(current, NativeSpawnConfigurationError):
+            return "startup_native_launcher"
         if isinstance(current, BaseExceptionGroup):
             pending.extend(current.exceptions[:32-len(pending)])
             continue

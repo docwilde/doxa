@@ -515,3 +515,21 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     dir.sync_all()?;
     Ok(())
 }
+
+/// Fixed startup diagnostics shared by the provider host and opening screen.
+pub fn claude_startup_diagnostic(code: Option<&str>) -> &'static str {
+    match code {
+        Some("startup_native_launcher") => "Claude native launcher rejected its Python interpreter, sidecar or runtime permissions; run doxa update and doxa doctor --engine claude",
+        Some("startup_cli_missing") => "Claude CLI was not found during SDK initialization; check doxa doctor --engine claude",
+        Some("startup_permission_denied") => "Claude startup could not access its configuration or executable; check owned file permissions",
+        Some("startup_timeout") => "Claude SDK initialization timed out; check doxa auth status claude and try again",
+        Some("startup_cli_protocol") => "Claude CLI returned an invalid initialization frame; update Claude CLI and DOXA",
+        Some("startup_cli_connection") => "Claude SDK could not connect to Claude CLI; check doxa doctor --engine claude",
+        Some("startup_cli_process") => "Claude CLI exited during SDK initialization; check doxa auth status claude and doxa doctor --engine claude",
+        Some("startup_options_invalid") => "Claude startup options or SDK configuration were refused; verify model/effort settings and update DOXA",
+        Some("startup_failed") => "Claude SDK initialization failed; check doxa auth status claude and doxa doctor --engine claude",
+        _ => "Claude sidecar refused session start",
+    }
+}
+
+pub const CLAUDE_STARTUP_CODES: &[&str] = &["startup_native_launcher","startup_cli_missing","startup_permission_denied","startup_timeout","startup_cli_protocol","startup_cli_connection","startup_cli_process","startup_options_invalid","startup_failed"];

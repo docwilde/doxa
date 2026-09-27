@@ -62,6 +62,7 @@ pub struct UiStateStore {
     pub(crate) startup_extra_ids: Vec<String>,
     pub(crate) startup_notice: String,
     pub(crate) startup_failed: bool,
+    pub(crate) startup_error: Option<String>,
     pub(crate) startup_overflow_id: Option<String>,
 }
 
@@ -70,7 +71,7 @@ impl UiStateStore {
     /// The transient store never writes; it only carries a startup notice.
     pub fn transient(scope_key:&str)->Self {
         Self {path:PathBuf::new(),scope_key:scope_key.into(),record:None,writable_layout:false,
-            startup_archives:Vec::new(),startup_extra_ids:Vec::new(),startup_notice:String::new(),startup_failed:false,startup_overflow_id:None}
+            startup_archives:Vec::new(),startup_extra_ids:Vec::new(),startup_notice:String::new(),startup_failed:false,startup_error:None,startup_overflow_id:None}
     }
     /// A clear may finalize its old daemon only when replacing the tab can
     /// be persisted from a complete live view of a representable layout.
@@ -103,7 +104,7 @@ impl UiStateStore {
             scope_key: scope_key.into(),
             record,
             writable_layout,
-            startup_archives: Vec::new(), startup_extra_ids: Vec::new(), startup_notice: String::new(), startup_failed:false, startup_overflow_id,
+            startup_archives: Vec::new(), startup_extra_ids: Vec::new(), startup_notice: String::new(), startup_failed:false,startup_error:None, startup_overflow_id,
         })
     }
 
@@ -128,7 +129,7 @@ impl UiStateStore {
             scope_key: scope_key.into(),
             record,
             writable_layout,
-            startup_archives: Vec::new(), startup_extra_ids: Vec::new(), startup_notice: String::new(), startup_failed:false, startup_overflow_id,
+            startup_archives: Vec::new(), startup_extra_ids: Vec::new(), startup_notice: String::new(), startup_failed:false,startup_error:None, startup_overflow_id,
         })
     }
 

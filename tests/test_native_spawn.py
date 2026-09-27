@@ -90,6 +90,41 @@ def test_native_host_config_rejects_untrusted_runtime_and_executable(tmp_path):
         native_launcher(cfg)
 
 
+def test_native_python_accepts_private_uv_layout_but_refuses_world_write(tmp_path):
+    cfg = config(tmp_path)
+    protected = tmp_path / "private-install"
+    protected.mkdir(mode=0o700)
+    binary = protected / "python"
+    binary.write_text("#!/bin/sh\nexit 1\n")
+    binary.chmod(0o775)
+    interpreter = tmp_path / "python3"
+    interpreter.symlink_to(binary)
+    cfg["python"] = str(interpreter)
+    assert callable(native_launcher(cfg))
+    binary.chmod(0o777)
+    with pytest.raises(ValueError):
+        native_launcher(cfg)
+
+
+def test_native_python_requires_private_protection_before_group_writable_parent(tmp_path, monkeypatch):
+    from doxa.native_spawn import _protected_python
+    binary = tmp_path / "python"
+    binary.write_text("fixture")
+    binary.chmod(0o775)
+    original = Path.stat
+
+    def public_route(path, *args, **kwargs):
+        metadata = original(path, *args, **kwargs)
+        if path != binary:
+            fields = list(metadata)
+            fields[0] = (metadata.st_mode & ~0o777) | 0o755
+            metadata = os.stat_result(fields)
+        return metadata
+
+    monkeypatch.setattr(Path, "stat", public_route)
+    assert not _protected_python(binary)
+
+
 def test_native_startup_effort_is_an_explicit_engine_option(tmp_path, monkeypatch):
     from doxa.engine import SessionEngine
     from doxa import config as config_mod

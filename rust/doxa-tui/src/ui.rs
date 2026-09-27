@@ -10026,7 +10026,7 @@ fn run_loop(
     if let Some((store, live_ids, _)) = &state {
         app.awaiting_initial_attach=!live_ids.is_empty();
         if live_ids.is_empty() && store.startup_failed {
-            app.startup_recovery=Some("Provider startup failed. Check setup, then retry.".into());
+            app.startup_recovery=store.startup_error.clone().or_else(||Some("Provider startup failed. Check setup, then retry.".into()));
         }
         store.restore(&mut app, live_ids);
     }
@@ -12045,17 +12045,17 @@ for line in sys.stdin:
         let mut terminal = Terminal::new(TestBackend::new(100, 32)).unwrap();
         terminal.draw(|frame| app.draw(frame)).unwrap();
         let buffer = terminal.backend().buffer();
-        let logo = buffer.content.iter().filter(|cell|cell.symbol()=="█").collect::<Vec<_>>();
+        let logo = buffer.content.iter().filter(|cell|cell.symbol()=="_" && cell.fg==theme::ACCENT).collect::<Vec<_>>();
         assert!(!logo.is_empty());
         assert!(logo.iter().all(|cell|cell.fg==theme::ACCENT && cell.bg==theme::BASE));
         let ready = painted_at(&app, 100, 32);
         assert!(ready.contains("Session ready") && ready.contains("gpt-6-sol"));
         app.sessions[0].transcript = "Actual conversation".into();
         let conversation = painted_at(&app, 100, 32);
-        assert!(conversation.contains("Actual conversation") && !conversation.contains("█"));
+        assert!(conversation.contains("Actual conversation") && !conversation.contains("/________\\"));
         app.sessions[0].transcript.clear();
         app.preferences.set_test("boot_banner", "0");
-        assert!(!painted_at(&app, 100, 32).contains("█"));
+        assert!(!painted_at(&app, 100, 32).contains("/________\\"));
     }
 
     #[test]

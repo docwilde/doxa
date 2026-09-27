@@ -7,6 +7,11 @@ the stable 2.0 release has not been cut.
 
 ## 2.0.0-alpha.33 — 2026-09-27
 
+- Fix Claude initialization with group-writable `uv` interpreters protected by
+  an owned private installation directory. Keep public writable paths refused
+  and display a specific launcher diagnostic in the opening view.
+- Draw the welcome wordmark as Greek ΔΟΞΑ using native ASCII strokes, with a
+  compact Greek-letter fallback in narrow panes.
 - Address engineering audit findings with typed, session-owned control replies,
   shared provider capabilities and checked registry readers. Background replies
   and disconnected queues preserve other sessions' notices and effort verification.
