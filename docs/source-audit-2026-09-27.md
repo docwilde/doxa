@@ -190,7 +190,7 @@ The frontend state definitions and defaults stay in `ui.rs`. Controllers own
 input, layout, session navigation, archived history, LORE review, diffs, model
 selection and explicit operations. Session-event reduction, transcript events,
 telemetry, rendering and the terminal loop have their own modules. Existing
-public entrypoints, state types and interaction contracts remain compatible.
+frontend entrypoints, state types and interaction contracts remain compatible.
 
 One command registry now generates typed local command identity, help,
 completion and palette entries. Unknown commands retain provider passthrough;
@@ -210,3 +210,7 @@ command forms, owner binding and null/absent-field compatibility. Local fixtures
 exercise malformed provider replies, superseded effort results, target refusal,
 exact unsent drafts, backpressure and owned router shutdown. Release CI retains
 the installed native-carrier and SDK adapter checks.
+
+`MultiBridge.frames` now yields `WorkerFrame`; direct bridge consumers can
+handle those variants or call `into_legacy_value` during migration. Legacy
+`run_with_frames` and JSON channel entrypoints remain available without relays.

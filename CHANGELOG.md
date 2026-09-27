@@ -9,7 +9,7 @@ the stable 2.0 release has not been cut.
 
 - Separate frontend session reduction, telemetry, rendering, input, layout,
   navigation, history, LORE review, diff, model and operation controllers.
-  Keep the coordinator focused on shared state and preserve existing public APIs.
+  Keep the coordinator focused on shared state and preserve frontend entrypoints.
 - Generate help, completion, palette and typed local command dispatch from one
   registry. Preserve malformed drafts, provider passthrough and keyboard-only
   private shell execution.
