@@ -4,6 +4,7 @@ pub(crate) mod fleet_menu;
 mod fleet_process;
 pub(crate) mod panes;
 mod actions;
+mod session_controls;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::cell::{Cell, RefCell};
@@ -2404,39 +2405,8 @@ impl App {
                 }
                 false
             }
-            "set_model_reply" => {
-                self.notice = if frame["ok"] == true {
-                    format!("Model selected · {}", safe_label(frame["model"].as_str().unwrap_or("awaiting event")))
-                } else {
-                    format!("Model change failed · {}", safe_label(frame["error"].as_str().unwrap_or("unknown error")))
-                };
-                true
-            }
-            "set_effort_reply" => {
-                let Some(id) = frame["session_id"].as_str() else { return false; };
-                let Some(requested) = self.pending_effort_verifications.get(id).cloned() else { return false; };
-                if frame["ok"] == true && frame["effort"].as_str() != Some(requested.as_str()) { return false; }
-                let active = self.groups[self.active_group].active_id() == Some(id);
-                if frame["ok"] != true {
-                    self.pending_effort_verifications.remove(id);
-                    if active { self.notice = format!("Effort change failed · {}",
-                        safe_label(frame["error"].as_str().unwrap_or("unknown error"))); }
-                } else if frame["verification_pending"] == false {
-                    self.pending_effort_verifications.remove(id);
-                    self.session_efforts.insert(id.to_owned(), requested.clone());
-                    if active { self.notice = format!("Effort verified · {requested}"); }
-                } else if active {
-                    self.notice = format!("Requested effort {requested} · awaiting provider verification");
-                }
-                true
-            }
-            "set_permission_mode_reply" => {
-                self.notice = if frame["ok"] == true {
-                    format!("Permission mode selected · {}", safe_label(frame["mode"].as_str().unwrap_or("awaiting event")))
-                } else {
-                    format!("Permission change failed · {}", safe_label(frame["error"].as_str().unwrap_or("unknown error")))
-                };
-                true
+            "set_model_reply" | "set_effort_reply" | "set_permission_mode_reply" => {
+                self.apply_control_reply(frame)
             }
             "stop_reply" => {
                 let Some(id) = frame["session_id"].as_str().filter(|id| self.sessions.iter().any(|s| s.id == *id)) else { return false; };
@@ -2676,6 +2646,27 @@ impl App {
             }
             _ => false,
         }
+    }
+
+    fn apply_control_reply(&mut self, frame: &serde_json::Value) -> bool {
+        use session_controls::{ControlReply, EffortTransition};
+        let Some(reply) = ControlReply::decode(frame) else { return false; };
+        let id = reply.owner.id();
+        if !self.sessions.iter().any(|session| session.id == id) { return false; }
+        let Some(transition) = reply.reduce(self.pending_effort_verifications.get(id).map(String::as_str)) else { return false; };
+        let state_changed = match transition.effort {
+            EffortTransition::Unchanged => false,
+            EffortTransition::Failed => self.pending_effort_verifications.remove(id).is_some(),
+            EffortTransition::Verified(effort) => {
+                self.pending_effort_verifications.remove(id);
+                self.session_efforts.insert(id.to_owned(), effort);
+                true
+            }
+        };
+        if reply.owner.is_active(self.groups[self.active_group].active_id()) {
+            self.notice = transition.notice;
+            true
+        } else { state_changed }
     }
 
     fn update_pending_effort(&mut self, id: &str, status: &serde_json::Value) {
@@ -10823,6 +10814,41 @@ for line in sys.stdin:
         app.handle(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert_eq!(app.pending_model_changes, vec![("claude-1".into(), "opus".into())]);
+    }
+
+    #[test]
+    fn model_and_permission_replies_do_not_replace_other_pane_notice_or_draft() {
+        let mut app = App::default();
+        for id in ["a", "b"] {
+            app.apply_daemon_frame(&json!({"type":"hello","session_id":id,
+                "engine":"claude","model":"sonnet","permission_mode":"plan"}));
+        }
+        app.groups[0].tabs = vec!["a".into()];
+        app.groups.push(PaneGroup { tabs: vec!["b".into()], active: 0, scroll: 0 });
+        app.active_group = 1;
+        app.input = "private B draft".into(); app.input_cursor = app.input.len();
+        app.notice = "B notice".into();
+        for kind in ["set_model_reply", "set_permission_mode_reply"] {
+            for ok in [true, false] {
+                assert!(!app.apply_daemon_frame(&json!({"type":kind,"session_id":"a",
+                    "ok":ok,"model":"opus","mode":"acceptEdits","error":"A failure"})));
+                assert_eq!(app.notice, "B notice");
+                assert_eq!(app.input, "private B draft");
+            }
+            for owner in [json!(null), json!("unknown")] {
+                assert!(!app.apply_daemon_frame(&json!({"type":kind,"session_id":owner,"ok":true})));
+                assert_eq!(app.notice, "B notice");
+            }
+        }
+        assert_eq!(app.session_identity["a"].1.as_deref(), Some("sonnet"));
+        assert_eq!(app.permission_modes["a"], "plan");
+        assert!(app.apply_daemon_frame(&json!({"type":"set_model_reply","session_id":"b","ok":true,"model":"opus"})));
+        assert!(app.notice.contains("Model selected"));
+        // Replies report acceptance; provider events remain authoritative state.
+        assert_eq!(app.session_identity["b"].1.as_deref(), Some("sonnet"));
+        assert!(app.apply_daemon_frame(&json!({"type":"set_permission_mode_reply","session_id":"b","ok":false,"error":"denied"})));
+        assert!(app.notice.contains("Permission change failed"));
+        assert_eq!(app.permission_modes["b"], "plan");
     }
 
     #[test]
