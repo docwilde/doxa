@@ -1303,6 +1303,8 @@ pub struct App {
     input_cursor: usize,
     input_drafts: HashMap<(usize, String), (String, usize)>,
     moved_active_tab: bool,
+    installation: crate::installation::Snapshot,
+    update_notified: bool,
     session_identity: HashMap<String, (Option<String>, Option<String>)>,
     session_efforts: HashMap<String, String>,
     catalog_efforts: HashMap<(String, String), Vec<String>>,
@@ -1486,6 +1488,7 @@ impl Default for App {
             input_cursor: 0,
             input_drafts: HashMap::new(),
             moved_active_tab: false,
+            installation: crate::installation::Snapshot::default(), update_notified: false,
             session_identity: HashMap::new(),
             session_efforts: HashMap::new(),
             catalog_efforts: HashMap::new(),
@@ -7152,9 +7155,22 @@ impl App {
         }
     }
 
+    fn apply_installation(&mut self, snapshot: crate::installation::Snapshot) {
+        let available = snapshot.update == crate::installation::Update::Available;
+        self.installation = snapshot;
+        if available && !self.update_notified {
+            self.update_notified = true;
+            self.notify_update_available("Configured main differs from this installation · /update");
+        }
+        if self.chip_info.as_ref().is_some_and(|info| info.kind == "about") { self.open_about(); }
+    }
+
     fn open_about(&mut self) {
         let id = self.groups[self.active_group].active_id();
-        let mut lines = vec![format!("DOXA Rust {}", env!("CARGO_PKG_VERSION")), String::new()];
+        let mut lines = vec![format!("DOXA Rust {}", env!("CARGO_PKG_VERSION"))];
+        lines.extend(self.installation.rows.iter().cloned());
+        lines.push(format!("Update · {}", self.installation.update.label()));
+        lines.push(String::new());
         if let Some(id) = id {
             lines.push(format!("Active session · {}", safe_label(id)));
             if let Some((engine, model)) = self.session_identity.get(id) {
@@ -9442,9 +9458,14 @@ fn run_loop(
     terminal.draw(|frame| app.draw(frame))?;
     let mut pointer_on_link = false;
     let mut first_run_pending=crate::first_run::needed();
+    let mut installation_worker = crate::installation::Worker::start().ok();
+    if installation_worker.is_none() { app.installation.update = crate::installation::Update::Unknown; }
     while !app.should_quit {
         let mut changed = false;
         if first_run_pending && app.offer_first_run() {first_run_pending=false;changed=true;}
+        if let Some(snapshot) = installation_worker.as_ref().and_then(crate::installation::Worker::poll) {
+            app.apply_installation(snapshot); installation_worker = None; changed = true;
+        }
         // Bound work per tick so a busy daemon cannot starve keyboard input.
         for _ in 0..64 {
             match receiver.try_recv() {
@@ -11754,6 +11775,19 @@ for line in sys.stdin:
         assert!(app.local_shell_jobs.is_empty()); assert_eq!(std::fs::read_to_string(proof).unwrap(), "keyboard");
         assert!(app.sessions[0].transcript.contains("DOXA_LOCAL_SHELL:"));
         assert!(!COMMANDS.iter().any(|row| row.name == "/shell" || row.name == "!"));
+    }
+
+    #[test]
+    fn about_renders_cached_installation_and_advisory_without_starting_work() {
+        let mut app = App::default(); app.handle(Event::Resize(100, 30));
+        app.apply_installation(crate::installation::Snapshot { rows:vec!["Installed commit · measured".into()], update:crate::installation::Update::Unknown });
+        app.open_about();
+        let info = app.chip_info.as_ref().unwrap();
+        assert!(info.lines.iter().any(|line| line == "Installed commit · measured"));
+        assert!(info.lines.iter().any(|line| line == "Update · check unavailable"));
+        assert!(!app.update_notified); assert!(app.pending_launches.is_empty()); assert!(app.pending_prompts.is_empty());
+        app.installation.update = crate::installation::Update::Skipped; app.open_about();
+        assert!(app.chip_info.as_ref().unwrap().lines.iter().any(|line| line == "Update · check skipped"));
     }
 
     #[test]
