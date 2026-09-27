@@ -180,15 +180,17 @@ fn fetch_with_client(mut client: LoreClient, query: Query) -> Result<ResultPage,
 }
 
 #[cfg(test)]
+pub(crate) fn fetch_fixture(python: &Path, query: Query) -> Result<ResultPage, &'static str> {
+    fetch_with_client(LoreClient::spawn(python, Duration::from_secs(2)).map_err(|_| "Fixture unavailable")?, query)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
     #[cfg(unix)]
     use std::{fs, os::unix::fs::PermissionsExt};
 
-    fn fetch_fixture(python: &Path, query: Query) -> Result<ResultPage, &'static str> {
-        fetch_with_client(LoreClient::spawn(python, Duration::from_secs(2)).map_err(|_| "Fixture unavailable")?, query)
-    }
 
     #[test]
     fn filter_input_matches_canonical_character_and_byte_limits() {

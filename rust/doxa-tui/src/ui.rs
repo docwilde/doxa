@@ -10664,7 +10664,7 @@ for line in sys.stdin:
         let mut permissions = std::fs::metadata(&sidecar).unwrap().permissions();
         permissions.set_mode(0o700);
         std::fs::set_permissions(&sidecar, permissions).unwrap();
-        let lore_picker::ResultPage::BeliefReview(review, true) = lore_picker::fetch(&sidecar,
+        let lore_picker::ResultPage::BeliefReview(review, true) = lore_picker::fetch_fixture(&sidecar,
             lore_picker::Query::BeliefReview("/repo".into(), 7)).unwrap() else { panic!("review") };
         review
     }
@@ -15153,7 +15153,7 @@ for line in sys.stdin:
         let mut permissions = std::fs::metadata(&sidecar).unwrap().permissions();
         permissions.set_mode(0o700);
         std::fs::set_permissions(&sidecar, permissions).unwrap();
-        let lore_picker::ResultPage::Review(review, can_resolve) = lore_picker::fetch(&sidecar,
+        let lore_picker::ResultPage::Review(review, can_resolve) = lore_picker::fetch_fixture(&sidecar,
             lore_picker::Query::Review("/repo".into(), "one".into())).unwrap() else { panic!("review") };
         assert!(can_resolve);
         let mut app = App::default();
