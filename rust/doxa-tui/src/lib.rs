@@ -25,3 +25,6 @@ pub mod theme;
 
 pub mod mesh_control;
 pub mod maintenance;
+pub mod settings;
+pub mod preferences;
+pub mod belief_graph;

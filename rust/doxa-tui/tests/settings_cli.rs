@@ -22,13 +22,15 @@ fn native_settings_cli_persists_safely_and_explains_overrides() {
     let path = dir.path().join("config.toml");
     let stored: toml::Value = fs::read_to_string(&path).unwrap().parse().unwrap();
     assert_eq!(stored["linger_secs"].as_float(), Some(45.0));
-    assert_eq!(stored["worktree_per_session"].as_bool(), Some(false));
+    assert_eq!(stored["worktree_per_session"].as_str(), Some("0"));
     let blocked = run(&["settings", "set", "worktree_per_session", "on"], Some("0"));
     assert!(!blocked.status.success());
     assert!(String::from_utf8_lossy(&blocked.stderr).contains("DOXA_WORKTREE overrides"));
     assert_eq!(fs::read_to_string(&path).unwrap().parse::<toml::Value>().unwrap(), stored);
+    for (key,value) in [("background","transparent"),("clock_hour","12"),("clock_show","off"),("notify","always"),("ctx_absolute","on"),("lore","off"),("graph_view","ascii")] {assert!(run(&["settings","set",key,value],None).status.success(),"{key}");}
+    let report=run(&["settings"],None);let report=String::from_utf8_lossy(&report.stdout);assert!(report.contains("clock_show: off (config.toml)"));assert!(report.contains("notify: always (config.toml)"));assert!(report.contains("Memory"));
     assert!(run(&["settings", "unset", "linger_secs"], None).status.success());
     let after: toml::Value = fs::read_to_string(&path).unwrap().parse().unwrap();
     assert!(after.get("linger_secs").is_none());
-    assert_eq!(after["worktree_per_session"].as_bool(), Some(false));
+    assert_eq!(after["worktree_per_session"].as_str(), Some("0"));
 }

@@ -20,7 +20,7 @@ use crossterm::event::{
 };
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::{
-    event::{DisableMouseCapture, EnableMouseCapture},
+    event::{DisableMouseCapture, EnableMouseCapture,DisableFocusChange,EnableFocusChange},
     execute,
 };
 use ratatui::backend::CrosstermBackend;
@@ -83,7 +83,7 @@ const COMMANDS: &[CommandHelp] = &[
     CommandHelp { name: "/img", form: "/img [path]", summary: "Image support", support: "unavailable in Rust" },
     CommandHelp { name: "/login", form: "/login [claude|codex] [--device-auth]", summary: "Provider login", support: "local · selectable operations menu" },
     CommandHelp { name: "/logout", form: "/logout [claude|codex]", summary: "Provider logout", support: "local · selectable operations menu" },
-    CommandHelp { name: "/settings", form: "/settings", summary: "Native settings", support: "local · linger and worktree for new sessions" },
+    CommandHelp { name: "/settings", form: "/settings", summary: "Native settings", support: "local · preferences, provenance and defaults" },
     CommandHelp { name: "/setup", form: "/setup", summary: "Setup checks", support: "local · auth checks, LORE store, defaults" },
     CommandHelp { name: "/doctor", form: "/doctor", summary: "Health checks", support: "local · selected provider" },
     CommandHelp { name: "/plugins", form: "/plugins", summary: "Plugin inventory", support: "local · selectable operations menu" },
@@ -298,9 +298,17 @@ struct QueuePicker {
 
 #[derive(Debug)]
 struct SettingsMenu {
-    rows: [(String, bool); 2],
-    selected: usize,
-    linger_draft: Option<String>,
+    rows: Vec<crate::settings::Row>, selected: usize, category: usize,
+    draft: Option<(String, String)>, edits: HashMap<String, Option<String>>, engine: String,
+}
+impl SettingsMenu {
+    fn indices(&self) -> Vec<usize> { self.rows.iter().enumerate().filter(|(_,r)|r.setting.category == crate::settings::CATEGORIES[self.category]).map(|(i,_)|i).collect() }
+    fn visible_indices(&self, height: u16) -> Vec<usize> {
+        let indices=self.indices(); let count=usize::from(height.saturating_sub(if height<12 {5} else {9})).max(1);
+        let position=indices.iter().position(|i|*i==self.selected).unwrap_or(0);
+        let start=position.saturating_sub(count.saturating_sub(1)); indices.into_iter().skip(start).take(count).collect()
+    }
+    fn finish_draft(&mut self) { if let Some((key,value))=self.draft.take() { self.edits.insert(key,Some(value)); } }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1241,6 +1249,21 @@ enum RailRow {
 
 #[derive(Debug)]
 pub struct App {
+    preferences: crate::preferences::Preferences,
+    persist_preferences: bool,
+    sidebar_auto: bool,
+    clock_text: String,
+    clock_deadline: Option<Instant>,
+    window_focused: bool,
+    auto_diff_seen: HashSet<String>,
+    auto_diff_baseline: HashMap<String,String>,
+    auto_diff_requests: VecDeque<String>,
+    auto_diff_pending: Option<(String,PathBuf,Receiver<(String,bool)>)>,
+    auto_diff_ready: HashSet<String>,
+    belief_graph_pending: Option<(u64,String,bool,Receiver<Result<doxa_lore::BeliefGraph,doxa_lore::LoreError>>)>,
+    belief_graph_lines: Option<(u64,Vec<String>)>,
+    belief_graph_scroll: usize,
+    belief_graph_server: Option<crate::belief_graph::GraphServer>,
     pub sessions: Vec<Session>,
     pub collections: Vec<crate::collections::Collection>,
     pub groups: Vec<PaneGroup>,
@@ -1403,6 +1426,9 @@ pub struct App {
 impl Default for App {
     fn default() -> Self {
         Self {
+            preferences: crate::preferences::Preferences::load(), persist_preferences: false, sidebar_auto:false, clock_text: String::new(), clock_deadline: None,
+            window_focused: true, auto_diff_seen: HashSet::new(), auto_diff_baseline: HashMap::new(),
+            auto_diff_requests: VecDeque::new(),auto_diff_pending: None,auto_diff_ready: HashSet::new(),belief_graph_pending:None,belief_graph_lines:None,belief_graph_scroll:0,belief_graph_server:None,
             sessions: Vec::new(),
             collections: Vec::new(),
             groups: vec![
@@ -1885,6 +1911,7 @@ impl App {
                     .find(|s| s.id == id)
                     .map(|s| s.transcript.clone())
                     .unwrap_or_default();
+                let transcript=if self.persist_preferences && transcript.is_empty() && self.preferences.on("boot_banner") {"       █       \n      ███      \n    ███████    \n   █████████   DOXA\n  ███████████  \n █████████████ \n███████████████\n\n".into()} else {transcript};
                 self.apply_update(DaemonUpdate::Upsert(Session {
                     id: id.into(),
                     title: self.custom_names.get(id).cloned().unwrap_or_else(|| model.clone().unwrap_or_else(|| safe_label(id))),
@@ -1892,6 +1919,7 @@ impl App {
                     transcript,
                     status: "Connected".into(),
                 }));
+                self.request_auto_diff(id);
                 self.notice = format!("Connected · {}", model.as_deref().unwrap_or(&safe_label(id)));
                 true
             }
@@ -1917,8 +1945,17 @@ impl App {
                     }
                     self.peer_map.event(&id, event_type, data);
                 }
+                if event_type=="tool_result" {self.request_auto_diff(&id);}
                 match event_type {
                     "tool_result_detail" => tool_updated,
+                    "derive_done"=>{
+                        let count=data["staged"].as_u64().unwrap_or(0);
+                        if count>0 {
+                            let body=format!("{count} proposals staged · {}",data["texts"].as_array().and_then(|r|r.first()).and_then(|v|v.as_str()).unwrap_or("/pending to review"));
+                            if self.preferences.should_notify("notify_staged",self.window_focused) {crate::preferences::notify(self.sessions.iter().find(|s|s.id==id).map(|s|s.title.as_str()).unwrap_or("DOXA memory review"),&body);}
+                            self.notice=safe_label(&body);return true;
+                        } false
+                    },
                     "branch_changed" => {
                         self.invalidate_repo(&id);
                         true
@@ -2049,6 +2086,7 @@ impl App {
                                         self.blink_on = true;
                                         self.blink_at = Instant::now();
                                     }
+                                    if self.preferences.should_notify("notify_needs_input",self.window_focused) {crate::preferences::notify("DOXA needs input",&format!("{} · {}",self.sessions.iter().find(|s|s.id==id).map(|s|s.title.as_str()).unwrap_or(&id),request.kind));}
                                     self.input_requests.push(request);
                                 } else {
                                     self.notice = "Too many input requests · inspect the session directly".into();
@@ -2157,6 +2195,7 @@ impl App {
                     return true;
                 }
                 info.lines.extend(context_detail_lines(&frame["detail"]));
+                if self.size.width>=65 {info.lines.extend(crate::preferences::context_grid(&frame["detail"],self.preferences.value("context_grid")=="ascii"));}
                 true
             }
             "models_reply" => {
@@ -2484,7 +2523,7 @@ impl App {
     }
 
     fn append_reasoning(&mut self, id: &str, data: &serde_json::Value, progress: bool) -> bool {
-        if !self.sessions.iter().any(|session| session.id == id) { return false; }
+        if !self.preferences.on("show_reasoning") || !self.sessions.iter().any(|session| session.id == id) { return false; }
         let stream = self.reasoning_streams.entry(id.to_owned()).or_default();
         if let Some(tokens) = data.get("approx_tokens").and_then(|value| value.as_u64()) {
             stream.tokens = stream.tokens.max(tokens);
@@ -2580,6 +2619,8 @@ impl App {
             {
                 self.key(key)
             }
+            Event::FocusGained=>{self.window_focused=true;false},
+            Event::FocusLost=>{self.window_focused=false;false},
             Event::Paste(text) => self.paste(&text),
             Event::Mouse(mouse) => self.mouse(mouse),
             _ => false,
@@ -2833,6 +2874,7 @@ impl App {
                 } else {
                     self.rail_visible = !self.rail_visible;
                 }
+                self.persist_sidebar();
             }
             "/detach" => self.detach_active_tab(),
             "/dir" => {
@@ -3079,6 +3121,7 @@ impl App {
         match key.code {
             KeyCode::F(3) => {
                 self.rail_visible = !self.rail_visible;
+                self.persist_sidebar();
                 true
             }
             KeyCode::BackTab | KeyCode::Tab if key.code == KeyCode::BackTab
@@ -4256,7 +4299,8 @@ impl App {
         }
         let engine = self.groups[self.active_group].active_id()
             .and_then(|id| self.session_identity.get(id)).and_then(|identity| identity.0.as_deref());
-        self.engine_selected = engine.and_then(|engine| ENGINE_CHOICES.iter().position(|name| *name == engine)).unwrap_or(0);
+        let configured=crate::settings::raw("engine");
+        self.engine_selected = engine.and_then(|engine| ENGINE_CHOICES.iter().position(|name| *name == engine)).or_else(||ENGINE_CHOICES.iter().position(|name|*name==configured)).unwrap_or(1);
         self.engine_picker = true;
     }
 
@@ -4726,79 +4770,148 @@ impl App {
         self.notice = "Cancelling selected queued prompt…".into();
     }
 
+    fn open_belief_graph(&mut self) {
+        if self.belief_browser_fixture {if let Some(picker)=&mut self.lore_picker {picker.status="Gallery fixture · LORE calls disabled".into();}return;}
+        let Some(picker)=&self.lore_picker else{return;};
+        if picker.proposal_mode || picker.pending.is_some() || self.belief_graph_pending.is_some(){return;}
+        let Some(id)=picker.rows.get(picker.selected).map(|row|row.id) else{return;};
+        if self.belief_graph_lines.as_ref().is_some_and(|(selected,_)|*selected==id){self.belief_graph_lines=None;return;}
+        let cwd=picker.cwd.clone();let browser=self.preferences.value("graph_view")!="ascii";
+        let python=std::env::var_os("DOXA_LORE_PYTHON").map(PathBuf::from).unwrap_or_else(||PathBuf::from("python3"));
+        let(tx,rx)=mpsc::sync_channel(1);self.belief_graph_pending=Some((id,cwd.clone(),browser,rx));
+        self.lore_picker.as_mut().unwrap().status="Loading LORE belief neighbourhood…".into();
+        std::thread::spawn(move||{let result=doxa_lore::LoreClient::spawn(&python,Duration::from_secs(3)).and_then(|mut client|client.belief_graph(&cwd,id,browser));let _=tx.send(result);});
+    }
+    fn poll_belief_graph(&mut self)->bool {
+        let Some((id,cwd,browser,rx))=self.belief_graph_pending.take() else{return false;};
+        let result=match rx.try_recv(){Ok(result)=>result,Err(TryRecvError::Empty)=>{self.belief_graph_pending=Some((id,cwd,browser,rx));return false;},Err(TryRecvError::Disconnected)=>Err(doxa_lore::LoreError::Remote("graph_unavailable"))};
+        let Some(picker)=self.lore_picker.as_mut().filter(|p|!p.proposal_mode && p.cwd==cwd && p.rows.get(p.selected).is_some_and(|r|r.id==id)) else{return false;};
+        match result {
+            Ok(graph) if graph.id==id=>{
+                if browser {if let Some(html)=graph.html {
+                    let result=crate::operations::doxa_home().and_then(|home|crate::belief_graph::write_page(&home,id,&html)).and_then(|path|{
+                        let directory=path.parent().unwrap().to_path_buf();
+                        if !self.belief_graph_server.as_ref().is_some_and(|s|s.matches(&directory)){self.belief_graph_server=Some(crate::belief_graph::GraphServer::start(directory)?);}
+                        Ok((path,self.belief_graph_server.as_ref().unwrap().url(id)))
+                    });
+                    match result {Ok((path,url))=>{picker.status=format!("{} · {}",safe_label(&graph.note),safe_label(&path.display().to_string()));self.pending_open_urls.push(url);},Err(error)=>picker.status=format!("Graph page unavailable: {}",safe_label(&error.to_string()))}
+                } else {picker.status=safe_label(&graph.note);self.belief_graph_lines=Some((id,graph.lines));self.belief_graph_scroll=0;}}
+                else {picker.status=safe_label(&graph.note);self.belief_graph_lines=Some((id,graph.lines));self.belief_graph_scroll=0;}
+            },
+            _=>picker.status="Belief graph unavailable from this LORE version or scope".into(),
+        } true
+    }
+    fn request_auto_diff(&mut self,id:&str) {
+        if self.preferences.on("auto_diff") && !self.auto_diff_seen.contains(id) && !self.auto_diff_requests.iter().any(|v|v==id) && self.auto_diff_requests.len()<128 {self.auto_diff_requests.push_back(id.into());}
+    }
+    fn poll_auto_diff(&mut self)->bool {
+        if !self.preferences.on("auto_diff") {self.auto_diff_requests.clear();self.auto_diff_ready.clear();return false;}
+        if let Some((id,cwd,receiver))=self.auto_diff_pending.take() {
+            match receiver.try_recv() {
+                Ok((digest,changed)) if self.session_cwds.get(&id)==Some(&cwd)=>{
+                    if let Some(baseline)=self.auto_diff_baseline.get(&id) {if baseline!=&digest && changed {self.auto_diff_ready.insert(id.clone());}}
+                    else {self.auto_diff_baseline.insert(id,digest);}
+                },
+                Err(TryRecvError::Empty)=>self.auto_diff_pending=Some((id,cwd,receiver)),_=>{}
+            }
+        }
+        if self.auto_diff_pending.is_none() {
+            if let Some(id)=self.auto_diff_requests.pop_front() {
+                if let Some(cwd)=self.session_cwds.get(&id).cloned() {
+                    let (tx,rx)=mpsc::sync_channel(1);self.auto_diff_pending=Some((id,cwd.clone(),rx));
+                    std::thread::spawn(move||{use sha2::Digest;let snapshot=diff_view::read(&cwd);let changed=!snapshot.files.is_empty() || snapshot.text.contains("Untracked files (names only");let digest=format!("{:x}",sha2::Sha256::digest(snapshot.text.as_bytes()));let _=tx.send((digest,changed));});
+                }
+            }
+        }
+        let Some(id)=self.groups[self.active_group].active_id().map(str::to_owned).filter(|id|self.auto_diff_ready.contains(id)) else {return false;};
+        self.auto_diff_ready.remove(&id);self.auto_diff_seen.insert(id);
+        if self.diff_pane || self.diff_modal {return false;}
+        if self.pane_tree.is_some() {self.notice="Worktree changed · /diff opens the live diff".into();return true;}
+        self.diff_pane=true;
+        if self.layout(self.size).panes.is_none() {self.diff_pane=false;self.notice="Worktree changed; terminal too narrow to auto-open diff · /diff".into();}
+        else {self.load_diff();self.notice="Live diff opened after this session changed its worktree".into();} true
+    }
+    fn refresh_clock(&mut self) {
+        let now=std::time::SystemTime::now();self.clock_text=self.preferences.clock(now);
+        self.clock_deadline=self.preferences.clock_delay(now).map(|delay|Instant::now()+delay);
+    }
+    fn tick_clock(&mut self,now:Instant)->bool {
+        if self.clock_deadline.is_some_and(|deadline|now>=deadline) {let old=self.clock_text.clone();self.refresh_clock();return old!=self.clock_text;} false
+    }
+    pub fn notify_update_available(&self,body:&str) {
+        if self.preferences.should_notify("notify_update",self.window_focused) {crate::preferences::notify("DOXA update available",body);}
+    }
+    fn persist_sidebar(&mut self) {
+        self.sidebar_auto=false;
+        if self.persist_preferences {self.rail_width=self.rail_width.clamp(22,41);}
+        if !self.persist_preferences {return;}
+        let edits=vec![("sidebar".into(),Some(if self.rail_visible {"1"} else {"0"}.into())),("sidebar_width".into(),Some(self.rail_width.to_string()))];
+        if let Err(error)=crate::settings::config_path().and_then(|p|crate::settings::save(&p,&edits,"claude")) {self.notice=format!("Sidebar changed for this window; preference unchanged: {}",safe_label(&error.to_string()));}
+    }
     fn open_settings_menu(&mut self) {
-        match crate::operations::native_settings() {
+        let identity=self.groups[self.active_group].active_id().and_then(|id|self.session_identity.get(id));
+        let engine=identity.and_then(|s|s.0.clone()).unwrap_or_else(||"claude".into());
+        let model=identity.and_then(|s|s.1.as_deref());
+        match crate::settings::rows(&engine,model) {
             Ok(rows) => {
-                self.settings_menu = Some(SettingsMenu { rows, selected: 0, linger_draft: None });
-                if self.active_chooser_rect().is_none() {
-                    self.settings_menu = None;
-                    self.notice = "Enlarge active pane to edit settings".into();
-                }
+                self.settings_menu = Some(SettingsMenu { rows, selected: 0, category: 0, draft: None, edits: HashMap::new(), engine });
+                if self.active_chooser_rect().is_none() { self.settings_menu=None; self.notice="Enlarge active pane to edit settings".into(); }
             }
-            Err(error) => self.notice = format!("Settings unavailable: {}", safe_label(&error.to_string())),
+            Err(error) => self.notice=format!("Settings unavailable: {}",safe_label(&error.to_string())),
         }
     }
-
-    fn settings_change(&mut self, key: &str, value: Option<&str>) {
-        match crate::operations::settings_change(key, value) {
-            Ok(message) => {
-                self.notice = message;
-                match crate::operations::native_settings() {
-                    Ok(rows) => if let Some(menu) = &mut self.settings_menu {
-                        menu.rows = rows;
-                        menu.linger_draft = None;
-                    },
-                    Err(error) => {
-                        self.settings_menu = None;
-                        self.notice = format!("Setting saved; refresh failed: {}", safe_label(&error.to_string()));
-                    }
+    fn save_settings_menu(&mut self) {
+        let Some(menu)=&mut self.settings_menu else { return; };
+        menu.finish_draft();
+        let edits=menu.edits.iter().map(|(k,v)|(k.clone(),v.clone())).collect::<Vec<_>>();
+        let engine=menu.engine.clone();
+        let result=crate::settings::config_path().and_then(|p|crate::settings::save(&p,&edits,&engine));
+        match result {
+            Ok(()) => {
+                let auto_diff_was_on=self.preferences.on("auto_diff");
+                self.preferences=crate::preferences::Preferences::load();
+                if !auto_diff_was_on && self.preferences.on("auto_diff") {for id in self.sessions.iter().map(|s|s.id.clone()).collect::<Vec<_>>() {self.request_auto_diff(&id);}}
+                self.sidebar_auto=self.preferences.value("sidebar").is_empty();
+                self.rail_width=self.preferences.sidebar_width();
+                self.rail_visible=match self.preferences.value("sidebar") { ""=>self.sessions.len()>1 || !self.collections.is_empty(),"0"|"false"|"off"|"no"=>false,_=>true };
+                self.refresh_clock();
+                match crate::settings::rows(&engine,None) {
+                    Ok(rows)=>{let menu=self.settings_menu.as_mut().unwrap();menu.rows=rows;menu.edits.clear();self.notice="Settings saved · session defaults apply to new sessions".into();},
+                    Err(error)=>self.notice=format!("Settings saved; refresh failed: {}",safe_label(&error.to_string())),
                 }
             }
-            Err(error) => self.notice = format!("Setting unchanged: {}", safe_label(&error.to_string())),
+            Err(error)=>self.notice=format!("Settings unchanged: {}",safe_label(&error.to_string())),
         }
     }
-
-    fn settings_menu_key(&mut self, key: KeyEvent) -> bool {
-        let Some(menu) = self.settings_menu.as_mut() else { return false; };
-        if let Some(draft) = &mut menu.linger_draft {
-            match key.code {
-                KeyCode::Esc => menu.linger_draft = None,
-                KeyCode::Backspace => { draft.pop(); },
-                KeyCode::Char(ch) if (ch.is_ascii_digit() || ch == '.') && draft.len() < 24 => draft.push(ch),
-                KeyCode::Enter => {
-                    let value = draft.clone();
-                    self.settings_change("linger_secs", Some(&value));
-                }
-                _ => {}
-            }
-            return true;
+    fn settings_menu_key(&mut self,key:KeyEvent)->bool {
+        let Some(menu)=self.settings_menu.as_mut() else { return false; };
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code==KeyCode::Char('s') { self.save_settings_menu();return true; }
+        if key.modifiers.contains(KeyModifiers::SHIFT) && matches!(key.code,KeyCode::Left|KeyCode::Right) {
+            menu.finish_draft();menu.category=if key.code==KeyCode::Right {(menu.category+1)%crate::settings::CATEGORIES.len()} else {(menu.category+crate::settings::CATEGORIES.len()-1)%crate::settings::CATEGORIES.len()};
+            menu.selected=menu.indices().first().copied().unwrap_or(0);return true;
+        }
+        if let Some((_,draft))=&mut menu.draft {
+            match key.code { KeyCode::Esc=>menu.draft=None,KeyCode::Backspace=>{draft.pop();},KeyCode::Char(ch) if !key.modifiers.intersects(KeyModifiers::CONTROL|KeyModifiers::ALT) && !ch.is_control() && draft.len()<4096=>draft.push(ch),KeyCode::Enter=>{menu.finish_draft();self.save_settings_menu();},_=>{} } return true;
         }
         match key.code {
-            KeyCode::Esc => self.settings_menu = None,
-            KeyCode::Up | KeyCode::BackTab => menu.selected = menu.selected.saturating_sub(1),
-            KeyCode::Down | KeyCode::Tab => menu.selected = (menu.selected + 1).min(1),
-            KeyCode::Char('u') | KeyCode::Delete => {
-                let selected = menu.selected;
-                if menu.rows[selected].1 {
-                    self.notice = "Environment override is active; unset it before editing".into();
-                } else {
-                    self.settings_change(if selected == 0 { "linger_secs" } else { "worktree_per_session" }, None);
+            KeyCode::Esc=>self.settings_menu=None,
+            KeyCode::Up|KeyCode::Down|KeyCode::Tab|KeyCode::BackTab=>{
+                let indices=menu.indices();if let Some(position)=indices.iter().position(|i|*i==menu.selected) {
+                    let next=if matches!(key.code,KeyCode::Up|KeyCode::BackTab) {position.saturating_sub(1)} else {(position+1).min(indices.len().saturating_sub(1))};menu.selected=indices[next];
                 }
             }
-            KeyCode::Enter | KeyCode::Char(' ') => {
-                let selected = menu.selected;
-                if menu.rows[selected].1 {
-                    self.notice = "Environment override is active; unset it before editing".into();
-                } else if selected == 0 {
-                    menu.linger_draft = Some(menu.rows[0].0.split(' ').next().unwrap_or("120").to_owned());
-                } else {
-                    let on = menu.rows[1].0.starts_with("on ");
-                    self.settings_change("worktree_per_session", Some(if on { "off" } else { "on" }));
-                }
+            KeyCode::Char('u')|KeyCode::Delete|KeyCode::Enter|KeyCode::Char(' ')=>{
+                let Some(row)=menu.rows.get(menu.selected) else {return true;};
+                if row.shadowed {self.notice=format!("Environment override is active; unset {} before editing",row.setting.env);}
+                else if row.setting.read_only || row.setting.key.is_empty() {self.notice=format!("{} is read-only. {}",row.setting.label,row.setting.note);}
+                else if matches!(key.code,KeyCode::Char('u')|KeyCode::Delete) {menu.edits.insert(row.setting.key.into(),None);}
+                else if matches!(row.setting.kind,crate::settings::Kind::Bool|crate::settings::Kind::BoolOn) {
+                    let current=menu.edits.get(row.setting.key).and_then(|v|v.as_deref()).unwrap_or(&row.value);
+                    let on=matches!(current,"on"|"1"|"true"|"yes");menu.edits.insert(row.setting.key.into(),Some(if on {"off"} else {"on"}.into()));
+                } else {let value=menu.edits.get(row.setting.key).and_then(|v|v.as_deref()).unwrap_or(&row.stored);menu.draft=Some((row.setting.key.into(),if value.is_empty() {row.setting.default.into()} else {value.into()}));}
             }
-            _ => {}
-        }
-        true
+            _=>{}
+        } true
     }
 
     fn open_lore_picker(&mut self) {
@@ -5226,6 +5339,12 @@ impl App {
     }
 
     fn lore_picker_key(&mut self, key: KeyEvent) -> bool {
+        if key.code==KeyCode::Char('g') && !key.modifiers.intersects(KeyModifiers::CONTROL|KeyModifiers::ALT) && self.lore_picker.as_ref().is_some_and(|p|!p.proposal_mode && p.query.is_empty()) {self.open_belief_graph();return true;}
+        if key.code==KeyCode::Esc && self.belief_graph_lines.take().is_some(){return true;}
+        if let Some((_,lines))=&self.belief_graph_lines {
+            match key.code {KeyCode::Up=>self.belief_graph_scroll=self.belief_graph_scroll.saturating_sub(1),KeyCode::Down=>self.belief_graph_scroll=(self.belief_graph_scroll+1).min(lines.len().saturating_sub(1)),KeyCode::PageDown=>self.belief_graph_scroll=(self.belief_graph_scroll+10).min(lines.len().saturating_sub(1)),KeyCode::PageUp=>self.belief_graph_scroll=self.belief_graph_scroll.saturating_sub(10),_=>{}}return true;
+        }
+
         let review_area = self.active_chooser_rect();
         let picker = self.lore_picker.as_mut().unwrap();
         if picker.resolving { return true; }
@@ -6464,7 +6583,8 @@ impl App {
         } else {
             MIN_PANE_WIDTH
         };
-        let rail_width = if self.rail_visible && area.width >= 70 {
+        let visible=if self.sidebar_auto {self.sessions.len()>1 || !self.collections.is_empty()} else {self.rail_visible};
+        let rail_width = if visible && area.width >= 70 {
             self.rail_width.clamp(
                 MIN_RAIL_WIDTH,
                 area.width.saturating_sub(min_body).max(MIN_RAIL_WIDTH),
@@ -6643,9 +6763,11 @@ impl App {
         chips.push(("effort", effort.to_owned()));
         if let Some(status) = id.and_then(|id| self.repo_cache.get(id))
             .and_then(|(status, _)| status.as_ref()) {
-            chips.push(repo_chip(status));
+            let (kind,label)=repo_chip(status);chips.push((kind,if self.preferences.on("nerd_font") {label.replace("⎇","\u{e0a0}")} else {label}));
         }
-        chips.push(("context", format!("Ctx {}", telemetry.and_then(|value| value.context.as_deref()).unwrap_or("?"))));
+        let context=telemetry.and_then(|value|value.context_percent).map(|v|format!("{v:.0}%")).unwrap_or_else(||"?".into());
+        let absolute=if self.preferences.on("ctx_absolute") && self.size.width>=100 {telemetry.and_then(|v|v.context_tokens).map(|used|format!(" {used}/{}",telemetry.and_then(|v|v.context_limit).map(|n|n.to_string()).unwrap_or_else(||"?".into()))).unwrap_or_default()} else {String::new()};
+        chips.push(("context",format!("Ctx {context}{absolute}")));
         let memory = self.memory_cache.get(id.unwrap_or("")).and_then(|(usage, _)| *usage)
             .map(|usage| format!("{} {}%/u {}%",
                 if self.memory_repo.get(id.unwrap_or("")).copied().unwrap_or(false) { "p" } else { "f" },
@@ -6971,10 +7093,9 @@ impl App {
         let visible = usize::from(menu.height.saturating_sub(3)).max(1);
         let attach_len = self.attach_picker.as_ref().map(|_| self.attach_matches().len());
         if let Some(settings) = self.settings_menu.as_mut() {
-            if (menu.y + 3..menu.y + 5).contains(&row) {
-                let index = usize::from(row - menu.y - 3);
-                if settings.selected != index { settings.selected = index; return true; }
-            }
+            if row >= menu.y + 3 { if let Some(index)=settings.visible_indices(menu.height).get(usize::from(row-menu.y-3)).copied() {
+                if settings.selected != index { settings.selected=index;return true; }
+            }}
         } else if let Some(picker) = self.branch_picker.as_mut() {
             if row < menu.y + 2 { return false; }
             let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
@@ -7179,8 +7300,9 @@ impl App {
             if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
                 if let Some(area) = menu.filter(|area| area.contains(
                     ratatui::layout::Position::new(mouse.column, mouse.row))) {
-                    let index = usize::from(mouse.row.saturating_sub(area.y.saturating_add(3)));
-                    if (area.y + 3..area.y + 5).contains(&mouse.row) {
+                    let offset=usize::from(mouse.row.saturating_sub(area.y.saturating_add(3)));
+                    let index=self.settings_menu.as_ref().unwrap().visible_indices(area.height).get(offset).copied();
+                    if let Some(index)=index.filter(|_|mouse.row>=area.y+3) {
                         let current = self.settings_menu.as_ref().unwrap().selected;
                         self.settings_menu.as_mut().unwrap().selected = index;
                         if current == index {
@@ -7933,6 +8055,7 @@ impl App {
             self.draw_request(frame, area, false);
         }
         self.draw_chip_tooltip(frame);
+        if self.preferences.value("background")=="transparent" {for cell in &mut frame.buffer_mut().content {if matches!(cell.bg,theme::BASE|theme::RAISED|theme::RAIL) {cell.bg=Color::Reset;}}}
     }
 
     fn draw_chip_tooltip(&self, frame: &mut Frame) {
@@ -8069,35 +8192,34 @@ impl App {
             .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)), modal);
     }
 
-    fn draw_settings_menu(&self, frame: &mut Frame, area: Rect) {
-        let Some(menu) = &self.settings_menu else { return; };
-        let mut lines = vec![
-            Line::from(" env > config.toml > default"),
-            Line::from(""),
-        ];
-        for (index, key) in ["linger_secs", "worktree_per_session"].iter().enumerate() {
-            let (value, shadowed) = &menu.rows[index];
-            let shown = if index == 0 { menu.linger_draft.as_deref().unwrap_or(value) } else { value };
-            let suffix = if *shadowed {
-                if index == 0 { " · DOXA_LINGER_SECS overrides config" }
-                else { " · DOXA_WORKTREE overrides config" }
-            } else { "" };
-            lines.push(Line::styled(format!(" {} {}: {}{}", if menu.selected == index { '›' } else { ' ' },
-                key, safe_label(shown), suffix),
-                Style::default().fg(if menu.selected == index { theme::TEXT } else { theme::SECONDARY })
-                    .bg(if menu.selected == index { theme::HIGHLIGHT } else { theme::RAISED })));
+    fn draw_settings_menu(&self,frame:&mut Frame,area:Rect) {
+        let Some(menu)=&self.settings_menu else {return;};
+        let mut lines=vec![Line::from(" env > config.toml > default"),Line::styled(format!(" {} · shift+←/→ categories · {} unsaved",crate::settings::CATEGORIES[menu.category],menu.edits.len()+usize::from(menu.draft.is_some())),Style::default().fg(theme::ACCENT))];
+        for index in menu.visible_indices(area.height) {
+            let row=&menu.rows[index];
+            let draft=menu.draft.as_ref().filter(|(k,_)|k==row.setting.key).map(|(_,v)|v.as_str());
+            let edited=menu.edits.get(row.setting.key);
+            let shown=draft.or_else(||edited.and_then(|v|v.as_deref())).unwrap_or(if edited==Some(&None) {"(default after save)"} else if row.value.is_empty() {"(unset)"} else {&row.value});
+            lines.push(Line::styled(format!(" {} {}: {} ({}){}",if menu.selected==index {'›'} else {' '},row.setting.label,safe_label(shown),row.source,if row.shadowed {" · set by env"} else if row.setting.read_only {" · read-only"} else if edited.is_some() {" *"} else {""}),Style::default().fg(if row.shadowed {theme::MUTED} else if menu.selected==index {theme::TEXT} else {theme::SECONDARY}).bg(if menu.selected==index {theme::HIGHLIGHT} else {theme::RAISED})));
         }
-        lines.push(Line::from(""));
-        lines.push(Line::from(if menu.linger_draft.is_some() {
-            " Enter save seconds · Esc cancel edit"
-        } else {
-            " Enter edit/toggle · U unset · Esc close"
-        }));
-        lines.push(Line::from(" Changes apply to new sessions; running sessions keep launch settings."));
-        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false })
-            .block(Block::default().title(" Native settings ").borders(Borders::ALL)
-                .border_style(Style::default().fg(theme::ACCENT)))
-            .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)), area);
+        if let Some(row)=menu.rows.get(menu.selected).filter(|r|r.setting.category==crate::settings::CATEGORIES[menu.category]) {
+            lines.push(Line::from(""));lines.push(Line::from(format!(" {}",row.setting.help)));
+            if !row.setting.choices.is_empty() {lines.push(Line::from(format!(" Choices: {}",row.setting.choices.iter().filter(|s|!s.is_empty()).copied().collect::<Vec<_>>().join(" | "))));}
+            if ["derive_secs","consult_floor","graph_context"].contains(&row.setting.key) {lines.push(Line::from(" Claude session memory control; Codex/vendor use their engine's snapshot policy."));}
+            if row.setting.key=="session_budget_usd" && menu.engine!="claude" {lines.push(Line::from(" This engine reports no session dollar cost; ceiling cannot be enforced."));}
+            if !row.setting.note.is_empty() {lines.push(Line::from(format!(" {}",row.setting.note)));}
+        }
+        if crate::settings::CATEGORIES[menu.category]=="Paths" {if let Ok(path)=crate::settings::config_path() {lines.push(Line::from(format!(" config file: {} (resolved; 0600)",path.display())));}}
+        if crate::settings::CATEGORIES[menu.category]=="About" {
+            lines.push(Line::from(format!(" DOXA Rust {} · /about build · /update refresh",env!("CARGO_PKG_VERSION"))));
+            if let Some(telemetry)=self.groups[self.active_group].active_id().and_then(|id|self.session_telemetry.get(id)) {
+                if let Some(tier)=&telemetry.subscription_type {lines.push(Line::from(format!(" plan: {} (reported by session)",safe_label(tier))));}
+            }
+        }
+        // Keep the action hint visible even when a setting has a long caveat.
+        lines.truncate(usize::from(area.height.saturating_sub(3)));
+        lines.push(Line::from(if menu.draft.is_some() {" Enter/Ctrl+S save · Esc cancel edit"} else {" Enter edit/toggle · U unset · Ctrl+S save · Esc discard/close"}));
+        frame.render_widget(Paragraph::new(lines).block(Block::default().title(" Settings ").borders(Borders::ALL).border_style(Style::default().fg(theme::ACCENT))).style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)),area);
     }
 
     fn draw_chip_info(&self, frame: &mut Frame, area: Rect) {
@@ -8381,13 +8503,17 @@ impl App {
             }
             return;
         }
+        if let Some((id,graph))=self.belief_graph_lines.as_ref().filter(|(id,_)|picker.rows.get(picker.selected).is_some_and(|r|r.id==*id)) {
+            let lines=std::iter::once(Line::from(format!(" Belief {id} · g/Esc back"))).chain(graph.iter().skip(self.belief_graph_scroll).take(usize::from(area.height.saturating_sub(3))).map(|line|Line::from(safe_label(line)))).collect::<Vec<_>>();
+            frame.render_widget(Paragraph::new(lines).wrap(Wrap{trim:false}).block(Block::default().title(" LORE graph neighbourhood ").borders(Borders::ALL).border_style(Style::default().fg(theme::ACCENT))).style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)),area);return;
+        }
         let height = area.height;
         let modal = area;
         let compact = height < 10;
         let mut lines = vec![Line::from(format!(" Search: {}", safe_label(&picker.query)))];
         if !compact {
             lines.push(Line::from(format!(" {}", picker.status)));
-            lines.push(Line::from(" Shift+A accept · Shift+D reject · Accept confirms; Reject retracts with history"));
+            lines.push(Line::from(" Shift+A accept · Shift+D reject · g graph · → evidence"));
             lines.push(Line::from(""));
         }
         if let Some((id, evidence)) = &picker.evidence {
@@ -8707,6 +8833,8 @@ impl App {
                 Line::styled(name.to_owned(), style)
             })
             .collect();
+        let clock_width=if index==self.active_group && !self.clock_text.is_empty() { (self.clock_text.width()+2).min(usize::from(inner[0].width.saturating_sub(15))) as u16 } else {0};
+        let tabs_area=Rect::new(inner[0].x,inner[0].y,inner[0].width.saturating_sub(clock_width),inner[0].height);
         let tabs = Tabs::new(if titles.is_empty() {
             vec![Line::from("Empty")]
         } else {
@@ -8732,7 +8860,8 @@ impl App {
                     theme::ERROR
                 } else { theme::BORDER })),
         );
-        frame.render_widget(tabs.style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)), inner[0]);
+        frame.render_widget(tabs.style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)), tabs_area);
+        if clock_width>0 {frame.render_widget(Paragraph::new(self.clock_text.as_str()).style(Style::default().fg(theme::MUTED).bg(theme::RAISED)),Rect::new(inner[0].right()-clock_width,inner[0].y+1,clock_width,1));}
         let content = session
             .map(|s| s.transcript.as_str())
             .unwrap_or("No session open. Select one in the rail and press Enter.");
@@ -8963,6 +9092,8 @@ struct TerminalGuard {
     alternate: bool,
     mouse: bool,
     paste: bool,
+    keyboard: bool,
+    measured_keyboard: Option<bool>,
 }
 impl TerminalGuard {
     fn enter() -> io::Result<Self> {
@@ -8972,12 +9103,15 @@ impl TerminalGuard {
             alternate: false,
             mouse: false,
             paste: false,
+            keyboard: false,measured_keyboard:None,
         };
         terminal::enable_raw_mode()?;
         guard.raw = true;
+        guard.measured_keyboard=match std::env::var("DOXA_KEYBOARD_PROTOCOL").ok().as_deref() {Some("kitty")=>Some(true),Some("legacy")=>Some(false),Some("unknown")=>None,_=>terminal::supports_keyboard_enhancement().ok()};
+        if guard.measured_keyboard==Some(true) {execute!(guard.out,crossterm::event::PushKeyboardEnhancementFlags(crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES))?;guard.keyboard=true;}
         execute!(guard.out, EnterAlternateScreen)?;
         guard.alternate = true;
-        execute!(guard.out, EnableMouseCapture)?;
+        execute!(guard.out, EnableMouseCapture,EnableFocusChange)?;
         guard.mouse = true;
         execute!(guard.out, EnableBracketedPaste)?;
         guard.paste = true;
@@ -8992,11 +9126,12 @@ impl Drop for TerminalGuard {
             let _ = execute!(self.out, DisableBracketedPaste);
         }
         if self.mouse {
-            let _ = execute!(self.out, DisableMouseCapture);
+            let _ = execute!(self.out, DisableMouseCapture,DisableFocusChange);
         }
         if self.alternate {
             let _ = execute!(self.out, LeaveAlternateScreen);
         }
+        if self.keyboard {let _=execute!(self.out,crossterm::event::PopKeyboardEnhancementFlags);}
         if self.raw {
             let _ = terminal::disable_raw_mode();
         }
@@ -9092,6 +9227,12 @@ fn run_loop(
     if let Some((store, live_ids, _)) = &state {
         store.restore(&mut app, live_ids);
     }
+    app.persist_preferences=true;
+    app.sidebar_auto=app.preferences.value("sidebar").is_empty();
+    app.rail_width=app.preferences.sidebar_width();
+    app.rail_visible=match app.preferences.value("sidebar") {""=>app.sessions.len()>1 || !app.collections.is_empty(),"0"|"false"|"off"|"no"=>false,_=>true};
+    app.refresh_clock();
+    if app.preferences.on("key_notice") && guard.measured_keyboard==Some(false) {app.notice="Legacy keys: Ctrl+, → /settings · Shift+Enter → Ctrl+J · Ctrl+Enter → /msg".into();}
     let mut saved_layout = crate::ui_state::LayoutSignature::capture(&app);
     terminal.draw(|frame| app.draw(frame))?;
     let mut pointer_on_link = false;
@@ -9133,15 +9274,18 @@ fn run_loop(
         changed |= app.poll_sessions_stop();
         changed |= app.poll_fleet();
         changed |= app.poll_diff();
+        changed |= app.poll_auto_diff();
         changed |= app.poll_history();
         changed |= app.poll_resume();
         changed |= app.poll_lore();
+        changed |= app.poll_belief_graph();
         changed |= app.poll_memory();
         changed |= app.poll_repo();
         changed |= app.poll_memory_menu();
         changed |= app.poll_vendor_catalog();
         changed |= app.tick_blink(Instant::now());
         changed |= app.tick_spinner(Instant::now());
+        changed |= app.tick_clock(Instant::now());
         if prompt_sender.is_none() {
             if let Some(id) = app.pending_peer_refresh.take() {
                 changed |= app.peer_map.roster(&id, &serde_json::json!({"ok":false}));
@@ -9558,16 +9702,62 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn settings_category_switch_keeps_unsaved_edits_and_escape_discards_them() {
+        let mut app=App::default();app.input="keep prompt".into();
+        let rows=crate::settings::SETTINGS.iter().map(|setting|crate::settings::Row {setting,value:setting.default.into(),stored:setting.default.into(),source:"default".into(),shadowed:false}).collect::<Vec<_>>();
+        let selected=rows.iter().position(|r|r.setting.key=="linger_secs").unwrap();
+        app.settings_menu=Some(SettingsMenu{rows,selected,category:0,draft:None,edits:HashMap::new(),engine:"claude".into()});
+        app.settings_menu_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
+        app.settings_menu_key(KeyEvent::new(KeyCode::Char('9'),KeyModifiers::NONE));
+        app.settings_menu_key(KeyEvent::new(KeyCode::Right,KeyModifiers::SHIFT));
+        let menu=app.settings_menu.as_ref().unwrap();assert_eq!(menu.category,1);assert_eq!(menu.edits["linger_secs"].as_deref(),Some("1209"));assert!(menu.draft.is_none());
+        app.settings_menu_key(KeyEvent::new(KeyCode::Left,KeyModifiers::SHIFT));assert_eq!(app.settings_menu.as_ref().unwrap().edits.len(),1);
+        app.settings_menu_key(KeyEvent::new(KeyCode::Esc,KeyModifiers::NONE));assert!(app.settings_menu.is_none());assert_eq!(app.input,"keep prompt");
+    }
+    #[test]
+    fn frontend_preferences_change_actual_context_chips_and_background() {
+        let mut app=App::default();app.size=Rect::new(0,0,140,30);app.rail_visible=false;
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"s","cwd":"/repo","engine":"claude","model":"model","ctx_percentage":25,"ctx_tokens":250,"ctx_max_tokens":1000}));
+        assert_eq!(app.chips(0).iter().find(|(k,_)|*k=="context").unwrap().1,"Ctx 25%");
+        app.preferences.set_test("ctx_absolute","1");assert_eq!(app.chips(0).iter().find(|(k,_)|*k=="context").unwrap().1,"Ctx 25% 250/1000");
+        app.size.width=90;assert_eq!(app.chips(0).iter().find(|(k,_)|*k=="context").unwrap().1,"Ctx 25%");
+        app.preferences.set_test("background","transparent");let mut terminal=Terminal::new(ratatui::backend::TestBackend::new(90,30)).unwrap();terminal.draw(|f|app.draw(f)).unwrap();assert_eq!(terminal.backend().buffer().cell((1,1)).unwrap().bg,Color::Reset);
+    }
+    #[test]
+    fn graph_reply_checks_selected_identity_and_ascii_expansion_keeps_prompt() {
+        let mut app=App::default();app.size=Rect::new(0,0,140,32);app.show_belief_browser_fixture(0,&[(1,"user","first"),(2,"user","second")]);app.input="private draft".into();
+        let(tx,rx)=mpsc::sync_channel(1);app.belief_graph_pending=Some((1,String::new(),false,rx));app.lore_picker.as_mut().unwrap().selected=1;
+        tx.send(Ok(doxa_lore::BeliefGraph{id:1,lines:vec!["stale relation".into()],html:None,note:"old".into()})).unwrap();assert!(!app.poll_belief_graph());assert!(app.belief_graph_lines.is_none());assert!(app.pending_open_urls.is_empty());
+        let(tx,rx)=mpsc::sync_channel(1);app.belief_graph_pending=Some((2,String::new(),false,rx));
+        tx.send(Ok(doxa_lore::BeliefGraph{id:2,lines:vec!["--depends_on--> [1] first".into()],html:None,note:"scoped".into()})).unwrap();assert!(app.poll_belief_graph());assert!(painted_at(&app,140,32).contains("depends_on"));
+        app.lore_picker_key(KeyEvent::new(KeyCode::Esc,KeyModifiers::NONE));assert!(app.belief_graph_lines.is_none());assert_eq!(app.input,"private draft");
+    }
+    #[test]
+    fn auto_diff_has_no_idle_probe_and_opens_once_without_moving_focus() {
+        let mut app=App::default();app.size=Rect::new(0,0,160,40);app.rail_visible=false;app.preferences.set_test("auto_diff","1");
+        app.apply_update(DaemonUpdate::Upsert(Session{id:"s".into(),title:"session".into(),collection:String::new(),transcript:String::new(),status:"Ready".into()}));
+        let cwd=PathBuf::from("/owned/repo");app.session_cwds.insert("s".into(),cwd.clone());assert!(!app.poll_auto_diff());assert!(app.auto_diff_pending.is_none());
+        app.auto_diff_baseline.insert("s".into(),"before".into());let(tx,rx)=mpsc::sync_channel(1);app.auto_diff_pending=Some(("s".into(),cwd,rx));tx.send(("after".into(),true)).unwrap();
+        let group=app.active_group;let focus=app.focus;assert!(app.poll_auto_diff());assert!(app.diff_pane);assert_eq!(app.active_group,group);assert_eq!(app.focus,focus);assert!(app.auto_diff_seen.contains("s"));
+        app.diff_pane=false;app.request_auto_diff("s");assert!(app.auto_diff_requests.is_empty());
+    }
+    fn settings_test_rows(linger:&str,shadowed:bool)->Vec<crate::settings::Row> {
+        ["linger_secs","worktree_per_session"].into_iter().map(|key|crate::settings::Row {
+            setting:crate::settings::find(key).unwrap(), value:if key=="linger_secs" {linger.into()} else {"on".into()},
+            stored:if key=="linger_secs" {linger.into()} else {"1".into()},source:if shadowed && key=="linger_secs" {"environment".into()} else {"default".into()},shadowed:shadowed && key=="linger_secs"
+        }).collect()
+    }
+    #[test]
     fn settings_menu_protects_env_shadowed_rows_and_keeps_prompt() {
         let mut app = App::default();
         app.input = "draft prompt".into();
         app.settings_menu = Some(SettingsMenu {
-            rows: [("90 (environment)".into(), true), ("on (default)".into(), false)],
+            rows: settings_test_rows("90",true),
             selected: 0,
-            linger_draft: None,
+            draft: None, category: 0, edits: HashMap::new(), engine: "claude".into(),
         });
         app.settings_menu_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(app.settings_menu.as_ref().unwrap().linger_draft.is_none());
+        assert!(app.settings_menu.as_ref().unwrap().draft.is_none());
         assert!(app.notice.contains("Environment override"));
         app.settings_menu_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE));
         assert!(app.settings_menu.is_some());
@@ -9580,16 +9770,16 @@ mod tests {
     fn settings_linger_editor_cancels_without_writing() {
         let mut app = App::default();
         app.settings_menu = Some(SettingsMenu {
-            rows: [("120 (default)".into(), false), ("on (default)".into(), false)],
+            rows: settings_test_rows("120",false),
             selected: 0,
-            linger_draft: None,
+            draft: None, category: 0, edits: HashMap::new(), engine: "claude".into(),
         });
         app.settings_menu_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert_eq!(app.settings_menu.as_ref().unwrap().linger_draft.as_deref(), Some("120"));
+        assert_eq!(app.settings_menu.as_ref().unwrap().draft.as_ref().map(|(_,v)|v.as_str()), Some("120"));
         app.settings_menu_key(KeyEvent::new(KeyCode::Char('9'), KeyModifiers::NONE));
         app.settings_menu_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        assert!(app.settings_menu.as_ref().unwrap().linger_draft.is_none());
-        assert_eq!(app.settings_menu.as_ref().unwrap().rows[0].0, "120 (default)");
+        assert!(app.settings_menu.as_ref().unwrap().draft.is_none());
+        assert_eq!(app.settings_menu.as_ref().unwrap().rows[0].value, "120");
     }
 
     #[cfg(unix)]
@@ -10043,7 +10233,6 @@ for line in sys.stdin:
         assert!(!ENGINE_CHOICES.contains(&"fixture"));
         let mut app = App::default();
         app.open_engine_picker();
-        app.handle(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert!(!app.engine_picker);
         assert_eq!(app.new_session.as_ref().unwrap().engine, launch::Engine::Claude);
@@ -10087,7 +10276,6 @@ for line in sys.stdin:
         let mut app = App::default();
         app.handle(Event::Resize(100, 28));
         app.open_engine_picker();
-        app.handle(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
         app.handle(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert_eq!(app.new_session.as_ref().unwrap().model, "deepseek-flash");
@@ -10891,8 +11079,8 @@ for line in sys.stdin:
             column: menu.x + 2, row: menu.y + 3, modifiers: KeyModifiers::NONE }));
         assert_eq!(app.branch_picker.as_ref().unwrap().selected, 1);
         app.branch_picker = None;
-        app.settings_menu = Some(SettingsMenu { rows: [("120".into(), false), ("false".into(), false)],
-            selected: 0, linger_draft: None });
+        app.settings_menu = Some(SettingsMenu { rows: settings_test_rows("120",false),
+            selected: 0, draft: None, category: 0, edits: HashMap::new(), engine: "claude".into() });
         let menu = app.active_chooser_rect().unwrap();
         assert!(app.mouse(MouseEvent { kind: MouseEventKind::Moved,
             column: menu.x + 2, row: menu.y + 4, modifiers: KeyModifiers::NONE }));
