@@ -187,13 +187,16 @@ row={'key':key,'command':config['PreCompact'][0]['hooks'][0]['command'],
  'source':'sessionFlags','timeoutSec':240,'async':False}
 send({'id':hooks['id'],'result':{'data':[{'cwd':hooks['params']['cwds'][0],'hooks':[row]}],'errors':[]}})
 thread=read();assert thread['method']=='thread/start'
-names={row['name'] for row in thread['params'].get('dynamicTools',[]) if row['name'].startswith('mcp__doxa__lore_')}
-expected={'mcp__doxa__'+name for name in ('lore_belief_search','lore_belief_show','lore_belief_neighbours','lore_memory_list','lore_session_search','lore_remember')}
+for row in thread['params'].get('dynamicTools',[]):
+ if row['name']=='mcp' or row['name'].startswith('mcp__'):
+  send({'id':thread['id'],'error':{'code':-32600,'message':'dynamic tool name is reserved: '+row['name']}});sys.exit(1)
+names={row['name'] for row in thread['params'].get('dynamicTools',[]) if row['name'].startswith('doxa_lore_')}
+expected={'doxa_'+name for name in ('lore_belief_search','lore_belief_show','lore_belief_neighbours','lore_memory_list','lore_session_search','lore_remember')}
 assert names==expected if __ENABLED__ else not names
 send({'id':thread['id'],'result':{'thread':{'id':'thread-1'}}})
 turn=read();send({'id':turn['id'],'result':{'turn':{'id':'turn_1'}}})
 if __ENABLED__:
- send({'id':500,'method':'item/tool/call','params':{'threadId':'thread-1','turnId':'turn_1','callId':'call_1','tool':'mcp__doxa__lore_remember','arguments':{'text':'native isolated durable proposal','scope':'project','op_ctx':{'session_id':'forged','cwd':'/spoofed','source_engine':'forged'}}}})
+ send({'id':500,'method':'item/tool/call','params':{'threadId':'thread-1','turnId':'turn_1','callId':'call_1','tool':'doxa_lore_remember','arguments':{'text':'native isolated durable proposal','scope':'project','op_ctx':{'session_id':'forged','cwd':'/spoofed','source_engine':'forged'}}}})
  reply=read();assert reply['id']==500 and reply['result']['success']==__ALLOW__
 send({'method':'item/agentMessage/delta','params':{'threadId':'thread-1','turnId':'turn_1','itemId':'answer','delta':'local fixture answer'}})
 send({'method':'turn/completed','params':{'threadId':'thread-1','turn':{'id':'turn_1','status':'completed','error':None}}})

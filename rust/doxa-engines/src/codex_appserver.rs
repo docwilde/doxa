@@ -56,6 +56,7 @@ pub struct AppServerDriver {
     interactive: bool,
     peer_tools: bool,
     agent_tools: Vec<Value>,
+    dynamic_tool_names: Vec<(String, String)>,
     compact_gate: Option<crate::codex_compact::CompactGate>,
     review_items: Vec<Value>,
     scrub: Box<dyn Fn(&str) -> String + Send + Sync>,
@@ -170,7 +171,7 @@ impl AppServerDriver {
         let scrub = std::sync::Arc::new(scrub);
         let tool_scrub = scrub.clone();
         let mut driver = Self {
-            options, effort: None, interactive: false, peer_tools: false, agent_tools: Vec::new(), compact_gate, review_items: Vec::new(), scrub: Box::new(move |text| scrub(text)), child, process_group, stdin, stdout, next_id: 0,
+            options, effort: None, interactive: false, peer_tools: false, agent_tools: Vec::new(), dynamic_tool_names: Vec::new(), compact_gate, review_items: Vec::new(), scrub: Box::new(move |text| scrub(text)), child, process_group, stdin, stdout, next_id: 0,
             thread_id: None, turn_id: None, reasoning_bytes: 0, reasoning_chars: 0,
             reasoning_buffer: String::new(), reasoning_truncated: false,
             assistant_buffers: Vec::new(), assistant_bytes: 0, assistant_message_emitted: false, usage: None, effective_model: None,
@@ -198,12 +199,28 @@ impl AppServerDriver {
     async fn start_thread(&mut self) -> Result<(), AppServerError> {
         let driver = self;
         let approval = if driver.interactive { "on-request" } else { "never" };
+        // Codex reserves `mcp` and `mcp__*` for provider MCP tools. Keep
+        // canonical host names while registering aliases only at this boundary.
+        // Primary contract: codex app-server thread_processor::validate_dynamic_tools.
+        let mut tools = if driver.peer_tools { crate::peer_tools::definitions() } else { Vec::new() };
+        tools.extend(driver.agent_tools.clone());
+        driver.dynamic_tool_names.clear();
+        for tool in &mut tools {
+            let canonical = tool["name"].as_str().ok_or(AppServerError::Protocol("Dynamic tool lacks canonical name"))?.to_owned();
+            let suffix = canonical.strip_prefix("mcp__doxa__")
+                .ok_or(AppServerError::Protocol("Invalid canonical dynamic tool name"))?;
+            let alias = format!("doxa_{suffix}");
+            if alias.len() > 128 || !alias.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+                || driver.dynamic_tool_names.iter().any(|(name, _)| name == &alias) {
+                return Err(AppServerError::Protocol("Invalid or duplicate Codex dynamic tool alias"));
+            }
+            tool["name"] = json!(alias);
+            driver.dynamic_tool_names.push((alias, canonical));
+        }
         let result = if let Some(id) = driver.options.resume_thread.clone() {
             driver.request("thread/resume", json!({"threadId":id,"cwd":driver.options.cwd,"model":driver.options.model,"approvalPolicy":approval,"sandbox":sandbox_name(driver.options.sandbox),"excludeTurns":true})).await?
         } else {
             let mut params = json!({"cwd":driver.options.cwd,"model":driver.options.model,"approvalPolicy":approval,"sandbox":sandbox_name(driver.options.sandbox)});
-            let mut tools = if driver.peer_tools { crate::peer_tools::definitions() } else { Vec::new() };
-            tools.extend(driver.agent_tools.clone());
             if !tools.is_empty() { params["dynamicTools"] = json!(tools); }
             driver.request("thread/start", params).await?
         };
@@ -344,6 +361,16 @@ impl AppServerDriver {
                         return Err(AppServerError::Protocol("server request has a different thread or turn"));
                     }
                     let mut frame = frame;
+                    if frame["method"] == "item/tool/call" {
+                        let canonical = frame["params"]["tool"].as_str()
+                            .and_then(|name| self.dynamic_tool_names.iter().find(|(alias, _)| alias == name))
+                            .map(|(_, canonical)| canonical.clone());
+                        if !frame["params"]["namespace"].is_null() || canonical.is_none() {
+                            self.send_bounded(json!({"id":frame["id"],"error":{"code":-32602,"message":"Unregistered Codex dynamic tool"}}), Some(cancel), deadline).await?;
+                            return Err(AppServerError::Protocol("Unregistered Codex dynamic tool"));
+                        }
+                        frame["params"]["tool"] = json!(canonical.unwrap());
+                    }
                     if let Some(item) = self.review_items.iter().find(|item| item["id"] == frame["params"]["itemId"]) {
                         frame["doxa_item"] = item.clone();
                     }
