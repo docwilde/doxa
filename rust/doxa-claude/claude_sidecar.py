@@ -25,6 +25,23 @@ TASK_CANCEL_TIMEOUT = 1.0
 COMPACT_REVIEW_DEADLINE = 185.0  # below the Rust host's 195-second acknowledgement deadline
 
 
+def model_effort_capabilities(engine: object, model: str) -> list[str]:
+    """Only exact model metadata from this SDK connection proves support."""
+    info = getattr(engine, "server_info", None)
+    rows = info.get("models") if isinstance(info, dict) else None
+    if not isinstance(rows, list) or not callable(getattr(engine, "set_effort", None)):
+        return []
+    for row in rows[:100]:
+        if not isinstance(row, dict) or row.get("value", row.get("id")) != model:
+            continue
+        levels = row.get("supportedEffortLevels")
+        if not isinstance(levels, list) or row.get("supportsEffort") is False:
+            return []
+        return [level for level in ("low", "medium", "high", "xhigh", "max")
+                if level in levels]
+    return []
+
+
 async def reviewed_compact_ready(engine: object, prompt: str,
                                  timeout: float = COMPACT_REVIEW_DEADLINE) -> bool:
     """Only a completed LORE review permits forwarding this exact command."""
@@ -157,8 +174,10 @@ async def run() -> None:
     engine = None
     turn = None
     catalog_task = None
+    catalog_completed = 0.0
+    catalog_cached = {"models": []}
 
-    async def load_catalog() -> dict:
+    async def catalog_snapshot() -> dict:
         """Prepare one account-scoped snapshot off the request path."""
         from doxa.claude_catalog import attempt_cli_catalog_refresh
         from doxa.providers import ClaudeProvider, model_provider
@@ -173,13 +192,25 @@ async def run() -> None:
             models = await provider.list_models()
             # Static aliases are not proof this account can use them.
             available = [m for m in models if m.source != "fallback"]
-            return {"models": [m.id for m in available[:100]
-                               if isinstance(m.id, str) and 0 < len(m.id) <= 128],
-                    "capabilities": [{"model": m.id, "efforts": ["low", "medium", "high", "xhigh", "max"] if hasattr(SessionEngine, "set_effort") else []} for m in available[:100]],
-                    "note": (provider.catalog_note(available) if available else
-                             "No verified Claude model catalog available")[:500]}
+            ids = [m.id for m in available[:100]
+                   if isinstance(m.id, str) and 0 < len(m.id) <= 128]
+            capabilities = [{"model": model, "efforts": model_effort_capabilities(engine, model)}
+                            for model in ids]
+            note = (provider.catalog_note(available) if available else
+                    "No verified Claude model catalog available")
+            if callable(getattr(engine, "set_effort", None)) and any(not row["efforts"] for row in capabilities):
+                note += "; effort support is unknown without SDK model capability metadata"
+            return {"models": ids, "capabilities": capabilities, "note": note[:500]}
+
         except Exception:  # optional catalog discovery must not stop the session
             return {"models": [], "note": "No verified Claude model catalog available"}
+
+    async def load_catalog() -> dict:
+        nonlocal catalog_completed, catalog_cached
+        result = await catalog_snapshot()
+        catalog_cached = result
+        catalog_completed = time.monotonic()
+        return result
 
     async def publish_turn(prompt: str) -> None:
         try:
@@ -192,9 +223,14 @@ async def run() -> None:
                 # The parent may have closed stdout along with stdin.
                 pass
             raise
-        except Exception:
+        except Exception as error:
+            # Expose only our fixed identity diagnostic, never SDK exception text.
+            note = ("Claude session identity verification failed; reconnect the session"
+                    if isinstance(error, RuntimeError) and str(error) ==
+                    "resumed provider identity was not confirmed; output withheld"
+                    else "Claude turn failed")
             emit({"type": "event", "event": "turn_done",
-                  "data": {"is_error": True, "error": "Claude turn failed"}})
+                  "data": {"is_error": True, "error": note}})
 
     peer_failed = False
 
@@ -344,9 +380,14 @@ async def run() -> None:
                 emit({"type": "reply", "id": request_id, "ok": True,
                       "result": {**_scrub_json(detail), "source": "Claude official context_usage"}})
             elif method == "list_models" and engine is not None:
+                if catalog_task.done():
+                    cached = catalog_task.result()
+                    ttl = 30.0 if cached.get("models") else 5.0
+                    if time.monotonic() - catalog_completed >= ttl:
+                        catalog_task = asyncio.create_task(load_catalog())
                 result = (catalog_task.result() if catalog_task.done() else
-                          {"models": [], "loading": True,
-                           "note": "Claude model catalog is loading; press R to retry"})
+                          {**catalog_cached, "loading": True,
+                           "note": "Claude model catalog is loading; refreshes automatically"})
                 emit({"type": "reply", "id": request_id, "ok": True,
                       "result": result})
             elif method == "set_model" and engine is not None:

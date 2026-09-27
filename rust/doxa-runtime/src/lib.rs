@@ -271,6 +271,7 @@ impl Inner {
         if event["type"] == "effort_verified" {
             if let Some(effort) = event["data"]["effort"].as_str().filter(|s| !s.is_empty() && !s.chars().any(char::is_control)) { state.effort = Some(effort.to_owned()); state.pending_effort = None; }
         }
+        if event["type"] == "effort_verification_failed" { state.pending_effort = None; }
         match event["type"].as_str() {
             Some("needs_input") => {
                 let data = &event["data"];
@@ -803,6 +804,23 @@ mod tests {
     impl Host for NoopHost {
         fn prompt(&self, _: &str, _: &mut dyn FnMut(Value)) {}
         fn call(&self, _: &str, _: &Value) -> Result<Value, String> { Ok(json!({})) }
+    }
+
+    #[test]
+    fn failed_effort_verification_clears_pending_but_preserves_verified_effort() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = Daemon::bind(dir.path(), Session {
+            session_id: "effort-test".into(), cwd: "/fixture".into(), model: None,
+            engine: "claude".into(), doxa_version: "test".into(),
+        }, Arc::new(NoopHost)).unwrap();
+        {
+            let mut state = daemon.inner.state.lock().unwrap();
+            state.effort = Some("low".into()); state.pending_effort = Some("high".into());
+        }
+        daemon.inner.publish(None, json!({"type":"effort_verification_failed","data":{"effort":"low","requested_effort":"high"}}));
+        let state = daemon.inner.state.lock().unwrap();
+        assert_eq!(state.effort.as_deref(), Some("low"));
+        assert!(state.pending_effort.is_none());
     }
 
     #[test]
