@@ -116,6 +116,48 @@ fn metadata_write_ignores_orphaned_pid_named_temp_file() {
 }
 
 #[test]
+fn clean_checkpoint_refuses_missing_torn_or_changed_transcript_and_validates_resume_boundary() {
+    let temp = tempdir().unwrap();
+    let store = store(temp.path());
+    let fields = serde_json::from_value::<Map<String, Value>>(
+        json!({"thread_id":"thread-1","turn_incomplete":false})).unwrap();
+    assert!(store.write_thread(fields.clone(), str::to_owned).is_err());
+    assert!(!store.thread_path().exists());
+    fs::write(store.transcript_path(), b"{\"type\":\"user\"}").unwrap();
+    assert!(store.write_thread(fields.clone(), str::to_owned).is_err());
+    assert!(!store.thread_path().exists());
+    store.append(json!({"type":"assistant","message":{"content":"answer"}}),
+                 "codex", str::to_owned).unwrap();
+    assert!(store.write_thread(fields.clone(), str::to_owned).is_err(),
+            "a completed append cannot repair a torn prior JSONL boundary");
+    fs::write(store.transcript_path(), b"{\"type\":\"user\"}\n").unwrap();
+    store.append(json!({"type":"assistant","message":{"content":"answer"}}),
+                 "codex", str::to_owned).unwrap();
+    store.write_thread(fields, str::to_owned).unwrap();
+    let metadata = store.read_thread().unwrap().unwrap();
+    let raw = fs::read(store.transcript_path()).unwrap();
+    assert_eq!(metadata["transcript_bytes"].as_u64(), Some(raw.len() as u64));
+    store.verify_thread_checkpoint(&metadata).unwrap();
+    for changed in [raw[..raw.len() - 1].to_vec(), [raw.as_slice(), b"{}\n"].concat(), {
+        let mut changed = raw.clone();
+        *changed.last_mut().unwrap() = b' ';
+        changed
+    }] {
+        fs::write(store.transcript_path(), changed).unwrap();
+        assert!(store.verify_thread_checkpoint(&metadata).is_err());
+    }
+    fs::write(store.transcript_path(), raw).unwrap();
+    for bytes in [json!(0), json!(-1), json!(true), json!("12")] {
+        let mut invalid = metadata.clone();
+        invalid["transcript_bytes"] = bytes;
+        assert!(store.verify_thread_checkpoint(&invalid).is_err());
+    }
+    let mut legacy = metadata;
+    legacy.as_object_mut().unwrap().remove("transcript_bytes");
+    store.verify_thread_checkpoint(&legacy).unwrap();
+}
+
+#[test]
 fn append_tightens_permissions_on_legacy_transcript() {
     let temp = tempdir().unwrap();
     let store = store(temp.path());

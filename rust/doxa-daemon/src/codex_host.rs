@@ -138,6 +138,9 @@ impl CodexHost {
                 || transcript.as_ref().is_none_or(|(_, len)| *len == 0) {
                 return Err("Codex thread record does not match this session".to_owned());
             }
+            store.verify_thread_checkpoint(&value).map_err(|_| {
+                "Codex transcript does not match its durable checkpoint; refusing to resume the thread".to_owned()
+            })?;
             let recorded_model = match value.get("model") {
                 None | Some(Value::Null) => None,
                 Some(Value::String(model)) if !model.is_empty() && model.len() <= 128

@@ -21,6 +21,7 @@ fn invalid() -> io::Error {
         "unsafe transcript path or identifier",
     )
 }
+
 fn bad_data() -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, "invalid JSON record")
 }
@@ -94,6 +95,56 @@ fn open_read(path: &Path) -> io::Result<File> {
         .open(path)?;
     checked_file(&file)?;
     Ok(file)
+}
+
+fn open_directory(path: &Path) -> io::Result<File> {
+    let file = OpenOptions::new().read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path)?;
+    let meta = file.metadata()?;
+    if !meta.is_dir() || meta.uid() != unsafe { libc::geteuid() } {
+        return Err(invalid());
+    }
+    Ok(file)
+}
+
+fn complete_transcript_boundary(file: &mut File) -> io::Result<u64> {
+    let bytes = file.metadata()?.len();
+    if bytes == 0 { return Err(bad_data()); }
+    file.seek(SeekFrom::End(-1))?;
+    let mut end = [0];
+    file.read_exact(&mut end)?;
+    if end != [b'\n'] { return Err(bad_data()); }
+    let mut cursor = bytes - 1;
+    let mut chunks = Vec::new();
+    let mut length = 0usize;
+    while cursor > 0 {
+        let count = cursor.min(8192) as usize;
+        cursor -= count as u64;
+        file.seek(SeekFrom::Start(cursor))?;
+        let mut chunk = vec![0; count];
+        file.read_exact(&mut chunk)?;
+        let boundary = chunk.iter().rposition(|byte| *byte == b'\n');
+        if let Some(index) = boundary { chunk.drain(..=index); }
+        length += chunk.len();
+        if length > MAX_TRANSCRIPT_BYTES { return Err(bad_data()); }
+        chunks.push(chunk);
+        if boundary.is_some() { break; }
+    }
+    let mut record = Vec::with_capacity(length);
+    for chunk in chunks.into_iter().rev() { record.extend_from_slice(&chunk); }
+    if !serde_json::from_slice::<Value>(&record).map_err(|_| bad_data())?.is_object()
+        || file.metadata()?.len() != bytes {
+        return Err(bad_data());
+    }
+    Ok(bytes)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CheckpointBarrier {
+    TranscriptData,
+    TranscriptEntry,
+    ThreadData,
+    ThreadEntry,
 }
 
 fn scrub_value(value: &mut Value, scrub: &impl Fn(&str) -> String) {
@@ -510,44 +561,26 @@ impl TranscriptStore {
         }
     }
 
+    /// Verify checkpoints written by native Codex before resuming. Legacy
+    /// Python/native metadata without this field keeps its previous contract.
+    /// A checkpoint covers the exact complete JSONL boundary, not a tail that
+    /// the permissive display reader might silently skip after a crash.
+    pub fn verify_thread_checkpoint(&self, metadata: &Value) -> io::Result<()> {
+        let Some(bytes) = metadata.get("transcript_bytes") else { return Ok(()); };
+        let bytes = bytes.as_u64().filter(|bytes| *bytes > 0).ok_or_else(bad_data)?;
+        owned_dir(&self.dir)?;
+        let mut file = open_read(&self.transcript_path())?;
+        if complete_transcript_boundary(&mut file)? != bytes { return Err(bad_data()); }
+        Ok(())
+    }
+
     /// Merge metadata keys with the existing object, retaining future fields and writing atomically.
     pub fn write_thread(
         &self,
         updates: Map<String, Value>,
         scrub: impl Fn(&str) -> String,
     ) -> io::Result<()> {
-        owned_dir(&self.dir)?;
-        let mut base = self
-            .read_thread()?
-            .and_then(|v| v.as_object().cloned())
-            .unwrap_or_default();
-        base.extend(updates);
-        if base
-            .get("thread_id")
-            .and_then(Value::as_str)
-            .is_none_or(str::is_empty)
-        {
-            return Err(bad_data());
-        }
-        let mut value = Value::Object(base);
-        scrub_value(&mut value, &scrub);
-        let bytes = serde_json::to_vec(&value)?;
-        if bytes.len() as u64 > MAX_METADATA_BYTES {
-            return Err(bad_data());
-        }
-        // Use a fresh name for each write. A crash may leave an old temp
-        // file behind, and concurrent writers in this process need distinct
-        // files even though they share a PID.
-        let mut temp = tempfile::Builder::new()
-            .prefix(&format!(".{}.codex.", self.session_id))
-            .suffix(".tmp")
-            .tempfile_in(&self.dir)?;
-        checked_file(temp.as_file())?;
-        temp.write_all(&bytes)?;
-        temp.as_file().sync_all()?;
-        temp.persist(self.thread_path())
-            .map_err(|error| error.error)?;
-        Ok(())
+        self.try_write_thread(updates, |text| Ok(scrub(text)))
     }
 
     /// Fallible variant for the LORE sidecar. Scrub before creating the temp file.
@@ -556,6 +589,15 @@ impl TranscriptStore {
         updates: Map<String, Value>,
         mut scrub: impl FnMut(&str) -> io::Result<String>,
     ) -> io::Result<()> {
+        self.try_write_thread_with_sync(updates, &mut scrub, &mut |file, _| file.sync_all())
+    }
+
+    fn try_write_thread_with_sync(
+        &self,
+        updates: Map<String, Value>,
+        scrub: &mut impl FnMut(&str) -> io::Result<String>,
+        sync: &mut impl FnMut(&File, CheckpointBarrier) -> io::Result<()>,
+    ) -> io::Result<()> {
         owned_dir(&self.dir)?;
         let mut base = self
             .read_thread()?
@@ -570,7 +612,19 @@ impl TranscriptStore {
             return Err(bad_data());
         }
         let mut value = Value::Object(base);
-        try_scrub_value(&mut value, &mut scrub)?;
+        try_scrub_value(&mut value, scrub)?;
+        let directory = open_directory(&self.dir)?;
+        if value["turn_incomplete"] == false {
+            let mut transcript = open_read(&self.transcript_path())?;
+            let bytes = complete_transcript_boundary(&mut transcript)?;
+            // The clean marker must never reach storage ahead of either the
+            // JSONL content or its newly-created directory entry.
+            sync(&transcript, CheckpointBarrier::TranscriptData)?;
+            sync(&directory, CheckpointBarrier::TranscriptEntry)?;
+            value["transcript_bytes"] = Value::from(bytes);
+        } else if value["turn_incomplete"] == true {
+            value.as_object_mut().expect("thread metadata object").remove("transcript_bytes");
+        }
         let bytes = serde_json::to_vec(&value)?;
         if bytes.len() as u64 > MAX_METADATA_BYTES {
             return Err(bad_data());
@@ -581,9 +635,128 @@ impl TranscriptStore {
             .tempfile_in(&self.dir)?;
         checked_file(temp.as_file())?;
         temp.write_all(&bytes)?;
-        temp.as_file().sync_all()?;
+        sync(temp.as_file(), CheckpointBarrier::ThreadData)?;
         temp.persist(self.thread_path())
             .map_err(|error| error.error)?;
-        Ok(())
+        // This barrier also makes the dirty guard durable before the caller
+        // admits a provider turn. Rename alone is not a durable transaction.
+        sync(&directory, CheckpointBarrier::ThreadEntry)
+    }
+}
+
+#[cfg(test)]
+mod checkpoint_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn fixture() -> (tempfile::TempDir, TranscriptStore) {
+        let root = tempfile::tempdir().unwrap();
+        let store = TranscriptStore::new(root.path(), "project", "session-1").unwrap();
+        store.append(json!({"type":"user","message":{"content":"owned prompt"}}),
+                     "codex", str::to_owned).unwrap();
+        store.append(json!({"type":"assistant","message":{"content":"owned ü answer"}}),
+                     "codex", str::to_owned).unwrap();
+        store.write_thread(fields(true), str::to_owned).unwrap();
+        (root, store)
+    }
+
+    fn fields(incomplete: bool) -> Map<String, Value> {
+        serde_json::from_value(json!({"thread_id":"thread-1","turn_incomplete":incomplete,
+                                      "future":{"keep":true}})).unwrap()
+    }
+
+    #[test]
+    fn clean_checkpoint_syncs_owned_transcript_and_directory_before_metadata_commit() {
+        let (_root, store) = fixture();
+        let mut stages = Vec::new();
+        store.try_write_thread_with_sync(fields(false), &mut |text| Ok(text.to_owned()),
+            &mut |file, stage| {
+                stages.push(stage);
+                if stage == CheckpointBarrier::ThreadEntry {
+                    let checkpoint = store.read_thread()?.unwrap();
+                    assert_eq!(checkpoint["turn_incomplete"], false);
+                    assert_eq!(checkpoint["transcript_bytes"].as_u64(),
+                               Some(fs::metadata(store.transcript_path())?.len()));
+                    store.verify_thread_checkpoint(&checkpoint)?;
+                } else {
+                    assert_eq!(store.read_thread()?.unwrap()["turn_incomplete"], true,
+                               "clean metadata appeared before {stage:?}");
+                }
+                if stage == CheckpointBarrier::TranscriptData {
+                    assert!(file.metadata()?.is_file());
+                    assert_eq!(file.metadata()?.ino(), fs::metadata(store.transcript_path())?.ino());
+                }
+                if matches!(stage, CheckpointBarrier::TranscriptEntry | CheckpointBarrier::ThreadEntry) {
+                    assert!(file.metadata()?.is_dir());
+                }
+                file.sync_all()
+            }).unwrap();
+        assert_eq!(stages, [CheckpointBarrier::TranscriptData, CheckpointBarrier::TranscriptEntry,
+                           CheckpointBarrier::ThreadData, CheckpointBarrier::ThreadEntry]);
+        assert_eq!(store.read_thread().unwrap().unwrap()["future"]["keep"], true);
+    }
+
+    #[test]
+    fn checkpoint_barrier_failures_keep_prior_dirty_metadata_and_allow_safe_retry() {
+        for failed in [CheckpointBarrier::TranscriptData, CheckpointBarrier::TranscriptEntry,
+                       CheckpointBarrier::ThreadData] {
+            let (_root, store) = fixture();
+            let previous = fs::read(store.thread_path()).unwrap();
+            let mut stages = Vec::new();
+            let result = store.try_write_thread_with_sync(fields(false), &mut |text| Ok(text.to_owned()),
+                &mut |file, stage| {
+                    stages.push(stage);
+                    if stage == failed { return Err(io::Error::other("owned sync fault")); }
+                    file.sync_all()
+                });
+            assert!(result.is_err(), "{failed:?}");
+            assert_eq!(stages.last(), Some(&failed));
+            assert_eq!(fs::read(store.thread_path()).unwrap(), previous);
+            assert_eq!(store.read_thread().unwrap().unwrap()["turn_incomplete"], true);
+            assert!(fs::read_dir(&store.dir).unwrap().all(|entry|
+                !entry.unwrap().file_name().to_string_lossy().ends_with(".tmp")));
+            store.write_thread(fields(false), str::to_owned).unwrap();
+            store.verify_thread_checkpoint(&store.read_thread().unwrap().unwrap()).unwrap();
+        }
+    }
+
+    #[test]
+    fn final_directory_sync_failure_is_reported_after_durable_transcript_checkpoint() {
+        let (_root, store) = fixture();
+        let mut stages = Vec::new();
+        let result = store.try_write_thread_with_sync(fields(false), &mut |text| Ok(text.to_owned()),
+            &mut |file, stage| {
+                stages.push(stage);
+                if stage == CheckpointBarrier::ThreadEntry {
+                    return Err(io::Error::other("owned rename durability fault"));
+                }
+                file.sync_all()
+            });
+        assert!(result.is_err());
+        // A rename can be visible despite this error, but it cannot advertise
+        // transcript data that was not already synced. No success is returned.
+        assert_eq!(stages, [CheckpointBarrier::TranscriptData, CheckpointBarrier::TranscriptEntry,
+                           CheckpointBarrier::ThreadData, CheckpointBarrier::ThreadEntry]);
+        store.verify_thread_checkpoint(&store.read_thread().unwrap().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn dirty_guard_syncs_metadata_and_rename_before_returning_to_provider_admission() {
+        let (_root, store) = fixture();
+        store.write_thread(fields(false), str::to_owned).unwrap();
+        let mut stages = Vec::new();
+        store.try_write_thread_with_sync(fields(true), &mut |text| Ok(text.to_owned()),
+            &mut |file, stage| {
+                stages.push(stage);
+                if stage == CheckpointBarrier::ThreadData {
+                    assert_eq!(store.read_thread()?.unwrap()["turn_incomplete"], false);
+                } else {
+                    let metadata = store.read_thread()?.unwrap();
+                    assert_eq!(metadata["turn_incomplete"], true);
+                    assert!(metadata.get("transcript_bytes").is_none());
+                }
+                file.sync_all()
+            }).unwrap();
+        assert_eq!(stages, [CheckpointBarrier::ThreadData, CheckpointBarrier::ThreadEntry]);
     }
 }
