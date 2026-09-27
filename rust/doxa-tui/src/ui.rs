@@ -879,8 +879,12 @@ impl SessionTelemetry {
                 Some("subscription") => {
                     let tier = self.subscription_type.as_deref().filter(|tier| *tier != "subscription");
                     if tier.is_none() && self.quota.is_none() { return None; }
-                    Some(format!("Sub {} · {}", tier.unwrap_or("?"),
-                        self.quota.as_deref().unwrap_or("quota ?")))
+                    Some(match (tier, self.quota.as_deref()) {
+                        (Some(tier), Some(quota)) => format!("{tier} · {quota}"),
+                        (Some(tier), None) => tier.to_owned(),
+                        (None, Some(quota)) => quota.to_owned(),
+                        (None, None) => return None,
+                    })
                 }
                 _ => None,
             },
@@ -10520,6 +10524,17 @@ for line in sys.stdin:
         assert!(!app.model_picker.as_ref().unwrap().catalog_pending);
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert_eq!(app.pending_model_changes, vec![("s".into(), "verified".into())]);
+    }
+
+    #[test]
+    fn subscription_chip_only_shows_reported_plan_and_quota() {
+        let mut telemetry = SessionTelemetry::default();
+        telemetry.update_status(&json!({"billing":{"mode":"subscription","type":"Max"}}));
+        assert_eq!(telemetry.billing_label(Some("claude")).as_deref(), Some("Max"));
+        telemetry.update_status(&json!({"billing":{"mode":"subscription","quota":"5h 42% · week 25%"}}));
+        assert_eq!(telemetry.billing_label(Some("claude")).as_deref(), Some("5h 42% · week 25%"));
+        telemetry.update_status(&json!({"billing":{"mode":"subscription"}}));
+        assert!(telemetry.billing_label(Some("claude")).is_none());
     }
 
     #[test]
