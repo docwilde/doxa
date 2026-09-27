@@ -167,6 +167,14 @@ fn seconds(value: &str) -> io::Result<Duration> {
 }
 
 struct Store { run: PathBuf, _claim: fs::File }
+impl Drop for Store {
+    fn drop(&mut self) {
+        // A concurrent process spawn can inherit the open file description
+        // across fork until exec closes CLOEXEC descriptors. Release the
+        // coordinator lease explicitly instead of waiting for its last fd.
+        unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&self._claim), libc::LOCK_UN); }
+    }
+}
 impl Store {
     fn create(root: &Path, id: &str) -> io::Result<Self> {
         fs::DirBuilder::new().recursive(true).mode(0o700).create(root)?;
@@ -589,8 +597,11 @@ mod tests {
         store.save(&value).unwrap();
         assert_eq!(store.load().unwrap(), value);
         assert!(Store::claim(store.run.clone()).is_err());
+        // Simulate the description retained by a forked child before exec.
+        let inherited = store._claim.try_clone().unwrap();
         drop(store);
         let store = Store::claim(root.path().join("native-test")).unwrap();
+        drop(inherited);
         assert_eq!(store.load().unwrap()["slots"][0]["phase"], "dispatch_pending");
     }
     #[test]
