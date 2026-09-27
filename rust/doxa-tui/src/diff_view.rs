@@ -221,8 +221,8 @@ fn run_git(command: &mut Command, input: Option<&[u8]>, limit: usize, timeout: D
         let mut buffer = [0u8;8192];
         for _ in 0..16 { match output.read(&mut buffer) {
             Ok(0) => { eof = true; break; },
-            Ok(count) => { let kept = count.min(limit.saturating_sub(bytes.len()));
-                bytes.extend_from_slice(&buffer[..kept]); truncated |= kept < count; },
+            Ok(count) => { let kept = count.min(limit.saturating_add(1).saturating_sub(bytes.len()));
+                bytes.extend_from_slice(&buffer[..kept]); truncated |= bytes.len() > limit; },
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(error) => return Err(error),
@@ -383,7 +383,7 @@ mod tests {
     fn owned_git_pipes_bound_inherited_output_and_unconsumed_input() {
         for input in [None, Some(vec![b'x';256*1024])] {
             let mut command = Command::new("/bin/sh");
-            command.args(["-c","sleep 10 & exit 0"]);
+            command.args(["-c",if input.is_some() { "sleep 10" } else { "sleep 10 & exit 0" }]);
             let started = Instant::now();
             let result = run_git(&mut command,input.as_deref(),64,Duration::from_millis(60));
             assert_eq!(result.unwrap_err().kind(),io::ErrorKind::TimedOut);
@@ -392,7 +392,7 @@ mod tests {
         let mut command = Command::new("/bin/sh");
         command.args(["-c","printf 123456789"]);
         let (status,bytes,truncated) = run_git(&mut command,None,4,Duration::from_secs(1)).unwrap();
-        assert!(status.success()); assert_eq!(bytes,b"1234"); assert!(truncated);
+        assert!(status.success()); assert_eq!(bytes,b"12345"); assert!(truncated);
     }
     use std::process::Command;
     #[test]
