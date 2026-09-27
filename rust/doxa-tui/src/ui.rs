@@ -1370,6 +1370,9 @@ pub struct App {
     chip_offsets: Vec<usize>,
     belief_browser_fixture: bool,
     belief_button_hover: Option<Rect>,
+    belief_preview:crate::belief_preview::Preview,
+    belief_pointer:Option<(u16,u16)>,
+    rendered_belief_rows:RefCell<Vec<crate::belief_preview::Owner>>,
     chip_hover: Option<ChipHit>,
     chip_hover_started: Option<(ChipHit, Instant)>,
     chip_tooltip_visible: bool,
@@ -1567,6 +1570,9 @@ impl Default for App {
             chip_offsets: vec![0; panes::MAX_PANES],
             belief_browser_fixture: false,
             belief_button_hover: None,
+            belief_preview:crate::belief_preview::Preview::default(),
+            belief_pointer:None,
+            rendered_belief_rows:RefCell::new(Vec::new()),
             chip_hover: None,
             chip_hover_started: None,
             chip_tooltip_visible: false,
@@ -2729,7 +2735,7 @@ impl App {
     pub fn handle(&mut self, event: Event) -> bool {
         let before = (self.active_group, self.groups[self.active_group].active_id().unwrap_or("").to_owned());
         let selection_view=(self.size,self.groups[self.active_group].scroll);
-        let changed = match event {
+        let mut changed = match event {
             Event::Resize(w, h) => {
                 if let Some(manager) = &mut self.memory_manager { manager.reset_review_visibility(); }
                 for request in &mut self.input_requests {
@@ -2737,6 +2743,8 @@ impl App {
                 }
                 self.size = Rect::new(0, 0, w, h);
                 self.drag = None;
+                self.belief_preview.clear();self.belief_pointer=None;
+                self.rendered_belief_rows.borrow_mut().clear();
                 self.chip_hover = None;
                 self.link_hover = None;
                 self.visible_links.borrow_mut().clear();
@@ -2811,6 +2819,7 @@ impl App {
         }
         self.sync_chooser_state();
         self.tick_chip_hover(Instant::now());
+        changed |= self.tick_belief_preview(Instant::now());
         if matches!(self.focus, Focus::Chip(_) | Focus::Rail) && !self.focus_ring().contains(&self.focus) {
             self.focus = Focus::Prompt;
         }
@@ -5370,6 +5379,19 @@ impl App {
         }
     }
 
+    /// Select a real painted row and advance only the hover clock. The fixture
+    /// can never request a sidecar or grant a writable belief review.
+    #[doc(hidden)]
+    pub fn show_belief_hover_fixture(&mut self,id:u64) {
+        if !self.belief_browser_fixture {return;}
+        let owner=self.rendered_belief_rows.borrow().iter().find(|owner|owner.id==id).cloned();
+        let Some(owner)=owner else{return;};
+        if let Some(picker)=&mut self.lore_picker {picker.selected=picker.rows.iter().position(|row|row.id==id).unwrap_or(picker.selected);}
+        self.belief_pointer=Some((owner.rect.x+owner.rect.width.saturating_sub(1).min(20),owner.rect.y));
+        let now=Instant::now();self.belief_preview.set_owner(Some(owner),now);
+        self.belief_preview.tick(now+Duration::from_millis(500));
+    }
+
     fn load_lore(&mut self, query: lore_picker::Query) {
         if self.belief_browser_fixture {
             if let Some(picker) = &mut self.lore_picker { picker.status = "Gallery fixture · LORE calls disabled".into(); }
@@ -7817,6 +7839,7 @@ impl App {
     }
 
     fn mouse(&mut self, mouse: MouseEvent) -> bool {
+        if mouse.kind==MouseEventKind::Moved {self.belief_pointer=Some((mouse.column,mouse.row));}
         if mouse.kind==MouseEventKind::Down(MouseButton::Left) && self.active_request_index().is_none()
             && (self.memory_manager.is_none() && self.chip_info.as_ref().is_some_and(|info|info.kind=="memory") && self.memory_list.is_some()
                 || self.belief_graph_lines.is_none() && self.lore_picker.as_ref().is_some_and(|picker|!picker.proposal_mode
@@ -8651,6 +8674,7 @@ impl App {
     }
 
     pub fn draw(&self, frame: &mut Frame) {
+        self.rendered_belief_rows.borrow_mut().clear();
         let area = frame.area();
         self.transcript_selection.borrow_mut().begin_frame();
         if self.link_interaction_blocked() || area.width<20 || area.height<5 {self.transcript_selection.borrow_mut().clear();}
@@ -8709,8 +8733,36 @@ impl App {
         }
         self.draw_chip_tooltip(frame);
         self.draw_link_tooltip(frame);
+        if self.belief_preview.owner().is_some_and(|owner|self.valid_belief_preview_owner(owner)) {
+            self.belief_preview.render(frame,area);
+        }
         self.transcript_selection.borrow_mut().finish_paint(frame.buffer_mut());
         if self.preferences.value("background")=="transparent" {for cell in &mut frame.buffer_mut().content {if matches!(cell.bg,theme::BASE|theme::RAISED|theme::RAIL) {cell.bg=Color::Reset;}}}
+    }
+
+    fn valid_belief_preview_owner(&self,owner:&crate::belief_preview::Owner)->bool {
+        if self.active_group!=owner.pane || self.groups[self.active_group].active_id()!=owner.session.as_deref()
+            || self.belief_filter_due.is_some() || self.belief_graph_lines.is_some() || self.active_request_index().is_some()
+            || self.chip_info.is_some() || self.map_modal || self.diff_modal || self.tool_modal || self.stop_confirmation.is_some() {return false;}
+        let Some(picker)=self.lore_picker.as_ref().filter(|picker|!picker.proposal_mode && picker.belief_review.is_none()
+            && picker.evidence.is_none() && picker.pending.is_none() && !picker.resolving) else{return false;};
+        if picker.cwd!=owner.cwd || picker.query!=owner.query || picker.offset!=owner.offset {return false;}
+        if !picker.rows.get(picker.selected).is_some_and(|row|row.id==owner.id && row.subject==owner.subject
+            && row.claim==owner.claim && row.truncated==owner.truncated) {return false;}
+        self.belief_pointer.is_some_and(|(x,y)|owner.rect.contains(ratatui::layout::Position::new(x,y)))
+            && self.rendered_belief_rows.borrow().contains(owner)
+    }
+
+    fn tick_belief_preview(&mut self,now:Instant)->bool {
+        let owner=self.belief_pointer.and_then(|(x,y)|self.rendered_belief_rows.borrow().iter()
+            .find(|owner|owner.rect.contains(ratatui::layout::Position::new(x,y)) && self.valid_belief_preview_owner(owner)).cloned());
+        let mut changed=self.belief_preview.set_owner(owner,now);
+        changed|=self.belief_preview.tick(now);
+        if self.belief_preview.needs_read() && !self.belief_browser_fixture {
+            let python=std::env::var_os("DOXA_LORE_PYTHON").map(PathBuf::from).unwrap_or_else(||PathBuf::from("python3"));
+            self.belief_preview.read(python);
+        }
+        changed|=self.belief_preview.poll();changed
     }
 
     /// One dwell timer for the actual painted chip. Input focus has its own
@@ -9249,6 +9301,12 @@ impl App {
             let visible = usize::from(area.height.saturating_sub(3)).max(1);
             let start = chooser_visible_start(&self.chooser_view_start,picker.selected,visible);
             for (index,row) in picker.rows.iter().enumerate().skip(start).take(visible) {
+                self.rendered_belief_rows.borrow_mut().push(crate::belief_preview::Owner {
+                    id:row.id,pane:self.active_group,session:self.groups[self.active_group].active_id().map(str::to_owned),
+                    cwd:picker.cwd.clone(),query:picker.query.clone(),offset:picker.offset,
+                    rect:Rect::new(area.x+1,area.y+2+(index-start) as u16,area.width.saturating_sub(2),1),menu:area,
+                    subject:row.subject.clone(),claim:row.claim.clone(),truncated:row.truncated,
+                });
                 lines.push(Line::styled(columns.belief(row.id,&row.subject,&row.claim,row.confidence,row.evidence_count,row.recency.as_deref()),
                     chooser_row_style(index==picker.selected)));
             }
@@ -10063,6 +10121,7 @@ fn run_loop(
         changed |= app.tick_spinner(Instant::now());
         changed |= app.tick_clock(Instant::now());
         changed |= app.tick_chip_hover(Instant::now());
+        changed |= app.tick_belief_preview(Instant::now());
         if prompt_sender.is_none() {
             if let Some(id) = app.pending_peer_refresh.take() {
                 changed |= app.peer_map.roster(&id, &serde_json::json!({"ok":false}));
@@ -14743,6 +14802,47 @@ for line in sys.stdin:
         assert!(picker.pending.is_none());
         for c in "agent".chars() { app.lore_picker_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)); }
         assert_eq!(app.lore_picker.as_ref().unwrap().query, "agent");
+    }
+
+    #[test]
+    fn belief_hover_preview_waits_for_dwell_and_revalidates_painted_rows() {
+        let mut app=App::default();app.rail_visible=false;app.handle(Event::Resize(120,40));
+        app.input="Private draft".into();app.input_cursor=app.input.len();
+        app.show_belief_browser_fixture(0,&[(7,"user","First line\nSecond full line"),(8,"project","Other claim")]);
+        painted_at(&app,120,40);
+        let row=app.rendered_belief_rows.borrow()[0].clone();
+        app.handle(Event::Mouse(MouseEvent {kind:MouseEventKind::Moved,column:row.rect.x+20,row:row.rect.y,modifiers:KeyModifiers::NONE}));
+        let now=Instant::now();
+        assert!(!painted_at(&app,120,40).contains("Full belief"));
+        assert!(app.tick_belief_preview(now+Duration::from_millis(500)));
+        let preview=painted_at(&app,120,40);
+        assert!(preview.contains("Full belief") && preview.contains("Second full line"));
+        assert_eq!(app.input,"Private draft");assert!(app.pending_prompts.is_empty());
+        let picker=app.lore_picker.as_ref().unwrap();
+        assert!(picker.belief_review.is_none() && picker.belief_action.is_none() && picker.review_seen==0);
+        // Leaving the row must itself request a redraw, even with no chip/link.
+        assert!(app.handle(Event::Mouse(MouseEvent {kind:MouseEventKind::Moved,column:row.rect.x+20,row:row.menu.y+1,modifiers:KeyModifiers::NONE})));
+        assert!(app.belief_preview.owner().is_none());
+        app.handle(Event::Mouse(MouseEvent {kind:MouseEventKind::Moved,column:row.rect.x+20,row:row.rect.y,modifiers:KeyModifiers::NONE}));
+        assert!(app.tick_belief_preview(Instant::now()+Duration::from_millis(500)));
+        app.lore_picker.as_mut().unwrap().rows[0].claim="Changed source row".into();
+        assert!(!painted_at(&app,120,40).contains("Full belief"));
+        app.tick_belief_preview(Instant::now());assert!(app.belief_preview.owner().is_none());
+        app.handle(Event::Resize(100,32));assert!(app.belief_pointer.is_none());
+    }
+
+    #[test]
+    fn belief_hover_filter_and_menu_changes_cancel_preview_without_reading_review() {
+        let mut app=App::default();app.rail_visible=false;app.handle(Event::Resize(120,40));
+        app.show_belief_browser_fixture(0,&[(7,"user","Safe complete belief")]);painted_at(&app,120,40);
+        let row=app.rendered_belief_rows.borrow()[0].clone();
+        app.handle(Event::Mouse(MouseEvent {kind:MouseEventKind::Moved,column:row.rect.x+20,row:row.rect.y,modifiers:KeyModifiers::NONE}));
+        app.tick_belief_preview(Instant::now()+Duration::from_millis(500));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('s'),KeyModifiers::NONE)));
+        assert!(app.belief_preview.owner().is_none());
+        assert!(app.lore_picker.as_ref().unwrap().belief_review.is_none());
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Esc,KeyModifiers::NONE)));
+        assert!(app.belief_preview.owner().is_none());
     }
 
     #[test]

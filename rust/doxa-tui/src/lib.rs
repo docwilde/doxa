@@ -29,6 +29,7 @@ pub mod maintenance;
 pub mod settings;
 pub mod preferences;
 pub mod belief_graph;
+pub mod belief_preview;
 
 pub mod shell;
 pub mod startup_restore;
