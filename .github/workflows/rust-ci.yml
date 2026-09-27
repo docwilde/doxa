@@ -61,6 +61,8 @@ jobs:
           native_claude_tests=$(mktemp -d "$RUNNER_TEMP/dc-XXXXXX")
           trap 'rm -rf "$native_claude_tests"' EXIT
           TMPDIR="$native_claude_tests" uv run pytest tests/test_resume.py tests/test_native_peer_presence.py -q --basetemp="$native_claude_tests"
+      - name: Test retained browser authorization boundary
+        run: uv run --extra remote pytest tests/test_remote_web.py tests/test_remote_policy.py -q
       - name: Test completed Claude compaction review gate
         run: |
           uv run pytest tests/test_engine.py -k compact -q
