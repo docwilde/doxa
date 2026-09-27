@@ -286,12 +286,26 @@ fn rgb(color: Color) -> [u8; 3] {
 fn main() {
     let name = std::env::args().nth(1).expect("scene name");
     let (width,height) = match name.as_str() {
+        "welcome" => (72,18),
         "hero" | "repo-picker" | "claude-session" | "tool-activity" | "tool-expanded" | "restored-tool" | "processing" | "reasoning" | "commands" | "help" | "needs-input" | "permissions" | "effort" | "history" | "queue" | "beliefs" | "belief-hover" | "memory" | "memory-management" | "memory-change" | "fleet-review" | "fleet-view" => (126,31),
         _ => panic!("unknown scene"),
     };
-    let app = scene(&name);
     let mut terminal = Terminal::new(TestBackend::new(width,height)).unwrap();
-    terminal.draw(|frame| app.draw(frame)).unwrap();
+    if name=="welcome" {
+        // The same native opening renderer used by App, with no provider call.
+        use ratatui::{style::Style,widgets::{Block,Borders,Paragraph}};
+        terminal.draw(|frame| {
+            let block=Block::default().borders(Borders::ALL).title(" ΔΟΞΑ · opening view ")
+                .style(Style::default().fg(doxa_tui::theme::SECONDARY).bg(doxa_tui::theme::BASE));
+            let inner=block.inner(frame.area());
+            frame.render_widget(block,frame.area());
+            let lines=doxa_tui::welcome::lines(doxa_tui::welcome::State::Ready {engine:Some("claude"),model:Some("opus")},true,inner.width,inner.height);
+            frame.render_widget(Paragraph::new(lines).style(Style::default().bg(doxa_tui::theme::BASE)),inner);
+        }).unwrap();
+    } else {
+        let app=scene(&name);
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+    }
     let cells: Vec<Value> = (0..height).flat_map(|y| (0..width).map(move |x| (x,y)))
         .map(|(x,y)| {
             let cell = &terminal.backend().buffer()[(x,y)];

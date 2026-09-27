@@ -329,3 +329,18 @@ h2#sel-title {
 }
 
 #sel-more { margin: 8px 0 0; font-size: 11px; }
+
+/* Persistent notice when this page has omitted older graph history. */
+#view-limit {
+  position: absolute;
+  top: 8px;
+  left: 12px;
+  right: 12px;
+  margin: 0;
+  padding: 7px 10px;
+  color: var(--text-2);
+  background: var(--dim-surface);
+  border: 1px solid var(--border);
+  font-size: 12px;
+  pointer-events: none;
+}

@@ -288,7 +288,9 @@ pub(crate) fn connect_sessions_inner(sessions:&[Session],readonly_restore:bool)-
     Ok(MultiBridge { frames: frame_rx, commands: command_tx, live_ids, complete, router, workers })
 }
 
-fn rejected(command: WorkerCommand, message: &str) -> Value {
+/// One owner-preserving failure envelope for router rejection and local queue
+/// disconnection. Callers must not replace its target with the focused session.
+pub(crate) fn rejected(command: WorkerCommand, message: &str) -> Value {
     match command {
         WorkerCommand::Launch(_, _, group) => json!({"type":"launch_reply", "ok":false,
             "message":message, "group":group}),

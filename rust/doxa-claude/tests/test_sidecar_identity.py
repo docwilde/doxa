@@ -20,8 +20,10 @@ spec.loader.exec_module(sidecar)
 class IdentityTests(unittest.TestCase):
     def test_startup_error_codes_use_sdk_types_and_never_echo_private_details(self):
         from claude_agent_sdk import CLIConnectionError, CLINotFoundError, CLIJSONDecodeError, ProcessError
+        from doxa.native_spawn import NativeSpawnConfigurationError
         private = "sk-private prompt account traceback"
         errors = [
+            (NativeSpawnConfigurationError(private), "startup_native_launcher"),
             (CLINotFoundError(private), "startup_cli_missing"),
             (PermissionError(private), "startup_permission_denied"),
             (TimeoutError(private), "startup_timeout"),

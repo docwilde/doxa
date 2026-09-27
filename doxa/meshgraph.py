@@ -55,7 +55,7 @@ file, because this is exactly the kind of invariant a later edit breaks
 by accident.
 
 TWO ENDPOINTS, AND THE CURSOR THAT JOINS THEM. ``/ledger`` returns
-everything so far plus the byte ``offset`` it stopped at; ``/events``
+bounded pages of a fixed snapshot plus the byte ``offset`` it stopped at; ``/events``
 streams what arrives after a given offset. The page opens the stream at
 the offset the snapshot handed back, which is what keeps the two from
 either double-counting a record or dropping one written between the two
@@ -77,10 +77,14 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import stat
+import socket
 import threading
 import time
 from pathlib import Path
 from typing import Any, Iterable
+
+from .identity import valid_session_id
 
 __all__ = [
     "LEDGER_ENV",
@@ -116,6 +120,21 @@ HEARTBEAT_SECS = 15.0
 #: full and unbounded by design, but a single line past a megabyte is a
 #: corrupt file or a hostile one, and neither deserves the memory.
 MAX_LINE_BYTES = 1 << 20
+MAX_LEDGER_BYTES = 128 << 20
+MAX_BATCH_BYTES = 4 << 20
+MAX_BATCH_RECORDS = 256
+MAX_BATCH_WIRE_BYTES = 8 << 20
+MAX_RECIPIENTS = 4096
+MAX_SESSION_ID_CHARS = 128
+LEDGER_READ_DEADLINE_SECS = 1.0
+MAX_HTTP_CONNECTIONS = 16
+MAX_HEADER_BYTES = 8192
+HEADER_DEADLINE_SECS = 2.0
+SOCKET_TIMEOUT_SECS = 2.0
+
+
+class LedgerReadLimit(ValueError):
+    """The view refused a file/read beyond its finite availability bounds."""
 
 
 # -- the ledger, behind the seam ------------------------------------------
@@ -198,7 +217,7 @@ def parse_record(line: str) -> "dict[str, Any] | None":
       model. The page falls back to the short session id rather than
       showing the word "null".
 
-    **None rather than a raise, for every kind of bad line**, and that is
+    **None for malformed/schema-invalid lines**, and that is
     the load-bearing decision here rather than laziness about validation.
     This file is read while it is being appended to by a different
     process: a half-flushed line, a line from a future schema version, a
@@ -206,6 +225,9 @@ def parse_record(line: str) -> "dict[str, Any] | None":
     reader, the view would go dark exactly when the fleet got busy --
     which is the moment it exists for. A skipped line is a missing edge;
     a raised exception is a blind operator.
+
+    Availability-limit violations raise LedgerReadLimit, so a bounded view
+    refuses an oversized record rather than quietly omitting its edges.
 
     What a record must have to be drawable at all: a sender session id
     and a list of recipients. Everything else is presentation, and a
@@ -223,6 +245,10 @@ def parse_record(line: str) -> "dict[str, Any] | None":
     session = sender.get("session")
     if not isinstance(session, str) or not session:
         return None
+    if len(session) > MAX_SESSION_ID_CHARS:
+        raise LedgerReadLimit("mesh sender identity exceeds 128 characters")
+    if not valid_session_id(session):
+        return None
 
     # `to` is normalized to a list of non-empty strings here rather than
     # trusted: the page indexes nodes by these values, and a null or a
@@ -232,10 +258,19 @@ def parse_record(line: str) -> "dict[str, Any] | None":
     # id can never silently double an edge's weight.
     raw_to = record.get("to")
     recipients: "list[str]" = []
+    seen_recipients: set[str] = set()
     if isinstance(raw_to, list):
+        if len(raw_to) > MAX_RECIPIENTS:
+            raise LedgerReadLimit("mesh recipient list exceeds 4096 entries")
         for target in raw_to:
-            if isinstance(target, str) and target and target not in recipients:
+            if isinstance(target, str) and target:
+                if len(target) > MAX_SESSION_ID_CHARS:
+                    raise LedgerReadLimit("mesh recipient identity exceeds 128 characters")
+                if not valid_session_id(target):
+                    return None
+            if isinstance(target, str) and target and target not in seen_recipients:
                 recipients.append(target)
+                seen_recipients.add(target)
 
     # KIND IS READ, NEVER INFERRED FROM len(to). It is tempting to treat
     # one recipient as "direct", and it is wrong: a broadcast to a
@@ -308,7 +343,7 @@ def edges_for(sender: str, recipients: "Iterable[str]", kind: str) -> "list[dict
 
 
 def read_batch(
-    path: Path, offset: int = 0
+    path: Path, offset: int = 0, *, until: int | None = None
 ) -> "tuple[list[tuple[dict[str, Any], int]], int]":
     """``([(record, offset_after_it), ...], offset_consumed_to)``.
 
@@ -336,45 +371,79 @@ def read_batch(
     A missing file is an empty batch, not an error: the ledger does not
     exist until a session sends something, and an empty graph is the
     honest picture of a fleet that has not spoken."""
+    offset = max(0, offset)
+    deadline = time.monotonic() + LEDGER_READ_DEADLINE_SECS
+    found: list[tuple[dict[str, Any], int]] = []
+    position = offset
+    # Reserve the envelope and per-record cursor/framing bytes too; normalized
+    # edges and markup escaping can expand far beyond the disk line size.
+    wire_bytes = 256
     try:
-        with open(path, "rb") as handle:
-            handle.seek(offset)
-            chunk = handle.read()
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError:
         return [], offset
-
-    # Keep only through the final newline; anything after it is a partial
-    # line, re-read on the next poll once its writer has finished it.
-    cut = chunk.rfind(b"\n") if chunk else -1
-    if cut < 0:
-        return [], offset
-
-    found: "list[tuple[dict[str, Any], int]]" = []
-    position = offset
-    for raw in chunk[: cut + 1].split(b"\n")[:-1]:
-        position += len(raw) + 1  # the line, plus the newline it ended on
-        if not raw.strip() or len(raw) > MAX_LINE_BYTES:
-            continue
-        try:
-            text = raw.decode("utf-8")
-        except UnicodeDecodeError:
-            # A corrupt byte range is a skipped line, never a dead reader.
-            continue
-        record = parse_record(text)
-        if record is not None:
-            found.append((record, position))
+    with os.fdopen(fd, "rb") as handle:
+        meta = os.fstat(handle.fileno())
+        if not stat.S_ISREG(meta.st_mode) or meta.st_nlink != 1:
+            return [], offset
+        if meta.st_size > MAX_LEDGER_BYTES:
+            raise LedgerReadLimit("mesh ledger exceeds 128 MiB")
+        end = min(meta.st_size, max(0, until)) if until is not None else meta.st_size
+        handle.seek(offset)
+        while len(found) < MAX_BATCH_RECORDS and position - offset < MAX_BATCH_BYTES:
+            if time.monotonic() >= deadline:
+                raise LedgerReadLimit("mesh ledger read deadline exceeded")
+            remaining = min(MAX_BATCH_BYTES - (position - offset), end - handle.tell())
+            if remaining <= 0:
+                break
+            raw = handle.readline(min(MAX_LINE_BYTES + 2, remaining))
+            if not raw:
+                break
+            # Scan oversized lines without retaining them. A discarded line
+            # still advances only after its newline; a partial writer tail is
+            # retried whole. Total scan work is bounded by the inode cap and
+            # deadline, even for a corrupt line spanning several batches.
+            size = len(raw)
+            oversized = size > MAX_LINE_BYTES
+            while not raw.endswith(b"\n") and size > MAX_LINE_BYTES:
+                if time.monotonic() >= deadline:
+                    raise LedgerReadLimit("mesh ledger read deadline exceeded")
+                raw = handle.readline(min(64 * 1024, max(0, end - handle.tell())))
+                size += len(raw)
+                if not raw:
+                    break
+            if not raw.endswith(b"\n"):
+                break
+            previous = position
+            position += size
+            if oversized or not raw.strip():
+                continue
+            try:
+                record = parse_record(raw.decode("utf-8"))
+            except UnicodeDecodeError:
+                continue
+            if record is not None:
+                cost = len(json_bytes(record)) + 64
+                if cost + 256 > MAX_BATCH_WIRE_BYTES:
+                    raise LedgerReadLimit("mesh record exceeds normalized JSON byte limit")
+                if wire_bytes + cost > MAX_BATCH_WIRE_BYTES:
+                    # Leave this entire record for the next page/stream poll.
+                    position = previous
+                    break
+                wire_bytes += cost
+                found.append((record, position))
     return found, position
 
 
-def read_records(path: Path, offset: int = 0) -> "tuple[list[dict[str, Any]], int]":
-    """Every record after ``offset``, and the offset to resume at -- the
+def read_records(path: Path, offset: int = 0, *, until: int | None = None) -> "tuple[list[dict[str, Any]], int]":
+    """One bounded batch after ``offset``, and the offset to resume at -- the
     plain form of :func:`read_batch`, and what ``/ledger`` serves.
 
     The returned offset is how far the reader consumed rather than the
     file's size, so a record half-written at the instant of the snapshot
     is left for the stream to deliver whole instead of falling into the
     gap between the two requests."""
-    found, position = read_batch(path, offset)
+    found, position = read_batch(path, offset, until=until)
     return [record for record, _ in found], position
 
 
@@ -545,8 +614,10 @@ class MeshServer:
         but would wait on a handler thread still sitting in a stream that
         by design never ends."""
         self._stopping.set()
+        self._server.close_connections()
         try:
             self._server.shutdown()
+            self._server.close_connections()
             self._server.server_close()
         except Exception:  # noqa: BLE001 -- teardown is best-effort
             pass
@@ -559,8 +630,94 @@ class MeshServer:
 
         mesh = self
 
+        class BoundedHeaders:
+            def __init__(self, stream):
+                self.stream = stream
+                self.used = 0
+
+            def readline(self, size=-1):
+                from http.client import LineTooLong
+                remaining = MAX_HEADER_BYTES - self.used
+                raw = self.stream.readline(min(size if size >= 0 else remaining + 1, remaining + 1))
+                self.used += len(raw)
+                if self.used > MAX_HEADER_BYTES:
+                    raise LineTooLong("mesh request headers")
+                return raw
+
+            def close(self):
+                self.stream.close()
+
+        class BoundedServer(ThreadingHTTPServer):
+            daemon_threads = True
+            request_queue_size = MAX_HTTP_CONNECTIONS
+
+            def __init__(self, *args):
+                self.slots = threading.BoundedSemaphore(MAX_HTTP_CONNECTIONS)
+                self.connections = set()
+                self.connections_lock = threading.Lock()
+                super().__init__(*args)
+
+            def process_request(self, request, address):
+                if mesh._stopping.is_set():
+                    self.shutdown_request(request)
+                    return
+                if not self.slots.acquire(blocking=False):
+                    self.shutdown_request(request)
+                    return
+                request.settimeout(SOCKET_TIMEOUT_SECS)
+                with self.connections_lock:
+                    self.connections.add(request)
+                try:
+                    super().process_request(request, address)
+                except BaseException:
+                    with self.connections_lock:
+                        self.connections.discard(request)
+                    self.slots.release()
+                    self.shutdown_request(request)
+                    raise
+
+            def process_request_thread(self, request, address):
+                try:
+                    super().process_request_thread(request, address)
+                finally:
+                    with self.connections_lock:
+                        self.connections.discard(request)
+                    self.slots.release()
+
+            def handle_error(self, request, address):
+                # A timed out/closed local connection must not print a
+                # traceback into the terminal hosting the optional view.
+                return
+
+            def close_connections(self):
+                with self.connections_lock:
+                    connections = tuple(self.connections)
+                for connection in connections:
+                    try:
+                        connection.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+
         class Handler(BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.1"
+
+            def setup(self):
+                super().setup()
+                self.rfile = BoundedHeaders(self.rfile)
+                def expire():
+                    try:
+                        self.connection.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+                # Absolute deadline, rather than an idle timeout a slow
+                # sender can extend indefinitely one byte at a time.
+                self.header_timer = threading.Timer(HEADER_DEADLINE_SECS, expire)
+                self.header_timer.daemon = True
+                self.header_timer.start()
+
+            def finish(self):
+                self.header_timer.cancel()
+                super().finish()
 
             # The stock handler logs every request to stderr. DOXA is a
             # full-screen Textual app and that is a line drawn over the
@@ -569,6 +726,8 @@ class MeshServer:
                 return
 
             def do_GET(self) -> None:  # noqa: N802 -- BaseHTTPRequestHandler's name
+                self.header_timer.cancel()
+                self.close_connection = True
                 parsed = urlparse(self.path)
                 query = parse_qs(parsed.query)
 
@@ -619,7 +778,7 @@ class MeshServer:
                 else:
                     self.send_error(404)
 
-        return ThreadingHTTPServer((self.host, port), Handler)
+        return BoundedServer((self.host, port), Handler)
 
     # -- responses --
 
@@ -652,15 +811,23 @@ class MeshServer:
         handler.wfile.write(payload)
 
     def _serve_ledger(self, handler: Any, query: "dict[str, list[str]]") -> None:
-        """Everything so far, plus the offset to open the stream at.
+        """One bounded snapshot page, plus the offset to resume reading at.
 
         The offset is the point: the page calls this, then opens
         ``/events?from=<offset>``. Anything appended between the two
         requests sits after that offset and arrives on the stream, and
         nothing already in this response can arrive twice."""
         offset = _int_param(query, "from", 0)
-        records, next_offset = read_records(self.path, offset)
-        body = json_bytes({"records": records, "offset": next_offset})
+        end = min(MAX_LEDGER_BYTES, _int_param(query, "until", _file_size(self.path)))
+        try:
+            records, next_offset = read_records(self.path, offset, until=end)
+        except LedgerReadLimit as exc:
+            handler.send_error(413, str(exc))
+            return
+        payload = {"records": records, "offset": next_offset}
+        if offset < next_offset < end:
+            payload.update(more=True, snapshot_end=end)
+        body = json_bytes(payload)
         handler.send_response(200)
         handler.send_header("Content-Type", "application/json; charset=utf-8")
         handler.send_header("Content-Length", str(len(body)))

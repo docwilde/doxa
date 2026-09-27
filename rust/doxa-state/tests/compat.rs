@@ -121,8 +121,8 @@ fn registry_filters_dead_and_malformed_entries() {
     let entry = json!({"session_id":"s1","pid":std::process::id(),"socket_path":"/tmp/sock","cwd":"/repo","repo_root":"/repo","title":"ok","started_at":stamp,"heartbeat_at":stamp,"daemon_socket":"/tmp/daemon"});
     fs::write(dir.path().join("ok.json"), entry.to_string()).unwrap();
     fs::write(dir.path().join("bad.json"), "{").unwrap();
-    assert_eq!(list_daemons(dir.path(), Some("/repo"), str::to_owned).len(), 1);
-    assert!(list_daemons(dir.path(), Some("/other"), str::to_owned).is_empty());
+    assert_eq!(list_daemons(dir.path(), Some("/repo"), str::to_owned).unwrap().len(), 1);
+    assert!(list_daemons(dir.path(), Some("/other"), str::to_owned).unwrap().is_empty());
 }
 
 #[test]
@@ -136,7 +136,7 @@ fn registry_rejects_symlinks_oversize_and_bad_ids_and_scrubs_display_text() {
     fs::write(dir.path().join("bad-id.json"), entry.to_string()).unwrap();
     fs::write(dir.path().join("huge.json"), vec![b'a'; MAX_REGISTRY_BYTES as usize + 1]).unwrap();
     std::os::unix::fs::symlink(dir.path().join("safe.json"), dir.path().join("link.json")).unwrap();
-    let found = list_daemons(dir.path(), Some("/repo"), |s| s.replace("SECRET", "[redacted]"));
+    let found = list_daemons(dir.path(), Some("/repo"), |s| s.replace("SECRET", "[redacted]")).unwrap();
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].display.title, "[redacted]");
     assert_eq!(found[0].display.cwd, "/repo/[redacted]");
@@ -235,4 +235,51 @@ fn state_readers_reject_oversize_symlink_and_fifo_inputs() {
     let fifo = std::ffi::CString::new(tabset.as_os_str().as_bytes()).unwrap();
     assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
     assert!(load_tabset(&tabset, "/repo").is_none());
+}
+
+
+#[test]
+fn common_registry_reader_checks_opened_inode_and_private_attach_policy() {
+    let dir = tempfile::tempdir().unwrap();
+    let normal = dir.path().join("normal.json");
+    fs::write(&normal, b"{}").unwrap();
+    fs::set_permissions(&normal, fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(read_registry_entry(&normal, false).unwrap(), b"{}");
+    assert!(read_registry_entry(&normal, true).is_err());
+    fs::set_permissions(&normal, fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(read_registry_entry(&normal, true).unwrap(), b"{}");
+    let link = dir.path().join("link.json");
+    std::os::unix::fs::symlink(&normal, &link).unwrap();
+    assert!(read_registry_entry(&link, false).is_err());
+    let hard = dir.path().join("hard.json");
+    fs::hard_link(&normal, &hard).unwrap();
+    assert!(read_registry_entry(&hard, false).is_err());
+    assert!(read_registry_entry(&normal, false).is_err());
+    let huge = dir.path().join("huge.json");
+    fs::File::create(&huge).unwrap().set_len(MAX_REGISTRY_BYTES + 1).unwrap();
+    assert!(read_registry_entry(&huge, false).is_err());
+    let fifo = dir.path().join("fifo.json");
+    let name = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+    let start = std::time::Instant::now();
+    assert!(read_registry_entry(&fifo, false).is_err());
+    assert!(start.elapsed() < std::time::Duration::from_secs(1));
+}
+
+#[test]
+fn registry_enumeration_counts_all_names_and_never_returns_partial_success() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("b.json"), b"{}").unwrap();
+    fs::write(dir.path().join("a.json"), b"{}").unwrap();
+    for index in 2..MAX_REGISTRY_ENTRIES {
+        fs::File::create(dir.path().join(format!("noise-{index}"))).unwrap();
+    }
+    let paths = registry_paths(dir.path()).unwrap();
+    assert_eq!(paths, vec![dir.path().join("a.json"), dir.path().join("b.json")]);
+    fs::File::create(dir.path().join("overflow")).unwrap();
+    let start = std::time::Instant::now();
+    assert_eq!(registry_paths(dir.path()).unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+    assert!(list_daemons(dir.path(), None, str::to_owned).is_err());
+    assert!(start.elapsed() < std::time::Duration::from_secs(2));
+    assert!(list_daemons(&dir.path().join("absent"), None, str::to_owned).unwrap().is_empty());
 }

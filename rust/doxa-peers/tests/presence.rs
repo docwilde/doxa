@@ -162,3 +162,18 @@ fn roster_and_display_titles_have_fixed_limits() {
     assert!(doxa_peers::presence::list_scoped_readonly_limit(&runtime,"/scope","self",4097,|text|Ok(text.into())).is_err());
     drop(listeners);
 }
+
+
+#[test]
+fn scoped_registry_overflow_is_explicit_and_read_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = dir.path().join("runtime");
+    let registry = Registry::open(&runtime).unwrap();
+    for index in 0..=doxa_peers::MAX_REGISTRY_ENTRIES {
+        fs::File::create(registry.directory().join(format!("noise-{index}"))).unwrap();
+    }
+    let start = std::time::Instant::now();
+    assert_eq!(list_scoped_readonly(&runtime, "/scope", "self", |s| Ok(s.to_owned())).unwrap_err().kind(), io::ErrorKind::InvalidData);
+    assert!(start.elapsed() < std::time::Duration::from_secs(2));
+    assert!(registry.directory().join("noise-0").exists());
+}

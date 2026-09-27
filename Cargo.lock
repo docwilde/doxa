@@ -231,7 +231,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-claude"
-version = "2.0.0-alpha.32"
+version = "2.0.0-alpha.33"
 dependencies = [
  "libc",
  "serde_json",
@@ -240,7 +240,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-daemon"
-version = "2.0.0-alpha.32"
+version = "2.0.0-alpha.33"
 dependencies = [
  "doxa-claude",
  "doxa-engines",
@@ -262,7 +262,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-engines"
-version = "2.0.0-alpha.32"
+version = "2.0.0-alpha.33"
 dependencies = [
  "libc",
  "serde",
@@ -275,7 +275,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-lore"
-version = "2.0.0-alpha.32"
+version = "2.0.0-alpha.33"
 dependencies = [
  "libc",
  "serde_json",
@@ -285,8 +285,9 @@ dependencies = [
 
 [[package]]
 name = "doxa-peers"
-version = "2.0.0-alpha.32"
+version = "2.0.0-alpha.33"
 dependencies = [
+ "doxa-state",
  "libc",
  "serde",
  "serde_json",
@@ -298,14 +299,14 @@ dependencies = [
 
 [[package]]
 name = "doxa-protocol"
-version = "2.0.0-alpha.32"
+version = "2.0.0-alpha.33"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "doxa-runtime"
-version = "2.0.0-alpha.32"
+version = "2.0.0-alpha.33"
 dependencies = [
  "libc",
  "serde_json",
@@ -314,7 +315,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-state"
-version = "2.0.0-alpha.32"
+version = "2.0.0-alpha.33"
 dependencies = [
  "libc",
  "serde",
@@ -327,7 +328,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-transcript"
-version = "2.0.0-alpha.32"
+version = "2.0.0-alpha.33"
 dependencies = [
  "libc",
  "serde_json",
@@ -336,9 +337,10 @@ dependencies = [
 
 [[package]]
 name = "doxa-tui"
-version = "2.0.0-alpha.32"
+version = "2.0.0-alpha.33"
 dependencies = [
  "crossterm",
+ "doxa-engines",
  "doxa-lore",
  "doxa-peers",
  "doxa-protocol",
@@ -361,7 +363,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-vendors"
-version = "2.0.0-alpha.32"
+version = "2.0.0-alpha.33"
 dependencies = [
  "futures-util",
  "reqwest",
@@ -371,7 +373,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-worktrees"
-version = "2.0.0-alpha.32"
+version = "2.0.0-alpha.33"
 dependencies = [
  "doxa-state",
  "libc",

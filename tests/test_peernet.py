@@ -681,3 +681,23 @@ async def test_fetch_roster_refuses_a_socket_path_the_reply_supplied(monkeypatch
     assert fetched[0].socket_path == ""
     assert fetched[0].pid == 0
     assert fetched[0].daemon_socket is None
+
+
+def test_refusal_history_has_finite_payload_and_count_bounds():
+    async def run():
+        server = _server()
+        requests = peernet_mod.MAX_REFUSAL_HISTORY * 3
+        for index in range(requests):
+            status, response = await server._dispatch(
+                {"op": f"unsupported-{index}-" + "x" * 2000}, login=LOGIN, from_loopback=True)
+            assert status == 400
+            assert str(index) in response["reason"]
+        assert server.refusal_count == requests
+        assert len(server.refusals) == peernet_mod.MAX_REFUSAL_HISTORY
+        assert all(len(reason) <= peernet_mod.MAX_REFUSAL_CHARS for reason in server.refusals)
+        assert f"unsupported-{requests - 1}-" in server.refusals[-1]
+        assert "unsupported-0-" not in server.refusals[0]
+        server.refusal_count = peernet_mod.MAX_REFUSAL_COUNT
+        await server._dispatch({"op": "unknown"}, login=LOGIN, from_loopback=True)
+        assert server.refusal_count == peernet_mod.MAX_REFUSAL_COUNT
+    asyncio.run(asyncio.wait_for(run(), timeout=2))

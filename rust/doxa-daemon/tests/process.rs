@@ -1233,9 +1233,104 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"fixture-
     assert_eq!(thread["thread_id"], "thread_1");
     assert_eq!(thread["session_id"], "codex-session");
     assert_eq!(thread["turn_incomplete"], false);
+    assert_eq!(thread["transcript_bytes"].as_u64(), Some(
+        fs::metadata(dir.path().join("project/codex-session.jsonl")).unwrap().len()));
     assert!(fs::read_to_string(args)
         .unwrap()
         .contains("exec\nresume\nthread_1\n"));
+}
+
+#[test]
+fn codex_clean_checkpoint_failure_overrides_success_and_preserves_dirty_resume_guard() {
+    let dir = tempfile::tempdir().unwrap();
+    let codex = dir.path().join("codex-fixture");
+    let python = dir.path().join("lore-fixture");
+    executable(&codex, "#!/bin/sh\ncat >/dev/null\necho '{\"type\":\"thread.started\",\"thread_id\":\"thread_1\"}'\necho '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"answer\"}}'\n");
+    executable(&python, r#"#!/usr/bin/env python3
+import json, sys
+from pathlib import Path
+root = Path(__file__).parent
+transcript = root / 'project/codex-session.jsonl'
+fault = root / 'checkpoint-fault'
+print(json.dumps({'type':'hello','proto':1,'capabilities':['scrub','snapshot','transcript_identity']}), flush=True)
+for line in sys.stdin:
+    frame = json.loads(line)
+    if frame.get('op') == 'transcript_identity':
+        reply = {'ok':True,'value':{'projects_dir':frame['cwd'],'slug':'project'}}
+    else:
+        # Assistant persistence is finished before clean metadata scrubbing.
+        # Remove that owned file only at the checkpoint boundary: append
+        # succeeded, but the clean commit must still verify and sync its data.
+        if not fault.exists() and transcript.exists() and '"type":"assistant"' in transcript.read_text():
+            transcript.rename(root / 'saved-complete.jsonl')
+            fault.write_text('owned checkpoint fault')
+        reply = {'ok':True,'text':frame.get('text','')}
+    print(json.dumps({'type':'reply','id':frame['id'],**reply}), flush=True)
+"#);
+    let mut process = Process::start_codex(dir.path(), &codex, &python);
+    let (mut reader, mut socket) = process.connect();
+    receive(&mut reader);
+    send(&mut socket, json!({"type":"attach","cursor":null}));
+    send(&mut socket, json!({"type":"prompt","id":1,"text":"owned prompt"}));
+    assert_eq!(receive(&mut reader)["ok"], true);
+    loop {
+        let frame = receive(&mut reader);
+        if frame["event"]["type"] == "turn_done" {
+            assert_eq!(frame["event"]["data"]["is_error"], true);
+            assert!(frame["event"]["data"]["error"].as_str().unwrap().contains("persistence failed"));
+            break;
+        }
+    }
+    assert!(dir.path().join("checkpoint-fault").exists());
+    let thread: Value = serde_json::from_slice(&fs::read(
+        dir.path().join("project/codex-session.codex.json")).unwrap()).unwrap();
+    assert_eq!(thread["turn_incomplete"], true);
+    assert!(thread.get("transcript_bytes").is_none());
+    // Even after the complete content reappears, the failed checkpoint must
+    // not become a clean/resumable turn or permit another provider execution.
+    fs::rename(dir.path().join("saved-complete.jsonl"),
+               dir.path().join("project/codex-session.jsonl")).unwrap();
+    send(&mut socket, json!({"type":"call","id":2,"method":"stop","params":{}}));
+    assert_eq!(receive(&mut reader)["ok"], true);
+    wait_until(|| process.exited());
+    let restart = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+        .args(["--runtime-dir", dir.path().to_str().unwrap(), "--cwd", dir.path().to_str().unwrap(),
+            "--session-id", "codex-session", "--engine", "codex", "--codex-bin", codex.to_str().unwrap(),
+            "--lore-python", python.to_str().unwrap(), "--resume", "true"])
+        .env("DOXA_HOME", dir.path().join("home")).output().unwrap();
+    assert!(!restart.status.success());
+    assert!(String::from_utf8_lossy(&restart.stderr).contains("transcript is incomplete"));
+}
+
+#[test]
+fn codex_resume_refuses_changed_clean_checkpoint_before_provider_execution() {
+    let dir = tempfile::tempdir().unwrap();
+    let codex = dir.path().join("codex-fixture");
+    let python = dir.path().join("lore-fixture");
+    let marker = dir.path().join("unexpected-provider-start");
+    fake_scrubber(&python, false);
+    executable(&codex, &format!("#!/bin/sh\ntouch '{}'\n", marker.display()));
+    let project = dir.path().join("project");
+    fs::create_dir(&project).unwrap();
+    let transcript = project.join("codex-session.jsonl");
+    let original = b"{\"type\":\"user\"}\n{\"type\":\"assistant\"}\n";
+    fs::write(&transcript, original).unwrap();
+    fs::write(project.join("codex-session.codex.json"), json!({
+        "thread_id":"thread_1","session_id":"codex-session","cwd":dir.path(),
+        "model":null,"turn_incomplete":false,"transcript_bytes":original.len()
+    }).to_string()).unwrap();
+    for changed in [original[..original.len()-1].to_vec(), [original.as_slice(), b"{}\n"].concat()] {
+        fs::write(&transcript, changed).unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_doxa-daemon"))
+            .args(["--runtime-dir", dir.path().to_str().unwrap(), "--cwd", dir.path().to_str().unwrap(),
+                "--session-id", "codex-session", "--engine", "codex", "--codex-bin", codex.to_str().unwrap(),
+                "--lore-python", python.to_str().unwrap(), "--resume", "true"])
+            .env("DOXA_HOME", dir.path().join("home")).output().unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("durable checkpoint"));
+        assert!(!marker.exists());
+        assert!(!dir.path().join("registry/codex-session.json").exists());
+    }
 }
 
 #[test]

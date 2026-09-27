@@ -12,11 +12,18 @@ pub enum State<'a> {
 
 pub fn lines(state:State<'_>,mark:bool,width:u16,height:u16)->Vec<Line<'static>> {
     let mut lines=Vec::new();
-    if mark && width>=24 && height>=16 {
-        for row in ["       █", "      ███", "    ███████", "   █████████   DOXA",
-            "  ███████████", " █████████████", "███████████████"] {
+    if mark && width>=52 && height>=14 {
+        // Greek capitals delta, omicron, xi, alpha, drawn with ASCII strokes.
+        for row in [r"      /\        ____     ______       /\",
+            r"     /  \      /    \                /  \",
+            r"    /    \    |      |    ____      /____\",
+            r"   /      \   |      |             /      \",
+            r"  /________\   \____/    ______   /        \"] {
             lines.push(Line::styled(row,Style::default().fg(theme::ACCENT)));
         }
+        lines.push(Line::default());
+    } else if mark && width>=8 && height>=10 {
+        lines.push(Line::styled("ΔΟΞΑ",Style::default().fg(theme::ACCENT)));
         lines.push(Line::default());
     }
     let heading=Style::default().fg(theme::TEXT).add_modifier(Modifier::BOLD);

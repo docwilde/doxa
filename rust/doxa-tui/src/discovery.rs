@@ -4,8 +4,8 @@
 //! this frontend, and every path taken from an entry is checked before use.
 
 use std::env;
-use std::fs::{self, File};
-use std::io::{self, Read};
+use std::fs;
+use std::io;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -15,7 +15,6 @@ use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
 const STALE_SECS: i64 = 60;
-const MAX_ENTRY_BYTES: u64 = 64 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct Session {
@@ -95,12 +94,7 @@ pub fn sessions_in(runtime: &Path) -> io::Result<Vec<Session>> {
         Ok(()) => {}
     }
     let mut result = Vec::new();
-    for item in fs::read_dir(registry)? {
-        let item = item?;
-        let path = item.path();
-        if path.extension().is_none_or(|ext| ext != "json") {
-            continue;
-        }
+    for path in doxa_state::registry_paths(&registry)? {
         if let Some(session) = read_entry(&path, &runtime, uid) {
             result.push(session);
         }
@@ -114,32 +108,7 @@ pub fn sessions_in(runtime: &Path) -> io::Result<Vec<Session>> {
 }
 
 fn read_entry(path: &Path, runtime: &Path, uid: u32) -> Option<Session> {
-    let path_meta = fs::symlink_metadata(path).ok()?;
-    if !path_meta.file_type().is_file()
-        || path_meta.uid() != uid
-        || path_meta.permissions().mode() & 0o077 != 0
-    {
-        return None;
-    }
-    let mut file = File::open(path).ok()?;
-    let meta = file.metadata().ok()?;
-    if !meta.file_type().is_file()
-        || meta.ino() != path_meta.ino()
-        || meta.dev() != path_meta.dev()
-        || meta.uid() != uid
-        || meta.permissions().mode() & 0o077 != 0
-        || meta.len() > MAX_ENTRY_BYTES
-    {
-        return None;
-    }
-    let mut bytes = Vec::new();
-    file.by_ref()
-        .take(MAX_ENTRY_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .ok()?;
-    if bytes.len() as u64 > MAX_ENTRY_BYTES {
-        return None;
-    }
+    let bytes = doxa_state::read_registry_entry(path, true).ok()?;
     let entry: Entry = serde_json::from_slice(&bytes).ok()?;
     if !valid_id(&entry.session_id)
         || path.file_stem()?.to_str()? != entry.session_id
@@ -277,6 +246,21 @@ mod tests {
         assert!(select(&entries, Some("abc")).is_err());
         assert!(select(&entries, None).is_err());
         assert!(select(&entries, Some("../abc")).is_err());
+    }
+
+    #[test]
+    fn registry_overflow_is_an_error_instead_of_an_empty_or_partial_roster() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::set_permissions(tmp.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let registry = tmp.path().join("registry");
+        fs::create_dir(&registry).unwrap();
+        fs::set_permissions(&registry, fs::Permissions::from_mode(0o700)).unwrap();
+        for index in 0..=doxa_state::MAX_REGISTRY_ENTRIES {
+            fs::File::create(registry.join(format!("noise-{index}"))).unwrap();
+        }
+        let start = std::time::Instant::now();
+        assert_eq!(sessions_in(tmp.path()).unwrap_err().kind(), io::ErrorKind::InvalidData);
+        assert!(start.elapsed() < std::time::Duration::from_secs(2));
     }
 
     #[test]

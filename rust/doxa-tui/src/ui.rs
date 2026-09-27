@@ -4,6 +4,7 @@ pub(crate) mod fleet_menu;
 mod fleet_process;
 pub(crate) mod panes;
 mod actions;
+mod session_controls;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::cell::{Cell, RefCell};
@@ -34,6 +35,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{diff_view, history, launch, lore_picker, markdown, peer_map::PeerMap};
 use crate::theme;
+use doxa_engines::EngineCapabilities;
 
 mod tool_cards;
 mod links;
@@ -132,8 +134,6 @@ const ENGINE_CHOICES: [&str; 4] = ["codex", "claude", "deepseek", "glm"];
 const DEEPSEEK_MODELS: [&str; 2] = ["deepseek-flash", "deepseek-v4-pro"];
 const GLM_MODELS: [&str; 10] = ["glm-4.5", "glm-4.5-air", "glm-4.6", "glm-4.7",
     "glm-5", "glm-5-turbo", "glm-5.1", "glm-5.2", "glm-5.3", "glm-5.3-flash"];
-const DEEPSEEK_EFFORTS: [&str; 4] = ["none", "low", "high", "max"];
-const GLM_EFFORTS: [&str; 3] = ["low", "high", "max"];
 
 fn vendor_models(engine: launch::Engine) -> &'static [&'static str] {
     match engine { launch::Engine::DeepSeek => &DEEPSEEK_MODELS, launch::Engine::Glm => &GLM_MODELS, _ => &[] }
@@ -143,8 +143,8 @@ fn vendor_default_model(engine: launch::Engine) -> &'static str {
 }
 fn effort_choices(engine: &str, model: &str) -> &'static [&'static str] {
     match engine {
-        "deepseek" if DEEPSEEK_MODELS.contains(&model) => &DEEPSEEK_EFFORTS,
-        "glm" if GLM_MODELS.contains(&model) => &GLM_EFFORTS,
+        "deepseek" => doxa_vendors::Vendor::DeepSeek.effort_choices(model),
+        "glm" => doxa_vendors::Vendor::Glm.effort_choices(model),
         _ => &[],
     }
 }
@@ -1332,7 +1332,7 @@ pub struct App {
     update_notified: bool,
     session_identity: HashMap<String, (Option<String>, Option<String>)>,
     session_efforts: HashMap<String, String>,
-    catalog_efforts: HashMap<(String, String), Vec<String>>,
+    session_catalogs: HashMap<String, session_controls::SessionCatalog>,
     effort_catalog_pending: Option<(String, String, String)>,
     model_refresh_after: Option<Instant>,
     requested_argument: Option<(String, &'static str, String)>,
@@ -1386,8 +1386,7 @@ pub struct App {
     rendered_chip_hits: RefCell<Option<Vec<ChipHit>>>,
     blink_on: bool,
     blink_at: Instant,
-    model_capabilities: HashMap<String, bool>,
-    permission_capabilities: HashMap<String, bool>,
+    session_capabilities: HashMap<String, EngineCapabilities>,
     permission_modes: HashMap<String, String>,
     session_activity: HashMap<String, (bool, usize)>,
     streaming_text: HashSet<String>,
@@ -1534,7 +1533,7 @@ impl Default for App {
             installation: crate::installation::Snapshot::default(), update_notified: false,
             session_identity: HashMap::new(),
             session_efforts: HashMap::new(),
-            catalog_efforts: HashMap::new(),
+            session_catalogs: HashMap::new(),
             effort_catalog_pending: None,
             model_refresh_after: None,
             requested_argument: None,
@@ -1584,8 +1583,7 @@ impl Default for App {
             rendered_chip_hits: RefCell::new(None),
             blink_on: true,
             blink_at: Instant::now(),
-            model_capabilities: HashMap::new(),
-            permission_capabilities: HashMap::new(),
+            session_capabilities: HashMap::new(),
             permission_modes: HashMap::new(),
             session_activity: HashMap::new(),
             streaming_text: HashSet::new(),
@@ -2002,8 +2000,8 @@ impl App {
                 } else { self.session_efforts.remove(id); }
                 self.update_pending_effort(id, frame);
                 self.session_telemetry.entry(id.to_owned()).or_default().update_status(frame);
-                self.model_capabilities.insert(id.to_owned(), frame["can_set_model"] == true);
-                self.permission_capabilities.insert(id.to_owned(), frame["can_set_permission_mode"] == true);
+                self.session_capabilities.insert(id.to_owned(), EngineCapabilities::from_session_controls(frame));
+                self.session_catalogs.remove(id);
                 if let Some(mode) = frame["permission_mode"].as_str().filter(|mode| permission_index(mode).is_some()) {
                     self.permission_modes.insert(id.to_owned(), mode.to_owned());
                 }
@@ -2355,16 +2353,9 @@ impl App {
             }
             "models_reply" => {
                 let Some(id) = frame.get("session_id").and_then(|v| v.as_str()) else { return false; };
-                if frame["ok"] == true {
-                    let engine = self.session_identity.get(id).and_then(|identity| identity.0.as_deref()).unwrap_or("");
-                    for row in frame["capabilities"].as_array().into_iter().flatten().take(100) {
-                        if let Some(model) = row["model"].as_str().filter(|model| !model.is_empty() && model.len() <= 128 && !model.chars().any(char::is_control)) {
-                            let levels = row["efforts"].as_array().into_iter().flatten().filter_map(serde_json::Value::as_str)
-                                .filter(|level| !level.is_empty() && level.len() <= 32 && level.bytes().all(|b| b.is_ascii_alphanumeric()))
-                                .take(16).map(str::to_owned).collect();
-                            self.catalog_efforts.insert((engine.into(), model.into()), levels);
-                        }
-                    }
+                if !self.sessions.iter().any(|session| session.id == id) { return false; }
+                if let Some(engine) = self.session_identity.get(id).and_then(|identity| identity.0.as_ref()) {
+                    self.session_catalogs.insert(id.to_owned(), session_controls::SessionCatalog::decode(engine, frame));
                 }
                 if self.effort_catalog_pending.as_ref().is_some_and(|pending| pending.0 == id)
                     && frame["loading"] != true {
@@ -2373,7 +2364,7 @@ impl App {
                         && self.session_identity.get(&owner).is_some_and(|identity|
                             identity.0.as_deref() == Some(engine.as_str()) && identity.1.as_deref() == Some(model.as_str())) {
                         self.model_picker = None;
-                        if frame["ok"] == true && self.catalog_efforts.contains_key(&(engine, model)) { self.open_effort_picker(); self.apply_requested_argument(); }
+                        if frame["ok"] == true && !self.session_effort_levels(&owner, &engine, &model).is_empty() { self.open_effort_picker(); self.apply_requested_argument(); }
                         else { self.notice = "Live effort capability unavailable from this engine".into(); }
                         return true;
                     }
@@ -2404,39 +2395,8 @@ impl App {
                 }
                 false
             }
-            "set_model_reply" => {
-                self.notice = if frame["ok"] == true {
-                    format!("Model selected · {}", safe_label(frame["model"].as_str().unwrap_or("awaiting event")))
-                } else {
-                    format!("Model change failed · {}", safe_label(frame["error"].as_str().unwrap_or("unknown error")))
-                };
-                true
-            }
-            "set_effort_reply" => {
-                let Some(id) = frame["session_id"].as_str() else { return false; };
-                let Some(requested) = self.pending_effort_verifications.get(id).cloned() else { return false; };
-                if frame["ok"] == true && frame["effort"].as_str() != Some(requested.as_str()) { return false; }
-                let active = self.groups[self.active_group].active_id() == Some(id);
-                if frame["ok"] != true {
-                    self.pending_effort_verifications.remove(id);
-                    if active { self.notice = format!("Effort change failed · {}",
-                        safe_label(frame["error"].as_str().unwrap_or("unknown error"))); }
-                } else if frame["verification_pending"] == false {
-                    self.pending_effort_verifications.remove(id);
-                    self.session_efforts.insert(id.to_owned(), requested.clone());
-                    if active { self.notice = format!("Effort verified · {requested}"); }
-                } else if active {
-                    self.notice = format!("Requested effort {requested} · awaiting provider verification");
-                }
-                true
-            }
-            "set_permission_mode_reply" => {
-                self.notice = if frame["ok"] == true {
-                    format!("Permission mode selected · {}", safe_label(frame["mode"].as_str().unwrap_or("awaiting event")))
-                } else {
-                    format!("Permission change failed · {}", safe_label(frame["error"].as_str().unwrap_or("unknown error")))
-                };
-                true
+            "set_model_reply" | "set_effort_reply" | "set_permission_mode_reply" => {
+                self.apply_control_reply(frame)
             }
             "stop_reply" => {
                 let Some(id) = frame["session_id"].as_str().filter(|id| self.sessions.iter().any(|s| s.id == *id)) else { return false; };
@@ -2468,8 +2428,8 @@ impl App {
                     self.memory_repo.remove(id);
                     self.repo_cache.remove(id);
                     self.repo_epoch.remove(id);
-                    self.model_capabilities.remove(id);
-                    self.permission_capabilities.remove(id);
+                    self.session_capabilities.remove(id);
+                    self.session_catalogs.remove(id);
                     self.permission_modes.remove(id);
                     self.streaming_text.remove(id);
                     self.reasoning_streams.remove(id);
@@ -2525,12 +2485,7 @@ impl App {
                             } else { self.session_efforts.remove(id); }
                         }
                         self.update_pending_effort(id, status);
-                        if let Some(can_set) = status.get("can_set_model").and_then(|v| v.as_bool()) {
-                            self.model_capabilities.insert(id.to_owned(), can_set);
-                        }
-                        if let Some(can_set) = status.get("can_set_permission_mode").and_then(|v| v.as_bool()) {
-                            self.permission_capabilities.insert(id.to_owned(), can_set);
-                        }
+                        self.session_capabilities.entry(id.to_owned()).or_default().update_session_controls(status);
                         if let Some(mode) = status["permission_mode"].as_str().filter(|mode| permission_index(mode).is_some()) {
                             self.permission_modes.insert(id.to_owned(), mode.to_owned());
                         }
@@ -2676,6 +2631,27 @@ impl App {
             }
             _ => false,
         }
+    }
+
+    fn apply_control_reply(&mut self, frame: &serde_json::Value) -> bool {
+        use session_controls::{ControlReply, EffortTransition};
+        let Some(reply) = ControlReply::decode(frame) else { return false; };
+        let id = reply.owner.id();
+        if !self.sessions.iter().any(|session| session.id == id) { return false; }
+        let Some(transition) = reply.reduce(self.pending_effort_verifications.get(id).map(String::as_str)) else { return false; };
+        let state_changed = match transition.effort {
+            EffortTransition::Unchanged => false,
+            EffortTransition::Failed => self.pending_effort_verifications.remove(id).is_some(),
+            EffortTransition::Verified(effort) => {
+                self.pending_effort_verifications.remove(id);
+                self.session_efforts.insert(id.to_owned(), effort);
+                true
+            }
+        };
+        if reply.owner.is_active(self.groups[self.active_group].active_id()) {
+            self.notice = transition.notice;
+            true
+        } else { state_changed }
     }
 
     fn update_pending_effort(&mut self, id: &str, status: &serde_json::Value) {
@@ -4482,7 +4458,7 @@ impl App {
             self.notice = "Select a session to inspect its model".into();
             return;
         };
-        if !self.model_capabilities.get(&id).copied().unwrap_or(false) {
+        if !self.session_capabilities.get(&id).is_some_and(|capabilities| capabilities.live_model_switch) {
             self.notice = "This session cannot change models".into();
             return;
         }
@@ -4509,6 +4485,14 @@ impl App {
         true
     }
 
+    fn session_effort_levels(&self, id: &str, engine: &str, model: &str) -> Vec<String> {
+        if let Some(levels) = self.session_catalogs.get(id).and_then(|catalog| catalog.efforts(engine, model)) {
+            // An authoritative catalog that omits a model or its efforts must
+            // not resurrect a measured fallback for that model.
+            levels.to_vec()
+        } else { effort_choices(engine, model).iter().map(|level| (*level).to_owned()).collect() }
+    }
+
     fn open_effort_picker(&mut self) {
         if self.size.width > 0 && (self.size.width < 29 || self.size.height < 11) {
             self.notice = "Enlarge terminal to open effort picker".into();
@@ -4526,7 +4510,7 @@ impl App {
             self.notice = "Effort capability is unknown for this session".into();
             return;
         };
-        if matches!(engine.as_str(), "codex" | "claude") && !self.catalog_efforts.contains_key(&(engine.clone(), model.clone())) {
+        if matches!(engine.as_str(), "codex" | "claude") && !self.session_catalogs.get(&id).is_some_and(|catalog| catalog.reported_for(engine)) {
             self.effort_catalog_pending = Some((id.clone(), engine.clone(), model.clone()));
             self.model_picker = Some(ModelPicker { session_id: id.clone(), models: Vec::new(),
                 selected: 0, note: "Loading effort capabilities for the current model…".into(),
@@ -4535,10 +4519,7 @@ impl App {
             self.notice = "Loading current model effort capabilities…".into();
             return;
         }
-        let known = effort_choices(engine, model);
-        let levels = self.catalog_efforts.get(&(engine.clone(), model.clone()))
-            .map(|levels| levels.clone())
-            .unwrap_or_else(|| known.iter().map(|level| (*level).to_owned()).collect::<Vec<_>>());
+        let levels = self.session_effort_levels(&id, engine, model);
         if levels.is_empty() {
             self.notice = "Live effort change is unavailable for this session model".into();
             return;
@@ -4558,10 +4539,7 @@ impl App {
         let Some((Some(engine), Some(model))) = self.session_identity.get(&picker.session_id) else { return; };
         if engine != &picker.engine || model != &picker.model { return; }
         let Some(chosen) = picker.levels.get(picker.selected) else { return; };
-        let known = effort_choices(engine, model);
-        let allowed = self.catalog_efforts.get(&(engine.clone(), model.clone()))
-            .map(|levels| levels.clone())
-            .unwrap_or_else(|| known.iter().map(|level| (*level).to_owned()).collect::<Vec<_>>());
+        let allowed = self.session_effort_levels(&picker.session_id, engine, model);
         if !allowed.contains(chosen) { return; }
         self.pending_effort_verifications.insert(picker.session_id.clone(), chosen.clone());
         self.pending_effort_changes.push((picker.session_id, chosen.clone()));
@@ -4589,7 +4567,7 @@ impl App {
             self.notice = "Select a session to inspect permissions".into();
             return;
         };
-        if !self.permission_capabilities.get(&id).copied().unwrap_or(false) {
+        if !self.session_capabilities.get(&id).is_some_and(|capabilities| capabilities.permission_modes) {
             self.notice = "This session cannot change permission modes".into();
             return;
         }
@@ -4600,6 +4578,10 @@ impl App {
 
     fn select_permission_mode(&mut self) {
         let Some((id, selected)) = self.permission_picker.as_ref() else { return; };
+        if !self.session_capabilities.get(id).is_some_and(|capabilities| capabilities.permission_modes) {
+            self.notice = "This session cannot change permission modes".into();
+            return;
+        }
         let mode = PERMISSION_CHOICES[*selected].0;
         if mode == "dontAsk" && self.permission_modes.get(id).is_none_or(|current| current != mode)
             && !self.session_activity.get(id).is_some_and(|(busy, queued)| !busy && *queued == 0) {
@@ -4629,6 +4611,19 @@ impl App {
         true
     }
 
+    // Keyboard and mouse selection share the same current capability gate.
+    fn select_model(&mut self) {
+        let Some(picker) = self.model_picker.as_ref().filter(|picker| !picker.loading) else { return; };
+        if !self.session_capabilities.get(&picker.session_id).is_some_and(|capabilities| capabilities.live_model_switch) {
+            self.notice = "This session cannot change models".into();
+            return;
+        }
+        let Some(model) = picker.models.get(picker.selected) else { return; };
+        self.pending_model_changes.push((picker.session_id.clone(), model.clone()));
+        self.notice = format!("Requesting model · {model}");
+        self.model_picker = None;
+    }
+
     fn model_picker_key(&mut self, key: KeyEvent) -> bool {
         let picker = self.model_picker.as_mut().unwrap();
         match key.code {
@@ -4642,13 +4637,7 @@ impl App {
                 self.model_refresh_after = None;
                 self.pending_model_queries.push(picker.session_id.clone());
             }
-            KeyCode::Enter if !picker.loading => {
-                if let Some(model) = picker.models.get(picker.selected) {
-                    self.pending_model_changes.push((picker.session_id.clone(), model.clone()));
-                    self.notice = format!("Requesting model · {}", model);
-                    self.model_picker = None;
-                }
-            }
+            KeyCode::Enter if !picker.loading => self.select_model(),
             _ => return false,
         }
         true
@@ -4716,7 +4705,6 @@ impl App {
             std::env::var("DOXA_MODEL").ok().as_deref(), std::env::var("DOXA_EFFORT").ok().as_deref());
         // A previous account-scoped catalog must not survive a vendor
         // re-selection when a later lookup fails or the credential changes.
-        self.catalog_efforts.retain(|(name, _), _| name != engine_id);
         let model_efforts = models.iter().map(|name| ((*name).to_owned(),
             effort_choices(engine_id, name).iter().map(|level| (*level).to_owned()).collect())).collect::<HashMap<_, _>>();
         let effort = self.next_efforts.get(engine_id).cloned().or(configured_effort)
@@ -4787,9 +4775,6 @@ impl App {
             form.models = model_efforts.keys().cloned().collect();
             form.models.sort();
             form.model_efforts = model_efforts;
-            self.catalog_efforts.retain(|(name, _), _| name != engine_name(engine));
-            self.catalog_efforts.extend(form.model_efforts.iter().map(|(model, levels)|
-                ((engine_name(engine).to_owned(), model.clone()), levels.clone())));
             form.catalog_note = if form.models.is_empty() {
                 "Live catalog has no models with verified effort support; choose another engine or retry later".into()
             } else if metadata_count > 0 {
@@ -7312,7 +7297,7 @@ impl App {
         // independent of the provider running this session.
         if let Some(mode) = id.and_then(|id| self.permission_modes.get(id)) {
             chips.push(("permission", mode.clone()));
-        } else if id.is_some_and(|id| self.permission_capabilities.get(id).copied().unwrap_or(false)) {
+        } else if id.is_some_and(|id| self.session_capabilities.get(id).is_some_and(|capabilities| capabilities.permission_modes)) {
             chips.push(("permission", "?".to_owned()));
         }
         if let Some(engine) = identity.and_then(|pair| pair.0.as_deref()) {
@@ -8412,9 +8397,8 @@ impl App {
             let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
             let row = start + usize::from(mouse.row.saturating_sub(y + offset));
             if mouse.row >= y + offset && row < picker.models.len() && !picker.loading {
-                self.pending_model_changes.push((picker.session_id.clone(), picker.models[row].clone()));
-                self.notice = format!("Requesting model · {}", picker.models[row]);
-                self.model_picker = None;
+                picker.selected = row;
+                self.select_model();
             }
             return true;
         }
@@ -10042,7 +10026,7 @@ fn run_loop(
     if let Some((store, live_ids, _)) = &state {
         app.awaiting_initial_attach=!live_ids.is_empty();
         if live_ids.is_empty() && store.startup_failed {
-            app.startup_recovery=Some("Provider startup failed. Check setup, then retry.".into());
+            app.startup_recovery=store.startup_error.clone().or_else(||Some("Provider startup failed. Check setup, then retry.".into()));
         }
         store.restore(&mut app, live_ids);
     }
@@ -10420,6 +10404,26 @@ fn dispatch_answers(app: &mut App, sender: &SyncSender<crate::bridge::WorkerComm
     false
 }
 
+// A disconnected router did not admit these queued commands. Reuse the same
+// typed-command failure envelopes as the router, including each original owner.
+fn reject_pending_controls(app: &mut App, failed: crate::bridge::WorkerCommand) -> bool {
+    use crate::bridge::WorkerCommand;
+    app.apply_daemon_frame(&crate::bridge::rejected(failed, "Daemon unavailable"));
+    for id in std::mem::take(&mut app.pending_model_queries) {
+        app.apply_daemon_frame(&crate::bridge::rejected(WorkerCommand::Models(id), "Daemon unavailable"));
+    }
+    for (id, model) in std::mem::take(&mut app.pending_model_changes) {
+        app.apply_daemon_frame(&crate::bridge::rejected(WorkerCommand::SetModel(id, model), "Daemon unavailable"));
+    }
+    for (id, effort) in std::mem::take(&mut app.pending_effort_changes) {
+        app.apply_daemon_frame(&crate::bridge::rejected(WorkerCommand::SetEffort(id, effort), "Daemon unavailable"));
+    }
+    for (id, mode) in std::mem::take(&mut app.pending_permission_changes) {
+        app.apply_daemon_frame(&crate::bridge::rejected(WorkerCommand::SetPermissionMode(id, mode), "Daemon unavailable"));
+    }
+    true
+}
+
 fn dispatch_model_controls(app: &mut App, sender: &SyncSender<crate::bridge::WorkerCommand>) -> bool {
     let mut queries = std::mem::take(&mut app.pending_model_queries).into_iter();
     while let Some(id) = queries.next() {
@@ -10430,14 +10434,9 @@ fn dispatch_model_controls(app: &mut App, sender: &SyncSender<crate::bridge::Wor
                 app.pending_model_queries.extend(queries);
                 break;
             }
-            Err(TrySendError::Disconnected(_)) => {
-                if let Some(picker) = app.model_picker.as_mut() {
-                    picker.loading = false;
-                    picker.catalog_pending = false;
-                    picker.note = "Daemon unavailable for model catalog · R retry".into();
-                }
-                app.notice = "Daemon unavailable for model catalog".into();
-                return true;
+            Err(TrySendError::Disconnected(command)) => {
+                app.pending_model_queries.extend(queries);
+                return reject_pending_controls(app, command);
             }
             Err(_) => unreachable!(),
         }
@@ -10451,9 +10450,9 @@ fn dispatch_model_controls(app: &mut App, sender: &SyncSender<crate::bridge::Wor
                 app.pending_model_changes.extend(changes);
                 break;
             }
-            Err(TrySendError::Disconnected(_)) => {
-                app.notice = "Daemon unavailable for model change".into();
-                return true;
+            Err(TrySendError::Disconnected(command)) => {
+                app.pending_model_changes.extend(changes);
+                return reject_pending_controls(app, command);
             }
             Err(_) => unreachable!(),
         }
@@ -10467,10 +10466,9 @@ fn dispatch_model_controls(app: &mut App, sender: &SyncSender<crate::bridge::Wor
                 app.pending_effort_changes.extend(efforts);
                 break;
             }
-            Err(TrySendError::Disconnected(_)) => {
-                app.pending_effort_verifications.clear();
-                app.notice = "Daemon unavailable for effort change".into();
-                return true;
+            Err(TrySendError::Disconnected(command)) => {
+                app.pending_effort_changes.extend(efforts);
+                return reject_pending_controls(app, command);
             }
             Err(_) => unreachable!(),
         }
@@ -10484,9 +10482,9 @@ fn dispatch_model_controls(app: &mut App, sender: &SyncSender<crate::bridge::Wor
                 app.pending_permission_changes.extend(permissions);
                 break;
             }
-            Err(TrySendError::Disconnected(_)) => {
-                app.notice = "Daemon unavailable for permission change".into();
-                return true;
+            Err(TrySendError::Disconnected(command)) => {
+                app.pending_permission_changes.extend(permissions);
+                return reject_pending_controls(app, command);
             }
             Err(_) => unreachable!(),
         }
@@ -10823,6 +10821,41 @@ for line in sys.stdin:
         app.handle(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert_eq!(app.pending_model_changes, vec![("claude-1".into(), "opus".into())]);
+    }
+
+    #[test]
+    fn model_and_permission_replies_do_not_replace_other_pane_notice_or_draft() {
+        let mut app = App::default();
+        for id in ["a", "b"] {
+            app.apply_daemon_frame(&json!({"type":"hello","session_id":id,
+                "engine":"claude","model":"sonnet","permission_mode":"plan"}));
+        }
+        app.groups[0].tabs = vec!["a".into()];
+        app.groups[1] = PaneGroup { tabs: vec!["b".into()], active: 0, scroll: 0 };
+        app.active_group = 1;
+        app.input = "private B draft".into(); app.input_cursor = app.input.len();
+        app.notice = "B notice".into();
+        for kind in ["set_model_reply", "set_permission_mode_reply"] {
+            for ok in [true, false] {
+                assert!(!app.apply_daemon_frame(&json!({"type":kind,"session_id":"a",
+                    "ok":ok,"model":"opus","mode":"acceptEdits","error":"A failure"})));
+                assert_eq!(app.notice, "B notice");
+                assert_eq!(app.input, "private B draft");
+            }
+            for owner in [json!(null), json!("unknown")] {
+                assert!(!app.apply_daemon_frame(&json!({"type":kind,"session_id":owner,"ok":true})));
+                assert_eq!(app.notice, "B notice");
+            }
+        }
+        assert_eq!(app.session_identity["a"].1.as_deref(), Some("sonnet"));
+        assert_eq!(app.permission_modes["a"], "plan");
+        assert!(app.apply_daemon_frame(&json!({"type":"set_model_reply","session_id":"b","ok":true,"model":"opus"})));
+        assert!(app.notice.contains("Model selected"));
+        // Replies report acceptance; provider events remain authoritative state.
+        assert_eq!(app.session_identity["b"].1.as_deref(), Some("sonnet"));
+        assert!(app.apply_daemon_frame(&json!({"type":"set_permission_mode_reply","session_id":"b","ok":false,"error":"denied"})));
+        assert!(app.notice.contains("Permission change failed"));
+        assert_eq!(app.permission_modes["b"], "plan");
     }
 
     #[test]
@@ -11431,6 +11464,73 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn effort_catalogs_belong_to_each_session_and_empty_refresh_revokes_choices() {
+        let mut app = App::default();
+        for id in ["a", "b"] {
+            app.apply_daemon_frame(&json!({"type":"hello","session_id":id,"engine":"claude","model":"same"}));
+        }
+        app.groups[0].tabs = vec!["a".into(), "b".into()];
+        app.apply_daemon_frame(&json!({"type":"models_reply","session_id":"a","ok":true,
+            "capabilities":[{"model":"same","efforts":["low"]}]}));
+        app.groups[0].active = 1;
+        app.open_effort_picker();
+        assert!(app.effort_picker.is_none());
+        assert_eq!(app.pending_model_queries.last().map(String::as_str), Some("b"));
+        app.apply_daemon_frame(&json!({"type":"models_reply","session_id":"b","ok":true,
+            "capabilities":[{"model":"same","efforts":["high"]}]}));
+        assert_eq!(app.effort_picker.as_ref().unwrap().levels, ["high"]);
+        app.apply_daemon_frame(&json!({"type":"models_reply","session_id":"b","ok":true,"capabilities":[]}));
+        app.select_effort();
+        assert!(app.pending_effort_changes.is_empty(), "an open picker cannot retain revoked effort metadata");
+        assert_eq!(app.session_effort_levels("a", "claude", "same"), ["low"]);
+        app.open_effort_picker();
+        assert!(app.effort_picker.is_none());
+        assert!(app.notice.contains("unavailable"));
+        app.apply_daemon_frame(&json!({"type":"models_reply","session_id":"a","ok":false}));
+        assert!(!app.session_catalogs["a"].reported_for("claude"));
+        assert!(app.session_effort_levels("a", "claude", "same").is_empty());
+        app.apply_daemon_frame(&json!({"type":"models_reply","session_id":"missing","ok":true,
+            "capabilities":[{"model":"same","efforts":["max"]}]}));
+        assert!(!app.session_catalogs.contains_key("missing"));
+    }
+
+    #[test]
+    fn dynamic_vendor_empty_metadata_denies_measured_fallback() {
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"s","engine":"deepseek","model":"deepseek-flash"}));
+        assert_eq!(app.session_effort_levels("s", "deepseek", "deepseek-flash"), ["none", "low", "high", "max"]);
+        app.apply_daemon_frame(&json!({"type":"models_reply","session_id":"s","ok":true,
+            "capabilities":[{"model":"deepseek-flash","efforts":[]}]}));
+        assert!(app.session_effort_levels("s", "deepseek", "deepseek-flash").is_empty());
+        assert!(app.session_effort_levels("s", "deepseek", "unknown").is_empty());
+        app.apply_daemon_frame(&json!({"type":"models_reply","session_id":"s","ok":false}));
+        assert!(app.session_effort_levels("s", "deepseek", "deepseek-flash").is_empty(), "failure cannot resurrect fallback");
+    }
+
+    #[test]
+    fn revoked_runtime_capabilities_block_open_picker_keyboard_and_mouse_commands() {
+        let mut app = App::default(); app.size = Rect::new(0, 0, 100, 28);
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"s","engine":"claude","model":"old",
+            "can_set_model":true,"can_set_permission_mode":true}));
+        app.open_model_picker();
+        app.apply_daemon_frame(&json!({"type":"models_reply","session_id":"s","ok":true,"models":["new"]}));
+        app.apply_daemon_frame(&json!({"type":"reply","status":{"session_id":"s","can_set_model":false}}));
+        app.model_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.pending_model_changes.is_empty());
+        let menu = app.active_chooser_rect().unwrap();
+        click_picker_row(&mut app, menu, 3);
+        assert!(app.pending_model_changes.is_empty());
+        app.model_picker = None;
+        app.open_permission_picker();
+        app.apply_daemon_frame(&json!({"type":"reply","status":{"session_id":"s","can_set_permission_mode":"true"}}));
+        app.permission_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.pending_permission_changes.is_empty());
+        let menu = app.active_chooser_rect().unwrap();
+        click_picker_row(&mut app, menu, 4);
+        assert!(app.pending_permission_changes.is_empty());
+    }
+
+    #[test]
     fn live_vendor_catalog_refresh_filters_models_and_switch_discards_stale_rows() {
         fn row(id: &str, efforts: &[&str], default: Option<&str>) -> doxa_vendors::ModelCapability {
             doxa_vendors::ModelCapability { id: id.into(), efforts: efforts.iter().map(|x| (*x).into()).collect(),
@@ -11497,10 +11597,10 @@ for line in sys.stdin:
         assert!(app.poll_vendor_catalog());
         assert_eq!(app.new_session.as_ref().unwrap().models, ["deepseek-flash", "deepseek-v4-pro"]);
         assert!(app.new_session.as_ref().unwrap().catalog_note.contains("Static fallback"));
-        app.catalog_efforts.insert(("deepseek".into(), "deepseek-flash".into()), vec!["low".into()]);
+        app.new_session.as_mut().unwrap().model_efforts.insert("deepseek-flash".into(), vec!["low".into()]);
         app.engine_selected = 2;
         app.select_new_engine();
-        assert!(!app.catalog_efforts.contains_key(&("deepseek".into(), "deepseek-flash".into())));
+        assert_eq!(app.new_session.as_ref().unwrap().model_efforts["deepseek-flash"], ["none", "low", "high", "max"]);
     }
 
     #[test]
@@ -11903,6 +12003,7 @@ for line in sys.stdin:
         app.rail_visible = false;
         app.handle(Event::Resize(100, 28));
         app.groups[0].tabs.push("session".into());
+        app.session_capabilities.insert("session".into(), EngineCapabilities::from_session_controls(&json!({"can_set_model":true})));
         app
     }
 
@@ -11944,17 +12045,17 @@ for line in sys.stdin:
         let mut terminal = Terminal::new(TestBackend::new(100, 32)).unwrap();
         terminal.draw(|frame| app.draw(frame)).unwrap();
         let buffer = terminal.backend().buffer();
-        let logo = buffer.content.iter().filter(|cell|cell.symbol()=="█").collect::<Vec<_>>();
+        let logo = buffer.content.iter().filter(|cell|cell.symbol()=="_" && cell.fg==theme::ACCENT).collect::<Vec<_>>();
         assert!(!logo.is_empty());
         assert!(logo.iter().all(|cell|cell.fg==theme::ACCENT && cell.bg==theme::BASE));
         let ready = painted_at(&app, 100, 32);
         assert!(ready.contains("Session ready") && ready.contains("gpt-6-sol"));
         app.sessions[0].transcript = "Actual conversation".into();
         let conversation = painted_at(&app, 100, 32);
-        assert!(conversation.contains("Actual conversation") && !conversation.contains("█"));
+        assert!(conversation.contains("Actual conversation") && !conversation.contains("/________\\"));
         app.sessions[0].transcript.clear();
         app.preferences.set_test("boot_banner", "0");
-        assert!(!painted_at(&app, 100, 32).contains("█"));
+        assert!(!painted_at(&app, 100, 32).contains("/________\\"));
     }
 
     #[test]
@@ -12364,6 +12465,7 @@ for line in sys.stdin:
         app.rail_visible = false;
         app.handle(Event::Resize(100, 28));
         app.groups[0].tabs.push("session".into());
+        app.session_capabilities.insert("session".into(), EngineCapabilities::from_session_controls(&json!({"can_set_model":true})));
         app.model_picker = Some(ModelPicker { session_id: "session".into(),
             models: vec!["first".into(), "second".into()], selected: 0,
             note: "Verified models".into(), loading: false, catalog_pending: false });
@@ -14087,6 +14189,31 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn disconnected_control_queue_rejects_only_its_owned_requests() {
+        let (sender, receiver) = mpsc::sync_channel(1); drop(receiver);
+        let mut app = App::default();
+        for id in ["a", "b"] {
+            app.apply_daemon_frame(&json!({"type":"hello","session_id":id,"engine":"claude","effort":"high"}));
+        }
+        app.groups[0].tabs = vec!["b".into()];
+        app.notice = "B notice".into(); app.input = "B draft".into(); app.input_cursor = app.input.len();
+        app.pending_effort_verifications.insert("b".into(), "low".into()); // already admitted to its provider
+        app.pending_effort_verifications.insert("a".into(), "max".into());
+        app.pending_model_changes.push(("a".into(), "opus".into()));
+        app.pending_permission_changes.push(("a".into(), "plan".into()));
+        app.pending_effort_changes.push(("a".into(), "max".into()));
+        assert!(dispatch_model_controls(&mut app, &sender));
+        assert_eq!(app.notice, "B notice"); assert_eq!(app.input, "B draft");
+        assert_eq!(app.pending_effort_verifications["b"], "low");
+        assert!(!app.pending_effort_verifications.contains_key("a"));
+        assert_eq!(app.session_efforts["a"], "high");
+        assert!(app.pending_model_changes.is_empty() && app.pending_permission_changes.is_empty() && app.pending_effort_changes.is_empty());
+        app.pending_permission_changes.push(("b".into(), "plan".into()));
+        assert!(dispatch_model_controls(&mut app, &sender));
+        assert!(app.notice.contains("Permission change failed"));
+    }
+
+    #[test]
     fn disconnected_attach_clears_marker_and_model_catalog_can_retry() {
         let (sender, receiver) = mpsc::sync_channel(1);
         drop(receiver);
@@ -14096,6 +14223,7 @@ for line in sys.stdin:
         assert!(app.attaching_ids.is_empty());
         app.attach_selected("session");
         assert_eq!(app.pending_attaches.len(), 1);
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"session","engine":"claude","can_set_model":true}));
         app.model_picker = Some(ModelPicker { session_id: "session".into(), models: Vec::new(),
             selected: 0, note: "Loading".into(), loading: true, catalog_pending: false });
         app.pending_model_queries.push("session".into());
@@ -15376,6 +15504,9 @@ mod parity_tests {
         app.notice = "active pane notice".into();
         app.apply_daemon_frame(&json!({"type":"set_effort_reply","session_id":"b","ok":true,"effort":"low","verification_pending":true}));
         assert_eq!(app.notice, "active pane notice"); assert_eq!(app.session_efforts["b"], "high");
+        assert!(app.apply_daemon_frame(&json!({"type":"set_effort_reply","session_id":"b","ok":true,"effort":"low","verification_pending":false})));
+        assert_eq!(app.notice, "active pane notice"); assert_eq!(app.session_efforts["b"], "low");
+        assert!(!app.pending_effort_verifications.contains_key("b"));
         app.pending_effort_verifications.insert("a".into(), "low".into());
         app.open_effort_picker(); assert!(app.effort_picker.is_none()); assert!(app.pending_effort_changes.is_empty());
         app.apply_daemon_frame(&json!({"type":"set_effort_reply","session_id":"a","ok":true,"effort":"max","verification_pending":false}));
