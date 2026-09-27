@@ -52,6 +52,8 @@ below this module in the import graph may import it first.
 from __future__ import annotations
 
 import os
+import json
+import stat
 import sys
 from pathlib import Path
 
@@ -141,5 +143,43 @@ def export_sticky_lore_root() -> None:
         os.environ["LORE_ROOT"] = str(stored)
 
 
+def export_shared_memory_caps() -> None:
+    """Share explicit LORE capacities with the user's Claude plugin carrier.
+
+    Claude's settings ``env`` is not the shell environment. Carry only these
+    three non-secret integer limits before LORE reads its config constants;
+    process overrides win. Hooks, plugins, credentials and other env keys
+    remain outside this narrow source of memory capacity configuration.
+    """
+    keys = ("LORE_MEMORY_CAP", "LORE_USER_CAP", "LORE_MACHINE_CAP")
+    if all(key in os.environ for key in keys):
+        return
+    base = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
+    path = (Path(base) if base else Path.home() / ".claude") / "settings.json"
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        with os.fdopen(fd, "rb") as file:
+            metadata = os.fstat(file.fileno())
+            if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid()
+                    or metadata.st_size > 1024 * 1024):
+                return
+            raw = file.read(1024 * 1024 + 1)
+        if len(raw) > 1024 * 1024:
+            return
+        settings = json.loads(raw)
+        configured = settings.get("env") if isinstance(settings, dict) else None
+        if not isinstance(configured, dict):
+            return
+        for key in keys:
+            value = configured.get(key)
+            if (key not in os.environ and isinstance(value, str)
+                    and value.isascii() and value.isdecimal() and len(value) <= 7
+                    and 0 < int(value) <= 1024 * 1024):
+                os.environ[key] = value
+    except (OSError, ValueError):
+        return
+
+
 ensure_importable()
 export_sticky_lore_root()
+export_shared_memory_caps()
