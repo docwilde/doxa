@@ -14827,7 +14827,9 @@ for line in sys.stdin:
         assert!(app.tick_belief_preview(Instant::now()+Duration::from_millis(500)));
         app.lore_picker.as_mut().unwrap().rows[0].claim="Changed source row".into();
         assert!(!painted_at(&app,120,40).contains("Full belief"));
-        app.tick_belief_preview(Instant::now());assert!(app.belief_preview.owner().is_none());
+        assert!(app.tick_belief_preview(Instant::now()));
+        assert_eq!(app.belief_preview.owner().unwrap().claim,"Changed source row");
+        assert!(!painted_at(&app,120,40).contains("Full belief"),"changed row starts a fresh dwell");
         app.handle(Event::Resize(100,32));assert!(app.belief_pointer.is_none());
     }
 
