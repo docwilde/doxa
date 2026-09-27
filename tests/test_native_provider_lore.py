@@ -32,10 +32,11 @@ def native_home():
         yield Path(home)
 
 
-def fixture_env(home):
+def fixture_env(home, broken_pending=False):
     root = home / "lore"
     root.mkdir()
     (root / "USER.md").write_text("- isolated native user memory\n")
+    if broken_pending: (root / "pending").write_text("isolated broken backend")
     return {"HOME":str(home), "PATH":os.environ.get("PATH", ""),
         "PYTHONPATH":str(Path(__file__).resolve().parents[1]),
         "LORE_ROOT":str(root), "LORE_PROJECTS_DIR":str(home / "projects"),
@@ -44,8 +45,8 @@ def fixture_env(home):
 
 
 @contextlib.contextmanager
-def daemon(home, engine, enabled, *extra, appserver=True):
-    env = fixture_env(home)
+def daemon(home, engine, enabled, *extra, appserver=True, broken_pending=False):
+    env = fixture_env(home,broken_pending)
     env["DOXA_LORE"] = "1" if enabled else "0"
     if not appserver: env["DOXA_CODEX_APPSERVER"] = "0"
     process = subprocess.Popen([BINARY, "--runtime-dir", str(home / "runtime"),
@@ -248,3 +249,47 @@ print(json.dumps({'type':'turn.completed','usage':{'input_tokens':1,'output_toke
         approved,_ = drive_turn(send,read,True)
         assert approved is False  # legacy exec MCP is noninteractive; canonical review still gates curated writes.
         assert_pending(native_home,"codex",enabled)
+
+
+def test_native_vendor_caches_belief_count_and_reports_canonical_two_strikes(native_home):
+    requests = []
+    class Provider(http.server.BaseHTTPRequestHandler):
+        def log_message(self,*args): pass
+        def do_POST(self):
+            request=json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            requests.append(request)
+            if len(requests)<=2:
+                delta={"tool_calls":[{"index":0,"id":f"tool-{len(requests)}","function":{
+                    "name":"lore_remember","arguments":json.dumps({"text":"cannot stage this proposal"})}}]}
+                reason="tool_calls"
+            else:
+                delta={"content":"recovered after canonical containment"};reason="stop"
+            body=("data: "+json.dumps({"choices":[{"finish_reason":reason,"delta":delta}]})+"\n\ndata: [DONE]\n\n").encode()
+            self.send_response(200);self.send_header("Content-Type","text/event-stream")
+            self.send_header("Content-Length",str(len(body)));self.end_headers();self.wfile.write(body)
+    server=http.server.HTTPServer(("127.0.0.1",0),Provider)
+    worker=threading.Thread(target=server.serve_forever,daemon=True);worker.start()
+    try:
+        endpoint=f"http://127.0.0.1:{server.server_port}"
+        with daemon(native_home,"deepseek",True,"--vendor-endpoint",endpoint,broken_pending=True) as (send,read):
+            send({"type":"call","id":7,"method":"status","params":{}})
+            while True:
+                frame=read()
+                if frame.get("id")==7:
+                    assert frame["status"]["belief_count"]==0
+                    assert frame["status"]["disabled_tools"]==[]
+                    break
+            approved,events=drive_turn(send,read,True)
+            assert approved
+            disabled=[row for row in events if row.get("type")=="tool_disabled"]
+            assert len(disabled)==1 and disabled[0]["data"]["name"]=="lore_remember"
+            send({"type":"call","id":8,"method":"status","params":{}})
+            while True:
+                frame=read()
+                if frame.get("id")==8:
+                    assert frame["status"]["disabled_tools"]==["lore_remember"]
+                    break
+            assert (native_home/"lore/pending").read_text()=="isolated broken backend"
+        assert len(requests)==3
+    finally:
+        server.shutdown();worker.join(timeout=5);server.server_close()

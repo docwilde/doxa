@@ -363,6 +363,7 @@ impl Host for PeerHost {
     fn account_snapshot(&self) -> Option<Value> { self.inner.account_snapshot() }
     fn billing_snapshot(&self) -> Option<Value> { self.inner.billing_snapshot() }
     fn lore_enabled(&self) -> Option<bool> { self.inner.lore_enabled() }
+    fn lore_status(&self) -> Option<Value> { self.inner.lore_status() }
     fn lore_scrub_status(&self) -> Option<&'static str> { self.inner.lore_scrub_status() }
     fn transcript_snapshot(&self) -> io::Result<Option<(PathBuf, u64)>> {
         self.inner.transcript_snapshot()

@@ -55,6 +55,16 @@ class AgentOperators:
         self.bind(identity)
         return [tool for tool in self.server.tools() if tool["name"] in LORE_TOOLS]
 
+    def status(self, identity: object) -> dict:
+        self.bind(identity)
+        count = None
+        try:
+            conn = self.server.ctx["belief_store"]()
+            count = conn.execute("SELECT count(*) FROM beliefs WHERE status = 'active'").fetchone()[0]
+        except Exception:
+            pass  # an unavailable store is unknown, never a fabricated zero
+        return {"belief_count": count, "disabled_tools": self.server.gate.disabled_tools()}
+
     async def call(self, identity: object, name: object, arguments: object) -> dict:
         self.bind(identity)
         if name not in LORE_TOOLS or not isinstance(arguments, dict):
@@ -77,7 +87,7 @@ def _write(frame: dict) -> None:
 def serve() -> None:
     operators = AgentOperators()
     _write({"type":"hello", "proto":1,
-            "capabilities":["agent_catalog_v1", "agent_tool_v1"]})
+            "capabilities":["agent_catalog_v1", "agent_tool_v1", "agent_status_v1"]})
     for raw in iter(lambda: sys.stdin.buffer.readline(MAX_FRAME_BYTES + 1), b""):
         if len(raw) > MAX_FRAME_BYTES or not raw.endswith(b"\n"):
             return
@@ -92,6 +102,8 @@ def serve() -> None:
             with open(os.devnull, "w") as sink, contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
                 if request.get("op") == "agent_catalog_v1":
                     result = operators.catalog(request.get("identity"))
+                elif request.get("op") == "agent_status_v1":
+                    result = operators.status(request.get("identity"))
                 elif request.get("op") == "agent_tool_v1":
                     result = asyncio.run(operators.call(request.get("identity"),
                         request.get("name"), request.get("arguments")))

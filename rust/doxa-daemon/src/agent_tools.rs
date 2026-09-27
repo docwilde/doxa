@@ -4,7 +4,7 @@ use doxa_lore::LoreClient;
 use serde_json::{json,Value};
 use std::{path::Path, sync::{Arc,Mutex}, time::Duration};
 
-pub struct AgentTools { client: Mutex<Option<LoreClient>>, identity: Value, definitions: Vec<Value> }
+pub struct AgentTools { client: Mutex<Option<LoreClient>>, identity: Value, definitions: Vec<Value>, status:Mutex<Option<Value>>, disabled_events:Mutex<Vec<Value>> }
 impl AgentTools {
     pub fn new(python: &Path, cwd: &str, session_id: &str, engine: &str, enabled: bool) -> Option<Arc<Self>> {
         if !enabled { return None; }
@@ -15,11 +15,13 @@ impl AgentTools {
         let definitions = rows.into_iter().map(|row| json!({"type":"function",
             "name":format!("mcp__doxa__{}",row["name"].as_str().unwrap()),
             "description":row["description"],"inputSchema":row["inputSchema"]})).collect();
-        Some(Arc::new(Self { client:Mutex::new(Some(client)), identity, definitions }))
+        let status=client.agent_status(&identity).ok();
+        Some(Arc::new(Self { status:Mutex::new(status),disabled_events:Mutex::new(Vec::new()),client:Mutex::new(Some(client)), identity, definitions }))
     }
     pub fn callback_definitions(&self) -> Vec<Value> { self.definitions.clone() }
     pub fn definitions(&self) -> Vec<Value> {
-        self.client.lock().ok().and_then(|mut client| client.as_mut()?.agent_catalog(&self.identity).ok())
+        self.client.lock().ok().and_then(|mut client| {
+            let client=client.as_mut()?; let rows=client.agent_catalog(&self.identity).ok(); self.refresh_status(client); rows })
             .map(|rows| rows.into_iter().map(|row| json!({"type":"function",
                 "name":format!("mcp__doxa__{}",row["name"].as_str().unwrap()),
                 "description":row["description"],"inputSchema":row["inputSchema"]})).collect()).unwrap_or_default()
@@ -36,8 +38,26 @@ impl AgentTools {
     pub fn call(&self, name: &str, arguments: &Value) -> Result<Value,String> {
         if !self.contains(name) { return Err("Unavailable LORE agent tool".into()); }
         let mut client = self.client.lock().map_err(|_|"LORE agent tools unavailable")?;
-        client.as_mut().ok_or("LORE session is closed")?.agent_call(&self.identity, name.strip_prefix("mcp__doxa__").ok_or("Invalid LORE agent tool")?,arguments)
-            .map_err(|_|"LORE agent tool failed".into())
+        let client=client.as_mut().ok_or("LORE session is closed")?;
+        let result=client.agent_call(&self.identity, name.strip_prefix("mcp__doxa__").ok_or("Invalid LORE agent tool")?,arguments)
+            .map_err(|_|"LORE agent tool failed".into());
+        self.refresh_status(client); result
+    }
+    /// Native status reads this cache and never waits behind an executing tool.
+    pub fn status(&self) -> Option<Value> { self.status.lock().ok()?.clone() }
+    pub fn take_disabled_events(&self) -> Vec<Value> { self.disabled_events.lock().map(|mut rows| std::mem::take(&mut *rows)).unwrap_or_default() }
+    fn refresh_status(&self, client: &mut LoreClient) {
+        let Ok(next)=client.agent_status(&self.identity) else { return; };
+        let Ok(mut status)=self.status.lock() else { return; };
+        let old=status.as_ref().and_then(|value|value["disabled_tools"].as_array());
+        if let Ok(mut events)=self.disabled_events.lock() {
+            for name in next["disabled_tools"].as_array().into_iter().flatten() {
+                if !old.is_some_and(|names|names.contains(name)) {
+                    events.push(json!({"type":"tool_disabled","data":{"name":name,"reason":"Repeated canonical operator failures; disabled for this session"}}));
+                }
+            }
+        }
+        *status=Some(next);
     }
     pub fn close(&self) { if let Ok(mut client) = self.client.lock() { client.take(); } }
     pub fn handler(self: &Arc<Self>) -> doxa_runtime::PeerToolHandler {

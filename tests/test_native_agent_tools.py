@@ -36,7 +36,7 @@ def test_native_catalog_has_exact_canonical_lore_tools_and_frozen_identity(tmp_p
         {"id":2,"op":"agent_catalog_v1","identity":{**bound,"session_id":"spoofed"}},
         {"id":3,"op":"agent_catalog_v1","identity":bound},
     ])
-    assert frames[0]["capabilities"] == ["agent_catalog_v1", "agent_tool_v1"]
+    assert frames[0]["capabilities"] == ["agent_catalog_v1", "agent_tool_v1", "agent_status_v1"]
     assert {tool["name"] for tool in frames[1]["value"]} == LORE_TOOLS
     assert all(tool["inputSchema"]["type"] == "object" for tool in frames[1]["value"])
     assert frames[2] == {"type":"reply","id":2,"ok":False,"error":"invalid_request"}
@@ -96,3 +96,9 @@ def test_canonical_two_strikes_remove_failed_operator_for_the_bound_session(tmp_
     assert "lore_remember" not in {tool["name"] for tool in frames[4]["value"]}
     assert "unavailable" in frames[5]["value"]["error"]
     assert (root / "pending").read_text() == "isolated broken backend"
+
+
+def test_canonical_status_reports_real_active_beliefs_and_disabled_names(tmp_path):
+    bound = identity(tmp_path)
+    _, frames = wire(tmp_path, [{"id":1,"op":"agent_status_v1","identity":bound}])
+    assert frames[1]["value"] == {"belief_count":0,"disabled_tools":[]}

@@ -50,6 +50,8 @@ pub trait Host: Send + Sync + 'static {
     fn lore_enabled(&self) -> Option<bool> { None }
     /// Display metadata asserted by this connected provider; never credentials.
     fn account_snapshot(&self) -> Option<Value> { None }
+    /// Cached canonical LORE counts/containment state; this must never block on a tool.
+    fn lore_status(&self) -> Option<Value> { None }
     /// Only the scrub preflight and sticky runtime scrub failure are known.
     /// This does not claim that memory indexing or snapshotting succeeded.
     fn lore_scrub_status(&self) -> Option<&'static str> { None }
@@ -361,6 +363,7 @@ fn handle_client(inner: Arc<Inner>, stream: UnixStream) {
     let peer_tools_ready = inner.host.peer_tools_ready();
     let lore_scrub = inner.host.lore_scrub_status();
     let billing = inner.host.billing_snapshot();
+    let lore_status = inner.host.lore_status();
     let hello = {
         let state = inner.state.lock().unwrap();
         json!({"type":"hello", "proto":1, "doxa":inner.session.doxa_version,
@@ -373,6 +376,8 @@ fn handle_client(inner: Arc<Inner>, stream: UnixStream) {
             "pending_inputs":state.pending_inputs,"pending_inputs_complete":state.pending_inputs_complete,
             "can_set_model":can_set_model,
             "can_set_permission_mode":can_set_permission_mode,"peer_tools_ready":peer_tools_ready,
+            "belief_count":lore_status.as_ref().and_then(|value|value["belief_count"].as_u64()),
+            "disabled_tools":lore_status.as_ref().and_then(|value|value["disabled_tools"].as_array().cloned()),
             "lore_enabled":inner.host.lore_enabled(),"lore_scrub":lore_scrub,"billing":billing,"account":inner.host.account_snapshot()})
     };
     if writer.set_write_timeout(Some(Duration::from_secs(2))).is_err() ||
@@ -591,12 +596,15 @@ fn handle_call(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame: &Value) {
         let peer_tools_ready = inner.host.peer_tools_ready();
         let lore_scrub = inner.host.lore_scrub_status();
         let billing = inner.host.billing_snapshot();
+        let lore_status = inner.host.lore_status();
         let state = inner.state.lock().unwrap();
         (Ok(json!({"status":{"session_id":inner.session.session_id,"cwd":inner.session.cwd,
             "model":state.model,"permission_mode":state.permission_mode,
             "engine":inner.session.engine,"effort":state.effort,"pending_effort":state.pending_effort,"running":state.busy,"queued":state.prompts.len(),"remote_driver":remote_identity(&state),
             "can_set_model":can_set_model,
             "can_set_permission_mode":can_set_permission_mode,"peer_tools_ready":peer_tools_ready,
+            "belief_count":lore_status.as_ref().and_then(|value|value["belief_count"].as_u64()),
+            "disabled_tools":lore_status.as_ref().and_then(|value|value["disabled_tools"].as_array().cloned()),
             "lore_enabled":inner.host.lore_enabled(),"lore_scrub":lore_scrub,"billing":billing,"account":inner.host.account_snapshot()}})), None)
     } else if method == "switch_branch" {
         let idle = {

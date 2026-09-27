@@ -257,6 +257,7 @@ impl Host for VendorHost {
             .map(|label| json!({"mode":"api","balance":label})))
     }
     fn lore_enabled(&self) -> Option<bool> { Some(self.lore_enabled) }
+    fn lore_status(&self) -> Option<Value> { self.agent_tools.as_ref()?.status() }
     fn lore_scrub_status(&self) -> Option<&'static str> {
         Some(if self.scrub_failed.load(Ordering::Acquire) { "unavailable" } else { "ready" })
     }
@@ -313,7 +314,12 @@ impl Host for VendorHost {
         let tools_enabled = self.workspace_read || peer.is_some() || self.agent_tools.is_some();
         let output = std::cell::RefCell::new(&mut *emit);
         let tool_events = Arc::new(Mutex::new(Vec::new()));
-        let emit_tool = |event: Value| (output.borrow_mut())(event);
+        let emit_tool = |event: Value| {
+            if event["type"] == "tool_result" { if let Some(tools)=&self.agent_tools {
+                for disabled in tools.take_disabled_events() { (output.borrow_mut())(disabled); }
+            } }
+            (output.borrow_mut())(event)
+        };
         let mut gate = NativeVendorGate::new(Path::new(&self.cwd), self.workspace_read, peer,
             self.peer_desk.clone(), &scrub_tool, &emit_tool, tool_events.clone());
         if let Some(tools) = &self.agent_tools { gate = gate.with_agent(tools.vendor_definitions(), tools.vendor_handler()); }
@@ -323,7 +329,7 @@ impl Host for VendorHost {
         let mut last_progress = Instant::now();
         let mut on_delta = |delta: Delta| {
             if let Ok(mut events) = tool_events.lock() {
-                for event in events.drain(..) { (output.borrow_mut())(event); }
+                for event in events.drain(..) { emit_tool(event); }
             }
             if let Delta::Reasoning(text) = delta {
                 reasoning_chars = reasoning_chars.saturating_add(text.chars().count() as u64);
@@ -385,6 +391,7 @@ impl Host for VendorHost {
             Err(_) => Err(Error::Transport),
         };
         drop(output);
+        if let Some(tools)=&self.agent_tools { for event in tools.take_disabled_events() { emit(event); } }
         if let Ok(mut events) = tool_events.lock() { for event in events.drain(..) { emit(event); } }
         if reasoning_chars > 0 && reasoning_chars.div_ceil(4) > reported_tokens {
             emit(json!({"type":"reasoning_progress","data":{"approx_tokens":reasoning_chars.div_ceil(4)}}));

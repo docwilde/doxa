@@ -331,6 +331,18 @@ impl LoreClient {
         if serde_json::to_vec(rows).map_or(true, |bytes| bytes.len() > 32 * 1024) { return Err(LoreError::InvalidFrame); }
         Ok(rows.clone())
     }
+    pub fn agent_status(&mut self, identity: &Value) -> Result<Value, LoreError> {
+        let value = self.request_value("agent_status_v1", json!({"identity":identity}))?;
+        if !value["belief_count"].is_null() && value["belief_count"].as_u64().is_none() { return Err(LoreError::InvalidFrame); }
+        let disabled=value["disabled_tools"].as_array().filter(|rows|rows.len()<=6).ok_or(LoreError::InvalidFrame)?;
+        let mut seen=HashSet::new();
+        for row in disabled {
+            let name=row.as_str().ok_or(LoreError::InvalidFrame)?;
+            if !matches!(name,"lore_belief_search"|"lore_belief_show"|"lore_belief_neighbours"|"lore_memory_list"|"lore_session_search"|"lore_remember")
+                || !seen.insert(name) { return Err(LoreError::InvalidFrame); }
+        }
+        Ok(json!({"belief_count":value["belief_count"],"disabled_tools":disabled}))
+    }
     pub fn agent_call(&mut self, identity: &Value, name: &str, arguments: &Value) -> Result<Value, LoreError> {
         if !arguments.is_object() || serde_json::to_vec(arguments).map_or(true, |bytes| bytes.len() > 32 * 1024) {
             return Err(LoreError::InvalidFrame);
