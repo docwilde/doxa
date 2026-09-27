@@ -62,12 +62,6 @@ from . import _lore_bootstrap  # noqa: F401 -- sys.path shim, see that module
 
 from claude_agent_sdk import SdkMcpTool
 
-from lore_core import beliefs as lore_beliefs
-from lore_core import graph as lore_graph
-from lore_core import store as lore_store
-from lore_core.config import ROOT, one_line, project_slug, utcnow
-from lore_core.deriver import pending_texts
-from lore_core.memory import memory_cap, memory_path, read_entries, usage_line
 from .native_lore import scrub as scrub_secrets
 
 from . import peerledger as peerledger_mod
@@ -145,57 +139,19 @@ class Operator:
     something inert."""
 
 
-def _conn(op_ctx: "OperatorContext | None"):
-    """Belief-store connection: the OperatorContext's handle when the gate
-    injected one (also the seam the read-only recording-store test taps),
-    lore_core's own db_connect otherwise."""
-    if op_ctx is not None and op_ctx.belief_store is not None:
-        return op_ctx.belief_store()
-    return lore_store.db_connect()
-
-
-def _slug(op_ctx: "OperatorContext | None") -> str:
-    return project_slug(op_ctx.cwd if op_ctx is not None else os.getcwd())
+def _native_operator(name: str, arguments: dict, op_ctx: "OperatorContext | None") -> Any:
+    callback = getattr(op_ctx, "native_lore", None) if op_ctx is not None else None
+    if callback is None:
+        return {"error":f"{name}: native session context required"}
+    return callback(name, arguments)
 
 
 # --------------------------------------------------------------------------
 # lore_belief_search -- FTS over the belief store (read-only)
 # --------------------------------------------------------------------------
 
-def _belief_search(query: str, limit: int = 8, op_ctx: "OperatorContext | None" = None) -> dict:
-    conn = _conn(op_ctx)
-    has_engine = any(r[0] == "source_engine" for r in conn.execute(
-        "SELECT name FROM pragma_table_info('beliefs')").fetchall())
-    rows: list = []
-    # AND first, OR fallback -- same widening lore_core.beliefs.cmd_belief
-    # uses, active beliefs only (dormant/superseded stay out uninvited).
-    for expr in (lore_store.fts_expr(query), lore_store.fts_expr(query, " OR ")):
-        if not expr:
-            return {"error": "lore_belief_search: empty query"}
-        rows = conn.execute(
-            f"SELECT {lore_beliefs.BELIEF_COLS_B}, "
-            f"{'b.source_engine' if has_engine else 'NULL'} FROM beliefs b"
-            " JOIN belief_fts f ON b.id = f.belief_id"
-            " WHERE belief_fts MATCH ? AND b.status IN ('active')"
-            " ORDER BY bm25(belief_fts) LIMIT ?",
-            (expr, limit),
-        ).fetchall()
-        if rows:
-            break
-    beliefs = []
-    for bid, subject, claim, conf, status, source_engine in rows:
-        n_ev = conn.execute(
-            "SELECT count(*) FROM belief_evidence WHERE belief_id = ?", (bid,)
-        ).fetchone()[0]
-        beliefs.append({
-            "id": bid, "subject": subject, "claim": claim,
-            "confidence": round(conf, 2), "status": status, "evidence_count": n_ev,
-            **({"source_engine": source_engine} if source_engine else {}),
-        })
-    out: dict = {"beliefs": beliefs, "count": len(beliefs)}
-    if not beliefs:
-        out["note"] = "no matching active beliefs"
-    return out
+def _belief_search(query: str, limit: int = 8, op_ctx: "OperatorContext | None" = None) -> Any:
+    return _native_operator("lore_belief_search", {"query":query, "limit":limit}, op_ctx)
 
 
 _LORE_BELIEF_SEARCH = Operator(
@@ -225,65 +181,8 @@ _LORE_BELIEF_SEARCH = Operator(
 # lore_belief_show -- one belief, full evidence trail (read-only)
 # --------------------------------------------------------------------------
 
-def _belief_show(belief_id: int) -> dict:
-    conn = lore_store.db_connect()
-    belief_engine = any(r[0] == "source_engine" for r in conn.execute(
-        "SELECT name FROM pragma_table_info('beliefs')").fetchall())
-    evidence_engine = any(r[0] == "source_engine" for r in conn.execute(
-        "SELECT name FROM pragma_table_info('belief_evidence')").fetchall())
-    row = conn.execute(
-        f"SELECT {lore_beliefs.BELIEF_COLS}, "
-        f"{'source_engine' if belief_engine else 'NULL'} FROM beliefs WHERE id = ?",
-        (belief_id,),
-    ).fetchone()
-    if not row:
-        # single-colon soft error: a bad id is the model's mistake to
-        # correct, never a hard failure for the two-strikes tracker.
-        return {"error": f"lore_belief_show: no belief with id {belief_id}"}
-    bid, subject, claim, conf, status, source_engine = row
-    evidence = [
-        {"session_id": sid, "project": proj, "note": note, "created": created,
-         **({"source_engine": engine} if engine else {})}
-        for sid, proj, note, created, engine in conn.execute(
-            "SELECT session_id, project, note, created, "
-            f"{'source_engine' if evidence_engine else 'NULL'} FROM belief_evidence"
-            " WHERE belief_id = ? ORDER BY created", (bid,)
-        )
-    ]
-    confirms, contradicts, stales = lore_beliefs.outcome_counts(conn, bid)
-    # EDGES (v0.84.0): the belief's typed relations, both directions --
-    # lore_core.beliefs.belief_edges already returns exactly this shape
-    # (direction, other_id, rel, source, support, other_claim, other_status),
-    # the same query `lore belief show`/`lore belief edges` render. Structure
-    # earns no authority here: `source` says who asserted it ("derived" is
-    # a model claim, as uncalibrated as a deriver-claimed confidence, and
-    # "structural" is a fact the store recorded itself), and `support` is
-    # the distinct-session corroboration count -- the caller reads both
-    # rather than the relation being handed extra weight for existing at
-    # all. An absent block (no edges) is an empty list, not a missing key,
-    # so a caller can always index it.
-    edges = [
-        {
-            "direction": direction, "verb": rel, "belief_id": other,
-            "claim": other_claim, "status": other_status,
-            "source": source, "support": support,
-        }
-        for direction, other, rel, source, support, other_claim, other_status
-        in lore_beliefs.belief_edges(conn, bid)
-    ]
-    return {
-        "belief": {
-            "id": bid, "subject": subject, "claim": claim,
-            "confidence": round(conf, 2),
-            "calibrated_confidence": round(
-                lore_beliefs.calibrated_confidence(conf, confirms, contradicts), 2),
-            "status": status,
-            **({"source_engine": source_engine} if source_engine else {}),
-        },
-        "evidence": evidence,
-        "outcomes": {"confirmed": confirms, "contradicted": contradicts, "stale": stales},
-        "edges": edges,
-    }
+def _belief_show(belief_id: int, op_ctx: "OperatorContext | None" = None) -> Any:
+    return _native_operator("lore_belief_show", {"belief_id":belief_id}, op_ctx)
 
 
 _LORE_BELIEF_SHOW = Operator(
@@ -349,124 +248,12 @@ _LORE_BELIEF_SHOW = Operator(
 #    "projected": true so nothing reads it as an asserted relation.
 
 
-def _citation_tag(conn, bid: int, claim: str) -> dict:
-    """One belief's own citation status -- independent of how it was
-    reached. The exact STEER/CITE-ONLY split lore_core.dialectic.cmd_consult
-    applies to FTS hits, applied here to graph-reached beliefs: >=3
-    outcome-ledger rows earns STEER with a calibrated confidence, anything
-    else is CITE ONLY with the uncalibrated, deriver-claimed one. Never a
-    property of the edge or path that reached this id."""
-    row = conn.execute("SELECT confidence FROM beliefs WHERE id = ?", (bid,)).fetchone()
-    conf = row[0] if row else 0.0
-    confirms, contradicts, stales = lore_beliefs.outcome_counts(conn, bid)
-    n_out = confirms + contradicts + stales
-    if n_out >= 3:
-        return {
-            "id": bid, "claim": claim, "citation_status": "steer",
-            "calibrated_confidence": round(
-                lore_beliefs.calibrated_confidence(conf, confirms, contradicts), 2),
-            "outcome_count": n_out,
-        }
-    return {
-        "id": bid, "claim": claim, "citation_status": "cite_only",
-        "confidence": round(conf, 2), "outcome_count": n_out,
-    }
-
-
 def _belief_neighbours(belief_id: int, hops: int = 1, to_id: "int | None" = None,
-                       limit: int = 12) -> dict:
-    conn = lore_store.db_connect()
-    hops = max(1, min(int(hops), 2))
-    limit = max(1, min(int(limit), BELIEF_NEIGHBOUR_LIMIT))
-    row = conn.execute(
-        f"SELECT {lore_beliefs.BELIEF_COLS} FROM beliefs WHERE id = ?", (belief_id,)
-    ).fetchone()
-    if not row:
-        return {"error": f"lore_belief_neighbours: no belief with id {belief_id}"}
-    seed_id, _subject, seed_claim, _conf, seed_status = row
-
-    # active-only, same view `lore consult`/`lore ask` traverse -- a
-    # superseded/retracted/dormant belief is not somewhere structure should
-    # lead the agent.
-    adj, claims = lore_graph.adjacency(conn)
-    if seed_id not in claims:
-        return {
-            "error": f"lore_belief_neighbours: belief {belief_id} is not active"
-                     f" (status {seed_status}) -- the graph view is active beliefs only",
-        }
-    seed_tag = _citation_tag(conn, seed_id, seed_claim)
-
+                       limit: int = 12, op_ctx: "OperatorContext | None" = None) -> Any:
+    arguments = {"belief_id":belief_id, "hops":hops, "limit":limit}
     if to_id is not None:
-        if to_id not in claims:
-            return {"error": f"lore_belief_neighbours: no active belief with id {to_id}"}
-        path_hops, confidence = lore_graph.best_path(adj, belief_id, to_id)
-        if not path_hops:
-            return {
-                "mode": "path", "seed": seed_tag,
-                "target": _citation_tag(conn, to_id, claims[to_id]),
-                "path": [], "confidence": 0.0, "hop_count": 0,
-                "note": "no path between these beliefs in the active graph",
-            }
-        node_ids = [path_hops[0][0]] + [dst for _s, _r, dst in path_hops]
-        path_out = []
-        for src, rel, dst in path_hops:
-            projected = rel in lore_beliefs.PROJECTED_RELATIONS
-            hop: dict = {"src": src, "verb": rel, "dst": dst, "projected": projected}
-            if not projected:
-                hop["support"] = lore_beliefs.edge_support(conn, src, dst, rel)
-            path_out.append(hop)
-        others = lore_graph.simple_paths(adj, belief_id, to_id, cutoff=len(path_hops) + 1)
-        return {
-            "mode": "path",
-            "path": path_out,
-            "confidence": round(confidence, 4),
-            "hop_count": len(path_hops),
-            "beliefs": [_citation_tag(conn, n, claims.get(n, "?")) for n in node_ids],
-            "other_paths_exist": len(others) > 1,
-            "note": "path confidence is the PRODUCT over hops, not a per-hop average or "
-                    "the weakest single hop's weight -- a long chain of plausible steps is "
-                    "not a strong conclusion. Structure earns no citation authority: read "
-                    "each belief's own citation_status, never the path's existence.",
-        }
-
-    # neighbourhood mode
-    reached = lore_graph.khop(adj, belief_id, hops)
-    others = sorted((n for n in reached if n != belief_id), key=lambda n: (reached[n], n))
-    truncated = len(others) > limit
-    kept = others[:limit]
-    neighbours_out = []
-    for node in kept:
-        path_hops, confidence = lore_graph.best_path(adj, belief_id, node)
-        rel = path_hops[-1][1] if path_hops else "?"
-        tag = _citation_tag(conn, node, claims.get(node, "?"))
-        tag.update({
-            "hop_distance": reached[node],
-            "path_confidence": round(confidence, 4),
-            "via_relation": rel,
-            "relation_projected": rel in lore_beliefs.PROJECTED_RELATIONS,
-        })
-        neighbours_out.append(tag)
-    out: dict = {
-        "mode": "neighbourhood",
-        "seed": seed_tag,
-        "hops": hops,
-        "neighbours": neighbours_out,
-        "count": len(neighbours_out),
-        "reachable_total": len(others),
-        "limit": limit,
-        "truncated": truncated,
-        "note": "structure earns no citation authority -- each neighbour's "
-                "citation_status is its own, independent of the seed's; "
-                "path_confidence is the product over hops, not a per-hop average.",
-    }
-    if truncated:
-        out["note"] += (
-            f" TRUNCATED to the nearest {limit} of {len(others)} reachable belief(s)"
-            " -- narrow with a smaller hops or ask about a more specific belief_id."
-        )
-    elif not others:
-        out["note"] = "no relation recorded for this belief in the active graph."
-    return out
+        arguments["to_id"] = to_id
+    return _native_operator("lore_belief_neighbours", arguments, op_ctx)
 
 
 _LORE_BELIEF_NEIGHBOURS = Operator(
@@ -511,15 +298,8 @@ _LORE_BELIEF_NEIGHBOURS = Operator(
 # lore_memory_list -- curated core memory, verbatim (read-only)
 # --------------------------------------------------------------------------
 
-def _memory_list(scope: str = "all", op_ctx: "OperatorContext | None" = None) -> dict:
-    if scope not in ("user", "project", "all"):
-        return {"error": "lore_memory_list: scope must be 'user', 'project' or 'all'"}
-    slug = _slug(op_ctx)
-    out: dict = {"project_slug": slug}
-    for sc in (("user", "project") if scope == "all" else (scope,)):
-        entries = read_entries(memory_path(sc, slug))
-        out[sc] = {"entries": entries, "usage": usage_line(entries, memory_cap(sc))}
-    return out
+def _memory_list(scope: str = "all", op_ctx: "OperatorContext | None" = None) -> Any:
+    return _native_operator("lore_memory_list", {"scope":scope}, op_ctx)
 
 
 _LORE_MEMORY_LIST = Operator(
@@ -547,53 +327,8 @@ _LORE_MEMORY_LIST = Operator(
 # lore_session_search -- FTS over the session index (read-only)
 # --------------------------------------------------------------------------
 
-def _session_search(query: str, limit: int = 6, op_ctx: "OperatorContext | None" = None) -> dict:
-    conn = _conn(op_ctx)
-    exprs = [e for e in dict.fromkeys(
-        (lore_store.fts_expr(query), lore_store.fts_expr(query, " OR "))) if e]
-    if not exprs:
-        return {"error": "lore_session_search: empty query"}
-    slug = _slug(op_ctx)
-    # Project scope first, then widen -- same order as `lore search`. This
-    # SERVES the existing index only; growing it (index_sessions/index_live)
-    # is a write and stays the engine's own job, per the read-only contract.
-    for scope in (slug, None):
-        for expr in exprs:
-            sql = (
-                "SELECT m.session_id, m.project, m.ts, m.role,"
-                " snippet(msg, 4, '[', ']', '…', 16)"
-                " FROM msg m WHERE msg MATCH ?"
-            )
-            params: list = [expr]
-            if scope:
-                sql += " AND m.project = ?"
-                params.append(scope)
-            sql += " ORDER BY bm25(msg) LIMIT ?"
-            params.append(limit)
-            rows = conn.execute(sql, params).fetchall()
-            if rows:
-                engines: dict[str, str] = {}
-                if any(r[0] == "engine" for r in conn.execute(
-                    "SELECT name FROM pragma_table_info('sessions')").fetchall()):
-                    ids = list(dict.fromkeys(str(r[0]) for r in rows))
-                    placeholders = ",".join("?" * len(ids))
-                    engines = {
-                        str(sid): str(engine) for sid, engine in conn.execute(
-                            f"SELECT session_id, engine FROM sessions"
-                            f" WHERE session_id IN ({placeholders})", ids,
-                        ).fetchall() if engine
-                    }
-                return {
-                    "scope": "project" if scope else "all",
-                    "hits": [
-                        {"session_id": sid, "project": proj, "ts": ts,
-                         "role": role, "snippet": one_line(snip)[:280],
-                         **({"engine": engines[str(sid)]} if str(sid) in engines else {})}
-                        for sid, proj, ts, role, snip in rows
-                    ],
-                    "count": len(rows),
-                }
-    return {"scope": "all", "hits": [], "count": 0, "note": "no hits in the session index"}
+def _session_search(query: str, limit: int = 6, op_ctx: "OperatorContext | None" = None) -> Any:
+    return _native_operator("lore_session_search", {"query":query, "limit":limit}, op_ctx)
 
 
 _LORE_SESSION_SEARCH = Operator(
@@ -623,50 +358,8 @@ _LORE_SESSION_SEARCH = Operator(
 # lore_remember -- THE one write operator: stages a pending proposal
 # --------------------------------------------------------------------------
 
-def _remember(text: str, scope: str = "project", op_ctx: "OperatorContext | None" = None) -> dict:
-    if scope not in ("user", "project"):
-        return {"error": "lore_remember: scope must be 'user' or 'project'"}
-    # scrub BEFORE truncation, same order as deriver.stage_proposals: on
-    # approval this text lands verbatim in USER.md/MEMORY.md, injected into
-    # every future session.
-    text = one_line(scrub_secrets(str(text)))[:300]
-    if not text:
-        return {"error": "lore_remember: empty text"}
-    slug = _slug(op_ctx)
-    existing = {t.lower() for t in pending_texts(slug)}
-    for sc in ("user", "project"):
-        existing.update(e.lower() for e in read_entries(memory_path(sc, slug)))
-    if text.lower() in existing:
-        return {"staged": None,
-                "note": "already in curated memory or pending review -- nothing staged"}
-    pdir = ROOT / "pending"
-    pdir.mkdir(parents=True, exist_ok=True)
-    item = {
-        "kind": "memory", "scope": scope, "action": "add", "match": "",
-        "text": text, "created": utcnow(), "project": slug,
-        "session_id": op_ctx.session_id if op_ctx is not None else None,
-        "derived_by": "doxa-tool",
-        **({"source_engine": op_ctx.source_engine}
-           if op_ctx is not None and op_ctx.source_engine else {}),
-    }
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
-    n = 0
-    while True:
-        pid = f"{stamp}-{n:02d}"
-        try:
-            # "x" makes the id claim atomic (stage_proposals' own pattern):
-            # a taken id is a FileExistsError to step over, never a file to
-            # overwrite.
-            with open(pdir / f"{pid}.json", "x", encoding="utf-8") as fh:
-                json.dump(item, fh, indent=2)
-            break
-        except FileExistsError:
-            n += 1
-    return {
-        "staged": pid, "scope": scope, "text": text,
-        "note": ("staged as a pending proposal -- nothing enters curated memory "
-                 "until a human approves it (lore pending / lore approve)"),
-    }
+def _remember(text: str, scope: str = "project", op_ctx: "OperatorContext | None" = None) -> Any:
+    return _native_operator("lore_remember", {"text":text, "scope":scope}, op_ctx)
 
 
 _LORE_REMEMBER = Operator(

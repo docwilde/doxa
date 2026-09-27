@@ -262,3 +262,42 @@ def test_retained_error_scrub_unavailability_uses_fixed_placeholder(monkeypatch)
     result = errors.scrub("fake-secret-not-for-output")
     assert "fake-secret" not in result
     assert "unavailable" in result
+
+
+def test_retained_transcript_path_uses_native_identity_and_rejects_path_components(tmp_path, monkeypatch):
+    from doxa import transcript
+    calls = []
+    def identity(op, **fields):
+        calls.append((op, fields))
+        return {"projects_dir":str(tmp_path / "projects"),"slug":"canonical-project"}
+    monkeypatch.setattr(transcript.native_lore, "request", identity)
+    assert transcript.transcript_path("owned-1", str(tmp_path)) == tmp_path / "projects/canonical-project/owned-1.jsonl"
+    assert calls == [("transcript_identity", {"cwd":str(tmp_path)})]
+    assert transcript.transcript_path("../unsafe", str(tmp_path)) is None
+    assert len(calls) == 1
+    monkeypatch.setattr(transcript.native_lore, "request", lambda *args, **kwargs:
+        {"projects_dir":str(tmp_path / "projects"),"slug":"../outside"})
+    assert transcript.transcript_path("owned-1", str(tmp_path)) is None
+
+
+def test_legacy_operator_helpers_require_frozen_native_context_and_never_fall_back(tmp_path):
+    from doxa import operators
+    from doxa.gate import OperatorContext
+    invocations = [lambda ctx: operators._belief_search("owned", op_ctx=ctx),
+        lambda ctx: operators._belief_show(1, op_ctx=ctx),
+        lambda ctx: operators._belief_neighbours(1, op_ctx=ctx),
+        lambda ctx: operators._memory_list(op_ctx=ctx),
+        lambda ctx: operators._session_search("owned", op_ctx=ctx),
+        lambda ctx: operators._remember("owned", op_ctx=ctx)]
+    for invoke in invocations:
+        assert "native session context required" in invoke(None)["error"]
+    calls = []
+    def native(name, arguments):
+        calls.append((name, arguments))
+        return {"native":True}
+    ctx = OperatorContext(session_id="owned", cwd=str(tmp_path), repo_root=str(tmp_path), native_lore=native)
+    for invoke in invocations:
+        assert invoke(ctx) == {"native":True}
+    assert len(calls) == 6
+    assert all("op_ctx" not in arguments for _, arguments in calls)
+    assert not (tmp_path / "state.db").exists()
