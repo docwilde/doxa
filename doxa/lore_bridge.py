@@ -31,6 +31,7 @@ _MEMORY_REVIEW_OP = "memory_review_v1"
 _MEMORY_ACTION_OP = "memory_action_v1"
 _BELIEF_REVIEW_OP = "belief_review_v1"
 _BELIEF_ACTION_OP = "belief_action_v1"
+_BELIEF_GRAPH_OP = "belief_graph_v1"
 _PENDING_ID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z", re.ASCII)
 _SESSION_ID = re.compile(r"[0-9A-Za-z][0-9A-Za-z-]{0,127}\Z", re.ASCII)
 _MAX_TRANSCRIPT_BYTES = 8 * 1024 * 1024
@@ -270,6 +271,77 @@ def _session_search(cwd: str, query: str, ops: tuple[Any, Any],
     finally:
         conn.close()
     return []
+
+
+def _belief_graph_ops() -> tuple[Any, Any, Any] | None:
+    try:
+        from lore_core.config import project_slug
+        from lore_core.store import db_connect
+        from lore_core.beliefs import format_edges
+        if not all(callable(op) for op in (project_slug, db_connect, format_edges)):
+            return None
+        return project_slug, db_connect, format_edges
+    except Exception:  # noqa: BLE001 -- graph API capability is measured
+        return None
+
+
+def _belief_graph(req: dict[str, Any], ops: tuple[Any, Any, Any], scrub: Any) -> dict[str, Any]:
+    cwd, bid, browser = req.get("cwd"), req.get("belief_id"), req.get("browser")
+    if (not isinstance(cwd, str) or not cwd or len(cwd) > 4096 or "\x00" in cwd
+            or type(bid) is not int or not 0 < bid <= 2**63 - 1 or type(browser) is not bool):
+        raise BeliefActionError("invalid_request")
+    slug = ops[0](cwd)
+    if not isinstance(slug, str) or not slug:
+        raise BeliefActionError("invalid_request")
+    subjects = ["user", "user-model", f"project:{slug}"]
+    conn = ops[1]()
+    try:
+        conn.execute("PRAGMA query_only=ON")
+        conn.execute("BEGIN")
+        row = conn.execute("SELECT subject,status FROM beliefs WHERE id=?", (bid,)).fetchone()
+        if row is None or row[0] not in subjects or row[1] != "active":
+            raise BeliefActionError("belief_unavailable")
+        scoped = {row[0] for row in conn.execute(
+            "SELECT id FROM beliefs WHERE subject IN (?,?,?)", subjects)}
+        block = ops[2](conn, bid)
+        if not isinstance(block, str):
+            raise BeliefActionError("graph_unavailable")
+        # Preserve LORE's canonical relation labels and provenance while
+        # excluding neighbours outside this browser's project/user scope.
+        lines = []
+        for line in block.splitlines():
+            neighbour = re.search(r"\[(\d+)\]", line)
+            if neighbour and int(neighbour.group(1)) in scoped:
+                safe = scrub(line)
+                if not isinstance(safe, str):
+                    raise BeliefActionError("graph_unavailable")
+                lines.append(safe)
+        if len(lines) > 200 or any(len(line.encode("utf-8")) > 4096 for line in lines):
+            raise BeliefActionError("output_too_large")
+        if not lines:
+            return {"id": bid, "lines": ["No relations recorded in this scope"], "html": None, "note": "No scoped relations"}
+        result = {"id": bid, "lines": lines, "html": None, "note": "LORE relations · project/user scope"}
+        if browser:
+            from lore_core.graph import adjacency, khop, mermaid_source, render_html
+            if not all(callable(op) for op in (adjacency, khop, mermaid_source, render_html)):
+                raise BeliefActionError("graph_unavailable")
+            adj, claims = adjacency(conn, subjects=subjects)
+            if bid not in claims:
+                raise BeliefActionError("belief_unavailable")
+            nodes = sorted(khop(adj, bid, 2))
+            if len(nodes) > 200:
+                raise BeliefActionError("output_too_large")
+            safe_claims = {node: scrub(claims[node]) for node in nodes}
+            if any(not isinstance(claim, str) for claim in safe_claims.values()):
+                raise BeliefActionError("graph_unavailable")
+            note = f"belief {bid}, 2 hops · {len(nodes)} beliefs · project/user scope"
+            html = render_html(mermaid_source(adj, safe_claims, nodes), f"belief {bid}", note)
+            if not isinstance(html, str) or len(html.encode("utf-8")) > MAX_FRAME_BYTES:
+                raise BeliefActionError("output_too_large")
+            result.update(html=html, note=note)
+        return result
+    finally:
+        conn.close()
 
 
 def _belief_action_ops() -> tuple[Any, Any, Any, Any, Any] | None:
@@ -679,6 +751,7 @@ def serve() -> None:
     manage_ops = _memory_manage_ops() if lore is not None else None
     read_ops = _read_ops() if lore is not None else None
     belief_ops = _belief_action_ops() if lore is not None else None
+    graph_ops = _belief_graph_ops() if lore is not None else None
     index_ops = _index_ops() if lore is not None and ext is not None else None
     review = _pending_review_reader() if lore is not None and ext is not None else None
     resolver = _pending_resolver() if review is not None else None
@@ -691,6 +764,7 @@ def serve() -> None:
                              + ([_MEMORY_REVIEW_OP, _MEMORY_ACTION_OP] if manage_ops is not None else [])
                              + ([_REVIEW_OP] if review is not None else [])
                              + ([_RESOLVE_OP] if resolver is not None else [])
+                             + ([_BELIEF_GRAPH_OP] if graph_ops is not None else [])
                              + ([_BELIEF_REVIEW_OP, _BELIEF_ACTION_OP] if belief_ops is not None else [])) if lore is not None else []})
     while True:
         raw = sys.stdin.buffer.readline(MAX_FRAME_BYTES + 1)
@@ -713,6 +787,10 @@ def serve() -> None:
             continue
         scrub, snapshot = lore
         try:
+            if op == _BELIEF_GRAPH_OP and graph_ops is not None:
+                result = _belief_graph(req, graph_ops, scrub)
+                _write({"type": "reply", "id": rid, "ok": True, "value": result})
+                continue
             if op in (_MEMORY_REVIEW_OP, _MEMORY_ACTION_OP) and manage_ops is not None:
                 result = (_memory_review(req, manage_ops, scrub) if op == _MEMORY_REVIEW_OP
                           else _memory_action(req, manage_ops, scrub))

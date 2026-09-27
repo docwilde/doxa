@@ -15,6 +15,36 @@ import pytest
 from doxa import lore_bridge
 
 
+def test_belief_graph_uses_scoped_canonical_relations_and_scrubs(tmp_path):
+    path = tmp_path / "graph.db"
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE beliefs(id INTEGER PRIMARY KEY, subject TEXT, status TEXT)")
+    conn.executemany("INSERT INTO beliefs VALUES(?,?,?)", [(1,"user","active"), (2,"project:current","active"), (3,"project:other","active")])
+    conn.commit(); conn.close()
+    def relations(conn, bid):
+        with pytest.raises(sqlite3.OperationalError):
+            conn.execute("DELETE FROM beliefs")
+        return "  relations:\n  --depends_on--> [2] derived SECRET\n  --depends_on--> [3] OUTSIDE"
+    ops = (lambda cwd: "current", lambda: sqlite3.connect(path), relations)
+    req = {"cwd":"/repo", "belief_id":1, "browser":False}
+    result = lore_bridge._belief_graph(req, ops, lambda text: text.replace("SECRET", "[redacted]"))
+    assert result["id"] == 1 and result["html"] is None
+    assert result["lines"] == ["  --depends_on--> [2] derived [redacted]"]
+    with pytest.raises(lore_bridge.BeliefActionError, match="belief_unavailable"):
+        lore_bridge._belief_graph({**req,"belief_id":3}, ops, lambda text: text)
+    with pytest.raises(lore_bridge.BeliefActionError, match="invalid_request"):
+        lore_bridge._belief_graph({**req,"browser":"false"}, ops, lambda text: text)
+
+
+def test_belief_graph_no_relations_does_not_import_browser_renderer(tmp_path):
+    path = tmp_path / "graph.db"; conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE beliefs(id INTEGER PRIMARY KEY, subject TEXT, status TEXT)")
+    conn.execute("INSERT INTO beliefs VALUES(1,'user','active')"); conn.commit(); conn.close()
+    result = lore_bridge._belief_graph({"cwd":"/repo","belief_id":1,"browser":True},
+        (lambda cwd:"current", lambda:sqlite3.connect(path), lambda *_:""), lambda text:text)
+    assert result["html"] is None and "No relations" in result["lines"][0]
+
+
 def test_indexed_session_search_is_project_first_bounded_and_scrubbed():
     conn = sqlite3.connect(":memory:")
     conn.execute("CREATE VIRTUAL TABLE msg USING fts5(session_id UNINDEXED, project UNINDEXED, "
@@ -120,6 +150,7 @@ def test_partial_archive_failure_is_returned_without_retry_or_item_text(monkeypa
 def no_optional_read_store(monkeypatch):
     monkeypatch.setattr(lore_bridge, "_read_ops", lambda: None)
     monkeypatch.setattr(lore_bridge, "_belief_action_ops", lambda: None)
+    monkeypatch.setattr(lore_bridge, "_belief_graph_ops", lambda: None)
     monkeypatch.setattr(lore_bridge, "_index_ops", lambda: None)
     monkeypatch.setattr(lore_bridge, "_pending_review_reader", lambda: None)
 

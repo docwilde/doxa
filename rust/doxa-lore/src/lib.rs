@@ -60,6 +60,15 @@ pub struct BeliefReview {
     claim_sha256: String,
 }
 
+#[derive(Clone, PartialEq, Eq)]
+pub struct BeliefGraph { pub id: u64, pub lines: Vec<String>, pub html: Option<String>, pub note: String }
+impl std::fmt::Debug for BeliefGraph {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BeliefGraph").field("id", &self.id).field("lines", &self.lines.len())
+            .field("html_bytes", &self.html.as_ref().map(String::len)).finish()
+    }
+}
+
 impl std::fmt::Debug for BeliefReview {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BeliefReview")
@@ -567,6 +576,22 @@ impl LoreClient {
 
     /// Fetch a complete, scrubbed belief for a human to review. The private
     /// identity fields are supplied back to LORE for its locked recheck.
+    pub fn belief_graph(&mut self, cwd: &str, belief_id: u64, browser: bool) -> Result<BeliefGraph, LoreError> {
+        if cwd.is_empty() || cwd.len() > 4096 || cwd.contains('\0') || belief_id == 0 || belief_id > i64::MAX as u64 {
+            return Err(LoreError::InvalidFrame);
+        }
+        let value = self.request_value("belief_graph_v1", json!({"cwd":cwd,"belief_id":belief_id,"browser":browser}))?;
+        if value["id"].as_u64() != Some(belief_id) { return Err(LoreError::InvalidFrame); }
+        let lines = value["lines"].as_array().filter(|lines| lines.len() <= 200).ok_or(LoreError::InvalidFrame)?
+            .iter().map(|line| line.as_str().filter(|line| line.len() <= 4096).map(str::to_owned).ok_or(LoreError::InvalidFrame))
+            .collect::<Result<Vec<_>, _>>()?;
+        let html = if value["html"].is_null() { None } else {
+            Some(value["html"].as_str().filter(|html| browser && html.len() <= MAX_FRAME_BYTES).ok_or(LoreError::InvalidFrame)?.to_owned())
+        };
+        let note = value["note"].as_str().filter(|note| note.len() <= 512).ok_or(LoreError::InvalidFrame)?.to_owned();
+        Ok(BeliefGraph { id: belief_id, lines, html, note })
+    }
+
     pub fn belief_review(&mut self, cwd: &str, belief_id: u64) -> Result<BeliefReview, LoreError> {
         if cwd.is_empty() || cwd.len() > 4096 || cwd.contains('\0')
             || belief_id == 0 || belief_id > i64::MAX as u64 {
