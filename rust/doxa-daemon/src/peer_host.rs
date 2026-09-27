@@ -17,6 +17,7 @@ const PENDING_CAPACITY: usize = 8;
 
 pub struct PeerHost {
     inner: Arc<dyn Host>,
+    agent_tools_enabled: bool,
     lore: Mutex<Option<LoreClient>>,
     lore_python: Option<PathBuf>,
     runtime: PathBuf,
@@ -36,6 +37,7 @@ impl PeerHost {
     /// Weak ownership keeps the provider callback from retaining its wrapper
     /// (and daemon) after shutdown. Expose only peer RPCs, never host controls.
     pub fn connect_provider_tools(self: &Arc<Self>) -> bool {
+        if !self.agent_tools_enabled { return false; }
         let weak = Arc::downgrade(self);
         self.inner.set_peer_tool_handler(Arc::new(move |name, params| {
             if !matches!(name, "peers" | "msg" | "peer_history") { return Err("Unsupported provider peer method".into()); }
@@ -63,11 +65,15 @@ impl PeerHost {
         if !home.is_absolute() {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "DOXA home must be absolute"));
         }
+        let config = doxa_state::load_config(&home.join("config.toml"));
+        let agent_tools_enabled = explicit_opt_in(&doxa_state::raw_setting(
+            std::env::var("DOXA_AGENT_PEER_SEND").ok().as_deref(), &config, "agent_peer_send"));
         let ledger = std::env::var_os("DOXA_PEER_LEDGER").filter(|value| !value.is_empty()).map(PathBuf::from)
             .unwrap_or_else(|| home.join("peers/messages.jsonl"));
         if !ledger.is_absolute() { return Err(io::Error::new(io::ErrorKind::InvalidInput, "peer ledger must be absolute")); }
         Ok(Self {
             inner,
+            agent_tools_enabled,
             lore: Mutex::new(None),
             lore_python: lore_python.map(Path::to_path_buf),
             runtime,
@@ -348,7 +354,7 @@ impl PeerHost {
 }
 
 impl Host for PeerHost {
-    fn peer_tools_ready(&self) -> bool { self.inner.peer_tools_ready() }
+    fn peer_tools_ready(&self) -> bool { self.agent_tools_enabled && self.inner.peer_tools_ready() }
     fn initial_model(&self) -> Option<String> { self.inner.initial_model() }
     fn initial_effort(&self) -> Option<String> { self.inner.initial_effort() }
     fn initial_permission_mode(&self) -> String { self.inner.initial_permission_mode() }
@@ -436,6 +442,11 @@ impl Host for PeerHost {
 
 /// Provider arguments bind the complete peer identity; interactive CLI callers
 /// retain their documented unambiguous prefix convenience.
+fn explicit_opt_in(value: &str) -> bool {
+    let value = value.trim();
+    !value.is_empty() && !matches!(value.to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off")
+}
+
 fn target_matches(session_id: &str, target: &str, exact: bool) -> bool {
     if exact { session_id == target } else { session_id.starts_with(target) }
 }
@@ -452,4 +463,39 @@ mod provider_target_tests {
         assert!(target_matches("peer-original", "peer-original", true));
         assert!(!target_matches("peer-replacement", "peer-original", true));
     }
+    #[test]
+    fn model_peer_tools_are_off_by_default_and_freeze_the_host_setting() {
+        use super::*;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Recorder(AtomicUsize);
+        impl Host for Recorder {
+            fn prompt(&self, _: &str, _: &mut dyn FnMut(Value)) {}
+            fn call(&self, _: &str, _: &Value) -> Result<Value, String> { Ok(json!({})) }
+            fn peer_tools_ready(&self) -> bool { true }
+            fn set_peer_tool_handler(&self, _: doxa_runtime::PeerToolHandler) -> bool {
+                self.0.fetch_add(1, Ordering::Relaxed); true
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let host = Arc::new(Recorder(AtomicUsize::new(0)));
+        let (tx, _) = std::sync::mpsc::sync_channel(1);
+        let mut peer = PeerHost::new(host.clone(), dir.path().to_path_buf(), dir.path(),
+            "session".into(), "session".into(), None, tx).unwrap();
+        peer.agent_tools_enabled = false;
+        let peer = Arc::new(peer);
+        assert!(!peer.connect_provider_tools());
+        assert!(!peer.peer_tools_ready());
+        assert_eq!(host.0.load(Ordering::Relaxed), 0);
+        // Manual commands still reach their ordinary scrub/identity gates.
+        assert_eq!(peer.call("peers", &json!({})).unwrap_err(), "LORE scrub unavailable");
+        let mut peer = Arc::try_unwrap(peer).ok().unwrap();
+        peer.agent_tools_enabled = true;
+        let peer = Arc::new(peer);
+        assert!(peer.connect_provider_tools());
+        assert!(peer.peer_tools_ready());
+        assert_eq!(host.0.load(Ordering::Relaxed), 1);
+        for value in ["", "0", "false", "no", "off", " FALSE "] { assert!(!explicit_opt_in(value)); }
+        for value in ["1", "true", "yes", "on"] { assert!(explicit_opt_in(value)); }
+    }
+
 }

@@ -3,6 +3,7 @@ mod claude_host;
 mod budget_host;
 mod codex_host;
 mod peer_host;
+mod remote_bridge;
 mod vendor_host;
 mod vendor_tools;
 use claude_host::ClaudeHost;
@@ -741,6 +742,10 @@ fn run() -> io::Result<()> {
     let inbox = Inbox::bind(&options.runtime, &options.session_id)?;
     let mut registry = Registry::new(&options, inbox.path(), handle.socket_path())?;
     registry.write(0)?;
+    let mut remote_bridge = match remote_bridge::Bootstrap::request(scrub_python, &options.runtime) {
+        Ok(bootstrap) => bootstrap,
+        Err(_) => { handle.publish(json!({"type":"remote_peer_bridge","data":{"state":"startup_failed"}})); None }
+    };
     if let Some(task) = &options.task {
         let origin = options.parent_session_id.as_deref().unwrap_or("child-task");
         let framed_task = initial_task_prompt(task, options.parent_session_id.as_deref());
@@ -763,6 +768,12 @@ fn run() -> io::Result<()> {
     let mut last_beat = Instant::now();
     let mut previous_clients = 0;
     let result = loop {
+        if let Some(bootstrap) = remote_bridge.as_mut() {
+            if let Some(ok) = bootstrap.poll() {
+                handle.publish(json!({"type":"remote_peer_bridge","data":{"state":if ok {"bootstrap_complete"} else {"startup_failed"}}}));
+                remote_bridge = None;
+            }
+        }
         while let Ok(event) = event_rx.try_recv() {
             handle.publish(event);
         }
