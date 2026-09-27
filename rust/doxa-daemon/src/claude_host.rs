@@ -53,6 +53,18 @@ pub struct ClaudeHost {
     initial_permission_mode: String,
     billing: Option<Value>,
     lore_enabled: Option<bool>,
+    account: Mutex<Option<Value>>,
+}
+
+fn display_account(value: &Value) -> Option<Value> {
+    let mut result = serde_json::Map::new();
+    for key in ["email", "organization", "subscriptionType", "apiProvider"] {
+        if let Some(text) = value[key].as_str().filter(|text| !text.trim().is_empty()
+            && text.len() <= 256 && !text.chars().any(char::is_control)) {
+            result.insert(key.into(), Value::String(text.trim().to_owned()));
+        }
+    }
+    (!result.is_empty()).then_some(Value::Object(result))
 }
 
 impl ClaudeHost {
@@ -132,6 +144,7 @@ impl ClaudeHost {
                 && !tier.chars().any(char::is_control))
             && value["quota"].as_str().is_none_or(|quota| quota.len() <= 120
                 && !quota.chars().any(char::is_control))).cloned();
+        let account = display_account(&start["account"]);
         let (tx, rx) = mpsc::channel();
         let turn_running = Arc::new(AtomicBool::new(false));
         let broker_turn_running = Arc::clone(&turn_running);
@@ -152,6 +165,7 @@ impl ClaudeHost {
             initial_effort,
             initial_permission_mode,
             billing, lore_enabled,
+            account: Mutex::new(account),
         })
     }
 
@@ -164,8 +178,12 @@ impl ClaudeHost {
                 reply: tx,
             })
             .map_err(|_| "Claude sidecar closed".to_owned())?;
-        rx.recv_timeout(if method == "set_effort" { Duration::from_secs(60) } else { RPC_TIMEOUT })
-            .map_err(|_| "Claude sidecar did not answer".to_owned())?
+        let result = rx.recv_timeout(if method == "set_effort" { Duration::from_secs(60) } else { RPC_TIMEOUT })
+            .map_err(|_| "Claude sidecar did not answer".to_owned())??;
+        if let Some(account) = result.get("account") {
+            *self.account.lock().unwrap() = display_account(account);
+        }
+        Ok(result)
     }
 
     pub fn shutdown(&self) -> bool {
@@ -202,6 +220,7 @@ impl Host for ClaudeHost {
     fn initial_effort(&self) -> Option<String> { self.initial_effort.clone() }
     fn initial_permission_mode(&self) -> String { self.initial_permission_mode.clone() }
     fn billing_snapshot(&self) -> Option<Value> { self.billing.clone() }
+    fn account_snapshot(&self) -> Option<Value> { self.account.lock().unwrap().clone() }
     fn prompt(&self, text: &str, emit: &mut dyn FnMut(Value)) {
         if text.trim_start().starts_with("/compact") && !self.reviewed_compact {
             emit(done("Reviewed compaction is unavailable in this Claude sidecar"));
@@ -488,6 +507,14 @@ mod tests {
     use std::fs;
     use std::sync::{mpsc, Arc};
 
+    #[test]
+    fn connected_account_snapshot_is_bounded_and_never_forwards_credentials() {
+        assert_eq!(display_account(&json!({"email":" sdk@example.test ","organization":"SDK org",
+            "accessToken":"secret","organizationName":"foreign cached org"})),
+            Some(json!({"email":"sdk@example.test","organization":"SDK org"})));
+        assert!(display_account(&json!({"email":"bad\nvalue","organization":"x".repeat(257)})).is_none());
+    }
+
     fn fixture(script: &str) -> (tempfile::TempDir, Arc<ClaudeHost>) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("sidecar.py");
@@ -506,7 +533,7 @@ for line in sys.stdin:
     frame = json.loads(line)
     method, ident = frame["method"], frame["id"]
     result = {"data":{"model":"opus"},"permission_mode":"plan"} if method == "start" else {}
-    if method == "set_model": result = {"model":None}
+    if method == "set_model": result = {"model":None,"account":{"email":"reconnected@example.test","accessToken":"secret"}}
     if method == "set_permission_mode": result = {"mode":frame["params"]["mode"]}
     print(json.dumps({"type":"reply","id":ident,"ok":True,"result":result}), flush=True)
     if method == "prompt":
@@ -517,6 +544,7 @@ for line in sys.stdin:
         print(json.dumps({"type":"event","event":"turn_done","data":{}}), flush=True)
 "#);
         assert_eq!(host.call("set_model", &json!({"model":null})).unwrap()["model"], "default");
+        assert_eq!(host.account_snapshot(), Some(json!({"email":"reconnected@example.test"})));
         // The duplicate set_model reply must not kill the broker.
         assert_eq!(host.call("set_permission_mode", &json!({"mode":"plan"})).unwrap()["mode"], "plan");
         let (seen_tx, seen_rx) = mpsc::channel();

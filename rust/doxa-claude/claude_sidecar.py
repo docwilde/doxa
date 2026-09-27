@@ -82,6 +82,19 @@ def session_engine_options(engine_type: type, options: dict) -> dict:
     return options
 
 
+def account_snapshot(account: object) -> dict | None:
+    """Only bounded display fields from this connected SDK account."""
+    if not isinstance(account, dict):
+        return None
+    snapshot = {}
+    for key in ("email", "organization", "subscriptionType", "apiProvider"):
+        value = account.get(key)
+        if (isinstance(value, str) and value.strip() and len(value.encode()) <= 256
+                and not any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in value)):
+            snapshot[key] = value.strip()
+    return snapshot or None
+
+
 def billing_snapshot(account: object) -> dict | None:
     """Use SDK subscription auth; add local precision only for the same account."""
     if not isinstance(account, dict):
@@ -285,6 +298,7 @@ async def run() -> None:
                                                 "permission_mode": getattr(candidate, "permission_mode", "default"),
                                                 "billing": billing,
                                                 "lore_enabled": getattr(candidate, "lore", None),
+                                                "account": account_snapshot(getattr(candidate, "account", None)),
                                                 "effort": getattr(candidate, "effort", None),
                                                 "spawn_depth": getattr(candidate, "spawn_depth", 0),
                                                 "parent_session_id": getattr(candidate, "parent_session_id", None),
@@ -344,7 +358,8 @@ async def run() -> None:
                     raise ValueError("invalid model")
                 selected = await engine.set_model(model)
                 emit({"type": "reply", "id": request_id, "ok": True,
-                      "result": {"model": selected}})
+                      "result": {"model": selected,
+                                 "account": account_snapshot(getattr(engine, "account", None))}})
             elif method == "set_effort" and engine is not None:
                 if turn is not None and not turn.done():
                     raise ValueError("effort changes require an idle session")
@@ -354,6 +369,7 @@ async def run() -> None:
                 selected = await engine.set_effort(effort)
                 emit({"type": "reply", "id": request_id, "ok": True,
                       "result": {"effort": selected,
+                                 "account": account_snapshot(getattr(engine, "account", None)),
                                  "verification_pending": bool(getattr(engine, "_resume_identity_pending", None))}})
             elif method == "set_permission_mode" and engine is not None:
                 mode = params["mode"]

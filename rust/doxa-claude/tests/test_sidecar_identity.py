@@ -18,6 +18,17 @@ spec.loader.exec_module(sidecar)
 
 
 class IdentityTests(unittest.TestCase):
+    def test_account_snapshot_uses_only_connected_display_fields(self):
+        self.assertEqual(sidecar.account_snapshot({
+            "email": " sdk@example.test ", "organization": "SDK org",
+            "subscriptionType": "pro", "apiProvider": "firstParty",
+            "accessToken": "must never cross bridge", "organizationName": "cached org",
+        }), {"email": "sdk@example.test", "organization": "SDK org",
+             "subscriptionType": "pro", "apiProvider": "firstParty"})
+        self.assertIsNone(sidecar.account_snapshot({"email": "bad\nvalue",
+                                                  "organization": "x" * 257}))
+        self.assertIsNone(sidecar.account_snapshot(None))
+
     def test_session_engine_options_requires_explicit_peer_ownership(self):
         class OlderEngine:
             def __init__(self, cwd, session_id=None, resume=None, model=None):

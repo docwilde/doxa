@@ -48,6 +48,8 @@ pub trait Host: Send + Sync + 'static {
     fn billing_snapshot(&self) -> Option<Value> { None }
     /// Effective session memory policy, distinct from required secret scrubbing.
     fn lore_enabled(&self) -> Option<bool> { None }
+    /// Display metadata asserted by this connected provider; never credentials.
+    fn account_snapshot(&self) -> Option<Value> { None }
     /// Only the scrub preflight and sticky runtime scrub failure are known.
     /// This does not claim that memory indexing or snapshotting succeeded.
     fn lore_scrub_status(&self) -> Option<&'static str> { None }
@@ -138,7 +140,7 @@ impl Daemon {
         let hello = json!({"type":"hello","proto":1,"doxa":session.doxa_version,
             "session_id":session.session_id,"model":model,"engine":session.engine,
             "permission_mode":permission_mode,"bypass_armed":false,
-            "cwd":session.cwd,"next_seq":0,"billing":host.billing_snapshot()});
+            "cwd":session.cwd,"next_seq":0,"billing":host.billing_snapshot(),"account":host.account_snapshot()});
         if serde_json::to_vec(&hello).map_err(io::Error::other)?.len() + 1 > MAX_FRAME_BYTES {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "hello frame too large"));
         }
@@ -371,7 +373,7 @@ fn handle_client(inner: Arc<Inner>, stream: UnixStream) {
             "pending_inputs":state.pending_inputs,"pending_inputs_complete":state.pending_inputs_complete,
             "can_set_model":can_set_model,
             "can_set_permission_mode":can_set_permission_mode,"peer_tools_ready":peer_tools_ready,
-            "lore_enabled":inner.host.lore_enabled(),"lore_scrub":lore_scrub,"billing":billing})
+            "lore_enabled":inner.host.lore_enabled(),"lore_scrub":lore_scrub,"billing":billing,"account":inner.host.account_snapshot()})
     };
     if writer.set_write_timeout(Some(Duration::from_secs(2))).is_err() ||
         writer.write_all(&encode_reply(&hello)).is_err() { return; }
@@ -436,6 +438,7 @@ fn detach_client(inner: &Inner, id: u64) {
     drop(state);
     if changed { inner.publish(None, json!({"type":"remote_driver_changed","data":{"identity":identity}})); }
 }
+#[cfg(test)]
 fn attach_client(inner: &Inner, id: u64, cursor: Option<u64>, tx: &SyncSender<Vec<u8>>) -> bool {
     attach_client_with_identity(inner, id, cursor, tx, None)
 }
@@ -594,7 +597,7 @@ fn handle_call(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame: &Value) {
             "engine":inner.session.engine,"effort":state.effort,"pending_effort":state.pending_effort,"running":state.busy,"queued":state.prompts.len(),"remote_driver":remote_identity(&state),
             "can_set_model":can_set_model,
             "can_set_permission_mode":can_set_permission_mode,"peer_tools_ready":peer_tools_ready,
-            "lore_enabled":inner.host.lore_enabled(),"lore_scrub":lore_scrub,"billing":billing}})), None)
+            "lore_enabled":inner.host.lore_enabled(),"lore_scrub":lore_scrub,"billing":billing,"account":inner.host.account_snapshot()}})), None)
     } else if method == "switch_branch" {
         let idle = {
             let state = inner.state.lock().unwrap();

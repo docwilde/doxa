@@ -111,7 +111,7 @@ const COMMANDS: &[CommandHelp] = &[
     CommandHelp { name: "/compact", form: "/compact", summary: "Compact transcript", support: "Claude only · completed LORE review required" },
     CommandHelp { name: "/update", form: "/update [--restart]", summary: "Update DOXA", support: "local · reviewed install" },
     CommandHelp { name: "/help", form: "/help", summary: "Command registry", support: "local" },
-    CommandHelp { name: "/about", form: "/about", summary: "Rust version", support: "local · measured installation and selected session details" },
+    CommandHelp { name: "/about", form: "/about", summary: "Version and active session identity", support: "local · measured installation and selected session details" },
 ];
 
 /// Source-derived no-argument fleet verbs and argument forms shared by help
@@ -744,6 +744,7 @@ pub struct Session {
 
 #[derive(Clone, Debug, Default)]
 struct SessionTelemetry {
+    account: Option<serde_json::Value>,
     context: Option<String>,
     context_percent: Option<f64>,
     context_tokens: Option<u64>,
@@ -800,6 +801,16 @@ impl SessionTelemetry {
     }
 
     fn update_status(&mut self, status: &serde_json::Value) {
+        if let Some(account) = status.get("account") {
+            let mut fields = serde_json::Map::new();
+            for key in ["email", "organization", "subscriptionType", "apiProvider"] {
+                if let Some(text) = account[key].as_str().filter(|text| !text.trim().is_empty()
+                    && text.len() <= 256 && !text.chars().any(char::is_control)) {
+                    fields.insert(key.into(), serde_json::Value::String(safe_label(text.trim())));
+                }
+            }
+            self.account = (!fields.is_empty()).then_some(serde_json::Value::Object(fields));
+        }
         if let Some(billing) = status.get("billing") {
             self.billing_mode = match billing["mode"].as_str() {
                 Some("api") => Some("api".into()),
@@ -2853,7 +2864,7 @@ impl App {
             "/help" => {
                 self.open_help();
             }
-            "/about" => self.notice = format!("DOXA Rust {}", env!("CARGO_PKG_VERSION")),
+            "/about" => self.open_about(),
             "/sessions" => self.open_live_sessions(),
             "/settings" => self.open_settings_menu(),
             "/model" => self.open_model_picker(),
@@ -2978,13 +2989,14 @@ impl App {
                 }
                 return true;
             }
-            if key.code == KeyCode::Esc {
+            if key.code == KeyCode::Esc || (self.chip_info.as_ref().is_some_and(|info| info.kind == "about")
+                && matches!(key.code, KeyCode::Enter | KeyCode::Char('q'))) {
                 self.chip_info = None;
                 self.memory_menu_pending = None;
                 return true;
             }
             if let Some(info) = self.chip_info.as_mut().filter(|info|
-                matches!(info.kind, "memory" | "usage" | "context" | "help" | "sessions")) {
+                matches!(info.kind, "memory" | "usage" | "context" | "help" | "sessions" | "about")) {
                 match key.code {
                     KeyCode::Up => info.scroll = info.scroll.saturating_sub(1),
                     KeyCode::Down => info.scroll = info.scroll.saturating_add(1).min(info.lines.len().saturating_sub(1)),
@@ -6803,7 +6815,7 @@ impl App {
         } else if let Some(menu) = &self.operations_menu {
             (menu.lines(usize::from(pane.width)).len() + 2).clamp(7, 19) as u16
         } else if self.chip_info.is_some() {
-            self.chip_info.as_ref().map_or(5, |info| if matches!(info.kind, "memory" | "usage" | "context" | "help" | "sessions" | "fleet" | "fleet_review") {
+            self.chip_info.as_ref().map_or(5, |info| if matches!(info.kind, "memory" | "usage" | "context" | "help" | "sessions" | "about" | "fleet" | "fleet_review") {
                 (info.lines.len() + 2).clamp(7, 19) as u16
             } else { 5 })
         } else if self.history_modal {
@@ -7072,6 +7084,30 @@ impl App {
         if self.active_chooser_rect().is_none() {
             self.chip_info = None;
             self.notice = "Enlarge active pane to inspect chip details".into();
+        }
+    }
+
+    fn open_about(&mut self) {
+        let id = self.groups[self.active_group].active_id();
+        let mut lines = vec![format!("DOXA Rust {}", env!("CARGO_PKG_VERSION")), String::new()];
+        if let Some(id) = id {
+            lines.push(format!("Active session · {}", safe_label(id)));
+            if let Some((engine, model)) = self.session_identity.get(id) {
+                if let Some(engine) = engine { lines.push(format!("Engine · {engine}")); }
+                if let Some(model) = model { lines.push(format!("Model · {model}")); }
+            }
+            if let Some(account) = self.session_telemetry.get(id).and_then(|state| state.account.as_ref()) {
+                for (key, label) in [("email", "Account"), ("organization", "Organization"),
+                    ("subscriptionType", "Subscription"), ("apiProvider", "API provider")] {
+                    if let Some(text) = account[key].as_str() { lines.push(format!("{label} · {text}")); }
+                }
+            } else { lines.push("Account identity unavailable for this connected session".into()); }
+        } else { lines.push("No active session".into()); }
+        self.chip_info = Some(ChipInfo { kind: "about", label: String::new(), lines,
+            scroll: 0, owner: id.map(|id| (id.to_owned(), String::new())) });
+        if self.active_chooser_rect().is_none() {
+            self.chip_info = None;
+            self.notice = "Enlarge active pane to open about".into();
         }
     }
 
@@ -8353,7 +8389,7 @@ impl App {
                 .block(Block::default().title(" Fleet · PgUp/PgDn scroll ").borders(Borders::ALL))
                 .style(Style::default().fg(theme::TEXT).bg(theme::RAISED)),area);return;
         }
-        if matches!(info.kind, "memory" | "usage" | "context" | "help" | "sessions") {
+        if matches!(info.kind, "memory" | "usage" | "context" | "help" | "sessions" | "about") {
             let current = self.groups[self.active_group].active_id().and_then(|id|
                 self.session_cwds.get(id).and_then(|cwd| cwd.to_str()).map(|cwd| (id, cwd)));
             let owner_matches = info.owner.as_ref().is_some_and(|(id, cwd)| {
@@ -11630,6 +11666,34 @@ for line in sys.stdin:
         assert!(app.local_shell_jobs.is_empty()); assert_eq!(std::fs::read_to_string(proof).unwrap(), "keyboard");
         assert!(app.sessions[0].transcript.contains("DOXA_LOCAL_SHELL:"));
         assert!(!COMMANDS.iter().any(|row| row.name == "/shell" || row.name == "!"));
+    }
+
+    #[test]
+    fn about_uses_only_selected_session_account_and_clears_missing_identity() {
+        let mut app = App::default();
+        app.handle(Event::Resize(100, 30));
+        for (id, email) in [("first", "first@example.test"), ("second", "second@example.test")] {
+            app.apply_daemon_frame(&json!({"type":"hello","session_id":id,"engine":"claude",
+                "model":"sonnet","cwd":"/project","account":{"email":email,
+                    "organization":"SDK org","accessToken":"secret"}}));
+        }
+        app.groups[0].active = app.groups[0].tabs.iter().position(|id| id == "first").unwrap();
+        app.input = "draft unchanged".into();
+        app.open_about();
+        let info = app.chip_info.as_ref().unwrap();
+        assert!(info.lines.iter().any(|line| line.contains("first@example.test")));
+        assert!(info.lines.iter().any(|line| line.contains("SDK org")));
+        assert!(!info.lines.iter().any(|line| line.contains("second@example.test") || line.contains("secret")));
+        assert_eq!(app.input, "draft unchanged");
+        assert!(app.pending_prompts.is_empty());
+        app.apply_daemon_frame(&json!({"type":"telemetry_status","session_id":"first",
+            "status":{"account":null}}));
+        app.open_about();
+        assert!(app.chip_info.as_ref().unwrap().lines.iter().any(|line| line.contains("unavailable")));
+        assert!(!app.chip_info.as_ref().unwrap().lines.iter().any(|line| line.contains("first@example.test")));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)));
+        assert!(app.chip_info.is_none());
+        assert_eq!(app.input, "draft unchanged");
     }
 
     #[test]
