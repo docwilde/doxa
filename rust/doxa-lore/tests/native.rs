@@ -36,3 +36,22 @@ fn native_transcript_identity_uses_canonical_projects_key_without_store_io() {
     assert!(!slug.is_empty());
     assert!(!root.exists());
 }
+
+#[test]
+fn native_index_transcript_preserves_existing_indexed_and_consumed_contract() {
+    use std::{fs, os::unix::fs::PermissionsExt};
+    let owned = tempfile::tempdir().unwrap();
+    let root = owned.path().join("store");
+    let config = lore_core::config::Config::for_root(root.clone());
+    let slug = lore_core::config::project_slug(owned.path());
+    let directory = config.projects.join(slug);
+    fs::create_dir_all(&directory).unwrap();
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+    let path = directory.join("native-owned-1.jsonl");
+    let record = serde_json::json!({"type":"user", "sessionId":"native-owned-1", "cwd":owned.path(),
+        "timestamp":"2026-09-27T12:00:00Z", "message":{"role":"user","content":"owned native index fixture"}});
+    fs::write(&path, format!("{record}\n")).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    let mut client = LoreClient::open_config(config, Duration::from_secs(1)).unwrap();
+    assert_eq!(client.index_transcript(owned.path().to_str().unwrap(), "native-owned-1").unwrap(), 1);
+}
