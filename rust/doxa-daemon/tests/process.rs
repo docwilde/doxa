@@ -2302,7 +2302,7 @@ mod vendor_process {
                 let mut names:Vec<_>=request["tools"].as_array().unwrap().iter()
                     .map(|tool|tool["function"]["name"].as_str().unwrap()).collect();
                 names.sort_unstable();
-                assert_eq!(names,["mcp__doxa__lore_belief_neighbours", "mcp__doxa__lore_belief_search", "mcp__doxa__lore_belief_show", "mcp__doxa__lore_memory_list", "mcp__doxa__lore_remember", "mcp__doxa__lore_session_search", "mcp__doxa__peer_history", "mcp__doxa__peer_list", "mcp__doxa__peer_send"]);
+                assert_eq!(names,["lore_belief_neighbours", "lore_belief_search", "lore_belief_show", "lore_memory_list", "lore_remember", "lore_session_search", "mcp__doxa__peer_history", "mcp__doxa__peer_list", "mcp__doxa__peer_send"]);
             }
             assert_eq!(requests[1]["messages"][2]["content"], "[REDACTED:api-key] answer");
             assert!(!requests[1].to_string().contains("sk-ownedCanonicalFixtureSecret1234567890"));
