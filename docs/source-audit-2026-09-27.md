@@ -96,27 +96,32 @@ from outside a checkout. Existing server processes need restarting after update.
   Their lifetime/deadline guarantees need to hold through successful completion,
   abrupt parent death, wrapper forwarding and asynchronous UI activation.
 
+## Follow-up fixes in alpha.33
+
+| Finding | Correction and evidence |
+| --- | --- |
+| Background control replies overwrote the focused notice; disconnected queues could clear unrelated effort verification. | Typed owner-qualified replies and a shared reducer preserve other sessions' drafts, notices and admitted verification. |
+| Capability checks and effort policy were duplicated, and effort metadata was shared across sessions. | Reuse engine capabilities and vendor policy. Session-qualified catalogs treat empty metadata as authoritative; failed/loading refreshes revoke choices. Keyboard and mouse application recheck current capabilities. |
+| Registry scans duplicated unbounded enumeration and entry checks. | State, discovery, peer registry and presence use canonical bounded readers with explicit overflow, opened-inode checks and private ownership rules; Python peers retain matching limits. |
+| Clean-session metadata could get ahead of durable transcript bytes. | Sync the complete final transcript record and directory before atomically syncing checkpoint metadata. Resume validates the byte boundary and final record. Fixtures cover publication failures and legacy recordings; no actual power outage was simulated. |
+| Peer and mesh processing lacked finite resource limits. | Cap refusal history, active connections, headers, deadlines, ledger/record/page sizes, routing identities, recipients and normalized JSON. Oversized pages preserve whole-record cursors. Browser node/tie/replay/feed capacities evict coherent projections and display a limited-view notice; an owned Node rotation fixture verifies bounded retention. |
+
+The integrated Rust workspace passed 856 test executions with all features
+enabled. Focused peer/mesh Python checks passed 111 tests. Browser/page/wheel follow-up checks passed 79 tests. These are separate
+runs, not additive unique-test totals. Fixtures use private stores and owned
+processes; no paid provider request or real memory mutation was performed.
+
 ## Remaining work and boundaries
 
-Structural refactoring should be a separate change with preserved behavioral
-contracts. Start with typed UI commands and owner transitions, a shared provider
-capability policy, and one registry reader. Avoid replacing provider adapters
-with a single implementation merely to reduce file count.
+The owner reducer, shared capability policy and registry reader address the
+specific demonstrated structural failures. Other menu/job JSON protocols and
+the large frontend coordinator remain candidates for gradual extraction with
+preserved behavioral contracts. Provider adapters retain distinct transports.
 
-A remaining low-priority UI issue is that a background session's model or
-permission reply can replace the active session's status notice. The actual
-settings update remains scoped to its session. Qualifying notices by owner
-should accompany the typed reply refactor.
-
-The transcript writer's ordering relative to Codex clean-session metadata also
-needs a durability review: append currently does not synchronize storage before
-the clean marker. A power-loss recovery failure was not reproduced in this audit;
-transactional checkpoint durability should be validated before claiming that case.
-
-Availability concerns needing further focused validation include the retained
-Python peer refusal history, browser mesh connection concurrency and ledger
-batching, and unbounded registry-directory enumeration. These are not claimed
-fixed by the asset-packaging change.
+Native LORE integration is in progress in the canonical LORE repository. The
+current alpha.33 still uses its external LORE carrier; it does not claim that
+the native memory port has shipped. Live provider/account compatibility and
+macOS/Windows behavior remain outside the local fixture evidence.
 
 The optional retained browser remote adapter is deliberately unavailable until
 its transport can prove proxy identity. Codex protected compaction remains pinned

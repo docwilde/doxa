@@ -5,6 +5,21 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.33 — 2026-09-27
+
+- Address engineering audit findings with typed, session-owned control replies,
+  shared provider capabilities and checked registry readers. Background replies
+  and disconnected queues preserve other sessions' notices and effort verification.
+- Scope effort catalogs to each session and recheck live picker capabilities.
+  Empty or failed refreshes revoke stale choices.
+- Synchronize complete transcript records before publishing durable clean-session
+  checkpoints. Validate checkpoint boundaries while retaining older recordings.
+- Bound peer refusal history, registry enumeration, mesh connection admission,
+  header deadlines, ledger pages and normalized graph edge JSON. Bound browser
+  nodes, ties, replay IDs and traffic retention; display a limited-view notice.
+- Rewrite “What you get” as concise feature bullets. Publish the Rust alpha as
+  the official latest GitHub release while retaining its alpha maturity label.
+
 ## 2.0.0-alpha.32 — 2026-09-27
 
 - Fix issues found in the post-release source audit: detached provider work now
