@@ -34,6 +34,7 @@ pub struct VendorHost {
     catalog: Mutex<Option<Vec<doxa_vendors::ModelCapability>>>,
     lore: Mutex<LoreClient>,
     lore_enabled: bool,
+    agent_tools: Option<Arc<crate::agent_tools::AgentTools>>,
     context: Mutex<Option<LoreClient>>,
     lore_python: PathBuf,
     session_id: String,
@@ -127,13 +128,15 @@ impl VendorHost {
                 .scrub(content)
                 .map_err(|_| { "LORE scrub failed for saved vendor message" })?);
         }
+        let lore_enabled = doxa_state::lore_enabled_default();
+        let agent_tools = crate::agent_tools::AgentTools::new(lore_python, &cwd, session_id, vendor.engine_id(), lore_enabled);
         let host = Self {
             vendor,
             model: Mutex::new(model),
             effort: Mutex::new(effort),
             catalog: Mutex::new(None),
             lore: Mutex::new(lore),
-            lore_enabled: doxa_state::lore_enabled_default(),
+            lore_enabled, agent_tools,
             context: Mutex::new(None), lore_python: lore_python.to_owned(),
             session_id: session_id.to_owned(), finalized: AtomicBool::new(false),
             scrub_failed: AtomicBool::new(false),
@@ -201,6 +204,7 @@ impl VendorHost {
         if self.finalized.swap(true, Ordering::AcqRel) { return; }
         self.closing.store(true, Ordering::Release);
         self.cancel();
+        if let Some(tools) = &self.agent_tools { tools.close(); }
         let deadline = Instant::now() + Duration::from_secs(5);
         while self.active.lock().unwrap().is_some() {
             if Instant::now() >= deadline { return; }
@@ -296,20 +300,23 @@ impl Host for VendorHost {
         let selected_model = self.model.lock().unwrap().clone();
         let peer = self.peer_tools.lock().unwrap().clone();
         emit(json!({"type":"turn_started","data":{"prompt":prompt,
-            "vendor_tools":match (self.workspace_read, peer.is_some()) {
-                (true, true) => "workspace-read, peers", (true, false) => "workspace-read",
-                (false, true) => "peers", (false, false) => "none"
+            "vendor_tools":match (self.workspace_read, peer.is_some(), self.agent_tools.is_some()) {
+                (true, true, true) => "workspace-read, peers, lore", (true, false, true) => "workspace-read, lore",
+                (false, true, true) => "peers, lore", (false, false, true) => "lore",
+                (true, true, false) => "workspace-read, peers", (true, false, false) => "workspace-read",
+                (false, true, false) => "peers", (false, false, false) => "none"
             }}}));
         let mut history = self.history.lock().unwrap().clone();
         let saved_history = history.clone();
         history.insert(0, self.system_message());
         let scrub_tool = |value: &str| self.scrub(value);
-        let tools_enabled = self.workspace_read || peer.is_some();
+        let tools_enabled = self.workspace_read || peer.is_some() || self.agent_tools.is_some();
         let output = std::cell::RefCell::new(&mut *emit);
         let tool_events = Arc::new(Mutex::new(Vec::new()));
         let emit_tool = |event: Value| (output.borrow_mut())(event);
         let mut gate = NativeVendorGate::new(Path::new(&self.cwd), self.workspace_read, peer,
             self.peer_desk.clone(), &scrub_tool, &emit_tool, tool_events.clone());
+        if let Some(tools) = &self.agent_tools { gate = gate.with_agent(tools.vendor_definitions(), tools.vendor_handler()); }
         let gate = if tools_enabled { Some(&mut gate as &mut dyn doxa_vendors::ToolGate) } else { None };
         let mut reasoning_chars = 0u64;
         let mut reported_tokens = 0u64;

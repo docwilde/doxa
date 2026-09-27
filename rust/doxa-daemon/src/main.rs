@@ -1,4 +1,5 @@
 //! Native DOXA protocol host. The fixture remains an explicit test mode.
+mod agent_tools;
 mod claude_host;
 mod budget_host;
 mod codex_host;

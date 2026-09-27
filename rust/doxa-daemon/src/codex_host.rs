@@ -52,6 +52,7 @@ pub struct CodexHost {
     peer_tools_allowed: bool,
     lore_python: PathBuf,
     lore_enabled: bool,
+    agent_tools: Option<Arc<crate::agent_tools::AgentTools>>,
     scrub_failed: Arc<AtomicBool>,
     persistence_failed: AtomicBool,
     lore: Arc<Mutex<LoreClient>>,
@@ -123,6 +124,7 @@ impl CodexHost {
         let mut rollout_path = None;
         let mut saved_transport = None;
         let mut saved_peer_tools = false;
+        let mut saved_lore_tools = false;
         let previous = if let Some(value) = thread_record {
             if value["lore_enabled"].as_bool().is_some_and(|recorded| recorded != lore_enabled)
                 || (!lore_enabled && value["lore_enabled"].as_bool().is_none()) {
@@ -165,6 +167,10 @@ impl CodexHost {
                 None => false,
                 _ => return Err("Codex peer tool metadata is invalid".into()),
             };
+            saved_lore_tools = match value.get("lore_tools") {
+                Some(Value::Bool(enabled)) => *enabled, None => false,
+                _ => return Err("Codex LORE tool metadata is invalid".into()),
+            };
             saved_transport = match value.get("transport") {
                 None => Some("exec"),
                 Some(Value::String(transport)) if transport == "exec" => Some("exec"),
@@ -185,6 +191,13 @@ impl CodexHost {
         let transport = saved_transport.unwrap_or_else(|| {
             if std::env::var("DOXA_CODEX_APPSERVER").as_deref() == Ok("0") { "exec" } else { "app-server" }
         });
+        let agent_tools = if transport == "app-server" && (options.resume_thread.is_none() || saved_lore_tools) {
+            crate::agent_tools::AgentTools::new(lore_python, &cwd, session_id, "codex", lore_enabled)
+        } else { None };
+        if saved_lore_tools && agent_tools.is_none() {
+            return Err("Codex saved LORE tools are unavailable; refusing to resume the thread".into());
+        }
+        if transport == "exec" { options.config_overrides = crate::agent_tools::mcp_overrides(lore_python, &cwd, session_id, lore_enabled); }
         let peer_tools_allowed = transport == "app-server" && (options.resume_thread.is_none() || saved_peer_tools);
         let selection = (options.model.clone(), options.effort.clone());
         let catalog_options = AppServerOptions { executable: options.executable.clone(), cwd: options.cwd.clone(),
@@ -256,7 +269,7 @@ impl CodexHost {
             peer_tools: Mutex::new(None), peer_tools_allowed, lore_python: lore_python.to_owned(),
             scrub_failed,
             persistence_failed: AtomicBool::new(false),
-            lore, lore_enabled,
+            lore, lore_enabled, agent_tools,
             index_tx,
             index_worker: Mutex::new(Some(index_worker)),
             store,
@@ -329,6 +342,7 @@ impl CodexHost {
         drop(selection);
         fields.insert("transport".into(), json!(self.transport));
         fields.insert("lore_enabled".into(), json!(self.lore_enabled));
+        fields.insert("lore_tools".into(), json!(self.agent_tools.is_some()));
         fields.insert("peer_tools".into(), json!(self.peer_tools_allowed && self.peer_tools.lock().unwrap().is_some()));
         fields.insert("cwd".into(), json!(self.cwd));
         fields.insert("recorded".into(), json!(crate::iso_now()));
@@ -391,6 +405,7 @@ impl CodexHost {
     pub fn shutdown(&self) -> bool {
         self.closing.store(true, Ordering::Release);
         self.cancel();
+        if let Some(tools) = &self.agent_tools { tools.close(); }
         let deadline = Instant::now() + Duration::from_secs(5);
         while self.active.lock().unwrap().is_some() {
             if Instant::now() >= deadline {
@@ -596,7 +611,8 @@ impl Host for CodexHost {
                                     _ = token.cancelled() => Err(AppServerError::Cancelled),
                                     result = async {
                                         let gate = self.compact_gate()?;
-                                        AppServerDriver::spawn_protected(options.clone(), scrub, peer_tools_enabled, gate).await
+                                        AppServerDriver::spawn_protected_with_agent_tools(options.clone(), scrub, peer_tools_enabled, gate,
+                                            self.agent_tools.as_ref().map(|tools| tools.definitions()).unwrap_or_default()).await
                                     } => result,
                                 }
                             }) {
@@ -640,8 +656,13 @@ impl Host for CodexHost {
                                     })
                                     };
                                     let pending = if frame["method"] == "item/tool/call" {
-                                        let handler = self.peer_tools.lock().unwrap().clone().ok_or("Codex peer tools unavailable")?;
-                                        self.input.begin_peer(frame, scrub, handler)
+                                        let name = frame["params"]["tool"].as_str().unwrap_or("");
+                                        if let Some(tools) = self.agent_tools.as_ref().filter(|tools| tools.contains(name)) {
+                                            self.input.begin_operator(frame, scrub, tools.handler(), &tools.callback_definitions())
+                                        } else {
+                                            let handler = self.peer_tools.lock().unwrap().clone().ok_or("Codex tool unavailable")?;
+                                            self.input.begin_peer(frame, scrub, handler)
+                                        }
                                     } else { self.input.begin(frame, scrub) };
                                     pending.and_then(|pending| {
                                     if self.scrub_failed.load(Ordering::Acquire) {

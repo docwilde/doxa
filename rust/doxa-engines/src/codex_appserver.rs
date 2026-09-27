@@ -55,6 +55,7 @@ pub struct AppServerDriver {
     effort: Option<String>,
     interactive: bool,
     peer_tools: bool,
+    agent_tools: Vec<Value>,
     compact_gate: Option<crate::codex_compact::CompactGate>,
     review_items: Vec<Value>,
     scrub: Box<dyn Fn(&str) -> String + Send + Sync>,
@@ -119,7 +120,22 @@ impl AppServerDriver {
         peer_tools: bool,
         gate: crate::codex_compact::CompactGate,
     ) -> Result<Self, AppServerError> {
+        Self::spawn_protected_with_agent_tools(options, scrub, peer_tools, gate, Vec::new()).await
+    }
+    pub async fn spawn_protected_with_agent_tools(
+        options: AppServerOptions,
+        scrub: impl Fn(&str) -> String + Send + Sync + 'static,
+        peer_tools: bool,
+        gate: crate::codex_compact::CompactGate,
+        definitions: Vec<Value>,
+    ) -> Result<Self, AppServerError> {
+        if definitions.len() > 6 || definitions.iter().enumerate().any(|(index,row)| definitions[..index].iter().any(|prior| prior["name"] == row["name"])) || definitions.iter().any(|row| row["name"].as_str().is_none_or(|name|
+            !matches!(name, "mcp__doxa__lore_belief_search" | "mcp__doxa__lore_belief_show" | "mcp__doxa__lore_belief_neighbours" |
+                "mcp__doxa__lore_memory_list" | "mcp__doxa__lore_session_search" | "mcp__doxa__lore_remember")) || row["inputSchema"]["type"] != "object") {
+            return Err(AppServerError::Protocol("Invalid canonical LORE tool catalog"));
+        }
         let mut driver = Self::initialize_with_gate(options, scrub, Some(gate)).await?;
+        driver.agent_tools = definitions;
         driver.interactive = true;
         driver.peer_tools = peer_tools;
         driver.start_thread().await?;
@@ -154,7 +170,7 @@ impl AppServerDriver {
         let scrub = std::sync::Arc::new(scrub);
         let tool_scrub = scrub.clone();
         let mut driver = Self {
-            options, effort: None, interactive: false, peer_tools: false, compact_gate, review_items: Vec::new(), scrub: Box::new(move |text| scrub(text)), child, process_group, stdin, stdout, next_id: 0,
+            options, effort: None, interactive: false, peer_tools: false, agent_tools: Vec::new(), compact_gate, review_items: Vec::new(), scrub: Box::new(move |text| scrub(text)), child, process_group, stdin, stdout, next_id: 0,
             thread_id: None, turn_id: None, reasoning_bytes: 0, reasoning_chars: 0,
             reasoning_buffer: String::new(), reasoning_truncated: false,
             assistant_buffers: Vec::new(), assistant_bytes: 0, assistant_message_emitted: false, usage: None, effective_model: None,
@@ -186,7 +202,9 @@ impl AppServerDriver {
             driver.request("thread/resume", json!({"threadId":id,"cwd":driver.options.cwd,"model":driver.options.model,"approvalPolicy":approval,"sandbox":sandbox_name(driver.options.sandbox),"excludeTurns":true})).await?
         } else {
             let mut params = json!({"cwd":driver.options.cwd,"model":driver.options.model,"approvalPolicy":approval,"sandbox":sandbox_name(driver.options.sandbox)});
-            if driver.peer_tools { params["dynamicTools"] = json!(crate::peer_tools::definitions()); }
+            let mut tools = if driver.peer_tools { crate::peer_tools::definitions() } else { Vec::new() };
+            tools.extend(driver.agent_tools.clone());
+            if !tools.is_empty() { params["dynamicTools"] = json!(tools); }
             driver.request("thread/start", params).await?
         };
         // Protected sessions must establish the requested price/model basis

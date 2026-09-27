@@ -221,9 +221,16 @@ impl LoreClient {
     /// Launch the sidecar lazily, only when a session requests LORE.
     /// `python` should point at the environment that installed DOXA and LORE.
     pub fn spawn(python: &Path, timeout: Duration) -> Result<Self, LoreError> {
+        Self::spawn_module(python, timeout, "doxa.lore_bridge", &["scrub", "snapshot"])
+    }
+    /// Separate canonical agent operator process; it binds one host identity.
+    pub fn spawn_agent(python: &Path, timeout: Duration) -> Result<Self, LoreError> {
+        Self::spawn_module(python, timeout, "doxa.native_agent_tools", &["agent_catalog_v1", "agent_tool_v1"])
+    }
+    fn spawn_module(python: &Path, timeout: Duration, module: &str, required: &[&str]) -> Result<Self, LoreError> {
         let mut command = Command::new(python);
         command
-            .args(["-m", "doxa.lore_bridge"])
+            .args(["-m", module])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
@@ -293,7 +300,7 @@ impl LoreClient {
         let caps = hello["capabilities"]
             .as_array()
             .ok_or(LoreError::InvalidFrame)?;
-        if !["scrub", "snapshot"]
+        if !required
             .iter()
             .all(|name| caps.iter().any(|cap| cap.as_str() == Some(name)))
         {
@@ -306,6 +313,29 @@ impl LoreClient {
             .map(str::to_owned)
             .collect();
         Ok(client)
+    }
+
+    pub fn agent_catalog(&mut self, identity: &Value) -> Result<Vec<Value>, LoreError> {
+        let value = self.request_value("agent_catalog_v1", json!({"identity":identity}))?;
+        let rows = value.as_array().filter(|rows| rows.len() <= 6).ok_or(LoreError::InvalidFrame)?;
+        let mut seen = HashSet::new();
+        for row in rows {
+            let name = row["name"].as_str().ok_or(LoreError::InvalidFrame)?;
+            if !matches!(name, "lore_belief_search" | "lore_belief_show" | "lore_belief_neighbours" |
+                "lore_memory_list" | "lore_session_search" | "lore_remember") || !seen.insert(name)
+                || row["description"].as_str().is_none_or(|text| text.len() > 8192 || text.chars().any(char::is_control))
+                || row["inputSchema"]["type"] != "object" || !row["inputSchema"].is_object() {
+                return Err(LoreError::InvalidFrame);
+            }
+        }
+        if serde_json::to_vec(rows).map_or(true, |bytes| bytes.len() > 32 * 1024) { return Err(LoreError::InvalidFrame); }
+        Ok(rows.clone())
+    }
+    pub fn agent_call(&mut self, identity: &Value, name: &str, arguments: &Value) -> Result<Value, LoreError> {
+        if !arguments.is_object() || serde_json::to_vec(arguments).map_or(true, |bytes| bytes.len() > 32 * 1024) {
+            return Err(LoreError::InvalidFrame);
+        }
+        self.request_value("agent_tool_v1", json!({"identity":identity,"name":name,"arguments":arguments}))
     }
 
     pub fn scrub(&mut self, text: &str) -> Result<String, LoreError> {

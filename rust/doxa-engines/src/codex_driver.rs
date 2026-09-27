@@ -50,6 +50,8 @@ pub struct DriverOptions {
     pub resume_thread: Option<String>,
     /// Refuse to create a new thread if the requested resume ID is absent.
     pub require_resume: bool,
+    /// Host-built non-secret MCP overrides, repeated for every first/resume turn.
+    pub config_overrides: Vec<String>,
 }
 
 impl DriverOptions {
@@ -63,6 +65,7 @@ impl DriverOptions {
             turn_timeout: Duration::from_secs(3600),
             resume_thread: None,
             require_resume: false,
+            config_overrides: Vec::new(),
         }
     }
 
@@ -93,6 +96,7 @@ impl DriverOptions {
         if let Some(effort) = &self.effort {
             args.extend(["-c".to_owned(), format!("model_reasoning_effort={}", serde_json::to_string(effort).unwrap())]);
         }
+        for value in &self.config_overrides { args.extend(["-c".to_owned(), value.clone()]); }
         args.push("-".to_owned());
         Ok(args)
     }

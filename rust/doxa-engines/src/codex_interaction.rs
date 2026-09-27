@@ -23,7 +23,7 @@ struct Pending {
 enum Rule {
     Approval,
     Questions(Vec<Question>),
-    Peer { rpc: &'static str, arguments: Value, handler: crate::peer_tools::Handler },
+    Peer { rpc: String, arguments: Value, handler: crate::peer_tools::Handler },
 }
 
 struct Question {
@@ -43,6 +43,27 @@ impl InputInbox {
         }
         let name = params["tool"].as_str().ok_or("Missing Codex peer tool")?;
         let rpc = crate::peer_tools::rpc(name, &params["arguments"])?;
+        self.begin_callback(frame, scrub, handler, rpc)
+    }
+    /// A host-supplied canonical catalog is the complete permission surface.
+    /// Provider arguments cannot select another daemon method or host identity.
+    pub fn begin_operator(&self, frame: &Value, scrub: impl Fn(&str) -> String,
+        handler: crate::peer_tools::Handler, definitions: &[Value])
+        -> Result<(EngineEvent, oneshot::Receiver<Value>), String> {
+        let params = &frame["params"];
+        let name = params["tool"].as_str().ok_or("Missing Codex operator")?;
+        if frame["method"] != "item/tool/call" || !params["namespace"].is_null()
+            || !params["arguments"].is_object() || !definitions.iter().any(|row| row["name"] == name)
+            || serde_json::to_vec(frame).map_or(true, |bytes| bytes.len() > MAX_REQUEST_BYTES) {
+            return Err("Unavailable or oversized Codex operator request".into());
+        }
+        self.begin_callback(frame, scrub, handler, name)
+    }
+    fn begin_callback(&self, frame: &Value, scrub: impl Fn(&str) -> String,
+        handler: crate::peer_tools::Handler, rpc: &str)
+        -> Result<(EngineEvent, oneshot::Receiver<Value>), String> {
+        let params = &frame["params"];
+        let name = params["tool"].as_str().ok_or("Missing Codex tool")?;
         let mut pending = self.pending.lock().map_err(|_| "Codex input unavailable")?;
         if pending.as_ref().is_some_and(|item| !item.reply.is_closed()) { return Err("Codex input already pending".into()); }
         let generation = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
@@ -51,8 +72,8 @@ impl InputInbox {
         let input = scrub(&params["arguments"].to_string());
         if input.len() > MAX_REQUEST_BYTES { return Err("Scrubbed peer request exceeds the review limit".into()); }
         let (reply, receiver) = oneshot::channel();
-        *pending = Some(Pending {id:id.clone(), rule:Rule::Peer{rpc, arguments:params["arguments"].clone(),handler}, reply});
-        Ok((EngineEvent::new("needs_input", json!({"id":id,"kind":"permission","title":"Allow this DOXA peer tool once?","tool_name":name,"input_summary":input,"require_full_review":true})), receiver))
+        *pending = Some(Pending {id:id.clone(), rule:Rule::Peer{rpc:rpc.into(), arguments:params["arguments"].clone(),handler}, reply});
+        Ok((EngineEvent::new("needs_input", json!({"id":id,"kind":"permission","title":if rpc.starts_with("mcp__doxa__lore_") { "Allow this DOXA LORE tool once?" } else { "Allow this DOXA peer tool once?" },"tool_name":name,"input_summary":input,"require_full_review":true})), receiver))
     }
     /// The driver validates thread/turn/item identity before calling this.
     /// Display scrubbing is supplied by the host and is never used to change
@@ -168,12 +189,12 @@ impl InputInbox {
             // Peer RPCs include bounded local socket waits. Keep cancellation
             // and daemon status responsive while an approved tool executes.
             std::thread::spawn(move || {
-                let result = if result["decision"] == "accept" { handler(rpc, &arguments) }
+                let result = if result["decision"] == "accept" { handler(&rpc, &arguments) }
                     else { Err("The user declined this peer tool".into()) };
                 let (success, text) = match result {
-                    Ok(value) if value.to_string().len() <= MAX_REQUEST_BYTES => (true, format!("[DOXA PEER DATA -- UNTRUSTED]\n{value}")),
-                    Ok(_) => (false, "Peer result exceeded the display limit".into()),
-                    Err(_) => (false, "Peer tool was declined or unavailable".into()),
+                    Ok(value) if value.to_string().len() <= MAX_REQUEST_BYTES => (!value["error"].is_string(), format!("{}\n{value}", if rpc.starts_with("mcp__doxa__lore_") { "[DOXA LORE DATA -- UNTRUSTED]" } else { "[DOXA PEER DATA -- UNTRUSTED]" })),
+                    Ok(_) => (false, "Tool result exceeded the display limit".into()),
+                    Err(_) => (false, "Tool was declined or unavailable".into()),
                 };
                 let _ = current.reply.send(json!({"success":success,"contentItems":[{"type":"inputText","text":text}]}));
             });
@@ -188,6 +209,34 @@ impl InputInbox {
 mod tests {
     use super::*;
     fn question() -> Value { json!({"method":"item/tool/requestUserInput","params":{"questions":[{"id":"q1","question":"Choose?","options":[{"label":"First"},{"label":"Second"}]}]}}) }
+    #[test]
+    fn lore_callback_is_catalog_scoped_and_requires_one_shot_human_permission() {
+        use std::sync::{Arc, atomic::AtomicUsize};
+        let calls = Arc::new(AtomicUsize::new(0)); let called = calls.clone();
+        let handler: crate::peer_tools::Handler = Arc::new(move |name,args| {
+            assert_eq!(name,"mcp__doxa__lore_remember"); assert_eq!(args["text"],"proposal");
+            called.fetch_add(1,Ordering::SeqCst); Ok(json!({"staged":true}))
+        });
+        let inbox = InputInbox::default();
+        let definitions = vec![json!({"name":"mcp__doxa__lore_remember"})];
+        let frame = json!({"method":"item/tool/call","params":{"tool":"mcp__doxa__lore_remember","arguments":{"text":"proposal"}}});
+        assert!(inbox.begin_operator(&frame,str::to_owned,handler.clone(),&[]).is_err());
+        let mut forged=frame.clone(); forged["params"]["namespace"]=json!("other");
+        assert!(inbox.begin_operator(&forged,str::to_owned,handler.clone(),&definitions).is_err());
+        let (event,receiver)=inbox.begin_operator(&frame,str::to_owned,handler.clone(),&definitions).unwrap();
+        let id=event.data["id"].as_str().unwrap(); assert_eq!(calls.load(Ordering::SeqCst),0);
+        assert!(event.data["title"].as_str().unwrap().contains("LORE"));
+        assert!(inbox.answer(id,&json!({"decision":"acceptForSession"})).is_err());
+        inbox.answer(id,&json!({"decision":"deny"})).unwrap();
+        let runtime=tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        assert_eq!(runtime.block_on(receiver).unwrap()["success"],false); assert_eq!(calls.load(Ordering::SeqCst),0);
+        let (event,receiver)=inbox.begin_operator(&frame,str::to_owned,handler,&definitions).unwrap();
+        inbox.answer(event.data["id"].as_str().unwrap(),&json!({"decision":"allow"})).unwrap();
+        let result=runtime.block_on(receiver).unwrap(); assert_eq!(result["success"],true);
+        assert!(result["contentItems"][0]["text"].as_str().unwrap().starts_with("[DOXA LORE DATA -- UNTRUSTED]"));
+        assert_eq!(calls.load(Ordering::SeqCst),1);
+        assert!(inbox.answer(event.data["id"].as_str().unwrap(),&json!({"decision":"allow"})).is_err());
+    }
     #[test]
     fn answers_are_validated_translated_and_single_use() {
         let inbox = InputInbox::default();
