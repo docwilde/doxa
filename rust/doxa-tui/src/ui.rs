@@ -3815,12 +3815,12 @@ impl App {
             }
         };
         self.session_stop_pending = None;
-        for id in &report.stopped {
+        for id in report.stopped.iter().chain(report.requested.iter()) {
             self.killed_this_run.insert(id.clone());
             self.offline_ids.insert(id.clone());
             self.input_requests.retain(|request| request.session_id != *id);
             self.pending_answers.retain(|(session, _, _)| session != id);
-            self.apply_update(DaemonUpdate::Status { id: id.clone(), text: "Stopping".into() });
+            self.apply_update(DaemonUpdate::Status { id: id.clone(), text: if report.stopped.contains(id) { "Stopped" } else { "Stopping" }.into() });
         }
         self.notice = safe_label(&report.text());
         true
@@ -14252,7 +14252,7 @@ mod parity_tests {
         let before = app.groups.clone();
         let (tx, rx) = mpsc::sync_channel(1);
         app.session_stop_pending = Some(rx);
-        tx.send(crate::sessions::Report { stopped:vec!["current".into()],failed:Vec::new(),error:None }).unwrap();
+        tx.send(crate::sessions::Report { stopped:vec!["current".into()],requested:Vec::new(),failed:Vec::new(),error:None }).unwrap();
         assert!(app.poll_sessions_stop());
         assert_eq!(app.groups[0].tabs, before[0].tabs);
         assert_eq!(app.groups[0].active, before[0].active);
@@ -14260,6 +14260,13 @@ mod parity_tests {
         assert!(app.killed_this_run.contains("current"));
         assert!(app.offline_ids.contains("current"));
         assert!(app.notice.contains("stopped: current"));
+        let (tx, rx) = mpsc::sync_channel(1); app.session_stop_pending = Some(rx);
+        tx.send(crate::sessions::Report { stopped:Vec::new(),requested:vec!["current".into()],failed:Vec::new(),error:None }).unwrap();
+        assert!(app.poll_sessions_stop());
+        assert!(app.killed_this_run.contains("current"));
+        assert_eq!(app.input, "/sessions kill current"); assert_eq!(app.input_cursor, 7);
+        assert!(app.notice.contains("teardown unconfirmed"));
+        assert!(!app.notice.contains("stopped:"));
     }
 
     #[test]

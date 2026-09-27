@@ -29,12 +29,13 @@ pub fn targets(entries: Vec<Session>, action: &Action, attached: &HashSet<String
 }
 
 #[derive(Debug)]
-pub struct Report { pub stopped: Vec<String>, pub failed: Vec<String>, pub error: Option<String> }
+pub struct Report { pub stopped: Vec<String>, pub requested: Vec<String>, pub failed: Vec<String>, pub error: Option<String> }
 impl Report {
     pub fn text(&self) -> String {
         if let Some(error) = &self.error { return format!("sessions: {error}"); }
         let mut lines = Vec::new();
         if !self.stopped.is_empty() { lines.push(format!("stopped: {}", self.stopped.iter().map(|id| &id[..id.len().min(8)]).collect::<Vec<_>>().join(", "))); }
+        if !self.requested.is_empty() { lines.push(format!("stop accepted; teardown unconfirmed: {}", self.requested.iter().map(|id| &id[..id.len().min(8)]).collect::<Vec<_>>().join(", "))); }
         if !self.failed.is_empty() { lines.push(format!("could not stop: {}", self.failed.iter().map(|id| &id[..id.len().min(8)]).collect::<Vec<_>>().join(", "))); }
         lines.join(" · ")
     }
@@ -47,7 +48,7 @@ pub fn start(action: Action, attached: HashSet<String>) -> io::Result<Receiver<R
     Ok(rx)
 }
 fn run(runtime: &Path, action: Action, attached: HashSet<String>) -> Report {
-    let mut report = Report { stopped: Vec::new(), failed: Vec::new(), error: None };
+    let mut report = Report { stopped: Vec::new(), requested: Vec::new(), failed: Vec::new(), error: None };
     let entries = match discovery::sessions_in(runtime).and_then(|entries| targets(entries, &action, &attached)) {
         Ok(entries) => entries,
         Err(error) => { report.error = Some(error.to_string()); return report; }
@@ -59,34 +60,54 @@ fn run(runtime: &Path, action: Action, attached: HashSet<String>) -> Report {
     // Bound total work even with a hostile listener or a very large registry.
     let deadline = Instant::now() + Duration::from_secs(60);
     for entry in entries {
-        if stop_verified(runtime, &entry, deadline).is_ok() { report.stopped.push(entry.id); }
-        else { report.failed.push(entry.id); }
+        match stop_verified(runtime, &entry, deadline) {
+            Ok(StopOutcome::Completed) => report.stopped.push(entry.id),
+            Ok(StopOutcome::Requested) => report.requested.push(entry.id),
+            Err(_) => report.failed.push(entry.id),
+        }
     }
     report
 }
 
-pub fn stop_verified(runtime: &Path, selected: &Session, deadline: Instant) -> io::Result<()> {
-    stop_verified_method(runtime, selected, deadline, "stop")
+#[derive(Debug, PartialEq, Eq)]
+pub enum StopOutcome { Completed, Requested }
+pub fn stop_verified(runtime: &Path, selected: &Session, deadline: Instant) -> io::Result<StopOutcome> {
+    stop_verified_method(runtime, selected, deadline, "stop", true)
 }
-
 pub fn stop_idle_verified(runtime: &Path, selected: &Session, deadline: Instant) -> io::Result<()> {
-    stop_verified_method(runtime, selected, deadline, "stop_if_idle")
+    // Update restart owns its separate all-target teardown check.
+    stop_verified_method(runtime, selected, deadline, "stop_if_idle", false).map(|_| ())
 }
-
-fn stop_verified_method(runtime: &Path, selected: &Session, deadline: Instant, method: &str) -> io::Result<()> {
+fn stop_verified_method(runtime: &Path, selected: &Session, deadline: Instant, method: &str, retirement: bool) -> io::Result<StopOutcome> {
+    use std::os::unix::fs::MetadataExt;
     let fresh = discovery::sessions_in(runtime)?.into_iter().find(|entry|
         entry.id == selected.id && entry.socket == selected.socket)
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "session identity changed before stop"))?;
     let pid = fresh.socket.file_stem().and_then(|name| name.to_str()).and_then(|name| name.rsplit('-').next())
         .and_then(|pid| pid.parse::<i32>().ok()).filter(|pid| *pid > 0)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid daemon process identity"))?;
+    let metadata = std::fs::symlink_metadata(&fresh.socket)?;
+    let identity = Some((metadata.dev(), metadata.ino()));
     let mut client = DaemonClient::connect_until(&fresh.socket, Some(u64::MAX - 1), deadline).map_err(io::Error::other)?;
     client.verify_peer(pid).map_err(io::Error::other)?;
     if client.hello["session_id"] != fresh.id { return Err(io::Error::new(io::ErrorKind::PermissionDenied, "session identity changed during stop")); }
     if Instant::now() >= deadline { return Err(io::Error::new(io::ErrorKind::TimedOut, "session stop deadline reached")); }
     let reply = client.call_until(method, serde_json::Map::new(), deadline).map_err(io::Error::other)?;
     if reply["ok"] != true { return Err(io::Error::other("daemon refused stop request")); }
-    Ok(())
+    if !retirement { return Ok(StopOutcome::Requested); }
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() { return Ok(StopOutcome::Requested); }
+        match client.poll_frame(remaining.min(Duration::from_millis(100))) {
+            Ok(Some(_)) | Ok(None) => {}
+            Err(crate::transport::TransportError::Closed) => {
+                return Ok(if crate::fleet_view::wait_retirement(&fresh.socket, &fresh.id, identity, deadline).is_ok() {
+                    StopOutcome::Completed
+                } else { StopOutcome::Requested });
+            }
+            Err(_) => return Ok(StopOutcome::Requested),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -119,7 +140,7 @@ mod tests {
         use std::io::{BufRead, BufReader, Write};
         use std::os::unix::{fs::PermissionsExt, net::UnixListener};
         use time::{OffsetDateTime, format_description::well_known::Rfc3339};
-        for mode in ["wrong-pid", "wrong-hello", "refused", "ok", "idle-refused", "idle-ok"] {
+        for mode in ["wrong-pid", "wrong-hello", "refused", "pending", "ok", "idle-refused", "idle-ok"] {
             let dir = tempfile::tempdir().unwrap();
             std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
             let registry = dir.path().join("registry");
@@ -133,6 +154,8 @@ mod tests {
             let path = registry.join("target.json");
             std::fs::write(&path, serde_json::to_vec(&serde_json::json!({"session_id":"target","pid":pid,"cwd":"/repo","heartbeat_at":OffsetDateTime::now_utc().format(&Rfc3339).unwrap(),"started_at":"2026-01-01T00:00:00Z","title":"target","daemon_socket":socket})).unwrap()).unwrap();
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            let retired_socket = socket.clone();
+            let retired_registry = path.clone();
             let server = std::thread::spawn(move || {
                 let (mut stream, _) = listener.accept().unwrap();
                 stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
@@ -147,12 +170,22 @@ mod tests {
                     reader.read_line(&mut line).unwrap();
                     let request: serde_json::Value = serde_json::from_str(&line).unwrap();
                     assert_eq!(request["method"], if mode.starts_with("idle-") { "stop_if_idle" } else { "stop" });
-                    writeln!(stream, "{}", serde_json::json!({"type":"reply","id":request["id"],"ok":matches!(mode, "ok" | "idle-ok")})).unwrap();
+                    writeln!(stream, "{}", serde_json::json!({"type":"reply","id":request["id"],"ok":matches!(mode, "ok" | "pending" | "idle-ok")})).unwrap();
+                    if mode == "ok" {
+                        drop(reader); drop(stream); drop(listener);
+                        std::fs::remove_file(retired_socket).unwrap();
+                        std::fs::remove_file(retired_registry).unwrap();
+                    } else if mode == "pending" { std::thread::sleep(Duration::from_millis(150)); }
                 }
             });
             let selected = discovery::sessions_in(dir.path()).unwrap().pop().unwrap();
-            let stopped = if mode.starts_with("idle-") { stop_idle_verified(dir.path(), &selected, Instant::now() + Duration::from_secs(2)) } else { stop_verified(dir.path(), &selected, Instant::now() + Duration::from_secs(2)) };
-            assert_eq!(stopped.is_ok(), matches!(mode, "ok" | "idle-ok"));
+            let deadline = Instant::now() + if mode == "pending" { Duration::from_millis(100) } else { Duration::from_secs(2) };
+            let outcome = if mode.starts_with("idle-") { stop_idle_verified(dir.path(), &selected, deadline).map(|_| StopOutcome::Requested) }
+                else { stop_verified(dir.path(), &selected, deadline) };
+            assert_eq!(outcome.is_ok(), matches!(mode, "ok" | "pending" | "idle-ok"));
+            if let Ok(outcome) = outcome {
+                assert_eq!(outcome, if mode == "ok" { StopOutcome::Completed } else { StopOutcome::Requested });
+            }
             server.join().unwrap(); let _ = other.kill(); let _ = other.wait();
         }
     }
