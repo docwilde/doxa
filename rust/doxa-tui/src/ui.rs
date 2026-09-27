@@ -10404,6 +10404,26 @@ fn dispatch_answers(app: &mut App, sender: &SyncSender<crate::bridge::WorkerComm
     false
 }
 
+// A disconnected router did not admit these queued commands. Reuse the same
+// typed-command failure envelopes as the router, including each original owner.
+fn reject_pending_controls(app: &mut App, failed: crate::bridge::WorkerCommand) -> bool {
+    use crate::bridge::WorkerCommand;
+    app.apply_daemon_frame(&crate::bridge::rejected(failed, "Daemon unavailable"));
+    for id in std::mem::take(&mut app.pending_model_queries) {
+        app.apply_daemon_frame(&crate::bridge::rejected(WorkerCommand::Models(id), "Daemon unavailable"));
+    }
+    for (id, model) in std::mem::take(&mut app.pending_model_changes) {
+        app.apply_daemon_frame(&crate::bridge::rejected(WorkerCommand::SetModel(id, model), "Daemon unavailable"));
+    }
+    for (id, effort) in std::mem::take(&mut app.pending_effort_changes) {
+        app.apply_daemon_frame(&crate::bridge::rejected(WorkerCommand::SetEffort(id, effort), "Daemon unavailable"));
+    }
+    for (id, mode) in std::mem::take(&mut app.pending_permission_changes) {
+        app.apply_daemon_frame(&crate::bridge::rejected(WorkerCommand::SetPermissionMode(id, mode), "Daemon unavailable"));
+    }
+    true
+}
+
 fn dispatch_model_controls(app: &mut App, sender: &SyncSender<crate::bridge::WorkerCommand>) -> bool {
     let mut queries = std::mem::take(&mut app.pending_model_queries).into_iter();
     while let Some(id) = queries.next() {
@@ -10414,14 +10434,9 @@ fn dispatch_model_controls(app: &mut App, sender: &SyncSender<crate::bridge::Wor
                 app.pending_model_queries.extend(queries);
                 break;
             }
-            Err(TrySendError::Disconnected(_)) => {
-                if let Some(picker) = app.model_picker.as_mut() {
-                    picker.loading = false;
-                    picker.catalog_pending = false;
-                    picker.note = "Daemon unavailable for model catalog · R retry".into();
-                }
-                app.notice = "Daemon unavailable for model catalog".into();
-                return true;
+            Err(TrySendError::Disconnected(command)) => {
+                app.pending_model_queries.extend(queries);
+                return reject_pending_controls(app, command);
             }
             Err(_) => unreachable!(),
         }
@@ -10435,9 +10450,9 @@ fn dispatch_model_controls(app: &mut App, sender: &SyncSender<crate::bridge::Wor
                 app.pending_model_changes.extend(changes);
                 break;
             }
-            Err(TrySendError::Disconnected(_)) => {
-                app.notice = "Daemon unavailable for model change".into();
-                return true;
+            Err(TrySendError::Disconnected(command)) => {
+                app.pending_model_changes.extend(changes);
+                return reject_pending_controls(app, command);
             }
             Err(_) => unreachable!(),
         }
@@ -10451,10 +10466,9 @@ fn dispatch_model_controls(app: &mut App, sender: &SyncSender<crate::bridge::Wor
                 app.pending_effort_changes.extend(efforts);
                 break;
             }
-            Err(TrySendError::Disconnected(_)) => {
-                app.pending_effort_verifications.clear();
-                app.notice = "Daemon unavailable for effort change".into();
-                return true;
+            Err(TrySendError::Disconnected(command)) => {
+                app.pending_effort_changes.extend(efforts);
+                return reject_pending_controls(app, command);
             }
             Err(_) => unreachable!(),
         }
@@ -10468,9 +10482,9 @@ fn dispatch_model_controls(app: &mut App, sender: &SyncSender<crate::bridge::Wor
                 app.pending_permission_changes.extend(permissions);
                 break;
             }
-            Err(TrySendError::Disconnected(_)) => {
-                app.notice = "Daemon unavailable for permission change".into();
-                return true;
+            Err(TrySendError::Disconnected(command)) => {
+                app.pending_permission_changes.extend(permissions);
+                return reject_pending_controls(app, command);
             }
             Err(_) => unreachable!(),
         }
@@ -14175,6 +14189,31 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn disconnected_control_queue_rejects_only_its_owned_requests() {
+        let (sender, receiver) = mpsc::sync_channel(1); drop(receiver);
+        let mut app = App::default();
+        for id in ["a", "b"] {
+            app.apply_daemon_frame(&json!({"type":"hello","session_id":id,"engine":"claude","effort":"high"}));
+        }
+        app.groups[0].tabs = vec!["b".into()];
+        app.notice = "B notice".into(); app.input = "B draft".into(); app.input_cursor = app.input.len();
+        app.pending_effort_verifications.insert("b".into(), "low".into()); // already admitted to its provider
+        app.pending_effort_verifications.insert("a".into(), "max".into());
+        app.pending_model_changes.push(("a".into(), "opus".into()));
+        app.pending_permission_changes.push(("a".into(), "plan".into()));
+        app.pending_effort_changes.push(("a".into(), "max".into()));
+        assert!(dispatch_model_controls(&mut app, &sender));
+        assert_eq!(app.notice, "B notice"); assert_eq!(app.input, "B draft");
+        assert_eq!(app.pending_effort_verifications["b"], "low");
+        assert!(!app.pending_effort_verifications.contains_key("a"));
+        assert_eq!(app.session_efforts["a"], "high");
+        assert!(app.pending_model_changes.is_empty() && app.pending_permission_changes.is_empty() && app.pending_effort_changes.is_empty());
+        app.pending_permission_changes.push(("b".into(), "plan".into()));
+        assert!(dispatch_model_controls(&mut app, &sender));
+        assert!(app.notice.contains("Permission change failed"));
+    }
+
+    #[test]
     fn disconnected_attach_clears_marker_and_model_catalog_can_retry() {
         let (sender, receiver) = mpsc::sync_channel(1);
         drop(receiver);
@@ -14184,6 +14223,7 @@ for line in sys.stdin:
         assert!(app.attaching_ids.is_empty());
         app.attach_selected("session");
         assert_eq!(app.pending_attaches.len(), 1);
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"session","engine":"claude","can_set_model":true}));
         app.model_picker = Some(ModelPicker { session_id: "session".into(), models: Vec::new(),
             selected: 0, note: "Loading".into(), loading: true, catalog_pending: false });
         app.pending_model_queries.push("session".into());
