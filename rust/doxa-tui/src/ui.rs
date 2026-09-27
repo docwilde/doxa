@@ -7417,6 +7417,11 @@ impl App {
             .map(|(_, url)| url.clone())
     }
 
+    fn pointer_on_link(&self) -> bool {
+        !self.link_interaction_blocked() && self.link_hover_position
+            .is_some_and(|(column, row)| self.link_at(column, row).is_some())
+    }
+
     fn link_interaction_blocked(&self) -> bool {
         self.active_chooser_rect().is_some() || self.active_request_index().is_some()
             || self.map_modal || self.diff_modal || self.tool_modal || self.action_menu
@@ -9919,7 +9924,7 @@ fn run_loop(
         if event::poll(Duration::from_millis(10))? {
             changed |= app.handle(event::read()?);
         }
-        let next_pointer = app.link_hover.is_some() && !app.link_interaction_blocked();
+        let next_pointer = app.pointer_on_link();
         if next_pointer != pointer_on_link {
             let mut out = io::stdout();
             out.write_all(pointer_shape(next_pointer))?;
@@ -12436,6 +12441,17 @@ for line in sys.stdin:
         let full = RenderedTranscript::render(0, "s", &extended, 20, None, None, 0, &[]);
         assert_eq!(cached.links, full.links);
         assert_eq!(cached.lines, full.lines);
+    }
+
+    #[test]
+    fn link_pointer_revalidates_stationary_mouse_after_geometry_changes() {
+        let mut app = App::default();
+        app.link_hover = Some("https://old.example".into());
+        app.link_hover_position = Some((5, 6));
+        app.visible_links.borrow_mut().push((Rect::new(5, 6, 4, 1), "https://old.example".into()));
+        assert!(app.pointer_on_link());
+        app.visible_links.borrow_mut().clear();
+        assert!(!app.pointer_on_link());
     }
 
     #[test]
