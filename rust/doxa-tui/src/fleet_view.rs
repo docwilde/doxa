@@ -220,8 +220,45 @@ pub struct StopReport {
 fn stop_one(socket: PathBuf, expected_id: String) -> Result<&'static str, String> {
     stop_one_until(socket, expected_id, Instant::now() + STOP_TIMEOUT)
 }
+// EOF closes the transport before shutdown unlinks the owned socket and
+// registry entry. Completion requires both pathnames to retire; the frontend
+// never removes either artifact and refuses a substituted socket inode.
+fn wait_retirement(socket: &Path, expected_id: &str, identity: Option<(u64, u64)>, deadline: Instant) -> Result<&'static str, String> {
+    if !doxa_state::valid_session_id(expected_id) { return Err("invalid teardown session identity".into()); }
+    let registry = socket.parent().ok_or("socket has no runtime directory")?.join("registry").join(format!("{expected_id}.json"));
+    loop {
+        let socket_gone = match fs::symlink_metadata(socket) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => true,
+            Err(error) => return Err(format!("socket retirement cannot be verified: {error}")),
+            Ok(metadata) => {
+                if !metadata.file_type().is_socket() || identity.is_none_or(|id| id != (metadata.dev(), metadata.ino())) {
+                    return Err("socket identity changed during retirement; completion withheld".into());
+                }
+                false
+            }
+        };
+        let registry_gone = match fs::symlink_metadata(&registry) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => true,
+            Err(error) => return Err(format!("registry retirement cannot be verified: {error}")),
+            Ok(metadata) => {
+                if !metadata.is_file() || metadata.uid() != unsafe { libc::geteuid() } || metadata.permissions().mode() & 0o077 != 0 {
+                    return Err("unsafe registry artifact during retirement; completion withheld".into());
+                }
+                false
+            }
+        };
+        if socket_gone && registry_gone { return Ok("daemon socket and registry retired"); }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() { return Err("daemon EOF observed; socket or registry retirement not confirmed before fleet deadline".into()); }
+        std::thread::sleep(remaining.min(Duration::from_millis(10)));
+    }
+}
 fn stop_one_until(socket: PathBuf, expected_id: String, deadline: Instant) -> Result<&'static str, String> {
-    if fs::symlink_metadata(&socket).is_err_and(|e| e.kind() == io::ErrorKind::NotFound) { return Ok("verified slot socket already gone"); }
+    let identity = match fs::symlink_metadata(&socket) {
+        Ok(metadata) => Some((metadata.dev(), metadata.ino())),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return wait_retirement(&socket, &expected_id, None, deadline),
+        Err(error) => return Err(error.to_string()),
+    };
     // Transport bounds hello at10s and reply at15s; reserve both before
     // starting another task so the bounded pool cannot overrun its deadline.
     if deadline.saturating_duration_since(Instant::now()) < Duration::from_secs(25) {
@@ -229,7 +266,7 @@ fn stop_one_until(socket: PathBuf, expected_id: String, deadline: Instant) -> Re
     }
     let mut client = match crate::transport::DaemonClient::connect_until(&socket, None, deadline) {
         Ok(client) => client,
-        Err(_) if fs::symlink_metadata(&socket).is_err_and(|e| e.kind() == io::ErrorKind::NotFound) => return Ok("verified slot socket already gone"),
+        Err(_) if fs::symlink_metadata(&socket).is_err_and(|e| e.kind() == io::ErrorKind::NotFound) => return wait_retirement(&socket, &expected_id, identity, deadline),
         Err(error) => return Err(error.to_string()),
     };
     if client.hello["session_id"] != expected_id { return Err("daemon session identity differs from manifest".into()); }
@@ -240,7 +277,7 @@ fn stop_one_until(socket: PathBuf, expected_id: String, deadline: Instant) -> Re
         if remaining.is_zero() { return Err("stop accepted; daemon close not confirmed before fleet deadline".into()); }
         match client.poll_frame(remaining.min(Duration::from_millis(250))) {
             Ok(Some(_)) | Ok(None) => {}
-            Err(crate::transport::TransportError::Closed) => return Ok("daemon connection closed"),
+            Err(crate::transport::TransportError::Closed) => return wait_retirement(&socket, &expected_id, identity, deadline),
             Err(error) => return Err(format!("stop accepted; daemon close unconfirmed: {error}")),
         }
     }
@@ -303,6 +340,12 @@ pub(crate) fn stop_slots(root: &Path, prefix: &str, native: bool) -> io::Result<
         }
         match slot_socket(root, prefix, index) {
             Ok((socket, id)) => targets.push((index, socket, id)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound && native => {
+                let socket = PathBuf::from(slot["socket_path"].as_str().unwrap());
+                let id = slot["session_id"].as_str().filter(|id| doxa_state::valid_session_id(id)).ok_or_else(|| invalid("fleet slot has no valid session ID"))?;
+                if socket.parent().and_then(|parent| parent.canonicalize().ok()) != Some(run.join("rt").canonicalize()?) { return Err(invalid("fleet socket is outside run runtime")); }
+                targets.push((index, socket, id.to_owned()));
+            }
             Err(error) if error.kind() == io::ErrorKind::NotFound => missing.push(index),
             Err(error) => return Err(error),
         }
@@ -398,6 +441,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("daemon.sock");
         let listener = UnixListener::bind(&path).unwrap();
+        let retired_path = path.clone();
         let server = std::thread::spawn(move || {
             let (mut socket, _) = listener.accept().unwrap();
             writeln!(socket, "{}", serde_json::json!({"type":"hello", "proto":1,
@@ -411,8 +455,9 @@ mod tests {
             let call: Value = serde_json::from_str(&line).unwrap();
             assert_eq!(call["method"], "stop");
             writeln!(socket, "{}", serde_json::json!({"type":"reply", "id":call["id"], "ok":true})).unwrap();
+            drop(reader); drop(socket); drop(listener); fs::remove_file(retired_path).unwrap();
         });
-        assert_eq!(stop_one(path, "sess-123".into()).unwrap(), "daemon connection closed");
+        assert_eq!(stop_one(path, "sess-123".into()).unwrap(), "daemon socket and registry retired");
         server.join().unwrap();
     }
 
@@ -422,6 +467,11 @@ mod tests {
         let listener = UnixListener::bind(&path).unwrap();
         let (ack_sender, ack_receiver) = std::sync::mpsc::channel();
         let (release_sender, release_receiver) = std::sync::mpsc::channel();
+        let (eof_sender, eof_receiver) = std::sync::mpsc::channel();
+        let (retire_sender, retire_receiver) = std::sync::mpsc::channel();
+        let retired_path = path.clone(); let registry = temp.path().join("registry");
+        fs::create_dir(&registry).unwrap(); let entry = registry.join("delayed.json");
+        fs::write(&entry, "{}").unwrap(); fs::set_permissions(&entry, fs::Permissions::from_mode(0o600)).unwrap();
         let server = std::thread::spawn(move || {
             let (mut socket, _) = listener.accept().unwrap();
             writeln!(socket, "{}", serde_json::json!({"type":"hello","proto":1,"session_id":"delayed","cwd":"/fixture","engine":"fixture","next_seq":0})).unwrap();
@@ -430,12 +480,17 @@ mod tests {
             let command: Value = serde_json::from_str(&line).unwrap();
             writeln!(socket, "{}", serde_json::json!({"type":"reply","id":command["id"],"ok":true})).unwrap();
             ack_sender.send(()).unwrap(); release_receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+            drop(reader); drop(socket); eof_sender.send(()).unwrap();
+            retire_receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+            drop(listener); fs::remove_file(retired_path).unwrap(); fs::remove_file(entry).unwrap();
         });
         let (result_sender, result_receiver) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || { let _ = result_sender.send(teardown(vec![(0, path, "delayed".into())])); });
         ack_receiver.recv_timeout(Duration::from_secs(2)).unwrap();
         assert!(matches!(result_receiver.recv_timeout(Duration::from_millis(100)), Err(std::sync::mpsc::RecvTimeoutError::Timeout)));
-        release_sender.send(()).unwrap();
+        release_sender.send(()).unwrap(); eof_receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(matches!(result_receiver.recv_timeout(Duration::from_millis(100)), Err(std::sync::mpsc::RecvTimeoutError::Timeout)));
+        retire_sender.send(()).unwrap();
         let results = result_receiver.recv_timeout(Duration::from_secs(2)).unwrap();
         assert!(results[0].1.is_ok()); worker.join().unwrap(); server.join().unwrap();
     }
@@ -479,6 +534,7 @@ mod tests {
         fs::write(&path, serde_json::json!({"run_id":"20260925T100000-abcd", "live":true,
             "slots":[{"index":0,"session_id":"sess-123","socket_path":socket}]}).to_string()).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let retired_path = socket.clone();
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             writeln!(stream, "{}", serde_json::json!({"type":"hello", "proto":1,
@@ -491,10 +547,26 @@ mod tests {
             let call: Value = serde_json::from_str(&line).unwrap();
             assert_eq!(call["method"], "stop");
             writeln!(stream, "{}", serde_json::json!({"type":"reply", "id":call["id"], "ok":true})).unwrap();
+            drop(reader); drop(stream); drop(listener); fs::remove_file(retired_path).unwrap();
         });
         let report = stop(root, "20260925T100000").unwrap();
         assert!(report.complete);
-        assert!(report.text.contains("slot 0: daemon connection closed"));
+        assert!(report.text.contains("slot 0: daemon socket and registry retired"));
         server.join().unwrap();
     }
+    #[test]
+    fn retirement_refuses_replaced_socket_and_unretired_registry() {
+        let dir = tempfile::tempdir().unwrap(); let socket = dir.path().join("owned.sock");
+        let original = UnixListener::bind(&socket).unwrap(); let metadata = fs::symlink_metadata(&socket).unwrap();
+        let identity = Some((metadata.dev(), metadata.ino()));
+        fs::remove_file(&socket).unwrap(); let replacement = UnixListener::bind(&socket).unwrap();
+        assert!(wait_retirement(&socket, "owned", identity, Instant::now() + Duration::from_millis(50)).is_err());
+        drop(replacement); fs::remove_file(&socket).unwrap(); drop(original);
+        fs::create_dir(dir.path().join("registry")).unwrap(); let entry = dir.path().join("registry/owned.json");
+        fs::write(&entry, "{}").unwrap(); fs::set_permissions(&entry, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(wait_retirement(&socket, "owned", None, Instant::now() + Duration::from_millis(50)).is_err());
+        fs::remove_file(entry).unwrap();
+        assert!(wait_retirement(&socket, "owned", None, Instant::now() + Duration::from_millis(50)).is_ok());
+    }
+
 }

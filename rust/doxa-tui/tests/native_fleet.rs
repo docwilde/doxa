@@ -54,7 +54,11 @@ fn finish(child: &mut Child) {
     assert!(child.wait().unwrap().success());
 }
 fn sockets_gone(value: &Value) -> bool {
-    value["slots"].as_array().unwrap().iter().all(|row| !Path::new(row["socket_path"].as_str().unwrap()).exists())
+    value["slots"].as_array().unwrap().iter().all(|row| {
+        let socket = Path::new(row["socket_path"].as_str().unwrap());
+        let registry = socket.parent().unwrap().join("registry").join(format!("{}.json", row["session_id"].as_str().unwrap()));
+        !socket.exists() && !registry.exists()
+    })
 }
 
 #[test]
