@@ -1,6 +1,6 @@
 [package]
 name = "doxa-daemon"
-version = "2.0.0-alpha.31"
+version = "2.0.0-alpha.32"
 edition = "2021"
 publish = false
 license = "AGPL-3.0-only"
@@ -24,6 +24,7 @@ tokio-util = { version = "0.7", features = ["rt"] }
 
 [dev-dependencies]
 tempfile = "3"
+doxa-tui = { path = "../doxa-tui" }
 
 [features]
 local-test-server = ["doxa-vendors/local-test-server"]

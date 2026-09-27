@@ -450,6 +450,7 @@ mod tests {
 }
 
 impl Host for CodexHost {
+    fn has_active_work(&self) -> bool { self.active.try_lock().map_or(true, |active| active.is_some()) }
     fn peer_tools_ready(&self) -> bool {
         self.peer_tools_allowed && self.peer_tools.lock().unwrap().is_some()
     }

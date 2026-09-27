@@ -9,6 +9,14 @@ use std::time::Duration;
 pub const PAGE_SIZE: u8 = 20;
 pub const EVIDENCE_LIMIT: u8 = 20;
 
+pub const FILTER_MAX_CHARS:usize=200;
+pub const FILTER_MAX_BYTES:usize=1024;
+
+pub fn append_filter_char(query:&mut String,ch:char)->bool {
+    if query.chars().count()>=FILTER_MAX_CHARS || query.len()+ch.len_utf8()>FILTER_MAX_BYTES {return false;}
+    query.push(ch);true
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Proposal {
     pub pid: String,
@@ -26,6 +34,7 @@ pub struct Belief {
     pub truncated: bool,
     pub confidence: f64,
     pub evidence_count: Option<u64>,
+    pub recency: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -54,6 +63,7 @@ pub enum ResultPage {
 #[derive(Clone, Debug)]
 pub enum Query {
     Beliefs(u16),
+    FilteredBeliefs(u16,String),
     Search(String),
     Evidence(u64),
     Proposals(String, u16),
@@ -106,6 +116,7 @@ pub fn parse_beliefs(rows: Vec<Value>) -> Result<Vec<Belief>, ()> {
             truncated: row["claim_truncated"].as_bool().ok_or(())?,
             confidence: row["confidence"].as_f64().filter(|n| n.is_finite() && (0.0..=1.0).contains(n)).ok_or(())?,
             evidence_count: Some(row["evidence_count"].as_u64().ok_or(())?),
+            recency:match row.get("recency") {None|Some(Value::Null)=>None,Some(_)=>Some(short(row,"recency",64).ok_or(())?)},
         })
     }).collect()
 }
@@ -133,6 +144,9 @@ pub fn fetch(python: &Path, query: Query) -> Result<ResultPage, &'static str> {
         Query::Beliefs(offset) => client.beliefs(offset, PAGE_SIZE)
             .map_err(|_| "Belief list unavailable")
             .and_then(|rows| parse_beliefs(rows).map(ResultPage::Beliefs).map_err(|_| "Invalid LORE belief reply")),
+        Query::FilteredBeliefs(offset,query)=>client.beliefs_filtered(offset,PAGE_SIZE,&query)
+            .map_err(|_|"Filtered belief list unavailable")
+            .and_then(|rows|parse_beliefs(rows).map(ResultPage::Beliefs).map_err(|_|"Invalid LORE belief reply")),
         Query::Search(prompt) => client.consult(&prompt)
             .map(ResultPage::Search).map_err(|_| "LORE search unavailable"),
         Query::Evidence(id) => client.evidence(id, EVIDENCE_LIMIT)
@@ -171,6 +185,17 @@ mod tests {
     use std::{fs, os::unix::fs::PermissionsExt};
 
     #[test]
+    fn filter_input_matches_canonical_character_and_byte_limits() {
+        for ch in ['x','界','🦀'] {
+            let mut query=String::new();
+            for _ in 0..FILTER_MAX_CHARS {assert!(append_filter_char(&mut query,ch));}
+            assert!(!append_filter_char(&mut query,ch));
+            assert_eq!(query.chars().count(),FILTER_MAX_CHARS);
+            assert!(query.len()<=FILTER_MAX_BYTES);
+        }
+    }
+
+    #[test]
     fn parses_bounded_scrubbed_rows() {
         let belief = parse_beliefs(vec![json!({"id":1,"subject":"user","claim":"safe","claim_truncated":false,"confidence":0.8,"evidence_count":2})]).unwrap();
         assert_eq!(belief[0].id, 1);
@@ -182,6 +207,15 @@ mod tests {
         assert_eq!(proposals[0].summary, "[redacted]");
         assert!(parse_proposals(vec![json!({"pid":"../outside","text":"unsafe"})]).is_err());
         assert!(parse_proposals(vec![json!({"pid":"one","text":"x".repeat(4097)})]).is_err());
+    }
+
+    #[test]
+    fn retains_canonical_recency_and_order_without_id_guessing() {
+        let rows=parse_beliefs(vec![json!({"id":7,"subject":"user","claim":"recent","claim_truncated":false,"confidence":0.8,"evidence_count":2,"recency":"2026-09-27T12:00:00Z"}),
+            json!({"id":99,"subject":"user","claim":"older","claim_truncated":false,"confidence":0.8,"evidence_count":2,"recency":null})]).unwrap();
+        assert_eq!(rows.iter().map(|row|row.id).collect::<Vec<_>>(),vec![7,99]);
+        assert_eq!(rows[0].recency.as_deref(),Some("2026-09-27T12:00:00Z"));
+        assert!(rows[1].recency.is_none());
     }
 
     #[cfg(unix)]

@@ -137,8 +137,9 @@ impl DaemonClient {
     }
 
     fn connect_inner(path: impl AsRef<Path>, cursor: Option<u64>, restore: bool) -> Result<(Self, Option<TranscriptSnapshot>), TransportError> {
-        let stream = UnixStream::connect(path)?;
-        Self::handshake(stream, cursor, restore, None)
+        let deadline = Instant::now() + HELLO_TIMEOUT;
+        let stream = unix_connect_until(path.as_ref(), deadline)?;
+        Self::handshake(stream, cursor, restore, Some(deadline))
     }
     fn handshake(stream: UnixStream, cursor: Option<u64>, restore: bool, deadline: Option<Instant>) -> Result<(Self, Option<TranscriptSnapshot>), TransportError> {
         let remaining = || -> Result<Duration, TransportError> {
@@ -359,6 +360,26 @@ fn map_wire_error(error: WireError) -> TransportError {
 mod deadline_tests {
     use super::*;
     use std::os::unix::net::UnixListener;
+    #[test]
+    fn ordinary_and_restore_connections_reject_full_backlog_without_blocking() {
+        for restore in [false, true] {
+            let dir = tempfile::tempdir().unwrap(); let path = dir.path().join("backlog.sock");
+            let listener = UnixListener::bind(&path).unwrap();
+            assert_eq!(unsafe { libc::listen(listener.as_raw_fd(), 0) }, 0);
+            let held = UnixStream::connect(&path).unwrap();
+            // Bound a regression too: closing the listener releases an old
+            // blocking connect, rather than leaving the test runner hung.
+            let release = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(300)); drop(listener); drop(held);
+            });
+            let started = Instant::now();
+            let failed = if restore { DaemonClient::connect_for_restore(&path).is_err() }
+                else { DaemonClient::connect(&path, None).is_err() };
+            let elapsed = started.elapsed(); release.join().unwrap();
+            assert!(failed);
+            assert!(elapsed < Duration::from_millis(150), "connect waited for backlog release: {elapsed:?}");
+        }
+    }
     #[test]
     fn full_listener_backlog_never_becomes_a_false_connected_stream() {
         let dir = tempfile::tempdir().unwrap(); let path = dir.path().join("backlog.sock");

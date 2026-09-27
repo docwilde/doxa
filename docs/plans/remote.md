@@ -1,8 +1,9 @@
 # Remote control and a web client — specification
 
-Status: **partly implemented**. The policy gate, cross-machine peer bridge,
-and an initial browser renderer for local daemon sessions are in the code.
-The richer renderer and the remaining design work below have not shipped.
+Status: **partly implemented**. The policy gate and cross-machine Unix peer
+bridge are available. The retained browser renderer is disabled until its
+transport can attest the local Tailscale proxy. The richer renderer and
+the remaining design work below have not shipped.
 This plan was written after looking at a colleague's `telag`, which solves
 the same user problem from the other end.
 
@@ -12,44 +13,30 @@ One session, reachable from more than one place: start an agent at the desk,
 pick it up on a phone, sit down and carry on in the terminal. The session must
 be the *same* session — not a copy, not a mirror.
 
-## Implemented slice: the browser bridge
+## Retained browser renderer: unavailable
 
-`doxa-remote` is a separate, optional process. It binds only
-`127.0.0.1:47601`, reads the local daemon registry and Unix sockets, and
-serves HTML and a WebSocket through Tailscale Serve. The daemon protocol and
-the session's worktree stay local. The first browser client lists running
-daemon sessions, loads each transcript, follows live turn events, sends
+The retained browser adapter in `doxa/remote_web.py` reads the local daemon
+registry and Unix sockets and renders HTML and a WebSocket. Its browser
+client lists running daemon sessions, loads each transcript, follows live turn events, sends
 prompts, and answers pending input. It is an initial renderer: it does not
 yet reproduce the Textual interface's richer turn, diff, image and belief
 views or push notifications. An `◎ remote:<login>` chip names an attached
 browser driver in the local status bar and disappears when it disconnects.
 
-From a checkout, opt in explicitly in `~/.doxa/config.toml`:
-
-```toml
-remote_enabled = true
-remote_allowed_logins = "you@example.com"
-```
-
-Replace that value with the Tailscale login allowed to drive the session;
-multiple logins are comma-separated. Then, with a daemon-backed DOXA session
-running, start the optional web dependencies, bridge, and private Serve proxy:
-
-```sh
-uv run --extra remote doxa-remote
-tailscale serve --bg 47601
-tailscale serve status
-```
-
-`doxa-remote` refuses to start while remote access is off or the allow-list
-is empty. It checks the `Tailscale-User-Login` header only on its loopback
-listener, applies the allow-list to each action, and rejects cross-origin
-browser WebSocket connections. Use Tailscale **Serve**, not public Funnel:
+The cold-installed sidecar wheel has no `doxa-remote` console script.
+`python -m doxa.remote_web` now refuses to start even with opt-in and an
+allow-list, and serving its ASGI app directly also refuses every request.
+A loopback TCP caller can forge `Tailscale-User-Login`; its address and
+ASGI scope metadata cannot prove that the caller is the Tailscale proxy.
+An attested transport must be implemented before browser access is enabled.
+The machine-wide Unix peer bridge remains available with its existing
+kernel peer-credential check and canonical policy gate. Use Tailscale
+**Serve**, not public Funnel:
 [Serve supplies identity headers for tailnet traffic; Funnel does not](https://tailscale.com/docs/features/tailscale-serve#identity-headers).
-The browser currently exposes transcript/status reads, prompts, and pending
+The retained renderer implements transcript/status reads, prompts, and pending
 input answers. Shell escapes and permission-mode changes are not browser
-operations. `tailscale serve off` disables sharing; stopping the bridge
-process closes the browser endpoint. A detached daemon still has its normal
+operations. Browser startup instructions will return after proxy attestation
+is implemented. A detached daemon still has its normal
 `--linger` timeout when no client is attached.
 
 ## Prior art: telag, and why its architecture is not ours
@@ -172,7 +159,8 @@ design worth having. An initial version now renders transcript text and live
 events. The richer views in this paragraph and cursor replay through the
 bridge remain proposed work.
 
-Recommendation: **(b)**. The initial browser bridge follows this path;
+Recommendation: **(b)**. The retained browser renderer follows this shape,
+but its proxy-attestation transport is still unavailable;
 continuing toward a full renderer remains the work in this plan. Streaming
 Textual as in (a) would be a separate stopgap with different limits.
 

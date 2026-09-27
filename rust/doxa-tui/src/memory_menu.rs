@@ -1,41 +1,6 @@
-//! Read only the LORE entries that its context snapshot actually renders.
+//! Canonical structured curated facts and exact-review memory management.
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-
-const BELIEF_LIMIT: u8 = 20;
-
-fn bounded_line(value: &str, limit: usize) -> String {
-    let clean = crate::markdown::sanitize(value).replace('\n', " ");
-    let mut chars = clean.chars();
-    let mut line: String = chars.by_ref().take(limit).collect();
-    if chars.next().is_some() { line.push('…'); }
-    line
-}
-
-fn belief_lines(beliefs: Vec<crate::lore_picker::Belief>) -> Vec<String> {
-    let mut lines = vec![format!("## Global active LORE beliefs (newest up to {BELIEF_LIMIT}; retrieved on demand)")];
-    if beliefs.is_empty() {
-        lines.push("No active beliefs".to_owned());
-    } else {
-        for belief in beliefs {
-            let subject = bounded_line(&belief.subject, 80);
-            let claim = bounded_line(&belief.claim, 400);
-            lines.push(format!("- {subject}: {claim}{}", if belief.truncated { "…" } else { "" }));
-        }
-    }
-    lines
-}
-
-fn section(snapshot: &str, prefix: &str) -> Option<Vec<String>> {
-    let mut lines = snapshot.lines();
-    let heading = lines.by_ref().find(|line| line.starts_with(prefix))?;
-    let mut rows = vec![bounded_line(heading, 400)];
-    for line in lines {
-        if line.is_empty() || line.starts_with("## ") { break; }
-        rows.push(bounded_line(line, 400));
-    }
-    Some(rows)
-}
 
 pub fn scope_path(cwd: &Path) -> (PathBuf, bool) {
     match crate::discovery::repo_root_for(cwd) {
@@ -44,126 +9,75 @@ pub fn scope_path(cwd: &Path) -> (PathBuf, bool) {
     }
 }
 
-pub fn fetch(python: &Path, cwd: &Path) -> Result<Vec<String>, &'static str> {
-    let (project, is_repo) = scope_path(cwd);
-    let mut lore = doxa_lore::LoreClient::spawn(python, Duration::from_secs(3))
-        .map_err(|_| "LORE unavailable")?;
-    let user = lore.snapshot(cwd.to_str().ok_or("invalid session directory")?, "user")
-        .map_err(|_| "User memory unavailable")?;
-    let project_snapshot = lore.snapshot(project.to_str().ok_or("invalid scope directory")?, "project")
-        .map_err(|_| "Scoped memory unavailable")?;
-    if user.len() > 64 * 1024 || project_snapshot.len() > 64 * 1024 {
-        return Err("LORE memory snapshot too large");
+/// Display facts are scrubbed canonical read rows. They are never reused as
+/// entry keys or replacement text by the separate exact-review write manager.
+#[derive(Clone,Debug,PartialEq,Eq)]
+pub struct Fact {pub scope:String,pub text:String,pub source:Option<String>,pub redacted:bool}
+
+pub fn parse_facts(rows:Vec<serde_json::Value>,scope:&str)->Result<Vec<Fact>,&'static str> {
+    if rows.len()>400 {return Err("Too many curated memory entries");}
+    let mut bytes=0;
+    rows.into_iter().map(|row|{
+        let text=row["text"].as_str().filter(|text|text.len()<=64*1024).ok_or("Invalid memory fact")?.to_owned();
+        let source=match row.get("source") {None|Some(serde_json::Value::Null)=>None,
+            Some(value)=>Some(value.as_str().filter(|source|source.len()<=512).ok_or("Invalid memory source")?.to_owned())};
+        let redacted=row["redacted"].as_bool().ok_or("Invalid memory redaction metadata")?;
+        bytes+=text.len()+source.as_ref().map_or(0,String::len);
+        if bytes>64*1024 {return Err("Curated memory entries too large");}
+        Ok(Fact {scope:scope.into(),text,source,redacted})
+    }).collect()
+}
+
+pub fn fetch_facts(python:&Path,cwd:&Path)->Result<Vec<Fact>,&'static str> {
+    let (project,is_repo)=scope_path(cwd);
+    let mut lore=doxa_lore::LoreClient::spawn(python,Duration::from_secs(3)).map_err(|_|"LORE unavailable")?;
+    let user=lore.memory_entries(cwd.to_str().ok_or("Invalid session directory")?,"user").map_err(|_|"User facts unavailable")?;
+    let project=lore.memory_entries(project.to_str().ok_or("Invalid scope directory")?,"project").map_err(|_|"Scoped facts unavailable")?;
+    let mut facts=parse_facts(user,"user")?;
+    facts.extend(parse_facts(project,if is_repo {"project"} else {"folder"})?);
+    if facts.len()>400 || facts.iter().map(|fact|fact.text.len()+fact.source.as_ref().map_or(0,String::len)).sum::<usize>()>64*1024 {
+        return Err("Curated memory entries exceed menu limit");
     }
-    let mut rows = section(&user, "## User memory").ok_or("User memory section unavailable")?;
-    rows.push(String::new());
-    let mut scoped = section(&project_snapshot, "## Project memory")
-        .ok_or("Scoped memory section unavailable")?;
-    if !is_repo { scoped[0] = scoped[0].replacen("Project memory", "Folder memory", 1); }
-    rows.extend(scoped);
-    if let Some(hint) = project_snapshot.lines().find(|line| line.starts_with("Belief store:")) {
-        rows.push(String::new());
-        rows.push(bounded_line(hint, 400));
+    Ok(facts)
+}
+
+#[derive(Debug)]
+pub struct List {pub owner:Option<(String,String)>,pub facts:Vec<Fact>,pub query:String}
+impl List {
+    pub fn indices(&self)->Vec<usize> {
+        let query=self.query.to_lowercase();
+        self.facts.iter().enumerate().filter(|(_,fact)|query.is_empty()||fact.text.to_lowercase().contains(&query)
+            ||fact.scope.to_lowercase().contains(&query)||fact.source.as_ref().is_some_and(|source|source.to_lowercase().contains(&query)))
+            .map(|(index,_)|index).collect()
     }
-    rows.push(String::new());
-    let beliefs = lore.beliefs(0, BELIEF_LIMIT)
-        .map_err(|_| "Global beliefs unavailable")
-        .and_then(|rows| crate::lore_picker::parse_beliefs(rows).map_err(|_| "Global beliefs unavailable"));
-    match beliefs {
-        Ok(beliefs) => rows.extend(belief_lines(beliefs)),
-        Err(message) => {
-            rows.push("## Global active LORE beliefs".to_owned());
-            rows.push(message.to_owned());
-        }
-    }
-    if rows.len() > 400 || rows.iter().map(String::len).sum::<usize>() > 32 * 1024 {
-        return Err("LORE memory entries exceed menu limit");
-    }
-    Ok(rows)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
     use std::process::Command;
 
-    fn fake_lore(dir: &Path) -> PathBuf {
-        let script = dir.join("fake-lore");
-        fs::write(&script, r#"#!/usr/bin/env python3
-import json, sys
-print(json.dumps({'type':'hello','proto':1,'capabilities':['scrub','snapshot','beliefs']}), flush=True)
-for line in sys.stdin:
-    req = json.loads(line)
-    if req['op'] == 'beliefs':
-        value = [{'id':4,'subject':'global','claim':'remember to cite evidence','claim_truncated':False,'confidence':0.9,'evidence_count':2}]
-        print(json.dumps({'type':'reply','id':req['id'],'ok':True,'value':value}), flush=True)
-        continue
-    if req['scope'] == 'user':
-        text = '## User memory (10/100 chars)\n- prefers concise text [source: codex]\n\nRules:\n'
-    else:
-        text = '## Project memory (10/100 chars) — ' + req['cwd'] + '\n- run checks\n\nBelief store: 3 active beliefs (derived, uncurated).\nRules:\n'
-    print(json.dumps({'type':'reply','id':req['id'],'ok':True,'text':text}), flush=True)
-"#).unwrap();
-        fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
-        script
+    #[test]
+    fn structured_facts_keep_actual_provenance_and_filter_without_markdown() {
+        let facts=parse_facts(vec![serde_json::json!({"text":"# Literal fact with \nline","source":"codex","redacted":false}),
+            serde_json::json!({"text":"[redacted]","source":null,"redacted":true})],"user").unwrap();
+        assert_eq!(facts[0].text,"# Literal fact with \nline");
+        assert_eq!(facts[1].source,None);
+        assert!(facts[1].redacted);
+        let list=List {owner:None,facts,query:"codex".into()};
+        assert_eq!(list.indices(),vec![0]);
+        assert!(parse_facts(vec![serde_json::json!({"text":"safe","source":17,"redacted":false})],"user").is_err());
     }
 
     #[test]
-    fn extracts_only_rendered_entries_and_belief_hint() {
-        let user = "LORE MEMORY\n## User memory (12/100 chars)\n- likes short replies\n\nRules:\n- unrelated\n";
-        let project = "LORE MEMORY\n## Project memory (20/100 chars) — repo\n- run task test\n\nFile map: 2 entries\n\nBelief store: 3 active beliefs (derived, uncurated).\nRules:\n";
-        assert_eq!(section(user, "## User memory").unwrap(),
-            vec!["## User memory (12/100 chars)", "- likes short replies"]);
-        assert_eq!(section(project, "## Project memory").unwrap(),
-            vec!["## Project memory (20/100 chars) — repo", "- run task test"]);
-        assert!(section(user, "## Project memory").is_none());
-        assert_eq!(project.lines().find(|line| line.starts_with("Belief store:")),
-            Some("Belief store: 3 active beliefs (derived, uncurated)."));
+    fn plain_directory_keeps_canonical_folder_scope() {
+        let dir=tempfile::tempdir().unwrap();
+        assert_eq!(scope_path(dir.path()),(dir.path().to_path_buf(),false));
     }
 
     #[test]
-    fn bounds_and_sanitizes_snapshot_and_global_belief_rows() {
-        let snapshot = format!("## User memory\n- useful\u{1b}[31m{}\n\nRules:\n", "x".repeat(2000));
-        let rows = section(&snapshot, "## User memory").unwrap();
-        assert!(rows[1].starts_with("- useful�[31m"));
-        assert!(rows[1].ends_with('…'));
-        assert!(rows[1].chars().count() <= 401);
-        let beliefs = belief_lines(vec![crate::lore_picker::Belief {
-            id: 4, subject: "all\nusers".into(), claim: format!("safe\u{1b}[31m{}", "x".repeat(2000)),
-            truncated: false, confidence: 0.9, evidence_count: Some(2),
-        }]);
-        assert!(beliefs[0].starts_with("## Global active LORE beliefs"));
-        assert!(beliefs[1].starts_with("- all users: safe�[31m"));
-        assert!(beliefs[1].ends_with('…'));
-        assert!(beliefs[1].chars().count() <= 490);
-    }
-
-    #[test]
-    fn unavailable_global_beliefs_do_not_hide_scoped_memory() {
-        let dir = tempfile::tempdir().unwrap();
-        let script = fake_lore(dir.path());
-        let source = fs::read_to_string(&script).unwrap();
-        fs::write(&script, source.replace("'ok':True,'value':value", "'ok':False,'error':'unavailable'")).unwrap();
-        let rows = fetch(&script, dir.path()).unwrap();
-        assert!(rows.iter().any(|row| row.contains("- run checks")));
-        assert!(rows.iter().any(|row| row == "Global beliefs unavailable"));
-    }
-
-    #[test]
-    fn plain_directory_keeps_lore_folder_scope_without_claiming_repo() {
-        let dir = tempfile::tempdir().unwrap();
-        assert_eq!(scope_path(dir.path()), (dir.path().to_path_buf(), false));
-        let rows = fetch(&fake_lore(dir.path()), dir.path()).unwrap();
-        assert!(rows.iter().any(|row| row.starts_with("## Folder memory")));
-        assert!(rows.iter().any(|row| row.contains("- run checks")));
-        assert!(rows.iter().any(|row| row.contains("global: remember to cite evidence")));
-        assert!(!rows.iter().any(|row| row.starts_with("## Project memory")));
-    }
-
-    #[test]
-    fn managed_worktree_reads_main_repository_memory_and_real_belief_hint() {
+    fn managed_worktree_uses_canonical_main_repository_scope() {
         let dir = tempfile::tempdir().unwrap();
         let main = dir.path().join("repo");
         let tree = dir.path().join("tree");
@@ -178,14 +92,7 @@ for line in sys.stdin:
         git(&main, &["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "base"]);
         git(&main, &["worktree", "add", "-q", "-b", "feature", tree.to_str().unwrap()]);
         assert_eq!(scope_path(&tree), (main.canonicalize().unwrap(), true));
-        let rows = fetch(&fake_lore(dir.path()), &tree).unwrap();
-        assert!(rows.iter().any(|row| row.starts_with("## User memory")));
-        assert!(rows.iter().any(|row| row.contains("[source: codex]")));
-        assert!(rows.iter().any(|row| row.contains(main.to_str().unwrap())));
-        assert!(rows.iter().any(|row| row.starts_with("Belief store: 3 active beliefs")));
-        assert!(rows.iter().any(|row| row.starts_with("## Global active LORE beliefs")));
-        assert!(rows.iter().any(|row| row.contains("global: remember to cite evidence")));
-        assert!(!rows.iter().any(|row| row.contains(tree.to_str().unwrap())));
+
     }
 }
 
@@ -417,12 +324,12 @@ impl Manager {
             let start = self.selected.saturating_sub(visible.saturating_sub(1));
             if self.entries.is_empty() { lines.push("(empty) · A add a fact".into()); }
             for (i, entry) in self.entries.iter().enumerate().skip(start).take(visible) {
-                lines.push(format!("{} {}", if i == self.selected { "›" } else { " " }, bounded_line(entry, width.saturating_sub(2))));
+                lines.push(format!("{} {}", if i == self.selected { "›" } else { " " }, crate::lore_table::cell(entry, width.saturating_sub(2)).trim_end()));
             }
             lines.push("Enter actions: A add · E edit · D remove · Tab scope".into());
         }
         let lines: Vec<_> = lines.into_iter().enumerate().map(|(index, line)|
-            if self.draft.is_some() && index > 0 { line } else { bounded_line(&line, width) }).collect();
+            if self.draft.is_some() && index > 0 { line } else { crate::lore_table::cell(&line, width).trim_end().to_owned() }).collect();
         frame.render_widget(Paragraph::new(lines.join("\n"))
             .block(Block::default().title(" LORE curated memory · Esc close ").borders(Borders::ALL)
                 .border_style(Style::default().fg(crate::theme::ACCENT)))

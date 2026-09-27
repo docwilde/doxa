@@ -384,6 +384,30 @@ impl LoreClient {
         Ok(MemoryUsage { project_chars, user_chars, project_cap_chars, user_cap_chars })
     }
 
+    /// Read complete canonical facts with informational provenance. Scrubbed
+    /// rows are marked and cannot substitute for an exact mutation review.
+    pub fn memory_entries(&mut self, cwd: &str, scope: &str) -> Result<Vec<Value>, LoreError> {
+        if cwd.is_empty() || cwd.len() > 4096 || cwd.contains('\0') || !matches!(scope, "user" | "project") {
+            return Err(LoreError::InvalidFrame);
+        }
+        let value = self.request_value("memory_entries_v1", json!({"cwd":cwd,"scope":scope}))?;
+        let rows = value.as_array().filter(|rows| rows.len() <= 400).ok_or(LoreError::InvalidFrame)?;
+        let mut bytes = 0usize;
+        for row in rows {
+            let text = row["text"].as_str().ok_or(LoreError::InvalidFrame)?;
+            if text.len() > 16384 || text.chars().any(char::is_control) || !row["redacted"].is_boolean() {
+                return Err(LoreError::InvalidFrame);
+            }
+            if !row["source"].is_null() && row["source"].as_str()
+                .is_none_or(|source| source.len() > 64 || source.chars().any(char::is_control)) {
+                return Err(LoreError::InvalidFrame);
+            }
+            bytes += text.len() + 3;
+        }
+        if bytes > 65536 { return Err(LoreError::InvalidFrame); }
+        Ok(rows.clone())
+    }
+
     /// Scoped, complete curated entries and optimistic review identity.
     pub fn memory_review(&mut self, cwd: &str, scope: &str) -> Result<Value, LoreError> {
         if cwd.is_empty() || cwd.len() > 4096 || cwd.contains('\0') || !matches!(scope, "user" | "project") {
@@ -733,10 +757,42 @@ impl LoreClient {
     }
 
     pub fn beliefs(&mut self, offset: u16, limit: u8) -> Result<Vec<Value>, LoreError> {
-        if offset > 10000 || limit > 50 {
+        self.beliefs_request("beliefs", offset, limit, "")
+    }
+
+    /// Literal Unicode casefold filter over visible subject/claim text, before
+    /// canonical recency ordering and pagination. No semantic consult fallback.
+    pub fn beliefs_filtered(&mut self, offset: u16, limit: u8, query: &str) -> Result<Vec<Value>, LoreError> {
+        self.beliefs_request(if query.is_empty() { "beliefs" } else { "beliefs_filtered_v1" }, offset, limit, query)
+    }
+
+    /// Bounded full display of an active list row. This grants no mutation
+    /// review identity; redacted/omitted source text is explicitly incomplete.
+    pub fn belief_display(&mut self, cwd: &str, belief_id: u64) -> Result<Value, LoreError> {
+        if cwd.is_empty() || cwd.len() > 4096 || cwd.contains('\0')
+            || belief_id == 0 || belief_id > i64::MAX as u64 {
             return Err(LoreError::InvalidFrame);
         }
-        let value = self.request_value("beliefs", json!({"offset":offset,"limit":limit}))?;
+        let value = self.request_value("belief_display_v1", json!({"cwd":cwd,"belief_id":belief_id}))?;
+        let subject = value["subject"].as_str().ok_or(LoreError::InvalidFrame)?;
+        let claim = value["claim"].as_str().ok_or(LoreError::InvalidFrame)?;
+        let complete = value["complete"].as_bool().ok_or(LoreError::InvalidFrame)?;
+        let redacted = value["redacted"].as_bool().ok_or(LoreError::InvalidFrame)?;
+        if value["id"].as_u64() != Some(belief_id) || subject.len() > 4096
+            || subject.chars().any(char::is_control) || subject.len() + claim.len() > 65536
+            || claim.chars().any(|c| c.is_control() && c != '\n') || (complete && redacted)
+            || value.get("claim_sha256").is_some() || value.get("uid").is_some() {
+            return Err(LoreError::InvalidFrame);
+        }
+        Ok(value)
+    }
+
+    fn beliefs_request(&mut self, op: &str, offset: u16, limit: u8, query: &str) -> Result<Vec<Value>, LoreError> {
+        if offset > 10000 || limit > 50 || query.chars().count() > 200 || query.len() > 1024
+            || query.chars().any(char::is_control) {
+            return Err(LoreError::InvalidFrame);
+        }
+        let value = self.request_value(op, json!({"offset":offset,"limit":limit,"query":query}))?;
         let rows = value
             .as_array()
             .filter(|rows| rows.len() <= limit as usize)
@@ -750,6 +806,10 @@ impl LoreClient {
                     .as_f64()
                     .is_some_and(|n| n.is_finite() && (0.0..=1.0).contains(&n))
                 && row["evidence_count"].as_u64().is_some()
+                && ["updated", "created", "recency"].iter().all(|field| {
+                    row[*field].is_null() || row[*field].as_str()
+                        .is_some_and(|text| text.len() <= 64 && !text.chars().any(char::is_control))
+                })
         }) {
             return Err(LoreError::InvalidFrame);
         }

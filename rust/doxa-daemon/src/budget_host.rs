@@ -130,6 +130,7 @@ impl BudgetHost {
 }
 
 impl Host for BudgetHost {
+    fn has_active_work(&self) -> bool { self.inner.has_active_work() }
     fn peer_tools_ready(&self) -> bool { self.inner.peer_tools_ready() }
     fn set_peer_tool_handler(&self, handler: doxa_runtime::PeerToolHandler) -> bool { self.inner.set_peer_tool_handler(handler) }
     fn initial_effort(&self) -> Option<String> { self.inner.initial_effort() }

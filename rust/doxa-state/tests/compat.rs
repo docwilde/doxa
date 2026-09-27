@@ -4,6 +4,19 @@ use std::{fs, os::unix::fs::PermissionsExt};
 use std::os::unix::ffi::OsStrExt;
 
 #[test]
+fn claude_startup_deadlines_cover_sdk_initialize_retry_and_user_override() {
+    assert_eq!(claude_startup_seconds(None), Ok((135, 150)));
+    assert_eq!(claude_startup_seconds(Some("1")), Ok((135, 150)));
+    assert_eq!(claude_startup_seconds(Some("-1")), Ok((135, 150)));
+    assert_eq!(claude_startup_seconds(Some("120000")), Ok((255, 270)));
+    assert_eq!(claude_startup_seconds(Some("120001")), Ok((257, 272)));
+    assert_eq!(claude_startup_seconds(Some("300000")), Ok((615, 630)));
+    for invalid in ["", "bad", "300001", "999999999999999999999999"] {
+        assert!(claude_startup_seconds(Some(invalid)).is_err());
+    }
+}
+
+#[test]
 fn python_session_id_examples_and_path_attacks() {
     for id in ["a", "abc-123", &"A".repeat(128)] { assert!(valid_session_id(id)); }
     for id in ["", "-x", "..", "a/b", "a\\b", "a*b", "a_b", "é", &"A".repeat(129)] {

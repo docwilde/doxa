@@ -4,6 +4,7 @@
 use std::fs::OpenOptions;
 use std::io::{self, Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::{fd::OwnedFd, unix::{net::UnixStream, process::CommandExt}};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -147,24 +148,10 @@ fn apply_patch(cwd: &Path, patch: &[u8], check: bool) -> Result<(), String> {
     let mut command = Command::new("git");
     command.args(["--no-pager", "apply", "--reverse", "--recount"]);
     if check { command.arg("--check"); }
-    let mut child = command.arg("-").current_dir(cwd).env("GIT_OPTIONAL_LOCKS", "0")
-        .stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()
-        .map_err(|_| "Could not start git apply.".to_owned())?;
-    let mut stdin = child.stdin.take().expect("piped stdin");
-    let input = patch.to_vec();
-    let writer = std::thread::spawn(move || stdin.write_all(&input));
-    let deadline = Instant::now() + GIT_TIMEOUT;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break Some(status),
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
-            _ => { let _ = child.kill(); let _ = child.wait(); break None; }
-        }
-    };
-    let written = writer.join().map_err(|_| "Git apply input writer stopped unexpectedly.".to_owned())?;
-    if status.is_none() { return Err("Git apply timed out; inspect the worktree before retrying.".into()); }
-    written.map_err(|_| "Git apply could not receive the patch.".to_owned())?;
-    if status.is_some_and(|status| status.success()) { Ok(()) }
+    command.arg("-").current_dir(cwd).env("GIT_OPTIONAL_LOCKS", "0");
+    let (status, _, _) = run_git(&mut command, Some(patch), 0, GIT_TIMEOUT)
+        .map_err(|_| "Git apply timed out or failed; inspect the worktree before retrying.".to_owned())?;
+    if status.success() { Ok(()) }
     else { Err("This hunk no longer applies; nothing was changed by this attempt.".into()) }
 }
 
@@ -205,47 +192,58 @@ fn nul_paths(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
     bytes.split(|byte| *byte == 0).filter(|path| !path.is_empty())
 }
 
-fn git_output(cwd: &Path, args: &[&str], limit: usize) -> Result<(Vec<u8>, bool), String> {
-    let mut child = Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|_| "Could not start git for this worktree.".to_owned())?;
-    let stdout = child.stdout.take().expect("piped stdout");
-    let reader = std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let mut stdout = stdout;
-        let mut chunk = [0u8; 8192];
-        loop {
-            match stdout.read(&mut chunk) {
-                Ok(0) => break,
-                Ok(count) => {
-                    let remaining = (limit + 1).saturating_sub(bytes.len());
-                    bytes.extend_from_slice(&chunk[..count.min(remaining)]);
-                }
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+/// Own the leader until its pipes close. Nonblocking pipe work shares the
+/// process deadline, including descendants that inherit either descriptor.
+fn run_git(command: &mut Command, input: Option<&[u8]>, limit: usize, timeout: Duration)
+    -> io::Result<(std::process::ExitStatus, Vec<u8>, bool)> {
+    let (mut output, writer) = UnixStream::pair()?; output.set_nonblocking(true)?;
+    let mut stdin = if input.is_some() {
+        let (reader, writer) = UnixStream::pair()?; writer.set_nonblocking(true)?;
+        command.stdin(Stdio::from(OwnedFd::from(reader))); Some(writer)
+    } else { command.stdin(Stdio::null()); None };
+    let mut child = command.stdout(Stdio::from(OwnedFd::from(writer)))
+        .stderr(Stdio::null()).process_group(0).spawn()?;
+    // Command retains configured descriptors; release the parent's copies.
+    command.stdin(Stdio::null()).stdout(Stdio::null());
+    let deadline = Instant::now() + timeout; let mut bytes = Vec::new();
+    let mut offset = 0; let mut eof = false; let mut truncated = false;
+    let result = (|| loop {
+        if let Some(pipe) = stdin.as_mut() {
+            let input = input.unwrap();
+            if offset == input.len() { stdin = None; }
+            else { match pipe.write(&input[offset..]) {
+                Ok(0) => return Err(io::Error::new(io::ErrorKind::WriteZero,"Git input closed")),
+                Ok(count) => offset += count,
+                Err(error) if matches!(error.kind(),io::ErrorKind::WouldBlock|io::ErrorKind::Interrupted) => {},
                 Err(error) => return Err(error),
-            }
+            } }
         }
-        Ok(bytes)
-    });
-    let deadline = Instant::now() + GIT_TIMEOUT;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break Some(status),
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
-            _ => { let _ = child.kill(); let _ = child.wait(); break None; }
-        }
-    };
-    let bytes = reader.join().map_err(|_| "Git output reader stopped unexpectedly.".to_owned())?
-        .map_err(|_| "Git output could not be read.".to_owned())?;
-    let Some(status) = status else { return Err("Git timed out or exceeded the bounded view.".into()); };
+        let mut buffer = [0u8;8192];
+        for _ in 0..16 { match output.read(&mut buffer) {
+            Ok(0) => { eof = true; break; },
+            Ok(count) => { let kept = count.min(limit.saturating_add(1).saturating_sub(bytes.len()));
+                bytes.extend_from_slice(&buffer[..kept]); truncated |= bytes.len() > limit; },
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        } }
+        // Don't reap a leader while a descendant holds a pipe. Its unreaped
+        // PID keeps deadline cancellation bound to this exact process group.
+        if eof && stdin.is_none() { if let Some(status) = child.try_wait()? { return Ok(status); } }
+        if Instant::now() >= deadline { return Err(io::Error::new(io::ErrorKind::TimedOut,"Git deadline exceeded")); }
+        std::thread::sleep(Duration::from_millis(10));
+    })();
+    if result.is_err() { unsafe { libc::kill(-(child.id() as i32),libc::SIGKILL); } let _ = child.wait(); }
+    result.map(|status|(status,bytes,truncated))
+}
+
+fn git_output(cwd: &Path, args: &[&str], limit: usize) -> Result<(Vec<u8>, bool), String> {
+    let mut command = Command::new("git");
+    command.args(args).current_dir(cwd).env("GIT_OPTIONAL_LOCKS", "0");
+    let (status, bytes, truncated) = run_git(&mut command,None,limit,GIT_TIMEOUT)
+        .map_err(|_| "Git timed out or could not inspect this worktree.".to_owned())?;
     if !status.success() { return Err("Git could not inspect this worktree.".into()); }
-    let truncated = bytes.len() > limit;
-    Ok((bytes, truncated))
+    Ok((bytes,truncated))
 }
 
 fn untracked_names(bytes: &[u8], truncated: bool) -> String {
@@ -381,6 +379,21 @@ pub fn read(cwd: &Path) -> DiffSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn owned_git_pipes_bound_inherited_output_and_unconsumed_input() {
+        for input in [None, Some(vec![b'x';256*1024])] {
+            let mut command = Command::new("/bin/sh");
+            command.args(["-c",if input.is_some() { "sleep 10" } else { "sleep 10 & exit 0" }]);
+            let started = Instant::now();
+            let result = run_git(&mut command,input.as_deref(),64,Duration::from_millis(60));
+            assert_eq!(result.unwrap_err().kind(),io::ErrorKind::TimedOut);
+            assert!(started.elapsed()<Duration::from_secs(1));
+        }
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c","printf 123456789"]);
+        let (status,bytes,truncated) = run_git(&mut command,None,4,Duration::from_secs(1)).unwrap();
+        assert!(status.success()); assert_eq!(bytes,b"12345"); assert!(truncated);
+    }
     use std::process::Command;
     #[test]
     fn rejects_self_base_and_option_like_refs() {

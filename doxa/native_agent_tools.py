@@ -59,8 +59,8 @@ class AgentOperators:
         self.bind(identity)
         count = None
         try:
-            conn = self.server.ctx["belief_store"]()
-            count = conn.execute("SELECT count(*) FROM beliefs WHERE status = 'active'").fetchone()[0]
+            with contextlib.closing(self.server.ctx["belief_store"]()) as conn:
+                count = conn.execute("SELECT count(*) FROM beliefs WHERE status = 'active'").fetchone()[0]
         except Exception:
             pass  # an unavailable store is unknown, never a fabricated zero
         return {"belief_count": count, "disabled_tools": self.server.gate.disabled_tools()}

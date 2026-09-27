@@ -5,6 +5,9 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import sqlite3
+from types import SimpleNamespace
+import pytest
 
 from doxa.native_agent_tools import LORE_TOOLS
 
@@ -102,3 +105,31 @@ def test_canonical_status_reports_real_active_beliefs_and_disabled_names(tmp_pat
     bound = identity(tmp_path)
     _, frames = wire(tmp_path, [{"id":1,"op":"agent_status_v1","identity":bound}])
     assert frames[1]["value"] == {"belief_count":0,"disabled_tools":[]}
+
+
+@pytest.mark.parametrize("query_fails", [False, True])
+def test_status_owns_and_closes_each_sqlite_connection(tmp_path, monkeypatch, query_fails):
+    from doxa.native_agent_tools import AgentOperators
+    path = tmp_path / "owned-status.sqlite3"
+    connection = sqlite3.connect(path)
+    if not query_fails:
+        connection.execute("CREATE TABLE beliefs(status TEXT)")
+        connection.execute("INSERT INTO beliefs VALUES ('active')")
+        connection.commit()
+    connection.close()
+    opened = []
+    def factory():
+        connection = sqlite3.connect(path)
+        opened.append(connection)  # Keep references so GC cannot mask missing close.
+        return connection
+    operators = AgentOperators()
+    monkeypatch.setattr(operators, "bind", lambda _: None)
+    operators.server = SimpleNamespace(ctx={"belief_store":factory},
+        gate=SimpleNamespace(disabled_tools=lambda: ["lore_remember"]))
+    for _ in range(30):
+        assert operators.status({}) == {"belief_count":None if query_fails else 1,
+            "disabled_tools":["lore_remember"]}
+    assert len(opened) == 30
+    for connection in opened:
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            connection.execute("SELECT 1")

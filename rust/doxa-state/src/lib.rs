@@ -32,6 +32,23 @@ pub const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 pub const MAX_TABSET_BYTES: u64 = 8 * 1024 * 1024;
 pub const MAX_MACHINE_ID_BYTES: u64 = 256;
 
+/// One startup policy shared by native Claude host and launcher. The SDK
+/// clamps initialization to at least 60 seconds and SessionEngine may retry
+/// once after refreshing its credential copy. Keep both attempts plus setup
+/// inside the host deadline, and allow the launcher another 15 seconds.
+pub fn claude_startup_seconds(initialize_ms: Option<&str>) -> Result<(u64, u64), &'static str> {
+    let milliseconds = match initialize_ms {
+        Some(value) => value.trim().parse::<i64>().map_err(|_| "Invalid Claude SDK initialization timeout")?,
+        None => 60_000,
+    };
+    if milliseconds > 300_000 {
+        return Err("Claude SDK initialization timeout exceeds the native 300000 ms startup bound");
+    }
+    let sdk_seconds = (milliseconds.max(60_000) as u64).div_ceil(1000);
+    let host = 2 * sdk_seconds + 15;
+    Ok((host, host + 15))
+}
+
 fn read_bounded_regular(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
     // Recheck the opened inode so a file swapped for a FIFO between path
     // inspection and open cannot block startup or bypass the size limit.

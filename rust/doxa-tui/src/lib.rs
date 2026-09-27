@@ -4,6 +4,7 @@ pub mod markdown;
 pub mod bridge;
 pub mod history;
 pub mod lore_picker;
+pub mod lore_table;
 pub mod memory_menu;
 pub mod diff_view;
 pub mod discovery;
@@ -28,6 +29,7 @@ pub mod maintenance;
 pub mod settings;
 pub mod preferences;
 pub mod belief_graph;
+pub mod belief_preview;
 
 pub mod shell;
 pub mod startup_restore;
@@ -36,3 +38,4 @@ pub mod installation;
 
 pub mod selection;
 pub mod clipboard;
+pub mod welcome;

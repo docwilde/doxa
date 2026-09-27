@@ -136,26 +136,30 @@ def messages_from_rollout(data, scrub):
 
 
 def run_worker(job, lore_parent, timeout=REVIEW_TIMEOUT):
+    source = globals().get("REVIEW_SUPERVISOR_SOURCE")
+    if not isinstance(source, str) or not source:
+        return False  # Only the binary's digest-verified supervisor can run.
     process = subprocess.Popen(
-        [sys.executable, "-I", "-c", "import sys; from pathlib import Path; "
-         "sys.path.insert(0, sys.argv[2]); from lore_core.deriver import worker_run; "
-         "sys.exit(worker_run(Path(sys.argv[1])))", str(job), str(lore_parent)],
-        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+        [sys.executable, "-I", "-c", "import sys; namespace={'__name__':'doxa_review_supervisor'}; "
+         "exec(compile(sys.argv[1],'<verified DOXA supervisor>','exec'),namespace); "
+         "sys.exit(namespace['supervise'](sys.argv[2],sys.argv[3],float(sys.argv[4])))",
+         source, str(job), str(lore_parent), str(timeout)],
+        stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL, start_new_session=True,
     )
     try:
-        return process.wait(timeout=timeout) == 0
-    except BaseException as failure:
-        # The whole-review deadline can interrupt imports/job construction or
-        # an in-flight worker. Reap its group before the outer gate blocks.
+        return process.wait(timeout=timeout + 5) == 0
+    except subprocess.TimeoutExpired:
+        return False
+    finally:
+        # EOF also happens on hook SIGKILL. The detached supervisor retains
+        # and reaps its owned worker group, including a reviewer's CLI children.
+        process.stdin.close()
         try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        process.wait()
-        if isinstance(failure, subprocess.TimeoutExpired):
-            return False
-        raise
+            process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
 
 
 def review(manifest_path, event, worker=run_worker):

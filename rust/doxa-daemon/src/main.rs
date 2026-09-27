@@ -805,7 +805,9 @@ fn run() -> io::Result<()> {
         if clients > 0 {
             had_client = true;
             empty_since = Instant::now();
-        } else if previous_clients > 0 {
+        } else if previous_clients > 0 || handle.has_active_work() {
+            // Detached work is still claimed. Give it a full idle interval
+            // after completion, rather than canceling at a detach deadline.
             empty_since = Instant::now();
         }
         let delay = if had_client {
@@ -814,7 +816,10 @@ fn run() -> io::Result<()> {
             options.linger.max(Duration::from_secs(120))
         };
         if clients == 0 && empty_since.elapsed() >= delay {
-            break Ok(());
+            if handle.expire_if_detached_idle() { break Ok(()); }
+            // An attach/admission raced the earlier snapshot. The runtime
+            // owns the final decision under its admission lock.
+            empty_since = Instant::now();
         }
         if clients != previous_clients || last_beat.elapsed() >= Duration::from_secs(15) {
             if let Err(error) = registry.write(clients) {

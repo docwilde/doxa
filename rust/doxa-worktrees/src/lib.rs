@@ -5,7 +5,7 @@ use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::{fs::{MetadataExt, OpenOptionsExt, PermissionsExt}, process::CommandExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -101,8 +101,7 @@ pub fn enabled() -> bool {
         if !value.trim().is_empty() { return truthy(&value); }
     }
     let Some(path) = home().map(|path| path.join("config.toml")) else { return true; };
-    let Ok(text) = fs::read_to_string(path) else { return true; };
-    let Ok(value) = text.parse::<toml::Value>() else { return true; };
+    let value = doxa_state::load_config(&path);
     match value.get("worktree_per_session") {
         Some(toml::Value::Boolean(false)) => false,
         Some(toml::Value::String(text)) if !text.trim().is_empty() => truthy(text),
@@ -111,33 +110,53 @@ pub fn enabled() -> bool {
 }
 
 fn git(cwd: &Path, args: &[&str], timeout: Duration) -> Option<(bool, Vec<u8>)> {
-    let mut child = Command::new("git").args(args).current_dir(cwd)
+    git_program(Path::new("git"), cwd, args, timeout)
+}
+fn git_program(program: &Path, cwd: &Path, args: &[&str], timeout: Duration) -> Option<(bool, Vec<u8>)> {
+    let mut child = Command::new(program).args(args).current_dir(cwd).process_group(0)
         .env_remove("GIT_DIR").env_remove("GIT_WORK_TREE")
         .env_remove("GIT_COMMON_DIR").env_remove("GIT_INDEX_FILE")
-        .stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
-    let mut stdout = child.stdout.take()?;
-    let reader = std::thread::spawn(move || -> io::Result<Vec<u8>> {
+        .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
+    let pid = child.id() as i32;
+    let result = (|| {
+        let mut stdout = child.stdout.take()?;
+        let flags = unsafe { libc::fcntl(stdout.as_raw_fd(), libc::F_GETFL) };
+        if flags < 0 || unsafe { libc::fcntl(stdout.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 { return None; }
+        let deadline = Instant::now() + timeout;
         let mut bytes = Vec::new();
         let mut chunk = [0u8; 8192];
+        let mut eof = false;
         loop {
-            let count = stdout.read(&mut chunk)?;
-            if count == 0 { break; }
-            let remaining = MAX_GIT_BYTES.saturating_add(1).saturating_sub(bytes.len());
-            bytes.extend_from_slice(&chunk[..count.min(remaining)]);
+            // A bounded burst permits cancellation even when output never stops.
+            for _ in 0..16 {
+                match stdout.read(&mut chunk) {
+                    Ok(0) => { eof = true; break; },
+                    Ok(count) => { if bytes.len().saturating_add(count) > MAX_GIT_BYTES { return None; } bytes.extend_from_slice(&chunk[..count]); },
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(_) => return None,
+                }
+            }
+            // Observe exit without reaping: its PID must remain reserved until
+            // every possible owned-group kill has completed. A descendant may
+            // retain stdout after Git exits; that pipe shares the deadline.
+            let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+            if unsafe { libc::waitid(libc::P_PID, pid as libc::id_t, &mut info, libc::WEXITED | libc::WNOHANG | libc::WNOWAIT) } != 0 {
+                if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted { continue; }
+                return None;
+            }
+            // P_PID restricts this observation to our exact child. A zeroed
+            // siginfo remains empty when WNOHANG reports no exited child.
+            if eof && info.si_signo != 0 { return Some(bytes); }
+            if Instant::now() >= deadline { return None; }
+            std::thread::sleep(Duration::from_millis(10));
         }
-        Ok(bytes)
-    });
-    let deadline = Instant::now() + timeout;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break Some(status),
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
-            _ => { let _ = child.kill(); let _ = child.wait(); break None; }
-        }
-    };
-    let bytes = reader.join().ok()?.ok()?;
-    if bytes.len() > MAX_GIT_BYTES { return None; }
-    Some((status?.success(), bytes))
+    })();
+    // Only this unreaped group leader owns pid. Always retire remaining owned
+    // descendants before reaping it, including failures and completed hooks.
+    unsafe { libc::kill(-pid, libc::SIGKILL); }
+    let status = child.wait().ok()?;
+    Some((status.success(), result?))
 }
 fn git_text(cwd: &Path, args: &[&str]) -> Option<String> {
     let (ok, bytes) = git(cwd, args, Duration::from_secs(10))?;
@@ -778,6 +797,61 @@ mod tests {
     fn run_git(cwd: &Path, args: &[&str]) {
         let result = Command::new("git").args(args).current_dir(cwd).output().unwrap();
         assert!(result.status.success(), "git {:?}: {}", args, String::from_utf8_lossy(&result.stderr));
+    }
+    #[test]
+    fn worktree_config_uses_bounded_nonblocking_canonical_reader() {
+        let _serial = TEST_ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let prior_home = env::var_os("DOXA_HOME"); let prior_switch = env::var_os("DOXA_WORKTREE");
+        env::set_var("DOXA_HOME", dir.path()); env::remove_var("DOXA_WORKTREE");
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "worktree_per_session = false\n").unwrap(); assert!(!enabled());
+        fs::remove_file(&path).unwrap();
+        let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || { let _ = tx.send(enabled()); });
+        let result = rx.recv_timeout(Duration::from_millis(300));
+        // Release a regressed blocking FIFO reader so a failed test also retires
+        // its owned thread; the production function must need no writer.
+        if result.is_err() {
+            if let Ok(mut writer) = OpenOptions::new().write(true).custom_flags(libc::O_NONBLOCK).open(&path) { let _ = writer.write_all(b"worktree_per_session = false\n"); }
+        }
+        worker.join().unwrap();
+        fs::remove_file(&path).unwrap();
+        fs::write(&path, vec![b' '; doxa_state::MAX_CONFIG_BYTES as usize + 1]).unwrap();
+        assert!(enabled());
+        if let Some(value) = prior_home { env::set_var("DOXA_HOME", value); } else { env::remove_var("DOXA_HOME"); }
+        if let Some(value) = prior_switch { env::set_var("DOXA_WORKTREE", value); } else { env::remove_var("DOXA_WORKTREE"); }
+        assert_eq!(result.unwrap(), true);
+    }
+    #[test]
+    fn git_deadline_covers_descendant_stdout_and_output_overflow() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("git-fixture");
+        fs::write(&program, "#!/bin/sh\nprintf '%s\\n' \"$$\" > leader\n/bin/sleep 30 &\nprintf '%s\\n' \"$!\" > descendant\nexit 0\n").unwrap();
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
+        let started = Instant::now();
+        assert!(git_program(&program, dir.path(), &[], Duration::from_millis(80)).is_none());
+        assert!(started.elapsed() < Duration::from_secs(1));
+        let leader: i32 = fs::read_to_string(dir.path().join("leader")).unwrap().trim().parse().unwrap();
+        assert_eq!(unsafe { libc::kill(leader, 0) }, -1);
+        let descendant: i32 = fs::read_to_string(dir.path().join("descendant")).unwrap().trim().parse().unwrap();
+        let retired = Instant::now() + Duration::from_secs(1);
+        loop {
+            let status = fs::read_to_string(format!("/proc/{descendant}/stat"));
+            if status.is_err() || status.unwrap().split(')').nth(1).unwrap().trim_start().starts_with('Z') { break; }
+            // SIGKILL delivery is asynchronous; an owned grandchild may still
+            // be scheduled between killing its group and observing /proc.
+            assert!(Instant::now() < retired, "owned Git descendant remained running after group cancellation");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        fs::write(&program, "#!/bin/sh\nhead -c 70000 /dev/zero\n/bin/sleep 30\n").unwrap();
+        let started = Instant::now();
+        assert!(git_program(&program, dir.path(), &[], Duration::from_secs(2)).is_none());
+        assert!(started.elapsed() < Duration::from_secs(1));
+        fs::write(&program, "#!/bin/sh\nprintf 'bounded output'\nexit 7\n").unwrap();
+        assert_eq!(git_program(&program, dir.path(), &[], Duration::from_secs(1)), Some((false, b"bounded output".to_vec())));
     }
     #[test]
     fn creation_requires_lifecycle_lock_before_creating_a_branch_or_sidecar() {

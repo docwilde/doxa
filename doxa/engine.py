@@ -2348,33 +2348,30 @@ class SessionEngine:
     @staticmethod
     def _review_worker(jobfile: Path) -> bool:
         import subprocess
-        import signal
         import sys
 
         # The parent may have selected a Claude plugin checkout over the
         # installed wheel. A fresh interpreter must use that same source.
         lore_parent = str(Path(lore_core.__file__).resolve().parent.parent)
         process = subprocess.Popen(
-            [sys.executable, "-c",
-             "import sys; from pathlib import Path; "
-             "sys.path.insert(0, sys.argv[2]); "
-             "from lore_core.deriver import worker_run; "
-             "sys.exit(worker_run(Path(sys.argv[1])))", str(jobfile), lore_parent],
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            [sys.executable, "-I", str(Path(__file__).with_name("review_worker.py")),
+             str(jobfile), lore_parent],
+            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL, start_new_session=True,
         )
         try:
-            return process.wait(timeout=180) == 0
+            return process.wait(timeout=185) == 0
         except subprocess.TimeoutExpired:
-            # LORE's worker may itself be waiting on a provider CLI. Kill
-            # the whole process group so a refused compact leaves no paid
-            # reviewer running in the background.
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            process.wait()
             return False
+        finally:
+            # The supervisor owns the worker PG and kills/reaps it on EOF.
+            # The OS also closes this pipe if the SDK parent is SIGKILLed.
+            process.stdin.close()
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
 
     # -- streaming deriver -------------------------------------------
 

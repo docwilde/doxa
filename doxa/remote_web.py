@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """A small browser client for daemon-hosted DOXA sessions.
 
-Run behind Tailscale Serve. The bridge binds loopback, accepts only the
-identity header Serve supplies, and asks remote_policy about every action.
-The daemon's Unix socket and protocol remain local and unchanged.
+The retained renderer is unavailable until its transport can attest the
+Tailscale proxy. A loopback TCP address cannot authenticate identity headers.
+The machine-wide Unix peer bridge has its own kernel credential checks.
 """
 
 from __future__ import annotations
@@ -11,7 +11,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
-import ipaddress
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -21,12 +20,15 @@ from . import peers, remote_policy, transcript
 from .client import EngineClient
 
 
-def _loopback(scope: dict) -> bool:
-    client = scope.get("client")
-    try:
-        return bool(client) and ipaddress.ip_address(client[0]).is_loopback
-    except ValueError:
-        return False
+def _attested_proxy(_scope: dict) -> bool:
+    """No current ASGI transport exposes verified Unix peer credentials.
+
+    Neither ``scope['client']`` nor an HTTP header proves that tailscaled
+    opened the connection. Fail closed even if the app is served directly
+    instead of through main(). Tests inject a deliberate transport attestor
+    to exercise the retained renderer independently of this missing adapter.
+    """
+    return False
 
 
 def _same_origin(headers: Any) -> bool:
@@ -43,7 +45,7 @@ def _decision(kind: str, scope: dict, headers: Any) -> remote_policy.Decision:
     return remote_policy.evaluate(
         kind,
         login=headers.get("tailscale-user-login"),
-        from_loopback=_loopback(scope),
+        from_loopback=_attested_proxy(scope),
     )
 
 
@@ -258,10 +260,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(decision.reason)
     if not remote_policy.allowed_logins():
         parser.error("remote_allowed_logins is empty; no one can authenticate")
-    import uvicorn
-
-    uvicorn.run(create_app(), host=args.host, port=args.port, ws_max_size=64 * 1024)
-    return 0
+    parser.error("browser bridge unavailable: loopback TCP cannot attest the Tailscale proxy; use the credential-checked Unix peer bridge")
 
 
 _HTML = """<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>DOXA remote</title><link rel="stylesheet" href="/remote.css"><main><header><strong>DOXA</strong><span id="status">Connecting…</span></header><nav id="sessions" aria-label="Sessions"></nav><section id="conversation" aria-live="polite"></section><section id="question" hidden></section><form id="prompt"><textarea id="prompt-text" aria-label="Message" placeholder="Message this session" rows="3"></textarea><button>Send</button></form></main><script src="/remote.js" defer></script></html>"""

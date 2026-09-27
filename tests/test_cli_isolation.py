@@ -54,6 +54,103 @@ def test_ensure_cli_config_dir_is_idempotent_and_repairs_drift(tmp_path):
     assert json.loads(settings_path.read_text(encoding="utf-8")) == {}
 
 
+def test_fixed_temporary_symlinks_cannot_clobber_settings_or_copy_credentials_out(tmp_path):
+    isolated = iso_mod.cli_config_dir()
+    isolated.mkdir(parents=True, mode=0o700)
+    settings_victim = tmp_path / "settings-victim"
+    credentials_victim = tmp_path / "credentials-victim"
+    for victim in [settings_victim, credentials_victim]:
+        victim.write_text("preserve owned fixture data")
+    (isolated / "settings.json.tmp").symlink_to(settings_victim)
+    (isolated / ".credentials.json.tmp").symlink_to(credentials_victim)
+    source = iso_mod.user_credentials_path()
+    source.write_text('{"claudeAiOauth": {"accessToken": "synthetic-only"}}')
+    iso_mod.ensure_cli_config_dir()
+    assert iso_mod.sync_credentials()
+    for victim in [settings_victim, credentials_victim]:
+        assert victim.read_text() == "preserve owned fixture data"
+    assert not (isolated / "settings.json").is_symlink()
+    assert not iso_mod.isolated_credentials_path().is_symlink()
+    assert json.loads(iso_mod.isolated_credentials_path().read_text()) == json.loads(source.read_text())
+    assert iso_mod.isolated_credentials_path().stat().st_mode & 0o777 == 0o600
+
+
+def test_existing_destination_symlinks_are_replaced_without_mutating_targets(tmp_path):
+    isolated = iso_mod.cli_config_dir()
+    isolated.mkdir(parents=True, mode=0o700)
+    settings_victim = tmp_path / "settings-victim"
+    settings_victim.write_text("{}\n")
+    (isolated / "settings.json").symlink_to(settings_victim)
+    source = iso_mod.user_credentials_path()
+    source.write_text('{"claudeAiOauth": {"accessToken": "synthetic-source"}}')
+    credentials_victim = tmp_path / "credentials-victim"
+    credentials_victim.write_text('{"claudeAiOauth": {"accessToken": "synthetic-outside"}}')
+    iso_mod.isolated_credentials_path().symlink_to(credentials_victim)
+    iso_mod.ensure_cli_config_dir()
+    assert iso_mod.sync_credentials()
+    assert settings_victim.read_text() == "{}\n"
+    assert "synthetic-outside" in credentials_victim.read_text()
+    assert not (isolated / "settings.json").is_symlink()
+    assert not iso_mod.isolated_credentials_path().is_symlink()
+
+
+def test_concurrent_provisioning_uses_distinct_private_inodes(tmp_path):
+    import concurrent.futures
+    source = iso_mod.user_credentials_path()
+    source.write_text('{"claudeAiOauth": {"accessToken": "synthetic-source"}}')
+    def provision(_):
+        iso_mod.ensure_cli_config_dir()
+        return iso_mod.sync_credentials(force=True)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as workers:
+        assert all(workers.map(provision, range(8)))
+    isolated = iso_mod.cli_config_dir()
+    assert json.loads((isolated / "settings.json").read_text()) == {}
+    assert iso_mod.isolated_credentials_path().read_bytes() == source.read_bytes()
+    assert not list(isolated.glob("*.tmp"))
+
+
+def test_fifo_hardlink_and_oversized_settings_are_repaired_without_blocking(tmp_path):
+    import concurrent.futures
+    isolated = iso_mod.cli_config_dir()
+    isolated.mkdir(parents=True, mode=0o700)
+    settings = isolated / "settings.json"
+    os.mkfifo(settings, 0o600)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as workers:
+        pending = workers.submit(iso_mod.ensure_cli_config_dir)
+        try:
+            pending.result(timeout=0.5)
+        except concurrent.futures.TimeoutError:
+            # Retire a regressed blocking reader before reporting the failure.
+            fd = os.open(settings, os.O_WRONLY | os.O_NONBLOCK)
+            os.write(fd, b"{}\n"); os.close(fd)
+            pending.result(timeout=1)
+            pytest.fail("existing settings FIFO blocked provisioning")
+    assert settings.is_file()
+    settings.unlink()
+    outside = tmp_path / "hardlink-fixture"
+    outside.write_text('{"hooks": {"fixture": []}}')
+    os.link(outside, settings)
+    iso_mod.ensure_cli_config_dir()
+    assert outside.read_text() == '{"hooks": {"fixture": []}}'
+    assert settings.stat().st_nlink == 1
+    settings.write_bytes(b" " * (iso_mod.MAX_SETTINGS_BYTES + 1))
+    iso_mod.ensure_cli_config_dir()
+    assert settings.read_text() == "{}\n"
+
+
+def test_symlinked_isolation_directory_is_refused_without_touching_target(tmp_path):
+    outside = tmp_path / "outside-directory"
+    outside.mkdir(mode=0o755)
+    (outside / "settings.json").write_text('{"hooks": {"fixture": []}}')
+    isolated = iso_mod.cli_config_dir()
+    isolated.parent.mkdir(parents=True)
+    isolated.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(PermissionError):
+        iso_mod.spawn_env()
+    assert (outside / "settings.json").read_text() == '{"hooks": {"fixture": []}}'
+    assert outside.stat().st_mode & 0o777 == 0o755
+
+
 def test_sync_credentials_copies_from_the_real_user_config(tmp_path):
     source = iso_mod.user_credentials_path()
     source.parent.mkdir(parents=True, exist_ok=True)

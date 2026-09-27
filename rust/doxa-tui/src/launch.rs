@@ -5,7 +5,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -62,6 +62,28 @@ pub struct LaunchOptions {
 
 fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message.into())
+}
+
+/// One wait-only worker owns every launched daemon after admission. Closing a
+/// window never kills a detached daemon; process exit reparents live children.
+fn daemon_reaper() -> &'static std::sync::mpsc::Sender<Child> {
+    static REAPER: std::sync::OnceLock<std::sync::mpsc::Sender<Child>> = std::sync::OnceLock::new();
+    REAPER.get_or_init(|| {
+        let (sender, receiver) = std::sync::mpsc::channel::<Child>();
+        thread::Builder::new().name("daemon-reaper".into()).spawn(move || {
+            let mut children: Vec<Child> = Vec::new();
+            loop {
+                if let Ok(child) = receiver.recv_timeout(Duration::from_millis(50)) { children.push(child); }
+                // Bound each intake burst so exited children are reaped even
+                // when a fleet continuously supplies new handles.
+                for _ in 0..63 {
+                    match receiver.try_recv() { Ok(child) => children.push(child), Err(_) => break }
+                }
+                children.retain_mut(|child| !matches!(child.try_wait(), Ok(Some(_))));
+            }
+        }).expect("could not start daemon reaper");
+        sender
+    })
 }
 
 /// Resolve a program to an absolute executable path. A command name is
@@ -287,6 +309,10 @@ pub fn spawn_fleet(options: &LaunchOptions, runtime: &Path, budget: Option<f64>,
 }
 
 fn spawn_inner(options: &LaunchOptions, fleet_runtime: Option<&Path>, environment: &[(&str, String)]) -> io::Result<Session> {
+    let startup_seconds = if options.engine == Engine::Claude {
+        doxa_state::claude_startup_seconds(env::var("CLAUDE_CODE_STREAM_CLOSE_TIMEOUT").ok().as_deref())
+            .map_err(invalid)?.1
+    } else { 10 };
     let cfg = config();
     let mut effective = options.clone();
     if effective.resume.is_none() && effective.engine != Engine::Fixture && effective.effort.is_none() {
@@ -529,6 +555,7 @@ fn spawn_inner(options: &LaunchOptions, fleet_runtime: Option<&Path>, environmen
         .create_new(true)
         .mode(0o600)
         .open(&stderr_path)?;
+    let reaper = daemon_reaper();
     let mut child = match command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -541,7 +568,7 @@ fn spawn_inner(options: &LaunchOptions, fleet_runtime: Option<&Path>, environmen
             return Err(error);
         }
     };
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(startup_seconds);
     loop {
         let sessions = match discovery::sessions_in(&runtime) {
             Ok(sessions) => sessions,
@@ -560,6 +587,9 @@ fn spawn_inner(options: &LaunchOptions, fleet_runtime: Option<&Path>, environmen
                     .is_some_and(|name| name == expected_socket.as_str())
         }) {
             let _ = fs::remove_file(&stderr_path);
+            // Child has no wait-on-drop behavior. Transfer exact ownership
+            // before returning the read-only session identity to the TUI.
+            let _ = reaper.send(child);
             return Ok(session);
         }
         let status = match child.try_wait() {
@@ -603,7 +633,7 @@ fn spawn_inner(options: &LaunchOptions, fleet_runtime: Option<&Path>, environmen
             let _ = fs::remove_file(&stderr_path);
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
-                "native daemon did not register within 10 seconds",
+                format!("native daemon did not register within {startup_seconds} seconds"),
             ));
         }
         thread::sleep(Duration::from_millis(25));
@@ -631,6 +661,19 @@ pub fn stop(session: &Session) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn admitted_daemon_reaper_waits_without_stopping_live_children() {
+        let child = Command::new("/bin/sleep").arg("0.2").spawn().unwrap();
+        let pid = child.id() as i32;
+        daemon_reaper().send(child).unwrap();
+        assert_eq!(unsafe { libc::kill(pid, 0) }, 0);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if unsafe { libc::kill(pid, 0) } == -1 { break; }
+            assert!(Instant::now() < deadline, "completed daemon remained an unreaped child");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
     #[test]
     fn model_preferences_remain_engine_scoped_and_do_not_cross_claude_defaults() {
         let config: toml::Value = "model = 'sonnet'\n[models]\ncodex = 'codex-model'\ndeepseek = 'deepseek-chat'\nglm = 'glm-model'".parse().unwrap();

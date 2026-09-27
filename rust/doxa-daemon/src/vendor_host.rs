@@ -236,6 +236,7 @@ impl Drop for ActiveTurn<'_> {
 }
 
 impl Host for VendorHost {
+    fn has_active_work(&self) -> bool { self.active.try_lock().map_or(true, |active| active.is_some()) }
     fn peer_tools_ready(&self) -> bool {
         !self.closing.load(Ordering::Acquire) && self.peer_tools.lock().is_ok_and(|handler| handler.is_some())
     }

@@ -1,8 +1,8 @@
 <p align="center"><img src="assets/logo.png" width="560" alt="DOXA — belief earning knowledge"></p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Rust%202.0-alpha.31-f59f00" alt="Rust 2.0 alpha.31 is the main frontend">
-  <a href="https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.31"><img src="https://img.shields.io/github/v/release/docwilde/doxa?include_prereleases&amp;sort=semver&amp;label=Rust%20preview&amp;color=e8590c" alt="latest Rust preview release"></a>
+  <img src="https://img.shields.io/badge/Rust%202.0-alpha.32-f59f00" alt="Rust 2.0 alpha.32 is the main frontend">
+  <a href="https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.32"><img src="https://img.shields.io/github/v/release/docwilde/doxa?include_prereleases&amp;sort=semver&amp;label=Rust%20preview&amp;color=e8590c" alt="latest Rust preview release"></a>
   <a href="https://github.com/docwilde/doxa/actions/workflows/rust-ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/docwilde/doxa/rust-ci.yml?branch=main&label=Rust%20CI" alt="Rust CI status"></a>
   <img src="https://img.shields.io/badge/TUI-Ratatui-2f9e44" alt="Rust TUI built with Ratatui">
   <img src="https://img.shields.io/badge/auth-provider%20CLI%20or%20API%20key-2f9e44" alt="authentication follows the selected engine">
@@ -14,12 +14,14 @@
 > can edit files and run commands with your privileges. Read
 > [Non-goals](#non-goals) before using it on important work.
 
-The current Rust preview is [v2.0.0-alpha.31](https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.31).
+The current Rust preview is [v2.0.0-alpha.32](https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.32).
 GitHub labels 1.19 as the latest stable release while Rust 2.0 remains a prerelease.
 Alpha.31 closes the audited Python 1.19 functional gaps: saved-session restoration,
 full preferences, native LORE tools, interactive fleets, plugin commands and local
-shell controls. See the [parity tracker](docs/rust-1.19-parity.md) for supported
-provider contracts and retained safety boundaries.
+shell controls. The subsequent [source audit](docs/source-audit-2026-09-27.md)
+documents the ownership/deadline fixes and remaining engineering debt. See the
+[parity tracker](docs/rust-1.19-parity.md) for supported provider contracts and
+retained safety boundaries.
 
 **DOXA** is a terminal for coding agents. Development now leads with the
 **Rust 2.0 alpha**, built with Ratatui and a native daemon. Run Claude, Codex,
@@ -96,13 +98,20 @@ in supporting terminals.
 
 ## Gallery
 
-### Rust 2.0 alpha.31
+### Rust 2.0 alpha.32
 
 ![Rust belief browser showing Accept and Reject actions for each entry](assets/shots/rust-beliefs.png)
 
 *Accept records a user confirmation in LORE. Reject retracts the belief from
 active memory while retaining its history. Each action reviews the exact claim
-above the prompt; retraction requires an explicit confirmation.*
+above the prompt; retraction requires an explicit confirmation. Type in the
+prompt to filter, or use Shift+A / Shift+R on the selected row. Hover an entry
+for the delayed full-belief tooltip.*
+
+![Rust belief hover preview showing the complete claim after a 500 ms delay](assets/shots/rust-belief-hover.png)
+
+*Hover previews wrap the complete safe claim. Beliefs too large for the terminal
+offer Enter to open the full review.*
 
 ![Rust directory picker expanded above a single session prompt](assets/shots/rust-repo-picker.png)
 
@@ -162,9 +171,10 @@ scrubbed indexed excerpts beneath each matching session.*
 
 *The queue picker shows waiting prompts and cancels the selected item by its ID.*
 
-![Rust LORE memory submenu above the prompt showing curated user and project entries plus global beliefs](assets/shots/rust-memory.png)
+![Rust LORE memory submenu showing a table of individual curated user and project facts](assets/shots/rust-memory.png)
 
-*The memory chip opens scoped curated entries and a separate list of global beliefs.*
+*The memory chip opens a table of individual curated facts with scope and
+provenance. The prompt filters the rows while the submenu is open.*
 
 ![Rust user and project memory management above the session prompt](assets/shots/rust-memory-management.png)
 
@@ -190,7 +200,7 @@ curl -fsSL https://raw.githubusercontent.com/docwilde/doxa/main/scripts/install.
 
 The installer builds the Rust frontend and daemon from `main` and installs the
 Rust `doxa` command in `~/.local/bin` (or `DOXA_RUST_BIN_DIR`). Pass a tag such
-as `v2.0.0-alpha.31` after `sh -s --` to pin a release. It uses Git, Cargo,
+as `v2.0.0-alpha.32` after `sh -s --` to pin a release. It uses Git, Cargo,
 Python 3.11+, and `uv`; the Python environment it creates is private to the
 LORE and Claude sidecars. No Python frontend command is installed. See the
 [Rust guide](rust/README.md) for provider setup and current limits.
@@ -231,7 +241,7 @@ and their [manual](docs/manual.md) remain available for historical reference;
 the Python SDK and LORE sidecar modules remain internal runtime dependencies.
 
 Rust CI tests the frontend, native daemon, protocol, LORE bridge, installer,
-and compatibility paths. See the [Rust UI benchmark](docs/rust-ui-benchmark-2026-09-25.md)
+and compatibility paths. See the [Rust UI benchmark](docs/rust-ui-benchmark-2026-09-27.md)
 for rendering, event-loop, scrolling, and resize measurements.
 
 ## Non-goals

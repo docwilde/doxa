@@ -31,6 +31,13 @@ def _client(*, login=LOGIN, address="127.0.0.1"):
     return TestClient(remote_web.create_app(), headers=headers, client=(address, 50000))
 
 
+@pytest.fixture
+def attested_test_proxy(monkeypatch):
+    """Renderer fixture only; production TCP never supplies this evidence."""
+    monkeypatch.setattr(remote_web, "_attested_proxy", lambda scope:
+                        scope.get("client", (None,))[0] == "127.0.0.1")
+
+
 def _session():
     return SimpleNamespace(
         session_id="session-1", title="Code review", engine="codex",
@@ -48,7 +55,7 @@ def test_bridge_routes_reject_by_default_even_with_identity(monkeypatch):
         assert client.get("/api/sessions/session-1/transcript").status_code == 403
 
 
-def test_identity_allow_list_and_loopback_gate_real_routes(monkeypatch):
+def test_identity_allow_list_and_attested_transport_gate_real_routes(monkeypatch, attested_test_proxy):
     monkeypatch.setenv("DOXA_REMOTE_ENABLED", "1")
     monkeypatch.setenv("DOXA_REMOTE_ALLOWED_LOGINS", LOGIN)
     monkeypatch.setattr(remote_web.peers, "list_daemons", lambda: [_session()])
@@ -74,7 +81,7 @@ def test_identity_allow_list_and_loopback_gate_real_routes(monkeypatch):
         assert allowed.headers["cache-control"] == "no-store"
 
 
-def test_transcript_reads_only_a_live_session_after_authorization(monkeypatch):
+def test_transcript_reads_only_a_live_session_after_authorization(monkeypatch, attested_test_proxy):
     monkeypatch.setenv("DOXA_REMOTE_ENABLED", "1")
     monkeypatch.setenv("DOXA_REMOTE_ALLOWED_LOGINS", LOGIN)
     monkeypatch.setattr(remote_web.peers, "list_daemons", lambda: [_session()])
@@ -107,7 +114,7 @@ def test_transcript_reads_only_a_live_session_after_authorization(monkeypatch):
     assert reads == [("session-1", "/repo")]
 
 
-def test_cross_origin_websocket_cannot_attach_even_when_identity_is_allowed(monkeypatch):
+def test_cross_origin_websocket_cannot_attach_even_when_identity_is_allowed(monkeypatch, attested_test_proxy):
     monkeypatch.setenv("DOXA_REMOTE_ENABLED", "1")
     monkeypatch.setenv("DOXA_REMOTE_ALLOWED_LOGINS", LOGIN)
     monkeypatch.setattr(remote_web.peers, "list_daemons", lambda: [_session()])
@@ -126,7 +133,7 @@ def test_cross_origin_websocket_cannot_attach_even_when_identity_is_allowed(monk
         assert exc.value.code == 1008
 
 
-def test_same_origin_allowed_websocket_attaches_and_receives_hello(monkeypatch):
+def test_same_origin_allowed_websocket_attaches_and_receives_hello(monkeypatch, attested_test_proxy):
     """Companion to the cross-origin refusal: a valid origin can attach."""
     monkeypatch.setenv("DOXA_REMOTE_ENABLED", "1")
     monkeypatch.setenv("DOXA_REMOTE_ALLOWED_LOGINS", LOGIN)
@@ -212,14 +219,34 @@ def test_listener_requires_opt_in_allow_list_and_loopback_bind(monkeypatch):
 
     calls = []
     monkeypatch.setattr("uvicorn.run", lambda *args, **kwargs: calls.append((args, kwargs)))
-    assert remote_web.main(["--port", "47602"]) == 0
-    assert calls[0][1]["host"] == "127.0.0.1"
-    assert calls[0][1]["port"] == 47602
+    with pytest.raises(SystemExit) as unattested:
+        remote_web.main(["--port", "47602"])
+    assert unattested.value.code == 2
+    assert calls == []
+
+
+def test_forged_loopback_identity_and_scope_metadata_never_attest_proxy(monkeypatch):
+    monkeypatch.setenv("DOXA_REMOTE_ENABLED", "1")
+    monkeypatch.setenv("DOXA_REMOTE_ALLOWED_LOGINS", LOGIN)
+    monkeypatch.setattr(remote_web.peers, "list_daemons", lambda: pytest.fail("unattested caller reached registry"))
+    monkeypatch.setattr(remote_web, "EngineClient", lambda *args, **kwargs: pytest.fail("unattested caller attached"))
+    headers = {"tailscale-user-login": LOGIN, "host": "127.0.0.1:47601", "origin": "http://127.0.0.1:47601"}
+    scope = {"client": ("127.0.0.1", 12345), "extensions": {"proxy_attested": True}, "tailscale_user_login": LOGIN}
+    decision = remote_web._decision(remote_web.remote_policy.REQUEST_SEND_PROMPT, scope, headers)
+    assert not decision.allowed
+    assert "identity header ignored" in decision.reason
+    with _client() as client:
+        for route in ["/", "/remote.js", "/remote.css", "/api/sessions", "/api/sessions/session-1/transcript"]:
+            assert client.get(route).status_code == 403
+        with pytest.raises(WebSocketDisconnect) as refused:
+            with client.websocket_connect("/api/sessions/session-1/events", headers={"Origin": "http://testserver"}):
+                pass
+        assert refused.value.code == 1008
 
 
 @pytest.mark.asyncio
 async def test_browser_socket_drives_the_same_live_daemon_as_a_local_client(
-    tmp_path, monkeypatch,
+    tmp_path, monkeypatch, attested_test_proxy,
 ):
     """Exercise the real Unix socket through the ASGI bridge and WebSocket."""
     websockets = pytest.importorskip("websockets")

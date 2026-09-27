@@ -140,7 +140,7 @@ impl MultiBridge {
 
 pub fn connect_sessions(sessions: &[Session]) -> io::Result<MultiBridge> { connect_sessions_inner(sessions,false) }
 
-fn connect_sessions_inner(sessions:&[Session],readonly_restore:bool)->io::Result<MultiBridge> {
+pub(crate) fn connect_sessions_inner(sessions:&[Session],readonly_restore:bool)->io::Result<MultiBridge> {
     if (sessions.is_empty() && !readonly_restore) || sessions.len() > crate::startup_restore::MAX_STARTUP_TABS {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "expected 1–257 startup sessions"));
     }
@@ -217,6 +217,7 @@ fn connect_sessions_inner(sessions:&[Session],readonly_restore:bool)->io::Result
                     }
                     if routes.len() >= crate::ui::panes::MAX_TABS {
                         let _ = router_frames.send(json!({"type":"attach_reply", "ok":false,
+                            "session_id":id, "group":group,
                             "message":"256 attached sessions is the limit"}));
                         continue;
                     }
@@ -234,6 +235,7 @@ fn connect_sessions_inner(sessions:&[Session],readonly_restore:bool)->io::Result
                                 "session_id":id, "group":group}));
                         }
                         Err(error) => { let _ = router_frames.send(json!({"type":"attach_reply", "ok":false,
+                            "session_id":id, "group":group,
                             "message":error.to_string()})); }
                     }
                     continue;

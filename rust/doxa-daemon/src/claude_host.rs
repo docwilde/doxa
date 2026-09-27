@@ -21,6 +21,7 @@ enum Command {
     Prompt {
         text: String,
         events: SyncSender<Value>,
+        terminal: Sender<Value>,
         reply: Sender<Result<Value, String>>,
     },
     Rpc {
@@ -67,6 +68,20 @@ fn display_account(value: &Value) -> Option<Value> {
     (!result.is_empty()).then_some(Value::Object(result))
 }
 
+fn startup_diagnostic(code: Option<&str>) -> &'static str {
+    match code {
+        Some("startup_cli_missing") => "Claude CLI was not found during SDK initialization; check doxa doctor --engine claude",
+        Some("startup_permission_denied") => "Claude startup could not access its configuration or executable; check owned file permissions",
+        Some("startup_timeout") => "Claude SDK initialization timed out; check doxa auth status claude and try again",
+        Some("startup_cli_protocol") => "Claude CLI returned an invalid initialization frame; update Claude CLI and DOXA",
+        Some("startup_cli_connection") => "Claude SDK could not connect to Claude CLI; check doxa doctor --engine claude",
+        Some("startup_cli_process") => "Claude CLI exited during SDK initialization; check doxa auth status claude and doxa doctor --engine claude",
+        Some("startup_options_invalid") => "Claude startup options or SDK configuration were refused; verify model/effort settings and update DOXA",
+        Some("startup_failed") => "Claude SDK initialization failed; check doxa auth status claude and doxa doctor --engine claude",
+        _ => "Claude sidecar refused session start",
+    }
+}
+
 impl ClaudeHost {
     pub fn new(
         python: &Path,
@@ -80,6 +95,8 @@ impl ClaudeHost {
         spawn_depth: u32,
         parent_session_id: Option<&str>,
     ) -> Result<Self, String> {
+        let (start_seconds, _) = doxa_state::claude_startup_seconds(
+            std::env::var("CLAUDE_CODE_STREAM_CLOSE_TIMEOUT").ok().as_deref()).map_err(str::to_owned)?;
         let mut bridge = Bridge::spawn(python, script)
             .map_err(|_| "Claude sidecar could not start".to_owned())?;
         let model_control = bridge.supports("set_model");
@@ -94,7 +111,7 @@ impl ClaudeHost {
         let id = bridge
             .request("start", params)
             .map_err(|_| "Claude sidecar start request failed".to_owned())?;
-        let deadline = Instant::now() + Duration::from_secs(30);
+        let deadline = Instant::now() + Duration::from_secs(start_seconds);
         let start = loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
@@ -106,7 +123,7 @@ impl ClaudeHost {
                         if frame["error"] == "peer_presence_unsupported_update_python_and_restart" {
                             return Err("Claude Python engine is outdated; run doxa update, then restart DOXA".to_owned());
                         }
-                        return Err("Claude sidecar refused session start".to_owned());
+                        return Err(startup_diagnostic(frame["error"].as_str()).to_owned());
                     }
                     break frame["result"].clone();
                 }
@@ -208,6 +225,7 @@ impl ClaudeHost {
 }
 
 impl Host for ClaudeHost {
+    fn has_active_work(&self) -> bool { self.turn_active() }
     fn lore_enabled(&self) -> Option<bool> { self.lore_enabled }
     fn peer_tools_ready(&self) -> bool { self.peer_tools_ready && !self.closing.load(Ordering::Acquire) }
     fn can_set_model(&self) -> bool { self.model_control }
@@ -223,6 +241,7 @@ impl Host for ClaudeHost {
             return;
         }
         let (events_tx, events_rx) = mpsc::sync_channel(EVENT_QUEUE);
+        let (terminal_tx, terminal_rx) = mpsc::channel();
         let (reply_tx, reply_rx) = mpsc::channel();
         let admitted = {
             let _admission = self.admission.lock().unwrap();
@@ -235,6 +254,7 @@ impl Host for ClaudeHost {
                 .send(Command::Prompt {
                     text: text.to_owned(),
                     events: events_tx,
+                    terminal: terminal_tx,
                     reply: reply_tx,
                 })
                 .is_err()
@@ -276,7 +296,10 @@ impl Host for ClaudeHost {
                     }
                 }
                 Err(RecvTimeoutError::Disconnected) => {
-                    emit(done("Claude event stream closed"));
+                    // Delta backpressure cannot complete ownership early.
+                    // The separate bounded-by-one terminal path is published
+                    // only after provider completion or cancellation acknowledgment.
+                    emit(terminal_rx.recv().unwrap_or_else(|_| done("Claude event stream closed")));
                     break;
                 }
                 Err(RecvTimeoutError::Timeout) if self.closing.load(Ordering::Acquire) => {
@@ -390,12 +413,15 @@ fn broker(bridge: Bridge, commands: Receiver<Command>, turn_running: Arc<AtomicB
 fn broker_loop(mut bridge: Bridge, commands: Receiver<Command>, turn_running: &AtomicBool) {
     let mut pending: HashMap<u64, Pending> = HashMap::new();
     let mut events: Option<SyncSender<Value>> = None;
+    let mut terminal_reply: Option<Sender<Value>> = None;
+    let mut overflowed = false;
     loop {
         for _ in 0..8 {
             match commands.try_recv() {
                 Ok(Command::Prompt {
                     text,
                     events: sink,
+                    terminal,
                     reply,
                 }) => {
                     if turn_running.load(Ordering::Acquire) {
@@ -406,6 +432,8 @@ fn broker_loop(mut bridge: Bridge, commands: Receiver<Command>, turn_running: &A
                         Ok(id) => {
                             turn_running.store(true, Ordering::Release);
                             events = Some(sink);
+                            terminal_reply = Some(terminal);
+                            overflowed = false;
                             pending.insert(
                                 id,
                                 Pending {
@@ -470,6 +498,7 @@ fn broker_loop(mut bridge: Bridge, commands: Receiver<Command>, turn_running: &A
                         .send(Err("Claude sidecar operation failed".into()));
                     if pending_reply.prompt {
                         events = None;
+                        terminal_reply = None;
                         turn_running.store(false, Ordering::Release);
                     }
                 }
@@ -484,14 +513,22 @@ fn broker_loop(mut bridge: Bridge, commands: Receiver<Command>, turn_running: &A
                     json!({"type":kind,"data":frame["data"]})
                 };
                 let terminal = matches!(event["type"].as_str(), Some("turn_done" | "turn_refused"));
-                if let Some(sink) = &events {
-                    if sink.try_send(event).is_err() {
-                        events = None;
-                    }
-                }
                 if terminal {
-                    events = None;
                     turn_running.store(false, Ordering::Release);
+                    if let Some(reply) = terminal_reply.take() {
+                        let _ = reply.send(if overflowed { done("Claude event stream overflowed; turn cancelled") } else { event });
+                    }
+                    events = None;
+                } else if !overflowed {
+                    if let Some(sink) = &events {
+                        if sink.try_send(event).is_err() {
+                            overflowed = true;
+                            // Keep reading operational frames until the owned
+                            // provider acknowledges cancellation. Never block
+                            // this broker behind its saturated delta queue.
+                            if bridge.request("interrupt", json!({})).is_err() { return; }
+                        }
+                    }
                 }
             }
             Ok(frame) if frame["type"] == "error" => return,
@@ -541,6 +578,14 @@ mod tests {
             "accessToken":"secret","organizationName":"foreign cached org"})),
             Some(json!({"email":"sdk@example.test","organization":"SDK org"})));
         assert!(display_account(&json!({"email":"bad\nvalue","organization":"x".repeat(257)})).is_none());
+    }
+    #[test]
+    fn startup_diagnostics_accept_only_fixed_non_secret_error_codes() {
+        assert!(startup_diagnostic(Some("startup_cli_process")).contains("auth status claude"));
+        assert!(startup_diagnostic(Some("startup_timeout")).contains("timed out"));
+        for code in [None,Some("sk-private startup traceback"),Some("operation_failed")] {
+            assert_eq!(startup_diagnostic(code),"Claude sidecar refused session start");
+        }
     }
 
     fn fixture(script: &str) -> (tempfile::TempDir, Arc<ClaudeHost>) {
@@ -637,22 +682,74 @@ for line in sys.stdin:
         print(json.dumps({"type":"event","event":"turn_done","data":{}}), flush=True)
 "#);
         let mut terminal = Value::Null;
+        let started = Instant::now();
         host.prompt("first", &mut |event| {
             if event["type"] == "text_delta" { thread::sleep(Duration::from_millis(2)); }
             if event["type"] == "turn_done" { terminal = event; }
         });
-        assert_eq!(terminal["data"]["error"], "Claude event stream closed");
-        assert!(host.call("set_permission_mode", &json!({"mode":"dontAsk"})).is_err());
-        let mut rejected = Vec::new();
-        host.prompt("too early", &mut |event| rejected.push(event));
-        assert_eq!(rejected[0]["data"]["error"], "Claude sidecar refused prompt");
-        // Queue saturation closes only this event receiver. The broker waits
-        // for the sidecar terminal before admitting a new turn.
-        thread::sleep(Duration::from_millis(600));
+        assert_eq!(terminal["data"]["error"], "Claude event stream overflowed; turn cancelled");
+        assert!(started.elapsed() >= Duration::from_millis(450), "host completed before provider terminal");
+        assert!(!host.has_active_work());
+        assert!(host.call("set_permission_mode", &json!({"mode":"dontAsk"})).is_ok());
         let mut second = Vec::new();
         host.prompt("second", &mut |event| second.push(event));
         assert_eq!(second.last().unwrap()["type"], "turn_done");
         assert!(host.shutdown());
+    }
+    #[test]
+    fn overflowed_turn_retains_runtime_queue_until_owned_terminal() {
+        struct SlowFirst(Arc<ClaudeHost>);
+        impl Host for SlowFirst {
+            fn has_active_work(&self) -> bool { self.0.has_active_work() }
+            fn prompt(&self, text: &str, emit: &mut dyn FnMut(Value)) {
+                self.0.prompt(text, &mut |event| {
+                    if text == "first" && event["type"] == "text_delta" { thread::sleep(Duration::from_millis(2)); }
+                    emit(event);
+                });
+            }
+            fn call(&self, method: &str, params: &Value) -> Result<Value,String> { self.0.call(method, params) }
+        }
+        let (dir, host) = fixture(r#"import json,sys,time
+from pathlib import Path
+root=Path(__file__).parent
+print(json.dumps({'type':'hello','protocol':'doxa-claude-sidecar','version':1,'capabilities':[]}),flush=True)
+for line in sys.stdin:
+ frame=json.loads(line); method=frame['method']
+ print(json.dumps({'type':'reply','id':frame['id'],'ok':True,'result':{}}),flush=True)
+ if method=='prompt':
+  if frame['params']['text']=='first':
+   for i in range(200): print(json.dumps({'type':'event','event':'text_delta','data':{'text':str(i)}}),flush=True)
+   time.sleep(.5); root.joinpath('first-terminal').touch()
+  else:
+   assert root.joinpath('first-terminal').exists()
+   root.joinpath('second-started').touch()
+  print(json.dumps({'type':'event','event':'turn_done','data':{}}),flush=True)
+"#);
+        let mut handle = doxa_runtime::Daemon::bind(&dir.path().join("runtime"), doxa_runtime::Session {
+            session_id:"overflow-queue".into(),cwd:dir.path().to_string_lossy().into(),model:None,
+            engine:"fixture".into(),doxa_version:"test".into(),
+        }, Arc::new(SlowFirst(host.clone()))).unwrap().start();
+        use std::io::{BufRead,BufReader,Write};
+        let mut socket = std::os::unix::net::UnixStream::connect(handle.socket_path()).unwrap();
+        socket.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        let mut reader = BufReader::new(socket.try_clone().unwrap());
+        let receive = |reader: &mut BufReader<std::os::unix::net::UnixStream>| {
+            let mut line=String::new(); reader.read_line(&mut line).unwrap(); serde_json::from_str::<Value>(&line).unwrap()
+        };
+        receive(&mut reader);
+        writeln!(socket,"{}",json!({"type":"attach","cursor":null})).unwrap();
+        writeln!(socket,"{}",json!({"type":"prompt","id":1,"text":"first"})).unwrap();
+        loop { let reply=receive(&mut reader); if reply["id"]==1 { assert_eq!(reply["ok"],true); break; } }
+        writeln!(socket,"{}",json!({"type":"prompt","id":2,"text":"second"})).unwrap();
+        let mut terminals = Vec::new(); let mut queued = false;
+        while terminals.len()<2 {
+            let frame=receive(&mut reader);
+            if frame["id"]==2 { assert_eq!(frame["ok"],true); queued=frame["queued"]==true; }
+            if frame["event"]["type"]=="turn_done" { terminals.push(frame["event"].clone()); }
+        }
+        assert!(queued); assert_eq!(terminals[0]["data"]["error"],"Claude event stream overflowed; turn cancelled");
+        assert!(terminals[1]["data"]["error"].is_null()); assert!(dir.path().join("second-started").exists());
+        handle.shutdown(); assert!(host.shutdown());
     }
     #[test]
     fn native_child_start_requires_exact_depth_parent_and_native_route_echo() {

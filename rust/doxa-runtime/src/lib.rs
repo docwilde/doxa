@@ -37,6 +37,9 @@ pub trait Host: Send + Sync + 'static {
     /// Initial effort asserted for this session; None is unknown.
     fn initial_effort(&self) -> Option<String> { None }
     fn initial_permission_mode(&self) -> String { "default".to_owned() }
+    /// Nonblocking provider work ownership, including work left after an early
+    /// prompt error. A true result prevents automatic idle expiration.
+    fn has_active_work(&self) -> bool { false }
     fn can_set_model(&self) -> bool { false }
     fn model_change_requires_idle(&self) -> bool { false }
     fn can_set_permission_mode(&self) -> bool { false }
@@ -207,6 +210,27 @@ impl DaemonHandle {
 
     /// Number of clients that have completed the protocol attach handshake.
     pub fn attached_clients(&self) -> usize { self.inner.state.lock().unwrap().clients.len() }
+
+    /// Both the runtime queue and provider must be idle before the linger clock
+    /// can run. Hosts report conservatively if their work state is unavailable.
+    pub fn has_active_work(&self) -> bool {
+        let Ok(_admission) = self.inner.controls.try_lock() else { return true; };
+        let provider_active = self.inner.host.has_active_work();
+        let state = self.inner.state.lock().unwrap();
+        provider_active || state.busy || !state.prompts.is_empty()
+    }
+
+    /// Claim automatic shutdown atomically with attach/prompt admission. The
+    /// caller must have checked its linger deadline; false rearms that clock.
+    pub fn expire_if_detached_idle(&self) -> bool {
+        let Ok(_admission) = self.inner.controls.try_lock() else { return false; };
+        let provider_active = self.inner.host.has_active_work();
+        let state = self.inner.state.lock().unwrap();
+        if provider_active || state.busy || !state.prompts.is_empty() || !state.clients.is_empty()
+            || self.inner.stopping.load(Ordering::Acquire) { return false; }
+        self.inner.stopping.store(true, Ordering::Release);
+        true
+    }
 
     /// Publish an out-of-band event (`turn: null`) to the ring and clients.
     pub fn publish(&self, event: Value) { self.inner.publish(None, event); }
@@ -449,7 +473,9 @@ fn attach_client(inner: &Inner, id: u64, cursor: Option<u64>, tx: &SyncSender<Ve
     attach_client_with_identity(inner, id, cursor, tx, None)
 }
 fn attach_client_with_identity(inner: &Inner, id: u64, cursor: Option<u64>, tx: &SyncSender<Vec<u8>>, login: Option<&str>) -> bool {
+    let _admission = inner.controls.lock().unwrap();
     let mut state = inner.state.lock().unwrap();
+    if inner.stopping.load(Ordering::Acquire) { return false; }
     // Replay and registration are one atomic operation with publish.
     if let (Some(requested), Some((oldest, _))) = (cursor, state.ring.front()) {
         if requested < *oldest {
@@ -580,8 +606,9 @@ fn handle_call(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame: &Value) {
         // Prompt admission (including peers) holds the same control lock.
         // Check the authoritative queue before stopping, then keep the lock
         // through the host call and shutdown flag so no turn can slip in.
+        let provider_active = inner.host.has_active_work();
         let state = inner.state.lock().unwrap();
-        let idle = !state.busy && state.prompts.is_empty()
+        let idle = !provider_active && !state.busy && state.prompts.is_empty()
             && !inner.stopping.load(Ordering::Acquire);
         drop(state);
         if idle { (inner.host.call("stop", &params), None) }

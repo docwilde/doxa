@@ -89,6 +89,36 @@ class PeerPresenceUnsupported(RuntimeError):
     """An old Python engine cannot safely share the native registry."""
 
 
+def startup_error_code(error: BaseException) -> str:
+    """Classify known startup failures without exposing SDK strings or stderr."""
+    from claude_agent_sdk import (CLIConnectionError, CLIJSONDecodeError,
+                                  CLINotFoundError, ProcessError)
+    pending = [error]
+    for _ in range(32):
+        if not pending:
+            break
+        current = pending.pop(0)
+        if isinstance(current, BaseExceptionGroup):
+            pending.extend(current.exceptions[:32-len(pending)])
+            continue
+        if isinstance(current, (CLINotFoundError, FileNotFoundError)):
+            return "startup_cli_missing"
+        if isinstance(current, PermissionError):
+            return "startup_permission_denied"
+        if isinstance(current, TimeoutError) or (
+                type(current) is Exception and str(current) == "Control request timeout: initialize"):
+            return "startup_timeout"
+        if isinstance(current, CLIJSONDecodeError):
+            return "startup_cli_protocol"
+        if isinstance(current, CLIConnectionError):
+            return "startup_cli_connection"
+        if isinstance(current, ProcessError):
+            return "startup_cli_process"
+        if isinstance(current, (TypeError, ValueError, KeyError)):
+            return "startup_options_invalid"
+    return "startup_failed"
+
+
 def session_engine_options(engine_type: type, options: dict) -> dict:
     """Require native registry ownership support before constructing the engine.
 
@@ -466,10 +496,10 @@ async def run() -> None:
         except PeerPresenceUnsupported:
             emit({"type": "reply", "id": request_id, "ok": False,
                   "error": "peer_presence_unsupported_update_python_and_restart"})
-        except Exception:
+        except Exception as error:
             # SDK exception strings can contain sensitive request material.
             emit({"type": "reply", "id": request_id, "ok": False,
-                  "error": "operation_failed"})
+                  "error": startup_error_code(error) if method == "start" else "operation_failed"})
     running = [task for task in (peer_task, turn, catalog_task)
                if task is not None and not task.done()]
     for task in running:

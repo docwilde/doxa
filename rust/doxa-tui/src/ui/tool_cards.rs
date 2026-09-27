@@ -4,7 +4,7 @@
 //! terminal controls and bounds retained text; it never writes tool input or
 //! results to disk. A replayed call/result updates its existing card by ID.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use serde_json::Value;
 
@@ -53,6 +53,7 @@ impl ToolCard {
 #[derive(Clone, Debug, Default)]
 pub(super) struct ToolCards {
     by_session: HashMap<String, Vec<ToolCard>>,
+    recent: VecDeque<String>,
 }
 
 impl ToolCards {
@@ -77,8 +78,10 @@ impl ToolCards {
             return false;
         };
         if !self.by_session.contains_key(session_id) && self.by_session.len() >= MAX_SESSIONS {
-            return false;
+            if let Some(oldest) = self.recent.pop_front() { self.by_session.remove(&oldest); }
         }
+        self.recent.retain(|id| id != session_id);
+        self.recent.push_back(session_id.to_owned());
         let cards = self.by_session.entry(session_id.to_owned()).or_default();
         let index = cards.iter().position(|card| card.id == id);
         if index.is_none() {
@@ -112,17 +115,18 @@ impl ToolCards {
         {
             card.parent_id = Some(clean_label(parent, 120));
         }
-        match kind {
-            "tool_call" => {
-                if let Some(input) = data.get("input").filter(|value| !value.is_null()) {
-                    let display = if let Some(text) = input.as_str() {
-                        text.to_owned()
-                    } else {
-                        serde_json::to_string_pretty(input).unwrap_or_default()
-                    };
-                    card.input = Some(clean(&display, MAX_DETAIL_CHARS));
-                }
+        if matches!(kind, "tool_call" | "tool_result") {
+            if let Some(input) = data.get("input").filter(|value| !value.is_null()) {
+                let display = if let Some(text) = input.as_str() {
+                    text.to_owned()
+                } else {
+                    serde_json::to_string_pretty(input).unwrap_or_default()
+                };
+                card.input = Some(clean(&display, MAX_DETAIL_CHARS));
             }
+        }
+        match kind {
+            "tool_call" => {}
             "tool_result" => {
                 card.result_detail_started = false;
                 card.result = Some(clean(
@@ -171,6 +175,21 @@ fn clean_label(value: &str, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn completed_provider_request_updates_one_existing_tool_card() {
+        let mut cards = ToolCards::default();
+        cards.record("s", "tool_call", &json!({"id":"web","name":"web_search",
+            "input":{"details":"Request details not yet reported by Codex"}}));
+        cards.record("s", "tool_result", &json!({"id":"web","name":"web_search",
+            "input":{"queries":["weather today"]},"result_summary":"Provider does not expose result content",
+            "duration_ms":12}));
+        assert_eq!(cards.for_session("s").len(),1);
+        let card = &cards.for_session("s")[0];
+        assert!(card.input.as_deref().unwrap().contains("weather today"));
+        assert!(!card.input.as_deref().unwrap().contains("not yet"));
+        assert_eq!(card.status(),"finished · 12 ms");
+    }
     use serde_json::json;
 
     #[test]
@@ -199,6 +218,25 @@ mod tests {
         assert!(card.input.as_ref().unwrap().contains("a.rs"));
         assert_eq!(card.result.as_deref(), Some("done"));
         assert_eq!(card.status(), "finished · 12 ms");
+    }
+
+    #[test]
+    fn later_sessions_receive_cards_without_expanding_the_session_budget() {
+        let mut cards = ToolCards::default();
+        for index in 0..=MAX_SESSIONS {
+            assert!(cards.record(&format!("s{index}"),"tool_call",&json!({"id":"call","name":"Read"})));
+        }
+        assert_eq!(cards.by_session.len(),MAX_SESSIONS);
+        assert!(cards.for_session("s0").is_empty());
+        assert_eq!(cards.for_session(&format!("s{MAX_SESSIONS}")).len(),1);
+        // Activity renews an existing owner; re-entering an evicted owner can
+        // retain new result detail while another idle owner is evicted.
+        cards.record("s1","tool_result",&json!({"id":"call","result_summary":"done"}));
+        cards.record("s0","tool_result_detail",&json!({"id":"call","text":"latest"}));
+        assert_eq!(cards.for_session("s0")[0].result.as_deref(),Some("latest"));
+        assert_eq!(cards.for_session("s1")[0].result.as_deref(),Some("done"));
+        assert!(cards.for_session("s2").is_empty());
+        assert_eq!(cards.by_session.len(),MAX_SESSIONS);
     }
 
     #[test]

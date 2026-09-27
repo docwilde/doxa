@@ -3,10 +3,12 @@
 
 use ratatui::{
     style::Style,
-    text::{Line, Span},
+    text::Span,
 };
 
 use crate::{markdown, theme};
+#[cfg(test)]
+use ratatui::text::Line;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Speaker {
@@ -27,22 +29,28 @@ pub(super) fn heading(paragraph: &str) -> Option<Speaker> {
 /// Render message Markdown at its actual content width. User messages get a
 /// warm highlight and a narrow left rule; assistant text retains the normal
 /// transcript surface. Role marker rows are not drawn.
+#[cfg(test)]
 pub(super) fn render(source: &str, width: u16, speaker: Option<Speaker>) -> Vec<Line<'static>> {
+    render_with_links(source, width, speaker).lines
+}
+
+pub(super) fn render_with_links(source: &str, width: u16, speaker: Option<Speaker>) -> markdown::RenderedMarkdown {
     let user = speaker == Some(Speaker::User);
     let rule = user && width > 2;
     let body_width = if rule { width - 2 } else { width };
-    markdown::render(source, body_width)
-        .into_iter()
-        .map(|mut line| {
-            if user {
-                if rule {
-                    line.spans.insert(0, Span::styled("│ ", Style::default().fg(theme::ACCENT)));
-                }
-                line = line.style(Style::default().bg(theme::HIGHLIGHT));
+    let mut rendered = markdown::render_with_links(source, body_width);
+    if rule {
+        for link in &mut rendered.links { link.start += 2; link.end += 2; }
+    }
+    for line in &mut rendered.lines {
+        if user {
+            if rule {
+                line.spans.insert(0, Span::styled("│ ", Style::default().fg(theme::ACCENT)));
             }
-            line
-        })
-        .collect()
+            line.style = line.style.patch(Style::default().bg(theme::HIGHLIGHT));
+        }
+    }
+    rendered
 }
 
 #[cfg(test)]
