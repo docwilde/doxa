@@ -19,7 +19,6 @@ pub struct PeerHost {
     inner: Arc<dyn Host>,
     agent_tools_enabled: bool,
     lore: Mutex<Option<LoreClient>>,
-    lore_python: Option<PathBuf>,
     runtime: PathBuf,
     cwd: PathBuf,
     scope: String,
@@ -53,7 +52,7 @@ impl PeerHost {
         cwd: &Path,
         session_id: String,
         title: String,
-        lore_python: Option<&Path>,
+        _lore_python: Option<&Path>,
         events: SyncSender<Value>,
     ) -> io::Result<Self> {
         let scope = scope_for_cwd(cwd)?;
@@ -76,7 +75,6 @@ impl PeerHost {
             inner,
             agent_tools_enabled,
             lore: Mutex::new(None),
-            lore_python: lore_python.map(Path::to_path_buf),
             runtime,
             cwd: cwd.to_path_buf(),
             scope,

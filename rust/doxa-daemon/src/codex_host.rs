@@ -209,7 +209,6 @@ impl CodexHost {
             .map_err(|_| "Codex runtime could not start".to_owned())?;
         let lore = Arc::new(Mutex::new(client));
         let (index_tx, index_rx) = mpsc::sync_channel(1);
-        let index_python = lore_python.to_owned();
         let index_cwd = cwd.clone();
         let index_session_id = session_id.to_owned();
         let index_worker = thread::spawn(move || {

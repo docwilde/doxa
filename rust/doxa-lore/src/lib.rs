@@ -677,7 +677,6 @@ impl LoreClient {
                     return Err(LoreError::InvalidFrame);
                 }
                 let applied = value["applied"].as_bool().ok_or(LoreError::InvalidFrame)?;
-                if applied && code != "archive_failed" { return Err(LoreError::InvalidFrame); }
                 Ok(PendingResolution::Refused { code: code.to_owned(), applied })
             }
             _ => Err(LoreError::InvalidFrame),
@@ -944,14 +943,16 @@ impl LoreClient {
         frame["id"] = json!(id);
         let bytes = encode(&frame)?;
         if let Backend::Native { core, agent } = &mut self.backend {
+            if *agent && bytes.len() > 64 * 1024 { return Err(LoreError::FrameTooLarge); }
             let result = if *agent { core.agent_execute(&frame) } else { core.execute(&frame) }
-                .map_err(|error| LoreError::Remote(error.code()))?;
+                .map_err(|error| native_error(frame["op"].as_str().unwrap_or(""), error))?;
             let reply = if matches!(frame["op"].as_str(), Some("scrub" | "snapshot")) {
                 json!({"type":"reply", "id":id, "ok":true, "text":result})
             } else { json!({"type":"reply", "id":id, "ok":true, "value":result}) };
             // The native path crosses the same finite frame boundary before
             // typed result validators consume it, with no trusted fast path.
-            encode(&reply)?;
+            let response = encode(&reply)?;
+            if *agent && response.len() > 64 * 1024 { return Err(LoreError::FrameTooLarge); }
             return Ok(reply);
         }
         let started = Instant::now();
@@ -1085,6 +1086,21 @@ impl Drop for LoreClient {
             }
         }
     }
+}
+
+fn native_error(op: &str, error: lore_core::Error) -> LoreError {
+    let code = match (op, error) {
+        ("pending_review_v1" | "resolve_reviewed_v1", lore_core::Error::Changed) => "pending_changed",
+        ("belief_review_v1" | "belief_action_v1", lore_core::Error::Changed) => "belief_changed",
+        ("memory_review_v1" | "memory_action_v1", lore_core::Error::Changed) => "memory_changed",
+        ("pending_review_v1", lore_core::Error::TooLarge) => "pending_incomplete",
+        ("belief_review_v1", lore_core::Error::TooLarge) => "belief_incomplete",
+        ("memory_review_v1", lore_core::Error::TooLarge) => "memory_incomplete",
+        ("memory_action_v1", lore_core::Error::OverCap) => "memory_over_cap",
+        ("memory_action_v1", lore_core::Error::Untrusted) => "memory_refused",
+        (_, error) => error.code(),
+    };
+    LoreError::Remote(code)
 }
 
 fn encode(value: &Value) -> Result<Vec<u8>, LoreError> {

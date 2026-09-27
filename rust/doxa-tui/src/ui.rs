@@ -5744,7 +5744,7 @@ impl App {
                     doxa_lore::PendingResolution::Indeterminate { code } =>
                         { urgent_resolution = true; format!("Proposal may have applied ({code}); recovery required, do not retry automatically") },
                     doxa_lore::PendingResolution::Refused { code, applied: true } =>
-                        { urgent_resolution = true; format!("Applied, but archive failed ({code}); do not retry automatically") },
+                        { urgent_resolution = true; format!("Applied; finalization failed ({code}); do not retry automatically") },
                     doxa_lore::PendingResolution::Refused { code, applied: false } =>
                         format!("Resolution refused: {code}"),
                 };

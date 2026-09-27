@@ -5,8 +5,7 @@ use doxa_transcript::TranscriptStore;
 use doxa_vendors::{Delta, Error, Vendor, MAX_TURN_DURATION};
 use crate::vendor_tools::{NativeVendorGate, PeerDesk};
 use serde_json::{json, Value};
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -36,7 +35,6 @@ pub struct VendorHost {
     lore_enabled: bool,
     agent_tools: Option<Arc<crate::agent_tools::AgentTools>>,
     context: Mutex<Option<LoreClient>>,
-    lore_python: PathBuf,
     session_id: String,
     finalized: AtomicBool,
     scrub_failed: AtomicBool,
@@ -137,7 +135,7 @@ impl VendorHost {
             catalog: Mutex::new(None),
             lore: Mutex::new(lore),
             lore_enabled, agent_tools,
-            context: Mutex::new(None), lore_python: lore_python.to_owned(),
+            context: Mutex::new(None),
             session_id: session_id.to_owned(), finalized: AtomicBool::new(false),
             scrub_failed: AtomicBool::new(false),
             history: Mutex::new(history),
