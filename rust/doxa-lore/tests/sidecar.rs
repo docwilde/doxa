@@ -156,7 +156,8 @@ for line in sys.stdin:
     assert_eq!(client.memory_usage("/repo").unwrap(), MemoryUsage {
         project_chars: 7, user_chars: 12, project_cap_chars: 8800, user_cap_chars: 9000,
     });
-    for cwd in ["/missing", "/negative", "/boolean", "/large", "/zero-cap", "/bad-cap", "/large-cap", ""] {
+    assert_eq!(client.memory_usage("/zero-cap").unwrap().project_cap_chars, 0);
+    for cwd in ["/missing", "/negative", "/boolean", "/large", "/bad-cap", "/large-cap", ""] {
         assert!(matches!(client.memory_usage(cwd), Err(LoreError::InvalidFrame)), "{cwd}");
     }
     let old = fake(dir.path(), "print('{\"type\":\"hello\",\"proto\":1,\"capabilities\":[\"scrub\",\"snapshot\"]}', flush=True)");

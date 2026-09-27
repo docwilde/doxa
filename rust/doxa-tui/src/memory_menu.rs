@@ -71,6 +71,20 @@ mod tests {
     }
 
     #[test]
+    fn memory_action_keeps_landed_and_uncertain_effects_visible() {
+        use serde_json::json;
+        let partial = ActionOutcome::decode(json!({"status":"refused","applied":true,"error":"io"})).unwrap();
+        assert_eq!(partial, ActionOutcome::Partial);
+        assert!(partial.refresh_usage());
+        assert!(partial.notice().contains("Memory changed"));
+        let uncertain = ActionOutcome::decode(json!({"status":"refused","applied":null,"may_have_applied":true,"error":"io"})).unwrap();
+        assert_eq!(uncertain, ActionOutcome::Indeterminate);
+        assert!(uncertain.refresh_usage());
+        assert!(uncertain.notice().contains("may have changed"));
+        assert!(ActionOutcome::decode(json!({"status":"refused","applied":false,"may_have_applied":true})).is_err());
+    }
+
+    #[test]
     fn plain_directory_keeps_canonical_folder_scope() {
         let dir=tempfile::tempdir().unwrap();
         assert_eq!(scope_path(dir.path()),(dir.path().to_path_buf(),false));
@@ -121,7 +135,37 @@ struct Draft {
     seen: std::cell::Cell<usize>,
 }
 
-enum Reply { Review(serde_json::Value), Action(String) }
+enum Reply { Review(serde_json::Value), Action(ActionOutcome) }
+
+#[derive(Debug, PartialEq)]
+enum ActionOutcome { Applied, Staged, Refused, Partial, Indeterminate }
+
+impl ActionOutcome {
+    fn decode(value: serde_json::Value) -> Result<Self, doxa_lore::LoreError> {
+        match value["status"].as_str() {
+            Some("applied") => Ok(Self::Applied),
+            Some("staged") => Ok(Self::Staged),
+            Some("refused") if value["applied"] == true => Ok(Self::Partial),
+            Some("refused") if value["applied"].is_null() && value["may_have_applied"] == true => Ok(Self::Indeterminate),
+            Some("refused") if value["may_have_applied"].is_null() || value["may_have_applied"] == false => Ok(Self::Refused),
+            _ => Err(doxa_lore::LoreError::InvalidFrame),
+        }
+    }
+
+    fn refresh_usage(&self) -> bool {
+        matches!(self, Self::Applied | Self::Partial | Self::Indeterminate)
+    }
+
+    fn notice(&self) -> &'static str {
+        match self {
+            Self::Applied => "Saved by LORE",
+            Self::Staged => "Staged by LORE write gate; review in /pending",
+            Self::Refused => "LORE refused action",
+            Self::Partial => "Memory changed, but LORE finalization failed; inspect refreshed entries before retrying",
+            Self::Indeterminate => "Memory may have changed; inspect refreshed entries before retrying",
+        }
+    }
+}
 
 impl Manager {
     pub fn new(owner: (String, String)) -> Self {
@@ -192,14 +236,10 @@ impl Manager {
                 if let Err(error) = self.accept_review(value) { self.status = error; self.review = None; }
             }
             Ok(Reply::Action(status)) => {
-                if status == "applied" { self.refresh_scope = Some(self.scope); }
+                if status.refresh_usage() { self.refresh_scope = Some(self.scope); }
                 self.draft = None;
                 self.load();
-                self.last_action = Some(match status.as_str() {
-                    "applied" => "Saved by LORE",
-                    "staged" => "Staged by LORE write gate; review in /pending",
-                    _ => "LORE refused action",
-                }.into());
+                self.last_action = Some(status.notice().into());
             }
             Err(error) => { self.status = error; self.draft = None; self.review = None; }
         }
@@ -270,7 +310,7 @@ impl Manager {
         std::thread::spawn(move || {
             let result = doxa_lore::LoreClient::open(Duration::from_secs(3))
                 .and_then(|mut client| client.memory_action(&cwd.to_string_lossy(), request))
-                .and_then(|value| value["status"].as_str().map(str::to_owned).ok_or(doxa_lore::LoreError::InvalidFrame))
+                .and_then(ActionOutcome::decode)
                 .map(Reply::Action).map_err(|error| format!("LORE refused memory change: {error}; R refresh"));
             let _ = tx.send(result);
         });
@@ -429,7 +469,7 @@ mod manager_tests {
         manager.pending = None; // completed worker before choosing another scope
         manager.key(key(KeyCode::Tab));
         assert_eq!(manager.scope, "project");
-        assert!(tx.send(Ok(Reply::Action("applied".into()))).is_err());
+        assert!(tx.send(Ok(Reply::Action(ActionOutcome::Applied))).is_err());
         assert!(manager.review.is_none());
     }
     #[test]

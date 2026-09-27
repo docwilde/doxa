@@ -87,7 +87,7 @@ fn native_zero_capacity_preserves_usage_review_and_exact_removal() {
     assert_eq!(fs::read_to_string(&path).unwrap(), "- owned existing fact\n");
     let removed = client.memory_action(cwd, json!({"scope":"user","action":"remove",
         "entry":"owned existing fact","text":"","expected":expected})).unwrap();
-    assert_eq!(removed["applied"], true);
+    assert_eq!(removed["status"], "applied");
     assert_eq!(fs::read_to_string(&path).unwrap(), "");
     assert_eq!(client.memory_usage(cwd).unwrap().user_chars, 0);
     assert_eq!(client.memory_review(cwd,"user").unwrap()["cap_chars"], 0);

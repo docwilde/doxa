@@ -24,12 +24,12 @@ jobs:
         run: rustup toolchain install stable --profile minimal
       - name: Build from repository root
         run: cargo +stable build --locked
+      - name: Build native LORE carrier
+        run: cargo +stable build --locked --package lore-core --bin lore-rs
       - name: Test Rust frontend
         run: cargo +stable test --locked --manifest-path rust/doxa-tui/Cargo.toml
       - name: Test Codex event normalization
         run: cargo +stable test --locked --manifest-path rust/doxa-engines/Cargo.toml
-      - name: Build native LORE carrier
-        run: cargo +stable build --locked --package lore-core --bin lore-rs
       - name: Test native LORE integration
         run: cargo +stable test --locked --manifest-path rust/doxa-lore/Cargo.toml
       - name: Test peer registry compatibility
