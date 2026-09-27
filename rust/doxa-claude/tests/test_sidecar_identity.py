@@ -307,6 +307,26 @@ class IdentityTests(unittest.TestCase):
         engine.server_info = None
         self.assertEqual(sidecar.model_effort_capabilities(engine, "sonnet"), [])
 
+    def test_effort_aliases_use_advertised_resolved_model_and_explicit_id_precedence(self):
+        # Primary CLI 2.1.283 model-info schema/constructor supplies resolvedModel;
+        # an alias's spelling or human-readable description alone proves nothing.
+        engine = types.SimpleNamespace(set_effort=lambda _: None, server_info={"models": [
+            {"value": "opus", "resolvedModel": "claude-opus-4-6",
+             "supportedEffortLevels": ["low", "medium", "high", "xhigh", "max"]},
+            {"value": "sonnet[1m]", "resolvedModel": "claude-sonnet-4-6[1m]",
+             "supportedEffortLevels": ["low", "medium", "high"]},
+        ]})
+        self.assertEqual(sidecar.model_effort_capabilities(engine, "claude-opus-4-6"),
+                         ["low", "medium", "high", "xhigh", "max"])
+        self.assertEqual(sidecar.model_effort_capabilities(engine, "claude-sonnet-4-6[1m]"),
+                         ["low", "medium", "high"])
+        self.assertEqual(sidecar.model_effort_capabilities(engine, "claude-sonnet-4-6"), [])
+        self.assertEqual(sidecar.model_effort_capabilities(engine, "claude-opus-4-6-other"), [])
+        engine.server_info["models"].append({"value": "claude-opus-4-6", "supportedEffortLevels": ["low"]})
+        self.assertEqual(sidecar.model_effort_capabilities(engine, "claude-opus-4-6"), ["low"])
+        engine.server_info["models"][-1]["supportsEffort"] = False
+        self.assertEqual(sidecar.model_effort_capabilities(engine, "claude-opus-4-6"), [])
+
     def test_catalog_retries_empty_after_five_seconds_and_refreshes_verified_after_thirty(self):
         from doxa import claude_catalog, providers
         class FakeEngine:

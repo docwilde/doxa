@@ -26,20 +26,29 @@ COMPACT_REVIEW_DEADLINE = 185.0  # below the Rust host's 195-second acknowledgem
 
 
 def model_effort_capabilities(engine: object, model: str) -> list[str]:
-    """Only exact model metadata from this SDK connection proves support."""
+    """Only connected SDK model metadata proves effort support.
+
+    Claude CLI 2.1.283's model-info schema advertises ``resolvedModel`` as
+    the concrete API ID behind ``value`` aliases. Use that exact mapping;
+    explicit model rows take precedence over alias rows for the same ID.
+    """
     info = getattr(engine, "server_info", None)
     rows = info.get("models") if isinstance(info, dict) else None
     if not isinstance(rows, list) or not callable(getattr(engine, "set_effort", None)):
         return []
-    for row in rows[:100]:
-        if not isinstance(row, dict) or row.get("value", row.get("id")) != model:
-            continue
+    rows = [row for row in rows[:100] if isinstance(row, dict)]
+    candidates = [row for row in rows if row.get("value", row.get("id")) == model]
+    if not candidates:
+        candidates = [row for row in rows if row.get("resolvedModel") == model]
+    if not candidates:
+        return []
+    supported = ["low", "medium", "high", "xhigh", "max"]
+    for row in candidates:
         levels = row.get("supportedEffortLevels")
         if not isinstance(levels, list) or row.get("supportsEffort") is False:
             return []
-        return [level for level in ("low", "medium", "high", "xhigh", "max")
-                if level in levels]
-    return []
+        supported = [level for level in supported if level in levels]
+    return supported
 
 
 async def reviewed_compact_ready(engine: object, prompt: str,
