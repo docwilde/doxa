@@ -23,6 +23,7 @@ pub struct LayoutSignature {
     pane_tree: Option<Tree>,
     fleet_views: Vec<crate::ui::fleet_menu::SavedView>,
     custom_names: Vec<(String, String)>,
+    killed: Vec<String>,
     active_group: usize,
     split: Split,
     split_percent: u16,
@@ -35,6 +36,7 @@ impl LayoutSignature {
         Self {
             groups: app.groups.iter().map(|g| (g.tabs.clone(), g.active)).collect(),
             pane_tree: app.pane_tree.clone(),
+            killed: { let mut ids: Vec<_> = app.killed_this_run.iter().cloned().collect(); ids.sort(); ids },
             fleet_views: app.fleet_views.clone(),
             custom_names: {
                 let mut names: Vec<_> = app.custom_names.iter().map(|(id, name)| (id.clone(), name.clone())).collect();
@@ -225,10 +227,53 @@ impl UiStateStore {
         true
     }
 
+    /// A successful explicit kill vetoes restore without pruning unrelated
+    /// offline tabs or changing this window's active prompt/layout.
+    pub fn forget_sessions(&mut self, killed: &HashSet<String>) -> io::Result<()> {
+        let Some(old) = self.record.as_ref() else { return Ok(()); };
+        if !old.tabs.iter().any(|tab| killed.contains(&tab.session_id)) { return Ok(()); }
+        let mut record = old.clone();
+        record.tabs.retain(|tab| !killed.contains(&tab.session_id));
+        if record.active_session_id.as_ref().is_some_and(|id| killed.contains(id)) {
+            record.active_session_id = record.tabs.first().map(|tab| tab.session_id.clone());
+        }
+        fn prune(value: &mut Value, killed: &HashSet<String>) {
+            match value {
+                Value::Array(rows) => {
+                    rows.retain(|row| !row.get("session_id").and_then(Value::as_str).is_some_and(|id| killed.contains(id))
+                        && !row.as_str().is_some_and(|id| killed.contains(id)));
+                    for row in rows { prune(row, killed); }
+                }
+                Value::Object(object) => {
+                    for (key, value) in object.iter_mut() {
+                        if matches!(key.as_str(), "tabs" | "trees" | "children" | "groups" | "sessions") { prune(value, killed); }
+                    }
+                    if let Some(tabs) = object.get("tabs").and_then(Value::as_array) {
+                        let active = object.get("active").and_then(Value::as_u64).unwrap_or(0) as usize;
+                        object.insert("active".into(), json!(active.min(tabs.len().saturating_sub(1))));
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let Some(layout) = record.raw.get_mut("layout") { prune(layout, killed); }
+        if let Some(collections) = record.raw.get_mut("collections") { prune(collections, killed); }
+        record.raw.insert("tabs".into(), json!(record.tabs.iter().map(|tab| json!({"session_id":tab.session_id,"pinned_name":tab.pinned_name,"cwd":tab.cwd})).collect::<Vec<_>>()));
+        save_tabset(&self.path, &record)?;
+        self.record = Some(record);
+        Ok(())
+    }
+
     /// Persist the two visible pane groups. The flat list remains authoritative
     /// for old DOXA readers, and the tree and legacy trees describe the same
     /// geometry. A record with more complex groups is never overwritten.
     pub fn save(&mut self, app: &App) -> io::Result<()> {
+        let persisted_groups: Vec<PaneGroup> = app.groups.iter().map(|group| {
+            let active_id = group.tabs.get(group.active);
+            let tabs: Vec<String> = group.tabs.iter().filter(|id| !app.killed_this_run.contains(*id)).cloned().collect();
+            let active = active_id.and_then(|id| tabs.iter().position(|candidate| candidate == id)).unwrap_or(0);
+            PaneGroup { tabs, active, scroll: group.scroll }
+        }).collect();
         if !self.writable_layout {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -240,10 +285,11 @@ impl UiStateStore {
         // in Python. Do not rewrite the shared record from a partial view.
         if self.record.as_ref().is_some_and(|record| {
             record.tabs.iter().any(|tab| {
-                !app.groups
+                !persisted_groups
                     .iter()
                     .any(|group| group.tabs.contains(&tab.session_id))
                     && !app.clear_stop_after_save.contains(&tab.session_id)
+                    && !app.killed_this_run.contains(&tab.session_id)
             })
         }) {
             return Err(io::Error::new(
@@ -251,12 +297,12 @@ impl UiStateStore {
                 "saved layout includes offline tabs",
             ));
         }
-        if app.groups.len() > MAX_PANES || app.groups.iter().map(|g| g.tabs.len()).sum::<usize>() > MAX_TABS {
+        if persisted_groups.len() > MAX_PANES || persisted_groups.iter().map(|g| g.tabs.len()).sum::<usize>() > MAX_TABS {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "pane/tab bounds exceeded"));
         }
         let mut seen = HashSet::new();
         let mut tabs = Vec::new();
-        for group in &app.groups {
+        for group in &persisted_groups {
             for id in &group.tabs {
                 if !valid_session_id(id) {
                     return Err(io::Error::new(
@@ -277,18 +323,17 @@ impl UiStateStore {
                 }
             }
         }
-        if tabs.is_empty() && app.fleet_views.is_empty() { return Ok(()); }
+        if tabs.is_empty() && app.fleet_views.is_empty() && app.killed_this_run.is_empty() { return Ok(()); }
         if app.fleet_views.len()>crate::ui::fleet_menu::MAX_SAVED_VIEWS || app.fleet_views.iter().any(|view|!view.valid()){
             return Err(io::Error::new(io::ErrorKind::InvalidInput,"invalid saved fleet view"));
         }
-        if tabs.len() != app.groups.iter().map(|g| g.tabs.len()).sum::<usize>() {
+        if tabs.len() != persisted_groups.iter().map(|g| g.tabs.len()).sum::<usize>() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "same session shown in multiple pane groups",
+                "same session shown in multiple pane persisted_groups",
             ));
         }
-        let active = app
-            .groups
+        let active = persisted_groups
             .get(app.active_group)
             .and_then(|g| g.tabs.get(g.active))
             .cloned();
@@ -301,12 +346,11 @@ impl UiStateStore {
         record.scope_key = self.scope_key.clone();
         record.active_session_id = active;
         record.tabs = tabs;
-        let groups: Vec<Value> = app.groups.iter().filter(|g| app.pane_tree.is_some() || !g.tabs.is_empty()).map(|g| {
+        let groups: Vec<Value> = persisted_groups.iter().filter(|g| app.pane_tree.is_some() || !g.tabs.is_empty()).map(|g| {
             let leaves: Vec<Value> = g.tabs.iter().map(|id| leaf(&record, id)).collect();
             json!({"kind":"group","active":g.active.min(leaves.len().saturating_sub(1)),"tabs":leaves})
         }).collect();
-        let trees: Vec<Value> = app
-            .groups
+        let trees: Vec<Value> = persisted_groups
             .iter()
             .filter_map(|g| g.tabs.get(g.active).map(|id| leaf(&record, id)))
             .collect();
@@ -724,6 +768,25 @@ mod tests {
         assert!(!saved.restore(&mut restored,&[]));assert_eq!(restored.fleet_views,app.fleet_views);
         assert!(restored.groups.iter().all(|group|group.tabs.is_empty()));
         assert!(crate::ui::fleet_menu::SavedView::parse(&json!([{"kind":"session","root":"/real/fleet","run_id":"actual-run"}])).is_none());
+    }
+
+    #[test]
+    fn explicit_kill_veto_preserves_other_offline_tabs_and_active_draft() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = UiStateStore::new(dir.path(), "/repo", "machine").unwrap();
+        let mut app = App::default();
+        app.groups[0].tabs = vec!["kill-me".into(), "keep-me".into()];
+        app.groups[0].active = 1;
+        app.input = "active draft".into();
+        store.save(&app).unwrap();
+        app.groups[0].tabs = vec!["kill-me".into()];
+        store.forget_sessions(&HashSet::from(["kill-me".into()])).unwrap();
+        let saved = load_tabset(store.path(), "/repo").unwrap();
+        assert_eq!(saved.tabs.iter().map(|tab| tab.session_id.as_str()).collect::<Vec<_>>(), ["keep-me"]);
+        assert_eq!(saved.active_session_id.as_deref(), Some("keep-me"));
+        assert!(!serde_json::to_string(&saved.raw).unwrap().contains("kill-me"));
+        assert_eq!(app.groups[0].tabs, ["kill-me"]);
+        assert_eq!(app.input, "active draft");
     }
 
 }

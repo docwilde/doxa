@@ -206,6 +206,34 @@ impl DaemonClient {
         self.await_reply(id)
     }
 
+    /// Bind destructive requests to the process owning this connected socket.
+    pub(crate) fn verify_peer(&self, expected_pid: i32) -> Result<(), TransportError> {
+        #[cfg(target_os = "linux")]
+        {
+            let mut credentials: libc::ucred = unsafe { std::mem::zeroed() };
+            let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+            if unsafe { libc::getsockopt(self.writer.as_raw_fd(), libc::SOL_SOCKET,
+                libc::SO_PEERCRED, (&mut credentials as *mut libc::ucred).cast(), &mut length) } != 0 {
+                return Err(io::Error::last_os_error().into());
+            }
+            if length as usize != std::mem::size_of::<libc::ucred>()
+                || credentials.uid != unsafe { libc::geteuid() } || credentials.pid != expected_pid {
+                return Err(TransportError::Malformed("daemon peer process changed"));
+            }
+            Ok(())
+        }
+        #[cfg(not(target_os = "linux"))]
+        { let _ = expected_pid; Err(TransportError::Malformed("daemon peer process verification unavailable")) }
+    }
+
+    pub(crate) fn call_until(&mut self, method: &str, params: Map<String, Value>, deadline: Instant) -> Result<Value, TransportError> {
+        let remaining = deadline.checked_duration_since(Instant::now()).ok_or(TransportError::Timeout)?;
+        self.writer.set_write_timeout(Some(remaining))?;
+        let id = self.request_id()?;
+        self.write_json(&json!({"type":"call","id":id,"method":method,"params":params}))?;
+        self.await_reply_until(id, deadline)
+    }
+
     fn request_id(&mut self) -> Result<u64, TransportError> {
         let id = self.next_id;
         self.next_id = id.checked_add(1).ok_or(TransportError::RequestIdsExhausted)?;
@@ -233,7 +261,10 @@ impl DaemonClient {
         if let Some(index) = self.queued.iter().position(|f| f["type"] == "reply" && f["id"] == id) {
             return Ok(self.queued.remove(index).unwrap());
         }
-        let deadline = Instant::now() + REPLY_TIMEOUT;
+        self.await_reply_until(id, Instant::now() + REPLY_TIMEOUT)
+    }
+
+    fn await_reply_until(&mut self, id: u64, deadline: Instant) -> Result<Value, TransportError> {
         let result = (|| loop {
             let remaining = deadline.checked_duration_since(Instant::now()).ok_or(TransportError::Timeout)?;
             self.reader.get_ref().set_read_timeout(Some(remaining))?;

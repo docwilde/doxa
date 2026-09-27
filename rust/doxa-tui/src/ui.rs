@@ -99,7 +99,7 @@ const COMMANDS: &[CommandHelp] = &[
     CommandHelp { name: "/clear", form: "/clear", summary: "Fresh session in this tab", support: "local · idle session and writable tabset required" },
     CommandHelp { name: "/detach", form: "/detach", summary: "Leave session running", support: "local" },
     CommandHelp { name: "/attach", form: "/attach [prefix]", summary: "Attach live session", support: "local · new tab" },
-    CommandHelp { name: "/sessions", form: "/sessions", summary: "Session history", support: "local · history browser; kill unavailable" },
+    CommandHelp { name: "/sessions", form: "/sessions [kill <prefix>|kill-detached]", summary: "Live sessions and stop", support: "local · exact live target or detached from this window" },
     CommandHelp { name: "/rename", form: "/rename [name]", summary: "Name active tab", support: "local" },
     CommandHelp { name: "/dir", form: "/dir", summary: "Session directory", support: "local" },
     CommandHelp { name: "/cd", form: "/cd <path>", summary: "Open directory", support: "local · new tab" },
@@ -1311,6 +1311,9 @@ pub struct App {
     pending_permission_changes: Vec<(String, String)>,
     stop_confirmation: Option<String>,
     pending_stops: Vec<String>,
+    session_roster_pending: Option<Receiver<io::Result<Vec<crate::discovery::Session>>>>,
+    session_stop_pending: Option<Receiver<crate::sessions::Report>>,
+    pub(crate) killed_this_run: HashSet<String>,
     pending_clear_finalizes: Vec<String>,
     pub(crate) clear_stop_after_save: Vec<String>,
     clear_pending: Option<ClearPending>,
@@ -1477,6 +1480,9 @@ impl Default for App {
             pending_permission_changes: Vec::new(),
             stop_confirmation: None,
             pending_stops: Vec::new(),
+            session_roster_pending: None,
+            session_stop_pending: None,
+            killed_this_run: HashSet::new(),
             pending_clear_finalizes: Vec::new(),
             clear_stop_after_save: Vec::new(),
             clear_pending: None,
@@ -2739,6 +2745,14 @@ impl App {
             return false;
         }
         if !args.is_empty() && matches!(name, "/model" | "/effort" | "/mode" | "/engine") { return false; }
+        if name == "/sessions" && !args.is_empty() {
+            let action = crate::sessions::Action::parse(&args);
+            match action {
+                Ok(action) => self.local_sessions_stop(action),
+                Err(error) => self.notice = error.to_string(),
+            }
+            return true;
+        }
         if !args.is_empty() && !matches!(name, "/pane" | "/sidebar") {
             self.notice = format!("{name} arguments are not available in Rust yet");
             return true;
@@ -2779,7 +2793,7 @@ impl App {
                 self.open_help();
             }
             "/about" => self.notice = format!("DOXA Rust {}", env!("CARGO_PKG_VERSION")),
-            "/sessions" => self.open_history(),
+            "/sessions" => self.open_live_sessions(),
             "/settings" => self.open_settings_menu(),
             "/model" => self.open_model_picker(),
             "/effort" => self.open_effort_picker(),
@@ -2898,7 +2912,7 @@ impl App {
                 return true;
             }
             if let Some(info) = self.chip_info.as_mut().filter(|info|
-                matches!(info.kind, "memory" | "usage" | "context" | "help")) {
+                matches!(info.kind, "memory" | "usage" | "context" | "help" | "sessions")) {
                 match key.code {
                     KeyCode::Up => info.scroll = info.scroll.saturating_sub(1),
                     KeyCode::Down => info.scroll = info.scroll.saturating_add(1).min(info.lines.len().saturating_sub(1)),
@@ -3556,6 +3570,80 @@ impl App {
             self.input_cursor = 0;
             self.notice = "Peer message queued".into();
         }
+    }
+
+    fn open_live_sessions(&mut self) {
+        if self.session_roster_pending.is_some() { self.notice = "sessions: discovery pending".into(); return; }
+        let (tx, rx) = mpsc::sync_channel(1);
+        match std::thread::Builder::new().name("session-roster".into()).spawn(move || {
+            let _ = tx.send(crate::discovery::sessions());
+        }) {
+            Ok(_) => { self.session_roster_pending = Some(rx); self.notice = "sessions: finding live daemons…".into(); }
+            Err(error) => self.notice = format!("sessions: {}", safe_label(&error.to_string())),
+        }
+    }
+
+    fn poll_sessions_roster(&mut self) -> bool {
+        let Some(receiver) = self.session_roster_pending.as_ref() else { return false; };
+        let result = match receiver.try_recv() {
+            Ok(result) => result,
+            Err(TryRecvError::Empty) => return false,
+            Err(TryRecvError::Disconnected) => Err(io::Error::other("discovery worker disconnected")),
+        };
+        self.session_roster_pending = None;
+        let rows = match result { Ok(rows) => rows, Err(error) => {
+            self.notice = format!("sessions: {}", safe_label(&error.to_string())); return true;
+        } };
+        let mut lines = rows.iter().map(|row| {
+            let attached = self.groups.iter().any(|group| group.tabs.contains(&row.id));
+            format!("{}  {}  ·  {}", safe_label(&row.id), safe_label(self.custom_names.get(&row.id).unwrap_or(&row.title)),
+                if attached { "attached here" } else { "detached" })
+        }).collect::<Vec<_>>();
+        if lines.is_empty() { lines.push("sessions: none live".into()); }
+        lines.push(String::new());
+        lines.push("/sessions kill <prefix> · /sessions kill-detached".into());
+        lines.push("/search · saved session history".into());
+        self.chip_info = Some(ChipInfo { kind:"sessions",label:String::new(),lines,scroll:0,owner:None });
+        self.notice.clear();
+        true
+    }
+
+    fn local_sessions_stop(&mut self, action: crate::sessions::Action) {
+        if self.session_stop_pending.is_some() {
+            self.notice = "sessions: stop already pending".into();
+            return;
+        }
+        let attached = self.groups.iter().flat_map(|group| group.tabs.iter().cloned()).collect();
+        match crate::sessions::start(action, attached) {
+            Ok(receiver) => {
+                self.session_stop_pending = Some(receiver);
+                self.notice = "sessions: checking live targets…".into();
+            }
+            Err(error) => self.notice = format!("sessions: {}", safe_label(&error.to_string())),
+        }
+    }
+
+    fn poll_sessions_stop(&mut self) -> bool {
+        let Some(receiver) = self.session_stop_pending.as_ref() else { return false; };
+        let report = match receiver.try_recv() {
+            Ok(report) => report,
+            Err(TryRecvError::Empty) => return false,
+            Err(TryRecvError::Disconnected) => {
+                self.session_stop_pending = None;
+                self.notice = "sessions: stop worker disconnected".into();
+                return true;
+            }
+        };
+        self.session_stop_pending = None;
+        for id in &report.stopped {
+            self.killed_this_run.insert(id.clone());
+            self.offline_ids.insert(id.clone());
+            self.input_requests.retain(|request| request.session_id != *id);
+            self.pending_answers.retain(|(session, _, _)| session != id);
+            self.apply_update(DaemonUpdate::Status { id: id.clone(), text: "Stopping".into() });
+        }
+        self.notice = safe_label(&report.text());
+        true
     }
 
     fn local_attach(&mut self, args: &str) {
@@ -6459,7 +6547,7 @@ impl App {
         } else if let Some(menu) = &self.operations_menu {
             (menu.lines(usize::from(pane.width)).len() + 2).clamp(7, 19) as u16
         } else if self.chip_info.is_some() {
-            self.chip_info.as_ref().map_or(5, |info| if matches!(info.kind, "memory" | "usage" | "context" | "help" | "fleet" | "fleet_review") {
+            self.chip_info.as_ref().map_or(5, |info| if matches!(info.kind, "memory" | "usage" | "context" | "help" | "sessions" | "fleet" | "fleet_review") {
                 (info.lines.len() + 2).clamp(7, 19) as u16
             } else { 5 })
         } else if self.history_modal {
@@ -8006,7 +8094,7 @@ impl App {
                 .block(Block::default().title(" Fleet · PgUp/PgDn scroll ").borders(Borders::ALL))
                 .style(Style::default().fg(theme::TEXT).bg(theme::RAISED)),area);return;
         }
-        if matches!(info.kind, "memory" | "usage" | "context" | "help") {
+        if matches!(info.kind, "memory" | "usage" | "context" | "help" | "sessions") {
             let current = self.groups[self.active_group].active_id().and_then(|id|
                 self.session_cwds.get(id).and_then(|cwd| cwd.to_str()).map(|cwd| (id, cwd)));
             let owner_matches = info.owner.as_ref().is_some_and(|(id, cwd)| {
@@ -9004,6 +9092,8 @@ fn run_loop(
                 changed = true;
             }
         }
+        changed |= app.poll_sessions_roster();
+        changed |= app.poll_sessions_stop();
         changed |= app.poll_fleet();
         changed |= app.poll_diff();
         changed |= app.poll_history();
@@ -9079,6 +9169,10 @@ fn run_loop(
         // Retry an unsaved layout on later ticks, including ticks with no new
         // UI event (for example when the live roster becomes complete).
         if let Some((store, _, complete)) = &mut state {
+            if let Err(error) = store.forget_sessions(&app.killed_this_run) {
+                app.notice = format!("sessions: stopped; tabset veto save failed · {}", safe_label(&error.to_string()));
+                changed = true;
+            }
             changed |= save_layout_if_changed(&mut app, store, complete, &mut saved_layout);
         } else {
             saved_layout = crate::ui_state::LayoutSignature::capture(&app);
@@ -9223,7 +9317,7 @@ fn save_layout_if_changed(
         }
         return false;
     }
-    if app.groups.iter().any(|group| group.tabs.iter().any(|id| app.offline_ids.contains(id))) {
+    if app.groups.iter().any(|group| group.tabs.iter().any(|id| app.offline_ids.contains(id) && !app.killed_this_run.contains(id))) {
         if app.notice != "Layout save skipped · archived tabs are read-only" {
             app.notice = "Layout save skipped · archived tabs are read-only".into();
             return true;
@@ -13636,6 +13730,35 @@ mod parity_tests {
         app.fleet_review.as_mut().unwrap().complete.set(true);app.fleet_review.as_mut().unwrap().armed=true;
         app.key(KeyEvent::new(KeyCode::Char('Y'),KeyModifiers::SHIFT));assert!(app.fleet_controller.is_none());assert!(app.notice.contains("fixture cannot launch"));
         app.show_fleet_view_fixture("gallery-run",&["Fixture status"]);assert!(!app.poll_fleet());assert!(app.fleet_views.is_empty());
+    }
+
+    #[test]
+    fn session_kill_completion_preserves_active_prompt_and_layout() {
+        let mut app = App::default();
+        app.apply_update(DaemonUpdate::Upsert(Session { id:"current".into(), title:"Current".into(), collection:String::new(), transcript:String::new(), status:"Idle".into() }));
+        app.groups[0].tabs = vec!["current".into()];
+        app.input = "/sessions kill current".into(); app.input_cursor = 7;
+        let before = app.groups.clone();
+        let (tx, rx) = mpsc::sync_channel(1);
+        app.session_stop_pending = Some(rx);
+        tx.send(crate::sessions::Report { stopped:vec!["current".into()],failed:Vec::new(),error:None }).unwrap();
+        assert!(app.poll_sessions_stop());
+        assert_eq!(app.groups[0].tabs, before[0].tabs);
+        assert_eq!(app.groups[0].active, before[0].active);
+        assert_eq!(app.input, "/sessions kill current"); assert_eq!(app.input_cursor, 7);
+        assert!(app.killed_this_run.contains("current"));
+        assert!(app.offline_ids.contains("current"));
+        assert!(app.notice.contains("stopped: current"));
+    }
+
+    #[test]
+    fn malformed_session_kill_form_never_reaches_agent_or_clears_prompt() {
+        let mut app = App::default();
+        app.input = "/sessions kill one two".into(); app.input_cursor = app.input.len();
+        assert!(app.dispatch_prompt_command());
+        assert!(app.notice.contains("usage:"));
+        assert_eq!(app.input, "/sessions kill one two");
+        assert!(app.session_stop_pending.is_none());
     }
 
 }

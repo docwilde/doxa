@@ -7,6 +7,7 @@ pub mod lore_picker;
 pub mod memory_menu;
 pub mod diff_view;
 pub mod discovery;
+pub mod sessions;
 pub mod transport;
 pub mod ui;
 

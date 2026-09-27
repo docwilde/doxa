@@ -317,8 +317,11 @@ impl Inner {
                 inner.publish(Some(&turn), json!({"type":"turn_done", "data":{}}));
             }
             let next = {
+                let _admission = inner.controls.lock().unwrap();
                 let mut state = inner.state.lock().unwrap();
-                if let Some(prompt) = state.prompts.pop_front() {
+                if inner.stopping.load(Ordering::Acquire) {
+                    state.prompts.clear(); state.busy = false; None
+                } else if let Some(prompt) = state.prompts.pop_front() {
                     let turn = format!("{}r{:011}", if prompt.peer_origin.is_some() { "peer-" } else { "" }, state.next_turn_id);
                     state.next_turn_id += 1;
                     Some((prompt, turn))
@@ -491,7 +494,7 @@ fn handle_call(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame: &Value) {
     let Some(req_id) = frame["id"].as_u64() else { return; };
     let Some(method) = frame["method"].as_str() else { return; };
     let params = frame.get("params").filter(|v| v.is_object()).cloned().unwrap_or_else(|| json!({}));
-    let _control_guard = matches!(method, "set_model" | "set_effort" | "set_permission_mode" | "switch_branch" | "stop_if_idle")
+    let _control_guard = matches!(method, "set_model" | "set_effort" | "set_permission_mode" | "switch_branch" | "stop" | "stop_if_idle")
         .then(|| inner.controls.lock().unwrap());
     let (result, changed) = if method == "answer_needs_input" {
         let reviewed = params.get("reviewed_request");
