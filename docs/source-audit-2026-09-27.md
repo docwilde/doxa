@@ -59,7 +59,9 @@ from that event are described as unavailable rather than synthesized.
 Belief ordering uses recorded LORE timestamps, with stable ID ordering only as a
 tie-breaker. Both LORE browsing menus use table rows and prompt-line filters;
 curated facts come from the canonical entry API rather than splitting displayed
-Markdown. Acceptance and rejection retain complete exact-snapshot review gates.
+Markdown. Delayed belief tooltips have a separate bounded read API for full display text;
+redaction or omitted content is marked incomplete. Acceptance and rejection
+retain complete exact-snapshot review gates.
 
 DOXA already calculated memory percentages from LORE's own character counts and
 caps. However, it did not propagate the allowlisted capacity settings carried in
@@ -125,10 +127,12 @@ inside Codex before DOXA observes and stops the session. See
 ## Verification record
 
 Local validation passed 827 Rust workspace test executions with all features
-enabled (no failures or ignored tests). The final prompt-focus change then passed
-the complete 409-test frontend library suite. Focused Python boundaries passed
+enabled (no failures or ignored tests). The final prompt-focus and delayed-hover
+changes then passed the complete 414-test frontend library suite. The LORE Rust
+suite passed 18 tests. Focused Python boundaries passed
 138 tests with one optional browser fixture skipped; the updated LORE suite
-passed 39 tests and Claude sidecar unit checks passed 28 tests. Counts describe
+passed 40 tests (including full display reads) and Claude sidecar unit checks
+passed 28 tests. Counts describe
 separate runs and are not additive totals.
 
 Focused regressions accompany the fixes. The release PR records the integrated

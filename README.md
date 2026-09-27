@@ -105,7 +105,13 @@ in supporting terminals.
 *Accept records a user confirmation in LORE. Reject retracts the belief from
 active memory while retaining its history. Each action reviews the exact claim
 above the prompt; retraction requires an explicit confirmation. Type in the
-prompt to filter, or use Shift+A / Shift+R on the selected row.*
+prompt to filter, or use Shift+A / Shift+R on the selected row. Hover an entry
+for the delayed full-belief tooltip.*
+
+![Rust belief hover preview showing the complete claim after a 500 ms delay](assets/shots/rust-belief-hover.png)
+
+*Hover previews wrap the complete safe claim. Beliefs too large for the terminal
+offer Enter to open the full review.*
 
 ![Rust directory picker expanded above a single session prompt](assets/shots/rust-repo-picker.png)
 

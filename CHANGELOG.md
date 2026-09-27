@@ -35,7 +35,8 @@ the stable 2.0 release has not been cut.
   policy, and report safe actionable failure classes without exposing stderr.
 - Present beliefs and curated memory as aligned tables, order beliefs by recorded
   recency, and filter from the prompt while preserving its original draft. Use
-  Shift+A and Shift+R to start the existing exact Accept/Reject review.
+  Shift+A and Shift+R to start the existing exact Accept/Reject review. Delayed
+  entry tooltips read full safe claims through a separate bounded display API.
 - Document DRY, dependency inversion and ownership findings with coverage and
   validation limits. Preserve the alpha.31 mesh wheel asset packaging fix.
 
