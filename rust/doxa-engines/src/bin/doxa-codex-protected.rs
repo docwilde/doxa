@@ -188,7 +188,11 @@ fn run() -> io::Result<()> {
             CString::new(value.as_bytes()).map_err(|_| invalid("invalid provider argument"))
         })
         .collect::<io::Result<Vec<_>>>()?;
-    let owner = if !helper_mode { env::var(doxa_engines::provider_owner::CONTROL_ENV).ok() } else { None };
+    let owner = if !helper_mode {
+        env::var(doxa_engines::provider_owner::CONTROL_ENV).ok()
+    } else {
+        None
+    };
     let environment = env::vars_os()
         .filter(|(key, _)| key != doxa_engines::provider_owner::CONTROL_ENV)
         .map(|(key, value)| {
@@ -210,22 +214,37 @@ fn run() -> io::Result<()> {
         .chain(std::iter::once(std::ptr::null()))
         .collect::<Vec<_>>();
     let exec = || {
-        unsafe { libc::fexecve(binary.as_raw_fd(), args.as_ptr(), environment.as_ptr()); }
+        unsafe {
+            libc::fexecve(binary.as_raw_fd(), args.as_ptr(), environment.as_ptr());
+        }
         io::Error::last_os_error()
     };
     if let Some(owner) = owner {
-        let fd = owner.parse::<i32>().ok().filter(|fd| *fd >= 3)
+        let fd = owner
+            .parse::<i32>()
+            .ok()
+            .filter(|fd| *fd >= 3)
             .ok_or_else(|| invalid("invalid provider owner control descriptor"))?;
         let mut kind = 0_i32;
         let mut size = std::mem::size_of_val(&kind) as libc::socklen_t;
-        if unsafe { libc::getsockopt(fd, libc::SOL_SOCKET, libc::SO_TYPE,
-            (&mut kind as *mut i32).cast(), &mut size) } != 0 || kind != libc::SOCK_STREAM {
+        if unsafe {
+            libc::getsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_TYPE,
+                (&mut kind as *mut i32).cast(),
+                &mut size,
+            )
+        } != 0
+            || kind != libc::SOCK_STREAM
+        {
             return Err(invalid("provider owner control must be a stream socket"));
         }
         if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
             return Err(io::Error::last_os_error());
         }
-        let code = doxa_engines::provider_owner::supervise(unsafe { UnixStream::from_raw_fd(fd) }, exec)?;
+        let code =
+            doxa_engines::provider_owner::supervise(unsafe { UnixStream::from_raw_fd(fd) }, exec)?;
         std::process::exit(code);
     }
     Err(exec())

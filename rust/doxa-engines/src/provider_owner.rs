@@ -1,6 +1,10 @@
 //! Dedicated Linux provider owner. Parent control EOF also covers parent SIGKILL.
 //! The owner is the only subreaper: the daemon never adopts unrelated children.
-use std::{io::{self, Read, Write, Seek, SeekFrom}, os::unix::{io::AsRawFd, net::UnixStream}, time::Duration};
+use std::{
+    io::{self, Read, Seek, SeekFrom, Write},
+    os::unix::{io::AsRawFd, net::UnixStream},
+    time::Duration,
+};
 
 pub const CONTROL_ENV: &str = "DOXA_CODEX_OWNER_FD";
 pub const READY: &[u8] = b"DOXA_PROVIDER_OWNER_V1\n";
@@ -14,18 +18,30 @@ pub async fn acknowledge(control: &mut UnixStream) -> io::Result<()> {
     let mut buffer = [0_u8; READY.len()];
     while offset < READY.len() {
         match control.read(&mut buffer[offset..]) {
-            Ok(0) => return Err(io::Error::other("protected provider owner closed before readiness")),
+            Ok(0) => {
+                return Err(io::Error::other(
+                    "protected provider owner closed before readiness",
+                ))
+            }
             Ok(count) => offset += count,
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {},
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(error) => return Err(error),
         }
         if tokio::time::Instant::now() >= deadline {
-            return Err(io::Error::other("protected provider owner readiness timed out"));
+            return Err(io::Error::other(
+                "protected provider owner readiness timed out",
+            ));
         }
-        if offset < READY.len() { tokio::time::sleep(Duration::from_millis(10)).await; }
+        if offset < READY.len() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
-    if buffer != READY { return Err(io::Error::other("invalid protected provider owner handshake")); }
+    if buffer != READY {
+        return Err(io::Error::other(
+            "invalid protected provider owner handshake",
+        ));
+    }
     control.write_all(b"G")
 }
 
@@ -39,16 +55,29 @@ fn census(file: &mut std::fs::File, signal: bool) -> io::Result<bool> {
     let mut any = false;
     loop {
         let count = file.read(&mut bytes)?;
-        for byte in bytes[..count].iter().copied().chain((count == 0).then_some(b' ')) {
+        for byte in bytes[..count]
+            .iter()
+            .copied()
+            .chain((count == 0).then_some(b' '))
+        {
             if byte.is_ascii_whitespace() {
-                if token.is_empty() { continue; }
-                let pid = std::str::from_utf8(&token).map_err(io::Error::other)?
-                    .parse::<libc::pid_t>().map_err(io::Error::other)?;
-                if pid <= 0 { return Err(io::Error::other("invalid owned child identity")); }
+                if token.is_empty() {
+                    continue;
+                }
+                let pid = std::str::from_utf8(&token)
+                    .map_err(io::Error::other)?
+                    .parse::<libc::pid_t>()
+                    .map_err(io::Error::other)?;
+                if pid <= 0 {
+                    return Err(io::Error::other("invalid owned child identity"));
+                }
                 any = true;
                 if signal {
                     // No waitpid between reading this identity and signaling.
-                    unsafe { libc::kill(pid, libc::SIGSTOP); libc::kill(pid, libc::SIGKILL); }
+                    unsafe {
+                        libc::kill(pid, libc::SIGSTOP);
+                        libc::kill(pid, libc::SIGKILL);
+                    }
                 }
                 token.clear();
             } else {
@@ -58,7 +87,9 @@ fn census(file: &mut std::fs::File, signal: bool) -> io::Result<bool> {
                 token.push(byte);
             }
         }
-        if count == 0 { return Ok(any); }
+        if count == 0 {
+            return Ok(any);
+        }
     }
 }
 
@@ -71,14 +102,24 @@ fn clean_children(file: &mut std::fs::File) {
         let signaled = census(file, true);
         loop {
             let result = unsafe { libc::waitpid(-1, std::ptr::null_mut(), libc::WNOHANG) };
-            if result > 0 { continue; }
-            if result < 0 && io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) { continue; }
-            if result < 0 && io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD) { return; }
+            if result > 0 {
+                continue;
+            }
+            if result < 0 && io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            if result < 0 && io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD) {
+                return;
+            }
             break;
         }
         // Killing direct parents adopts detached grandchildren. Repeat the
         // census after reaping; never signal old identities after a waitpid.
-        std::thread::sleep(if signaled.is_ok() { Duration::from_millis(10) } else { Duration::from_millis(250) });
+        std::thread::sleep(if signaled.is_ok() {
+            Duration::from_millis(10)
+        } else {
+            Duration::from_millis(250)
+        });
     }
 }
 
@@ -87,41 +128,67 @@ fn clean_children(file: &mut std::fs::File) {
 #[cfg(target_os = "linux")]
 pub fn supervise(mut control: UnixStream, exec: impl FnOnce() -> io::Error) -> io::Result<i32> {
     unsafe {
-        if libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0 { return Err(io::Error::last_os_error()); }
+        if libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0 {
+            return Err(io::Error::last_os_error());
+        }
         libc::signal(libc::SIGCHLD, libc::SIG_DFL);
     }
     // Pin and preflight the ownership census before acknowledging any start.
-    let mut census_file = std::fs::File::open(format!("/proc/self/task/{}/children", std::process::id()))?;
+    let mut census_file =
+        std::fs::File::open(format!("/proc/self/task/{}/children", std::process::id()))?;
     census(&mut census_file, false)?;
     control.set_read_timeout(Some(Duration::from_secs(30)))?;
     control.write_all(READY)?;
     let mut go = [0];
     control.read_exact(&mut go)?;
-    if go != *b"G" { return Err(io::Error::other("invalid provider owner start authorization")); }
+    if go != *b"G" {
+        return Err(io::Error::other(
+            "invalid provider owner start authorization",
+        ));
+    }
     control.set_nonblocking(true)?;
     let pid = unsafe { libc::fork() };
-    if pid < 0 { return Err(io::Error::last_os_error()); }
+    if pid < 0 {
+        return Err(io::Error::last_os_error());
+    }
     if pid == 0 {
         unsafe {
             libc::close(control.as_raw_fd());
-            if libc::setsid() < 0 { libc::_exit(127); }
+            if libc::setsid() < 0 {
+                libc::_exit(127);
+            }
         }
         let _ = exec();
-        unsafe { libc::_exit(127); }
+        unsafe {
+            libc::_exit(127);
+        }
     }
     // Only the provider owns protocol stdIO. EOF must not wait on this owner.
-    unsafe { libc::close(0); libc::close(1); libc::close(2); }
+    unsafe {
+        libc::close(0);
+        libc::close(1);
+        libc::close(2);
+    }
     let mut status = 0;
     let result = loop {
         let waited = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
         if waited == pid {
-            break if libc::WIFEXITED(status) { libc::WEXITSTATUS(status) }
-                else { 128 + libc::WTERMSIG(status) };
+            break if libc::WIFEXITED(status) {
+                libc::WEXITSTATUS(status)
+            } else {
+                128 + libc::WTERMSIG(status)
+            };
         }
-        if waited < 0 && io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) { break 1; }
+        if waited < 0 && io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+            break 1;
+        }
         match control.read(&mut go) {
             Ok(_) => break 130, // EOF or unexpected traffic means shutdown.
-            Err(error) if matches!(error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted) => {},
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                ) => {}
             Err(_) => break 1,
         }
         std::thread::sleep(Duration::from_millis(10));
@@ -132,5 +199,7 @@ pub fn supervise(mut control: UnixStream, exec: impl FnOnce() -> io::Error) -> i
 
 #[cfg(not(target_os = "linux"))]
 pub fn supervise(_: UnixStream, _: impl FnOnce() -> io::Error) -> io::Result<i32> {
-    Err(io::Error::other("protected provider descendant ownership requires Linux"))
+    Err(io::Error::other(
+        "protected provider descendant ownership requires Linux",
+    ))
 }
