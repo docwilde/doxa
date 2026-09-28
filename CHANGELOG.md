@@ -9,8 +9,8 @@ the stable 2.0 release has not been cut.
 
 **Peer transport verification**
 
-- Fix the HTTP test fixture to consume its complete POST body before closing
-  the connection; avoid intermittent TCP resets in the remote roster test.
+- Fix **`roster_origin_is_from_dialed_endpoint_and_client_never_follows_redirect`**
+  to read the full POST body before closing its fixture socket; prevent TCP resets.
 - Keep the production transport unchanged. Retain the actual alpha.37 gallery
   captures and their recorded source provenance.
 
