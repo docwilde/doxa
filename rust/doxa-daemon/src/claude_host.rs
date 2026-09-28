@@ -34,6 +34,7 @@ struct Shared {
     active: AtomicBool,
     closing: AtomicBool,
     cancelled: AtomicBool,
+    resume_identity_pending: AtomicBool,
     selection: Mutex<(Option<String>, Option<String>, String)>,
     account: Mutex<Option<Value>>,
     billing: Mutex<Option<Value>>,
@@ -297,10 +298,29 @@ impl ClaudeHost {
         let mut requested_effort = effort.map(str::to_owned);
         let mut mode = "default".to_owned();
         if resume {
-            let old = store
+            let old = match store
                 .read_thread()
                 .map_err(|_| "Claude saved state unavailable")?
-                .ok_or("Claude resume metadata is unavailable")?;
+            {
+                Some(old) => old,
+                None => {
+                    if depth != 0 || parent.is_some() {
+                        return Err("Legacy Claude lineage is unproven; restore refused".into());
+                    }
+                    doxa_claude::resume::verify_legacy(&doxa_claude::isolation::config_dir(),&store.transcript_path(),session_id,Path::new(&cwd))
+                        .map_err(|_| "Legacy Claude source identity or complete owned logs are unproven; restore refused")?;
+                    let fields = json!({"thread_id":session_id,"session_id":session_id,"engine":"claude","transport":"stream-json","cwd":cwd,"lore_enabled":enabled,"spawn_depth":0,"parent_session_id":null,"turn_incomplete":false,"legacy_imported":true,"permission_mode":"default"});
+                    store
+                        .try_write_thread(fields.as_object().unwrap().clone(), |s| {
+                            lore.scrub(s).map_err(io::Error::other)
+                        })
+                        .map_err(|_| "Legacy Claude checkpoint failed")?;
+                    store
+                        .read_thread()
+                        .map_err(|_| "Legacy Claude checkpoint unavailable")?
+                        .ok_or("Legacy Claude checkpoint unavailable")?
+                }
+            };
             if old["engine"] != "claude"
                 || old["thread_id"] != session_id
                 || old["cwd"] != cwd
@@ -355,6 +375,7 @@ impl ClaudeHost {
             active: AtomicBool::new(false),
             closing: AtomicBool::new(false),
             cancelled: AtomicBool::new(false),
+            resume_identity_pending: AtomicBool::new(resume),
             selection: Mutex::new((
                 requested_model.clone(),
                 requested_effort.clone(),
@@ -363,12 +384,7 @@ impl ClaudeHost {
             account: Mutex::new(None),
             billing: Mutex::new(None),
             catalog: Mutex::new(Value::Null),
-            agent: crate::agent_tools::AgentTools::new(
-                &cwd,
-                session_id,
-                "claude",
-                enabled,
-            ),
+            agent: crate::agent_tools::AgentTools::new(&cwd, session_id, "claude", enabled),
             peer: Mutex::new(None),
             peer_allowed,
             depth,
@@ -846,6 +862,27 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>) {
                 return;
             }
         }
+        if shared.resume_identity_pending.load(Ordering::Acquire) {
+            if frame["type"] == "system"
+                && frame["subtype"] == "init"
+                && frame["session_id"] == shared.session
+            {
+                shared
+                    .resume_identity_pending
+                    .store(false, Ordering::Release);
+            } else if !matches!(
+                frame["type"].as_str(),
+                Some("control_request" | "control_response" | "rate_limit_event")
+            ) {
+                shared.failed.store(true, Ordering::Release);
+                shared.active.store(false, Ordering::Release);
+                send_event(
+                    &events,
+                    done("Resumed Claude provider identity was not confirmed; output withheld"),
+                );
+                return;
+            }
+        }
         match frame["type"].as_str() {
             Some("control_response") => {
                 let id = frame["response"]["request_id"].as_str().unwrap_or("");
@@ -1318,6 +1355,7 @@ for line in sys.stdin:
             active: AtomicBool::new(false),
             closing: AtomicBool::new(false),
             cancelled: AtomicBool::new(false),
+            resume_identity_pending: AtomicBool::new(false),
             selection: Mutex::new((
                 Some("claude-opus-5-5".into()),
                 Some("high".into()),

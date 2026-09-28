@@ -1586,7 +1586,7 @@ fn claude_reported_spend_blocks_next_prompt_over_daemon_socket() {
     send(&mut socket, json!({"type":"attach","cursor":null}));
     send(&mut socket, json!({"type":"prompt","id":1,"text":"first"}));
     assert_eq!(receive(&mut reader)["ok"], true);
-    assert_eq!(receive(&mut reader)["event"]["type"], "turn_done");
+    assert_eq!(claude_receive_until(&mut reader,|f|f["event"]["type"]=="turn_done")["event"]["type"], "turn_done");
     send(&mut socket, json!({"type":"prompt","id":2,"text":"second"}));
     assert_eq!(receive(&mut reader)["ok"], true);
     let refusal = receive(&mut reader);
@@ -1595,6 +1595,28 @@ fn claude_reported_spend_blocks_next_prompt_over_daemon_socket() {
     assert_eq!(refusal["event"]["data"]["spent_usd"], 1.1);
     unsafe { libc::kill(process.child.id() as libc::pid_t, libc::SIGTERM); }
     wait_until(|| process.exited());
+}
+
+#[test]
+fn claude_legacy_resume_requires_owned_provider_and_lore_source_then_verifies_live_identity() {
+    let dir=tempfile::tempdir().unwrap();let script=dir.path().join("legacy-cli");
+    claude_fixture(&script,"assert '--resume' in args",r#"if frame['type']=='user':
+  emit({'type':'system','subtype':'init','session_id':session,'model':model});delta('restored');result()
+"#);
+    let project=dir.path().join("home/claude-cli/projects/legacy");fs::create_dir_all(&project).unwrap();
+    for path in [dir.path().join("home/claude-cli"),dir.path().join("home/claude-cli/projects"),project.clone()] {fs::set_permissions(path,fs::Permissions::from_mode(0o700)).unwrap();}
+    let source=format!("{}\n{}\n",json!({"type":"user","engine":"claude","sessionId":CLAUDE_SESSION,"cwd":dir.path(),"message":{"role":"user","content":"saved task"}}),json!({"type":"assistant","engine":"claude","sessionId":CLAUDE_SESSION,"cwd":dir.path(),"message":{"role":"assistant","content":[{"type":"text","text":"saved answer"}]}}));
+    fs::write(project.join(format!("{CLAUDE_SESSION}.jsonl")),&source).unwrap();
+    fs::create_dir_all(native_transcript_dir(dir.path())).unwrap();fs::set_permissions(native_transcript_dir(dir.path()),fs::Permissions::from_mode(0o700)).unwrap();
+    let transcript=native_transcript(dir.path(),&format!("{CLAUDE_SESSION}.jsonl"));fs::write(&transcript,&source).unwrap();
+    let child=daemon_command().args(["--runtime-dir",dir.path().to_str().unwrap(),"--cwd",dir.path().to_str().unwrap(),"--session-id",CLAUDE_SESSION,"--engine","claude","--claude-bin",script.to_str().unwrap(),"--resume","true","--linger","10"]).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
+    let registry=dir.path().join("registry").join(format!("{CLAUDE_SESSION}.json"));let mut process=Process{child,registry,socket:PathBuf::new()};
+    wait_until(||process.registry.exists()||process.exited());assert!(!process.exited());process.socket=process.entry()["daemon_socket"].as_str().unwrap().into();
+    let (mut reader,mut socket)=process.connect();receive(&mut reader);send(&mut socket,json!({"type":"attach","cursor":null}));send(&mut socket,json!({"type":"prompt","id":1,"text":"continue"}));
+    let completed=claude_receive_until(&mut reader,|f|f["event"]["type"]=="turn_done");assert_eq!(completed["event"]["data"]["is_error"],false);
+    let metadata:Value=serde_json::from_slice(&fs::read(native_transcript(dir.path(),&format!("{CLAUDE_SESSION}.codex.json"))).unwrap()).unwrap();assert_eq!(metadata["legacy_imported"],true);assert_eq!(metadata["thread_id"],CLAUDE_SESSION);
+    assert!(fs::read_to_string(transcript).unwrap().starts_with(&source),"legacy source was rewritten");
+    send(&mut socket,json!({"type":"call","id":2,"method":"stop","params":{}}));claude_receive_until(&mut reader,|f|f["id"]==2);wait_until(||process.exited());
 }
 
 #[test]
@@ -1634,7 +1656,7 @@ fn oversized_claude_event_fails_turn_without_forwarding_content() {
     send(&mut socket, json!({"type":"attach","cursor":null}));
     send(&mut socket, json!({"type":"prompt","id":1,"text":"hello"}));
     assert_eq!(receive(&mut reader)["ok"], true);
-    let frame = receive(&mut reader);
+    let frame = claude_receive_until(&mut reader,|f|f["event"]["type"]=="turn_done");
     assert_eq!(frame["event"]["type"], "turn_done");
     assert_eq!(frame["event"]["data"]["is_error"], true);
     assert!(!frame.to_string().contains("SENSITIVE"));
