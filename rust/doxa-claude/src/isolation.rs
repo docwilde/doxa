@@ -143,6 +143,7 @@ fn copy_tree(
                 .checked_sub(data.len() as u64)
                 .ok_or_else(unsafe_path)?;
             write(&dst, &data)?;
+            fs::set_permissions(&dst, fs::Permissions::from_mode(0o600 | (m.mode() & 0o111)))?;
         }
     }
     Ok(())
@@ -191,13 +192,7 @@ pub fn prepare() -> io::Result<PathBuf> {
     Ok(base)
 }
 pub fn adopted_plugins() -> io::Result<Vec<PathBuf>> {
-    let raw = std::env::var("DOXA_ADOPT_PLUGINS").unwrap_or_default();
-    if raw.is_empty()
-        || matches!(
-            raw.to_ascii_lowercase().as_str(),
-            "0" | "false" | "no" | "off"
-        )
-    {
+    if !adoption_enabled() {
         return Ok(vec![]);
     }
     let base = user_config_base();
@@ -208,20 +203,17 @@ pub fn adopted_plugins() -> io::Result<Vec<PathBuf>> {
     let settings: Value = serde_json::from_slice(&bytes(&base.join("settings.json"), 65536)?)?;
     let mut result = Vec::new();
     for (key, rows) in installed["plugins"].as_object().into_iter().flatten() {
-        if key.len() > 128
-            || key.starts_with('.')
-            || !key
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b"-_.@".contains(&b))
-            || key == "lore@lore"
-            || settings["enabledPlugins"][key] != true
-        {
+        if !safe_scope(key) || key == "lore@lore" || settings["enabledPlugins"][key] != true {
             continue;
         }
         let Some(source) = rows[0]["installPath"].as_str().map(PathBuf::from) else {
             continue;
         };
-        if !source.is_absolute() {
+        if !source.is_absolute()
+            || !["commands", "skills", "agents"]
+                .iter()
+                .any(|name| source.join(name).is_dir())
+        {
             continue;
         }
         let dest = config_dir().join("adopted-plugins").join(key);
@@ -258,4 +250,200 @@ pub fn mark_logged_in() -> io::Result<bool> {
     }
     sync_credentials(false)?;
     Ok(bytes(&config_dir().join(".credentials.json"), 1024 * 1024).is_ok_and(|v| oauth(&v)))
+}
+
+/// Same saved preference used by the native UI; staging remains opt-in.
+pub fn adoption_enabled() -> bool {
+    let config = doxa_state::load_config(&config_dir().parent().unwrap().join("config.toml"));
+    let raw = doxa_state::raw_setting(
+        std::env::var("DOXA_ADOPT_PLUGINS").ok().as_deref(),
+        &config,
+        "adopt_plugins",
+    );
+    !raw.trim().is_empty()
+        && !matches!(
+            raw.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off"
+        )
+}
+
+/// Read-only approved plugin commands from the user registry. This performs
+/// no SDK initialization, plugin code execution, staging, or hook discovery.
+pub fn plugin_commands(mut cancelled: impl FnMut() -> bool) -> io::Result<Vec<Value>> {
+    if !adoption_enabled() {
+        return Ok(Vec::new());
+    }
+    let base = user_config_base();
+    let installed: Value = match bytes(&base.join("plugins/installed_plugins.json"), 1024 * 1024) {
+        Ok(raw) => serde_json::from_slice(&raw)?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    let settings: Value = match bytes(&base.join("settings.json"), 65536) {
+        Ok(raw) => serde_json::from_slice(&raw)?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Value::Null,
+        Err(error) => return Err(error),
+    };
+    let mut output = Vec::new();
+    for (key, rows) in installed["plugins"].as_object().into_iter().flatten() {
+        if cancelled() {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "Plugin inventory cancelled",
+            ));
+        }
+        if !safe_scope(key) || key == "lore@lore" || settings["enabledPlugins"][key] != true {
+            continue;
+        }
+        let Some(source) = rows[0]["installPath"]
+            .as_str()
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+        else {
+            continue;
+        };
+        let plugin = key.split('@').next().unwrap_or(key);
+        for entry in fs::read_dir(source.join("commands"))
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            if cancelled() {
+                return Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "Plugin inventory cancelled",
+                ));
+            }
+            let path = entry.path();
+            if path.extension().is_none_or(|v| v != "md") {
+                continue;
+            }
+            let Some(name) = path
+                .file_stem()
+                .and_then(|v| v.to_str())
+                .filter(|v| safe_scope(v))
+            else {
+                continue;
+            };
+            let raw = match fs::canonicalize(&path).and_then(|path| bytes(&path, 65536)) {
+                Ok(raw) => raw,
+                Err(_) => continue,
+            };
+            let text = String::from_utf8(raw)
+                .map_err(|_| io::Error::other("Invalid plugin command text"))?;
+            let (summary, usage) = front_matter(&text);
+            let full = format!("/{plugin}:{name}");
+            if full.len() > 128 {
+                continue;
+            }
+            output.push(
+                serde_json::json!({"name":full,"summary":summary,"usage":usage,"plugin":key}),
+            );
+            if output.len() > 100 {
+                return Err(io::Error::other(
+                    "Plugin command inventory exceeds 100 entries",
+                ));
+            }
+        }
+    }
+    output.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+    Ok(output)
+}
+fn safe_scope(key: &str) -> bool {
+    !key.is_empty()
+        && key.len() <= 128
+        && !key.starts_with('.')
+        && !key.contains("..")
+        && key
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-_.@".contains(&b))
+}
+fn front_matter(text: &str) -> (String, String) {
+    let mut description = String::new();
+    let mut usage = String::new();
+    if !text.starts_with("---\n") {
+        return (description, usage);
+    }
+    for line in text[4..].lines() {
+        if line.trim() == "---" {
+            break;
+        }
+        if let Some((key, value)) = line.split_once(':') {
+            let value = value.trim().trim_matches(['\'', '"']);
+            if value.len() > 1024 || value.chars().any(char::is_control) {
+                continue;
+            }
+            match key.trim() {
+                "description" => description = value.into(),
+                "argument-hint" => usage = value.into(),
+                _ => {}
+            }
+        }
+    }
+    (description, usage)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn plugin_snapshot_strips_executing_channels_and_copies_links_one_direction() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("plugin");
+        let target = dir.path().join("isolated");
+        fs::create_dir_all(source.join(".claude-plugin")).unwrap();
+        fs::create_dir_all(source.join("hooks")).unwrap();
+        fs::create_dir_all(source.join("scripts")).unwrap();
+        fs::write(source.join(".claude-plugin/plugin.json"),br#"{"name":"safe","hooks":"arbitrary-command","mcpServers":{"foreign":{}},"lspServers":{},"description":"approved commands"}"#).unwrap();
+        fs::write(source.join("hooks/hooks.json"), "bad").unwrap();
+        fs::write(source.join(".mcp.json"), "bad").unwrap();
+        fs::write(source.join("scripts/run"), "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(
+            source.join("scripts/run"),
+            fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        let approved = dir.path().join("approved.md");
+        fs::write(&approved, "approved skill").unwrap();
+        std::os::unix::fs::symlink(&approved, source.join("approved.md")).unwrap();
+        snapshot(&source, &target, true).unwrap();
+        assert!(!target.join("hooks").exists());
+        assert!(!target.join(".mcp.json").exists());
+        let manifest: Value =
+            serde_json::from_slice(&fs::read(target.join(".claude-plugin/plugin.json")).unwrap())
+                .unwrap();
+        assert!(manifest.get("hooks").is_none());
+        assert!(manifest.get("mcpServers").is_none());
+        assert!(manifest.get("lspServers").is_none());
+        assert_eq!(manifest["description"], "approved commands");
+        assert!(fs::metadata(target.join("scripts/run")).unwrap().mode() & 0o100 != 0);
+        assert!(!fs::symlink_metadata(target.join("approved.md"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        fs::write(target.join("approved.md"), "model changed copy").unwrap();
+        assert_eq!(fs::read_to_string(&approved).unwrap(), "approved skill");
+        snapshot(&source, &target, true).unwrap();
+        assert_eq!(
+            fs::read_to_string(target.join("approved.md")).unwrap(),
+            "approved skill"
+        );
+    }
+    #[test]
+    fn snapshot_never_deletes_unowned_directory_or_reads_special_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        let target = dir.path().join("target");
+        fs::create_dir(&source).unwrap();
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("not-ours"), "keep").unwrap();
+        assert!(snapshot(&source, &target, false).is_err());
+        assert_eq!(fs::read_to_string(target.join("not-ours")).unwrap(), "keep");
+        assert!(bytes(Path::new("/dev/zero"), 10).is_err());
+        assert!(!safe_scope("safe..collision"));
+        assert_eq!(
+            front_matter("---\ndescription: 'A useful command'\nargument-hint: TASK\n---\nRun it"),
+            ("A useful command".into(), "TASK".into())
+        );
+    }
 }

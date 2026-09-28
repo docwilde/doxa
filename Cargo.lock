@@ -258,6 +258,7 @@ dependencies = [
 name = "doxa-claude"
 version = "2.0.0-alpha.36"
 dependencies = [
+ "doxa-state",
  "libc",
  "serde_json",
  "tempfile",
@@ -368,6 +369,7 @@ name = "doxa-tui"
 version = "2.0.0-alpha.36"
 dependencies = [
  "crossterm",
+ "doxa-claude",
  "doxa-engines",
  "doxa-lore",
  "doxa-peers",

@@ -439,13 +439,14 @@ impl ClaudeHost {
             agent.close();
         }
         let _reviewed = self.shared.review(false);
-        let indexed = self
-            .shared
-            .lore
-            .lock()
-            .unwrap()
-            .index_transcript(&self.shared.cwd, &self.shared.session)
-            .is_ok();
+        let indexed = !self.shared.enabled
+            || self
+                .shared
+                .lore
+                .lock()
+                .unwrap()
+                .index_transcript(&self.shared.cwd, &self.shared.session)
+                .is_ok();
         indexed && !self.shared.failed.load(Ordering::Acquire)
     }
 }
@@ -909,32 +910,29 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>) {
                         *shared.catalog.lock().unwrap() = value.clone();
                         catalog(value)
                     }
-                    "set_model" | "set_effort" => {
-                        match settings(value) {
-                            Ok((model, effort)) => {
-                                let applied = if op.method == "set_effort" {
-                                    effort.as_deref() == op.params["effort"].as_str()
-                                } else {
-                                    model_applied(
-                                        &shared.catalog.lock().unwrap(),
-                                        op.params["model"].as_str().unwrap_or("default"),
-                                        model.as_deref(),
-                                    )
-                                };
-                                let mut selected = shared.selection.lock().unwrap();
-                                selected.0 = model.clone();
-                                selected.1 = effort.clone();
-                                drop(selected);
-                                if !applied {
-                                    Err("Claude provider did not apply the requested setting"
-                                        .into())
-                                } else {
-                                    shared.checkpoint(!shared.store.transcript_path().exists()).map(|_|if op.method=="set_model"{json!({"model":model,"effort":effort,"verified":true})}else{json!({"effort":effort,"model":model,"verified":true})})
-                                }
+                    "set_model" | "set_effort" => match settings(value) {
+                        Ok((model, effort)) => {
+                            let applied = if op.method == "set_effort" {
+                                effort.as_deref() == op.params["effort"].as_str()
+                            } else {
+                                model_applied(
+                                    &shared.catalog.lock().unwrap(),
+                                    op.params["model"].as_str().unwrap_or("default"),
+                                    model.as_deref(),
+                                )
+                            };
+                            let mut selected = shared.selection.lock().unwrap();
+                            selected.0 = model.clone();
+                            selected.1 = effort.clone();
+                            drop(selected);
+                            if !applied {
+                                Err("Claude provider did not apply the requested setting".into())
+                            } else {
+                                shared.checkpoint(!shared.store.transcript_path().exists()).map(|_|if op.method=="set_model"{json!({"model":model,"effort":effort,"verified":true})}else{json!({"effort":effort,"model":model,"verified":true,"verification_pending":false})})
                             }
-                            Err(e) => Err(e),
                         }
-                    }
+                        Err(e) => Err(e),
+                    },
                     "set_permission_mode" => {
                         let mode = op.params["mode"].as_str().unwrap_or("default");
                         let wire = if mode == "default" { "manual" } else { mode };
@@ -1281,4 +1279,210 @@ fn model_applied(catalog: &Value, requested: &str, effective: Option<&str>) -> b
         .and_then(|r| r["resolvedModel"].as_str())
         .unwrap_or(requested);
     effective == Some(expected)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{fs, os::unix::fs::PermissionsExt};
+    const SESSION: &str = "0b256c09-8d74-4865-9be0-4e6d24384551";
+    fn fixture(body: &str) -> (tempfile::TempDir, Arc<ClaudeHost>) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("claude");
+        fs::write(&path,format!(r#"#!/usr/bin/python3
+import sys,json,os,time
+model='claude-opus-5-5';effort='high'
+def emit(row): print(json.dumps(row),flush=True)
+for line in sys.stdin:
+ row=json.loads(line)
+ if row['type']=='control_request':
+  request=row['request'];sub=request['subtype'];response={{}}
+  if sub=='initialize': response={{'models':[{{'value':'opus','resolvedModel':'claude-opus-5-5','supportedEffortLevels':['low','high']}},{{'value':'sonnet','resolvedModel':'claude-sonnet-5','supportedEffortLevels':['low','high']}}]}}
+  elif sub=='get_settings': response={{'applied':{{'model':model,'effort':effort}}}}
+  elif sub=='apply_flag_settings': effort=request['settings']['effortLevel']
+  elif sub=='set_model': model='claude-'+request['model']+'-5' if request['model']=='sonnet' else request['model']
+  elif sub=='get_context_usage':response={{'totalTokens':1234,'maxTokens':1000000,'percentage':.1234}}
+  elif sub=='set_permission_mode':response={{'mode':'default' if request['mode']=='manual' else request['mode']}}
+  emit({{'type':'control_response','response':{{'subtype':'success','request_id':row['request_id'],'response':response}}}})
+  if sub=='interrupt':emit({{'type':'result','session_id':'{SESSION}','is_error':True}})
+ {body}
+"#)).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        let store = TranscriptStore::new(dir.path(), "project", SESSION).unwrap();
+        let shared = Arc::new(Shared {
+            session: SESSION.into(),
+            cwd: dir.path().to_string_lossy().into_owned(),
+            lore: Mutex::new(LoreClient::open(Duration::from_secs(3)).unwrap()),
+            store,
+            enabled: false,
+            failed: AtomicBool::new(false),
+            active: AtomicBool::new(false),
+            closing: AtomicBool::new(false),
+            cancelled: AtomicBool::new(false),
+            selection: Mutex::new((
+                Some("claude-opus-5-5".into()),
+                Some("high".into()),
+                "default".into(),
+            )),
+            account: Mutex::new(None),
+            billing: Mutex::new(Some(
+                json!({"mode":"subscription","type":"max","quota":null}),
+            )),
+            catalog: Mutex::new(Value::Null),
+            agent: None,
+            peer: Mutex::new(None),
+            peer_allowed: false,
+            depth: 0,
+            parent: None,
+        });
+        let mut cli = Cli::spawn(CliOptions {
+            executable: &path,
+            cwd: dir.path(),
+            session_id: SESSION,
+            resume: false,
+            model: None,
+            effort: None,
+            permission_mode: "manual",
+            config_dir: dir.path(),
+            plugins: &[],
+        })
+        .unwrap();
+        let initial = startup_control(
+            &mut cli,
+            init_request(),
+            &shared,
+            Instant::now() + Duration::from_secs(3),
+        )
+        .unwrap();
+        *shared.catalog.lock().unwrap() = initial;
+        let (tx, rx) = mpsc::channel();
+        let worker_shared = shared.clone();
+        let worker = thread::spawn(move || broker(cli, rx, worker_shared));
+        let host = Arc::new(ClaudeHost {
+            commands: tx,
+            worker: Mutex::new(Some(worker)),
+            shared,
+            admission: Mutex::new(()),
+        });
+        (dir, host)
+    }
+    #[test]
+    fn same_cli_turn_observes_verified_model_effort_and_immediate_reasoning() {
+        let (_dir, host) = fixture(&format!(
+            r#"if row['type']=='user':
+  emit({{'type':'stream_event','session_id':'{SESSION}','event':{{'type':'content_block_delta','delta':{{'type':'thinking_delta','thinking':'reasoning before completion'}}}}}})
+  emit({{'type':'stream_event','session_id':'{SESSION}','event':{{'type':'content_block_delta','delta':{{'type':'text_delta','text':model+' '+effort+' '+str(os.getpid())}}}}}})
+  time.sleep(.05)
+  emit({{'type':'assistant','session_id':'{SESSION}','message':{{'role':'assistant','content':[{{'type':'text','text':model+' '+effort}}]}}}})
+  emit({{'type':'result','session_id':'{SESSION}','is_error':False,'usage':{{'input_tokens':5,'output_tokens':2}}}})
+"#
+        ));
+        let models = host.call("list_models", &json!({})).unwrap();
+        assert!(models["models"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("claude-sonnet-5")));
+        assert_eq!(
+            host.call("set_model", &json!({"model":"sonnet"})).unwrap()["model"],
+            "claude-sonnet-5"
+        );
+        assert_eq!(
+            host.call("set_effort", &json!({"effort":"low"})).unwrap()["verification_pending"],
+            false
+        );
+        let mut events = Vec::new();
+        host.prompt("first", &mut |e| events.push(e));
+        let first = events.iter().find(|e| e["type"] == "text_delta").unwrap()["data"]["text"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(first.starts_with("claude-sonnet-5 low "));
+        assert_eq!(events[1]["type"], "reasoning_delta");
+        assert_eq!(events.last().unwrap()["data"]["ctx_tokens"], 1234);
+        host.call("set_effort", &json!({"effort":"high"})).unwrap();
+        let mut second = Vec::new();
+        host.prompt("second", &mut |e| second.push(e));
+        let text = second.iter().find(|e| e["type"] == "text_delta").unwrap()["data"]["text"]
+            .as_str()
+            .unwrap();
+        assert!(text.starts_with("claude-sonnet-5 high "));
+        assert_eq!(
+            first.split_whitespace().last(),
+            text.split_whitespace().last()
+        );
+        assert_eq!(
+            host.call("set_permission_mode", &json!({"mode":"default"}))
+                .unwrap()["mode"],
+            "default"
+        );
+        let old = host.shared.store.read_thread().unwrap().unwrap();
+        assert_eq!(old["thread_id"], SESSION);
+        assert_eq!(old["turn_incomplete"], false);
+        host.shared.store.verify_thread_checkpoint(&old).unwrap();
+        assert!(host.shutdown());
+    }
+    #[test]
+    fn exact_permission_and_ask_answers_retain_original_input_and_resolve_once() {
+        let (_dir, host) = fixture(&format!(
+            r#"if row['type']=='user':
+  emit({{'type':'control_request','request_id':'exact-request-id','request':{{'subtype':'can_use_tool','tool_use_id':'exact-tool-id','tool_name':'AskUserQuestion','input':{{'questions':[{{'question':'Choose','options':[{{'label':'A'}}]}}],'opaque':'original'}}}}}})
+ elif row['type']=='control_response':
+  assert row['response']['request_id']=='exact-request-id'
+  answer=row['response']['response']
+  assert answer['behavior']=='allow' and answer['toolUseID']=='exact-tool-id'
+  assert answer['updatedInput']=={{'questions':[{{'question':'Choose','options':[{{'label':'A'}}]}}],'opaque':'original','answers':{{'Choose':'A'}}}}
+  emit({{'type':'assistant','session_id':'{SESSION}','message':{{'role':'assistant','content':[{{'type':'text','text':'answered'}}]}}}})
+  emit({{'type':'result','session_id':'{SESSION}','is_error':False}})
+"#
+        ));
+        let mut asked = false;
+        host.prompt("question", &mut |event| {
+            if event["type"] == "needs_input" {
+                asked = true;
+                assert_eq!(event["data"]["id"], "exact-request-id");
+                assert!(host.call("set_effort", &json!({"effort":"low"})).is_err());
+                assert_eq!(
+                    host.call(
+                        "answer_needs_input",
+                        &json!({"id":"foreign","answer":{"decision":"allow"}})
+                    )
+                    .unwrap()["applied"],
+                    false
+                );
+                assert_eq!(
+                    host.call(
+                        "answer_needs_input",
+                        &json!({"id":"exact-request-id","answer":{"answers":{"Choose":"A"}}})
+                    )
+                    .unwrap()["applied"],
+                    true
+                );
+                assert_eq!(
+                    host.call(
+                        "answer_needs_input",
+                        &json!({"id":"exact-request-id","answer":{"answers":{"Choose":"A"}}})
+                    )
+                    .unwrap()["applied"],
+                    false
+                );
+            }
+        });
+        assert!(asked);
+        assert!(host.shutdown());
+    }
+    #[test]
+    fn quota_projection_never_forwards_credentials_or_invalid_percent() {
+        let (_dir, host) = fixture("");
+        let report=rate_limit(&json!({"status":"allowed_warning","rateLimitType":"five_hour","utilization":0.23,"resetsAt":123,"raw":"private"})).unwrap();
+        assert!(report.get("raw").is_none());
+        assert_eq!(
+            update_quota(&host.shared, &report).unwrap()["quota"],
+            "5h:23%"
+        );
+        assert!(rate_limit(
+            &json!({"status":"allowed","rateLimitType":"five_hour","utilization":1.01})
+        )
+        .is_none());
+        assert!(host.shutdown());
+    }
 }
