@@ -147,4 +147,21 @@ mod tests {
         assert!(!supervise_at(&worker, &serde_json::json!({}), "codex", Duration::from_secs(1), pipe[0]).unwrap());
         unsafe { libc::close(pipe[0]); }
     }
+    #[test]
+    fn native_review_requires_exact_receipt_and_rejects_spawn_or_output_failures() {
+        let dir = tempfile::tempdir().unwrap();
+        let executable = dir.path().join("supervisor-fixture");
+        let metadata = serde_json::json!({"provider_thread":"bound-thread","expected_source":{"sha256":"owned-source"}});
+        let timeout = Duration::from_secs(1);
+        assert!(review(&executable, &metadata, "codex", timeout, || false).is_err());
+        let receipt = approval_receipt(&metadata, "codex", timeout).unwrap();
+        let wrong = approval_receipt(&serde_json::json!({"provider_thread":"foreign"}), "codex", timeout).unwrap();
+        for (output, approved) in [("".to_owned(), false), ("invalid output".to_owned(), false), (wrong.to_string(), false), (receipt.to_string(), true)] {
+            std::fs::write(&executable, format!("#!/bin/sh\nprintf '%s' '{}'\n", output)).unwrap();
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+            assert_eq!(review(&executable, &metadata, "codex", timeout, || false).unwrap(), approved);
+        }
+        assert!(!review(&executable, &metadata, "codex", timeout, || true).unwrap());
+    }
+
 }
