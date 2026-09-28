@@ -1234,6 +1234,16 @@ impl App {
         Some((id, sections.len()))
     }
 
+    fn remember_tool_selection(&mut self, id: String, key: transcript_tools::FoldKey) {
+        if !self.selected_tool_sections.contains_key(&id) && self.selected_tool_sections.len() >= 64 {
+            if let Some(oldest) = self.selected_tool_sections.keys().next().cloned() {
+                self.selected_tool_sections.remove(&oldest);
+                self.expanded_tool_sections.remove(&oldest);
+            }
+        }
+        self.selected_tool_sections.insert(id, key);
+    }
+
     pub(super) fn select_tool_section(&mut self, forward: bool) -> bool {
         let Some((id, _)) = self.tool_sections_for_active() else {
             return false;
@@ -1256,7 +1266,7 @@ impl App {
             None if forward => 0,
             None => visible.len() - 1,
         };
-        self.selected_tool_sections.insert(id, visible[next].clone());
+        self.remember_tool_selection(id, visible[next].clone());
         true
     }
 
@@ -1281,7 +1291,7 @@ impl App {
             .filter(|section| visible.contains(section))
             .or_else(|| visible.last().cloned())
             .unwrap_or(transcript_tools::FoldKey::Section(count - 1));
-        self.selected_tool_sections.insert(id.clone(), selected.clone());
+        self.remember_tool_selection(id.clone(), selected.clone());
         self.toggle_tool_section(id, selected);
         true
     }
@@ -2821,7 +2831,7 @@ impl App {
                 if let Some((_, group, id, section)) = section_hit {
                     self.active_group = group;
                     self.focus = Focus::Transcript;
-                    self.selected_tool_sections.insert(id.clone(), section.clone());
+                    self.remember_tool_selection(id.clone(), section.clone());
                     self.toggle_tool_section(id, section);
                     return true;
                 }
