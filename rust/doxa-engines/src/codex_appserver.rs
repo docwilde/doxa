@@ -508,6 +508,9 @@ impl AppServerDriver {
                             self.kill_group();
                             return Err(AppServerError::Protocol("automatic compaction completed without observed native LORE review; protected session stopped"));
                         }
+                        if item["type"] == "contextCompaction" && method == "item/completed" {
+                            automatic_compaction_reviewed = false;
+                        }
                         if item["type"] == "fileChange" {
                             if let Some(index) = self.review_items.iter().position(|old| old["id"] == item["id"]) {
                                 self.review_items.remove(index);
