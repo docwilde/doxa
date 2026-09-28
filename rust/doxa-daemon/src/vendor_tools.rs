@@ -90,6 +90,8 @@ mod tests {
     #[test]
     fn credential_file_never_reaches_workspace_scrubber_or_result() {
         let root = tempfile::tempdir().unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let previous = std::env::var_os("DOXA_HOME");
         struct Restore(Option<std::ffi::OsString>);
         impl Drop for Restore { fn drop(&mut self) {

@@ -23,6 +23,8 @@ async fn credential_guard() -> CredentialGuard {
     let lock = LOCK.get_or_init(|| Mutex::new(())).lock().await;
     let previous = ["DOXA_HOME", "DEEPSEEK_API_KEY", "ZAI_API_KEY"].into_iter().map(|name| (name, std::env::var_os(name))).collect();
     let home = tempfile::tempdir().unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     // No test ever opens the user's real credential store.
     std::env::set_var("DOXA_HOME", home.path());
     std::env::remove_var("DEEPSEEK_API_KEY");
