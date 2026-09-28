@@ -2880,6 +2880,68 @@ for line in sys.stdin:
         assert!(session.transcript.ends_with("éEND"));
     }
 
+    fn saturated_stream_session() -> Session {
+        let turn = "**You:**\n\nEarlier question\n\n**Assistant:**\n\nEarlier **answer**.\n\n";
+        let current = "**You:**\n\nCurrent question\n\n**Assistant:**\n\nTool: Read started · file.rs\n\nCurrent answer";
+        let mut transcript = turn.repeat(6000);
+        transcript.push_str(&"é".repeat((MAX_TRANSCRIPT_BYTES - transcript.len() - current.len() - 2) / 2));
+        transcript.push_str("\n\n");
+        transcript.push_str(current);
+        // Fill the single odd byte, if needed, before the current heading.
+        if transcript.len() < MAX_TRANSCRIPT_BYTES { transcript.insert(transcript.len() - current.len() - 2, 'a'); }
+        Session { id: "cap".into(), title: "Cap".into(), collection: "repo".into(), transcript, status: "Working".into() }
+    }
+
+    #[test]
+    fn saturated_tail_evicts_old_turns_once_and_preserves_current_turn() {
+        let mut session = saturated_stream_session();
+        assert_eq!(session.transcript.len(), MAX_TRANSCRIPT_BYTES);
+        let current = session.transcript[streamed_turn_start(&session.transcript).unwrap()..].to_owned();
+        assert!(append_transcript(&mut session, " delta"));
+        assert!(session.transcript.starts_with("**You:**"));
+        assert!(session.transcript.ends_with(&format!("{current} delta")));
+        assert!(session.transcript.len() < MAX_TRANSCRIPT_BYTES - 32 * 1024);
+        let mut cached = RenderedTranscript::render(0, "cap", &session.transcript, 80, None, None, 0, &[]);
+        for _ in 0..5 {
+            let previous = session.transcript.clone();
+            assert!(!append_transcript(&mut session, " é"));
+            assert!(session.transcript.starts_with(&previous));
+            cached.update(&session.transcript, 80, None, None, 0, &[]);
+            let (lines, sections, links) = transcript_tools::render_with_links(&session.transcript, 80, None, None, &[]);
+            assert_eq!(cached.lines, lines);
+            assert_eq!(cached.sections, sections);
+            assert_eq!(cached.links, links);
+        }
+        // A single giant current turn still obeys the cap and keeps its tail.
+        session.transcript = format!("**You:**\n\n{}", "é".repeat(MAX_TRANSCRIPT_BYTES / 2 - 5));
+        append_transcript(&mut session, "ENDING");
+        assert!(session.transcript.len() <= MAX_TRANSCRIPT_BYTES);
+        assert!(session.transcript.ends_with("ENDING"));
+    }
+
+    #[test]
+    #[ignore = "manual deterministic saturated display throughput measurement"]
+    fn saturated_stream_render_throughput() {
+        let mut session = saturated_stream_session();
+        let mut legacy = session.transcript.clone();
+        let mut cached = RenderedTranscript::render(0, "cap", &session.transcript, 80, None, None, 0, &[]);
+        let start = Instant::now();
+        let mut evictions = 0;
+        for _ in 0..200 {
+            evictions += usize::from(append_transcript(&mut session, " streamed"));
+            cached.update(&session.transcript, 80, None, None, 0, &[]);
+        }
+        let incremental = start.elapsed();
+        let start = Instant::now();
+        for _ in 0..200 {
+            legacy.drain(.." streamed".len());
+            legacy.push_str(" streamed");
+            let _ = RenderedTranscript::render(0, "cap", &legacy, 80, None, None, 0, &[]);
+        }
+        eprintln!("200 saturated assistant delta paints: batched={incremental:?}, byte-trim={:?}, evictions={evictions}, retained={} bytes", start.elapsed(), session.transcript.len());
+        assert_eq!(evictions, 1);
+    }
+
     #[test]
     fn input_requests_have_a_visible_capacity_limit() {
         let mut app = App::default();
