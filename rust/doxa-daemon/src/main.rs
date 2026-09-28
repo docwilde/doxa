@@ -792,7 +792,7 @@ fn run() -> io::Result<()> {
     }
     if let Some(host) = &claude_host {
         if !host.shutdown() {
-            eprintln!("doxa-daemon: Claude sidecar did not finalize cleanly");
+            eprintln!("doxa-daemon: Claude CLI host did not finalize cleanly");
         }
     }
     if let Some(host) = &vendor_host {
