@@ -83,11 +83,11 @@ pub fn mcp_overrides( cwd: &str, session_id: &str, enabled: bool) -> Vec<String>
         ("DOXA_MCP_LORE",if enabled {"1"} else {"0"}), ("DOXA_MCP_PEER_SEND","0")] {
         values.push(format!("mcp_servers.doxa.env.{name}={}",quote(value)));
     }
-    for name in ["HOME","PATH","LORE_ROOT","LORE_PROJECTS_DIR","DOXA_HOME",
+    for name in ["HOME","PATH","CLAUDE_CONFIG_DIR","LORE_ROOT","LORE_PROJECTS_DIR","LORE_SKILLS_DIR","CODEX_HOME","LORE_CODEX_SESSIONS_DIR","DOXA_HOME",
         "DOXA_RUNTIME_DIR","DOXA_MCP_RUNTIME","DOXA_LORE_CORE_PATH","DOXA_LORE_SOURCE"] {
-        if let Ok(value) = std::env::var(name) { if !value.is_empty() {
+        if let Ok(value) = std::env::var(name) {
             values.push(format!("mcp_servers.doxa.env.{name}={}",quote(&value)));
-        } }
+        }
     }
     values
 }
