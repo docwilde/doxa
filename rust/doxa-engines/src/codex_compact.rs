@@ -97,7 +97,7 @@ impl CompactGate {
         let group = format!("{{matcher={},hooks=[{{type=\"command\",command={},timeout={},async=false}}]}}",
             string(MATCHER), string(&self.command), HOOK_TIMEOUT);
         let state = format!("{}={{enabled=true,trusted_hash={}}}", string(HOOK_KEY), string(&self.hash));
-        vec!["features.codex_hooks=true".into(), format!("hooks={{PreCompact=[{group}],state={{{state}}}}}")]
+        vec!["features.codex_hooks=true".into(), "features.token_budget=false".into(), format!("hooks={{PreCompact=[{group}],state={{{state}}}}}")]
     }
     /// Call `hooks/list` after initialize and BEFORE starting/resuming a thread.
     /// Failure means this provider must not claim protected compaction.
@@ -126,6 +126,12 @@ impl CompactGate {
         self.descriptor = descriptor;
         Ok(())
     }
+    pub(crate) fn manual_review_job(&self, transcript: &Path) -> io::Result<Option<crate::compact_hook::ReviewJob>> {
+        if !self.verified() { return Ok(None); }
+        crate::compact_hook::review_job(&self.manifest, &json!({"hook_event_name":"PreCompact","trigger":"manual",
+            "session_id":self.descriptor["provider_thread"],"transcript_path":transcript}))
+    }
+    pub(crate) fn carrier(&self) -> PathBuf { self.directory.join("native-carrier") }
     pub fn verified(&self) -> bool { self.verified && self.descriptor["provider_thread"].is_string() }
     pub fn hook_key(&self) -> &str { HOOK_KEY }
     /// Only the DOXA session-flags command contributes review authorization.

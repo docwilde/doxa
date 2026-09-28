@@ -9,6 +9,34 @@ impl AppServerDriver {
             return Err(AppServerError::Protocol("Codex reviewed compaction gate is unavailable"));
         }
         if cancel.is_cancelled() { return Err(AppServerError::Cancelled); }
+        if self.turn_id.is_some() { return Err(AppServerError::Protocol("cannot compact during an active turn")); }
+        // Obtain the official bound rollout path without hydrating history.
+        let thread = self.thread_id().to_owned();
+        let result = self.request("thread/read", json!({"threadId":thread,"includeTurns":false})).await?;
+        if result["thread"]["id"] != thread { return Err(AppServerError::Protocol("compact source belongs to a different thread")); }
+        let path = result["thread"]["path"].as_str().map(std::path::PathBuf::from)
+            .ok_or(AppServerError::CompactionBlocked)?;
+        let gate = self.compact_gate.as_ref().expect("verified gate");
+        let job = gate.manual_review_job(&path).ok().flatten().ok_or(AppServerError::CompactionBlocked)?;
+        let carrier = gate.carrier();
+        emit(EngineEvent::new("lore_review_started", json!({"before":"compaction"})));
+        let token = cancel.clone();
+        let reviewed_job = tokio::task::spawn_blocking(move || {
+            let approved = crate::review_worker::review(&carrier, &job.metadata, "codex", crate::review_worker::REVIEW_TIMEOUT, || token.is_cancelled())
+                .unwrap_or(false);
+            (approved && job.unchanged().unwrap_or(false)).then_some(job)
+        }).await.map_err(|_| AppServerError::CompactionBlocked)?;
+        if cancel.is_cancelled() { return Err(AppServerError::Cancelled); }
+        let job = reviewed_job.ok_or(AppServerError::CompactionBlocked)?;
+        if !job.unchanged().unwrap_or(false) { return Err(AppServerError::CompactionBlocked); }
+        emit(EngineEvent::new("lore_review_completed", json!({"before":"compaction","source":"native_pre_request"})));
+        self.compact_approved(cancel, emit, job).await
+    }
+
+    async fn compact_approved(&mut self, cancel: &CancellationToken, mut emit: impl FnMut(EngineEvent), job: crate::compact_hook::ReviewJob) -> Result<(), AppServerError> {
+        // The private job cannot be created by adapter consumers. Recheck the
+        // approved exact source immediately before submitting compaction.
+        if !job.unchanged().unwrap_or(false) { return Err(AppServerError::CompactionBlocked); }
         self.usage=None;
         let thread = self.thread_id().to_owned();
         let deadline = tokio::time::Instant::now() + self.options.turn_timeout;
@@ -88,4 +116,77 @@ impl AppServerDriver {
             }
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::codex_compact::CompactGate;
+    use std::{fs, os::unix::fs::PermissionsExt};
+    include!("../tests/fixtures/codex_protected_fixture.rs");
+
+    // The test oracle replaces only canonical review, after the same owned
+    // source parsing and proof checks as the runtime. Private submission is
+    // deliberately inaccessible to consumers of AppServerDriver.
+    async fn approved_compact(driver: &mut AppServerDriver, cancel: &CancellationToken, emit: impl FnMut(EngineEvent)) -> Result<(), AppServerError> {
+        let result = driver.request("thread/read", json!({"threadId":driver.thread_id(),"includeTurns":false})).await?;
+        let path = std::path::Path::new(result["thread"]["path"].as_str().unwrap());
+        let job = driver.compact_gate.as_ref().unwrap().manual_review_job(path).unwrap().unwrap();
+        assert!(job.metadata["expected_source"]["sha256"].as_str().is_some());
+        driver.compact_approved(cancel, emit, job).await
+    }
+#[tokio::test]
+async fn manual_compaction_binds_actual_thread_and_requires_review_before_completion() {
+    for mode in ["compact", "order", "failed", "foreign", "stale-turn", "blocked"] {
+        let (dir, options, gate) = fixture(mode);
+        let mut driver = AppServerDriver::spawn_protected(options, str::to_owned, false, gate).await.unwrap();
+        let manifest:Value=serde_json::from_slice(&fs::read(dir.path().join("gate/compact-session.json")).unwrap()).unwrap();
+        assert_eq!(manifest["provider_thread"], "thread-actual");
+        let mut events=Vec::new();
+        let result=approved_compact(&mut driver, &CancellationToken::new(), |e| events.push(e)).await;
+        if mode == "blocked" {
+            assert!(matches!(result,Err(crate::codex_appserver::AppServerError::CompactionBlocked)));
+            assert_eq!(driver.thread_id(),"thread-actual");
+            assert!(driver.run_turn("fixture followup",&CancellationToken::new(),|_|{}).await.is_ok());
+            assert!(dir.path().join("usable-after-blocked").exists());
+        }
+        assert_eq!(result.is_ok(), mode=="compact");
+        assert_eq!(events.iter().any(|e| e.kind=="compaction_done"),mode=="compact");
+        if mode=="compact"{let done=events.iter().find(|event|event.kind=="turn_done").unwrap();assert_eq!(done.data["usage_complete"],true);assert_eq!(done.data["input_tokens"],10);assert_eq!(done.data["output_tokens"],20);}
+        if mode=="failed" {
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            assert!(!dir.path().join("survived-failed-hook").exists());
+            assert!(driver.compact(&CancellationToken::new(), |_|{}).await.is_err());
+        }
+        driver.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn manual_compaction_never_invents_missing_or_inconsistent_accounting(){
+    for mode in ["compact-no-usage","blocked-usage"]{
+        let (_dir,options,gate)=fixture(mode);
+        let mut driver=AppServerDriver::spawn_protected(options,str::to_owned,false,gate).await.unwrap();
+        let mut events=vec![];let result=approved_compact(&mut driver, &CancellationToken::new(),|event|events.push(event)).await;
+        if mode=="compact-no-usage"{assert!(result.is_ok());let done=events.iter().find(|event|event.kind=="turn_done").unwrap();assert_eq!(done.data["usage_complete"],false);assert!(done.data["input_tokens"].is_null());}
+        else{assert!(result.is_err());assert!(!matches!(result,Err(crate::codex_appserver::AppServerError::CompactionBlocked)));assert!(!events.iter().any(|event|event.kind=="compaction_done"));}
+        driver.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn changed_native_snapshot_refuses_before_compact_rpc() {
+    let (dir, options, gate) = fixture("native-review-failure");
+    let mut driver = AppServerDriver::spawn_protected(options, str::to_owned, false, gate).await.unwrap();
+    let result = driver.request("thread/read", json!({"threadId":driver.thread_id(),"includeTurns":false})).await.unwrap();
+    let source = std::path::Path::new(result["thread"]["path"].as_str().unwrap());
+    let job = driver.compact_gate.as_ref().unwrap().manual_review_job(source).unwrap().unwrap();
+    fs::write(source, b"changed after review\n").unwrap();
+    assert!(matches!(driver.compact_approved(&CancellationToken::new(), |_| {}, job).await, Err(AppServerError::CompactionBlocked)));
+    let requests = fs::read_to_string(dir.path().join("requests.jsonl")).unwrap();
+    assert!(!requests.contains("thread/compact/start"));
+    assert_eq!(driver.thread_id(), "thread-actual");
+    driver.shutdown().await;
+}
+
 }

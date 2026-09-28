@@ -697,8 +697,8 @@ impl Host for CodexHost {
                 }
         };
         self.input.clear();
-        // A verified blocking hook is a provider-guaranteed stop before manual
-        // compaction. Its turn was drained; no raw context was compacted. Keep
+        // Native pre-request refusal sends no compaction RPC. A verified
+        // blocking hook also drains its submitted turn without replacement. Keep
         // the existing thread usable and clear only the temporary restart guard.
         if compaction && compact_blocked.get() && !self.scrub_failed.load(Ordering::Acquire)
             && !self.persistence_failed.load(Ordering::Acquire) && !thread_write_failed.get() {
@@ -707,7 +707,7 @@ impl Host for CodexHost {
                     *self.active.lock().unwrap() = None;
                     emit(json!({"type":"turn_done","data":{"is_error":true,"operation":"compact","blocked":true,
                         "model":self.initial_model(),"model_consistent":true,"usage_complete":true,
-                        "usage_source":"codex_precompact_blocked","turn_input_tokens":0,"turn_output_tokens":0,"cost_usd":0.0,
+                        "usage_source":"codex_review_compaction_blocked","turn_input_tokens":0,"turn_output_tokens":0,"cost_usd":0.0,
                         "error":"LORE review blocked compaction; existing context retained"}}));
                     return;
                 }
