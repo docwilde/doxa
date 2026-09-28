@@ -48,10 +48,7 @@ impl App {
         } else {
             self.draw_group(frame, layout.body, self.active_group);
         }
-        if self.active_chooser_rect().is_none()
-            && !self
-                .active_request_index()
-                .is_some_and(|index| self.input_requests[index].kind == "ask_user")
+        if self.active_chooser_rect().is_none() && self.active_request_index().is_none()
         {
             let width = area.width.saturating_sub(2).min(74);
             let height = area.height.saturating_sub(2).min(19);
@@ -97,10 +94,10 @@ impl App {
         }
         self.draw_diff(frame, area);
         self.draw_stop_confirmation(frame, area);
-        if !self
-            .active_request_index()
-            .is_some_and(|index| self.input_requests[index].kind == "ask_user")
-            || self.active_chooser_rect().is_none()
+        if self.active_chooser_rect().is_none()
+            && self
+                .active_request_index()
+                .is_some_and(|index| self.input_requests[index].kind == "ask_user")
         {
             self.draw_request(frame, area, false);
         }
@@ -1689,7 +1686,7 @@ impl App {
                 request.review_seen.set(seen.max(end));
                 request
                     .review_complete
-                    .set(request.review_available && end >= total);
+                    .set(request.review_complete.get() || request.review_available && end >= total);
             }
             reviewed_body.as_str()
         } else {
@@ -1728,7 +1725,26 @@ impl App {
                 })
                 .unwrap_or_else(|| " Choose an answer ".into())
         } else {
-            format!(" Input required · {} ", request.kind)
+            format!(
+                " {}{} ",
+                if self.blink_on && !request.sending {
+                    "● "
+                } else {
+                    "  "
+                },
+                clipped_title(
+                    &super::markdown::sanitize(
+                        request
+                            .heading
+                            .lines()
+                            .next()
+                            .unwrap_or("Approval required")
+                            .trim_start_matches("Title: ")
+                    ),
+                    usize::from(modal.width.saturating_sub(8)),
+                )
+                .0,
+            )
         };
         if !inline {
             frame.render_widget(Clear, modal);
@@ -2009,9 +2025,7 @@ impl App {
                     content,
                     inner[1].width.saturating_sub(2),
                     self.expanded_tool_sections.get(id),
-                    (active && self.focus == Focus::Transcript)
-                        .then(|| self.selected_tool_sections.get(id).copied())
-                        .flatten(),
+                    self.tool_section_hover.as_ref().filter(|(session, _)| session == id).map(|(_, key)| key.clone()).or_else(|| (active && self.focus == Focus::Transcript).then(|| self.selected_tool_sections.get(id).cloned()).flatten()),
                     cards_revision,
                     self.tool_cards.for_session(id),
                 ));
@@ -2021,9 +2035,7 @@ impl App {
                 content,
                 inner[1].width.saturating_sub(2),
                 self.expanded_tool_sections.get(id),
-                (active && self.focus == Focus::Transcript)
-                    .then(|| self.selected_tool_sections.get(id).copied())
-                    .flatten(),
+                self.tool_section_hover.as_ref().filter(|(session, _)| session == id).map(|(_, key)| key.clone()).or_else(|| (active && self.focus == Focus::Transcript).then(|| self.selected_tool_sections.get(id).cloned()).flatten()),
                 cards_revision,
                 self.tool_cards.for_session(id),
             );
@@ -2180,9 +2192,7 @@ impl App {
             );
         }
         if active && chooser_height > 0 {
-            if self
-                .active_request_index()
-                .is_some_and(|index| self.input_requests[index].kind == "ask_user")
+            if self.active_request_index().is_some()
             {
                 self.draw_request(frame, inner[2], true);
             } else if self.settings_menu.is_some() {

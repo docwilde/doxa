@@ -1,6 +1,6 @@
 //! Reduce keyboard, mouse and clipboard input against the current owner.
 use super::{
-    ask_user_option_at, belief_buttons, belief_review_buttons, chooser_visible_start,
+    input_request_option_at, belief_buttons, belief_review_buttons, chooser_visible_start,
     prompt_height, raw_visual_rows, safe_label, tool_cards, transcript_tools, unsafe_input_char,
     vendor_models, App, DragTarget, Focus, RailRow, Split, COMMANDS, ENGINE_CHOICES,
     MAX_ANSWER_BYTES, MAX_INPUT_BYTES, MAX_PENDING_PROMPTS, MAX_REJECT_REASON_BYTES,
@@ -36,7 +36,6 @@ impl App {
                 for request in &mut self.input_requests {
                     request.review_seen.set(0);
                     request.review_complete.set(false);
-                    request.allow_armed = false;
                     request.scroll = 0;
                 }
                 self.size = Rect::new(0, 0, w, h);
@@ -1048,7 +1047,7 @@ impl App {
                 self.select_tool_section(false)
             }
             KeyCode::Char(']') if self.focus == Focus::Transcript => self.select_tool_section(true),
-            KeyCode::Enter if self.focus == Focus::Transcript => {
+            KeyCode::Enter | KeyCode::Char(' ') if self.focus == Focus::Transcript => {
                 self.toggle_selected_tool_section()
             }
             KeyCode::PageUp if self.focus == Focus::Transcript => {
@@ -1235,21 +1234,31 @@ impl App {
         Some((id, sections.len()))
     }
 
+    fn remember_tool_selection(&mut self, id: String, key: transcript_tools::FoldKey) {
+        if !self.selected_tool_sections.contains_key(&id) && self.selected_tool_sections.len() >= 64 {
+            if let Some(oldest) = self.selected_tool_sections.keys().next().cloned() {
+                self.selected_tool_sections.remove(&oldest);
+                self.expanded_tool_sections.remove(&oldest);
+            }
+        }
+        self.selected_tool_sections.insert(id, key);
+    }
+
     pub(super) fn select_tool_section(&mut self, forward: bool) -> bool {
         let Some((id, _)) = self.tool_sections_for_active() else {
             return false;
         };
-        let visible: Vec<usize> = self
+        let visible: Vec<transcript_tools::FoldKey> = self
             .visible_tool_sections
             .borrow()
             .iter()
             .filter(|(_, group, session, _)| *group == self.active_group && *session == id)
-            .map(|(_, _, _, section)| *section)
+            .map(|(_, _, _, section)| section.clone())
             .collect();
         if visible.is_empty() {
             return false;
         }
-        let current = self.selected_tool_sections.get(&id).copied();
+        let current = self.selected_tool_sections.get(&id).cloned();
         let next = match current.and_then(|value| visible.iter().position(|index| *index == value))
         {
             Some(position) if forward => (position + 1).min(visible.len() - 1),
@@ -1257,7 +1266,7 @@ impl App {
             None if forward => 0,
             None => visible.len() - 1,
         };
-        self.selected_tool_sections.insert(id, visible[next]);
+        self.remember_tool_selection(id, visible[next].clone());
         true
     }
 
@@ -1268,36 +1277,37 @@ impl App {
         if count == 0 {
             return false;
         }
-        let visible: Vec<usize> = self
+        let visible: Vec<transcript_tools::FoldKey> = self
             .visible_tool_sections
             .borrow()
             .iter()
             .filter(|(_, group, session, _)| *group == self.active_group && *session == id)
-            .map(|(_, _, _, section)| *section)
+            .map(|(_, _, _, section)| section.clone())
             .collect();
         let selected = self
             .selected_tool_sections
             .get(&id)
-            .copied()
+            .cloned()
             .filter(|section| visible.contains(section))
-            .or_else(|| visible.last().copied())
-            .unwrap_or(count - 1);
-        self.selected_tool_sections.insert(id.clone(), selected);
+            .or_else(|| visible.last().cloned())
+            .unwrap_or(transcript_tools::FoldKey::Section(count - 1));
+        self.remember_tool_selection(id.clone(), selected.clone());
         self.toggle_tool_section(id, selected);
         true
     }
 
-    pub(super) fn toggle_tool_section(&mut self, id: String, selected: usize) {
+    pub(super) fn toggle_tool_section(&mut self, id: String, selected: transcript_tools::FoldKey) {
         if !self.expanded_tool_sections.contains_key(&id) && self.expanded_tool_sections.len() >= 64
         {
             if let Some(oldest) = self.expanded_tool_sections.keys().next().cloned() {
                 self.expanded_tool_sections.remove(&oldest);
+                self.selected_tool_sections.remove(&oldest);
             }
         }
         let expanded = self.expanded_tool_sections.entry(id).or_default();
         if !expanded.remove(&selected) {
             if expanded.len() >= 64 {
-                if let Some(oldest) = expanded.iter().copied().min() {
+                if let Some(oldest) = expanded.iter().cloned().min() {
                     expanded.remove(&oldest);
                 }
             }
@@ -1435,30 +1445,34 @@ impl App {
         }
         let kind = self.input_requests[index].kind.clone();
         if kind != "ask_user" {
-            if !matches!(key.code, KeyCode::Char('A' | 'Y'))
-                || !(key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
-            {
-                self.input_requests[index].allow_armed = false;
-            }
+            let page = self.active_chooser_rect().map_or(1, |menu| menu.height.saturating_sub(2).max(1));
             match key.code {
                 KeyCode::Up => {
-                    self.input_requests[index].scroll =
-                        self.input_requests[index].scroll.saturating_sub(1);
+                    self.input_requests[index].selected =
+                        if self.input_requests[index].selected == 1 {
+                            2
+                        } else {
+                            1
+                        };
                     return true;
                 }
                 KeyCode::Down => {
-                    self.input_requests[index].scroll =
-                        self.input_requests[index].scroll.saturating_add(1);
+                    self.input_requests[index].selected =
+                        if self.input_requests[index].selected == 1 {
+                            2
+                        } else {
+                            1
+                        };
                     return true;
                 }
                 KeyCode::PageUp => {
                     self.input_requests[index].scroll =
-                        self.input_requests[index].scroll.saturating_sub(10);
+                        self.input_requests[index].scroll.saturating_sub(page);
                     return true;
                 }
                 KeyCode::PageDown => {
                     self.input_requests[index].scroll =
-                        self.input_requests[index].scroll.saturating_add(10);
+                        self.input_requests[index].scroll.saturating_add(page);
                     return true;
                 }
                 _ => {}
@@ -1515,28 +1529,24 @@ impl App {
                 {
                     Some(serde_json::json!({"decision":"deny"}))
                 }
-                KeyCode::Char('A')
+                KeyCode::Enter if self.input_requests[index].selected == 2 => {
+                    Some(serde_json::json!({"decision":"deny"}))
+                }
+                KeyCode::Char('a' | 'A') | KeyCode::Enter
                     if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
                 {
+                    if !self.active_chooser_rect().is_some_and(|menu| menu.width >= 20 && menu.height >= 5) {
+                        self.notice = "Enlarge the active pane to review and approve".into();
+                        return true;
+                    }
                     if self.input_requests[index].require_full_review
                         && (!self.input_requests[index].review_available
                             || !self.input_requests[index].review_complete.get())
                     {
                         self.notice =
-                            "Read the complete input summary (↓/PgDn) before allowing".into();
+                            "Read the complete input summary (PgDn) before approving".into();
                         return true;
                     }
-                    self.input_requests[index].allow_armed = true;
-                    self.notice = "Approval armed · press Shift+Y to confirm".into();
-                    return true;
-                }
-                KeyCode::Char('Y')
-                    if self.input_requests[index].allow_armed
-                        && (!self.input_requests[index].require_full_review
-                            || self.input_requests[index].review_complete.get()
-                                && self.input_requests[index].review_available)
-                        && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT) =>
-                {
                     Some(serde_json::json!({"decision":"allow"}))
                 }
                 _ => None,
@@ -1600,10 +1610,10 @@ impl App {
             return false;
         }
         if let Some(index) = self.active_request_index() {
-            if self.input_requests[index].kind != "ask_user" || self.input_requests[index].sending {
+            if self.input_requests[index].sending {
                 return false;
             }
-            if let Some(option) = ask_user_option_at(&self.input_requests[index], menu, row) {
+            if let Some(option) = input_request_option_at(&self.input_requests[index], menu, row) {
                 if self.input_requests[index].selected != option {
                     self.input_requests[index].selected = option;
                     return true;
@@ -1803,7 +1813,15 @@ impl App {
     }
 
     pub(super) fn mouse(&mut self, mouse: MouseEvent) -> bool {
+        let mut tool_hover_changed = false;
         if mouse.kind == MouseEventKind::Moved {
+            let hover = self.visible_tool_sections.borrow().iter()
+                .find(|(rect, _, _, _)| rect.contains(ratatui::layout::Position::new(mouse.column, mouse.row)))
+                .map(|(_, _, id, key)| (id.clone(), key.clone()));
+            if self.tool_section_hover != hover {
+                tool_hover_changed = true;
+                self.tool_section_hover = hover;
+            }
             self.belief_pointer = Some((mouse.column, mouse.row));
         }
         if mouse.kind == MouseEventKind::Down(MouseButton::Left)
@@ -1962,7 +1980,7 @@ impl App {
             let moved = self.link_hover_position != position;
             self.link_hover_position = position;
             self.link_hover = link;
-            return changed || moved;
+            return changed || moved || tool_hover_changed;
         }
         if mouse.kind == MouseEventKind::Down(MouseButton::Left)
             && self.active_chooser_rect().is_some_and(|area| {
@@ -1973,13 +1991,25 @@ impl App {
             return true;
         }
         if let Some(index) = self.active_request_index() {
-            if self.input_requests[index].kind == "ask_user"
-                && mouse.kind == MouseEventKind::Down(MouseButton::Left)
+            if !self.input_requests[index].sending && self.active_chooser_rect().is_some_and(|menu| menu.contains(ratatui::layout::Position::new(mouse.column, mouse.row))) {
+                match mouse.kind {
+                    MouseEventKind::ScrollUp => {
+                        self.input_requests[index].scroll = self.input_requests[index].scroll.saturating_sub(1);
+                        return true;
+                    }
+                    MouseEventKind::ScrollDown => {
+                        self.input_requests[index].scroll = self.input_requests[index].scroll.saturating_add(1);
+                        return true;
+                    }
+                    _ => {}
+                }
+            }
+            if mouse.kind == MouseEventKind::Down(MouseButton::Left)
             {
                 if let Some(menu) = self.active_chooser_rect() {
                     if mouse.column > menu.x && mouse.column < menu.right().saturating_sub(1) {
                         if let Some(option) =
-                            ask_user_option_at(&self.input_requests[index], menu, mouse.row)
+                            input_request_option_at(&self.input_requests[index], menu, mouse.row)
                         {
                             self.input_requests[index].selected = option;
                             return self
@@ -2801,7 +2831,7 @@ impl App {
                 if let Some((_, group, id, section)) = section_hit {
                     self.active_group = group;
                     self.focus = Focus::Transcript;
-                    self.selected_tool_sections.insert(id.clone(), section);
+                    self.remember_tool_selection(id.clone(), section.clone());
                     self.toggle_tool_section(id, section);
                     return true;
                 }

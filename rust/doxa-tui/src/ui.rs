@@ -759,7 +759,6 @@ pub struct InputRequest {
     pub selected: usize,
     pub answers: serde_json::Map<String, serde_json::Value>,
     pub sending: bool,
-    pub allow_armed: bool,
     pub require_full_review: bool,
     review_available: bool,
     review_seen: Cell<usize>,
@@ -861,7 +860,6 @@ impl InputRequest {
             selected: 1,
             answers: serde_json::Map::new(),
             sending: false,
-            allow_armed: false,
             require_full_review: data["require_full_review"] == true,
             review_available: data["input_summary"].as_str().is_some()
                 && data["input_summary_truncated"] != true,
@@ -951,12 +949,23 @@ fn input_request_body(
             body.push_str("Question unavailable\n");
         }
     } else {
-        body.push_str(&markdown::sanitize(&request.heading));
-        body.push_str("\n\n");
-        body.push_str("D deny · Esc deny · ↑/↓ scroll\nShift+A then Shift+Y to allow");
-        if request.allow_armed {
-            body.push_str("\nApproval armed · press Shift+Y now");
+        for (i, label) in ["Approve · A", "Deny · D / Esc"].iter().enumerate() {
+            option_rows.push(body.lines().count());
+            if request.selected == i + 1 {
+                selected_row = Some(body.lines().count());
+            }
+            body.push_str(&format!(
+                "{} {}\n",
+                if request.selected == i + 1 {
+                    "▸"
+                } else {
+                    " "
+                },
+                label
+            ));
         }
+        body.push_str("Enter select · PgUp/PgDn review\n");
+        body.push_str(&markdown::sanitize(&request.heading));
     }
     if request.sending {
         body.push_str("\nSending answer…");
@@ -964,12 +973,8 @@ fn input_request_body(
     (body, selected_row, option_rows)
 }
 
-fn ask_user_option_at(request: &InputRequest, menu: Rect, row: u16) -> Option<usize> {
-    if request.kind != "ask_user"
-        || request.sending
-        || row <= menu.y
-        || row >= menu.bottom().saturating_sub(1)
-    {
+fn input_request_option_at(request: &InputRequest, menu: Rect, row: u16) -> Option<usize> {
+    if request.sending || row <= menu.y || row >= menu.bottom().saturating_sub(1) {
         return None;
     }
     let (body, _, option_rows) =
@@ -980,22 +985,44 @@ fn ask_user_option_at(request: &InputRequest, menu: Rect, row: u16) -> Option<us
     let lines: Vec<Line> = body
         .lines()
         .enumerate()
-        .map(|(line_index, text)| {
-            if let Some(option) = option_rows.iter().rposition(|&start| start <= line_index) {
-                Line::styled(
-                    text.to_owned(),
-                    Style::default().bg(Color::Rgb(0, 0, (option + 1) as u8)),
+        .flat_map(|(line_index, text)| {
+            let texts = if request.require_full_review {
+                crate::memory_menu::wrap_review(
+                    text,
+                    usize::from(menu.width.saturating_sub(2)).max(1),
                 )
             } else {
-                Line::from(text.to_owned())
-            }
+                vec![text.to_owned()]
+            };
+            let option_rows = &option_rows;
+            texts.into_iter().map(move |text| {
+                if let Some(option) = option_rows.iter().rposition(|&start| {
+                    start == line_index || request.kind == "ask_user" && start <= line_index
+                }) {
+                    Line::styled(
+                        text.to_owned(),
+                        Style::default().bg(Color::Rgb(0, 0, (option + 1) as u8)),
+                    )
+                } else {
+                    Line::from(text.to_owned())
+                }
+            })
         })
         .collect();
+    let scroll = if request.require_full_review {
+        usize::from(request.scroll).min(
+            lines
+                .len()
+                .saturating_sub(usize::from(menu.height.saturating_sub(2))),
+        ) as u16
+    } else {
+        request.scroll
+    };
     let area = Rect::new(0, 0, menu.width, menu.height);
     let mut buffer = Buffer::empty(area);
     Paragraph::new(lines)
         .wrap(Wrap { trim: false })
-        .scroll((request.scroll, 0))
+        .scroll((scroll, 0))
         .block(Block::default().borders(Borders::ALL))
         .render(area, &mut buffer);
     let local_row = row - menu.y;
@@ -1011,24 +1038,25 @@ struct RenderedTranscript {
     id: String,
     source: String,
     width: u16,
-    expanded: Option<HashSet<usize>>,
-    selected: Option<usize>,
+    expanded: Option<HashSet<transcript_tools::FoldKey>>,
+    selected: Option<transcript_tools::FoldKey>,
     cards_revision: u64,
     lines: Vec<Line<'static>>,
     sections: Vec<transcript_tools::Section>,
     links: Vec<markdown::LinkRegion>,
     turn_start: Option<usize>,
     prefix_lines: usize,
+    prefix_sections: usize,
 }
 
-/// Locate the final role heading outside fenced code. Repainting a streamed
-/// turn can then parse only that turn while retaining the earlier styled lines.
+/// Locate the final user turn outside fenced code. Tools are laid out after
+/// their response, so cache the whole turn while retaining earlier styled lines.
 fn streamed_turn_start(source: &str) -> Option<usize> {
     let mut fence = None;
     let mut start = 0;
     let mut found = None;
     for paragraph in source.split("\n\n") {
-        if fence.is_none() && matches!(paragraph.trim_matches('\n'), "**You:**" | "**Assistant:**")
+        if fence.is_none() && paragraph.trim_matches('\n') == "**You:**"
         {
             found = Some(start);
         } else {
@@ -1054,7 +1082,7 @@ fn streamed_turn_start(source: &str) -> Option<usize> {
         }
         start += paragraph.len() + 2;
     }
-    found.filter(|start| *start > 0)
+    found
 }
 
 impl RenderedTranscript {
@@ -1063,32 +1091,18 @@ impl RenderedTranscript {
         id: &str,
         source: &str,
         width: u16,
-        expanded: Option<&HashSet<usize>>,
-        selected: Option<usize>,
+        expanded: Option<&HashSet<transcript_tools::FoldKey>>,
+        selected: Option<transcript_tools::FoldKey>,
         cards_revision: u64,
         cards: &[tool_cards::ToolCard],
     ) -> Self {
         let (lines, sections, links) =
-            transcript_tools::render_with_links(source, width, expanded, selected, cards);
-        let mut turn_start = None;
-        let mut prefix_lines = 0;
-        if let Some(start) = streamed_turn_start(source) {
-            let tail = &source[start..];
-            if !tail.contains("Tool: ")
-                && !tail.contains(transcript_tools::REASONING_PREFIX)
-                && !tail.contains(transcript_tools::SHELL_PREFIX)
-            {
-                let (tail_lines, tail_sections) = transcript_tools::render(tail, width, None, None);
-                if tail_sections.is_empty() && lines.len() > tail_lines.len() {
-                    prefix_lines = lines.len() - tail_lines.len() - 1;
-                    // A deferred tool section at the end belongs to this
-                    // turn, even if its source precedes the final heading.
-                    if sections.iter().all(|section| section.line < prefix_lines) {
-                        turn_start = Some(start);
-                    }
-                }
-            }
-        }
+            transcript_tools::render_with_links(source, width, expanded, selected.clone(), cards);
+        let turn_start = streamed_turn_start(source);
+        let (prefix_lines, prefix_sections) = turn_start.map(|start| {
+            let (prefix, folds) = transcript_tools::render_with_cards(&source[..start], width, expanded, selected.clone(), cards);
+            (prefix.len(), folds.iter().filter(|fold| matches!(fold.index, transcript_tools::FoldKey::Section(_))).count())
+        }).unwrap_or((0, 0));
         Self {
             pane,
             id: id.to_owned(),
@@ -1102,6 +1116,7 @@ impl RenderedTranscript {
             links,
             turn_start,
             prefix_lines,
+            prefix_sections,
         }
     }
 
@@ -1109,8 +1124,8 @@ impl RenderedTranscript {
         &mut self,
         source: &str,
         width: u16,
-        expanded: Option<&HashSet<usize>>,
-        selected: Option<usize>,
+        expanded: Option<&HashSet<transcript_tools::FoldKey>>,
+        selected: Option<transcript_tools::FoldKey>,
         cards_revision: u64,
         cards: &[tool_cards::ToolCard],
     ) {
@@ -1124,29 +1139,25 @@ impl RenderedTranscript {
             }
             if let Some(start) = self.turn_start.filter(|_| source.starts_with(&self.source)) {
                 if streamed_turn_start(source) == Some(start) {
-                    let tail = &source[start..];
-                    if !tail.contains("Tool: ")
-                        && !tail.contains(transcript_tools::REASONING_PREFIX)
-                        && !tail.contains(transcript_tools::SHELL_PREFIX)
-                    {
-                        let (tail_lines, tail_sections, mut tail_links) =
-                            transcript_tools::render_with_links(tail, width, None, None, &[]);
-                        if tail_sections.is_empty() {
-                            self.links.retain(|link| link.row < self.prefix_lines);
-                            for link in &mut tail_links {
-                                link.row += self.prefix_lines + 1;
-                            }
-                            self.links.extend(tail_links);
-                            self.lines.truncate(self.prefix_lines);
-                            self.lines.push(Line::default());
-                            self.lines.extend(tail_lines);
-                            self.sections
-                                .retain(|section| section.line < self.prefix_lines);
-                            self.source.clear();
-                            self.source.push_str(source);
-                            return;
-                        }
+                    let (tail_lines, mut tail_sections, mut tail_links) = transcript_tools::render_with_links_from(
+                        &source[start..], width, expanded, selected.clone(), cards, self.prefix_sections);
+                    self.links.retain(|link| link.row < self.prefix_lines);
+                    self.lines.truncate(self.prefix_lines);
+                    if !self.lines.is_empty() && !self.lines.last().is_some_and(|line| line.spans.is_empty()) {
+                        self.lines.push(Line::default());
                     }
+                    let offset = self.lines.len();
+                    for link in &mut tail_links { link.row += offset; }
+                    for section in &mut tail_sections {
+                        section.line += offset;
+                    }
+                    self.links.extend(tail_links);
+                    self.lines.extend(tail_lines);
+                    self.sections.retain(|section| section.line < self.prefix_lines);
+                    self.sections.extend(tail_sections);
+                    self.source.clear();
+                    self.source.push_str(source);
+                    return;
                 }
             }
         }
@@ -1343,9 +1354,10 @@ pub struct App {
     tool_modal: bool,
     tool_selected: usize,
     tool_scroll: u16,
-    expanded_tool_sections: HashMap<String, HashSet<usize>>,
-    selected_tool_sections: HashMap<String, usize>,
-    visible_tool_sections: RefCell<Vec<(Rect, usize, String, usize)>>,
+    expanded_tool_sections: HashMap<String, HashSet<transcript_tools::FoldKey>>,
+    tool_section_hover: Option<(String, transcript_tools::FoldKey)>,
+    selected_tool_sections: HashMap<String, transcript_tools::FoldKey>,
+    visible_tool_sections: RefCell<Vec<(Rect, usize, String, transcript_tools::FoldKey)>>,
     peer_map: PeerMap,
     map_modal: bool,
     action_menu: bool,
@@ -1558,7 +1570,8 @@ impl Default for App {
             tool_selected: 0,
             tool_scroll: 0,
             expanded_tool_sections: HashMap::new(),
-            selected_tool_sections: HashMap::new(),
+            tool_section_hover: None,
+    selected_tool_sections: HashMap::new(),
             visible_tool_sections: RefCell::new(Vec::new()),
             peer_map: PeerMap::default(),
             map_modal: false,

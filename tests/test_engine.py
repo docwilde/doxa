@@ -801,6 +801,37 @@ async def test_lore_snapshot_is_scoped_per_project_not_shared_across_tabs(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_partial_text_reaches_consumer_before_provider_finishes(tmp_path):
+    factory, created = factory_with_script([])
+    engine = SessionEngine(cwd=str(tmp_path), client_factory=factory)
+    await engine.start()
+    release = asyncio.Event()
+    provider_waiting = asyncio.Event()
+
+    async def response():
+        for index, text in enumerate(["First", " second"]):
+            yield StreamEvent(uuid=f"stream-{index}", session_id="s", event={
+                "type": "content_block_delta", "delta": {"type": "text_delta", "text": text}})
+        provider_waiting.set()
+        await release.wait()
+        yield _script_one_turn_with_tool_call()[-1]
+
+    created[0].receive_response = response
+    stream = engine.send("stream")
+    assert (await anext(stream)).type == "turn_started"
+    for text in ["First", " second"]:
+        event = await asyncio.wait_for(anext(stream), timeout=1)
+        assert event.type == "text_delta" and event.data["text"] == text
+        assert not provider_waiting.is_set()
+    terminal = asyncio.create_task(anext(stream))
+    await asyncio.wait_for(provider_waiting.wait(), timeout=1)
+    assert not terminal.done()
+    release.set()
+    assert (await asyncio.wait_for(terminal, timeout=1)).type == "turn_done"
+    await stream.aclose()
+
+
+@pytest.mark.asyncio
 async def test_send_yields_typed_events_in_order(tmp_path):
     factory, created = factory_with_script(
         _script_one_turn_with_tool_call(), ctx_usage={"percentage": 12.5}

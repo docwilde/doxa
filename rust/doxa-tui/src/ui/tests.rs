@@ -1563,11 +1563,11 @@ for line in sys.stdin:
             app.sessions.push(Session { id: "session".into(), title: "Session".into(),
                 collection: String::new(), transcript: "Tool: Read started".into(), status: "Ready".into() });
             *app.visible_tool_sections.borrow_mut() = (0..3).map(|index|
-                (Rect::new(0, index as u16, 20, 1), 0, "session".into(), index)).collect();
+                (Rect::new(0, index as u16, 20, 1), 0, "session".into(), transcript_tools::FoldKey::Section(index))).collect();
             assert!(app.select_tool_section(forward));
-            assert_eq!(app.selected_tool_sections["session"], if forward { 0 } else { 2 });
+            assert_eq!(app.selected_tool_sections["session"], transcript_tools::FoldKey::Section(if forward { 0 } else { 2 }));
             assert!(app.select_tool_section(forward));
-            assert_eq!(app.selected_tool_sections["session"], 1);
+            assert_eq!(app.selected_tool_sections["session"], transcript_tools::FoldKey::Section(1));
         }
     }
 
@@ -1887,7 +1887,7 @@ for line in sys.stdin:
             column: menu.x + 2, row: menu.y, modifiers: KeyModifiers::NONE });
         let request = &app.input_requests[0];
         let second = (menu.y + 1..menu.bottom() - 1)
-            .find(|&row| ask_user_option_at(request, menu, row) == Some(2)).unwrap();
+            .find(|&row| input_request_option_at(request, menu, row) == Some(2)).unwrap();
         assert!(app.mouse(MouseEvent { kind: MouseEventKind::Moved,
             column: menu.x + 2, row: second, modifiers: KeyModifiers::NONE }));
         assert_eq!(app.input_requests[0].selected, 2);
@@ -1915,7 +1915,7 @@ for line in sys.stdin:
         let second_row = (1..menu.height - 1).find(|&row|
             (1..menu.width - 1).map(|x| buffer[(x, row)].symbol()).collect::<String>().contains("Second"))
             .unwrap();
-        assert_eq!(ask_user_option_at(&app.input_requests[0], menu, second_row), Some(2));
+        assert_eq!(input_request_option_at(&app.input_requests[0], menu, second_row), Some(2));
     }
 
     #[test]
@@ -2207,7 +2207,7 @@ for line in sys.stdin:
                 assert_eq!(app.pending_open_urls.pop().as_deref(), Some(url));
             }
         }
-        app.expanded_tool_sections.insert("links".into(), HashSet::from([0]));
+        app.expanded_tool_sections.insert("links".into(), HashSet::from([transcript_tools::FoldKey::Section(0)]));
         terminal.draw(|frame| app.draw(frame)).unwrap();
         assert!(app.visible_links.borrow().iter().any(|(_, url)| url == "https://hidden.example"));
         let cached = app.rendered_transcripts.borrow().iter().find(|entry| entry.id == "links").unwrap().links.clone();
@@ -2878,6 +2878,68 @@ for line in sys.stdin:
         assert!(append_transcript(session, &long));
         assert!(session.transcript.len() <= MAX_TRANSCRIPT_BYTES);
         assert!(session.transcript.ends_with("éEND"));
+    }
+
+    fn saturated_stream_session() -> Session {
+        let turn = "**You:**\n\nEarlier question\n\n**Assistant:**\n\nEarlier **answer**.\n\n";
+        let current = "**You:**\n\nCurrent question\n\n**Assistant:**\n\nTool: Read started · file.rs\n\nCurrent answer";
+        let mut transcript = turn.repeat(6000);
+        transcript.push_str(&"é".repeat((MAX_TRANSCRIPT_BYTES - transcript.len() - current.len() - 2) / 2));
+        transcript.push_str("\n\n");
+        transcript.push_str(current);
+        // Fill the single odd byte, if needed, before the current heading.
+        if transcript.len() < MAX_TRANSCRIPT_BYTES { transcript.insert(transcript.len() - current.len() - 2, 'a'); }
+        Session { id: "cap".into(), title: "Cap".into(), collection: "repo".into(), transcript, status: "Working".into() }
+    }
+
+    #[test]
+    fn saturated_tail_evicts_old_turns_once_and_preserves_current_turn() {
+        let mut session = saturated_stream_session();
+        assert_eq!(session.transcript.len(), MAX_TRANSCRIPT_BYTES);
+        let current = session.transcript[streamed_turn_start(&session.transcript).unwrap()..].to_owned();
+        assert!(append_transcript(&mut session, " delta"));
+        assert!(session.transcript.starts_with("**You:**"));
+        assert!(session.transcript.ends_with(&format!("{current} delta")));
+        assert!(session.transcript.len() < MAX_TRANSCRIPT_BYTES - 32 * 1024);
+        let mut cached = RenderedTranscript::render(0, "cap", &session.transcript, 80, None, None, 0, &[]);
+        for _ in 0..5 {
+            let previous = session.transcript.clone();
+            assert!(!append_transcript(&mut session, " é"));
+            assert!(session.transcript.starts_with(&previous));
+            cached.update(&session.transcript, 80, None, None, 0, &[]);
+            let (lines, sections, links) = transcript_tools::render_with_links(&session.transcript, 80, None, None, &[]);
+            assert_eq!(cached.lines, lines);
+            assert_eq!(cached.sections, sections);
+            assert_eq!(cached.links, links);
+        }
+        // A single giant current turn still obeys the cap and keeps its tail.
+        session.transcript = format!("**You:**\n\n{}", "é".repeat(MAX_TRANSCRIPT_BYTES / 2 - 5));
+        append_transcript(&mut session, "ENDING");
+        assert!(session.transcript.len() <= MAX_TRANSCRIPT_BYTES);
+        assert!(session.transcript.ends_with("ENDING"));
+    }
+
+    #[test]
+    #[ignore = "manual deterministic saturated display throughput measurement"]
+    fn saturated_stream_render_throughput() {
+        let mut session = saturated_stream_session();
+        let mut legacy = session.transcript.clone();
+        let mut cached = RenderedTranscript::render(0, "cap", &session.transcript, 80, None, None, 0, &[]);
+        let start = Instant::now();
+        let mut evictions = 0;
+        for _ in 0..200 {
+            evictions += usize::from(append_transcript(&mut session, " streamed"));
+            cached.update(&session.transcript, 80, None, None, 0, &[]);
+        }
+        let incremental = start.elapsed();
+        let start = Instant::now();
+        for _ in 0..200 {
+            legacy.drain(.." streamed".len());
+            legacy.push_str(" streamed");
+            let _ = RenderedTranscript::render(0, "cap", &legacy, 80, None, None, 0, &[]);
+        }
+        eprintln!("200 saturated assistant delta paints: batched={incremental:?}, byte-trim={:?}, evictions={evictions}, retained={} bytes", start.elapsed(), session.transcript.len());
+        assert_eq!(evictions, 1);
     }
 
     #[test]
@@ -3769,8 +3831,10 @@ for line in sys.stdin:
     #[test]
     fn stream_heading_detection_respects_longer_outer_fences() {
         let prefix = "**You:**\n\nhello\n\n**Assistant:**\n\n";
-        let source = format!("{prefix}````markdown\n\n```\n\n**Assistant:**\n\n```\n\n````\n\nend");
-        assert_eq!(streamed_turn_start(&source), prefix.find("**Assistant:**"));
+        let source = format!("{prefix}````markdown\n\n```\n\n**You:**\n\n```\n\n````\n\nend");
+        assert_eq!(streamed_turn_start(&source), Some(0));
+        let next = format!("{source}\n\n**You:**\n\nNext turn");
+        assert_eq!(streamed_turn_start(&next), next.rfind("**You:**"));
     }
 
     #[test]
@@ -3779,8 +3843,8 @@ for line in sys.stdin:
         let mut sending = request.clone();
         sending.sending = true;
         let menu = Rect::new(0, 0, 80, 15);
-        for row in 1..14 { assert_eq!(ask_user_option_at(&sending, menu, row), None); }
-        assert!((1..14).any(|row| ask_user_option_at(&request, menu, row) == Some(1)));
+        for row in 1..14 { assert_eq!(input_request_option_at(&sending, menu, row), None); }
+        assert!((1..14).any(|row| input_request_option_at(&request, menu, row) == Some(1)));
     }
 
     #[test]
@@ -3948,6 +4012,43 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn nested_tool_calls_support_keyboard_mouse_hover_and_streamed_details() {
+        use transcript_tools::FoldKey;
+        let mut app = App::default();
+        app.handle(Event::Resize(100, 32));
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"s"}));
+        let event = |kind: &str, data: serde_json::Value| json!({"type":"event", "session_id":"s", "event":{"type":kind,"data":data}});
+        app.apply_daemon_frame(&event("turn_started", json!({"prompt":"inspect"})));
+        for (id, name, input) in [("one", "Read", "first secret"), ("two", "Write", "second secret")] {
+            app.apply_daemon_frame(&event("tool_call", json!({"id":id,"name":name,"input":input})));
+        }
+        app.focus = Focus::Transcript;
+        painted(&app);
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        let frame = painted(&app);
+        assert!(frame.contains("Read · running") && frame.contains("Write · running"));
+        assert!(!frame.contains("first secret") && !frame.contains("second secret"));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::NONE)));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)));
+        assert!(painted(&app).contains("first secret"));
+        assert!(!painted(&app).contains("second secret"));
+        app.apply_daemon_frame(&event("tool_result_detail", json!({"id":"one","text":"streamed first result"})));
+        assert!(painted(&app).contains("streamed first result"));
+        let hit = app.visible_tool_sections.borrow().iter()
+            .find(|(_, _, _, key)| *key == FoldKey::Tool("two".into()))
+            .map(|(rect, _, _, _)| *rect).unwrap();
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Moved,
+            column: hit.x + 1, row: hit.y, modifiers: KeyModifiers::NONE }));
+        assert_eq!(app.tool_section_hover, Some(("s".into(), FoldKey::Tool("two".into()))));
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: hit.x + 1, row: hit.y, modifiers: KeyModifiers::NONE }));
+        let frame = painted(&app);
+        assert!(frame.contains("first secret") && frame.contains("second secret"));
+        assert!(app.expanded_tool_sections["s"].contains(&FoldKey::Tool("one".into())));
+        assert!(app.expanded_tool_sections["s"].contains(&FoldKey::Tool("two".into())));
+    }
+
+    #[test]
     fn live_tool_activity_stays_between_latest_response_and_spinner() {
         let mut app = App::default();
         app.handle(Event::Resize(100, 28));
@@ -3958,7 +4059,7 @@ for line in sys.stdin:
         app.apply_daemon_frame(&event("tool_call", json!({"name":"Read","input":{}})));
         app.apply_daemon_frame(&event("text_delta", json!({"text":"Latest response"})));
         for expanded in [false, true] {
-            if expanded { app.expanded_tool_sections.insert("s".into(), HashSet::from([0])); }
+            if expanded { app.expanded_tool_sections.insert("s".into(), HashSet::from([transcript_tools::FoldKey::Section(0)])); }
             let frame = painted(&app);
             assert!(frame.find("Latest response").unwrap() < frame.find("1 tool call").unwrap());
             assert!(frame.find("1 tool call").unwrap() < frame.find("Processing").unwrap());
@@ -4008,24 +4109,59 @@ for line in sys.stdin:
     #[test]
     fn streamed_turn_cache_preserves_prior_tool_sections() {
         let mut source = "**You:**\n\nInspect\n\n**Assistant:**\n\nTool: Read started · file.rs\n\nTool: Read finished · ok\n\n**You:**\n\nSummarize\n\n**Assistant:**\n\n".to_owned();
-        let expanded = HashSet::from([0]);
-        let mut cached = RenderedTranscript::render(0, "s", &source, 50, Some(&expanded), Some(0), 0, &[]);
+        let expanded = HashSet::from([transcript_tools::FoldKey::Section(0)]);
+        let mut cached = RenderedTranscript::render(0, "s", &source, 50, Some(&expanded), Some(transcript_tools::FoldKey::Section(0)), 0, &[]);
         for chunk in ["Summary", " with more detail", "\n\nFinal paragraph"] {
             source.push_str(chunk);
-            cached.update(&source, 50, Some(&expanded), Some(0), 0, &[]);
-            let (expected, sections) = transcript_tools::render(&source, 50, Some(&expanded), Some(0));
+            cached.update(&source, 50, Some(&expanded), Some(transcript_tools::FoldKey::Section(0)), 0, &[]);
+            let (expected, sections) = transcript_tools::render(&source, 50, Some(&expanded), Some(transcript_tools::FoldKey::Section(0)));
             assert_eq!(cached.lines, expected);
             assert_eq!(cached.sections, sections);
         }
     }
 
     #[test]
+    fn streamed_tool_reasoning_cache_matches_full_render() {
+        use transcript_tools::FoldKey;
+        let mut source = "**You:**\n\nEarlier\n\n**Assistant:**\n\nTool: Read started · old\n\n**You:**\n\nNext\n\n**Assistant:**\n\n".to_owned();
+        let expanded = HashSet::from([FoldKey::Section(0), FoldKey::Section(1), FoldKey::Section(2), FoldKey::Tool("legacy:Section(2):0".into())]);
+        let selected = Some(FoldKey::Tool("legacy:Section(2):0".into()));
+        let mut cached = RenderedTranscript::render(0, "s", &source, 38, Some(&expanded), selected.clone(), 0, &[]);
+        for chunk in [
+            "\u{001e}DOXA_REASONING:{\"text\":\"Thinking\",\"tokens\":3,\"streaming\":false}\n\n",
+            "Tool: Read started · new\n\n", "Response [link](https://example.com)", " with more text", "\n\n```rust\nfn main() {}\n```", "\n\nDone",
+        ] {
+            source.push_str(chunk);
+            cached.update(&source, 38, Some(&expanded), selected.clone(), 0, &[]);
+            let (lines, sections, links) = transcript_tools::render_with_links(&source, 38, Some(&expanded), selected.clone(), &[]);
+            assert_eq!(cached.lines, lines);
+            assert_eq!(cached.sections, sections);
+            assert_eq!(cached.links, links);
+        }
+    }
+
+    #[test]
+    #[ignore = "manual deterministic render throughput measurement"]
+    fn streamed_tool_render_throughput() {
+        let history = (0..3000).map(|_| "**You:**\n\nEarlier question\n\n**Assistant:**\n\nEarlier answer with **markdown** and a [link](https://example.com).\n\n").collect::<String>();
+        let mut source = format!("{history}**You:**\n\nNext\n\n**Assistant:**\n\nTool: Read started · file.rs\n\n");
+        let mut cached = RenderedTranscript::render(0, "s", &source, 80, None, None, 0, &[]);
+        let start = Instant::now();
+        for _ in 0..200 { source.push_str(" streamed"); cached.update(&source, 80, None, None, 0, &[]); }
+        let incremental = start.elapsed();
+        source.truncate(source.len() - 200 * " streamed".len());
+        let start = Instant::now();
+        for _ in 0..200 { source.push_str(" streamed"); let _ = transcript_tools::render_with_links(&source, 80, None, None, &[]); }
+        eprintln!("200 tool-turn delta paints: cached={incremental:?}, full={:?}, history={} bytes", start.elapsed(), history.len());
+    }
+
+    #[test]
     fn rendered_transcript_invalidates_on_width_and_expansion() {
         let source = "**Assistant:**\n\nTool: Read started · file.rs\n\nTool: Read finished · ok";
         let mut cached = RenderedTranscript::render(0, "s", source, 60, None, None, 0, &[]);
-        let expanded = HashSet::from([0]);
-        cached.update(source, 24, Some(&expanded), Some(0), 0, &[]);
-        let (expected, sections) = transcript_tools::render(source, 24, Some(&expanded), Some(0));
+        let expanded = HashSet::from([transcript_tools::FoldKey::Section(0)]);
+        cached.update(source, 24, Some(&expanded), Some(transcript_tools::FoldKey::Section(0)), 0, &[]);
+        let (expected, sections) = transcript_tools::render(source, 24, Some(&expanded), Some(transcript_tools::FoldKey::Section(0)));
         assert_eq!(cached.lines, expected);
         assert_eq!(cached.sections, sections);
         assert_eq!(cached.width, 24);
@@ -4034,9 +4170,9 @@ for line in sys.stdin:
         cards.record("s", "tool_call", &json!({"id":"one","name":"Read","input":"file.rs"}));
         cards.record("s", "tool_result", &json!({"id":"one","name":"Read","result_summary":"updated"}));
         let identified = "**Assistant:**\n\nTool: Read started\u{001f}DOXA_TOOL_ID:\"one\"\n\nTool: Read finished\u{001f}DOXA_TOOL_ID:\"one\"";
-        cached.update(identified, 24, Some(&expanded), Some(0), 1, cards.for_session("s"));
+        cached.update(identified, 24, Some(&expanded), Some(transcript_tools::FoldKey::Section(0)), 1, cards.for_session("s"));
         let (expected, sections) = transcript_tools::render_with_cards(
-            identified, 24, Some(&expanded), Some(0), cards.for_session("s"));
+            identified, 24, Some(&expanded), Some(transcript_tools::FoldKey::Section(0)), cards.for_session("s"));
         assert_eq!(cached.lines, expected);
         assert_eq!(cached.sections, sections);
     }
@@ -4095,17 +4231,17 @@ for line in sys.stdin:
         assert!(!collapsed.iter().any(|line| line.to_string().contains("scrubbed thought")));
         assert!(collapsed.iter().any(|line| line.to_string().contains("Thinking · 7 tokens")));
         assert!(!collapsed.iter().any(|line| line.to_string().contains("~7 tokens")));
-        let (expanded, _) = transcript_tools::render(transcript, 80, Some(&HashSet::from([0])), None);
+        let (expanded, _) = transcript_tools::render(transcript, 80, Some(&HashSet::from([transcript_tools::FoldKey::Section(0)])), None);
         assert!(expanded.iter().any(|line| line.to_string().contains("scrubbed thought")));
         assert!(expanded.iter().any(|line| line.to_string().contains("Answer")));
         app.handle(Event::Resize(100, 28));
         painted(&app);
         let hit = app.visible_tool_sections.borrow().iter()
-            .find(|(_, _, session, section)| session == "s" && *section == 0)
+            .find(|(_, _, session, section)| session == "s" && *section == transcript_tools::FoldKey::Section(0))
             .map(|(rect, _, _, _)| *rect).unwrap();
         app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
             column: hit.x + 1, row: hit.y, modifiers: KeyModifiers::NONE }));
-        assert!(app.expanded_tool_sections["s"].contains(&0));
+        assert!(app.expanded_tool_sections["s"].contains(&transcript_tools::FoldKey::Section(0)));
     }
 
     #[test]

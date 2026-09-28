@@ -17,13 +17,12 @@ use unicode_width::UnicodeWidthStr;
 
 impl App {
     pub(super) fn chooser_identity(&self) -> Option<String> {
-        let kind = if let Some(index) = self
-            .active_request_index()
-            .filter(|&index| self.input_requests[index].kind == "ask_user")
-        {
+        let kind = if let Some(index) = self.active_request_index() {
             format!(
-                "ask_user:{}:{}",
-                self.input_requests[index].id, self.input_requests[index].step
+                "input_request:{}:{}:{}",
+                self.input_requests[index].kind,
+                self.input_requests[index].id,
+                self.input_requests[index].step
             )
         } else if self.settings_menu.is_some() {
             "settings".into()
@@ -288,10 +287,7 @@ impl App {
     /// prompt. Reserving this space keeps the transcript and prompt visible.
     pub(super) fn chooser_rect(&self, pane: Rect) -> Option<Rect> {
         self.sync_chooser_state();
-        let wanted = if let Some(index) = self
-            .active_request_index()
-            .filter(|&index| self.input_requests[index].kind == "ask_user")
-        {
+        let wanted = if let Some(index) = self.active_request_index() {
             let (body, _, _) = input_request_body(
                 &self.input_requests[index],
                 usize::from(pane.width.saturating_sub(4)),

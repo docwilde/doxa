@@ -693,7 +693,8 @@ fn tool_activity_folds_in_transcript_and_expands_by_keyboard_or_mouse() {
     app.apply_daemon_frame(&json!({"type":"hello","session_id":"one","model":"sol"}));
     for (kind, data) in [
         ("tool_call", json!({"id":"t1","name":"Read","input":"hidden-input"})),
-        ("tool_result", json!({"id":"t1","name":"Read","result_summary":"hidden-result"})),
+        ("tool_result", json!({"id":"t1","name":"Read","result_summary":"short summary"})),
+        ("tool_result_detail", json!({"id":"t1","text":"hidden-result full detail\nfull-result-tail"})),
     ] {
         app.apply_daemon_frame(&json!({"type":"event","session_id":"one","event":{"type":kind,"data":data}}));
     }
@@ -705,16 +706,32 @@ fn tool_activity_folds_in_transcript_and_expands_by_keyboard_or_mouse() {
     app.handle(key(KeyCode::Tab, KeyModifiers::NONE)); // Tab headers.
     app.handle(key(KeyCode::Tab, KeyModifiers::NONE));
     assert!(app.handle(key(KeyCode::Enter, KeyModifiers::NONE)));
+    let entries = screen(&app, 110, 30);
+    assert!(entries.contains("Read · finished"), "{entries}");
+    assert!(!entries.contains("hidden-input") && !entries.contains("hidden-result"), "{entries}");
+    assert!(app.handle(key(KeyCode::Char(']'), KeyModifiers::NONE)));
+    assert!(app.handle(key(KeyCode::Char(' '), KeyModifiers::NONE)));
     let expanded = screen(&app, 110, 30);
     assert!(expanded.contains("hidden-input"), "{expanded}");
-    assert!(expanded.contains("hidden-result"), "{expanded}");
+    assert!(expanded.contains("hidden-result") && expanded.contains("full-result-tail"), "{expanded}");
+    assert!(app.handle(key(KeyCode::Enter, KeyModifiers::NONE)));
+    let entries = screen(&app, 110, 30);
+    assert!(entries.contains("Read · finished"));
+    assert!(app.handle(key(KeyCode::Char('['), KeyModifiers::NONE)));
     assert!(app.handle(key(KeyCode::Enter, KeyModifiers::NONE)));
     let collapsed = screen(&app, 110, 30);
     let (row, column) = collapsed.lines().enumerate()
         .find_map(|(row, line)| line.find("1 tool call").map(|column| (row, line[..column].chars().count())))
         .expect("visible tool summary");
     assert!(app.handle(mouse(MouseEventKind::Down(MouseButton::Left), column as u16, row as u16)));
-    assert!(screen(&app, 110, 30).contains("hidden-input"));
+    let entries = screen(&app, 110, 30);
+    assert!(!entries.contains("hidden-input") && !entries.contains("hidden-result"));
+    let (row, column) = entries.lines().enumerate()
+        .find_map(|(row, line)| line.find("Read · finished").map(|column| (row, line[..column].chars().count())))
+        .expect("visible individual tool entry");
+    assert!(app.handle(mouse(MouseEventKind::Down(MouseButton::Left), column as u16, row as u16)));
+    let expanded = screen(&app, 110, 30);
+    assert!(expanded.contains("hidden-input") && expanded.contains("hidden-result") && expanded.contains("full-result-tail"), "{expanded}");
 }
 
 #[test]
@@ -732,16 +749,32 @@ fn restored_tool_activity_folds_and_expands_by_keyboard_and_mouse() {
     app.handle(key(KeyCode::Tab, KeyModifiers::NONE)); // Tab headers.
     app.handle(key(KeyCode::Tab, KeyModifiers::NONE));
     assert!(app.handle(key(KeyCode::Enter, KeyModifiers::NONE)));
+    let entries = screen(&app, 110, 30);
+    assert!(entries.contains("Read · finished"), "{entries}");
+    assert!(!entries.contains("restored-input") && !entries.contains("restored-result"), "{entries}");
+    assert!(app.handle(key(KeyCode::Char(']'), KeyModifiers::NONE)));
+    assert!(app.handle(key(KeyCode::Enter, KeyModifiers::NONE)));
     let expanded = screen(&app, 110, 30);
     assert!(expanded.contains("restored-input"), "{expanded}");
     assert!(expanded.contains("restored-result"), "{expanded}");
+    assert!(app.handle(key(KeyCode::Enter, KeyModifiers::NONE)));
+    let entries = screen(&app, 110, 30);
+    assert!(entries.contains("Read · finished"));
+    assert!(app.handle(key(KeyCode::Char('['), KeyModifiers::NONE)));
     assert!(app.handle(key(KeyCode::Enter, KeyModifiers::NONE)));
     let collapsed = screen(&app, 110, 30);
     let (row, column) = collapsed.lines().enumerate()
         .find_map(|(row, line)| line.find("1 tool call").map(|column| (row, line[..column].chars().count())))
         .expect("visible restored tool summary");
     assert!(app.handle(mouse(MouseEventKind::Down(MouseButton::Left), column as u16, row as u16)));
-    assert!(screen(&app, 110, 30).contains("restored-result"));
+    let entries = screen(&app, 110, 30);
+    assert!(!entries.contains("restored-input") && !entries.contains("restored-result"));
+    let (row, column) = entries.lines().enumerate()
+        .find_map(|(row, line)| line.find("Read · finished").map(|column| (row, line[..column].chars().count())))
+        .expect("visible individual restored tool entry");
+    assert!(app.handle(mouse(MouseEventKind::Down(MouseButton::Left), column as u16, row as u16)));
+    let expanded = screen(&app, 110, 30);
+    assert!(expanded.contains("restored-input") && expanded.contains("restored-result"), "{expanded}");
 }
 
 #[test]
@@ -817,6 +850,7 @@ fn full_prompt_queue_preserves_draft() {
 #[test]
 fn permission_requires_explicit_allow_and_preserves_prompt_draft() {
     let mut app = App::default();
+    app.handle(Event::Resize(90, 25));
     app.apply_daemon_frame(&json!({"type":"hello", "session_id":"one", "model":"test"}));
     app.input = "unfinished prompt".into();
     app.apply_daemon_frame(&json!({"type":"event", "session_id":"one", "event":{"type":"needs_input", "data":{
@@ -827,20 +861,12 @@ fn permission_requires_explicit_allow_and_preserves_prompt_draft() {
     assert!(rendered.contains("Execute command"));
     assert!(rendered.contains("Deletes a file"));
     assert!(!rendered.contains('\u{1b}'));
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
-    app.handle(key(KeyCode::Char('a'), KeyModifiers::NONE));
+    assert!(rendered.contains("Approve · A"));
+    assert!(rendered.contains("unfinished prompt"));
+    app.handle(Event::Paste("aA".into()));
     assert!(app.take_answers().is_empty());
     assert_eq!(app.input, "unfinished prompt");
-    app.handle(key(KeyCode::Char('A'), KeyModifiers::SHIFT));
-    assert!(app.input_requests[0].allow_armed);
-    assert!(app.take_answers().is_empty());
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
-    assert!(!app.input_requests[0].allow_armed);
-    assert!(app.take_answers().is_empty());
-    // Some terminals report uppercase letters without a SHIFT modifier.
-    app.handle(key(KeyCode::Char('A'), KeyModifiers::NONE));
-    assert!(app.take_answers().is_empty());
-    app.handle(key(KeyCode::Char('Y'), KeyModifiers::NONE));
+    app.handle(key(KeyCode::Char('a'), KeyModifiers::NONE));
     assert_eq!(
         app.take_answers(),
         vec![("one".into(), "req-1".into(), json!({"decision":"allow"}))]
@@ -859,18 +885,22 @@ fn permission_requires_explicit_allow_and_preserves_prompt_draft() {
 }
 
 #[test]
-fn shifted_confirmation_allows_only_after_second_key() {
-    let mut app = App::default();
-    app.apply_daemon_frame(&json!({"type":"hello", "session_id":"one", "model":"test"}));
-    app.apply_daemon_frame(
-        &json!({"type":"event", "session_id":"one", "event":{"type":"needs_input", "data":{
-        "id":"req-shift", "kind":"permission", "tool_name":"Write"}}}),
-    );
-    app.handle(key(KeyCode::Char('A'), KeyModifiers::SHIFT));
-    assert!(app.take_answers().is_empty());
-    assert!(screen(&app, 90, 25).contains("Approval armed"));
-    app.handle(key(KeyCode::Char('Y'), KeyModifiers::SHIFT));
-    assert_eq!(app.take_answers()[0].2, json!({"decision":"allow"}));
+fn permission_enter_selects_action_and_escape_denies() {
+    for (keys, decision) in [
+        (vec![KeyCode::Enter], "allow"),
+        (vec![KeyCode::Down, KeyCode::Enter], "deny"),
+        (vec![KeyCode::Esc], "deny"),
+        (vec![KeyCode::Char('A')], "allow"),
+    ] {
+        let mut app = App::default();
+        app.handle(Event::Resize(90, 25));
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"one", "model":"test"}));
+        app.apply_daemon_frame(&json!({"type":"event", "session_id":"one", "event":{"type":"needs_input", "data":{"id":"req", "kind":"permission", "tool_name":"Write"}}}));
+        for code in keys { app.handle(key(code, KeyModifiers::NONE)); }
+        assert_eq!(app.take_answers(), vec![("one".into(), "req".into(), json!({"decision":decision}))]);
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.take_answers().is_empty());
+    }
 }
 
 #[test]

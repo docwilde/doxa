@@ -69,7 +69,18 @@ pub(super) fn append_transcript(session: &mut Session, text: &str) -> bool {
     let keep_existing = MAX_TRANSCRIPT_BYTES - text.len();
     let clipped = session.transcript.len() > keep_existing;
     if clipped {
-        let mut start = session.transcript.len() - keep_existing;
+        let minimum = session.transcript.len() - keep_existing;
+        // Evict old turns in batches so a full display tail does not invalidate
+        // its render cache for every token. The durable transcript is separate.
+        let current_turn = super::streamed_turn_start(&session.transcript);
+        let mut start = minimum;
+        if let Some(current) = current_turn.filter(|current| *current >= minimum) {
+            let mut target = (minimum + MAX_TRANSCRIPT_BYTES / 8).min(current);
+            while !session.transcript.is_char_boundary(target) { target -= 1; }
+            start = super::streamed_turn_start(&session.transcript[..target])
+                .filter(|boundary| *boundary >= minimum)
+                .unwrap_or(current);
+        }
         while !session.transcript.is_char_boundary(start) {
             start += 1;
         }
@@ -109,7 +120,7 @@ impl std::fmt::Debug for ReasoningStream {
     }
 }
 
-pub(super) fn set_reasoning_marker(session: &mut Session, stream: &ReasoningStream) {
+pub(super) fn set_reasoning_marker(session: &mut Session, stream: &ReasoningStream) -> bool {
     let marker = format!(
         "{}{}",
         transcript_tools::REASONING_PREFIX,
@@ -124,11 +135,12 @@ pub(super) fn set_reasoning_marker(session: &mut Session, stream: &ReasoningStre
             session.transcript.replace_range(start..end, &marker);
             if session.transcript.len() > MAX_TRANSCRIPT_BYTES {
                 session.transcript = transcript_tail(&session.transcript).to_owned();
+                return true;
             }
-            return;
+            return false;
         }
     }
-    append_transcript(session, &format!("\n\n{marker}\n\n"));
+    append_transcript(session, &format!("\n\n{marker}\n\n"))
 }
 
 pub(super) fn structured_event(event_type: &str, data: &serde_json::Value) -> Option<String> {
