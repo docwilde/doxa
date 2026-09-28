@@ -169,6 +169,16 @@ mod tests {
                     assert!(!result.contains(secret), "split {split}: {result}");
                 }
             }
+            let mut stream = StreamScrubber::default();
+            let mut incremental = String::new();
+            for c in text.chars() {
+                incremental.push_str(&stream.push(&c.to_string(), scrub).unwrap());
+                for secret in ["abcdefgh", "long secret", "fixturePrivate", "secret phrase"] {
+                    assert!(!incremental.contains(secret));
+                }
+            }
+            incremental.push_str(&stream.finish(scrub).unwrap());
+            assert!(incremental.contains("[REDACTED:"));
         }
     }
     #[test]
