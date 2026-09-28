@@ -43,7 +43,14 @@ def output_text(row):
 
 def visible_tools(body):
     names = set()
-    for item in body.get("tools", []):
+    tools = list(body.get("tools", []))
+    # gpt-6-sol uses Responses Lite: the pinned provider puts the same tool
+    # inventory in developer additional_tools input rather than the API field.
+    for item in body.get("input", []):
+        if (isinstance(item, dict) and item.get("type") == "additional_tools"
+                and item.get("role") == "developer"):
+            tools.extend(item.get("tools", []))
+    for item in tools:
         if not isinstance(item, dict):
             continue
         if isinstance(item.get("name"), str):
@@ -150,6 +157,10 @@ class ModelPeer:
         self.requests = 0
         self.read_verified = False
         self.code_mode_only = False
+        self.tool_names = []
+        self.request_fields = []
+        self.tool_shapes = []
+        self.responses_lite = False
         self.output_seen = False
         self.failed = False
         self.output_error_tags = []
@@ -192,6 +203,13 @@ class ModelPeer:
         response = "owned-response-" + str(self.requests)
         if self.requests == 1:
             tools = visible_tools(body)
+            self.tool_names = sorted(tools)
+            self.request_fields = sorted(body)
+            self.responses_lite = "tools" not in body and any(
+                isinstance(row, dict) and row.get("type") == "additional_tools"
+                and row.get("role") == "developer" for row in body.get("input", []))
+            self.tool_shapes = [{"keys": sorted(row), "type": row.get("type")}
+                                for row in body.get("tools", []) if isinstance(row, dict)]
             self.code_mode_only = "exec" in tools and not tools.intersection({"exec_command", "shell"})
             item = {"type": "custom_tool_call", "call_id": CALL_ID, "name": "exec", "input": self.code}
         else:
@@ -261,6 +279,7 @@ def provider_turn(server, root, peer, token):
         rpc.send({"method": "initialized"})
         config = rpc.request("config/read", {"cwd": str(root / "workspace"), "includeLayers": False})
         assert config["config"]["features"]["token_budget"] is False
+        assert config["config"]["features"]["code_mode_only"] is True
         inventory = rpc.request("hooks/list", {"cwds": [str(root / "workspace")]})
         hooks = [hook for row in inventory.get("data", []) for hook in row.get("hooks", [])
                  if hook.get("eventName") == "preCompact" and hook.get("source") == "sessionFlags"]
@@ -358,6 +377,9 @@ def scenario(server, scratch, daemon=None, launcher=None, lore=None):
             except Exception as error:
                 report.update({"result": type(error).__name__})
             report.update({"http_requests": peer.requests, "code_mode_only_visible": peer.code_mode_only,
+                "visible_tool_names": peer.tool_names,
+                "request_fields": peer.request_fields, "tool_shapes": peer.tool_shapes,
+                "responses_lite_tool_inventory": peer.responses_lite,
                 "matching_tool_output_seen": peer.output_seen, "helper_read_verified": peer.read_verified,
                 "tool_output_error_tags": peer.output_error_tags, "fixture_unchanged": fixture.read_bytes() == before})
             passed = (not peer.failed and peer.requests == 2 and peer.code_mode_only and peer.read_verified

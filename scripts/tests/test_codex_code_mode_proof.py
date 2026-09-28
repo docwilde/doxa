@@ -16,6 +16,17 @@ spec.loader.exec_module(proof)
 
 
 class ProofTests(unittest.TestCase):
+    def test_responses_lite_inventory_requires_developer_additional_tools(self):
+        inventory = {"type": "additional_tools", "role": "developer", "tools": [
+            {"type": "namespace", "name": "functions", "tools": [
+                {"type": "custom", "name": "exec"}]}]}
+        self.assertEqual(proof.visible_tools({"input": [inventory]}), {"functions", "exec"})
+        inventory["role"] = "user"
+        self.assertEqual(proof.visible_tools({"input": [inventory]}), set())
+        inventory["role"] = "developer"
+        inventory["type"] = "message"
+        self.assertEqual(proof.visible_tools({"input": [inventory]}), set())
+
     def test_model_peer_requires_one_matching_successful_tool_output(self):
         with tempfile.TemporaryDirectory() as directory:
             peer = proof.ModelPeer(Path(directory), "owned-unpredictable-token")
