@@ -136,8 +136,7 @@ impl Process {
         command.args([
             "--runtime-dir", runtime.to_str().unwrap(), "--cwd", runtime.to_str().unwrap(),
             "--session-id", "codex-session", "--linger", "10", "--engine", "codex",
-            "--codex-bin", codex.to_str().unwrap(), "--lore-python", python.to_str().unwrap(),
-            "--resume", if resume { "true" } else { "false" },
+            "--codex-bin", codex.to_str().unwrap(), "--resume", if resume { "true" } else { "false" },
         ]).stdout(Stdio::null()).stderr(Stdio::piped())
             .env("DOXA_HOME", runtime.join("home"))
             .env_remove("DOXA_CODEX_APPSERVER");
@@ -164,9 +163,7 @@ impl Process {
                 "codex",
                 "--codex-bin",
                 codex.to_str().unwrap(),
-                "--lore-python",
-                python.to_str().unwrap(),
-            ])
+                ])
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .env("DOXA_HOME", runtime.join("home"))
@@ -824,7 +821,7 @@ fn rejects_budgeted_codex_without_selected_price_basis() {
         let mut command = daemon_command();
         command.args(["--runtime-dir", dir.path().to_str().unwrap(), "--session-id", "fleet-slot",
             "--engine", "codex", "--codex-bin", codex.to_str().unwrap(),
-            "--lore-python", python.to_str().unwrap()])
+            ])
             .env("DOXA_HOME", dir.path().join("home"))
             .env("DOXA_SESSION_BUDGET_USD", "1.0");
         if let Some(model) = model { command.args(["--model", model]); }
@@ -841,7 +838,7 @@ fn rejects_unpriced_vendor_budget_before_binding() {
     let python = Path::new("/usr/bin/python3");
     let output = daemon_command()
         .args(["--runtime-dir", dir.path().to_str().unwrap(), "--session-id", "fleet-slot",
-            "--engine", "glm", "--model", "glm-5-turbo", "--lore-python", python.to_str().unwrap()])
+            "--engine", "glm", "--model", "glm-5-turbo", ])
         .env("DOXA_SESSION_BUDGET_USD", "1.0")
         .output().unwrap();
     assert!(!output.status.success());
@@ -1228,7 +1225,7 @@ fn codex_clean_checkpoint_failure_overrides_success_and_preserves_dirty_resume_g
     let restart = daemon_command()
         .args(["--runtime-dir", dir.path().to_str().unwrap(), "--cwd", dir.path().to_str().unwrap(),
             "--session-id", "codex-session", "--engine", "codex", "--codex-bin", codex.to_str().unwrap(),
-            "--lore-python", python.to_str().unwrap(), "--resume", "true"])
+            "--resume", "true"])
         .env("DOXA_HOME", dir.path().join("home")).output().unwrap();
     assert!(!restart.status.success());
     assert!(String::from_utf8_lossy(&restart.stderr).contains("transcript is incomplete"));
@@ -1255,7 +1252,7 @@ fn codex_resume_refuses_changed_clean_checkpoint_before_provider_execution() {
         let output = daemon_command()
             .args(["--runtime-dir", dir.path().to_str().unwrap(), "--cwd", dir.path().to_str().unwrap(),
                 "--session-id", "codex-session", "--engine", "codex", "--codex-bin", codex.to_str().unwrap(),
-                "--lore-python", python.to_str().unwrap(), "--resume", "true"])
+                "--resume", "true"])
             .env("DOXA_HOME", dir.path().join("home")).output().unwrap();
         assert!(!output.status.success());
         assert!(String::from_utf8_lossy(&output.stderr).contains("durable checkpoint"));
@@ -1412,9 +1409,7 @@ fn codex_assistant_append_failure_overrides_successful_provider_turn() {
             "codex",
             "--codex-bin",
             codex.to_str().unwrap(),
-            "--lore-python",
-            python.to_str().unwrap(),
-        ])
+            ])
         .output()
         .unwrap();
     assert!(!restart.status.success());
@@ -1444,9 +1439,7 @@ fn existing_transcript_without_thread_id_refuses_new_codex_thread() {
             "codex",
             "--codex-bin",
             codex.to_str().unwrap(),
-            "--lore-python",
-            python.to_str().unwrap(),
-        ])
+            ])
         .output()
         .unwrap();
     assert!(!output.status.success());
@@ -1468,7 +1461,7 @@ fn explicit_codex_resume_requires_matching_thread_metadata() {
         .args(["--runtime-dir", dir.path().to_str().unwrap(),
             "--cwd", dir.path().to_str().unwrap(), "--session-id", "codex-session",
             "--engine", "codex", "--codex-bin", codex.to_str().unwrap(),
-            "--lore-python", python.to_str().unwrap(), "--resume", "true"])
+            "--resume", "true"])
         .output().unwrap();
     assert!(!run().status.success(), "resume without saved state must fail");
     fs::write(&transcript, b"{\"type\":\"user\"}\n").unwrap();
@@ -1491,7 +1484,7 @@ fn explicit_codex_resume_requires_matching_thread_metadata() {
         .args(["--runtime-dir", dir.path().to_str().unwrap(),
             "--cwd", dir.path().to_str().unwrap(), "--session-id", "codex-session",
             "--engine", "codex", "--codex-bin", codex.to_str().unwrap(),
-            "--lore-python", python.to_str().unwrap(), "--resume", "true"])
+            "--resume", "true"])
         .stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
     wait_until(|| dir.path().join("registry/codex-session.json").exists());
     resumed.kill().unwrap();
@@ -1839,8 +1832,7 @@ fn interrupt_reaps_codex_process_group() {
             "--cwd", dir.path().to_str().unwrap(),
             "--session-id", "codex-session", "--engine", "codex",
             "--codex-bin", codex.to_str().unwrap(),
-            "--lore-python", python.to_str().unwrap(),
-        ])
+            ])
         .output()
         .unwrap();
     assert!(!restart.status.success(), "incomplete turn must refuse restart");
@@ -1865,9 +1857,7 @@ fn invalid_native_lore_capacity_rejects_session_before_socket_or_registry() {
             "codex",
             "--codex-bin",
             codex.to_str().unwrap(),
-            "--lore-python",
-            python.to_str().unwrap(),
-        ])
+            ])
         .env("LORE_USER_CAP", "invalid-native-capacity")
         .output()
         .unwrap();
@@ -2108,8 +2098,7 @@ mod vendor_process {
         let child = daemon_command()
             .args(["--runtime-dir", dir.path().to_str().unwrap(), "--cwd", dir.path().to_str().unwrap(),
                 "--session-id", "vendor-session", "--linger", "10", "--engine", "deepseek",
-                "--model", "deepseek-flash", "--lore-python", lore.to_str().unwrap(),
-                "--vendor-endpoint", &endpoint])
+                "--model", "deepseek-flash", "--vendor-endpoint", &endpoint])
             .env("DEEPSEEK_API_KEY", "test-key-1234")
             .env("DOXA_SESSION_BUDGET_USD", "1.0")
             .env("DOXA_HOME", dir.path().join("home"))
@@ -2168,8 +2157,6 @@ mod vendor_process {
                 "10",
                 "--engine",
                 vendor,
-                "--lore-python",
-                lore.to_str().unwrap(),
                 "--vendor-endpoint",
                 endpoint,
                 "--resume",
@@ -2513,8 +2500,6 @@ mod vendor_process {
                     "vendor-session",
                     "--engine",
                     vendor,
-                    "--lore-python",
-                    lore.to_str().unwrap(),
                     "--resume",
                     "true",
                 ])
@@ -2536,8 +2521,6 @@ mod vendor_process {
                     "vendor-session",
                     "--engine",
                     vendor,
-                    "--lore-python",
-                    lore.to_str().unwrap(),
                     "--resume",
                     "true",
                 ])
@@ -2684,9 +2667,7 @@ mod vendor_process {
                 "vendor-session",
                 "--engine",
                 "deepseek",
-                "--lore-python",
-                lore.to_str().unwrap(),
-            ])
+                ])
             .env_remove("DEEPSEEK_API_KEY")
             .output()
             .unwrap();
@@ -3296,7 +3277,7 @@ fn memory_off_codex_scrubs_and_records_without_snapshot_index_or_compact_review(
         executable(&codex, &format!("#!/bin/sh\ncat > '{}'\necho '{{\"type\":\"thread.started\",\"thread_id\":\"thread_1\"}}'\n", captured.display()));
         let mut command = daemon_command();
         command.args(["--runtime-dir", dir.path().to_str().unwrap(), "--cwd", dir.path().to_str().unwrap(),
-            "--session-id", "codex-session", "--linger", "10", "--engine", "codex", "--codex-bin", codex.to_str().unwrap(), "--lore-python", python.to_str().unwrap()])
+            "--session-id", "codex-session", "--linger", "10", "--engine", "codex", "--codex-bin", codex.to_str().unwrap(), ])
             .env("DOXA_HOME", dir.path().join("home")).env("DOXA_CODEX_APPSERVER", "0").env_remove("DOXA_LORE")
             .stdout(Stdio::null()).stderr(Stdio::piped());
         if let Some(value) = override_env { command.env("DOXA_LORE", value); }

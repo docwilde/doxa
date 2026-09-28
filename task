@@ -13,8 +13,7 @@ esac
 root=$(CDPATH= cd -- "$script_dir" && pwd -P) || fail 'cannot find repository root'
 tui_manifest=$root/rust/doxa-tui/Cargo.toml
 daemon_manifest=$root/rust/doxa-daemon/Cargo.toml
-sidecar=$root/rust/doxa-claude/claude_sidecar.py
-[ -f "$tui_manifest" ] && [ -f "$daemon_manifest" ] && [ -f "$sidecar" ] ||
+[ -f "$tui_manifest" ] && [ -f "$daemon_manifest" ] ||
   fail 'run this script from the DOXA Rust source checkout'
 
 usage() {
@@ -26,17 +25,15 @@ Usage: ./task COMMAND [arguments]
   run [doxa args]       Build and run the frontend in the current directory
   new [doxa args]       Build and start a new session in the current directory
   doctor [args]         Build and check the native launch dependencies
-  test                  Run all Rust crate and Claude sidecar tests
+  test                  Run all Rust crate tests
   clean                 Remove the task's local Rust build directory
   help                  Show this help
 
 DOXA_TASK_TARGET_DIR defaults to <repo>/target/rust-task.
 DOXA_TASK_PROFILE=release selects release binaries for run/new/doctor.
-DOXA_LORE_PYTHON selects the retained SDK/review helper interpreter; otherwise
-<repo>/.venv/bin/python is used when present, then python3 on PATH.
-DOXA_RUST_BIN_DIR defaults to ~/.local/bin. install uses the locked sidecar
-dependencies and writes the Rust doxa launcher from committed HEAD.
-Pass --lore-python or --claude-python to override Python for one launch.
+DOXA_RUST_BIN_DIR defaults to ~/.local/bin. install writes the Rust launcher
+and a desktop shortcut from committed HEAD. Provider CLIs must be on PATH.
+Pass --codex-bin or --claude-bin to select a provider CLI executable.
 EOF
 }
 
@@ -45,6 +42,12 @@ case ${DOXA_TASK_TARGET_DIR:-$root/target/rust-task} in
   *) target_dir=$root/${DOXA_TASK_TARGET_DIR} ;;
 esac
 export CARGO_TARGET_DIR=$target_dir
+if [ -z "${TMPDIR:-}" ]; then
+  TMPDIR=${XDG_CACHE_HOME:-$HOME/.cache}/doxa/task-tmp
+  mkdir -p "$TMPDIR"
+  chmod 700 "$TMPDIR"
+  export TMPDIR
+fi
 
 profile=${DOXA_TASK_PROFILE:-debug}
 case $profile in debug|release) : ;; *) fail 'DOXA_TASK_PROFILE must be debug or release' ;; esac
@@ -67,28 +70,6 @@ build() {
   fi
 }
 
-python_bin() {
-  if [ -n "${DOXA_LORE_PYTHON:-}" ]; then
-    candidate=$DOXA_LORE_PYTHON
-  elif [ -x "$root/.venv/bin/python" ]; then
-    candidate=$root/.venv/bin/python
-  else
-    candidate=$(command -v python3 || :)
-  fi
-  [ -n "$candidate" ] || fail 'Python is required; set DOXA_LORE_PYTHON'
-  case $candidate in
-    /*) : ;;
-    *) candidate=$(command -v "$candidate" || :) ;;
-  esac
-  [ -n "$candidate" ] && [ -x "$candidate" ] || fail 'DOXA_LORE_PYTHON is not executable'
-  case $candidate in
-    /*) : ;;
-    */*) candidate=$(CDPATH= cd -- "${candidate%/*}" && pwd -P)/${candidate##*/} ;;
-    *) fail 'could not resolve Python to an absolute path' ;;
-  esac
-  printf '%s\n' "$candidate"
-}
-
 launch() {
   verb=$1
   shift
@@ -99,39 +80,6 @@ launch() {
   [ -x "$binary" ] && [ -x "$daemon" ] && [ -x "$lore" ] || fail 'Cargo produced no runnable frontend, daemon or native LORE'
   export DOXA_LORE_RS=$lore
   export DOXA_DAEMON_BIN=$daemon
-  export DOXA_CLAUDE_SCRIPT=$sidecar
-
-  engine=codex
-  has_lore=0
-  has_claude=0
-  expect_engine=0
-  for arg do
-    if [ "$expect_engine" -eq 1 ]; then
-      engine=$arg
-      expect_engine=0
-      continue
-    fi
-    case $arg in
-      --engine) expect_engine=1 ;;
-      --lore-python) has_lore=1 ;;
-      --claude-python) has_claude=1 ;;
-    esac
-  done
-  [ "$expect_engine" -eq 0 ] || fail 'missing value for --engine'
-  if [ "$engine" != fixture ]; then
-    # The Rust launcher owns configured-engine selection. Supply both adapter
-    # interpreters so plain startup and later engine switches use the same env.
-    selected_python=$(python_bin)
-    PATH=${selected_python%/*}:$PATH
-    export PATH
-    if [ "$has_claude" -eq 0 ]; then
-      set -- "$@" --claude-python "$selected_python"
-    fi
-    if [ "$has_lore" -eq 0 ]; then
-      set -- "$@" --lore-python "$selected_python"
-    fi
-  fi
-
   case $verb in
     run) exec "$binary" "$@" ;;
     *) exec "$binary" "$verb" "$@" ;;
@@ -177,7 +125,7 @@ case $command in
         *) cargo test --locked --manifest-path "$root/rust/$crate/Cargo.toml" ;;
       esac
     done
-    "$(python_bin)" -m unittest discover -s "$root/rust/doxa-claude/tests" -p 'test_*.py' ;;
+    ;;
   clean)
     [ "$#" -eq 0 ] || fail 'clean takes no arguments'
     [ -z "${DOXA_TASK_TARGET_DIR:-}" ] || fail 'clean requires the default target directory'

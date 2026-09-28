@@ -84,41 +84,19 @@ fn daemon_reaper() -> &'static std::sync::mpsc::Sender<Child> {
     })
 }
 
-/// Resolve a program to an absolute executable path. A command name is
-/// searched on PATH; a path containing a slash is never searched. Python's
-/// final symlink must survive: it identifies a venv for Python's sys.prefix.
-fn resolve_executable(input: &Path, preserve_python_link: bool) -> io::Result<PathBuf> {
+/// Resolve a command from PATH or an explicit path to its executable file.
+pub fn executable(input: &Path) -> io::Result<PathBuf> {
     let candidates: Vec<PathBuf> = if input.components().count() > 1 || input.is_absolute() {
         vec![input.to_path_buf()]
     } else {
-        env::split_paths(&env::var_os("PATH").unwrap_or_default())
-            .filter(|dir| dir.is_absolute())
-            .map(|dir| dir.join(input))
-            .collect()
+        env::split_paths(&env::var_os("PATH").unwrap_or_default()).filter(|dir| dir.is_absolute()).map(|dir| dir.join(input)).collect()
     };
     for candidate in candidates {
-        if let Ok(meta) = fs::metadata(&candidate) {
-            if meta.is_file() && meta.permissions().mode() & 0o111 != 0 {
-                if preserve_python_link {
-                    if let (Some(parent), Some(name)) = (candidate.parent(), candidate.file_name()) {
-                        if let Ok(parent) = fs::canonicalize(parent) {
-                            return Ok(parent.join(name));
-                        }
-                    }
-                } else if let Ok(path) = fs::canonicalize(&candidate) {
-                    return Ok(path);
-                }
-            }
+        if fs::metadata(&candidate).is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0) {
+            if let Ok(path) = fs::canonicalize(candidate) { return Ok(path); }
         }
     }
-    Err(io::Error::new(
-        io::ErrorKind::NotFound,
-        format!("executable not found: {}", input.display()),
-    ))
-}
-
-pub fn executable(input: &Path) -> io::Result<PathBuf> {
-    resolve_executable(input, false)
+    Err(io::Error::new(io::ErrorKind::NotFound,format!("executable not found: {}",input.display())))
 }
 
 pub fn claude_executable(options: &LaunchOptions) -> io::Result<PathBuf> {

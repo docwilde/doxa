@@ -2,6 +2,38 @@
 use std::{fs, io::{self, Read}, os::unix::{fs::{MetadataExt, OpenOptionsExt}, io::AsRawFd, process::CommandExt}, path::Path, process::{Command, Stdio}, sync::{atomic::{AtomicBool, Ordering}, mpsc::{self, Receiver, TryRecvError}, Arc}, thread, time::{Duration, Instant}};
 
 pub const DEFAULT_REPO: &str = "https://github.com/docwilde/doxa";
+
+/// Install the desktop entry and compiled icons without a scripting runtime.
+pub fn install_launcher(command: &Path) -> io::Result<std::path::PathBuf> {
+    use std::io::Write;
+    if !command.is_absolute() || !command.is_file() {return Err(io::Error::other("launcher must be an absolute file"));}
+    let word=desktop_word(&command.to_string_lossy())?;
+    let home=std::env::var_os("HOME").ok_or_else(||io::Error::other("HOME is unavailable"))?;
+    let data=std::env::var_os("XDG_DATA_HOME").filter(|v|!v.is_empty()).map(std::path::PathBuf::from).unwrap_or_else(||std::path::PathBuf::from(home).join(".local/share"));
+    if !data.is_absolute(){return Err(io::Error::other("XDG_DATA_HOME must be absolute"));}
+    let write=|path:&Path,bytes:&[u8]|->io::Result<()> {
+        let parent=path.parent().ok_or_else(||io::Error::other("missing asset directory"))?;
+        fs::create_dir_all(parent)?;
+        let meta=fs::symlink_metadata(parent)?;
+        if !meta.is_dir() || meta.file_type().is_symlink() || meta.uid()!=unsafe {libc::geteuid()} || meta.mode()&0o022!=0 {return Err(io::Error::other("unsafe launcher directory"));}
+        let mut file=tempfile::NamedTempFile::new_in(parent)?;file.write_all(bytes)?;file.as_file().sync_all()?;
+        file.persist(path).map_err(|e|e.error)?;Ok(())
+    };
+    let desktop=data.join("applications/doxa.desktop");
+    write(&desktop,format!("[Desktop Entry]\nType=Application\nName=DOXA\nGenericName=Agent terminal\nComment=Agent terminal with reviewed memory\nExec={word}\nIcon=doxa\nTerminal=true\nCategories=Development;Utility;\nKeywords=claude;codex;agent;terminal;lore;memory;\nX-DOXA-Version={}\n",env!("CARGO_PKG_VERSION")).as_bytes())?;
+    write(&data.join("icons/hicolor/512x512/apps/doxa.png"),include_bytes!("../../../assets/icon.png"))?;
+    write(&data.join("icons/hicolor/scalable/apps/doxa.svg"),include_bytes!("../../../assets/icon.svg"))?;
+    for(mut command,path)in [(Command::new("update-desktop-database"),data.join("applications")),(Command::new("gtk-update-icon-cache"),data.join("icons/hicolor"))] {
+        let _=command.arg(path).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
+    }
+    Ok(desktop)
+}
+fn desktop_word(value:&str)->io::Result<String> {
+    if value.contains('=') || value.chars().any(char::is_control){return Err(io::Error::other("launcher path cannot be represented in desktop entry"));}
+    // Desktop entry string escaping is decoded before Exec argument escaping.
+    let escaped=value.replace('%',"%%").replace('\\',"\\\\\\\\").replace('"',"\\\\\"").replace('`',"\\\\`").replace('$',"\\\\$");
+    Ok(format!("\"{escaped}\""))
+}
 const LIMIT: usize = 4096;
 const TIMEOUT: Duration = Duration::from_secs(8);
 
