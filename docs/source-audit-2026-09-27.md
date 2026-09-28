@@ -367,3 +367,15 @@ A subsequent live alpha.44 candidate turn reported both five-hour and weekly
 percentages/resets through the corrected stream. Default-window large-context
 stress and longer/reasoning streaming remain unverified. No fallback endpoint
 or inferred quota is introduced.
+
+## LORE integration follow-up in alpha.45
+
+DOXA now selects its effective sticky store before calling LORE 0.62.3’s shared
+settings resolver. Native CLI, embedded memory and review workers use the same
+caps, stage switches and signing/transport settings. Explicit environment
+values win, including empty values; a custom store does not inherit saved host
+credentials unless it belongs to the explicitly selected settings directory.
+
+LORE’s plugin launcher accepts newer stable patches within the same major/minor
+version. Malformed or unsafe saved settings fail configuration loading; startup
+hooks never compile. No remote destination is added by these integration fixes.

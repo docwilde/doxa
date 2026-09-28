@@ -1,7 +1,7 @@
 # Rust 2.0 parity with DOXA 1.19.0
 
 Baseline: Python `v1.19.0` production behavior. This tracker records implementation
-through **alpha.44**, with canonical **LORE 0.62.2**, and account checks on **alpha.43**.
+through **alpha.45**, with canonical **LORE 0.62.3**, and account checks on **alpha.43**.
 The Rust runtime implements the audited workflows below. Live account checks
 remain bounded by the [verification record](live-provider-verification-2026-09-28.md)
 and the [remaining verification](#remaining-verification) section; implementation
@@ -33,6 +33,7 @@ coverage alone does not establish authenticated compatibility for every provider
 | Alpha.42 | Verified startup preparation before fault-injection deadlines; early invalid-payload refusal while retaining all execution integrity checks. |
 | Alpha.43 | README and tracker refresh with release-specific evidence and remaining live checks; no additional runtime implementation. |
 | Alpha.44 | Retain Claude's nested five-hour/weekly quota windows and startup events; preserve valid partial updates and identify native CLI provenance. Record authenticated alpha.43 verification. |
+| Alpha.45 | Share native LORE settings across embedded memory, standalone carriers and review workers; resolve the sticky store before loading saved caps, signing keys and transport preferences. |
 
 Standalone LORE administration, hooks, MCP and network operations are native Rust;
 they are not a remaining Python replacement task. See the
