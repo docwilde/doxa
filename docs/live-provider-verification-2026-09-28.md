@@ -32,6 +32,41 @@ The credential preflight, the launcher's missing-credential `--live` path,
 and the Python child's missing-credential branch were executed.
 The paid branch of the verifier has **not** been exercised against either vendor.
 
+### Credential-free native fixture verification
+
+Review caught an obsolete `--lore-python` flag in the initial, unexercised paid
+branch. It has been removed. The verifier now launches a separate process group
+and cleans up the entire group, including descendants that ignore SIGTERM.
+
+`tests/test_native_live_vendor_verifier.py` executes the actual native daemon
+built with `local-test-server`, a loopback SSE vendor, synthetic credentials,
+and disposable homes. Only catalog discovery is adapted with a synthetic flat
+native reply, because its production URL is fixed. No fixture key is sent to a
+real provider; the native test endpoint also suppresses DeepSeek balance fetches.
+This fixture exercises startup, flat model/effort/status replies, two native
+turns, reasoning/text callbacks, one actual workspace read, aggregate token
+usage, committed history, and timeout cleanup with a SIGTERM-resistant child.
+Both tests passed for the fresh build; the successful cases contain exactly
+three loopback HTTP requests per vendor. This is local fixture evidence, not
+live account verification.
+
+The exact request assertions exposed DeepSeek effort nested inside `thinking`.
+The native builder now sends top-level `reasoning_effort`, as specified by the
+[official thinking guide](https://api-docs.deepseek.com/guides/thinking_mode/).
+Its assistant tool-continuation message now retains `reasoning_content`; the
+loopback DeepSeek fixture rejects a missing field with HTTP 400. Reasoning is
+not included in verification reports or the public JSONL transcript.
+
+```bash
+TMPDIR=/home/docwilde/.d39 \
+CARGO_TARGET_DIR=/home/docwilde/.cache/doxa-native-target-vendor-live-fixture \
+cargo build -j 1 -p doxa-daemon --features local-test-server
+
+TMPDIR=/home/docwilde/.d39 \
+DOXA_NATIVE_DAEMON=/home/docwilde/.cache/doxa-native-target-vendor-live-fixture/debug/doxa-daemon \
+python3 -m unittest discover -s tests -p test_native_live_vendor_verifier.py -v
+```
+
 ### Reproduce safely
 
 Run from a checkout after configuring keys through DOXA's `/setup` or inherited

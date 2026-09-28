@@ -366,10 +366,9 @@ fn provider_bodies_match_measured_contract() {
     )
     .unwrap();
     let g = request_body(Vendor::Glm, "glm-5.3-flash", &[], "high").unwrap();
-    assert_eq!(
-        d.pointer("/thinking/reasoning_effort"),
-        Some(&json!("high"))
-    );
+    assert_eq!(d.get("reasoning_effort"), Some(&json!("high")));
+    assert_eq!(d["thinking"], json!({"type":"enabled"}));
+    assert!(d.pointer("/thinking/reasoning_effort").is_none());
     assert_eq!(g.get("reasoning_effort"), Some(&json!("high")));
     assert!(g.pointer("/thinking/reasoning_effort").is_none());
     assert!(d.get("max_tokens").is_none() && g.get("max_tokens").is_none());

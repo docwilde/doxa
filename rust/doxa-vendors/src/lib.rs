@@ -371,9 +371,9 @@ pub fn request_body(
     });
     if effort == "none" {
         body["thinking"] = json!({"type": "disabled"});
-    } else if vendor == Vendor::DeepSeek {
-        body["thinking"] = json!({"type": "enabled", "reasoning_effort": effort});
     } else {
+        // Both current official Chat Completions contracts place effort at
+        // the request root. A tolerated nested value is not proof it applies.
         body["thinking"] = json!({"type": "enabled"});
         body["reasoning_effort"] = json!(effort);
     }
@@ -958,7 +958,13 @@ async fn run_turn_at(
                 "name":call.name, "arguments":Value::Object(call.arguments.clone()).to_string()
             }
         })).collect();
-        messages.push(json!({"role":"assistant","content":completion.text,"tool_calls":calls}));
+        let mut assistant = json!({"role":"assistant","content":completion.text,"tool_calls":calls});
+        if vendor == Vendor::DeepSeek && effort != "none" {
+            // DeepSeek rejects thinking tool continuation without the complete
+            // preceding assistant reasoning. Keep it in request history only.
+            assistant["reasoning_content"] = json!(completion.reasoning);
+        }
+        messages.push(assistant);
         check_history(&messages)?;
         for call in &completion.tool_calls {
             if *cancel.borrow() {

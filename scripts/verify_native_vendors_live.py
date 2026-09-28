@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import secrets
+import signal
 import socket
 import subprocess
 import sys
@@ -19,6 +20,7 @@ import time
 
 
 KEYS = [os.environ[n] for n in ("DEEPSEEK_API_KEY", "ZAI_API_KEY") if os.environ.get(n)]
+TURN_TIMEOUT = 90
 
 
 def emit(value):
@@ -55,10 +57,10 @@ class Wire:
     def send(self, value):
         self.sock.sendall((json.dumps(value) + "\n").encode())
 
-    def call(self, method, params=None):
+    def call(self, method, params=None, timeout=20):
         self.counter += 1
         self.send({"type": "call", "id": self.counter, "method": method, "params": params or {}})
-        deadline = time.monotonic() + 20
+        deadline = time.monotonic() + timeout
         while True:
             frame = self.receive(deadline)
             if frame.get("id") == self.counter:
@@ -67,7 +69,7 @@ class Wire:
     def turn(self, text):
         self.counter += 1
         self.send({"type": "prompt", "id": self.counter, "text": text})
-        deadline = time.monotonic() + 90
+        deadline = time.monotonic() + TURN_TIMEOUT
         counts = collections.Counter()
         rendered = ""
         while True:
@@ -84,6 +86,24 @@ class Wire:
                 return {"events": dict(counts), "done": event.get("data", {})}, rendered
             if frame.get("id") == self.counter and frame.get("ok") is False:
                 raise RuntimeError("native prompt rejected")
+
+
+def terminate_group(process):
+    """Reap the daemon and stop descendants even if their parent exited first."""
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        pass
+    # A surviving child may ignore SIGTERM after the daemon has already exited.
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    process.wait(timeout=5)
 
 
 def verify(provider, variable):
@@ -115,8 +135,8 @@ def verify(provider, variable):
                variable: os.environ[variable]}
         process = subprocess.Popen([daemon, "--runtime-dir", str(home / "runtime"), "--cwd", str(workspace),
             "--session-id", "live-vendor", "--engine", provider, "--effort", "low",
-            "--lore-python", sys.executable, "--linger", "10"], env=env,
-            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            "--linger", "10"], env=env,
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, start_new_session=True)
         wire = None
         try:
             registry = home / "runtime/registry/live-vendor.json"
@@ -182,18 +202,12 @@ def verify(provider, variable):
         finally:
             if wire:
                 try:
-                    wire.call("interrupt")
-                    wire.call("stop")
+                    wire.call("interrupt", timeout=2)
+                    wire.call("stop", timeout=2)
                 except (TimeoutError, RuntimeError, OSError, ValueError):
                     pass
                 wire.sock.close()
-            if process.poll() is None:
-                process.terminate()
-                try:
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=5)
+            terminate_group(process)
             process.stderr.close()
     return result
 
