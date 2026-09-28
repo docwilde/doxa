@@ -349,3 +349,55 @@ Eight focused native checks passed independently, covering launcher integrity,
 startup refusal/cancellation, escaped process groups/sessions, already orphaned
 tools, natural provider exit and preservation of an unrelated process. The
 isolated owner entry is an ignored test-harness utility invoked by those tests.
+
+## Alpha.43 authenticated follow-up — 2026-09-28
+
+Fresh checks used commit `37ad100d375b055dbaf3eae3356c1a34ad65c6c5`,
+the **2.0.0-alpha.43** debug daemon with production features, native LORE
+**0.62.2**, and the installed receipt-verified protected Codex **0.156.1**
+package. These establish behavior, not a performance comparison. Earlier
+sections remain evidence for their separately named builds and account states.
+
+Claude Code **2.1.284** completed two authenticated native Sonnet turns:
+streaming, a synthetic file read, retained recall after native stop/resume,
+and native model/effort controls passed. A read-only CLI `get_usage` request
+succeeded with `rate_limits=null` and made no additional model turn. Raw quota
+frames were deleted; a subsequent native source review found an omission of
+nested quota windows. Consequently this run does not establish complete weekly
+quota rendering or that the upstream provider omitted a weekly window.
+
+Codex completed successful exact-source native LORE review, manual compaction,
+and retained recall. A second isolated run verified real provider automatic
+compaction and retained recall on the same owned thread. Across both runs the
+allowance was **four Codex prompts, one manual compaction, one automatic
+compaction, and three actual Haiku reviews**. Native LORE's canonical
+authentication fallback also produced three explicit `--bare` authentication
+refusals before model work; these were not additional inference turns.
+
+The first run stopped after successful manual compaction and recall when the
+harness attempted to connect through a stale owned registry during resume.
+No automatic prompt was submitted in that failed path. The exact owned stale
+registry was corrected for the separate automatic-only run, which used the
+remaining allowance without an inference retry.
+
+The automatic check lowered the threshold to **14,022 tokens**, derived from
+**15,580** reported tokens in the short synthetic conversation. It observed one
+new provider compaction checkpoint, native review completion, unchanged provider
+thread identity and exact retained recall without tools. The reported usable
+model window was **258,400 tokens**. This controlled trigger does **not** verify
+default-window large-context stress: the cached 272,000-token model window and
+pinned provider's 90% rule imply a default threshold of approximately **244,800
+tokens**. Representative owned history near that threshold, followed by actual
+automatic compaction and recall, remains unverified.
+
+All checks used private SSD workspaces and isolated memory, beliefs and proposals.
+Original authentication remained unchanged. Temporary credential copies, stores,
+runtime files and owned processes were removed; native supervision and exact
+owned process cleanup completed. Retained evidence contains metadata only, with
+no source content, prompts, replies or credentials. Reported token accounting
+does not establish a separate billed compaction cost.
+
+DeepSeek and z.ai still lacked configured keys; their checks made zero paid
+requests. These results retain the [native runtime guide](../rust/README.md)
+and [supported boundaries](rust-1.19-parity.md#preserved-boundaries), including
+the [protected compaction contract](../rust/doxa-engines/README.md#compaction-review).
