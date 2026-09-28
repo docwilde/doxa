@@ -4,7 +4,7 @@
 //! The shapes below come from `codex app-server generate-ts --experimental`
 //! (Codex 0.156.1). Stdio is newline-delimited JSON-RPC without LSP headers.
 use std::io;
-use std::os::unix::process::CommandExt;
+use std::os::unix::{process::CommandExt, net::UnixStream, io::AsRawFd};
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -81,6 +81,8 @@ pub struct AppServerDriver {
     // Keep the unreaped leader PID reserved until killing this original group.
     // Reaping first would allow PID/PGID reuse and miss surviving descendants.
     process_group: Option<u32>,
+    owner_control: Option<UnixStream>,
+    supervised: bool,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
     next_id: u64,
@@ -169,26 +171,37 @@ impl AppServerDriver {
         if options.resume_thread.as_deref().is_some_and(|id| !valid_thread_id(id)) {
             return Err(AppServerError::Protocol("invalid resume thread ID"));
         }
+        let supervised = compact_gate.is_some();
+        let (mut owner_control, owner_peer) = if supervised {
+            let (parent, child) = UnixStream::pair()?;
+            (Some(parent), Some(child))
+        } else { (None, None) };
+        let owner_fd = owner_peer.as_ref().map(AsRawFd::as_raw_fd);
         let mut command = Command::new(&options.executable);
         command.arg("app-server").arg("--stdio")
             .current_dir(&options.cwd).stdin(Stdio::piped())
-            .stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true);
+            .stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(!supervised);
+        if let Some(fd) = owner_fd { command.env(crate::provider_owner::CONTROL_ENV, fd.to_string()); }
         if let Some(gate) = &compact_gate {
             for value in gate.cli_overrides() { command.arg("-c").arg(value); }
         }
         unsafe {
-            command.as_std_mut().pre_exec(|| {
+            command.as_std_mut().pre_exec(move || {
+                if let Some(fd) = owner_fd {
+                    if libc::fcntl(fd, libc::F_SETFD, 0) < 0 { return Err(io::Error::last_os_error()); }
+                }
                 if libc::setsid() == -1 { Err(io::Error::last_os_error()) } else { Ok(()) }
             });
         }
         let mut child = command.spawn()?;
+        drop(owner_peer);
         let process_group = child.id();
         let stdin = child.stdin.take().ok_or(AppServerError::Protocol("missing stdin"))?;
         let stdout = BufReader::new(child.stdout.take().ok_or(AppServerError::Protocol("missing stdout"))?);
         let scrub = std::sync::Arc::new(scrub);
         let tool_scrub = scrub.clone();
         let mut driver = Self {
-            options, effort: None, interactive: false, peer_tools: false, agent_tools: Vec::new(), dynamic_tool_names: Vec::new(), compact_gate, review_items: Vec::new(), scrub: Box::new(move |text| scrub(text)), child, process_group, stdin, stdout, next_id: 0,
+            options, effort: None, interactive: false, peer_tools: false, agent_tools: Vec::new(), dynamic_tool_names: Vec::new(), compact_gate, review_items: Vec::new(), scrub: Box::new(move |text| scrub(text)), child, process_group, owner_control: owner_control.take(), supervised, stdin, stdout, next_id: 0,
             thread_id: None, turn_id: None, reasoning_bytes: 0, reasoning_chars: 0,
             reasoning_buffer: String::new(), reasoning_truncated: false,
             assistant_buffers: Vec::new(), assistant_bytes: 0, assistant_message_emitted: false, usage: None, effective_model: None,
@@ -196,6 +209,7 @@ impl AppServerDriver {
             pending_bytes: 0,
             tool_normalizer: CodexJsonlNormalizer::new(move |text| tool_scrub(text)),
         };
+        if let Some(control) = driver.owner_control.as_mut() { crate::provider_owner::acknowledge(control).await?; }
         let initialized = driver.request("initialize", json!({"clientInfo":{"name":"doxa","title":null,"version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true}})).await?;
         driver.send(json!({"method":"initialized"})).await?;
         if driver.compact_gate.is_some() {
@@ -319,11 +333,12 @@ impl AppServerDriver {
 
     pub async fn shutdown(&mut self) {
         self.kill_group();
-        let _ = self.child.start_kill();
+        if !self.supervised { let _ = self.child.start_kill(); }
         let _ = timeout(Duration::from_secs(5), self.child.wait()).await;
     }
 
     fn kill_group(&mut self) {
+        if self.supervised { self.owner_control.take(); return; }
         if let Some(pid) = self.process_group.take() {
             unsafe { libc::kill(-(pid as i32), libc::SIGKILL); }
         }
@@ -698,7 +713,7 @@ impl AppServerDriver {
 impl Drop for AppServerDriver {
     fn drop(&mut self) {
         self.kill_group();
-        let _ = self.child.start_kill();
+        if !self.supervised { let _ = self.child.start_kill(); }
     }
 }
 
