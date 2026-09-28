@@ -334,3 +334,18 @@ temporary directories remained. Only metadata was retained, with no prompts,
 source content or replies. These checks used isolated LORE stores with memory
 enabled; they did not trigger compaction or establish successful LORE review.
 Claude reviewer authentication is still required for that separate live gate.
+
+### Actual helper and tool shutdown
+
+The lifecycle check used the unchanged pinned Codex server and Code Mode
+payload with the new native supervisor and production daemon. An active helper
+and `sleep` tool were both stopped and reaped after ordinary daemon shutdown.
+A second check killed only the exact owned daemon through its pidfd; the
+control socket's EOF caused the supervisor to stop and reap both descendants.
+Neither check needed the harness to adopt or kill those descendants afterward.
+Both used only a local model peer and made zero paid requests.
+
+Eight focused native checks passed independently, covering launcher integrity,
+startup refusal/cancellation, escaped process groups/sessions, already orphaned
+tools, natural provider exit and preservation of an unrelated process. The
+isolated owner entry is an ignored test-harness utility invoked by those tests.
