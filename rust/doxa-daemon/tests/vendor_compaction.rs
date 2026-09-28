@@ -10,11 +10,14 @@ fn receive(reader:&mut BufReader<UnixStream>)->Value{let mut line=String::new();
 fn send(socket:&mut UnixStream,value:Value){writeln!(socket,"{value}").unwrap();}
 fn done(reader:&mut BufReader<UnixStream>)->Value{loop{let frame=receive(reader);if frame["event"]["type"]=="turn_done"{return frame["event"]["data"].clone();}}}
 fn serve(frames:Vec<&'static str>)->(String,thread::JoinHandle<Vec<Value>>){
+    serve_events(frames.into_iter().map(|content| vec![json!({"model":"deepseek-flash","choices":[{"finish_reason":"stop","delta":{"content":content}}],"usage":{"prompt_tokens":3,"completion_tokens":4}})]).collect())
+}
+fn serve_events(frames:Vec<Vec<Value>>)->(String,thread::JoinHandle<Vec<Value>>){
     let listener=TcpListener::bind("127.0.0.1:0").unwrap();listener.set_nonblocking(true).unwrap();
     let endpoint=format!("http://{}/chat/completions",listener.local_addr().unwrap());
     let worker=thread::spawn(move||{
         let mut requests=vec![];
-        for content in frames{
+        for events in frames{
             let deadline=Instant::now()+Duration::from_secs(10);
             let mut socket=loop{match listener.accept(){Ok((stream,_))=>break stream,Err(error) if error.kind()==std::io::ErrorKind::WouldBlock=>{assert!(Instant::now()<deadline,"provider fixture request deadline");thread::sleep(Duration::from_millis(10));},Err(error)=>panic!("{error}")}};
             socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();let mut request=vec![];
@@ -24,8 +27,8 @@ fn serve(frames:Vec<&'static str>)->(String,thread::JoinHandle<Vec<Value>>){
                     if request.len()>=index+4+length{requests.push(serde_json::from_slice(&request[index+4..index+4+length]).unwrap());break;}
                 }
             }
-            let event=json!({"model":"deepseek-flash","choices":[{"finish_reason":"stop","delta":{"content":content}}],"usage":{"prompt_tokens":3,"completion_tokens":4}});
-            let body=format!("data: {event}\n\ndata: [DONE]\n\n");
+            let mut body=events.into_iter().map(|event|format!("data: {event}\n\n")).collect::<String>();
+            body.push_str("data: [DONE]\n\n");
             write!(socket,"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
         }requests
     });(endpoint,worker)
@@ -75,4 +78,51 @@ fn reviewed_managed_compaction_preserves_originals_and_review_refusal_keeps_sess
         let durable=fs::read_to_string(transcripts.join("vendor-compaction.messages.json")).unwrap();
         assert!(durable.contains("original assistant"));assert!(durable.contains("followup assistant"));assert!(!durable.contains("MANAGED-SUMMARY-FIXTURE"));
     }
+}
+
+#[test]
+fn split_vendor_content_is_scrubbed_as_complete_messages_and_plain_text_stays_ordered(){
+    let dir=tempfile::tempdir().unwrap();let root=dir.path();
+    let secret="sk-ownedCanonicalFixtureSecret1234567890";
+    let mut events=vec![];
+    for (field,value) in [("reasoning_content",format!("{secret} thought")),("content",format!("{secret} answer"))]{
+        for fragment in value.chars(){
+            let mut delta=json!({});delta[field]=json!(fragment.to_string());
+            events.push(json!({"model":"deepseek-flash","choices":[{"finish_reason":null,"delta":delta}]}));
+        }
+    }
+    events.push(json!({"model":"deepseek-flash","choices":[{"finish_reason":"stop","delta":{}}],"usage":{"prompt_tokens":3,"completion_tokens":4}}));
+    let plain=json!({"model":"deepseek-flash","choices":[{"finish_reason":"stop","delta":{"reasoning_content":"ordinary café thought","content":"ordinary café answer"}}],"usage":{"prompt_tokens":3,"completion_tokens":4}});
+    let (endpoint,server)=serve_events(vec![events,vec![plain]]);
+    let mut daemon=Daemon(Command::new(env!("CARGO_BIN_EXE_doxa-daemon")).env_clear()
+        .args(["--runtime-dir",root.to_str().unwrap(),"--cwd",root.to_str().unwrap(),"--session-id","vendor-stream","--engine","deepseek","--model","deepseek-flash","--vendor-endpoint",&endpoint,"--linger","20"])
+        .env("PATH","/usr/bin:/bin").env("HOME",root.join("home")).env("DOXA_HOME",root.join("doxa"))
+        .env("LORE_ROOT",root.join("lore")).env("LORE_PROJECTS_DIR",root.join("projects")).env("LORE_SKILLS_DIR",root.join("skills"))
+        .env("LORE_DISABLE_SYNC","1").env("LORE_DISABLE_REVIEW","1").env("DEEPSEEK_API_KEY","local-fixture-key")
+        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap());
+    let registry=root.join("registry/vendor-stream.json");
+    wait(||{if registry.exists(){true}else{if daemon.0.try_wait().unwrap().is_some(){let mut detail=String::new();daemon.0.stderr.take().unwrap().read_to_string(&mut detail).unwrap();panic!("native daemon: {detail}");}false}});
+    let entry:Value=serde_json::from_slice(&fs::read(registry).unwrap()).unwrap();
+    let mut socket=UnixStream::connect(entry["daemon_socket"].as_str().unwrap()).unwrap();socket.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    let mut reader=BufReader::new(socket.try_clone().unwrap());receive(&mut reader);send(&mut socket,json!({"type":"attach","cursor":null}));
+    for (id,expected_text,expected_reasoning) in [(1,"[REDACTED:api-key] answer","[REDACTED:api-key] thought"),(2,"ordinary café answer","ordinary café thought")]{
+        send(&mut socket,json!({"type":"prompt","id":id,"text":"normal fixture prompt"}));
+        let (mut text,mut reasoning)=(String::new(),String::new());let mut kinds=vec![];
+        loop{let frame=receive(&mut reader);assert!(!frame.to_string().contains(secret));let event=&frame["event"];
+            let kind=event["type"].as_str().unwrap_or("");
+            match kind{"text_delta"=>text.push_str(event["data"]["text"].as_str().unwrap()),"reasoning_delta"=>reasoning.push_str(event["data"]["text"].as_str().unwrap()),"turn_done"=>{assert_eq!(event["data"]["is_error"],false,"{frame}");assert_eq!(event["data"]["usage_complete"],true);break;},_=>{}}
+            if matches!(kind,"text_delta"|"reasoning_delta"){kinds.push(kind.to_owned());}
+        }
+        // No single credential fragment contains the entire key: check the
+        // concatenated projection as well as complete durable messages.
+        assert_eq!(text,expected_text);assert_eq!(reasoning,expected_reasoning);
+        assert_eq!(kinds,["reasoning_delta","text_delta"]);
+    }
+    let originals=transcript_dir(root);
+    for file in ["vendor-stream.jsonl","vendor-stream.messages.json"]{
+        let durable=fs::read_to_string(originals.join(file)).unwrap();
+        assert!(!durable.contains(secret));assert!(durable.contains("[REDACTED:api-key] answer"));assert!(durable.contains("ordinary café answer"));
+    }
+    send(&mut socket,json!({"type":"call","id":3,"method":"stop","params":{}}));wait(||daemon.0.try_wait().unwrap().is_some());
+    assert_eq!(server.join().unwrap().len(),2);
 }

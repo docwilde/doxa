@@ -2953,10 +2953,12 @@ assert 'sk-ownedCanonicalFixtureSecret1234567890' in turn['params']['input'][0][
 if 'second' in turn['params']['input'][0]['text']:
     assert turn['params']['model']=='gpt-test' and turn['params']['effort']=='high'
 send({'id':turn['id'],'result':{'turn':{'id':'turn_1'}}})
-send({'method':'item/reasoning/textDelta','params':{'threadId':'thread-1','turnId':'turn_1','itemId':'r','delta':'sk-ownedCanonicalFixtureSecret1234567890 thought'}})
+for fragment in 'sk-ownedCanonicalFixtureSecret1234567890 thought':
+    send({'method':'item/reasoning/textDelta','params':{'threadId':'thread-1','turnId':'turn_1','itemId':'r','delta':fragment}})
 send({'method':'item/started','params':{'threadId':'thread-1','turnId':'turn_1','item':{'type':'commandExecution','id':'cmd_1','command':'echo sk-ownedCanonicalFixtureSecret1234567890'}}})
 send({'method':'item/completed','params':{'threadId':'thread-1','turnId':'turn_1','item':{'type':'commandExecution','id':'cmd_1','command':'echo sk-ownedCanonicalFixtureSecret1234567890','status':'completed','aggregatedOutput':'sk-ownedCanonicalFixtureSecret1234567890 tool output','exitCode':0}}})
-send({'method':'item/agentMessage/delta','params':{'threadId':'thread-1','turnId':'turn_1','itemId':'a','delta':'sk-ownedCanonicalFixtureSecret1234567890 answer'}})
+for fragment in 'sk-ownedCanonicalFixtureSecret1234567890 answer':
+    send({'method':'item/agentMessage/delta','params':{'threadId':'thread-1','turnId':'turn_1','itemId':'a','delta':fragment}})
 send({'method':'thread/tokenUsage/updated','params':{'threadId':'thread-1','turnId':'turn_1','tokenUsage':{'total':{'inputTokens':100,'outputTokens':50,'cachedInputTokens':10},'last':{'totalTokens':20000,'reasoningOutputTokens':7},'modelContextWindow':32000}}})
 send({'method':'turn/completed','params':{'threadId':'thread-1','turn':{'id':'turn_1','status':'completed','error':None}}})
 for line in sys.stdin: pass
@@ -2999,12 +3001,16 @@ for line in sys.stdin: pass
             if reply["type"] == "reply" && reply["id"] == prompt_id { assert_eq!(reply["ok"], true); break; }
         }
         let mut kinds = Vec::new();
+        let mut text = String::new();
+        let mut reasoning = String::new();
         loop {
             let frame = receive(&mut reader);
             assert!(!frame.to_string().contains("sk-ownedCanonicalFixtureSecret1234567890"));
             let event = &frame["event"];
             let kind = event["type"].as_str().unwrap_or("");
             kinds.push(kind.to_owned());
+            if kind == "text_delta" { text.push_str(event["data"]["text"].as_str().unwrap()); }
+            if kind == "reasoning_delta" { reasoning.push_str(event["data"]["text"].as_str().unwrap()); }
             if kind == "turn_done" {
                 assert_eq!(event["data"]["is_error"], false, "{event}");
                 assert_eq!(event["data"]["ctx_tokens"], 8000);
@@ -3014,6 +3020,9 @@ for line in sys.stdin: pass
                 break;
             }
         }
+        // Concatenation catches leaks which no individual fragment contains.
+        assert_eq!(text, "[REDACTED:api-key] answer");
+        assert_eq!(reasoning, "[REDACTED:api-key] thought");
         assert!(kinds.contains(&"reasoning_delta".to_owned()));
         assert!(kinds.contains(&"tool_call".to_owned()));
         assert!(kinds.contains(&"tool_result_detail".to_owned()));
