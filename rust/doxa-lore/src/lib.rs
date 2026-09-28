@@ -24,6 +24,18 @@ pub const PROTOCOL_VERSION: u64 = 1;
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 const MAX_MEMORY_CHARS: u64 = 1024 * 1024;
 
+/// Effective DOXA store for native child carriers. This contains only a path;
+/// shared settings and credentials are resolved by LORE inside the child.
+pub fn carrier_root() -> Result<Option<PathBuf>, LoreError> {
+    native_config::carrier_root()
+}
+
+/// Mandatory review policy uses the same effective store and persisted settings
+/// as the worker. Resolution errors cannot authorize protected compaction.
+pub fn review_disabled() -> Result<bool, LoreError> {
+    native_config::review_disabled()
+}
+
 fn valid_digest(s: &str) -> bool {
     s.len() == 64 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
@@ -271,6 +283,7 @@ impl LoreClient {
     }
     fn spawn_module(carrier: &Path, timeout: Duration, module: &str, required: &[&str]) -> Result<Self, LoreError> {
         let mut command = Command::new(carrier);
+        if let Some(root) = carrier_root()? { command.env("LORE_ROOT", root); }
         command
             .args(["-m", module])
             .stdin(Stdio::piped())

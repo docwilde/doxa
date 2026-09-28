@@ -112,10 +112,21 @@ pub fn supervise(metadata: &Value, engine: &str, timeout: Duration) -> io::Resul
     supervise_at(&binary()?, metadata, engine, timeout, 0)
 }
 
+/// Host-resolved store paths apply only to this native worker. Secrets remain
+/// in the inherited environment or the canonical private settings file.
+pub fn supervise_with_env(metadata: &Value, engine: &str, timeout: Duration, environment: &[(std::ffi::OsString, std::ffi::OsString)]) -> io::Result<bool> {
+    supervise_at_with_env(&binary()?, metadata, engine, timeout, 0, environment)
+}
+
 fn supervise_at(binary: &Path, metadata: &Value, engine: &str, timeout: Duration, control: libc::c_int) -> io::Result<bool> {
+    supervise_at_with_env(binary, metadata, engine, timeout, control, &[])
+}
+
+fn supervise_at_with_env(binary: &Path, metadata: &Value, engine: &str, timeout: Duration, control: libc::c_int, environment: &[(std::ffi::OsString, std::ffi::OsString)]) -> io::Result<bool> {
     let raw = metadata_bytes(metadata, engine, timeout)?;
     if review_disabled() || ready(control, libc::POLLIN)? { return Ok(false); }
     let mut command = Command::new(binary);
+    command.envs(environment.iter().cloned());
     command.args(["review-worker", "--engine", engine]).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null());
     unsafe { command.pre_exec(|| { if libc::setsid() < 0 { return Err(io::Error::last_os_error()); } Ok(()) }); }
     let mut child = command.spawn()?;

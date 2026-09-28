@@ -5,6 +5,17 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.45 — 2026-09-29
+
+**LORE integration**
+
+- Fix **`native_config::resolve`** to choose the sticky store before loading
+  shared **LORE 0.62.3** caps, stage switches, signing and transport settings.
+- Remove the duplicate capacity parser. Explicit environment values win;
+  isolated stores do not inherit saved host credentials.
+- Respect saved review policy before issuing compaction approval receipts;
+  pass effective stores to review workers and test ten isolated settings cases.
+
 ## 2.0.0-alpha.44 — 2026-09-28
 
 **Claude quotas**

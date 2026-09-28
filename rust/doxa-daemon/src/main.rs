@@ -815,10 +815,15 @@ fn main() {
             println!("{}",doxa_engines::compact_hook::hook_main(Path::new(manifest),digest));return;
         },
         [mode,engine,metadata,timeout] if mode=="__review-supervisor"=>Some((||{
+            if doxa_lore::review_disabled().map_err(|_| invalid("LORE review settings unavailable"))? {
+                return Err(io::Error::other("LORE review is disabled"));
+            }
             let value=serde_json::from_str(metadata).map_err(|_|invalid("invalid review metadata"))?;
             let millis=timeout.parse::<u64>().ok().filter(|n|*n<=180000).ok_or_else(||invalid("invalid review timeout"))?;
             let timeout = Duration::from_millis(millis);
-            if doxa_engines::review_worker::supervise(&value,engine,timeout)? {
+            let environment = doxa_lore::carrier_root().map_err(|_| invalid("invalid LORE carrier root"))?
+                .map(|root| vec![(std::ffi::OsString::from("LORE_ROOT"), root.into_os_string())]).unwrap_or_default();
+            if doxa_engines::review_worker::supervise_with_env(&value,engine,timeout,&environment)? {
                 println!("{}", doxa_engines::review_worker::approval_receipt(&value,engine,timeout)?);
                 Ok(())
             } else { Err(io::Error::other("review did not complete")) }

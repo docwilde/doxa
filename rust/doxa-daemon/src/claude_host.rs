@@ -97,7 +97,7 @@ impl Shared {
             })
     }
     fn review(&self, older: bool) -> bool {
-        if !self.enabled || self.failed.load(Ordering::Acquire) {
+        if !self.enabled || self.failed.load(Ordering::Acquire) || doxa_lore::review_disabled().unwrap_or(true) {
             return false;
         }
         let metadata = json!({"cwd":self.cwd,"session_id":self.session,"transcript":self.store.transcript_path(),"older":older});

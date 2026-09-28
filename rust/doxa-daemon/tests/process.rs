@@ -39,7 +39,10 @@ impl NativeDaemonCommand {
             fs::create_dir_all(&home).unwrap();
             fs::set_permissions(&home, fs::Permissions::from_mode(0o700)).unwrap();
         }
-        self.0.env("LORE_DISABLE_SYNC","1").env("LORE_DISABLE_REVIEW","1");
+        self.0.env("LORE_DISABLE_SYNC","1");
+        if !self.0.get_envs().any(|(name,value)|name=="LORE_DISABLE_REVIEW" && value.is_some()) {
+            self.0.env("LORE_DISABLE_REVIEW","1");
+        }
     }
     fn spawn(&mut self)->std::io::Result<Child> {self.isolate();self.0.spawn()}
     fn output(&mut self)->std::io::Result<std::process::Output> {self.isolate();self.0.output()}
@@ -176,6 +179,9 @@ impl Process {
         Self::start_codex_with_inbound(runtime, codex, python, false)
     }
     fn start_codex_appserver(runtime: &Path, codex: &Path, _fixture_interpreter: &Path, resume: bool) -> Self {
+        Self::start_codex_appserver_with_review(runtime,codex,resume,false)
+    }
+    fn start_codex_appserver_with_review(runtime: &Path, codex: &Path, resume: bool, review_enabled: bool) -> Self {
         // Inline peers retain their existing protocol/adversarial behavior
         // after the same protected owner admission as the common turn peer.
         let source = fs::read_to_string(codex).unwrap();
@@ -193,6 +199,12 @@ impl Process {
             .env("DOXA_HOME", runtime.join("home"))
             .env_remove("DOXA_CODEX_APPSERVER");
         if resume { command.env("DOXA_CODEX_APPSERVER", "0"); }
+        if review_enabled {
+            // Reach pre-review source preparation while preventing inference
+            // if a regression unexpectedly advances into the reviewer.
+            command.env("LORE_DISABLE_REVIEW","0").env("LORE_SKIP","")
+                .env("DOXA_LORE_RS","/usr/bin/false").env("LORE_CLAUDE_BIN","/usr/bin/false");
+        }
         let child = command.spawn().unwrap();
         let registry = runtime.join("registry/codex-session.json");
         wait_until(|| registry.exists());
@@ -3541,7 +3553,7 @@ while True:
  notice('thread/tokenUsage/updated',turnId='turn-1',tokenUsage={'last':{'inputTokens':0,'outputTokens':0,'totalTokens':0},'total':{'inputTokens':0,'outputTokens':0,'cachedInputTokens':0},'modelContextWindow':32000})
  notice('turn/completed',turn={'id':'turn-1','status':'completed','error':None})
 "#);
-    let mut process=Process::start_codex_appserver(dir.path(),&codex,Path::new("/usr/bin/python3"),false);
+    let mut process=Process::start_codex_appserver_with_review(dir.path(),&codex,false,true);
     let (mut reader,mut socket)=process.connect();
     reader.get_ref().set_read_timeout(Some(CODEX_PREPARATION_TIMEOUT)).unwrap();
     receive(&mut reader);send(&mut socket,json!({"type":"attach","cursor":null}));

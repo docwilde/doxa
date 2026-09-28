@@ -286,7 +286,7 @@ impl VendorHost {
             "usage_complete":true,"model_consistent":true,"usage_scope":"turn","usage_source":"vendor_response",
             "cost_usd":null,"session_cost_usd":null});
         let run = (|| -> Result<(), &'static str> {
-            if !self.lore_enabled || doxa_engines::review_worker::review_disabled() { return Err("LORE review is disabled; managed compaction blocked"); }
+            if !self.lore_enabled || doxa_lore::review_disabled().unwrap_or(true) { return Err("LORE review is disabled; managed compaction blocked"); }
             if self.storage_uncertain.load(Ordering::Acquire) || self.scrub_failed.load(Ordering::Acquire) { return Err("Vendor source storage or scrubbing is unavailable"); }
             if self.closing.load(Ordering::Acquire) { return Err("Vendor session is stopping"); }
             let (sender, cancel) = watch::channel(false);
