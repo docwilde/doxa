@@ -260,17 +260,17 @@ impl LoreClient {
             && self.capabilities.contains("belief_action_v1")
     }
 
-    /// Launch the sidecar lazily, only when a session requests LORE.
-    /// `python` should point at the environment that installed DOXA and LORE.
-    pub fn spawn(python: &Path, timeout: Duration) -> Result<Self, LoreError> {
-        Self::spawn_module(python, timeout, "doxa.lore_bridge", &["scrub", "snapshot"])
+    /// Launch the trusted native LORE carrier when a session requests memory.
+    /// Its `-m` dispatch preserves the development compatibility protocol.
+    pub fn spawn(carrier: &Path, timeout: Duration) -> Result<Self, LoreError> {
+        Self::spawn_module(carrier, timeout, "doxa.lore_bridge", &["scrub", "snapshot"])
     }
     /// Separate canonical agent operator process; it binds one host identity.
-    pub fn spawn_agent(python: &Path, timeout: Duration) -> Result<Self, LoreError> {
-        Self::spawn_module(python, timeout, "doxa.native_agent_tools", &["agent_catalog_v1", "agent_tool_v1"])
+    pub fn spawn_agent(carrier: &Path, timeout: Duration) -> Result<Self, LoreError> {
+        Self::spawn_module(carrier, timeout, "doxa.native_agent_tools", &["agent_catalog_v1", "agent_tool_v1"])
     }
-    fn spawn_module(python: &Path, timeout: Duration, module: &str, required: &[&str]) -> Result<Self, LoreError> {
-        let mut command = Command::new(python);
+    fn spawn_module(carrier: &Path, timeout: Duration, module: &str, required: &[&str]) -> Result<Self, LoreError> {
+        let mut command = Command::new(carrier);
         command
             .args(["-m", module])
             .stdin(Stdio::piped())
@@ -286,7 +286,7 @@ impl LoreClient {
                 }
             });
         }
-        // An interpreter being replaced during an update can briefly return
+        // A carrier executable being replaced during an update can return
         // ETXTBSY. Retry only that transient error; other spawn failures are
         // reported immediately.
         #[cfg(unix)]
