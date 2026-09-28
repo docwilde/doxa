@@ -337,3 +337,10 @@ synchronize on the fresh provider turn RPC with the existing thirty-second
 preparation budget, then retain their original persistence, cancellation and
 process-leak assertions and deadlines. The receipt, carrier checks, runtime
 limits and fail-closed compaction contract stay intact.
+
+The next CI run cleared all seventy-two daemon tests and exposed a separate
+launcher refusal deadline. It hashed the large debug dispatcher twice before
+noticing a missing helper. Payload verification now precedes dispatcher hashing;
+both owned, verified descriptors are required before any execution. Invalid
+helper cases still have a one-second refusal limit. The test actively kills and
+reaps a command that exceeds its bound, including a future FIFO regression.

@@ -7,12 +7,14 @@ the stable 2.0 release has not been cut.
 
 ## 2.0.0-alpha.42 — 2026-09-28
 
-**Protected provider tests**
+**Protected provider startup**
 
 - Synchronize fault-injection tests with verified provider startup before
   checking state; accommodate debug-carrier hashing on slower CI runners.
 - Preserve persistence, cancellation and process-leak assertions and their
-  original deadlines after preparation. Production protection is unchanged.
+  original deadlines after preparation.
+- Reject invalid helper payloads before hashing the dispatcher; keep both
+  verified file descriptors before execution and bound refusal-test cleanup.
 
 ## 2.0.0-alpha.41 — 2026-09-28
 
