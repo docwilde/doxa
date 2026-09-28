@@ -1,5 +1,9 @@
 # Live provider verification — 2026-09-28
 
+The [latest authenticated checks](#alpha43-authenticated-follow-up--2026-09-28)
+verified Claude turns and native LORE-backed Codex manual and controlled automatic
+compaction. Earlier sections retain the account state and versions they measured.
+
 ## Fresh authentication and resume verification
 
 The completion run used isolated worktree `codex/live-providers-20260928` at
@@ -358,9 +362,11 @@ the **2.0.0-alpha.43** debug daemon with production features, native LORE
 package. These establish behavior, not a performance comparison. Earlier
 sections remain evidence for their separately named builds and account states.
 
-Claude Code **2.1.284** completed two authenticated native Sonnet turns:
-streaming, a synthetic file read, retained recall after native stop/resume,
-and native model/effort controls passed. A read-only CLI `get_usage` request
+Claude Code **2.1.284** completed two authenticated native Sonnet turns on the
+same running process: streamed text, a synthetic file read, within-session recall,
+and native model/effort controls passed. These short replies each produced one
+text delta; long-form streaming fluency and reasoning deltas were not established.
+A read-only CLI `get_usage` request
 succeeded with `rate_limits=null` and made no additional model turn. Raw quota
 frames were deleted; a subsequent native source review found an omission of
 nested quota windows. Consequently this run does not establish complete weekly

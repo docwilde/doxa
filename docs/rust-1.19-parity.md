@@ -1,7 +1,7 @@
 # Rust 2.0 parity with DOXA 1.19.0
 
-Baseline: Python `v1.19.0` production behavior. This alpha.43 documentation
-refresh records implementation through **alpha.42**, with canonical **LORE 0.62.2**.
+Baseline: Python `v1.19.0` production behavior. This tracker records implementation
+through **alpha.44**, with canonical **LORE 0.62.2**, and account checks on **alpha.43**.
 The Rust runtime implements the audited workflows below. Live account checks
 remain bounded by the [verification record](live-provider-verification-2026-09-28.md)
 and the [remaining verification](#remaining-verification) section; implementation
@@ -32,6 +32,7 @@ coverage alone does not establish authenticated compatibility for every provider
 | Alpha.41 | Required Code Mode host, receipt-bound helper dispatch and native supervision that reaps escaped tool descendants. |
 | Alpha.42 | Verified startup preparation before fault-injection deadlines; early invalid-payload refusal while retaining all execution integrity checks. |
 | Alpha.43 | README and tracker refresh with release-specific evidence and remaining live checks; no additional runtime implementation. |
+| Alpha.44 | Retain Claude's nested five-hour/weekly quota windows and startup events; preserve valid partial updates and identify native CLI provenance. Record authenticated alpha.43 verification. |
 
 Standalone LORE administration, hooks, MCP and network operations are native Rust;
 they are not a remaining Python replacement task. See the
@@ -39,13 +40,16 @@ they are not a remaining Python replacement task. See the
 
 ## Remaining verification
 
-The recorded account state on **2026-09-28** leaves these checks open:
+The latest authenticated alpha.43 checks on **2026-09-28** verified Claude file
+reads, text events, within-session recall and model/effort controls. Native
+Claude-backed LORE review and Codex manual/controlled automatic compaction also
+passed with post-compaction recall. The following checks remain open:
 
 | Check | Required setup and evidence |
 | --- | --- |
-| Claude streaming, tools, current-session model/effort and 5-hour/weekly quota | Authenticate with `doxa auth login claude` or `claude auth login`, then exercise a native session. CLI initialization returned eight models; that does not prove an authenticated turn or reported quota. |
+| Claude full five-hour/weekly quota and longer streaming | Two short native turns passed on Claude Code 2.1.284 with verified model/effort changes. Only a five-hour status/reset appeared in normalized events; raw CLI frames were deleted and the translator omitted nested windows. Alpha.44 fixes that omission. Read-only `get_usage` returned null quota rows; percentages/weekly and long-form/reasoning streaming remain unverified. |
 | DeepSeek and z.ai live turns, streaming, tools, controls and resume | Set the appropriate key through `/setup` or inherited `DEEPSEEK_API_KEY` / `ZAI_API_KEY`. Two-turn native loopback checks passed for both; account requests were not made because keys were absent. |
-| Successful LORE review and Codex manual/large-context automatic compaction | Authenticate the Claude-backed native LORE reviewer, complete an exact-snapshot review, then verify the protected provider's successful compaction path. Codex authentication alone does not provide reviewer authentication. |
+| Codex default-window large-context automatic compaction | Manual compaction and real automatic compaction with a lowered 14,022-token threshold passed exact native review and recall. Representative history near the approximately 244,800-token default trigger remains unverified; the lowered-threshold run does not establish that stress coverage. |
 
 Unknown plan, quota, balance and context values remain unknown. DeepSeek balance
 can be shown when its endpoint reports it; z.ai has no supported balance endpoint.
@@ -72,9 +76,10 @@ intentional [boundaries](#preserved-boundaries) below.
   until explicit migration resumes their original thread. Alpha.41 also installs
   the matching native Code Mode host and verifies its receipt for models that
   require Code Mode rather than direct shell tools. Compiled loopback
-  tests verify the gate; successful real-account LORE review and large-context
-  compaction remain unverified without Claude reviewer authentication. Native
-  vendor compaction retains durable history and a reviewed summary checkpoint.
+  tests verify refusal gates; alpha.43 authenticated checks verify successful
+  native review and manual/controlled automatic compaction. Default-window stress
+  remains unverified. Native vendor compaction retains durable history and a
+  reviewed summary checkpoint.
 - Unreported account, plan, quota, balance and context components stay unknown.
   Fixture tests do not establish compatibility with arbitrary live provider builds.
 - Native input, output, tab, roster and snapshot bounds remain enforced. Normal
@@ -107,14 +112,22 @@ provider/LORE seams against disposable stores and local provider fixtures.
 | Evidence | Result and scope |
 | --- | --- |
 | Alpha.42 [main CI](https://github.com/docwilde/doxa/actions/runs/36472835265), commit `3e1f9d3` | 962 Rust tests passed, zero failed, four optional/harness tests ignored; installer checks and native launcher smoke passed. |
+| Alpha.43 [main CI](https://github.com/docwilde/doxa/actions/runs/36476565103), commit `37ad100` | Required Rust CI passed before these account checks. |
 | Compiled protected app server | Nine automatic-compaction refusal cases preserved history without compaction requests; an explicit allow control produced one checkpoint. These used a local model peer and zero paid requests. |
 | Compiled Code Mode package | Three scenarios verified workspace command execution, missing-helper refusal and native DOXA/LORE call-result-detail correlation. Each used two local HTTP requests and zero paid requests. |
 | Authenticated Codex, `2026-09-28T18:11:14Z` | Alpha.40 daemon with alpha.41's staged provider package: exactly two turns accepted model/effort controls, read a synthetic file and recalled its token on the same thread after daemon restart. No successful LORE review or compaction was triggered. |
 | Helper/tool lifecycle | Ordinary shutdown and an exact owned daemon kill stopped and reaped the active helper and tool without harness cleanup; zero paid requests. |
+| Alpha.43 authenticated parity | Two Claude turns verified native reads, text, recall and same-process model/effort controls. Four Codex prompts, one manual and one controlled automatic compaction used three real Haiku reviews and retained exact recall; original authentication remained unchanged and isolated stores/processes were cleaned. |
 
 See the [live verification record](live-provider-verification-2026-09-28.md#alpha41-code-mode-dependency-verification)
-for provenance and reproduction. The authenticated check used the versions named
-above; it is not a fresh authenticated alpha.42 or alpha.43 check.
+for provenance and reproduction of the earlier alpha.40 daemon/alpha.41 package
+check; that earlier result is not a fresh authenticated alpha.42 or alpha.43 check.
+
+The [alpha.43 follow-up](live-provider-verification-2026-09-28.md#alpha43-authenticated-follow-up--2026-09-28)
+records the newer authenticated checks, including the initial harness-only stale
+registry failure and the separate automatic run within the remaining allowance.
+Seven focused quota regressions verify alpha.44's nested-window projection,
+startup caching, partial updates, reset transitions and legacy flat compatibility.
 
 Alpha.31 supplied the [event-loop benchmark](rust-ui-benchmark-2026-09-27.md)
 measurements. The [gallery](rust-gallery.md) remains labelled **alpha.37**,

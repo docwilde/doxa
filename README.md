@@ -1,8 +1,8 @@
 <p align="center"><img src="assets/logo.png" width="560" alt="DOXA — belief earning knowledge"></p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Rust%202.0-alpha.43-f59f00" alt="Rust 2.0 alpha.43 is the main frontend">
-  <a href="https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.43"><img src="https://img.shields.io/github/v/release/docwilde/doxa?include_prereleases&amp;sort=semver&amp;label=Rust%20preview&amp;color=e8590c" alt="latest Rust preview release"></a>
+  <img src="https://img.shields.io/badge/Rust%202.0-alpha.44-f59f00" alt="Rust 2.0 alpha.44 is the main frontend">
+  <a href="https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.44"><img src="https://img.shields.io/github/v/release/docwilde/doxa?include_prereleases&amp;sort=semver&amp;label=Rust%20preview&amp;color=e8590c" alt="latest Rust preview release"></a>
   <a href="https://github.com/docwilde/doxa/actions/workflows/rust-ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/docwilde/doxa/rust-ci.yml?branch=main&label=Rust%20CI" alt="Rust CI status"></a>
   <img src="https://img.shields.io/badge/TUI-Ratatui-2f9e44" alt="Rust TUI built with Ratatui">
   <img src="https://img.shields.io/badge/auth-provider%20CLI%20or%20API%20key-2f9e44" alt="authentication follows the selected engine">
@@ -14,12 +14,12 @@
 > can edit files and run commands with your privileges. Read
 > [Non-goals](#non-goals) before using it on important work.
 
-The official latest GitHub release is [v2.0.0-alpha.43](https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.43).
+The official latest GitHub release is [v2.0.0-alpha.44](https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.44).
 Rust 2.0 leads development and remains an evolving alpha. See the
 [parity tracker](docs/rust-1.19-parity.md) for supported provider contracts and
 remaining release gates, and the [source audit](docs/source-audit-2026-09-27.md)
-for engineering findings and their follow-up fixes. Alpha.43 refreshes this
-documentation; runtime changes and verification below are from alpha.42 and earlier.
+for engineering findings and their follow-up fixes. Alpha.44 fixes Claude quota
+projection and records authenticated parity checks performed with alpha.43.
 
 **DOXA** is a terminal for coding agents. Development now leads with the
 **Rust 2.0 alpha**, built with Ratatui and a native daemon. Run Claude, Codex,
@@ -102,7 +102,7 @@ curl -fsSL https://raw.githubusercontent.com/docwilde/doxa/main/scripts/install.
 
 The installer builds the Rust frontend and daemon from `main` and installs the
 Rust `doxa` command in `~/.local/bin` (or `DOXA_RUST_BIN_DIR`). Pass a tag such
-as `v2.0.0-alpha.43` after `sh -s --` to pin a release. Git and Cargo build three
+as `v2.0.0-alpha.44` after `sh -s --` to pin a release. Git and Cargo build three
 native binaries: the frontend, daemon and LORE carrier. Claude requires its CLI.
 When Codex is installed, the installer also builds a private, protected Codex
 app server and its required Code Mode host; the official CLI remains available
@@ -174,25 +174,28 @@ still refuse or stage oversized writes; overflow does not guarantee the same ent
 - **Protected Codex:** Alpha.40–42 add reviewed compaction, the required native
   Code Mode host, verified installation and tool-process cleanup. See the
   [audit follow-ups](docs/source-audit-2026-09-27.md#completion-follow-up-in-alpha40).
-- **Regression coverage:** Alpha.42's [main CI](https://github.com/docwilde/doxa/actions/runs/36472835265)
+- **Regression coverage:** Alpha.43's [main CI](https://github.com/docwilde/doxa/actions/runs/36476565103)
   passed **962 Rust tests**, with zero failures and four optional/harness tests
   ignored. CI also checks the installer and native launcher.
-- **Provider evidence:** Three compiled Code Mode scenarios passed using a local
-  model peer and zero paid requests. A separate authenticated Codex check used
-  the alpha.40 daemon with alpha.41's staged provider package: two turns proved
-  file access, model/effort controls and same-thread recall after restart. See
-  the [verification record](docs/live-provider-verification-2026-09-28.md#alpha41-code-mode-dependency-verification).
+- **Claude quota handling:** Alpha.44 preserves nested and startup window reports,
+  with seven focused quota regressions passing. Missing account values stay unknown.
+- **Live provider evidence:** Alpha.43 verified Claude file reads, text streaming,
+  recall and same-session model/effort controls. Codex passed real Claude-backed
+  LORE review, manual compaction and controlled automatic compaction, with exact
+  recall afterward. See the
+  [verification record](docs/live-provider-verification-2026-09-28.md#alpha43-authenticated-follow-up--2026-09-28)
+  for account checks, compiled scenarios and cleanup evidence.
 
 ### Remaining live checks
 
-Authenticated Claude streaming, tools, controls and 5-hour/weekly quota remain
-unverified with the recorded logged-out account. DeepSeek and z.ai account checks
-need API keys. Successful Claude-backed LORE review followed by manual or
-large-context automatic Codex compaction also remains unverified; an authenticated
-Codex account alone does not authenticate the LORE reviewer.
+DeepSeek and z.ai account checks need API keys. Full Claude quota percentages,
+weekly reporting and long-form streaming remain unverified. Alpha.44 retains
+reported nested quota windows; the read-only CLI usage probe returned no rows.
+Codex's controlled automatic test used a 14,022-token threshold; representative
+stress near its approximately 244,800-token default trigger remains unverified.
 
-Run `doxa auth login claude` and configure vendor keys through `/setup` or the
-launching environment before those checks. The
+Configure vendor keys through `/setup` or the launching environment before their
+account checks. The
 [tracker](docs/rust-1.19-parity.md#remaining-verification) separates these checks
 from implemented features and intentional limits. See the
 [Rust UI benchmark](docs/rust-ui-benchmark-2026-09-27.md) for rendering, event-loop,
