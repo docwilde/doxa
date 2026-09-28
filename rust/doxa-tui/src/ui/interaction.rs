@@ -199,10 +199,11 @@ impl App {
     /// session together; moving a tab deliberately carries its active draft.
     pub(super) fn finish_prompt_owner_transition(&mut self, before: (usize, String)) {
         let after = self.prompt_owner();
+        if self.operations_menu.as_ref().is_some_and(|menu| menu.editing_credential())
+            && (before != after || self.active_request_index().is_some()) {
+            self.retire_operations(); self.chip_info = None;
+        }
         if before != after {
-            if self.operations_menu.as_ref().is_some_and(|menu| menu.editing_credential()) {
-                self.retire_operations(); self.chip_info = None;
-            }
             self.branch_picker = None;
             let moved_active_tab = std::mem::take(&mut self.moved_active_tab)
                 && !before.1.is_empty()
@@ -260,6 +261,7 @@ impl App {
         let text = match result {
             Ok(text) => text,
             Err(_) => {
+                self.clipboard_secret_owner = None;
                 self.notice = "Clipboard read failed · use terminal Ctrl+Shift+V".into();
                 return true;
             }
@@ -641,6 +643,13 @@ impl App {
         }
         if key.code == KeyCode::Char('w') && ctrl {
             self.detach_active_tab();
+            return true;
+        }
+        // A credential owns all typing while its editor exists. Provider input
+        // requests must never capture a key intended for this transient field.
+        if let Some(menu) = self.operations_menu.as_mut().filter(|menu| menu.editing_credential()) {
+            menu.key(key);
+            if let Some(info) = &mut self.chip_info { info.lines = menu.lines(usize::from(self.size.width)); }
             return true;
         }
         if self.active_request_index().is_some() {

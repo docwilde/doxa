@@ -36,6 +36,8 @@ use super::*;
         let secret = "fixture-deepseek-api-key";
         open(&mut app, "DeepSeek API key");
         app.input = "ordinary draft".into(); app.input_cursor = app.input.len();
+        app.handle(key(KeyCode::Char('X')));
+        app.handle(key(KeyCode::Backspace));
         app.handle(Event::Paste(format!("{secret}X")));
         app.handle(key(KeyCode::Backspace));
         assert_eq!(app.input, "ordinary draft");
@@ -100,6 +102,19 @@ use super::*;
         app.handle(key(KeyCode::Esc));
         app.handle(key(KeyCode::Esc));
         assert!(app.operations_menu.is_none());
+
+        app.open_operations(operations_menu::Menu::new("setup"));
+        open(&mut app, "DeepSeek API key");
+        app.handle(Event::Paste("fixture-question-secret".into()));
+        let session = app.groups[0].active_id().unwrap().to_owned();
+        app.input_requests.push(InputRequest::from_event(&session, &json!({
+            "id":"question", "kind":"ask_user", "questions":[{"question":"Choose?", "options":[]}]
+        })).unwrap());
+        app.handle(key(KeyCode::Char('Z')));
+        assert!(app.operations_menu.is_none());
+        assert!(app.input_requests[0].free_text.is_empty());
+        assert!(app.pending_answers.is_empty());
+        assert!(!app.input.contains("fixture-question-secret"));
     }
 
     #[test]
