@@ -16,6 +16,8 @@ import urllib.request
 import stat
 import fcntl
 import ctypes
+import tomllib
+import re
 from contextlib import contextmanager
 
 SOURCE = "b412ff32c417f855c2b2d1581b77058eed87c84b"
@@ -161,11 +163,69 @@ def toolchain(cache, cargo):
 
 def build_environment(overrides):
     environment = dict(os.environ)
+    for key in list(environment):
+        if key.startswith(("RUSTY_V8_", "V8_", "CARGO_PROFILE_")):
+            environment.pop(key)
     for key in ("RUSTC", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER", "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS",
-                "RUSTUP_TOOLCHAIN", "RUSTDOC", "RUSTDOCFLAGS"):
+                "RUSTUP_TOOLCHAIN", "RUSTDOC", "RUSTDOCFLAGS", "DOCS_RS", "DENO_TRYBUILD", "CARGO_BUILD_TARGET"):
         environment.pop(key, None)
     environment.update(overrides)
     return environment
+
+
+def verified_download(path, url, expected_digest, limit):
+    if path.exists() and private_read(path, limit, hash_only=True) == expected_digest:
+        return
+    descriptor, temporary = tempfile.mkstemp(prefix=".v8-download-", dir=path.parent)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            hasher = hashlib.sha256()
+            total = 0
+            with urllib.request.urlopen(url, timeout=60) as response:
+                while chunk := response.read(1024 * 1024):
+                    total += len(chunk)
+                    if total > limit:
+                        raise ValueError("official V8 input exceeded its download bound")
+                    stream.write(chunk)
+                    hasher.update(chunk)
+            if hasher.hexdigest() != expected_digest:
+                raise ValueError("official V8 input differs from its pinned checksum")
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+def v8_inputs(cache, source, target):
+    """Trust manifests from the already verified official source, never mirror/env overrides."""
+    if not re.fullmatch(r"[a-zA-Z0-9_-]+", target):
+        raise ValueError("invalid helper target")
+    lock = tomllib.loads((source / "codex-rs/Cargo.lock").read_text())
+    versions = {package["version"] for package in lock["package"] if package["name"] == "v8"}
+    if versions != {"150.4.0"}:
+        raise ValueError("reviewed source no longer has the expected locked V8 version")
+    version = "150.4.0"
+    manifest_name = f"rusty_v8_ptrcomp_sandbox_release_{target}.sha256"
+    trusted = source / "third_party/v8/rusty_v8_150_4_0_release_manifests.sha256"
+    manifest_pins = dict((name, checksum) for checksum, name in (line.split() for line in trusted.read_text().splitlines()))
+    if manifest_name not in manifest_pins:
+        raise ValueError("the pinned source has no approved sandbox V8 inputs for this target")
+    directory = cache / "v8" / target
+    private_directory(directory)
+    base = f"https://github.com/openai/codex/releases/download/rusty-v8-v{version}"
+    manifest = directory / manifest_name
+    verified_download(manifest, f"{base}/{manifest_name}", manifest_pins[manifest_name], 65536)
+    suffix = ".lib.gz" if "windows" in target else ".a.gz"
+    archive_name = ("rusty_v8_" if "windows" in target else "librusty_v8_") + f"ptrcomp_sandbox_release_{target}{suffix}"
+    binding_name = f"src_binding_ptrcomp_sandbox_release_{target}.rs"
+    pins = dict((name, checksum) for checksum, name in (line.split() for line in private_read(manifest, 65536).decode().splitlines()))
+    if set(pins) != {archive_name, binding_name} or any(not re.fullmatch(r"[0-9a-f]{64}", value) for value in pins.values()):
+        raise ValueError("approved V8 manifest does not bind the exact archive/binding pair")
+    archive, binding = directory / archive_name, directory / binding_name
+    verified_download(archive, f"{base}/{archive_name}", pins[archive_name], 256 * 1024 * 1024)
+    verified_download(binding, f"{base}/{binding_name}", pins[binding_name], 1024 * 1024)
+    identity = {"version": version, "target": target, "manifest_sha256": manifest_pins[manifest_name],
+                "archive_sha256": pins[archive_name], "binding_sha256": pins[binding_name]}
+    return {"RUSTY_V8_ARCHIVE": str(archive), "RUSTY_V8_SRC_BINDING_PATH": str(binding)}, identity
 
 
 def build(cache, cargo):
@@ -202,15 +262,18 @@ def build_code_mode_host(cache, cargo):
     source = prepare_source(cache)
     binary = cache / "target/dev-small/codex-code-mode-host"
     fingerprint = cache / "code-mode-host-build.json"
+    cargo, toolchain_environment = toolchain(cache, cargo)
+    target = subprocess.check_output([toolchain_environment["RUSTC"], "--print", "host-tuple"],
+        text=True, env=build_environment(toolchain_environment), timeout=10).strip()
+    native_environment, native_identity = v8_inputs(cache, source, target)
     identity = {"source_commit": SOURCE, "patch_sha256": PATCH_SHA256,
-                "profile": "dev-small", "toolchain": "1.95.0", "product": "codex-code-mode-host"}
+                "profile": "dev-small", "toolchain": "1.95.0", "product": "codex-code-mode-host", "v8_inputs": native_identity}
     if binary.is_file() and fingerprint.is_file():
         previous = json.loads(private_read(fingerprint, 16384))
         if previous == dict(identity, binary_sha256=digest(binary)):
             print("doxa-codex-install: reusing verified code-mode host artifact", flush=True)
-            return binary
-    cargo, toolchain_environment = toolchain(cache, cargo)
-    environment = build_environment(dict(toolchain_environment, CARGO_TARGET_DIR=str(cache / "target"), CARGO_BUILD_JOBS="1",
+            return binary, identity
+    environment = build_environment(dict(toolchain_environment, **native_environment, CARGO_TARGET_DIR=str(cache / "target"), CARGO_BUILD_JOBS="1",
                        RUST_TEST_THREADS="1", TMPDIR=str(cache / "scratch"), CARGO_HTTP_MULTIPLEXING="false"))
     private_directory(cache / "scratch")
     if not shutil.which("systemd-run") or subprocess.run(["systemctl", "--user", "show-environment"],
@@ -222,10 +285,10 @@ def build_code_mode_host(cache, cargo):
     run(command, cwd=source / "codex-rs", env=environment)
     fingerprint.write_text(json.dumps(dict(identity, binary_sha256=digest(binary)), sort_keys=True) + "\n")
     fingerprint.chmod(0o600)
-    return binary
+    return binary, identity
 
 
-def install(binary, root, official_cli, launcher, code_mode_host):
+def install(binary, root, official_cli, launcher, code_mode_host, helper_identity=None):
     probe(binary)
     private_directory(root)
     destination = root / PROVIDER
@@ -248,6 +311,8 @@ def install(binary, root, official_cli, launcher, code_mode_host):
                    "code_mode_host_dispatcher_sha256": digest(stage / "codex-code-mode-host"),
                    "code_mode_host_source_commit": SOURCE,
                    "profile": "dev-small", "toolchain": "1.95.0"}
+        if helper_identity is not None:
+            receipt["code_mode_host_v8_inputs"] = helper_identity["v8_inputs"]
         (stage / "receipt.json").write_text(json.dumps(receipt, sort_keys=True) + "\n")
         (stage / "receipt.json").chmod(0o600)
         # Existing installations are identical or retained until an explicit upgrade.
@@ -259,6 +324,8 @@ def install(binary, root, official_cli, launcher, code_mode_host):
             # Alpha.40 has neither helper field. Migrate only that exact reviewed
             # server identity; partial/different helper provenance is refused.
             helper_keys = ("code_mode_host_sha256", "code_mode_host_source_commit")
+            if "code_mode_host_dispatcher_sha256" in previous and not all(key in previous for key in helper_keys):
+                raise ValueError("partial code-mode helper provenance differs from installed receipt")
             if any(key in previous for key in helper_keys) and any(previous.get(key) != receipt[key] for key in helper_keys):
                 raise ValueError("code-mode helper differs from installed receipt; use a new --install-root for review")
             # Check the actual installed payload, not only its receipt. Republish the
@@ -365,9 +432,9 @@ def main():
         parser.error("--launcher must be an absolute native launcher executable")
     with locked_directory(options.cache):
         binary = build(options.cache, options.cargo)
-        code_mode_host = build_code_mode_host(options.cache, options.cargo)
+        code_mode_host, helper_identity = build_code_mode_host(options.cache, options.cargo)
         with locked_directory(options.install_root):
-            install(binary, options.install_root, official, options.launcher, code_mode_host)
+            install(binary, options.install_root, official, options.launcher, code_mode_host, helper_identity)
 
 
 if __name__ == "__main__":

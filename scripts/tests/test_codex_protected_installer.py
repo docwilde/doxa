@@ -5,6 +5,8 @@ import os
 from pathlib import Path
 import tempfile
 import subprocess
+import hashlib
+import io
 import unittest
 from unittest.mock import patch
 
@@ -130,11 +132,58 @@ sys.stdin.read()
             file.chmod(0o700)
         with self.assertRaisesRegex(ValueError, "both be Rust 1.95.0"):
             installer.toolchain(self.root, str(self.root / "cargo"))
-        with patch.dict(os.environ, {"RUSTC": "/unsafe/compiler", "RUSTC_WRAPPER": "/unsafe/wrapper", "RUSTFLAGS": "unsafe"}):
+        injected = {"RUSTC": "/unsafe/compiler", "RUSTC_WRAPPER": "/unsafe/wrapper", "RUSTFLAGS": "unsafe",
+                    "RUSTY_V8_ARCHIVE": "/unsafe/archive", "RUSTY_V8_MIRROR": "https://unsafe.invalid",
+                    "RUSTY_V8_SRC_BINDING_PATH": "/unsafe/bindings", "V8_FROM_SOURCE": "1", "V8_FORCE_DEBUG": "1",
+                    "DENO_TRYBUILD": "1", "DOCS_RS": "1", "CARGO_BUILD_TARGET": "unreviewed-target"}
+        with patch.dict(os.environ, injected):
             environment = installer.build_environment({"RUSTC": "/reviewed/compiler"})
         self.assertEqual("/reviewed/compiler", environment["RUSTC"])
         self.assertNotIn("RUSTC_WRAPPER", environment)
         self.assertNotIn("RUSTFLAGS", environment)
+        for key in injected:
+            if key != "RUSTC":
+                self.assertNotIn(key, environment)
+
+    def test_v8_inputs_verify_source_manifest_and_archive_binding_bytes(self):
+        target = "x86_64-unknown-linux-gnu"
+        source = self.root / "v8-source"
+        (source / "codex-rs").mkdir(parents=True)
+        (source / "third_party/v8").mkdir(parents=True)
+        (source / "codex-rs/Cargo.lock").write_text('[[package]]\nname="v8"\nversion="150.4.0"\n')
+        archive = f"librusty_v8_ptrcomp_sandbox_release_{target}.a.gz"
+        binding = f"src_binding_ptrcomp_sandbox_release_{target}.rs"
+        name = f"rusty_v8_ptrcomp_sandbox_release_{target}.sha256"
+        artifacts = {archive: b"approved archive fixture", binding: b"approved binding fixture"}
+        manifest = "".join(f"{hashlib.sha256(data).hexdigest()}  {artifact}\n" for artifact, data in artifacts.items()).encode()
+        artifacts[name] = manifest
+        (source / "third_party/v8/rusty_v8_150_4_0_release_manifests.sha256").write_text(f"{hashlib.sha256(manifest).hexdigest()}  {name}\n")
+        def response(url, **_):
+            self.assertTrue(url.startswith("https://github.com/openai/codex/releases/download/rusty-v8-v150.4.0/"))
+            return io.BytesIO(artifacts[url.rsplit("/", 1)[1]])
+        with patch.object(installer.urllib.request, "urlopen", side_effect=response):
+            environment, identity = installer.v8_inputs(self.root, source, target)
+            self.assertEqual(hashlib.sha256(artifacts[archive]).hexdigest(), identity["archive_sha256"])
+            self.assertEqual(hashlib.sha256(artifacts[binding]).hexdigest(), identity["binding_sha256"])
+            self.assertEqual(artifacts[archive], Path(environment["RUSTY_V8_ARCHIVE"]).read_bytes())
+            Path(environment["RUSTY_V8_ARCHIVE"]).write_bytes(b"corrupted cache")
+            installer.v8_inputs(self.root, source, target)
+            self.assertEqual(artifacts[archive], Path(environment["RUSTY_V8_ARCHIVE"]).read_bytes())
+            # A mirror/release delivering different bytes cannot become trusted.
+            Path(environment["RUSTY_V8_ARCHIVE"]).unlink()
+            artifacts[archive] = b"unreviewed native archive"
+            with self.assertRaisesRegex(ValueError, "pinned checksum"):
+                installer.v8_inputs(self.root, source, target)
+            self.assertFalse(Path(environment["RUSTY_V8_ARCHIVE"]).exists())
+
+    def test_native_input_download_bounds_and_checksum_fail_before_publication(self):
+        path = self.root / "input"
+        for data, bound in [(b"wrong", 100), (b"over bound", 1)]:
+            with patch.object(installer.urllib.request, "urlopen", return_value=io.BytesIO(data)):
+                with self.assertRaises(ValueError):
+                    installer.verified_download(path, "https://fixture.invalid/input", "0" * 64, bound)
+            self.assertFalse(path.exists())
+            self.assertEqual([], list(self.root.glob(".v8-download-*")))
 
     def test_explicit_rustup_proxy_keeps_cargo_and_rustc_dispatch_names(self):
         rustup = self.root / "rustup"
