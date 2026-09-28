@@ -1,6 +1,6 @@
 //! Reduce keyboard, mouse and clipboard input against the current owner.
 use super::{
-    ask_user_option_at, belief_buttons, belief_review_buttons, chooser_visible_start,
+    input_request_option_at, belief_buttons, belief_review_buttons, chooser_visible_start,
     prompt_height, raw_visual_rows, safe_label, tool_cards, transcript_tools, unsafe_input_char,
     vendor_models, App, DragTarget, Focus, RailRow, Split, COMMANDS, ENGINE_CHOICES,
     MAX_ANSWER_BYTES, MAX_INPUT_BYTES, MAX_PENDING_PROMPTS, MAX_REJECT_REASON_BYTES,
@@ -36,7 +36,6 @@ impl App {
                 for request in &mut self.input_requests {
                     request.review_seen.set(0);
                     request.review_complete.set(false);
-                    request.allow_armed = false;
                     request.scroll = 0;
                 }
                 self.size = Rect::new(0, 0, w, h);
@@ -1435,30 +1434,34 @@ impl App {
         }
         let kind = self.input_requests[index].kind.clone();
         if kind != "ask_user" {
-            if !matches!(key.code, KeyCode::Char('A' | 'Y'))
-                || !(key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
-            {
-                self.input_requests[index].allow_armed = false;
-            }
+            let page = self.active_chooser_rect().map_or(1, |menu| menu.height.saturating_sub(2).max(1));
             match key.code {
                 KeyCode::Up => {
-                    self.input_requests[index].scroll =
-                        self.input_requests[index].scroll.saturating_sub(1);
+                    self.input_requests[index].selected =
+                        if self.input_requests[index].selected == 1 {
+                            2
+                        } else {
+                            1
+                        };
                     return true;
                 }
                 KeyCode::Down => {
-                    self.input_requests[index].scroll =
-                        self.input_requests[index].scroll.saturating_add(1);
+                    self.input_requests[index].selected =
+                        if self.input_requests[index].selected == 1 {
+                            2
+                        } else {
+                            1
+                        };
                     return true;
                 }
                 KeyCode::PageUp => {
                     self.input_requests[index].scroll =
-                        self.input_requests[index].scroll.saturating_sub(10);
+                        self.input_requests[index].scroll.saturating_sub(page);
                     return true;
                 }
                 KeyCode::PageDown => {
                     self.input_requests[index].scroll =
-                        self.input_requests[index].scroll.saturating_add(10);
+                        self.input_requests[index].scroll.saturating_add(page);
                     return true;
                 }
                 _ => {}
@@ -1515,28 +1518,24 @@ impl App {
                 {
                     Some(serde_json::json!({"decision":"deny"}))
                 }
-                KeyCode::Char('A')
+                KeyCode::Enter if self.input_requests[index].selected == 2 => {
+                    Some(serde_json::json!({"decision":"deny"}))
+                }
+                KeyCode::Char('a' | 'A') | KeyCode::Enter
                     if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
                 {
+                    if !self.active_chooser_rect().is_some_and(|menu| menu.width >= 20 && menu.height >= 5) {
+                        self.notice = "Enlarge the active pane to review and approve".into();
+                        return true;
+                    }
                     if self.input_requests[index].require_full_review
                         && (!self.input_requests[index].review_available
                             || !self.input_requests[index].review_complete.get())
                     {
                         self.notice =
-                            "Read the complete input summary (↓/PgDn) before allowing".into();
+                            "Read the complete input summary (PgDn) before approving".into();
                         return true;
                     }
-                    self.input_requests[index].allow_armed = true;
-                    self.notice = "Approval armed · press Shift+Y to confirm".into();
-                    return true;
-                }
-                KeyCode::Char('Y')
-                    if self.input_requests[index].allow_armed
-                        && (!self.input_requests[index].require_full_review
-                            || self.input_requests[index].review_complete.get()
-                                && self.input_requests[index].review_available)
-                        && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT) =>
-                {
                     Some(serde_json::json!({"decision":"allow"}))
                 }
                 _ => None,
@@ -1600,10 +1599,10 @@ impl App {
             return false;
         }
         if let Some(index) = self.active_request_index() {
-            if self.input_requests[index].kind != "ask_user" || self.input_requests[index].sending {
+            if self.input_requests[index].sending {
                 return false;
             }
-            if let Some(option) = ask_user_option_at(&self.input_requests[index], menu, row) {
+            if let Some(option) = input_request_option_at(&self.input_requests[index], menu, row) {
                 if self.input_requests[index].selected != option {
                     self.input_requests[index].selected = option;
                     return true;
@@ -1973,13 +1972,25 @@ impl App {
             return true;
         }
         if let Some(index) = self.active_request_index() {
-            if self.input_requests[index].kind == "ask_user"
-                && mouse.kind == MouseEventKind::Down(MouseButton::Left)
+            if !self.input_requests[index].sending && self.active_chooser_rect().is_some_and(|menu| menu.contains(ratatui::layout::Position::new(mouse.column, mouse.row))) {
+                match mouse.kind {
+                    MouseEventKind::ScrollUp => {
+                        self.input_requests[index].scroll = self.input_requests[index].scroll.saturating_sub(1);
+                        return true;
+                    }
+                    MouseEventKind::ScrollDown => {
+                        self.input_requests[index].scroll = self.input_requests[index].scroll.saturating_add(1);
+                        return true;
+                    }
+                    _ => {}
+                }
+            }
+            if mouse.kind == MouseEventKind::Down(MouseButton::Left)
             {
                 if let Some(menu) = self.active_chooser_rect() {
                     if mouse.column > menu.x && mouse.column < menu.right().saturating_sub(1) {
                         if let Some(option) =
-                            ask_user_option_at(&self.input_requests[index], menu, mouse.row)
+                            input_request_option_at(&self.input_requests[index], menu, mouse.row)
                         {
                             self.input_requests[index].selected = option;
                             return self

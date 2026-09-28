@@ -1887,7 +1887,7 @@ for line in sys.stdin:
             column: menu.x + 2, row: menu.y, modifiers: KeyModifiers::NONE });
         let request = &app.input_requests[0];
         let second = (menu.y + 1..menu.bottom() - 1)
-            .find(|&row| ask_user_option_at(request, menu, row) == Some(2)).unwrap();
+            .find(|&row| input_request_option_at(request, menu, row) == Some(2)).unwrap();
         assert!(app.mouse(MouseEvent { kind: MouseEventKind::Moved,
             column: menu.x + 2, row: second, modifiers: KeyModifiers::NONE }));
         assert_eq!(app.input_requests[0].selected, 2);
@@ -1915,7 +1915,7 @@ for line in sys.stdin:
         let second_row = (1..menu.height - 1).find(|&row|
             (1..menu.width - 1).map(|x| buffer[(x, row)].symbol()).collect::<String>().contains("Second"))
             .unwrap();
-        assert_eq!(ask_user_option_at(&app.input_requests[0], menu, second_row), Some(2));
+        assert_eq!(input_request_option_at(&app.input_requests[0], menu, second_row), Some(2));
     }
 
     #[test]
@@ -3779,8 +3779,8 @@ for line in sys.stdin:
         let mut sending = request.clone();
         sending.sending = true;
         let menu = Rect::new(0, 0, 80, 15);
-        for row in 1..14 { assert_eq!(ask_user_option_at(&sending, menu, row), None); }
-        assert!((1..14).any(|row| ask_user_option_at(&request, menu, row) == Some(1)));
+        for row in 1..14 { assert_eq!(input_request_option_at(&sending, menu, row), None); }
+        assert!((1..14).any(|row| input_request_option_at(&request, menu, row) == Some(1)));
     }
 
     #[test]

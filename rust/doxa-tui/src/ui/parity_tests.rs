@@ -305,18 +305,65 @@ use super::*;
     }
 
     #[test]
-    fn full_permission_review_cannot_be_armed_before_complete_or_when_truncated() {
-        let mut app = App::default(); app.groups[0].tabs = vec!["s".into()];
-        let data = json!({"id":"r","kind":"permission","title":"Review","input_summary":"long review","require_full_review":true});
-        app.input_requests.push(InputRequest::from_event("s", &data).unwrap());
-        app.request_key(KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT));
-        assert!(!app.input_requests[0].allow_armed);
-        app.input_requests[0].review_complete.set(true);
-        app.request_key(KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT));
-        assert!(app.input_requests[0].allow_armed);
-        app.input_requests[0].review_available = false;
-        app.request_key(KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::SHIFT));
+    fn full_permission_review_gates_every_approval_path() {
+        for code in [KeyCode::Char('a'), KeyCode::Char('A'), KeyCode::Enter] {
+            let mut app = App::default(); app.groups[0].tabs = vec!["s".into()];
+            let data = json!({"id":"r","kind":"permission","title":"Review","input_summary":"long review","require_full_review":true});
+            app.input_requests.push(InputRequest::from_event("s", &data).unwrap());
+            app.request_key(KeyEvent::new(code, KeyModifiers::NONE));
+            assert!(app.pending_answers.is_empty());
+            app.input_requests[0].review_complete.set(true);
+            app.input_requests[0].review_available = false;
+            app.request_key(KeyEvent::new(code, KeyModifiers::NONE));
+            assert!(app.pending_answers.is_empty());
+            app.input_requests[0].review_available = true;
+            app.request_key(KeyEvent::new(code, KeyModifiers::NONE));
+            assert_eq!(app.pending_answers[0].2, json!({"decision":"allow"}));
+        }
+    }
+
+    #[test]
+    fn permission_menu_is_inline_mouse_selectable_and_owned_by_active_session() {
+        let mut app = App::default();
+        app.rail_visible = false;
+        app.handle(Event::Resize(100, 30));
+        app.groups[0].tabs = vec!["s".into(), "other".into()];
+        app.input_requests.push(InputRequest::from_event("s", &json!({"id":"r","kind":"permission","title":"Run command?","input_summary":"echo hello"})).unwrap());
+        let menu = app.active_chooser_rect().unwrap();
+        assert!(menu.y > 0);
+        assert!(menu.bottom() < app.size.bottom());
+        let row = (menu.y + 1..menu.bottom() - 1).find(|&row| input_request_option_at(&app.input_requests[0], menu, row) == Some(2)).unwrap();
+        assert!(app.hover_chooser(menu.x + 2, row));
+        assert_eq!(app.input_requests[0].selected, 2);
+        app.groups[0].active = 1;
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)));
         assert!(app.pending_answers.is_empty());
+        app.groups[0].active = 0;
+        click(&mut app, menu.x + 2, row);
+        assert_eq!(app.pending_answers, vec![("s".into(), "r".into(), json!({"decision":"deny"}))]);
+        click(&mut app, menu.x + 2, menu.y + 1);
+        assert_eq!(app.pending_answers.len(), 1);
+    }
+
+    #[test]
+    fn short_permission_review_pages_contiguously_and_tiny_pane_blocks_allow() {
+        let mut app = App::default();
+        app.rail_visible = false;
+        app.handle(Event::Resize(80, 18));
+        app.groups[0].tabs = vec!["s".into()];
+        app.input_requests.push(InputRequest::from_event("s", &json!({"id":"r","kind":"permission","input_summary":"review line\n".repeat(50),"require_full_review":true})).unwrap());
+        for _ in 0..100 {
+            let _ = paint(&app);
+            if app.input_requests[0].review_complete.get() { break; }
+            app.request_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        }
+        assert!(app.input_requests[0].review_complete.get());
+        app.handle(Event::Resize(20, 8));
+        app.input_requests[0].require_full_review = false;
+        app.request_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+        assert!(app.pending_answers.is_empty());
+        app.request_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.pending_answers[0].2, json!({"decision":"deny"}));
     }
 
     #[test]

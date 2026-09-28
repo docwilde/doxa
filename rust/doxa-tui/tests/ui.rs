@@ -827,20 +827,12 @@ fn permission_requires_explicit_allow_and_preserves_prompt_draft() {
     assert!(rendered.contains("Execute command"));
     assert!(rendered.contains("Deletes a file"));
     assert!(!rendered.contains('\u{1b}'));
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
-    app.handle(key(KeyCode::Char('a'), KeyModifiers::NONE));
+    assert!(rendered.contains("Approve · A"));
+    assert!(rendered.contains("unfinished prompt"));
+    app.handle(Event::Paste("aA".into()));
     assert!(app.take_answers().is_empty());
     assert_eq!(app.input, "unfinished prompt");
-    app.handle(key(KeyCode::Char('A'), KeyModifiers::SHIFT));
-    assert!(app.input_requests[0].allow_armed);
-    assert!(app.take_answers().is_empty());
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
-    assert!(!app.input_requests[0].allow_armed);
-    assert!(app.take_answers().is_empty());
-    // Some terminals report uppercase letters without a SHIFT modifier.
-    app.handle(key(KeyCode::Char('A'), KeyModifiers::NONE));
-    assert!(app.take_answers().is_empty());
-    app.handle(key(KeyCode::Char('Y'), KeyModifiers::NONE));
+    app.handle(key(KeyCode::Char('a'), KeyModifiers::NONE));
     assert_eq!(
         app.take_answers(),
         vec![("one".into(), "req-1".into(), json!({"decision":"allow"}))]
@@ -859,18 +851,21 @@ fn permission_requires_explicit_allow_and_preserves_prompt_draft() {
 }
 
 #[test]
-fn shifted_confirmation_allows_only_after_second_key() {
-    let mut app = App::default();
-    app.apply_daemon_frame(&json!({"type":"hello", "session_id":"one", "model":"test"}));
-    app.apply_daemon_frame(
-        &json!({"type":"event", "session_id":"one", "event":{"type":"needs_input", "data":{
-        "id":"req-shift", "kind":"permission", "tool_name":"Write"}}}),
-    );
-    app.handle(key(KeyCode::Char('A'), KeyModifiers::SHIFT));
-    assert!(app.take_answers().is_empty());
-    assert!(screen(&app, 90, 25).contains("Approval armed"));
-    app.handle(key(KeyCode::Char('Y'), KeyModifiers::SHIFT));
-    assert_eq!(app.take_answers()[0].2, json!({"decision":"allow"}));
+fn permission_enter_selects_action_and_escape_denies() {
+    for (keys, decision) in [
+        (vec![KeyCode::Enter], "allow"),
+        (vec![KeyCode::Down, KeyCode::Enter], "deny"),
+        (vec![KeyCode::Esc], "deny"),
+        (vec![KeyCode::Char('A')], "allow"),
+    ] {
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"one", "model":"test"}));
+        app.apply_daemon_frame(&json!({"type":"event", "session_id":"one", "event":{"type":"needs_input", "data":{"id":"req", "kind":"permission", "tool_name":"Write"}}}));
+        for code in keys { app.handle(key(code, KeyModifiers::NONE)); }
+        assert_eq!(app.take_answers(), vec![("one".into(), "req".into(), json!({"decision":decision}))]);
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.take_answers().is_empty());
+    }
 }
 
 #[test]

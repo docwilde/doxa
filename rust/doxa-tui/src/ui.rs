@@ -759,7 +759,6 @@ pub struct InputRequest {
     pub selected: usize,
     pub answers: serde_json::Map<String, serde_json::Value>,
     pub sending: bool,
-    pub allow_armed: bool,
     pub require_full_review: bool,
     review_available: bool,
     review_seen: Cell<usize>,
@@ -861,7 +860,6 @@ impl InputRequest {
             selected: 1,
             answers: serde_json::Map::new(),
             sending: false,
-            allow_armed: false,
             require_full_review: data["require_full_review"] == true,
             review_available: data["input_summary"].as_str().is_some()
                 && data["input_summary_truncated"] != true,
@@ -951,12 +949,23 @@ fn input_request_body(
             body.push_str("Question unavailable\n");
         }
     } else {
-        body.push_str(&markdown::sanitize(&request.heading));
-        body.push_str("\n\n");
-        body.push_str("D deny · Esc deny · ↑/↓ scroll\nShift+A then Shift+Y to allow");
-        if request.allow_armed {
-            body.push_str("\nApproval armed · press Shift+Y now");
+        for (i, label) in ["Approve · A", "Deny · D / Esc"].iter().enumerate() {
+            option_rows.push(body.lines().count());
+            if request.selected == i + 1 {
+                selected_row = Some(body.lines().count());
+            }
+            body.push_str(&format!(
+                "{} {}\n",
+                if request.selected == i + 1 {
+                    "▸"
+                } else {
+                    " "
+                },
+                label
+            ));
         }
+        body.push_str("Enter select · PgUp/PgDn review\n");
+        body.push_str(&markdown::sanitize(&request.heading));
     }
     if request.sending {
         body.push_str("\nSending answer…");
@@ -964,12 +973,8 @@ fn input_request_body(
     (body, selected_row, option_rows)
 }
 
-fn ask_user_option_at(request: &InputRequest, menu: Rect, row: u16) -> Option<usize> {
-    if request.kind != "ask_user"
-        || request.sending
-        || row <= menu.y
-        || row >= menu.bottom().saturating_sub(1)
-    {
+fn input_request_option_at(request: &InputRequest, menu: Rect, row: u16) -> Option<usize> {
+    if request.sending || row <= menu.y || row >= menu.bottom().saturating_sub(1) {
         return None;
     }
     let (body, _, option_rows) =
@@ -980,22 +985,44 @@ fn ask_user_option_at(request: &InputRequest, menu: Rect, row: u16) -> Option<us
     let lines: Vec<Line> = body
         .lines()
         .enumerate()
-        .map(|(line_index, text)| {
-            if let Some(option) = option_rows.iter().rposition(|&start| start <= line_index) {
-                Line::styled(
-                    text.to_owned(),
-                    Style::default().bg(Color::Rgb(0, 0, (option + 1) as u8)),
+        .flat_map(|(line_index, text)| {
+            let texts = if request.require_full_review {
+                crate::memory_menu::wrap_review(
+                    text,
+                    usize::from(menu.width.saturating_sub(2)).max(1),
                 )
             } else {
-                Line::from(text.to_owned())
-            }
+                vec![text.to_owned()]
+            };
+            let option_rows = &option_rows;
+            texts.into_iter().map(move |text| {
+                if let Some(option) = option_rows.iter().rposition(|&start| {
+                    start == line_index || request.kind == "ask_user" && start <= line_index
+                }) {
+                    Line::styled(
+                        text.to_owned(),
+                        Style::default().bg(Color::Rgb(0, 0, (option + 1) as u8)),
+                    )
+                } else {
+                    Line::from(text.to_owned())
+                }
+            })
         })
         .collect();
+    let scroll = if request.require_full_review {
+        usize::from(request.scroll).min(
+            lines
+                .len()
+                .saturating_sub(usize::from(menu.height.saturating_sub(2))),
+        ) as u16
+    } else {
+        request.scroll
+    };
     let area = Rect::new(0, 0, menu.width, menu.height);
     let mut buffer = Buffer::empty(area);
     Paragraph::new(lines)
         .wrap(Wrap { trim: false })
-        .scroll((request.scroll, 0))
+        .scroll((scroll, 0))
         .block(Block::default().borders(Borders::ALL))
         .render(area, &mut buffer);
     let local_row = row - menu.y;
