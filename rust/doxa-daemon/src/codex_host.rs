@@ -546,6 +546,7 @@ impl Host for CodexHost {
         };
         let thread_write_failed = Cell::new(false);
         let compact_blocked = Cell::new(false);
+        let compact_cancelled_before_submission = Cell::new(false);
         let mut terminal_event = None;
         let mut handle_event = |event: doxa_engines::EngineEvent| {
             if self.scrub_failed.load(Ordering::Acquire)
@@ -637,16 +638,20 @@ impl Host for CodexHost {
                                     *active = Some(app);
                                 }
                                 Err(error) => {
+                                    let cancelled_startup = matches!(error, AppServerError::Cancelled);
                                     startup_error = Some(match error {
                                         AppServerError::Protocol(message) => message.to_owned(),
                                         AppServerError::Server(message) => message,
                                         _ => "Codex app-server or compaction review gate could not start".into(),
                                     });
-                                    thread_write_failed.set(true);
+                                    if compaction && cancelled_startup {
+                                        compact_blocked.set(true);
+                                        compact_cancelled_before_submission.set(true);
+                                    } else { thread_write_failed.set(true); }
                                 }
                             }
                         }
-                        if thread_write_failed.get() {
+                        if thread_write_failed.get() || startup_error.is_some() {
                             Err(startup_error.unwrap_or_else(|| "Codex app-server thread persistence failed".to_owned()))
                         } else {
                             let selected = self.selection.lock().unwrap().clone();
@@ -681,13 +686,18 @@ impl Host for CodexHost {
                                     })
                                 },
                             )) }.map_err(|error| match error {
+                                AppServerError::CompactionCancelled => {
+                                    compact_blocked.set(true);
+                                    compact_cancelled_before_submission.set(true);
+                                    "Codex compaction cancelled before submission; existing context retained".to_owned()
+                                },
                                 AppServerError::CompactionBlocked => { compact_blocked.set(true); "LORE review blocked compaction; existing context retained".to_owned() },
                                 AppServerError::Server(message) => message,
                                 AppServerError::Cancelled => "Codex turn cancelled".to_owned(),
                                 AppServerError::TimedOut => "Codex app-server turn timed out".to_owned(),
                                 _ => "Codex app-server protocol or process failed".to_owned(),
                             });
-                            if outcome.is_err() && !compact_blocked.get() {
+                            if outcome.is_err() && (!compact_blocked.get() || compact_cancelled_before_submission.get()) {
                                 if let Some(app) = active.as_mut() { runtime.block_on(app.shutdown()); }
                                 *active = None;
                             }
@@ -705,10 +715,11 @@ impl Host for CodexHost {
             if let Some(id) = self.driver.lock().unwrap().thread_id().map(str::to_owned) {
                 if self.persist_thread(&id, false).is_ok() {
                     *self.active.lock().unwrap() = None;
-                    emit(json!({"type":"turn_done","data":{"is_error":true,"operation":"compact","blocked":true,
+                    emit(json!({"type":"turn_done","data":{"is_error":true,"operation":"compact","blocked":!compact_cancelled_before_submission.get(),"cancelled":compact_cancelled_before_submission.get(),
                         "model":self.initial_model(),"model_consistent":true,"usage_complete":true,
                         "usage_source":"codex_review_compaction_blocked","turn_input_tokens":0,"turn_output_tokens":0,"cost_usd":0.0,
-                        "error":"LORE review blocked compaction; existing context retained"}}));
+                        "error":if compact_cancelled_before_submission.get() { "Codex compaction cancelled before submission; existing context retained" }
+                            else { "LORE review blocked compaction; existing context retained" }}}));
                     return;
                 }
             }

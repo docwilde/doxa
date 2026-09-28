@@ -126,3 +126,27 @@ async fn observed_unreviewed_automatic_compaction_stops_provider() {
     assert!(!dir.path().join("survived-unreviewed-auto").exists());
     driver.shutdown().await;
 }
+
+#[tokio::test]
+async fn cancellation_during_compaction_source_read_sends_no_compact_rpc() {
+    let (dir, options, gate) = fixture("read-stall");
+    let mut driver = AppServerDriver::spawn_protected(options, str::to_owned, false, gate).await.unwrap();
+    let token = CancellationToken::new(); let cancel = token.clone();
+    let ready = dir.path().join("read-requested");
+    let canceller = tokio::spawn(async move {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !ready.exists() { tokio::time::sleep(Duration::from_millis(5)).await; }
+        }).await.unwrap();
+        cancel.cancel();
+    });
+    let started = tokio::time::Instant::now();
+    assert!(matches!(driver.compact(&token, |_| {}).await, Err(doxa_engines::codex_appserver::AppServerError::CompactionCancelled)));
+    assert!(started.elapsed() < Duration::from_secs(1));
+    canceller.await.unwrap();
+    let requests = fs::read_to_string(dir.path().join("requests.jsonl")).unwrap();
+    assert!(requests.contains("thread/read"));
+    assert!(!requests.contains("thread/compact/start") && !requests.contains("turn/start"));
+    assert_eq!(driver.thread_id(), "thread-actual");
+    assert_eq!(fs::read(dir.path().join("codex-home/sessions/thread.jsonl")).unwrap(), fs::read(dir.path().join("source-before")).unwrap());
+    driver.shutdown().await;
+}

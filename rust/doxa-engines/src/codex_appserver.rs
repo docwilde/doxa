@@ -57,6 +57,9 @@ pub enum AppServerError {
     /// Native pre-request review refused submission, or a verified blocking
     /// hook stopped a submitted manual compaction before context replacement.
     CompactionBlocked,
+    /// Cancellation before sending any compaction request. The bound context
+    /// remains safe to resume even if the source-read transport was stopped.
+    CompactionCancelled,
     TimedOut,
 }
 

@@ -61,6 +61,10 @@ if operation['method']=='thread/read':
     source.parent.mkdir(parents=True,exist_ok=True)
     source.write_text(json.dumps({'type':'session_meta','payload':{'id':'thread-actual'}})+'\n')
     Path('source-before').write_bytes(source.read_bytes())
+    if mode=='read-stall':
+        Path('read-requested').write_text('ready')
+        import time
+        time.sleep(60)
     if mode=='missing-source': source.unlink()
     if mode=='foreign-source': source.write_text(json.dumps({'type':'session_meta','payload':{'id':'foreign'}})+'\n')
     send({'id':operation['id'],'result':{'thread':{'id':'foreign' if mode=='foreign-thread' else 'thread-actual','path':str(source)}}})

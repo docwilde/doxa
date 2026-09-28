@@ -3404,3 +3404,75 @@ fn native_spawn_reviews_exact_task_cancels_single_use_and_publishes_verified_chi
     send(&mut controls,json!({"type":"call","id":6,"method":"answer_needs_input","params":{"id":cancelled_id,"answer":{"decision":"allow"}}}));assert_ne!(claude_receive_until(&mut review,|f|f["id"]==6)["applied"],true);
     send(&mut controls,json!({"type":"call","id":7,"method":"stop","params":{}}));claude_receive_until(&mut review,|f|f["id"]==7);wait_until(||parent.exited());
 }
+
+#[test]
+fn cancellation_before_compaction_submission_clears_restart_guard_and_resumes_context() {
+    let dir=tempfile::tempdir().unwrap(); let codex=dir.path().join("codex-source-stall");
+    executable(&codex,r#"#!/usr/bin/python3
+import json,sys,os,tomllib,time
+from pathlib import Path
+root=Path(__file__).parent
+source=Path(os.environ['CODEX_HOME'])/'sessions'/'owned-thread.jsonl'
+source.parent.mkdir(parents=True,exist_ok=True)
+if not source.exists(): source.write_text(json.dumps({'type':'session_meta','payload':{'id':'thread-1'}})+'\n')
+def read():
+ line=sys.stdin.readline()
+ if not line: sys.exit(0)
+ with root.joinpath('requests.jsonl').open('a') as log: log.write(line)
+ return json.loads(line)
+def send(value): print(json.dumps(value),flush=True)
+def notice(method,**params): send({'method':method,'params':dict(threadId='thread-1',**params)})
+init=read();send({'id':init['id'],'result':{'userAgent':'codex_cli_rs/0.156.1'}})
+assert read()['method']=='initialized'
+request=read()
+if request['method']=='model/list':
+ send({'id':request['id'],'result':{'data':[{'model':'gpt-test','hidden':False,'isDefault':True,'supportedReasoningEfforts':[]}],'nextCursor':None}})
+ sys.exit(0)
+assert request['method']=='config/read'
+send({'id':request['id'],'result':{'config':{'features':{'token_budget':False}},'origins':{},'layers':None}})
+request=read();assert request['method']=='hooks/list'
+overrides=[sys.argv[i+1] for i,x in enumerate(sys.argv[:-1]) if x=='-c']
+hooks=next(tomllib.loads(x)['hooks'] for x in overrides if x.startswith('hooks='));key=next(iter(hooks['state']))
+row={'key':key,'command':hooks['PreCompact'][0]['hooks'][0]['command'],'handlerType':'command','enabled':True,'trustStatus':'trusted','currentHash':hooks['state'][key]['trusted_hash'],'eventName':'preCompact','source':'sessionFlags','timeoutSec':240,'async':False}
+send({'id':request['id'],'result':{'data':[{'hooks':[row]}],'errors':[]}})
+request=read();assert request['method'] in ('thread/start','thread/resume')
+send({'id':request['id'],'result':{'thread':{'id':'thread-1'},'model':'gpt-test'}})
+while True:
+ request=read()
+ if request['method']=='thread/read':
+  root.joinpath('source-before').write_bytes(source.read_bytes());root.joinpath('read-requested').write_text('ready')
+  time.sleep(60)
+  sys.exit(0)
+ assert request['method']=='turn/start'
+ send({'id':request['id'],'result':{'turn':{'id':'turn-1'}}})
+ notice('thread/tokenUsage/updated',turnId='turn-1',tokenUsage={'last':{'inputTokens':0,'outputTokens':0,'totalTokens':0},'total':{'inputTokens':0,'outputTokens':0,'cachedInputTokens':0},'modelContextWindow':32000})
+ notice('turn/completed',turn={'id':'turn-1','status':'completed','error':None})
+"#);
+    let mut process=Process::start_codex_appserver(dir.path(),&codex,Path::new("/usr/bin/python3"),false);
+    let (mut reader,mut socket)=process.connect();
+    reader.get_ref().set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    receive(&mut reader);send(&mut socket,json!({"type":"attach","cursor":null}));
+    send(&mut socket,json!({"type":"prompt","id":1,"text":"initial fixture"}));
+    assert_eq!(claude_receive_until(&mut reader,|frame|frame["event"]["type"]=="turn_done")["event"]["data"]["is_error"],false);
+    send(&mut socket,json!({"type":"prompt","id":2,"text":"/compact"}));
+    wait_until(||dir.path().join("read-requested").exists());
+    let started=Instant::now();
+    send(&mut socket,json!({"type":"call","id":3,"method":"interrupt","params":{}}));
+    let done=claude_receive_until(&mut reader,|frame|frame["event"]["type"]=="turn_done");
+    assert!(started.elapsed()<Duration::from_secs(2));
+    assert_eq!(done["event"]["data"]["cancelled"],true);
+    assert_eq!(done["event"]["data"]["turn_input_tokens"],0);
+    let thread_path=native_transcript(dir.path(),"codex-session.codex.json");
+    let state:Value=serde_json::from_slice(&fs::read(&thread_path).unwrap()).unwrap();
+    assert_eq!(state["thread_id"],"thread-1");assert_eq!(state["turn_incomplete"],false);
+    let source=dir.path().join("fixture-codex/sessions/owned-thread.jsonl");
+    assert_eq!(fs::read(&source).unwrap(),fs::read(dir.path().join("source-before")).unwrap());
+    send(&mut socket,json!({"type":"prompt","id":4,"text":"safe followup"}));
+    assert_eq!(claude_receive_until(&mut reader,|frame|frame["event"]["type"]=="turn_done")["event"]["data"]["is_error"],false);
+    let requests=fs::read_to_string(dir.path().join("requests.jsonl")).unwrap();
+    assert!(requests.contains("thread/resume"));assert!(!requests.contains("thread/compact/start"));
+    assert_eq!(fs::read(&source).unwrap(),fs::read(dir.path().join("source-before")).unwrap());
+    send(&mut socket,json!({"type":"call","id":5,"method":"stop","params":{}}));
+    assert_eq!(claude_receive_until(&mut reader,|frame|frame["type"]=="reply"&&frame["id"]==5)["ok"],true);
+    wait_until(||process.exited());
+}

@@ -8,11 +8,24 @@ impl AppServerDriver {
         if !self.compact_gate.as_ref().is_some_and(|gate| gate.verified()) {
             return Err(AppServerError::Protocol("Codex reviewed compaction gate is unavailable"));
         }
-        if cancel.is_cancelled() { return Err(AppServerError::Cancelled); }
+        if cancel.is_cancelled() { return Err(AppServerError::CompactionCancelled); }
         if self.turn_id.is_some() { return Err(AppServerError::Protocol("cannot compact during an active turn")); }
         // Obtain the official bound rollout path without hydrating history.
         let thread = self.thread_id().to_owned();
-        let result = self.request("thread/read", json!({"threadId":thread,"includeTurns":false})).await?;
+        let deadline = tokio::time::Instant::now() + RPC_TIMEOUT.min(self.options.turn_timeout);
+        let result = async {
+            let request = self.send_request_bounded("thread/read", json!({"threadId":thread,"includeTurns":false}), Some(cancel), deadline).await?;
+            self.wait_response(request, Some(cancel), deadline, false).await
+        }.await;
+        let result = match result {
+            Err(AppServerError::Cancelled) => {
+                // read_frame may have consumed part of a frame. Retire this
+                // transport; no compact RPC was sent and the thread is resumable.
+                self.kill_group();
+                return Err(AppServerError::CompactionCancelled);
+            }
+            other => other?,
+        };
         if result["thread"]["id"] != thread { return Err(AppServerError::Protocol("compact source belongs to a different thread")); }
         let path = result["thread"]["path"].as_str().map(std::path::PathBuf::from)
             .ok_or(AppServerError::CompactionBlocked)?;
@@ -26,7 +39,7 @@ impl AppServerDriver {
                 .unwrap_or(false);
             (approved && job.unchanged().unwrap_or(false)).then_some(job)
         }).await.map_err(|_| AppServerError::CompactionBlocked)?;
-        if cancel.is_cancelled() { return Err(AppServerError::Cancelled); }
+        if cancel.is_cancelled() { return Err(AppServerError::CompactionCancelled); }
         let job = reviewed_job.ok_or(AppServerError::CompactionBlocked)?;
         if !job.unchanged().unwrap_or(false) { return Err(AppServerError::CompactionBlocked); }
         emit(EngineEvent::new("lore_review_completed", json!({"before":"compaction","source":"native_pre_request"})));
@@ -34,12 +47,14 @@ impl AppServerDriver {
     }
 
     async fn compact_approved(&mut self, cancel: &CancellationToken, mut emit: impl FnMut(EngineEvent), job: crate::compact_hook::ReviewJob) -> Result<(), AppServerError> {
+        if cancel.is_cancelled() { return Err(AppServerError::CompactionCancelled); }
         // The private job cannot be created by adapter consumers. Recheck the
         // approved exact source immediately before submitting compaction.
         if !job.unchanged().unwrap_or(false)
             || self.compact_gate.as_ref().is_none_or(|gate| !gate.verified() || gate.pinned_carrier().is_err()) {
             return Err(AppServerError::CompactionBlocked);
         }
+        if cancel.is_cancelled() { return Err(AppServerError::CompactionCancelled); }
         self.usage=None;
         let thread = self.thread_id().to_owned();
         let deadline = tokio::time::Instant::now() + self.options.turn_timeout;
