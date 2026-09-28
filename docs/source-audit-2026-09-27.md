@@ -305,7 +305,7 @@ workspace read through both native dispatchers, refusal with the helper missing,
 and correlated successful command call/result/detail through DOXA and native
 LORE. Each made two loopback requests. The unpredictable file token was absent
 from the first request, the final response came from the returned tool output,
-and the source file stayed unchanged. Eight proof tests and eleven installer
+and the source file stayed unchanged. Ten proof tests and eleven installer
 tests cover these assertions and artifact migration/repair.
 
 A subsequent two-turn authenticated check accepted `gpt-6-sol` with low effort,

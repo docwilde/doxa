@@ -310,12 +310,12 @@ The actual compiled package passed three credential-free scenarios:
 Each scenario made exactly two local HTTP requests. The first request contained
 no fixture token; the loopback model generated its final answer only from the
 returned tool output. Fixtures stayed unchanged, no credentials or paid requests
-were used, and owned temporary directories were removed. Eight stdlib tests
-cover the proof's inventory, leakage, output and event-correlation checks.
+were used, and owned temporary directories were removed. Ten stdlib tests
+cover inventory, leakage, output, event correlation and descendant cleanup.
 
 Reproduce with `scripts/codex-protected/verify_code_mode.py --help`; use the
-installed private launcher for `--server` and `--launcher`, the compiled server
-payload for `--negative-server`, and native binaries for `--daemon` and `--lore`.
+compiled server payload for `--server` and `--negative-server`, its installed
+private launcher for `--launcher`, and native binaries for `--daemon` and `--lore`.
 These checks establish tool execution and DOXA normalization.
 
 ### Authenticated file read and same-thread recall
