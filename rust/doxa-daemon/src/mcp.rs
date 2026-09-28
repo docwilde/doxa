@@ -19,6 +19,7 @@ fn spawn_in_parent(session:&str,cwd:&std::path::Path,args:&Value)->Result<Value,
     let hello:Value=serde_json::from_slice(&frame).map_err(|_|"Parent handshake unavailable")?;
     if frame.len() as u64>FRAME_LIMIT||hello["type"]!="hello"||hello["session_id"]!=session||hello["engine"]!="codex"{return Err("Parent identity changed".into());}
     stream.set_read_timeout(None).map_err(|_|"Parent answer unavailable")?;reader.get_ref().set_read_timeout(None).map_err(|_|"Parent answer unavailable")?;
+    writeln!(stream,"{}",json!({"type":"attach","cursor":null})).map_err(|_|"Parent attach unavailable")?;
     writeln!(stream,"{}",json!({"type":"call","id":1,"method":"spawn_session","params":args})).map_err(|_|"Parent request unavailable")?;
     stream.flush().map_err(|_|"Parent request unavailable")?;
     loop {frame.clear();let count=std::io::Read::take(&mut reader,FRAME_LIMIT+1).read_until(b'\n',&mut frame).map_err(|_|"Parent reply unavailable")?;
