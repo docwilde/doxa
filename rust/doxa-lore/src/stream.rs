@@ -129,13 +129,19 @@ impl StreamScrubber {
             self.context_bytes += unit.len();
             self.context.push_back(unit);
         }
+        let mut trimmed = false;
         while self.context_bytes > MAX_CONTEXT {
+            trimmed = true;
             self.context_bytes -= self.context.pop_front().unwrap().len();
         }
-        let input = self.context.iter().cloned().collect::<String>();
-        self.clean_context = match scrub(&input) {
-            Ok(s) => s,
-            Err(_) => return self.refuse(),
+        self.clean_context = if trimmed {
+            let input = self.context.iter().cloned().collect::<String>();
+            match scrub(&input) {
+                Ok(s) => s,
+                Err(_) => return self.refuse(),
+            }
+        } else {
+            clean
         };
         Ok(output)
     }
