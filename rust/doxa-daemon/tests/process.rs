@@ -192,6 +192,7 @@ impl Process {
         Self { child, registry, socket: PathBuf::from(entry["daemon_socket"].as_str().unwrap()) }
     }
     fn start_codex_with_inbound(runtime: &Path, codex: &Path, _fixture_interpreter: &Path, inbound: bool) -> Self {
+        let codex = codex_appserver_fixture(codex);
         let mut command = daemon_command();
         command
             .args([
@@ -211,7 +212,7 @@ impl Process {
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .env("DOXA_HOME", runtime.join("home"))
-            .env("DOXA_CODEX_APPSERVER", "0");
+            .env_remove("DOXA_CODEX_APPSERVER");
         if inbound { command.env("DOXA_PEER_INBOUND_TURNS", "yes"); }
         let child = command.spawn().unwrap();
         let registry = runtime.join("registry/codex-session.json");
@@ -263,7 +264,9 @@ impl Process {
     fn connect(&self) -> (BufReader<UnixStream>, UnixStream) {
         let socket = UnixStream::connect(&self.socket).unwrap();
         socket
-            .set_read_timeout(Some(Duration::from_secs(2)))
+            .set_read_timeout(Some(if self.registry.file_name().and_then(|name|name.to_str()) == Some("codex-session.json") {
+                CODEX_PREPARATION_TIMEOUT
+            } else { Duration::from_secs(2) }))
             .unwrap();
         (BufReader::new(socket.try_clone().unwrap()), socket)
     }
@@ -476,6 +479,17 @@ fn managed_worktree_conflict_refuses_to_start_in_original_checkout() {
     assert_eq!(row["cwd"], plain.to_str().unwrap());
     unsafe { libc::kill(non_git.id() as libc::pid_t, libc::SIGTERM); }
     wait_until(|| non_git.try_wait().unwrap().is_some());
+}
+fn codex_appserver_fixture(producer: &Path) -> PathBuf {
+    let server = producer.with_extension("appserver");
+    let turn = server.with_extension("turn");
+    fs::copy(producer, &turn).unwrap();
+    executable(&server, include_str!("fixtures/codex_appserver.py"));
+    server
+}
+fn codex_fixture_rpcs(producer: &Path) -> Vec<Value> {
+    fs::read_to_string(producer.with_extension("rpc")).unwrap().lines()
+        .map(|line| serde_json::from_str(line).unwrap()).collect()
 }
 fn executable(path: &Path, body: &str) {
     fs::write(path, body).unwrap();
@@ -896,7 +910,7 @@ fn codex_host_resumes_and_scrubs_provider_events() {
 printf '%s\n' "$@" >> '{}'
 echo END >> '{}'
 cat >> '{}'
-echo '{{"type":"thread.started","thread_id":"thread_1"}}'
+echo '{{"type":"thread.started","thread_id":"thread-1"}}'
 echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"sk-ownedCanonicalFixtureSecret1234567890 answer"}}}}'
 "#,
             args.display(),
@@ -937,7 +951,11 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"sk-owned
         assert_eq!(kinds, ["turn_started", "text_delta", "turn_done"]);
     }
     let argv = fs::read_to_string(args).unwrap();
-    assert!(argv.contains("exec\nresume\nthread_1\n"));
+    assert!(argv.contains("exec\nresume\nthread-1\n"));
+    let rpcs = codex_fixture_rpcs(&codex);
+    assert_eq!(rpcs.iter().filter(|row|row["method"]=="thread/start").count(),1);
+    assert_eq!(rpcs.iter().filter(|row|row["method"]=="turn/start").count(),2);
+    assert!(!rpcs.iter().any(|row|row["method"]=="thread/resume"));
     let provider_stdin=fs::read_to_string(prompt).unwrap();
     assert!(provider_stdin.starts_with("[DOXA MEMORY -- not typed by the user]"));
     assert!(provider_stdin.ends_with("[END OF MEMORY]\n\nsk-ownedCanonicalFixtureSecret1234567890 first promptsecond prompt"));
@@ -954,7 +972,7 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"sk-owned
 fn codex_host_indexes_completed_turn_and_finalized_transcript() {
     let dir=tempfile::tempdir().unwrap();let codex=dir.path().join("codex-fixture");
     let python=Path::new("/usr/bin/python3");
-    executable(&codex,"#!/bin/sh\ncat >/dev/null\necho '{\"type\":\"thread.started\",\"thread_id\":\"thread_1\"}'\necho '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"answer\"}}'\n");
+    executable(&codex,"#!/bin/sh\ncat >/dev/null\necho '{\"type\":\"thread.started\",\"thread_id\":\"thread-1\"}'\necho '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"answer\"}}'\n");
     native_memory_fixture(dir.path(),"- poisoned optional context\n");
     let source=dir.path().join("native-lore/USER.md");fs::remove_file(&source).unwrap();
     let target=dir.path().join("unused-context-target");
@@ -977,7 +995,7 @@ fn codex_host_indexes_completed_turn_and_finalized_transcript() {
 #[test]
 fn blocked_codex_index_does_not_delay_scrubbing_or_disable_later_turns() {
     let dir=tempfile::tempdir().unwrap();let codex=dir.path().join("codex-fixture");
-    executable(&codex,"#!/bin/sh\ncat >/dev/null\necho '{\"type\":\"thread.started\",\"thread_id\":\"thread_1\"}'\necho '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"sk-ownedCanonicalFixtureSecret1234567890 answer\"}}'\n");
+    executable(&codex,"#!/bin/sh\ncat >/dev/null\necho '{\"type\":\"thread.started\",\"thread_id\":\"thread-1\"}'\necho '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"sk-ownedCanonicalFixtureSecret1234567890 answer\"}}'\n");
     native_memory_fixture(dir.path(),"- poisoned optional context\n");
     let source=dir.path().join("native-lore/USER.md");fs::remove_file(&source).unwrap();
     let target=dir.path().join("unused-context-target");
@@ -987,7 +1005,16 @@ fn blocked_codex_index_does_not_delay_scrubbing_or_disable_later_turns() {
     let mut process=Process::start_codex(dir.path(),&codex,Path::new("/usr/bin/python3"));
     let (mut reader,mut socket)=process.connect();receive(&mut reader);send(&mut socket,json!({"type":"attach","cursor":null}));
     let mut turn=|id| {
-        let start=Instant::now();send(&mut socket,json!({"type":"prompt","id":id,"text":"sk-ownedCanonicalFixtureSecret1234567890 hello"}));assert_eq!(receive(&mut reader)["ok"],true);
+        let preparation=Instant::now();send(&mut socket,json!({"type":"prompt","id":id,"text":"sk-ownedCanonicalFixtureSecret1234567890 hello"}));assert_eq!(receive(&mut reader)["ok"],true);
+        // Protected startup attests the full carrier before provider input.
+        // Keep the two-second indexing/scrubbing gate after actual submission.
+        while !fs::read_to_string(codex.with_extension("rpc")).unwrap_or_default().lines()
+            .filter_map(|line|serde_json::from_str::<Value>(line).ok())
+            .any(|row|row["method"]=="turn/start") {
+            assert!(preparation.elapsed()<CODEX_PREPARATION_TIMEOUT);
+            thread::sleep(Duration::from_millis(10));
+        }
+        let start=Instant::now();
         loop {let frame=receive(&mut reader);assert!(!frame.to_string().contains("sk-ownedCanonicalFixtureSecret1234567890"));if frame["event"]["type"]=="turn_done" {assert_eq!(frame["event"]["data"]["is_error"],false,"{frame}");break;}}
         assert!(start.elapsed()<Duration::from_secs(2),"optional native indexing delayed mandatory scrub");
     };
@@ -1019,7 +1046,7 @@ if [ "$2" = resume ]; then
 else
   cat > '{}'
 fi
-echo '{{"type":"thread.started","thread_id":"thread_1"}}'
+echo '{{"type":"thread.started","thread_id":"thread-1"}}'
 echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"answer"}}}}'
 "#,
             resumed.display(),
@@ -1103,7 +1130,7 @@ fn unavailable_lore_snapshot_does_not_block_a_scrubbable_codex_turn() {
     executable(
         &codex,
         &format!(
-            "#!/bin/sh\ncat > '{}'\necho '{{\"type\":\"thread.started\",\"thread_id\":\"thread_1\"}}'\n",
+            "#!/bin/sh\ncat > '{}'\necho '{{\"type\":\"thread.started\",\"thread_id\":\"thread-1\"}}'\n",
             captured.display()
         ),
     );
@@ -1148,7 +1175,7 @@ fn codex_transcript_and_thread_survive_daemon_restart() {
             r#"#!/bin/sh
 printf '%s\n' "$@" >> '{}'
 cat >/dev/null
-echo '{{"type":"thread.started","thread_id":"thread_1"}}'
+echo '{{"type":"thread.started","thread_id":"thread-1"}}'
 echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"sk-ownedCanonicalFixtureSecret1234567890 answer"}}}}'
 "#,
             args.display()
@@ -1206,14 +1233,18 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"sk-owned
         &fs::read(native_transcript(dir.path(), "codex-session.codex.json")).unwrap(),
     )
     .unwrap();
-    assert_eq!(thread["thread_id"], "thread_1");
+    assert_eq!(thread["thread_id"], "thread-1");
     assert_eq!(thread["session_id"], "codex-session");
     assert_eq!(thread["turn_incomplete"], false);
     assert_eq!(thread["transcript_bytes"].as_u64(), Some(
         fs::metadata(native_transcript(dir.path(), "codex-session.jsonl")).unwrap().len()));
     assert!(fs::read_to_string(args)
         .unwrap()
-        .contains("exec\nresume\nthread_1\n"));
+        .contains("exec\nresume\nthread-1\n"));
+    let rpcs = codex_fixture_rpcs(&codex);
+    let resumed = rpcs.iter().find(|row|row["method"]=="thread/resume").unwrap();
+    assert_eq!(resumed["params"]["threadId"], "thread-1");
+    assert_eq!(rpcs.iter().filter(|row|row["method"]=="thread/start").count(),1);
 }
 
 #[test]
@@ -1222,7 +1253,7 @@ fn codex_clean_checkpoint_failure_overrides_success_and_preserves_dirty_resume_g
     let codex = dir.path().join("codex-fixture");
     let python = Path::new("/usr/bin/python3");
     let ready=dir.path().join("checkpoint-ready");let release=dir.path().join("checkpoint-release");
-    executable(&codex,&format!("#!/bin/sh\ncat >/dev/null\necho '{{\"type\":\"thread.started\",\"thread_id\":\"thread_1\"}}'\ntouch '{}'\nattempt=0\nwhile [ ! -e '{}' ]; do attempt=$((attempt+1)); [ $attempt -le 1000 ] || exit 1; sleep .01; done\n",ready.display(),release.display()));
+    executable(&codex,&format!("#!/bin/sh\ncat >/dev/null\necho '{{\"type\":\"thread.started\",\"thread_id\":\"thread-1\"}}'\ntouch '{}'\nattempt=0\nwhile [ ! -e '{}' ]; do attempt=$((attempt+1)); [ $attempt -le 1000 ] || exit 1; sleep .01; done\n",ready.display(),release.display()));
     let mut process = Process::start_codex(dir.path(), &codex, &python);
     let (mut reader, mut socket) = process.connect();
     receive(&mut reader);
@@ -1279,7 +1310,7 @@ fn codex_resume_refuses_changed_clean_checkpoint_before_provider_execution() {
     let original = b"{\"type\":\"user\"}\n{\"type\":\"assistant\"}\n";
     fs::write(&transcript, original).unwrap();
     fs::write(project.join("codex-session.codex.json"), json!({
-        "thread_id":"thread_1","session_id":"codex-session","cwd":dir.path(),
+        "thread_id":"thread-1","session_id":"codex-session","cwd":dir.path(),
         "model":null,"turn_incomplete":false,"transcript_bytes":original.len()
     }).to_string()).unwrap();
     for changed in [original[..original.len()-1].to_vec(), [original.as_slice(), b"{}\n"].concat()] {
@@ -1347,7 +1378,7 @@ fn codex_thread_write_failure_reports_turn_error_and_stops_session() {
     executable(
         &codex,
         &format!(
-            "#!/bin/sh\ntouch '{}'\ncat >/dev/null\necho '{{\"type\":\"thread.started\",\"thread_id\":\"thread_1\"}}'\necho '{{\"type\":\"item.completed\",\"item\":{{\"type\":\"agent_message\",\"text\":\"answer\"}}}}'\n",
+            "#!/bin/sh\ntouch '{}'\ncat >/dev/null\necho '{{\"type\":\"thread.started\",\"thread_id\":\"thread-1\"}}'\necho '{{\"type\":\"item.completed\",\"item\":{{\"type\":\"agent_message\",\"text\":\"answer\"}}}}'\n",
             invoked.display()
         ),
     );
@@ -1369,7 +1400,12 @@ fn codex_thread_write_failure_reports_turn_error_and_stops_session() {
             break;
         }
     }
-    assert!(invoked.exists());
+    // App-server reports its thread identity before turn submission, so the
+    // same durable-write fault must now withhold the provider turn entirely.
+    let rpcs = codex_fixture_rpcs(&codex);
+    assert_eq!(rpcs.iter().filter(|row|row["method"]=="thread/start").count(),1);
+    assert!(!rpcs.iter().any(|row|row["method"]=="turn/start"));
+    assert!(!invoked.exists());
     send(&mut socket, json!({"type":"prompt","id":2,"text":"again"}));
     assert_eq!(receive(&mut reader)["ok"], true);
     loop {
@@ -1382,6 +1418,7 @@ fn codex_thread_write_failure_reports_turn_error_and_stops_session() {
     send(&mut socket, json!({"type":"call","id":3,"method":"stop","params":{}}));
     assert_eq!(receive(&mut reader)["ok"], true);
     wait_until(|| process.exited());
+    assert!(!codex_fixture_rpcs(&codex).iter().any(|row|row["method"]=="turn/start"));
 }
 
 #[test]
@@ -1394,7 +1431,7 @@ fn codex_assistant_append_failure_overrides_successful_provider_turn() {
     executable(
         &codex,
         &format!(
-            "#!/bin/sh\ncat >/dev/null\necho '{{\"type\":\"thread.started\",\"thread_id\":\"thread_1\"}}'\ntouch '{}'\nwhile [ ! -e '{}' ]; do sleep 0.01; done\necho '{{\"type\":\"item.completed\",\"item\":{{\"type\":\"agent_message\",\"text\":\"answer\"}}}}'\n",
+            "#!/bin/sh\ncat >/dev/null\necho '{{\"type\":\"thread.started\",\"thread_id\":\"thread-1\"}}'\ntouch '{}'\nwhile [ ! -e '{}' ]; do sleep 0.01; done\necho '{{\"type\":\"item.completed\",\"item\":{{\"type\":\"agent_message\",\"text\":\"answer\"}}}}'\n",
             ready.display(),
             release.display()
         ),
@@ -1427,7 +1464,7 @@ fn codex_assistant_append_failure_overrides_successful_provider_turn() {
         &fs::read(native_transcript(dir.path(), "codex-session.codex.json")).unwrap(),
     )
     .unwrap();
-    assert_eq!(thread["thread_id"], "thread_1");
+    assert_eq!(thread["thread_id"], "thread-1");
     assert_eq!(thread["turn_incomplete"], true);
     send(&mut socket, json!({"type":"call","id":2,"method":"stop","params":{}}));
     assert_eq!(receive(&mut reader)["ok"], true);
@@ -1499,11 +1536,11 @@ fn explicit_codex_resume_requires_matching_thread_metadata() {
     assert!(!run().status.success(), "resume without saved state must fail");
     fs::write(&transcript, b"{\"type\":\"user\"}\n").unwrap();
     for state in [
-        json!({"thread_id":"thread_1","session_id":"other","cwd":dir.path()}),
-        json!({"thread_id":"thread_1","session_id":"codex-session","cwd":"/wrong"}),
+        json!({"thread_id":"thread-1","session_id":"other","cwd":dir.path()}),
+        json!({"thread_id":"thread-1","session_id":"codex-session","cwd":"/wrong"}),
         json!({"thread_id":"-unsafe","session_id":"codex-session","cwd":dir.path()}),
-        json!({"thread_id":"thread_1","session_id":"codex-session","cwd":dir.path()}),
-        json!({"thread_id":"thread_1","session_id":"codex-session","cwd":dir.path(),"turn_incomplete":true}),
+        json!({"thread_id":"thread-1","session_id":"codex-session","cwd":dir.path()}),
+        json!({"thread_id":"thread-1","session_id":"codex-session","cwd":dir.path(),"turn_incomplete":true}),
     ] {
         fs::write(&thread, state.to_string()).unwrap();
         let output = run();
@@ -1511,7 +1548,7 @@ fn explicit_codex_resume_requires_matching_thread_metadata() {
         assert!(!project.join("should-not-start").exists());
         assert!(!dir.path().join("registry/codex-session.json").exists());
     }
-    fs::write(&thread, json!({"thread_id":"thread_1","session_id":"codex-session",
+    fs::write(&thread, json!({"thread_id":"thread-1","session_id":"codex-session",
         "cwd":dir.path(),"model":null,"turn_incomplete":false}).to_string()).unwrap();
     let mut resumed = daemon_command()
         .args(["--runtime-dir", dir.path().to_str().unwrap(),
@@ -1530,7 +1567,7 @@ fn thread_identity_is_durable_before_turn_completes() {
     let dir = tempfile::tempdir().unwrap();
     let codex = dir.path().join("codex-fixture");
     let python = Path::new("/usr/bin/python3");
-    executable(&codex, "#!/bin/sh\ncat >/dev/null\necho '{\"type\":\"thread.started\",\"thread_id\":\"thread_early\"}'\nsleep 10\n");
+    executable(&codex, "#!/bin/sh\ncat >/dev/null\necho '{\"type\":\"thread.started\",\"thread_id\":\"thread-early\"}'\nsleep 10\n");
     let mut process = Process::start_codex(dir.path(), &codex, &python);
     let (mut reader, mut socket) = process.connect();
     receive(&mut reader);
@@ -1540,7 +1577,7 @@ fn thread_identity_is_durable_before_turn_completes() {
     let path = native_transcript(dir.path(), "codex-session.codex.json");
     wait_until(|| path.exists());
     let thread: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
-    assert_eq!(thread["thread_id"], "thread_early");
+    assert_eq!(thread["thread_id"], "thread-early");
     unsafe {
         libc::kill(process.child.id() as libc::pid_t, libc::SIGTERM);
     }
@@ -1720,7 +1757,7 @@ fn interrupt_reaps_codex_process_group() {
     executable(
         &codex,
         &format!(
-            "#!/bin/sh\ncat >/dev/null\necho '{{\"type\":\"thread.started\",\"thread_id\":\"thread_1\"}}'\nsh -c 'sleep 1; echo leaked > {}' &\nwait\n",
+            "#!/bin/sh\ncat >/dev/null\necho '{{\"type\":\"thread.started\",\"thread_id\":\"thread-1\"}}'\nsh -c 'sleep 1; echo leaked > {}' &\nwait\n",
             marker.display()
         ),
     );
@@ -1753,7 +1790,7 @@ fn interrupt_reaps_codex_process_group() {
     thread::sleep(Duration::from_millis(1200));
     assert!(!marker.exists(), "Codex descendant survived interruption");
     let thread: Value = serde_json::from_slice(&fs::read(&thread_path).unwrap()).unwrap();
-    assert_eq!(thread["thread_id"], "thread_1");
+    assert_eq!(thread["thread_id"], "thread-1");
     assert_eq!(thread["turn_incomplete"], true);
     send(
         &mut socket,
@@ -1819,7 +1856,7 @@ fn queued_codex_prompt_is_scrubbed_for_other_clients() {
     let dir = tempfile::tempdir().unwrap();
     let codex = dir.path().join("codex-fixture");
     let python = Path::new("/usr/bin/python3");
-    executable(&codex, "#!/bin/sh\ncat >/dev/null\nsleep 1\necho '{\"type\":\"thread.started\",\"thread_id\":\"thread_1\"}'\n");
+    executable(&codex, "#!/bin/sh\ncat >/dev/null\nsleep 1\necho '{\"type\":\"thread.started\",\"thread_id\":\"thread-1\"}'\n");
     let mut process = Process::start_codex(dir.path(), &codex, &python);
     let (mut first, mut first_socket) = process.connect();
     receive(&mut first);
@@ -2772,7 +2809,7 @@ fn inbound_direct_peer_starts_scrubbed_turn_but_broadcast_does_not() {
     let captured = dir.path().join("captured-prompt");
     executable(&codex, &format!(r#"#!/bin/sh
 cat >> '{}'
-echo '{{"type":"thread.started","thread_id":"thread_1"}}'
+echo '{{"type":"thread.started","thread_id":"thread-1"}}'
 echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}}'
 "#, captured.display()));
     let (_sender_listener, _) = registry_peer(dir.path(), "sender", dir.path().to_str().unwrap(), "sender");
@@ -2832,7 +2869,7 @@ cat >/dev/null
 if [ ! -f '{}' ]; then
   while [ ! -f '{}' ]; do sleep 0.01; done
 fi
-echo '{{"type":"thread.started","thread_id":"thread_1"}}'
+echo '{{"type":"thread.started","thread_id":"thread-1"}}'
 echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}}'
 "#, release.display(), release.display()));
     let (_sender_listener, _) = registry_peer(dir.path(), "sender", dir.path().to_str().unwrap(), "sender");
@@ -2884,7 +2921,7 @@ fn native_daemon_queue_rpc_scrubs_and_cancels_before_turn_starts() {
 cat >/dev/null
 touch '{}'
 while [ ! -f '{}' ]; do sleep 0.01; done
-echo '{{"type":"thread.started","thread_id":"thread_1"}}'
+echo '{{"type":"thread.started","thread_id":"thread-1"}}'
 echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}}'
 "#, ready.display(), release.display()));
     let mut process = Process::start_codex(dir.path(), &codex, &python);
@@ -2936,7 +2973,7 @@ def read(): return json.loads(sys.stdin.readline())
 def send(v): print(json.dumps(v),flush=True)
 log = open('__LOG__','a')
 init=read(); assert init['method']=='initialize'
-send({'id':init['id'],'result':{'userAgent':'codex_cli_rs/0.156.1'}})
+send({'id':init['id'],'result':{'userAgent':'doxa_codex_rs/0.156.1 (doxa-precompact-fail-closed-v1; upstream fixture)'}})
 assert read()['method']=='initialized'
 thread=read()
 if thread['method']=='config/read':
@@ -3099,7 +3136,7 @@ fn stopping_codex_during_unanswered_appserver_initialization_is_prompt() {
 }
 
 #[test]
-fn saved_exec_codex_settings_preserve_transport_and_resume_thread() {
+fn saved_appserver_codex_settings_preserve_controls_and_resume_thread() {
     let dir = tempfile::tempdir().unwrap();
     let codex = dir.path().join("codex-fixture");
     let python = Path::new("/usr/bin/python3");
@@ -3116,7 +3153,7 @@ if sys.argv[1]=='app-server':
 else:
     with open({:?},'a') as log: log.write(json.dumps(sys.argv[1:])+'\n')
     sys.stdin.read()
-    print(json.dumps({{'type':'thread.started','thread_id':'thread_legacy'}}))
+    print(json.dumps({{'type':'thread.started','thread_id':'thread-legacy'}}))
     print(json.dumps({{'type':'item.completed','item':{{'type':'agent_message','text':'answer'}}}}))
     print(json.dumps({{'type':'turn.completed','usage':{{'input_tokens':1,'output_tokens':1}}}}))
 "#, args.to_str().unwrap()));
@@ -3141,11 +3178,19 @@ else:
     assert_eq!(calls.len(), 2);
     for call in &calls { assert!(call.as_array().unwrap().contains(&json!("account-model"))); assert!(call.as_array().unwrap().contains(&json!("model_reasoning_effort=\"high\""))); }
     assert_eq!(calls[1][1], "resume");
-    assert_eq!(calls[1][2], "thread_legacy");
+    assert_eq!(calls[1][2], "thread-legacy");
     let thread: Value = serde_json::from_slice(&fs::read(native_transcript(dir.path(), "codex-session.codex.json")).unwrap()).unwrap();
-    assert_eq!(thread["transport"], "exec");
+    assert_eq!(thread["transport"], "app-server");
     assert_eq!(thread["model"], "account-model");
     assert_eq!(thread["effort"], "high");
+    let rpcs = codex_fixture_rpcs(&codex);
+    assert_eq!(rpcs.iter().find(|row|row["method"]=="thread/resume").unwrap()["params"]["threadId"],"thread-legacy");
+    let turns: Vec<_> = rpcs.iter().filter(|row|row["method"]=="turn/start").collect();
+    assert_eq!(turns.len(),2);
+    for turn in turns {
+        assert_eq!(turn["params"]["model"],"account-model");
+        assert_eq!(turn["params"]["effort"],"high");
+    }
 }
 
 #[test]
@@ -3196,11 +3241,12 @@ fn memory_off_codex_scrubs_and_records_without_snapshot_index_or_compact_review(
         let codex = dir.path().join("codex-fixture");
         let captured = dir.path().join("stdin.txt");
         native_memory_fixture(dir.path(),"- durable memory\n");
-        executable(&codex, &format!("#!/bin/sh\ncat > '{}'\necho '{{\"type\":\"thread.started\",\"thread_id\":\"thread_1\"}}'\n", captured.display()));
+        executable(&codex, &format!("#!/bin/sh\ncat > '{}'\necho '{{\"type\":\"thread.started\",\"thread_id\":\"thread-1\"}}'\n", captured.display()));
+        let codex = codex_appserver_fixture(&codex);
         let mut command = daemon_command();
         command.args(["--runtime-dir", dir.path().to_str().unwrap(), "--cwd", dir.path().to_str().unwrap(),
             "--session-id", "codex-session", "--linger", "10", "--engine", "codex", "--codex-bin", codex.to_str().unwrap(), ])
-            .env("DOXA_HOME", dir.path().join("home")).env("DOXA_CODEX_APPSERVER", "0").env_remove("DOXA_LORE")
+            .env("DOXA_HOME", dir.path().join("home")).env_remove("DOXA_CODEX_APPSERVER").env_remove("DOXA_LORE")
             .stdout(Stdio::null()).stderr(Stdio::piped());
         if let Some(value) = override_env { command.env("DOXA_LORE", value); }
         let child = command.spawn().unwrap(); let registry = dir.path().join("registry/codex-session.json");
@@ -3435,7 +3481,7 @@ def read():
  return json.loads(line)
 def send(value): print(json.dumps(value),flush=True)
 def notice(method,**params): send({'method':method,'params':dict(threadId='thread-1',**params)})
-init=read();send({'id':init['id'],'result':{'userAgent':'codex_cli_rs/0.156.1'}})
+init=read();send({'id':init['id'],'result':{'userAgent':'doxa_codex_rs/0.156.1 (doxa-precompact-fail-closed-v1; upstream fixture)'}})
 assert read()['method']=='initialized'
 request=read()
 if request['method']=='model/list':

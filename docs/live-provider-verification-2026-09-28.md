@@ -1,5 +1,39 @@
 # Live provider verification — 2026-09-28
 
+## Fresh authentication and resume verification
+
+The completion run used isolated worktree `codex/live-providers-20260928` at
+`ac0097f` (alpha.39), with all disposable homes and build files beneath
+`/home/docwilde/.d40`. The production guarded resolver was run again against
+the original effective DOXA home before isolation. DeepSeek and z.ai still
+reported `missing`, with no guard rejection. Both `--check` and `--live`
+returned zero paid requests; no vendor account request was sent.
+
+Claude Code 2.1.283's fresh `auth status --json` reported `loggedIn: false`,
+`authMethod: none`, and `apiProvider: firstParty`. Native LORE 0.62.2's review
+worker uses Claude for derivation even when reviewing a Codex source; an
+authenticated Codex session alone does not provide that reviewer authentication.
+A successful provider-backed LORE review remains unverified with this account
+state.
+
+At `2026-09-28T16:50:39Z`, the actual Codex 0.156.1 account catalog returned
+seven models and accepted native `set_model` / `set_effort`. Stock protected
+startup then refused the first submitted prompt with
+`Codex build has no verified DOXA compaction hook contract`. There were no
+text/tool events, no successful native turn, and no provider thread to resume
+in this fresh run. Earlier successful turns below remain historical evidence;
+they do not establish compatibility of this fresh protected startup.
+
+The vendor verifier now uses its existing **two submitted turn** allowance to
+verify resume: it completes the first file-read turn, applies the next-turn
+effort control, stops and reaps the native daemon, resumes the same session
+with the selected model and effort, then submits the retained-token turn. It
+checks the resumed hello configuration before that second prompt. This path
+has passed against the real native daemon with loopback SSE for **both**
+DeepSeek and z.ai. Live account resume remains blocked by their missing keys.
+The temporary directory prefix is shortened to leave room for native Unix
+socket paths under an explicit disk-backed `TMPDIR`.
+
 ## Native Codex and Claude
 
 These checks used the actual installed provider CLIs and the Rust DOXA daemon,
@@ -25,10 +59,10 @@ the durable restart guard only after successful persistence. A follow-up turn
 resumes the original thread. Native approval receipts, carrier/manifest replacement,
 held stdout descendants and unreviewed automatic events have separate fixtures.
 
-Stock Codex's automatic hook failure behavior remains an upstream limitation:
-DOXA can stop after observing failure, without proving that automatic context
-replacement was prevented. The pinned source also contains independent triggers
-outside the configured token threshold. See the
+The historical stock Codex checks above predate alpha.40's private fail-closed
+build. The stock provider can continue after hook infrastructure failures and
+contains independent triggers outside the configured token threshold; DOXA now
+refuses it for protected turns. See the
 [engine contract](../rust/doxa-engines/README.md#compaction-review) and pinned
 [turn implementation](https://github.com/openai/codex/blob/rust-v0.156.1/codex-rs/core/src/session/turn.rs),
 [context-window cap](https://github.com/openai/codex/blob/rust-v0.156.1/codex-rs/core/src/session/context_window.rs)
@@ -37,6 +71,43 @@ and [model threshold logic](https://github.com/openai/codex/blob/rust-v0.156.1/c
 To unblock Claude's account check, run `doxa auth login claude` or `claude auth login`.
 Configure vendor keys in `/setup` or inherited environment before the opt-in
 checks below. Do not put credentials in project files, prompts or memory.
+
+## Private protected Codex completion checks
+
+The private app server builds official source
+`b412ff32c417f855c2b2d1581b77058eed87c84b` with reviewed patch SHA-256
+`d6c8a41c0370c12dcace10d6babe13de7852f0095fed7b46289b38e7a6cd0f4b`.
+Its compiled contract is `doxa-precompact-fail-closed-v1`; the checked executable
+SHA-256 is `f9fee41f3ef5eddd362df199d5d5253fec802ffaaa5f2c4baea9c2e04e3723cd`.
+It was built with private Rust 1.95 and the unoptimized `dev-small` profile;
+these checks establish behavior, not optimized performance.
+
+`scripts/codex-protected/verify_automatic.py` drives that actual executable with a
+credential-free loopback Responses model. Nine cases (missing hook/carrier,
+timeout, malformed/empty/plain output, stopped, asynchronous and duplicate hooks)
+complete the first turn and interrupt the automatic-compaction turn. Each makes
+one original-model HTTP request, zero compaction requests and zero history
+replacements, preserving the first assistant message. The explicit allow control
+makes three requests and one real compacted checkpoint. The missing-carrier
+fixture executes a shell that returns 127; the compiled hook parser separately
+covers operating-system spawn failure. No case uses a paid account.
+
+At `2026-09-28T17:24:29Z`, an actual authenticated check used the private native
+launcher, an alpha.39-labelled integration daemon and native LORE 0.62.2. Catalog
+returned seven models; model `gpt-6-sol` and effort `low` were accepted. Two real
+turns completed with streamed text and complete reported usage. Stopping and
+restarting the native daemon resumed the exact same provider thread. Enabled
+manual compaction started native LORE review, refused with the reviewer logged
+out, and preserved the exact rollout digest.
+
+The file-read prompt produced a short text-only response, zero tool events and no
+matching synthetic file token. A second bounded pair with explicit `cat` had the
+same outcome. The replies do not establish tool or content-recall compatibility;
+no tool configuration was independently observed. Further paid retries stopped.
+No credential, file token, prompt/reply text or private rollout is included in the
+verification record, and temporary authentication copies were removed.
+Successful live reviewer compaction and large-context automatic compaction still
+need Claude reviewer authentication. Token usage does not establish billed cost.
 
 ## Native DeepSeek and z.ai / GLM
 
@@ -83,8 +154,10 @@ native reply, because its production URL is fixed. No fixture key is sent to a
 real provider; the native test endpoint also suppresses DeepSeek balance fetches.
 This fixture exercises startup, flat model/effort/status replies, two native
 turns, reasoning/text callbacks, one actual workspace read, aggregate token
-usage, committed history, and timeout cleanup with a SIGTERM-resistant child.
-All five verifier fixture tests passed for the fresh build; the successful cases contain exactly
+usage, committed history, native stop/resume before the second turn for both
+providers, timeout cleanup with a SIGTERM-resistant child, and failed-resume
+startup cleanup without a second submitted turn.
+All six verifier fixture tests passed for the fresh build; the successful cases contain exactly
 three loopback HTTP requests per vendor. This is local fixture evidence, not
 live account verification.
 
@@ -185,9 +258,9 @@ capability is unavailable, it stops without guessing another paid model.
 
 Each account receives at most two submitted turns, with a 90-second deadline
 per turn and short output instructions. The first asks for exactly one read of
-the synthetic file and a short token answer. The second tests retained history
+the synthetic file and a short token answer. The second tests retained history after native daemon stop/resume
 without tool calls, after reapplying the next-turn `low` effort control for
-both providers. Tool definitions remain available so the DeepSeek check exercises
+both providers and checking the resumed configuration. Tool definitions remain available so the DeepSeek check exercises
 the documented prior-turn reasoning replay requirement. It records catalog/control results, native reasoning/text event
 counts, native completion and usage metadata, persisted paired-message roles,
 and the final native status (including DeepSeek balance when available).

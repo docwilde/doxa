@@ -175,8 +175,10 @@ class NativeLiveVerifierTests(unittest.TestCase):
                 stack.enter_context(patch.object(verifier.tempfile, "TemporaryDirectory",
                     lambda **_kwargs: contextlib.nullcontext(str(home))))
             outcome = verifier.verify(provider, variable)
-        self.assertEqual(len(processes), 1)
-        self.assertIsNotNone(processes[0].poll())
+        self.assertIn(len(processes), (1, 2))
+        if outcome.get("resume", {}).get("started"):
+            self.assertEqual(len(processes), 2)
+        self.assertTrue(all(process.poll() is not None for process in processes))
         return outcome
 
     def test_native_startup_controls_sse_tool_and_committed_history(self):
@@ -188,6 +190,9 @@ class NativeLiveVerifierTests(unittest.TestCase):
                 result = self.fixture(provider, endpoint, Path(directory))
                 self.assertEqual(result["result"], "passed", result)
                 self.assertEqual(result["submitted_turns"], 2)
+                self.assertTrue(result["resume"]["started"])
+                self.assertEqual(result["resume"]["config"]["model"], requests[0]["model"])
+                self.assertEqual(result["resume"]["config"]["effort"], "low")
                 self.assertEqual(len(requests), 3)
                 self.assertEqual(result["committed_history_roles"], ["user", "assistant"] * 2)
                 self.assertEqual(result["config_controls"][0]["model"], requests[0]["model"])
@@ -311,6 +316,35 @@ class NativeLiveVerifierTests(unittest.TestCase):
                 time.sleep(.01)
             else:
                 self.fail("term-resistant native descendant is still running")
+
+    def test_resume_startup_failure_sends_no_second_turn_and_reaps_child(self):
+        parent = Path(os.environ.get("TMPDIR", str(Path.home() / ".cache/doxa-fixture-tests")))
+        parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with tempfile.TemporaryDirectory(dir=parent) as directory, vendor_server() as (endpoint, requests):
+            root = Path(directory)
+            pidfile = root / "resume-child.pid"
+            wrapper = root / "resume-failure"
+            wrapper.write_text("#!/usr/bin/python3\nimport os,subprocess,sys\n"
+                "if '--resume' in sys.argv:\n"
+                " child=subprocess.Popen([sys.executable,'-c',"
+                "'import signal,time;signal.signal(signal.SIGTERM,signal.SIG_IGN);time.sleep(60)'])\n"
+                f" open({str(pidfile)!r},'w').write(str(child.pid))\n"
+                " sys.exit(1)\n"
+                f"os.execv({BINARY!r},[{BINARY!r}]+sys.argv[1:])\n")
+            wrapper.chmod(0o700)
+            result = self.fixture("deepseek", endpoint, root, str(wrapper))
+            self.assertEqual(result["result"], "RuntimeError", result)
+            self.assertEqual(result["submitted_turns"], 1)
+            self.assertEqual(len(requests), 2, "failed resume must not submit the history turn")
+            pid = int(pidfile.read_text())
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                path = Path(f"/proc/{pid}/stat")
+                if not path.exists() or path.read_text().split(") ", 1)[1][0] == "Z":
+                    break
+                time.sleep(.01)
+            else:
+                self.fail("failed resume left a provider descendant running")
 
 
 if __name__ == "__main__":

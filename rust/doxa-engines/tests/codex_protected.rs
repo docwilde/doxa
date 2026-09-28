@@ -8,7 +8,7 @@ include!("fixtures/codex_protected_fixture.rs");
 
 #[tokio::test]
 async fn authoritative_version_and_hook_hash_refuse_before_thread_creation() {
-    for mode in ["version", "hash", "token-budget"] {
+    for mode in ["version", "stock", "hash", "token-budget"] {
         let (dir, options, gate) = fixture(mode);
         assert!(AppServerDriver::spawn_protected(options, str::to_owned, false, gate).await.is_err());
         assert!(!dir.path().join(format!("unsafe-after-{mode}")).exists());

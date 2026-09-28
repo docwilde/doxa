@@ -22,6 +22,7 @@ Usage: ./task COMMAND [arguments]
 
   build [--release]     Build the frontend, daemon and native LORE (debug by default)
   install               Build and install committed HEAD as the Rust doxa launcher
+  codex-provider [args] Build/install the pinned protected Codex app-server
   run [doxa args]       Build and run the frontend in the current directory
   new [doxa args]       Build and start a new session in the current directory
   doctor [args]         Build and check the native launch dependencies
@@ -34,6 +35,8 @@ DOXA_TASK_PROFILE=release selects release binaries for run/new/doctor.
 DOXA_RUST_BIN_DIR defaults to ~/.local/bin. install writes the Rust launcher
 and a desktop shortcut from committed HEAD. Provider CLIs must be on PATH.
 Pass --codex-bin or --claude-bin to select a provider CLI executable.
+codex-provider needs Python 3 for build tooling and bootstraps a private
+Rust 1.95 toolchain; installed provider dispatch is native Rust.
 EOF
 }
 
@@ -42,6 +45,7 @@ case ${DOXA_TASK_TARGET_DIR:-$root/target/rust-task} in
   *) target_dir=$root/${DOXA_TASK_TARGET_DIR} ;;
 esac
 export CARGO_TARGET_DIR=$target_dir
+export CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-2}
 if [ -z "${TMPDIR:-}" ]; then
   TMPDIR=${XDG_CACHE_HOME:-$HOME/.cache}/doxa/task-tmp
   mkdir -p "$TMPDIR"
@@ -95,6 +99,18 @@ install_committed() {
   DOXA_RUST_REPO_URL="$root" sh "$root/scripts/install.sh" "$revision"
 }
 
+install_codex_provider() {
+  command -v python3 >/dev/null 2>&1 || fail 'Python 3 is required for provider build tooling'
+  case ${1:-} in
+    -h|--help) exec python3 "$root/scripts/install_codex_protected.py" "$@" ;;
+  esac
+  command -v cargo >/dev/null 2>&1 || fail 'cargo is required to build the native provider launcher'
+  cargo build --release --locked --manifest-path "$tui_manifest" \
+    --package doxa-engines --bin doxa-codex-protected
+  python3 "$root/scripts/install_codex_protected.py" \
+    --launcher "$target_dir/release/doxa-codex-protected" "$@"
+}
+
 command=${1:-help}
 [ "$#" -eq 0 ] || shift
 case $command in
@@ -106,6 +122,7 @@ case $command in
       *) fail 'usage: ./task build [--release]' ;;
     esac ;;
   install) [ "$#" -eq 0 ] || fail 'install takes no arguments'; install_committed ;;
+  codex-provider) install_codex_provider "$@" ;;
   run|new|doctor) launch "$command" "$@" ;;
   test)
     [ "$#" -eq 0 ] || fail 'test takes no arguments'

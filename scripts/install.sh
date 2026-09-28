@@ -97,6 +97,17 @@ main() {
     printf 'doxa-install: Rust build produced no frontend, daemon or native LORE carrier\n' >&2; exit 1;
   }
 
+  # Protected Codex uses a private provider build. Keep the official CLI for
+  # login/help and compile the pinned app server in its own reusable cache.
+  # An explicit skip supports installations using only other engines; protected
+  # Codex startup then refuses until this separate installer is run.
+  if [ "${DOXA_INSTALL_CODEX_PROTECTED:-1}" = 1 ] && command -v codex >/dev/null 2>&1; then
+    command -v python3 >/dev/null 2>&1 || { printf 'doxa-install: Python 3.11+ is required only to build/install the private Codex provider\n' >&2; exit 1; }
+    printf 'doxa-install: installing private fail-closed Codex app server (isolated Rust 1.95 toolchain/cache)\n'
+    CARGO_TARGET_DIR="$build_dir" cargo build --release --locked --target "$host_target" --manifest-path "$tui_manifest" --package doxa-engines --bin doxa-codex-protected -j 1 || exit 1
+    python3 "$checkout/scripts/install_codex_protected.py" --launcher "$build_dir/$host_target/release/doxa-codex-protected" || exit 1
+  fi
+
   mkdir -p "$bin_dir" || exit 1
   for name in doxa doxa-rs doxa-daemon-rs lore-rs doxa-claude-sidecar.py .doxa-sidecar-current .doxa-install-sha; do
     [ ! -d "$bin_dir/$name" ] || [ -L "$bin_dir/$name" ] || { printf 'doxa-install: %s is a directory\n' "$bin_dir/$name" >&2; exit 1; }

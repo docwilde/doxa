@@ -17,12 +17,12 @@ def read():
 def send(x): print(json.dumps(x),flush=True)
 def notice(method,**params): send({'method':method,'params':dict(threadId='thread-actual',**params)})
 init=read(); assert init['method']=='initialize'
-agent='Codex Desktop/0.156.1 (Ubuntu 26.4.0; x86_64) dumb (doxa; 2.0.0-alpha.37)' if mode=='compact' else 'codex_cli_rs/'+('0.1.0' if mode=='version' else '0.156.1')
+agent='codex_cli_rs/0.156.1' if mode=='stock' else 'doxa_codex_rs/'+('0.1.0' if mode=='version' else '0.156.1')+' (doxa-precompact-fail-closed-v1; upstream fixture)'
 send({'id':init['id'],'result':{'userAgent':agent}})
 assert read()['method']=='initialized'
-if mode=='version':
+if mode in ('version','stock'):
     # Any subsequent request is evidence of an unsafe initialization order.
-    if sys.stdin.readline(): Path('unsafe-after-version').write_text('request')
+    if sys.stdin.readline(): Path('unsafe-after-'+mode).write_text('request')
     sys.exit(0)
 args=sys.argv[1:]; overrides=[args[i+1] for i,x in enumerate(args[:-1]) if x=='-c']
 hooks=next(tomllib.loads(x)['hooks'] for x in overrides if x.startswith('hooks='))

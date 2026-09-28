@@ -1,8 +1,8 @@
 <p align="center"><img src="assets/logo.png" width="560" alt="DOXA — belief earning knowledge"></p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Rust%202.0-alpha.39-f59f00" alt="Rust 2.0 alpha.39 is the main frontend">
-  <a href="https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.39"><img src="https://img.shields.io/github/v/release/docwilde/doxa?include_prereleases&amp;sort=semver&amp;label=Rust%20preview&amp;color=e8590c" alt="latest Rust preview release"></a>
+  <img src="https://img.shields.io/badge/Rust%202.0-alpha.40-f59f00" alt="Rust 2.0 alpha.40 is the main frontend">
+  <a href="https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.40"><img src="https://img.shields.io/github/v/release/docwilde/doxa?include_prereleases&amp;sort=semver&amp;label=Rust%20preview&amp;color=e8590c" alt="latest Rust preview release"></a>
   <a href="https://github.com/docwilde/doxa/actions/workflows/rust-ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/docwilde/doxa/rust-ci.yml?branch=main&label=Rust%20CI" alt="Rust CI status"></a>
   <img src="https://img.shields.io/badge/TUI-Ratatui-2f9e44" alt="Rust TUI built with Ratatui">
   <img src="https://img.shields.io/badge/auth-provider%20CLI%20or%20API%20key-2f9e44" alt="authentication follows the selected engine">
@@ -14,7 +14,7 @@
 > can edit files and run commands with your privileges. Read
 > [Non-goals](#non-goals) before using it on important work.
 
-The official latest GitHub release is [v2.0.0-alpha.39](https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.39).
+The official latest GitHub release is [v2.0.0-alpha.40](https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.40).
 Rust 2.0 leads development and remains an evolving alpha. See the
 [parity tracker](docs/rust-1.19-parity.md) for supported provider contracts and
 remaining release gates, and the [source audit](docs/source-audit-2026-09-27.md)
@@ -101,9 +101,19 @@ curl -fsSL https://raw.githubusercontent.com/docwilde/doxa/main/scripts/install.
 
 The installer builds the Rust frontend and daemon from `main` and installs the
 Rust `doxa` command in `~/.local/bin` (or `DOXA_RUST_BIN_DIR`). Pass a tag such
-as `v2.0.0-alpha.39` after `sh -s --` to pin a release. It requires Git and Cargo and installs three native binaries: the frontend,
-daemon and LORE carrier. Claude and Codex additionally require their provider CLIs. See the
-[Rust guide](rust/README.md) for provider setup and current limits.
+as `v2.0.0-alpha.40` after `sh -s --` to pin a release. Git and Cargo build three
+native binaries: the frontend, daemon and LORE carrier. Claude requires its CLI.
+When Codex is installed, the installer also builds a private, protected Codex
+app server; the official CLI remains available for login and ordinary commands.
+
+The protected provider build needs Python 3.11+ as build tooling, a Linux x86_64
+user systemd service, and a separately bootstrapped Rust 1.95 toolchain. Its first
+build takes several minutes; later installs reuse verified artifacts in
+`~/.cache/doxa/codex-protected` (override with `DOXA_CODEX_PROTECTED_CACHE`).
+Runtime dispatch is native Rust. Other-engine installations can set
+`DOXA_INSTALL_CODEX_PROTECTED=0`; Codex turns then require a separately installed
+protected provider. From a checkout, run `./task codex-provider` to install it.
+See the [Rust guide](rust/README.md) for provider setup and current limits.
 On Linux, it also installs a per-user application menu entry and icons under
 `$XDG_DATA_HOME` (default `~/.local/share`). The entry launches the installed
 Rust `doxa` by absolute path. Set `DOXA_NO_LAUNCHER=1` to skip it.

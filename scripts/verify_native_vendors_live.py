@@ -106,6 +106,24 @@ def terminate_group(process):
     process.wait(timeout=5)
 
 
+def attach_daemon(process, registry):
+    deadline = time.monotonic() + 15
+    while not registry.exists():
+        if process.poll() is not None:
+            raise RuntimeError("native daemon startup failed")
+        if time.monotonic() >= deadline:
+            raise TimeoutError("native daemon startup timed out")
+        time.sleep(.02)
+    wire = Wire(json.loads(registry.read_text())["daemon_socket"])
+    try:
+        hello = wire.receive(time.monotonic() + 10)
+        wire.send({"type": "attach", "cursor": None})
+        return wire, hello
+    except BaseException:
+        wire.sock.close()
+        raise
+
+
 def verify(provider, variable):
     if not os.environ.get(variable):
         return {"provider": provider, "result": "missing_credential", "submitted_turns": 0}
@@ -117,7 +135,8 @@ def verify(provider, variable):
     result = {"provider": provider, "submitted_turns": 0, "protocol": "native daemon / Chat Completions SSE",
               "started_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
               "cost_basis": "provider reported prompt/completion tokens; no billed cost inferred"}
-    with tempfile.TemporaryDirectory(prefix="vendors-live-", dir=parent) as directory:
+    # Leave room for the native Unix socket beneath an explicit disk TMPDIR.
+    with tempfile.TemporaryDirectory(prefix="v-", dir=parent) as directory:
         home = Path(directory)
         home.chmod(0o700)
         workspace = home / "workspace"
@@ -133,24 +152,16 @@ def verify(provider, variable):
                "DOXA_LORE": "0", "DOXA_AGENT_PEER_SEND": "0", "DOXA_VENDOR_TOOLS": "workspace-read",
                "DOXA_LORE_RS": os.environ.get("DOXA_LORE_RS", "/home/docwilde/.local/bin/lore-rs"),
                variable: os.environ[variable]}
-        process = subprocess.Popen([daemon, "--runtime-dir", str(home / "runtime"), "--cwd", str(workspace),
+        command = [daemon, "--runtime-dir", str(home / "runtime"), "--cwd", str(workspace),
             "--session-id", "live-vendor", "--engine", provider, "--effort", "low",
-            "--linger", "10"], env=env,
+            "--linger", "10"]
+        process = subprocess.Popen(command, env=env,
             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, start_new_session=True)
         wire = None
         try:
             registry = home / "runtime/registry/live-vendor.json"
-            deadline = time.monotonic() + 15
-            while not registry.exists():
-                if process.poll() is not None:
-                    raise RuntimeError("native daemon startup failed")
-                if time.monotonic() >= deadline:
-                    raise TimeoutError("native daemon startup timed out")
-                time.sleep(.02)
-            wire = Wire(json.loads(registry.read_text())["daemon_socket"])
-            hello = wire.receive(time.monotonic() + 10)
+            wire, hello = attach_daemon(process, registry)
             result["initial_config"] = {n: hello.get(n) for n in ("model", "effort", "lore_enabled", "billing")}
-            wire.send({"type": "attach", "cursor": None})
             catalog = wire.call("list_models")
             result["catalog"] = catalog
             if not catalog.get("ok") or "Provider account catalog" not in catalog.get("note", ""):
@@ -178,6 +189,22 @@ def verify(provider, variable):
             result["next_turn_config"] = wire.call("set_effort", {"effort": next_effort})
             if not result["next_turn_config"].get("ok"):
                 result["result"] = "next_turn_configuration_failed"
+                return result
+            # The existing second-turn budget also verifies durable replay:
+            # stop the actual daemon, then resume the same isolated identity.
+            wire.call("stop", timeout=5)
+            wire.sock.close()
+            wire = None
+            terminate_group(process)
+            process.stderr.close()
+            registry.unlink(missing_ok=True)
+            process = subprocess.Popen([*command, "--model", preferred, "--resume", "true"], env=env,
+                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, start_new_session=True)
+            wire, hello = attach_daemon(process, registry)
+            result["resume"] = {"started": True,
+                "config": {n: hello.get(n) for n in ("model", "effort", "lore_enabled", "billing")}}
+            if hello.get("model") != preferred or hello.get("effort") != next_effort:
+                result["result"] = "resumed_configuration_mismatch_no_second_turn"
                 return result
             result["submitted_turns"] += 1
             second, text = wire.turn("Without tools, repeat the token from your previous answer. "
