@@ -693,7 +693,8 @@ fn tool_activity_folds_in_transcript_and_expands_by_keyboard_or_mouse() {
     app.apply_daemon_frame(&json!({"type":"hello","session_id":"one","model":"sol"}));
     for (kind, data) in [
         ("tool_call", json!({"id":"t1","name":"Read","input":"hidden-input"})),
-        ("tool_result", json!({"id":"t1","name":"Read","result_summary":"hidden-result"})),
+        ("tool_result", json!({"id":"t1","name":"Read","result_summary":"short summary"})),
+        ("tool_result_detail", json!({"id":"t1","text":"hidden-result full detail\nfull-result-tail"})),
     ] {
         app.apply_daemon_frame(&json!({"type":"event","session_id":"one","event":{"type":kind,"data":data}}));
     }
@@ -712,7 +713,7 @@ fn tool_activity_folds_in_transcript_and_expands_by_keyboard_or_mouse() {
     assert!(app.handle(key(KeyCode::Char(' '), KeyModifiers::NONE)));
     let expanded = screen(&app, 110, 30);
     assert!(expanded.contains("hidden-input"), "{expanded}");
-    assert!(expanded.contains("hidden-result"), "{expanded}");
+    assert!(expanded.contains("hidden-result") && expanded.contains("full-result-tail"), "{expanded}");
     assert!(app.handle(key(KeyCode::Enter, KeyModifiers::NONE)));
     let entries = screen(&app, 110, 30);
     assert!(entries.contains("Read · finished"));
@@ -730,7 +731,7 @@ fn tool_activity_folds_in_transcript_and_expands_by_keyboard_or_mouse() {
         .expect("visible individual tool entry");
     assert!(app.handle(mouse(MouseEventKind::Down(MouseButton::Left), column as u16, row as u16)));
     let expanded = screen(&app, 110, 30);
-    assert!(expanded.contains("hidden-input") && expanded.contains("hidden-result"), "{expanded}");
+    assert!(expanded.contains("hidden-input") && expanded.contains("hidden-result") && expanded.contains("full-result-tail"), "{expanded}");
 }
 
 #[test]
