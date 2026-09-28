@@ -150,7 +150,11 @@ impl SpawnManager {
         }
         self.cancel.fetch_add(1, Ordering::AcqRel);
         if let Ok(mut pending) = self.pending.lock() {
-            pending.take();
+            if let Some(pending) = pending.take() {
+                let _ = self
+                    .events
+                    .try_send(json!({"type":"needs_input_resolved","data":{"id":pending.id}}));
+            }
         }
     }
     pub fn answer(&self, id: &str, answer: &Value) -> Option<Result<Value, String>> {
