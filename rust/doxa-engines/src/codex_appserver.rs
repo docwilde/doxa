@@ -735,6 +735,37 @@ mod web_item_tests {
         }
     }
 
+    /// Opt-in installed-provider probe: initialization and hook inventory only.
+    #[tokio::test]
+    #[ignore = "requires DOXA_CODEX_PROBE pointing to installed Codex 0.156.1"]
+    async fn installed_codex_hook_inventory_verifies_without_starting_a_thread() {
+        use std::os::unix::fs::PermissionsExt;
+        let executable = PathBuf::from(std::env::var_os("DOXA_CODEX_PROBE").expect("explicit installed provider"));
+        let scratch = PathBuf::from(std::env::var_os("TMPDIR").expect("real disk scratch"));
+        let dir = tempfile::tempdir_in(scratch).unwrap();
+        let home = dir.path().join("home");
+        let gate_dir = dir.path().join("gate");
+        let codex_home = dir.path().join("codex-home");
+        for path in [&home, &gate_dir, &codex_home] {
+            std::fs::create_dir(path).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        // Run this ignored probe alone: no account settings or credentials are
+        // inherited from the normal user config directory.
+        std::env::set_var("HOME", &home);
+        std::env::set_var("CODEX_HOME", &codex_home);
+        std::env::remove_var("OPENAI_API_KEY");
+        let gate = crate::codex_compact::CompactGate::prepare(&gate_dir,
+            &std::env::current_exe().unwrap(), &codex_home, dir.path(), "installed-probe",
+            crate::codex_compact::SUPPORTED_VERSION).unwrap();
+        let options = AppServerOptions { executable, cwd: dir.path().to_owned(), model: None,
+            sandbox: SandboxMode::WorkspaceWrite, resume_thread: None, turn_timeout: Duration::from_secs(5) };
+        let mut driver = timeout(Duration::from_secs(20),
+            AppServerDriver::initialize_with_gate(options, str::to_owned, Some(gate))).await.unwrap().unwrap();
+        assert!(driver.thread_id.is_none(), "inventory probe must never start a provider thread");
+        driver.shutdown().await;
+    }
+
     #[test]
     fn generated_codex_web_search_actions_survive_adapter_and_completion() {
         let mut normalizer = CodexJsonlNormalizer::new(|text| text.replace("fixture-secret","[redacted]"));
