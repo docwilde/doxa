@@ -593,5 +593,9 @@ mod tests {
 }
 
 #[cfg(test)]
+#[path = "ui/credential_editor.rs"]
+mod credential_editor;
+
+#[cfg(test)]
 #[path = "ui/operations_menu.rs"]
 mod operations_menu_test;
