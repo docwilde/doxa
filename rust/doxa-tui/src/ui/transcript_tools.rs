@@ -13,7 +13,7 @@ use super::tool_cards::ToolCard;
 
 pub(super) const SHELL_PREFIX: &str = "\u{001e}DOXA_LOCAL_SHELL:";
 pub(super) const REASONING_PREFIX: &str = "\u{001e}DOXA_REASONING:";
-pub(super) const TOOL_ID_PREFIX: &str = "\u{001f}DOXA_TOOL_ID:";
+pub(crate) const TOOL_ID_PREFIX: &str = "\u{001f}DOXA_TOOL_ID:";
 pub(crate) const RESTORED_TOOL_PREFIX: &str = "\u{001e}DOXA_RESTORED_TOOL:";
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
