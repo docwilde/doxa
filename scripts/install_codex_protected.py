@@ -119,9 +119,11 @@ RUSTUP_SHA256 = "dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb7
 
 def toolchain(cache, cargo):
     if cargo:
-        executable = Path(cargo).resolve()
+        # Preserve rustup proxy basename: resolving cargo's symlink to rustup
+        # changes argv[0] dispatch and loses the sibling rustc proxy.
+        executable = Path(cargo).absolute()
         rustc = executable.parent / "rustc"
-        environment = {"RUSTC": str(rustc)}
+        environment = {"RUSTC": str(rustc), "RUSTUP_TOOLCHAIN": "1.95.0"}
         for binary, prefix in [(executable, "cargo 1.95.0 "), (rustc, "rustc 1.95.0 ")]:
             version = subprocess.check_output([str(binary), "--version"], text=True, env=build_environment(environment), timeout=10)
             if not version.startswith(prefix):
@@ -294,6 +296,8 @@ def _probe(binary, request, home, environment):
         except ProcessLookupError:
             pass
         process.wait(timeout=5)
+        process.stdin.close()
+        process.stdout.close()
 
 
 def main():

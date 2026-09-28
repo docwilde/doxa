@@ -82,6 +82,16 @@ sys.stdin.read()
         self.assertNotIn("RUSTC_WRAPPER", environment)
         self.assertNotIn("RUSTFLAGS", environment)
 
+    def test_explicit_rustup_proxy_keeps_cargo_and_rustc_dispatch_names(self):
+        rustup = self.root / "rustup"
+        rustup.write_text("#!/bin/sh\nname=${0##*/}\necho \"$name 1.95.0 (fixture)\"\n")
+        rustup.chmod(0o700)
+        for name in ("cargo", "rustc"):
+            (self.root / name).symlink_to(rustup)
+        cargo, environment = installer.toolchain(self.root, str(self.root / "cargo"))
+        self.assertEqual(str(self.root / "cargo"), cargo)
+        self.assertEqual(str(self.root / "rustc"), environment["RUSTC"])
+
 
 if __name__ == "__main__":
     unittest.main()

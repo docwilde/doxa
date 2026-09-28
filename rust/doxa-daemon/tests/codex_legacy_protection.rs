@@ -1,7 +1,7 @@
 #![cfg(unix)]
 use doxa_transcript::TranscriptStore;
 use serde_json::{json, Value};
-use std::{fs, io::{BufRead, BufReader, Write}, os::unix::{fs::PermissionsExt, net::UnixStream}, path::{Path,PathBuf}, process::{Command,Stdio}, time::{Duration,Instant}};
+use std::{fs, io::{BufRead, BufReader, Write}, os::unix::{fs::PermissionsExt, net::UnixStream}, path::Path, process::{Command,Stdio}, time::{Duration,Instant}};
 fn receive(reader:&mut BufReader<UnixStream>)->Value {let mut line=String::new();reader.read_line(&mut line).unwrap();assert!(!line.is_empty());serde_json::from_str(&line).unwrap()}
 fn send(socket:&mut UnixStream,frame:Value){writeln!(socket,"{frame}").unwrap();}
 fn seed(root:&Path)->TranscriptStore {
