@@ -124,9 +124,11 @@ worker outcomes through bounded channels. Provider wire payloads retain their
 native JSON schemas; legacy consumers use one compatibility adapter. Provider
 adapters retain distinct transports.
 
-Canonical native LORE shipped in alpha.34. Standalone LORE administration and
-network services retain Python compatibility entrypoints. Live provider/account
-compatibility and macOS/Windows behavior remain outside the local fixture evidence.
+Canonical native LORE shipped in alpha.34. The current pinned LORE also provides
+native standalone administration, setup, hooks, MCP and sync clients/peer serving.
+Python modules remain development compatibility references and test oracles.
+Live provider/account compatibility and macOS/Windows behavior remain outside
+the local fixture evidence.
 
 The optional retained browser remote adapter is deliberately unavailable until
 its transport can prove proxy identity. Codex protected compaction remains pinned
@@ -174,9 +176,11 @@ Landed writes followed by sync or reconciliation failures report partial or
 `may_have_applied`, so a retry cannot claim the earlier effects were absent.
 Native worker fixtures verify descendant cleanup on success, error and timeout.
 
-Standalone LORE plugin administration and network transport services retain
-their Python compatibility entrypoints. The native module covers DOXA's active
-memory semantics; those standalone tools are not described as Rust ports.
+This alpha.34 review covered DOXA's active memory semantics. Subsequent LORE
+releases also moved standalone plugin administration and network transports
+to the native core; their Python implementations remain interoperability oracles.
+The current [native LORE guide](https://github.com/docwilde/LORE/blob/main/docs/native-core.md)
+describes those commands and runtime boundaries.
 
 Checkout task commands now build and select the native carrier explicitly. The
 LORE upgrade workflow moves both native and development-oracle pins and locks
