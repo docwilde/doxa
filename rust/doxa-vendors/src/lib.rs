@@ -182,6 +182,8 @@ pub async fn catalog_models(vendor: Vendor) -> Option<Vec<ModelCapability>> {
 }
 
 async fn catalog_models_at(vendor: Vendor, endpoint: &str, key: &str) -> Option<Vec<ModelCapability>> {
+    let mut known = credentials::known_keys().ok()?;
+    known.push(key.to_owned());
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(8))
         .redirect(reqwest::redirect::Policy::none()).build().ok()?;
@@ -199,7 +201,7 @@ async fn catalog_models_at(vendor: Vendor, endpoint: &str, key: &str) -> Option<
     let mut models = Vec::new();
     for row in rows.iter().take(1000) {
         let Some(id) = row.get("id").and_then(Value::as_str) else { continue; };
-        if !id.is_empty() && !id.contains(key) && id.len() <= 128 && id.bytes().all(|byte|
+        if !id.is_empty() && !known.iter().any(|key| id.contains(key)) && id.len() <= 128 && id.bytes().all(|byte|
             byte.is_ascii_alphanumeric() || b"-._:/".contains(&byte))
             && !models.iter().any(|existing: &ModelCapability| existing.id == id) {
             let mut efforts = Vec::new();
@@ -250,6 +252,7 @@ mod catalog_tests {
 
     #[tokio::test]
     async fn model_catalog_is_bounded_and_does_not_follow_redirects() {
+        let (_guard, _home) = credentials::tests::fixture();
         let (url, worker) = serve("200 OK", r#"{"data":[{"id":"deepseek-flash","effort":{"supported_levels":["low","high","max"],"default_level":"high"}},{"id":"deepseek-flash"},{"id":"new-model","effort":{"supported_levels":["medium","max","high"],"default_level":"medium"}},{"id":"bad\u202e-id","effort":{"supported_levels":["high"]}},{"id":"has space","effort":{"supported_levels":["high"]}}]}"#.into(), "").await;
         assert_eq!(catalog_models_at(Vendor::DeepSeek, &url, "test-secret").await.unwrap(), [
             ModelCapability { id: "deepseek-flash".into(), efforts: vec!["low".into(), "high".into(), "max".into()], default_effort: Some("high".into()), effort_metadata_present: true },
@@ -292,6 +295,24 @@ mod catalog_tests {
         assert!(!models[0].effort_metadata_present);
         worker.await.unwrap();
     }
+    #[tokio::test]
+    async fn catalog_never_displays_saved_inherited_or_inactive_keys() {
+        let (_guard, home) = credentials::tests::fixture();
+        std::env::set_var("DEEPSEEK_API_KEY", "env-active-fixture-key");
+        std::env::set_var("ZAI_API_KEY", "env-inactive-fixture-key");
+        credentials::save(Vendor::DeepSeek, "saved-active-fixture-key").unwrap();
+        credentials::save(Vendor::Glm, "saved-inactive-fixture-key").unwrap();
+        let body = json!({"data":[{"id":"saved-active-fixture-key"},{"id":"prefix-env-active-fixture-key"},
+            {"id":"saved-inactive-fixture-key"},{"id":"env-inactive-fixture-key"},{"id":"deepseek-flash"}]}).to_string();
+        let (url, worker) = serve("200 OK", body, "").await;
+        let models = catalog_models_at(Vendor::DeepSeek, &url, "saved-active-fixture-key").await.unwrap();
+        worker.await.unwrap();
+        assert_eq!(models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["deepseek-flash"]);
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(home.path().join("credentials.json"), std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(catalog_models_at(Vendor::DeepSeek, "http://127.0.0.1:1/models", "saved-active-fixture-key").await.is_none());
+    }
+
 }
 
 #[derive(Debug, PartialEq, Eq)]

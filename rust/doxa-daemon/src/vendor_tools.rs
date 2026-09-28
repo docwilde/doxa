@@ -38,6 +38,9 @@ impl<'a> WorkspaceReadGate<'a> {
             .open(self.root).map_err(|_| ())?;
         for (index, part) in parts.iter().enumerate() {
             let Component::Normal(name) = part else { return Err(()); };
+            if index + 1 == parts.len() && doxa_vendors::credentials::is_credential_path(&file, name).map_err(|_| ())? {
+                return Err(());
+            }
             use std::os::unix::ffi::OsStrExt;
             let name = CString::new(name.as_bytes()).map_err(|_| ())?;
             let last = index + 1 == parts.len();
@@ -209,6 +212,7 @@ impl ToolGate for NativeVendorGate<'_> {
             return Box::pin(async move { result });
         }
         let start = (|| {
+            let call_id = (self.scrub)(&call.id)?;
             let arguments: Value = serde_json::from_str(&(self.scrub)(&Value::Object(call.arguments.clone()).to_string())?).map_err(|_| ())?;
             let (peer, method) = if let Some((_, handler)) = self.agent.as_ref().filter(|(rows, _)|
                 rows.iter().any(|row| row["function"]["name"] == call.name)) {
@@ -216,15 +220,15 @@ impl ToolGate for NativeVendorGate<'_> {
             } else { (self.peer.clone().ok_or(())?, doxa_engines::peer_tools::rpc(&call.name, &arguments).map_err(|_| ())?.to_owned()) };
             let (request, reply) = self.desk.begin(&call.name, &arguments)?;
             let guard = ResolvePeer { desk:self.desk.clone(), id:request["id"].clone(), events:self.events.clone() };
-            (self.emit)(json!({"type":"tool_call","data":{"id":call.id,"name":call.name,"input":arguments}}));
+            (self.emit)(json!({"type":"tool_call","data":{"id":call_id,"name":call.name,"input":arguments}}));
             (self.emit)(json!({"type":"needs_input","data":request}));
-            Ok((peer, method, arguments, reply, guard))
+            Ok((peer, method, arguments, reply, guard, call_id))
         })();
         let scrub = self.scrub;
         let events = self.events.clone();
-        let call_id = call.id.clone(); let tool_name = call.name.clone();
+        let tool_name = call.name.clone();
         Box::pin(async move {
-            let (peer, method, arguments, reply, _guard) = start?;
+            let (peer, method, arguments, reply, _guard, call_id) = start?;
             let allowed = reply.await.map_err(|_| ())?;
             // A peer refusal is an ordinary operator result (unknown target,
             // rate limit, unavailable ledger), so the model can recover. It
@@ -296,11 +300,12 @@ mod peer_tests {
         });
         let desk = Arc::new(PeerDesk::default()); let displayed = RefCell::new(Vec::new());
         let emit = |event| displayed.borrow_mut().push(event);
-        let scrub = |text: &str| Ok(text.replace("secret", "[redacted]"));
+        let scrub = |text: &str| Ok(text.replace("saved-inactive-fixture-key", "***").replace("secret", "[redacted]"));
         let events = Arc::new(Mutex::new(Vec::new()));
         let mut gate = NativeVendorGate::new(dir.path(), false, Some(handler), desk.clone(), &scrub, &emit, events.clone());
         assert_eq!(gate.definitions().len(), 3);
-        let call = peer_call(doxa_engines::peer_tools::SEND, json!({"target":"same-project","text":"secret message"}));
+        let mut call = peer_call(doxa_engines::peer_tools::SEND, json!({"target":"same-project","text":"secret message"}));
+        call.id = "saved-inactive-fixture-key".into();
         let execution = gate.execute(&call);
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         let ask = displayed.borrow().iter().find(|event| event["type"] == "needs_input").unwrap()["data"].clone();
@@ -314,6 +319,8 @@ mod peer_tests {
         assert_eq!(runtime.block_on(execution).unwrap()["result"], "[redacted] reply");
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert!(events.lock().unwrap().iter().any(|event| event["type"] == "needs_input_resolved"));
+        assert!(!displayed.borrow().iter().any(|event| event.to_string().contains("saved-inactive-fixture-key")));
+        assert!(!events.lock().unwrap().iter().any(|event| event.to_string().contains("saved-inactive-fixture-key")));
     }
     #[test]
     fn retryable_peer_refusals_are_scrubbed_results_and_do_not_disable_the_tool() {

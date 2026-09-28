@@ -207,6 +207,18 @@ pub fn redact(text: &str) -> io::Result<String> {
     Ok(known_keys()?.iter().fold(text.to_owned(), |text, key| text.replace(key, "***")))
 }
 
+/// Deny the reserved path using the opened parent before a read tool opens it.
+/// This remains true when an atomic save/remove retires an already opened inode.
+pub fn is_credential_path(parent: &File, entry: &std::ffi::OsStr) -> io::Result<bool> {
+    if entry != std::ffi::OsStr::new(FILE_NAME) { return Ok(false); }
+    clean((|| {
+        let Some(dir) = directory(&home()?, false)? else { return Ok(false); };
+        let expected = dir.metadata()?;
+        let actual = parent.metadata()?;
+        Ok((expected.dev(), expected.ino()) == (actual.dev(), actual.ino()))
+    })())
+}
+
 /// Reject the private credential file if a workspace tool encounters it through
 /// another relative path. File identity also covers a renamed opened directory.
 pub fn is_credential_file(file: &File) -> io::Result<bool> {
@@ -218,17 +230,17 @@ pub fn is_credential_file(file: &File) -> io::Result<bool> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::os::unix::fs::{PermissionsExt, symlink};
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    struct EnvironmentGuard { _lock: std::sync::MutexGuard<'static, ()>, previous: Vec<(&'static str, Option<std::ffi::OsString>)> }
+    pub(crate) struct EnvironmentGuard { _lock: std::sync::MutexGuard<'static, ()>, previous: Vec<(&'static str, Option<std::ffi::OsString>)> }
     impl Drop for EnvironmentGuard { fn drop(&mut self) {
         for (name, value) in self.previous.drain(..) {
             match value { Some(value) => std::env::set_var(name, value), None => std::env::remove_var(name) }
         }
     } }
-    fn fixture() -> (EnvironmentGuard, tempfile::TempDir) {
+    pub(crate) fn fixture() -> (EnvironmentGuard, tempfile::TempDir) {
         let lock = ENV_LOCK.lock().unwrap();
         // Opaque snapshots are restored only, never resolved/asserted/displayed.
         let previous = ["DOXA_HOME", "DEEPSEEK_API_KEY", "ZAI_API_KEY"].into_iter().map(|name| (name, std::env::var_os(name))).collect();
@@ -367,6 +379,18 @@ mod tests {
         let start = std::time::Instant::now();
         assert_eq!(status(Vendor::DeepSeek).unwrap_err().kind(), io::ErrorKind::WouldBlock);
         assert!(start.elapsed() < std::time::Duration::from_secs(2));
+    }
+    #[test]
+    fn reserved_path_stays_private_when_save_or_remove_retires_open_inode() {
+        let (_guard, dir) = fixture();
+        save(Vendor::DeepSeek, "saved-first-fixture-key").unwrap();
+        let parent = File::open(dir.path()).unwrap();
+        let old = File::open(dir.path().join(FILE_NAME)).unwrap();
+        save(Vendor::DeepSeek, "saved-next-fixture-key").unwrap();
+        assert!(!is_credential_file(&old).unwrap());
+        assert!(is_credential_path(&parent, std::ffi::OsStr::new(FILE_NAME)).unwrap());
+        remove(Vendor::DeepSeek).unwrap();
+        assert!(is_credential_path(&parent, std::ffi::OsStr::new(FILE_NAME)).unwrap());
     }
     #[test]
     fn private_home_created_but_status_and_remove_do_not_create_a_missing_home() {

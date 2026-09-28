@@ -26,6 +26,29 @@ fn emit_content_chunks(kind: &str, content: &str, approx_tokens: u64, emit: &mut
     }
 }
 
+/// At most one balance fetch runs at a time. Mutations advance the generation,
+/// retire stale results, and ask that worker to fetch the newest account next.
+fn request_balance_refresh(balance: Arc<Mutex<Option<String>>>, current: Arc<AtomicU64>,
+    refreshing: Arc<AtomicBool>, mut fetch: impl FnMut() -> Option<String> + Send + 'static) {
+    current.fetch_add(1, Ordering::AcqRel);
+    if let Ok(mut stored) = balance.lock() { *stored = None; }
+    if refreshing.swap(true, Ordering::AcqRel) { return; }
+    let worker_flag = refreshing.clone();
+    let spawned = std::thread::Builder::new().name("doxa-balance".into()).spawn(move || loop {
+        let generation = current.load(Ordering::Acquire);
+        let latest = fetch();
+        if let Ok(mut stored) = balance.lock() {
+            if current.load(Ordering::Acquire) == generation { *stored = latest; }
+        }
+        if current.load(Ordering::Acquire) != generation { continue; }
+        worker_flag.store(false, Ordering::Release);
+        // A request may have raced with releasing the worker flag. It either
+        // starts another worker or leaves this worker responsible for rerunning.
+        if current.load(Ordering::Acquire) == generation || worker_flag.swap(true, Ordering::AcqRel) { break; }
+    });
+    if spawned.is_err() { refreshing.store(false, Ordering::Release); }
+}
+
 pub struct VendorHost {
     vendor: Vendor,
     model: Mutex<String>,
@@ -53,6 +76,7 @@ pub struct VendorHost {
     closing: AtomicBool,
     balance: Arc<Mutex<Option<String>>>,
     balance_generation: Arc<AtomicU64>,
+    balance_refreshing: Arc<AtomicBool>,
     #[cfg(feature = "local-test-server")]
     endpoint: Option<String>,
 }
@@ -159,6 +183,7 @@ impl VendorHost {
             closing: AtomicBool::new(false),
             balance: Arc::new(Mutex::new(None)),
             balance_generation: Arc::new(AtomicU64::new(0)),
+            balance_refreshing: Arc::new(AtomicBool::new(false)),
             #[cfg(feature = "local-test-server")]
             endpoint,
         };
@@ -170,15 +195,9 @@ impl VendorHost {
         if self.vendor != Vendor::DeepSeek { return; }
         #[cfg(feature = "local-test-server")]
         if self.endpoint.is_some() { return; }
-        let generation = self.balance_generation.fetch_add(1, Ordering::AcqRel) + 1;
-        let balance = Arc::clone(&self.balance);
-        let current = Arc::clone(&self.balance_generation);
-        std::thread::spawn(move || {
-            let latest = tokio::runtime::Builder::new_current_thread().enable_all().build()
-                .ok().and_then(|runtime| runtime.block_on(doxa_vendors::deepseek_balance()));
-            if let Ok(mut stored) = balance.lock() {
-                if current.load(Ordering::Acquire) == generation { *stored = latest; }
-            }
+        request_balance_refresh(self.balance.clone(), self.balance_generation.clone(), self.balance_refreshing.clone(), || {
+            tokio::runtime::Builder::new_current_thread().enable_all().build()
+                .ok().and_then(|runtime| runtime.block_on(doxa_vendors::deepseek_balance()))
         });
     }
 
@@ -595,7 +614,6 @@ impl Host for VendorHost {
             "list_models" => {
                 // A setup mutation queues this call for attached sessions. The
                 // account-scoped catalog and displayed balance must refresh.
-                if let Ok(mut balance) = self.balance.lock() { *balance = None; }
                 self.refresh_balance();
                 let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|_| "catalog runtime unavailable")?;
                 let catalog = runtime.block_on(doxa_vendors::catalog_models(self.vendor));
@@ -669,6 +687,33 @@ fn done(message: &str) -> Value {
 mod stream_tests {
     use super::*;
 
+    #[test]
+    fn balance_refresh_has_one_worker_and_reruns_for_latest_account() {
+        let balance = Arc::new(Mutex::new(None));
+        let current = Arc::new(AtomicU64::new(0));
+        let refreshing = Arc::new(AtomicBool::new(false));
+        let calls = Arc::new(AtomicU64::new(0));
+        let observed = calls.clone();
+        let (started, waiting) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        request_balance_refresh(balance.clone(), current.clone(), refreshing.clone(), move || {
+            if observed.fetch_add(1, Ordering::SeqCst) == 0 {
+                started.send(()).unwrap();
+                released.recv_timeout(Duration::from_secs(2)).unwrap();
+                Some("$old-account".into())
+            } else { Some("$new-account".into()) }
+        });
+        waiting.recv_timeout(Duration::from_secs(2)).unwrap();
+        for _ in 0..20 {
+            request_balance_refresh(balance.clone(), current.clone(), refreshing.clone(), || panic!("concurrent balance worker"));
+        }
+        release.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while refreshing.load(Ordering::Acquire) && Instant::now() < deadline { std::thread::sleep(Duration::from_millis(5)); }
+        assert!(!refreshing.load(Ordering::Acquire));
+        assert_eq!(calls.load(Ordering::Acquire), 2);
+        assert_eq!(balance.lock().unwrap().as_deref(), Some("$new-account"));
+    }
     #[test]
     fn scrubbed_reasoning_chunks_keep_utf8_and_final_boundary() {
         let text = format!("{}end", "é".repeat(25_000));
