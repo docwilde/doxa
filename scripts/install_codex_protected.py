@@ -104,7 +104,9 @@ def prepare_source(cache):
             raise ValueError("provider source has unrelated changes")
         run(["git", "-C", str(source), "apply", str(PATCH)])
         run(["git", "-C", str(source), "add", "-N", "codex-rs/core/src/doxa_precompact.rs"])
-    actual_patch = subprocess.check_output(["git", "-C", str(source), "diff", "--binary"])
+    # Include staged changes as well as the worktree. Intent-to-add retains the
+    # new gate in this complete HEAD comparison; unrelated staged code fails.
+    actual_patch = subprocess.check_output(["git", "-C", str(source), "diff", "HEAD", "--binary"])
     if actual_patch != PATCH.read_bytes():
         raise ValueError("provider source changes do not match the reviewed patch")
     untracked = subprocess.check_output(["git", "-C", str(source), "ls-files", "--others", "--exclude-standard"])

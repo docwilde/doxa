@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import subprocess
 import unittest
 from unittest.mock import patch
 
@@ -91,6 +92,27 @@ sys.stdin.read()
         cargo, environment = installer.toolchain(self.root, str(self.root / "cargo"))
         self.assertEqual(str(self.root / "cargo"), cargo)
         self.assertEqual(str(self.root / "rustc"), environment["RUSTC"])
+
+    def test_source_verification_rejects_unrelated_staged_changes(self):
+        source = self.root / "source"
+        subprocess.run(["git", "init", "-q", str(source)], check=True)
+        subprocess.run(["git", "-C", str(source), "config", "user.name", "Fixture"], check=True)
+        subprocess.run(["git", "-C", str(source), "config", "user.email", "fixture@example.invalid"], check=True)
+        first, unrelated = source / "first", source / "Cargo.toml"
+        first.write_text("original\n")
+        unrelated.write_text("original package\n")
+        subprocess.run(["git", "-C", str(source), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(source), "commit", "-qm", "test: fixture source"], check=True)
+        head = subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
+        first.write_text("reviewed change\n")
+        patch_file = self.root / "fixture.patch"
+        patch_file.write_bytes(subprocess.check_output(["git", "-C", str(source), "diff", "--binary"]))
+        with patch.multiple(installer, SOURCE=head, PATCH=patch_file, PATCH_SHA256=installer.digest(patch_file)):
+            self.assertEqual(source, installer.prepare_source(self.root))
+            unrelated.write_text("unreviewed staged package\n")
+            subprocess.run(["git", "-C", str(source), "add", "Cargo.toml"], check=True)
+            with self.assertRaisesRegex(ValueError, "do not match the reviewed patch"):
+                installer.prepare_source(self.root)
 
 
 if __name__ == "__main__":
