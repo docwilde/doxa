@@ -679,6 +679,106 @@ fn send_event(sink: &Option<SyncSender<Value>>, value: Value) -> bool {
 fn done(reason: &str) -> Value {
     json!({"type":"turn_done","data":{"error":reason,"is_error":true}})
 }
+fn provider_error(frame: &Value, shared: &Shared) -> Option<String> {
+    let api_error = frame["isApiErrorMessage"] == true;
+    let error_frame = frame["type"] == "error";
+    let failed_result = frame["type"] == "result" && frame["is_error"] == true;
+    if !api_error && !error_frame && !failed_result && frame["error"].is_null() {
+        return None;
+    }
+    let mut parts = Vec::new();
+    if let Some(text) = frame["error"].as_str() {
+        parts.push(text);
+    }
+    if frame["error"].is_object() {
+        for key in ["type", "code", "message"] {
+            if let Some(text) = frame["error"][key].as_str() {
+                parts.push(text);
+            }
+        }
+    }
+    if api_error {
+        if let Some(blocks) = frame["message"]["content"].as_array() {
+            if blocks.len() > 32 {
+                return Some(
+                    "Claude provider error; diagnostic exceeded the safe display bound".into(),
+                );
+            }
+            for block in blocks {
+                if block["type"] == "text" {
+                    if let Some(text) = block["text"].as_str() {
+                        parts.push(text);
+                    }
+                }
+            }
+        }
+    }
+    if error_frame {
+        if let Some(text) = frame["message"].as_str() {
+            parts.push(text);
+        }
+    }
+    if failed_result {
+        if let Some(errors) = frame["errors"].as_array() {
+            if errors.len() > 8 {
+                return Some(
+                    "Claude provider error; diagnostic exceeded the safe display bound".into(),
+                );
+            }
+            for error in errors {
+                if let Some(text) = error.as_str().or_else(|| error["message"].as_str()) {
+                    parts.push(text);
+                }
+            }
+        }
+        if let Some(text) = frame["result"].as_str() {
+            parts.push(text);
+        }
+    }
+    parts.retain(|text| !text.is_empty());
+    if parts.is_empty() {
+        return None;
+    }
+    // Refuse oversized raw diagnostics before truncation: cutting a credential
+    // first could make its prefix invisible to the canonical matcher.
+    if parts.iter().map(|s| s.len()).sum::<usize>() > 16 * 1024 {
+        return Some("Claude provider error; diagnostic exceeded the safe display bound".into());
+    }
+    let raw = parts.join(" ");
+    let lower = raw.to_ascii_lowercase();
+    let auth = frame["error"] == "authentication_failed"
+        || frame["error"]["type"] == "authentication_error"
+        || [
+            "failed to authenticate",
+            "oauth session expired",
+            "authentication failed",
+            "invalid api key",
+            "not logged in",
+        ]
+        .iter()
+        .any(|s| lower.contains(s));
+    let clean = match shared.scrub(&raw) {
+        Ok(clean) => clean,
+        Err(_) => return Some("Claude provider error; canonical diagnostic scrub failed".into()),
+    };
+    let mut clean = clean
+        .chars()
+        .filter(|c| !c.is_control() || *c == '\n')
+        .collect::<String>();
+    let mut end = clean.len().min(2048);
+    while !clean.is_char_boundary(end) {
+        end -= 1;
+    }
+    if end < clean.len() {
+        clean.truncate(end);
+        clean.push('…');
+    }
+    Some(if auth {
+        format!("Claude authentication expired or was rejected. Open /setup and log in to Claude, or run `claude auth login`, then retry. {clean}")
+    } else {
+        format!("Claude provider error: {clean}")
+    })
+}
 fn resolve(cli: &mut Cli, id: &str, request: &Value, answer: &Value) -> Result<(), Error> {
     let allowed = answer["decision"] == "allow";
     let response = if request["tool_name"] == "AskUserQuestion"
@@ -924,6 +1024,7 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>) {
     let mut inputs: HashMap<String, PendingInput> = HashMap::new();
     let mut events = None;
     let mut overflow = false;
+    let mut provider_failure: Option<String> = None;
     let mut stopping = false;
     let mut turn_deadline = None;
     let mut compact_permit = false;
@@ -945,6 +1046,7 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>) {
                     durable = DurableTurn::default();
                     events = Some(sink);
                     overflow = false;
+                    provider_failure = None;
                     compact_permit = text.trim() == "/compact";
                     let ready = !shared.cancelled.load(Ordering::Acquire);
                     let admitted = (|| {
@@ -1100,7 +1202,11 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>) {
             cli.terminate();
             send_event(
                 &events,
-                done("Claude cancellation deadline expired; provider terminated"),
+                done(
+                    provider_failure
+                        .as_deref()
+                        .unwrap_or("Claude cancellation deadline expired; provider terminated"),
+                ),
             );
             shared.active.store(false, Ordering::Release);
             return;
@@ -1109,7 +1215,14 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>) {
             Ok(v) => v,
             Err(Error::Timeout) => continue,
             Err(_) => {
-                send_event(&events, done("Claude CLI stream closed"));
+                send_event(
+                    &events,
+                    done(
+                        provider_failure
+                            .as_deref()
+                            .unwrap_or("Claude CLI stream closed"),
+                    ),
+                );
                 shared.active.store(false, Ordering::Release);
                 return;
             }
@@ -1144,7 +1257,16 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>) {
                 return;
             }
         }
+        if let Some(error) = provider_error(&frame, &shared) {
+            if provider_failure.is_none() || error.contains("Open /setup") {
+                provider_failure = Some(error);
+            }
+        }
         match frame["type"].as_str() {
+            Some("error") => {
+                let _ = cli.control(json!({"subtype":"interrupt"}));
+                turn_deadline = Some(Instant::now() + Duration::from_secs(5));
+            }
             Some("control_response") => {
                 let id = frame["response"]["request_id"].as_str().unwrap_or("");
                 if terminal_context
@@ -1461,8 +1583,10 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>) {
                 if !flush_streams(&mut streams, &shared, &events, false) {
                     shared.failed.store(true, Ordering::Release);
                 }
-                let error =
-                    frame["is_error"] == true || overflow || shared.failed.load(Ordering::Acquire);
+                let error = frame["is_error"] == true
+                    || provider_failure.is_some()
+                    || overflow
+                    || shared.failed.load(Ordering::Acquire);
                 for (id, request) in inputs.drain() {
                     if let PendingInput::Tool(request) = request {
                         let _ = resolve(&mut cli, &id, &request, &json!({"decision":"deny"}));
@@ -1476,7 +1600,18 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>) {
                     shared.failed.store(true, Ordering::Release);
                 }
                 let usage = &frame["usage"];
-                let data = json!({"ctx_percentage":null,"ctx_tokens":null,"ctx_max_tokens":null,"input_tokens":usage["input_tokens"],"output_tokens":usage["output_tokens"],"cache_read_input_tokens":usage["cache_read_input_tokens"],"cache_creation_input_tokens":usage["cache_creation_input_tokens"],"cost_usd":frame["total_cost_usd"],"is_error":error||shared.failed.load(Ordering::Acquire),"num_turns":frame["num_turns"],"error":if overflow{Some("Claude event stream overflowed; turn cancelled")}else if error{Some("Claude turn failed or was interrupted")}else{None}});
+                let reason = if overflow {
+                    Some("Claude event stream overflowed; turn cancelled")
+                } else if error {
+                    Some(
+                        provider_failure
+                            .as_deref()
+                            .unwrap_or("Claude turn failed or was interrupted"),
+                    )
+                } else {
+                    None
+                };
+                let data = json!({"ctx_percentage":null,"ctx_tokens":null,"ctx_max_tokens":null,"input_tokens":usage["input_tokens"],"output_tokens":usage["output_tokens"],"cache_read_input_tokens":usage["cache_read_input_tokens"],"cache_creation_input_tokens":usage["cache_creation_input_tokens"],"cost_usd":frame["total_cost_usd"],"is_error":error||shared.failed.load(Ordering::Acquire),"num_turns":frame["num_turns"],"error":reason});
                 match cli.control(json!({"subtype":"get_context_usage","detail":"summary"})) {
                     Ok(id) => {
                         terminal_context =
@@ -1712,6 +1847,48 @@ for line in sys.stdin:
             admission: Mutex::new(()),
         });
         (dir, host)
+    }
+    #[test]
+    fn expired_cli_auth_reports_scrubbed_login_guidance() {
+        let body = r#"if row['type']=='user':
+  assert row['message']['content']=='private task'
+  emit({'type':'assistant','session_id':'$SESSION','isApiErrorMessage':True,'error':'authentication_failed','message':{'role':'assistant','content':[{'type':'text','text':'Failed to authenticate: OAuth session expired and could not be refreshed. token=sk-abcdefghijklmnopqrstuvwxyz123456'}]}})
+  emit({'type':'result','session_id':'$SESSION','is_error':True,'errors':['Claude turn failed']})
+"#.replace("$SESSION", SESSION);
+        let (_dir, host) = fixture(&body);
+        let mut events = Vec::new();
+        host.prompt("private task", &mut |event| events.push(event));
+        let terminal = events.last().unwrap();
+        assert_eq!(terminal["type"], "turn_done");
+        assert_eq!(terminal["data"]["is_error"], true);
+        let error = terminal["data"]["error"].as_str().unwrap();
+        assert!(error.contains("OAuth session expired"), "{error}");
+        assert!(error.contains("/setup"));
+        assert!(error.contains("claude auth login"));
+        assert!(error.contains("[REDACTED:"));
+        assert!(!error.contains("abcdefghijkl"));
+        assert!(!error.contains("private task"));
+        assert!(host.shutdown());
+    }
+    #[test]
+    fn provider_error_fields_are_bounded_scrubbed_and_failure_only() {
+        let (_dir, host) = fixture("");
+        let shared = &host.shared;
+        assert!(provider_error(&json!({"type":"assistant","message":{"content":[{"type":"text","text":"Discuss OAuth session expired"}]}}), shared).is_none());
+        let message = provider_error(&json!({"type":"result","is_error":true,"errors":["Service overloaded sk-abcdefghijklmnopqrstuvwxyz123456"],"prompt":"never echo this"}), shared).unwrap();
+        assert!(message.contains("Service overloaded [REDACTED:api-key]"));
+        assert!(!message.contains("never echo"));
+        assert!(!message.contains("/setup"));
+        let message = provider_error(&json!({"type":"error","error":{"type":"authentication_error","message":"Token was rejected"}}), shared).unwrap();
+        assert!(message.contains("claude auth login"));
+        let message = provider_error(
+            &json!({"type":"result","is_error":true,"errors":["x".repeat(16*1024+1)]}),
+            shared,
+        )
+        .unwrap();
+        assert!(message.contains("safe display bound"));
+        assert!(message.len() < 100);
+        assert!(host.shutdown());
     }
     #[test]
     fn durable_prose_keeps_contiguous_blocks_and_real_tool_separators() {
