@@ -52,7 +52,6 @@ impl PeerHost {
         cwd: &Path,
         session_id: String,
         title: String,
-        _lore_python: Option<&Path>,
         events: SyncSender<Value>,
     ) -> io::Result<Self> {
         let scope = scope_for_cwd(cwd)?;

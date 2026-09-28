@@ -759,3 +759,11 @@ pub fn setup_interactive() -> io::Result<()> {
     println!("setup complete\n{}", setup_report()?);
     Ok(())
 }
+
+/// Launch a browser without inheriting terminal streams; one worker reaps it.
+pub fn open_browser(url: &str) -> io::Result<()> {
+    #[cfg(target_os="macos")] let opener="open";
+    #[cfg(not(target_os="macos"))] let opener="xdg-open";
+    let mut child=Command::new(opener).arg(url).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()?;
+    std::thread::spawn(move||{let _=child.wait();}); Ok(())
+}

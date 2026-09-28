@@ -129,20 +129,7 @@ pub(super) fn open_link(url: &str) -> io::Result<()> {
             "unsupported link",
         ));
     }
-    #[cfg(target_os = "macos")]
-    let opener = "open";
-    #[cfg(not(target_os = "macos"))]
-    let opener = "xdg-open";
-    let mut child = std::process::Command::new(opener)
-        .arg(url)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()?;
-    std::thread::spawn(move || {
-        let _ = child.wait();
-    });
-    Ok(())
+    crate::operations::open_browser(url)
 }
 
 pub fn run() -> io::Result<()> {

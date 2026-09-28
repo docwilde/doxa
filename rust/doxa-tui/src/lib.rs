@@ -26,6 +26,7 @@ pub mod fleet_control;
 pub mod theme;
 
 pub mod mesh_control;
+mod mesh_server;
 pub mod maintenance;
 pub mod settings;
 pub mod preferences;

@@ -1,4 +1,4 @@
-//! Frozen host identity and the canonical Python operator catalog. This process
+//! Frozen host identity and the canonical Rust operator catalog. This process
 //! cannot offer daemon controls, spawning, or direct curated-memory mutations.
 use doxa_lore::LoreClient;
 use serde_json::{json,Value};
@@ -6,7 +6,7 @@ use std::{path::Path, sync::{Arc,Mutex}, time::Duration};
 
 pub struct AgentTools { client: Mutex<Option<LoreClient>>, identity: Value, definitions: Vec<Value>, status:Mutex<Option<Value>>, disabled_events:Mutex<Vec<Value>> }
 impl AgentTools {
-    pub fn new(_python: &Path, cwd: &str, session_id: &str, engine: &str, enabled: bool) -> Option<Arc<Self>> {
+    pub fn new(cwd: &str, session_id: &str, engine: &str, enabled: bool) -> Option<Arc<Self>> {
         if !enabled { return None; }
         let identity = json!({"cwd":cwd,"session_id":session_id,"source_engine":engine,"spawn_depth":0,"lore":true});
         let mut client = LoreClient::open_agent(Duration::from_secs(5)).ok()?;

@@ -54,8 +54,7 @@ pub fn prepare(
     if saved.len() > MAX_STARTUP_TABS || (saved.len() > crate::ui::panes::MAX_TABS && store.as_ref().is_none_or(|store|store.startup_overflow_id.is_none())) {
         return Err(io::Error::new(io::ErrorKind::Unsupported, "saved tabset exceeds the native 256-tab restore bound plus one reserved startup tab; record retained"));
     }
-    let python = options.lore_python.clone().or_else(|| std::env::var_os("DOXA_LORE_PYTHON").map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from("python3"));
+    let python = PathBuf::new();
     let launch_cwd = std::env::current_dir()?;
     let mut result = plan(&saved, &live, resume,
         |tab| history::saved_session(&tab.session_id,
@@ -66,10 +65,8 @@ pub fn prepare(
                 if let Some(session) = rows.into_iter().find(|session| session.id == entry.id) { return Ok(session); }
             }
             let mut verified = history::resume_plan(entry, &python).map_err(str::to_owned)?;
-            verified.lore_python = options.lore_python.clone();
             verified.codex_bin = options.codex_bin.clone();
-            verified.claude_python = options.claude_python.clone();
-            verified.claude_script = options.claude_script.clone();
+            verified.claude_bin = options.claude_bin.clone();
             launch::spawn(&verified).map_err(|error| error.to_string())
         });
     if let Some(store) = &mut store {

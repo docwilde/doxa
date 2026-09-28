@@ -89,9 +89,7 @@ struct Options {
     linger: Duration,
     engine: Engine,
     codex_bin: Option<PathBuf>,
-    lore_python: Option<PathBuf>,
-    claude_python: Option<PathBuf>,
-    claude_script: Option<PathBuf>,
+    claude_bin: Option<PathBuf>,
     resume: bool,
     model: Option<String>,
     effort: Option<String>,
@@ -133,9 +131,7 @@ fn options() -> io::Result<Options> {
     let mut linger = Duration::from_secs(120);
     let mut engine = Engine::Fixture;
     let mut codex_bin = None;
-    let mut lore_python = None;
-    let mut claude_python = None;
-    let mut claude_script = None;
+    let mut claude_bin = None;
     let mut resume = false;
     let mut model = None;
     let mut effort = None;
@@ -176,9 +172,7 @@ fn options() -> io::Result<Options> {
                 _ => return Err(invalid("engine must be fixture, codex, claude, deepseek, or glm")),
             },
             Some("--codex-bin") => codex_bin = Some(PathBuf::from(value)),
-            Some("--lore-python") => lore_python = Some(PathBuf::from(value)),
-            Some("--claude-python") => claude_python = Some(PathBuf::from(value)),
-            Some("--claude-script") => claude_script = Some(PathBuf::from(value)),
+            Some("--claude-bin") => claude_bin = Some(PathBuf::from(value)),
             Some("--resume") => resume = match value.to_str() {
                 Some("true") => true, Some("false") => false,
                 _ => return Err(invalid("resume must be true or false")),
@@ -210,7 +204,7 @@ fn options() -> io::Result<Options> {
             Some("--linger") => {
                 linger = linger_duration(value.to_str().ok_or_else(|| invalid("invalid linger"))?)?;
             }
-            _ => return Err(invalid("usage: doxa-daemon [--runtime-dir PATH] [--cwd PATH] [--session-id ID] [--base-branch REF] [--linger SECONDS] [--engine fixture|codex|claude|deepseek|glm] [--codex-bin PATH --lore-python PATH --claude-python PATH --claude-script PATH --model MODEL --effort EFFORT --sandbox MODE --resume true|false]")),
+            _ => return Err(invalid("usage: doxa-daemon [--runtime-dir PATH] [--cwd PATH] [--session-id ID] [--base-branch REF] [--linger SECONDS] [--engine fixture|codex|claude|deepseek|glm] [--codex-bin PATH --claude-bin PATH --model MODEL --effort EFFORT --sandbox MODE --resume true|false]")),
         }
     }
     // Do not let registry entries claim an unvalidated path or identity.
@@ -250,13 +244,10 @@ fn options() -> io::Result<Options> {
         codex_bin = Some(executable(
             codex_bin.ok_or_else(|| invalid("Codex needs --codex-bin"))?,
         )?);
-        lore_python = Some(python_executable(
-            lore_python.ok_or_else(|| invalid("Codex needs --lore-python"))?,
-        )?);
         if resume && !explicit_session_id {
             return Err(invalid("Codex resume needs --session-id"));
         }
-        if claude_python.is_some() || claude_script.is_some() {
+        if claude_bin.is_some() {
             return Err(invalid("Claude options require --engine claude"));
         }
     } else if engine == Engine::Claude {
@@ -266,32 +257,17 @@ fn options() -> io::Result<Options> {
         if resume && !explicit_session_id {
             return Err(invalid("Claude resume needs --session-id"));
         }
-        claude_python = Some(python_executable(
-            claude_python.ok_or_else(|| invalid("Claude needs --claude-python"))?,
-        )?);
-        let script = claude_script.ok_or_else(|| invalid("Claude needs --claude-script"))?;
-        if !script.is_absolute() {
-            return Err(invalid("Claude script path must be absolute"));
-        }
-        let script = fs::canonicalize(script)?;
-        if !fs::metadata(&script)?.is_file() {
-            return Err(invalid("Claude script must be a file"));
-        }
-        claude_script = Some(script);
-        if codex_bin.is_some() || lore_python.is_some() || sandbox != SandboxMode::WorkspaceWrite {
+        claude_bin = Some(executable(claude_bin.ok_or_else(||invalid("Claude needs --claude-bin"))?)?);
+        if codex_bin.is_some() || sandbox != SandboxMode::WorkspaceWrite {
             return Err(invalid("Codex options require --engine codex"));
         }
     } else if let Some(vendor) = engine.vendor() {
         if codex_bin.is_some()
-            || claude_python.is_some()
-            || claude_script.is_some()
+            || claude_bin.is_some()
             || sandbox != SandboxMode::WorkspaceWrite
         {
             return Err(invalid("unsupported option for vendor engine"));
         }
-        lore_python = Some(python_executable(
-            lore_python.ok_or_else(|| invalid("vendor needs --lore-python"))?,
-        )?);
         if resume && !explicit_session_id {
             return Err(invalid("vendor resume needs --session-id"));
         }
@@ -300,9 +276,7 @@ fn options() -> io::Result<Options> {
         doxa_vendors::request_body(vendor, chosen_model, &[], chosen_effort)
             .map_err(|_| invalid("invalid vendor effort"))?;
     } else if codex_bin.is_some()
-        || lore_python.is_some()
-        || claude_python.is_some()
-        || claude_script.is_some()
+        || claude_bin.is_some()
         || resume
         || model.is_some()
         || effort.is_some()
@@ -321,9 +295,7 @@ fn options() -> io::Result<Options> {
         linger,
         engine,
         codex_bin,
-        lore_python,
-        claude_python,
-        claude_script,
+        claude_bin,
         resume,
         model,
         effort,
@@ -345,20 +317,6 @@ fn executable(path: PathBuf) -> io::Result<PathBuf> {
         return Err(invalid("executable path must name an executable file"));
     }
     Ok(path)
-}
-/// Keep the final Python symlink so pyvenv.cfg can determine sys.prefix.
-/// Canonicalize only its parent to retain the absolute-path boundary.
-fn python_executable(path: PathBuf) -> io::Result<PathBuf> {
-    if !path.is_absolute() {
-        return Err(invalid("executable path must be absolute"));
-    }
-    let meta = fs::metadata(&path)?;
-    if !meta.is_file() || meta.permissions().mode() & 0o111 == 0 {
-        return Err(invalid("executable path must name an executable file"));
-    }
-    let parent = fs::canonicalize(path.parent().ok_or_else(|| invalid("invalid executable path"))?)?;
-    let name = path.file_name().ok_or_else(|| invalid("invalid executable path"))?;
-    Ok(parent.join(name))
 }
 fn random_id() -> io::Result<String> {
     let mut bytes = [0u8; 16];
@@ -643,10 +601,6 @@ fn run() -> io::Result<()> {
             let host = Arc::new(
                 CodexHost::new(
                     driver,
-                    options
-                        .lore_python
-                        .as_ref()
-                        .expect("validated LORE interpreter"),
                     &options.session_id,
                     options.resume,
                 )
@@ -658,14 +612,7 @@ fn run() -> io::Result<()> {
         Engine::Claude => {
             let host = Arc::new(
                 ClaudeHost::new(
-                    options
-                        .claude_python
-                        .as_ref()
-                        .expect("validated Claude interpreter"),
-                    options
-                        .claude_script
-                        .as_ref()
-                        .expect("validated Claude script"),
+                    options.claude_bin.as_ref().expect("validated Claude executable"),
                     &options.cwd,
                     &options.session_id,
                     options.resume,
@@ -686,10 +633,6 @@ fn run() -> io::Result<()> {
                     options.engine.vendor().expect("vendor engine"),
                     options.model.clone().expect("validated model"),
                     options.effort.clone().expect("validated effort"),
-                    options
-                        .lore_python
-                        .as_ref()
-                        .expect("validated LORE interpreter"),
                     &options.cwd,
                     &options.session_id,
                     options.resume,
@@ -714,12 +657,6 @@ fn run() -> io::Result<()> {
         },
         None => host,
     };
-    let scrub_python = match options.engine {
-        Engine::Codex => options.lore_python.as_deref(),
-        Engine::Claude => options.claude_python.as_deref(),
-        Engine::DeepSeek | Engine::Glm => options.lore_python.as_deref(),
-        Engine::Fixture => None,
-    };
     let (event_tx, event_rx) = mpsc::sync_channel(256);
     let peer_host = Arc::new(PeerHost::new(
         host,
@@ -727,7 +664,6 @@ fn run() -> io::Result<()> {
         &options.cwd,
         options.session_id.clone(),
         format!("DOXA Rust {} session", options.engine.name()),
-        scrub_python,
         event_tx,
     )?);
     peer_host.connect_provider_tools();
@@ -743,7 +679,7 @@ fn run() -> io::Result<()> {
     let inbox = Inbox::bind(&options.runtime, &options.session_id)?;
     let mut registry = Registry::new(&options, inbox.path(), handle.socket_path())?;
     registry.write(0)?;
-    let mut remote_bridge = match remote_bridge::Bootstrap::request(scrub_python, &options.runtime) {
+    let mut remote_bridge = match remote_bridge::Bootstrap::request(&options.runtime) {
         Ok(bootstrap) => bootstrap,
         Err(_) => { handle.publish(json!({"type":"remote_peer_bridge","data":{"state":"startup_failed"}})); None }
     };
@@ -879,34 +815,5 @@ mod tests {
         assert!(linger_duration("NaN").is_err());
     }
 
-    #[test]
-    fn python_validation_keeps_venv_link_and_imports_outside_checkout() {
-        let dir = tempfile::tempdir().unwrap();
-        let venv = dir.path().join("venv");
-        assert!(Command::new("python3")
-            .args(["-m", "venv", "--without-pip"])
-            .arg(&venv)
-            .status()
-            .unwrap()
-            .success());
-        let python = venv.join("bin/python3");
-        assert!(fs::symlink_metadata(&python).unwrap().file_type().is_symlink());
-        let selected = python_executable(python.clone()).unwrap();
-        assert_eq!(selected, python);
-        assert_ne!(executable(python.clone()).unwrap(), python);
-        let site = Command::new(&selected)
-            .args(["-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])"])
-            .output()
-            .unwrap();
-        assert!(site.status.success());
-        let site = PathBuf::from(String::from_utf8(site.stdout).unwrap().trim());
-        fs::write(site.join("doxa_venv_marker.py"), "VALUE = 'venv only'\n").unwrap();
-        let imported = Command::new(&selected)
-            .args(["-c", "import doxa_venv_marker, sys; assert doxa_venv_marker.VALUE == 'venv only'; print(sys.prefix)"])
-            .current_dir("/")
-            .output()
-            .unwrap();
-        assert!(imported.status.success());
-        assert_eq!(String::from_utf8(imported.stdout).unwrap().trim(), venv.to_str().unwrap());
-    }
+
 }

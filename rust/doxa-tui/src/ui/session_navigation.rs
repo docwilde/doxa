@@ -487,7 +487,7 @@ impl App {
             ..Default::default()
         };
         if engine == launch::Engine::Claude {
-            options.claude_script = std::env::var_os("DOXA_CLAUDE_SCRIPT").map(PathBuf::from);
+            options.claude_bin = std::env::var_os("DOXA_CLAUDE_BIN").map(PathBuf::from);
         }
         self.clear_pending = Some(ClearPending { old_id: id, group });
         self.pending_launches.push((options, None, group));
@@ -566,7 +566,7 @@ impl App {
             ..Default::default()
         };
         if engine == launch::Engine::Claude {
-            options.claude_script = std::env::var_os("DOXA_CLAUDE_SCRIPT").map(PathBuf::from);
+            options.claude_bin = std::env::var_os("DOXA_CLAUDE_BIN").map(PathBuf::from);
         }
         self.pending_launches
             .push((options, None, self.active_group));
