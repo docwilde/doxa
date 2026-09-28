@@ -5,6 +5,35 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.37 — 2026-09-28
+
+**Native runtime**
+
+- Replace the Claude SDK sidecar with the native CLI control protocol.
+  Verify live model/effort changes and use reported context and quota events.
+- Serve mesh assets and attested Unix peer traffic with Hyper; use Reqwest
+  for remote clients. Install frontend, daemon and LORE without Python or uv.
+- Share opt-in **`spawn_session`** across providers with exact human approval,
+  immutable parent identity, cancellation and depth/live/rate/disk limits.
+
+**Recovery and compaction**
+
+- Migrate verified legacy Claude logs; withhold resumed output until the CLI
+  confirms the same session. Preserve unsupported or uncertain history.
+- Run Codex hooks and review supervisors natively with pinned carrier/source
+  proofs. Keep compaction usage in budget accounting and refuse unknown totals.
+- Add reviewed vendor summary checkpoints beneath the original durable
+  conversation; refused review leaves the session available for the next turn.
+
+**Installation and documentation**
+
+- Integrate native LORE 0.62.0 CLI, hooks, administration and sync transports.
+  Preserve existing stores and their review, capacity and provenance gates.
+- Pin desktop asset writes to checked directory descriptors and retain the
+  Cargo dependency cache between upgrades; remove retired sidecar launch links.
+- Refresh native runtime documentation and real application gallery captures.
+  Retained Python sources serve development compatibility tests only.
+
 ## 2.0.0-alpha.36 — 2026-09-28
 
 **Inline permissions.**

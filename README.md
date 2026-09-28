@@ -1,8 +1,8 @@
 <p align="center"><img src="assets/logo.png" width="560" alt="DOXA — belief earning knowledge"></p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Rust%202.0-alpha.36-f59f00" alt="Rust 2.0 alpha.36 is the main frontend">
-  <a href="https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.36"><img src="https://img.shields.io/github/v/release/docwilde/doxa?include_prereleases&amp;sort=semver&amp;label=Rust%20preview&amp;color=e8590c" alt="latest Rust preview release"></a>
+  <img src="https://img.shields.io/badge/Rust%202.0-alpha.37-f59f00" alt="Rust 2.0 alpha.37 is the main frontend">
+  <a href="https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.37"><img src="https://img.shields.io/github/v/release/docwilde/doxa?include_prereleases&amp;sort=semver&amp;label=Rust%20preview&amp;color=e8590c" alt="latest Rust preview release"></a>
   <a href="https://github.com/docwilde/doxa/actions/workflows/rust-ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/docwilde/doxa/rust-ci.yml?branch=main&label=Rust%20CI" alt="Rust CI status"></a>
   <img src="https://img.shields.io/badge/TUI-Ratatui-2f9e44" alt="Rust TUI built with Ratatui">
   <img src="https://img.shields.io/badge/auth-provider%20CLI%20or%20API%20key-2f9e44" alt="authentication follows the selected engine">
@@ -14,12 +14,14 @@
 > can edit files and run commands with your privileges. Read
 > [Non-goals](#non-goals) before using it on important work.
 
-The official latest GitHub release is [v2.0.0-alpha.36](https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.36).
+The official latest GitHub release is [v2.0.0-alpha.37](https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.37).
 Rust 2.0 leads development; its alpha version still indicates that it is evolving.
 Alpha.31 closes the audited Python 1.19 functional gaps: saved-session restoration,
 full preferences, native LORE tools, interactive fleets, plugin commands and local
 shell controls. The subsequent [source audit](docs/source-audit-2026-09-27.md)
-documents the ownership/deadline fixes and alpha.35 controller and typed-worker cleanup. See the
+documents ownership/deadline fixes and controller cleanup. Alpha.37 replaces
+the remaining Python runtime paths, adds verified Claude controls and completes
+native vendor compaction. See the
 [parity tracker](docs/rust-1.19-parity.md) for supported provider contracts and
 retained safety boundaries.
 
@@ -33,7 +35,7 @@ shares user and repo memory across DOXA, Claude Code, and Codex, with
 evidence-backed beliefs and an informational source-engine label. See the
 [engine setup and capabilities](rust/README.md) guide.
 
-![Rust 2.0 alpha.36 running a real Claude session, with file reads, command approval and a completed greeting check](assets/shots/rust-hero.png)
+![Rust 2.0 alpha.37 running a real Claude session, with file reads, command approval and a completed greeting check](assets/shots/rust-hero.png)
 
 *Captured from the running Rust app in a real VTE terminal, using an authenticated
 Claude session and a small isolated example repository. The provider replies and tool
@@ -55,7 +57,7 @@ results are real. See the [capture method](docs/rust-gallery.md).*
 See the [Rust guide](rust/README.md) for engine capabilities, shortcuts and
 [compaction boundaries](rust/doxa-engines/README.md#compaction-review).
 
-## Gallery · alpha.36
+## Gallery · alpha.37
 
 ### Individual tool details
 
@@ -92,7 +94,7 @@ The pending indicator blinks while the request is unresolved.*
 unavailable values remain unset.*
 
 All six frames are unedited 3068 × 1734 terminal captures from the same running
-alpha.36 build. [Capture provenance and reproduction](docs/rust-gallery.md).
+alpha.37 build. [Capture provenance and reproduction](docs/rust-gallery.md).
 
 ## Install
 
@@ -104,7 +106,7 @@ curl -fsSL https://raw.githubusercontent.com/docwilde/doxa/main/scripts/install.
 
 The installer builds the Rust frontend and daemon from `main` and installs the
 Rust `doxa` command in `~/.local/bin` (or `DOXA_RUST_BIN_DIR`). Pass a tag such
-as `v2.0.0-alpha.36` after `sh -s --` to pin a release. It requires Git and Cargo and installs three native binaries: the frontend,
+as `v2.0.0-alpha.37` after `sh -s --` to pin a release. It requires Git and Cargo and installs three native binaries: the frontend,
 daemon and LORE carrier. Claude and Codex additionally require their provider CLIs. See the
 [Rust guide](rust/README.md) for provider setup and current limits.
 On Linux, it also installs a per-user application menu entry and icons under
