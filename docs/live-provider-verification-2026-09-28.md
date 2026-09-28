@@ -316,5 +316,21 @@ cover the proof's inventory, leakage, output and event-correlation checks.
 Reproduce with `scripts/codex-protected/verify_code_mode.py --help`; use the
 installed private launcher for `--server` and `--launcher`, the compiled server
 payload for `--negative-server`, and native binaries for `--daemon` and `--lore`.
-These checks establish tool execution and DOXA normalization. Authenticated
-account recall and successful LORE reviewer compaction are separate checks.
+These checks establish tool execution and DOXA normalization.
+
+### Authenticated file read and same-thread recall
+
+At `2026-09-28T18:11:14Z`, the installed alpha.40 native daemon was checked
+with alpha.41's staged, verified private server and both native dispatchers.
+`gpt-6-sol` with low effort accepted model and effort controls. Exactly two
+turns were submitted, with no retry: the first emitted one correlated successful
+command call/result/detail, read the synthetic file and returned its exact token.
+After stopping and restarting DOXA, the same provider thread recalled that
+token with zero tool calls. Both turns reported complete usage.
+
+Neither prompt contained the token. The fixture and original authentication
+were unchanged; no owned authentication copies, descendant processes or
+temporary directories remained. Only metadata was retained, with no prompts,
+source content or replies. These checks used isolated LORE stores with memory
+enabled; they did not trigger compaction or establish successful LORE review.
+Claude reviewer authentication is still required for that separate live gate.

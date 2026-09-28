@@ -307,3 +307,10 @@ LORE. Each made two loopback requests. The unpredictable file token was absent
 from the first request, the final response came from the returned tool output,
 and the source file stayed unchanged. Eight proof tests and eleven installer
 tests cover these assertions and artifact migration/repair.
+
+A subsequent two-turn authenticated check accepted `gpt-6-sol` with low effort,
+executed the actual file read and recalled its token after daemon restart on
+the same provider thread. Both turns reported complete usage. Fixtures and
+original authentication stayed unchanged; no owned processes or credential
+copies remained. Successful LORE review and large-context compaction still
+require Claude reviewer authentication.

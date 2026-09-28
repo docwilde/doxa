@@ -13,8 +13,8 @@ the stable 2.0 release has not been cut.
   restoring required tool support for Code Mode Only models such as **`gpt-6-sol`**.
 - Bind the helper to the private build receipt and native launch checks; repair
   missing/corrupt installations with atomic publication and retained compaction gates.
-- Verify workspace tool dispatch with the actual compiled provider and a
-  credential-free loopback model. Successful live LORE review still needs Claude auth.
+- Verify Code Mode workspace reads and same-thread recall with **two live turns**;
+  keep compiled refusal checks. Successful LORE review still needs Claude auth.
 
 ## 2.0.0-alpha.40 — 2026-09-28
 
