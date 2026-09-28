@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import shutil
 import subprocess
 import threading
 
@@ -76,12 +77,13 @@ def _run_terminal(args, state, display_number):
         environment.update(
             DOXA_HOME=str(state / "home"), DOXA_RUNTIME_DIR=str(state / "runtime"),
             LORE_ROOT=str(state / "lore"), DOXA_LORE="0", DOXA_DAEMON_BIN=str(Path(args.daemon).resolve()),
-            DOXA_LORE_PYTHON=str(Path(args.python).absolute()), DOXA_CLAUDE_PYTHON=str(Path(args.python).absolute()),
-            DOXA_CLAUDE_SCRIPT=str(Path(args.sidecar).resolve()), TERM="xterm-256color",
+            DOXA_LORE_RS=str(Path(args.lore).resolve()), TERM="xterm-256color",
         )
         argv = [str(Path(args.binary).resolve()), "new", "--engine", args.engine, "--linger", "600"]
-        if args.engine == "claude":
-            argv += ["--claude-python", str(Path(args.python).absolute()), "--claude-script", str(Path(args.sidecar).resolve())]
+        provider = args.provider_bin or shutil.which(args.engine)
+        if not provider:
+            raise RuntimeError(f"{args.engine} CLI is unavailable")
+        argv += [f"--{args.engine}-bin", str(Path(provider).resolve())]
         if args.model:
             argv += ["--model", args.model]
         if args.session:
@@ -153,9 +155,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     launch = commands.add_parser("run")
-    for name in ("binary", "daemon", "python", "sidecar", "repo", "state", "control"):
+    for name in ("binary", "daemon", "lore", "repo", "state", "control"):
         launch.add_argument("--" + name, required=True)
     launch.add_argument("--engine", choices=("claude", "codex"), default="claude")
+    launch.add_argument("--provider-bin", help="Absolute provider CLI executable")
     launch.add_argument("--model")
     launch.add_argument("--session", help="Reattach an actual session in the isolated runtime")
     send = commands.add_parser("control")

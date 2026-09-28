@@ -1,4 +1,4 @@
-//! Read-only discovery of attachable Python daemon sessions.
+//! Read-only discovery of attachable DOXA daemon sessions.
 //!
 //! The peer registry is a hint, not authority. Its files are never reaped by
 //! this frontend, and every path taken from an entry is checked before use.
