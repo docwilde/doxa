@@ -42,6 +42,7 @@ use super::*;
         app.handle(key(KeyCode::Backspace));
         assert_eq!(app.input, "ordinary draft");
         assert!(app.pending_prompts.is_empty());
+        assert!(!format!("{app:?}").contains(secret));
         let mut terminal = Terminal::new(TestBackend::new(140,36)).unwrap();
         terminal.draw(|frame| app.draw(frame)).unwrap();
         let rendered = terminal.backend().buffer().content.iter().map(|cell| cell.symbol()).collect::<String>();
