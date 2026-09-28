@@ -23,6 +23,8 @@ pub struct CompactGate {
     verified: bool,
     directory_identity: (u64, u64),
     carrier_identity: (u64,u64),
+    carrier_digest: String,
+    manifest_identity: (u64,u64),
 }
 fn shell_quote(value: &str) -> String { format!("'{}'", value.replace('\'', "'\\''")) }
 fn string(value: &str) -> String { serde_json::to_string(value).expect("string JSON") }
@@ -76,7 +78,7 @@ impl CompactGate {
         if crate::compact_hook::executable_digest(&executable)?!=executable_digest{
             let _=fs::remove_file(&executable);return Err(io::Error::other("native carrier digest changed"));
         }
-        let command = [executable.display().to_string(), "__codex-precompact".into(), manifest.display().to_string(), executable_digest]
+        let command = [executable.display().to_string(), "__codex-precompact".into(), manifest.display().to_string(), executable_digest.clone()]
             .iter().map(|s| shell_quote(s)).collect::<Vec<_>>().join(" ");
         let normalized = json!({"event_name":"pre_compact","matcher":MATCHER,"hooks":[{
             "type":"command","command":command,"timeout":HOOK_TIMEOUT,"async":false
@@ -89,7 +91,9 @@ impl CompactGate {
             if fs::symlink_metadata(&executable).is_ok_and(|meta|meta.is_file()&&(meta.dev(),meta.ino())==carrier_identity){let _=fs::remove_file(&executable);}
             return Err(error);
         }
-        Ok(Self { directory:directory.to_owned(), manifest, descriptor, command, hash, verified:false, directory_identity,carrier_identity })
+        let manifest_meta = fs::symlink_metadata(&manifest)?;
+        Ok(Self { directory:directory.to_owned(), manifest, descriptor, command, hash, verified:false, directory_identity,carrier_identity,
+            carrier_digest: executable_digest, manifest_identity: (manifest_meta.dev(),manifest_meta.ino()) })
     }
     /// Append as process-local `-c` overrides. These trust this single pinned
     /// command; they never set bypass_hook_trust or edit CODEX_HOME/config.toml.
@@ -123,15 +127,49 @@ impl CompactGate {
         let temporary = self.directory.join("compact-session.next.json");
         write_new(&temporary, &serde_json::to_vec(&descriptor)?)?;
         if let Err(error) = fs::rename(&temporary, &self.manifest) { let _ = fs::remove_file(temporary); return Err(error); }
+        let manifest_meta = fs::symlink_metadata(&self.manifest)?;
+        self.manifest_identity = (manifest_meta.dev(),manifest_meta.ino());
         self.descriptor = descriptor;
         Ok(())
     }
     pub(crate) fn manual_review_job(&self, transcript: &Path) -> io::Result<Option<crate::compact_hook::ReviewJob>> {
         if !self.verified() { return Ok(None); }
-        crate::compact_hook::review_job(&self.manifest, &json!({"hook_event_name":"PreCompact","trigger":"manual",
+        self.validate_manifest()?;
+        // The original in-memory descriptor owns thread/cwd authorization.
+        // A disk manifest replacement never contributes new authority.
+        crate::compact_hook::review_job_for_manifest(&self.descriptor, &json!({"hook_event_name":"PreCompact","trigger":"manual",
             "session_id":self.descriptor["provider_thread"],"transcript_path":transcript}))
     }
-    pub(crate) fn carrier(&self) -> PathBuf { self.directory.join("native-carrier") }
+    fn validate_manifest(&self) -> io::Result<()> {
+        private_directory(&self.directory)?;
+        let directory = fs::symlink_metadata(&self.directory)?;
+        if (directory.dev(),directory.ino()) != self.directory_identity { return Err(io::Error::other("compact gate directory replaced")); }
+        let (bytes, proof) = crate::compact_hook::safe_read(&self.manifest, crate::compact_hook::MAX_INPUT)?;
+        if (proof.device,proof.inode) != self.manifest_identity || bytes != serde_json::to_vec(&self.descriptor)? {
+            return Err(io::Error::other("compact gate manifest replaced or changed"));
+        }
+        Ok(())
+    }
+    pub(crate) fn pinned_carrier(&self) -> io::Result<fs::File> {
+        use std::io::Read;
+        self.validate_manifest()?;
+        let path = self.directory.join("native-carrier");
+        let mut file = fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(&path)?;
+        let before = file.metadata()?;
+        if !before.is_file() || (before.dev(),before.ino()) != self.carrier_identity || before.len() > 256*1024*1024 {
+            return Err(io::Error::other("compact native carrier replaced"));
+        }
+        let mut hasher = Sha256::new();
+        let mut bytes = [0u8;65536];
+        loop { let count=file.read(&mut bytes)?; if count==0 {break;} hasher.update(&bytes[..count]); }
+        let after = file.metadata()?;
+        if (before.dev(),before.ino(),before.len(),before.mtime(),before.mtime_nsec()) != (after.dev(),after.ino(),after.len(),after.mtime(),after.mtime_nsec())
+            || format!("{:x}",hasher.finalize()) != self.carrier_digest {
+            return Err(io::Error::other("compact native carrier changed"));
+        }
+        // Keep this exact open inode alive through exec, even if its path moves.
+        Ok(file)
+    }
     pub fn verified(&self) -> bool { self.verified && self.descriptor["provider_thread"].is_string() }
     pub fn hook_key(&self) -> &str { HOOK_KEY }
     /// Only the DOXA session-flags command contributes review authorization.
@@ -209,4 +247,23 @@ mod tests {
         drop(gate); assert!(!dir.path().join("compact-session.json").exists());
         assert!(dir.path().join("keep").exists());
     }
+    #[test]
+    fn manual_review_refuses_replaced_manifest_and_carrier() {
+        for replacement in ["manifest", "carrier"] {
+            let dir=tempfile::tempdir().unwrap(); let mut gate=prepare(dir.path());
+            gate.verify_hooks(&metadata(&gate)).unwrap(); gate.bind_thread("provider-thread").unwrap();
+            let codex_home=Path::new("/fixture/codex");
+            if replacement=="manifest" {
+                fs::rename(&gate.manifest,dir.path().join("old-manifest")).unwrap();
+                fs::write(&gate.manifest,serde_json::to_vec(&gate.descriptor).unwrap()).unwrap();
+                assert!(gate.manual_review_job(&codex_home.join("sessions/thread.jsonl")).is_err());
+            } else {
+                let carrier=dir.path().join("native-carrier");
+                fs::rename(&carrier,dir.path().join("old-carrier")).unwrap();
+                fs::write(&carrier,b"replacement executable").unwrap();
+                assert!(gate.pinned_carrier().is_err());
+            }
+        }
+    }
+
 }

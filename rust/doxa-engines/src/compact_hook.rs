@@ -53,6 +53,10 @@ fn read_owned(path: &Path, limit: usize, executable:bool) -> io::Result<(Vec<u8>
 pub(crate) fn review_job(manifest_path: &Path, event: &Value) -> io::Result<Option<ReviewJob>> {
     let (descriptor, _) = safe_read(manifest_path, MAX_INPUT)?;
     let manifest: Value = serde_json::from_slice(&descriptor)?;
+    review_job_for_manifest(&manifest, event)
+}
+
+pub(crate) fn review_job_for_manifest(manifest: &Value, event: &Value) -> io::Result<Option<ReviewJob>> {
     if manifest["version"] != crate::codex_compact::SUPPORTED_VERSION || event["hook_event_name"] != "PreCompact"
         || !matches!(event["trigger"].as_str(),Some("auto" | "manual"))
         || manifest["provider_thread"].as_str().is_none_or(str::is_empty) || event["session_id"] != manifest["provider_thread"]

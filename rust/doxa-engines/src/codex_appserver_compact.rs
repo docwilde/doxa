@@ -18,11 +18,11 @@ impl AppServerDriver {
             .ok_or(AppServerError::CompactionBlocked)?;
         let gate = self.compact_gate.as_ref().expect("verified gate");
         let job = gate.manual_review_job(&path).ok().flatten().ok_or(AppServerError::CompactionBlocked)?;
-        let carrier = gate.carrier();
+        let carrier = gate.pinned_carrier().map_err(|_| AppServerError::CompactionBlocked)?;
         emit(EngineEvent::new("lore_review_started", json!({"before":"compaction"})));
         let token = cancel.clone();
         let reviewed_job = tokio::task::spawn_blocking(move || {
-            let approved = crate::review_worker::review(&carrier, &job.metadata, "codex", crate::review_worker::REVIEW_TIMEOUT, || token.is_cancelled())
+            let approved = crate::review_worker::review_pinned(&carrier, &job.metadata, "codex", crate::review_worker::REVIEW_TIMEOUT, || token.is_cancelled())
                 .unwrap_or(false);
             (approved && job.unchanged().unwrap_or(false)).then_some(job)
         }).await.map_err(|_| AppServerError::CompactionBlocked)?;
