@@ -32,7 +32,9 @@ match; incomplete usage cannot authorize additional budgeted turns.
 
 ## Compaction review
 
-Protected native app-server sessions currently require **Codex 0.156.1**.
+Protected native app-server sessions require **DOXA’s private Codex 0.156.1
+app-server build, contract `doxa-precompact-fail-closed-v1`**. Stock Codex
+refuses protected startup before creating or resuming a thread.
 Initialization checks the server's build identity and `hooks/list` verifies
 DOXA's synchronous, trusted `PreCompact` command hash before a thread starts.
 It also verifies that the provider's unhooked token-budget reset feature is
@@ -53,14 +55,50 @@ requires a bounded receipt for the exact job; an exit code alone is insufficient
 DOXA still waits for matching hook and compaction events. A failed hook
 notification stops the protected session.
 
-**Provider limitation:** Codex 0.156.1 can continue compaction if the operating
-system cannot spawn a hook, or if the hook times out or returns invalid output.
-DOXA's parent can stop the process after observing failure, but this does not
-guarantee that automatic compaction was prevented. Manual requests have the
-independent review gate above. Raising a token threshold is not an automatic
-compaction disable switch: the pinned build can also compact for a full context
-window, model/context changes or recovery. Stable parity retains this upstream
-limitation until the provider guarantees blocking infrastructure failures.
+The private provider makes the decision inside `run_pre_compact_hooks`, before
+local/remote compaction inference or history replacement. Exactly one required
+session hook must complete as a synchronous command with explicit JSON approval.
+Missing hooks, spawn/read failures, timeout, invalid/empty/plain output, stopped
+review, async handlers and duplicate required hooks cannot authorize replacement.
+DOXA still verifies trust, the exact hook hash and disabled token-budget feature.
+The provider identifies itself as `doxa_codex_rs/0.156.1` with the explicit private
+contract; it never impersonates stock Codex.
+
+### Install the protected provider
+
+The standard installer builds a native Rust dispatcher and the pinned private
+app server. This is a separate, initially unoptimized `dev-small` provider build;
+no release-performance claim is made. The frontend/daemon keep their release
+profiles. Build tooling requires Python 3.11+, Git, Cargo/Rust 1.95.0 and a user
+systemd scope, with a 12 GiB memory cap, zero swap and one build job. The first
+build downloads and compiles a large Codex dependency graph; its separate cache
+is reused on subsequent installs. Python is not used by the installed dispatcher.
+
+The provider is installed under
+`~/.local/share/doxa/providers/codex-0.156.1-precompact-v1/` (or `XDG_DATA_HOME`).
+Normal Codex sessions select it automatically; an explicit `--codex-bin` takes
+precedence. Its native launcher verifies a private bounded receipt and executable
+SHA256, then executes the same open inode. Login, version and other CLI commands
+are delegated to the recorded official Codex executable, which is never replaced.
+
+For a separate build/install from a checkout:
+
+```sh
+cargo build --locked -j 1 -p doxa-engines --bin doxa-codex-protected
+python3 scripts/install_codex_protected.py \
+  --launcher "$PWD/target/debug/doxa-codex-protected"
+```
+
+The installer pins official source commit
+`b412ff32c417f855c2b2d1581b77058eed87c84b` and the reviewed patch checksum. The
+release tag leaves 155 local workspace package versions at `0.0.0` in its
+lockfile; the patch normalizes only these to `0.156.1`, with no external
+version/source/checksum/dependency changes. Every compile uses `--locked`.
+A real bounded initialize probe verifies the compiled contract before install.
+The receipt records source, patch and binary hashes. An existing differing
+provider receipt requires a separate install root for review. An explicit
+`DOXA_INSTALL_CODEX_PROTECTED=0` installs the other DOXA engines without this
+provider; protected Codex then remains unavailable until it is installed.
 
 ## Verification
 

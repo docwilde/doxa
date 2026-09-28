@@ -31,7 +31,7 @@ const RPC_TIMEOUT: Duration = Duration::from_secs(15);
 fn provider_version(agent: &str) -> Option<&str> {
     let prefix = agent.split('(').next()?.trim();
     let (product, rest) = prefix.split_once('/')?;
-    if !matches!(product, "codex_cli_rs" | "Codex Desktop") { return None; }
+    if !matches!(product, "codex_cli_rs" | "Codex Desktop" | "doxa_codex_rs") { return None; }
     let version = rest.split_whitespace().next()?;
     let parts = version.split('.').collect::<Vec<_>>();
     (parts.len() == 3 && parts.iter().all(|part| !part.is_empty() && part.bytes().all(|c| c.is_ascii_digit())))
@@ -204,6 +204,10 @@ impl AppServerDriver {
             let version = initialized["userAgent"].as_str().and_then(provider_version);
             if version != Some(crate::codex_compact::SUPPORTED_VERSION) {
                 return Err(AppServerError::Protocol("Codex build has no verified DOXA compaction hook contract"));
+            }
+            if !initialized["userAgent"].as_str().is_some_and(|agent| agent.starts_with(
+                crate::codex_compact::PROTECTED_AGENT_PREFIX)) {
+                return Err(AppServerError::Protocol("Protected Codex requires DOXA's installed fail-closed app server; run scripts/install_codex_protected.py or select its launcher with --codex-bin"));
             }
             // Token-budget context resets bypass PreCompact in this provider.
             // Confirm the process-local override is supported and effective.

@@ -2936,7 +2936,7 @@ def read(): return json.loads(sys.stdin.readline())
 def send(v): print(json.dumps(v),flush=True)
 log = open('__LOG__','a')
 init=read(); assert init['method']=='initialize'
-send({'id':init['id'],'result':{'userAgent':'codex_cli_rs/0.156.1'}})
+send({'id':init['id'],'result':{'userAgent':'doxa_codex_rs/0.156.1 (doxa-precompact-fail-closed-v1; upstream fixture)'}})
 assert read()['method']=='initialized'
 thread=read()
 if thread['method']=='config/read':
@@ -3435,7 +3435,7 @@ def read():
  return json.loads(line)
 def send(value): print(json.dumps(value),flush=True)
 def notice(method,**params): send({'method':method,'params':dict(threadId='thread-1',**params)})
-init=read();send({'id':init['id'],'result':{'userAgent':'codex_cli_rs/0.156.1'}})
+init=read();send({'id':init['id'],'result':{'userAgent':'doxa_codex_rs/0.156.1 (doxa-precompact-fail-closed-v1; upstream fixture)'}})
 assert read()['method']=='initialized'
 request=read()
 if request['method']=='model/list':

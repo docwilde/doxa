@@ -413,7 +413,11 @@ fn spawn_inner(options: &LaunchOptions, fleet_runtime: Option<&Path>, environmen
             if options.claude_bin.is_some() {
                 return Err(invalid("Claude options require --engine claude"));
             }
-            let codex = executable(options.codex_bin.as_deref().unwrap_or(Path::new("codex")))?;
+            let installed = env::var_os("XDG_DATA_HOME").map(PathBuf::from)
+                .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
+                .map(|data| data.join("doxa/providers/codex-0.156.1-precompact-v1/codex"));
+            let default = installed.as_deref().filter(|path| path.is_file()).unwrap_or(Path::new("codex"));
+            let codex = executable(options.codex_bin.as_deref().unwrap_or(default))?;
             command.args(["--engine", "codex", "--codex-bin"]).arg(codex).args(["--sandbox", sandbox]);
             if options.resume.is_some() {
                 command.args(["--resume", "true"]);

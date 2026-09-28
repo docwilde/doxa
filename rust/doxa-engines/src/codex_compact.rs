@@ -1,6 +1,6 @@
 //! Reviewed, session-scoped PreCompact hook for the exact verified Codex build.
-//! Codex's OS-level hook errors are fail-open; consumers must monitor hook
-//! failure notifications and abort. Expected review errors return blocking JSON.
+//! Protected sessions require the explicitly identified DOXA provider build:
+//! its native PreCompact boundary blocks infrastructure errors before replacement.
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{fs, io, path::{Path, PathBuf}};
@@ -10,6 +10,7 @@ use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 
 pub const SUPPORTED_VERSION: &str = "0.156.1";
+pub const PROTECTED_AGENT_PREFIX: &str = "doxa_codex_rs/0.156.1 (doxa-precompact-fail-closed-v1; ";
 pub const HOOK_TIMEOUT: u64 = 240;
 pub const HOOK_KEY: &str = "/<session-flags>/config.toml:pre_compact:0:0";
 const MATCHER: &str = "^(auto|manual)$";
