@@ -97,7 +97,14 @@ fn lock(dir: &File) -> io::Result<File> {
     let meta = check_file(&lock)?;
     if identity(dir, LOCK_NAME)? != Some((meta.dev(), meta.ino())) { return Err(private_error()); }
     // SAFETY: live owned regular fd. Closing the guard releases the lock.
-    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } != 0 { return Err(io::Error::last_os_error()); }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+    loop {
+        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 { break; }
+        let e = io::Error::last_os_error();
+        if e.kind() != io::ErrorKind::WouldBlock { return Err(e); }
+        if std::time::Instant::now() >= deadline { return Err(error(io::ErrorKind::WouldBlock)); }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
     if identity(dir, LOCK_NAME)? != Some((meta.dev(), meta.ino())) { return Err(private_error()); }
     Ok(lock)
 }
@@ -131,6 +138,8 @@ impl Store {
         if bytes.len() as u64 > MAX_BYTES { return Err(error(io::ErrorKind::InvalidData)); }
         let temp = format!(".credentials-{}-{}", std::process::id(), NEXT_FILE.fetch_add(1, Ordering::Relaxed));
         let mut file = open_at(&self.dir, &temp, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL, 0o600)?;
+        let meta = file.metadata()?;
+        let temp_identity = (meta.dev(), meta.ino());
         let result = (|| {
             let meta = check_file(&file)?;
             file.write_all(&bytes)?;
@@ -141,7 +150,9 @@ impl Store {
             self.dir.sync_all()
         })();
         // SAFETY: removes only our temporary child name; absent after rename.
-        unsafe { libc::unlinkat(self.dir.as_raw_fd(), name(&temp).as_ptr(), 0); }
+        if identity(&self.dir, &temp).ok() == Some(Some(temp_identity)) {
+            unsafe { libc::unlinkat(self.dir.as_raw_fd(), name(&temp).as_ptr(), 0); }
+        }
         result
     }
 }
@@ -332,6 +343,17 @@ mod tests {
         fs::write(&other, "ordinary").unwrap();
         assert!(!is_credential_file(&File::open(other).unwrap()).unwrap());
         assert_eq!(format!("{:?}", status(Vendor::DeepSeek).unwrap()), "Saved");
+    }
+    #[test]
+    fn foreign_owned_directory_and_contended_lock_are_refused() {
+        let (_guard, dir) = fixture();
+        if unsafe { libc::geteuid() } != 0 {
+            assert!(directory(Path::new("/usr"), false).is_err());
+        }
+        let _store = Store::open(dir.path(), false).unwrap().unwrap();
+        let start = std::time::Instant::now();
+        assert_eq!(status(Vendor::DeepSeek).unwrap_err().kind(), io::ErrorKind::WouldBlock);
+        assert!(start.elapsed() < std::time::Duration::from_secs(2));
     }
     #[test]
     fn private_home_created_but_status_and_remove_do_not_create_a_missing_home() {

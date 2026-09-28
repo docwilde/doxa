@@ -19,6 +19,8 @@ async fn credential_guard() -> CredentialGuard {
     let home = tempfile::tempdir().unwrap();
     // No test ever opens the user's real credential store.
     std::env::set_var("DOXA_HOME", home.path());
+    std::env::remove_var("DEEPSEEK_API_KEY");
+    std::env::remove_var("ZAI_API_KEY");
     CredentialGuard { _lock: lock, _home: home }
 }
 

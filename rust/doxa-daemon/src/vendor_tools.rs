@@ -88,6 +88,24 @@ mod tests {
     }
 
     #[test]
+    fn credential_file_never_reaches_workspace_scrubber_or_result() {
+        let root = tempfile::tempdir().unwrap();
+        let previous = std::env::var_os("DOXA_HOME");
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore { fn drop(&mut self) {
+            if let Some(value) = self.0.take() { std::env::set_var("DOXA_HOME", value); }
+            else { std::env::remove_var("DOXA_HOME"); }
+        } }
+        let _restore = Restore(previous);
+        std::env::set_var("DOXA_HOME", root.path());
+        doxa_vendors::credentials::save(doxa_vendors::Vendor::DeepSeek, "synthetic-private-key").unwrap();
+        let calls = std::cell::Cell::new(0);
+        let scrub = |text: &str| { calls.set(calls.get() + 1); Ok(text.to_owned()) };
+        let gate = WorkspaceReadGate::new(root.path(), &scrub);
+        assert!(gate.read(&call("credentials.json")).is_err());
+        assert_eq!(calls.get(), 0);
+    }
+    #[test]
     fn reads_bounded_file_and_rejects_escape_and_hidden_paths() {
         let root = tempfile::tempdir().unwrap();
         fs::create_dir(root.path().join("src")).unwrap();
