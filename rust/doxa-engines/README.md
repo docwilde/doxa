@@ -69,13 +69,14 @@ contract; it never impersonates stock Codex.
 The standard installer builds a native Rust dispatcher and the pinned private
 app server. This is a separate, initially unoptimized `dev-small` provider build;
 no release-performance claim is made. The frontend/daemon keep their release
-profiles. Build tooling requires Python 3.11+, Git and a user
-systemd scope. The installer bootstraps a private Rust 1.95.0 toolchain on Linux
-x86_64 using checksum-pinned Rustup 1.29.1, with a 12 GiB memory cap, zero swap and one build job. The first
-build downloads and compiles a large Codex dependency graph; its separate cache
-is reused on subsequent installs, including the verified binary. Other hosts
-can pass `--cargo` for an existing Rust 1.95.0 toolchain. Python is not used by
-the installed dispatcher.
+profiles. The supported installer is Linux x86_64 with Python 3.11+, Git and a
+working user systemd scope. It bootstraps private Rust 1.95.0 using checksum-pinned
+Rustup 1.29.1, with a 12 GiB memory cap, zero swap and one build job. The first
+build downloads and compiles a large Codex dependency graph; later installs reuse
+its verified artifact. `--cargo` selects an existing Rust 1.95.0 toolchain on the
+supported host; it does not remove the Linux/systemd requirements. Set
+`DOXA_CODEX_PROTECTED_CACHE` for the standard installer or pass `--cache` to the
+standalone builder to select the private cache. Python is build tooling only.
 
 Legacy `exec` sessions and `DOXA_CODEX_APPSERVER=0` cannot run provider turns:
 review failure cannot be blocked inside stock exec. Refusal happens before any
