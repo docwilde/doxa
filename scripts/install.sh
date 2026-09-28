@@ -116,7 +116,7 @@ SH
   done
 
   installing=1
-  for name in doxa-rs doxa-daemon-rs lore-rs doxa-claude-sidecar.py .doxa-sidecar-current .doxa-install-sha doxa; do
+  for name in doxa-rs doxa-daemon-rs lore-rs .doxa-install-sha doxa; do
     # mv can treat a symlink to a directory as the destination directory,
     # leaving the old launcher pointer in place and writing inside its target.
     if [ -L "$bin_dir/$name" ]; then

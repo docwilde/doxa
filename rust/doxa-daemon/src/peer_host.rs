@@ -481,7 +481,7 @@ mod provider_target_tests {
         let host = Arc::new(Recorder(AtomicUsize::new(0)));
         let (tx, _) = std::sync::mpsc::sync_channel(1);
         let mut peer = PeerHost::new(host.clone(), dir.path().to_path_buf(), dir.path(),
-            "session".into(), "session".into(), None, tx).unwrap();
+            "session".into(), "session".into(), tx).unwrap();
         peer.agent_tools_enabled = false;
         let peer = Arc::new(peer);
         assert!(!peer.connect_provider_tools());

@@ -116,11 +116,12 @@ pub fn installed_commit(executable: &Path) -> io::Result<Option<String>> {
     let target = fs::read_link(&pointer)?;
     let target = if target.is_absolute() { target } else { bin.join(target) };
     let path = target.parent().ok_or_else(|| io::Error::other("sidecar directory unavailable"))?.join(".doxa-install-sha");
-    let metadata = fs::symlink_metadata(&path)?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 128 || metadata.nlink() != 1 {
+    let file=std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW|libc::O_NONBLOCK).open(&path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len()>128 || metadata.nlink()!=1 || metadata.uid()!=unsafe {libc::geteuid()} {
         return Err(io::Error::other("invalid installation marker"));
     }
-    let mut value = String::new(); fs::File::open(path)?.take(129).read_to_string(&mut value)?;
+    let mut value = String::new(); file.take(129).read_to_string(&mut value)?;
     if value.len() > 128 { return Err(io::Error::other("invalid installation marker")); }
     sha(&value).map(Some).ok_or_else(|| io::Error::other("invalid installation commit"))
 }
