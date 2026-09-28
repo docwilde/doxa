@@ -133,6 +133,57 @@ class ProofTests(unittest.TestCase):
             frames.close()
             proof.terminate(process)
 
+    def test_cleanup_tracks_owned_descendants_with_separate_groups_and_sessions(self):
+        import signal
+        script = """import os,time
+children=[]
+for detach in ['group','session']:
+    child=os.fork()
+    if child==0:
+        if detach=='group': os.setpgid(0,0)
+        else: os.setsid()
+        time.sleep(30)
+        os._exit(0)
+    children.append(child)
+print(' '.join(map(str,children)),flush=True)
+time.sleep(30)
+"""
+        unrelated = subprocess.Popen(["/usr/bin/python3", "-c", "import time;time.sleep(30)"],
+                                     start_new_session=True)
+        process = proof.owned_process(["/usr/bin/python3", "-c", script],
+                                      stdout=subprocess.PIPE, start_new_session=True)
+        children = []
+        starts = {}
+        try:
+            children = [int(pid) for pid in process.stdout.readline().split()]
+            process.proof_tree.collect()
+            starts = {pid: proof.process_snapshot()[pid][0] for pid in children}
+            # Orphan the already remembered children before cleanup. Their SID/
+            # PGID and current ancestry cannot be relied on after leader exit.
+            process.kill()
+            process.wait(timeout=2)
+            started = time.monotonic()
+            proof.terminate(process)
+            self.assertLess(time.monotonic() - started, 3)
+            rows = proof.process_snapshot()
+            for pid, start in starts.items():
+                self.assertFalse(pid in rows and rows[pid][0] == start and rows[pid][2] != "Z")
+            self.assertIsNone(unrelated.poll(), "cleanup must not signal another owned test process")
+        finally:
+            if process.poll() is None:
+                proof.terminate(process)
+            for pid, start in starts.items():
+                with proof.contextlib.suppress(ProcessLookupError):
+                    descriptor = os.pidfd_open(pid)
+                    try:
+                        row = proof.process_row(pid)
+                        if row and row[0] == start:
+                            signal.pidfd_send_signal(descriptor, signal.SIGKILL)
+                    finally:
+                        os.close(descriptor)
+            unrelated.kill()
+            unrelated.wait(timeout=2)
+
     def test_explicit_hook_control_keeps_trusted_synchronous_review_contract(self):
         import tomllib
         flag, value = proof.allow_hook()

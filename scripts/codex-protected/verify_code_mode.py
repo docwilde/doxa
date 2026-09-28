@@ -62,14 +62,162 @@ def visible_tools(body):
     return names
 
 
+def process_row(pid):
+    try:
+        entry = Path("/proc") / str(pid)
+        if entry.stat().st_uid != os.getuid():
+            return None
+        # comm may contain spaces/parentheses; fields follow its last ')'.
+        fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
+        return int(fields[19]), int(fields[1]), fields[0]
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def process_snapshot():
+    """Read bounded Linux process identities; PID alone never authorizes a signal."""
+    rows = {}
+    deadline = time.monotonic() + 1
+    for count, entry in enumerate(Path("/proc").iterdir()):
+        if count >= 32768 or time.monotonic() >= deadline:
+            raise RuntimeError("owned proof process census exceeded bound")
+        if entry.name.isdecimal():
+            row = process_row(int(entry.name))
+            if row is not None:
+                rows[int(entry.name)] = row
+    return rows
+
+
+class OwnedProcessTree:
+    """Remember descendants while their ancestry exists, including new sessions.
+
+    At cleanup, stop the owned tree before its last census so a parent cannot
+    keep forking during collection. pidfds bind every signal to that same process,
+    even if a numeric PID is reused. No process-name or global group matching.
+    """
+    def __init__(self, process, monitor=True):
+        self.process = process
+        self.identities = {}
+        self.lock = threading.Lock()
+        self.stopping = threading.Event()
+        self.error = None
+        rows = process_snapshot()
+        root = rows.get(process.pid)
+        if root:
+            self._remember(process.pid, root[0])
+        self.collect()
+        self.worker = None
+        if monitor:
+            self.worker = threading.Thread(target=self._monitor, daemon=True)
+            self.worker.start()
+
+    def _remember(self, pid, start):
+        identity = (pid, start)
+        if identity in self.identities:
+            return False
+        if len(self.identities) >= 128:
+            raise RuntimeError("owned proof descendant count exceeded bound")
+        try:
+            descriptor = os.pidfd_open(pid)
+        except ProcessLookupError:
+            return False
+        row = process_row(pid)
+        if row is None or row[0] != start:
+            os.close(descriptor)
+            return False
+        self.identities[identity] = descriptor
+        return True
+
+    def collect(self):
+        rows = process_snapshot()
+        with self.lock:
+            changed = True
+            added = False
+            while changed:
+                changed = False
+                for pid, (start, parent, state) in rows.items():
+                    parent_row = rows.get(parent)
+                    if (state != "Z" and parent_row is not None
+                            and (parent, parent_row[0]) in self.identities):
+                        if self._remember(pid, start):
+                            changed = added = True
+            return added
+
+    def _monitor(self):
+        while not self.stopping.wait(.02):
+            try:
+                self.collect()
+            except Exception as error:
+                self.error = error
+                return
+
+    def signal_all(self, kind, leader_last=False):
+        with self.lock:
+            items = list(self.identities.items())
+        if leader_last:
+            items.sort(key=lambda item: item[0][0] == self.process.pid)
+        for _, descriptor in items:
+            with contextlib.suppress(ProcessLookupError):
+                signal.pidfd_send_signal(descriptor, kind)
+
+    def close(self):
+        self.stopping.set()
+        if self.worker:
+            self.worker.join(timeout=1)
+        try:
+            # Freeze parents first, then repeatedly discover/stop their children.
+            self.signal_all(signal.SIGSTOP)
+            deadline = time.monotonic() + 1
+            while self.collect():
+                self.signal_all(signal.SIGSTOP)
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("owned proof descendant census did not settle")
+        finally:
+            self.signal_all(signal.SIGKILL, leader_last=True)
+            try:
+                self.process.wait(timeout=5)
+                deadline = time.monotonic() + 2
+                while True:
+                    rows = process_snapshot()
+                    alive = [identity for identity in self.identities
+                             if identity[0] in rows and rows[identity[0]][0] == identity[1]
+                             and rows[identity[0]][2] != "Z"]
+                    if not alive:
+                        break
+                    if time.monotonic() >= deadline:
+                        raise RuntimeError("owned proof descendants survived cleanup")
+                    time.sleep(.01)
+            finally:
+                for descriptor in self.identities.values():
+                    os.close(descriptor)
+                for stream in (self.process.stdin, self.process.stdout, self.process.stderr):
+                    if stream:
+                        stream.close()
+        if self.error:
+            raise RuntimeError("owned proof descendant monitor failed") from self.error
+
+
+def owned_process(*args, **kwargs):
+    if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
+        raise RuntimeError("owned proof cleanup requires Linux pidfds")
+    process = subprocess.Popen(*args, **kwargs)
+    try:
+        process.proof_tree = OwnedProcessTree(process)
+    except Exception:
+        process.kill()
+        process.wait(timeout=5)
+        for stream in (process.stdin, process.stdout, process.stderr):
+            if stream:
+                stream.close()
+        raise
+    return process
+
+
 def terminate(process):
-    # Keep the leader unreaped until descendants have received SIGKILL.
-    with contextlib.suppress(ProcessLookupError):
-        os.killpg(process.pid, signal.SIGKILL)
-    process.wait(timeout=5)
-    for stream in (process.stdin, process.stdout, process.stderr):
-        if stream:
-            stream.close()
+    tree = getattr(process, "proof_tree", None)
+    if tree is None:
+        tree = OwnedProcessTree(process, monitor=False)
+    tree.close()
 
 
 class Frames:
@@ -107,7 +255,7 @@ class Frames:
 
 class Rpc:
     def __init__(self, command, environment, cwd):
-        self.process = subprocess.Popen(command, cwd=cwd, env=environment,
+        self.process = owned_process(command, cwd=cwd, env=environment,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             start_new_session=True)
         self.frames = Frames(self.process.stdout)
@@ -341,7 +489,7 @@ def daemon_turn(daemon, launcher, lore, root, peer, token):
         "LORE_PROJECTS_DIR": str(root / "projects"), "LORE_CODEX_SESSIONS_DIR": str(root / "codex/sessions"),
         "LORE_SKILLS_DIR": str(root / "skills"), "DOXA_LORE_RS": str(lore), "DOXA_LORE": "1",
         "LORE_DISABLE_SYNC": "1", "LORE_DISABLE_REVIEW": "1", "DOXA_AGENT_PEER_SEND": "0"})
-    process = subprocess.Popen([str(daemon), "--runtime-dir", str(root / "runtime"), "--cwd", str(root / "workspace"),
+    process = owned_process([str(daemon), "--runtime-dir", str(root / "runtime"), "--cwd", str(root / "workspace"),
         "--session-id", "code-mode-proof", "--engine", "codex", "--codex-bin", str(launcher),
         "--model", "gpt-6-sol", "--sandbox", "read-only", "--linger", "10"], env=env,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
