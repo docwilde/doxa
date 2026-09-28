@@ -161,7 +161,7 @@ fn saved(vendor: Vendor) -> io::Result<Option<String>> {
 }
 fn environment(vendor: Vendor) -> Option<String> {
     // Preserve inherited credential compatibility; bound all values before use.
-    std::env::var(vendor.env_var()).ok().filter(|k| !k.is_empty() && k.len() <= MAX_KEY && k.bytes().all(|b| b.is_ascii_graphic()))
+    std::env::var(vendor.env_var()).ok().and_then(|k| valid_key(&k).ok().map(str::to_owned))
 }
 /// Source only; the saved and inherited values are never exposed to setup UI.
 pub fn status(vendor: Vendor) -> io::Result<CredentialStatus> {
@@ -218,8 +218,17 @@ mod tests {
     use super::*;
     use std::os::unix::fs::{PermissionsExt, symlink};
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    fn fixture() -> (std::sync::MutexGuard<'static, ()>, tempfile::TempDir) {
-        let guard = ENV_LOCK.lock().unwrap();
+    struct EnvironmentGuard { _lock: std::sync::MutexGuard<'static, ()>, previous: Vec<(&'static str, Option<std::ffi::OsString>)> }
+    impl Drop for EnvironmentGuard { fn drop(&mut self) {
+        for (name, value) in self.previous.drain(..) {
+            match value { Some(value) => std::env::set_var(name, value), None => std::env::remove_var(name) }
+        }
+    } }
+    fn fixture() -> (EnvironmentGuard, tempfile::TempDir) {
+        let lock = ENV_LOCK.lock().unwrap();
+        // Opaque snapshots are restored only, never resolved/asserted/displayed.
+        let previous = ["DOXA_HOME", "DEEPSEEK_API_KEY", "ZAI_API_KEY"].into_iter().map(|name| (name, std::env::var_os(name))).collect();
+        let guard = EnvironmentGuard { _lock: lock, previous };
         let dir = tempfile::tempdir().unwrap();
         fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
         std::env::set_var("DOXA_HOME", dir.path());

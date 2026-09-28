@@ -12,23 +12,40 @@ use std::time::Duration;
 use tokio::sync::watch;
 use tokio::sync::{Mutex, MutexGuard};
 
-struct CredentialGuard { _lock: MutexGuard<'static, ()>, _home: tempfile::TempDir }
+struct CredentialGuard { _lock: MutexGuard<'static, ()>, _home: tempfile::TempDir, previous: Vec<(&'static str, Option<std::ffi::OsString>)> }
+impl Drop for CredentialGuard { fn drop(&mut self) {
+    for (name, value) in self.previous.drain(..) {
+        match value { Some(value) => std::env::set_var(name, value), None => std::env::remove_var(name) }
+    }
+} }
 async fn credential_guard() -> CredentialGuard {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     let lock = LOCK.get_or_init(|| Mutex::new(())).lock().await;
+    let previous = ["DOXA_HOME", "DEEPSEEK_API_KEY", "ZAI_API_KEY"].into_iter().map(|name| (name, std::env::var_os(name))).collect();
     let home = tempfile::tempdir().unwrap();
     // No test ever opens the user's real credential store.
     std::env::set_var("DOXA_HOME", home.path());
     std::env::remove_var("DEEPSEEK_API_KEY");
     std::env::remove_var("ZAI_API_KEY");
-    CredentialGuard { _lock: lock, _home: home }
+    CredentialGuard { _lock: lock, _home: home, previous }
 }
 
+fn accept(listener: &TcpListener) -> std::net::TcpStream {
+    listener.set_nonblocking(true).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        match listener.accept() {
+            Ok((socket, _)) => return socket,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock && std::time::Instant::now() < deadline => std::thread::sleep(Duration::from_millis(2)),
+            Err(_) => panic!("fixture request was not accepted before deadline"),
+        }
+    }
+}
 fn server(response: Vec<u8>, delay: Duration) -> (String, std::thread::JoinHandle<String>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}/chat/completions", listener.local_addr().unwrap());
     let task = std::thread::spawn(move || {
-        let (mut socket, _) = listener.accept().unwrap();
+        let mut socket = accept(&listener);
         socket
             .set_read_timeout(Some(Duration::from_secs(3)))
             .unwrap();
@@ -74,7 +91,7 @@ fn multi_server(bodies: Vec<&'static str>) -> (String, std::thread::JoinHandle<C
         let mut requests = Vec::new();
         let mut auth = Vec::new();
         for body in bodies {
-            let (mut socket, _) = listener.accept().unwrap();
+            let mut socket = accept(&listener);
             socket
                 .set_read_timeout(Some(Duration::from_secs(3)))
                 .unwrap();
@@ -127,7 +144,7 @@ struct LookupGate {
     calls: Vec<String>,
 }
 
-struct PendingGate;
+struct PendingGate { started: Option<tokio::sync::oneshot::Sender<()>> }
 struct RotatingGate;
 impl ToolGate for RotatingGate {
     fn definitions(&self) -> Vec<serde_json::Value> {
@@ -151,6 +168,7 @@ impl ToolGate for PendingGate {
         &'a mut self,
         _call: &'a ToolCall,
     ) -> BoxFuture<'a, Result<serde_json::Value, ()>> {
+        if let Some(started) = self.started.take() { started.send(()).unwrap(); }
         Box::pin(std::future::pending())
     }
 }
@@ -292,9 +310,10 @@ async fn cancellation_and_deadline_cover_tool_execution() {
     let (url, task) = multi_server(vec![body]);
     let mut history = vec![];
     let (sender, cancel) = watch::channel(false);
-    let mut gate = PendingGate;
+    let (started, waiting) = tokio::sync::oneshot::channel();
+    let mut gate = PendingGate { started: Some(started) };
     tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(40)).await;
+        waiting.await.unwrap();
         sender.send(true).unwrap();
     });
     let error = run_turn_local(
@@ -326,7 +345,7 @@ async fn cancellation_and_deadline_cover_tool_execution() {
         "question",
         Some(&mut gate),
         cancel,
-        Duration::from_millis(50),
+        Duration::from_millis(250),
         |_| {},
     )
     .await
@@ -536,7 +555,7 @@ async fn cancellation_and_timeout_abort_request() {
             &url,
             json!({}),
             cancel,
-            Duration::from_millis(50),
+            Duration::from_millis(250),
             |_| {}
         )
         .await,
@@ -561,7 +580,7 @@ async fn local_override_rejects_userinfo_and_remote_hosts() {
             endpoint,
             json!({}),
             cancel,
-            Duration::from_millis(50),
+            Duration::from_millis(250),
             |_| {},
         )
         .await;
