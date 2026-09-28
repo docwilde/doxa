@@ -78,14 +78,21 @@ main() {
     [ -f "$required_file" ] || { printf 'doxa-install: missing %s\n' "$required_file" >&2; exit 1; }
   done
 
+  # Keep dependency artifacts between upgrades. Source checks and the locked
+  # Cargo graph still select this checkout's actual binaries.
+  build_dir="${DOXA_INSTALL_TARGET_DIR:-$cache_dir/target}"
+  case "$build_dir" in /*) : ;; *) printf 'doxa-install: build cache must be absolute\n' >&2; exit 1 ;; esac
+  [ ! -L "$build_dir" ] || { printf 'doxa-install: build cache must not be a symlink\n' >&2; exit 1; }
+  mkdir -p "$build_dir"
+  chmod 700 "$build_dir"
   printf 'doxa-install: building Rust frontend and daemon\n'
-  CARGO_TARGET_DIR="$checkout/target" cargo build --release --locked --target "$host_target" --manifest-path "$tui_manifest" --bin doxa-rs || exit 1
-  CARGO_TARGET_DIR="$checkout/target" cargo build --release --locked --target "$host_target" --manifest-path "$daemon_manifest" || exit 1
-  CARGO_TARGET_DIR="$checkout/target" cargo build --release --locked --target "$host_target" --manifest-path "$tui_manifest" --package lore-core --bin lore-rs || exit 1
-  lore_bin="$checkout/target/$host_target/release/lore-rs"
-  tui_bin="$checkout/target/$host_target/release/doxa-rs"
-  daemon_bin="$checkout/target/$host_target/release/doxa-daemon-rs"
-  [ -f "$daemon_bin" ] || daemon_bin="$checkout/target/$host_target/release/doxa-daemon"
+  CARGO_TARGET_DIR="$build_dir" cargo build --release --locked --target "$host_target" --manifest-path "$tui_manifest" --bin doxa-rs || exit 1
+  CARGO_TARGET_DIR="$build_dir" cargo build --release --locked --target "$host_target" --manifest-path "$daemon_manifest" || exit 1
+  CARGO_TARGET_DIR="$build_dir" cargo build --release --locked --target "$host_target" --manifest-path "$tui_manifest" --package lore-core --bin lore-rs || exit 1
+  lore_bin="$build_dir/$host_target/release/lore-rs"
+  tui_bin="$build_dir/$host_target/release/doxa-rs"
+  daemon_bin="$build_dir/$host_target/release/doxa-daemon-rs"
+  [ -f "$daemon_bin" ] || daemon_bin="$build_dir/$host_target/release/doxa-daemon"
   [ -f "$tui_bin" ] && [ -f "$daemon_bin" ] && [ -f "$lore_bin" ] || {
     printf 'doxa-install: Rust build produced no frontend, daemon or native LORE carrier\n' >&2; exit 1;
   }

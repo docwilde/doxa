@@ -41,6 +41,8 @@ jobs:
           DOXA_RUST_REPO_URL="$GITHUB_WORKSPACE" \
             DOXA_HOME="$smoke_dir/home" \
             DOXA_RUST_BIN_DIR="$smoke_dir/bin" \
+            DOXA_INSTALL_TARGET_DIR="$GITHUB_WORKSPACE/target" \
+            CARGO_BUILD_JOBS=2 \
             DOXA_NO_LAUNCHER=1 \
             sh scripts/install.sh HEAD
           (cd / && "$smoke_dir/bin/doxa" --version)
