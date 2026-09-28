@@ -19,7 +19,8 @@ def read(): return json.loads(sys.stdin.readline())
 def send(x): print(json.dumps(x),flush=True)
 def notice(method,**params): send({'method':method,'params':dict(threadId='thread-actual',**params)})
 init=read(); assert init['method']=='initialize'
-send({'id':init['id'],'result':{'userAgent':'codex_cli_rs/'+('0.1.0' if mode=='version' else '0.156.1')}})
+agent='Codex Desktop/0.156.1 (Ubuntu 26.4.0; x86_64) dumb (doxa; 2.0.0-alpha.37)' if mode=='compact' else 'codex_cli_rs/'+('0.1.0' if mode=='version' else '0.156.1')
+send({'id':init['id'],'result':{'userAgent':agent}})
 assert read()['method']=='initialized'
 if mode=='version':
     # Any subsequent request is evidence of an unsafe initialization order.
