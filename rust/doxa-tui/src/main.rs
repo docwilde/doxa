@@ -86,8 +86,7 @@ fn installed_bin_dir_for(executable: &Path) -> io::Result<PathBuf> {
     if executable.file_name().is_none_or(|name| name != "doxa-rs")
         || !bin_dir.join("doxa").is_file()
         || !bin_dir.join("doxa-daemon-rs").is_file()
-        || !std::fs::symlink_metadata(bin_dir.join(".doxa-sidecar-current"))
-            .is_ok_and(|meta| meta.file_type().is_symlink())
+        || doxa_tui::installation::installed_commit(executable)?.is_none()
     {
         return Err(invalid("update requires an installed Rust doxa launcher; from a source checkout run ./task install"));
     }
@@ -124,6 +123,11 @@ fn update() -> io::Result<()> {
 }
 
 fn run(args: &[String]) -> io::Result<()> {
+    if args.first().is_some_and(|arg|arg=="install-launcher") {
+        if args.len()!=2 {return Err(invalid("usage: doxa install-launcher ABSOLUTE_LAUNCHER_PATH"));}
+        let path=doxa_tui::installation::install_launcher(Path::new(&args[1]))?;
+        println!("Desktop shortcut · {}",path.display()); return Ok(());
+    }
     if let Some(command) = args.first().map(String::as_str) {
         match command {
             "help" | "--help" | "-help" | "-h" => {
@@ -571,7 +575,8 @@ mod tests {
         }
         let executable = bin.join("doxa-rs");
         assert!(installed_bin_dir_for(&executable).is_err());
-        symlink("unused-sidecar", bin.join(".doxa-sidecar-current")).unwrap();
+        fs::write(bin.join(".doxa-install-sha"),"0123456789abcdef0123456789abcdef01234567").unwrap();
+        fs::set_permissions(bin.join(".doxa-install-sha"),fs::Permissions::from_mode(0o600)).unwrap();
         assert_eq!(installed_bin_dir_for(&executable).unwrap(), bin);
 
         let shell = dir.path().join("fake-sh");

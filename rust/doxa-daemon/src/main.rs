@@ -1,5 +1,6 @@
 //! Native DOXA protocol host. The fixture remains an explicit test mode.
 mod agent_tools;
+mod mcp;
 mod claude_host;
 mod budget_host;
 mod codex_host;
@@ -787,6 +788,20 @@ fn run() -> io::Result<()> {
     result
 }
 fn main() {
+    let args:Vec<String>=std::env::args().skip(1).collect();
+    let helper=match args.as_slice() {
+        [mode] if mode=="__mcp"=>Some(mcp::serve()),
+        [mode,manifest,digest] if mode=="__codex-precompact"=>{
+            println!("{}",doxa_engines::compact_hook::hook_main(Path::new(manifest),digest));return;
+        },
+        [mode,engine,metadata,timeout] if mode=="__review-supervisor"=>Some((||{
+            let value=serde_json::from_str(metadata).map_err(|_|invalid("invalid review metadata"))?;
+            let millis=timeout.parse::<u64>().ok().filter(|n|*n<=180000).ok_or_else(||invalid("invalid review timeout"))?;
+            if doxa_engines::review_worker::supervise(&value,engine,Duration::from_millis(millis))? {Ok(())}else{Err(io::Error::other("review did not complete"))}
+        })()),
+        _=>None,
+    };
+    if let Some(result)=helper {if let Err(error)=result{eprintln!("doxa-daemon helper: {error}");std::process::exit(1);}return;}
     if let Err(error) = run() {
         eprintln!("doxa-daemon: {error}");
         std::process::exit(1);

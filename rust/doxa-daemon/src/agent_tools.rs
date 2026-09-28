@@ -2,7 +2,7 @@
 //! cannot offer daemon controls, spawning, or direct curated-memory mutations.
 use doxa_lore::LoreClient;
 use serde_json::{json,Value};
-use std::{path::Path, sync::{Arc,Mutex}, time::Duration};
+use std::{sync::{Arc,Mutex}, time::Duration};
 
 pub struct AgentTools { client: Mutex<Option<LoreClient>>, identity: Value, definitions: Vec<Value>, status:Mutex<Option<Value>>, disabled_events:Mutex<Vec<Value>> }
 impl AgentTools {
@@ -70,11 +70,11 @@ impl AgentTools {
 /// non-secret host identity or the same path/switch allowlist as Python Codex.
 /// No native engine control socket exists for this transport, so peer_send is
 /// absent and cannot be activated by inherited model configuration.
-pub fn mcp_overrides(python: &Path, cwd: &str, session_id: &str, enabled: bool) -> Vec<String> {
+pub fn mcp_overrides( cwd: &str, session_id: &str, enabled: bool) -> Vec<String> {
     let quote = |value: &str| serde_json::to_string(value).unwrap();
     let mut values = vec![
-        format!("mcp_servers.doxa.command={}", quote(&python.to_string_lossy())),
-        "mcp_servers.doxa.args=[\"-m\",\"doxa.mcpserver\"]".into(),
+        format!("mcp_servers.doxa.command={}", quote(&std::env::current_exe().expect("daemon executable").to_string_lossy())),
+        "mcp_servers.doxa.args=[\"__mcp\"]".into(),
         "mcp_servers.doxa.default_tools_approval_mode=\"approve\"".into(),
         "mcp_servers.doxa.enabled=true".into(),
     ];
@@ -83,7 +83,7 @@ pub fn mcp_overrides(python: &Path, cwd: &str, session_id: &str, enabled: bool) 
         ("DOXA_MCP_LORE",if enabled {"1"} else {"0"}), ("DOXA_MCP_PEER_SEND","0")] {
         values.push(format!("mcp_servers.doxa.env.{name}={}",quote(value)));
     }
-    for name in ["HOME","PATH","PYTHONPATH","LORE_ROOT","LORE_PROJECTS_DIR","DOXA_HOME",
+    for name in ["HOME","PATH","LORE_ROOT","LORE_PROJECTS_DIR","DOXA_HOME",
         "DOXA_RUNTIME_DIR","DOXA_LORE_CORE_PATH","DOXA_LORE_SOURCE"] {
         if let Ok(value) = std::env::var(name) { if !value.is_empty() {
             values.push(format!("mcp_servers.doxa.env.{name}={}",quote(&value)));
@@ -97,8 +97,8 @@ mod tests {
     use super::*;
     #[test]
     fn exec_mcp_overrides_freeze_identity_and_memory_off_without_secrets() {
-        let options = mcp_overrides(Path::new("/python with spaces"), "/workspace", "fixed-host", false);
-        assert!(options.contains(&"mcp_servers.doxa.command=\"/python with spaces\"".into()));
+        let options = mcp_overrides("/workspace", "fixed-host", false);
+        assert!(options.contains(&"mcp_servers.doxa.args=[\"__mcp\"]".into()));
         assert!(options.contains(&"mcp_servers.doxa.env.DOXA_MCP_LORE=\"0\"".into()));
         assert!(options.contains(&"mcp_servers.doxa.env.DOXA_MCP_PEER_SEND=\"0\"".into()));
         assert!(options.contains(&"mcp_servers.doxa.env.DOXA_MCP_SESSION_ID=\"fixed-host\"".into()));

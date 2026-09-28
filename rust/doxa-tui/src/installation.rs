@@ -1,5 +1,5 @@
 //! One bounded startup advisory. No provider connection or Python identity.
-use std::{fs, io::{self, Read}, os::unix::{fs::MetadataExt, io::AsRawFd, process::CommandExt}, path::Path, process::{Command, Stdio}, sync::{atomic::{AtomicBool, Ordering}, mpsc::{self, Receiver, TryRecvError}, Arc}, thread, time::{Duration, Instant}};
+use std::{fs, io::{self, Read}, os::unix::{fs::{MetadataExt, OpenOptionsExt}, io::AsRawFd, process::CommandExt}, path::Path, process::{Command, Stdio}, sync::{atomic::{AtomicBool, Ordering}, mpsc::{self, Receiver, TryRecvError}, Arc}, thread, time::{Duration, Instant}};
 
 pub const DEFAULT_REPO: &str = "https://github.com/docwilde/doxa";
 const LIMIT: usize = 4096;
@@ -59,10 +59,22 @@ fn repo_display(repo: &str) -> String {
     }
     display(repo)
 }
-fn marker(executable: &Path) -> io::Result<Option<String>> {
+pub fn installed_commit(executable: &Path) -> io::Result<Option<String>> {
     let bin = executable.parent().ok_or_else(|| io::Error::other("executable directory unavailable"))?;
-    let pointer = bin.join(".doxa-sidecar-current");
     if executable.file_name().is_none_or(|name| name != "doxa-rs") { return Ok(None); }
+    let native = bin.join(".doxa-install-sha");
+    match std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(&native) {
+        Ok(file) => {
+            let metadata=file.metadata()?;
+            if !metadata.is_file() || metadata.uid()!=unsafe {libc::geteuid()} || metadata.nlink()!=1 || metadata.len()>128 || metadata.mode()&0o077!=0 {return Err(io::Error::other("invalid installation marker"));}
+            let mut value=String::new();file.take(129).read_to_string(&mut value)?;
+            return sha(&value).map(Some).ok_or_else(||io::Error::other("invalid installation commit"));
+        },
+        Err(error) if error.kind()==io::ErrorKind::NotFound=>{},
+        Err(error)=>return Err(error),
+    }
+    // Read an older installation's marker so `doxa update` can migrate it.
+    let pointer = bin.join(".doxa-sidecar-current");
     match fs::symlink_metadata(&pointer) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),
@@ -85,7 +97,7 @@ fn measure(executable: &Path, source: &Path, config: &Path, repo: &str, skip: bo
         format!("Platform · {} ({})", std::env::consts::OS, std::env::consts::ARCH),
         format!("Config · {}{}", display(&config.to_string_lossy()), if config.exists() { "" } else { " (not written yet)" }),
         format!("Update source · {} main", repo_display(repo))];
-    let installed = marker(executable);
+    let installed = installed_commit(executable);
     let local = match installed {
         Ok(Some(value)) => { rows.push(format!("Installed commit · {value}")); Some(value) }
         Err(_) => { rows.push("Installed commit · unavailable".into()); None }
