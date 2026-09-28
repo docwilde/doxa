@@ -44,6 +44,7 @@ pub struct VendorHost {
     cwd: String,
     workspace_read: bool,
     peer_tools: Mutex<Option<doxa_runtime::PeerToolHandler>>,
+    session_tools: Mutex<Option<doxa_runtime::PeerToolHandler>>,
     peer_desk: Arc<PeerDesk>,
     storage_uncertain: AtomicBool,
     committed_bytes: AtomicU64,
@@ -146,6 +147,7 @@ impl VendorHost {
             cwd: cwd.into_owned(),
             workspace_read,
             peer_tools: Mutex::new(None),
+            session_tools: Mutex::new(None),
             peer_desk: Arc::new(PeerDesk::default()),
             storage_uncertain: AtomicBool::new(false),
             committed_bytes: AtomicU64::new(committed_bytes),
@@ -327,6 +329,9 @@ impl Host for VendorHost {
     fn peer_tools_ready(&self) -> bool {
         !self.closing.load(Ordering::Acquire) && self.peer_tools.lock().is_ok_and(|handler| handler.is_some())
     }
+    fn set_session_tool_handler(&self,handler:doxa_runtime::PeerToolHandler)->bool {
+        if self.active.lock().unwrap().is_some(){return false;}let mut slot=self.session_tools.lock().unwrap();if slot.is_some(){return false;}*slot=Some(handler);true
+    }
     fn set_peer_tool_handler(&self, handler: doxa_runtime::PeerToolHandler) -> bool {
         if let Ok(active) = self.active.lock() {
             if active.is_some() || self.closing.load(Ordering::Acquire) { return false; }
@@ -411,7 +416,11 @@ impl Host for VendorHost {
         };
         let mut gate = NativeVendorGate::new(Path::new(&self.cwd), self.workspace_read, peer,
             self.peer_desk.clone(), &scrub_tool, &emit_tool, tool_events.clone());
-        if let Some(tools) = &self.agent_tools { gate = gate.with_agent(tools.vendor_definitions(), tools.vendor_handler()); }
+        let mut definitions=self.agent_tools.as_ref().map(|tools|tools.vendor_definitions()).unwrap_or_default();
+        let agent=self.agent_tools.as_ref().map(|tools|tools.vendor_handler());let session=self.session_tools.lock().unwrap().clone();
+        if session.is_some(){definitions.extend(doxa_engines::session_tools::definitions().into_iter().map(|row|json!({"type":"function","function":{"name":"spawn_session","description":row["description"],"parameters":row["inputSchema"]}})));}
+        if !definitions.is_empty(){gate=gate.with_agent(definitions,Arc::new(move|name,args|if name=="spawn_session"{session.as_ref().ok_or("Session tools unavailable".to_owned())?(name,args)}else{agent.as_ref().ok_or("LORE tools unavailable".to_owned())?(name,args)}));}
+
         let gate = if tools_enabled { Some(&mut gate as &mut dyn doxa_vendors::ToolGate) } else { None };
         let mut reasoning_chars = 0u64;
         let mut reported_tokens = 0u64;

@@ -41,6 +41,7 @@ struct Shared {
     catalog: Mutex<Value>,
     agent: Option<Arc<crate::agent_tools::AgentTools>>,
     peer: Mutex<Option<PeerToolHandler>>,
+    session_tools: Mutex<Option<PeerToolHandler>>,
     peer_allowed: bool,
     depth: u32,
     parent: Option<String>,
@@ -120,6 +121,7 @@ impl Shared {
             .as_ref()
             .map(|a| a.definitions())
             .unwrap_or_default();
+        if self.session_tools.lock().is_ok_and(|h|h.is_some()) { rows.extend(doxa_engines::session_tools::definitions()); }
         if self.peer_allowed {
             rows.extend(doxa_engines::peer_tools::definitions());
         }
@@ -127,6 +129,7 @@ impl Shared {
     }
     fn tool(&self, name: &str, args: &Value) -> Result<Value, String> {
         let wire = format!("mcp__doxa__{name}");
+        if wire==doxa_engines::session_tools::SPAWN { return (self.session_tools.lock().map_err(|_|"Session tools unavailable")?.clone().ok_or("Session tools unavailable")?)(&wire,args); }
         if let Some(agent) = &self.agent {
             if agent.contains(&wire) {
                 return agent.call(&wire, args);
@@ -308,7 +311,7 @@ impl ClaudeHost {
                         return Err("Legacy Claude lineage is unproven; restore refused".into());
                     }
                     doxa_claude::resume::verify_legacy(&doxa_claude::isolation::config_dir(),&store.transcript_path(),session_id,Path::new(&cwd))
-                        .map_err(|_| "Legacy Claude source identity or complete owned logs are unproven; restore refused")?;
+                        .map_err(|error|format!("Legacy Claude restore refused: {error}"))?;
                     let fields = json!({"thread_id":session_id,"session_id":session_id,"engine":"claude","transport":"stream-json","cwd":cwd,"lore_enabled":enabled,"spawn_depth":0,"parent_session_id":null,"turn_incomplete":false,"legacy_imported":true,"permission_mode":"default"});
                     store
                         .try_write_thread(fields.as_object().unwrap().clone(), |s| {
@@ -386,6 +389,7 @@ impl ClaudeHost {
             catalog: Mutex::new(Value::Null),
             agent: crate::agent_tools::AgentTools::new(&cwd, session_id, "claude", enabled),
             peer: Mutex::new(None),
+            session_tools: Mutex::new(None),
             peer_allowed,
             depth,
             parent: parent.map(str::to_owned),
@@ -514,6 +518,10 @@ impl Host for ClaudeHost {
     }
     fn peer_tools_ready(&self) -> bool {
         self.shared.peer_allowed && self.shared.peer.lock().unwrap().is_some()
+    }
+    fn set_session_tool_handler(&self,handler:PeerToolHandler)->bool {
+        if self.shared.active.load(Ordering::Acquire){return false;}
+        if let Ok(mut slot)=self.shared.session_tools.lock(){if slot.is_none(){*slot=Some(handler);return true;}}false
     }
     fn set_peer_tool_handler(&self, handler: PeerToolHandler) -> bool {
         if !self.shared.peer_allowed || self.has_active_work() {
@@ -1368,6 +1376,7 @@ for line in sys.stdin:
             catalog: Mutex::new(Value::Null),
             agent: None,
             peer: Mutex::new(None),
+            session_tools: Mutex::new(None),
             peer_allowed: false,
             depth: 0,
             parent: None,

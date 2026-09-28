@@ -49,6 +49,7 @@ pub struct CodexHost {
     active: Mutex<Option<CancellationToken>>,
     input: doxa_engines::codex_interaction::InputInbox,
     peer_tools: Mutex<Option<doxa_runtime::PeerToolHandler>>,
+    session_tools: Mutex<Option<doxa_runtime::PeerToolHandler>>,
     peer_tools_allowed: bool,
     lore_enabled: bool,
     agent_tools: Option<Arc<crate::agent_tools::AgentTools>>,
@@ -266,7 +267,8 @@ impl CodexHost {
             runtime: Mutex::new(runtime),
             active: Mutex::new(None),
             input: Default::default(),
-            peer_tools: Mutex::new(None), peer_tools_allowed,
+            peer_tools: Mutex::new(None),
+            session_tools: Mutex::new(None), peer_tools_allowed,
             scrub_failed,
             persistence_failed: AtomicBool::new(false),
             lore, lore_enabled, agent_tools,
@@ -454,6 +456,9 @@ impl Host for CodexHost {
     fn peer_tools_ready(&self) -> bool {
         self.peer_tools_allowed && self.peer_tools.lock().unwrap().is_some()
     }
+    fn set_session_tool_handler(&self,handler:doxa_runtime::PeerToolHandler)->bool {
+        if self.active.lock().unwrap().is_some(){return false;}let mut slot=self.session_tools.lock().unwrap();if slot.is_some(){return false;}*slot=Some(handler);true
+    }
     fn set_peer_tool_handler(&self, handler: doxa_runtime::PeerToolHandler) -> bool {
         if !self.peer_tools_allowed || self.active.lock().unwrap().is_some() { return false; }
         let mut tools = self.peer_tools.lock().unwrap();
@@ -614,7 +619,7 @@ impl Host for CodexHost {
                                     result = async {
                                         let gate = self.compact_gate()?;
                                         AppServerDriver::spawn_protected_with_agent_tools(options.clone(), scrub, peer_tools_enabled, gate,
-                                            self.agent_tools.as_ref().map(|tools| tools.definitions()).unwrap_or_default()).await
+                                            {let mut rows=self.agent_tools.as_ref().map(|tools|tools.definitions()).unwrap_or_default();if self.session_tools.lock().unwrap().is_some(){rows.extend(doxa_engines::session_tools::definitions());}rows}).await
                                     } => result,
                                 }
                             }) {
@@ -659,7 +664,10 @@ impl Host for CodexHost {
                                     };
                                     let pending = if frame["method"] == "item/tool/call" {
                                         let name = frame["params"]["tool"].as_str().unwrap_or("");
-                                        if let Some(tools) = self.agent_tools.as_ref().filter(|tools| tools.contains(name)) {
+                                        if name==doxa_engines::session_tools::SPAWN {
+                                            let handler=self.session_tools.lock().unwrap().clone().ok_or("Session tools unavailable")?;
+                                            self.input.begin_operator(frame,scrub,handler,&doxa_engines::session_tools::definitions())
+                                        } else if let Some(tools) = self.agent_tools.as_ref().filter(|tools| tools.contains(name)) {
                                             self.input.begin_operator(frame, scrub, tools.handler(), &tools.callback_definitions())
                                         } else {
                                             let handler = self.peer_tools.lock().unwrap().clone().ok_or("Codex tool unavailable")?;

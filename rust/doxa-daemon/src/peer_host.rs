@@ -30,6 +30,7 @@ pub struct PeerHost {
     ledger_path: PathBuf,
     events: SyncSender<Value>,
     pending: Mutex<VecDeque<Value>>,
+    spawner: Mutex<Option<Arc<crate::session_spawn::SpawnManager>>>,
 }
 
 impl PeerHost {
@@ -46,6 +47,22 @@ impl PeerHost {
             else { peer.call(name, params) }
         }))
     }
+    pub fn configure_spawner(self:&Arc<Self>,config:crate::session_spawn::SpawnConfig)->io::Result<()> {
+        let manager=Arc::new(crate::session_spawn::SpawnManager::new(config,self.events.clone())?);
+        let mut slot=self.spawner.lock().map_err(|_|io::Error::other("Spawn configuration unavailable"))?;
+        if slot.is_some(){return Err(io::Error::other("Spawner already configured"));}*slot=Some(manager);drop(slot);
+        if crate::session_spawn::enabled() {
+            let weak=Arc::downgrade(self);
+            self.inner.set_session_tool_handler(Arc::new(move|name,args|{
+                if !matches!(name,"spawn_session"|doxa_engines::session_tools::SPAWN){return Err("Unsupported session operator".into());}
+                let peer=weak.upgrade().ok_or("Parent session closed")?;
+                let manager=peer.spawner.lock().map_err(|_|"Spawner unavailable")?.clone().ok_or("Spawner unavailable")?;
+                manager.spawn(args,&*peer.inner)
+            }));
+        }
+        Ok(())
+    }
+    pub fn cancel_spawns(&self,close:bool){if let Ok(manager)=self.spawner.lock(){if let Some(manager)=manager.as_ref(){manager.cancel(close);}}}
     pub fn new(
         inner: Arc<dyn Host>,
         runtime: PathBuf,
@@ -85,6 +102,7 @@ impl PeerHost {
             ledger: Ledger::new(ledger),
             events,
             pending: Mutex::new(VecDeque::new()),
+            spawner: Mutex::new(None),
         })
     }
 
@@ -399,18 +417,21 @@ impl PeerHost {
                     data.insert("peer_origin".into(), json!(origin));
                 }
             }
+            let terminal=matches!(event["type"].as_str(),Some("turn_done"|"turn_refused"));
             emit(event);
+            if terminal{self.cancel_spawns(false);}
         });
     }
 }
 
 impl Host for PeerHost {
-    fn has_active_work(&self) -> bool { self.inner.has_active_work() }
+    fn has_active_work(&self) -> bool { self.inner.has_active_work() || self.spawner.lock().map_or(true,|manager|manager.as_ref().is_some_and(|manager|manager.is_active())) }
     fn peer_tools_ready(&self) -> bool { self.agent_tools_enabled && self.inner.peer_tools_ready() }
     fn initial_model(&self) -> Option<String> { self.inner.initial_model() }
     fn initial_effort(&self) -> Option<String> { self.inner.initial_effort() }
     fn initial_permission_mode(&self) -> String { self.inner.initial_permission_mode() }
     fn can_set_model(&self) -> bool { self.inner.can_set_model() }
+    fn model_change_requires_idle(&self)->bool{self.inner.model_change_requires_idle()}
     fn can_set_permission_mode(&self) -> bool { self.inner.can_set_permission_mode() }
     fn account_snapshot(&self) -> Option<Value> { self.inner.account_snapshot() }
     fn billing_snapshot(&self) -> Option<Value> { self.inner.billing_snapshot() }
@@ -443,7 +464,9 @@ impl Host for PeerHost {
         let mut refused = false;
         self.execute_prompt(&full, &mut |event| {
             if event["type"] == "turn_refused" { refused = true; }
+            let terminal=matches!(event["type"].as_str(),Some("turn_done"|"turn_refused"));
             emit(event);
+            if terminal{self.cancel_spawns(false);}
         });
         if refused {
             let mut queue = self.pending.lock().unwrap_or_else(|poison| poison.into_inner());
@@ -455,7 +478,15 @@ impl Host for PeerHost {
         self.inner.public_prompt(text)
     }
     fn call(&self, method: &str, params: &Value) -> Result<Value, String> {
+        if matches!(method,"interrupt"|"stop"){self.cancel_spawns(method=="stop");}
+        if method=="answer_needs_input"&&params["id"].as_str().is_some_and(|id|id.starts_with("spawn-")) {
+            return self.spawner.lock().map_err(|_|"Spawner unavailable")?.as_ref()
+                .and_then(|manager|manager.answer(params["id"].as_str().unwrap(),&params["answer"]))
+                .unwrap_or_else(||Ok(json!({"applied":false})));
+        }
+
         match method {
+            "spawn_session" => { let manager=self.spawner.lock().map_err(|_|"Spawner unavailable")?.clone().ok_or("Spawner unavailable")?;manager.spawn(params,&*self.inner) },
             "peer_tools_status" => Ok(json!({"provider_peer_tools":self.peer_tools_ready(),"ledger_path":self.ledger_path})),
             "peers" => self.peers(params),
             "msg" => self.msg(params),

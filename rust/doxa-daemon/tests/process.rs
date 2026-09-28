@@ -1606,12 +1606,13 @@ fn claude_legacy_resume_requires_owned_provider_and_lore_source_then_verifies_li
     let project=dir.path().join("home/claude-cli/projects/legacy");fs::create_dir_all(&project).unwrap();
     for path in [dir.path().join("home/claude-cli"),dir.path().join("home/claude-cli/projects"),project.clone()] {fs::set_permissions(path,fs::Permissions::from_mode(0o700)).unwrap();}
     let source=format!("{}\n{}\n",json!({"type":"user","engine":"claude","sessionId":CLAUDE_SESSION,"cwd":dir.path(),"message":{"role":"user","content":"saved task"}}),json!({"type":"assistant","engine":"claude","sessionId":CLAUDE_SESSION,"cwd":dir.path(),"message":{"role":"assistant","content":[{"type":"text","text":"saved answer"}]}}));
-    fs::write(project.join(format!("{CLAUDE_SESSION}.jsonl")),&source).unwrap();
+    fs::write(project.join(format!("{CLAUDE_SESSION}.jsonl")),&source).unwrap();fs::set_permissions(project.join(format!("{CLAUDE_SESSION}.jsonl")),fs::Permissions::from_mode(0o600)).unwrap();
     fs::create_dir_all(native_transcript_dir(dir.path())).unwrap();fs::set_permissions(native_transcript_dir(dir.path()),fs::Permissions::from_mode(0o700)).unwrap();
-    let transcript=native_transcript(dir.path(),&format!("{CLAUDE_SESSION}.jsonl"));fs::write(&transcript,&source).unwrap();
+    let transcript=native_transcript(dir.path(),&format!("{CLAUDE_SESSION}.jsonl"));fs::write(&transcript,&source).unwrap();fs::set_permissions(&transcript,fs::Permissions::from_mode(0o600)).unwrap();
+    doxa_claude::resume::verify_legacy(&dir.path().join("home/claude-cli"),&transcript,CLAUDE_SESSION,dir.path()).unwrap();
     let child=daemon_command().args(["--runtime-dir",dir.path().to_str().unwrap(),"--cwd",dir.path().to_str().unwrap(),"--session-id",CLAUDE_SESSION,"--engine","claude","--claude-bin",script.to_str().unwrap(),"--resume","true","--linger","10"]).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
     let registry=dir.path().join("registry").join(format!("{CLAUDE_SESSION}.json"));let mut process=Process{child,registry,socket:PathBuf::new()};
-    wait_until(||process.registry.exists()||process.exited());assert!(!process.exited());process.socket=process.entry()["daemon_socket"].as_str().unwrap().into();
+    wait_until(||process.registry.exists()||process.exited());if process.exited(){let mut error=String::new();process.child.stderr.take().unwrap().read_to_string(&mut error).unwrap();panic!("legacy fixture failed: {error}");}process.socket=process.entry()["daemon_socket"].as_str().unwrap().into();
     let (mut reader,mut socket)=process.connect();receive(&mut reader);send(&mut socket,json!({"type":"attach","cursor":null}));send(&mut socket,json!({"type":"prompt","id":1,"text":"continue"}));
     let completed=claude_receive_until(&mut reader,|f|f["event"]["type"]=="turn_done");assert_eq!(completed["event"]["data"]["is_error"],false);
     let metadata:Value=serde_json::from_slice(&fs::read(native_transcript(dir.path(),&format!("{CLAUDE_SESSION}.codex.json"))).unwrap()).unwrap();assert_eq!(metadata["legacy_imported"],true);assert_eq!(metadata["thread_id"],CLAUDE_SESSION);
@@ -3352,4 +3353,32 @@ fn claude_initialization_past_ten_seconds_survives_real_frontend_launch() {
     drop(client); drop(owned);
     // Claim lock files deliberately persist to retain one stable lock inode.
     wait_until(||!record.exists());
+}
+
+#[test]
+fn native_spawn_reviews_exact_task_cancels_single_use_and_publishes_verified_child() {
+    let dir=tempfile::tempdir().unwrap();fs::create_dir_all(dir.path().join("home")).unwrap();
+    fs::write(dir.path().join("home/config.toml"),"spawn_sessions = true\n").unwrap();
+    let mut parent=Process::start(dir.path(),"10");let (mut review,mut controls)=parent.connect();receive(&mut review);send(&mut controls,json!({"type":"attach","cursor":null}));
+    let (mut callback,mut request)=parent.connect();receive(&mut callback);
+    send(&mut request,json!({"type":"call","id":11,"method":"spawn_session","params":{"task":"approved fixture task"}}));
+    let approval=claude_receive_until(&mut review,|f|f["event"]["type"]=="needs_input");
+    assert_eq!(approval["event"]["data"]["kind"],"spawn");assert_eq!(approval["event"]["data"]["task"],"approved fixture task");
+    assert!(approval["event"]["data"]["body"].as_str().unwrap().contains("Engine: fixture"));
+    let id=approval["event"]["data"]["id"].as_str().unwrap();
+    send(&mut controls,json!({"type":"call","id":1,"method":"answer_needs_input","params":{"id":"spawn-foreign-identity","answer":{"decision":"allow"}}}));assert_eq!(claude_receive_until(&mut review,|f|f["id"]==1)["applied"],false);
+    send(&mut controls,json!({"type":"call","id":2,"method":"answer_needs_input","params":{"id":id,"answer":{"decision":"allow"}}}));assert_eq!(claude_receive_until(&mut review,|f|f["id"]==2)["applied"],true);
+    let spawned=receive(&mut callback);assert_eq!(spawned["ok"],true);let child_id=spawned["session_id"].as_str().unwrap();assert_ne!(child_id,"fixture-session");
+    let child_socket=spawned["daemon_socket"].as_str().unwrap();let stream=UnixStream::connect(child_socket).unwrap();stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();let mut child_reader=BufReader::new(stream.try_clone().unwrap());let mut child_control=stream;
+    let hello=receive(&mut child_reader);assert_eq!(hello["session_id"],child_id);assert_eq!(hello["engine"],"fixture");
+    let registry:Value=serde_json::from_slice(&fs::read(dir.path().join("registry").join(format!("{child_id}.json"))).unwrap()).unwrap();assert_eq!(registry["parent_session_id"],"fixture-session");
+    send(&mut child_control,json!({"type":"attach","cursor":null}));let task_event=claude_receive_until(&mut child_reader,|f|f["event"]["type"]=="text_delta");assert!(task_event["event"]["data"]["text"].as_str().unwrap().contains("[SPAWNED SESSION]"));assert!(task_event.to_string().contains("approved fixture task"));
+    send(&mut controls,json!({"type":"call","id":3,"method":"answer_needs_input","params":{"id":id,"answer":{"decision":"allow"}}}));assert_eq!(claude_receive_until(&mut review,|f|f["id"]==3)["applied"],false);
+    send(&mut request,json!({"type":"call","id":12,"method":"spawn_session","params":{"task":"over rate"}}));assert_eq!(receive(&mut callback)["ok"],false);
+    send(&mut child_control,json!({"type":"call","id":4,"method":"stop","params":{}}));claude_receive_until(&mut child_reader,|f|f["id"]==4);
+    wait_until(||!dir.path().join("registry").join(format!("{child_id}.json")).exists());
+    send(&mut request,json!({"type":"call","id":13,"method":"spawn_session","params":{"task":"cancelled fixture task"}}));let approval=claude_receive_until(&mut review,|f|f["event"]["type"]=="needs_input");let cancelled_id=approval["event"]["data"]["id"].clone();
+    send(&mut controls,json!({"type":"call","id":5,"method":"interrupt","params":{}}));claude_receive_until(&mut review,|f|f["id"]==5);assert_eq!(receive(&mut callback)["ok"],false);
+    send(&mut controls,json!({"type":"call","id":6,"method":"answer_needs_input","params":{"id":cancelled_id,"answer":{"decision":"allow"}}}));assert_eq!(claude_receive_until(&mut review,|f|f["id"]==6)["applied"],false);
+    send(&mut controls,json!({"type":"call","id":7,"method":"stop","params":{}}));claude_receive_until(&mut review,|f|f["id"]==7);wait_until(||parent.exited());
 }

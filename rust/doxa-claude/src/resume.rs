@@ -30,7 +30,8 @@ fn log(path: &Path, mut row: impl FnMut(Value) -> io::Result<()>) -> io::Result<
     if !meta.is_file()
         || meta.uid() != unsafe { libc::geteuid() }
         || meta.nlink() != 1
-        || meta.mode() & 0o022 != 0
+        || (meta.mode() & 0o022 != 0
+            && fs::symlink_metadata(path.parent().unwrap())?.mode() & 0o077 != 0)
         || meta.len() == 0
         || meta.len() > MAX_LOG
     {
@@ -155,6 +156,9 @@ mod tests {
         );
         fs::write(&transcript, &body).unwrap();
         fs::write(&provider, &body).unwrap();
+        for path in [&transcript, &provider] {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
         assert!(verify_legacy(&config, &transcript, id, dir.path()).is_ok());
         fs::write(&provider, body.trim_end()).unwrap();
         assert!(verify_legacy(&config, &transcript, id, dir.path()).is_err());

@@ -4,6 +4,7 @@
 pub mod codex;
 pub mod codex_interaction;
 pub mod peer_tools;
+pub mod session_tools;
 #[cfg(unix)]
 pub mod codex_appserver;
 #[cfg(unix)]

@@ -84,7 +84,7 @@ pub fn mcp_overrides( cwd: &str, session_id: &str, enabled: bool) -> Vec<String>
         values.push(format!("mcp_servers.doxa.env.{name}={}",quote(value)));
     }
     for name in ["HOME","PATH","LORE_ROOT","LORE_PROJECTS_DIR","DOXA_HOME",
-        "DOXA_RUNTIME_DIR","DOXA_LORE_CORE_PATH","DOXA_LORE_SOURCE"] {
+        "DOXA_RUNTIME_DIR","DOXA_MCP_RUNTIME","DOXA_LORE_CORE_PATH","DOXA_LORE_SOURCE"] {
         if let Ok(value) = std::env::var(name) { if !value.is_empty() {
             values.push(format!("mcp_servers.doxa.env.{name}={}",quote(&value)));
         } }
