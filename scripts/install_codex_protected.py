@@ -304,7 +304,7 @@ def _probe(binary, request, home, environment):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--cache", type=Path, default=Path.home() / ".cache/doxa/codex-protected")
+    parser.add_argument("--cache", type=Path, default=Path(os.environ.get("DOXA_CODEX_PROTECTED_CACHE", str(Path.home() / ".cache/doxa/codex-protected"))))
     parser.add_argument("--install-root", type=Path, default=Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local/share"))) / "doxa/providers")
     parser.add_argument("--official-cli", type=Path)
     parser.add_argument("--cargo", help="explicit Rust 1.95.0 cargo; default bootstraps a private pinned toolchain")
