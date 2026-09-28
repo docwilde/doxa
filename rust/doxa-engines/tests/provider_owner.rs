@@ -38,6 +38,14 @@ time.sleep(60)
     let flag = CString::new("-c").unwrap();
     let root = CString::new(root).unwrap();
     let args = [executable.as_ptr(), flag.as_ptr(), script.as_ptr(), root.as_ptr(), std::ptr::null()];
+    // libtest runs tests on a worker thread. Fork an isolated single-thread
+    // owner first, matching the production launcher (getpid == gettid).
+    let owner = unsafe { libc::fork() };
+    assert!(owner >= 0);
+    if owner > 0 {
+        let mut status=0;assert_eq!(unsafe {libc::waitpid(owner,&mut status,0)},owner);
+        std::process::exit(if libc::WIFEXITED(status) {libc::WEXITSTATUS(status)} else {1});
+    }
     let code = provider_owner::supervise(unsafe { UnixStream::from_raw_fd(fd) }, || {
         unsafe { libc::execv(executable.as_ptr(), args.as_ptr()); }
         std::io::Error::last_os_error()
