@@ -30,6 +30,11 @@ impl NativeDaemonCommand {
             ("LORE_CODEX_SESSIONS_DIR",runtime.join("native-codex-sessions")),("LORE_SKILLS_DIR",runtime.join("native-skills"))] {
             if !self.0.get_envs().any(|(name,_)|name==key) {self.0.env(key,value);}
         }
+        if args.windows(2).any(|pair| pair[0] == "--engine" && matches!(pair[1].to_str(), Some("deepseek" | "glm"))) {
+            let home = self.0.get_envs().find(|(name, _)| *name == "DOXA_HOME").and_then(|(_, value)| value).map(PathBuf::from).expect("isolated native credential home");
+            fs::create_dir_all(&home).unwrap();
+            fs::set_permissions(&home, fs::Permissions::from_mode(0o700)).unwrap();
+        }
         self.0.env("LORE_DISABLE_SYNC","1").env("LORE_DISABLE_REVIEW","1");
     }
     fn spawn(&mut self)->std::io::Result<Child> {self.isolate();self.0.spawn()}

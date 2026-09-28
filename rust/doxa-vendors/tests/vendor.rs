@@ -618,3 +618,30 @@ async fn saved_credentials_apply_to_next_turn_of_existing_history_and_stay_out_o
         assert!(!committed.contains("inherited-zai-fixture-key"));
     }
 }
+
+#[tokio::test]
+async fn inactive_key_in_provider_tool_identity_never_reaches_gate_or_history() {
+    let _credential_guard = credential_guard().await;
+    std::env::set_var("DEEPSEEK_API_KEY", "active-fixture-key");
+    doxa_vendors::credentials::save(Vendor::Glm, "saved-inactive-fixture-key").unwrap();
+    let tool = "data: {\"choices\":[{\"finish_reason\":\"tool_calls\",\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"saved-inactive-fixture-key\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{\\\"x\\\":1}\"}}]}}]}\n\ndata: [DONE]\n\n";
+    let done = "data: {\"choices\":[{\"finish_reason\":\"stop\",\"delta\":{\"content\":\"saved-inactive-fixture-key\"}}]}\n\ndata: [DONE]\n\n";
+    let (url, task) = multi_server(vec![tool, done]);
+    let (_, cancel) = watch::channel(false);
+    let mut history = Vec::new();
+    struct IdentityGate;
+    impl ToolGate for IdentityGate {
+        fn definitions(&self) -> Vec<serde_json::Value> { vec![json!({"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}})] }
+        fn execute<'a>(&'a mut self, call: &'a ToolCall) -> BoxFuture<'a, Result<serde_json::Value, ()>> {
+            assert_eq!(call.id, "***");
+            Box::pin(async { Ok(json!({"result":"ok"})) })
+        }
+    }
+    let mut gate = IdentityGate;
+    let result = run_turn_local(Vendor::DeepSeek, &url, "deepseek-flash", "high", &mut history,
+        "Question", Some(&mut gate), cancel, Duration::from_secs(3), |_| {}).await.unwrap();
+    assert_eq!(result.text, "***");
+    assert!(!serde_json::to_string(&history).unwrap().contains("saved-inactive-fixture-key"));
+    let (requests, _) = task.join().unwrap();
+    assert!(!requests.iter().any(|request| request.to_string().contains("saved-inactive-fixture-key")));
+}

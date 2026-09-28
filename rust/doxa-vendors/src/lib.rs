@@ -282,6 +282,7 @@ mod catalog_tests {
 
     #[tokio::test]
     async fn only_documented_deepseek_effort_metadata_is_used() {
+        let (_guard, _home) = credentials::tests::fixture();
         let body = r#"{"data":[{"id":"next-model","effort":{"supported_levels":["none","low","high"],"default_level":"none"}}]}"#;
         let (url, worker) = serve("200 OK", body.into(), "").await;
         let models = catalog_models_at(Vendor::DeepSeek, &url, "key").await.unwrap();
@@ -879,7 +880,7 @@ async fn run_turn_at(
             body["tools"] = Value::Array(definitions.clone());
             body["tool_choice"] = json!("auto");
         }
-        let completion = stream_at_with_key(
+        let mut completion = stream_at_with_key(
             vendor,
             endpoint,
             body,
@@ -889,6 +890,21 @@ async fn run_turn_at(
             &mut on_delta,
         )
         .await?;
+        // Provider metadata can echo an inactive credential too. Mask the
+        // frozen known values before a tool gate, event sink or history sees it.
+        for known in &known {
+            completion.text = scrub(&completion.text, known);
+            completion.reasoning = scrub(&completion.reasoning, known);
+            completion.model = completion.model.map(|value| scrub(&value, known));
+            completion.finish_reason = completion.finish_reason.map(|value| scrub(&value, known));
+            completion.usage = completion.usage.map(|value| scrub_json(value, known));
+            for call in &mut completion.tool_calls {
+                call.id = scrub(&call.id, known);
+                call.name = scrub(&call.name, known);
+                let arguments = scrub_json(Value::Object(std::mem::take(&mut call.arguments)), known);
+                call.arguments = arguments.as_object().cloned().unwrap_or_default();
+            }
+        }
         outcome.requests += 1;
         outcome.model_consistent &= completion.model.as_deref() == Some(model);
         outcome.usage_complete &= completion.usage.as_ref().is_some_and(|usage| {
