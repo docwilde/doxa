@@ -1,7 +1,7 @@
 [project]
 name = "doxa"
-version = "2.0.0a36"
-description = "Internal Claude SDK adapters for the native DOXA terminal."
+version = "2.0.0a37"
+description = "Development compatibility reference for the native DOXA terminal."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "AGPL-3.0-only"
@@ -20,36 +20,19 @@ classifiers = [
     "Topic :: Software Development",
     "Topic :: Terminals",
 ]
-dependencies = [
-    "claude-agent-sdk>=0.2.144",
-    "textual>=5,<6",
-    "textual-image>=0.12.0",
-    # NOT a new dependency: textual-image has always required Pillow and it
-    # has always been on disk. What changed in v0.41.0 is who imports it.
-    # doxa.banner opens assets/logo.png itself -- it has to, because
-    # textual-image normalizes with PIL's convert("RGB"), which discards
-    # alpha instead of compositing it, and the logo's transparent
-    # background would render as a white slab on a dark theme. So the
-    # banner crops and flattens the image before handing it over, and this
-    # line moves up out of the dev group on the rule that group's own
-    # comment already stated: code that imports `PIL.Image` directly earns
-    # its own declaration rather than riding another package's coattails.
-    # scripts/record_gif.py, the previous holder of that comment, is
-    # covered by this line too.
-    "pillow>=11",
-]
-
-[project.optional-dependencies]
-remote = [
-    "starlette>=1,<2",
-    "uvicorn>=0.52,<1",
-    "websockets>=15,<17",
-]
+dependencies = []
 
 [dependency-groups]
 dev = [
-    # Canonical Python APIs remain an interoperability oracle, never a runtime backend.
-    "lore-core @ git+https://github.com/docwilde/LORE@c9d2cc2f72080dc823b101f9ee1ab33a2dd028b7",
+    # Historical Python UI/SDK and canonical APIs are test oracles only.
+    "claude-agent-sdk>=0.2.144",
+    "textual>=5,<6",
+    "textual-image>=0.12.0",
+    "pillow>=11",
+    "starlette>=1,<2",
+    "uvicorn>=0.52,<1",
+    "websockets>=15,<17",
+    "lore-core @ git+https://github.com/docwilde/LORE@d8abc3e104aacda221b5df7baace13c0a1a69b53",
     "pytest>=8",
     "pytest-asyncio>=0.24",
 ]

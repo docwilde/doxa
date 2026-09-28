@@ -1,7 +1,7 @@
 //! Bounded, versioned DOXA daemon protocol v1 frame validation.
 //!
 //! Both the native daemon and the terminal client can use this crate while
-//! Python 1.x is still on the other end of the socket. Unknown optional
+//! Native and retained Python daemons share this socket contract. Unknown optional
 //! fields survive decoding so a newer peer does not break an older one.
 
 use serde_json::Value;

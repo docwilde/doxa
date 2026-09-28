@@ -210,9 +210,10 @@ impl ToolGate for NativeVendorGate<'_> {
             // is not a canonical backend strike and must not end the turn.
             // Canonical LORE bridge failures retain their uncertain-outcome
             // boundary rather than inviting an automatic write retry.
-            let result = if allowed { match peer(&method, &arguments) {
+            let refusal_method=method.clone();
+            let result = if allowed { match tokio::task::spawn_blocking(move||peer(&method,&arguments)).await.map_err(|_|())? {
                 Ok(result) => result,
-                Err(reason) if matches!(method.as_str(), "peers" | "msg" | "peer_history") =>
+                Err(reason) if matches!(refusal_method.as_str(), "peers" | "msg" | "peer_history"|"spawn_session") =>
                     json!({"error":format!("{}: {reason}",tool_name.strip_prefix("mcp__doxa__").unwrap_or(&tool_name))}),
                 Err(_) => return Err(()),
             } }

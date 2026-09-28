@@ -66,10 +66,10 @@ Ctrl+Q detaches without stopping its daemon.
 New-session options: --engine codex|claude|deepseek|glm, --model NAME,
   --branch LOCAL_OR_REMOTE, --linger SECONDS, --resume FULL_SESSION_ID.
 Codex: --sandbox read-only|workspace-write|danger-full-access, --codex-bin PATH.
-Claude: --claude-python PATH, --claude-script ABSOLUTE_PATH, --effort low|medium|high|max.
+Claude: --claude-bin PATH, --effort low|medium|high|xhigh|max.
 Codex: --effort uses account model capabilities.
 DeepSeek/GLM: --effort low|high|max (DeepSeek also none).
-LORE memory runs in Rust. --lore-python PATH selects the retained SDK/review helper.
+LORE memory, provider review and peer services run in Rust.
 API keys come from provider environment variables.
 
 Fleet: doxa fleet preflight --sessions N --run-budget USD [--supervisor ENGINE[:MODEL]] [--approve none|peer|all] [--approval-grace SECONDS] [--root PATH]
@@ -86,8 +86,7 @@ fn installed_bin_dir_for(executable: &Path) -> io::Result<PathBuf> {
     if executable.file_name().is_none_or(|name| name != "doxa-rs")
         || !bin_dir.join("doxa").is_file()
         || !bin_dir.join("doxa-daemon-rs").is_file()
-        || !std::fs::symlink_metadata(bin_dir.join(".doxa-sidecar-current"))
-            .is_ok_and(|meta| meta.file_type().is_symlink())
+        || doxa_tui::installation::installed_commit(executable)?.is_none()
     {
         return Err(invalid("update requires an installed Rust doxa launcher; from a source checkout run ./task install"));
     }
@@ -124,6 +123,11 @@ fn update() -> io::Result<()> {
 }
 
 fn run(args: &[String]) -> io::Result<()> {
+    if args.first().is_some_and(|arg|arg=="install-launcher") {
+        if args.len()!=2 {return Err(invalid("usage: doxa install-launcher ABSOLUTE_LAUNCHER_PATH"));}
+        let path=doxa_tui::installation::install_launcher(Path::new(&args[1]))?;
+        println!("Desktop shortcut · {}",path.display()); return Ok(());
+    }
     if let Some(command) = args.first().map(String::as_str) {
         match command {
             "help" | "--help" | "-help" | "-h" => {
@@ -208,8 +212,8 @@ fn run(args: &[String]) -> io::Result<()> {
                 command = Some(arg)
             }
             "--session" | "--socket" | "--engine" | "--model" | "--effort" | "--linger"
-            | "--sandbox" | "--codex-bin" | "--lore-python" | "--claude-python"
-            | "--claude-script" | "--resume" | "--branch" => {
+            | "--sandbox" | "--codex-bin" | "--claude-bin"
+             | "--resume" | "--branch" => {
                 index += 1;
                 let value = args
                     .get(index)
@@ -245,9 +249,7 @@ fn run(args: &[String]) -> io::Result<()> {
                     }
                     "--sandbox" => options.sandbox = Some(value.clone()),
                     "--codex-bin" => options.codex_bin = Some(PathBuf::from(value)),
-                    "--lore-python" => options.lore_python = Some(PathBuf::from(value)),
-                    "--claude-python" => options.claude_python = Some(PathBuf::from(value)),
-                    "--claude-script" => options.claude_script = Some(PathBuf::from(value)),
+                    "--claude-bin" => options.claude_bin = Some(PathBuf::from(value)),
                     "--resume" => options.resume = Some(value.clone()),
                     "--branch" => options.branch = Some(value.clone()),
                     _ => unreachable!(),
@@ -367,21 +369,7 @@ fn run(args: &[String]) -> io::Result<()> {
                         ),
                     ));
                 }
-                launch::Engine::Claude => {
-                    checks.push((
-                        "claude python",
-                        launch::python_executable(
-                            options
-                                .claude_python
-                                .as_deref()
-                                .unwrap_or(std::path::Path::new("python3")),
-                        ),
-                    ));
-                    checks.push((
-                        "claude sidecar",
-                        launch::resolve_claude_script(&options),
-                    ));
-                }
+                launch::Engine::Claude => {checks.push(("claude",launch::claude_executable(&options)));}
                 launch::Engine::Fixture => {}
                 launch::Engine::DeepSeek | launch::Engine::Glm => {
                     if let Err(error) = launch::vendor_effort(&options) {
@@ -517,11 +505,9 @@ fn worktrees(args: &[String]) -> io::Result<()> {
 }
 
 fn fleet(args: &[String]) -> io::Result<()> {
+    if args.iter().any(|arg|matches!(arg.as_str(),"--help"|"-h")) {print!("{}",fleet_control::HELP);return Ok(());}
     if args.first().is_some_and(|arg| arg == "start") {
         return fleet_control::start(&args[1..]);
-    }
-    if args.first().is_some_and(|arg| arg == "start-python") {
-        return fleet_start_compat(&args[1..]);
     }
     if args.first().is_some_and(|arg| arg == "preflight") {
         let root = fleet_view::default_root().unwrap_or_default();
@@ -569,33 +555,7 @@ fn fleet(args: &[String]) -> io::Result<()> {
             let (socket, session_id) = fleet_view::slot_socket(&root, run, slot)?;
             return bridge::run_socket_expected(socket, Some(&session_id));
         }
-        _ => return Err(invalid("usage: doxa fleet start --pool ENGINE:MODEL --prompt TEXT -n N --run-budget USD|start-python PYTHON_FLEET_OPTIONS|preflight --sessions N --run-budget USD [--supervisor ENGINE[:MODEL]] [--approve none|peer|all] [--approval-grace SECONDS] [--root ABSOLUTE_PATH]|runs|status RUN_ID|stop RUN_ID|attach RUN_ID SLOT [--root ABSOLUTE_PATH]")),
-    }
-    Ok(())
-}
-
-fn fleet_start_compat(args: &[String]) -> io::Result<()> {
-    let selected = std::env::var_os("DOXA_LORE_PYTHON")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("python3"));
-    let python = launch::python_executable(&selected)?;
-    let packaged = Command::new(&python).args(["-c", "import doxa.fleet"])
-        .stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|status| status.success());
-    let mut command = Command::new(python);
-    command.args(["-m", "doxa.fleet"]).args(args);
-    // Source builds run from arbitrary project directories. Installed builds
-    // use the packaged sidecar environment after the source tree is gone.
-    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    if !packaged && source.join("doxa/fleet.py").is_file() {
-        let mut paths = vec![source];
-        paths.extend(std::env::split_paths(&std::env::var_os("PYTHONPATH").unwrap_or_default()));
-        command.env("PYTHONPATH", std::env::join_paths(paths).map_err(|_| invalid("invalid PYTHONPATH"))?);
-    }
-    eprintln!("fleet start: running the Python fleet harness for capacity, budget, barrier and teardown controls");
-    let status = command.status()?;
-    if !status.success() {
-        std::process::exit(status.code().unwrap_or(1));
+        _ => return Err(invalid("usage: doxa fleet start --pool ENGINE:MODEL --prompt TEXT -n N --run-budget USD|preflight --sessions N --run-budget USD [--supervisor ENGINE[:MODEL]] [--approve none|peer|all] [--approval-grace SECONDS] [--root ABSOLUTE_PATH]|runs|status RUN_ID|stop RUN_ID|attach RUN_ID SLOT [--root ABSOLUTE_PATH]")),
     }
     Ok(())
 }
@@ -604,7 +564,7 @@ fn fleet_start_compat(args: &[String]) -> io::Result<()> {
 mod tests {
     use super::*;
     use std::fs;
-    use std::os::unix::fs::{symlink, PermissionsExt};
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn update_runs_embedded_installer_for_verified_bin_directory() {
@@ -616,7 +576,8 @@ mod tests {
         }
         let executable = bin.join("doxa-rs");
         assert!(installed_bin_dir_for(&executable).is_err());
-        symlink("unused-sidecar", bin.join(".doxa-sidecar-current")).unwrap();
+        fs::write(bin.join(".doxa-install-sha"),"0123456789abcdef0123456789abcdef01234567").unwrap();
+        fs::set_permissions(bin.join(".doxa-install-sha"),fs::Permissions::from_mode(0o600)).unwrap();
         assert_eq!(installed_bin_dir_for(&executable).unwrap(), bin);
 
         let shell = dir.path().join("fake-sh");

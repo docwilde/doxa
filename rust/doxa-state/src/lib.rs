@@ -519,7 +519,7 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
 /// Fixed startup diagnostics shared by the provider host and opening screen.
 pub fn claude_startup_diagnostic(code: Option<&str>) -> &'static str {
     match code {
-        Some("startup_native_launcher") => "Claude native launcher rejected its Python interpreter, sidecar or runtime permissions; run doxa update and doxa doctor --engine claude",
+        Some("startup_native_launcher") => "Claude native launcher rejected its CLI executable or runtime permissions; run doxa update and doxa doctor --engine claude",
         Some("startup_cli_missing") => "Claude CLI was not found during SDK initialization; check doxa doctor --engine claude",
         Some("startup_permission_denied") => "Claude startup could not access its configuration or executable; check owned file permissions",
         Some("startup_timeout") => "Claude SDK initialization timed out; check doxa auth status claude and try again",

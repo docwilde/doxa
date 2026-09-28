@@ -51,13 +51,10 @@ fn assert_resume_refuses_existing_same_id_daemon(vendor: bool) {
         if vendor { "deepseek" } else { "claude" },
     ]);
     if vendor {
-        command.args(["--lore-python", "/usr/bin/python3"]);
         command.env("DEEPSEEK_API_KEY", "secret-vendor-key");
     } else {
         command.args([
-            "--claude-python",
-            "/usr/bin/python3",
-            "--claude-script",
+            "--claude-bin",
             sidecar.to_str().unwrap(),
         ]);
     }

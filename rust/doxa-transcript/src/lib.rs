@@ -11,8 +11,8 @@ pub const MAX_TRANSCRIPT_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_TRANSCRIPT_LINES: usize = 20_000;
 pub const MAX_METADATA_BYTES: u64 = 64 * 1024;
 pub const THREAD_SUFFIX: &str = ".codex.json";
-pub const MAX_VENDOR_MESSAGES_BYTES: u64 = 8 * 1024 * 1024;
-pub const MAX_VENDOR_MESSAGES: usize = 512;
+pub const MAX_VENDOR_MESSAGES_BYTES: u64 = 16 * 1024 * 1024;
+pub const MAX_VENDOR_MESSAGES: usize = 20_000;
 pub const MAX_VENDOR_TRANSCRIPT_BYTES: u64 = 16 * 1024 * 1024;
 
 fn invalid() -> io::Error {
@@ -351,6 +351,59 @@ impl TranscriptStore {
 
     pub fn vendor_messages_path(&self) -> PathBuf {
         self.dir.join(format!("{}.messages.json", self.session_id))
+    }
+
+    pub fn vendor_context_path(&self) -> PathBuf {
+        self.dir.join(format!("{}.context.json", self.session_id))
+    }
+
+    /// A context summary is a DOXA optimization, anchored to complete durable
+    /// original turns. It never substitutes for the transcript or replay file.
+    pub fn read_vendor_context(&self, engine: &str, messages: &[Value]) -> io::Result<Option<(usize, String)>> {
+        use sha2::{Digest, Sha256};
+        owned_dir(&self.dir)?;
+        let mut file = match open_read(&self.vendor_context_path()) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        if file.metadata()?.len() > 128 * 1024 { return Err(bad_data()); }
+        let mut raw = Vec::new(); Read::by_ref(&mut file).take(128 * 1024 + 1).read_to_end(&mut raw)?;
+        let value: Value = serde_json::from_slice(&raw)?;
+        let count = value["compacted_messages"].as_u64().and_then(|n| usize::try_from(n).ok()).filter(|n| *n > 0 && n.is_multiple_of(2) && *n <= messages.len()).ok_or_else(bad_data)?;
+        let summary = value["summary"].as_str().filter(|s| !s.trim().is_empty() && s.len() <= 64 * 1024).ok_or_else(bad_data)?;
+        let hash = format!("{:x}", Sha256::digest(serde_json::to_vec(&messages[..count])?));
+        if raw.len() > 128 * 1024 || value["version"] != 1 || value["semantics"] != "doxa_managed_summary"
+            || value["engine"] != engine || value["session_id"] != self.session_id || value["prefix_sha256"] != hash { return Err(bad_data()); }
+        Ok(Some((count,summary.to_owned())))
+    }
+
+    /// Persist only after a reviewed source still matches. `unchanged` must
+    /// compare the exact transcript proof and original saved messages identity.
+    /// A failed summary commit leaves the original replay files untouched.
+    pub fn try_write_vendor_context(&self, engine: &str, messages: &[Value], summary: &str, reviewed_source: &Value,
+        mut unchanged: impl FnMut() -> io::Result<bool>) -> io::Result<()> {
+        use sha2::{Digest, Sha256};
+        owned_dir(&self.dir)?; validate_vendor_messages(messages)?;
+        if messages.is_empty() || summary.trim().is_empty() || summary.len() > 64 * 1024 || !reviewed_source.is_object() { return Err(bad_data()); }
+        let directory = open_directory(&self.dir)?;
+        let identity = directory.metadata()?;
+        let value = serde_json::json!({"version":1,"semantics":"doxa_managed_summary","engine":engine,
+            "session_id":self.session_id,"compacted_messages":messages.len(),
+            "prefix_sha256":format!("{:x}",Sha256::digest(serde_json::to_vec(messages)?)),
+            "reviewed_source":reviewed_source,"summary":summary});
+        // The fd keeps all writes anchored to this exact owned directory even
+        // if someone swaps its path while the provider is summarizing.
+        let anchored = PathBuf::from(format!("/proc/self/fd/{}", std::os::fd::AsRawFd::as_raw_fd(&directory)));
+        let mut temp = tempfile::Builder::new().prefix(".context-").tempfile_in(&anchored)?;
+        temp.as_file().set_permissions(fs::Permissions::from_mode(0o600))?;
+        temp.write_all(&serde_json::to_vec(&value)?)?; temp.as_file().sync_all()?;
+        let current = open_directory(&self.dir)?.metadata()?;
+        if (identity.dev(),identity.ino()) != (current.dev(),current.ino()) || !unchanged()? { return Err(io::Error::other("reviewed context source changed")); }
+        let current = open_directory(&self.dir)?.metadata()?;
+        if (identity.dev(),identity.ino()) != (current.dev(),current.ino()) { return Err(io::Error::other("context directory changed")); }
+        temp.persist(anchored.join(format!("{}.context.json",self.session_id))).map_err(|error| error.error)?;
+        directory.sync_all()
     }
 
     /// Read Python's vendor envelope. Older envelopes omit session_id/model;

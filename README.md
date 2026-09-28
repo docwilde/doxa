@@ -1,8 +1,8 @@
 <p align="center"><img src="assets/logo.png" width="560" alt="DOXA — belief earning knowledge"></p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Rust%202.0-alpha.36-f59f00" alt="Rust 2.0 alpha.36 is the main frontend">
-  <a href="https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.36"><img src="https://img.shields.io/github/v/release/docwilde/doxa?include_prereleases&amp;sort=semver&amp;label=Rust%20preview&amp;color=e8590c" alt="latest Rust preview release"></a>
+  <img src="https://img.shields.io/badge/Rust%202.0-alpha.37-f59f00" alt="Rust 2.0 alpha.37 is the main frontend">
+  <a href="https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.37"><img src="https://img.shields.io/github/v/release/docwilde/doxa?include_prereleases&amp;sort=semver&amp;label=Rust%20preview&amp;color=e8590c" alt="latest Rust preview release"></a>
   <a href="https://github.com/docwilde/doxa/actions/workflows/rust-ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/docwilde/doxa/rust-ci.yml?branch=main&label=Rust%20CI" alt="Rust CI status"></a>
   <img src="https://img.shields.io/badge/TUI-Ratatui-2f9e44" alt="Rust TUI built with Ratatui">
   <img src="https://img.shields.io/badge/auth-provider%20CLI%20or%20API%20key-2f9e44" alt="authentication follows the selected engine">
@@ -14,28 +14,31 @@
 > can edit files and run commands with your privileges. Read
 > [Non-goals](#non-goals) before using it on important work.
 
-The official latest GitHub release is [v2.0.0-alpha.36](https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.36).
+The official latest GitHub release is [v2.0.0-alpha.37](https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.37).
 Rust 2.0 leads development; its alpha version still indicates that it is evolving.
 Alpha.31 closes the audited Python 1.19 functional gaps: saved-session restoration,
 full preferences, native LORE tools, interactive fleets, plugin commands and local
 shell controls. The subsequent [source audit](docs/source-audit-2026-09-27.md)
-documents the ownership/deadline fixes and alpha.35 controller and typed-worker cleanup. See the
+documents ownership/deadline fixes and controller cleanup. Alpha.37 replaces
+the remaining Python runtime paths, adds verified Claude controls and completes
+native vendor compaction. See the
 [parity tracker](docs/rust-1.19-parity.md) for supported provider contracts and
 retained safety boundaries.
 
 **DOXA** is a terminal for coding agents. Development now leads with the
 **Rust 2.0 alpha**, built with Ratatui and a native daemon. Run Claude, Codex,
 DeepSeek, or GLM in separate sessions; close the terminal and reattach to their
-daemons later. Claude currently uses a bundled Python SDK sidecar.
+daemons later. Claude runs through its CLI control protocol; Codex uses its app server.
+DOXA and its integrated LORE runtime are Rust.
 [LORE](https://github.com/docwilde/LORE)
 shares user and repo memory across DOXA, Claude Code, and Codex, with
 evidence-backed beliefs and an informational source-engine label. See the
 [engine setup and capabilities](rust/README.md) guide.
 
-![Rust 2.0 alpha.36 running a real Claude session, with file reads, command approval and a completed greeting check](assets/shots/rust-hero.png)
+![Rust 2.0 alpha.37 running a real Codex session, with file reads, command approval and a completed greeting check](assets/shots/rust-hero.png)
 
 *Captured from the running Rust app in a real VTE terminal, using an authenticated
-Claude session and a small isolated example repository. The provider replies and tool
+Codex session and a small isolated example repository. The provider replies and tool
 results are real. See the [capture method](docs/rust-gallery.md).*
 
 ## What you get
@@ -54,20 +57,20 @@ results are real. See the [capture method](docs/rust-gallery.md).*
 See the [Rust guide](rust/README.md) for engine capabilities, shortcuts and
 [compaction boundaries](rust/doxa-engines/README.md#compaction-review).
 
-## Gallery · alpha.36
+## Gallery · alpha.37
 
 ### Individual tool details
 
-![Real Claude Read calls with one tool expanded and the other collapsed](assets/shots/rust-tool-entries.png)
+![Real Codex command calls with one tool expanded and the others collapsed](assets/shots/rust-tool-entries.png)
 
 *Open a tool section, then expand each call independently with a click or Enter.
-Here the README read is expanded while the greeting file read remains collapsed.*
+Here the greeting command is expanded while the earlier file reads remain collapsed.*
 
 ### Inline approval
 
-![A live Claude Bash permission request with Approve and Deny above the prompt](assets/shots/rust-permission-request.png)
+![A live Codex command permission request with Approve and Deny above the prompt](assets/shots/rust-permission-request.png)
 
-*The real Bash request waits above the prompt. Select Approve or Deny with the mouse
+*The real command request waits above the prompt. Select Approve or Deny with the mouse
 or keyboard; Enter submits the selection, A approves, and D or Esc denies.
 The pending indicator blinks while the request is unresolved.*
 
@@ -85,13 +88,13 @@ The pending indicator blinks while the request is unresolved.*
 
 ### Session settings
 
-![Live session settings showing the actual selected Claude model and unset effort](assets/shots/rust-settings.png)
+![Settings showing configuration defaults and the session model, with verified live Codex chips below](assets/shots/rust-settings.png)
 
-*Settings show the current session and where each value comes from. Unknown or
-unavailable values remain unset.*
+*Settings identify configuration defaults and values inherited from the session.
+The chips below show the active engine, model and verified low effort.*
 
 All six frames are unedited 3068 × 1734 terminal captures from the same running
-alpha.36 build. [Capture provenance and reproduction](docs/rust-gallery.md).
+alpha.37 build. [Capture provenance and reproduction](docs/rust-gallery.md).
 
 ## Install
 
@@ -103,9 +106,8 @@ curl -fsSL https://raw.githubusercontent.com/docwilde/doxa/main/scripts/install.
 
 The installer builds the Rust frontend and daemon from `main` and installs the
 Rust `doxa` command in `~/.local/bin` (or `DOXA_RUST_BIN_DIR`). Pass a tag such
-as `v2.0.0-alpha.36` after `sh -s --` to pin a release. It uses Git, Cargo,
-Python 3.11+, and `uv`; the Python environment it creates is private to the
-Claude SDK and transport adapters. No Python frontend command is installed. See the
+as `v2.0.0-alpha.37` after `sh -s --` to pin a release. It requires Git and Cargo and installs three native binaries: the frontend,
+daemon and LORE carrier. Claude and Codex additionally require their provider CLIs. See the
 [Rust guide](rust/README.md) for provider setup and current limits.
 On Linux, it also installs a per-user application menu entry and icons under
 `$XDG_DATA_HOME` (default `~/.local/share`). The entry launches the installed
@@ -117,7 +119,7 @@ would shadow its launcher.
 From a checkout, `cargo build --locked` builds the Rust frontend and daemon;
 `./task build`, `./task run`, and `./task install` provide the matching local
 launcher workflow. Install
-builds committed `HEAD` with the same locked sidecars and launcher as the
+builds committed `HEAD` with the same native binaries and launcher as the
 release installer. If an existing local `main` predates the Rust files, run
 `git pull --ff-only` after checking it out; `git checkout main` alone does not
 fetch newer commits.
@@ -141,8 +143,9 @@ The [Rust guide](rust/README.md) covers Claude, DeepSeek, and GLM setup.
 Rust 2.0 alpha is the main line. The [Rust guide](rust/README.md) tracks
 what is implemented and what still needs porting. Existing Python 1.x releases
 and their [manual](docs/manual.md) remain available for historical reference;
-the Python Claude SDK and transport adapters remain internal runtime dependencies.
-LORE 0.61.1 is now integrated as a canonical Rust module; memory, beliefs,
+Python modules remain development compatibility references; installation and
+normal operation use the Rust runtime.
+LORE is integrated as a canonical Rust module; memory, beliefs,
 context, session indexing and detached review use the same existing store.
 Signed sync replays portable project memory and file-map keys across machines,
 preserves conflicts in their project scope, and sorts curated entries so the
@@ -159,8 +162,9 @@ for rendering, event-loop, scrolling, and resize measurements.
   not load-balance or fail over between providers.
 - **Replacing LORE:** DOXA uses the same core as the Claude Code and Codex
   plugins.
-- **Full Claude plugin compatibility:** the 2.0 alpha uses a Claude SDK
-  sidecar. DOXA's [plugin API](docs/plans/plugin-api.md) remains a design.
+- **Full Claude plugin compatibility:** adoption loads reviewed commands, skills
+  and agents into a private CLI configuration. Foreign hooks and MCP servers
+  are excluded; DOXA's [plugin API](docs/plans/plugin-api.md) remains a design.
 
 ## License
 

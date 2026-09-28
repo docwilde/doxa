@@ -256,8 +256,9 @@ dependencies = [
 
 [[package]]
 name = "doxa-claude"
-version = "2.0.0-alpha.36"
+version = "2.0.0-alpha.37"
 dependencies = [
+ "doxa-state",
  "libc",
  "serde_json",
  "tempfile",
@@ -265,7 +266,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-daemon"
-version = "2.0.0-alpha.36"
+version = "2.0.0-alpha.37"
 dependencies = [
  "doxa-claude",
  "doxa-engines",
@@ -280,14 +281,16 @@ dependencies = [
  "futures-util",
  "libc",
  "serde_json",
+ "sha2",
  "tempfile",
+ "time",
  "tokio",
  "tokio-util",
 ]
 
 [[package]]
 name = "doxa-engines"
-version = "2.0.0-alpha.36"
+version = "2.0.0-alpha.37"
 dependencies = [
  "libc",
  "serde",
@@ -300,7 +303,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-lore"
-version = "2.0.0-alpha.36"
+version = "2.0.0-alpha.37"
 dependencies = [
  "doxa-state",
  "libc",
@@ -312,28 +315,34 @@ dependencies = [
 
 [[package]]
 name = "doxa-peers"
-version = "2.0.0-alpha.36"
+version = "2.0.0-alpha.37"
 dependencies = [
+ "bytes",
  "doxa-state",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "libc",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
  "time",
+ "tokio",
  "uuid",
 ]
 
 [[package]]
 name = "doxa-protocol"
-version = "2.0.0-alpha.36"
+version = "2.0.0-alpha.37"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "doxa-runtime"
-version = "2.0.0-alpha.36"
+version = "2.0.0-alpha.37"
 dependencies = [
  "libc",
  "serde_json",
@@ -342,7 +351,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-state"
-version = "2.0.0-alpha.36"
+version = "2.0.0-alpha.37"
 dependencies = [
  "libc",
  "serde",
@@ -355,18 +364,20 @@ dependencies = [
 
 [[package]]
 name = "doxa-transcript"
-version = "2.0.0-alpha.36"
+version = "2.0.0-alpha.37"
 dependencies = [
  "libc",
  "serde_json",
+ "sha2",
  "tempfile",
 ]
 
 [[package]]
 name = "doxa-tui"
-version = "2.0.0-alpha.36"
+version = "2.0.0-alpha.37"
 dependencies = [
  "crossterm",
+ "doxa-claude",
  "doxa-engines",
  "doxa-lore",
  "doxa-peers",
@@ -374,6 +385,10 @@ dependencies = [
  "doxa-state",
  "doxa-vendors",
  "doxa-worktrees",
+ "futures-util",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "libc",
  "pulldown-cmark",
  "ratatui",
@@ -390,7 +405,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-vendors"
-version = "2.0.0-alpha.36"
+version = "2.0.0-alpha.37"
 dependencies = [
  "futures-util",
  "reqwest",
@@ -400,7 +415,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-worktrees"
-version = "2.0.0-alpha.36"
+version = "2.0.0-alpha.37"
 dependencies = [
  "doxa-state",
  "libc",
@@ -428,7 +443,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -494,6 +509,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b1f9e3d69d39e4862ffed03ed071a76f9a13ba1d9109d355b0f0aa6b15e393c4"
 dependencies = [
  "futures-core",
+ "futures-sink",
 ]
 
 [[package]]
@@ -686,6 +702,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6dbf3de79e51f3d586ab4cb9d5c3e2c14aa28ed23d180cf89b4df0454a69cc87"
 
 [[package]]
+name = "httpdate"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
+
+[[package]]
 name = "hyper"
 version = "1.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -698,6 +720,7 @@ dependencies = [
  "http",
  "http-body",
  "httparse",
+ "httpdate",
  "itoa",
  "pin-project-lite",
  "smallvec",
@@ -971,19 +994,24 @@ checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
 name = "lore-core"
-version = "0.61.1"
-source = "git+https://github.com/docwilde/LORE?rev=c9d2cc2f72080dc823b101f9ee1ab33a2dd028b7#c9d2cc2f72080dc823b101f9ee1ab33a2dd028b7"
+version = "0.62.0"
+source = "git+https://github.com/docwilde/LORE?rev=d8abc3e104aacda221b5df7baace13c0a1a69b53#d8abc3e104aacda221b5df7baace13c0a1a69b53"
 dependencies = [
  "fancy-regex",
  "hmac",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "libc",
  "regex",
+ "reqwest",
  "rusqlite",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
  "time",
+ "tokio",
  "uuid",
 ]
 
@@ -1175,7 +1203,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1286,6 +1314,7 @@ checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
  "base64 0.22.1",
  "bytes",
+ "futures-channel",
  "futures-core",
  "futures-util",
  "http",
@@ -1387,7 +1416,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1687,7 +1716,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.5",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

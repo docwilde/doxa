@@ -8,12 +8,10 @@ on:
 permissions:
   contents: read
 
-# Process fixtures generate executable scripts. Serial test cases avoid fork
-# inheritance of another fixture's writable descriptor during publication;
-# concurrency regressions explicitly start their own threads and processes.
 env:
   RUST_TEST_THREADS: "1"
   DOXA_LORE_RS: ${{ github.workspace }}/target/debug/lore-rs
+  TMPDIR: /home/runner/.doxa-tests
 
 jobs:
   rust:
@@ -21,89 +19,36 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Select stable Rust
-        run: rustup toolchain install stable --profile minimal
-      - name: Build from repository root
-        run: cargo +stable build --locked
-      - name: Build native LORE carrier
-        run: cargo +stable build --locked --package lore-core --bin lore-rs
-      - name: Test Rust frontend
-        run: cargo +stable test --locked --manifest-path rust/doxa-tui/Cargo.toml
-      - name: Test Codex event normalization
-        run: cargo +stable test --locked --manifest-path rust/doxa-engines/Cargo.toml
-      - name: Test native LORE integration
-        run: cargo +stable test --locked --manifest-path rust/doxa-lore/Cargo.toml
-      - name: Test peer registry compatibility
-        run: cargo +stable test --locked --manifest-path rust/doxa-peers/Cargo.toml
-      - name: Test Rust protocol compatibility
-        run: cargo +stable test --locked --manifest-path rust/doxa-protocol/Cargo.toml
-      - name: Test Claude sidecar client
-        run: cargo +stable test --locked --manifest-path rust/doxa-claude/Cargo.toml
-      - name: Check Claude sidecar syntax
-        run: python3 -m py_compile rust/doxa-claude/claude_sidecar.py
-      - name: Test Python-compatible transcript store
-        run: cargo +stable test --locked --manifest-path rust/doxa-transcript/Cargo.toml
-      - name: Test Rust state compatibility
-        run: cargo +stable test --locked --manifest-path rust/doxa-state/Cargo.toml
-      - name: Install uv for Python client integration
-        uses: astral-sh/setup-uv@v10.0.1
-      - name: Sync Python client dependencies
-        run: uv sync --frozen --python 3.12
-      - name: Test Claude sidecar identity checks
-        run: uv run --frozen python -m unittest discover -s rust/doxa-claude/tests -p 'test_*.py'
-      - name: Check release installer and task entry points
+        run: |
+          mkdir -p "$TMPDIR"
+          chmod 700 "$TMPDIR"
+          rustup toolchain install stable --profile minimal
+      - uses: Swatinem/rust-cache@v2
+      - name: Build native runtime and LORE carrier
+        run: |
+          cargo +stable build --locked
+          cargo +stable build --locked --package lore-core --bin lore-rs
+      - name: Test native runtime, providers and interaction
+        run: cargo +stable test --locked --workspace --features doxa-daemon/local-test-server,doxa-vendors/local-test-server
+      - name: Check task and release installer
         run: |
           sh -n scripts/install.sh task
           ./task help
-          uv run pytest tests/test_install_rust.py tests/test_mesh_wheel.py tests/test_task_native.py tests/test_lore_bump.py -q
-      - name: Test native LORE adapter and compatibility fixtures
-        run: uv run pytest tests/test_lore_bridge.py tests/test_settings_graph.py tests/test_native_agent_tools.py tests/test_lore_capacity.py tests/test_claude_quota.py -q
-      - name: Test native LORE SDK carrier and diagnostics
-        env:
-          DOXA_TEST_LORE_RS: ${{ github.workspace }}/target/debug/lore-rs
-        run: uv run pytest tests/test_native_lore_carrier.py tests/test_native_lore_interop.py tests/test_native_lore_diagnostics.py tests/test_lore_dependency.py -q
-      - name: Test native plugin inventory and sanitized reload
-        run: uv run pytest tests/test_native_plugin_inventory.py tests/test_native_plugin_commands.py -q
-      - name: Test native Claude identity and peer ownership
+      - name: Smoke installed Rust launcher without a Python environment
         run: |
-          native_claude_tests=$(mktemp -d "$RUNNER_TEMP/dc-XXXXXX")
-          trap 'rm -rf "$native_claude_tests"' EXIT
-          TMPDIR="$native_claude_tests" uv run pytest tests/test_resume.py tests/test_native_peer_presence.py tests/test_cli_isolation.py -q --basetemp="$native_claude_tests"
-      - name: Test retained browser authorization boundary
-        run: uv run --extra remote pytest tests/test_remote_web.py tests/test_remote_policy.py -q
-      - name: Test completed Claude compaction review gate
-        run: |
-          uv run pytest tests/test_engine.py -k compact -q
-          uv run pytest tests/test_review_worker.py -q
-      - name: Test protected Codex compaction hook
-        run: uv run pytest rust/doxa-engines/tests/test_codex_compact_hook.py rust/doxa-engines/tests/test_codex_compact_deadline.py rust/doxa-engines/tests/test_codex_compact_ownership.py -q
-      - name: Test native daemon protocol
-        env:
-          DOXA_TEST_PYTHON: ${{ github.workspace }}/.venv/bin/python
-        run: cargo +stable test --locked --manifest-path rust/doxa-runtime/Cargo.toml
-      - name: Test native daemon hosts and peer RPC
-        run: cargo +stable test --locked --features local-test-server --manifest-path rust/doxa-daemon/Cargo.toml
-      - name: Test native provider LORE contracts without provider accounts
-        env:
-          DOXA_NATIVE_DAEMON: ${{ github.workspace }}/target/debug/doxa-daemon
-        run: |
-          native_lore_tests=$(mktemp -d "$RUNNER_TEMP/dn-XXXXXX")
-          trap 'rm -rf "$native_lore_tests"' EXIT
-          TMPDIR="$native_lore_tests" uv run pytest tests/test_native_provider_lore.py tests/test_native_spawn.py tests/test_peernet.py tests/test_remote_policy.py -q --basetemp="$native_lore_tests"
-      - name: Test managed worktree lifecycle
-        run: cargo +stable test --locked --manifest-path rust/doxa-worktrees/Cargo.toml
-      - name: Smoke installed Rust launcher and locked sidecars
-        run: |
-          smoke_dir=$(mktemp -d)
-          smoke_sha=$(git rev-parse HEAD)
+          smoke_dir=$(mktemp -d "$TMPDIR/install-XXXXXXXX")
+          trap 'rm -rf "$smoke_dir"' EXIT
           DOXA_RUST_REPO_URL="$GITHUB_WORKSPACE" \
             DOXA_HOME="$smoke_dir/home" \
             DOXA_RUST_BIN_DIR="$smoke_dir/bin" \
+            DOXA_INSTALL_TARGET_DIR="$GITHUB_WORKSPACE/target" \
+            CARGO_BUILD_JOBS=2 \
+            DOXA_NO_LAUNCHER=1 \
             sh scripts/install.sh HEAD
           (cd / && "$smoke_dir/bin/doxa" --version)
-          doctor_output=$(cd / && "$smoke_dir/bin/doxa" doctor --engine deepseek || true)
-          printf '%s\n' "$doctor_output" | grep -F "ok daemon:"
-          (cd / && "$smoke_dir/home/sidecars/$smoke_sha/bin/python" \
-            -I -c 'import doxa.native_lore, doxa.engine, claude_agent_sdk; import importlib.util; assert importlib.util.find_spec("lore_core") is None')
+          test ! -e "$smoke_dir/home/sidecars"
+          test ! -e "$smoke_dir/bin/.doxa-sidecar-current"
           HOME="$smoke_dir/owned-home" "$smoke_dir/bin/lore-rs" memory show
-      - name: Test vendor chat adapter
-        run: cargo +stable test --locked --features local-test-server --manifest-path rust/doxa-vendors/Cargo.toml
+          XDG_DATA_HOME="$smoke_dir/desktop" "$smoke_dir/bin/doxa" install-launcher "$smoke_dir/bin/doxa"
+          test -f "$smoke_dir/desktop/applications/doxa.desktop"
+          test -f "$smoke_dir/desktop/icons/hicolor/scalable/apps/doxa.svg"

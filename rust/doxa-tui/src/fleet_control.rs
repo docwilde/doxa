@@ -8,6 +8,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
+pub const HELP: &str = "Native DOXA fleet coordinator\n\nUsage: doxa fleet start --pool ENGINE[:MODEL][@WEIGHT],... [OPTIONS]\n\n  --prompt TEXT | --prompt-file PATH   Shared task (file takes precedence)\n  -n, --sessions N                    Worker count\n  --supervisor ENGINE[:MODEL]          Additional supervisor; task may be interactive\n  --cwd PATH --root PATH --run-id ID   Workspace and isolated run identity\n  --seed INTEGER                      Recorded deterministic assignment seed\n  --memory-off N                      Number of workers with memory disabled\n  --run-budget USD | --allow-unbudgeted\n  --approve none|peer|all              Permission policy; questions/spawns require a human\n  --approval-grace SECONDS             Human review window before policy applies\n  --quiescence-timeout SECONDS         Total wait deadline\n  --quiet-dwell SECONDS                Quiet period (alias: --quiescence-grace)\n  --force                             Override memory capacity refusal\n  --dry-run                           Review capacity and assignments without launching\n\nOther commands: preflight, runs, status, resume, review, answer, attach, stop\n";
+
 fn invalid(message: impl Into<String>) -> io::Error { io::Error::new(io::ErrorKind::InvalidInput, message.into()) }
 fn now() -> String { OffsetDateTime::now_utc().format(&Rfc3339).unwrap_or_default() }
 fn params(value: Value) -> serde_json::Map<String, Value> { value.as_object().cloned().unwrap_or_default() }
@@ -75,6 +77,14 @@ pub struct Spec {
 }
 impl Spec {
     pub fn parse(args: &[String]) -> io::Result<Self> {
+        let expanded = args.iter().flat_map(|arg| {
+            if arg.starts_with("--") {
+                if let Some((key,value)) = arg.split_once('=') { return vec![key.to_owned(),value.to_owned()]; }
+            }
+            if let Some(value) = arg.strip_prefix("-n").filter(|value| !value.is_empty()) { return vec!["-n".into(),value.to_owned()]; }
+            vec![arg.clone()]
+        }).collect::<Vec<_>>();
+        let args = &expanded;
         let mut base = Vec::new(); let mut pool = None; let mut prompt = String::new(); let mut prompt_file = None;
         let mut cwd = std::env::current_dir()?; let mut seed = 0; let mut timeout = None;
         let mut quiet = Duration::from_secs(20); let mut dry_run = false; let mut memory_off = 0; let mut index = 0;
@@ -88,13 +98,13 @@ impl Spec {
                     "--pool" => pool = Some(value.split(',').map(choice).collect::<io::Result<Vec<_>>>()?),
                     "--prompt" => prompt = value.clone(), "--prompt-file" => prompt_file = Some(PathBuf::from(value)),
                     "--cwd" => cwd = PathBuf::from(value),
-                    "--seed" => seed = value.parse().map_err(|_| invalid("invalid fleet seed"))?,
+                    "--seed" => seed = value.parse::<u64>().or_else(|_| value.parse::<i64>().map(|seed| seed as u64)).map_err(|_| invalid("fleet seed must be a signed or unsigned 64-bit integer"))?,
                     "--quiescence-timeout" => timeout = Some(seconds(value)?),
                     "--quiescence-grace" | "--quiet-dwell" => quiet = seconds(value)?,
                     "--memory-off" => memory_off = value.parse::<i64>().map_err(|_| invalid("invalid fleet memory-off count"))?.max(0) as u64,
                     "-n" => { base.push("--sessions".into()); base.push(value.clone()); },
                     "--sessions" | "--root" | "--run-id" | "--run-budget" | "--supervisor" | "--approve" | "--approval-grace" => { base.push(key.into()); base.push(value.clone()); },
-                    _ => return Err(invalid(format!("unsupported native fleet option {key}; use fleet start-python for legacy options"))),
+                    _ => return Err(invalid(format!("unsupported native fleet option {key}"))),
                 }
             }
             index += 1;
@@ -611,6 +621,18 @@ fn monitor(store: &Store, value: &mut Value, slots: &mut [Slot], timeout: Option
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn native_parser_accepts_equals_short_counts_and_signed_seed() {
+        let args = ["--pool=fixture","--prompt=task","-n2","--seed=-7","--allow-unbudgeted","--quiet-dwell=0.1"]
+            .into_iter().map(str::to_owned).collect::<Vec<_>>();
+        let spec = Spec::parse(&args).unwrap();
+        assert_eq!(spec.preflight.sessions,2); assert_eq!(spec.seed,(-7_i64) as u64);
+        assert_eq!(spec.quiet,Duration::from_millis(100));
+        assert_eq!(spec.assignments().unwrap().len(),2);
+        let mut rejected = args; rejected.push("--unrecognized=argument".into());
+        let message = Spec::parse(&rejected).err().unwrap().to_string();
+        assert!(!message.contains("python"));
+    }
     fn memory_spec(supervisor: bool, off: &str) -> Spec {
         let mut args = vec!["--pool".into(), "codex:model-a@3,claude:model-b@1".into(),
             "--prompt".into(), "bounded task".into(), "-n".into(), "8".into(),

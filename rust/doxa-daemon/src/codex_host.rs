@@ -49,8 +49,8 @@ pub struct CodexHost {
     active: Mutex<Option<CancellationToken>>,
     input: doxa_engines::codex_interaction::InputInbox,
     peer_tools: Mutex<Option<doxa_runtime::PeerToolHandler>>,
+    session_tools: Mutex<Option<doxa_runtime::PeerToolHandler>>,
     peer_tools_allowed: bool,
-    lore_python: PathBuf,
     lore_enabled: bool,
     agent_tools: Option<Arc<crate::agent_tools::AgentTools>>,
     scrub_failed: Arc<AtomicBool>,
@@ -99,7 +99,6 @@ impl CodexHost {
 
     pub fn new(
         mut options: DriverOptions,
-        lore_python: &Path,
         session_id: &str,
         resume: bool,
     ) -> Result<Self, String> {
@@ -195,12 +194,12 @@ impl CodexHost {
             if std::env::var("DOXA_CODEX_APPSERVER").as_deref() == Ok("0") { "exec" } else { "app-server" }
         });
         let agent_tools = if transport == "app-server" && (options.resume_thread.is_none() || saved_lore_tools) {
-            crate::agent_tools::AgentTools::new(lore_python, &cwd, session_id, "codex", lore_enabled)
+            crate::agent_tools::AgentTools::new(&cwd, session_id, "codex", lore_enabled)
         } else { None };
         if saved_lore_tools && agent_tools.is_none() {
             return Err("Codex saved LORE tools are unavailable; refusing to resume the thread".into());
         }
-        if transport == "exec" { options.config_overrides = crate::agent_tools::mcp_overrides(lore_python, &cwd, session_id, lore_enabled); }
+        if transport == "exec" { options.config_overrides = crate::agent_tools::mcp_overrides(&cwd, session_id, lore_enabled); }
         let peer_tools_allowed = transport == "app-server" && (options.resume_thread.is_none() || saved_peer_tools);
         let selection = (options.model.clone(), options.effort.clone());
         let catalog_options = AppServerOptions { executable: options.executable.clone(), cwd: options.cwd.clone(),
@@ -268,7 +267,8 @@ impl CodexHost {
             runtime: Mutex::new(runtime),
             active: Mutex::new(None),
             input: Default::default(),
-            peer_tools: Mutex::new(None), peer_tools_allowed, lore_python: lore_python.to_owned(),
+            peer_tools: Mutex::new(None),
+            session_tools: Mutex::new(None), peer_tools_allowed,
             scrub_failed,
             persistence_failed: AtomicBool::new(false),
             lore, lore_enabled, agent_tools,
@@ -305,7 +305,7 @@ impl CodexHost {
             .map_err(|_| AppServerError::Protocol("Compact gate clock unavailable"))?.as_nanos();
         let directory = root.join(format!("codex-{}-{generation}", std::process::id()));
         std::fs::DirBuilder::new().mode(0o700).create(&directory)?;
-        match doxa_engines::codex_compact::CompactGate::prepare_with_memory(&directory, &self.lore_python, &codex_home,
+        match doxa_engines::codex_compact::CompactGate::prepare_with_memory(&directory, &std::env::current_exe()?, &codex_home,
             Path::new(&self.cwd), &self.session_id, doxa_engines::codex_compact::SUPPORTED_VERSION, self.lore_enabled) {
             Ok(gate) => Ok(gate),
             Err(error) => { let _ = std::fs::remove_dir(directory); Err(AppServerError::Io(error)) }
@@ -456,6 +456,9 @@ impl Host for CodexHost {
     fn peer_tools_ready(&self) -> bool {
         self.peer_tools_allowed && self.peer_tools.lock().unwrap().is_some()
     }
+    fn set_session_tool_handler(&self,handler:doxa_runtime::PeerToolHandler)->bool {
+        if self.active.lock().unwrap().is_some(){return false;}let mut slot=self.session_tools.lock().unwrap();if slot.is_some(){return false;}*slot=Some(handler);true
+    }
     fn set_peer_tool_handler(&self, handler: doxa_runtime::PeerToolHandler) -> bool {
         if !self.peer_tools_allowed || self.active.lock().unwrap().is_some() { return false; }
         let mut tools = self.peer_tools.lock().unwrap();
@@ -542,6 +545,7 @@ impl Host for CodexHost {
                 .and_then(|path| codex_context::size(path, id))), id.is_none())
         };
         let thread_write_failed = Cell::new(false);
+        let compact_blocked = Cell::new(false);
         let mut terminal_event = None;
         let mut handle_event = |event: doxa_engines::EngineEvent| {
             if self.scrub_failed.load(Ordering::Acquire)
@@ -615,7 +619,7 @@ impl Host for CodexHost {
                                     result = async {
                                         let gate = self.compact_gate()?;
                                         AppServerDriver::spawn_protected_with_agent_tools(options.clone(), scrub, peer_tools_enabled, gate,
-                                            self.agent_tools.as_ref().map(|tools| tools.definitions()).unwrap_or_default()).await
+                                            {let mut rows=self.agent_tools.as_ref().map(|tools|tools.definitions()).unwrap_or_default();if self.session_tools.lock().unwrap().is_some(){rows.extend(doxa_engines::session_tools::definitions());}rows}).await
                                     } => result,
                                 }
                             }) {
@@ -660,7 +664,10 @@ impl Host for CodexHost {
                                     };
                                     let pending = if frame["method"] == "item/tool/call" {
                                         let name = frame["params"]["tool"].as_str().unwrap_or("");
-                                        if let Some(tools) = self.agent_tools.as_ref().filter(|tools| tools.contains(name)) {
+                                        if name==doxa_engines::session_tools::SPAWN {
+                                            let handler=self.session_tools.lock().unwrap().clone().ok_or("Session tools unavailable")?;
+                                            self.input.begin_operator(frame,scrub,handler,&doxa_engines::session_tools::definitions())
+                                        } else if let Some(tools) = self.agent_tools.as_ref().filter(|tools| tools.contains(name)) {
                                             self.input.begin_operator(frame, scrub, tools.handler(), &tools.callback_definitions())
                                         } else {
                                             let handler = self.peer_tools.lock().unwrap().clone().ok_or("Codex tool unavailable")?;
@@ -674,12 +681,13 @@ impl Host for CodexHost {
                                     })
                                 },
                             )) }.map_err(|error| match error {
+                                AppServerError::CompactionBlocked => { compact_blocked.set(true); "LORE review blocked compaction; existing context retained".to_owned() },
                                 AppServerError::Server(message) => message,
                                 AppServerError::Cancelled => "Codex turn cancelled".to_owned(),
                                 AppServerError::TimedOut => "Codex app-server turn timed out".to_owned(),
                                 _ => "Codex app-server protocol or process failed".to_owned(),
                             });
-                            if outcome.is_err() {
+                            if outcome.is_err() && !compact_blocked.get() {
                                 if let Some(app) = active.as_mut() { runtime.block_on(app.shutdown()); }
                                 *active = None;
                             }
@@ -689,6 +697,22 @@ impl Host for CodexHost {
                 }
         };
         self.input.clear();
+        // A verified blocking hook is a provider-guaranteed stop before manual
+        // compaction. Its turn was drained; no raw context was compacted. Keep
+        // the existing thread usable and clear only the temporary restart guard.
+        if compaction && compact_blocked.get() && !self.scrub_failed.load(Ordering::Acquire)
+            && !self.persistence_failed.load(Ordering::Acquire) && !thread_write_failed.get() {
+            if let Some(id) = self.driver.lock().unwrap().thread_id().map(str::to_owned) {
+                if self.persist_thread(&id, false).is_ok() {
+                    *self.active.lock().unwrap() = None;
+                    emit(json!({"type":"turn_done","data":{"is_error":true,"operation":"compact","blocked":true,
+                        "model":self.initial_model(),"model_consistent":true,"usage_complete":true,
+                        "usage_source":"codex_precompact_blocked","turn_input_tokens":0,"turn_output_tokens":0,"cost_usd":0.0,
+                        "error":"LORE review blocked compaction; existing context retained"}}));
+                    return;
+                }
+            }
+        }
         // A provider error or interrupted turn can leave the provider thread
         // ahead of our durable transcript. Keep its restart guard armed.
         let turn_succeeded = result.is_ok()

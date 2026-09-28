@@ -1,6 +1,6 @@
 [package]
 name = "doxa-tui"
-version = "2.0.0-alpha.36"
+version = "2.0.0-alpha.37"
 edition = "2021"
 publish = false
 license = "AGPL-3.0-only"
@@ -10,6 +10,7 @@ name = "doxa-rs"
 path = "src/main.rs"
 
 [dependencies]
+doxa-claude = { path = "../doxa-claude" }
 doxa-engines = { path = "../doxa-engines" }
 doxa-peers = { path = "../doxa-peers" }
 doxa-state = { path = "../doxa-state" }
@@ -27,7 +28,11 @@ sha2 = "0.10"
 tempfile = "3"
 time = { version = "0.3", features = ["formatting", "parsing"] }
 toml = "0.8"
-tokio = { version = "1", features = ["rt", "time"] }
+tokio = { version = "1", features = ["rt", "time", "net", "sync", "macros"] }
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+futures-util = "0.3"
 unicode-width = "0.2"
 tui-nodes = "=0.9.0"
 

@@ -728,8 +728,8 @@ impl App {
                     options.effort = form.effort;
                 }
                 if form.engine == launch::Engine::Claude {
-                    options.claude_script =
-                        std::env::var_os("DOXA_CLAUDE_SCRIPT").map(PathBuf::from);
+                    options.claude_bin =
+                        std::env::var_os("DOXA_CLAUDE_BIN").map(PathBuf::from);
                 }
                 let prompt = if form.prompt.trim().is_empty() {
                     None

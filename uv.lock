@@ -235,47 +235,38 @@ wheels = [
 
 [[package]]
 name = "doxa"
-version = "2.0.0a36"
+version = "2.0.0a37"
 source = { editable = "." }
-dependencies = [
+
+[package.dev-dependencies]
+dev = [
     { name = "claude-agent-sdk" },
+    { name = "lore-core" },
     { name = "pillow" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "starlette" },
     { name = "textual" },
     { name = "textual-image", version = "0.12.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "textual-image", version = "0.13.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
-]
-
-[package.optional-dependencies]
-remote = [
-    { name = "starlette" },
     { name = "uvicorn" },
     { name = "websockets" },
 ]
 
-[package.dev-dependencies]
-dev = [
-    { name = "lore-core" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-]
-
 [package.metadata]
-requires-dist = [
-    { name = "claude-agent-sdk", specifier = ">=0.2.144" },
-    { name = "pillow", specifier = ">=11" },
-    { name = "starlette", marker = "extra == 'remote'", specifier = ">=1,<2" },
-    { name = "textual", specifier = ">=5,<6" },
-    { name = "textual-image", specifier = ">=0.12.0" },
-    { name = "uvicorn", marker = "extra == 'remote'", specifier = ">=0.52,<1" },
-    { name = "websockets", marker = "extra == 'remote'", specifier = ">=15,<17" },
-]
-provides-extras = ["remote"]
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "lore-core", git = "https://github.com/docwilde/LORE?rev=c9d2cc2f72080dc823b101f9ee1ab33a2dd028b7" },
+    { name = "claude-agent-sdk", specifier = ">=0.2.144" },
+    { name = "lore-core", git = "https://github.com/docwilde/LORE?rev=d8abc3e104aacda221b5df7baace13c0a1a69b53" },
+    { name = "pillow", specifier = ">=11" },
     { name = "pytest", specifier = ">=8" },
     { name = "pytest-asyncio", specifier = ">=0.24" },
+    { name = "starlette", specifier = ">=1,<2" },
+    { name = "textual", specifier = ">=5,<6" },
+    { name = "textual-image", specifier = ">=0.12.0" },
+    { name = "uvicorn", specifier = ">=0.52,<1" },
+    { name = "websockets", specifier = ">=15,<17" },
 ]
 
 [[package]]
@@ -385,8 +376,8 @@ wheels = [
 
 [[package]]
 name = "lore-core"
-version = "0.61.1"
-source = { git = "https://github.com/docwilde/LORE?rev=c9d2cc2f72080dc823b101f9ee1ab33a2dd028b7#c9d2cc2f72080dc823b101f9ee1ab33a2dd028b7" }
+version = "0.62.0"
+source = { git = "https://github.com/docwilde/LORE?rev=d8abc3e104aacda221b5df7baace13c0a1a69b53#d8abc3e104aacda221b5df7baace13c0a1a69b53" }
 
 [[package]]
 name = "markdown-it-py"

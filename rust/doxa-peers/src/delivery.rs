@@ -308,6 +308,7 @@ struct Charge { at: Instant, count: u32, turn: Option<String> }
 pub struct RateLimiter { limits: SendLimits, history: VecDeque<Charge>, current_turn: Option<String> }
 impl RateLimiter {
     pub fn new(limits: SendLimits) -> Self { Self { limits, history: VecDeque::new(), current_turn: None } }
+    pub fn active(&self) -> bool { self.history.back().is_some_and(|charge|charge.at.elapsed()<self.limits.window) }
     pub fn charge(&mut self, turn: Option<&str>, fanout: usize) -> io::Result<()> {
         let count = u32::try_from(fanout).map_err(|_| invalid("fanout too large"))?;
         if count == 0 { return Err(invalid("empty fanout")); }
@@ -325,6 +326,8 @@ impl RateLimiter {
 }
 
 pub struct DeliveryResult { pub delivered: Vec<String>, pub failed: Vec<String>, pub record: Option<Message>, pub ledger_error: Option<String> }
+pub fn valid_reply_reference(id: &str) -> bool { Uuid::parse_str(id).is_ok() }
+pub fn new_message_id() -> String { Uuid::new_v4().simple().to_string() }
 /// The single local outbound path: scoped discovery, charge, send, then append only successful recipients.
 pub fn deliver(registry: &Registry, sender: &PeerRecord, recipients: &[String], body: &str, kind: &str,
     turn_id: Option<&str>, limiter: &Mutex<RateLimiter>, ledger: &Ledger, scrubber: &impl Scrubber) -> io::Result<DeliveryResult> {

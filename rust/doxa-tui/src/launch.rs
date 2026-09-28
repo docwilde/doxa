@@ -54,9 +54,7 @@ pub struct LaunchOptions {
     pub linger: Option<f64>,
     pub sandbox: Option<String>,
     pub codex_bin: Option<PathBuf>,
-    pub lore_python: Option<PathBuf>,
-    pub claude_python: Option<PathBuf>,
-    pub claude_script: Option<PathBuf>,
+    pub claude_bin: Option<PathBuf>,
     pub resume: Option<String>,
 }
 
@@ -86,82 +84,23 @@ fn daemon_reaper() -> &'static std::sync::mpsc::Sender<Child> {
     })
 }
 
-/// Resolve a program to an absolute executable path. A command name is
-/// searched on PATH; a path containing a slash is never searched. Python's
-/// final symlink must survive: it identifies a venv for Python's sys.prefix.
-fn resolve_executable(input: &Path, preserve_python_link: bool) -> io::Result<PathBuf> {
+/// Resolve a command from PATH or an explicit path to its executable file.
+pub fn executable(input: &Path) -> io::Result<PathBuf> {
     let candidates: Vec<PathBuf> = if input.components().count() > 1 || input.is_absolute() {
         vec![input.to_path_buf()]
     } else {
-        env::split_paths(&env::var_os("PATH").unwrap_or_default())
-            .filter(|dir| dir.is_absolute())
-            .map(|dir| dir.join(input))
-            .collect()
+        env::split_paths(&env::var_os("PATH").unwrap_or_default()).filter(|dir| dir.is_absolute()).map(|dir| dir.join(input)).collect()
     };
     for candidate in candidates {
-        if let Ok(meta) = fs::metadata(&candidate) {
-            if meta.is_file() && meta.permissions().mode() & 0o111 != 0 {
-                if preserve_python_link {
-                    if let (Some(parent), Some(name)) = (candidate.parent(), candidate.file_name()) {
-                        if let Ok(parent) = fs::canonicalize(parent) {
-                            return Ok(parent.join(name));
-                        }
-                    }
-                } else if let Ok(path) = fs::canonicalize(&candidate) {
-                    return Ok(path);
-                }
-            }
+        if fs::metadata(&candidate).is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0) {
+            if let Ok(path) = fs::canonicalize(candidate) { return Ok(path); }
         }
     }
-    Err(io::Error::new(
-        io::ErrorKind::NotFound,
-        format!("executable not found: {}", input.display()),
-    ))
+    Err(io::Error::new(io::ErrorKind::NotFound,format!("executable not found: {}",input.display())))
 }
 
-pub fn executable(input: &Path) -> io::Result<PathBuf> {
-    resolve_executable(input, false)
-}
-
-pub fn python_executable(input: &Path) -> io::Result<PathBuf> {
-    resolve_executable(input, true)
-}
-
-/// The sidecar is Python source, not an executable. Require a real absolute
-/// file so the daemon never receives a relative path resolved in another cwd.
-pub fn claude_script(input: &Path) -> io::Result<PathBuf> {
-    if !input.is_absolute() {
-        return Err(invalid("Claude sidecar path must be absolute"));
-    }
-    let path = fs::canonicalize(input)?;
-    if !fs::metadata(&path)?.is_file() {
-        return Err(invalid("Claude sidecar must be a file"));
-    }
-    Ok(path)
-}
-
-fn claude_script_at(options: &LaunchOptions, override_path: Option<PathBuf>, executable: &Path) -> io::Result<PathBuf> {
-    let candidate = options.claude_script.clone()
-        .or(override_path)
-        .unwrap_or_else(|| executable.with_file_name("doxa-claude-sidecar.py"));
-    if options.claude_script.is_none() && !candidate.exists() {
-        return Err(invalid("Claude sidecar missing; install the Rust preview or set DOXA_CLAUDE_SCRIPT"));
-    }
-    claude_script(&candidate)
-}
-
-pub fn resolve_claude_script(options: &LaunchOptions) -> io::Result<PathBuf> {
-    claude_script_at(options, env::var_os("DOXA_CLAUDE_SCRIPT").map(PathBuf::from), &env::current_exe()?)
-}
-
-pub fn claude_dependencies(options: &LaunchOptions) -> io::Result<(PathBuf, PathBuf)> {
-    let python = python_executable(
-        options
-            .claude_python
-            .as_deref()
-            .unwrap_or(Path::new("python3")),
-    )?;
-    Ok((python, resolve_claude_script(options)?))
+pub fn claude_executable(options: &LaunchOptions) -> io::Result<PathBuf> {
+    executable(options.claude_bin.as_deref().unwrap_or(Path::new("claude")))
 }
 
 pub fn vendor_effort(options: &LaunchOptions) -> io::Result<()> {
@@ -451,9 +390,7 @@ fn spawn_inner(options: &LaunchOptions, fleet_runtime: Option<&Path>, environmen
                 || options.effort.is_some()
                 || options.sandbox.is_some()
                 || options.codex_bin.is_some()
-                || options.lore_python.is_some()
-                || options.claude_python.is_some()
-                || options.claude_script.is_some()
+                || options.claude_bin.is_some()
                 || options.resume.is_some()
             {
                 return Err(invalid(
@@ -463,24 +400,11 @@ fn spawn_inner(options: &LaunchOptions, fleet_runtime: Option<&Path>, environmen
             command.args(["--engine", "fixture"]);
         }
         Engine::Codex => {
-            if options.claude_python.is_some()
-                || options.claude_script.is_some()
-            {
+            if options.claude_bin.is_some() {
                 return Err(invalid("Claude options require --engine claude"));
             }
             let codex = executable(options.codex_bin.as_deref().unwrap_or(Path::new("codex")))?;
-            let python = python_executable(
-                options
-                    .lore_python
-                    .as_deref()
-                    .unwrap_or(Path::new("python3")),
-            )?;
-            command.args(["--engine", "codex", "--codex-bin"]);
-            command.arg(codex);
-            command
-                .arg("--lore-python")
-                .arg(python)
-                .args(["--sandbox", sandbox]);
+            command.args(["--engine", "codex", "--codex-bin"]).arg(codex).args(["--sandbox", sandbox]);
             if options.resume.is_some() {
                 command.args(["--resume", "true"]);
             }
@@ -491,18 +415,11 @@ fn spawn_inner(options: &LaunchOptions, fleet_runtime: Option<&Path>, environmen
         }
         Engine::Claude => {
             if options.codex_bin.is_some()
-                || options.lore_python.is_some()
                 || options.sandbox.is_some()
             {
                 return Err(invalid("Codex options require --engine codex"));
             }
-            let (python, script) = claude_dependencies(options)?;
-            command
-                .args(["--engine", "claude"])
-                .arg("--claude-python")
-                .arg(python)
-                .arg("--claude-script")
-                .arg(script);
+            command.args(["--engine", "claude", "--claude-bin"]).arg(claude_executable(options)?);
             if options.resume.is_some() {
                 command.args(["--resume", "true"]);
             }
@@ -514,8 +431,7 @@ fn spawn_inner(options: &LaunchOptions, fleet_runtime: Option<&Path>, environmen
         Engine::DeepSeek | Engine::Glm => {
             if options.codex_bin.is_some()
                 || options.sandbox.is_some()
-                || options.claude_python.is_some()
-                || options.claude_script.is_some()
+                || options.claude_bin.is_some()
             {
                 return Err(invalid("unsupported option for vendor engine"));
             }
@@ -524,17 +440,7 @@ fn spawn_inner(options: &LaunchOptions, fleet_runtime: Option<&Path>, environmen
                 return Err(invalid(format!("{key} is required for native vendor chat")));
             }
             vendor_effort(options)?;
-            let python = python_executable(
-                options
-                    .lore_python
-                    .as_deref()
-                    .unwrap_or(Path::new("python3")),
-            )?;
-            let name = options.engine.model_key();
-            command
-                .args(["--engine", name])
-                .arg("--lore-python")
-                .arg(python);
+            command.args(["--engine", options.engine.model_key()]);
             if let Some(model) = &model {
                 command.arg("--model").arg(model);
             }
@@ -620,7 +526,7 @@ fn spawn_inner(options: &LaunchOptions, fleet_runtime: Option<&Path>, environmen
             return Err(io::Error::other(format!(
                 "native daemon exited before startup ({status}); check {} dependencies",
                 match options.engine {
-                    Engine::Claude => "Claude SDK and sidecar",
+                    Engine::Claude => "Claude CLI and authentication",
                     Engine::Codex => "Codex authentication and LORE",
                     Engine::Fixture => "fixture",
                     Engine::DeepSeek | Engine::Glm => "vendor API key and LORE",
@@ -751,27 +657,7 @@ mod tests {
         let link = dir.path().join("link");
         symlink(&script, &link).unwrap();
         assert_eq!(executable(&link).unwrap(), script);
-        assert_eq!(python_executable(&link).unwrap(), link);
         assert!(executable(&dir.path().join("missing")).is_err());
-    }
-
-    #[test]
-    fn claude_sidecar_resolution_prefers_explicit_then_override_then_sibling() {
-        let dir = tempfile::tempdir().unwrap();
-        let executable = dir.path().join("doxa-rs");
-        let bundled = dir.path().join("doxa-claude-sidecar.py");
-        let override_path = dir.path().join("override.py");
-        let explicit = dir.path().join("explicit.py");
-        for path in [&bundled, &override_path, &explicit] {
-            fs::write(path, "# safe fixture\n").unwrap();
-        }
-        let mut options = LaunchOptions::default();
-        assert_eq!(claude_script_at(&options, None, &executable).unwrap(), bundled);
-        assert_eq!(claude_script_at(&options, Some(override_path.clone()), &executable).unwrap(), override_path);
-        options.claude_script = Some(explicit.clone());
-        assert_eq!(claude_script_at(&options, Some(override_path), &executable).unwrap(), explicit);
-        options.claude_script = Some(PathBuf::from("relative.py"));
-        assert!(claude_script_at(&options, None, &executable).is_err());
     }
 
     #[test]

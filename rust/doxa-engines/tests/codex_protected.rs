@@ -19,7 +19,8 @@ def read(): return json.loads(sys.stdin.readline())
 def send(x): print(json.dumps(x),flush=True)
 def notice(method,**params): send({'method':method,'params':dict(threadId='thread-actual',**params)})
 init=read(); assert init['method']=='initialize'
-send({'id':init['id'],'result':{'userAgent':'codex_cli_rs/'+('0.1.0' if mode=='version' else '0.156.1')}})
+agent='Codex Desktop/0.156.1 (Ubuntu 26.4.0; x86_64) dumb (doxa; 2.0.0-alpha.37)' if mode=='compact' else 'codex_cli_rs/'+('0.1.0' if mode=='version' else '0.156.1')
+send({'id':init['id'],'result':{'userAgent':agent}})
 assert read()['method']=='initialized'
 if mode=='version':
     # Any subsequent request is evidence of an unsafe initialization order.
@@ -81,13 +82,21 @@ else:
     assert operation['method']=='thread/compact/start' and operation['params']=={'threadId':'thread-actual'}
     send({'id':operation['id'],'result':{}})
     notice('turn/started',turn={'id':'turn-compact','status':'inProgress'})
-    run={'eventName':'preCompact','source':'sessionFlags','sourcePath':'/<session-flags>/config.toml','handlerType':'command','executionMode':'sync','status':'failed' if mode=='failed' else 'completed'}
+    run={'eventName':'preCompact','source':'sessionFlags','sourcePath':'/<session-flags>/config.toml','handlerType':'command','executionMode':'sync','status':'failed' if mode=='failed' else 'stopped' if mode.startswith('blocked') else 'completed'}
     if mode=='order': notice('item/completed',turnId='turn-compact',item={'id':'compact','type':'contextCompaction'})
     if mode=='foreign': send({'method':'hook/completed','params':{'threadId':'thread-other','turnId':'turn-compact','run':run}})
     elif mode=='stale-turn': notice('hook/completed',turnId='turn-other',run=run)
     else: notice('hook/completed',turnId='turn-compact',run=run)
-    notice('item/completed',turnId='turn-compact',item={'id':'compact','type':'contextCompaction'})
+    if not mode.startswith('blocked'):
+        notice('item/completed',turnId='turn-compact',item={'id':'compact','type':'contextCompaction'})
+        if mode=='compact': notice('thread/tokenUsage/updated',turnId='turn-compact',tokenUsage={'last':{'inputTokens':3,'outputTokens':4},'total':{'inputTokens':10,'outputTokens':20,'cachedInputTokens':2}})
+    if mode=='blocked-usage': notice('thread/tokenUsage/updated',turnId='turn-compact',tokenUsage={'last':{'inputTokens':3,'outputTokens':4},'total':{'inputTokens':10,'outputTokens':20}})
     notice('turn/completed',turn={'id':'turn-compact','status':'completed','error':None})
+    if mode=='blocked':
+        followup=read(); assert followup['method']=='turn/start'
+        send({'id':followup['id'],'result':{'turn':{'id':'turn-followup'}}})
+        Path('usable-after-blocked').write_text('verified')
+        notice('turn/completed',turn={'id':'turn-followup','status':'completed','error':None})
     if mode=='failed':
         # Driver must stop this process, rather than merely hiding success.
         import time
@@ -95,7 +104,7 @@ else:
 "#).unwrap();
     fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
     let gate_dir = dir.path().join("gate"); fs::create_dir(&gate_dir).unwrap(); fs::set_permissions(&gate_dir, fs::Permissions::from_mode(0o700)).unwrap();
-    let gate = CompactGate::prepare(&gate_dir, std::path::Path::new("/usr/bin/python3"), &dir.path().join("codex-home"), dir.path(), "doxa-fixture", "0.156.1").unwrap();
+    let gate = CompactGate::prepare(&gate_dir, &std::env::current_exe().unwrap(), &dir.path().join("codex-home"), dir.path(), "doxa-fixture", "0.156.1").unwrap();
     let options = AppServerOptions { executable, cwd:dir.path().to_owned(), model:None, sandbox:SandboxMode::WorkspaceWrite, resume_thread:None, turn_timeout:Duration::from_secs(3) };
     (dir, options, gate)
 }
@@ -123,15 +132,22 @@ async fn protected_initial_model_is_verified_before_any_turn() {
 
 #[tokio::test]
 async fn manual_compaction_binds_actual_thread_and_requires_review_before_completion() {
-    for mode in ["compact", "order", "failed", "foreign", "stale-turn"] {
+    for mode in ["compact", "order", "failed", "foreign", "stale-turn", "blocked"] {
         let (dir, options, gate) = fixture(mode);
         let mut driver = AppServerDriver::spawn_protected(options, str::to_owned, false, gate).await.unwrap();
         let manifest:Value=serde_json::from_slice(&fs::read(dir.path().join("gate/compact-session.json")).unwrap()).unwrap();
         assert_eq!(manifest["provider_thread"], "thread-actual");
         let mut events=Vec::new();
         let result=driver.compact(&CancellationToken::new(), |e| events.push(e)).await;
+        if mode == "blocked" {
+            assert!(matches!(result,Err(doxa_engines::codex_appserver::AppServerError::CompactionBlocked)));
+            assert_eq!(driver.thread_id(),"thread-actual");
+            assert!(driver.run_turn("fixture followup",&CancellationToken::new(),|_|{}).await.is_ok());
+            assert!(dir.path().join("usable-after-blocked").exists());
+        }
         assert_eq!(result.is_ok(), mode=="compact");
         assert_eq!(events.iter().any(|e| e.kind=="compaction_done"),mode=="compact");
+        if mode=="compact"{let done=events.iter().find(|event|event.kind=="turn_done").unwrap();assert_eq!(done.data["usage_complete"],true);assert_eq!(done.data["input_tokens"],10);assert_eq!(done.data["output_tokens"],20);}
         if mode=="failed" {
             tokio::time::sleep(Duration::from_millis(400)).await;
             assert!(!dir.path().join("survived-failed-hook").exists());
@@ -200,4 +216,16 @@ async fn codex_dynamic_aliases_route_all_canonical_handlers_and_refuse_unadverti
     }
     // Shared Claude MCP/vendor handler contracts retain their canonical names.
     assert_eq!(doxa_engines::peer_tools::definitions()[0]["name"], "mcp__doxa__peer_list");
+}
+
+#[tokio::test]
+async fn manual_compaction_never_invents_missing_or_inconsistent_accounting(){
+    for mode in ["compact-no-usage","blocked-usage"]{
+        let (_dir,options,gate)=fixture(mode);
+        let mut driver=AppServerDriver::spawn_protected(options,str::to_owned,false,gate).await.unwrap();
+        let mut events=vec![];let result=driver.compact(&CancellationToken::new(),|event|events.push(event)).await;
+        if mode=="compact-no-usage"{assert!(result.is_ok());let done=events.iter().find(|event|event.kind=="turn_done").unwrap();assert_eq!(done.data["usage_complete"],false);assert!(done.data["input_tokens"].is_null());}
+        else{assert!(result.is_err());assert!(!matches!(result,Err(doxa_engines::codex_appserver::AppServerError::CompactionBlocked)));assert!(!events.iter().any(|event|event.kind=="compaction_done"));}
+        driver.shutdown().await;
+    }
 }

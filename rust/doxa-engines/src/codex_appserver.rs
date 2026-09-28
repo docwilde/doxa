@@ -27,6 +27,17 @@ const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 const MAX_REASONING_BYTES: usize = 256 * 1024;
 const RPC_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// Read the provider's product/version prefix, never a client or platform suffix.
+fn provider_version(agent: &str) -> Option<&str> {
+    let prefix = agent.split('(').next()?.trim();
+    let (product, rest) = prefix.split_once('/')?;
+    if !matches!(product, "codex_cli_rs" | "Codex Desktop") { return None; }
+    let version = rest.split_whitespace().next()?;
+    let parts = version.split('.').collect::<Vec<_>>();
+    (parts.len() == 3 && parts.iter().all(|part| !part.is_empty() && part.bytes().all(|c| c.is_ascii_digit())))
+        .then_some(version)
+}
+
 #[derive(Clone, Debug)]
 pub struct AppServerOptions {
     pub executable: PathBuf,
@@ -43,6 +54,9 @@ pub enum AppServerError {
     Protocol(&'static str),
     Server(String),
     Cancelled,
+    /// A verified blocking PreCompact response stopped a manual compaction
+    /// before any context-compaction item, and its turn was fully drained.
+    CompactionBlocked,
     TimedOut,
 }
 
@@ -184,8 +198,7 @@ impl AppServerDriver {
         if driver.compact_gate.is_some() {
             // The server's build version is authoritative. The client version
             // in its suffix never becomes proof of the provider hook contract.
-            let version = initialized["userAgent"].as_str().and_then(|agent| agent.split_whitespace().next())
-                .and_then(|prefix| prefix.rsplit_once('/').map(|(_, version)| version));
+            let version = initialized["userAgent"].as_str().and_then(provider_version);
             if version != Some(crate::codex_compact::SUPPORTED_VERSION) {
                 return Err(AppServerError::Protocol("Codex build has no verified DOXA compaction hook contract"));
             }
@@ -702,6 +715,56 @@ fn normalize_tool_item(item: &Value) -> Option<Value> {
 #[cfg(test)]
 mod web_item_tests {
     use super::*;
+
+    #[test]
+    fn provider_version_uses_only_the_authoritative_product_prefix() {
+        let desktop = "Codex Desktop/0.156.1 (Ubuntu 26.4.0; x86_64) dumb (doxa; 2.0.0-alpha.37)";
+        assert_eq!(provider_version(desktop), Some(crate::codex_compact::SUPPORTED_VERSION));
+        assert_eq!(provider_version("codex_cli_rs/0.156.1"), Some(crate::codex_compact::SUPPORTED_VERSION));
+        for agent in [
+            "Codex Desktop/0.1.0 (doxa; 0.156.1)",
+            "codex_cli_rs/0.1.0 (client/0.156.1)",
+            "Codex Desktop (doxa/0.156.1)",
+            "codex_cli_rs (doxa; 0.156.1)",
+            "unknown/0.156.1 (doxa; 0.156.1)",
+            "doxa/0.156.1",
+            "Codex Desktop/unknown (doxa; 0.156.1)",
+            "Codex Desktop/0.156.1-client",
+        ] {
+            assert_ne!(provider_version(agent), Some(crate::codex_compact::SUPPORTED_VERSION), "{agent}");
+        }
+    }
+
+    /// Opt-in installed-provider probe: initialization and hook inventory only.
+    #[tokio::test]
+    #[ignore = "requires DOXA_CODEX_PROBE pointing to installed Codex 0.156.1"]
+    async fn installed_codex_hook_inventory_verifies_without_starting_a_thread() {
+        use std::os::unix::fs::PermissionsExt;
+        let executable = PathBuf::from(std::env::var_os("DOXA_CODEX_PROBE").expect("explicit installed provider"));
+        let scratch = PathBuf::from(std::env::var_os("TMPDIR").expect("real disk scratch"));
+        let dir = tempfile::tempdir_in(scratch).unwrap();
+        let home = dir.path().join("home");
+        let gate_dir = dir.path().join("gate");
+        let codex_home = dir.path().join("codex-home");
+        for path in [&home, &gate_dir, &codex_home] {
+            std::fs::create_dir(path).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        // Run this ignored probe alone: no account settings or credentials are
+        // inherited from the normal user config directory.
+        std::env::set_var("HOME", &home);
+        std::env::set_var("CODEX_HOME", &codex_home);
+        std::env::remove_var("OPENAI_API_KEY");
+        let gate = crate::codex_compact::CompactGate::prepare(&gate_dir,
+            &std::env::current_exe().unwrap(), &codex_home, dir.path(), "installed-probe",
+            crate::codex_compact::SUPPORTED_VERSION).unwrap();
+        let options = AppServerOptions { executable, cwd: dir.path().to_owned(), model: None,
+            sandbox: SandboxMode::WorkspaceWrite, resume_thread: None, turn_timeout: Duration::from_secs(5) };
+        let mut driver = timeout(Duration::from_secs(20),
+            AppServerDriver::initialize_with_gate(options, str::to_owned, Some(gate))).await.unwrap().unwrap();
+        assert!(driver.thread_id.is_none(), "inventory probe must never start a provider thread");
+        driver.shutdown().await;
+    }
 
     #[test]
     fn generated_codex_web_search_actions_survive_adapter_and_completion() {

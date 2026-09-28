@@ -28,7 +28,7 @@ pub fn parse_facts(rows:Vec<serde_json::Value>,scope:&str)->Result<Vec<Fact>,&'s
     }).collect()
 }
 
-pub fn fetch_facts(_python:&Path,cwd:&Path)->Result<Vec<Fact>,&'static str> {
+pub fn fetch_facts(cwd:&Path)->Result<Vec<Fact>,&'static str> {
     let (project,is_repo)=scope_path(cwd);
     let mut lore=doxa_lore::LoreClient::open(Duration::from_secs(3)).map_err(|_|"LORE unavailable")?;
     let user=lore.memory_entries(cwd.to_str().ok_or("Invalid session directory")?,"user").map_err(|_|"User facts unavailable")?;

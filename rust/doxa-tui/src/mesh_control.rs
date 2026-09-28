@@ -1,37 +1,8 @@
-//! Owned loopback graph bridge to the packaged Python 1.19 mesh renderer.
+//! Owned native loopback graph reader with compiled browser assets.
 //! Only the selected private ledger is readable; the token lives in memory.
-use crate::{fleet_view, launch};
-use std::{fs, io::{self, BufRead, BufReader, Read, Write}, os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt}, path::{Path, PathBuf}, process::{Child, Command, Stdio}, sync::mpsc, time::{Duration, Instant}};
-use serde_json::Value;
+use crate::fleet_view;
+use std::{fs, io::self, os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt}, path::{Path, PathBuf}, sync::mpsc, time::Duration};
 
-const ADAPTER: &str = r#"
-import os, sys, json, stat
-from pathlib import Path
-if sys.argv[2]: sys.path.insert(0, sys.argv[2])
-from doxa import meshgraph
-path = Path(sys.argv[1])
-directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-info = os.fstat(directory)
-if info.st_uid != os.getuid() or info.st_mode & 0o077: raise PermissionError('unsafe mesh directory')
-def safe_open(name, mode):
-    if Path(name) != path or mode != 'rb': raise PermissionError('unexpected mesh file')
-    fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
-    info = os.fstat(fd)
-    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077 or info.st_nlink != 1 or info.st_size > 134217728:
-        os.close(fd); raise PermissionError('unsafe mesh ledger')
-    return os.fdopen(fd, 'rb')
-meshgraph.open = safe_open
-with meshgraph.MeshServer(path=path) as server:
-    print(json.dumps({'url':server.url}), flush=True)
-    for line in sys.stdin:
-        if line.strip() == 'stop': break
-        if line.strip() in ('open', 'open-force'):
-            from doxa import config
-            if line.strip() == 'open-force' or config.mesh_open_browser():
-                import webbrowser
-                webbrowser.open(server.url)
-os.close(directory)
-"#;
 fn invalid(message: &str) -> io::Error { io::Error::new(io::ErrorKind::InvalidInput, message) }
 fn private_directory(path: &Path) -> io::Result<()> {
     let info = fs::symlink_metadata(path)?;
@@ -64,11 +35,11 @@ pub fn run_ledger(root: &Path, id: &str) -> io::Result<PathBuf> {
     Ok(expected)
 }
 /// At most one handle is owned by a window; callers must stop it before
-/// switching ledgers. Drop closes the control pipe and reaps the child.
-pub struct MeshServer { child: Option<Child>, pub ledger: PathBuf, url: String }
+/// switching ledgers. Drop closes every connection and joins the server.
+pub struct MeshServer { server: crate::mesh_server::Server, pub ledger: PathBuf }
 impl MeshServer {
     pub fn start(ledger: &Path) -> io::Result<Self> { Self::start_at(ledger, None) }
-    fn start_at(ledger: &Path, working_directory: Option<&Path>) -> io::Result<Self> {
+    fn start_at(ledger: &Path, _working_directory: Option<&Path>) -> io::Result<Self> {
         if !ledger.is_absolute() || ledger.file_name().is_none() { return Err(invalid("mesh ledger must be absolute")); }
         let parent = ledger.parent().ok_or_else(|| invalid("mesh ledger has no directory"))?;
         if fs::symlink_metadata(parent).is_err_and(|error| error.kind() == io::ErrorKind::NotFound) {
@@ -81,45 +52,19 @@ impl MeshServer {
                 return Err(invalid("unsafe mesh ledger"));
             }
         }
-        let python = launch::python_executable(&std::env::var_os("DOXA_LORE_PYTHON").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("python3")))?;
-        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let source = if source.join("doxa/meshgraph.py").is_file() { fs::canonicalize(source)? } else { PathBuf::new() };
-        // Isolated Python excludes the working directory, PYTHONPATH and user
-        // site. Only the compiled checkout bootstrap or packaged sidecar can
-        // supply DOXA; the currently opened project cannot shadow imports.
-        let mut command = Command::new(python); command.args(["-I", "-u", "-c", ADAPTER]).arg(ledger).arg(source)
-            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
-        if let Some(directory) = working_directory { command.current_dir(directory); }
-        let mut child = command.spawn()?;
-        let output = child.stdout.take().unwrap(); let (sender, receiver) = mpsc::channel();
-        std::thread::spawn(move || { let mut line = String::new(); let result = BufReader::new(output).take(4096).read_line(&mut line).map(|_| line); let _ = sender.send(result); });
-        let mut owned = Self { child:Some(child), ledger:ledger.to_owned(), url:String::new() };
-        let line = receiver.recv_timeout(Duration::from_secs(5)).map_err(|_| io::Error::other("mesh renderer startup timed out"))??;
-        let value: Value = serde_json::from_str(&line).map_err(|_| io::Error::other("mesh renderer did not start"))?;
-        let url = value["url"].as_str().ok_or_else(|| invalid("mesh renderer URL missing"))?;
-        let rest = url.strip_prefix("http://127.0.0.1:").ok_or_else(|| invalid("mesh renderer is not loopback"))?;
-        let (port, token) = rest.split_once('/').ok_or_else(|| invalid("mesh renderer token missing"))?;
-        if port.parse::<u16>().ok().filter(|p| *p != 0).is_none() || token.trim_end_matches('/').len() < 24 || !token.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-'|'_'|'/')) { return Err(invalid("invalid mesh renderer URL")); }
-        owned.url = url.to_owned(); Ok(owned)
+        let server = crate::mesh_server::Server::start(ledger)?;
+        Ok(Self {server,ledger:ledger.to_owned()})
     }
-    pub fn url(&self) -> &str { &self.url }
-    /// Honors Python's existing config/env browser setting, default off.
+    pub fn url(&self) -> &str { &self.server.url }
     pub fn open_if_configured(&mut self) -> io::Result<()> {
-        self.child.as_mut().and_then(|c| c.stdin.as_mut()).ok_or_else(|| invalid("mesh renderer stopped"))?.write_all(b"open\n")
-    }
-    pub fn open_browser(&mut self) -> io::Result<()> {
-        self.child.as_mut().and_then(|c| c.stdin.as_mut()).ok_or_else(|| invalid("mesh renderer stopped"))?.write_all(b"open-force\n")
-    }
-    pub fn stop(&mut self) -> io::Result<()> {
-        let Some(mut child) = self.child.take() else { return Ok(()); };
-        if let Some(mut input) = child.stdin.take() { let _ = input.write_all(b"stop\n"); }
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while child.try_wait()?.is_none() {
-            if Instant::now() >= deadline { let _ = child.kill(); child.wait()?; break; }
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        if crate::settings::enabled("mesh_open_browser") {self.open_browser()?;}
         Ok(())
     }
+    pub fn open_browser(&mut self) -> io::Result<()> {
+        crate::operations::open_browser(self.url())
+    }
+    pub fn stop(&mut self) -> io::Result<()> { self.server.stop(); Ok(()) }
+
 }
 impl Drop for MeshServer { fn drop(&mut self) { let _ = self.stop(); } }
 
@@ -179,7 +124,7 @@ impl Drop for WindowMesh {
 
 static STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 extern "C" fn stop_signal(_: libc::c_int) { STOP.store(true, std::sync::atomic::Ordering::Relaxed); }
-/// Foreground CLI owner: Ctrl-C stops and reaps the renderer, releasing port.
+/// Foreground CLI owner: Ctrl-C joins the server, releasing its port.
 pub fn serve(ledger: &Path) -> io::Result<()> {
     STOP.store(false, std::sync::atomic::Ordering::Relaxed);
     let interrupt = unsafe { libc::signal(libc::SIGINT, stop_signal as *const () as libc::sighandler_t) };
@@ -191,7 +136,7 @@ pub fn serve(ledger: &Path) -> io::Result<()> {
         println!("mesh: {}\n{}\nCtrl-C stops this loopback renderer.", ledger.display(), server.url());
         if !STOP.load(std::sync::atomic::Ordering::Relaxed) { server.open_if_configured()?; }
         while !STOP.load(std::sync::atomic::Ordering::Relaxed) {
-            if server.child.as_mut().unwrap().try_wait()?.is_some() { return Err(io::Error::other("mesh renderer exited")); }
+            if !server.server.running() { return Err(io::Error::other("mesh renderer exited")); }
             std::thread::sleep(Duration::from_millis(100));
         }
         server.stop()
@@ -203,7 +148,7 @@ pub fn serve(ledger: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::TcpStream;
+    use std::{net::TcpStream,io::{Read,Write},time::Instant};
     #[test]
     fn window_mesh_is_nonblocking_and_releases_renderer_on_window_close() {
         let root = tempfile::tempdir().unwrap();

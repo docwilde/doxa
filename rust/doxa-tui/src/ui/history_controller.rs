@@ -539,9 +539,6 @@ impl App {
                     self.notice = "Resume unavailable: no saved transcript for this session".into();
                     return;
                 };
-                let python = std::env::var_os("DOXA_LORE_PYTHON")
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| PathBuf::from("python3"));
                 let (tx, rx) = mpsc::sync_channel(1);
                 self.resume_pending = Some((
                     self.active_group,
@@ -551,7 +548,7 @@ impl App {
                     rx,
                 ));
                 std::thread::spawn(move || {
-                    let result = history::resume_plan(&entry, &python);
+                    let result = history::resume_plan(&entry);
                     let _ = tx.send((id, result));
                 });
                 self.notice = "Checking saved conversation…".into();

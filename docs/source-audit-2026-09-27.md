@@ -214,3 +214,19 @@ the installed native-carrier and SDK adapter checks.
 `MultiBridge.frames` now yields `WorkerFrame`; direct bridge consumers can
 handle those variants or call `into_legacy_value` during migration. Legacy
 `run_with_frames` and JSON channel entrypoints remain available without relays.
+
+## Native runtime follow-up in alpha.37
+
+The Claude SDK adapter, mesh subprocess, remote peer bridge, compaction hook,
+review supervisor, plugin inventory and session spawner have native replacements.
+Claude controls use the CLI's catalog/settings contract; shared session spawning
+uses one provider-independent host seam and canonical review owner. Hyper handles
+HTTP parsing and SSE; Reqwest handles remote clients. Installed runtime paths
+require no Python interpreter.
+
+Compaction pins the native carrier inode and exact transcript bytes. Original
+vendor history remains durable beneath its reviewed summary checkpoint. Desktop
+asset creation and publication use the same pinned directory descriptor. Native
+installation markers reject symlinks/hardlinks and unsafe permissions. Controlled
+provider, filesystem and installed-launcher fixtures cover these boundaries;
+live-provider and gallery checks retain their explicit provenance.

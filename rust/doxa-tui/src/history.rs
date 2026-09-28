@@ -155,7 +155,7 @@ pub fn discover() -> Vec<OfflineSession> {
 
 /// Resolve a saved tab through canonical project identity, then open only its
 /// exact owned transcript. A missing managed checkout can use its recorded cwd.
-pub fn saved_session(id: &str, cwd: &Path, _python: &Path) -> Option<OfflineSession> {
+pub fn saved_session(id: &str, cwd: &Path) -> Option<OfflineSession> {
     if !crate::discovery::valid_id(id) || !cwd.is_absolute() { return None; }
     let root = projects_dir()?;
     if let Ok(mut lore) = LoreClient::open(Duration::from_secs(3)) {
@@ -286,7 +286,7 @@ fn discover_in(root: &Path, prefix: Option<&str>, query: Option<&str>) -> Vec<Of
 
 /// Verify the session's recorded cwd maps back to this transcript directory,
 /// then require the original engine's replay artefact.
-pub fn resume_plan(entry: &OfflineSession, _python: &Path) -> Result<LaunchOptions, &'static str> {
+pub fn resume_plan(entry: &OfflineSession) -> Result<LaunchOptions, &'static str> {
     let root = projects_dir().ok_or("transcript root unavailable")?;
     let claude = claude_store_root().ok_or("DOXA home unavailable")?;
     resume_plan_in(entry, &root, &claude, &|| LoreClient::open(Duration::from_secs(3)))

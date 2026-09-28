@@ -502,7 +502,7 @@ fn detailed_plugin_rows(installed: &serde_json::Value, settings: &serde_json::Va
     rows
 }
 
-/// Run the installed canonical plugin policy without creating an SDK session.
+/// Run the installed canonical plugin policy without creating a provider session.
 pub fn plugins_reload() -> io::Result<String> {
     plugins_bridge(true)
 }
@@ -513,8 +513,8 @@ pub struct PluginCommand { pub name: String, pub summary: String, pub usage: Str
 pub fn plugin_commands() -> io::Result<Vec<PluginCommand>> { plugin_commands_cancel(&AtomicBool::new(false)) }
 fn plugin_commands_cancel(cancel: &AtomicBool) -> io::Result<Vec<PluginCommand>> {
     if !adoption_enabled()? { return Ok(Vec::new()); }
-    let text = plugin_bridge_arg_cancel("--plugin-commands", cancel)?;
-    let rows: Vec<PluginCommand> = serde_json::from_str(&text).map_err(|_| io::Error::other("Invalid plugin command inventory"))?;
+    let values = doxa_claude::isolation::plugin_commands(||cancel.load(std::sync::atomic::Ordering::Acquire))?;
+    let rows: Vec<PluginCommand> = values.into_iter().map(serde_json::from_value).collect::<Result<_,_>>().map_err(|_| io::Error::other("Invalid plugin command inventory"))?;
     if rows.len() > 100 || rows.iter().any(|row| !row.name.starts_with('/') || row.name.len() < 2 || row.name.len() > 128
         || !row.name[1..].bytes().all(|c| c.is_ascii_alphanumeric() || b"._:-".contains(&c))
         || row.summary.len() > 1024 || row.usage.len() > 1024 || row.plugin.len() > 128
@@ -541,42 +541,8 @@ impl PluginRefresh {
 impl Drop for PluginRefresh { fn drop(&mut self) { self.cancel.store(true, std::sync::atomic::Ordering::Release); if let Some(worker) = self.worker.take() { let _ = worker.join(); } } }
 
 pub fn plugins_bridge(reload: bool) -> io::Result<String> {
-    plugin_bridge_arg(if reload { "--reload-plugins" } else { "--plugins-report" })
-}
-fn plugin_bridge_arg(argument: &str) -> io::Result<String> { plugin_bridge_arg_cancel(argument, &AtomicBool::new(false)) }
-fn plugin_bridge_arg_cancel(argument: &str, cancel: &AtomicBool) -> io::Result<String> {
-    let (python, script) = crate::launch::claude_dependencies(&Default::default())?;
-    let mut child = Command::new(python).arg("-I").arg(script)
-        .arg(argument)
-        .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null())
-        .process_group(0).spawn()?;
-    let stdout = child.stdout.take().unwrap();
-    let reader = thread::spawn(move || {
-        let mut bytes = Vec::new();
-        stdout.take(65537).read_to_end(&mut bytes).map(|_| bytes)
-    });
-    let deadline = Instant::now() + Duration::from_secs(30);
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break Ok(Some(status)),
-            Ok(None) => {},
-            Err(error) => break Err(error),
-        }
-        if Instant::now() >= deadline || cancel.load(std::sync::atomic::Ordering::Acquire) {
-            unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL); }
-            let _ = child.wait(); break Ok(None);
-        }
-        thread::sleep(Duration::from_millis(20));
-    };
-    // Kill descendants before joining a reader: a leftover inherited stdout
-    // must not hold this operation open after its leader exits.
-    unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL); }
-    let _ = child.wait();
-    let bytes = reader.join().map_err(|_| io::Error::other("Plugin inventory reader failed"))??;
-    let status = status?;
-    if status.is_none() { return Err(io::Error::new(io::ErrorKind::TimedOut, "Plugin inventory timed out")); }
-    if !status.unwrap().success() || bytes.len() > 65536 { return Err(io::Error::other("Plugin inventory failed; verify installed Python/LORE dependencies")); }
-    String::from_utf8(bytes).map_err(|_| io::Error::other("Invalid plugin inventory response"))
+    if reload && doxa_claude::isolation::adoption_enabled() { doxa_claude::isolation::adopted_plugins()?; }
+    plugins_report()
 }
 
 pub fn plugins_report() -> io::Result<String> {
@@ -591,7 +557,7 @@ pub fn plugins_report() -> io::Result<String> {
     let on = adoption_enabled()?;
     let rows = detailed_plugin_rows(&installed, &settings, on);
     if rows.is_empty() { Ok(format!("Claude plugin adoption: {} · no Claude Code plugins found", if on { "ON" } else { "OFF" })) }
-    else { Ok(format!("Claude plugin adoption: {} · refreshed from CLI registry\n{}\n\nChanges apply to new sessions; the sidecar rebuilds sanitized copies at launch.", if on { "ON" } else { "OFF" }, rows.join("\n"))) }
+    else { Ok(format!("Claude plugin adoption: {} · refreshed from CLI registry\n{}\n\nChanges apply to new sessions; the native Claude host rebuilds sanitized copies at launch.", if on { "ON" } else { "OFF" }, rows.join("\n"))) }
 }
 
 #[cfg(test)]
@@ -758,4 +724,12 @@ pub fn setup_interactive() -> io::Result<()> {
     }
     println!("setup complete\n{}", setup_report()?);
     Ok(())
+}
+
+/// Launch a browser without inheriting terminal streams; one worker reaps it.
+pub fn open_browser(url: &str) -> io::Result<()> {
+    #[cfg(target_os="macos")] let opener="open";
+    #[cfg(not(target_os="macos"))] let opener="xdg-open";
+    let mut child=Command::new(opener).arg(url).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()?;
+    std::thread::spawn(move||{let _=child.wait();}); Ok(())
 }

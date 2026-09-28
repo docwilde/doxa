@@ -1,7 +1,71 @@
 //! One bounded startup advisory. No provider connection or Python identity.
-use std::{fs, io::{self, Read}, os::unix::{fs::MetadataExt, io::AsRawFd, process::CommandExt}, path::Path, process::{Command, Stdio}, sync::{atomic::{AtomicBool, Ordering}, mpsc::{self, Receiver, TryRecvError}, Arc}, thread, time::{Duration, Instant}};
+use std::{fs, io::{self, Read}, os::unix::{fs::{MetadataExt, OpenOptionsExt}, io::AsRawFd, process::CommandExt}, path::Path, process::{Command, Stdio}, sync::{atomic::{AtomicBool, Ordering}, mpsc::{self, Receiver, TryRecvError}, Arc}, thread, time::{Duration, Instant}};
 
 pub const DEFAULT_REPO: &str = "https://github.com/docwilde/doxa";
+
+/// Install the desktop entry and compiled icons without a scripting runtime.
+pub fn install_launcher(command: &Path) -> io::Result<std::path::PathBuf> {
+    if !command.is_absolute() || !command.is_file() {return Err(io::Error::other("launcher must be an absolute file"));}
+    let word=desktop_word(&command.to_string_lossy())?;
+    let home=std::env::var_os("HOME").ok_or_else(||io::Error::other("HOME is unavailable"))?;
+    let data=std::env::var_os("XDG_DATA_HOME").filter(|v|!v.is_empty()).map(std::path::PathBuf::from).unwrap_or_else(||std::path::PathBuf::from(home).join(".local/share"));
+    if !data.is_absolute(){return Err(io::Error::other("XDG_DATA_HOME must be absolute"));}
+    let write=|path:&Path,bytes:&[u8]|->io::Result<()> {
+        let parent=path.parent().ok_or_else(||io::Error::other("missing asset directory"))?;
+        let name=path.file_name().ok_or_else(||io::Error::other("missing asset name"))?;
+        LauncherDir::open(parent)?.write(name,bytes)
+    };
+    let desktop=data.join("applications/doxa.desktop");
+    write(&desktop,format!("[Desktop Entry]\nType=Application\nName=DOXA\nGenericName=Agent terminal\nComment=Agent terminal with reviewed memory\nExec={word}\nIcon=doxa\nTerminal=true\nCategories=Development;Utility;\nKeywords=claude;codex;agent;terminal;lore;memory;\nX-DOXA-Version={}\n",env!("CARGO_PKG_VERSION")).as_bytes())?;
+    write(&data.join("icons/hicolor/512x512/apps/doxa.png"),include_bytes!("../../../assets/icon.png"))?;
+    write(&data.join("icons/hicolor/scalable/apps/doxa.svg"),include_bytes!("../../../assets/icon.svg"))?;
+    for(mut command,path)in [(Command::new("update-desktop-database"),data.join("applications")),(Command::new("gtk-update-icon-cache"),data.join("icons/hicolor"))] {
+        let _=command.arg(path).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
+    }
+    Ok(desktop)
+}
+/// Pin both temporary creation and publication to the checked directory inode.
+/// A renamed/replaced ancestor must not redirect a desktop asset write.
+struct LauncherDir(fs::File);
+impl LauncherDir {
+    fn open(path:&Path)->io::Result<Self> {
+        use std::os::unix::fs::DirBuilderExt;
+        // Explicit permissions keep fresh XDG paths safe under a group-writable
+        // caller umask; existing unsafe directories must still be refused.
+        fs::DirBuilder::new().recursive(true).mode(0o755).create(path)?;
+        let file=fs::OpenOptions::new().read(true)
+            .custom_flags(libc::O_DIRECTORY|libc::O_NOFOLLOW|libc::O_CLOEXEC).open(path)?;
+        let meta=file.metadata()?;
+        if !meta.is_dir() || meta.uid()!=unsafe {libc::geteuid()} || meta.mode()&0o022!=0 {
+            return Err(io::Error::other("unsafe launcher directory"));
+        }
+        Ok(Self(file))
+    }
+    fn write(&self,name:&std::ffi::OsStr,bytes:&[u8])->io::Result<()> {
+        use std::{ffi::CString,os::fd::FromRawFd,io::Write};
+        if name.as_encoded_bytes().contains(&b'/') {return Err(io::Error::other("invalid asset name"));}
+        let target=CString::new(name.as_encoded_bytes())?;
+        let mut random=[0u8;16];fs::File::open("/dev/urandom")?.read_exact(&mut random)?;
+        let temporary=CString::new(format!(".doxa-{}",random.iter().map(|b|format!("{b:02x}")).collect::<String>()))?;
+        let directory=self.0.as_raw_fd();
+        let fd=unsafe {libc::openat(directory,temporary.as_ptr(),libc::O_WRONLY|libc::O_CREAT|libc::O_EXCL|libc::O_NOFOLLOW|libc::O_CLOEXEC,0o600)};
+        if fd<0 {return Err(io::Error::last_os_error());}
+        let mut file=unsafe {fs::File::from_raw_fd(fd)};
+        let result=(|| {
+            file.write_all(bytes)?;file.sync_all()?;
+            if unsafe {libc::renameat(directory,temporary.as_ptr(),directory,target.as_ptr())}!=0 {return Err(io::Error::last_os_error());}
+            self.0.sync_all()
+        })();
+        if result.is_err(){unsafe {libc::unlinkat(directory,temporary.as_ptr(),0);}}
+        result
+    }
+}
+fn desktop_word(value:&str)->io::Result<String> {
+    if value.contains('=') || value.chars().any(char::is_control){return Err(io::Error::other("launcher path cannot be represented in desktop entry"));}
+    // Desktop entry string escaping is decoded before Exec argument escaping.
+    let escaped=value.replace('%',"%%").replace('\\',"\\\\\\\\").replace('"',"\\\\\"").replace('`',"\\\\`").replace('$',"\\\\$");
+    Ok(format!("\"{escaped}\""))
+}
 const LIMIT: usize = 4096;
 const TIMEOUT: Duration = Duration::from_secs(8);
 
@@ -59,10 +123,22 @@ fn repo_display(repo: &str) -> String {
     }
     display(repo)
 }
-fn marker(executable: &Path) -> io::Result<Option<String>> {
+pub fn installed_commit(executable: &Path) -> io::Result<Option<String>> {
     let bin = executable.parent().ok_or_else(|| io::Error::other("executable directory unavailable"))?;
-    let pointer = bin.join(".doxa-sidecar-current");
     if executable.file_name().is_none_or(|name| name != "doxa-rs") { return Ok(None); }
+    let native = bin.join(".doxa-install-sha");
+    match std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(&native) {
+        Ok(file) => {
+            let metadata=file.metadata()?;
+            if !metadata.is_file() || metadata.uid()!=unsafe {libc::geteuid()} || metadata.nlink()!=1 || metadata.len()>128 || metadata.mode()&0o077!=0 {return Err(io::Error::other("invalid installation marker"));}
+            let mut value=String::new();file.take(129).read_to_string(&mut value)?;
+            return sha(&value).map(Some).ok_or_else(||io::Error::other("invalid installation commit"));
+        },
+        Err(error) if error.kind()==io::ErrorKind::NotFound=>{},
+        Err(error)=>return Err(error),
+    }
+    // Read an older installation's marker so `doxa update` can migrate it.
+    let pointer = bin.join(".doxa-sidecar-current");
     match fs::symlink_metadata(&pointer) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),
@@ -72,11 +148,12 @@ fn marker(executable: &Path) -> io::Result<Option<String>> {
     let target = fs::read_link(&pointer)?;
     let target = if target.is_absolute() { target } else { bin.join(target) };
     let path = target.parent().ok_or_else(|| io::Error::other("sidecar directory unavailable"))?.join(".doxa-install-sha");
-    let metadata = fs::symlink_metadata(&path)?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 128 || metadata.nlink() != 1 {
+    let file=std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW|libc::O_NONBLOCK).open(&path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len()>128 || metadata.nlink()!=1 || metadata.uid()!=unsafe {libc::geteuid()} {
         return Err(io::Error::other("invalid installation marker"));
     }
-    let mut value = String::new(); fs::File::open(path)?.take(129).read_to_string(&mut value)?;
+    let mut value = String::new(); file.take(129).read_to_string(&mut value)?;
     if value.len() > 128 { return Err(io::Error::other("invalid installation marker")); }
     sha(&value).map(Some).ok_or_else(|| io::Error::other("invalid installation commit"))
 }
@@ -85,7 +162,7 @@ fn measure(executable: &Path, source: &Path, config: &Path, repo: &str, skip: bo
         format!("Platform · {} ({})", std::env::consts::OS, std::env::consts::ARCH),
         format!("Config · {}{}", display(&config.to_string_lossy()), if config.exists() { "" } else { " (not written yet)" }),
         format!("Update source · {} main", repo_display(repo))];
-    let installed = marker(executable);
+    let installed = installed_commit(executable);
     let local = match installed {
         Ok(Some(value)) => { rows.push(format!("Installed commit · {value}")); Some(value) }
         Err(_) => { rows.push("Installed commit · unavailable".into()); None }
@@ -164,6 +241,25 @@ mod tests {
     }
     fn script(root: &Path, text: &str) -> PathBuf {
         let path = root.join("git-fixture"); fs::write(&path, format!("#!/bin/sh\n{text}\n")).unwrap(); fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap(); path
+    }
+    #[test]
+    fn native_marker_and_desktop_writes_refuse_links_and_pin_the_directory() {
+        let root=tempfile::tempdir().unwrap();
+        let bin=root.path().join("bin");fs::create_dir(&bin).unwrap();
+        let marker=bin.join(".doxa-install-sha");fs::write(&marker,A).unwrap();
+        fs::set_permissions(&marker,fs::Permissions::from_mode(0o600)).unwrap();
+        let exe=bin.join("doxa-rs");assert_eq!(installed_commit(&exe).unwrap(),Some(A.into()));
+        fs::hard_link(&marker,bin.join("linked")).unwrap();assert!(installed_commit(&exe).is_err());
+        fs::remove_file(&marker).unwrap();symlink(bin.join("linked"),&marker).unwrap();assert!(installed_commit(&exe).is_err());
+        let parent=root.path().join("applications");fs::create_dir(&parent).unwrap();
+        fs::set_permissions(&parent,fs::Permissions::from_mode(0o700)).unwrap();
+        let writer=LauncherDir::open(&parent).unwrap();let moved=root.path().join("original");
+        fs::rename(&parent,&moved).unwrap();fs::create_dir(&parent).unwrap();
+        writer.write(std::ffi::OsStr::new("doxa.desktop"),b"native").unwrap();
+        assert_eq!(fs::read(moved.join("doxa.desktop")).unwrap(),b"native");
+        assert!(!parent.join("doxa.desktop").exists());
+        assert!(desktop_word("/path/line\nbreak").is_err());
+        assert_eq!(desktop_word("/path/100%/doxa").unwrap(),"\"/path/100%%/doxa\"");
     }
     #[test]
     fn installed_identity_skip_and_failures_never_claim_current() {

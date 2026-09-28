@@ -17,7 +17,7 @@ fn codex_resume_passes_exact_session_and_explicit_resume_flag() {
     fs::write(home.join("config.toml"), "[models]\ncodex = 'configured-model'\n").unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_doxa-rs"))
         .args(["new", "--engine", "codex", "--resume", "saved-1", "--codex-bin", codex.to_str().unwrap(),
-            "--lore-python", "/usr/bin/python3"])
+            ])
         .env("DOXA_DAEMON_BIN", &daemon)
         .env("DOXA_CAPTURE_ARGS", &capture)
         .env("DOXA_RUNTIME_DIR", dir.path().join("runtime"))

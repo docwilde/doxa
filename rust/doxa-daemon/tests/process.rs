@@ -89,6 +89,41 @@ fn wait_until(mut predicate: impl FnMut() -> bool) {
         thread::sleep(Duration::from_millis(10));
     }
 }
+const CLAUDE_SESSION: &str = "0b256c09-8d74-4865-9be0-4e6d24384551";
+// Executable stream-json fixtures are protocol peers, not SDK shims. They parse
+// the same exact control envelopes as the installed Claude Code CLI.
+fn claude_fixture(path: &Path, setup: &str, body: &str) {
+    executable(path, &format!(r#"#!/usr/bin/python3
+import json,sys,os,time,signal
+from pathlib import Path
+root=Path(__file__).parent
+args=sys.argv[1:]
+session=args[args.index('--resume')+1] if '--resume' in args else args[args.index('--session-id')+1]
+model=args[args.index('--model')+1] if '--model' in args else 'opus'
+effort=args[args.index('--effort')+1] if '--effort' in args else 'high'
+def emit(row): print(json.dumps(row),flush=True)
+def result(error=False,cost=0): emit({{'type':'result','session_id':session,'is_error':error,'total_cost_usd':cost,'usage':{{'input_tokens':2,'output_tokens':3}}}})
+def delta(text): emit({{'type':'stream_event','session_id':session,'event':{{'type':'content_block_delta','delta':{{'type':'text_delta','text':text}}}}}})
+{setup}
+for line in sys.stdin:
+ frame=json.loads(line)
+ if frame['type']=='control_request':
+  request=frame['request']; sub=request['subtype']; response={{}}
+  if sub=='initialize': response={{'models':[{{'value':name,'supportsEffort':True,'supportedEffortLevels':['low','medium','high','max']}} for name in ['opus','haiku','fixture-claude']]}}
+  elif sub=='get_settings': response={{'applied':{{'model':model,'effort':effort}}}}
+  elif sub=='set_model': model=request['model']
+  elif sub=='apply_flag_settings': effort=request['settings']['effortLevel']
+  elif sub=='set_permission_mode': response={{'mode':'default' if request['mode']=='manual' else request['mode']}}
+  elif sub=='get_context_usage': response={{'totalTokens':123,'maxTokens':1000,'percentage':12.3,'model':model,'categories':[]}}
+  emit({{'type':'control_response','response':{{'subtype':'success','request_id':frame['request_id'],'response':response}}}})
+  if sub=='interrupt': result(True)
+ {body}
+"#));
+}
+fn claude_receive_until(reader: &mut BufReader<UnixStream>, predicate: impl Fn(&Value)->bool)->Value {
+    loop { let frame=receive(reader); if predicate(&frame) { return frame; } }
+}
+
 struct Process {
     child: Child,
     registry: PathBuf,
@@ -131,13 +166,12 @@ impl Process {
     fn start_codex(runtime: &Path, codex: &Path, python: &Path) -> Self {
         Self::start_codex_with_inbound(runtime, codex, python, false)
     }
-    fn start_codex_appserver(runtime: &Path, codex: &Path, python: &Path, resume: bool) -> Self {
+    fn start_codex_appserver(runtime: &Path, codex: &Path, _fixture_interpreter: &Path, resume: bool) -> Self {
         let mut command = daemon_command();
         command.args([
             "--runtime-dir", runtime.to_str().unwrap(), "--cwd", runtime.to_str().unwrap(),
             "--session-id", "codex-session", "--linger", "10", "--engine", "codex",
-            "--codex-bin", codex.to_str().unwrap(), "--lore-python", python.to_str().unwrap(),
-            "--resume", if resume { "true" } else { "false" },
+            "--codex-bin", codex.to_str().unwrap(), "--resume", if resume { "true" } else { "false" },
         ]).stdout(Stdio::null()).stderr(Stdio::piped())
             .env("DOXA_HOME", runtime.join("home"))
             .env_remove("DOXA_CODEX_APPSERVER");
@@ -148,7 +182,7 @@ impl Process {
         let entry: Value = serde_json::from_slice(&fs::read(&registry).unwrap()).unwrap();
         Self { child, registry, socket: PathBuf::from(entry["daemon_socket"].as_str().unwrap()) }
     }
-    fn start_codex_with_inbound(runtime: &Path, codex: &Path, python: &Path, inbound: bool) -> Self {
+    fn start_codex_with_inbound(runtime: &Path, codex: &Path, _fixture_interpreter: &Path, inbound: bool) -> Self {
         let mut command = daemon_command();
         command
             .args([
@@ -164,9 +198,7 @@ impl Process {
                 "codex",
                 "--codex-bin",
                 codex.to_str().unwrap(),
-                "--lore-python",
-                python.to_str().unwrap(),
-            ])
+                ])
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .env("DOXA_HOME", runtime.join("home"))
@@ -195,14 +227,12 @@ impl Process {
                 "--cwd",
                 runtime.to_str().unwrap(),
                 "--session-id",
-                "claude-session",
+                CLAUDE_SESSION,
                 "--linger",
                 "10",
                 "--engine",
                 "claude",
-                "--claude-python",
-                "/usr/bin/python3",
-                "--claude-script",
+                "--claude-bin",
                 script.to_str().unwrap(),
             ])
             .stdout(Stdio::null())
@@ -211,7 +241,7 @@ impl Process {
             .env_remove("DOXA_SESSION_BUDGET_USD");
         if let Some(budget) = budget { command.env("DOXA_SESSION_BUDGET_USD", budget); }
         let child = command.spawn().unwrap();
-        let registry = runtime.join("registry/claude-session.json");
+        let registry = runtime.join("registry").join(format!("{CLAUDE_SESSION}.json"));
         wait_until(|| registry.exists());
         let entry: Value = serde_json::from_slice(&fs::read(&registry).unwrap()).unwrap();
         let socket = PathBuf::from(entry["daemon_socket"].as_str().unwrap());
@@ -590,13 +620,12 @@ fn legacy_registry_entry_blocks_resume_before_claude_host_starts() {
     let entry = registry.join("legacy-session.json");
     let marker = dir.path().join("claude-host-opened");
     let sidecar = dir.path().join("claude-sidecar.py");
-    fs::write(&sidecar, format!("from pathlib import Path\nPath({}).write_text('opened')\n",
-        serde_json::to_string(marker.to_str().unwrap()).unwrap())).unwrap();
+    executable(&sidecar, &format!("#!/usr/bin/python3\nfrom pathlib import Path\nPath({}).write_text('opened')\n",
+        serde_json::to_string(marker.to_str().unwrap()).unwrap()));
     let run_resume = || daemon_command()
         .args(["--runtime-dir", dir.path().join("runtime").to_str().unwrap(),
             "--cwd", dir.path().to_str().unwrap(), "--session-id", "legacy-session",
-            "--engine", "claude", "--claude-python", "/usr/bin/python3",
-            "--claude-script", sidecar.to_str().unwrap(), "--resume", "true"])
+            "--engine", "claude", "--claude-bin", sidecar.to_str().unwrap(), "--resume", "true"])
         .env("DOXA_HOME", dir.path().join("home"))
         .output().unwrap();
 
@@ -621,13 +650,12 @@ fn missing_unowned_resume_directory_refuses_before_claude_host_starts() {
     let missing = dir.path().join("missing-checkout");
     let marker = dir.path().join("claude-host-opened");
     let sidecar = dir.path().join("claude-sidecar.py");
-    fs::write(&sidecar, format!("from pathlib import Path\nPath({}).write_text('opened')\n",
-        serde_json::to_string(marker.to_str().unwrap()).unwrap())).unwrap();
+    executable(&sidecar, &format!("#!/usr/bin/python3\nfrom pathlib import Path\nPath({}).write_text('opened')\n",
+        serde_json::to_string(marker.to_str().unwrap()).unwrap()));
     let result = daemon_command()
         .args(["--runtime-dir", dir.path().join("runtime").to_str().unwrap(),
             "--cwd", missing.to_str().unwrap(), "--session-id", "saved-session",
-            "--engine", "claude", "--claude-python", "/usr/bin/python3",
-            "--claude-script", sidecar.to_str().unwrap(), "--resume", "true"])
+            "--engine", "claude", "--claude-bin", sidecar.to_str().unwrap(), "--resume", "true"])
         .env("DOXA_HOME", dir.path().join("home"))
         .output().unwrap();
     assert!(!result.status.success());
@@ -653,32 +681,30 @@ fn claude_resume_restores_verified_missing_managed_checkout() {
     git(&["add", "README"]);
     git(&["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "test: seed"]);
     let oid = git(&["rev-parse", "HEAD"]);
-    git(&["branch", "doxa/saved123", "main"]);
+    git(&["branch", "doxa/0b256c09", "main"]);
     let root = home.join("worktrees");
     let meta_dir = root.join(".meta");
     fs::create_dir_all(&meta_dir).unwrap();
     fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
     fs::set_permissions(&meta_dir, fs::Permissions::from_mode(0o700)).unwrap();
-    let checkout = root.join("repo-saved123");
-    let sidecar = meta_dir.join("repo-saved123.json");
-    fs::write(&sidecar, json!({"main_root":main,"branch":"doxa/saved123",
-        "base_ref":"main","base_oid":oid,"session_id":"saved123-session"}).to_string()).unwrap();
+    let checkout = root.join("repo-0b256c09");
+    let sidecar = meta_dir.join("repo-0b256c09.json");
+    fs::write(&sidecar, json!({"main_root":main,"branch":"doxa/0b256c09",
+        "base_ref":"main","base_oid":oid,"session_id":"0b256c09-8d74-4865-9be0-4e6d24384551"}).to_string()).unwrap();
     fs::set_permissions(&sidecar, fs::Permissions::from_mode(0o600)).unwrap();
     let script = dir.path().join("claude-sidecar.py");
-    fs::write(&script, r#"import json, sys
-print(json.dumps({'type':'hello','protocol':'doxa-claude-sidecar','version':1,'capabilities':['start']}), flush=True)
-for line in sys.stdin:
-    request = json.loads(line)
-    print(json.dumps({'type':'reply','id':request['id'],'ok':True,
-        'result':{'data':{'model':'fixture'},'permission_mode':'default'}}), flush=True)
-"#).unwrap();
+    claude_fixture(&script,"assert '--resume' in args", "if frame['type']=='user': result()");
+    let slug:String=main.to_string_lossy().chars().map(|c|if c.is_ascii_alphanumeric(){c}else{'-'}).collect();
+    let store=doxa_transcript::TranscriptStore::new(&runtime.join("native-projects"),&slug,CLAUDE_SESSION).unwrap();
+    store.try_append(json!({"type":"user","message":{"role":"user","content":"saved turn"}}),"claude",|s|Ok(s.to_owned())).unwrap();
+    store.try_write_thread(json!({"thread_id":CLAUDE_SESSION,"engine":"claude","cwd":checkout,"lore_enabled":true,"spawn_depth":0,"parent_session_id":null,"turn_incomplete":false,"model":"opus","effort":"high"}).as_object().unwrap().clone(),|s|Ok(s.to_owned())).unwrap();
     let mut child = daemon_command()
         .args(["--runtime-dir", runtime.to_str().unwrap(), "--cwd", checkout.to_str().unwrap(),
-            "--session-id", "saved123-session", "--engine", "claude",
-            "--claude-python", "/usr/bin/python3", "--claude-script", script.to_str().unwrap(),
+            "--session-id", "0b256c09-8d74-4865-9be0-4e6d24384551", "--engine", "claude",
+            "--claude-bin", script.to_str().unwrap(),
             "--resume", "true", "--linger", "10"])
         .env("DOXA_HOME", &home).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
-    let registry = runtime.join("registry/saved123-session.json");
+    let registry = runtime.join("registry/0b256c09-8d74-4865-9be0-4e6d24384551.json");
     wait_until(|| registry.exists() || child.try_wait().unwrap().is_some());
     if !registry.exists() {
         let output = child.wait_with_output().unwrap();
@@ -817,14 +843,13 @@ fn rejects_invalid_ceiling_before_binding() {
 fn rejects_budgeted_codex_without_selected_price_basis() {
     let dir = tempfile::tempdir().unwrap();
     let codex = dir.path().join("codex-fixture");
-    let python = Path::new("/usr/bin/python3");
     executable(&codex, "#!/bin/sh\nexit 0\n");
     for (model, expected) in [(None, "budgeted Codex session requires a priced model"),
         (Some("gpt-reserve"), "no native budget price for selected Codex model")] {
         let mut command = daemon_command();
         command.args(["--runtime-dir", dir.path().to_str().unwrap(), "--session-id", "fleet-slot",
             "--engine", "codex", "--codex-bin", codex.to_str().unwrap(),
-            "--lore-python", python.to_str().unwrap()])
+            ])
             .env("DOXA_HOME", dir.path().join("home"))
             .env("DOXA_SESSION_BUDGET_USD", "1.0");
         if let Some(model) = model { command.args(["--model", model]); }
@@ -838,10 +863,9 @@ fn rejects_budgeted_codex_without_selected_price_basis() {
 #[test]
 fn rejects_unpriced_vendor_budget_before_binding() {
     let dir = tempfile::tempdir().unwrap();
-    let python = Path::new("/usr/bin/python3");
     let output = daemon_command()
         .args(["--runtime-dir", dir.path().to_str().unwrap(), "--session-id", "fleet-slot",
-            "--engine", "glm", "--model", "glm-5-turbo", "--lore-python", python.to_str().unwrap()])
+            "--engine", "glm", "--model", "glm-5-turbo", ])
         .env("DOXA_SESSION_BUDGET_USD", "1.0")
         .output().unwrap();
     assert!(!output.status.success());
@@ -1228,7 +1252,7 @@ fn codex_clean_checkpoint_failure_overrides_success_and_preserves_dirty_resume_g
     let restart = daemon_command()
         .args(["--runtime-dir", dir.path().to_str().unwrap(), "--cwd", dir.path().to_str().unwrap(),
             "--session-id", "codex-session", "--engine", "codex", "--codex-bin", codex.to_str().unwrap(),
-            "--lore-python", python.to_str().unwrap(), "--resume", "true"])
+            "--resume", "true"])
         .env("DOXA_HOME", dir.path().join("home")).output().unwrap();
     assert!(!restart.status.success());
     assert!(String::from_utf8_lossy(&restart.stderr).contains("transcript is incomplete"));
@@ -1238,7 +1262,6 @@ fn codex_clean_checkpoint_failure_overrides_success_and_preserves_dirty_resume_g
 fn codex_resume_refuses_changed_clean_checkpoint_before_provider_execution() {
     let dir = tempfile::tempdir().unwrap();
     let codex = dir.path().join("codex-fixture");
-    let python = Path::new("/usr/bin/python3");
     let marker = dir.path().join("unexpected-provider-start");
     executable(&codex, &format!("#!/bin/sh\ntouch '{}'\n", marker.display()));
     let project = native_transcript_dir(dir.path());
@@ -1255,7 +1278,7 @@ fn codex_resume_refuses_changed_clean_checkpoint_before_provider_execution() {
         let output = daemon_command()
             .args(["--runtime-dir", dir.path().to_str().unwrap(), "--cwd", dir.path().to_str().unwrap(),
                 "--session-id", "codex-session", "--engine", "codex", "--codex-bin", codex.to_str().unwrap(),
-                "--lore-python", python.to_str().unwrap(), "--resume", "true"])
+                "--resume", "true"])
             .env("DOXA_HOME", dir.path().join("home")).output().unwrap();
         assert!(!output.status.success());
         assert!(String::from_utf8_lossy(&output.stderr).contains("durable checkpoint"));
@@ -1412,9 +1435,7 @@ fn codex_assistant_append_failure_overrides_successful_provider_turn() {
             "codex",
             "--codex-bin",
             codex.to_str().unwrap(),
-            "--lore-python",
-            python.to_str().unwrap(),
-        ])
+            ])
         .output()
         .unwrap();
     assert!(!restart.status.success());
@@ -1424,7 +1445,6 @@ fn codex_assistant_append_failure_overrides_successful_provider_turn() {
 fn existing_transcript_without_thread_id_refuses_new_codex_thread() {
     let dir = tempfile::tempdir().unwrap();
     let codex = dir.path().join("codex-fixture");
-    let python = Path::new("/usr/bin/python3");
     executable(&codex, "#!/bin/sh\necho started > should-not-start\n");
     fs::create_dir_all(native_transcript_dir(dir.path())).unwrap();
     fs::write(
@@ -1444,9 +1464,7 @@ fn existing_transcript_without_thread_id_refuses_new_codex_thread() {
             "codex",
             "--codex-bin",
             codex.to_str().unwrap(),
-            "--lore-python",
-            python.to_str().unwrap(),
-        ])
+            ])
         .output()
         .unwrap();
     assert!(!output.status.success());
@@ -1458,7 +1476,6 @@ fn existing_transcript_without_thread_id_refuses_new_codex_thread() {
 fn explicit_codex_resume_requires_matching_thread_metadata() {
     let dir = tempfile::tempdir().unwrap();
     let codex = dir.path().join("codex-fixture");
-    let python = Path::new("/usr/bin/python3");
     executable(&codex, "#!/bin/sh\necho started > should-not-start\n");
     let project = native_transcript_dir(dir.path());
     fs::create_dir_all(&project).unwrap();
@@ -1468,7 +1485,7 @@ fn explicit_codex_resume_requires_matching_thread_metadata() {
         .args(["--runtime-dir", dir.path().to_str().unwrap(),
             "--cwd", dir.path().to_str().unwrap(), "--session-id", "codex-session",
             "--engine", "codex", "--codex-bin", codex.to_str().unwrap(),
-            "--lore-python", python.to_str().unwrap(), "--resume", "true"])
+            "--resume", "true"])
         .output().unwrap();
     assert!(!run().status.success(), "resume without saved state must fail");
     fs::write(&transcript, b"{\"type\":\"user\"}\n").unwrap();
@@ -1491,7 +1508,7 @@ fn explicit_codex_resume_requires_matching_thread_metadata() {
         .args(["--runtime-dir", dir.path().to_str().unwrap(),
             "--cwd", dir.path().to_str().unwrap(), "--session-id", "codex-session",
             "--engine", "codex", "--codex-bin", codex.to_str().unwrap(),
-            "--lore-python", python.to_str().unwrap(), "--resume", "true"])
+            "--resume", "true"])
         .stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
     wait_until(|| dir.path().join("registry/codex-session.json").exists());
     resumed.kill().unwrap();
@@ -1522,114 +1539,49 @@ fn thread_identity_is_durable_before_turn_completes() {
 }
 
 #[test]
-fn claude_sidecar_answers_interrupts_and_finalizes() {
-    let dir = tempfile::tempdir().unwrap();
-    let script = dir.path().join("claude-fixture.py");
-    let finalized = dir.path().join("finalized");
-    fs::write(&script, format!(r#"import json, sys
-print(json.dumps({{"type":"hello","protocol":"doxa-claude-sidecar","version":1}}),flush=True)
-for line in sys.stdin:
-    frame=json.loads(line)
-    method=frame["method"]
-    if method == "start":
-        assert frame["params"]["session_id"] == "claude-session"
-        print(json.dumps({{"type":"reply","id":frame["id"],"ok":True,"result":{{"event":"session_started","data":{{}}}}}}),flush=True)
-    elif method == "prompt":
-        print(json.dumps({{"type":"reply","id":frame["id"],"ok":True,"result":{{}}}}),flush=True)
-        print(json.dumps({{"type":"event","event":"turn_started","data":{{"prompt":frame["params"]["text"]}}}}),flush=True)
-        print(json.dumps({{"type":"event","event":"needs_input","data":{{"id":"question-1"}}}}),flush=True)
-    elif method == "answer":
-        assert frame["params"]["id"] == "question-1"
-        print(json.dumps({{"type":"reply","id":frame["id"],"ok":True,"result":{{"applied":True}}}}),flush=True)
-        print(json.dumps({{"type":"event","event":"text_delta","data":{{"text":"answered"}}}}),flush=True)
-        print(json.dumps({{"type":"event","event":"turn_done","data":{{"is_error":False}}}}),flush=True)
-    elif method == "interrupt":
-        print(json.dumps({{"type":"reply","id":frame["id"],"ok":True,"result":{{}}}}),flush=True)
-        print(json.dumps({{"type":"event","event":"turn_interrupted","data":{{}}}}),flush=True)
-    elif method == "finalize":
-        open({:?},"w").write("done")
-        print(json.dumps({{"type":"reply","id":frame["id"],"ok":True,"result":{{}}}}),flush=True)
-        break
-"#, finalized.to_string_lossy().to_string())).unwrap();
-    let mut process = Process::start_claude(dir.path(), &script);
-    assert_eq!(process.entry()["engine"], "claude");
-    let (mut reader, mut socket) = process.connect();
-    assert_eq!(receive(&mut reader)["engine"], "claude");
-    send(&mut socket, json!({"type":"attach","cursor":null}));
-    send(&mut socket, json!({"type":"call","id":6,"method":"set_model",
-        "params":{"model":"haiku"}}));
-    assert_eq!(receive(&mut reader)["ok"], false);
-    send(&mut socket, json!({"type":"prompt","id":1,"text":"hello"}));
-    assert_eq!(receive(&mut reader)["ok"], true);
-    assert_eq!(receive(&mut reader)["event"]["type"], "turn_started");
-    assert_eq!(receive(&mut reader)["event"]["type"], "needs_input");
-    send(
-        &mut socket,
-        json!({"type":"call","id":2,"method":"answer_needs_input",
-        "params":{"id":"question-1","answer":{"choice":"yes"}}}),
-    );
-    let frames = [
-        receive(&mut reader),
-        receive(&mut reader),
-        receive(&mut reader),
-    ];
-    assert!(frames.iter().any(|frame| frame["applied"] == true));
-    assert!(frames
-        .iter()
-        .any(|frame| frame["event"]["data"]["text"] == "answered"));
-    assert!(frames
-        .iter()
-        .any(|frame| frame["event"]["type"] == "turn_done"));
-    send(&mut socket, json!({"type":"prompt","id":3,"text":"again"}));
-    assert_eq!(receive(&mut reader)["ok"], true);
-    let mut next = receive(&mut reader);
-    if next["event"]["type"] == "prompt_dequeued" {
-        next = receive(&mut reader);
-    }
-    assert_eq!(next["event"]["type"], "turn_started");
-    assert_eq!(receive(&mut reader)["event"]["type"], "needs_input");
-    send(
-        &mut socket,
-        json!({"type":"call","id":4,"method":"interrupt","params":{}}),
-    );
-    let first = receive(&mut reader);
-    let second = receive(&mut reader);
-    let (reply, interrupted) = if first["type"] == "reply" {
-        (first, second)
-    } else {
-        (second, first)
-    };
-    assert_eq!(reply["ok"], true);
-    assert_eq!(interrupted["event"]["type"], "turn_done");
-    assert_eq!(interrupted["event"]["data"]["is_error"], true);
-    send(
-        &mut socket,
-        json!({"type":"call","id":5,"method":"stop","params":{}}),
-    );
-    assert_eq!(receive(&mut reader)["ok"], true);
-    wait_until(|| process.exited());
-    assert!(finalized.exists());
+fn claude_cli_answers_interrupts_and_reaps_owned_process() {
+    let dir=tempfile::tempdir().unwrap(); let script=dir.path().join("claude-cli");
+    claude_fixture(&script,"root.joinpath('pid').write_text(str(os.getpid()))",r#"if frame['type']=='user':
+  emit({'type':'control_request','request_id':'question-1','request':{'subtype':'can_use_tool','tool_name':'AskUserQuestion','tool_use_id':'ask-1','input':{'questions':[{'question':'Continue?','options':[{'label':'yes'}]}]}}})
+ elif frame['type']=='control_response':
+  assert frame['response']['request_id']=='question-1'
+  assert frame['response']['response']['updatedInput']['answers']=={'Continue?':'yes'}
+  delta('answered');result()
+"#);
+    let mut process=Process::start_claude(dir.path(),&script);
+    assert_eq!(process.entry()["engine"],"claude");
+    let pid:libc::pid_t=fs::read_to_string(dir.path().join("pid")).unwrap().parse().unwrap();
+    let (mut reader,mut socket)=process.connect();assert_eq!(receive(&mut reader)["engine"],"claude");
+    send(&mut socket,json!({"type":"attach","cursor":null}));
+    send(&mut socket,json!({"type":"prompt","id":1,"text":"hello"}));
+    assert_eq!(receive(&mut reader)["ok"],true);
+    let input=claude_receive_until(&mut reader,|f|f["event"]["type"]=="needs_input");assert_eq!(input["event"]["data"]["id"],"question-1");
+    send(&mut socket,json!({"type":"call","id":2,"method":"answer_needs_input","params":{"id":"question-1","answer":{"answers":{"Continue?":"yes"}}}}));
+    let mut applied=false;let mut text=false;
+    loop {let frame=receive(&mut reader);applied|=frame["applied"]==true;text|=frame["event"]["data"]["text"]=="answered";
+        if frame["event"]["type"]=="turn_done" {assert_eq!(frame["event"]["data"]["ctx_tokens"],123);break;}}
+    assert!(applied&&text);
+    send(&mut socket,json!({"type":"prompt","id":3,"text":"again"}));
+    claude_receive_until(&mut reader,|f|f["event"]["type"]=="needs_input");
+    send(&mut socket,json!({"type":"call","id":4,"method":"interrupt","params":{}}));
+    let interrupted=claude_receive_until(&mut reader,|f|f["event"]["type"]=="turn_done");assert_eq!(interrupted["event"]["data"]["is_error"],true);
+    send(&mut socket,json!({"type":"call","id":5,"method":"stop","params":{}}));
+    assert_eq!(claude_receive_until(&mut reader,|f|f["id"]==5)["ok"],true);wait_until(||process.exited());
+    assert_eq!(unsafe{libc::kill(pid,0)},-1,"CLI child survived host shutdown");
 }
 
 #[test]
 fn claude_reported_spend_blocks_next_prompt_over_daemon_socket() {
     let dir = tempfile::tempdir().unwrap();
     let script = dir.path().join("claude-cost.py");
-    fs::write(&script, r#"import json, sys
-print(json.dumps({"type":"hello","protocol":"doxa-claude-sidecar","version":1}),flush=True)
-for line in sys.stdin:
-    frame=json.loads(line)
-    print(json.dumps({"type":"reply","id":frame["id"],"ok":True,"result":{}}),flush=True)
-    if frame["method"] == "prompt":
-        print(json.dumps({"type":"event","event":"turn_done","data":{"cost_usd":1.1}}),flush=True)
-"#).unwrap();
+    claude_fixture(&script,"", "if frame['type']=='user': result(False,1.1)");
     let mut process = Process::start_claude_with_budget(dir.path(), &script, Some("1.0"));
     let (mut reader, mut socket) = process.connect();
     receive(&mut reader);
     send(&mut socket, json!({"type":"attach","cursor":null}));
     send(&mut socket, json!({"type":"prompt","id":1,"text":"first"}));
     assert_eq!(receive(&mut reader)["ok"], true);
-    assert_eq!(receive(&mut reader)["event"]["type"], "turn_done");
+    assert_eq!(claude_receive_until(&mut reader,|f|f["event"]["type"]=="turn_done")["event"]["type"], "turn_done");
     send(&mut socket, json!({"type":"prompt","id":2,"text":"second"}));
     assert_eq!(receive(&mut reader)["ok"], true);
     let refusal = receive(&mut reader);
@@ -1641,99 +1593,66 @@ for line in sys.stdin:
 }
 
 #[test]
-fn claude_controls_require_capabilities_and_broadcast_changes() {
-    let dir = tempfile::tempdir().unwrap();
-    let script = dir.path().join("claude-controls.py");
-    fs::write(&script, r#"import json, sys
-print(json.dumps({"type":"hello","protocol":"doxa-claude-sidecar","version":1,
-                  "capabilities":["set_model","set_permission_mode"]}),flush=True)
-for line in sys.stdin:
-    frame=json.loads(line)
-    method=frame["method"]
-    result={}
-    if method=="start":
-        result={"data":{"model":"opus"},"permission_mode":"plan"}
-    elif method=="set_model":
-        result={"model":frame["params"]["model"] or "default"}
-    elif method=="set_permission_mode":
-        result={"mode":frame["params"]["mode"]}
-    elif method=="prompt":
-        print(json.dumps({"type":"reply","id":frame["id"],"ok":True,"result":{}}),flush=True)
-        print(json.dumps({"type":"event","event":"needs_input","data":{"id":"q"}}),flush=True)
-        continue
-    elif method=="answer":
-        print(json.dumps({"type":"reply","id":frame["id"],"ok":True,"result":{"applied":True}}),flush=True)
-        print(json.dumps({"type":"event","event":"turn_done","data":{}}),flush=True)
-        continue
-    print(json.dumps({"type":"reply","id":frame["id"],"ok":True,"result":result}),flush=True)
-    if method=="finalize": break
-"#).unwrap();
-    let mut process = Process::start_claude(dir.path(), &script);
-    let (mut reader, mut socket) = process.connect();
-    let hello = receive(&mut reader);
-    assert_eq!(hello["model"], "opus");
-    assert_eq!(hello["permission_mode"], "plan");
-    assert_eq!(hello["bypass_armed"], false);
-    assert_eq!(hello["can_set_permission_mode"], true);
-    assert_eq!(hello["running"], false);
-    assert_eq!(hello["queued"], 0);
-    send(&mut socket, json!({"type":"attach","cursor":null}));
-    send(&mut socket, json!({"type":"call","id":1,"method":"set_model",
-        "params":{"model":"haiku"}}));
-    assert_eq!(receive(&mut reader)["model"], "haiku");
-    assert_eq!(receive(&mut reader)["event"]["type"], "model_changed");
-    send(&mut socket, json!({"type":"call","id":2,"method":"set_permission_mode",
-        "params":{"mode":"dontAsk"}}));
-    assert_eq!(receive(&mut reader)["mode"], "dontAsk");
-    assert_eq!(receive(&mut reader)["event"]["type"], "permission_mode_changed");
-    send(&mut socket, json!({"type":"call","id":3,"method":"status","params":{}}));
-    let status = receive(&mut reader);
-    assert_eq!(status["status"]["model"], "haiku");
-    assert_eq!(status["status"]["permission_mode"], "dontAsk");
-    assert_eq!(status["status"]["can_set_permission_mode"], true);
-    send(&mut socket, json!({"type":"call","id":4,"method":"set_permission_mode",
-        "params":{"mode":"bypassPermissions"}}));
-    assert_eq!(receive(&mut reader)["ok"], false);
-    send(&mut socket, json!({"type":"call","id":5,"method":"set_permission_mode",
-        "params":{"mode":"plan"}}));
-    assert_eq!(receive(&mut reader)["mode"], "plan");
-    assert_eq!(receive(&mut reader)["event"]["type"], "permission_mode_changed");
-    send(&mut socket, json!({"type":"prompt","id":6,"text":"hello"}));
-    assert_eq!(receive(&mut reader)["ok"], true);
-    assert_eq!(receive(&mut reader)["event"]["type"], "needs_input");
-    send(&mut socket, json!({"type":"call","id":7,"method":"set_permission_mode",
-        "params":{"mode":"dontAsk"}}));
-    assert_eq!(receive(&mut reader)["ok"], false);
-    send(&mut socket, json!({"type":"call","id":8,"method":"answer_needs_input",
-        "params":{"id":"q","answer":{"yes":true}}}));
-    let answer1 = receive(&mut reader);
-    let answer2 = receive(&mut reader);
-    assert!(answer1["applied"] == true || answer2["applied"] == true);
-    assert!(answer1["event"]["type"] == "turn_done" || answer2["event"]["type"] == "turn_done");
-    send(&mut socket, json!({"type":"call","id":9,"method":"stop","params":{}}));
-    assert_eq!(receive(&mut reader)["ok"], true);
-    wait_until(|| process.exited());
+fn claude_legacy_resume_requires_owned_provider_and_lore_source_then_verifies_live_identity() {
+    let dir=tempfile::tempdir().unwrap();let script=dir.path().join("legacy-cli");
+    claude_fixture(&script,"assert '--resume' in args",r#"if frame['type']=='user':
+  emit({'type':'system','subtype':'init','session_id':session,'model':model});delta('restored');result()
+"#);
+    let project=dir.path().join("home/claude-cli/projects/legacy");fs::create_dir_all(&project).unwrap();
+    for path in [dir.path().join("home/claude-cli"),dir.path().join("home/claude-cli/projects"),project.clone()] {fs::set_permissions(path,fs::Permissions::from_mode(0o700)).unwrap();}
+    let source=format!("{}\n{}\n",json!({"type":"user","engine":"claude","sessionId":CLAUDE_SESSION,"cwd":dir.path(),"message":{"role":"user","content":"saved task"}}),json!({"type":"assistant","engine":"claude","sessionId":CLAUDE_SESSION,"cwd":dir.path(),"message":{"role":"assistant","content":[{"type":"text","text":"saved answer"}]}}));
+    fs::write(project.join(format!("{CLAUDE_SESSION}.jsonl")),&source).unwrap();fs::set_permissions(project.join(format!("{CLAUDE_SESSION}.jsonl")),fs::Permissions::from_mode(0o600)).unwrap();
+    fs::create_dir_all(native_transcript_dir(dir.path())).unwrap();fs::set_permissions(native_transcript_dir(dir.path()),fs::Permissions::from_mode(0o700)).unwrap();
+    let transcript=native_transcript(dir.path(),&format!("{CLAUDE_SESSION}.jsonl"));fs::write(&transcript,&source).unwrap();fs::set_permissions(&transcript,fs::Permissions::from_mode(0o600)).unwrap();
+    doxa_claude::resume::verify_legacy(&dir.path().join("home/claude-cli"),&transcript,CLAUDE_SESSION,dir.path()).unwrap();
+    let child=daemon_command().args(["--runtime-dir",dir.path().to_str().unwrap(),"--cwd",dir.path().to_str().unwrap(),"--session-id",CLAUDE_SESSION,"--engine","claude","--claude-bin",script.to_str().unwrap(),"--resume","true","--linger","10"]).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
+    let registry=dir.path().join("registry").join(format!("{CLAUDE_SESSION}.json"));let mut process=Process{child,registry,socket:PathBuf::new()};
+    wait_until(||process.registry.exists()||process.exited());if process.exited(){let mut error=String::new();process.child.stderr.take().unwrap().read_to_string(&mut error).unwrap();panic!("legacy fixture failed: {error}");}process.socket=process.entry()["daemon_socket"].as_str().unwrap().into();
+    let (mut reader,mut socket)=process.connect();receive(&mut reader);send(&mut socket,json!({"type":"attach","cursor":null}));send(&mut socket,json!({"type":"prompt","id":1,"text":"continue"}));
+    let completed=claude_receive_until(&mut reader,|f|f["event"]["type"]=="turn_done");assert_eq!(completed["event"]["data"]["is_error"],false);
+    let metadata:Value=serde_json::from_slice(&fs::read(native_transcript(dir.path(),&format!("{CLAUDE_SESSION}.codex.json"))).unwrap()).unwrap();assert_eq!(metadata["legacy_imported"],true);assert_eq!(metadata["thread_id"],CLAUDE_SESSION);
+    assert!(fs::read_to_string(transcript).unwrap().starts_with(&source),"legacy source was rewritten");
+    send(&mut socket,json!({"type":"call","id":2,"method":"stop","params":{}}));claude_receive_until(&mut reader,|f|f["id"]==2);wait_until(||process.exited());
+}
+
+#[test]
+fn claude_controls_verify_effective_settings_and_broadcast_changes() {
+    let dir=tempfile::tempdir().unwrap();let script=dir.path().join("claude-controls");
+    claude_fixture(&script,"root.joinpath('pid').write_text(str(os.getpid()))",r#"if frame['type']=='user':
+  emit({'type':'control_request','request_id':'q','request':{'subtype':'can_use_tool','tool_name':'Bash','tool_use_id':'bash-1','input':{'command':'true'}}})
+ elif frame['type']=='control_response': result()
+"#);
+    let mut process=Process::start_claude(dir.path(),&script);let (mut reader,mut socket)=process.connect();let hello=receive(&mut reader);
+    assert_eq!(hello["model"],"opus");assert_eq!(hello["permission_mode"],"default");assert_eq!(hello["bypass_armed"],false);assert_eq!(hello["can_set_permission_mode"],true);
+    send(&mut socket,json!({"type":"attach","cursor":null}));
+    for (id,method,params,event) in [(1,"set_model",json!({"model":"haiku"}),"model_changed"),(2,"set_effort",json!({"effort":"low"}),"effort_changed"),(3,"set_permission_mode",json!({"mode":"plan"}),"permission_mode_changed")] {
+        send(&mut socket,json!({"type":"call","id":id,"method":method,"params":params}));
+        let reply=claude_receive_until(&mut reader,|f|f["id"]==id);assert_eq!(reply["ok"],true);
+        if method!="set_permission_mode"{assert_eq!(reply["verified"],true);}
+        claude_receive_until(&mut reader,|f|f["event"]["type"]==event);
+    }
+    send(&mut socket,json!({"type":"call","id":4,"method":"status","params":{}}));
+    let status=receive(&mut reader);assert_eq!(status["status"]["model"],"haiku");assert_eq!(status["status"]["effort"],"low");
+    send(&mut socket,json!({"type":"call","id":5,"method":"set_permission_mode","params":{"mode":"bypassPermissions"}}));assert_eq!(receive(&mut reader)["ok"],false);
+    send(&mut socket,json!({"type":"prompt","id":6,"text":"hello"}));claude_receive_until(&mut reader,|f|f["event"]["type"]=="needs_input");
+    send(&mut socket,json!({"type":"call","id":7,"method":"set_effort","params":{"effort":"high"}}));assert_eq!(receive(&mut reader)["ok"],false);
+    send(&mut socket,json!({"type":"call","id":8,"method":"answer_needs_input","params":{"id":"q","answer":{"decision":"allow"}}}));
+    claude_receive_until(&mut reader,|f|f["event"]["type"]=="turn_done");
+    send(&mut socket,json!({"type":"call","id":9,"method":"stop","params":{}}));assert_eq!(claude_receive_until(&mut reader,|f|f["id"]==9)["ok"],true);wait_until(||process.exited());
 }
 
 #[test]
 fn oversized_claude_event_fails_turn_without_forwarding_content() {
     let dir = tempfile::tempdir().unwrap();
     let script = dir.path().join("claude-oversize.py");
-    fs::write(&script, r#"import json, sys
-print(json.dumps({"type":"hello","protocol":"doxa-claude-sidecar","version":1}),flush=True)
-for line in sys.stdin:
-    frame=json.loads(line)
-    print(json.dumps({"type":"reply","id":frame["id"],"ok":True,"result":{}}),flush=True)
-    if frame["method"] == "prompt":
-        print(json.dumps({"type":"event","event":"text_delta","data":{"text":"SENSITIVE"*10000}}),flush=True)
-"#).unwrap();
+    claude_fixture(&script,"", "if frame['type']=='user': delta('SENSITIVE'*150000)");
     let mut process = Process::start_claude(dir.path(), &script);
     let (mut reader, mut socket) = process.connect();
     receive(&mut reader);
     send(&mut socket, json!({"type":"attach","cursor":null}));
     send(&mut socket, json!({"type":"prompt","id":1,"text":"hello"}));
     assert_eq!(receive(&mut reader)["ok"], true);
-    let frame = receive(&mut reader);
+    let frame = claude_receive_until(&mut reader,|f|f["event"]["type"]=="turn_done");
     assert_eq!(frame["event"]["type"], "turn_done");
     assert_eq!(frame["event"]["data"]["is_error"], true);
     assert!(!frame.to_string().contains("SENSITIVE"));
@@ -1839,8 +1758,7 @@ fn interrupt_reaps_codex_process_group() {
             "--cwd", dir.path().to_str().unwrap(),
             "--session-id", "codex-session", "--engine", "codex",
             "--codex-bin", codex.to_str().unwrap(),
-            "--lore-python", python.to_str().unwrap(),
-        ])
+            ])
         .output()
         .unwrap();
     assert!(!restart.status.success(), "incomplete turn must refuse restart");
@@ -1850,7 +1768,6 @@ fn interrupt_reaps_codex_process_group() {
 fn invalid_native_lore_capacity_rejects_session_before_socket_or_registry() {
     let dir = tempfile::tempdir().unwrap();
     let codex = dir.path().join("codex-fixture");
-    let python = Path::new("/usr/bin/python3");
     executable(&codex, "#!/bin/sh\nexit 0\n");
 
     let output = daemon_command()
@@ -1865,9 +1782,7 @@ fn invalid_native_lore_capacity_rejects_session_before_socket_or_registry() {
             "codex",
             "--codex-bin",
             codex.to_str().unwrap(),
-            "--lore-python",
-            python.to_str().unwrap(),
-        ])
+            ])
         .env("LORE_USER_CAP", "invalid-native-capacity")
         .output()
         .unwrap();
@@ -1877,55 +1792,17 @@ fn invalid_native_lore_capacity_rejects_session_before_socket_or_registry() {
 }
 
 #[test]
-fn claude_daemon_uses_venv_interpreter_from_absolute_argument() {
-    let dir = tempfile::tempdir().unwrap();
-    let venv = dir.path().join("venv");
-    assert!(Command::new("python3")
-        .args(["-m", "venv", "--without-pip"])
-        .arg(&venv)
-        .status()
-        .unwrap()
-        .success());
-    let python = venv.join("bin/python3");
-    let site = Command::new(&python)
-        .args(["-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])"])
-        .output()
-        .unwrap();
-    assert!(site.status.success());
-    let site = PathBuf::from(String::from_utf8(site.stdout).unwrap().trim());
-    fs::write(site.join("doxa_venv_marker.py"), "VALUE = 'installed in venv'\n").unwrap();
-    let marker = dir.path().join("prefix.txt");
-    let script = dir.path().join("claude_sidecar.py");
-    fs::write(&script, r#"import json, os, pathlib, sys
-import doxa_venv_marker
-assert doxa_venv_marker.VALUE == 'installed in venv'
-pathlib.Path(os.environ['DOXA_TEST_VENV_MARKER']).write_text(sys.prefix)
-print(json.dumps({'type':'hello','protocol':'doxa-claude-sidecar','version':1,'capabilities':['start']}), flush=True)
-for line in sys.stdin:
-    request = json.loads(line)
-    print(json.dumps({'type':'reply','id':request['id'],'ok':True,
-        'result':{'data':{'model':'fixture'},'permission_mode':'default'}}), flush=True)
-"#).unwrap();
-    let mut child = daemon_command()
-        .args(["--runtime-dir", dir.path().to_str().unwrap(),
-            "--cwd", dir.path().to_str().unwrap(),
-            "--session-id", "venv-claude", "--engine", "claude",
-            "--claude-python", python.to_str().unwrap(),
-            "--claude-script", script.to_str().unwrap(), "--linger", "10"])
-        .env("DOXA_TEST_VENV_MARKER", &marker)
-        .current_dir("/")
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !marker.exists() && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(10));
-    }
-    let _ = child.kill();
-    let output = child.wait_with_output().unwrap();
-    assert!(marker.exists(), "daemon did not start venv sidecar: {}", String::from_utf8_lossy(&output.stderr));
-    assert_eq!(fs::read_to_string(marker).unwrap(), venv.to_str().unwrap());
+fn claude_daemon_uses_validated_absolute_cli_executable() {
+    let dir=tempfile::tempdir().unwrap();let script=dir.path().join("claude-owned-cli");
+    claude_fixture(&script,"root.joinpath('argv').write_text(json.dumps(sys.argv))", "if frame['type']=='user': result()");
+    let mut command=daemon_command();
+    command.args(["--runtime-dir",dir.path().to_str().unwrap(),"--cwd",dir.path().to_str().unwrap(),"--session-id",CLAUDE_SESSION,"--engine","claude","--claude-bin",script.to_str().unwrap(),"--linger","10"]).current_dir("/").stdout(Stdio::null()).stderr(Stdio::piped());
+    let mut child=command.spawn().unwrap();wait_until(||dir.path().join("argv").exists());
+    let argv:Value=serde_json::from_slice(&fs::read(dir.path().join("argv")).unwrap()).unwrap();assert_eq!(argv[0],script.to_str().unwrap());
+    assert!(argv.as_array().unwrap().iter().any(|arg|arg=="--include-partial-messages"));assert!(!argv.as_array().unwrap().iter().any(|arg|arg=="--bare"));
+    unsafe{libc::kill(child.id() as libc::pid_t,libc::SIGTERM);}wait_until(||child.try_wait().unwrap().is_some());
+    fs::set_permissions(&script,fs::Permissions::from_mode(0o600)).unwrap();
+    let refused=command.output().unwrap();assert!(!refused.status.success());assert!(String::from_utf8_lossy(&refused.stderr).contains("executable"));
 }
 
 #[test]
@@ -2102,14 +1979,12 @@ mod vendor_process {
     #[test]
     fn priced_vendor_budget_blocks_the_next_socket_prompt() {
         let dir = tempfile::tempdir().unwrap();
-        let lore = Path::new("/usr/bin/python3");
         let body = "data: {\"model\":\"deepseek-flash\",\"choices\":[{\"finish_reason\":\"stop\",\"delta\":{\"content\":\"answer\"}}],\"usage\":{\"prompt_tokens\":1000000,\"completion_tokens\":1000000}}\n\ndata: [DONE]\n\n";
         let (endpoint, server) = fake_vendor_frames(vec![body.to_owned()]);
         let child = daemon_command()
             .args(["--runtime-dir", dir.path().to_str().unwrap(), "--cwd", dir.path().to_str().unwrap(),
                 "--session-id", "vendor-session", "--linger", "10", "--engine", "deepseek",
-                "--model", "deepseek-flash", "--lore-python", lore.to_str().unwrap(),
-                "--vendor-endpoint", &endpoint])
+                "--model", "deepseek-flash", "--vendor-endpoint", &endpoint])
             .env("DEEPSEEK_API_KEY", "test-key-1234")
             .env("DOXA_SESSION_BUDGET_USD", "1.0")
             .env("DOXA_HOME", dir.path().join("home"))
@@ -2152,7 +2027,7 @@ mod vendor_process {
         runtime: &Path,
         vendor: &str,
         endpoint: &str,
-        lore: &Path,
+        _lore: &Path,
         resume: bool,
         tools: bool,
     ) -> Process {
@@ -2168,8 +2043,6 @@ mod vendor_process {
                 "10",
                 "--engine",
                 vendor,
-                "--lore-python",
-                lore.to_str().unwrap(),
                 "--vendor-endpoint",
                 endpoint,
                 "--resume",
@@ -2513,8 +2386,6 @@ mod vendor_process {
                     "vendor-session",
                     "--engine",
                     vendor,
-                    "--lore-python",
-                    lore.to_str().unwrap(),
                     "--resume",
                     "true",
                 ])
@@ -2536,8 +2407,6 @@ mod vendor_process {
                     "vendor-session",
                     "--engine",
                     vendor,
-                    "--lore-python",
-                    lore.to_str().unwrap(),
                     "--resume",
                     "true",
                 ])
@@ -2673,7 +2542,6 @@ mod vendor_process {
     #[test]
     fn vendor_missing_credential_rejects_session_before_socket() {
         let dir = tempfile::tempdir().unwrap();
-        let lore = Path::new("/usr/bin/python3");
         let output = daemon_command()
             .args([
                 "--runtime-dir",
@@ -2684,9 +2552,7 @@ mod vendor_process {
                 "vendor-session",
                 "--engine",
                 "deepseek",
-                "--lore-python",
-                lore.to_str().unwrap(),
-            ])
+                ])
             .env_remove("DEEPSEEK_API_KEY")
             .output()
             .unwrap();
@@ -3085,10 +2951,12 @@ assert 'sk-ownedCanonicalFixtureSecret1234567890' in turn['params']['input'][0][
 if 'second' in turn['params']['input'][0]['text']:
     assert turn['params']['model']=='gpt-test' and turn['params']['effort']=='high'
 send({'id':turn['id'],'result':{'turn':{'id':'turn_1'}}})
-send({'method':'item/reasoning/textDelta','params':{'threadId':'thread-1','turnId':'turn_1','itemId':'r','delta':'sk-ownedCanonicalFixtureSecret1234567890 thought'}})
+for fragment in 'sk-ownedCanonicalFixtureSecret1234567890 thought':
+    send({'method':'item/reasoning/textDelta','params':{'threadId':'thread-1','turnId':'turn_1','itemId':'r','delta':fragment}})
 send({'method':'item/started','params':{'threadId':'thread-1','turnId':'turn_1','item':{'type':'commandExecution','id':'cmd_1','command':'echo sk-ownedCanonicalFixtureSecret1234567890'}}})
 send({'method':'item/completed','params':{'threadId':'thread-1','turnId':'turn_1','item':{'type':'commandExecution','id':'cmd_1','command':'echo sk-ownedCanonicalFixtureSecret1234567890','status':'completed','aggregatedOutput':'sk-ownedCanonicalFixtureSecret1234567890 tool output','exitCode':0}}})
-send({'method':'item/agentMessage/delta','params':{'threadId':'thread-1','turnId':'turn_1','itemId':'a','delta':'sk-ownedCanonicalFixtureSecret1234567890 answer'}})
+for fragment in 'sk-ownedCanonicalFixtureSecret1234567890 answer':
+    send({'method':'item/agentMessage/delta','params':{'threadId':'thread-1','turnId':'turn_1','itemId':'a','delta':fragment}})
 send({'method':'thread/tokenUsage/updated','params':{'threadId':'thread-1','turnId':'turn_1','tokenUsage':{'total':{'inputTokens':100,'outputTokens':50,'cachedInputTokens':10},'last':{'totalTokens':20000,'reasoningOutputTokens':7},'modelContextWindow':32000}}})
 send({'method':'turn/completed','params':{'threadId':'thread-1','turn':{'id':'turn_1','status':'completed','error':None}}})
 for line in sys.stdin: pass
@@ -3100,6 +2968,8 @@ for line in sys.stdin: pass
     for resume in [false, true] {
         let mut process = Process::start_codex_appserver(dir.path(), &codex, &python, resume);
         let (mut reader, mut socket) = process.connect();
+        // Native hook trust hashes the debug carrier before starting Codex.
+        reader.get_ref().set_read_timeout(Some(Duration::from_secs(10))).unwrap();
         receive(&mut reader);
         send(&mut socket, json!({"type":"attach","cursor":null}));
         for prompt_id in [1, 2] {
@@ -3131,12 +3001,16 @@ for line in sys.stdin: pass
             if reply["type"] == "reply" && reply["id"] == prompt_id { assert_eq!(reply["ok"], true); break; }
         }
         let mut kinds = Vec::new();
+        let mut text = String::new();
+        let mut reasoning = String::new();
         loop {
             let frame = receive(&mut reader);
             assert!(!frame.to_string().contains("sk-ownedCanonicalFixtureSecret1234567890"));
             let event = &frame["event"];
             let kind = event["type"].as_str().unwrap_or("");
             kinds.push(kind.to_owned());
+            if kind == "text_delta" { text.push_str(event["data"]["text"].as_str().unwrap()); }
+            if kind == "reasoning_delta" { reasoning.push_str(event["data"]["text"].as_str().unwrap()); }
             if kind == "turn_done" {
                 assert_eq!(event["data"]["is_error"], false, "{event}");
                 assert_eq!(event["data"]["ctx_tokens"], 8000);
@@ -3146,6 +3020,9 @@ for line in sys.stdin: pass
                 break;
             }
         }
+        // Concatenation catches leaks which no individual fragment contains.
+        assert_eq!(text, "[REDACTED:api-key] answer");
+        assert_eq!(reasoning, "[REDACTED:api-key] thought");
         assert!(kinds.contains(&"reasoning_delta".to_owned()));
         assert!(kinds.contains(&"tool_call".to_owned()));
         assert!(kinds.contains(&"tool_result_detail".to_owned()));
@@ -3267,7 +3144,11 @@ assert json.loads(sys.stdin.readline())['method']=='initialized'
 assert not sys.stdin.readline()
 "#);
     let mut process=Process::start_codex_appserver(dir.path(),&codex,&python,false);
-    let (mut reader,mut socket)=process.connect();receive(&mut reader);
+    let (mut reader,mut socket)=process.connect();
+    // Native carrier attestation and provider teardown can outlast the old
+    // two-second fixture deadline while an installer build is running.
+    reader.get_ref().set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    receive(&mut reader);
     send(&mut socket,json!({"type":"attach","cursor":null}));
     send(&mut socket,json!({"type":"prompt","id":1,"text":"never delivered to a provider"}));
     loop {
@@ -3290,13 +3171,13 @@ fn memory_off_codex_scrubs_and_records_without_snapshot_index_or_compact_review(
         let dir = tempfile::tempdir().unwrap();
         fs::create_dir(dir.path().join("home")).unwrap();
         fs::write(dir.path().join("home/config.toml"), format!("lore = '{configured}'\n")).unwrap();
-        let codex = dir.path().join("codex-fixture"); let python = Path::new("/usr/bin/python3");
+        let codex = dir.path().join("codex-fixture");
         let captured = dir.path().join("stdin.txt");
         native_memory_fixture(dir.path(),"- durable memory\n");
         executable(&codex, &format!("#!/bin/sh\ncat > '{}'\necho '{{\"type\":\"thread.started\",\"thread_id\":\"thread_1\"}}'\n", captured.display()));
         let mut command = daemon_command();
         command.args(["--runtime-dir", dir.path().to_str().unwrap(), "--cwd", dir.path().to_str().unwrap(),
-            "--session-id", "codex-session", "--linger", "10", "--engine", "codex", "--codex-bin", codex.to_str().unwrap(), "--lore-python", python.to_str().unwrap()])
+            "--session-id", "codex-session", "--linger", "10", "--engine", "codex", "--codex-bin", codex.to_str().unwrap(), ])
             .env("DOXA_HOME", dir.path().join("home")).env("DOXA_CODEX_APPSERVER", "0").env_remove("DOXA_LORE")
             .stdout(Stdio::null()).stderr(Stdio::piped());
         if let Some(value) = override_env { command.env("DOXA_LORE", value); }
@@ -3403,30 +3284,20 @@ fn native_broadcast_reply_and_history_filters_follow_the_owned_delivery_path() {
 fn detached_claude_work_survives_linger_and_gets_a_full_idle_interval() {
     let dir = tempfile::tempdir().unwrap();
     let script = dir.path().join("linger-claude.py");
-    fs::write(&script, r#"import json,sys,time
-from pathlib import Path
-root=Path(__file__).parent
-print(json.dumps({'type':'hello','protocol':'doxa-claude-sidecar','version':1,'capabilities':[]}),flush=True)
-for line in sys.stdin:
- frame=json.loads(line); method=frame['method']
- print(json.dumps({'type':'reply','id':frame['id'],'ok':True,'result':{'lore_enabled':False} if method=='start' else {}}),flush=True)
- if method=='prompt':
+    claude_fixture(&script,"",r#"if frame['type']=='user':
   root.joinpath('started').write_text('owned fixture work')
-  while not root.joinpath('release').exists(): time.sleep(0.005)
-  print(json.dumps({'type':'event','event':'turn_done','data':{}}),flush=True)
-  root.joinpath('completed').write_text('finished')
- if method=='interrupt': root.joinpath('interrupted').write_text('unexpected cancellation')
- if method=='finalize': break
-"#).unwrap();
+  while not root.joinpath('release').exists(): time.sleep(.005)
+  result();root.joinpath('completed').write_text('finished')
+ elif frame['type']=='control_request' and frame['request']['subtype']=='interrupt': root.joinpath('interrupted').write_text('unexpected cancellation')
+"#);
     let child = daemon_command()
         .args(["--runtime-dir", dir.path().to_str().unwrap(), "--cwd", dir.path().to_str().unwrap(),
-            "--session-id", "linger-claude", "--engine", "claude", "--claude-python", "/usr/bin/python3",
-            "--claude-script", script.to_str().unwrap(), "--linger", "0.7"])
+            "--session-id", CLAUDE_SESSION, "--engine", "claude", "--claude-bin", script.to_str().unwrap(), "--linger", "0.7"])
         .env("DOXA_HOME", dir.path().join("home")).env("LORE_ROOT",dir.path().join("lore"))
         .env("LORE_PROJECTS_DIR",dir.path().join("projects")).env("DOXA_LORE","0")
         .env_remove("DOXA_SESSION_BUDGET_USD").env("DOXA_AGENT_PEER_SEND","0")
         .stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
-    let registry=dir.path().join("registry/linger-claude.json");
+    let registry=dir.path().join("registry").join(format!("{CLAUDE_SESSION}.json"));
     let mut process=Process { child, registry, socket:PathBuf::new() };
     wait_until(|| {
         if let Some(status) = process.child.try_wait().unwrap() {
@@ -3474,18 +3345,10 @@ fn claude_initialization_past_ten_seconds_survives_real_frontend_launch() {
     environment.0.push(("CLAUDE_CODE_STREAM_CLOSE_TIMEOUT",std::env::var_os("CLAUDE_CODE_STREAM_CLOSE_TIMEOUT")));
     std::env::remove_var("CLAUDE_CODE_STREAM_CLOSE_TIMEOUT");
     let script=dir.path().join("slow-start.py");
-    fs::write(&script,r#"import json,sys,time
-print(json.dumps({'type':'hello','protocol':'doxa-claude-sidecar','version':1,'capabilities':[]}),flush=True)
-for line in sys.stdin:
- frame=json.loads(line); method=frame['method']
- if method=='start': time.sleep(11)
- result={'lore_enabled':False,'effort':'low','data':{'model':'fixture-claude'}} if method=='start' else {}
- print(json.dumps({'type':'reply','id':frame['id'],'ok':True,'result':result}),flush=True)
- if method=='finalize': break
-"#).unwrap();
+    claude_fixture(&script,"time.sleep(11)", "if frame['type']=='user': result()");
     let options=LaunchOptions { engine:Engine::Claude,cwd:Some(dir.path().to_owned()),
         model:Some("fixture-claude".into()),effort:Some("low".into()),
-        claude_python:Some("/usr/bin/python3".into()),claude_script:Some(script),..LaunchOptions::default() };
+        claude_bin:Some(script),..LaunchOptions::default() };
     let started=Instant::now();
     let owned=OwnedSession(launch::spawn_fleet(&options,&runtime,None,false,false).unwrap());
     assert!(started.elapsed()>=Duration::from_secs(11));
@@ -3497,4 +3360,38 @@ for line in sys.stdin:
     drop(client); drop(owned);
     // Claim lock files deliberately persist to retain one stable lock inode.
     wait_until(||!record.exists());
+}
+
+#[test]
+fn native_spawn_reviews_exact_task_cancels_single_use_and_publishes_verified_child() {
+    let dir=tempfile::tempdir().unwrap();fs::create_dir_all(dir.path().join("home")).unwrap();
+    fs::write(dir.path().join("home/config.toml"),"spawn_sessions = true\n").unwrap();fs::set_permissions(dir.path().join("home/config.toml"),fs::Permissions::from_mode(0o600)).unwrap();fs::set_permissions(dir.path().join("home"),fs::Permissions::from_mode(0o700)).unwrap();
+    let cli=dir.path().join("spawn-claude-cli");claude_fixture(&cli,"",r#"if frame['type']=='user':
+  root.joinpath('task-'+session).write_text(frame['message']['content']);result()
+"#);
+    let child=daemon_command().args(["--runtime-dir",dir.path().to_str().unwrap(),"--cwd",dir.path().to_str().unwrap(),"--session-id",CLAUDE_SESSION,"--engine","claude","--claude-bin",cli.to_str().unwrap(),"--linger","10"]).env("DOXA_SPAWN_SESSIONS","yes").stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
+    let registry=dir.path().join("registry").join(format!("{CLAUDE_SESSION}.json"));wait_until(||registry.exists());let entry:Value=serde_json::from_slice(&fs::read(&registry).unwrap()).unwrap();
+    let mut parent=Process{child,registry,socket:entry["daemon_socket"].as_str().unwrap().into()};let (mut review,mut controls)=parent.connect();receive(&mut review);send(&mut controls,json!({"type":"attach","cursor":null}));
+    let (mut callback,mut request)=parent.connect();receive(&mut callback);send(&mut request,json!({"type":"attach","cursor":null}));
+    send(&mut request,json!({"type":"call","id":11,"method":"spawn_session","params":{"task":"approved fixture task"}}));
+    let approval=claude_receive_until(&mut review,|f|f["event"]["type"]=="needs_input");
+    assert_eq!(approval["event"]["data"]["kind"],"spawn");assert_eq!(approval["event"]["data"]["task"],"approved fixture task");
+    assert!(approval["event"]["data"]["body"].as_str().unwrap().contains("Engine: claude"));
+    let id=approval["event"]["data"]["id"].as_str().unwrap();
+    send(&mut controls,json!({"type":"call","id":1,"method":"answer_needs_input","params":{"id":"spawn-foreign-identity","answer":{"decision":"allow"}}}));assert_eq!(claude_receive_until(&mut review,|f|f["id"]==1)["ok"],false);
+    send(&mut controls,json!({"type":"call","id":2,"method":"answer_needs_input","params":{"id":id,"answer":{"decision":"allow"}}}));assert_eq!(claude_receive_until(&mut review,|f|f["id"]==2)["applied"],true);
+    let spawned=claude_receive_until(&mut callback,|f|f["id"]==11);assert_eq!(spawned["ok"],true);let child_id=spawned["session_id"].as_str().unwrap();assert_ne!(child_id,CLAUDE_SESSION);
+    let child_socket=spawned["daemon_socket"].as_str().unwrap();let stream=UnixStream::connect(child_socket).unwrap();stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();let mut child_reader=BufReader::new(stream.try_clone().unwrap());let mut child_control=stream;
+    let hello=receive(&mut child_reader);assert_eq!(hello["session_id"],child_id);assert_eq!(hello["engine"],"claude");
+    let registry:Value=serde_json::from_slice(&fs::read(dir.path().join("registry").join(format!("{child_id}.json"))).unwrap()).unwrap();assert_eq!(registry["parent_session_id"],CLAUDE_SESSION);
+    send(&mut child_control,json!({"type":"attach","cursor":null}));
+    let task_path=dir.path().join(format!("task-{child_id}"));wait_until(||task_path.exists());let delivered=fs::read_to_string(task_path).unwrap();assert!(delivered.contains("[SPAWNED SESSION]"));assert!(delivered.contains("approved fixture task"));
+    send(&mut controls,json!({"type":"call","id":3,"method":"answer_needs_input","params":{"id":id,"answer":{"decision":"allow"}}}));assert_ne!(claude_receive_until(&mut review,|f|f["id"]==3)["applied"],true);
+    send(&mut request,json!({"type":"call","id":12,"method":"spawn_session","params":{"task":"over rate"}}));assert_eq!(claude_receive_until(&mut callback,|f|f["id"]==12)["ok"],false);
+    send(&mut child_control,json!({"type":"call","id":4,"method":"stop","params":{}}));claude_receive_until(&mut child_reader,|f|f["id"]==4);
+    wait_until(||!dir.path().join("registry").join(format!("{child_id}.json")).exists());
+    send(&mut request,json!({"type":"call","id":13,"method":"spawn_session","params":{"task":"cancelled fixture task"}}));let approval=claude_receive_until(&mut review,|f|f["event"]["type"]=="needs_input");let cancelled_id=approval["event"]["data"]["id"].clone();
+    send(&mut controls,json!({"type":"call","id":5,"method":"interrupt","params":{}}));claude_receive_until(&mut review,|f|f["id"]==5);assert_eq!(claude_receive_until(&mut callback,|f|f["id"]==13)["ok"],false);
+    send(&mut controls,json!({"type":"call","id":6,"method":"answer_needs_input","params":{"id":cancelled_id,"answer":{"decision":"allow"}}}));assert_ne!(claude_receive_until(&mut review,|f|f["id"]==6)["applied"],true);
+    send(&mut controls,json!({"type":"call","id":7,"method":"stop","params":{}}));claude_receive_until(&mut review,|f|f["id"]==7);wait_until(||parent.exited());
 }

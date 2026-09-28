@@ -1,11 +1,11 @@
 # DOXA Rust 2.0
 
 Rust is the main DOXA frontend. The installer exposes `doxa`; the compiled
-frontend is `doxa-rs`. This alpha uses native Codex and vendor hosts plus a
-Python Claude SDK sidecar. Canonical LORE 0.61 is integrated as a Rust library
-for memory, reviews, indexing, and secret scrubbing. Retained SDK adapters use
-the installed `lore-rs` carrier and native review worker; they have no Python
-LORE backend fallback.
+frontend is `doxa-rs`. Claude uses its native CLI control protocol, Codex uses
+its app server, and API vendors use Rust HTTP clients. Canonical LORE is an
+integrated Rust library for memory, reviews, indexing, and secret scrubbing;
+`lore-rs` also provides detached review and standalone plugin commands.
+The installed runtime requires no Python interpreter.
 The [parity tracker](../docs/rust-1.19-parity.md) records stable release gates.
 
 ## Build and install
@@ -21,12 +21,11 @@ cargo build --locked
 
 `./task` builds incrementally in `target/rust-task`; ordinary Cargo uses
 `target`. `./task build --release` selects a release build. `./task install`
-installs committed HEAD, including a locked Python sidecar environment.
-Working-tree changes must be committed first. Set `DOXA_LORE_PYTHON` or pass
-`--claude-python` to choose the Claude SDK interpreter for source builds.
-`DOXA_LORE_RS` selects the native carrier used by retained SDK adapters; the
-installer builds and installs it alongside the frontend and daemon. Python
-`lore-core` is a development interoperability oracle, not a runtime dependency.
+installs committed HEAD, including the native LORE carrier. Working-tree
+changes must be committed first. Pass `--claude-bin` or `--codex-bin` to
+select a provider CLI executable. `DOXA_LORE_RS` selects a detached native
+carrier; the installer places it beside the frontend and daemon.
+Python sources and dependencies are development interoperability references.
 
 The POSIX installer builds `main` by default:
 
@@ -35,7 +34,7 @@ curl -fsSL https://raw.githubusercontent.com/docwilde/doxa/main/scripts/install.
 ```
 
 Append a tag or SHA after `sh -s --` to pin a ref. Installation requires Git,
-Cargo, Python 3.11+, and `uv`. Binaries go to `~/.local/bin`, overridable with
+Cargo and Rust. Binaries go to `~/.local/bin`, overridable with
 `DOXA_RUST_BIN_DIR`. Linux application-menu integration can be disabled with
 `DOXA_NO_LAUNCHER=1`. `doxa update` updates an installed launcher; source builds
 use `./task install`. `doxa help` lists CLI forms and options.
@@ -47,7 +46,7 @@ Bare `doxa` restores this project's saved tabs or starts the configured engine
 read only with a reason. `restore_tabs` and `resume_restored` control this behavior. `new` always
 starts a session; `attach`, `stop`, and `list` manage live sessions. Select
 `--engine codex|claude|deepseek|glm`, `--model`, and supported `--effort` values.
-Claude needs the Claude Agent SDK; vendors use `DEEPSEEK_API_KEY` or
+Claude needs the Claude Code CLI; vendors use `DEEPSEEK_API_KEY` or
 `ZAI_API_KEY`. Doctor checks dependencies without printing credentials.
 
 Git sessions receive managed linked worktrees unless `DOXA_WORKTREE=0` or
@@ -94,8 +93,8 @@ processing indicators, and per-session chip menus use bounded data. `/queue`
 previews and cancels waiting prompts by stable ID. `/model [name]`,
 `/effort [name]`, `/mode [name]`, and `/engine [name]` use supported capability
 and catalog choices. Live changes require an idle session and empty queue.
-Claude effort stays pending until the SDK verifies it; unknown state is not
-presented as applied. Engine selection starts a new session.
+Claude model and effort changes are verified with the live CLI
+`get_settings` response; unknown state is not presented as applied. Engine selection starts a new session.
 
 `/diff` or F2 opens a bounded worktree diff; F4 keeps it beside the session.
 File/hunk navigation and exact tracked-text-hunk rejection are supported.
@@ -138,8 +137,8 @@ shadows remain read only. Settings are validated against the categorized catalog
 Native `fleet start` accepts pool, prompt/file, worker count, supervisor, budget,
 approval policy, and quiescence options. `fleet preflight` validates capacity,
 spend ceiling, and socket paths. `fleet runs|status|attach|stop|resume` use owned
-manifests and verified slot sockets. `fleet start-python` is the explicit legacy
-harness path for options outside the native parser.
+manifests and verified slot sockets. All production fleet orchestration is
+native; unsupported forms are refused with their original arguments retained.
 
 The native controller owns startup barriers, supervision, approval handling,
 budget checks, cancellation, and teardown. `fleet review` / `fleet answer`
@@ -158,11 +157,14 @@ before exiting. Controller completion refreshes actual manifest state.
 `/peers` and Ctrl+M open the native peer map. `/msg PEER TEXT` sends
 same-project scrubbed messages. Native inbound turns use bounded queues;
 supervisor peer tools are capability gated. CLI `mesh serve` and `fleet mesh RUN`
-serve the private graph with an owned, stoppable Python browser-mesh child.
+serve the private graph through Hyper using compiled page assets and a
+private URL token.
 TUI `/mesh [RUN|stop]` opens or stops a browser graph owned by this window.
 `/fleet status`, `stop`, `detach`, `attach INDEX` and `mesh` use the current run.
 Old manifests lacking a verified private ledger are refused for browser serving.
-Remote routing is not claimed as a Python 1.19 parity requirement.
+Remote routing uses a private Unix socket and kernel-attested proxy identity.
+Configured remote endpoints must have reciprocal verified rosters. See
+[the remote transport contract](../docs/native-peernet.md).
 
 ## Codex compaction protection
 
@@ -171,7 +173,9 @@ contract and checks DOXA's trusted synchronous `PreCompact` hook hash. An
 unsupported build or missing trusted hook refuses startup. The hook binds the
 provider thread and owned rollout, prepares a scrubbed private snapshot, and
 waits for the native LORE review worker. Manual `/compact` uses the official compaction request;
-Claude compaction also waits for LORE review. Vendor compaction is unavailable.
+Claude compaction also waits for LORE review. Vendor `/compact` preserves the
+full durable conversation and writes a separate, reviewed summary checkpoint;
+it validates the original prefix before using that summary on resume.
 
 Codex 0.156.1 can continue compaction when the OS cannot spawn a hook, or the
 hook times out or returns invalid output. DOXA stops a protected session after
@@ -182,14 +186,14 @@ See [engine contracts](doxa-engines/README.md) for transport and review details.
 
 ## Verification and gallery
 
-The alpha.31 release verifies the full Rust workspace and the installed Python
-SDK/native LORE seams using disposable stores and local provider fixtures. Coverage
+Rust CI verifies the workspace and a native installation using disposable
+stores and controlled provider fixtures. Python is used only by development
+compatibility tests. Coverage
 includes layout, review gates, restoration, current-session controls, cancellation,
 interactive fleets, device login, private ledgers and malformed manifests.
 Run `./task test` for the current full suite. Alpha tests do not establish live
 provider compatibility beyond the explicitly verified contracts.
 
-The [gallery](../docs/rust-gallery.md) renders production Rust layouts from
-labelled deterministic fixtures. Terminal image support is explicitly excluded
-by user preference. Stable release still requires the tracker gates and final
-performance/regression verification.
+The [gallery](../docs/rust-gallery.md) captures the real application in a VTE
+terminal with an authenticated provider and isolated example repository.
+Development fixtures are kept separate. Terminal image probes are disabled.

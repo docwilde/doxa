@@ -13,11 +13,6 @@ pub const SUPPORTED_VERSION: &str = "0.156.1";
 pub const HOOK_TIMEOUT: u64 = 240;
 pub const HOOK_KEY: &str = "/<session-flags>/config.toml:pre_compact:0:0";
 const MATCHER: &str = "^(auto|manual)$";
-const SCRIPT: &str = include_str!("../codex_compact_hook.py");
-const REVIEW_SUPERVISOR: &str = include_str!("../../../doxa/review_worker.py");
-// This command itself is part of the trusted hash. It verifies the embedded
-// source digest before compile/exec, including syntax/import failure handling.
-const BOOTSTRAP: &str = "import sys,json,hashlib,os,stat,contextlib; result={'continue':False,'suppressOutput':True,'stopReason':'DOXA LORE review unavailable; compaction blocked'}\ntry:\n fd=os.open(sys.argv[1],os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK); st=os.fstat(fd); assert stat.S_ISREG(st.st_mode) and st.st_uid==os.getuid() and st.st_nlink==1 and st.st_size<65536; data=os.read(fd,65536); os.close(fd); assert hashlib.sha256(data).hexdigest()==sys.argv[2]\n with open(os.devnull,'w') as sink,contextlib.redirect_stdout(sink),contextlib.redirect_stderr(sink):\n  ns={'__name__':'doxa_compact_hook'}; exec(compile(data,sys.argv[1],'exec'),ns); sys.argv=[sys.argv[1],sys.argv[3]]; result=ns['main']()\nexcept BaseException: pass\nprint(json.dumps(result,separators=(',',':')))";
 
 pub struct CompactGate {
     directory: PathBuf,
@@ -27,6 +22,7 @@ pub struct CompactGate {
     hash: String,
     verified: bool,
     directory_identity: (u64, u64),
+    carrier_identity: (u64,u64),
 }
 fn shell_quote(value: &str) -> String { format!("'{}'", value.replace('\'', "'\\''")) }
 fn string(value: &str) -> String { serde_json::to_string(value).expect("string JSON") }
@@ -43,13 +39,13 @@ fn write_new(path: &Path, bytes: &[u8]) -> io::Result<()> {
     file.write_all(bytes)?; file.sync_all()
 }
 impl CompactGate {
-    /// `directory` is a fresh, private DOXA-owned session directory. Source is
-    /// compiled into this binary, never read from a user's plugin directory.
-    pub fn prepare(directory: &Path, python: &Path, codex_home: &Path, cwd: &Path, session_id: &str, version: &str) -> io::Result<Self> {
-        Self::prepare_with_memory(directory, python, codex_home, cwd, session_id, version, true)
+    /// `directory` is a fresh, private DOXA-owned session directory. The native
+    /// daemon executable is pinned by digest, never from a plugin import path.
+    pub fn prepare(directory: &Path, executable: &Path, codex_home: &Path, cwd: &Path, session_id: &str, version: &str) -> io::Result<Self> {
+        Self::prepare_with_memory(directory, executable, codex_home, cwd, session_id, version, true)
     }
     #[allow(clippy::too_many_arguments)]
-    pub fn prepare_with_memory(directory: &Path, python: &Path, codex_home: &Path, cwd: &Path, session_id: &str, version: &str, lore_enabled: bool) -> io::Result<Self> {
+    pub fn prepare_with_memory(directory: &Path, executable: &Path, codex_home: &Path, cwd: &Path, session_id: &str, version: &str, lore_enabled: bool) -> io::Result<Self> {
         if version != SUPPORTED_VERSION { return Err(io::Error::other("Codex build has no verified PreCompact hook contract")); }
         if session_id.is_empty() || session_id.len() > 128 || !session_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
             return Err(io::Error::other("invalid DOXA session id"));
@@ -57,12 +53,30 @@ impl CompactGate {
         private_directory(directory)?;
         let directory_meta = fs::symlink_metadata(directory)?;
         let directory_identity = (directory_meta.dev(), directory_meta.ino());
-        let source = directory.join("precompact.py");
         let manifest = directory.join("compact-session.json");
-        // Pin the canonical supervisor in the same source digest as the hook.
-        // Neither process resolves DOXA code through the workspace/import path.
-        let script = format!("REVIEW_SUPERVISOR_SOURCE = {}\n{}", string(REVIEW_SUPERVISOR), SCRIPT);
-        let command = [python.display().to_string(), "-I".into(), "-c".into(), BOOTSTRAP.into(), source.display().to_string(), digest(script.as_bytes()), manifest.display().to_string()]
+        let source = fs::canonicalize(executable)?;
+        let running=fs::metadata("/proc/self/exe")?;
+        let executable_digest = crate::compact_hook::executable_digest(&source)?;
+        let executable=directory.join("native-carrier");
+        match fs::hard_link(&source,&executable){
+            Ok(())=>{
+                let pinned=fs::metadata(&executable)?;
+                if (pinned.dev(),pinned.ino())!=(running.dev(),running.ino()){
+                    let _=fs::remove_file(&executable);return Err(io::Error::other("native executable changed before pinning"));
+                }
+            },
+            Err(error) if error.raw_os_error()==Some(libc::EXDEV)=>{
+                let mut input=fs::File::open(&source)?;let pinned=input.metadata()?;
+                if (pinned.dev(),pinned.ino())!=(running.dev(),running.ino()){return Err(io::Error::other("native executable changed before pinning"));}
+                let mut output=fs::OpenOptions::new().write(true).create_new(true).mode(0o700).custom_flags(libc::O_NOFOLLOW).open(&executable)?;
+                if let Err(error)=io::copy(&mut input,&mut output).and_then(|_|output.sync_all()) {let _=fs::remove_file(&executable);return Err(error);}
+            },Err(error)=>return Err(error),
+        }
+        let carrier=fs::metadata(&executable)?;let carrier_identity=(carrier.dev(),carrier.ino());
+        if crate::compact_hook::executable_digest(&executable)?!=executable_digest{
+            let _=fs::remove_file(&executable);return Err(io::Error::other("native carrier digest changed"));
+        }
+        let command = [executable.display().to_string(), "__codex-precompact".into(), manifest.display().to_string(), executable_digest]
             .iter().map(|s| shell_quote(s)).collect::<Vec<_>>().join(" ");
         let normalized = json!({"event_name":"pre_compact","matcher":MATCHER,"hooks":[{
             "type":"command","command":command,"timeout":HOOK_TIMEOUT,"async":false
@@ -71,11 +85,11 @@ impl CompactGate {
         let descriptor = json!({"version":SUPPORTED_VERSION,"provider_thread":null,"doxa_session":session_id,
             "codex_home":codex_home,"cwd":cwd,"lore_enabled":lore_enabled});
         let descriptor_bytes = serde_json::to_vec(&descriptor)?;
-        write_new(&source, script.as_bytes())?;
-        if let Err(error) = write_new(&manifest, &descriptor_bytes) {
-            let _ = fs::remove_file(source); return Err(error);
+        if let Err(error)=write_new(&manifest, &descriptor_bytes){
+            if fs::symlink_metadata(&executable).is_ok_and(|meta|meta.is_file()&&(meta.dev(),meta.ino())==carrier_identity){let _=fs::remove_file(&executable);}
+            return Err(error);
         }
-        Ok(Self { directory:directory.to_owned(), manifest, descriptor, command, hash, verified:false, directory_identity })
+        Ok(Self { directory:directory.to_owned(), manifest, descriptor, command, hash, verified:false, directory_identity,carrier_identity })
     }
     /// Append as process-local `-c` overrides. These trust this single pinned
     /// command; they never set bypass_hook_trust or edit CODEX_HOME/config.toml.
@@ -89,10 +103,10 @@ impl CompactGate {
     /// Failure means this provider must not claim protected compaction.
     pub fn verify_hooks(&mut self, result: &Value) -> io::Result<()> {
         let matches = result["data"].as_array().into_iter().flatten().flat_map(|entry| entry["hooks"].as_array().into_iter().flatten())
-            .filter(|hook| hook["key"] == HOOK_KEY && hook["command"] == self.command).collect::<Vec<_>>();
+            .filter(|hook| hook["key"] == HOOK_KEY || (hook["source"] == "sessionFlags" && hook["eventName"] == "preCompact")).collect::<Vec<_>>();
         if matches.len() != 1 { return Err(io::Error::other("DOXA PreCompact hook missing or duplicated")); }
         let hook = matches[0];
-        if hook["handlerType"] != "command" || hook["enabled"] != true || hook["trustStatus"] != "trusted" || hook["currentHash"] != self.hash || hook["eventName"] != "preCompact" || hook["source"] != "sessionFlags" || hook["timeoutSec"] != HOOK_TIMEOUT || hook["async"] != false {
+        if hook["command"] != self.command || hook["key"] != HOOK_KEY || hook["handlerType"] != "command" || hook["enabled"] != true || hook["trustStatus"] != "trusted" || hook["currentHash"] != self.hash || hook["eventName"] != "preCompact" || hook["source"] != "sessionFlags" || hook["timeoutSec"] != HOOK_TIMEOUT || hook["async"] != false {
             return Err(io::Error::other("DOXA PreCompact hook is not active with its pinned hash"));
         }
         self.verified = true; Ok(())
@@ -131,7 +145,9 @@ pub enum ReviewOutcome { Unrelated, Reviewed, Blocked, Failed }
 impl Drop for CompactGate {
     fn drop(&mut self) {
         if fs::symlink_metadata(&self.directory).is_ok_and(|meta| meta.is_dir() && !meta.file_type().is_symlink() && (meta.dev(),meta.ino()) == self.directory_identity) {
-            for name in ["precompact.py", "compact-session.json", "compact-session.next.json"] { let _ = fs::remove_file(self.directory.join(name)); }
+            for name in ["compact-session.json", "compact-session.next.json"] { let _ = fs::remove_file(self.directory.join(name)); }
+            let carrier=self.directory.join("native-carrier");
+            if fs::symlink_metadata(&carrier).is_ok_and(|meta|meta.is_file()&&(meta.dev(),meta.ino())==self.carrier_identity){let _=fs::remove_file(carrier);}
             // Never recursively remove unknown content added to this directory.
             let _ = fs::remove_dir(&self.directory);
         }
@@ -143,7 +159,7 @@ mod tests {
     use super::*;
     fn prepare(root: &Path) -> CompactGate {
         fs::set_permissions(root, fs::Permissions::from_mode(0o700)).unwrap();
-        CompactGate::prepare(root, Path::new("/usr/bin/python3"), Path::new("/fixture/codex"), Path::new("/fixture/project"), "doxa-session", SUPPORTED_VERSION).unwrap()
+        CompactGate::prepare(root, &std::env::current_exe().unwrap(), Path::new("/fixture/codex"), Path::new("/fixture/project"), "doxa-session", SUPPORTED_VERSION).unwrap()
     }
     fn metadata(gate: &CompactGate) -> Value {
         json!({"data":[{"hooks":[{"key":HOOK_KEY,"command":gate.command,"async":false,"handlerType":"command","enabled":true,"trustStatus":"trusted","currentHash":gate.hash,"eventName":"preCompact","source":"sessionFlags","sourcePath":"/<session-flags>/config.toml","timeoutSec":HOOK_TIMEOUT}]}]})
@@ -162,6 +178,12 @@ mod tests {
         assert_eq!(gate.observe_completion(&run), ReviewOutcome::Failed); assert!(!gate.verified());
     }
     #[test]
+    fn cleanup_does_not_remove_a_replaced_native_carrier(){
+        let dir=tempfile::tempdir().unwrap();let gate=prepare(dir.path());let carrier=dir.path().join("native-carrier");
+        fs::rename(&carrier,dir.path().join("old-carrier")).unwrap();fs::write(&carrier,"replacement").unwrap();
+        drop(gate);assert_eq!(fs::read_to_string(carrier).unwrap(),"replacement");
+    }
+    #[test]
     fn unknown_version_and_unsafe_preparation_never_enable_gate() {
         let dir = tempfile::tempdir().unwrap();
         assert!(CompactGate::prepare(dir.path(), Path::new("python"), Path::new("codex"), Path::new("project"), "session", "0.unknown").is_err());
@@ -170,27 +192,15 @@ mod tests {
         assert!(CompactGate::prepare(dir.path(), Path::new("python"), Path::new("codex"), Path::new("project"), "session", SUPPORTED_VERSION).is_err());
     }
     #[test]
-    fn pinned_bootstrap_blocks_changed_source_and_cleanup_preserves_unknown_files() {
+    fn native_command_is_pinned_and_cleanup_preserves_unknown_files() {
         let dir = tempfile::tempdir().unwrap(); let gate = prepare(dir.path());
-        let source = dir.path().join("precompact.py"); fs::write(&source, "invalid syntax !!!").unwrap();
-        let output = std::process::Command::new("/bin/sh").args(["-c", &gate.command]).output().unwrap();
-        assert!(output.status.success()); let result: Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(result["continue"], false);
+        assert!(gate.command.contains("__codex-precompact"));
+        assert!(gate.command.contains("native-carrier"));
+        assert_eq!(fs::metadata(dir.path().join("native-carrier")).unwrap().ino(),fs::metadata("/proc/self/exe").unwrap().ino());
+        assert!(!gate.command.contains("python"));
+        assert!(!dir.path().join("precompact.py").exists());
         fs::write(dir.path().join("keep"), "unknown content").unwrap();
-        drop(gate); assert!(!source.exists()); assert!(dir.path().join("keep").exists());
-    }
-    #[test]
-    fn pinned_bootstrap_covers_canonical_review_supervisor_bytes() {
-        let dir = tempfile::tempdir().unwrap(); let gate = prepare(dir.path());
-        let source = dir.path().join("precompact.py");
-        let bytes = fs::read_to_string(&source).unwrap();
-        assert_eq!(bytes, format!("REVIEW_SUPERVISOR_SOURCE = {}\n{}", string(REVIEW_SUPERVISOR), SCRIPT));
-        // A syntactically valid replacement cannot weaken the worker's owner
-        // contract while retaining the Codex-approved hook command/hash.
-        fs::write(&source, format!("REVIEW_SUPERVISOR_SOURCE = 'changed supervisor'\n{}", SCRIPT)).unwrap();
-        let output = std::process::Command::new("/bin/sh").args(["-c", &gate.command]).output().unwrap();
-        assert!(output.status.success());
-        let result: Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(result["continue"], false);
+        drop(gate); assert!(!dir.path().join("compact-session.json").exists());
+        assert!(dir.path().join("keep").exists());
     }
 }
