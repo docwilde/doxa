@@ -133,6 +133,30 @@ class ProofTests(unittest.TestCase):
             frames.close()
             proof.terminate(process)
 
+    def test_initial_census_failure_reaps_process_and_closes_pipes_and_pidfds(self):
+        popen = subprocess.Popen
+        snapshot = proof.process_snapshot
+        spawned = []
+        censuses = 0
+        def spawn(*args, **kwargs):
+            process = popen(*args, **kwargs)
+            spawned.append(process)
+            return process
+        def census():
+            nonlocal censuses
+            censuses += 1
+            if censuses == 2:
+                raise RuntimeError("synthetic census failure")
+            return snapshot()
+        before = len(list(Path("/proc/self/fd").iterdir()))
+        with patch.object(proof.subprocess, "Popen", side_effect=spawn), patch.object(proof, "process_snapshot", side_effect=census):
+            with self.assertRaisesRegex(RuntimeError, "synthetic census failure"):
+                proof.owned_process(["/usr/bin/python3", "-c", "import time;time.sleep(30)"],
+                                    stdout=subprocess.PIPE, start_new_session=True)
+        self.assertIsNotNone(spawned[0].returncode)
+        self.assertTrue(spawned[0].stdout.closed)
+        self.assertEqual(before, len(list(Path("/proc/self/fd").iterdir())))
+
     def test_cleanup_tracks_owned_descendants_with_separate_groups_and_sessions(self):
         import signal
         script = """import os,time

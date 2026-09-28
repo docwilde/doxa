@@ -101,15 +101,21 @@ class OwnedProcessTree:
         self.lock = threading.Lock()
         self.stopping = threading.Event()
         self.error = None
-        rows = process_snapshot()
-        root = rows.get(process.pid)
-        if root:
-            self._remember(process.pid, root[0])
-        self.collect()
         self.worker = None
-        if monitor:
-            self.worker = threading.Thread(target=self._monitor, daemon=True)
-            self.worker.start()
+        try:
+            rows = process_snapshot()
+            root = rows.get(process.pid)
+            if root:
+                self._remember(process.pid, root[0])
+            self.collect()
+            if monitor:
+                self.worker = threading.Thread(target=self._monitor, daemon=True)
+                self.worker.start()
+        except Exception:
+            self.signal_all(signal.SIGKILL, leader_last=True)
+            for descriptor in self.identities.values():
+                os.close(descriptor)
+            raise
 
     def _remember(self, pid, start):
         identity = (pid, start)
