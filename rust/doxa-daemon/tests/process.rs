@@ -166,7 +166,7 @@ impl Process {
     fn start_codex(runtime: &Path, codex: &Path, python: &Path) -> Self {
         Self::start_codex_with_inbound(runtime, codex, python, false)
     }
-    fn start_codex_appserver(runtime: &Path, codex: &Path, python: &Path, resume: bool) -> Self {
+    fn start_codex_appserver(runtime: &Path, codex: &Path, _fixture_interpreter: &Path, resume: bool) -> Self {
         let mut command = daemon_command();
         command.args([
             "--runtime-dir", runtime.to_str().unwrap(), "--cwd", runtime.to_str().unwrap(),
@@ -182,7 +182,7 @@ impl Process {
         let entry: Value = serde_json::from_slice(&fs::read(&registry).unwrap()).unwrap();
         Self { child, registry, socket: PathBuf::from(entry["daemon_socket"].as_str().unwrap()) }
     }
-    fn start_codex_with_inbound(runtime: &Path, codex: &Path, python: &Path, inbound: bool) -> Self {
+    fn start_codex_with_inbound(runtime: &Path, codex: &Path, _fixture_interpreter: &Path, inbound: bool) -> Self {
         let mut command = daemon_command();
         command
             .args([
@@ -843,7 +843,6 @@ fn rejects_invalid_ceiling_before_binding() {
 fn rejects_budgeted_codex_without_selected_price_basis() {
     let dir = tempfile::tempdir().unwrap();
     let codex = dir.path().join("codex-fixture");
-    let python = Path::new("/usr/bin/python3");
     executable(&codex, "#!/bin/sh\nexit 0\n");
     for (model, expected) in [(None, "budgeted Codex session requires a priced model"),
         (Some("gpt-reserve"), "no native budget price for selected Codex model")] {
@@ -864,7 +863,6 @@ fn rejects_budgeted_codex_without_selected_price_basis() {
 #[test]
 fn rejects_unpriced_vendor_budget_before_binding() {
     let dir = tempfile::tempdir().unwrap();
-    let python = Path::new("/usr/bin/python3");
     let output = daemon_command()
         .args(["--runtime-dir", dir.path().to_str().unwrap(), "--session-id", "fleet-slot",
             "--engine", "glm", "--model", "glm-5-turbo", ])
@@ -1264,7 +1262,6 @@ fn codex_clean_checkpoint_failure_overrides_success_and_preserves_dirty_resume_g
 fn codex_resume_refuses_changed_clean_checkpoint_before_provider_execution() {
     let dir = tempfile::tempdir().unwrap();
     let codex = dir.path().join("codex-fixture");
-    let python = Path::new("/usr/bin/python3");
     let marker = dir.path().join("unexpected-provider-start");
     executable(&codex, &format!("#!/bin/sh\ntouch '{}'\n", marker.display()));
     let project = native_transcript_dir(dir.path());
@@ -1448,7 +1445,6 @@ fn codex_assistant_append_failure_overrides_successful_provider_turn() {
 fn existing_transcript_without_thread_id_refuses_new_codex_thread() {
     let dir = tempfile::tempdir().unwrap();
     let codex = dir.path().join("codex-fixture");
-    let python = Path::new("/usr/bin/python3");
     executable(&codex, "#!/bin/sh\necho started > should-not-start\n");
     fs::create_dir_all(native_transcript_dir(dir.path())).unwrap();
     fs::write(
@@ -1480,7 +1476,6 @@ fn existing_transcript_without_thread_id_refuses_new_codex_thread() {
 fn explicit_codex_resume_requires_matching_thread_metadata() {
     let dir = tempfile::tempdir().unwrap();
     let codex = dir.path().join("codex-fixture");
-    let python = Path::new("/usr/bin/python3");
     executable(&codex, "#!/bin/sh\necho started > should-not-start\n");
     let project = native_transcript_dir(dir.path());
     fs::create_dir_all(&project).unwrap();
@@ -1773,7 +1768,6 @@ fn interrupt_reaps_codex_process_group() {
 fn invalid_native_lore_capacity_rejects_session_before_socket_or_registry() {
     let dir = tempfile::tempdir().unwrap();
     let codex = dir.path().join("codex-fixture");
-    let python = Path::new("/usr/bin/python3");
     executable(&codex, "#!/bin/sh\nexit 0\n");
 
     let output = daemon_command()
@@ -3164,7 +3158,7 @@ fn memory_off_codex_scrubs_and_records_without_snapshot_index_or_compact_review(
         let dir = tempfile::tempdir().unwrap();
         fs::create_dir(dir.path().join("home")).unwrap();
         fs::write(dir.path().join("home/config.toml"), format!("lore = '{configured}'\n")).unwrap();
-        let codex = dir.path().join("codex-fixture"); let python = Path::new("/usr/bin/python3");
+        let codex = dir.path().join("codex-fixture");
         let captured = dir.path().join("stdin.txt");
         native_memory_fixture(dir.path(),"- durable memory\n");
         executable(&codex, &format!("#!/bin/sh\ncat > '{}'\necho '{{\"type\":\"thread.started\",\"thread_id\":\"thread_1\"}}'\n", captured.display()));
