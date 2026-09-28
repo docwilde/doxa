@@ -1177,6 +1177,7 @@ impl App {
                     self.rejected_drafts.remove(id);
                     self.expanded_tool_sections.remove(id);
                     self.selected_tool_sections.remove(id);
+                    if self.tool_section_hover.as_ref().is_some_and(|(session, _)| session == id) { self.tool_section_hover = None; }
                     self.tool_cards_revision.remove(id);
                     self.input_requests
                         .retain(|request| request.session_id != id);

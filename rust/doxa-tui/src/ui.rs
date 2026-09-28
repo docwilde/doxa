@@ -1038,8 +1038,8 @@ struct RenderedTranscript {
     id: String,
     source: String,
     width: u16,
-    expanded: Option<HashSet<usize>>,
-    selected: Option<usize>,
+    expanded: Option<HashSet<transcript_tools::FoldKey>>,
+    selected: Option<transcript_tools::FoldKey>,
     cards_revision: u64,
     lines: Vec<Line<'static>>,
     sections: Vec<transcript_tools::Section>,
@@ -1090,13 +1090,13 @@ impl RenderedTranscript {
         id: &str,
         source: &str,
         width: u16,
-        expanded: Option<&HashSet<usize>>,
-        selected: Option<usize>,
+        expanded: Option<&HashSet<transcript_tools::FoldKey>>,
+        selected: Option<transcript_tools::FoldKey>,
         cards_revision: u64,
         cards: &[tool_cards::ToolCard],
     ) -> Self {
         let (lines, sections, links) =
-            transcript_tools::render_with_links(source, width, expanded, selected, cards);
+            transcript_tools::render_with_links(source, width, expanded, selected.clone(), cards);
         let mut turn_start = None;
         let mut prefix_lines = 0;
         if let Some(start) = streamed_turn_start(source) {
@@ -1136,8 +1136,8 @@ impl RenderedTranscript {
         &mut self,
         source: &str,
         width: u16,
-        expanded: Option<&HashSet<usize>>,
-        selected: Option<usize>,
+        expanded: Option<&HashSet<transcript_tools::FoldKey>>,
+        selected: Option<transcript_tools::FoldKey>,
         cards_revision: u64,
         cards: &[tool_cards::ToolCard],
     ) {
@@ -1370,9 +1370,10 @@ pub struct App {
     tool_modal: bool,
     tool_selected: usize,
     tool_scroll: u16,
-    expanded_tool_sections: HashMap<String, HashSet<usize>>,
-    selected_tool_sections: HashMap<String, usize>,
-    visible_tool_sections: RefCell<Vec<(Rect, usize, String, usize)>>,
+    expanded_tool_sections: HashMap<String, HashSet<transcript_tools::FoldKey>>,
+    tool_section_hover: Option<(String, transcript_tools::FoldKey)>,
+    selected_tool_sections: HashMap<String, transcript_tools::FoldKey>,
+    visible_tool_sections: RefCell<Vec<(Rect, usize, String, transcript_tools::FoldKey)>>,
     peer_map: PeerMap,
     map_modal: bool,
     action_menu: bool,
@@ -1585,7 +1586,8 @@ impl Default for App {
             tool_selected: 0,
             tool_scroll: 0,
             expanded_tool_sections: HashMap::new(),
-            selected_tool_sections: HashMap::new(),
+            tool_section_hover: Option<(String, transcript_tools::FoldKey)>,
+    selected_tool_sections: HashMap::new(),
             visible_tool_sections: RefCell::new(Vec::new()),
             peer_map: PeerMap::default(),
             map_modal: false,

@@ -2019,8 +2019,8 @@ impl App {
                     inner[1].width.saturating_sub(2),
                     self.expanded_tool_sections.get(id),
                     (active && self.focus == Focus::Transcript)
-                        .then(|| self.selected_tool_sections.get(id).copied())
-                        .flatten(),
+                        .then(|| self.selected_tool_sections.get(id).cloned())
+                        .flatten().or_else(|| self.tool_section_hover.as_ref().filter(|(session, _)| session == id).map(|(_, key)| key.clone())),
                     cards_revision,
                     self.tool_cards.for_session(id),
                 ));
@@ -2031,8 +2031,8 @@ impl App {
                 inner[1].width.saturating_sub(2),
                 self.expanded_tool_sections.get(id),
                 (active && self.focus == Focus::Transcript)
-                    .then(|| self.selected_tool_sections.get(id).copied())
-                    .flatten(),
+                    .then(|| self.selected_tool_sections.get(id).cloned())
+                    .flatten().or_else(|| self.tool_section_hover.as_ref().filter(|(session, _)| session == id).map(|(_, key)| key.clone())),
                 cards_revision,
                 self.tool_cards.for_session(id),
             );

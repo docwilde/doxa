@@ -1563,11 +1563,11 @@ for line in sys.stdin:
             app.sessions.push(Session { id: "session".into(), title: "Session".into(),
                 collection: String::new(), transcript: "Tool: Read started".into(), status: "Ready".into() });
             *app.visible_tool_sections.borrow_mut() = (0..3).map(|index|
-                (Rect::new(0, index as u16, 20, 1), 0, "session".into(), index)).collect();
+                (Rect::new(0, index as u16, 20, 1), 0, "session".into(), transcript_tools::FoldKey::Section(index))).collect();
             assert!(app.select_tool_section(forward));
-            assert_eq!(app.selected_tool_sections["session"], if forward { 0 } else { 2 });
+            assert_eq!(app.selected_tool_sections["session"], transcript_tools::FoldKey::Section(if forward { 0 } else { 2 }));
             assert!(app.select_tool_section(forward));
-            assert_eq!(app.selected_tool_sections["session"], 1);
+            assert_eq!(app.selected_tool_sections["session"], transcript_tools::FoldKey::Section(1));
         }
     }
 
@@ -2207,7 +2207,7 @@ for line in sys.stdin:
                 assert_eq!(app.pending_open_urls.pop().as_deref(), Some(url));
             }
         }
-        app.expanded_tool_sections.insert("links".into(), HashSet::from([0]));
+        app.expanded_tool_sections.insert("links".into(), HashSet::from([transcript_tools::FoldKey::Section(0)]));
         terminal.draw(|frame| app.draw(frame)).unwrap();
         assert!(app.visible_links.borrow().iter().any(|(_, url)| url == "https://hidden.example"));
         let cached = app.rendered_transcripts.borrow().iter().find(|entry| entry.id == "links").unwrap().links.clone();
@@ -3948,6 +3948,43 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn nested_tool_calls_support_keyboard_mouse_hover_and_streamed_details() {
+        use transcript_tools::FoldKey;
+        let mut app = App::default();
+        app.handle(Event::Resize(100, 32));
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"s"}));
+        let event = |kind: &str, data: serde_json::Value| json!({"type":"event", "session_id":"s", "event":{"type":kind,"data":data}});
+        app.apply_daemon_frame(&event("turn_started", json!({"prompt":"inspect"})));
+        for (id, name, input) in [("one", "Read", "first secret"), ("two", "Write", "second secret")] {
+            app.apply_daemon_frame(&event("tool_call", json!({"id":id,"name":name,"input":input})));
+        }
+        app.focus = Focus::Transcript;
+        painted(&app);
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        let frame = painted(&app);
+        assert!(frame.contains("Read · running") && frame.contains("Write · running"));
+        assert!(!frame.contains("first secret") && !frame.contains("second secret"));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::NONE)));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE)));
+        assert!(painted(&app).contains("first secret"));
+        assert!(!painted(&app).contains("second secret"));
+        app.apply_daemon_frame(&event("tool_result_detail", json!({"id":"one","text":"streamed first result"})));
+        assert!(painted(&app).contains("streamed first result"));
+        let hit = app.visible_tool_sections.borrow().iter()
+            .find(|(_, _, _, key)| *key == FoldKey::Tool("two".into()))
+            .map(|(rect, _, _, _)| *rect).unwrap();
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Moved,
+            column: hit.x + 1, row: hit.y, modifiers: KeyModifiers::NONE }));
+        assert_eq!(app.tool_section_hover, Some(("s".into(), FoldKey::Tool("two".into()))));
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: hit.x + 1, row: hit.y, modifiers: KeyModifiers::NONE }));
+        let frame = painted(&app);
+        assert!(frame.contains("first secret") && frame.contains("second secret"));
+        assert!(app.expanded_tool_sections["s"].contains(&FoldKey::Tool("one".into())));
+        assert!(app.expanded_tool_sections["s"].contains(&FoldKey::Tool("two".into())));
+    }
+
+    #[test]
     fn live_tool_activity_stays_between_latest_response_and_spinner() {
         let mut app = App::default();
         app.handle(Event::Resize(100, 28));
@@ -3958,7 +3995,7 @@ for line in sys.stdin:
         app.apply_daemon_frame(&event("tool_call", json!({"name":"Read","input":{}})));
         app.apply_daemon_frame(&event("text_delta", json!({"text":"Latest response"})));
         for expanded in [false, true] {
-            if expanded { app.expanded_tool_sections.insert("s".into(), HashSet::from([0])); }
+            if expanded { app.expanded_tool_sections.insert("s".into(), HashSet::from([transcript_tools::FoldKey::Section(0)])); }
             let frame = painted(&app);
             assert!(frame.find("Latest response").unwrap() < frame.find("1 tool call").unwrap());
             assert!(frame.find("1 tool call").unwrap() < frame.find("Processing").unwrap());
@@ -4008,12 +4045,12 @@ for line in sys.stdin:
     #[test]
     fn streamed_turn_cache_preserves_prior_tool_sections() {
         let mut source = "**You:**\n\nInspect\n\n**Assistant:**\n\nTool: Read started · file.rs\n\nTool: Read finished · ok\n\n**You:**\n\nSummarize\n\n**Assistant:**\n\n".to_owned();
-        let expanded = HashSet::from([0]);
-        let mut cached = RenderedTranscript::render(0, "s", &source, 50, Some(&expanded), Some(0), 0, &[]);
+        let expanded = HashSet::from([transcript_tools::FoldKey::Section(0)]);
+        let mut cached = RenderedTranscript::render(0, "s", &source, 50, Some(&expanded), Some(transcript_tools::FoldKey::Section(0)), 0, &[]);
         for chunk in ["Summary", " with more detail", "\n\nFinal paragraph"] {
             source.push_str(chunk);
-            cached.update(&source, 50, Some(&expanded), Some(0), 0, &[]);
-            let (expected, sections) = transcript_tools::render(&source, 50, Some(&expanded), Some(0));
+            cached.update(&source, 50, Some(&expanded), Some(transcript_tools::FoldKey::Section(0)), 0, &[]);
+            let (expected, sections) = transcript_tools::render(&source, 50, Some(&expanded), Some(transcript_tools::FoldKey::Section(0)));
             assert_eq!(cached.lines, expected);
             assert_eq!(cached.sections, sections);
         }
@@ -4023,9 +4060,9 @@ for line in sys.stdin:
     fn rendered_transcript_invalidates_on_width_and_expansion() {
         let source = "**Assistant:**\n\nTool: Read started · file.rs\n\nTool: Read finished · ok";
         let mut cached = RenderedTranscript::render(0, "s", source, 60, None, None, 0, &[]);
-        let expanded = HashSet::from([0]);
-        cached.update(source, 24, Some(&expanded), Some(0), 0, &[]);
-        let (expected, sections) = transcript_tools::render(source, 24, Some(&expanded), Some(0));
+        let expanded = HashSet::from([transcript_tools::FoldKey::Section(0)]);
+        cached.update(source, 24, Some(&expanded), Some(transcript_tools::FoldKey::Section(0)), 0, &[]);
+        let (expected, sections) = transcript_tools::render(source, 24, Some(&expanded), Some(transcript_tools::FoldKey::Section(0)));
         assert_eq!(cached.lines, expected);
         assert_eq!(cached.sections, sections);
         assert_eq!(cached.width, 24);
@@ -4034,9 +4071,9 @@ for line in sys.stdin:
         cards.record("s", "tool_call", &json!({"id":"one","name":"Read","input":"file.rs"}));
         cards.record("s", "tool_result", &json!({"id":"one","name":"Read","result_summary":"updated"}));
         let identified = "**Assistant:**\n\nTool: Read started\u{001f}DOXA_TOOL_ID:\"one\"\n\nTool: Read finished\u{001f}DOXA_TOOL_ID:\"one\"";
-        cached.update(identified, 24, Some(&expanded), Some(0), 1, cards.for_session("s"));
+        cached.update(identified, 24, Some(&expanded), Some(transcript_tools::FoldKey::Section(0)), 1, cards.for_session("s"));
         let (expected, sections) = transcript_tools::render_with_cards(
-            identified, 24, Some(&expanded), Some(0), cards.for_session("s"));
+            identified, 24, Some(&expanded), Some(transcript_tools::FoldKey::Section(0)), cards.for_session("s"));
         assert_eq!(cached.lines, expected);
         assert_eq!(cached.sections, sections);
     }
@@ -4095,17 +4132,17 @@ for line in sys.stdin:
         assert!(!collapsed.iter().any(|line| line.to_string().contains("scrubbed thought")));
         assert!(collapsed.iter().any(|line| line.to_string().contains("Thinking · 7 tokens")));
         assert!(!collapsed.iter().any(|line| line.to_string().contains("~7 tokens")));
-        let (expanded, _) = transcript_tools::render(transcript, 80, Some(&HashSet::from([0])), None);
+        let (expanded, _) = transcript_tools::render(transcript, 80, Some(&HashSet::from([transcript_tools::FoldKey::Section(0)])), None);
         assert!(expanded.iter().any(|line| line.to_string().contains("scrubbed thought")));
         assert!(expanded.iter().any(|line| line.to_string().contains("Answer")));
         app.handle(Event::Resize(100, 28));
         painted(&app);
         let hit = app.visible_tool_sections.borrow().iter()
-            .find(|(_, _, session, section)| session == "s" && *section == 0)
+            .find(|(_, _, session, section)| session == "s" && *section == transcript_tools::FoldKey::Section(0))
             .map(|(rect, _, _, _)| *rect).unwrap();
         app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
             column: hit.x + 1, row: hit.y, modifiers: KeyModifiers::NONE }));
-        assert!(app.expanded_tool_sections["s"].contains(&0));
+        assert!(app.expanded_tool_sections["s"].contains(&transcript_tools::FoldKey::Section(0)));
     }
 
     #[test]

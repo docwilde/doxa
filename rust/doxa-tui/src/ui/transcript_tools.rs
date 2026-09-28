@@ -16,9 +16,12 @@ pub(super) const REASONING_PREFIX: &str = "\u{001e}DOXA_REASONING:";
 pub(super) const TOOL_ID_PREFIX: &str = "\u{001f}DOXA_TOOL_ID:";
 pub(crate) const RESTORED_TOOL_PREFIX: &str = "\u{001e}DOXA_RESTORED_TOOL:";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(super) enum FoldKey { Section(usize), Tool(String) }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Section {
-    pub index: usize,
+    pub index: FoldKey,
     pub line: usize,
 }
 
@@ -106,7 +109,7 @@ fn append_markdown(lines: &mut Vec<Line<'static>>, links: &mut Vec<markdown::Lin
 
 fn render_turn(blocks: &mut Vec<Block<'_>>, lines: &mut Vec<Line<'static>>,
                sections: &mut Vec<Section>, links: &mut Vec<markdown::LinkRegion>, width: u16,
-               expanded: Option<&HashSet<usize>>, selected: Option<usize>, cards: &[ToolCard]) {
+               expanded: Option<&HashSet<FoldKey>>, selected: Option<FoldKey>, cards: &[ToolCard]) {
     let mut prose = String::new();
     let mut speaker = None;
     let flush_prose = |prose: &mut String, lines: &mut Vec<Line<'static>>, links: &mut Vec<markdown::LinkRegion>, speaker| {
@@ -118,7 +121,7 @@ fn render_turn(blocks: &mut Vec<Block<'_>>, lines: &mut Vec<Line<'static>>,
     // Keep fold identities in transcript order while laying each turn's tool
     // activity out after its final response. New prose must not move the tool
     // section back above the response or change which section is expanded.
-    let mut next_index = sections.len();
+    let mut next_index = sections.iter().filter(|s| matches!(s.index, FoldKey::Section(_))).count();
     let mut ordered = Vec::with_capacity(blocks.len());
     let mut tools = Vec::new();
     for block in blocks.drain(..) {
@@ -154,7 +157,8 @@ fn render_turn(blocks: &mut Vec<Block<'_>>, lines: &mut Vec<Line<'static>>,
                 flush_prose(&mut prose, lines, links, speaker);
                 speaker = Some(Speaker::Assistant);
                 let index = section_index.expect("foldable blocks have an identity");
-                sections.push(Section { index, line: lines.len() });
+                let index = FoldKey::Section(index);
+                sections.push(Section { index: index.clone(), line: lines.len() });
                 let calls = tools.iter().filter(|row| {
                     let display = row.split_once(RESTORED_TOOL_PREFIX).map_or(**row, |(display, _)| display);
                     display.contains(" started") || display.starts_with("[Tool: ")
@@ -165,29 +169,52 @@ fn render_turn(blocks: &mut Vec<Block<'_>>, lines: &mut Vec<Line<'static>>,
                 let summary = format!("{marker} {count} tool call{} · {} · Enter",
                     if count == 1 { "" } else { "s" }, tool_name(tools[0]));
                 let summary: String = summary.chars().take(usize::from(width.saturating_sub(2))).collect();
-                let style = if selected == Some(index) {
+                let style = if selected.as_ref() == Some(&index) {
                     Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(theme::SECONDARY)
                 };
                 lines.push(Line::styled(format!(" {summary}"), style));
                 if open {
-                    let mut seen = HashSet::new();
+                    // Group start, summary and streamed detail rows by their persisted
+                    // call ID. Opening one call never opens its neighbours.
+                    let mut calls: Vec<(String, Vec<&str>)> = Vec::new();
                     for row in tools {
-                        let (display, id) = tool_identity(row);
-                        if let Some(card) = id.as_deref().and_then(|id| cards.iter().find(|card| card.id == id)) {
-                            if !seen.insert(card.id.as_str()) { continue; }
-                            lines.push(Line::styled(format!("  {} · {}", card.name, card.status()),
-                                Style::default().fg(theme::ACCENT)));
+                        let (_, id) = tool_identity(row);
+                        let id = id.unwrap_or_else(|| format!("legacy:{index:?}:{}", tool_name(row)));
+                        if let Some((_, rows)) = calls.iter_mut().find(|(key, _)| *key == id) {
+                            rows.push(row);
+                        } else { calls.push((id, vec![row])); }
+                    }
+                    for (id, rows) in calls {
+                        let key = FoldKey::Tool(id.clone());
+                        let call_open = expanded.is_some_and(|set| set.contains(&key));
+                        sections.push(Section { index: key.clone(), line: lines.len() });
+                        let card = cards.iter().find(|card| card.id == id);
+                        let name = card.map_or_else(|| tool_name(rows[0]), |card| card.name.as_str());
+                        let status = card.map_or_else(|| {
+                            let (display, _) = tool_identity(rows.last().copied().unwrap());
+                            (if display.contains(" failed") { "failed" }
+                            else if display.contains(" finished") { "finished" }
+                            else { "running" }).to_owned()
+                        }, |card| card.status());
+                        let style = if selected.as_ref() == Some(&key) {
+                            Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)
+                        } else { Style::default().fg(theme::SECONDARY) };
+                        lines.push(Line::styled(format!("  {} {name} · {status} · Enter",
+                            if call_open { "▾" } else { "▸" }), style));
+                        if !call_open { continue; }
+                        if let Some(card) = card {
                             if let Some(input) = &card.input { plain_detail(lines, "Input", input, width); }
                             if let Some(result) = &card.result { plain_detail(lines, "Result", result, width); }
                         } else {
-                            if let Some((label, detail)) = restored_detail(row) {
-                                let status = display.split_once(" · ").map_or(display, |(status, _)| status);
-                                lines.push(Line::styled(format!("  {status}"), Style::default().fg(theme::ACCENT)));
-                                plain_detail(lines, label, &detail, width);
-                            } else {
-                                append_markdown(lines, links, markdown::render_with_links(display, width));
+                            for row in rows {
+                                if let Some((label, detail)) = restored_detail(row) {
+                                    plain_detail(lines, label, &detail, width);
+                                } else {
+                                    let (display, _) = tool_identity(row);
+                                    append_markdown(lines, links, markdown::render_with_links(display, width));
+                                }
                             }
                         }
                     }
@@ -196,10 +223,11 @@ fn render_turn(blocks: &mut Vec<Block<'_>>, lines: &mut Vec<Line<'static>>,
             Block::Shell(result) => {
                 flush_prose(&mut prose, lines, links, speaker);
                 let index = section_index.expect("shell blocks have an identity");
-                sections.push(Section { index, line: lines.len() });
+                let index = FoldKey::Section(index);
+                sections.push(Section { index: index.clone(), line: lines.len() });
                 let open = expanded.is_some_and(|set| set.contains(&index));
                 let marker = if open { "▾" } else { "▸" };
-                let style = if selected == Some(index) { Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD) } else { Style::default().fg(theme::SECONDARY) };
+                let style = if selected.as_ref() == Some(&index) { Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD) } else { Style::default().fg(theme::SECONDARY) };
                 let command = markdown::sanitize(&result.command).replace('\n', " ");
                 let label = format!(" {marker} !{command} · {}", result.status);
                 let label: String = label.chars().take(usize::from(width.saturating_sub(1))).collect();
@@ -211,13 +239,14 @@ fn render_turn(blocks: &mut Vec<Block<'_>>, lines: &mut Vec<Line<'static>>,
                 flush_prose(&mut prose, lines, links, speaker);
                 speaker = Some(Speaker::Assistant);
                 let index = section_index.expect("foldable blocks have an identity");
-                sections.push(Section { index, line: lines.len() });
+                let index = FoldKey::Section(index);
+                sections.push(Section { index: index.clone(), line: lines.len() });
                 let open = expanded.is_some_and(|set| set.contains(&index));
                 let marker = if open { "▾" } else { "▸" };
                 let estimate = if exact { "" } else { "~" };
                 let label = format!(" {marker} Reasoning/Thinking · {estimate}{tokens} tokens{}",
                     if streaming { " · receiving" } else { "" });
-                let style = if selected == Some(index) {
+                let style = if selected.as_ref() == Some(&index) {
                     Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)
                 } else { Style::default().fg(theme::SECONDARY) };
                 lines.push(Line::styled(label, style));
@@ -241,8 +270,8 @@ fn render_turn(blocks: &mut Vec<Block<'_>>, lines: &mut Vec<Line<'static>>,
 pub(super) fn render(
     source: &str,
     width: u16,
-    expanded: Option<&HashSet<usize>>,
-    selected: Option<usize>,
+    expanded: Option<&HashSet<FoldKey>>,
+    selected: Option<FoldKey>,
 ) -> (Vec<Line<'static>>, Vec<Section>) {
     render_with_cards(source, width, expanded, selected, &[])
 }
@@ -250,17 +279,17 @@ pub(super) fn render(
 pub(super) fn render_with_cards(
     source: &str,
     width: u16,
-    expanded: Option<&HashSet<usize>>,
-    selected: Option<usize>,
+    expanded: Option<&HashSet<FoldKey>>,
+    selected: Option<FoldKey>,
     cards: &[ToolCard],
 ) -> (Vec<Line<'static>>, Vec<Section>) {
-    let (lines, sections, _) = render_with_links(source, width, expanded, selected, cards);
+    let (lines, sections, _) = render_with_links(source, width, expanded, selected.clone(), cards);
     (lines, sections)
 }
 
 pub(super) fn render_with_links(
-    source: &str, width: u16, expanded: Option<&HashSet<usize>>,
-    selected: Option<usize>, cards: &[ToolCard],
+    source: &str, width: u16, expanded: Option<&HashSet<FoldKey>>,
+    selected: Option<FoldKey>, cards: &[ToolCard],
 ) -> (Vec<Line<'static>>, Vec<Section>, Vec<markdown::LinkRegion>) {
     let mut lines = Vec::new();
     let mut sections = Vec::new();
@@ -273,12 +302,12 @@ pub(super) fn render_with_links(
         if paragraph.is_empty() { continue; }
         if fence.is_none() && matches!(paragraph, "**You:**" | "**Assistant:**") {
             if paragraph == "**You:**" {
-                render_turn(&mut blocks, &mut lines, &mut sections, &mut links, width, expanded, selected, cards);
+                render_turn(&mut blocks, &mut lines, &mut sections, &mut links, width, expanded, selected.clone(), cards);
                 tool_index = None;
             }
             blocks.push(Block::Heading(paragraph));
         } else if fence.is_none() && paragraph.starts_with(SHELL_PREFIX) {
-            render_turn(&mut blocks, &mut lines, &mut sections, &mut links, width, expanded, selected, cards);
+            render_turn(&mut blocks, &mut lines, &mut sections, &mut links, width, expanded, selected.clone(), cards);
             tool_index = None;
             if let Ok(result) = serde_json::from_str(paragraph.strip_prefix(SHELL_PREFIX).unwrap()) { blocks.push(Block::Shell(result)); }
             else { blocks.push(Block::Prose("Local shell output unavailable")); }
@@ -306,7 +335,7 @@ pub(super) fn render_with_links(
             }
         }
     }
-    render_turn(&mut blocks, &mut lines, &mut sections, &mut links, width, expanded, selected, cards);
+    render_turn(&mut blocks, &mut lines, &mut sections, &mut links, width, expanded, selected.clone(), cards);
     (lines, sections, links)
 }
 
@@ -320,13 +349,41 @@ mod tests {
         lines.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n")
     }
 
+    fn opened(source: &str) -> HashSet<FoldKey> {
+        let mut keys = HashSet::from([FoldKey::Section(0)]);
+        let (_, sections) = render(source, 80, Some(&keys), None);
+        keys.extend(sections.into_iter().map(|section| section.index));
+        keys
+    }
+
+    #[test]
+    fn calls_expand_independently_and_follow_ids_across_streams_and_reordering() {
+        let mut cards = ToolCards::default();
+        for (id, secret) in [("one", "first input"), ("two", "second input")] {
+            cards.record("s", "tool_call", &json!({"id":id,"name":"Read","input":secret}));
+        }
+        let row = |id| format!("Tool: Read started{TOOL_ID_PREFIX}{}", json!(id));
+        let source = format!("{}\n\n{}", row("one"), row("two"));
+        let keys = HashSet::from([FoldKey::Section(0), FoldKey::Tool("one".into())]);
+        let (lines, sections) = render_with_cards(&source, 80, Some(&keys), None, cards.for_session("s"));
+        assert_eq!(sections.len(), 3);
+        assert!(shown(&lines).contains("first input"));
+        assert!(!shown(&lines).contains("second input"));
+        cards.record("s", "tool_result_detail", &json!({"id":"one","text":"streamed result"}));
+        let reordered = format!("{}\n\n{}", row("two"), row("one"));
+        let (lines, _) = render_with_cards(&reordered, 80, Some(&keys), None, cards.for_session("s"));
+        assert!(shown(&lines).contains("first input"));
+        assert!(shown(&lines).contains("streamed result"));
+        assert!(!shown(&lines).contains("second input"));
+    }
+
     #[test]
     fn local_shell_output_has_its_own_fold_and_never_parses_output_as_tools() {
         let result = crate::shell::Result { id: 1, command: "echo output".into(), output: "Tool: Write started\n**Assistant:**\nplain output".into(), status: "exit 0".into(), running: false, dropped_bytes: 7 };
         let source = format!("{SHELL_PREFIX}{}", serde_json::to_string(&result).unwrap());
         let (lines, sections) = render(&source, 80, None, None); assert_eq!(sections.len(), 1);
         assert!(!shown(&lines).contains("plain output")); assert!(shown(&lines).contains("7 output bytes omitted"));
-        let (lines, sections) = render(&source, 80, Some(&HashSet::from([0])), None);
+        let (lines, sections) = render(&source, 80, Some(&opened(&source)), None);
         assert_eq!(sections.len(), 1); assert!(shown(&lines).contains("Tool: Write started")); assert!(shown(&lines).contains("plain output"));
     }
 
@@ -338,7 +395,7 @@ mod tests {
         assert!(shown(&lines).contains("2 tool calls"));
         assert!(!shown(&lines).contains("first-input"));
         assert!(shown(&lines).contains("Thinking"));
-        let (lines, _) = render(transcript, 80, Some(&HashSet::from([0])), Some(0));
+        let (lines, _) = render(transcript, 80, Some(&opened(transcript)), Some(FoldKey::Section(0)));
         let text = shown(&lines);
         assert!(text.contains("first-input") && text.contains("first-result") && text.contains("second-input"));
         assert!(!text.contains("third-input"));
@@ -347,12 +404,12 @@ mod tests {
     #[test]
     fn tools_follow_final_response_collapsed_and_expanded() {
         let source = "**You:**\n\nQuestion\n\n**Assistant:**\n\nFirst response\n\nTool: Read started · input\n\nSecond response\n\nTool: Read finished · result\n\nLast response";
-        for expanded in [None, Some(HashSet::from([0]))] {
+        for expanded in [None, Some(HashSet::from([FoldKey::Section(0)]))] {
             let (lines, sections) = render(source, 80, expanded.as_ref(), None);
             let text = shown(&lines);
             assert!(text.find("Last response").unwrap() < text.find("1 tool call").unwrap());
-            assert_eq!(sections.len(), 1);
-            if expanded.is_some() { assert!(text.find("Last response").unwrap() < text.find("input").unwrap()); }
+            assert_eq!(sections.len(), if expanded.is_some() { 2 } else { 1 });
+            if expanded.is_some() { assert!(text.find("Last response").unwrap() < text.find("Read ·").unwrap()); }
         }
     }
 
@@ -360,13 +417,13 @@ mod tests {
     fn tool_identity_survives_later_reasoning_and_stays_in_its_turn() {
         let reasoning = format!("{REASONING_PREFIX}{}", json!({"text":"hidden thinking", "tokens":10, "streaming":false}));
         let source = format!("**You:**\n\nFirst question\n\nTool: Read started · visible input\n\n{reasoning}\n\n**Assistant:**\n\nFinal answer\n\n**You:**\n\nNext question");
-        let (lines, sections) = render(&source, 80, Some(&HashSet::from([0])), None);
+        let (lines, sections) = render(&source, 80, Some(&opened(&source)), None);
         let text = shown(&lines);
         assert!(text.find("Final answer").unwrap() < text.find("1 tool call").unwrap());
         assert!(text.find("1 tool call").unwrap() < text.find("Next question").unwrap());
         assert!(text.contains("visible input"));
         assert!(!text.contains("hidden thinking"));
-        assert_eq!(sections.iter().map(|section| section.index).collect::<Vec<_>>(), vec![1, 0]);
+        assert_eq!(sections.iter().map(|section| section.index.clone()).collect::<Vec<_>>(), vec![FoldKey::Section(1), FoldKey::Section(0), FoldKey::Tool("legacy:Section(0):Read".into())]);
     }
 
     #[test]
@@ -380,7 +437,7 @@ mod tests {
         assert!(shown(&lines).contains("Reasoning/Thinking · ~42 tokens · receiving"));
         assert!(!shown(&lines).contains("private reasoning"));
         assert!(shown(&lines).contains("Answer"));
-        let (expanded, _) = render(&source, 80, Some(&HashSet::from([0])), Some(0));
+        let (expanded, _) = render(&source, 80, Some(&opened(&source)), Some(FoldKey::Section(0)));
         assert!(shown(&expanded).contains("private reasoning"));
         assert!(shown(&expanded).contains("with a second line"));
     }
@@ -396,7 +453,7 @@ mod tests {
         let (collapsed, sections) = render_with_cards(&source, 80, None, None, cards.for_session("s"));
         assert_eq!(sections.len(), 1);
         assert!(!shown(&collapsed).contains("long result"));
-        let (expanded, _) = render_with_cards(&source, 80, Some(&HashSet::from([0])), None, cards.for_session("s"));
+        let (expanded, _) = render_with_cards(&source, 80, Some(&opened(&source)), None, cards.for_session("s"));
         let visible = shown(&expanded);
         assert!(visible.contains("a.rs"));
         assert!(visible.contains("long result"));
@@ -418,7 +475,7 @@ mod tests {
         assert_eq!(sections.len(), 1);
         assert!(shown(&collapsed).contains("1 tool call"));
         assert!(!shown(&collapsed).contains("second line"));
-        let (expanded, _) = render(&source, 80, Some(&HashSet::from([0])), None);
+        let (expanded, _) = render(&source, 80, Some(&opened(&source)), None);
         let visible = shown(&expanded);
         assert!(visible.contains("src/main.rs"));
         assert!(visible.contains("first line"));
@@ -442,7 +499,7 @@ mod tests {
         let (collapsed, sections) = render(&source, 80, None, None);
         assert_eq!(sections.len(), 1);
         assert!(!shown(&collapsed).contains("second line"));
-        let (expanded, _) = render(&source, 80, Some(&HashSet::from([0])), None);
+        let (expanded, _) = render(&source, 80, Some(&opened(&source)), None);
         let visible = shown(&expanded);
         assert!(visible.contains("src/main.rs"));
         assert!(visible.contains("first line"));
@@ -472,8 +529,8 @@ mod tests {
         assert_eq!(sections.len(), 1);
         assert!(shown(&lines).contains("2 tool calls"));
         assert!(!shown(&lines).contains("[Tool: Search]"));
-        let (lines, _) = render(source, 80, Some(&HashSet::from([0])), None);
-        assert!(shown(&lines).contains("[Tool: Search]"));
+        let (lines, _) = render(source, 80, Some(&opened(&source)), None);
+        assert!(shown(&lines).contains("Search · running"));
     }
 
     #[test]

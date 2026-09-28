@@ -1047,7 +1047,7 @@ impl App {
                 self.select_tool_section(false)
             }
             KeyCode::Char(']') if self.focus == Focus::Transcript => self.select_tool_section(true),
-            KeyCode::Enter if self.focus == Focus::Transcript => {
+            KeyCode::Enter | KeyCode::Char(' ') if self.focus == Focus::Transcript => {
                 self.toggle_selected_tool_section()
             }
             KeyCode::PageUp if self.focus == Focus::Transcript => {
@@ -1238,17 +1238,17 @@ impl App {
         let Some((id, _)) = self.tool_sections_for_active() else {
             return false;
         };
-        let visible: Vec<usize> = self
+        let visible: Vec<transcript_tools::FoldKey> = self
             .visible_tool_sections
             .borrow()
             .iter()
             .filter(|(_, group, session, _)| *group == self.active_group && *session == id)
-            .map(|(_, _, _, section)| *section)
+            .map(|(_, _, _, section)| section.clone())
             .collect();
         if visible.is_empty() {
             return false;
         }
-        let current = self.selected_tool_sections.get(&id).copied();
+        let current = self.selected_tool_sections.get(&id).cloned();
         let next = match current.and_then(|value| visible.iter().position(|index| *index == value))
         {
             Some(position) if forward => (position + 1).min(visible.len() - 1),
@@ -1256,7 +1256,7 @@ impl App {
             None if forward => 0,
             None => visible.len() - 1,
         };
-        self.selected_tool_sections.insert(id, visible[next]);
+        self.selected_tool_sections.insert(id, visible[next].clone());
         true
     }
 
@@ -1267,36 +1267,37 @@ impl App {
         if count == 0 {
             return false;
         }
-        let visible: Vec<usize> = self
+        let visible: Vec<transcript_tools::FoldKey> = self
             .visible_tool_sections
             .borrow()
             .iter()
             .filter(|(_, group, session, _)| *group == self.active_group && *session == id)
-            .map(|(_, _, _, section)| *section)
+            .map(|(_, _, _, section)| section.clone())
             .collect();
         let selected = self
             .selected_tool_sections
             .get(&id)
-            .copied()
+            .cloned()
             .filter(|section| visible.contains(section))
-            .or_else(|| visible.last().copied())
-            .unwrap_or(count - 1);
-        self.selected_tool_sections.insert(id.clone(), selected);
+            .or_else(|| visible.last().cloned())
+            .unwrap_or(transcript_tools::FoldKey::Section(count - 1));
+        self.selected_tool_sections.insert(id.clone(), selected.clone());
         self.toggle_tool_section(id, selected);
         true
     }
 
-    pub(super) fn toggle_tool_section(&mut self, id: String, selected: usize) {
+    pub(super) fn toggle_tool_section(&mut self, id: String, selected: transcript_tools::FoldKey) {
         if !self.expanded_tool_sections.contains_key(&id) && self.expanded_tool_sections.len() >= 64
         {
             if let Some(oldest) = self.expanded_tool_sections.keys().next().cloned() {
                 self.expanded_tool_sections.remove(&oldest);
+                self.selected_tool_sections.remove(&oldest);
             }
         }
         let expanded = self.expanded_tool_sections.entry(id).or_default();
         if !expanded.remove(&selected) {
             if expanded.len() >= 64 {
-                if let Some(oldest) = expanded.iter().copied().min() {
+                if let Some(oldest) = expanded.iter().cloned().min() {
                     expanded.remove(&oldest);
                 }
             }
@@ -1803,6 +1804,12 @@ impl App {
 
     pub(super) fn mouse(&mut self, mouse: MouseEvent) -> bool {
         if mouse.kind == MouseEventKind::Moved {
+            let hover = self.visible_tool_sections.borrow().iter()
+                .find(|(rect, _, _, _)| rect.contains(ratatui::layout::Position::new(mouse.column, mouse.row)))
+                .map(|(_, _, id, key)| (id.clone(), key.clone()));
+            if self.tool_section_hover != hover {
+                self.tool_section_hover = hover;
+            }
             self.belief_pointer = Some((mouse.column, mouse.row));
         }
         if mouse.kind == MouseEventKind::Down(MouseButton::Left)
@@ -2812,7 +2819,7 @@ impl App {
                 if let Some((_, group, id, section)) = section_hit {
                     self.active_group = group;
                     self.focus = Focus::Transcript;
-                    self.selected_tool_sections.insert(id.clone(), section);
+                    self.selected_tool_sections.insert(id.clone(), section.clone());
                     self.toggle_tool_section(id, section);
                     return true;
                 }
