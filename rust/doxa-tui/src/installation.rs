@@ -29,7 +29,10 @@ pub fn install_launcher(command: &Path) -> io::Result<std::path::PathBuf> {
 struct LauncherDir(fs::File);
 impl LauncherDir {
     fn open(path:&Path)->io::Result<Self> {
-        fs::create_dir_all(path)?;
+        use std::os::unix::fs::DirBuilderExt;
+        // Explicit permissions keep fresh XDG paths safe under a group-writable
+        // caller umask; existing unsafe directories must still be refused.
+        fs::DirBuilder::new().recursive(true).mode(0o755).create(path)?;
         let file=fs::OpenOptions::new().read(true)
             .custom_flags(libc::O_DIRECTORY|libc::O_NOFOLLOW|libc::O_CLOEXEC).open(path)?;
         let meta=file.metadata()?;
