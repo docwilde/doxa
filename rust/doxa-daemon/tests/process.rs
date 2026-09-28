@@ -499,6 +499,24 @@ fn codex_fixture_rpcs(producer: &Path) -> Vec<Value> {
     fs::read_to_string(producer.with_extension("rpc")).unwrap().lines()
         .map(|line| serde_json::from_str(line).unwrap()).collect()
 }
+#[track_caller]
+fn wait_for_codex_turn_submission(process: &mut Process, producer: &Path, turn_number: usize) {
+    // A daemon acknowledgement/turn_started precedes carrier attestation.
+    // Start ordinary state/cancellation clocks only after this owned peer has
+    // received the requested turn; existing entries cannot admit a later turn.
+    let started = Instant::now();
+    loop {
+        let submissions = fs::read_to_string(producer.with_extension("rpc"))
+            .unwrap_or_default().lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|row| row["method"] == "turn/start").count();
+        if submissions >= turn_number { return; }
+        assert!(!process.exited(), "Codex daemon exited before fixture turn submission");
+        assert!(started.elapsed() < CODEX_PREPARATION_TIMEOUT,
+            "protected Codex preparation did not submit fixture turn {turn_number}");
+        thread::sleep(Duration::from_millis(10));
+    }
+}
 fn executable(path: &Path, body: &str) {
     fs::write(path, body).unwrap();
     let mut perms = fs::metadata(path).unwrap().permissions();
@@ -1272,6 +1290,7 @@ fn codex_clean_checkpoint_failure_overrides_success_and_preserves_dirty_resume_g
     // The host buffers assistant output until EOF. A successful empty answer
     // isolates the clean checkpoint from the separately tested append failure.
     let thread_path=native_transcript(dir.path(),"codex-session.codex.json");
+    wait_for_codex_turn_submission(&mut process, &codex, 1);
     wait_until(||ready.exists()&&native_role_count(&transcript,"user")==1
         &&fs::read(&thread_path).ok().and_then(|bytes|serde_json::from_slice::<Value>(&bytes).ok())
             .is_some_and(|state|state["turn_incomplete"]==true));
@@ -1450,6 +1469,7 @@ fn codex_assistant_append_failure_overrides_successful_provider_turn() {
     send(&mut socket, json!({"type":"attach","cursor":null}));
     send(&mut socket, json!({"type":"prompt","id":1,"text":"hello"}));
     assert_eq!(receive(&mut reader)["ok"], true);
+    wait_for_codex_turn_submission(&mut process, &codex, 1);
     wait_until(|| ready.exists());
     let transcript = native_transcript(dir.path(), "codex-session.jsonl");
     let saved = native_transcript(dir.path(), "saved-user.jsonl");
@@ -1583,6 +1603,7 @@ fn thread_identity_is_durable_before_turn_completes() {
     send(&mut socket, json!({"type":"prompt","id":1,"text":"hello"}));
     assert_eq!(receive(&mut reader)["ok"], true);
     let path = native_transcript(dir.path(), "codex-session.codex.json");
+    wait_for_codex_turn_submission(&mut process, &codex, 1);
     wait_until(|| path.exists());
     let thread: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
     assert_eq!(thread["thread_id"], "thread-early");
@@ -1762,11 +1783,12 @@ fn interrupt_reaps_codex_process_group() {
     let codex = dir.path().join("codex-fixture");
     let python = Path::new("/usr/bin/python3");
     let marker = dir.path().join("survived");
+    let ready = dir.path().join("descendant-ready");
     executable(
         &codex,
         &format!(
-            "#!/bin/sh\ncat >/dev/null\necho '{{\"type\":\"thread.started\",\"thread_id\":\"thread-1\"}}'\nsh -c 'sleep 1; echo leaked > {}' &\nwait\n",
-            marker.display()
+            "#!/bin/sh\ncat >/dev/null\necho '{{\"type\":\"thread.started\",\"thread_id\":\"thread-1\"}}'\nsh -c 'echo ready > {}; sleep 1; echo leaked > {}' &\nwait\n",
+            ready.display(), marker.display()
         ),
     );
     let mut process = Process::start_codex(dir.path(), &codex, &python);
@@ -1777,7 +1799,8 @@ fn interrupt_reaps_codex_process_group() {
     assert_eq!(receive(&mut reader)["ok"], true);
     assert_eq!(receive(&mut reader)["event"]["type"], "turn_started");
     let thread_path = native_transcript(dir.path(), "codex-session.codex.json");
-    wait_until(|| thread_path.exists());
+    wait_for_codex_turn_submission(&mut process, &codex, 1);
+    wait_until(|| thread_path.exists() && ready.exists());
     send(
         &mut socket,
         json!({"type":"call","id":2,"method":"interrupt","params":{}}),
@@ -1907,13 +1930,14 @@ fn sigterm_reaps_active_codex_process_group() {
     let python = Path::new("/usr/bin/python3");
     let ready = dir.path().join("ready");
     let marker = dir.path().join("survived");
-    executable(&codex, &format!("#!/bin/sh\ncat >/dev/null\necho ready > {}\nsh -c 'sleep 1; echo leaked > {}' &\nwait\n", ready.display(), marker.display()));
+    executable(&codex, &format!("#!/bin/sh\ncat >/dev/null\nsh -c 'echo ready > {}; sleep 1; echo leaked > {}' &\nwait\n", ready.display(), marker.display()));
     let mut process = Process::start_codex(dir.path(), &codex, &python);
     let (mut reader, mut socket) = process.connect();
     receive(&mut reader);
     send(&mut socket, json!({"type":"attach","cursor":null}));
     send(&mut socket, json!({"type":"prompt","id":1,"text":"hello"}));
     assert_eq!(receive(&mut reader)["ok"], true);
+    wait_for_codex_turn_submission(&mut process, &codex, 1);
     wait_until(|| ready.exists());
     unsafe {
         libc::kill(process.child.id() as libc::pid_t, libc::SIGTERM);
@@ -1934,13 +1958,14 @@ fn registry_write_failure_reaps_active_codex_process_group() {
     let python = Path::new("/usr/bin/python3");
     let ready = dir.path().join("ready");
     let marker = dir.path().join("survived");
-    executable(&codex, &format!("#!/bin/sh\ncat >/dev/null\necho ready > {}\nsh -c 'sleep 1; echo leaked > {}' &\nwait\n", ready.display(), marker.display()));
+    executable(&codex, &format!("#!/bin/sh\ncat >/dev/null\nsh -c 'echo ready > {}; sleep 1; echo leaked > {}' &\nwait\n", ready.display(), marker.display()));
     let mut process = Process::start_codex(dir.path(), &codex, &python);
     let (mut reader, mut socket) = process.connect();
     receive(&mut reader);
     send(&mut socket, json!({"type":"attach","cursor":null}));
     send(&mut socket, json!({"type":"prompt","id":1,"text":"hello"}));
     assert_eq!(receive(&mut reader)["ok"], true);
+    wait_for_codex_turn_submission(&mut process, &codex, 1);
     wait_until(|| ready.exists() && process.entry()["clients"] == 1);
 
     let owned_inode = fs::metadata(&process.registry).unwrap().ino();
@@ -2939,6 +2964,7 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}
     send(&mut socket, json!({"type":"prompt","id":1,"text":"first"}));
     assert_eq!(receive(&mut reader)["ok"], true);
     assert_eq!(receive(&mut reader)["event"]["type"], "turn_started");
+    wait_for_codex_turn_submission(&mut process, &codex, 1);
     wait_until(|| ready.exists());
     send(&mut socket, json!({"type":"prompt","id":2,"text":"sk-ownedCanonicalFixtureSecret1234567890 queued"}));
     assert_eq!(receive(&mut reader)["queue_id"], "q1");

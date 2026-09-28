@@ -157,7 +157,8 @@ fn run() -> io::Result<()> {
         })?;
     // Upstream starts the sibling dispatcher lazily. Its helper mode verifies
     // the payload again at actual execution and fexecve pins that checked inode.
-    let _dispatcher = checked_binary(&root.join("codex-code-mode-host"), dispatcher_digest)?;
+    // Refuse missing/unsafe/changed payloads before hashing the potentially
+    // large dispatcher. Every required checked descriptor precedes exec.
     let host = checked_binary(&root.join("codex-code-mode-host-payload"), host_digest)?;
     let path = root.join(if helper_mode {
         "codex-code-mode-host-payload"
@@ -169,6 +170,7 @@ fn run() -> io::Result<()> {
     } else {
         checked_binary(&path, &receipt.binary_sha256)?
     };
+    let _dispatcher = checked_binary(&root.join("codex-code-mode-host"), dispatcher_digest)?;
     if !helper_mode {
         args.remove(0);
         if args.first().is_some_and(|arg| arg == "--stdio") {

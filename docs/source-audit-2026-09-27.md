@@ -326,3 +326,26 @@ before fork; cleanup keeps the owner until its children can be reaped, while the
 driver's shutdown wait stays bounded. Kernel-uninterruptible children can retain
 that small owner until they exit. This ownership change leaves the compiled
 compaction gate and official CLI unchanged.
+
+## CI preparation follow-up in alpha.42
+
+Post-merge CI exposed seven fault-injection tests waiting ten seconds for
+provider state before the protected provider had finished preparing. Preparation
+hashes the full debug daemon twice to bind the trusted compaction carrier;
+neighboring successful CI startups took about twelve seconds. These tests now
+synchronize on the fresh provider turn RPC with the existing thirty-second
+preparation budget, then retain their original persistence, cancellation and
+process-leak assertions and deadlines. The receipt, carrier checks, runtime
+limits and fail-closed compaction contract stay intact.
+
+The next CI run cleared all seventy-two daemon tests and exposed a separate
+launcher refusal deadline. It hashed the large debug dispatcher twice before
+noticing a missing helper. Payload verification now precedes dispatcher hashing;
+both owned, verified descriptors are required before any execution. Invalid
+helper cases still have a one-second refusal limit. The test actively kills and
+reaps a command that exceeds its bound, including a future FIFO regression.
+
+The same targeted audit found invalid app-server payload checks behind the
+dispatcher hash. The selected executable is now verified before the dispatcher
+in both modes, and provider refusal tests use the same deadline cleanup. All
+helper, selected-payload and dispatcher proofs remain required before execution.
