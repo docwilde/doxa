@@ -708,6 +708,13 @@ struct DurableTurn {
     bytes: usize,
     channels: Vec<(Option<String>, StreamScrubber)>,
 }
+struct DurableText {
+    channel: usize,
+    segment: usize,
+    record: usize,
+    block: usize,
+    text: String,
+}
 impl DurableTurn {
     fn stage(&mut self, record: Value, shared: &Shared) -> Result<(), String> {
         let bytes = serde_json::to_vec(&record)
@@ -729,27 +736,43 @@ impl DurableTurn {
     fn flush(&mut self, shared: &Shared, terminal: bool) -> Result<(), String> {
         let mut records = std::mem::take(&mut self.records);
         self.bytes = 0;
-        let mut outputs: Vec<(usize, usize, usize, String)> = Vec::new();
+        let mut outputs: Vec<DurableText> = Vec::new();
+        let mut prefixes = Vec::new();
+        let mut segment = 0;
         for (ri, record) in records.iter_mut().enumerate() {
-            if record["type"] != "assistant" {
-                continue;
-            }
+            let assistant = record["type"] == "assistant";
+            let has_text = assistant
+                && record["message"]["content"]
+                    .as_array()
+                    .is_some_and(|blocks| blocks.iter().any(|b| b["type"] == "text"));
             let parent = record["parent_tool_use_id"].as_str().map(str::to_owned);
-            let ci = match self.channels.iter().position(|(id, _)| *id == parent) {
-                Some(ci) => ci,
-                None if self.channels.len() < 32 => {
-                    self.channels.push((parent, StreamScrubber::default()));
-                    self.channels.len() - 1
-                }
-                None => return Err("Claude durable channel bound exceeded".into()),
+            let ci = if has_text {
+                Some(
+                    match self.channels.iter().position(|(id, _)| *id == parent) {
+                        Some(ci) => ci,
+                        None if self.channels.len() < 32 => {
+                            self.channels.push((parent, StreamScrubber::default()));
+                            self.channels.len() - 1
+                        }
+                        None => return Err("Claude durable channel bound exceeded".into()),
+                    },
+                )
+            } else {
+                None
             };
             let Some(blocks) = record["message"]["content"].as_array_mut() else {
                 continue;
             };
             for (bi, block) in blocks.iter_mut().enumerate() {
-                if block["type"] != "text" {
+                if matches!(block["type"].as_str(), Some("tool_use" | "tool_result")) {
+                    self.separator(shared, &mut outputs, &mut prefixes)?;
+                    segment += 1;
                     continue;
                 }
+                if !assistant || block["type"] != "text" {
+                    continue;
+                }
+                let ci = ci.ok_or("Claude durable channel missing")?;
                 let text = block["text"]
                     .as_str()
                     .ok_or("Invalid Claude durable text")?;
@@ -769,9 +792,22 @@ impl DurableTurn {
                     tail = &tail[end..];
                 }
                 block["text"] = json!("");
-                // Keep completed text at its original record/block position;
-                // only the uncertain lexical carry moves to a later boundary.
-                outputs.push((ci, ri, bi, clean));
+                // Plain provider blocks have no visible separator. Combine only
+                // inside one contiguous segment; real tools start a new segment.
+                if let Some(output) = outputs
+                    .iter_mut()
+                    .find(|o| o.channel == ci && o.segment == segment)
+                {
+                    output.text.push_str(&clean);
+                } else {
+                    outputs.push(DurableText {
+                        channel: ci,
+                        segment,
+                        record: ri,
+                        block: bi,
+                        text: clean,
+                    });
+                }
             }
         }
         if terminal {
@@ -779,27 +815,54 @@ impl DurableTurn {
                 let clean = stream
                     .finish(|s| shared.scrub(s).map_err(io::Error::other))
                     .map_err(|_| "Claude durable text boundary refused")?;
-                if let Some((_, _, _, output)) = outputs
-                    .iter_mut()
-                    .rev()
-                    .find(|(channel, _, _, _)| *channel == ci)
-                {
-                    output.push_str(&clean);
+                if let Some(output) = outputs.iter_mut().rev().find(|o| o.channel == ci) {
+                    output.text.push_str(&clean);
                 } else if !clean.is_empty() {
                     let ri = records.len();
                     records.push(json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":""}]},"parent_tool_use_id":parent,"sessionId":shared.session,"cwd":shared.cwd,"timestamp":crate::iso_now()}));
-                    outputs.push((ci, ri, 0, clean));
+                    outputs.push(DurableText {
+                        channel: ci,
+                        segment,
+                        record: ri,
+                        block: 0,
+                        text: clean,
+                    });
                 }
             }
         }
-        for (_, ri, bi, text) in outputs {
-            records[ri]["message"]["content"][bi]["text"] = json!(text);
+        for output in outputs {
+            records[output.record]["message"]["content"][output.block]["text"] = json!(output.text);
         }
-        for record in records {
+        for record in prefixes.into_iter().chain(records) {
             shared.persist(record)?;
         }
         if terminal {
             self.channels.clear();
+        }
+        Ok(())
+    }
+    fn separator(
+        &mut self,
+        shared: &Shared,
+        outputs: &mut [DurableText],
+        prefixes: &mut Vec<Value>,
+    ) -> Result<(), String> {
+        for (ci, (parent, stream)) in self.channels.iter_mut().enumerate() {
+            let mut clean = stream
+                .push("\n", |s| shared.scrub(s).map_err(io::Error::other))
+                .map_err(|_| "Claude durable tool separator refused")?;
+            clean.push_str(
+                &stream
+                    .finish(|s| shared.scrub(s).map_err(io::Error::other))
+                    .map_err(|_| "Claude durable tool boundary refused")?,
+            );
+            if let Some(output) = outputs.iter_mut().rev().find(|o| o.channel == ci) {
+                output.text.push_str(&clean);
+            } else if !clean.trim().is_empty() {
+                // This carry predates the current staged batch, so retain its
+                // position before that batch rather than moving it after tools.
+                prefixes.push(json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":clean}]},"parent_tool_use_id":parent,"sessionId":shared.session,"cwd":shared.cwd,"timestamp":crate::iso_now()}));
+            }
         }
         Ok(())
     }
@@ -1649,6 +1712,54 @@ for line in sys.stdin:
             admission: Mutex::new(()),
         });
         (dir, host)
+    }
+    #[test]
+    fn durable_prose_keeps_contiguous_blocks_and_real_tool_separators() {
+        let body = r#"if row['type']=='user':
+  emit({'type':'assistant','session_id':'$SESSION','message':{'role':'assistant','content':[{'type':'text','text':'I will '},{'type':'text','text':'read.'}]}})
+  emit({'type':'assistant','session_id':'$SESSION','message':{'role':'assistant','content':[{'type':'tool_use','id':'exact-tool','name':'fixture','input':{}}]}})
+  emit({'type':'user','session_id':'$SESSION','message':{'role':'user','content':[{'type':'tool_result','tool_use_id':'exact-tool','content':'exact result'}]}})
+  for text in ['The result ', 'is correct.']:
+   emit({'type':'assistant','session_id':'$SESSION','message':{'role':'assistant','content':[{'type':'text','text':text}]}})
+  emit({'type':'result','session_id':'$SESSION','is_error':False})
+"#.replace("$SESSION", SESSION);
+        let (_dir, host) = fixture(&body);
+        host.prompt("task", &mut |_| {});
+        let bytes = fs::read(host.shared.store.transcript_path()).unwrap();
+        let restored = doxa_tui::history::render(&doxa_tui::transport::TranscriptSnapshot {
+            bytes,
+            earlier_bytes_omitted: false,
+        });
+        assert!(restored.contains("I will read."), "{restored}");
+        assert!(restored.contains("The result is correct."), "{restored}");
+        assert!(!restored.contains("read.The"));
+        let records = host.shared.store.read_records().unwrap();
+        let before = records
+            .iter()
+            .position(|r| {
+                r["message"]["content"][0]["text"]
+                    .as_str()
+                    .is_some_and(|t| t.starts_with("I will"))
+            })
+            .unwrap();
+        let tool = records
+            .iter()
+            .position(|r| r["message"]["content"][0]["type"] == "tool_use")
+            .unwrap();
+        let result = records
+            .iter()
+            .position(|r| r["message"]["content"][0]["type"] == "tool_result")
+            .unwrap();
+        let after = records
+            .iter()
+            .position(|r| {
+                r["message"]["content"][0]["text"]
+                    .as_str()
+                    .is_some_and(|t| t.starts_with("The result"))
+            })
+            .unwrap();
+        assert!(before < tool && tool < result && result < after);
+        assert!(host.shutdown());
     }
     #[test]
     fn durable_split_text_is_safe_on_actual_tui_replay() {

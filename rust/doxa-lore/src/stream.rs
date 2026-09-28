@@ -82,8 +82,9 @@ impl StreamScrubber {
         }
         self.emit(units, &mut scrub)
     }
-    /// Flush only at a verified content-block or turn boundary. An unfinished
-    /// quoted/PEM span refuses the turn instead of releasing uncertain bytes.
+    /// Flush only at a genuine turn end or after emitting a visible lexical
+    /// separator. Provider content-block stops are not lexical boundaries.
+    /// An unfinished quoted/PEM span refuses instead of releasing uncertain bytes.
     pub fn finish(
         &mut self,
         mut scrub: impl FnMut(&str) -> io::Result<String>,
