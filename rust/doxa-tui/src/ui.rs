@@ -11,6 +11,7 @@ mod lore_controller;
 mod model_controls;
 mod operations_controller;
 mod operations_menu;
+mod credential_editor;
 pub(crate) mod panes;
 mod render;
 mod session_controls;

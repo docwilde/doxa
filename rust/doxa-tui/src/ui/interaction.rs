@@ -56,6 +56,7 @@ impl App {
                     }
                 }
                 if self.chip_info.is_some() && self.active_chooser_rect().is_none() {
+                    self.retire_operations();
                     self.chip_info = None;
                     self.fleet_review = None;
                 }
@@ -147,6 +148,13 @@ impl App {
         {
             self.transcript_selection.borrow_mut().clear();
         }
+        self.refresh_vendor_credentials();
+        if self.operations_menu.as_ref().is_some_and(|menu| menu.editing_credential())
+            && (self.should_quit || !self.chip_info.as_ref().is_some_and(|info| info.kind == "operations")
+                || self.engine_picker || self.model_picker.is_some() || self.effort_picker.is_some()
+                || self.settings_menu.is_some() || self.history_modal) {
+            self.retire_operations();
+        }
         self.finish_prompt_owner_transition(before);
         if self.input.is_empty() && self.action_draft.is_some() {
             let (owner, draft, cursor) = self.action_draft.take().unwrap();
@@ -192,6 +200,9 @@ impl App {
     pub(super) fn finish_prompt_owner_transition(&mut self, before: (usize, String)) {
         let after = self.prompt_owner();
         if before != after {
+            if self.operations_menu.as_ref().is_some_and(|menu| menu.editing_credential()) {
+                self.retire_operations(); self.chip_info = None;
+            }
             self.branch_picker = None;
             let moved_active_tab = std::mem::take(&mut self.moved_active_tab)
                 && !before.1.is_empty()
@@ -325,6 +336,11 @@ impl App {
     }
 
     pub(super) fn paste(&mut self, text: &str) -> bool {
+        if let Some(menu) = &mut self.operations_menu {
+            let handled = menu.paste(text);
+            if let Some(info) = &mut self.chip_info { info.lines = menu.lines(usize::from(self.size.width)); }
+            return handled;
+        }
         if let Some(picker) = self.lore_picker.as_mut().filter(|picker| {
             !picker.proposal_mode
                 && picker.belief_review.is_none()

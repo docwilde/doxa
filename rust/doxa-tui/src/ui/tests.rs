@@ -6,6 +6,84 @@ use super::*;
     use serde_json::json;
 
     #[test]
+    fn credential_ui_transient_routes() {
+        use doxa_vendors::{credentials, Vendor};
+        use std::os::unix::fs::PermissionsExt;
+        if std::env::var_os("DOXA_CREDENTIAL_UI_FIXTURE").is_none() {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "ui::tests::credential_ui_transient_routes", "--test-threads=1"])
+                .env("DOXA_CREDENTIAL_UI_FIXTURE", "1").env("DOXA_HOME", dir.path())
+                .env_remove("DEEPSEEK_API_KEY").env_remove("ZAI_API_KEY").output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+            assert!(output.stdout.windows(b"1 passed".len()).any(|s| s == b"1 passed"));
+            return;
+        }
+        let mut app = App { size: Rect::new(0,0,140,36), ..Default::default() };
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"ds","engine":"deepseek","model":"deepseek-flash","cwd":"/repo"}));
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"za","engine":"glm","model":"glm-5.3-flash","cwd":"/repo"}));
+        app.pending_model_queries.clear();
+        app.open_operations(operations_menu::Menu::new("setup"));
+        let key = |code| Event::Key(KeyEvent::new(code,KeyModifiers::NONE));
+        let open = |app: &mut App, label: &str| {
+            let lines = app.operations_menu.as_ref().unwrap().lines(140);
+            let row = lines.iter().position(|line| line.contains(label) && line.contains("· edit")).unwrap();
+            let area = app.active_chooser_rect().unwrap();
+            app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column:area.x+2, row:area.y+1+row as u16, modifiers:KeyModifiers::NONE }));
+            assert!(app.operations_menu.as_ref().unwrap().editing_credential());
+        };
+        let secret = "fixture-deepseek-api-key";
+        open(&mut app, "DeepSeek API key");
+        app.input = "ordinary draft".into(); app.input_cursor = app.input.len();
+        app.handle(Event::Paste(format!("{secret}X")));
+        app.handle(key(KeyCode::Backspace));
+        assert_eq!(app.input, "ordinary draft");
+        assert!(app.pending_prompts.is_empty());
+        let mut terminal = Terminal::new(TestBackend::new(140,36)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let rendered = terminal.backend().buffer().content.iter().map(|cell| cell.symbol()).collect::<String>();
+        assert!(!rendered.contains(secret)); assert!(rendered.contains('•'));
+        assert!(!app.operations_menu.as_ref().unwrap().lines(140).join("\n").contains(secret));
+        app.handle(key(KeyCode::Enter));
+        assert!(!app.operations_menu.as_ref().unwrap().editing_credential());
+        assert_eq!(credentials::resolve(Vendor::DeepSeek).unwrap().as_deref(),Some(secret));
+        assert_eq!(credentials::status(Vendor::Glm).unwrap(),credentials::CredentialStatus::Missing);
+        assert_eq!(app.pending_model_queries, ["ds"]);
+        assert!(app.pending_prompts.is_empty());
+        assert!(app.input_drafts.values().all(|(s,_)| !s.contains(secret)));
+        assert!(!app.notice.contains(secret));
+
+        open(&mut app, "z.ai API key");
+        app.handle(Event::Paste("fixture-zai-api-key".into()));
+        app.handle(key(KeyCode::Esc));
+        assert!(!app.operations_menu.as_ref().unwrap().editing_credential());
+        assert_eq!(credentials::status(Vendor::Glm).unwrap(),credentials::CredentialStatus::Missing);
+        open(&mut app, "z.ai API key");
+        app.handle(Event::Paste("fixture-zai-api-key".into()));
+        let area = app.active_chooser_rect().unwrap();
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),column:area.x+2,row:area.y+3,modifiers:KeyModifiers::NONE }));
+        assert_eq!(credentials::resolve(Vendor::Glm).unwrap().as_deref(),Some("fixture-zai-api-key"));
+        assert_eq!(app.pending_model_queries, ["ds","za"]);
+
+        std::env::set_var("DEEPSEEK_API_KEY", "fixture-environment-key");
+        let lines = app.operations_menu.as_ref().unwrap().lines(140);
+        let row = lines.iter().position(|line| line.contains("Remove saved DeepSeek API key")).unwrap();
+        let area = app.active_chooser_rect().unwrap();
+        app.handle(Event::Mouse(MouseEvent { kind:MouseEventKind::Down(MouseButton::Left),column:area.x+2,row:area.y+1+row as u16,modifiers:KeyModifiers::NONE }));
+        assert_eq!(credentials::status(Vendor::DeepSeek).unwrap(),credentials::CredentialStatus::Environment);
+        assert!(app.operations_menu.as_ref().unwrap().lines(140).join("\n").contains("configured (environment)"));
+        open(&mut app, "DeepSeek API key");
+        app.handle(Event::Paste("fixture-unsaved-secret".into()));
+        let before = app.prompt_owner();
+        app.groups[0].tabs.push("other-session".into()); app.groups[0].active = app.groups[0].tabs.len()-1;
+        app.finish_prompt_owner_transition(before);
+        assert!(app.operations_menu.is_none());
+        assert!(app.pending_prompts.is_empty());
+        assert!(app.input_drafts.values().all(|(s,_)| !s.contains("fixture-unsaved-secret")));
+    }
+
+    #[test]
     fn reserved_startup_slot_does_not_raise_manual_tab_capacity() {
         let mut app=App::default();app.groups[0].tabs=(0..panes::MAX_TABS).map(|index|format!("saved-{index}")).collect();
         app.open_engine_picker();assert!(!app.engine_picker);

@@ -13,6 +13,26 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 impl App {
+    pub(super) fn refresh_vendor_credentials(&mut self) {
+        let changes = self.operations_menu.as_mut().map(|menu| menu.take_credentials_changed()).unwrap_or_default();
+        for vendor in changes {
+            let ids = self.session_identity.iter().filter_map(|(id,(engine,_))| {
+                (engine.as_deref() == Some(vendor.engine_id()) && self.sessions.contains_key(id) && !self.offline_ids.contains(id)).then(|| id.clone())
+            }).collect::<Vec<_>>();
+            for id in ids {
+                self.session_catalogs.remove(&id);
+                if !self.pending_model_queries.contains(&id) { self.pending_model_queries.push(id); }
+            }
+            let engine = match vendor { doxa_vendors::Vendor::DeepSeek => crate::launch::Engine::DeepSeek, doxa_vendors::Vendor::Glm => crate::launch::Engine::Glm };
+            if self.new_session.as_ref().is_some_and(|form| form.engine == engine) {
+                let pending = self.request_vendor_catalog(engine);
+                if let Some(form) = self.new_session.as_mut() {
+                    form.catalog_pending = pending;
+                    form.catalog_note = if pending { "Checking vendor model catalog…" } else { "Static fallback; vendor catalog unavailable" }.into();
+                }
+            }
+        }
+    }
     pub(super) fn offer_first_run(&mut self) -> bool {
         if self.operations_menu.is_some()
             || self.chip_info.is_some()

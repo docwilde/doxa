@@ -451,26 +451,7 @@ impl App {
             })
             .or_else(|| (!models.is_empty()).then(|| "high".to_owned()));
         self.vendor_catalog_pending = None;
-        let mut catalog_pending = false;
-        if let Some(vendor) = match engine {
-            launch::Engine::DeepSeek => Some(doxa_vendors::Vendor::DeepSeek),
-            launch::Engine::Glm => Some(doxa_vendors::Vendor::Glm),
-            _ => None,
-        } {
-            if !cfg!(test) && std::env::var(vendor.env_var()).is_ok_and(|key| !key.is_empty()) {
-                let (tx, rx) = mpsc::sync_channel(1);
-                std::thread::spawn(move || {
-                    let result = tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                        .ok()
-                        .and_then(|runtime| runtime.block_on(doxa_vendors::catalog_models(vendor)));
-                    let _ = tx.send(result);
-                });
-                self.vendor_catalog_pending = Some((engine, rx));
-                catalog_pending = true;
-            }
-        }
+        let catalog_pending = self.request_vendor_catalog(engine);
         self.new_session = Some(NewSession {
             engine,
             model,
@@ -488,6 +469,24 @@ impl App {
             prompt: String::new(),
             field: 0,
         });
+    }
+
+    pub(super) fn request_vendor_catalog(&mut self, engine: launch::Engine) -> bool {
+        self.vendor_catalog_pending = None;
+        let vendor = match engine {
+            launch::Engine::DeepSeek => doxa_vendors::Vendor::DeepSeek,
+            launch::Engine::Glm => doxa_vendors::Vendor::Glm,
+            _ => return false,
+        };
+        if cfg!(test) || !doxa_vendors::credentials::status(vendor).is_ok_and(|status| status != doxa_vendors::credentials::CredentialStatus::Missing) { return false; }
+        let (tx, rx) = mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            let result = tokio::runtime::Builder::new_current_thread().enable_all().build().ok()
+                .and_then(|runtime| runtime.block_on(doxa_vendors::catalog_models(vendor)));
+            let _ = tx.send(result);
+        });
+        self.vendor_catalog_pending = Some((engine, rx));
+        true
     }
 
     pub(super) fn poll_vendor_catalog(&mut self) -> bool {
