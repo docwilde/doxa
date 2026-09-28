@@ -50,6 +50,25 @@ fn fixture() -> tempfile::TempDir {
     .unwrap();
     dir
 }
+// Refusal checks must themselves be bounded: a regressed FIFO open must fail
+// this test rather than block inside Command::output before the elapsed check.
+fn assert_refusal(command: &mut Command, deadline: std::time::Instant, label: &str) {
+    let mut child = command.stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null()).spawn().unwrap();
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            assert!(!status.success(), "{label}");
+            return;
+        }
+        if std::time::Instant::now() >= deadline {
+            // The unreaped direct child reserves its PID until this kill/wait.
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("protected provider refusal exceeded one second: {label}");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
 #[test]
 fn helper_missing_changed_or_unbound_refuses_before_provider_dispatch() {
     for change in [
@@ -93,23 +112,10 @@ fn helper_missing_changed_or_unbound_refuses_before_provider_dispatch() {
             _ => unreachable!(),
         }
         let started = std::time::Instant::now();
-        assert!(
-            !Command::new(dir.path().join("codex"))
-                .arg("app-server")
-                .output()
-                .unwrap()
-                .status
-                .success(),
-            "{change}"
-        );
-        assert!(
-            !Command::new(dir.path().join("codex-code-mode-host"))
-                .output()
-                .unwrap()
-                .status
-                .success(),
-            "lazy helper {change}"
-        );
+        let deadline = started + std::time::Duration::from_secs(1);
+        assert_refusal(Command::new(dir.path().join("codex")).arg("app-server"), deadline, change);
+        assert_refusal(&mut Command::new(dir.path().join("codex-code-mode-host")), deadline,
+            &format!("lazy helper {change}"));
         assert!(
             started.elapsed() < std::time::Duration::from_secs(1),
             "{change}"
@@ -229,4 +235,22 @@ fn verified_launcher_owns_provider_after_control_handshake() {
     assert!(owner.try_wait().unwrap().is_none());
     parent.write_all(b"G").unwrap();
     assert!(owner.wait().unwrap().success());
+}
+
+#[test]
+fn invalid_payload_is_checked_before_dispatcher_and_valid_payload_still_requires_dispatcher() {
+    let dir = fixture();
+    let host = dir.path().join("codex-code-mode-host-payload");
+    fs::remove_file(&host).unwrap();
+    fs::write(dir.path().join("codex-code-mode-host"), b"changed dispatcher").unwrap();
+    let result = Command::new(dir.path().join("codex")).arg("app-server").output().unwrap();
+    assert!(!result.status.success());
+    let diagnostic = String::from_utf8(result.stderr).unwrap();
+    assert!(diagnostic.contains(&std::io::Error::from_raw_os_error(libc::ENOENT).to_string()),
+        "missing helper must refuse before dispatcher digest mismatch: {diagnostic}");
+    fs::copy("/usr/bin/true", &host).unwrap();
+    fs::set_permissions(&host, fs::Permissions::from_mode(0o700)).unwrap();
+    let result = Command::new(dir.path().join("codex")).arg("app-server").output().unwrap();
+    assert!(!result.status.success());
+    assert!(String::from_utf8(result.stderr).unwrap().contains("protected executable differs from its build receipt"));
 }
