@@ -33,12 +33,16 @@ fn serve_events(frames:Vec<Vec<Value>>)->(String,thread::JoinHandle<Vec<Value>>)
         }requests
     });(endpoint,worker)
 }
+fn private_credentials(root:&Path){
+    let home=root.join("doxa");fs::create_dir_all(&home).unwrap();
+    fs::set_permissions(home,fs::Permissions::from_mode(0o700)).unwrap();
+}
 fn transcript_dir(runtime:&Path)->PathBuf{let slug:String=runtime.to_string_lossy().chars().map(|c|if c.is_ascii_alphanumeric(){c}else{'-'}).collect();runtime.join("projects").join(slug)}
 
 #[test]
 fn reviewed_managed_compaction_preserves_originals_and_review_refusal_keeps_session_usable(){
     for approved in [true,false]{
-        let dir=tempfile::tempdir().unwrap();let root=dir.path();
+        let dir=tempfile::tempdir().unwrap();let root=dir.path();private_credentials(root);
         let worker=root.join("review-worker");
         fs::write(&worker,format!("#!/bin/sh\n[ \"$1\" = review-worker ] || exit 7\ncat > \"$REVIEW_CAPTURE\"\nexit {}\n",if approved{0}else{1})).unwrap();
         fs::set_permissions(&worker,fs::Permissions::from_mode(0o700)).unwrap();
@@ -82,7 +86,7 @@ fn reviewed_managed_compaction_preserves_originals_and_review_refusal_keeps_sess
 
 #[test]
 fn split_vendor_content_is_scrubbed_as_complete_messages_and_plain_text_stays_ordered(){
-    let dir=tempfile::tempdir().unwrap();let root=dir.path();
+    let dir=tempfile::tempdir().unwrap();let root=dir.path();private_credentials(root);
     let secret="sk-ownedCanonicalFixtureSecret1234567890";
     let mut events=vec![];
     for (field,value) in [("reasoning_content",format!("{secret} thought")),("content",format!("{secret} answer"))]{

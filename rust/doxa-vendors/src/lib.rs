@@ -2,6 +2,8 @@
 //! Bounded DeepSeek/GLM chat-completions transport and SSE normalization.
 //! Tool execution deliberately belongs to a future gated engine integration.
 
+pub mod credentials;
+
 use futures_util::{future::BoxFuture, StreamExt};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
@@ -24,11 +26,13 @@ const BALANCE_BODY_MAX: usize = 4096;
 /// Optional display-only account balance. The endpoint is fixed to DeepSeek's
 /// official API and never derived from a chat-completions endpoint override.
 pub async fn deepseek_balance() -> Option<String> {
-    let key = std::env::var("DEEPSEEK_API_KEY").ok().filter(|key| !key.is_empty())?;
+    let key = credentials::resolve(Vendor::DeepSeek).ok()??;
     deepseek_balance_at(BALANCE_URL, &key).await
 }
 
 async fn deepseek_balance_at(endpoint: &str, key: &str) -> Option<String> {
+    let mut known = credentials::known_keys().ok()?;
+    known.push(key.to_owned());
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(3))
         .redirect(reqwest::redirect::Policy::none())
@@ -49,7 +53,7 @@ async fn deepseek_balance_at(endpoint: &str, key: &str) -> Option<String> {
     for info in infos.iter().take(4) {
         let currency = info["currency"].as_str()?;
         let amount = info["total_balance"].as_str()?;
-        if !valid_balance_amount(amount) { return None; }
+        if !valid_balance_amount(amount) || known.iter().any(|key| amount.contains(key)) { return None; }
         let prefix = match currency { "USD" => "$", "CNY" => "¥", _ => return None };
         if amounts.iter().any(|(seen, _)| *seen == currency) { return None; }
         amounts.push((currency, format!("{prefix}{amount}")));
@@ -89,6 +93,7 @@ mod balance_tests {
 
     #[tokio::test]
     async fn balance_reads_only_valid_official_shape_and_uses_bearer_key() {
+        let (_guard, _home) = credentials::tests::fixture();
         let (url, worker) = mock_balance("200 OK", r#"{"is_available":true,"balance_infos":[{"currency":"CNY","total_balance":"25.50"},{"currency":"USD","total_balance":"3.25"}]}"#).await;
         assert_eq!(deepseek_balance_at(&url, "secret-key").await.as_deref(), Some("$3.25 · ¥25.50"));
         let request = worker.await.unwrap();
@@ -104,6 +109,10 @@ mod balance_tests {
             assert!(deepseek_balance_at(&url, "secret-key").await.is_none());
             worker.await.unwrap();
         }
+        credentials::save(Vendor::Glm, "12345678").unwrap();
+        let (url, worker) = mock_balance("200 OK", r#"{"is_available":true,"balance_infos":[{"currency":"USD","total_balance":"12345678"}]}"#).await;
+        assert!(deepseek_balance_at(&url, "secret-key").await.is_none());
+        worker.await.unwrap();
         let (url, worker) = mock_balance("401 Unauthorized", "{}").await;
         assert!(deepseek_balance_at(&url, "secret-key").await.is_none());
         worker.await.unwrap();
@@ -175,11 +184,13 @@ pub struct ModelCapability {
 /// Bounded account-scoped model catalogue. A missing credential, network
 /// failure, or malformed body returns None so callers can label a fallback.
 pub async fn catalog_models(vendor: Vendor) -> Option<Vec<ModelCapability>> {
-    let key = std::env::var(vendor.env_var()).ok().filter(|key| !key.is_empty())?;
+    let key = credentials::resolve(vendor).ok()??;
     catalog_models_at(vendor, vendor.models_endpoint(), &key).await
 }
 
 async fn catalog_models_at(vendor: Vendor, endpoint: &str, key: &str) -> Option<Vec<ModelCapability>> {
+    let mut known = credentials::known_keys().ok()?;
+    known.push(key.to_owned());
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(8))
         .redirect(reqwest::redirect::Policy::none()).build().ok()?;
@@ -197,7 +208,7 @@ async fn catalog_models_at(vendor: Vendor, endpoint: &str, key: &str) -> Option<
     let mut models = Vec::new();
     for row in rows.iter().take(1000) {
         let Some(id) = row.get("id").and_then(Value::as_str) else { continue; };
-        if !id.is_empty() && id.len() <= 128 && id.bytes().all(|byte|
+        if !id.is_empty() && !known.iter().any(|key| id.contains(key)) && id.len() <= 128 && id.bytes().all(|byte|
             byte.is_ascii_alphanumeric() || b"-._:/".contains(&byte))
             && !models.iter().any(|existing: &ModelCapability| existing.id == id) {
             let mut efforts = Vec::new();
@@ -248,6 +259,7 @@ mod catalog_tests {
 
     #[tokio::test]
     async fn model_catalog_is_bounded_and_does_not_follow_redirects() {
+        let (_guard, _home) = credentials::tests::fixture();
         let (url, worker) = serve("200 OK", r#"{"data":[{"id":"deepseek-flash","effort":{"supported_levels":["low","high","max"],"default_level":"high"}},{"id":"deepseek-flash"},{"id":"new-model","effort":{"supported_levels":["medium","max","high"],"default_level":"medium"}},{"id":"bad\u202e-id","effort":{"supported_levels":["high"]}},{"id":"has space","effort":{"supported_levels":["high"]}}]}"#.into(), "").await;
         assert_eq!(catalog_models_at(Vendor::DeepSeek, &url, "test-secret").await.unwrap(), [
             ModelCapability { id: "deepseek-flash".into(), efforts: vec!["low".into(), "high".into(), "max".into()], default_effort: Some("high".into()), effort_metadata_present: true },
@@ -277,6 +289,7 @@ mod catalog_tests {
 
     #[tokio::test]
     async fn only_documented_deepseek_effort_metadata_is_used() {
+        let (_guard, _home) = credentials::tests::fixture();
         let body = r#"{"data":[{"id":"next-model","effort":{"supported_levels":["none","low","high"],"default_level":"none"}}]}"#;
         let (url, worker) = serve("200 OK", body.into(), "").await;
         let models = catalog_models_at(Vendor::DeepSeek, &url, "key").await.unwrap();
@@ -290,11 +303,30 @@ mod catalog_tests {
         assert!(!models[0].effort_metadata_present);
         worker.await.unwrap();
     }
+    #[tokio::test]
+    async fn catalog_never_displays_saved_inherited_or_inactive_keys() {
+        let (_guard, home) = credentials::tests::fixture();
+        std::env::set_var("DEEPSEEK_API_KEY", "env-active-fixture-key");
+        std::env::set_var("ZAI_API_KEY", "env-inactive-fixture-key");
+        credentials::save(Vendor::DeepSeek, "saved-active-fixture-key").unwrap();
+        credentials::save(Vendor::Glm, "saved-inactive-fixture-key").unwrap();
+        let body = json!({"data":[{"id":"saved-active-fixture-key"},{"id":"prefix-env-active-fixture-key"},
+            {"id":"saved-inactive-fixture-key"},{"id":"env-inactive-fixture-key"},{"id":"deepseek-flash"}]}).to_string();
+        let (url, worker) = serve("200 OK", body, "").await;
+        let models = catalog_models_at(Vendor::DeepSeek, &url, "saved-active-fixture-key").await.unwrap();
+        worker.await.unwrap();
+        assert_eq!(models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["deepseek-flash"]);
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(home.path().join("credentials.json"), std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(catalog_models_at(Vendor::DeepSeek, "http://127.0.0.1:1/models", "saved-active-fixture-key").await.is_none());
+    }
+
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Error {
     MissingCredential(&'static str),
+    CredentialStore,
     InvalidEffort,
     InvalidEndpoint,
     Transport,
@@ -821,13 +853,15 @@ async fn run_turn_at(
         .iter()
         .filter_map(|d| d.pointer("/function/name").and_then(Value::as_str))
         .collect();
-    let key =
-        std::env::var(vendor.env_var()).map_err(|_| Error::MissingCredential(vendor.env_var()))?;
-    if key.is_empty() {
-        return Err(Error::MissingCredential(vendor.env_var()));
-    }
+    let key = credentials::resolve(vendor).map_err(|_| Error::CredentialStore)?
+        .ok_or(Error::MissingCredential(vendor.env_var()))?;
     let mut messages = history.clone();
     messages.push(json!({"role":"user","content":prompt}));
+    let known = credentials::known_keys().map_err(|_| Error::CredentialStore)?;
+    for message in &mut messages {
+        *message = scrub_json(std::mem::take(message), &key);
+        for key in &known { *message = scrub_json(std::mem::take(message), key); }
+    }
     check_history(&messages)?;
     let mut outcome = TurnOutcome {
         text: String::new(),
@@ -853,7 +887,7 @@ async fn run_turn_at(
             body["tools"] = Value::Array(definitions.clone());
             body["tool_choice"] = json!("auto");
         }
-        let completion = stream_at_with_key(
+        let mut completion = stream_at_with_key(
             vendor,
             endpoint,
             body,
@@ -863,6 +897,21 @@ async fn run_turn_at(
             &mut on_delta,
         )
         .await?;
+        // Provider metadata can echo an inactive credential too. Mask the
+        // frozen known values before a tool gate, event sink or history sees it.
+        for known in &known {
+            completion.text = scrub(&completion.text, known);
+            completion.reasoning = scrub(&completion.reasoning, known);
+            completion.model = completion.model.map(|value| scrub(&value, known));
+            completion.finish_reason = completion.finish_reason.map(|value| scrub(&value, known));
+            completion.usage = completion.usage.map(|value| scrub_json(value, known));
+            for call in &mut completion.tool_calls {
+                call.id = scrub(&call.id, known);
+                call.name = scrub(&call.name, known);
+                let arguments = scrub_json(Value::Object(std::mem::take(&mut call.arguments)), known);
+                call.arguments = arguments.as_object().cloned().unwrap_or_default();
+            }
+        }
         outcome.requests += 1;
         outcome.model_consistent &= completion.model.as_deref() == Some(model);
         outcome.usage_complete &= completion.usage.as_ref().is_some_and(|usage| {
@@ -945,12 +994,9 @@ async fn stream_at(
     timeout: Duration,
     on_delta: impl FnMut(Delta),
 ) -> Result<Completion, Error> {
-    let key =
-        std::env::var(vendor.env_var()).map_err(|_| Error::MissingCredential(vendor.env_var()))?;
-    if key.is_empty() {
-        return Err(Error::MissingCredential(vendor.env_var()));
-    }
-    stream_at_with_key(vendor, endpoint, body, &key, cancel, timeout, on_delta).await
+    let key = credentials::resolve(vendor).map_err(|_| Error::CredentialStore)?
+        .ok_or(Error::MissingCredential(vendor.env_var()))?;
+    stream_at_with_key(vendor, endpoint, scrub_json(body, &key), &key, cancel, timeout, on_delta).await
 }
 
 async fn stream_at_with_key(
@@ -962,6 +1008,12 @@ async fn stream_at_with_key(
     timeout: Duration,
     mut on_delta: impl FnMut(Delta),
 ) -> Result<Completion, Error> {
+    // Reuse the transport's exact-known-key masking for every string in the
+    // request, including LORE snapshots, tool definitions and inactive vendors.
+    // Authentication stays frozen for a turn even if setup changes meanwhile.
+    let mut body = scrub_json(body, key);
+    let known = credentials::known_keys().map_err(|_| Error::CredentialStore)?;
+    for known in &known { body = scrub_json(body, known); }
     let client = reqwest::Client::builder()
         .timeout(timeout)
         .redirect(reqwest::redirect::Policy::none())
@@ -997,7 +1049,7 @@ async fn stream_at_with_key(
                         v.to_string()
                     }
                 })
-                .map(|s| sanitize_code(&scrub(&s, key)));
+                .map(|s| sanitize_code(&known.iter().fold(scrub(&s, key), |s, key| scrub(&s, key))));
             return Err(Error::Http {
                 status: status.as_u16(),
                 code,

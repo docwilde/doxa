@@ -5,6 +5,24 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.38 — 2026-09-28
+
+**API key setup**
+
+- Add masked DeepSeek and z.ai key editing and removal to **`/setup`**;
+  keep input separate from prompt drafts, history and clipboard ownership.
+- Resolve private saved overrides for each request; refresh model lists and
+  DeepSeek balance. Removing an override restores inherited environment keys.
+- Protect **`credentials.json`** with owner-only storage, bounded locking and
+  atomic writes; refuse workspace reads and redact known keys at vendor boundaries.
+
+**Peer transport verification**
+
+- Fix **`roster_origin_is_from_dialed_endpoint_and_client_never_follows_redirect`**
+  to read the full POST body before closing its fixture socket; prevent TCP resets.
+- Keep the production transport unchanged. Retain the actual alpha.37 gallery
+  captures and their recorded source provenance.
+
 ## 2.0.0-alpha.37 — 2026-09-28
 
 **Native runtime**

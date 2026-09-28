@@ -377,11 +377,12 @@ fn run(args: &[String]) -> io::Result<()> {
                         missing = true;
                     }
                     let key = options.engine.vendor_key().expect("vendor engine");
-                    if std::env::var(key).is_ok_and(|value| !value.is_empty()) {
-                        println!("ok {key}: set");
-                    } else {
-                        println!("missing {key}: unset");
-                        missing = true;
+                    use doxa_vendors::credentials::CredentialStatus;
+                    match options.engine.vendor_credential_status() {
+                        Ok(CredentialStatus::Saved) => println!("ok {key}: set (saved)"),
+                        Ok(CredentialStatus::Environment) => println!("ok {key}: set (environment)"),
+                        Ok(CredentialStatus::Missing) => { println!("missing {key}: unset"); missing = true; }
+                        Err(_) => { println!("missing {key}: credential store unavailable"); missing = true; }
                     }
                 }
             }
@@ -590,6 +591,10 @@ mod tests {
         assert!(script.contains("main \"$@\""));
     }
 }
+
+#[cfg(test)]
+#[path = "ui/credential_editor.rs"]
+mod credential_editor;
 
 #[cfg(test)]
 #[path = "ui/operations_menu.rs"]

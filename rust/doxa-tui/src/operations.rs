@@ -384,7 +384,7 @@ pub fn setup_report() -> io::Result<String> {
         }
     };
     Ok(format!(
-        "auth state\n{}\n\nSign in with the provider CLI: claude auth login or codex login. DOXA never asks for credentials.\n\nLORE store\n{lore}\n\nmodel & effort defaults (stored preferences)\nmodel: {}\neffort: {}\n\nUse `doxa settings` or /settings for native preferences.",
+        "auth state\n{}\n\nSign in with the provider CLI: claude auth login or codex login. Use the masked API-key rows in /setup to save or remove DeepSeek and z.ai credentials.\n\nLORE store\n{lore}\n\nmodel & effort defaults (stored preferences)\nmodel: {}\neffort: {}\n\nUse `doxa settings` or /settings for native preferences.",
         auth_status(None)?, preference(&config, "model", "DOXA_MODEL"),
         preference(&config, "effort", "DOXA_EFFORT"),
     ))

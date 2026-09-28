@@ -444,6 +444,7 @@ fn worker_loop(
                             models: None, note: None, loading: None, capabilities: None },
                     };
                     if frames.send(command_frame(id, reply)).is_err() { return; }
+                    if deepseek && !forward_status(&mut client, frames, &session_id) { return; }
                 }
                 Ok(WorkerCommand::SetModel(id, model)) => {
                     let result = if id == session_id {

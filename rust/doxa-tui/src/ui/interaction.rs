@@ -56,6 +56,7 @@ impl App {
                     }
                 }
                 if self.chip_info.is_some() && self.active_chooser_rect().is_none() {
+                    self.retire_operations();
                     self.chip_info = None;
                     self.fleet_review = None;
                 }
@@ -147,6 +148,13 @@ impl App {
         {
             self.transcript_selection.borrow_mut().clear();
         }
+        self.refresh_vendor_credentials();
+        if self.operations_menu.as_ref().is_some_and(|menu| menu.editing_credential())
+            && (self.should_quit || !self.chip_info.as_ref().is_some_and(|info| info.kind == "operations")
+                || self.engine_picker || self.model_picker.is_some() || self.effort_picker.is_some()
+                || self.settings_menu.is_some() || self.history_modal) {
+            self.retire_operations();
+        }
         self.finish_prompt_owner_transition(before);
         if self.input.is_empty() && self.action_draft.is_some() {
             let (owner, draft, cursor) = self.action_draft.take().unwrap();
@@ -191,6 +199,10 @@ impl App {
     /// session together; moving a tab deliberately carries its active draft.
     pub(super) fn finish_prompt_owner_transition(&mut self, before: (usize, String)) {
         let after = self.prompt_owner();
+        if self.operations_menu.as_ref().is_some_and(|menu| menu.editing_credential())
+            && before != after {
+            self.retire_operations(); self.chip_info = None;
+        }
         if before != after {
             self.branch_picker = None;
             let moved_active_tab = std::mem::take(&mut self.moved_active_tab)
@@ -249,10 +261,24 @@ impl App {
         let text = match result {
             Ok(text) => text,
             Err(_) => {
+                self.clipboard_secret_owner = None;
                 self.notice = "Clipboard read failed · use terminal Ctrl+Shift+V".into();
                 return true;
             }
         };
+        if let Some(token) = self.clipboard_secret_owner.take() {
+            let active = self.active_group == target.pane
+                && self.groups[self.active_group].active_id().unwrap_or("") == target.session;
+            if active && self.chip_info.as_ref().is_some_and(|info| info.kind == "operations") {
+                if let Some(menu) = self.operations_menu.as_mut().filter(|menu| menu.credential_token() == Some(token)) {
+                    menu.paste(&text);
+                    if let Some(info) = &mut self.chip_info { info.lines = menu.lines(usize::from(self.size.width)); }
+                    return true;
+                }
+            }
+            self.notice = "Credential paste discarded; editor changed".into();
+            return true;
+        }
         let exists = self.groups.get(target.pane).is_some_and(|group| {
             if target.session.is_empty() {
                 group.tabs.is_empty()
@@ -325,6 +351,11 @@ impl App {
     }
 
     pub(super) fn paste(&mut self, text: &str) -> bool {
+        if let Some(menu) = &mut self.operations_menu {
+            let handled = menu.paste(text);
+            if let Some(info) = &mut self.chip_info { info.lines = menu.lines(usize::from(self.size.width)); }
+            return handled;
+        }
         if let Some(picker) = self.lore_picker.as_mut().filter(|picker| {
             !picker.proposal_mode
                 && picker.belief_review.is_none()
@@ -543,12 +574,25 @@ impl App {
         {
             return true;
         }
+        if ctrl && matches!(key.code, KeyCode::Char('v' | 'V')) {
+            if let Some(token) = self.operations_menu.as_ref().and_then(|menu| menu.credential_token()) {
+                self.clipboard_job = None;
+                self.clipboard_secret_owner = Some(token);
+                let mut target = self.clipboard_target(); target.draft.clear(); target.cursor = 0;
+                match crate::clipboard::Job::start(target) {
+                    Ok(job) => self.clipboard_job = Some(job),
+                    Err(_) => { self.clipboard_secret_owner = None; self.notice = "Clipboard reader unavailable · use terminal Ctrl+Shift+V".into(); },
+                }
+                return true;
+            }
+        }
         if ctrl
             && matches!(key.code, KeyCode::Char('v' | 'V'))
             && self.focus == Focus::Prompt
             && !self.link_interaction_blocked()
         {
             self.clipboard_job = None;
+            self.clipboard_secret_owner = None;
             match crate::clipboard::Job::start(self.clipboard_target()) {
                 Ok(job) => {
                     self.clipboard_job = Some(job);
@@ -599,6 +643,13 @@ impl App {
         }
         if key.code == KeyCode::Char('w') && ctrl {
             self.detach_active_tab();
+            return true;
+        }
+        // A credential owns all typing while its editor exists. Provider input
+        // requests must never capture a key intended for this transient field.
+        if let Some(menu) = self.operations_menu.as_mut().filter(|menu| menu.editing_credential()) {
+            menu.key(key);
+            if let Some(info) = &mut self.chip_info { info.lines = menu.lines(usize::from(self.size.width)); }
             return true;
         }
         if self.active_request_index().is_some() {
@@ -1376,6 +1427,11 @@ impl App {
     }
 
     pub(super) fn active_request_index(&self) -> Option<usize> {
+        // Keep both input and rendering with the secret editor until the user
+        // explicitly saves or cancels. Requests remain queued in their store.
+        if self.operations_menu.as_ref().is_some_and(|menu| menu.editing_credential()) {
+            return None;
+        }
         let id = self.groups[self.active_group].active_id()?;
         self.input_requests.iter().position(|r| r.session_id == id)
     }

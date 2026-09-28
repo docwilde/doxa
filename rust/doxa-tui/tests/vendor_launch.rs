@@ -4,6 +4,9 @@ use std::process::Command;
 
 fn fixture() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
     let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    fs::create_dir(&home).unwrap();
+    fs::set_permissions(&home, fs::Permissions::from_mode(0o700)).unwrap();
     let daemon = dir.path().join("fake-daemon");
     let capture = dir.path().join("argv.txt");
     fs::write(
@@ -39,6 +42,7 @@ fn new_deepseek_passes_only_vendor_options_and_never_key() {
         .env("DOXA_DAEMON_BIN", &daemon)
         .env("DOXA_CAPTURE_ARGS", &capture)
         .env("DOXA_RUNTIME_DIR", dir.path().join("runtime"))
+        .env("DOXA_HOME", dir.path().join("home"))
         .env("DEEPSEEK_API_KEY", "secret-vendor-key")
         .env("DOXA_MODEL", "codex-only-model")
         .current_dir(dir.path())
@@ -76,6 +80,7 @@ fn glm_uses_its_own_configured_model_and_doctor_checks_key_without_printing_it()
             ])
         .env("DOXA_DAEMON_BIN", &daemon)
         .env("DOXA_RUNTIME_DIR", dir.path().join("runtime"))
+        .env("DOXA_HOME", dir.path().join("home"))
         .env("DOXA_HOME", &home)
         .env("ZAI_API_KEY", "secret-vendor-key")
         .output()
@@ -100,6 +105,7 @@ fn glm_uses_its_own_configured_model_and_doctor_checks_key_without_printing_it()
         .env("DOXA_DAEMON_BIN", &daemon)
         .env("DOXA_CAPTURE_ARGS", &capture)
         .env("DOXA_RUNTIME_DIR", dir.path().join("runtime"))
+        .env("DOXA_HOME", dir.path().join("home"))
         .env("DOXA_HOME", &home)
         .env_remove("DOXA_MODEL")
         .env_remove("DOXA_EFFORT")
@@ -120,6 +126,7 @@ fn glm_uses_its_own_configured_model_and_doctor_checks_key_without_printing_it()
         .env("DOXA_DAEMON_BIN", &daemon)
         .env("DOXA_CAPTURE_ARGS", &capture)
         .env("DOXA_RUNTIME_DIR", dir.path().join("runtime"))
+        .env("DOXA_HOME", dir.path().join("home"))
         .env("DOXA_HOME", &home)
         .env("DOXA_MODEL", "glm-env-override")
         .env_remove("DOXA_EFFORT")
@@ -137,7 +144,7 @@ fn invalid_vendor_effort_and_missing_key_never_start_daemon() {
     for (args, key) in [
         (
             vec!["new", "--engine", "glm", "--effort", "none"],
-            Some("secret"),
+            Some("synthetic-invalid-effort-key"),
         ),
         (vec!["new", "--engine", "deepseek"], None),
     ] {
@@ -147,6 +154,7 @@ fn invalid_vendor_effort_and_missing_key_never_start_daemon() {
             .env("DOXA_DAEMON_BIN", &daemon)
             .env("DOXA_CAPTURE_ARGS", &capture)
             .env("DOXA_RUNTIME_DIR", dir.path().join("runtime"))
+        .env("DOXA_HOME", dir.path().join("home"))
             .env_remove("DEEPSEEK_API_KEY")
             .env_remove("ZAI_API_KEY")
             .current_dir(dir.path());
@@ -174,6 +182,7 @@ fn vendor_resume_passes_exact_identity_and_boolean_without_credentials() {
             .env("DOXA_DAEMON_BIN", &daemon)
             .env("DOXA_CAPTURE_ARGS", &capture)
             .env("DOXA_RUNTIME_DIR", dir.path().join("runtime"))
+        .env("DOXA_HOME", dir.path().join("home"))
             .env(key, "secret-vendor-key")
             .current_dir(dir.path())
             .output()
@@ -212,6 +221,7 @@ fn vendor_resume_rejects_invalid_identity_and_non_new_command_before_spawn() {
             .env("DOXA_DAEMON_BIN", &daemon)
             .env("DOXA_CAPTURE_ARGS", &capture)
             .env("DOXA_RUNTIME_DIR", dir.path().join("runtime"))
+        .env("DOXA_HOME", dir.path().join("home"))
             .env("DEEPSEEK_API_KEY", "secret-vendor-key")
             .env("ZAI_API_KEY", "secret-vendor-key")
             .current_dir(dir.path())
@@ -219,5 +229,41 @@ fn vendor_resume_rejects_invalid_identity_and_non_new_command_before_spawn() {
             .unwrap();
         assert!(!output.status.success());
         assert!(!capture.exists());
+    }
+}
+
+#[test]
+fn saved_only_keys_pass_launch_and_doctor_without_exposing_values_and_unsafe_store_refuses() {
+    for (engine, key_name) in [("deepseek", "deepseek"), ("glm", "glm")] {
+        let (dir, daemon, capture) = fixture();
+        let home = dir.path().join("home");
+        let store = home.join("credentials.json");
+        let secret = "synthetic-saved-only-api-key";
+        fs::write(&store, serde_json::json!({key_name: secret}).to_string()).unwrap();
+        fs::set_permissions(&store, fs::Permissions::from_mode(0o600)).unwrap();
+        let command = || {
+            let mut command = Command::new(env!("CARGO_BIN_EXE_doxa-rs"));
+            command.env("DOXA_HOME", &home).env("DOXA_DAEMON_BIN", &daemon)
+                .env("DOXA_CAPTURE_ARGS", &capture).env("DOXA_RUNTIME_DIR", dir.path().join("runtime"))
+                .env_remove("DEEPSEEK_API_KEY").env_remove("ZAI_API_KEY")
+                .env_remove("DOXA_MODEL").env_remove("DOXA_EFFORT").current_dir(dir.path());
+            command
+        };
+        let doctor = command().args(["doctor", "--engine", engine]).output().unwrap();
+        assert!(doctor.status.success(), "{}", String::from_utf8_lossy(&doctor.stderr));
+        assert!(String::from_utf8_lossy(&doctor.stdout).contains("set (saved)"));
+        assert!(!String::from_utf8_lossy(&doctor.stdout).contains(secret));
+        let launched = command().args(["new", "--engine", engine]).output().unwrap();
+        assert!(!launched.status.success()); // Fake daemon records argv then exits.
+        assert!(argv(&capture).windows(2).any(|w| w == ["--engine", engine]));
+        assert!(!argv(&capture).join(" ").contains(secret));
+        assert!(!String::from_utf8_lossy(&launched.stderr).contains(secret));
+        fs::remove_file(&capture).unwrap();
+        fs::set_permissions(&store, fs::Permissions::from_mode(0o644)).unwrap();
+        let refused = command().args(["new", "--engine", engine]).output().unwrap();
+        assert!(!refused.status.success());
+        assert!(!capture.exists());
+        assert!(String::from_utf8_lossy(&refused.stderr).contains("credential store is unavailable"));
+        assert!(!String::from_utf8_lossy(&refused.stderr).contains(secret));
     }
 }

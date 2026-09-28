@@ -12,16 +12,42 @@ use std::time::Duration;
 use tokio::sync::watch;
 use tokio::sync::{Mutex, MutexGuard};
 
-async fn credential_guard() -> MutexGuard<'static, ()> {
+struct CredentialGuard { _lock: MutexGuard<'static, ()>, _home: tempfile::TempDir, previous: Vec<(&'static str, Option<std::ffi::OsString>)> }
+impl Drop for CredentialGuard { fn drop(&mut self) {
+    for (name, value) in self.previous.drain(..) {
+        match value { Some(value) => std::env::set_var(name, value), None => std::env::remove_var(name) }
+    }
+} }
+async fn credential_guard() -> CredentialGuard {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(())).lock().await
+    let lock = LOCK.get_or_init(|| Mutex::new(())).lock().await;
+    let previous = ["DOXA_HOME", "DEEPSEEK_API_KEY", "ZAI_API_KEY"].into_iter().map(|name| (name, std::env::var_os(name))).collect();
+    let home = tempfile::tempdir().unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    // No test ever opens the user's real credential store.
+    std::env::set_var("DOXA_HOME", home.path());
+    std::env::remove_var("DEEPSEEK_API_KEY");
+    std::env::remove_var("ZAI_API_KEY");
+    CredentialGuard { _lock: lock, _home: home, previous }
 }
 
+fn accept(listener: &TcpListener) -> std::net::TcpStream {
+    listener.set_nonblocking(true).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    loop {
+        match listener.accept() {
+            Ok((socket, _)) => return socket,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock && std::time::Instant::now() < deadline => std::thread::sleep(Duration::from_millis(2)),
+            Err(_) => panic!("fixture request was not accepted before deadline"),
+        }
+    }
+}
 fn server(response: Vec<u8>, delay: Duration) -> (String, std::thread::JoinHandle<String>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}/chat/completions", listener.local_addr().unwrap());
     let task = std::thread::spawn(move || {
-        let (mut socket, _) = listener.accept().unwrap();
+        let mut socket = accept(&listener);
         socket
             .set_read_timeout(Some(Duration::from_secs(3)))
             .unwrap();
@@ -67,7 +93,7 @@ fn multi_server(bodies: Vec<&'static str>) -> (String, std::thread::JoinHandle<C
         let mut requests = Vec::new();
         let mut auth = Vec::new();
         for body in bodies {
-            let (mut socket, _) = listener.accept().unwrap();
+            let mut socket = accept(&listener);
             socket
                 .set_read_timeout(Some(Duration::from_secs(3)))
                 .unwrap();
@@ -120,7 +146,7 @@ struct LookupGate {
     calls: Vec<String>,
 }
 
-struct PendingGate;
+struct PendingGate { started: Option<tokio::sync::oneshot::Sender<()>> }
 struct RotatingGate;
 impl ToolGate for RotatingGate {
     fn definitions(&self) -> Vec<serde_json::Value> {
@@ -144,6 +170,7 @@ impl ToolGate for PendingGate {
         &'a mut self,
         _call: &'a ToolCall,
     ) -> BoxFuture<'a, Result<serde_json::Value, ()>> {
+        if let Some(started) = self.started.take() { started.send(()).unwrap(); }
         Box::pin(std::future::pending())
     }
 }
@@ -285,9 +312,10 @@ async fn cancellation_and_deadline_cover_tool_execution() {
     let (url, task) = multi_server(vec![body]);
     let mut history = vec![];
     let (sender, cancel) = watch::channel(false);
-    let mut gate = PendingGate;
+    let (started, waiting) = tokio::sync::oneshot::channel();
+    let mut gate = PendingGate { started: Some(started) };
     tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(40)).await;
+        waiting.await.unwrap();
         sender.send(true).unwrap();
     });
     let error = run_turn_local(
@@ -319,7 +347,7 @@ async fn cancellation_and_deadline_cover_tool_execution() {
         "question",
         Some(&mut gate),
         cancel,
-        Duration::from_millis(50),
+        Duration::from_millis(250),
         |_| {},
     )
     .await
@@ -494,6 +522,12 @@ async fn fake_server_error_code_never_exposes_key() {
         }
     );
     assert!(!format!("{error}").contains("test-secret"));
+    doxa_vendors::credentials::save(Vendor::DeepSeek, "inactive-credential-fixture").unwrap();
+    let (url, task) = server(http("401 Unauthorized", r#"{"error":{"code":"inactive-credential-fixture"}}"#, "application/json"), Duration::ZERO);
+    let (_, cancel) = watch::channel(false);
+    let error = stream_once_local(Vendor::Glm, &url, json!({}), cancel, Duration::from_secs(3), |_| {}).await.unwrap_err();
+    task.join().unwrap();
+    assert!(!format!("{error:?} {error}").contains("inactive-credential-fixture"));
 }
 #[tokio::test]
 async fn cancellation_and_timeout_abort_request() {
@@ -529,7 +563,7 @@ async fn cancellation_and_timeout_abort_request() {
             &url,
             json!({}),
             cancel,
-            Duration::from_millis(50),
+            Duration::from_millis(250),
             |_| {}
         )
         .await,
@@ -554,10 +588,66 @@ async fn local_override_rejects_userinfo_and_remote_hosts() {
             endpoint,
             json!({}),
             cancel,
-            Duration::from_millis(50),
+            Duration::from_millis(250),
             |_| {},
         )
         .await;
         assert_eq!(result, Err(Error::InvalidEndpoint), "{endpoint}");
     }
+}
+
+#[tokio::test]
+async fn saved_credentials_apply_to_next_turn_of_existing_history_and_stay_out_of_context() {
+    let _credential_guard = credential_guard().await;
+    std::env::set_var("DEEPSEEK_API_KEY", "inherited-fixture-key");
+    std::env::set_var("ZAI_API_KEY", "inherited-zai-fixture-key");
+    doxa_vendors::credentials::save(Vendor::Glm, "saved-zai-fixture-key").unwrap();
+    let mut history = vec![json!({"role":"system","content":"saved-zai-fixture-key inherited-zai-fixture-key"})];
+    for key in ["saved-fixture-key-one", "saved-fixture-key-two", "inherited-fixture-key"] {
+        if key.starts_with("saved") { doxa_vendors::credentials::save(Vendor::DeepSeek, key).unwrap(); }
+        else { doxa_vendors::credentials::remove(Vendor::DeepSeek).unwrap(); }
+        let body = format!("data: {{\"model\":\"deepseek-flash\",\"choices\":[{{\"finish_reason\":\"stop\",\"delta\":{{\"content\":\"{key}\"}}}}]}}\n\ndata: [DONE]\n\n");
+        let (url, task) = server(http("200 OK", &body, "text/event-stream"), Duration::ZERO);
+        let (_, cancel) = watch::channel(false);
+        let result = run_turn_local(Vendor::DeepSeek, &url, "deepseek-flash", "high", &mut history,
+            &format!("Question includes {key}"), None, cancel, Duration::from_secs(3), |_| {}).await.unwrap();
+        assert_eq!(result.text, "***");
+        let request = task.join().unwrap();
+        let (headers, payload) = request.split_once("\r\n\r\n").unwrap();
+        assert!(headers.to_ascii_lowercase().contains(&format!("authorization: bearer {key}")));
+        assert!(!payload.contains(key));
+        assert!(!payload.contains("saved-zai-fixture-key"));
+        assert!(!payload.contains("inherited-zai-fixture-key"));
+        let committed = serde_json::to_string(&history).unwrap();
+        assert!(!committed.contains(key));
+        assert!(!committed.contains("saved-zai-fixture-key"));
+        assert!(!committed.contains("inherited-zai-fixture-key"));
+    }
+}
+
+#[tokio::test]
+async fn inactive_key_in_provider_tool_identity_never_reaches_gate_or_history() {
+    let _credential_guard = credential_guard().await;
+    std::env::set_var("DEEPSEEK_API_KEY", "primary-fixture-key");
+    doxa_vendors::credentials::save(Vendor::Glm, "saved-inactive-fixture-key").unwrap();
+    let tool = "data: {\"choices\":[{\"finish_reason\":\"tool_calls\",\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"saved-inactive-fixture-key\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{\\\"x\\\":1}\"}}]}}]}\n\ndata: [DONE]\n\n";
+    let done = "data: {\"choices\":[{\"finish_reason\":\"stop\",\"delta\":{\"content\":\"saved-inactive-fixture-key\"}}]}\n\ndata: [DONE]\n\n";
+    let (url, task) = multi_server(vec![tool, done]);
+    let (_, cancel) = watch::channel(false);
+    let mut history = Vec::new();
+    struct IdentityGate;
+    impl ToolGate for IdentityGate {
+        fn definitions(&self) -> Vec<serde_json::Value> { vec![json!({"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}})] }
+        fn execute<'a>(&'a mut self, call: &'a ToolCall) -> BoxFuture<'a, Result<serde_json::Value, ()>> {
+            assert_eq!(call.id, "***");
+            Box::pin(async { Ok(json!({"result":"ok"})) })
+        }
+    }
+    let mut gate = IdentityGate;
+    let result = run_turn_local(Vendor::DeepSeek, &url, "deepseek-flash", "high", &mut history,
+        "Question", Some(&mut gate), cancel, Duration::from_secs(3), |_| {}).await.unwrap();
+    assert_eq!(result.text, "***");
+    assert!(!serde_json::to_string(&history).unwrap().contains("saved-inactive-fixture-key"));
+    let (requests, _) = task.join().unwrap();
+    assert!(!requests.iter().any(|request| request.to_string().contains("saved-inactive-fixture-key")));
 }

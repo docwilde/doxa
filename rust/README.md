@@ -46,8 +46,9 @@ Bare `doxa` restores this project's saved tabs or starts the configured engine
 read only with a reason. `restore_tabs` and `resume_restored` control this behavior. `new` always
 starts a session; `attach`, `stop`, and `list` manage live sessions. Select
 `--engine codex|claude|deepseek|glm`, `--model`, and supported `--effort` values.
-Claude needs the Claude Code CLI; vendors use `DEEPSEEK_API_KEY` or
-`ZAI_API_KEY`. Doctor checks dependencies without printing credentials.
+Claude needs the Claude Code CLI. Set DeepSeek or z.ai API keys in `/setup`,
+or inherit `DEEPSEEK_API_KEY` / `ZAI_API_KEY` from the launching environment.
+Doctor checks dependencies without printing credentials.
 
 Git sessions receive managed linked worktrees unless `DOXA_WORKTREE=0` or
 `worktree_per_session=false`. `new --branch NAME` selects an existing base.
@@ -127,6 +128,20 @@ corresponding slash commands invoke the selected provider CLI. Codex login
 supports `--device-auth`. Public sign-in URLs/codes are allowlisted; credentials
 and raw authentication output do not enter transcripts. Closing authentication
 cancels and reaps its worker. `auth status` checks CLI exit status.
+
+In `/setup`, select the DeepSeek or z.ai API key edit row, type or paste into
+the masked field, and choose Save or Cancel. Setup reports only the source
+(saved, environment, or missing); it never reveals the key. Remove deletes
+the saved override and falls back to the inherited environment key.
+Changes refresh the vendor model list and DeepSeek balance and apply to the
+next request in existing sessions.
+
+Saved keys are plaintext in the owner-only `~/.doxa/credentials.json` file
+(mode `0600`), under `DOXA_HOME` when configured. They override environment
+keys. DOXA does not load credentials from project files, `.env`, or LORE
+memory. Key input stays separate from prompt drafts and conversation history;
+known keys are redacted before crossing vendor memory or transcript boundaries.
+
 `plugins [refresh|adopt on|off]` and `/plugins` / `/reload-plugins` discover and
 control sanitized Claude plugin adoption for future sessions. Native settings
 and `/settings` edit the full categorized preference catalog; environment

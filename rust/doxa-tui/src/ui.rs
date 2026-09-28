@@ -11,6 +11,7 @@ mod lore_controller;
 mod model_controls;
 mod operations_controller;
 mod operations_menu;
+mod credential_editor;
 pub(crate) mod panes;
 mod render;
 mod session_controls;
@@ -1351,6 +1352,7 @@ pub struct App {
     transcript_selection: RefCell<crate::selection::Selection>,
     pending_clipboard_copy: Option<Vec<u8>>,
     clipboard_job: Option<crate::clipboard::Job>,
+    clipboard_secret_owner: Option<u64>,
     tool_modal: bool,
     tool_selected: usize,
     tool_scroll: u16,
@@ -1566,6 +1568,7 @@ impl Default for App {
             transcript_selection: RefCell::new(crate::selection::Selection::default()),
             pending_clipboard_copy: None,
             clipboard_job: None,
+            clipboard_secret_owner: None,
             tool_modal: false,
             tool_selected: 0,
             tool_scroll: 0,

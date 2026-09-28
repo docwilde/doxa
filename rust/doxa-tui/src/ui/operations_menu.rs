@@ -1,12 +1,14 @@
 //! Selectable operations popup. Authentication runs on a worker and only
 //! filtered public progress is retained in this menu, never in transcripts.
 use crossterm::event::{KeyCode, KeyEvent};
+use super::credential_editor::{self, Editor};
+use doxa_vendors::Vendor;
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 
 #[derive(Clone)]
 enum Action { Report, Store(bool), Plugins(bool), Auth(crate::operations::AuthRequest), Reload, Skip,
-    Maintenance(&'static str, bool), MeshOpen, MeshStop }
+    Maintenance(&'static str, bool), MeshOpen, MeshStop, CredentialEdit(Vendor), CredentialRemove(Vendor) }
 
 pub struct Menu {
     kind: String,
@@ -28,11 +30,13 @@ pub struct Menu {
     mesh: Option<crate::mesh_control::WindowHandle>,
     mesh_revision: u64,
     plugins_changed: bool,
+    secret: Option<Editor>,
+    credentials_changed: Vec<Vendor>,
 }
 impl Menu {
     pub fn new(kind: &str) -> Self {
         let mut menu = Self { kind: kind.into(), rows: Vec::new(), selected: 0, messages: Vec::new(), worker: None, closed: false, step: 0, editing: None, input: String::new(), scroll: 0, cancel: None, requested: false,
-            engine: None, restart_ready: false, restart_complete: None, mesh: None, mesh_revision: 0, worker_thread: None, plugins_changed: false };
+            engine: None, restart_ready: false, restart_complete: None, mesh: None, mesh_revision: 0, worker_thread: None, plugins_changed: false, secret: None, credentials_changed: Vec::new() };
         menu.prepare(); menu
     }
     /// Parsing/selection is pure. The UI calls start_requested only after the
@@ -63,8 +67,11 @@ impl Menu {
         let mut menu = Self::new("mesh"); menu.mesh = Some(handle); menu
     }
     pub fn take_plugins_changed(&mut self) -> bool { std::mem::take(&mut self.plugins_changed) }
+    pub fn take_credentials_changed(&mut self) -> Vec<Vendor> { std::mem::take(&mut self.credentials_changed) }
+    pub fn editing_credential(&self) -> bool { self.secret.is_some() }
+    pub fn credential_token(&self) -> Option<u64> { self.secret.as_ref().map(|editor| editor.token) }
     pub fn take_restart(&mut self) -> bool { std::mem::take(&mut self.restart_ready) }
-    pub fn cancel(&mut self) { if let Some(cancel) = &self.cancel { cancel.store(true, Ordering::Release); } }
+    pub fn cancel(&mut self) { self.secret = None; if let Some(cancel) = &self.cancel { cancel.store(true, Ordering::Release); } }
     pub fn start_requested(&mut self) {
         if self.requested && !self.busy() && !self.closed {
             self.requested = false;
@@ -92,6 +99,12 @@ impl Menu {
             },
             _ => vec![("Refresh discovered Claude plugins".into(), Action::Reload), ("Enable adoption for new sessions".into(), Action::Plugins(true)), ("Disable adoption for new sessions".into(), Action::Plugins(false))],
         };
+        if self.kind == "setup" {
+            for vendor in [Vendor::DeepSeek, Vendor::Glm] {
+                self.rows.push((format!("{} API key · {} · edit", credential_editor::label(vendor), credential_editor::status(vendor)), Action::CredentialEdit(vendor)));
+                self.rows.push((format!("Remove saved {} API key", credential_editor::label(vendor)), Action::CredentialRemove(vendor)));
+            }
+        }
     }
     pub fn poll(&mut self) {
         if let Some(mesh) = &self.mesh {
@@ -124,7 +137,13 @@ impl Menu {
         } else { format!("{} · ↑↓ choose · Enter apply · Esc close · PgUp/PgDn report", self.kind) }];
         if self.busy() { lines.push("Operation running…".into()); }
         else if self.requested { lines.push("Operation requested…".into()); }
-        if let Some(key) = self.editing { lines.push(format!("{key}: {}", self.input)); }
+        if let Some(editor) = &self.secret {
+            lines[0] = "API key · paste/type · Backspace delete · Enter save · Esc cancel".into();
+            lines.push(format!("{} API key: {}", credential_editor::label(editor.vendor), editor.mask()));
+            lines.push(format!("{} Save API key", if self.selected == 0 { "›" } else { " " }));
+            lines.push(format!("{} Cancel editing", if self.selected == 1 { "›" } else { " " }));
+        }
+        else if let Some(key) = self.editing { lines.push(format!("{key}: {}", self.input)); }
         else { lines.extend(self.rows.iter().enumerate().map(|(i, (label, _))| format!("{} {label}", if i == self.selected { "›" } else { " " }))); }
         let mut report = Vec::new();
         for source in self.messages.iter().flat_map(|s| s.lines()) {
@@ -141,11 +160,41 @@ impl Menu {
         lines.extend(report[end.saturating_sub(room)..end].iter().cloned());
         lines
     }
-    pub fn choice_at(&self, row: usize) -> bool { !self.busy() && !self.requested && self.editing.is_none() && row > 0 && row <= self.rows.len() }
-    pub fn hover(&mut self, row: usize) { if self.choice_at(row) { self.selected = row - 1; } }
+    pub fn choice_at(&self, row: usize) -> bool { !self.busy() && !self.requested && self.editing.is_none() && if self.secret.is_some() { matches!(row, 2|3) } else { row > 0 && row <= self.rows.len() } }
+    pub fn hover(&mut self, row: usize) { if self.choice_at(row) { self.selected = row - if self.secret.is_some() { 2 } else { 1 }; } }
+    pub fn paste(&mut self, text: &str) -> bool {
+        let Some(editor) = &mut self.secret else { return false; };
+        if !editor.append(text) { self.messages.push("API key must be a single line of at most 4096 printable ASCII characters".into()); }
+        true
+    }
+    fn finish_secret(&mut self, save: bool) {
+        if let Some(editor) = self.secret.take() {
+            if save {
+                match doxa_vendors::credentials::save(editor.vendor, editor.value()) {
+                    Ok(()) => { self.credentials_changed.push(editor.vendor); self.messages.push(format!("{} API key saved", credential_editor::label(editor.vendor))); }
+                    Err(_) => self.messages.push("API key was not saved; check key format and private credential-file ownership".into()),
+                }
+            }
+        }
+        self.prepare();
+    }
     pub fn key(&mut self, key: KeyEvent) {
+        if self.secret.is_some() {
+            match key.code {
+                KeyCode::Esc => self.finish_secret(false),
+                KeyCode::Backspace => self.secret.as_mut().unwrap().backspace(),
+                KeyCode::Char(c) if !key.modifiers.intersects(crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::ALT) => {
+                    let mut bytes = [0;4]; self.paste(c.encode_utf8(&mut bytes));
+                }
+                KeyCode::Up => self.selected = 0,
+                KeyCode::Down => self.selected = 1,
+                KeyCode::Enter => self.finish_secret(self.selected == 0),
+                _ => {},
+            }
+            return;
+        }
         if key.code == KeyCode::Esc {
-            if let Some(cancel) = &self.cancel { cancel.store(true, Ordering::Release); }
+            self.cancel();
             self.closed = true; return;
         }
         if key.code == KeyCode::PageUp { self.scroll = self.scroll.saturating_add(8); return; }
@@ -173,6 +222,17 @@ impl Menu {
     fn apply(&mut self) {
         self.scroll = 0;
         let action = self.rows[self.selected].1.clone();
+        match action {
+            Action::CredentialEdit(vendor) => { self.secret = Some(Editor::new(vendor)); self.selected = 0; return; }
+            Action::CredentialRemove(vendor) => {
+                match doxa_vendors::credentials::remove(vendor) {
+                    Ok(()) => { self.credentials_changed.push(vendor); self.messages.push(format!("Saved {} API key removed", credential_editor::label(vendor))); }
+                    Err(_) => self.messages.push("Saved API key was not removed; check private credential-file ownership".into()),
+                }
+                self.prepare(); return;
+            }
+            _ => {},
+        }
         if let Action::Maintenance(kind, restart) = action {
             let (sender, receiver) = mpsc::channel(); self.worker = Some(receiver);
             let cancel = Arc::new(AtomicBool::new(false)); self.cancel = Some(cancel.clone());
@@ -218,7 +278,7 @@ impl Menu {
             Action::Reload => crate::operations::plugins_reload(),
             Action::Skip => Ok("Skipped".into()),
             Action::Auth(_) => unreachable!(),
-            Action::Maintenance(_, _) | Action::MeshOpen | Action::MeshStop => unreachable!(),
+            Action::Maintenance(_, _) | Action::MeshOpen | Action::MeshStop | Action::CredentialEdit(_) | Action::CredentialRemove(_) => unreachable!(),
         };
         let success = result.is_ok(); self.plugins_changed |= success && matches!(self.kind.as_str(), "plugins" | "reload-plugins"); self.messages.push(result.unwrap_or_else(|e| e.to_string()));
         if self.kind == "setup" && success {
