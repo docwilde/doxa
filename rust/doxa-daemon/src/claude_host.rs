@@ -700,6 +700,112 @@ struct StreamOutput {
     parent: Option<String>,
     scrubber: StreamScrubber,
 }
+/// Public durable text is framed across assistant blocks and records, while
+/// tool structure stays in its original record order. CLI state is untouched.
+#[derive(Default)]
+struct DurableTurn {
+    records: Vec<Value>,
+    bytes: usize,
+    channels: Vec<(Option<String>, StreamScrubber)>,
+}
+impl DurableTurn {
+    fn stage(&mut self, record: Value, shared: &Shared) -> Result<(), String> {
+        let bytes = serde_json::to_vec(&record)
+            .map_err(|_| "Invalid Claude durable record")?
+            .len();
+        if bytes > 1024 * 1024 {
+            return Err("Claude durable record exceeded bound".into());
+        }
+        if self.bytes.saturating_add(bytes) > 256 * 1024 {
+            self.flush(shared, false)?;
+        }
+        self.bytes += bytes;
+        self.records.push(record);
+        if self.bytes > 256 * 1024 {
+            self.flush(shared, false)?;
+        }
+        Ok(())
+    }
+    fn flush(&mut self, shared: &Shared, terminal: bool) -> Result<(), String> {
+        let mut records = std::mem::take(&mut self.records);
+        self.bytes = 0;
+        let mut outputs: Vec<(usize, usize, usize, String)> = Vec::new();
+        for (ri, record) in records.iter_mut().enumerate() {
+            if record["type"] != "assistant" {
+                continue;
+            }
+            let parent = record["parent_tool_use_id"].as_str().map(str::to_owned);
+            let ci = match self.channels.iter().position(|(id, _)| *id == parent) {
+                Some(ci) => ci,
+                None if self.channels.len() < 32 => {
+                    self.channels.push((parent, StreamScrubber::default()));
+                    self.channels.len() - 1
+                }
+                None => return Err("Claude durable channel bound exceeded".into()),
+            };
+            let Some(blocks) = record["message"]["content"].as_array_mut() else {
+                continue;
+            };
+            for (bi, block) in blocks.iter_mut().enumerate() {
+                if block["type"] != "text" {
+                    continue;
+                }
+                let text = block["text"]
+                    .as_str()
+                    .ok_or("Invalid Claude durable text")?;
+                let mut clean = String::new();
+                let mut tail = text;
+                while !tail.is_empty() {
+                    let mut end = tail.len().min(65536);
+                    while !tail.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    clean.push_str(
+                        &self.channels[ci]
+                            .1
+                            .push(&tail[..end], |s| shared.scrub(s).map_err(io::Error::other))
+                            .map_err(|_| "Claude durable text framing refused")?,
+                    );
+                    tail = &tail[end..];
+                }
+                block["text"] = json!("");
+                if let Some((_, _, _, output)) =
+                    outputs.iter_mut().find(|(channel, _, _, _)| *channel == ci)
+                {
+                    output.push_str(&clean);
+                } else {
+                    outputs.push((ci, ri, bi, clean));
+                }
+            }
+        }
+        if terminal {
+            for (ci, (parent, stream)) in self.channels.iter_mut().enumerate() {
+                let clean = stream
+                    .finish(|s| shared.scrub(s).map_err(io::Error::other))
+                    .map_err(|_| "Claude durable text boundary refused")?;
+                if let Some((_, _, _, output)) =
+                    outputs.iter_mut().find(|(channel, _, _, _)| *channel == ci)
+                {
+                    output.push_str(&clean);
+                } else if !clean.is_empty() {
+                    let ri = records.len();
+                    records.push(json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":""}]},"parent_tool_use_id":parent,"sessionId":shared.session,"cwd":shared.cwd,"timestamp":crate::iso_now()}));
+                    outputs.push((ci, ri, 0, clean));
+                }
+            }
+        }
+        for (_, ri, bi, text) in outputs {
+            records[ri]["message"]["content"][bi]["text"] = json!(text);
+        }
+        for record in records {
+            shared.persist(record)?;
+        }
+        if terminal {
+            self.channels.clear();
+        }
+        Ok(())
+    }
+}
 impl StreamOutput {
     fn event(&self, text: String) -> Value {
         let mut data = json!({"text":text});
@@ -752,6 +858,7 @@ fn flush_streams(
 }
 fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>) {
     let mut streams: Vec<StreamOutput> = Vec::new();
+    let mut durable = DurableTurn::default();
     let mut operations: HashMap<String, Operation> = HashMap::new();
     let mut inputs: HashMap<String, PendingInput> = HashMap::new();
     let mut events = None;
@@ -774,6 +881,7 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>) {
                 }
                 Command::Prompt(text, sink, reply) => {
                     streams.clear();
+                    durable = DurableTurn::default();
                     events = Some(sink);
                     overflow = false;
                     compact_permit = text.trim() == "/compact";
@@ -1142,6 +1250,13 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>) {
                         }
                     }
                     Some("hook_callback") => {
+                        if request["callback_id"] == "doxa_pre_compact"
+                            && durable.flush(&shared, false).is_err()
+                        {
+                            shared.failed.store(true, Ordering::Release);
+                            let _ = cli.respond(&id, Ok(json!({"decision":"block","reason":"Canonical durable transcript framing failed"})));
+                            continue;
+                        }
                         if request["callback_id"] == "doxa_pre_compact" && compact_permit {
                             compact_permit = false;
                             let _ = cli.respond(&id, Ok(json!({})));
@@ -1259,7 +1374,7 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>) {
                             !matches!(b["type"].as_str(), Some("thinking" | "redacted_thinking"))
                         });
                     }
-                    if shared.persist(json!({"type":kind,"message":message,"sessionId":shared.session,"cwd":shared.cwd,"timestamp":crate::iso_now()})).is_err(){let _=cli.control(json!({"subtype":"interrupt"}));}
+                    if durable.stage(json!({"type":kind,"message":message,"parent_tool_use_id":frame["parent_tool_use_id"],"sessionId":shared.session,"cwd":shared.cwd,"timestamp":crate::iso_now()}), &shared).is_err(){shared.failed.store(true, Ordering::Release); let _=cli.control(json!({"subtype":"interrupt"})); turn_deadline=Some(Instant::now()+Duration::from_secs(5));}
                     for block in frame["message"]["content"].as_array().into_iter().flatten() {
                         let event = match block["type"].as_str() {
                             Some("tool_use") => Some(
@@ -1279,6 +1394,9 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>) {
                 }
             }
             Some("result") => {
+                if durable.flush(&shared, true).is_err() {
+                    shared.failed.store(true, Ordering::Release);
+                }
                 if !flush_streams(&mut streams, &shared, &events, false) {
                     shared.failed.store(true, Ordering::Release);
                 }
@@ -1533,6 +1651,75 @@ for line in sys.stdin:
             admission: Mutex::new(()),
         });
         (dir, host)
+    }
+    #[test]
+    fn durable_split_text_is_safe_on_actual_tui_replay() {
+        let body = r#"if row['type']=='user':
+  for chunks in [['safe ', 'sk-', 'abcdefghijklmnop', 'qrstuvwxyz123456 '], ['Bearer ', 'abcdefghijklmnop', 'qrstuvwxyz '], ["password='long ", 'secret ', "phrase' "], ['-----BEGIN PRIVATE KEY-----\n', 'fixturePrivateMaterial\n', '-----END PRIVATE KEY----- ']]:
+   emit({'type':'assistant','session_id':'$SESSION','message':{'role':'assistant','content':[{'type':'text','text':chunk} for chunk in chunks[:2]]}})
+   for chunk in chunks[2:]:
+    emit({'type':'assistant','session_id':'$SESSION','message':{'role':'assistant','content':[{'type':'text','text':chunk}]}})
+  emit({'type':'assistant','session_id':'$SESSION','message':{'role':'assistant','content':[{'type':'tool_use','id':'exact-tool','name':'fixture','input':{'path':'preserved'}}]}})
+  emit({'type':'user','session_id':'$SESSION','message':{'role':'user','content':[{'type':'tool_result','tool_use_id':'exact-tool','content':'exact result','is_error':False}]}})
+  emit({'type':'result','session_id':'$SESSION','is_error':False})
+"#.replace("$SESSION", SESSION);
+        let (_dir, host) = fixture(&body);
+        let mut events = Vec::new();
+        host.prompt("task", &mut |event| events.push(event));
+        assert_eq!(events.last().unwrap()["data"]["is_error"], false);
+        let bytes = fs::read(host.shared.store.transcript_path()).unwrap();
+        let restored = doxa_tui::history::render(&doxa_tui::transport::TranscriptSnapshot {
+            bytes: bytes.clone(),
+            earlier_bytes_omitted: false,
+        });
+        for public in [String::from_utf8(bytes).unwrap(), restored] {
+            for secret in ["abcdefgh", "long ", "secret ", "phrase'", "fixturePrivate"] {
+                assert!(!public.contains(secret), "{public}");
+            }
+            for marker in ["api-key", "bearer", "value", "pem"] {
+                assert!(public.contains(&format!("[REDACTED:{marker}]")), "{public}");
+            }
+        }
+        let records = host.shared.store.read_records().unwrap();
+        let tool = records
+            .iter()
+            .flat_map(|r| r["message"]["content"].as_array().into_iter().flatten())
+            .find(|b| b["type"] == "tool_use")
+            .unwrap();
+        assert_eq!(tool["id"], "exact-tool");
+        assert_eq!(tool["input"]["path"], "preserved");
+        let result = records
+            .iter()
+            .flat_map(|r| r["message"]["content"].as_array().into_iter().flatten())
+            .find(|b| b["type"] == "tool_result")
+            .unwrap();
+        assert_eq!(result["tool_use_id"], "exact-tool");
+        assert_eq!(result["content"], "exact result");
+        let saved = host.shared.store.read_thread().unwrap().unwrap();
+        assert_eq!(saved["turn_incomplete"], false);
+        host.shared.store.verify_thread_checkpoint(&saved).unwrap();
+        assert!(host.shutdown());
+    }
+    #[test]
+    fn durable_flush_retains_uncertain_spans_and_refuses_oversized_records() {
+        let (_dir, host) = fixture("");
+        let shared = &host.shared;
+        let record = |text: &str| json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":text}]}});
+        let mut durable = DurableTurn::default();
+        durable.stage(record("password='long "), shared).unwrap();
+        durable.flush(shared, false).unwrap();
+        assert!(!fs::read_to_string(shared.store.transcript_path())
+            .unwrap()
+            .contains("long "));
+        durable.stage(record("secret phrase'"), shared).unwrap();
+        durable.flush(shared, true).unwrap();
+        assert!(fs::read_to_string(shared.store.transcript_path())
+            .unwrap()
+            .contains("[REDACTED:value]"));
+        assert!(durable
+            .stage(record(&"x".repeat(1024 * 1024)), shared)
+            .is_err());
+        assert!(host.shutdown());
     }
     #[test]
     fn tool_separator_keeps_recent_credential_label_context() {
