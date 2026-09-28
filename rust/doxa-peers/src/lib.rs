@@ -3,6 +3,8 @@
 pub mod delivery;
 pub mod query;
 pub mod presence;
+pub mod remote_policy;
+pub mod peernet;
 use serde::{Deserialize, Serialize};
 use std::ffi::OsStr;
 use std::fs::{self, File, OpenOptions};

@@ -114,13 +114,46 @@ impl PeerHost {
         .map_err(|_| "peer discovery unavailable or LORE scrub failed".to_owned())
     }
 
+    fn remote_roster(&self, lore: &mut LoreClient) -> Result<(Vec<(doxa_peers::peernet::Endpoint,Value)>,Vec<String>),String> {
+        fn scrub(value:&mut Value,lore:&mut LoreClient)->Result<(),String>{match value {
+            Value::String(text)=>*text=lore.scrub(text).map_err(|_|"LORE scrub unavailable")?,
+            Value::Array(values)=>for value in values{scrub(value,lore)?},Value::Object(values)=>for value in values.values_mut(){scrub(value,lore)?},_=>{}
+        }Ok(())}
+        let mut rows=Vec::new();let mut problems=Vec::new();
+        for (endpoint,result) in doxa_peers::peernet::rosters(){
+            match result{Ok(peers)=>for mut peer in peers{
+                if peer["session_id"]==self.session_id{continue;}
+                let id=peer["session_id"].clone();scrub(&mut peer,lore)?;
+                if peer["session_id"]!=id{return Err("remote session identity cannot be safely displayed".into());}
+                rows.push((endpoint.clone(),peer));
+            },Err(_)=>problems.push(format!("{}: remote roster unavailable",lore.scrub(&endpoint.label).map_err(|_|"LORE scrub unavailable")?))}
+        }Ok((rows,problems))
+    }
+
+    fn send_remote(&self, targets:&[(doxa_peers::peernet::Endpoint,Value)], body:&str, title:&str, scope:&str, kind:&str, reply:Option<&str>) -> Result<delivery::DeliveryResult,String> {
+        self.limiter.lock().map_err(|_|"peer rate limiter unavailable")?.charge(None,targets.len()).map_err(|_|"peer send limit")?;
+        let mut result=delivery::DeliveryResult{delivered:Vec::new(),failed:Vec::new(),record:None,ledger_error:None};
+        let deadline=std::time::Instant::now()+Duration::from_secs(10);
+        for (endpoint,peer) in targets {
+            let id=peer["session_id"].as_str().ok_or("remote peer identity unavailable")?;
+            let payload=json!({"op":"deliver","target":id,"from_id":self.session_id,"from_title":title,"body":body,"from_repo":scope,"kind":kind});
+            if std::time::Instant::now()<deadline&&doxa_peers::peernet::request(endpoint,&payload).is_ok(){result.delivered.push(id.to_owned());}else{result.failed.push(id.to_owned());}
+        }
+        if !result.delivered.is_empty(){
+            let message=delivery::Message{v:1,id:delivery::new_message_id(),ts:now(),sender:delivery::Sender{session:self.session_id.clone(),title:Some(title.into()),repo:Some(scope.into()),model:None,engine:None},to:result.delivered.clone(),kind:kind.into(),in_reply_to:reply.map(str::to_owned),body:body.into(),body_sha256:String::new(),latency_ms:None,turn:delivery::TurnRef{id:None,state:"idle".into()}};
+            match self.ledger.append(message,&|text:&str|text.to_owned()){Ok(record)=>result.record=Some(record),Err(_)=>result.ledger_error=Some("remote delivery ledger unavailable".into())}
+        }
+        Ok(result)
+    }
+
     fn peers(&self, params: &Value) -> Result<Value, String> {
         if params.as_object().is_none_or(|rows|rows.keys().any(|key|key!="limit")) { return Err("invalid peer roster limit".into()); }
         let limit=params.get("limit").map(|value|value.as_u64().ok_or("invalid peer roster limit")).transpose()?.unwrap_or(presence::MAX_DISPLAY_PEERS as u64);
         if !(1..=100).contains(&limit) { return Err("invalid peer roster limit".into()); }
         self.with_lore(|lore| {
-            let rows=self.roster(lore)?; let total=rows.len();
-            Ok(json!({"peers":rows.into_iter().take(limit as usize).collect::<Vec<_>>(),"count":total.min(limit as usize),"total_count":total,"bounded":total>limit as usize,"trust":PEER_UNTRUSTED_INTRO,"untrusted_peer_data":true}))
+            let mut rows=self.roster(lore)?.into_iter().map(|peer|json!({"session_id":peer.session_id,"title":peer.title,"origin":null})).collect::<Vec<_>>();
+            let (remote,problems)=self.remote_roster(lore)?;rows.extend(remote.into_iter().map(|(_,peer)|json!({"session_id":peer["session_id"],"title":peer["title"],"origin":peer["origin"]})));let total=rows.len();
+            Ok(json!({"peers":rows.into_iter().take(limit as usize).collect::<Vec<_>>(),"count":total.min(limit as usize),"total_count":total,"bounded":total>limit as usize,"problems":problems,"trust":PEER_UNTRUSTED_INTRO,"untrusted_peer_data":true}))
         })
     }
 
@@ -136,6 +169,7 @@ impl PeerHost {
         let body=params.get("text").or_else(||params.get("body")).and_then(Value::as_str).ok_or("invalid peer message")?;
         let broadcast=params.get("broadcast").map(|value|value.as_bool().ok_or("invalid peer broadcast")).transpose()?.unwrap_or(false);
         let in_reply_to=params.get("in_reply_to").filter(|value|!value.is_null()).map(|value|value.as_str().ok_or("invalid peer reply reference")).transpose()?;
+        if in_reply_to.is_some_and(|id|!delivery::valid_reply_reference(id)){return Err("invalid peer reply reference".into());}
         if (broadcast && !target.is_empty()) || (!broadcast && target.is_empty())
             || target.len()>128 || !target.bytes().all(|byte|byte.is_ascii_alphanumeric()||byte==b'-')
             || body.trim().is_empty() || body.chars().count()>delivery::MAX_BODY_CHARS {
@@ -160,7 +194,18 @@ impl PeerHost {
         if clean_body.chars().count() > delivery::MAX_BODY_CHARS {
             return Err("message too long after scrubbing".into());
         }
+        let remote=self.with_lore(|lore|self.remote_roster(lore).map(|(rows,_)|rows))?;
+        let remote_matches=remote.into_iter().filter(|(_,peer)|broadcast||peer["session_id"].as_str().is_some_and(|id|target_matches(id,target,exact))).collect::<Vec<_>>();
         let matches:Vec<_>=roster.iter().filter(|peer|broadcast||target_matches(&peer.session_id,target,exact)).collect();
+        if matches.iter().map(|peer|peer.session_id.len()+4).sum::<usize>()+remote_matches.iter().filter_map(|(_,peer)|peer["session_id"].as_str()).map(|id|id.len()+4).sum::<usize>()>40*1024{return Err("broadcast recipient evidence exceeds the reply bound; nothing was sent".into());}
+        if !broadcast && matches.len()+remote_matches.len()>1{return Err("peer target is ambiguous across local and remote machines".into());}
+        if matches.is_empty() && !remote_matches.is_empty(){
+            let kind=if broadcast{"broadcast"}else{"direct"};
+            let result=self.send_remote(&remote_matches,&clean_body,&clean_title,&clean_scope,kind,in_reply_to)?;
+            if result.delivered.is_empty(){return Err("remote peer delivery failed".into());}
+            let _=self.events.try_send(json!({"type":"peer_sent","data":{"to":result.delivered,"kind":kind,"remote":true,"message_id":result.record.as_ref().map(|row|row.id.as_str())}}));
+            return Ok(json!({"peer":if broadcast{None}else{remote_matches.first().map(|(_,peer)|peer)},"peer_count":remote_matches.len(),"kind":kind,"in_reply_to":in_reply_to,"trust":PEER_UNTRUSTED_INTRO,"untrusted_peer_data":true,"delivered_to":result.delivered,"failed":result.failed,"message_id":result.record.as_ref().map(|row|row.id.as_str()),"ledger_error":result.ledger_error}));
+        }
         if matches.is_empty() { return Err(if broadcast { "no live same-scope peers to broadcast to" } else { "no live same-scope peer matches target" }.into()); }
         if !broadcast && matches.len()!=1 { return Err("peer target is ambiguous".into()); }
         let recipients:Vec<String>=matches.iter().map(|peer|peer.session_id.clone()).collect();
@@ -232,8 +277,9 @@ impl PeerHost {
         };
         let scope = self.scope.clone();
         let raw_body = body.to_owned();
+        let remote_body=clean_body.clone();let remote_scope=clean_scope.clone();
         let kind=if broadcast { "broadcast" } else { "direct" };
-        let result = delivery::deliver_with_reply(
+        let mut result = delivery::deliver_with_reply(
             &registry,
             &sender,
             &recipients,
@@ -254,6 +300,12 @@ impl PeerHost {
             },
         )
         .map_err(|_| "peer delivery failed".to_owned())?;
+        if broadcast && !remote_matches.is_empty(){
+            match self.send_remote(&remote_matches,&remote_body,&sender.title,&remote_scope,kind,in_reply_to){
+                Ok(remote)=>{result.delivered.extend(remote.delivered);result.failed.extend(remote.failed);if result.ledger_error.is_none(){result.ledger_error=remote.ledger_error;}},
+                Err(_)=>result.failed.extend(remote_matches.iter().filter_map(|(_,peer)|peer["session_id"].as_str().map(str::to_owned))),
+            }
+        }
         let _ = self.events.try_send(json!({"type":"peer_sent","data":{
             "to":result.delivered,"kind":kind,"in_reply_to":in_reply_to,
             "message_id":result.record.as_ref().map(|r| r.id.as_str())}}));
@@ -268,14 +320,20 @@ impl PeerHost {
             return Err("self peer frame".into());
         }
         let roster = self.with_lore(|lore| self.roster(lore))?;
-        if !roster.iter().any(|p| p.session_id == frame.from_id) {
-            return Err("sender is not a live same-scope peer".into());
-        }
+        let remote_origin=if roster.iter().any(|p|p.session_id==frame.from_id){None}else{
+            let peers=self.with_lore(|lore|self.remote_roster(lore).map(|(rows,_)|rows))?;
+            let matches=peers.iter().filter(|(_,peer)|peer["session_id"]==frame.from_id).collect::<Vec<_>>();
+            if matches.len()!=1{return Err("sender is not a live local or configured remote peer".into());}
+            // Origin is observed from the configured endpoint dialed by this
+            // process; a frame's serialized origin never authorizes admission.
+            Some(matches[0].1["origin"].as_str().ok_or("remote origin unavailable")?.to_owned())
+        };
         {
             let mut limiters = self.inbound_limiters
                 .lock()
                 .map_err(|_| "peer rate limiter unavailable")?;
-            limiters.retain(|id, _| roster.iter().any(|peer| peer.session_id == *id));
+            limiters.retain(|_,limiter|limiter.active());
+            if limiters.len()>=doxa_peers::MAX_REGISTRY_ENTRIES&&!limiters.contains_key(&frame.from_id){return Err("peer receive limiter capacity reached".into());}
             limiters.entry(frame.from_id.clone())
                 .or_insert_with(|| RateLimiter::new(SendLimits::default()))
                 .charge(None, 1)
@@ -300,7 +358,7 @@ impl PeerHost {
         })?;
         Ok(
             json!({"type":"peer_message","data":{"from_id":frame.from_id,
-            "from_title":title,"body":body,"from_repo":repo,"sent_at":sent_at,"kind":kind}}),
+            "from_title":title,"body":body,"from_repo":repo,"sent_at":sent_at,"kind":kind,"origin":remote_origin}}),
         )
     }
 
@@ -323,8 +381,9 @@ impl PeerHost {
         let repo = data["from_repo"].as_str().unwrap_or("repo unknown");
         let sent_at = data["sent_at"].as_str()?;
         let body = data["body"].as_str()?;
-        let origin = format!("--- peer message · {} ({}) · {} · {} ---", title,
-            id.chars().take(8).collect::<String>(), repo, sent_at);
+        let machine=data["origin"].as_str().map(|value|format!(" · machine {value}")).unwrap_or_default();
+        let origin = format!("--- peer message · {} ({}) · {} · {}{} ---", title,
+            id.chars().take(8).collect::<String>(), repo, sent_at,machine);
         Some((format!("{origin}\n{body}"), origin))
     }
 
