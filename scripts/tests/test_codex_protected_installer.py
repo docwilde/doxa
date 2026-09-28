@@ -90,7 +90,7 @@ sys.stdin.read()
                 value.pop("code_mode_host_source_commit")
             receipt_path.write_text(json.dumps(value))
             before = {file.name: file.read_bytes() for file in self.destination.iterdir()}
-            with self.assertRaisesRegex(ValueError, "helper differs"):
+            with self.assertRaisesRegex(ValueError, "helper.*differs"):
                 self.install()
             self.assertEqual(before, {file.name: file.read_bytes() for file in self.destination.iterdir()})
             # Restore valid provenance before the next independent corruption.

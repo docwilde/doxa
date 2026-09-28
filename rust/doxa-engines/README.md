@@ -97,13 +97,13 @@ SHA256, then executes the same open inode. Login, version and other CLI commands
 are delegated to the recorded official Codex executable, which is never replaced.
 The sibling code-mode dispatcher also verifies its helper payload and executes
 that checked open inode when Codex starts code mode. Its receipt binds the helper
-hash to the same pinned source. The helper has a separate verified build cache;
+hash to the same pinned source. The helper has a separate verified build cache.
 its sandbox V8 archive and generated bindings come from the official Codex V8
 release. The pinned source authenticates that release's checksum manifest, and
 the installer verifies both input hashes before compilation. Their identity is
 recorded in the helper fingerprint and installed receipt. Inherited V8 archive,
 mirror, binding and source-build overrides cannot change these native inputs.
-adding it reuses the existing protected server. Existing alpha.40 installations
+Adding it reuses the existing protected server. Existing alpha.40 installations
 receive the helper, dispatchers and new receipt in one atomic directory exchange
 only when their reviewed server/source/patch identity still matches. Missing or
 corrupted installed helper files are repaired from that verified build artifact.
