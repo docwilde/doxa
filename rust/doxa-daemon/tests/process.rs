@@ -2935,6 +2935,10 @@ init=read(); assert init['method']=='initialize'
 send({'id':init['id'],'result':{'userAgent':'codex_cli_rs/0.156.1'}})
 assert read()['method']=='initialized'
 thread=read()
+if thread['method']=='config/read':
+    assert 'features.token_budget=false' in sys.argv
+    send({'id':thread['id'],'result':{'config':{'features':{'token_budget':False}},'origins':{},'layers':None}})
+    thread=read()
 if thread['method']=='hooks/list':
     overrides=[sys.argv[i+1] for i,x in enumerate(sys.argv[:-1]) if x=='-c']
     hooks=next(tomllib.loads(x)['hooks'] for x in overrides if x.startswith('hooks='))

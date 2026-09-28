@@ -1,10 +1,19 @@
 //! Native owner for the canonical LORE reviewer. Metadata is never authority:
 //! lore-rs verifies its frozen source proof before provider work and effects.
 use serde_json::Value;
-use std::{io::{self, Write}, os::{fd::AsRawFd, unix::process::CommandExt}, path::{Path, PathBuf}, process::{Command, Stdio}, time::{Duration, Instant}};
+use std::{io::{self, Read, Write}, os::{fd::AsRawFd, unix::process::CommandExt}, path::{Path, PathBuf}, process::{Command, Stdio}, time::{Duration, Instant}};
 
 pub const MAX_METADATA_BYTES: usize = 16 * 1024;
 pub const REVIEW_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// A successful supervisor must prove which bounded job it approved. Merely
+/// exiting zero (including an executable that ignores helper arguments) cannot
+/// authorize destruction of context.
+pub fn approval_receipt(metadata: &Value, engine: &str, timeout: Duration) -> io::Result<Value> {
+    use sha2::{Digest, Sha256};
+    Ok(serde_json::json!({"approved":true,"job_sha256":format!("{:x}",Sha256::digest(metadata_bytes(metadata,engine,timeout)?))}))
+}
+
 pub fn review_disabled() -> bool {
     std::env::var("LORE_DISABLE_REVIEW").is_ok_and(|value| !matches!(value.as_str(), "" | "0"))
         || std::env::var("LORE_SKIP").is_ok_and(|value| !value.is_empty())
@@ -23,17 +32,23 @@ fn metadata_bytes(metadata: &Value, engine: &str, timeout: Duration) -> io::Resu
 /// EOF (including parent SIGKILL) makes it stop and reap its review worker group.
 /// `executable` must dispatch `__review-supervisor` to [`supervise`].
 pub fn review(executable: &Path, metadata: &Value, engine: &str, timeout: Duration, mut cancelled: impl FnMut() -> bool) -> io::Result<bool> {
-    metadata_bytes(metadata, engine, timeout)?;
+    let expected_receipt = approval_receipt(metadata, engine, timeout)?;
     if cancelled() || review_disabled() { return Ok(false); }
     let mut command = Command::new(executable);
     command.args(["__review-supervisor", engine, &metadata.to_string(), &timeout.as_millis().to_string()])
-        .stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null());
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
     unsafe { command.pre_exec(|| { if libc::setsid() < 0 { return Err(io::Error::last_os_error()); } Ok(()) }); }
     let mut supervisor = command.spawn()?;
     let control = supervisor.stdin.take();
     let deadline = Instant::now() + timeout + Duration::from_secs(3);
     loop {
-        if let Some(status) = supervisor.try_wait()? { drop(control); return Ok(status.success()); }
+        if let Some(status) = supervisor.try_wait()? {
+            drop(control);
+            if !status.success() { return Ok(false); }
+            let mut raw = Vec::new();
+            if let Some(output) = supervisor.stdout.take() { output.take(2049).read_to_end(&mut raw)?; }
+            return Ok(raw.len() <= 2048 && serde_json::from_slice::<Value>(&raw).is_ok_and(|receipt| receipt == expected_receipt));
+        }
         if cancelled() || Instant::now() >= deadline { break; }
         std::thread::sleep(Duration::from_millis(20));
     }
