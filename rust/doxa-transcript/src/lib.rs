@@ -13,6 +13,8 @@ pub const MAX_METADATA_BYTES: u64 = 64 * 1024;
 pub const THREAD_SUFFIX: &str = ".codex.json";
 pub const MAX_VENDOR_MESSAGES_BYTES: u64 = 16 * 1024 * 1024;
 pub const MAX_VENDOR_MESSAGES: usize = 20_000;
+/// Private reasoning attached to one paired assistant replay message.
+pub const MAX_VENDOR_REASONING_BYTES: usize = 1024 * 1024;
 pub const MAX_VENDOR_TRANSCRIPT_BYTES: u64 = 16 * 1024 * 1024;
 
 fn invalid() -> io::Error {
@@ -192,10 +194,13 @@ fn validate_vendor_messages(messages: &[Value]) -> io::Result<()> {
     let mut bytes = 0usize;
     for (index, message) in messages.iter().enumerate() {
         let fields = message.as_object().ok_or_else(bad_data)?;
-        if fields.len() != 2
+        let reasoning = fields.get("reasoning_content");
+        if !(fields.len() == 2 || fields.len() == 3 && reasoning.is_some())
             || fields.get("role").and_then(Value::as_str)
                 != Some(if index % 2 == 0 { "user" } else { "assistant" })
             || fields.get("content").and_then(Value::as_str).is_none()
+            || reasoning.is_some_and(|value| index % 2 == 0
+                || value.as_str().is_none_or(|text| text.len() > MAX_VENDOR_REASONING_BYTES))
         {
             return Err(bad_data());
         }
@@ -300,6 +305,7 @@ impl TranscriptStore {
     /// Reject a crash that left the replay file and JSONL at different turns.
     pub fn verify_vendor_transcript(&self, engine: &str, messages: &[Value]) -> io::Result<()> {
         owned_dir(&self.dir)?;
+        validate_vendor_messages(messages)?;
         let mut file = match open_read(&self.transcript_path()) {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound && messages.is_empty() => {
@@ -339,7 +345,10 @@ impl TranscriptStore {
                 _ => return Err(bad_data()),
             }
         }
-        if found != messages {
+        // Reasoning is private provider replay state, never public JSONL.
+        let public: Vec<Value> = messages.iter().map(|message|
+            serde_json::json!({"role":message["role"],"content":message["content"]})).collect();
+        if found != public {
             return Err(bad_data());
         }
         Ok(())
@@ -424,7 +433,8 @@ impl TranscriptStore {
             return Err(bad_data());
         }
         let mut raw = Vec::new();
-        file.read_to_end(&mut raw)?;
+        (&mut file).take(MAX_VENDOR_MESSAGES_BYTES + 1).read_to_end(&mut raw)?;
+        if raw.len() as u64 > MAX_VENDOR_MESSAGES_BYTES { return Err(bad_data()); }
         let value: Value = serde_json::from_slice(&raw).map_err(|_| bad_data())?;
         let fields = value.as_object().ok_or_else(bad_data)?;
         if fields.get("engine").and_then(Value::as_str) != Some(engine)
@@ -442,6 +452,10 @@ impl TranscriptStore {
             .and_then(Value::as_array)
             .ok_or_else(bad_data)?;
         validate_vendor_messages(messages)?;
+        if messages.iter().any(|message| message.get("reasoning_content").is_some())
+            && file.metadata()?.permissions().mode() & 0o7777 != 0o600 {
+            return Err(invalid());
+        }
         Ok(Some(messages.clone()))
     }
 

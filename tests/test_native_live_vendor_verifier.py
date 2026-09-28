@@ -29,7 +29,7 @@ ORIGINAL_POPEN = subprocess.Popen
 
 
 @contextlib.contextmanager
-def vendor_server(hang=False):
+def vendor_server(hang=False, resumed_reasoning=None, first_reasoning="Finish the synthetic token answer."):
     requests = []
     release = threading.Event()
 
@@ -51,20 +51,30 @@ def vendor_server(hang=False):
                         "name": "workspace_read", "arguments": '{"path":"fixture.txt"}'}}]}
                 finish = "tool_calls"
             elif len(requests) == 2:
-                if model.startswith("deepseek") and messages[-2].get("reasoning_content") != "Read the synthetic file.":
+                if model.startswith("deepseek") and request["thinking"]["type"] == "enabled" \
+                        and messages[-2].get("reasoning_content") != "Read the synthetic file.":
                     # Realistic DeepSeek failure rather than a fixture which
                     # accepts a continuation the documented service rejects.
                     self.send_error(400, "missing reasoning_content in tool continuation")
                     return
                 result = json.loads(messages[-1]["content"])
                 assert result["path"] == "fixture.txt"
-                delta = {"content": result["content"].strip()}
+                delta = {"content": result["content"].strip(), "reasoning_content": "Finish the synthetic token answer."}
                 finish = "stop"
             else:
+                if model.startswith("deepseek") and request["thinking"]["type"] == "enabled":
+                    assistants = [message for message in messages if message["role"] == "assistant"]
+                    expected = first_reasoning if len(requests) == 3 else (
+                        resumed_reasoning or "Recall the previous token.")
+                    if not assistants or assistants[-1].get("reasoning_content") != expected:
+                        self.send_error(400, "prior assistant reasoning missing after new user input")
+                        return
                 answer = next(message["content"] for message in reversed(messages)
                               if message["role"] == "assistant")
                 delta = {"reasoning_content": "Recall the previous token.", "content": answer}
                 finish = "stop"
+            if request["thinking"]["type"] == "disabled":
+                delta.pop("reasoning_content", None)
             frame = {"model": model, "choices": [{"delta": delta, "finish_reason": finish}],
                      "usage": {"prompt_tokens": 3, "completion_tokens": 2}}
             body = ("data: " + json.dumps(frame) + "\n\ndata: [DONE]\n\n").encode()
@@ -101,9 +111,43 @@ class CatalogAdapter(verifier.Wire):
                 "note": "Provider account catalog · changes apply next turn"}
 
 
+class NoneThenLowWire(CatalogAdapter):
+    switched = False
+
+    def call(self, method, params=None, timeout=20):
+        if method == "set_effort" and not self.switched:
+            self.switched = True
+            params = {"effort": "none"}
+        return super().call(method, params, timeout)
+
+
 @unittest.skipUnless(BINARY, "requires local-test-server DOXA_NATIVE_DAEMON")
 class NativeLiveVerifierTests(unittest.TestCase):
-    def fixture(self, provider, endpoint, root, binary=None):
+    @contextlib.contextmanager
+    def resumed(self, home):
+        args, kwargs = self.last_launch
+        process = ORIGINAL_POPEN([*args, "--resume", "true"], **kwargs)
+        wire = None
+        try:
+            registry = home / "runtime/registry/live-vendor.json"
+            deadline = time.monotonic() + 10
+            while not registry.exists():
+                self.assertIsNone(process.poll(), "native resume startup failed")
+                self.assertLess(time.monotonic(), deadline)
+                time.sleep(.01)
+            wire = verifier.Wire(json.loads(registry.read_text())["daemon_socket"])
+            wire.receive(time.monotonic() + 10)
+            wire.send({"type": "attach", "cursor": None})
+            yield wire
+        finally:
+            if wire:
+                with contextlib.suppress(TimeoutError, RuntimeError, OSError, ValueError):
+                    wire.call("stop", timeout=2)
+                wire.sock.close()
+            verifier.terminate_group(process)
+            process.stderr.close()
+
+    def fixture(self, provider, endpoint, root, binary=None, retained=False, wire_class=CatalogAdapter):
         variable = "DEEPSEEK_API_KEY" if provider == "deepseek" else "ZAI_API_KEY"
         environment = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "TMPDIR": str(root),
                        "DOXA_NATIVE_DAEMON": binary or BINARY,
@@ -118,10 +162,18 @@ class NativeLiveVerifierTests(unittest.TestCase):
             self.assertEqual(kwargs["env"]["DOXA_VENDOR_TOOLS"], "workspace-read")
             process = ORIGINAL_POPEN([*args, "--vendor-endpoint", endpoint], **kwargs)
             processes.append(process)
+            self.last_launch = ([*args, "--vendor-endpoint", endpoint], kwargs)
             return process
 
-        with patch.dict(os.environ, environment, clear=True), patch.object(verifier, "Wire", CatalogAdapter), \
-                patch.object(verifier.subprocess, "Popen", launch):
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch.dict(os.environ, environment, clear=True))
+            stack.enter_context(patch.object(verifier, "Wire", wire_class))
+            stack.enter_context(patch.object(verifier.subprocess, "Popen", launch))
+            if retained:
+                home = root / "retained"
+                home.mkdir(mode=0o700)
+                stack.enter_context(patch.object(verifier.tempfile, "TemporaryDirectory",
+                    lambda **_kwargs: contextlib.nullcontext(str(home))))
             outcome = verifier.verify(provider, variable)
         self.assertEqual(len(processes), 1)
         self.assertIsNotNone(processes[0].poll())
@@ -150,16 +202,85 @@ class NativeLiveVerifierTests(unittest.TestCase):
                 self.assertEqual(result["turns"][0]["done"]["completion_tokens"], 4)
                 self.assertEqual(requests[0]["reasoning_effort"], "low")
                 self.assertEqual(requests[1]["reasoning_effort"], "low")
-                if provider == "deepseek":
-                    self.assertEqual(requests[2]["thinking"], {"type": "disabled"})
-                else:
-                    self.assertEqual(requests[2]["reasoning_effort"], "low")
+                self.assertEqual(requests[2]["thinking"], {"type": "enabled"})
+                self.assertEqual(requests[2]["reasoning_effort"], "low")
                 self.assertTrue(all(request["stream"] for request in requests))
                 if provider == "deepseek":
                     self.assertEqual(requests[1]["messages"][-2]["reasoning_content"],
                                      "Read the synthetic file.")
                 self.assertEqual(result["final_status"]["status"]["effort"],
-                                 "none" if provider == "deepseek" else "low")
+                                 "low")
+
+    def test_deepseek_private_reasoning_survives_native_resume_without_public_leak(self):
+        parent = Path(os.environ.get("TMPDIR", str(Path.home() / ".cache/doxa-fixture-tests")))
+        parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with tempfile.TemporaryDirectory(dir=parent) as directory, \
+                vendor_server(resumed_reasoning="*** Recall the previous token.") as (endpoint, requests):
+            root = Path(directory)
+            result = self.fixture("deepseek", endpoint, root, retained=True)
+            self.assertEqual(result["result"], "passed", result)
+            home = root / "retained"
+            paths = list(home.rglob("live-vendor.messages.json"))
+            self.assertEqual(len(paths), 1)
+            private = paths[0]
+            envelope = json.loads(private.read_text())
+            self.assertEqual(envelope["messages"][1]["reasoning_content"], "Finish the synthetic token answer.")
+            self.assertEqual(envelope["messages"][3]["reasoning_content"], "Recall the previous token.")
+            self.assertEqual(private.stat().st_mode & 0o7777, 0o600)
+            # Exercise constructor redaction after reading previously persisted
+            # reasoning. The synthetic fixture key never leaves loopback.
+            envelope["messages"][3]["reasoning_content"] = "isolated-native-live-fixture Recall the previous token."
+            private.write_text(json.dumps(envelope))
+            with self.resumed(home) as wire:
+                done, text = wire.turn("Without tools, repeat the previous token; reply only with the token.")
+                self.assertFalse(done["done"]["is_error"], done)
+                self.assertEqual(text.strip(), (home / "workspace/fixture.txt").read_text().strip())
+                self.assertEqual(len(requests), 4)
+                self.assertEqual(requests[3]["messages"][-2]["reasoning_content"], "*** Recall the previous token.")
+                self.assertNotIn("isolated-native-live-fixture", json.dumps(requests[3]))
+                self.assertNotIn("isolated-native-live-fixture", private.read_text())
+                public = next(home.rglob("live-vendor.jsonl")).read_text()
+                self.assertNotIn("reasoning_content", public)
+                self.assertNotIn("Finish the synthetic token answer.", public)
+                self.assertNotIn("Recall the previous token.", public)
+
+    def test_legacy_reasoning_refusal_preserves_history_and_names_recovery(self):
+        parent = Path(os.environ.get("TMPDIR", str(Path.home() / ".cache/doxa-fixture-tests")))
+        parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with tempfile.TemporaryDirectory(dir=parent) as directory, vendor_server() as (endpoint, requests):
+            root = Path(directory)
+            result = self.fixture("deepseek", endpoint, root, retained=True)
+            self.assertEqual(result["result"], "passed", result)
+            home = root / "retained"
+            private = next(home.rglob("live-vendor.messages.json"))
+            envelope = json.loads(private.read_text())
+            for message in envelope["messages"]:
+                message.pop("reasoning_content", None)
+            private.write_text(json.dumps(envelope))
+            original = private.read_bytes()
+            transcript = next(home.rglob("live-vendor.jsonl"))
+            public = transcript.read_bytes()
+            with self.resumed(home) as wire:
+                done, _text = wire.turn("repeat the previous token")
+                self.assertTrue(done["done"]["is_error"], done)
+                self.assertIn("start a new session or restart with --effort none", done["done"]["error"])
+                self.assertEqual(len(requests), 3, "legacy refusal must not send a fourth HTTP request")
+                self.assertEqual(private.read_bytes(), original)
+                self.assertEqual(transcript.read_bytes(), public)
+
+    def test_none_then_low_replays_known_empty_reasoning(self):
+        parent = Path(os.environ.get("TMPDIR", str(Path.home() / ".cache/doxa-fixture-tests")))
+        parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with tempfile.TemporaryDirectory(dir=parent) as directory, \
+                vendor_server(first_reasoning="") as (endpoint, requests):
+            result = self.fixture("deepseek", endpoint, Path(directory), wire_class=NoneThenLowWire)
+            self.assertEqual(result["result"], "passed", result)
+            self.assertEqual(result["config_controls"][1]["effort"], "none")
+            self.assertEqual(requests[0]["thinking"], {"type": "disabled"})
+            self.assertEqual(requests[1]["thinking"], {"type": "disabled"})
+            self.assertEqual(requests[2]["thinking"], {"type": "enabled"})
+            self.assertEqual(requests[2]["reasoning_effort"], "low")
+            self.assertEqual(requests[2]["messages"][-2]["reasoning_content"], "")
 
     def test_timeout_kills_native_process_group_and_term_resistant_child(self):
         parent = Path(os.environ.get("TMPDIR", str(Path.home() / ".cache/doxa-fixture-tests")))

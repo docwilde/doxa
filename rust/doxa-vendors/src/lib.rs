@@ -346,6 +346,7 @@ pub enum Error {
     ToolFailed,
     InvalidToolDefinitions,
     HistoryTooLarge,
+    MissingReasoningHistory,
     ToolResultTooLarge,
     UsageOverflow,
 }
@@ -853,6 +854,13 @@ async fn run_turn_at(
         .iter()
         .filter_map(|d| d.pointer("/function/name").and_then(Value::as_str))
         .collect();
+    if vendor == Vendor::DeepSeek && effort != "none" && !definitions.is_empty()
+        && history.iter().any(|message| message["role"] == "assistant"
+            && message["reasoning_content"].as_str().is_none()) {
+        // Legacy text-only history cannot reconstruct a discarded reasoning
+        // trace. Fail before making a paid request instead of inventing one.
+        return Err(Error::MissingReasoningHistory);
+    }
     let key = credentials::resolve(vendor).map_err(|_| Error::CredentialStore)?
         .ok_or(Error::MissingCredential(vendor.env_var()))?;
     let mut messages = history.clone();
@@ -932,7 +940,13 @@ async fn run_turn_at(
             if *cancel.borrow() {
                 return Err(Error::Cancelled);
             }
-            messages.push(json!({"role":"assistant","content":completion.text}));
+            let mut assistant = json!({"role":"assistant","content":completion.text});
+            if vendor == Vendor::DeepSeek {
+                // Preserve just the final assistant reasoning for paired
+                // cross-turn replay. Tool-step messages stay turn-local.
+                assistant["reasoning_content"] = json!(completion.reasoning);
+            }
+            messages.push(assistant);
             check_history(&messages)?;
             *history = messages;
             return Ok(outcome);

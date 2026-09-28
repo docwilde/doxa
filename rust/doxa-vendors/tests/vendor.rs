@@ -382,6 +382,26 @@ fn provider_bodies_match_measured_contract() {
         Err(Error::InvalidEffort)
     );
 }
+
+#[tokio::test]
+async fn legacy_missing_reasoning_refuses_before_a_paid_request_and_preserves_history() {
+    let _guard = credential_guard().await;
+    std::env::set_var("DEEPSEEK_API_KEY", "isolated-fixture-key");
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let endpoint = format!("http://{}/chat/completions", listener.local_addr().unwrap());
+    let original = vec![json!({"role":"user","content":"old question"}),
+        json!({"role":"assistant","content":"old answer"})];
+    let mut history = original.clone();
+    let mut gate = LookupGate { calls: Vec::new() };
+    let (_, cancel) = watch::channel(false);
+    let result = run_turn_local(Vendor::DeepSeek, &endpoint, "deepseek-flash", "low", &mut history,
+        "new question", Some(&mut gate), cancel, Duration::from_secs(1), |_| {}).await;
+    assert_eq!(result.unwrap_err(), Error::MissingReasoningHistory);
+    assert_eq!(history, original);
+    assert!(gate.calls.is_empty());
+    assert_eq!(listener.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+}
 #[test]
 fn fragmented_sse_and_tool_arguments() {
     let sse = concat!(

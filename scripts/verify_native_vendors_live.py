@@ -174,7 +174,7 @@ def verify(provider, variable):
             if first["done"].get("is_error") or not first["synthetic_file_content_matches"]:
                 result["result"] = "native_turn_failed_or_tool_read_unverified"
                 return result
-            next_effort = "none" if provider == "deepseek" else "low"
+            next_effort = "low"
             result["next_turn_config"] = wire.call("set_effort", {"effort": next_effort})
             if not result["next_turn_config"].get("ok"):
                 result["result"] = "next_turn_configuration_failed"

@@ -46,7 +46,7 @@ real provider; the native test endpoint also suppresses DeepSeek balance fetches
 This fixture exercises startup, flat model/effort/status replies, two native
 turns, reasoning/text callbacks, one actual workspace read, aggregate token
 usage, committed history, and timeout cleanup with a SIGTERM-resistant child.
-Both tests passed for the fresh build; the successful cases contain exactly
+All five verifier fixture tests passed for the fresh build; the successful cases contain exactly
 three loopback HTTP requests per vendor. This is local fixture evidence, not
 live account verification.
 
@@ -56,6 +56,36 @@ The native builder now sends top-level `reasoning_effort`, as specified by the
 Its assistant tool-continuation message now retains `reasoning_content`; the
 loopback DeepSeek fixture rejects a missing field with HTTP 400. Reasoning is
 not included in verification reports or the public JSONL transcript.
+
+The fixture now requires **two consecutive low-thinking DeepSeek turns with
+tools**, and rejects missing prior-assistant reasoning on the next user turn.
+The final completion's reasoning is preserved in the private paired provider
+replay file as an optional assistant-only `reasoning_content` string. The file
+must be mode 0600 to load reasoning, and each reasoning field is bounded to
+1 MiB of UTF-8 bytes before and after scrubbing. Intermediate tool messages
+and their reasoning remain turn-local. Public JSONL stays user/final text;
+history/verification reports contain roles and counts, not private reasoning.
+
+A real native stop/resume fixture proves replay of the saved field, constructor
+redaction of a synthetic credential in that field, and absence of reasoning in
+public JSONL. A none→low fixture proves an observed empty reasoning field can
+be replayed. Managed compaction's synthetic assistant summary explicitly carries
+empty reasoning; that field describes a constructed summary and does not
+pretend to recover discarded historical thinking.
+
+Older paired files without reasoning still load, but DeepSeek thinking with
+tools refuses before an HTTP request if earlier assistant reasoning is missing.
+The old history is preserved and the native error says to start a new session
+or restart with `--effort none`. This names a native launch option rather than
+assuming an account catalog exposes a thinking-off choice among enabled effort
+levels. No legacy trace is inferred from the current effort setting.
+This recovery behavior is covered by a transport test with zero accepted
+loopback connections. Private-store tests cover role/type/size rejection,
+redaction expansion beyond the bound, permission rejection, atomic failed saves,
+and comparison of public transcript against private replay's visible projection.
+The touched replay reader also caps actual reads at 16 MiB plus one byte and
+rejects overflow after reading, so concurrent file growth cannot bypass the
+metadata size check.
 
 ```bash
 TMPDIR=/home/docwilde/.d39 \
@@ -114,8 +144,9 @@ capability is unavailable, it stops without guessing another paid model.
 Each account receives at most two submitted turns, with a 90-second deadline
 per turn and short output instructions. The first asks for exactly one read of
 the synthetic file and a short token answer. The second tests retained history
-without tools, after applying the next-turn effort control (`none` on DeepSeek,
-`low` on GLM). It records catalog/control results, native reasoning/text event
+without tool calls, after reapplying the next-turn `low` effort control for
+both providers. Tool definitions remain available so the DeepSeek check exercises
+the documented prior-turn reasoning replay requirement. It records catalog/control results, native reasoning/text event
 counts, native completion and usage metadata, persisted paired-message roles,
 and the final native status (including DeepSeek balance when available).
 It does not derive a billed dollar cost from aggregate token counts.
