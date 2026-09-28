@@ -308,6 +308,7 @@ use super::*;
     fn full_permission_review_gates_every_approval_path() {
         for code in [KeyCode::Char('a'), KeyCode::Char('A'), KeyCode::Enter] {
             let mut app = App::default(); app.groups[0].tabs = vec!["s".into()];
+            app.handle(Event::Resize(100, 30));
             let data = json!({"id":"r","kind":"permission","title":"Review","input_summary":"long review","require_full_review":true});
             app.input_requests.push(InputRequest::from_event("s", &data).unwrap());
             app.request_key(KeyEvent::new(code, KeyModifiers::NONE));

@@ -94,6 +94,13 @@ impl App {
         }
         self.draw_diff(frame, area);
         self.draw_stop_confirmation(frame, area);
+        if self.active_chooser_rect().is_none()
+            && self
+                .active_request_index()
+                .is_some_and(|index| self.input_requests[index].kind == "ask_user")
+        {
+            self.draw_request(frame, area, false);
+        }
         self.draw_chip_tooltip(frame);
         self.draw_link_tooltip(frame);
         if self
