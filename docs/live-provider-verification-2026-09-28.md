@@ -118,8 +118,9 @@ real provider; the native test endpoint also suppresses DeepSeek balance fetches
 This fixture exercises startup, flat model/effort/status replies, two native
 turns, reasoning/text callbacks, one actual workspace read, aggregate token
 usage, committed history, native stop/resume before the second turn for both
-providers, and timeout cleanup with a SIGTERM-resistant child.
-All five verifier fixture tests passed for the fresh build; the successful cases contain exactly
+providers, timeout cleanup with a SIGTERM-resistant child, and failed-resume
+startup cleanup without a second submitted turn.
+All six verifier fixture tests passed for the fresh build; the successful cases contain exactly
 three loopback HTTP requests per vendor. This is local fixture evidence, not
 live account verification.
 
