@@ -15,6 +15,7 @@ import http.server
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 import selectors
 import shlex
@@ -161,6 +162,7 @@ class ModelPeer:
         self.request_fields = []
         self.tool_shapes = []
         self.responses_lite = False
+        self.first_request_token_absent = False
         self.output_seen = False
         self.failed = False
         self.output_error_tags = []
@@ -202,6 +204,9 @@ class ModelPeer:
             raise ValueError("extra inference request")
         response = "owned-response-" + str(self.requests)
         if self.requests == 1:
+            self.first_request_token_absent = self.token not in json.dumps(body)
+            if not self.first_request_token_absent:
+                raise ValueError("fixture token already visible before tool execution")
             tools = visible_tools(body)
             self.tool_names = sorted(tools)
             self.request_fields = sorted(body)
@@ -218,11 +223,14 @@ class ModelPeer:
             self.output_seen = len(outputs) == 1
             text = output_text(outputs[0]) if self.output_seen else ""
             self.read_verified = self.token in text and outputs[0].get("success") is not False
+            # Derive the answer from the actual output. The expected token is
+            # used only by independent evidence checks, never as answer text.
+            tokens = set(re.findall(r"(?<![0-9a-f])[0-9a-f]{32}(?![0-9a-f])", text))
+            answer = next(iter(tokens)) if self.read_verified and len(tokens) == 1 else "owned fixture tool result refused"
             self.output_error_tags = [tag for tag in ("failed", "unavailable", "host", "permission")
                                       if tag in text.lower()]
             item = {"type": "message", "role": "assistant", "id": "owned-answer",
-                    "content": [{"type": "output_text", "text": self.token if self.read_verified
-                                 else "owned fixture tool result refused"}]}
+                    "content": [{"type": "output_text", "text": answer}]}
         usage = {"input_tokens": 50, "input_tokens_details": None, "output_tokens": 5,
                  "output_tokens_details": None, "total_tokens": 55}
         return [{"type": "response.created", "response": {"id": response}},
@@ -270,8 +278,10 @@ def configure(root, peer):
     (home / "config.toml").chmod(0o600)
 
 
-def provider_turn(server, root, peer, token):
-    rpc = Rpc([str(server), "--listen", "stdio://", *allow_hook()], environment(root), root / "workspace")
+def provider_turn(server, root, peer, token, launcher=None):
+    command = ([str(launcher), "app-server", "--stdio"] if launcher else
+               [str(server), "--listen", "stdio://"])
+    rpc = Rpc([*command, *allow_hook()], environment(root), root / "workspace")
     try:
         initialized = rpc.request("initialize", {"clientInfo": {"name": "doxa_owned_code_mode", "version": "1"},
                                                 "capabilities": {"experimentalApi": True}})
@@ -353,7 +363,7 @@ def daemon_turn(daemon, launcher, lore, root, peer, token):
         terminate(process)
 
 
-def scenario(server, scratch, daemon=None, launcher=None, lore=None):
+def scenario(server, scratch, daemon=None, launcher=None, lore=None, missing_helper=False):
     report = {"paid_requests": 0, "model": "gpt-6-sol", "submitted_turns": 1,
               "source_or_reply_text_retained": False, "credential_files_created": False,
               "sibling_helper_present": server.with_name("codex-code-mode-host").is_file()}
@@ -367,24 +377,40 @@ def scenario(server, scratch, daemon=None, launcher=None, lore=None):
         fixture.write_text(token + "\n")
         fixture.chmod(0o600)
         before = fixture.read_bytes()
+        if missing_helper:
+            # An owned hard link changes the actual executable's sibling path;
+            # no installed provider directory is mutated for this fault proof.
+            isolated = root / "server-only"
+            isolated.mkdir(mode=0o700)
+            os.link(server, isolated / "codex-app-server")
+            server = isolated / "codex-app-server"
+            report["sibling_helper_present"] = False
         with ModelPeer(workspace, token) as peer:
             configure(root, peer)
             try:
                 if daemon:
                     report.update(daemon_turn(daemon, launcher, lore, root, peer, token))
                 else:
-                    report.update(provider_turn(server, root, peer, token))
+                    report.update(provider_turn(server, root, peer, token, launcher))
             except Exception as error:
                 report.update({"result": type(error).__name__})
             report.update({"http_requests": peer.requests, "code_mode_only_visible": peer.code_mode_only,
                 "visible_tool_names": peer.tool_names,
                 "request_fields": peer.request_fields, "tool_shapes": peer.tool_shapes,
                 "responses_lite_tool_inventory": peer.responses_lite,
+                "first_request_token_absent": peer.first_request_token_absent,
                 "matching_tool_output_seen": peer.output_seen, "helper_read_verified": peer.read_verified,
                 "tool_output_error_tags": peer.output_error_tags, "fixture_unchanged": fixture.read_bytes() == before})
-            passed = (not peer.failed and peer.requests == 2 and peer.code_mode_only and peer.read_verified
+            passed = (not peer.failed and peer.requests == 2 and peer.first_request_token_absent
+                      and peer.code_mode_only and peer.read_verified
                       and report.get("command_read_verified") and report.get("final_token_matches")
                       and report.get("turn_status") == "completed" and report["fixture_unchanged"])
+            if missing_helper:
+                report["transport"] = "compiled-provider-missing-helper"
+                passed = (not peer.failed and peer.requests == 2 and peer.first_request_token_absent
+                          and peer.code_mode_only and peer.output_seen and not peer.read_verified
+                          and not report.get("command_read_verified") and not report.get("final_token_matches")
+                          and "host" in peer.output_error_tags and report["fixture_unchanged"])
             report["result"] = "passed" if passed else report.get("result", "failed")
     return report
 
@@ -395,6 +421,7 @@ def main():
     parser.add_argument("--scratch", type=Path, required=True)
     parser.add_argument("--daemon", type=Path, help="also verify normalization through the actual native daemon")
     parser.add_argument("--launcher", type=Path, help="explicit protected native dispatcher for --daemon")
+    parser.add_argument("--negative-server", type=Path, help="raw compiled server for the owned missing-helper fault")
     parser.add_argument("--lore", type=Path, help="actual native LORE carrier for --daemon")
     args = parser.parse_args()
     if not args.server.is_absolute() or not args.server.is_file():
@@ -407,7 +434,9 @@ def main():
     metadata = args.scratch.stat()
     if metadata.st_uid != os.getuid() or metadata.st_mode & 0o077:
         parser.error("--scratch must be private and owned")
-    reports = [scenario(args.server, args.scratch)]
+    reports = [scenario(args.server, args.scratch, launcher=args.launcher)]
+    if args.negative_server:
+        reports.append(scenario(args.negative_server, args.scratch, missing_helper=True))
     if args.daemon:
         reports.append(scenario(args.server, args.scratch, args.daemon, args.launcher, args.lore))
     for report in reports:

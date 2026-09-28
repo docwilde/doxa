@@ -16,6 +16,26 @@ spec.loader.exec_module(proof)
 
 
 class ProofTests(unittest.TestCase):
+    def test_first_request_cannot_contain_token_and_answer_is_returned_output_only(self):
+        token = "a1" * 16
+        with tempfile.TemporaryDirectory() as directory:
+            peer = proof.ModelPeer(Path(directory), token)
+            try:
+                with self.assertRaisesRegex(ValueError, "already visible"):
+                    peer.response({"input": [{"text": token}]})
+                self.assertFalse(peer.first_request_token_absent)
+            finally:
+                peer.server.server_close()
+            peer = proof.ModelPeer(Path(directory), token)
+            try:
+                peer.response({"tools": [{"name": "exec"}]})
+                self.assertTrue(peer.first_request_token_absent)
+                events = peer.response({"input": [{"type": "custom_tool_call_output",
+                    "call_id": proof.CALL_ID, "output": "actual read: " + token + "\n"}]})
+                self.assertEqual(events[1]["item"]["content"][0]["text"], token)
+            finally:
+                peer.server.server_close()
+
     def test_responses_lite_inventory_requires_developer_additional_tools(self):
         inventory = {"type": "additional_tools", "role": "developer", "tools": [
             {"type": "namespace", "name": "functions", "tools": [
