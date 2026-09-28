@@ -481,6 +481,29 @@ mod tests {
     }
 
     #[test]
+    fn restored_same_name_tools_keep_independent_persisted_ids() {
+        let records = [
+            json!({"type":"user","message":{"content":"inspect"}}),
+            json!({"type":"assistant","message":{"content":[
+                {"type":"tool_use","id":"a","name":"Read","input":"first restored"},
+                {"type":"tool_use","id":"b","name":"Read","input":"second restored"}]}}),
+            json!({"type":"user","message":{"content":[
+                {"type":"tool_result","tool_use_id":"a","content":"first result"},
+                {"type":"tool_result","tool_use_id":"b","content":"second result"}]}}),
+        ];
+        let source = crate::history::render(&crate::transport::TranscriptSnapshot {
+            bytes: records.iter().map(serde_json::Value::to_string).collect::<Vec<_>>().join("\n").into_bytes(),
+            earlier_bytes_omitted: false,
+        });
+        let keys = HashSet::from([FoldKey::Section(0), FoldKey::Tool("a".into())]);
+        let (lines, sections) = render(&source, 80, Some(&keys), None);
+        assert_eq!(sections.len(), 3);
+        let text = shown(&lines);
+        assert!(text.contains("first restored") && text.contains("first result"));
+        assert!(!text.contains("second restored") && !text.contains("second result"));
+    }
+
+    #[test]
     fn restored_tool_detail_is_hidden_until_expanded_and_keeps_multiline_result() {
         let result = "first line\n".to_owned() + &"second line ".repeat(80);
         let records = format!("{}\n{}\n{}\n",
