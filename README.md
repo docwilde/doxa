@@ -35,10 +35,10 @@ shares user and repo memory across DOXA, Claude Code, and Codex, with
 evidence-backed beliefs and an informational source-engine label. See the
 [engine setup and capabilities](rust/README.md) guide.
 
-![Rust 2.0 alpha.37 running a real Claude session, with file reads, command approval and a completed greeting check](assets/shots/rust-hero.png)
+![Rust 2.0 alpha.37 running a real Codex session, with file reads, command approval and a completed greeting check](assets/shots/rust-hero.png)
 
 *Captured from the running Rust app in a real VTE terminal, using an authenticated
-Claude session and a small isolated example repository. The provider replies and tool
+Codex session and a small isolated example repository. The provider replies and tool
 results are real. See the [capture method](docs/rust-gallery.md).*
 
 ## What you get
@@ -61,16 +61,16 @@ See the [Rust guide](rust/README.md) for engine capabilities, shortcuts and
 
 ### Individual tool details
 
-![Real Claude Read calls with one tool expanded and the other collapsed](assets/shots/rust-tool-entries.png)
+![Real Codex command calls with one tool expanded and the others collapsed](assets/shots/rust-tool-entries.png)
 
 *Open a tool section, then expand each call independently with a click or Enter.
-Here the README read is expanded while the greeting file read remains collapsed.*
+Here the greeting command is expanded while the earlier file reads remain collapsed.*
 
 ### Inline approval
 
-![A live Claude Bash permission request with Approve and Deny above the prompt](assets/shots/rust-permission-request.png)
+![A live Codex command permission request with Approve and Deny above the prompt](assets/shots/rust-permission-request.png)
 
-*The real Bash request waits above the prompt. Select Approve or Deny with the mouse
+*The real command request waits above the prompt. Select Approve or Deny with the mouse
 or keyboard; Enter submits the selection, A approves, and D or Esc denies.
 The pending indicator blinks while the request is unresolved.*
 
@@ -88,10 +88,10 @@ The pending indicator blinks while the request is unresolved.*
 
 ### Session settings
 
-![Live session settings showing the actual selected Claude model and unset effort](assets/shots/rust-settings.png)
+![Settings showing configuration defaults and the session model, with verified live Codex chips below](assets/shots/rust-settings.png)
 
-*Settings show the current session and where each value comes from. Unknown or
-unavailable values remain unset.*
+*Settings identify configuration defaults and values inherited from the session.
+The chips below show the active engine, model and verified low effort.*
 
 All six frames are unedited 3068 × 1734 terminal captures from the same running
 alpha.37 build. [Capture provenance and reproduction](docs/rust-gallery.md).

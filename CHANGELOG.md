@@ -9,8 +9,8 @@ the stable 2.0 release has not been cut.
 
 **Native runtime**
 
-- Replace the Claude SDK sidecar with the native CLI control protocol.
-  Verify live model/effort changes and use reported context and quota events.
+- Replace the Claude SDK sidecar with native CLI controls and verified live
+  model/effort changes. Show reported usage and actionable authentication errors.
 - Serve mesh assets and attested Unix peer traffic with Hyper; use Reqwest
   for remote clients. Install frontend, daemon and LORE without Python or uv.
 - Share opt-in **`spawn_session`** across providers with exact human approval,
@@ -19,7 +19,7 @@ the stable 2.0 release has not been cut.
 **Recovery and compaction**
 
 - Migrate verified legacy Claude logs; withhold resumed output until the CLI
-  confirms the same session. Preserve unsupported or uncertain history.
+  confirms the same session. Canonically scrub streamed and restored text.
 - Run Codex hooks and review supervisors natively with pinned carrier/source
   proofs. Keep compaction usage in budget accounting and refuse unknown totals.
 - Add reviewed vendor summary checkpoints beneath the original durable

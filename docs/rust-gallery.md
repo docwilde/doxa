@@ -3,7 +3,7 @@
 The README gallery records the running Rust app in a real GTK3/VTE terminal on
 an isolated Xvfb display. FFmpeg captures the terminal framebuffer directly.
 These images use the production frontend and native daemon with an authenticated
-Claude session; they do not use `TestBackend`, `--demo`, a fixture engine, or
+Codex session; they do not use `TestBackend`, `--demo`, a fixture engine, or
 injected daemon events. The PNGs are unedited.
 
 ## Capture provenance
@@ -11,26 +11,29 @@ injected daemon events. The PNGs are unedited.
 | Item | Recorded value |
 | --- | --- |
 | Date | 2026-09-28 |
-| Release | `2.0.0-alpha.36` |
-| Frontend and daemon source | `85b011e` |
-| Build profile | Production binaries, Cargo debug profile |
-| Provider | Authenticated Claude CLI `2.1.283`, through the Claude SDK sidecar |
-| Model | CLI default for the two provider turns; `claude-opus-5-5` explicitly selected afterward |
+| Release | `2.0.0-alpha.37` |
+| Frontend and daemon source | `1c563f644a13b5854c01a00211158b0f7b19c680` |
+| Build profile | Native installer binaries, Cargo release profile |
+| LORE | Native `0.62.0`, pinned to `d8abc3e104aacda221b5df7baace13c0a1a69b53` |
+| Provider | Authenticated Codex CLI `0.156.1`, through its app server |
+| Model and effort | `gpt-6-sol`; `low` selected and verified before the provider turns |
 | Terminal | GTK3/VTE, DejaVu Sans Mono 30, 127 columns × 36 rows |
 | Framebuffer | 3068 × 1734, captured with FFmpeg `x11grab` |
-| State | Fresh isolated `DOXA_HOME`, `DOXA_RUNTIME_DIR` and `LORE_ROOT`; `DOXA_LORE=0` |
+| State | Fresh isolated `DOXA_HOME`, `DOXA_RUNTIME_DIR`, `LORE_ROOT` and `LORE_PROJECTS_DIR`; `DOXA_LORE=0` |
 
 The small **Harbour notes** repository was written specifically as safe example
-input. It contains a README, a three-item checklist, and a two-line Python greeting
-function. Claude actually read the files and produced the replies shown. The
-separate Bash turn ran `python3 -c "from greeting import greet; print(greet('Ada'))"`
-after a real permission callback, approved with plain `a`; its actual output was
+input. It contains a README and a two-line shell greeting script. Codex actually
+read the files with separate commands and produced the replies shown. A second
+turn requested escalation for `sh greeting.sh Ada`. The real app-server permission
+callback was reviewed and approved with plain `a`; its actual output was
 `Welcome aboard, Ada!`. No files were edited by the provider.
 
-The pending-permission image was captured before explicit model selection.
-The hero, individual-tool, help, completion and settings images were captured
-after selecting the actual catalog entry. Live effort changes were unavailable
-for this session, so the effort chip remains unknown and settings show it unset.
+All six frames use the same live session, model and verified effort selection.
+The pending-permission image was captured before approval; the hero and other
+menus were captured after the greeting command completed.
+The settings submenu shows startup configuration defaults (Claude and unset
+effort) alongside the inherited session model; the live chips show Codex and
+verified low effort. Opening settings does not change the active provider.
 Displayed context and timing values are the app's reported values, not invented
 usage data. Memory is disabled and the isolated store is empty.
 
@@ -42,22 +45,22 @@ provider CLI can authenticate; DOXA and LORE state are isolated. It creates its
 own display and never captures the user's desktop.
 
 Build the frontend and native daemon from the intended release first. Supply
-absolute paths for your binaries, SDK Python environment and sidecar:
+absolute paths for the native frontend, daemon, LORE carrier and provider CLI:
 
 ```sh
 /usr/bin/python3 scripts/live_rust_gallery.py run \
   --binary /absolute/path/to/doxa-rs \
-  --daemon /absolute/path/to/doxa-daemon \
-  --python /absolute/path/to/sdk-environment/bin/python \
-  --sidecar /absolute/path/to/doxa/rust/doxa-claude/claude_sidecar.py \
+  --daemon /absolute/path/to/doxa-daemon-rs \
+  --lore /absolute/path/to/lore-rs \
   --repo /absolute/path/to/isolated-example-repo \
   --state /absolute/private/path/gallery-state \
   --control /absolute/private/path/gallery.sock \
-  --engine claude
+  --engine codex --model gpt-6-sol \
+  --provider-bin /absolute/path/to/codex
 ```
 
 Keep the control-socket and runtime paths short enough for Unix sockets.
-The native Claude launcher requires a non-writable-by-others daemon and sidecar.
+The native launcher checks daemon and carrier ownership and permissions.
 The script requires system Python with GTK3/VTE, Xvfb, FFmpeg and the font above.
 It enables the terminal's normal color palette even if the invoking shell sets
 `NO_COLOR`.
@@ -67,12 +70,15 @@ In another terminal, send normal terminal input through the owned VTE PTY:
 ```sh
 /usr/bin/python3 scripts/live_rust_gallery.py control \
   --control /absolute/private/path/gallery.sock \
-  --action '{"kind":"input","text":"Read README.md and greeting.py with separate Read calls. Give two short bullets. Do not edit files.\r"}'
+  --action '{"kind":"input","text":"Read README.md and greeting.sh using separate file read calls. Give two short bullets describing the greeting. Do not edit files.\r"}'
 ```
 
+Close the initial setup submenu with a separate Esc input. Select `/effort low`
+and wait for the app to report verification before sending a provider prompt.
 Wait for actual provider completion, then use the app's normal keyboard or mouse
 controls to expand individual calls. For a permission frame, ask the provider to
-run the harmless greeting command and capture while its genuine approval is
+run the harmless greeting command with `sandbox_permissions=require_escalated`
+and capture while its genuine approval is
 pending. Review that request and explicitly approve or deny it in the app.
 The script does not answer requests automatically.
 
