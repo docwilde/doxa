@@ -687,6 +687,7 @@ fn provider_error(frame: &Value, shared: &Shared) -> Option<String> {
         return None;
     }
     let mut parts = Vec::new();
+    let mut api_text = String::new();
     if let Some(text) = frame["error"].as_str() {
         parts.push(text);
     }
@@ -707,10 +708,19 @@ fn provider_error(frame: &Value, shared: &Shared) -> Option<String> {
             for block in blocks {
                 if block["type"] == "text" {
                     if let Some(text) = block["text"].as_str() {
-                        parts.push(text);
+                        if api_text.len().saturating_add(text.len()) > 16 * 1024 {
+                            return Some(
+                                "Claude provider error; diagnostic exceeded the safe display bound"
+                                    .into(),
+                            );
+                        }
+                        // Plain text blocks are one diagnostic channel; adding
+                        // whitespace here could hide a split key from LORE.
+                        api_text.push_str(text);
                     }
                 }
             }
+            parts.push(&api_text);
         }
     }
     if error_frame {
@@ -1879,6 +1889,9 @@ for line in sys.stdin:
         assert!(message.contains("Service overloaded [REDACTED:api-key]"));
         assert!(!message.contains("never echo"));
         assert!(!message.contains("/setup"));
+        let message = provider_error(&json!({"type":"assistant","isApiErrorMessage":true,"message":{"content":[{"type":"text","text":"API error sk-"},{"type":"text","text":"abcdefghijklmnopqrstuvwxyz123456"}]}}), shared).unwrap();
+        assert!(message.contains("[REDACTED:api-key]"));
+        assert!(!message.contains("abcdefgh"));
         let message = provider_error(&json!({"type":"error","error":{"type":"authentication_error","message":"Token was rejected"}}), shared).unwrap();
         assert!(message.contains("claude auth login"));
         let message = provider_error(
