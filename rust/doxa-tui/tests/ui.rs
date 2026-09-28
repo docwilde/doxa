@@ -705,16 +705,32 @@ fn tool_activity_folds_in_transcript_and_expands_by_keyboard_or_mouse() {
     app.handle(key(KeyCode::Tab, KeyModifiers::NONE)); // Tab headers.
     app.handle(key(KeyCode::Tab, KeyModifiers::NONE));
     assert!(app.handle(key(KeyCode::Enter, KeyModifiers::NONE)));
+    let entries = screen(&app, 110, 30);
+    assert!(entries.contains("Read · finished"), "{entries}");
+    assert!(!entries.contains("hidden-input") && !entries.contains("hidden-result"), "{entries}");
+    assert!(app.handle(key(KeyCode::Char(']'), KeyModifiers::NONE)));
+    assert!(app.handle(key(KeyCode::Char(' '), KeyModifiers::NONE)));
     let expanded = screen(&app, 110, 30);
     assert!(expanded.contains("hidden-input"), "{expanded}");
     assert!(expanded.contains("hidden-result"), "{expanded}");
+    assert!(app.handle(key(KeyCode::Enter, KeyModifiers::NONE)));
+    let entries = screen(&app, 110, 30);
+    assert!(entries.contains("Read · finished"));
+    assert!(app.handle(key(KeyCode::Char('['), KeyModifiers::NONE)));
     assert!(app.handle(key(KeyCode::Enter, KeyModifiers::NONE)));
     let collapsed = screen(&app, 110, 30);
     let (row, column) = collapsed.lines().enumerate()
         .find_map(|(row, line)| line.find("1 tool call").map(|column| (row, line[..column].chars().count())))
         .expect("visible tool summary");
     assert!(app.handle(mouse(MouseEventKind::Down(MouseButton::Left), column as u16, row as u16)));
-    assert!(screen(&app, 110, 30).contains("hidden-input"));
+    let entries = screen(&app, 110, 30);
+    assert!(!entries.contains("hidden-input") && !entries.contains("hidden-result"));
+    let (row, column) = entries.lines().enumerate()
+        .find_map(|(row, line)| line.find("Read · finished").map(|column| (row, line[..column].chars().count())))
+        .expect("visible individual tool entry");
+    assert!(app.handle(mouse(MouseEventKind::Down(MouseButton::Left), column as u16, row as u16)));
+    let expanded = screen(&app, 110, 30);
+    assert!(expanded.contains("hidden-input") && expanded.contains("hidden-result"), "{expanded}");
 }
 
 #[test]
@@ -732,16 +748,32 @@ fn restored_tool_activity_folds_and_expands_by_keyboard_and_mouse() {
     app.handle(key(KeyCode::Tab, KeyModifiers::NONE)); // Tab headers.
     app.handle(key(KeyCode::Tab, KeyModifiers::NONE));
     assert!(app.handle(key(KeyCode::Enter, KeyModifiers::NONE)));
+    let entries = screen(&app, 110, 30);
+    assert!(entries.contains("Read · finished"), "{entries}");
+    assert!(!entries.contains("restored-input") && !entries.contains("restored-result"), "{entries}");
+    assert!(app.handle(key(KeyCode::Char(']'), KeyModifiers::NONE)));
+    assert!(app.handle(key(KeyCode::Enter, KeyModifiers::NONE)));
     let expanded = screen(&app, 110, 30);
     assert!(expanded.contains("restored-input"), "{expanded}");
     assert!(expanded.contains("restored-result"), "{expanded}");
+    assert!(app.handle(key(KeyCode::Enter, KeyModifiers::NONE)));
+    let entries = screen(&app, 110, 30);
+    assert!(entries.contains("Read · finished"));
+    assert!(app.handle(key(KeyCode::Char('['), KeyModifiers::NONE)));
     assert!(app.handle(key(KeyCode::Enter, KeyModifiers::NONE)));
     let collapsed = screen(&app, 110, 30);
     let (row, column) = collapsed.lines().enumerate()
         .find_map(|(row, line)| line.find("1 tool call").map(|column| (row, line[..column].chars().count())))
         .expect("visible restored tool summary");
     assert!(app.handle(mouse(MouseEventKind::Down(MouseButton::Left), column as u16, row as u16)));
-    assert!(screen(&app, 110, 30).contains("restored-result"));
+    let entries = screen(&app, 110, 30);
+    assert!(!entries.contains("restored-input") && !entries.contains("restored-result"));
+    let (row, column) = entries.lines().enumerate()
+        .find_map(|(row, line)| line.find("Read · finished").map(|column| (row, line[..column].chars().count())))
+        .expect("visible individual restored tool entry");
+    assert!(app.handle(mouse(MouseEventKind::Down(MouseButton::Left), column as u16, row as u16)));
+    let expanded = screen(&app, 110, 30);
+    assert!(expanded.contains("restored-input") && expanded.contains("restored-result"), "{expanded}");
 }
 
 #[test]
