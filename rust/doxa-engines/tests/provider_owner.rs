@@ -25,12 +25,12 @@ p=os.fork()
 if p==0:
  c=os.fork()
  if c==0:
-  os.setsid();open(root+'/orphan','w').write(str(os.getpid()));time.sleep(60);os._exit(0)
+  os.setsid();open(root+'/orphan.new','w').write(str(os.getpid()));os.rename(root+'/orphan.new',root+'/orphan');time.sleep(60);os._exit(0)
  os._exit(0)
 os.waitpid(p,0)
 while not os.path.exists(root+'/orphan'):time.sleep(.01)
 children.append(int(open(root+'/orphan').read()))
-open(root+'/ready','w').write(json.dumps(children))
+open(root+'/ready.new','w').write(json.dumps(children));os.rename(root+'/ready.new',root+'/ready')
 if os.path.exists(root+'/exit'):sys.exit(23)
 time.sleep(60)
 "#).unwrap();
@@ -49,7 +49,7 @@ time.sleep(60)
     let code = provider_owner::supervise(unsafe { UnixStream::from_raw_fd(fd) }, || {
         unsafe { libc::execv(executable.as_ptr(), args.as_ptr()); }
         std::io::Error::last_os_error()
-    }).unwrap();
+    }).unwrap_or(1);
     std::process::exit(code);
 }
 
