@@ -1,5 +1,9 @@
 # Shared worktree lifecycle
 
+The installed runtime uses the Rust daemon. Python references below describe
+development interoperability and retained legacy checkout metadata; they do
+not require Python for native sessions. See the [current Rust guide](../rust/README.md).
+
 Updated Python and Rust daemons use the same advisory `flock` at
 `$DOXA_HOME/worktrees/.meta/<checkout-name>.lock`. They acquire it before
 creating or reusing a managed checkout and retain it while the daemon is

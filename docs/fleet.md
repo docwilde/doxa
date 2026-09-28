@@ -1,5 +1,7 @@
 # Fleets: N sessions, one task — symmetric or supervised — and more than one machine
 
+> Historical Python 1.x fleet harness guide, retained for development interoperability and experiment history. Its `uv run python`, `doxa.fleet`, SDK, and Python LORE instructions do not describe the installed Rust runtime. Use the [current Rust guide](../rust/README.md) for native fleet/session commands and [native peer bridge guide](native-peernet.md) for remote configuration.
+
 Three things landed together, because the experiment in
 [`plans/emergent-organization.md`](plans/emergent-organization.md) needs all
 three and none of them is useful alone:

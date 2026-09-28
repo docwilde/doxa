@@ -6,7 +6,7 @@ directory, then calls `Daemon::bind(...).start()`. The returned handle owns
 the listener and removes its socket on shutdown or drop. An engine can publish
 out-of-band events through `DaemonHandle::publish`.
 
-Implemented in this slice:
+The socket layer provides:
 
 - Unix socket in an owned, non-symlink runtime directory (0700); socket 0600.
   A pre-existing socket is refused and never unlinked. Cleanup checks the
@@ -26,19 +26,32 @@ Implemented in this slice:
   protocol v1 reply envelopes.
 - Multiple clients, explicit handle shutdown, and a host-approved `stop` call.
 
-This is **not yet a replacement for the Python daemon**. The Python engine,
-PeerHost registry/discovery, transcript and LORE persistence, permission
-gates, full RPC set, linger/finalization lifecycle, signals, session resume,
-and process launching are not connected. The test `Host` is an in-process
-fixture only. A later slice must define the native engine adapter and audit
-each RPC before exposing it to socket clients. Until then, the existing Rust
-TUI continues to connect to the Python daemon.
+## Production integration
 
-Run `cargo test --manifest-path rust/doxa-runtime/Cargo.toml` from the repo
-root. The socket tests cover frame shapes, replay/live order, prompt ordering,
+The installed Rust frontend connects to `doxa-daemon`, which uses this crate.
+[`doxa-daemon/src`](../doxa-daemon/src) supplies native Claude, Codex, and vendor
+hosts plus peer discovery, transcript persistence, canonical native LORE,
+permission gates, session recovery, and finalization. Those policies belong to
+the host and daemon integration rather than the socket library. See the
+[current runtime guide](../README.md) for installation and user commands.
+
+The `Host` trait exposes prompt execution, RPC dispatch, capability and status
+snapshots, scrubbing, durable transcript restore, and host-owned peer/session
+tools. `DaemonHandle` supports peer prompt admission and detached idle expiry;
+active provider work prevents automatic idle expiration. Real hosts must reject
+unsafe public prompt text before queueing or sending it to clients.
+
+## Verification
+
+From the repository root:
+
+```sh
+cargo test --locked -p doxa-runtime
+```
+
+Socket fixtures cover frame shapes, replay/live order, prompt ordering,
 multiple clients, malformed and oversized input, permissions, path refusal,
-and cleanup. One integration test connects with the real Python
-`doxa.client.EngineClient` and checks attach, replay, prompt events, and status.
-The fixture's minimal status leaves the Python client's other cached fields
-at their defaults; those fields need the native engine adapter and full RPC
-implementation before this socket can back the production UI.
+and cleanup. Development interoperability tests also use the Python
+`doxa.client.EngineClient`; that client is a compatibility fixture, not an
+installed runtime dependency. Fixture status does not establish live provider
+behavior.
