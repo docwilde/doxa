@@ -1586,7 +1586,7 @@ impl Default for App {
             tool_selected: 0,
             tool_scroll: 0,
             expanded_tool_sections: HashMap::new(),
-            tool_section_hover: Option<(String, transcript_tools::FoldKey)>,
+            tool_section_hover: None,
     selected_tool_sections: HashMap::new(),
             visible_tool_sections: RefCell::new(Vec::new()),
             peer_map: PeerMap::default(),

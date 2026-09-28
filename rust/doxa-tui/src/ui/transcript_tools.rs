@@ -180,8 +180,16 @@ fn render_turn(blocks: &mut Vec<Block<'_>>, lines: &mut Vec<Line<'static>>,
                     // call ID. Opening one call never opens its neighbours.
                     let mut calls: Vec<(String, Vec<&str>)> = Vec::new();
                     for row in tools {
-                        let (_, id) = tool_identity(row);
-                        let id = id.unwrap_or_else(|| format!("legacy:{index:?}:{}", tool_name(row)));
+                        let (display, id) = tool_identity(row);
+                        let id = id.unwrap_or_else(|| {
+                            let name = tool_name(row);
+                            if !display.contains(" started") && !display.starts_with("[Tool: ") {
+                                if let Some((key, _)) = calls.iter().rev().find(|(_, rows)| tool_name(rows[0]) == name) {
+                                    return key.clone();
+                                }
+                            }
+                            format!("legacy:{index:?}:{}", calls.len())
+                        });
                         if let Some((_, rows)) = calls.iter_mut().find(|(key, _)| *key == id) {
                             rows.push(row);
                         } else { calls.push((id, vec![row])); }
@@ -357,6 +365,17 @@ mod tests {
     }
 
     #[test]
+    fn repeated_legacy_names_remain_separate_calls() {
+        let source = "Tool: Read started · first\n\nTool: Read finished · one\n\nTool: Read started · second\n\nTool: Read finished · two";
+        let keys = HashSet::from([FoldKey::Section(0), FoldKey::Tool("legacy:Section(0):0".into())]);
+        let (lines, sections) = render(source, 80, Some(&keys), None);
+        assert_eq!(sections.len(), 3);
+        let text = shown(&lines);
+        assert!(text.contains("first") && text.contains("one"));
+        assert!(!text.contains("second") && !text.contains(" · two"));
+    }
+
+    #[test]
     fn calls_expand_independently_and_follow_ids_across_streams_and_reordering() {
         let mut cards = ToolCards::default();
         for (id, secret) in [("one", "first input"), ("two", "second input")] {
@@ -423,7 +442,7 @@ mod tests {
         assert!(text.find("1 tool call").unwrap() < text.find("Next question").unwrap());
         assert!(text.contains("visible input"));
         assert!(!text.contains("hidden thinking"));
-        assert_eq!(sections.iter().map(|section| section.index.clone()).collect::<Vec<_>>(), vec![FoldKey::Section(1), FoldKey::Section(0), FoldKey::Tool("legacy:Section(0):Read".into())]);
+        assert_eq!(sections.iter().map(|section| section.index.clone()).collect::<Vec<_>>(), vec![FoldKey::Section(1), FoldKey::Section(0), FoldKey::Tool("legacy:Section(0):0".into())]);
     }
 
     #[test]

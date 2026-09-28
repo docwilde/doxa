@@ -1803,11 +1803,13 @@ impl App {
     }
 
     pub(super) fn mouse(&mut self, mouse: MouseEvent) -> bool {
+        let mut tool_hover_changed = false;
         if mouse.kind == MouseEventKind::Moved {
             let hover = self.visible_tool_sections.borrow().iter()
                 .find(|(rect, _, _, _)| rect.contains(ratatui::layout::Position::new(mouse.column, mouse.row)))
                 .map(|(_, _, id, key)| (id.clone(), key.clone()));
             if self.tool_section_hover != hover {
+                tool_hover_changed = true;
                 self.tool_section_hover = hover;
             }
             self.belief_pointer = Some((mouse.column, mouse.row));
@@ -1968,7 +1970,7 @@ impl App {
             let moved = self.link_hover_position != position;
             self.link_hover_position = position;
             self.link_hover = link;
-            return changed || moved;
+            return changed || moved || tool_hover_changed;
         }
         if mouse.kind == MouseEventKind::Down(MouseButton::Left)
             && self.active_chooser_rect().is_some_and(|area| {
