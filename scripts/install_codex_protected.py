@@ -197,7 +197,35 @@ def build(cache, cargo):
     return binary
 
 
-def install(binary, root, official_cli, launcher):
+def build_code_mode_host(cache, cargo):
+    """Build the required helper from the same reviewed source; no prebuilt shortcut."""
+    source = prepare_source(cache)
+    binary = cache / "target/dev-small/codex-code-mode-host"
+    fingerprint = cache / "code-mode-host-build.json"
+    identity = {"source_commit": SOURCE, "patch_sha256": PATCH_SHA256,
+                "profile": "dev-small", "toolchain": "1.95.0", "product": "codex-code-mode-host"}
+    if binary.is_file() and fingerprint.is_file():
+        previous = json.loads(private_read(fingerprint, 16384))
+        if previous == dict(identity, binary_sha256=digest(binary)):
+            print("doxa-codex-install: reusing verified code-mode host artifact", flush=True)
+            return binary
+    cargo, toolchain_environment = toolchain(cache, cargo)
+    environment = build_environment(dict(toolchain_environment, CARGO_TARGET_DIR=str(cache / "target"), CARGO_BUILD_JOBS="1",
+                       RUST_TEST_THREADS="1", TMPDIR=str(cache / "scratch"), CARGO_HTTP_MULTIPLEXING="false"))
+    private_directory(cache / "scratch")
+    if not shutil.which("systemd-run") or subprocess.run(["systemctl", "--user", "show-environment"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
+        raise ValueError("a user systemd scope is required for the bounded code-mode host build")
+    command = ["systemd-run", "--user", "--scope", "-q", "-p", "MemoryMax=12G", "-p", "MemorySwapMax=0",
+               cargo, "build", "--locked", "--profile", "dev-small", "-p", "codex-code-mode-host",
+               "--bin", "codex-code-mode-host", "-j", "1"]
+    run(command, cwd=source / "codex-rs", env=environment)
+    fingerprint.write_text(json.dumps(dict(identity, binary_sha256=digest(binary)), sort_keys=True) + "\n")
+    fingerprint.chmod(0o600)
+    return binary
+
+
+def install(binary, root, official_cli, launcher, code_mode_host):
     probe(binary)
     private_directory(root)
     destination = root / PROVIDER
@@ -210,8 +238,15 @@ def install(binary, root, official_cli, launcher):
         (stage / "codex-app-server").chmod(0o700)
         shutil.copyfile(launcher, stage / "codex")
         (stage / "codex").chmod(0o700)
+        shutil.copyfile(launcher, stage / "codex-code-mode-host")
+        (stage / "codex-code-mode-host").chmod(0o700)
+        shutil.copyfile(code_mode_host, stage / "codex-code-mode-host-payload")
+        (stage / "codex-code-mode-host-payload").chmod(0o700)
         receipt = {"contract": CONTRACT, "source_commit": SOURCE, "patch_sha256": digest(PATCH),
                    "binary_sha256": digest(stage / "codex-app-server"), "official_cli": str(official_cli),
+                   "code_mode_host_sha256": digest(stage / "codex-code-mode-host-payload"),
+                   "code_mode_host_dispatcher_sha256": digest(stage / "codex-code-mode-host"),
+                   "code_mode_host_source_commit": SOURCE,
                    "profile": "dev-small", "toolchain": "1.95.0"}
         (stage / "receipt.json").write_text(json.dumps(receipt, sort_keys=True) + "\n")
         (stage / "receipt.json").chmod(0o600)
@@ -221,6 +256,11 @@ def install(binary, root, official_cli, launcher):
             identity_keys = ("contract", "source_commit", "patch_sha256", "binary_sha256", "profile", "toolchain")
             if any(previous.get(key) != receipt[key] for key in identity_keys):
                 raise ValueError("provider artifact differs from installed receipt; use a new --install-root for review")
+            # Alpha.40 has neither helper field. Migrate only that exact reviewed
+            # server identity; partial/different helper provenance is refused.
+            helper_keys = ("code_mode_host_sha256", "code_mode_host_source_commit")
+            if any(key in previous for key in helper_keys) and any(previous.get(key) != receipt[key] for key in helper_keys):
+                raise ValueError("code-mode helper differs from installed receipt; use a new --install-root for review")
             # Check the actual installed payload, not only its receipt. Republish the
             # verified stage to repair a missing/corrupt file and refresh the shim.
             try:
@@ -229,6 +269,12 @@ def install(binary, root, official_cli, launcher):
                 installed_hash = None
             if installed_hash != receipt["binary_sha256"]:
                 print("doxa-codex-install: repairing installed provider payload from verified artifact", flush=True)
+            try:
+                installed_host_hash = private_read(destination / "codex-code-mode-host-payload", 1024 * 1024 * 1024, hash_only=True)
+            except (OSError, ValueError):
+                installed_host_hash = None
+            if installed_host_hash != receipt["code_mode_host_sha256"]:
+                print("doxa-codex-install: installing or repairing required code-mode host", flush=True)
             exchange_directories(stage, destination)
         else:
             stage.rename(destination)
@@ -319,8 +365,9 @@ def main():
         parser.error("--launcher must be an absolute native launcher executable")
     with locked_directory(options.cache):
         binary = build(options.cache, options.cargo)
+        code_mode_host = build_code_mode_host(options.cache, options.cargo)
         with locked_directory(options.install_root):
-            install(binary, options.install_root, official, options.launcher)
+            install(binary, options.install_root, official, options.launcher, code_mode_host)
 
 
 if __name__ == "__main__":

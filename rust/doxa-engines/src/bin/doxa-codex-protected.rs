@@ -27,6 +27,12 @@ struct Receipt {
     source_commit: String,
     patch_sha256: String,
     binary_sha256: String,
+    #[serde(default)]
+    code_mode_host_sha256: Option<String>,
+    #[serde(default)]
+    code_mode_host_source_commit: Option<String>,
+    #[serde(default)]
+    code_mode_host_dispatcher_sha256: Option<String>,
     official_cli: PathBuf,
 }
 fn invalid(message: &str) -> io::Error {
@@ -71,6 +77,27 @@ fn receipt(path: &Path) -> io::Result<Receipt> {
     }
     Ok(receipt)
 }
+fn checked_binary(path: &Path, expected_digest: &str) -> io::Result<File> {
+    let mut binary = safe_file(path, MAX_BINARY, true)?;
+    let before = binary.metadata()?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 65536];
+    let mut total = 0_u64;
+    loop {
+        let count = binary.read(&mut buffer)?;
+        if count == 0 { break; }
+        total += count as u64;
+        if total > MAX_BINARY { return Err(invalid("provider executable grew beyond its bound")); }
+        hasher.update(&buffer[..count]);
+    }
+    let after = binary.metadata()?;
+    if format!("{:x}", hasher.finalize()) != expected_digest
+        || (before.dev(), before.ino(), before.len(), before.mtime(), before.mtime_nsec())
+        != (after.dev(), after.ino(), after.len(), after.mtime(), after.mtime_nsec()) {
+        return Err(invalid("protected executable differs from its build receipt"));
+    }
+    Ok(binary)
+}
 fn run() -> io::Result<()> {
     let launcher = env::current_exe()?;
     let root = launcher
@@ -86,7 +113,8 @@ fn run() -> io::Result<()> {
     }
     let receipt = receipt(&root.join("receipt.json"))?;
     let mut args = env::args_os().skip(1).collect::<Vec<_>>();
-    if args.first().is_none_or(|arg| arg != "app-server") {
+    let helper_mode = launcher.file_name().is_some_and(|name| name == "codex-code-mode-host");
+    if !helper_mode && args.first().is_none_or(|arg| arg != "app-server") {
         if !receipt.official_cli.is_absolute()
             || std::fs::canonicalize(&receipt.official_cli)? == launcher
         {
@@ -94,49 +122,26 @@ fn run() -> io::Result<()> {
         }
         return Err(Command::new(receipt.official_cli).args(args).exec());
     }
-    let path = root.join("codex-app-server");
-    let mut binary = safe_file(&path, MAX_BINARY, true)?;
-    let before = binary.metadata()?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 65536];
-    let mut total = 0_u64;
-    loop {
-        let count = binary.read(&mut buffer)?;
-        if count == 0 {
-            break;
-        }
-        total += count as u64;
-        if total > MAX_BINARY {
-            return Err(invalid("provider binary grew beyond its bound"));
-        }
-        hasher.update(&buffer[..count]);
+    if receipt.code_mode_host_source_commit.as_deref() != Some(SOURCE) {
+        return Err(invalid("required code-mode helper is not bound to the reviewed source; rerun the DOXA installer"));
     }
-    let after = binary.metadata()?;
-    if format!("{:x}", hasher.finalize()) != receipt.binary_sha256
-        || (
-            before.dev(),
-            before.ino(),
-            before.len(),
-            before.mtime(),
-            before.mtime_nsec(),
-        ) != (
-            after.dev(),
-            after.ino(),
-            after.len(),
-            after.mtime(),
-            after.mtime_nsec(),
-        )
-    {
-        return Err(invalid(
-            "protected provider binary differs from its build receipt",
-        ));
-    }
-    args.remove(0);
-    if args.first().is_some_and(|arg| arg == "--stdio") {
+    let host_digest = receipt.code_mode_host_sha256.as_deref().ok_or_else(||
+        invalid("required code-mode helper receipt is missing; rerun the DOXA installer"))?;
+    let dispatcher_digest = receipt.code_mode_host_dispatcher_sha256.as_deref().ok_or_else(||
+        invalid("required code-mode dispatcher receipt is missing; rerun the DOXA installer"))?;
+    // Upstream starts the sibling dispatcher lazily. Its helper mode verifies
+    // the payload again at actual execution and fexecve pins that checked inode.
+    let _dispatcher = checked_binary(&root.join("codex-code-mode-host"), dispatcher_digest)?;
+    let host = checked_binary(&root.join("codex-code-mode-host-payload"), host_digest)?;
+    let path = root.join(if helper_mode { "codex-code-mode-host-payload" } else { "codex-app-server" });
+    let binary = if helper_mode { host } else { checked_binary(&path, &receipt.binary_sha256)? };
+    if !helper_mode {
         args.remove(0);
+        if args.first().is_some_and(|arg| arg == "--stdio") { args.remove(0); }
     }
     let mut command = Command::new(&path);
-    command.args(["--listen", "stdio://"]).args(args);
+    if !helper_mode { command.args(["--listen", "stdio://"]); }
+    command.args(args);
     // fexecve executes the pinned inode, including when its path is replaced.
     let command_args = std::iter::once(command.get_program())
         .chain(command.get_args())

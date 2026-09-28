@@ -66,8 +66,12 @@ contract; it never impersonates stock Codex.
 
 ### Install the protected provider
 
-The standard installer builds a native Rust dispatcher and the pinned private
-app server. This is a separate, initially unoptimized `dev-small` provider build;
+The standard installer builds a native Rust dispatcher, the pinned private
+app server and its matching native `codex-code-mode-host`. Models such as
+`gpt-6-sol` require code mode even when shell tools are enabled; their direct
+shell tools remain hidden if this helper is absent. The provider resolves its
+helper beside the app-server executable, independently of `PATH`.
+This is a separate, initially unoptimized `dev-small` provider build;
 no release-performance claim is made. The frontend/daemon keep their release
 profiles. The supported installer is Linux x86_64 with Python 3.11+, Git and a
 working user systemd scope. It bootstraps private Rust 1.95.0 using checksum-pinned
@@ -91,6 +95,13 @@ Normal Codex sessions select it automatically; an explicit `--codex-bin` takes
 precedence. Its native launcher verifies a private bounded receipt and executable
 SHA256, then executes the same open inode. Login, version and other CLI commands
 are delegated to the recorded official Codex executable, which is never replaced.
+The sibling code-mode dispatcher also verifies its helper payload and executes
+that checked open inode when Codex starts code mode. Its receipt binds the helper
+hash to the same pinned source. The helper has a separate verified build cache;
+adding it reuses the existing protected server. Existing alpha.40 installations
+receive the helper, dispatchers and new receipt in one atomic directory exchange
+only when their reviewed server/source/patch identity still matches. Missing or
+corrupted installed helper files are repaired from that verified build artifact.
 
 For a separate build/install from a checkout:
 

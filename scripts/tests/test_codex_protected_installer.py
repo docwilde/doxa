@@ -37,10 +37,63 @@ sys.stdin.read()
         self.launcher = self.root / "launcher"
         self.launcher.write_bytes(b"synthetic native dispatcher fixture")
         self.launcher.chmod(0o700)
+        self.helper = self.root / "code-mode-host-built"
+        self.helper.write_bytes(b"synthetic compiled helper fixture")
+        self.helper.chmod(0o700)
         self.destination = self.root / "providers" / installer.PROVIDER
 
     def install(self):
-        return installer.install(self.binary, self.root / "providers", Path("/usr/bin/true"), self.launcher)
+        return installer.install(self.binary, self.root / "providers", Path("/usr/bin/true"), self.launcher, self.helper)
+
+    def test_alpha40_migration_adds_helper_without_changing_trusted_server(self):
+        self.install()
+        receipt_path = self.destination / "receipt.json"
+        receipt = json.loads(receipt_path.read_text())
+        for key in ["code_mode_host_sha256", "code_mode_host_source_commit", "code_mode_host_dispatcher_sha256"]:
+            receipt.pop(key)
+        receipt_path.write_text(json.dumps(receipt))
+        (self.destination / "codex-code-mode-host").unlink()
+        (self.destination / "codex-code-mode-host-payload").unlink()
+        before = (self.destination / "codex-app-server").read_bytes()
+        self.install()
+        after = json.loads(receipt_path.read_text())
+        self.assertEqual(before, (self.destination / "codex-app-server").read_bytes())
+        for key, value in receipt.items():
+            self.assertEqual(value, after[key])
+        self.assertEqual(installer.SOURCE, after["code_mode_host_source_commit"])
+        self.assertEqual(installer.digest(self.helper), after["code_mode_host_sha256"])
+        self.assertEqual(installer.digest(self.launcher), after["code_mode_host_dispatcher_sha256"])
+
+    def test_missing_corrupted_helper_and_dispatcher_are_atomically_repaired(self):
+        self.install()
+        for damage in ["missing", "changed"]:
+            payload = self.destination / "codex-code-mode-host-payload"
+            if damage == "missing":
+                payload.unlink()
+            else:
+                payload.write_bytes(b"changed helper")
+            (self.destination / "codex-code-mode-host").write_bytes(b"changed dispatcher")
+            self.install()
+            self.assertEqual(self.helper.read_bytes(), payload.read_bytes())
+            self.assertEqual(self.launcher.read_bytes(), (self.destination / "codex-code-mode-host").read_bytes())
+
+    def test_different_or_partial_helper_provenance_refuses_complete_refresh(self):
+        for damage in ["source", "partial"]:
+            self.install()
+            receipt_path = self.destination / "receipt.json"
+            value = json.loads(receipt_path.read_text())
+            if damage == "source":
+                value["code_mode_host_source_commit"] = "unreviewed source"
+            else:
+                value.pop("code_mode_host_source_commit")
+            receipt_path.write_text(json.dumps(value))
+            before = {file.name: file.read_bytes() for file in self.destination.iterdir()}
+            with self.assertRaisesRegex(ValueError, "helper differs"):
+                self.install()
+            self.assertEqual(before, {file.name: file.read_bytes() for file in self.destination.iterdir()})
+            # Restore valid provenance before the next independent corruption.
+            value["code_mode_host_source_commit"] = installer.SOURCE
+            receipt_path.write_text(json.dumps(value))
 
     def test_probe_isolates_operator_home_and_credentials(self):
         with patch.dict(os.environ, {"DOXA_INSTALL_TEST_SECRET": "must-not-reach-provider", "OPENAI_API_KEY": "fixture"}):
