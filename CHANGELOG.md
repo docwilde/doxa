@@ -5,6 +5,17 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.41 — 2026-09-28
+
+**Codex Code Mode**
+
+- Install pinned **`codex-code-mode-host`** beside the private app server,
+  restoring required tool support for Code Mode Only models such as **`gpt-6-sol`**.
+- Bind the helper to the private build receipt and native launch checks; repair
+  missing/corrupt installations with atomic publication and retained compaction gates.
+- Verify workspace tool dispatch with the actual compiled provider and a
+  credential-free loopback model. Successful live LORE review still needs Claude auth.
+
 ## 2.0.0-alpha.40 — 2026-09-28
 
 **Protected Codex**

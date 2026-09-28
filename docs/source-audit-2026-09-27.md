@@ -277,3 +277,18 @@ partial imports and current-stream status. Its standalone CLI, administration,
 setup, hooks, MCP and network commands were already native; the earlier migration
 claim was stale. Python remains a development oracle and provider build tooling,
 with no installed DOXA/LORE runtime dependency.
+
+## Code Mode dependency follow-up in alpha.41
+
+The fresh file-tool probe exposed a missing runtime dependency in the private
+Codex package. Official cached `gpt-6-sol` metadata requires `code_mode_only`;
+the pinned provider therefore hides direct shell tools. Its installation resolver
+looks for `codex-code-mode-host` beside the actual app server and does not fall
+back to `PATH` when the current executable is known. Alpha.40 omitted that host.
+The disabled token-budget reset feature does not cause this tool limitation.
+
+Alpha.41 builds the host from the same verified source, installs it beside the
+private server and binds it to the receipt and native startup verification.
+Existing alpha.40 receipts migrate only with unchanged trusted server/source/
+patch identity. Publication and repair preserve the complete prior installation
+on failure. The official CLI remains available for login and ordinary commands.
