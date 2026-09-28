@@ -25,6 +25,8 @@ the stable 2.0 release has not been cut.
   tools or reasoning; repaint the current turn with its original links and folds.
 - In the debug render benchmark with 339 KB of history, 200 text updates take
   0.55 s instead of 12.34 s. Tool-card revisions still invalidate the full cache.
+- Batch old display-turn eviction at the 512 KiB cap; preserve durable history.
+  The saturated debug benchmark takes 1.05 s instead of 37.13 s for 200 updates.
 
 **Canonical LORE sync.**
 
