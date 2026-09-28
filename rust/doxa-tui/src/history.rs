@@ -474,6 +474,11 @@ fn tool_detail(value: &Value) -> String {
     escaped
 }
 
+fn restored_tool_id(id: &str) -> String {
+    if id.is_empty() || id.len() > 200 || id.chars().any(char::is_control) { return String::new(); }
+    format!("{}{}", crate::ui::transcript_tools::TOOL_ID_PREFIX, serde_json::json!(id))
+}
+
 fn restored_detail_marker(kind: &str, value: &Value) -> String {
     if value.is_null() { return String::new(); }
     let raw = value.as_str().map(str::to_owned).unwrap_or_else(|| value.to_string());
@@ -511,17 +516,17 @@ pub fn render(snapshot: &TranscriptSnapshot) -> String {
                     let name = if name.is_empty() { "Tool".to_owned() } else { name };
                     turn.tool_names.insert(id.to_owned(), name.clone());
                     let detail = tool_detail(&data["input"]);
-                    turn.tools.push(format!("Tool: {name} started{}{}",
+                    turn.tools.push(format!("Tool: {name} started{}{}{}",
                         if detail.is_empty() { String::new() } else { format!(" · {detail}") },
-                        restored_detail_marker("input", &data["input"])));
+                        restored_tool_id(id), restored_detail_marker("input", &data["input"])));
                 }
                 "tool_result" => {
                     let name = turn.tool_names.get(id).map(String::as_str)
                         .or_else(|| data["name"].as_str()).unwrap_or("Tool");
                     let outcome = if data["is_error"] == true { "failed" } else { "finished" };
                     let summary = tool_detail(&data["result_summary"]);
-                    let row = format!("Tool: {name} {outcome}{}",
-                        if summary.is_empty() { String::new() } else { format!(" · {summary}") });
+                    let row = format!("Tool: {name} {outcome}{}{}",
+                        if summary.is_empty() { String::new() } else { format!(" · {summary}") }, restored_tool_id(id));
                     if let Some(index) = turn.codex_results.get(id).copied() {
                         turn.tools[index] = row;
                         turn.codex_details.remove(id);
@@ -567,9 +572,9 @@ pub fn render(snapshot: &TranscriptSnapshot) -> String {
                         let name = turn.tool_names.get(id).map(String::as_str).unwrap_or("Tool");
                         let outcome = if block["is_error"] == true { "failed" } else { "finished" };
                         let detail = tool_detail(&block["content"]);
-                        turn.tools.push(format!("Tool: {name} {outcome}{}{}",
+                        turn.tools.push(format!("Tool: {name} {outcome}{}{}{}",
                             if detail.is_empty() { String::new() } else { format!(" · {detail}") },
-                            restored_detail_marker("result", &block["content"])));
+                            restored_tool_id(id), restored_detail_marker("result", &block["content"])));
                     }
                 }
             }
@@ -587,9 +592,9 @@ pub fn render(snapshot: &TranscriptSnapshot) -> String {
                     let name = if name.is_empty() { "Tool".to_owned() } else { name };
                     if let Some(id) = block["id"].as_str() { turn.tool_names.insert(id.to_owned(), name.clone()); }
                     let detail = tool_detail(&block["input"]);
-                    turn.tools.push(format!("Tool: {name} started{}{}",
+                    turn.tools.push(format!("Tool: {name} started{}{}{}",
                         if detail.is_empty() { String::new() } else { format!(" · {detail}") },
-                        restored_detail_marker("input", &block["input"])));
+                        restored_tool_id(block["id"].as_str().unwrap_or("")), restored_detail_marker("input", &block["input"])));
                 }
                 _ => {}
             }
