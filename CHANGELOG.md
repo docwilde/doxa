@@ -37,6 +37,11 @@ the stable 2.0 release has not been cut.
 - Sort curated memory and file-map entries so the same entry set converges to
   identical bytes. Caps still refuse or stage writes; overflow can leave different entry sets.
 
+**Live gallery.**
+
+- Replace README fixture screenshots with real terminal captures of the running
+  Rust app and a live Claude session; document the capture method and provenance.
+
 ## 2.0.0-alpha.35 — 2026-09-27
 
 - Separate frontend session reduction, telemetry, rendering, input, layout,
