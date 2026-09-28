@@ -564,7 +564,7 @@ fn fleet(args: &[String]) -> io::Result<()> {
 mod tests {
     use super::*;
     use std::fs;
-    use std::os::unix::fs::{symlink, PermissionsExt};
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn update_runs_embedded_installer_for_verified_bin_directory() {

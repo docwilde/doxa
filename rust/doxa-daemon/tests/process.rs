@@ -1979,7 +1979,6 @@ mod vendor_process {
     #[test]
     fn priced_vendor_budget_blocks_the_next_socket_prompt() {
         let dir = tempfile::tempdir().unwrap();
-        let lore = Path::new("/usr/bin/python3");
         let body = "data: {\"model\":\"deepseek-flash\",\"choices\":[{\"finish_reason\":\"stop\",\"delta\":{\"content\":\"answer\"}}],\"usage\":{\"prompt_tokens\":1000000,\"completion_tokens\":1000000}}\n\ndata: [DONE]\n\n";
         let (endpoint, server) = fake_vendor_frames(vec![body.to_owned()]);
         let child = daemon_command()
@@ -2028,7 +2027,7 @@ mod vendor_process {
         runtime: &Path,
         vendor: &str,
         endpoint: &str,
-        lore: &Path,
+        _lore: &Path,
         resume: bool,
         tools: bool,
     ) -> Process {
@@ -2543,7 +2542,6 @@ mod vendor_process {
     #[test]
     fn vendor_missing_credential_rejects_session_before_socket() {
         let dir = tempfile::tempdir().unwrap();
-        let lore = Path::new("/usr/bin/python3");
         let output = daemon_command()
             .args([
                 "--runtime-dir",
