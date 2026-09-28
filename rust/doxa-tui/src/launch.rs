@@ -32,6 +32,16 @@ impl Engine {
         }
     }
 
+    pub fn vendor_credential_status(self) -> io::Result<doxa_vendors::credentials::CredentialStatus> {
+        let vendor = match self {
+            Self::DeepSeek => doxa_vendors::Vendor::DeepSeek,
+            Self::Glm => doxa_vendors::Vendor::Glm,
+            _ => return Err(invalid("vendor credential check requires a vendor engine")),
+        };
+        doxa_vendors::credentials::status(vendor)
+            .map_err(|_| invalid("Native vendor credential store is unavailable"))
+    }
+
     fn model_key(self) -> &'static str {
         match self {
             Self::Codex => "codex",
@@ -436,7 +446,7 @@ fn spawn_inner(options: &LaunchOptions, fleet_runtime: Option<&Path>, environmen
                 return Err(invalid("unsupported option for vendor engine"));
             }
             let key = options.engine.vendor_key().expect("vendor engine");
-            if !env::var(key).is_ok_and(|value| !value.is_empty()) {
+            if options.engine.vendor_credential_status()? == doxa_vendors::credentials::CredentialStatus::Missing {
                 return Err(invalid(format!("{key} is required for native vendor chat")));
             }
             vendor_effort(options)?;

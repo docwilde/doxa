@@ -11,6 +11,6 @@ fn native_launch_and_doctor_work_from_another_directory_without_python_on_path()
     let launched=command().args(["new","--engine","claude"]).output().unwrap();assert!(!launched.status.success());
     let args=fs::read_to_string(&capture).unwrap();assert!(args.contains(&claude.to_string_lossy().to_string()));assert!(!args.contains("python"));assert!(!args.contains("--claude-script"));
     fs::remove_file(&capture).unwrap();
-    let vendor=command().args(["new","--engine","deepseek"]).env("DEEPSEEK_API_KEY","fixture").output().unwrap();assert!(!vendor.status.success());
+    let vendor=command().args(["new","--engine","deepseek"]).env("DEEPSEEK_API_KEY","fixture-vendor-key").output().unwrap();assert!(!vendor.status.success());
     assert!(!fs::read_to_string(capture).unwrap().contains("python"));
 }
