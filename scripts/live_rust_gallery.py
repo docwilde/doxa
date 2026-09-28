@@ -31,7 +31,7 @@ def control(args):
 def run(args):
     state = Path(args.state).resolve()
     state.mkdir(mode=0o700, parents=True, exist_ok=True)
-    for name in ("home", "runtime", "lore", "shots"):
+    for name in ("home", "runtime", "lore", "projects", "shots"):
         (state / name).mkdir(mode=0o700, exist_ok=True)
     read_fd, write_fd = os.pipe()
     log = (state / "xvfb.log").open("wb")
@@ -76,7 +76,7 @@ def _run_terminal(args, state, display_number):
         environment["COLORTERM"] = "truecolor"
         environment.update(
             DOXA_HOME=str(state / "home"), DOXA_RUNTIME_DIR=str(state / "runtime"),
-            LORE_ROOT=str(state / "lore"), DOXA_LORE="0", DOXA_DAEMON_BIN=str(Path(args.daemon).resolve()),
+            LORE_ROOT=str(state / "lore"), LORE_PROJECTS_DIR=str(state / "projects"), DOXA_LORE="0", DOXA_DAEMON_BIN=str(Path(args.daemon).resolve()),
             DOXA_LORE_RS=str(Path(args.lore).resolve()), TERM="xterm-256color",
         )
         argv = [str(Path(args.binary).resolve()), "new", "--engine", args.engine, "--linger", "600"]
