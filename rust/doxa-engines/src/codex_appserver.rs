@@ -201,7 +201,7 @@ impl AppServerDriver {
         let scrub = std::sync::Arc::new(scrub);
         let tool_scrub = scrub.clone();
         let mut driver = Self {
-            options, effort: None, interactive: false, peer_tools: false, agent_tools: Vec::new(), dynamic_tool_names: Vec::new(), compact_gate, review_items: Vec::new(), scrub: Box::new(move |text| scrub(text)), child, process_group, owner_control: owner_control.take(), supervised, stdin, stdout, next_id: 0,
+            options, effort: None, interactive: false, peer_tools: false, agent_tools: Vec::new(), dynamic_tool_names: Vec::new(), compact_gate, review_items: Vec::new(), scrub: Box::new(move |text| scrub(text)), child, process_group, owner_control: owner_control.take(), supervised: false, stdin, stdout, next_id: 0,
             thread_id: None, turn_id: None, reasoning_bytes: 0, reasoning_chars: 0,
             reasoning_buffer: String::new(), reasoning_truncated: false,
             assistant_buffers: Vec::new(), assistant_bytes: 0, assistant_message_emitted: false, usage: None, effective_model: None,
@@ -209,7 +209,11 @@ impl AppServerDriver {
             pending_bytes: 0,
             tool_normalizer: CodexJsonlNormalizer::new(move |text| tool_scrub(text)),
         };
-        if let Some(control) = driver.owner_control.as_mut() { crate::provider_owner::acknowledge(control).await?; }
+        if let Some(control) = driver.owner_control.as_mut() {
+            crate::provider_owner::acknowledge(control).await?;
+            // No await separates sending G from selecting owner-only teardown.
+            driver.supervised = true;
+        }
         let initialized = driver.request("initialize", json!({"clientInfo":{"name":"doxa","title":null,"version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":true}})).await?;
         driver.send(json!({"method":"initialized"})).await?;
         if driver.compact_gate.is_some() {

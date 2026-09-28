@@ -1,6 +1,6 @@
 //! Dedicated Linux provider owner. Parent control EOF also covers parent SIGKILL.
 //! The owner is the only subreaper: the daemon never adopts unrelated children.
-use std::{io::{self, Read, Write}, os::unix::{io::AsRawFd, net::UnixStream}, time::{Duration, Instant}};
+use std::{io::{self, Read, Write, Seek, SeekFrom}, os::unix::{io::AsRawFd, net::UnixStream}, time::{Duration, Instant}};
 
 pub const CONTROL_ENV: &str = "DOXA_CODEX_OWNER_FD";
 pub const READY: &[u8] = b"DOXA_PROVIDER_OWNER_V1\n";
@@ -30,22 +30,22 @@ pub async fn acknowledge(control: &mut UnixStream) -> io::Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-fn children() -> io::Result<Vec<libc::pid_t>> {
+fn children(file: &mut std::fs::File) -> io::Result<Vec<libc::pid_t>> {
     // All entries are direct, unreaped children of this dedicated process.
     // Their IDs remain reserved until OUR waitpid. No ancestry PID guesswork.
     let mut bytes = Vec::new();
-    std::fs::File::open(format!("/proc/self/task/{}/children", std::process::id()))?
-        .take(256 * 1024 + 1).read_to_end(&mut bytes)?;
+    file.seek(SeekFrom::Start(0))?;
+    file.take(256 * 1024 + 1).read_to_end(&mut bytes)?;
     if bytes.len() > 256 * 1024 { return Err(io::Error::other("provider child census exceeds bound")); }
     std::str::from_utf8(&bytes).map_err(io::Error::other)?.split_whitespace()
         .map(|pid| pid.parse::<libc::pid_t>().map_err(io::Error::other)).collect()
 }
 
 #[cfg(target_os = "linux")]
-fn clean_children() -> io::Result<()> {
+fn clean_children(file: &mut std::fs::File) -> io::Result<()> {
     let deadline = Instant::now() + Duration::from_secs(4);
     loop {
-        let owned = children()?;
+        let owned = children(file)?;
         // Do not reap between census and signaling. Stop before killing, so
         // live parents cannot keep forking while grandchildren are adopted.
         for &pid in &owned { unsafe { libc::kill(pid, libc::SIGSTOP); } }
@@ -56,7 +56,7 @@ fn clean_children() -> io::Result<()> {
             if result < 0 && io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) { continue; }
             break;
         }
-        if children()?.is_empty() { return Ok(()); }
+        if children(file)?.is_empty() { return Ok(()); }
         if Instant::now() >= deadline { return Err(io::Error::other("provider descendants did not reap within shutdown bound")); }
         std::thread::sleep(Duration::from_millis(10));
     }
@@ -70,6 +70,9 @@ pub fn supervise(mut control: UnixStream, exec: impl FnOnce() -> io::Error) -> i
         if libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0 { return Err(io::Error::last_os_error()); }
         libc::signal(libc::SIGCHLD, libc::SIG_DFL);
     }
+    // Pin and preflight the ownership census before acknowledging any start.
+    let mut census = std::fs::File::open(format!("/proc/self/task/{}/children", std::process::id()))?;
+    children(&mut census)?;
     control.set_read_timeout(Some(Duration::from_secs(30)))?;
     control.write_all(READY)?;
     let mut go = [0];
@@ -103,7 +106,7 @@ pub fn supervise(mut control: UnixStream, exec: impl FnOnce() -> io::Error) -> i
         }
         std::thread::sleep(Duration::from_millis(10));
     };
-    clean_children()?;
+    clean_children(&mut census)?;
     Ok(result)
 }
 
