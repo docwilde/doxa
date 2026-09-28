@@ -93,3 +93,43 @@ fn native_zero_capacity_preserves_usage_review_and_exact_removal() {
     assert_eq!(client.memory_review(cwd,"user").unwrap()["cap_chars"], 0);
     assert!(!root.join("state.db").exists());
 }
+
+#[test]
+fn canonical_memory_order_preserves_exact_review_and_stale_snapshot_refusal() {
+    use serde_json::json;
+    use std::{fs, os::unix::fs::PermissionsExt};
+    let owned = tempfile::tempdir().unwrap();
+    let root = owned.path().join("store");
+    fs::create_dir(&root).unwrap();
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+    let path = root.join("USER.md");
+    fs::write(&path, "- zebra fixture\n- alpha fixture\n").unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    let mut config = lore_core::config::Config::for_root(root);
+    config.sync.enabled = false;
+    let mut client = LoreClient::open_config(config, Duration::from_secs(1)).unwrap();
+    let cwd = owned.path().to_str().unwrap();
+    // The bridge validates the digest against the entries' returned order.
+    let reviewed = client.memory_review(cwd, "user").unwrap();
+    let expected = json!({"key":reviewed["key"], "sha256":reviewed["sha256"]});
+    let add = json!({"scope":"user", "action":"add", "entry":"",
+        "text":"middle fixture", "expected":expected});
+    assert_eq!(client.memory_action(cwd, add).unwrap()["status"], "applied");
+    let canonical = "- alpha fixture\n- middle fixture\n- zebra fixture\n";
+    assert_eq!(fs::read_to_string(&path).unwrap(), canonical);
+    let current = client.memory_review(cwd, "user").unwrap();
+    assert_eq!(
+        current["entries"],
+        json!(["alpha fixture", "middle fixture", "zebra fixture"])
+    );
+    let stale = client.memory_action(
+        cwd,
+        json!({"scope":"user", "action":"remove",
+        "entry":"zebra fixture", "text":"", "expected":expected}),
+    );
+    assert!(matches!(
+        stale,
+        Err(doxa_lore::LoreError::Remote("memory_changed"))
+    ));
+    assert_eq!(fs::read_to_string(&path).unwrap(), canonical);
+}

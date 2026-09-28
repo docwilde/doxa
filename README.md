@@ -1,8 +1,8 @@
 <p align="center"><img src="assets/logo.png" width="560" alt="DOXA — belief earning knowledge"></p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Rust%202.0-alpha.35-f59f00" alt="Rust 2.0 alpha.35 is the main frontend">
-  <a href="https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.35"><img src="https://img.shields.io/github/v/release/docwilde/doxa?include_prereleases&amp;sort=semver&amp;label=Rust%20preview&amp;color=e8590c" alt="latest Rust preview release"></a>
+  <img src="https://img.shields.io/badge/Rust%202.0-alpha.36-f59f00" alt="Rust 2.0 alpha.36 is the main frontend">
+  <a href="https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.36"><img src="https://img.shields.io/github/v/release/docwilde/doxa?include_prereleases&amp;sort=semver&amp;label=Rust%20preview&amp;color=e8590c" alt="latest Rust preview release"></a>
   <a href="https://github.com/docwilde/doxa/actions/workflows/rust-ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/docwilde/doxa/rust-ci.yml?branch=main&label=Rust%20CI" alt="Rust CI status"></a>
   <img src="https://img.shields.io/badge/TUI-Ratatui-2f9e44" alt="Rust TUI built with Ratatui">
   <img src="https://img.shields.io/badge/auth-provider%20CLI%20or%20API%20key-2f9e44" alt="authentication follows the selected engine">
@@ -14,7 +14,7 @@
 > can edit files and run commands with your privileges. Read
 > [Non-goals](#non-goals) before using it on important work.
 
-The official latest GitHub release is [v2.0.0-alpha.35](https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.35).
+The official latest GitHub release is [v2.0.0-alpha.36](https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.36).
 Rust 2.0 leads development; its alpha version still indicates that it is evolving.
 Alpha.31 closes the audited Python 1.19 functional gaps: saved-session restoration,
 full preferences, native LORE tools, interactive fleets, plugin commands and local
@@ -166,7 +166,7 @@ curl -fsSL https://raw.githubusercontent.com/docwilde/doxa/main/scripts/install.
 
 The installer builds the Rust frontend and daemon from `main` and installs the
 Rust `doxa` command in `~/.local/bin` (or `DOXA_RUST_BIN_DIR`). Pass a tag such
-as `v2.0.0-alpha.35` after `sh -s --` to pin a release. It uses Git, Cargo,
+as `v2.0.0-alpha.36` after `sh -s --` to pin a release. It uses Git, Cargo,
 Python 3.11+, and `uv`; the Python environment it creates is private to the
 Claude SDK and transport adapters. No Python frontend command is installed. See the
 [Rust guide](rust/README.md) for provider setup and current limits.
@@ -205,8 +205,12 @@ Rust 2.0 alpha is the main line. The [Rust guide](rust/README.md) tracks
 what is implemented and what still needs porting. Existing Python 1.x releases
 and their [manual](docs/manual.md) remain available for historical reference;
 the Python Claude SDK and transport adapters remain internal runtime dependencies.
-LORE 0.61.0 is now integrated as a canonical Rust module; memory, beliefs,
+LORE 0.61.1 is now integrated as a canonical Rust module; memory, beliefs,
 context, session indexing and detached review use the same existing store.
+Signed sync replays portable project memory and file-map keys across machines,
+preserves conflicts in their project scope, and sorts curated entries so the
+same entry set converges to identical memory/file-map bytes. Capacity limits
+still refuse or stage oversized writes; overflow does not guarantee the same entry set.
 
 Rust CI tests the frontend, native daemon, protocol, LORE bridge, installer,
 and compatibility paths. See the [Rust UI benchmark](docs/rust-ui-benchmark-2026-09-27.md)

@@ -5,6 +5,17 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.36 — 2026-09-28
+
+**Canonical LORE sync.**
+
+- Pin **`lore-core`** to 0.61.1 in the native bridge and Python development
+  oracle. Replay portable project memory and file-map keys across machines.
+- Preserve signed-sync conflicts in their original project scope, retaining
+  review visibility for the active DOXA project.
+- Sort curated memory and file-map entries so the same entry set converges to
+  identical bytes. Caps still refuse or stage writes; overflow can leave different entry sets.
+
 ## 2.0.0-alpha.35 — 2026-09-27
 
 - Separate frontend session reduction, telemetry, rendering, input, layout,
