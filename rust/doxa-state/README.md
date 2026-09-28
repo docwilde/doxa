@@ -1,20 +1,45 @@
 # doxa-state
 
-Local file compatibility layer for the Rust 2.0 port. It validates session IDs,
-reads live daemon registry entries into separate routing and redacted display
-fields, reads and atomically writes TOML settings,
-and reads and atomically writes flat tabset records. Callers supply paths rather
-than relying on process-global environment variables.
+Shared native state helpers for session IDs, bounded registry reads, TOML
+configuration, machine identity, and tabset files. [`lib.rs`](src/lib.rs)
+provides owner-checked file access and atomic writes; callers supply the paths
+for configuration and tabset operations.
 
-Tabset writes preserve unknown top-level keys and layout members, including
-Python's split trees, groups, and collections. They refuse changes to tab IDs
-while any of those structures are present, until pruning is ported. `ensure_machine_id` now mints DOXA's local 32-character UUID4 hex identity once,
-with an atomic no-clobber publish so concurrent starters keep one ID.
-`resolve_tabset_path` adopts a valid pre-1.10 scope-only tabset into the
-machine-specific name without overwriting an existing record. The Rust crate
-does not yet interpret split structures or resolve archived transcripts. It
-also does not probe sockets, reap stale registry files, or implement Python's
-full typed settings catalog. The caller
-must supply its secret scrubber for registry reads. Unknown registry fields are
-dropped. Raw routing fields must never be displayed. Registry results are advisory and must not be treated
-as proof that a socket is attachable.
+## Tabset storage and frontend ownership
+
+`load_tabset` validates the flat session list and retains the original JSON,
+including unknown top-level keys, split trees, pane groups, and collections.
+`save_tabset` preserves those fields and refuses membership/order changes when
+structured references have not been rebuilt to match. This guard protects
+callers that only understand the flat list; it is not a limit on native pane
+or collection support.
+
+The TUI's [`ui_state.rs`](../doxa-tui/src/ui_state.rs) restores and saves nested
+layouts, active tabs, labels, drafts, collections, and fleet views. It rebuilds
+layout and collection references before calling `save_tabset`, and refuses a
+save when a partial or unsupported view would lose retained sessions. Pane
+geometry and bounds belong to [`ui/panes.rs`](../doxa-tui/src/ui/panes.rs) and
+[`ui/layout.rs`](../doxa-tui/src/ui/layout.rs), rather than this file layer.
+
+`ensure_machine_id` mints the local 32-character UUID4 hex identity once using
+atomic no-clobber publication. `resolve_tabset_path` safely adopts a valid
+pre-1.10 scope-only tabset into the machine-specific name without replacing an
+existing record. Retained Python-shaped records are compatibility data; the
+installed runtime is native Rust.
+
+## Settings and sessions
+
+This crate loads and atomically writes TOML tables, preserving unrelated keys;
+`update_config` serializes a read-modify-write operation with an advisory lock.
+The typed settings catalog, validation, categories, and environment override
+presentation belong to [`doxa-tui/src/settings.rs`](../doxa-tui/src/settings.rs).
+Archived transcript discovery and verified resume plans belong to
+[`doxa-tui/src/history.rs`](../doxa-tui/src/history.rs).
+
+Registry reads separate raw routing fields from scrubbed display fields.
+Callers must supply the secret scrubber; unknown registry fields are dropped.
+Raw routing fields must never be displayed. Results are advisory: this crate
+filters registry records but does not probe sockets or remove stale entries.
+The TUI's [`discovery.rs`](../doxa-tui/src/discovery.rs) verifies attach targets,
+while the [`peer registry`](../doxa-peers/README.md) owns stale peer cleanup.
+See the [current runtime guide](../README.md) for user commands and behavior.
