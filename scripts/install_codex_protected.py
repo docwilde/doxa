@@ -18,7 +18,7 @@ SOURCE = "b412ff32c417f855c2b2d1581b77058eed87c84b"
 CONTRACT = "doxa-precompact-fail-closed-v1"
 PROVIDER = "codex-0.156.1-precompact-v1"
 PATCH = Path(__file__).resolve().parent / "codex-protected/precompact.patch"
-PATCH_SHA256 = "96a3c37b55f2bade5dc72f3ab344d30ed25c39c8fb42b42cfe5774fb7b210e6b"
+PATCH_SHA256 = "d6c8a41c0370c12dcace10d6babe13de7852f0095fed7b46289b38e7a6cd0f4b"
 AGENT_PREFIX = "doxa_codex_rs/0.156.1 (doxa-precompact-fail-closed-v1; "
 
 

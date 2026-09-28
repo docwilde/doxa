@@ -1419,10 +1419,10 @@ index 0000000..ead8b47
 +    }
 +}
 diff --git a/codex-rs/core/src/hook_runtime.rs b/codex-rs/core/src/hook_runtime.rs
-index e3407cd..c2ba23d 100644
+index e3407cd..a699b92 100644
 --- a/codex-rs/core/src/hook_runtime.rs
 +++ b/codex-rs/core/src/hook_runtime.rs
-@@ -549,12 +549,27 @@ pub(crate) async fn run_pre_compact_hooks(
+@@ -549,12 +549,32 @@ pub(crate) async fn run_pre_compact_hooks(
          model: turn_context.model_info().slug.clone(),
          trigger: compaction_trigger_label(trigger).to_string(),
      };
@@ -1437,6 +1437,11 @@ index e3407cd..c2ba23d 100644
      let preview_runs = sess.hooks().preview_pre_compact(&request);
 +    let required_previews = preview_runs.iter().filter(|run| required(run)).count();
      emit_hook_started_events(sess, turn_context, preview_runs).await;
++    // Review the complete materialized source, including the newest tool/input
++    // items. A failed flush must not permit review of an older disk transcript.
++    if sess.flush_rollout().await.is_err() {
++        return PreCompactHookOutcome::Stopped;
++    }
  
      let outcome = sess.hooks().run_pre_compact(request).await;
 +    let reviewed_runs = outcome.hook_events.iter().filter(|event| required(&event.run))

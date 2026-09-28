@@ -2,7 +2,7 @@
 use sha2::{Digest, Sha256};
 use serde_json::json;
 use std::{fs, os::unix::fs::PermissionsExt, process::Command};
-const PATCH: &str = "96a3c37b55f2bade5dc72f3ab344d30ed25c39c8fb42b42cfe5774fb7b210e6b";
+const PATCH: &str = "d6c8a41c0370c12dcace10d6babe13de7852f0095fed7b46289b38e7a6cd0f4b";
 fn fixture() -> tempfile::TempDir {
     let dir=tempfile::tempdir().unwrap();
     fs::set_permissions(dir.path(),fs::Permissions::from_mode(0o700)).unwrap();
