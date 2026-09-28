@@ -116,3 +116,13 @@ async fn provider_slash_compaction_never_bypasses_native_review() {
     assert!(!requests.contains("turn/start") && !requests.contains("thread/compact/start"));
     driver.shutdown().await;
 }
+
+#[tokio::test]
+async fn observed_unreviewed_automatic_compaction_stops_provider() {
+    let (dir, options, gate) = fixture("unreviewed-auto");
+    let mut driver = AppServerDriver::spawn_protected(options, str::to_owned, false, gate).await.unwrap();
+    assert!(driver.run_turn("fixture", &CancellationToken::new(), |_| {}).await.is_err());
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(!dir.path().join("survived-unreviewed-auto").exists());
+    driver.shutdown().await;
+}

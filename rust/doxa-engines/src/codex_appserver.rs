@@ -360,6 +360,7 @@ impl AppServerDriver {
             .filter(|id| valid_thread_id(id))
             .ok_or(AppServerError::Protocol("turn response lacks a valid ID"))?.to_owned();
         self.turn_id = Some(turn_id.clone());
+        let mut automatic_compaction_reviewed = false;
         loop {
             let frame = if let Some((frame, bytes)) = self.pending_notifications.pop_front() {
                 self.pending_bytes = self.pending_bytes.saturating_sub(bytes);
@@ -437,12 +438,16 @@ impl AppServerDriver {
                 }
                 match method {
                     "hook/started" if params["run"]["eventName"] == "preCompact" => {
+                        automatic_compaction_reviewed = false;
                         emit(EngineEvent::new("lore_review_started", json!({"before":"compaction"})));
                     }
                     "hook/completed" => {
                         if let Some(gate) = self.compact_gate.as_mut() {
                             match gate.observe_completion(&params["run"]) {
-                                crate::codex_compact::ReviewOutcome::Reviewed => emit(EngineEvent::new("lore_review_completed", json!({"before":"compaction"}))),
+                                crate::codex_compact::ReviewOutcome::Reviewed => {
+                                    automatic_compaction_reviewed = true;
+                                    emit(EngineEvent::new("lore_review_completed", json!({"before":"compaction"})));
+                                },
                                 crate::codex_compact::ReviewOutcome::Blocked => return Err(AppServerError::Server("LORE review blocked Codex compaction".into())),
                                 crate::codex_compact::ReviewOutcome::Failed => { self.kill_group(); return Err(AppServerError::Protocol("Codex compaction review hook failed; protected session stopped")); }
                                 crate::codex_compact::ReviewOutcome::Unrelated => {},
@@ -498,6 +503,11 @@ impl AppServerDriver {
                     }
                     "item/started" | "item/completed" => {
                         let item = &params["item"];
+                        if item["type"] == "contextCompaction" && method == "item/completed"
+                            && self.compact_gate.is_some() && !automatic_compaction_reviewed {
+                            self.kill_group();
+                            return Err(AppServerError::Protocol("automatic compaction completed without observed native LORE review; protected session stopped"));
+                        }
                         if item["type"] == "fileChange" {
                             if let Some(index) = self.review_items.iter().position(|old| old["id"] == item["id"]) {
                                 self.review_items.remove(index);

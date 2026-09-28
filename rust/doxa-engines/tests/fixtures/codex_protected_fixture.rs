@@ -65,7 +65,13 @@ if operation['method']=='thread/read':
     if mode=='foreign-source': source.write_text(json.dumps({'type':'session_meta','payload':{'id':'foreign'}})+'\n')
     send({'id':operation['id'],'result':{'thread':{'id':'foreign' if mode=='foreign-thread' else 'thread-actual','path':str(source)}}})
     operation=read()
-if mode.startswith('alias'):
+if mode=='unreviewed-auto':
+    assert operation['method']=='turn/start'
+    send({'id':operation['id'],'result':{'turn':{'id':'turn-auto'}}})
+    notice('item/completed',turnId='turn-auto',item={'id':'compact','type':'contextCompaction'})
+    import time
+    time.sleep(0.3); Path('survived-unreviewed-auto').write_text('unsafe')
+elif mode.startswith('alias'):
     assert operation['method']=='turn/start'
     send({'id':operation['id'],'result':{'turn':{'id':'turn-alias'}}})
     names=[tool['name'] for tool in thread['params']['dynamicTools']]
