@@ -264,6 +264,19 @@ impl App {
                 return true;
             }
         };
+        if let Some(token) = self.clipboard_secret_owner.take() {
+            let active = self.active_group == target.pane
+                && self.groups[self.active_group].active_id().unwrap_or("") == target.session;
+            if active && self.chip_info.as_ref().is_some_and(|info| info.kind == "operations") {
+                if let Some(menu) = self.operations_menu.as_mut().filter(|menu| menu.credential_token() == Some(token)) {
+                    menu.paste(&text);
+                    if let Some(info) = &mut self.chip_info { info.lines = menu.lines(usize::from(self.size.width)); }
+                    return true;
+                }
+            }
+            self.notice = "Credential paste discarded; editor changed".into();
+            return true;
+        }
         let exists = self.groups.get(target.pane).is_some_and(|group| {
             if target.session.is_empty() {
                 group.tabs.is_empty()
@@ -559,12 +572,25 @@ impl App {
         {
             return true;
         }
+        if ctrl && matches!(key.code, KeyCode::Char('v' | 'V')) {
+            if let Some(token) = self.operations_menu.as_ref().and_then(|menu| menu.credential_token()) {
+                self.clipboard_job = None;
+                self.clipboard_secret_owner = Some(token);
+                let mut target = self.clipboard_target(); target.draft.clear(); target.cursor = 0;
+                match crate::clipboard::Job::start(target) {
+                    Ok(job) => self.clipboard_job = Some(job),
+                    Err(_) => { self.clipboard_secret_owner = None; self.notice = "Clipboard reader unavailable · use terminal Ctrl+Shift+V".into(); },
+                }
+                return true;
+            }
+        }
         if ctrl
             && matches!(key.code, KeyCode::Char('v' | 'V'))
             && self.focus == Focus::Prompt
             && !self.link_interaction_blocked()
         {
             self.clipboard_job = None;
+            self.clipboard_secret_owner = None;
             match crate::clipboard::Job::start(self.clipboard_target()) {
                 Ok(job) => {
                     self.clipboard_job = Some(job);

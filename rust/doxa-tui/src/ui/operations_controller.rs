@@ -17,7 +17,7 @@ impl App {
         let changes = self.operations_menu.as_mut().map(|menu| menu.take_credentials_changed()).unwrap_or_default();
         for vendor in changes {
             let ids = self.session_identity.iter().filter_map(|(id,(engine,_))| {
-                (engine.as_deref() == Some(vendor.engine_id()) && self.sessions.contains_key(id) && !self.offline_ids.contains(id)).then(|| id.clone())
+                (engine.as_deref() == Some(vendor.engine_id()) && self.sessions.iter().any(|session| session.id == *id) && !self.offline_ids.contains(id)).then(|| id.clone())
             }).collect::<Vec<_>>();
             for id in ids {
                 self.session_catalogs.remove(&id);
@@ -70,6 +70,8 @@ impl App {
     }
 
     pub(super) fn open_operations(&mut self, menu: operations_menu::Menu) {
+        self.clipboard_job = None;
+        self.clipboard_secret_owner = None;
         self.memory_menu_pending = None;
         self.memory_manager = None;
         self.retire_operations();
@@ -97,6 +99,7 @@ impl App {
     }
 
     pub(super) fn retire_operations(&mut self) {
+        if self.clipboard_secret_owner.take().is_some() { self.clipboard_job = None; }
         if let Some(mut menu) = self.operations_menu.take() {
             menu.cancel();
             if menu.busy() {

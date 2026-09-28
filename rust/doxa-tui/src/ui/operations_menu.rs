@@ -69,6 +69,7 @@ impl Menu {
     pub fn take_plugins_changed(&mut self) -> bool { std::mem::take(&mut self.plugins_changed) }
     pub fn take_credentials_changed(&mut self) -> Vec<Vendor> { std::mem::take(&mut self.credentials_changed) }
     pub fn editing_credential(&self) -> bool { self.secret.is_some() }
+    pub fn credential_token(&self) -> Option<u64> { self.secret.as_ref().map(|editor| editor.token) }
     pub fn take_restart(&mut self) -> bool { std::mem::take(&mut self.restart_ready) }
     pub fn cancel(&mut self) { self.secret = None; if let Some(cancel) = &self.cancel { cancel.store(true, Ordering::Release); } }
     pub fn start_requested(&mut self) {

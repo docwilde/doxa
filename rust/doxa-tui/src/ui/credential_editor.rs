@@ -1,14 +1,18 @@
 //! Transient credential entry: no Debug, prompt ownership or persisted draft.
 use doxa_vendors::Vendor;
+use std::sync::atomic::{AtomicU64, Ordering};
+static NEXT_EDITOR: AtomicU64 = AtomicU64::new(1);
 
 pub(super) struct Editor {
     pub vendor: Vendor,
+    pub token: u64,
     bytes: Vec<u8>,
 }
 impl Editor {
     pub fn new(vendor: Vendor) -> Self {
         Self {
             vendor,
+            token: NEXT_EDITOR.fetch_add(1, Ordering::Relaxed),
             bytes: Vec::with_capacity(4096),
         }
     }

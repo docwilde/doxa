@@ -55,7 +55,11 @@ use super::*;
         assert!(!app.notice.contains(secret));
 
         open(&mut app, "z.ai API key");
-        app.handle(Event::Paste("fixture-zai-api-key".into()));
+        app.clipboard_secret_owner = app.operations_menu.as_ref().unwrap().credential_token();
+        app.clipboard_job = Some(crate::clipboard::Job::fixture(app.clipboard_target(),Ok("fixture-zai-api-key".into())));
+        assert!(app.poll_clipboard());
+        assert_eq!(app.input,"ordinary draft");
+        assert!(app.pending_prompts.is_empty());
         app.handle(key(KeyCode::Esc));
         assert!(!app.operations_menu.as_ref().unwrap().editing_credential());
         assert_eq!(credentials::status(Vendor::Glm).unwrap(),credentials::CredentialStatus::Missing);
@@ -81,6 +85,21 @@ use super::*;
         assert!(app.operations_menu.is_none());
         assert!(app.pending_prompts.is_empty());
         assert!(app.input_drafts.values().all(|(s,_)| !s.contains("fixture-unsaved-secret")));
+
+        app.open_operations(operations_menu::Menu::new("setup"));
+        open(&mut app, "DeepSeek API key");
+        let old_token = app.operations_menu.as_ref().unwrap().credential_token();
+        let target = app.clipboard_target();
+        app.handle(key(KeyCode::Esc));
+        open(&mut app, "DeepSeek API key");
+        app.clipboard_secret_owner = old_token;
+        app.clipboard_job = Some(crate::clipboard::Job::fixture(target,Ok("fixture-stale-secret".into())));
+        assert!(app.poll_clipboard());
+        assert!(!app.operations_menu.as_ref().unwrap().lines(140).join("\n").contains('•'));
+        assert!(!app.input.contains("fixture-stale-secret"));
+        app.handle(key(KeyCode::Esc));
+        app.handle(key(KeyCode::Esc));
+        assert!(app.operations_menu.is_none());
     }
 
     #[test]
