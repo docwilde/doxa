@@ -5,6 +5,26 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.40 — 2026-09-28
+
+**Protected Codex**
+
+- Install a private fail-closed **0.156.1** app server; preserve the official CLI
+  for login/help and require exact trusted review before compaction.
+- Flush rollout before review; block nine compiled-provider refusal cases before
+  compaction inference/history replacement. Live successful review needs Claude auth.
+- Keep legacy exec sessions read only until explicit same-thread migration.
+  Verify cached builds and atomically refresh the native provider installation.
+
+**Native LORE and verification**
+
+- Pin **LORE 0.62.2** with corrected sync limits, endpoint/credential cursors,
+  partial-import reporting and current-stream status. Standalone LORE is native.
+- Stop and resume the native vendor verifier between its two turns; preserve
+  adversarial daemon regression coverage with protected app-server fixtures.
+- Add **`./task codex-provider`** and document build tooling and fresh evidence.
+  Authenticated Claude, DeepSeek and z.ai checks still need credentials.
+
 ## 2.0.0-alpha.39 — 2026-09-28
 
 **Compaction protection**

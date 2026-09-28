@@ -1,6 +1,6 @@
 [project]
 name = "doxa"
-version = "2.0.0a38"
+version = "2.0.0a40"
 description = "Development compatibility reference for the native DOXA terminal."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -32,7 +32,7 @@ dev = [
     "starlette>=1,<2",
     "uvicorn>=0.52,<1",
     "websockets>=15,<17",
-    "lore-core @ git+https://github.com/docwilde/LORE@8412657eb8e06028a417ceb2e7e1a9420e881d9d",
+    "lore-core @ git+https://github.com/docwilde/LORE@4e8bb3d573f7c52df5b26d3dad11d52e9007afbe",
     "pytest>=8",
     "pytest-asyncio>=0.24",
 ]

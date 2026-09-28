@@ -10,7 +10,7 @@ reported `missing`, with no guard rejection. Both `--check` and `--live`
 returned zero paid requests; no vendor account request was sent.
 
 Claude Code 2.1.283's fresh `auth status --json` reported `loggedIn: false`,
-`authMethod: none`, and `apiProvider: firstParty`. Native LORE 0.62.1's review
+`authMethod: none`, and `apiProvider: firstParty`. Native LORE 0.62.2's review
 worker uses Claude for derivation even when reviewing a Codex source; an
 authenticated Codex session alone does not provide that reviewer authentication.
 A successful provider-backed LORE review remains unverified with this account
@@ -59,10 +59,10 @@ the durable restart guard only after successful persistence. A follow-up turn
 resumes the original thread. Native approval receipts, carrier/manifest replacement,
 held stdout descendants and unreviewed automatic events have separate fixtures.
 
-Stock Codex's automatic hook failure behavior remains an upstream limitation:
-DOXA can stop after observing failure, without proving that automatic context
-replacement was prevented. The pinned source also contains independent triggers
-outside the configured token threshold. See the
+The historical stock Codex checks above predate alpha.40's private fail-closed
+build. The stock provider can continue after hook infrastructure failures and
+contains independent triggers outside the configured token threshold; DOXA now
+refuses it for protected turns. See the
 [engine contract](../rust/doxa-engines/README.md#compaction-review) and pinned
 [turn implementation](https://github.com/openai/codex/blob/rust-v0.156.1/codex-rs/core/src/session/turn.rs),
 [context-window cap](https://github.com/openai/codex/blob/rust-v0.156.1/codex-rs/core/src/session/context_window.rs)
@@ -71,6 +71,43 @@ and [model threshold logic](https://github.com/openai/codex/blob/rust-v0.156.1/c
 To unblock Claude's account check, run `doxa auth login claude` or `claude auth login`.
 Configure vendor keys in `/setup` or inherited environment before the opt-in
 checks below. Do not put credentials in project files, prompts or memory.
+
+## Private protected Codex completion checks
+
+The private app server builds official source
+`b412ff32c417f855c2b2d1581b77058eed87c84b` with reviewed patch SHA-256
+`d6c8a41c0370c12dcace10d6babe13de7852f0095fed7b46289b38e7a6cd0f4b`.
+Its compiled contract is `doxa-precompact-fail-closed-v1`; the checked executable
+SHA-256 is `f9fee41f3ef5eddd362df199d5d5253fec802ffaaa5f2c4baea9c2e04e3723cd`.
+It was built with private Rust 1.95 and the unoptimized `dev-small` profile;
+these checks establish behavior, not optimized performance.
+
+`scripts/codex-protected/verify_automatic.py` drives that actual executable with a
+credential-free loopback Responses model. Nine cases (missing hook/carrier,
+timeout, malformed/empty/plain output, stopped, asynchronous and duplicate hooks)
+complete the first turn and interrupt the automatic-compaction turn. Each makes
+one original-model HTTP request, zero compaction requests and zero history
+replacements, preserving the first assistant message. The explicit allow control
+makes three requests and one real compacted checkpoint. The missing-carrier
+fixture executes a shell that returns 127; the compiled hook parser separately
+covers operating-system spawn failure. No case uses a paid account.
+
+At `2026-09-28T17:24:29Z`, an actual authenticated check used the private native
+launcher, an alpha.39-labelled integration daemon and native LORE 0.62.2. Catalog
+returned seven models; model `gpt-6-sol` and effort `low` were accepted. Two real
+turns completed with streamed text and complete reported usage. Stopping and
+restarting the native daemon resumed the exact same provider thread. Enabled
+manual compaction started native LORE review, refused with the reviewer logged
+out, and preserved the exact rollout digest.
+
+The file-read prompt produced a short text-only response, zero tool events and no
+matching synthetic file token. A second bounded pair with explicit `cat` had the
+same outcome. The replies do not establish tool or content-recall compatibility;
+no tool configuration was independently observed. Further paid retries stopped.
+No credential, file token, prompt/reply text or private rollout is included in the
+verification record, and temporary authentication copies were removed.
+Successful live reviewer compaction and large-context automatic compaction still
+need Claude reviewer authentication. Token usage does not establish billed cost.
 
 ## Native DeepSeek and z.ai / GLM
 

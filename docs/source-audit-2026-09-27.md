@@ -131,10 +131,11 @@ Live provider/account compatibility and macOS/Windows behavior remain outside
 the local fixture evidence.
 
 The optional retained browser remote adapter is deliberately unavailable until
-its transport can prove proxy identity. Codex protected compaction remains pinned
-to its documented contract; operating-system hook startup failures can fail open
-inside Codex before DOXA observes and stops the session. See
-[parity boundaries](rust-1.19-parity.md).
+its transport can prove proxy identity. Alpha.40 uses a private pinned Codex
+build that refuses compaction before inference/history replacement unless its
+trusted synchronous review explicitly allows it. Stock builds refuse protected
+turns. Live successful LORE review remains blocked by reviewer authentication.
+See [parity boundaries](rust-1.19-parity.md).
 
 ## Verification record
 
@@ -251,3 +252,28 @@ plans and the Python manual are explicitly historical, with the Rust guide
 primary. These corrections preserve the earlier audit findings and proof counts.
 The [provider verification record](live-provider-verification-2026-09-28.md)
 separates actual account checks, local fixtures and missing authentication.
+
+## Completion follow-up in alpha.40
+
+The private Codex build closes the automatic hook infrastructure failure gate
+identified in alpha.39. Local and remote compaction share the native gate before
+inference and history replacement; the rollout is flushed before review.
+Nine compiled-provider loopback refusal cases preserve history and send no
+compaction inference; a separate explicit allow control replaces context once.
+The native dispatcher verifies a fixed build receipt and executes the opened
+binary inode. Installer refresh atomically publishes the complete private
+provider directory and rejects unrelated staged or unstaged source changes.
+
+Legacy exec sessions are read only until explicit verified migration resumes the
+same saved thread. Native process regressions retain their failure, cancellation,
+descendant ownership and persistence checks through an app-server fixture.
+The vendor verifier now stops and resumes each native daemon between its two
+allowed turns. Live protocol, usage and same-thread resume were observed with the
+protected Codex build; file tools/content recall and successful reviewer compaction
+remain unverified in that fresh account check.
+
+LORE 0.62.2 corrects native sync byte limits, endpoint/credential cursor identity,
+partial imports and current-stream status. Its standalone CLI, administration,
+setup, hooks, MCP and network commands were already native; the earlier migration
+claim was stale. Python remains a development oracle and provider build tooling,
+with no installed DOXA/LORE runtime dependency.
