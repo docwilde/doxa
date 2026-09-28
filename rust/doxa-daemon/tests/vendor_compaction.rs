@@ -78,6 +78,9 @@ fn reviewed_managed_compaction_preserves_originals_and_review_refusal_keeps_sess
             assert!(requests[1].get("tools").is_none());assert_eq!(requests[1]["max_tokens"],4096);
             assert!(requests[1].to_string().contains("original user"));assert!(requests[2].to_string().contains("MANAGED-SUMMARY-FIXTURE"));
             assert!(!requests[2].to_string().contains("original assistant"));
+            let synthetic = requests[2]["messages"].as_array().unwrap().iter()
+                .find(|message| message["role"] == "assistant" && message["content"] == "MANAGED-SUMMARY-FIXTURE").unwrap();
+            assert_eq!(synthetic["reasoning_content"], "");
         }else{assert!(requests[1].to_string().contains("original assistant"));assert!(!requests[1].to_string().contains("MANAGED-SUMMARY-FIXTURE"));}
         let durable=fs::read_to_string(transcripts.join("vendor-compaction.messages.json")).unwrap();
         assert!(durable.contains("original assistant"));assert!(durable.contains("followup assistant"));assert!(!durable.contains("MANAGED-SUMMARY-FIXTURE"));

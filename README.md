@@ -1,8 +1,8 @@
 <p align="center"><img src="assets/logo.png" width="560" alt="DOXA — belief earning knowledge"></p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Rust%202.0-alpha.38-f59f00" alt="Rust 2.0 alpha.38 is the main frontend">
-  <a href="https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.38"><img src="https://img.shields.io/github/v/release/docwilde/doxa?include_prereleases&amp;sort=semver&amp;label=Rust%20preview&amp;color=e8590c" alt="latest Rust preview release"></a>
+  <img src="https://img.shields.io/badge/Rust%202.0-alpha.39-f59f00" alt="Rust 2.0 alpha.39 is the main frontend">
+  <a href="https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.39"><img src="https://img.shields.io/github/v/release/docwilde/doxa?include_prereleases&amp;sort=semver&amp;label=Rust%20preview&amp;color=e8590c" alt="latest Rust preview release"></a>
   <a href="https://github.com/docwilde/doxa/actions/workflows/rust-ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/docwilde/doxa/rust-ci.yml?branch=main&label=Rust%20CI" alt="Rust CI status"></a>
   <img src="https://img.shields.io/badge/TUI-Ratatui-2f9e44" alt="Rust TUI built with Ratatui">
   <img src="https://img.shields.io/badge/auth-provider%20CLI%20or%20API%20key-2f9e44" alt="authentication follows the selected engine">
@@ -14,16 +14,11 @@
 > can edit files and run commands with your privileges. Read
 > [Non-goals](#non-goals) before using it on important work.
 
-The official latest GitHub release is [v2.0.0-alpha.38](https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.38).
-Rust 2.0 leads development; its alpha version still indicates that it is evolving.
-Alpha.31 closes the audited Python 1.19 functional gaps: saved-session restoration,
-full preferences, native LORE tools, interactive fleets, plugin commands and local
-shell controls. The subsequent [source audit](docs/source-audit-2026-09-27.md)
-documents ownership/deadline fixes and controller cleanup. Alpha.37 replaces
-the remaining Python runtime paths, adds verified Claude controls and completes
-native vendor compaction. See the
+The official latest GitHub release is [v2.0.0-alpha.39](https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.39).
+Rust 2.0 leads development and remains an evolving alpha. See the
 [parity tracker](docs/rust-1.19-parity.md) for supported provider contracts and
-retained safety boundaries.
+remaining release gates, and the [source audit](docs/source-audit-2026-09-27.md)
+for engineering findings and their follow-up fixes.
 
 **DOXA** is a terminal for coding agents. Development now leads with the
 **Rust 2.0 alpha**, built with Ratatui and a native daemon. Run Claude, Codex,
@@ -43,16 +38,16 @@ results are real. See the [capture method](docs/rust-gallery.md).*
 
 ## What you get
 
-- **Four engines:** Run Claude, Codex, DeepSeek or GLM, with supported model, reasoning effort and permission changes during a session.
+- **Four engines:** Run Claude, Codex, DeepSeek or GLM with supported model, reasoning effort and permission controls.
 - **Flexible workspace:** Group tabs, split panes horizontally or vertically, and drag dividers; each pane has its own prompt.
-- **Session recovery:** Restore saved tabs, drafts and layouts, safely resume recorded conversations, or reattach to running daemons.
-- **Clear conversations:** Follow a processing spinner and live reasoning count, expand thinking or each individual tool call, and open links with Ctrl+click.
-- **Shared memory:** Browse and filter LORE's individual user/project memories, inspect belief evidence, and accept or reject exact reviewed claims.
-- **Repo and worktree tools:** Browse folders, switch branches, inspect diffs, reject tracked hunks and perform guarded checkout recovery or cleanup.
-- **Fleets and peers:** Review multi-agent plans, coordinate supervised runs, enforce reported spend limits and inspect peer activity in the TUI or browser mesh.
+- **Session recovery:** Restore tabs, drafts and layouts, safely resume recorded conversations, or reattach to running daemons.
+- **Clear conversations:** Follow live progress, expand reasoning or individual tool calls, and open links with Ctrl+click.
+- **Shared memory:** Browse and filter LORE memory and beliefs, inspect evidence, and approve or reject fully reviewed changes.
+- **Repo and worktree tools:** Browse folders, switch branches, inspect diffs and reject tracked hunks. Recover or clean up managed checkouts with ownership checks.
+- **Fleets and peers:** Coordinate supervised agents, inspect peer activity and review requests in the TUI or browser mesh. Spend limits require complete reported accounting.
 - **Usage at a glance:** Inspect reported context, plan, quota and API balance details; unavailable values stay unknown.
-- **Keyboard and mouse:** Approve provider requests inline with A, Enter or a click; navigate tabs, chips and prompts with Tab, use slash completion, and select/copy text or paste into the prompt where supported.
-- **Setup and customization:** Manage provider login and masked API keys, plugins, categorized settings, help and updates; run private local shell commands with `!`.
+- **Keyboard and mouse:** Approve requests inline with A, Enter or a click. Navigate with Tab, complete slash commands, and copy or paste where supported.
+- **Setup and customization:** Manage provider login, masked API keys, plugins and settings. Run private local shell commands with `!`.
 
 See the [Rust guide](rust/README.md) for engine capabilities, shortcuts and
 [compaction boundaries](rust/doxa-engines/README.md#compaction-review).
@@ -106,7 +101,7 @@ curl -fsSL https://raw.githubusercontent.com/docwilde/doxa/main/scripts/install.
 
 The installer builds the Rust frontend and daemon from `main` and installs the
 Rust `doxa` command in `~/.local/bin` (or `DOXA_RUST_BIN_DIR`). Pass a tag such
-as `v2.0.0-alpha.38` after `sh -s --` to pin a release. It requires Git and Cargo and installs three native binaries: the frontend,
+as `v2.0.0-alpha.39` after `sh -s --` to pin a release. It requires Git and Cargo and installs three native binaries: the frontend,
 daemon and LORE carrier. Claude and Codex additionally require their provider CLIs. See the
 [Rust guide](rust/README.md) for provider setup and current limits.
 On Linux, it also installs a per-user application menu entry and icons under
@@ -128,7 +123,7 @@ launcher from `main`.
 
 ## Quickstart
 
-Check dependencies, start a session, and reattach later:
+Check dependencies and start a session:
 
 ```sh
 doxa doctor --engine codex
@@ -136,15 +131,22 @@ doxa new --engine codex
 doxa list
 ```
 
-The [Rust guide](rust/README.md) covers Claude, DeepSeek, and GLM setup.
+Ctrl+Q detaches the frontend. Use an ID or unique prefix from `doxa list` to
+reattach later:
+
+```sh
+doxa attach SESSION_ID
+```
+
+The [Rust guide](rust/README.md) is the primary user guide and covers Claude,
+DeepSeek, and GLM setup.
 
 ## Status
 
-Rust 2.0 alpha is the main line. The [Rust guide](rust/README.md) tracks
-what is implemented and what still needs porting. Existing Python 1.x releases
-and their [manual](docs/manual.md) remain available for historical reference;
-Python modules remain development compatibility references; installation and
-normal operation use the Rust runtime.
+Rust 2.0 alpha is the main line. The [Rust guide](rust/README.md) describes
+current commands, setup and provider limits. Existing Python 1.x releases and
+their [historical compatibility manual](docs/manual.md) remain reference material;
+installation and normal operation use the Rust runtime.
 LORE is integrated as a canonical Rust module; memory, beliefs,
 context, session indexing and detached review use the same existing store.
 Signed sync replays portable project memory and file-map keys across machines,
@@ -152,7 +154,7 @@ preserves conflicts in their project scope, and sorts curated entries so the
 same entry set converges to identical memory/file-map bytes. Capacity limits
 still refuse or stage oversized writes; overflow does not guarantee the same entry set.
 
-Rust CI tests the frontend, native daemon, protocol, LORE bridge, installer,
+Rust CI tests the frontend, native daemon, protocol, integrated LORE, installer,
 and compatibility paths. See the [Rust UI benchmark](docs/rust-ui-benchmark-2026-09-27.md)
 for rendering, event-loop, scrolling, and resize measurements.
 

@@ -2,7 +2,7 @@
 
 Rust is the main DOXA frontend. The installer exposes `doxa`; the compiled
 frontend is `doxa-rs`. Claude uses its native CLI control protocol, Codex uses
-its app server, and API vendors use Rust HTTP clients. Canonical LORE is an
+its app server, and API vendors use Rust HTTP clients. Canonical LORE 0.62.1 is an
 integrated Rust library for memory, reviews, indexing, and secret scrubbing;
 `lore-rs` also provides detached review and standalone plugin commands.
 The installed runtime requires no Python interpreter.
@@ -187,16 +187,20 @@ Protected app-server startup requires the verified **Codex 0.156.1** hook
 contract and checks DOXA's trusted synchronous `PreCompact` hook hash. An
 unsupported build or missing trusted hook refuses startup. The hook binds the
 provider thread and owned rollout, prepares a scrubbed private snapshot, and
-waits for the native LORE review worker. Manual `/compact` uses the official compaction request;
+waits for the native LORE review worker. Before the official manual `/compact`
+request, DOXA independently reviews the bound source and rechecks its identity
+and digest. Failed, disabled or missing review sends no compaction request.
+Startup verifies that Codex's unhooked token-budget reset feature is disabled.
 Claude compaction also waits for LORE review. Vendor `/compact` preserves the
 full durable conversation and writes a separate, reviewed summary checkpoint;
 it validates the original prefix before using that summary on resume.
 
 Codex 0.156.1 can continue compaction when the OS cannot spawn a hook, or the
 hook times out or returns invalid output. DOXA stops a protected session after
-observed failure, but cannot guarantee that the provider has not already
-compacted. Normal reviewer failure returns a valid blocking decision before
-the deadline. This provider infrastructure limitation remains a stable gate.
+observed failure, but cannot guarantee that automatic compaction was prevented.
+Manual compaction has the independent gate above; threshold configuration alone
+cannot disable every automatic path. This provider infrastructure limitation
+remains a stable gate.
 See [engine contracts](doxa-engines/README.md) for transport and review details.
 
 ## Verification and gallery

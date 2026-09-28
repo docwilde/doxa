@@ -1,14 +1,20 @@
 # DOXA protocol v1
 
-Standalone shared wire contract for the Python 1.x daemon and Rust 2.0
-frontend/runtime migration. The codec checks newline-delimited JSON frames,
-the 64 KiB size cap, required fields, and protocol version. Unknown optional
-fields are retained. It does not implement socket I/O, session lifecycle,
-authorization, engine semantics, or persistence.
+Shared wire contract used by the native Rust frontend transport. The codec
+checks newline-delimited JSON frames, the 64 KiB size cap, required fields,
+and protocol version. Unknown optional fields are retained. It does not
+implement socket I/O, session lifecycle, authorization, engine semantics,
+or persistence.
 
-`doxa/client.py`, `doxa/daemon.py`, and `doxa/peers.py` remain the behavior
-reference. The TUI and native runtime will adopt this crate after their
-current frontend and daemon PRs merge.
+[`doxa-tui/src/transport.rs`](../doxa-tui/src/transport.rs) uses the codec for
+client writes and server-frame validation. [`doxa-runtime`](../doxa-runtime/README.md)
+implements the native daemon socket and host boundary. Python 1.x client,
+daemon, and peer files remain development interoperability references.
 
-Run `cargo test --locked --manifest-path rust/doxa-protocol/Cargo.toml` from
-the repository root. Rust CI runs this crate independently of the TUI.
+From the repository root:
+
+```sh
+cargo test --locked -p doxa-protocol
+```
+
+See the [current runtime guide](../README.md) for installation and session use.

@@ -1,6 +1,6 @@
 # doxa-peers
 
-Standalone Rust port of local peer presence in `doxa/peers.py`. It reads and writes the same JSON registry schema, including optional daemon marker, client count, usage, self description, and parent session ID. `origin` is not serialized because Python sets it from the remote endpoint, never from the local registry.
+Standalone Rust port of local peer presence in `doxa/peers.py`. It reads and writes the same JSON registry schema, including optional daemon marker, client count, usage, self description, and parent session ID. `origin` is not serialized: remote origins are derived from configured endpoints, never accepted from local registry claims. Python records remain development interoperability references.
 
 A caller must supply a `Scrubber` implementation backed by LORE's secret scrubber before reading records for display. This crate intentionally has no pass-through scrubber. Provider, model, and engine are unverified self descriptions; consumers must never treat them as capabilities or authority. The static fixture in `tests/fixtures/python_peer.json` was emitted from Python `PeerInfo` with `dataclasses.asdict` (omitting local-only `origin`), and the Rust test checks old and future schema compatibility.
 
@@ -17,4 +17,25 @@ reaps entries or sockets.
 
 `deliver` resolves recipients by exact session ID within the sender's repository scope, charges a per-session budget before attempting sends, and writes a Python-compatible append-only ledger record naming only successful recipients. The record hashes the original body before scrubbing body and sender self descriptions. Ledger writes use an owner-private directory, no-follow file open, a cross-process lock, and a 2 GiB refusal ceiling. If delivery succeeds but the ledger fails, the result reports `ledger_error` alongside the delivered IDs, because retrying would duplicate a real delivery. The host must provide the scrubber from `doxa-lore`; an identity closure is suitable only for test fixtures without secrets.
 
-The native daemon binds a separate owner-only peer inbox socket and publishes its path in `socket_path`; `daemon_socket` remains the TUI attach socket. Its `msg` RPC resolves one live same-scope recipient, scrubs the complete frame before transport, appends the delivered message to the ledger, and emits `peer_sent`. The inbox emits scrubbed `peer_message` events only for live same-scope senders. Peer operations start LORE lazily and reject sends and events when scrubbing fails. The in-memory rate limiter is per host process and is not persisted across daemon restarts. Read-only `Ledger` queries now provide `recent`, `in_repo`, `sent_by`, `received_by`, `since`, `latest_id`, and count/malformed-line statistics. They preserve Python order (newest first for filtered history, oldest first after a cursor), reject unknown cursors, and ignore an unfinished final line. Queries use a fixed file snapshot and owner-checked descriptor; each line is capped at 8 MiB and results at 5,000 records. This is a bounded streaming implementation, not yet Python’s incremental cache, so polling a large ledger rescans it. It does not yet provide inbound turn policy, cross-repository addressing, or remote/fleet routing. The host should call `heartbeat` every `HEARTBEAT_SECS` after binding its inbox socket. Frame self descriptions and `from_id` are claims from a same-user process, not verified sender identity.
+The native daemon binds a separate owner-only peer inbox socket and publishes its path in `socket_path`; `daemon_socket` remains the TUI attach socket. Its `msg` RPC resolves one live same-scope recipient, scrubs the complete frame before transport, appends the delivered message to the ledger, and emits `peer_sent`. The inbox emits scrubbed `peer_message` events only for live same-scope senders. Peer operations start LORE lazily and reject sends and events when scrubbing fails. The in-memory rate limiter is per host process and is not persisted across daemon restarts. Read-only `Ledger` queries now provide `recent`, `in_repo`, `sent_by`, `received_by`, `since`, `latest_id`, and count/malformed-line statistics. They preserve Python order (newest first for filtered history, oldest first after a cursor), reject unknown cursors, and ignore an unfinished final line. Queries use a fixed file snapshot and owner-checked descriptor; each line is capped at 8 MiB and results at 5,000 records. This is a bounded streaming implementation, not yet Python’s incremental cache, so polling a large ledger rescans it. The host should call `heartbeat` every `HEARTBEAT_SECS` after binding its inbox socket. Frame self descriptions and `from_id` are claims from a same-user process, not verified sender identity.
+
+
+## Remote and daemon integration
+
+[`peernet.rs`](src/peernet.rs) and [`remote_policy.rs`](src/remote_policy.rs)
+provide the native Unix HTTP bridge, bounded outbound endpoint requests, and
+remote policy parsing. The daemon validates remote senders against reciprocal
+configured endpoint rosters and supplies LORE scrubbing and message admission.
+The local delivery API remains repository scoped; cross-machine configuration
+and proxy attestation are described in the [native remote guide](../../docs/native-peernet.md).
+Inbound turn policy and fleet routing are owned by the daemon/controller; see
+the [current runtime guide](../README.md).
+
+From the repository root:
+
+```sh
+cargo test --locked -p doxa-peers
+```
+
+Fixtures use local sockets and controlled endpoints; they do not establish live
+remote machine availability.

@@ -1,6 +1,6 @@
 # DOXA vendor chat adapter (Rust 2.0 preview)
 
-`doxa-vendors` implements bounded chat-completions SSE transport and a tool turn loop for DeepSeek and GLM. The native daemon connects it through `VendorHost` and `NativeVendorGate`. DeepSeek nests `reasoning_effort` inside `thinking`; GLM places it at the root and refuses `none`; neither receives `max_tokens`.
+`doxa-vendors` implements bounded chat-completions SSE transport and a tool turn loop for DeepSeek and GLM. The native daemon connects it through `VendorHost` and `NativeVendorGate`. Both receive root-level `reasoning_effort` and a separate `thinking` toggle; GLM refuses `none`. Neither receives `max_tokens`.
 
 ## Credentials
 
@@ -14,6 +14,19 @@ The SSE decoder caps a line at 1 MiB and a response at 64 MiB. Tool arguments ca
 
 A concrete `ToolGate` owns approval and execution. The adapter validates offered names and refuses unoffered calls; gate errors are not sent to the provider. The daemon exposes explicitly enabled workspace reads and approved native LORE, peer and session tools. Callers remain responsible for canonical scrubbing of secrets other than known vendor keys.
 
+## DeepSeek replay
+
+Thinking with tools requires prior assistant `reasoning_content`. The daemon
+preserves final-completion reasoning in its private paired replay file, with
+owner-only access and a 1 MiB UTF-8 bound per field before and after scrubbing.
+Reads are capped at 16 MiB; intermediate tool reasoning remains turn-local.
+Public JSONL contains user and final assistant text. Legacy history missing
+reasoning still loads, but thinking with tools refuses before HTTP submission;
+start a new session or launch with `--effort none` to retain that history.
+
 ## Verification
 
 CI enables the loopback-only transport and exercises synthetic keys against local HTTP fixtures, including rotation in existing history, inactive-key metadata, storage attacks, cancellation and tool gates. Production URLs are fixed. Fixtures make no paid requests and do not establish live account availability, catalog contents or pricing.
+
+See the [provider verification record](../../docs/live-provider-verification-2026-09-28.md)
+for opt-in commands, actual CLI checks and outstanding account authentication.

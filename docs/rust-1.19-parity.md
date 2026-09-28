@@ -40,9 +40,11 @@ trust gates and unavailable historical data retain their documented limits.
   incomplete pending requests cannot receive an approval for an earlier snapshot.
 - Codex protected startup requires the verified **0.156.1** contract. That provider
   can fail open if its operating system cannot start the hook, or the hook times
-  out/returns invalid output. DOXA stops after observing failure; it cannot claim
-  that compaction was prevented. Native vendor compaction retains the durable
-  history and uses a separately reviewed summary checkpoint.
+  out/returns invalid output during automatic compaction. DOXA stops after
+  observing failure; it cannot claim that automatic compaction was prevented.
+  Alpha.39 adds independent native review before manual compaction requests and
+  verifies that the unhooked token-budget reset feature is disabled. Native vendor
+  compaction retains durable history and uses a reviewed summary checkpoint.
 - Unreported account, plan, quota, balance and context components stay unknown.
   Fixture tests do not establish compatibility with arbitrary live provider builds.
 - Native input, output, tab, roster and snapshot bounds remain enforced. Normal
@@ -76,6 +78,8 @@ are labelled by their rendered package version;
 see the [benchmark](rust-ui-benchmark-2026-09-27.md) and
 [gallery](rust-gallery.md). Live-provider compatibility remains bounded by the
 explicit supported contracts.
+The [live verification record](live-provider-verification-2026-09-28.md) separates
+actual account checks from fixture coverage and missing authentication.
 
 See the [source audit](source-audit-2026-09-27.md) for confirmed follow-up fixes,
 engineering debt and validation limits.

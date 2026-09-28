@@ -54,9 +54,12 @@ pub enum AppServerError {
     Protocol(&'static str),
     Server(String),
     Cancelled,
-    /// A verified blocking PreCompact response stopped a manual compaction
-    /// before any context-compaction item, and its turn was fully drained.
+    /// Native pre-request review refused submission, or a verified blocking
+    /// hook stopped a submitted manual compaction before context replacement.
     CompactionBlocked,
+    /// Cancellation before sending any compaction request. The bound context
+    /// remains safe to resume even if the source-read transport was stopped.
+    CompactionCancelled,
     TimedOut,
 }
 
@@ -202,6 +205,12 @@ impl AppServerDriver {
             if version != Some(crate::codex_compact::SUPPORTED_VERSION) {
                 return Err(AppServerError::Protocol("Codex build has no verified DOXA compaction hook contract"));
             }
+            // Token-budget context resets bypass PreCompact in this provider.
+            // Confirm the process-local override is supported and effective.
+            let config = driver.request("config/read", json!({"cwd":driver.options.cwd,"includeLayers":false})).await?;
+            if config["config"]["features"]["token_budget"] != false {
+                return Err(AppServerError::Protocol("Codex unhooked token-budget reset path is not disabled"));
+            }
             let hooks = driver.request("hooks/list", json!({"cwds":[driver.options.cwd]})).await?;
             driver.compact_gate.as_mut().unwrap().verify_hooks(&hooks)
                 .map_err(|_| AppServerError::Protocol("DOXA Codex compaction hook is not active with verified trust"))?;
@@ -332,6 +341,9 @@ impl AppServerDriver {
         mut emit: impl FnMut(EngineEvent),
         mut request: impl FnMut(&Value) -> Result<Option<(EngineEvent, tokio::sync::oneshot::Receiver<Value>)>, String>,
     ) -> Result<(), AppServerError> {
+        if prompt.split_whitespace().next() == Some("/compact") {
+            return Err(AppServerError::Protocol("Use the reviewed compaction operation; slash compaction cannot pass through a provider turn"));
+        }
         if cancel.is_cancelled() { return Err(AppServerError::Cancelled); }
         self.reasoning_bytes = 0;
         self.reasoning_chars = 0;
@@ -351,6 +363,7 @@ impl AppServerDriver {
             .filter(|id| valid_thread_id(id))
             .ok_or(AppServerError::Protocol("turn response lacks a valid ID"))?.to_owned();
         self.turn_id = Some(turn_id.clone());
+        let mut automatic_compaction_reviewed = false;
         loop {
             let frame = if let Some((frame, bytes)) = self.pending_notifications.pop_front() {
                 self.pending_bytes = self.pending_bytes.saturating_sub(bytes);
@@ -428,12 +441,16 @@ impl AppServerDriver {
                 }
                 match method {
                     "hook/started" if params["run"]["eventName"] == "preCompact" => {
+                        automatic_compaction_reviewed = false;
                         emit(EngineEvent::new("lore_review_started", json!({"before":"compaction"})));
                     }
                     "hook/completed" => {
                         if let Some(gate) = self.compact_gate.as_mut() {
                             match gate.observe_completion(&params["run"]) {
-                                crate::codex_compact::ReviewOutcome::Reviewed => emit(EngineEvent::new("lore_review_completed", json!({"before":"compaction"}))),
+                                crate::codex_compact::ReviewOutcome::Reviewed => {
+                                    automatic_compaction_reviewed = true;
+                                    emit(EngineEvent::new("lore_review_completed", json!({"before":"compaction"})));
+                                },
                                 crate::codex_compact::ReviewOutcome::Blocked => return Err(AppServerError::Server("LORE review blocked Codex compaction".into())),
                                 crate::codex_compact::ReviewOutcome::Failed => { self.kill_group(); return Err(AppServerError::Protocol("Codex compaction review hook failed; protected session stopped")); }
                                 crate::codex_compact::ReviewOutcome::Unrelated => {},
@@ -489,6 +506,14 @@ impl AppServerDriver {
                     }
                     "item/started" | "item/completed" => {
                         let item = &params["item"];
+                        if item["type"] == "contextCompaction" && method == "item/completed"
+                            && self.compact_gate.is_some() && !automatic_compaction_reviewed {
+                            self.kill_group();
+                            return Err(AppServerError::Protocol("automatic compaction completed without observed native LORE review; protected session stopped"));
+                        }
+                        if item["type"] == "contextCompaction" && method == "item/completed" {
+                            automatic_compaction_reviewed = false;
+                        }
                         if item["type"] == "fileChange" {
                             if let Some(index) = self.review_items.iter().position(|old| old["id"] == item["id"]) {
                                 self.review_items.remove(index);

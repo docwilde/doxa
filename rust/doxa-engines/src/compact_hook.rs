@@ -50,26 +50,47 @@ fn read_owned(path: &Path, limit: usize, executable:bool) -> io::Result<(Vec<u8>
         ctime:before.ctime(), ctime_nsec:before.ctime_nsec(), mtime:before.mtime(), mtime_nsec:before.mtime_nsec() }))
 }
 
-pub fn review(manifest_path: &Path, event: &Value, mut worker: impl FnMut(&Value) -> io::Result<bool>) -> io::Result<bool> {
+pub(crate) fn review_job(manifest_path: &Path, event: &Value) -> io::Result<Option<ReviewJob>> {
     let (descriptor, _) = safe_read(manifest_path, MAX_INPUT)?;
     let manifest: Value = serde_json::from_slice(&descriptor)?;
+    review_job_for_manifest(&manifest, event)
+}
+
+pub(crate) fn review_job_for_manifest(manifest: &Value, event: &Value) -> io::Result<Option<ReviewJob>> {
     if manifest["version"] != crate::codex_compact::SUPPORTED_VERSION || event["hook_event_name"] != "PreCompact"
         || !matches!(event["trigger"].as_str(),Some("auto" | "manual"))
         || manifest["provider_thread"].as_str().is_none_or(str::is_empty) || event["session_id"] != manifest["provider_thread"]
-        || manifest["lore_enabled"] != true || crate::review_worker::review_disabled() { return Ok(false); }
+        || manifest["lore_enabled"] != true || crate::review_worker::review_disabled() { return Ok(None); }
     let source = Path::new(event["transcript_path"].as_str().ok_or_else(|| io::Error::other("missing transcript"))?);
     let root = fs::canonicalize(manifest["codex_home"].as_str().ok_or_else(|| io::Error::other("missing Codex home"))?)?;
-    if !source.starts_with(root.join("sessions")) && !source.starts_with(root.join("archived_sessions")) { return Ok(false); }
+    if !source.starts_with(root.join("sessions")) && !source.starts_with(root.join("archived_sessions")) { return Ok(None); }
     let (bytes, before) = safe_read(source, MAX_ROLLOUT)?;
-    if bytes.is_empty() || bytes.split(|byte| *byte == b'\n').any(|line| line.len() > MAX_LINE) { return Ok(false); }
+    if bytes.is_empty() || bytes.split(|byte| *byte == b'\n').any(|line| line.len() > MAX_LINE) { return Ok(None); }
     let first: Value = serde_json::from_slice(bytes.split(|byte| *byte == b'\n').next().unwrap_or_default())?;
-    if first["type"] != "session_meta" || first["payload"]["id"] != manifest["provider_thread"] { return Ok(false); }
+    if first["type"] != "session_meta" || first["payload"]["id"] != manifest["provider_thread"] { return Ok(None); }
     let cwd = manifest["cwd"].as_str().filter(|cwd| Path::new(cwd).is_absolute()).ok_or_else(|| io::Error::other("invalid cwd"))?;
     let session = manifest["doxa_session"].as_str().filter(|id| !id.is_empty() && id.len() <= 128 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b)))
         .ok_or_else(|| io::Error::other("invalid session"))?;
-    let approved = worker(&json!({"cwd":cwd,"session_id":session,"provider_thread":manifest["provider_thread"],"transcript":source,
-        "older":true,"expected_source":before.json()}))?;
-    Ok(approved && safe_read(source, MAX_ROLLOUT)?.1 == before)
+    Ok(Some(ReviewJob { source: source.to_owned(), proof: before.clone(), metadata: json!({"cwd":cwd,"session_id":session,"provider_thread":manifest["provider_thread"],"transcript":source,
+        "older":true,"expected_source":before.json()}) }))
+}
+
+/// An owned source snapshot. The worker's answer is accepted only while the
+/// original rollout still has the same bytes and filesystem identity.
+pub(crate) struct ReviewJob {
+    source: std::path::PathBuf,
+    proof: SourceProof,
+    pub(crate) metadata: Value,
+}
+impl ReviewJob {
+    pub(crate) fn unchanged(&self) -> io::Result<bool> {
+        Ok(safe_read(&self.source, MAX_ROLLOUT)?.1 == self.proof)
+    }
+}
+
+pub fn review(manifest_path: &Path, event: &Value, mut worker: impl FnMut(&Value) -> io::Result<bool>) -> io::Result<bool> {
+    let Some(job) = review_job(manifest_path, event)? else { return Ok(false) };
+    Ok(worker(&job.metadata)? && job.unchanged()?)
 }
 
 fn read_input(deadline: Instant) -> io::Result<Vec<u8>> {
@@ -132,4 +153,21 @@ mod tests {
         let mut forged = event; forged["session_id"] = json!("foreign");
         assert!(!review(&manifest,&forged,|_| panic!("must not review foreign session")).unwrap());
     }
+    #[test]
+    fn native_manual_review_failures_never_authorize_an_owned_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = dir.path().join("sessions"); fs::create_dir(&sessions).unwrap();
+        let source = sessions.join("thread.jsonl");
+        let bytes = br#"{"type":"session_meta","payload":{"id":"provider-thread"}}"#;
+        fs::write(&source, bytes).unwrap();
+        let manifest = dir.path().join("manifest.json");
+        fs::write(&manifest, json!({"version":"0.156.1","provider_thread":"provider-thread","doxa_session":"doxa-session","codex_home":dir.path(),"cwd":dir.path(),"lore_enabled":true}).to_string()).unwrap();
+        let event = json!({"hook_event_name":"PreCompact","trigger":"manual","session_id":"provider-thread","transcript_path":source});
+        assert!(!review(&manifest, &event, |_| Ok(false)).unwrap());
+        for failure in ["worker spawn failed", "worker timed out", "invalid approval output"] {
+            assert!(review(&manifest, &event, |_| Err(io::Error::other(failure))).is_err());
+            assert_eq!(fs::read(&source).unwrap(), bytes);
+        }
+    }
+
 }

@@ -1,5 +1,7 @@
 # DOXA 2.0: full Rust port plan
 
+> Historical planning snapshot from 2026-09-24. The native runtime and integrated canonical LORE have since landed; references below to a Python daemon, external LORE, and future adoption describe that original plan. For current installation and behavior, see [README.md](README.md).
+
 Status: planning document for `rust/2.0`; PR status snapshot at
 2026-09-24 15:52 UTC.
 DOXA 1.x remains the behavior reference. **LORE remains an external

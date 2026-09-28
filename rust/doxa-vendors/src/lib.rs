@@ -346,6 +346,7 @@ pub enum Error {
     ToolFailed,
     InvalidToolDefinitions,
     HistoryTooLarge,
+    MissingReasoningHistory,
     ToolResultTooLarge,
     UsageOverflow,
 }
@@ -371,9 +372,9 @@ pub fn request_body(
     });
     if effort == "none" {
         body["thinking"] = json!({"type": "disabled"});
-    } else if vendor == Vendor::DeepSeek {
-        body["thinking"] = json!({"type": "enabled", "reasoning_effort": effort});
     } else {
+        // Both current official Chat Completions contracts place effort at
+        // the request root. A tolerated nested value is not proof it applies.
         body["thinking"] = json!({"type": "enabled"});
         body["reasoning_effort"] = json!(effort);
     }
@@ -853,6 +854,13 @@ async fn run_turn_at(
         .iter()
         .filter_map(|d| d.pointer("/function/name").and_then(Value::as_str))
         .collect();
+    if vendor == Vendor::DeepSeek && effort != "none" && !definitions.is_empty()
+        && history.iter().any(|message| message["role"] == "assistant"
+            && message["reasoning_content"].as_str().is_none()) {
+        // Legacy text-only history cannot reconstruct a discarded reasoning
+        // trace. Fail before making a paid request instead of inventing one.
+        return Err(Error::MissingReasoningHistory);
+    }
     let key = credentials::resolve(vendor).map_err(|_| Error::CredentialStore)?
         .ok_or(Error::MissingCredential(vendor.env_var()))?;
     let mut messages = history.clone();
@@ -932,7 +940,13 @@ async fn run_turn_at(
             if *cancel.borrow() {
                 return Err(Error::Cancelled);
             }
-            messages.push(json!({"role":"assistant","content":completion.text}));
+            let mut assistant = json!({"role":"assistant","content":completion.text});
+            if vendor == Vendor::DeepSeek {
+                // Preserve just the final assistant reasoning for paired
+                // cross-turn replay. Tool-step messages stay turn-local.
+                assistant["reasoning_content"] = json!(completion.reasoning);
+            }
+            messages.push(assistant);
             check_history(&messages)?;
             *history = messages;
             return Ok(outcome);
@@ -958,7 +972,13 @@ async fn run_turn_at(
                 "name":call.name, "arguments":Value::Object(call.arguments.clone()).to_string()
             }
         })).collect();
-        messages.push(json!({"role":"assistant","content":completion.text,"tool_calls":calls}));
+        let mut assistant = json!({"role":"assistant","content":completion.text,"tool_calls":calls});
+        if vendor == Vendor::DeepSeek && effort != "none" {
+            // DeepSeek rejects thinking tool continuation without the complete
+            // preceding assistant reasoning. Keep it in request history only.
+            assistant["reasoning_content"] = json!(completion.reasoning);
+        }
+        messages.push(assistant);
         check_history(&messages)?;
         for call in &completion.tool_calls {
             if *cancel.borrow() {

@@ -817,7 +817,11 @@ fn main() {
         [mode,engine,metadata,timeout] if mode=="__review-supervisor"=>Some((||{
             let value=serde_json::from_str(metadata).map_err(|_|invalid("invalid review metadata"))?;
             let millis=timeout.parse::<u64>().ok().filter(|n|*n<=180000).ok_or_else(||invalid("invalid review timeout"))?;
-            if doxa_engines::review_worker::supervise(&value,engine,Duration::from_millis(millis))? {Ok(())}else{Err(io::Error::other("review did not complete"))}
+            let timeout = Duration::from_millis(millis);
+            if doxa_engines::review_worker::supervise(&value,engine,timeout)? {
+                println!("{}", doxa_engines::review_worker::approval_receipt(&value,engine,timeout)?);
+                Ok(())
+            } else { Err(io::Error::other("review did not complete")) }
         })()),
         _=>None,
     };

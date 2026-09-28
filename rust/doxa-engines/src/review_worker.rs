@@ -1,10 +1,20 @@
 //! Native owner for the canonical LORE reviewer. Metadata is never authority:
 //! lore-rs verifies its frozen source proof before provider work and effects.
 use serde_json::Value;
-use std::{io::{self, Write}, os::{fd::AsRawFd, unix::process::CommandExt}, path::{Path, PathBuf}, process::{Command, Stdio}, time::{Duration, Instant}};
+use std::{io::{self, Read, Write}, os::{fd::AsRawFd, unix::process::CommandExt}, path::{Path, PathBuf}, process::{Command, Stdio}, time::{Duration, Instant}};
 
 pub const MAX_METADATA_BYTES: usize = 16 * 1024;
 pub const REVIEW_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// A successful supervisor must prove which bounded job it approved. Merely
+/// exiting zero (including an executable that ignores helper arguments) cannot
+/// authorize destruction of context.
+pub fn approval_receipt(metadata: &Value, engine: &str, timeout: Duration) -> io::Result<Value> {
+    use sha2::{Digest, Sha256};
+    metadata_bytes(metadata, engine, timeout)?;
+    Ok(serde_json::json!({"approved":true,"job_sha256":format!("{:x}",Sha256::digest(serde_json::to_vec(&serde_json::json!({"metadata":metadata,"engine":engine,"timeout_ms":timeout.as_millis()}))?))}))
+}
+
 pub fn review_disabled() -> bool {
     std::env::var("LORE_DISABLE_REVIEW").is_ok_and(|value| !matches!(value.as_str(), "" | "0"))
         || std::env::var("LORE_SKIP").is_ok_and(|value| !value.is_empty())
@@ -22,31 +32,64 @@ fn metadata_bytes(metadata: &Value, engine: &str, timeout: Duration) -> io::Resu
 /// Spawn an independent supervisor whose stdin remains a parent-liveness pipe.
 /// EOF (including parent SIGKILL) makes it stop and reap its review worker group.
 /// `executable` must dispatch `__review-supervisor` to [`supervise`].
-pub fn review(executable: &Path, metadata: &Value, engine: &str, timeout: Duration, mut cancelled: impl FnMut() -> bool) -> io::Result<bool> {
-    metadata_bytes(metadata, engine, timeout)?;
+pub fn review(executable: &Path, metadata: &Value, engine: &str, timeout: Duration, cancelled: impl FnMut() -> bool) -> io::Result<bool> {
+    review_at(executable, metadata, engine, timeout, cancelled)
+}
+
+/// Execute the already verified native inode, avoiding a path-replacement race.
+pub(crate) fn review_pinned(executable: &std::fs::File, metadata: &Value, engine: &str, timeout: Duration, cancelled: impl FnMut() -> bool) -> io::Result<bool> {
+    review_at(Path::new(&format!("/proc/self/fd/{}",executable.as_raw_fd())), metadata, engine, timeout, cancelled)
+}
+
+fn child_status(pid: libc::pid_t) -> io::Result<Option<bool>> {
+    let mut status: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    if unsafe { libc::waitid(libc::P_PID,pid as libc::id_t,&mut status,libc::WEXITED|libc::WNOHANG|libc::WNOWAIT) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok((unsafe {status.si_pid()} != 0).then(|| status.si_code==libc::CLD_EXITED && unsafe {status.si_status()}==0))
+}
+
+fn review_at(executable: &Path, metadata: &Value, engine: &str, timeout: Duration, mut cancelled: impl FnMut() -> bool) -> io::Result<bool> {
+    let expected_receipt = approval_receipt(metadata, engine, timeout)?;
     if cancelled() || review_disabled() { return Ok(false); }
     let mut command = Command::new(executable);
     command.args(["__review-supervisor", engine, &metadata.to_string(), &timeout.as_millis().to_string()])
-        .stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null());
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
     unsafe { command.pre_exec(|| { if libc::setsid() < 0 { return Err(io::Error::last_os_error()); } Ok(()) }); }
     let mut supervisor = command.spawn()?;
+    let pid = supervisor.id() as libc::pid_t;
     let control = supervisor.stdin.take();
-    let deadline = Instant::now() + timeout + Duration::from_secs(3);
-    loop {
-        if let Some(status) = supervisor.try_wait()? { drop(control); return Ok(status.success()); }
-        if cancelled() || Instant::now() >= deadline { break; }
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    let result = (|| {
+        let mut output = supervisor.stdout.take().ok_or_else(|| io::Error::other("review receipt unavailable"))?;
+        let fd = output.as_raw_fd();
+        if unsafe { libc::fcntl(fd,libc::F_SETFL,libc::O_NONBLOCK) } < 0 { return Err(io::Error::last_os_error()); }
+        let deadline = Instant::now() + timeout + Duration::from_secs(3);
+        let mut raw = Vec::new();
+        let mut eof = false;
+        loop {
+            if cancelled() || Instant::now() >= deadline { return Ok(false); }
+            let mut chunk = [0u8;2049];
+            match output.read(&mut chunk) {
+                Ok(0) => eof=true,
+                Ok(count) => { raw.extend_from_slice(&chunk[..count]); if raw.len()>2048 { return Ok(false); } }
+                Err(error) if error.kind()==io::ErrorKind::WouldBlock => {},
+                Err(error) => return Err(error),
+            }
+            if let Some(success) = child_status(pid)? {
+                if !success { return Ok(false); }
+                if eof { return Ok(serde_json::from_slice::<Value>(&raw).is_ok_and(|receipt|receipt==expected_receipt)); }
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    })();
     drop(control);
-    // The supervisor stops the worker on EOF, then reaps it. Do not SIGKILL
-    // this owner first: its separately owned worker group would be orphaned.
-    let shutdown = Instant::now() + Duration::from_secs(3);
-    while Instant::now() < shutdown {
-        if supervisor.try_wait()?.is_some() { return Ok(false); }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    let _ = supervisor.kill(); let _ = supervisor.wait();
-    Ok(false)
+    // EOF lets the native owner stop its separate worker group. Retain the
+    // leader PID with WNOWAIT until this original supervisor group is killed.
+    let shutdown = Instant::now()+Duration::from_secs(3);
+    while Instant::now()<shutdown && child_status(pid).ok().flatten().is_none() { std::thread::sleep(Duration::from_millis(10)); }
+    unsafe { libc::kill(-pid,libc::SIGKILL); }
+    let _ = supervisor.wait();
+    result
 }
 
 fn binary() -> io::Result<PathBuf> {
@@ -132,4 +175,46 @@ mod tests {
         assert!(!supervise_at(&worker, &serde_json::json!({}), "codex", Duration::from_secs(1), pipe[0]).unwrap());
         unsafe { libc::close(pipe[0]); }
     }
+    #[test]
+    fn native_review_requires_exact_receipt_and_rejects_spawn_or_output_failures() {
+        let dir = tempfile::tempdir().unwrap();
+        let executable = dir.path().join("supervisor-fixture");
+        let metadata = serde_json::json!({"provider_thread":"bound-thread","expected_source":{"sha256":"owned-source"}});
+        let timeout = Duration::from_secs(1);
+        assert!(review(&executable, &metadata, "codex", timeout, || false).is_err());
+        let receipt = approval_receipt(&metadata, "codex", timeout).unwrap();
+        let wrong = approval_receipt(&serde_json::json!({"provider_thread":"foreign"}), "codex", timeout).unwrap();
+        for (output, approved) in [("".to_owned(), false), ("invalid output".to_owned(), false), (wrong.to_string(), false), (receipt.to_string(), true)] {
+            std::fs::write(&executable, format!("#!/bin/sh\nprintf '%s' '{}'\n", output)).unwrap();
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+            assert_eq!(review(&executable, &metadata, "codex", timeout, || false).unwrap(), approved);
+        }
+        assert!(!review(&executable, &metadata, "codex", timeout, || true).unwrap());
+    }
+
+    #[test]
+    fn held_receipt_stdout_and_oversize_output_are_bounded_and_reaped() {
+        let dir=tempfile::tempdir().unwrap(); let executable=dir.path().join("supervisor-fixture");
+        let metadata=serde_json::json!({}); let timeout=Duration::from_millis(20);
+        let receipt=approval_receipt(&metadata,"codex",timeout).unwrap();
+        let pidfile=dir.path().join("child-pid");
+        std::fs::write(&executable,format!("#!/bin/sh\nsleep 60 &\necho $! > '{}'\nprintf '%s' '{}'\n",pidfile.display(),receipt)).unwrap();
+        std::fs::set_permissions(&executable,std::fs::Permissions::from_mode(0o700)).unwrap();
+        let started=Instant::now();
+        assert!(!review(&executable,&metadata,"codex",timeout,||false).unwrap());
+        assert!(started.elapsed()<Duration::from_secs(5));
+        let pid:i32=std::fs::read_to_string(pidfile).unwrap().trim().parse().unwrap();
+        let deadline=Instant::now()+Duration::from_secs(1);
+        let state=loop {
+            let state=std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+            if state.is_empty() || state.split_whitespace().nth(2)==Some("Z") || Instant::now()>=deadline {break state;}
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert!(state.is_empty() || state.split_whitespace().nth(2)==Some("Z"));
+        std::fs::write(&executable,"#!/bin/sh\nhead -c 2049 /dev/zero\n").unwrap();
+        assert!(!review(&executable,&metadata,"codex",timeout,||false).unwrap());
+        assert_ne!(receipt,approval_receipt(&metadata,"claude",timeout).unwrap());
+        assert_ne!(receipt,approval_receipt(&metadata,"codex",Duration::from_secs(1)).unwrap());
+    }
+
 }

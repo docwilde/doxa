@@ -289,6 +289,17 @@ fn slow_model_control_does_not_block_other_clients_status() {
     recv(&mut status_reader);
     send(&mut control_writer, json!({"type":"attach","cursor":null}));
     send(&mut status_writer, json!({"type":"attach","cursor":null}));
+    // Attach admission shares the control lock. Confirm both clients have
+    // attached before testing status while a provider control call is blocked.
+    for writer in [&mut control_writer, &mut status_writer] {
+        send(writer, json!({"type":"call","id":0,"method":"get_state","params":{}}));
+    }
+    for reader in [&mut control_reader, &mut status_reader] {
+        let attached = recv(reader);
+        assert_eq!(attached["type"], "reply");
+        assert_eq!(attached["id"], 0);
+        assert_eq!(attached["ok"], true);
+    }
     send(&mut control_writer, json!({"type":"call","id":1,"method":"set_model","params":{"model":"test-model"}}));
     let deadline = Instant::now() + Duration::from_secs(5);
     while !host.entered.load(Ordering::Acquire) && Instant::now() < deadline {

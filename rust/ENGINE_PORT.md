@@ -1,5 +1,7 @@
 # Rust 2.0 engine adapter plan
 
+> Historical engine migration plan. Its Python SDK/service alternatives and unimplemented surfaces describe the planning stage. The installed runtime now uses native Claude CLI, Codex app-server, vendor HTTP clients, and integrated canonical LORE. See [README.md](README.md) and the crate guides for current implementation; this plan is retained as design history.
+
 This is a port plan for DOXA session engines, based on the Python contracts in `doxa/engines.py`, `events.py`, `engine.py`, `codex.py`, `vendors.py`, `cli_isolation.py`, `auth.py`, `transcript.py`, and `daemon.py`. It describes a target contract, not implemented Rust provider parity. LORE remains a separately installed service and store; Rust must not absorb `lore_core` or silently promise its surfaces.
 
 ## Boundary and order
