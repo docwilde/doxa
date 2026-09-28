@@ -769,13 +769,9 @@ impl DurableTurn {
                     tail = &tail[end..];
                 }
                 block["text"] = json!("");
-                if let Some((_, _, _, output)) =
-                    outputs.iter_mut().find(|(channel, _, _, _)| *channel == ci)
-                {
-                    output.push_str(&clean);
-                } else {
-                    outputs.push((ci, ri, bi, clean));
-                }
+                // Keep completed text at its original record/block position;
+                // only the uncertain lexical carry moves to a later boundary.
+                outputs.push((ci, ri, bi, clean));
             }
         }
         if terminal {
@@ -783,8 +779,10 @@ impl DurableTurn {
                 let clean = stream
                     .finish(|s| shared.scrub(s).map_err(io::Error::other))
                     .map_err(|_| "Claude durable text boundary refused")?;
-                if let Some((_, _, _, output)) =
-                    outputs.iter_mut().find(|(channel, _, _, _)| *channel == ci)
+                if let Some((_, _, _, output)) = outputs
+                    .iter_mut()
+                    .rev()
+                    .find(|(channel, _, _, _)| *channel == ci)
                 {
                     output.push_str(&clean);
                 } else if !clean.is_empty() {
