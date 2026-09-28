@@ -5,6 +5,15 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.42 — 2026-09-28
+
+**Protected provider tests**
+
+- Synchronize fault-injection tests with verified provider startup before
+  checking state; accommodate debug-carrier hashing on slower CI runners.
+- Preserve persistence, cancellation and process-leak assertions and their
+  original deadlines after preparation. Production protection is unchanged.
+
 ## 2.0.0-alpha.41 — 2026-09-28
 
 **Codex Code Mode**

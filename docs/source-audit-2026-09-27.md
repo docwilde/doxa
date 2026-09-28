@@ -326,3 +326,14 @@ before fork; cleanup keeps the owner until its children can be reaped, while the
 driver's shutdown wait stays bounded. Kernel-uninterruptible children can retain
 that small owner until they exit. This ownership change leaves the compiled
 compaction gate and official CLI unchanged.
+
+## CI preparation follow-up in alpha.42
+
+Post-merge CI exposed seven fault-injection tests waiting ten seconds for
+provider state before the protected provider had finished preparing. Preparation
+hashes the full debug daemon twice to bind the trusted compaction carrier;
+neighboring successful CI startups took about twelve seconds. These tests now
+synchronize on the fresh provider turn RPC with the existing thirty-second
+preparation budget, then retain their original persistence, cancellation and
+process-leak assertions and deadlines. The receipt, carrier checks, runtime
+limits and fail-closed compaction contract stay intact.
