@@ -716,8 +716,8 @@ fn flush_streams(
     visible_separator: bool,
 ) -> bool {
     let mut ok = true;
-    while !streams.is_empty() {
-        let mut stream = streams.remove(0);
+    let mut carried = std::mem::take(streams);
+    for stream in &mut carried {
         let clean = (|| {
             let mut text = if visible_separator {
                 stream
@@ -742,6 +742,11 @@ fn flush_streams(
                 ok = false;
             }
         }
+    }
+    // Visible tool separators delimit lexical tokens but remain whitespace for
+    // canonical label matching. Keep recent label context across tool output.
+    if visible_separator {
+        *streams = carried;
     }
     ok
 }
@@ -1528,6 +1533,22 @@ for line in sys.stdin:
             admission: Mutex::new(()),
         });
         (dir, host)
+    }
+    #[test]
+    fn tool_separator_keeps_recent_credential_label_context() {
+        let body = r#"if row['type']=='user':
+  emit({'type':'stream_event','session_id':'$SESSION','event':{'delta':{'type':'text_delta','text':'Bearer '}}})
+  emit({'type':'assistant','session_id':'$SESSION','message':{'role':'assistant','content':[{'type':'tool_use','id':'tool','name':'fixture','input':{}}]}})
+  emit({'type':'stream_event','session_id':'$SESSION','event':{'delta':{'type':'text_delta','text':'abcdefghijklmnopqrstuvwx '}}})
+  emit({'type':'result','session_id':'$SESSION','is_error':False})
+"#.replace("$SESSION", SESSION);
+        let (_dir, host) = fixture(&body);
+        let mut events = Vec::new();
+        host.prompt("task", &mut |event| events.push(event));
+        let public = serde_json::to_string(&events).unwrap();
+        assert!(public.contains("[REDACTED:bearer]"));
+        assert!(!public.contains("abcdefgh"));
+        assert!(host.shutdown());
     }
     #[test]
     fn adjacent_provider_blocks_do_not_release_incomplete_credentials() {
