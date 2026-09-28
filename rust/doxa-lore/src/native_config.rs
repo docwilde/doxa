@@ -25,6 +25,18 @@ pub(crate) fn resolve(timeout: Duration) -> Result<Config, LoreError> {
     Config::from_env_with_root(carrier_root()?, timeout).map_err(|error| LoreError::Remote(error.code()))
 }
 
+pub(crate) fn review_disabled() -> Result<bool, LoreError> {
+    let config = resolve(Duration::from_secs(1))?;
+    let settings = config.settings().map_err(|error| LoreError::Remote(error.code()))?;
+    let value = |name| match settings.get(name) {
+        Ok(value) => Ok(Some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(LoreError::InvalidFrame),
+    };
+    Ok(value("LORE_DISABLE_REVIEW")?.is_some_and(|value| !matches!(value.as_str(), "" | "0"))
+        || value("LORE_SKIP")?.is_some_and(|value| !value.is_empty()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -66,12 +78,31 @@ mod tests {
             }
             assert!(child.status().unwrap().success(), "configuration probe failed: {mode}");
         }
+        fs::write(doxa.join("config.toml"), format!("lore_root = {}\n", serde_json::to_string(&default_root.to_string_lossy()).unwrap())).unwrap();
+        for (name, mode) in [("LORE_DISABLE_REVIEW", "review-disabled"), ("LORE_SKIP", "review-skipped")] {
+            let mut values = serde_json::Map::new();
+            values.insert(name.into(), serde_json::json!("1"));
+            fs::write(&settings, serde_json::json!({"env":values}).to_string()).unwrap();
+            for override_empty in [false, true] {
+                let mut child = Command::new(std::env::current_exe().unwrap());
+                child.args(["--exact", "native_config::tests::configuration_probe", "--nocapture"])
+                    .env_clear().env("HOME", &home).env("DOXA_HOME", &doxa)
+                    .env("DOXA_CONFIG_PROBE", if override_empty { "review-empty-override" } else { mode });
+                if override_empty { child.env(name, ""); }
+                assert!(child.status().unwrap().success(), "review policy probe failed");
+            }
+        }
     }
 
     #[test]
     fn configuration_probe() {
         let Ok(mode) = std::env::var("DOXA_CONFIG_PROBE") else { return; };
         let before = std::env::vars_os().collect::<Vec<_>>();
+        if mode.starts_with("review-") {
+            assert_eq!(review_disabled().unwrap(), mode != "review-empty-override");
+            assert_eq!(before, std::env::vars_os().collect::<Vec<_>>());
+            return;
+        }
         if mode == "explicit-empty-cap" {
             assert!(resolve(Duration::from_secs(1)).is_err());
             assert_eq!(before, std::env::vars_os().collect::<Vec<_>>());

@@ -815,6 +815,9 @@ fn main() {
             println!("{}",doxa_engines::compact_hook::hook_main(Path::new(manifest),digest));return;
         },
         [mode,engine,metadata,timeout] if mode=="__review-supervisor"=>Some((||{
+            if doxa_lore::review_disabled().map_err(|_| invalid("LORE review settings unavailable"))? {
+                return Err(io::Error::other("LORE review is disabled"));
+            }
             let value=serde_json::from_str(metadata).map_err(|_|invalid("invalid review metadata"))?;
             let millis=timeout.parse::<u64>().ok().filter(|n|*n<=180000).ok_or_else(||invalid("invalid review timeout"))?;
             let timeout = Duration::from_millis(millis);

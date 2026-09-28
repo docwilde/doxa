@@ -494,6 +494,9 @@ impl Host for CodexHost {
         if text.split_whitespace().next() == Some("/compact") && !compaction {
             emit(json!({"type":"turn_done","data":{"is_error":true,"error":"Use /compact without arguments"}})); return;
         }
+        if compaction && doxa_lore::review_disabled().unwrap_or(true) {
+            emit(json!({"type":"turn_done","data":{"is_error":true,"error":"LORE review is disabled or unavailable; compaction blocked"}})); return;
+        }
         if compaction && (self.transport != "app-server" || self.driver.lock().unwrap().thread_id().is_none()) {
             emit(json!({"type":"turn_done","data":{"is_error":true,"error":"Reviewed compaction requires an existing native Codex app-server thread"}})); return;
         }

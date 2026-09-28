@@ -30,6 +30,12 @@ pub fn carrier_root() -> Result<Option<PathBuf>, LoreError> {
     native_config::carrier_root()
 }
 
+/// Mandatory review policy uses the same effective store and persisted settings
+/// as the worker. Resolution errors cannot authorize protected compaction.
+pub fn review_disabled() -> Result<bool, LoreError> {
+    native_config::review_disabled()
+}
+
 fn valid_digest(s: &str) -> bool {
     s.len() == 64 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
