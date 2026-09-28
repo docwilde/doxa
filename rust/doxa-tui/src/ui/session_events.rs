@@ -1752,4 +1752,21 @@ mod tests {
         assert_evicted_folds(&app);
     }
 
+
+    #[test]
+    fn eviction_retains_stable_selection_and_other_owner_hover() {
+        use crate::ui::transcript_tools::FoldKey;
+        let mut app = saturated_folds();
+        app.selected_tool_sections.insert("s".into(), FoldKey::Tool("provider-call".into()));
+        app.tool_section_hover = Some(("other".into(), FoldKey::Section(0)));
+        app.transcript_evicted("s", true);
+        assert_eq!(app.selected_tool_sections["s"], FoldKey::Tool("provider-call".into()));
+        assert_eq!(app.tool_section_hover, Some(("other".into(), FoldKey::Section(0))));
+        let mut app = saturated_folds();
+        app.tool_section_hover = Some(("s".into(), FoldKey::Tool("provider-call".into())));
+        app.apply_update(DaemonUpdate::Upsert(Session { id:"s".into(), title:"S".into(), collection:"repo".into(), transcript:"changed".into(), status:"Ready".into() }));
+        assert_eq!(app.tool_section_hover, Some(("s".into(), FoldKey::Tool("provider-call".into()))));
+        assert!(!app.selected_tool_sections.contains_key("s"));
+    }
+
 }
