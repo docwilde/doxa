@@ -9,6 +9,10 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+// Protected startup attests the entire debug daemon twice before provider I/O.
+// Allow preparation on CI hardware separately from cancellation assertions.
+const CODEX_PREPARATION_TIMEOUT: Duration = Duration::from_secs(30);
+
 struct NativeDaemonCommand(Command);
 fn daemon_command() -> NativeDaemonCommand {
     NativeDaemonCommand(Command::new(env!("CARGO_BIN_EXE_doxa-daemon")))
@@ -2978,7 +2982,7 @@ for line in sys.stdin: pass
         let mut process = Process::start_codex_appserver(dir.path(), &codex, &python, resume);
         let (mut reader, mut socket) = process.connect();
         // Native hook trust hashes the debug carrier before starting Codex.
-        reader.get_ref().set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        reader.get_ref().set_read_timeout(Some(CODEX_PREPARATION_TIMEOUT)).unwrap();
         receive(&mut reader);
         send(&mut socket, json!({"type":"attach","cursor":null}));
         for prompt_id in [1, 2] {
@@ -3071,7 +3075,16 @@ fn stopping_codex_during_unanswered_appserver_initialization_is_prompt() {
     send(&mut socket, json!({"type":"attach","cursor":null}));
     send(&mut socket, json!({"type":"prompt","id":1,"text":"not submitted"}));
     assert_eq!(receive(&mut reader)["ok"], true);
-    wait_until(|| marker.exists());
+    // Preparation hashes and pins the full debug carrier before starting the
+    // provider. CI needs a separate readiness budget; cancellation must still
+    // finish within two seconds after initialize has actually been received.
+    let preparation = Instant::now();
+    while !marker.exists() {
+        assert!(!process.exited(), "daemon exited before app-server initialization");
+        assert!(preparation.elapsed() < CODEX_PREPARATION_TIMEOUT,
+            "native carrier preparation did not reach app-server initialization");
+        thread::sleep(Duration::from_millis(10));
+    }
     let started = Instant::now();
     send(&mut socket, json!({"type":"call","id":2,"method":"stop","params":{}}));
     loop {
@@ -3156,7 +3169,7 @@ assert not sys.stdin.readline()
     let (mut reader,mut socket)=process.connect();
     // Native carrier attestation and provider teardown can outlast the old
     // two-second fixture deadline while an installer build is running.
-    reader.get_ref().set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    reader.get_ref().set_read_timeout(Some(CODEX_PREPARATION_TIMEOUT)).unwrap();
     receive(&mut reader);
     send(&mut socket,json!({"type":"attach","cursor":null}));
     send(&mut socket,json!({"type":"prompt","id":1,"text":"never delivered to a provider"}));
@@ -3450,7 +3463,7 @@ while True:
 "#);
     let mut process=Process::start_codex_appserver(dir.path(),&codex,Path::new("/usr/bin/python3"),false);
     let (mut reader,mut socket)=process.connect();
-    reader.get_ref().set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    reader.get_ref().set_read_timeout(Some(CODEX_PREPARATION_TIMEOUT)).unwrap();
     receive(&mut reader);send(&mut socket,json!({"type":"attach","cursor":null}));
     send(&mut socket,json!({"type":"prompt","id":1,"text":"initial fixture"}));
     assert_eq!(claude_receive_until(&mut reader,|frame|frame["event"]["type"]=="turn_done")["event"]["data"]["is_error"],false);
