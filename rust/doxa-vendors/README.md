@@ -1,11 +1,19 @@
 # DOXA vendor chat adapter (Rust 2.0 preview)
 
-`doxa-vendors` implements bounded chat-completions SSE requests and a multi-request turn loop for DeepSeek and GLM. It follows the measured Python request shapes in `doxa/vendors.py`: DeepSeek nests `reasoning_effort` inside `thinking`; GLM places it at the root and refuses `none`; neither receives `max_tokens`. The API key is read from `DEEPSEEK_API_KEY` or `ZAI_API_KEY` when each request starts, passed only in the Authorization header, and never retained by a client struct. HTTP error text is discarded after parsing a bounded vendor code, so a key echoed by a provider cannot enter an error display. Streamed text and tool argument values redact the active key, including when it is split across SSE fragments.
+`doxa-vendors` implements bounded chat-completions SSE transport and a tool turn loop for DeepSeek and GLM. The native daemon connects it through `VendorHost` and `NativeVendorGate`. DeepSeek nests `reasoning_effort` inside `thinking`; GLM places it at the root and refuses `none`; neither receives `max_tokens`.
 
-The SSE decoder caps a line at 1 MiB and a response at 64 MiB. Tool arguments cap at 1 MiB with at most 128 calls. Cancellation drops an in-flight HTTP request.
+## Credentials
 
-`run_turn` now owns a bounded multi-request turn: it carries chat-completions history across tool steps, sums provider-reported prompt and completion tokens, and applies one deadline (at most 3600 seconds) across requests and tool execution. It caps tool steps at 24, history at 512 messages/8 MiB, and each tool result at 1 MiB. History is committed only on success. A failed turn may have already executed a tool, so callers must not blindly retry it.
+Use the masked DeepSeek or z.ai fields in DOXA's `/setup`, or inherit `DEEPSEEK_API_KEY` / `ZAI_API_KEY`. Private saved keys override environment keys. Removing an override restores environment fallback. The owner-only plaintext `DOXA_HOME/credentials.json` store uses checked directory descriptors, atomic writes and a bounded lock; unsafe stores fail closed. Project files and LORE memory are not credential sources.
 
-Tool definitions are sent only when the caller supplies a concrete `ToolGate`. The gate must own permission checks and safe tool execution; the crate validates offered names and refuses unoffered calls. Its errors are not sent to the provider. The active API key is scrubbed from tool results before they are added to history. Callers must still scrub other secrets in prompts, definitions, history, and results. This crate does not claim `mcp_tools`/`tool_gate` parity until a production gate is connected.
+Each new turn, model catalog and DeepSeek balance request resolves credentials afresh. A running turn keeps its authentication key fixed across tool steps. Keys travel in the Authorization header and are not retained in a client struct. Exact known keys are removed from request context and successful retained history; completed tool metadata is masked before reaching gates. The host applies canonical LORE scrubbing before transcript boundaries, and the workspace gate rejects the credential path before opening it. Provider error bodies are discarded after parsing bounded, sanitized codes.
 
-The crate is not yet wired to the native daemon. CI enables a loopback-only test transport and uses a local fake HTTP server with synthetic keys. The production entry point fixes provider URLs, so an arbitrary endpoint cannot receive an API key. Live DeepSeek/GLM behavior, credentials, model catalogue changes, LORE tool gating, and price-sheet charges remain release gates.
+## Bounds and tool ownership
+
+The SSE decoder caps a line at 1 MiB and a response at 64 MiB. Tool arguments cap at 1 MiB with at most 128 calls. Cancellation drops an in-flight request. `run_turn` limits a turn to 24 tool steps, 512 messages / 8 MiB of history, 1 MiB per tool result and a deadline of at most 3600 seconds; it sums provider-reported usage and commits history only on success. Failed turns may have executed a tool and must not be retried blindly.
+
+A concrete `ToolGate` owns approval and execution. The adapter validates offered names and refuses unoffered calls; gate errors are not sent to the provider. The daemon exposes explicitly enabled workspace reads and approved native LORE, peer and session tools. Callers remain responsible for canonical scrubbing of secrets other than known vendor keys.
+
+## Verification
+
+CI enables the loopback-only transport and exercises synthetic keys against local HTTP fixtures, including rotation in existing history, inactive-key metadata, storage attacks, cancellation and tool gates. Production URLs are fixed. Fixtures make no paid requests and do not establish live account availability, catalog contents or pricing.
