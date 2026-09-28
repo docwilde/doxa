@@ -4057,6 +4057,41 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn streamed_tool_reasoning_cache_matches_full_render() {
+        use transcript_tools::FoldKey;
+        let mut source = "**You:**\n\nEarlier\n\n**Assistant:**\n\nTool: Read started · old\n\n**You:**\n\nNext\n\n**Assistant:**\n\n".to_owned();
+        let expanded = HashSet::from([FoldKey::Section(0), FoldKey::Section(1), FoldKey::Section(2), FoldKey::Tool("legacy:Section(2):0".into())]);
+        let selected = Some(FoldKey::Tool("legacy:Section(2):0".into()));
+        let mut cached = RenderedTranscript::render(0, "s", &source, 38, Some(&expanded), selected.clone(), 0, &[]);
+        for chunk in [
+            "\u{001e}DOXA_REASONING:{\"text\":\"Thinking\",\"tokens\":3,\"streaming\":false}\n\n",
+            "Tool: Read started · new\n\n", "Response [link](https://example.com)", " with more text", "\n\n```rust\nfn main() {}\n```", "\n\nDone",
+        ] {
+            source.push_str(chunk);
+            cached.update(&source, 38, Some(&expanded), selected.clone(), 0, &[]);
+            let (lines, sections, links) = transcript_tools::render_with_links(&source, 38, Some(&expanded), selected.clone(), &[]);
+            assert_eq!(cached.lines, lines);
+            assert_eq!(cached.sections, sections);
+            assert_eq!(cached.links, links);
+        }
+    }
+
+    #[test]
+    #[ignore = "manual deterministic render throughput measurement"]
+    fn streamed_tool_render_throughput() {
+        let history = (0..3000).map(|_| "**You:**\n\nEarlier question\n\n**Assistant:**\n\nEarlier answer with **markdown** and a [link](https://example.com).\n\n").collect::<String>();
+        let mut source = format!("{history}**You:**\n\nNext\n\n**Assistant:**\n\nTool: Read started · file.rs\n\n");
+        let mut cached = RenderedTranscript::render(0, "s", &source, 80, None, None, 0, &[]);
+        let start = Instant::now();
+        for _ in 0..200 { source.push_str(" streamed"); cached.update(&source, 80, None, None, 0, &[]); }
+        let incremental = start.elapsed();
+        source.truncate(source.len() - 200 * " streamed".len());
+        let start = Instant::now();
+        for _ in 0..200 { source.push_str(" streamed"); let _ = transcript_tools::render_with_links(&source, 80, None, None, &[]); }
+        eprintln!("200 tool-turn delta paints: cached={incremental:?}, full={:?}, history={} bytes", start.elapsed(), history.len());
+    }
+
+    #[test]
     fn rendered_transcript_invalidates_on_width_and_expansion() {
         let source = "**Assistant:**\n\nTool: Read started · file.rs\n\nTool: Read finished · ok";
         let mut cached = RenderedTranscript::render(0, "s", source, 60, None, None, 0, &[]);

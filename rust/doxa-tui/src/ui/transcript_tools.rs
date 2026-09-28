@@ -109,7 +109,7 @@ fn append_markdown(lines: &mut Vec<Line<'static>>, links: &mut Vec<markdown::Lin
 
 fn render_turn(blocks: &mut Vec<Block<'_>>, lines: &mut Vec<Line<'static>>,
                sections: &mut Vec<Section>, links: &mut Vec<markdown::LinkRegion>, width: u16,
-               expanded: Option<&HashSet<FoldKey>>, selected: Option<FoldKey>, cards: &[ToolCard]) {
+               expanded: Option<&HashSet<FoldKey>>, selected: Option<FoldKey>, cards: &[ToolCard], section_offset: usize) {
     let mut prose = String::new();
     let mut speaker = None;
     let flush_prose = |prose: &mut String, lines: &mut Vec<Line<'static>>, links: &mut Vec<markdown::LinkRegion>, speaker| {
@@ -121,7 +121,7 @@ fn render_turn(blocks: &mut Vec<Block<'_>>, lines: &mut Vec<Line<'static>>,
     // Keep fold identities in transcript order while laying each turn's tool
     // activity out after its final response. New prose must not move the tool
     // section back above the response or change which section is expanded.
-    let mut next_index = sections.iter().filter(|s| matches!(s.index, FoldKey::Section(_))).count();
+    let mut next_index = section_offset + sections.iter().filter(|s| matches!(s.index, FoldKey::Section(_))).count();
     let mut ordered = Vec::with_capacity(blocks.len());
     let mut tools = Vec::new();
     for block in blocks.drain(..) {
@@ -299,6 +299,13 @@ pub(super) fn render_with_links(
     source: &str, width: u16, expanded: Option<&HashSet<FoldKey>>,
     selected: Option<FoldKey>, cards: &[ToolCard],
 ) -> (Vec<Line<'static>>, Vec<Section>, Vec<markdown::LinkRegion>) {
+    render_with_links_from(source, width, expanded, selected, cards, 0)
+}
+
+pub(super) fn render_with_links_from(
+    source: &str, width: u16, expanded: Option<&HashSet<FoldKey>>,
+    selected: Option<FoldKey>, cards: &[ToolCard], section_offset: usize,
+) -> (Vec<Line<'static>>, Vec<Section>, Vec<markdown::LinkRegion>) {
     let mut lines = Vec::new();
     let mut sections = Vec::new();
     let mut links = Vec::new();
@@ -310,12 +317,12 @@ pub(super) fn render_with_links(
         if paragraph.is_empty() { continue; }
         if fence.is_none() && matches!(paragraph, "**You:**" | "**Assistant:**") {
             if paragraph == "**You:**" {
-                render_turn(&mut blocks, &mut lines, &mut sections, &mut links, width, expanded, selected.clone(), cards);
+                render_turn(&mut blocks, &mut lines, &mut sections, &mut links, width, expanded, selected.clone(), cards, section_offset);
                 tool_index = None;
             }
             blocks.push(Block::Heading(paragraph));
         } else if fence.is_none() && paragraph.starts_with(SHELL_PREFIX) {
-            render_turn(&mut blocks, &mut lines, &mut sections, &mut links, width, expanded, selected.clone(), cards);
+            render_turn(&mut blocks, &mut lines, &mut sections, &mut links, width, expanded, selected.clone(), cards, section_offset);
             tool_index = None;
             if let Ok(result) = serde_json::from_str(paragraph.strip_prefix(SHELL_PREFIX).unwrap()) { blocks.push(Block::Shell(result)); }
             else { blocks.push(Block::Prose("Local shell output unavailable")); }
@@ -343,7 +350,7 @@ pub(super) fn render_with_links(
             }
         }
     }
-    render_turn(&mut blocks, &mut lines, &mut sections, &mut links, width, expanded, selected.clone(), cards);
+    render_turn(&mut blocks, &mut lines, &mut sections, &mut links, width, expanded, selected.clone(), cards, section_offset);
     (lines, sections, links)
 }
 

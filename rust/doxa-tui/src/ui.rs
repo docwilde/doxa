@@ -1046,16 +1046,17 @@ struct RenderedTranscript {
     links: Vec<markdown::LinkRegion>,
     turn_start: Option<usize>,
     prefix_lines: usize,
+    prefix_sections: usize,
 }
 
-/// Locate the final role heading outside fenced code. Repainting a streamed
-/// turn can then parse only that turn while retaining the earlier styled lines.
+/// Locate the final user turn outside fenced code. Tools are laid out after
+/// their response, so cache the whole turn while retaining earlier styled lines.
 fn streamed_turn_start(source: &str) -> Option<usize> {
     let mut fence = None;
     let mut start = 0;
     let mut found = None;
     for paragraph in source.split("\n\n") {
-        if fence.is_none() && matches!(paragraph.trim_matches('\n'), "**You:**" | "**Assistant:**")
+        if fence.is_none() && paragraph.trim_matches('\n') == "**You:**"
         {
             found = Some(start);
         } else {
@@ -1097,25 +1098,11 @@ impl RenderedTranscript {
     ) -> Self {
         let (lines, sections, links) =
             transcript_tools::render_with_links(source, width, expanded, selected.clone(), cards);
-        let mut turn_start = None;
-        let mut prefix_lines = 0;
-        if let Some(start) = streamed_turn_start(source) {
-            let tail = &source[start..];
-            if !tail.contains("Tool: ")
-                && !tail.contains(transcript_tools::REASONING_PREFIX)
-                && !tail.contains(transcript_tools::SHELL_PREFIX)
-            {
-                let (tail_lines, tail_sections) = transcript_tools::render(tail, width, None, None);
-                if tail_sections.is_empty() && lines.len() > tail_lines.len() {
-                    prefix_lines = lines.len() - tail_lines.len() - 1;
-                    // A deferred tool section at the end belongs to this
-                    // turn, even if its source precedes the final heading.
-                    if sections.iter().all(|section| section.line < prefix_lines) {
-                        turn_start = Some(start);
-                    }
-                }
-            }
-        }
+        let turn_start = streamed_turn_start(source);
+        let (prefix_lines, prefix_sections) = turn_start.map(|start| {
+            let (prefix, folds) = transcript_tools::render_with_cards(&source[..start], width, expanded, selected.clone(), cards);
+            (prefix.len(), folds.iter().filter(|fold| matches!(fold.index, transcript_tools::FoldKey::Section(_))).count())
+        }).unwrap_or((0, 0));
         Self {
             pane,
             id: id.to_owned(),
@@ -1129,6 +1116,7 @@ impl RenderedTranscript {
             links,
             turn_start,
             prefix_lines,
+            prefix_sections,
         }
     }
 
@@ -1151,29 +1139,25 @@ impl RenderedTranscript {
             }
             if let Some(start) = self.turn_start.filter(|_| source.starts_with(&self.source)) {
                 if streamed_turn_start(source) == Some(start) {
-                    let tail = &source[start..];
-                    if !tail.contains("Tool: ")
-                        && !tail.contains(transcript_tools::REASONING_PREFIX)
-                        && !tail.contains(transcript_tools::SHELL_PREFIX)
-                    {
-                        let (tail_lines, tail_sections, mut tail_links) =
-                            transcript_tools::render_with_links(tail, width, None, None, &[]);
-                        if tail_sections.is_empty() {
-                            self.links.retain(|link| link.row < self.prefix_lines);
-                            for link in &mut tail_links {
-                                link.row += self.prefix_lines + 1;
-                            }
-                            self.links.extend(tail_links);
-                            self.lines.truncate(self.prefix_lines);
-                            self.lines.push(Line::default());
-                            self.lines.extend(tail_lines);
-                            self.sections
-                                .retain(|section| section.line < self.prefix_lines);
-                            self.source.clear();
-                            self.source.push_str(source);
-                            return;
-                        }
+                    let (tail_lines, mut tail_sections, mut tail_links) = transcript_tools::render_with_links_from(
+                        &source[start..], width, expanded, selected.clone(), cards, self.prefix_sections);
+                    self.links.retain(|link| link.row < self.prefix_lines);
+                    self.lines.truncate(self.prefix_lines);
+                    if !self.lines.is_empty() && !self.lines.last().is_some_and(|line| line.spans.is_empty()) {
+                        self.lines.push(Line::default());
                     }
+                    let offset = self.lines.len();
+                    for link in &mut tail_links { link.row += offset; }
+                    for section in &mut tail_sections {
+                        section.line += offset;
+                    }
+                    self.links.extend(tail_links);
+                    self.lines.extend(tail_lines);
+                    self.sections.retain(|section| section.line < self.prefix_lines);
+                    self.sections.extend(tail_sections);
+                    self.source.clear();
+                    self.source.push_str(source);
+                    return;
                 }
             }
         }
