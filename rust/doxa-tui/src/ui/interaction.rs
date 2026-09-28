@@ -200,7 +200,7 @@ impl App {
     pub(super) fn finish_prompt_owner_transition(&mut self, before: (usize, String)) {
         let after = self.prompt_owner();
         if self.operations_menu.as_ref().is_some_and(|menu| menu.editing_credential())
-            && (before != after || self.active_request_index().is_some()) {
+            && before != after {
             self.retire_operations(); self.chip_info = None;
         }
         if before != after {
@@ -1427,6 +1427,11 @@ impl App {
     }
 
     pub(super) fn active_request_index(&self) -> Option<usize> {
+        // Keep both input and rendering with the secret editor until the user
+        // explicitly saves or cancels. Requests remain queued in their store.
+        if self.operations_menu.as_ref().is_some_and(|menu| menu.editing_credential()) {
+            return None;
+        }
         let id = self.groups[self.active_group].active_id()?;
         self.input_requests.iter().position(|r| r.session_id == id)
     }

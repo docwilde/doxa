@@ -105,16 +105,24 @@ use super::*;
 
         app.open_operations(operations_menu::Menu::new("setup"));
         open(&mut app, "DeepSeek API key");
-        app.handle(Event::Paste("fixture-question-secret".into()));
         let session = app.groups[0].active_id().unwrap().to_owned();
-        app.input_requests.push(InputRequest::from_event(&session, &json!({
-            "id":"question", "kind":"ask_user", "questions":[{"question":"Choose?", "options":[]}]
-        })).unwrap());
-        app.handle(key(KeyCode::Char('Z')));
-        assert!(app.operations_menu.is_none());
+        app.apply_daemon_frame(&json!({"type":"event", "session_id":session,
+            "event":{"type":"needs_input", "data":{
+                "id":"question", "kind":"ask_user", "questions":[{"question":"Choose?", "options":[]}]
+            }}}));
+        assert!(app.active_request_index().is_none());
+        for ch in "fixture-question-secret".chars() { app.handle(key(KeyCode::Char(ch))); }
+        assert!(app.operations_menu.as_ref().unwrap().editing_credential());
         assert!(app.input_requests[0].free_text.is_empty());
         assert!(app.pending_answers.is_empty());
         assert!(!app.input.contains("fixture-question-secret"));
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let rendered = terminal.backend().buffer().content.iter().map(|cell| cell.symbol()).collect::<String>();
+        assert!(rendered.contains('•')); assert!(!rendered.contains("fixture-question-secret"));
+        assert!(rendered.contains("API key:")); assert!(!rendered.contains("Choose?"));
+        app.handle(key(KeyCode::Esc));
+        assert!(app.active_request_index().is_some());
+        assert!(app.pending_answers.is_empty());
     }
 
     #[test]
