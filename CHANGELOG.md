@@ -19,6 +19,13 @@ the stable 2.0 release has not been cut.
 - Expand each tool call separately inside **`transcript_tools`** sections.
   Use keyboard selection or mouse clicks to reveal that call's input and result.
 
+**Streaming repaint.**
+
+- Keep history cached in **`RenderedTranscript`** when Claude turns contain
+  tools or reasoning; repaint the current turn with its original links and folds.
+- In the debug render benchmark with 339 KB of history, 200 text updates take
+  0.55 s instead of 12.34 s. Tool-card revisions still invalidate the full cache.
+
 **Canonical LORE sync.**
 
 - Pin **`lore-core`** to 0.61.1 in the native bridge and Python development

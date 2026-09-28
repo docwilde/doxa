@@ -1082,7 +1082,7 @@ fn streamed_turn_start(source: &str) -> Option<usize> {
         }
         start += paragraph.len() + 2;
     }
-    found.filter(|start| *start > 0)
+    found
 }
 
 impl RenderedTranscript {
