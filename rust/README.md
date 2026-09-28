@@ -195,13 +195,20 @@ Claude compaction also waits for LORE review. Vendor `/compact` preserves the
 full durable conversation and writes a separate, reviewed summary checkpoint;
 it validates the original prefix before using that summary on resume.
 
-Alpha.40 requires DOXA's private Codex 0.156.1 app-server build. It flushes the
+Alpha.41 requires DOXA's private Codex 0.156.1 app server and its matching
+`codex-code-mode-host`. Model-required Code Mode uses that native host; the
+launcher verifies both private artifacts before dispatch. The app server flushes the
 owned rollout before review and blocks local and remote compaction before
 inference or history replacement unless exactly one trusted synchronous hook
 explicitly allows continuation. Missing, failed, timed-out, malformed, asynchronous
 or duplicate review refuses compaction. Stock app servers refuse protected turns.
 Legacy exec sessions stay read only until an explicit same-thread migration with
 `DOXA_CODEX_MIGRATE_APPSERVER=1`. The official Codex CLI is retained for login/help.
+
+Protected DOXA sessions use a private Linux provider supervisor. Its control
+handshake completes before the provider starts; control closure on cancellation,
+shutdown or daemon death stops and reaps provider descendants even across new
+process groups or sessions. The daemon does not adopt unrelated jobs.
 
 Ten tests against the compiled provider cover nine refusal cases and a successful
 allow control with a loopback model. Real-account successful LORE review and

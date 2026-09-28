@@ -9,7 +9,8 @@ use std::{
     io::{self, Read},
     os::unix::{
         fs::{MetadataExt, OpenOptionsExt},
-        io::AsRawFd,
+        io::{AsRawFd, FromRawFd},
+        net::UnixStream,
         process::CommandExt,
     },
     path::{Path, PathBuf},
@@ -27,6 +28,12 @@ struct Receipt {
     source_commit: String,
     patch_sha256: String,
     binary_sha256: String,
+    #[serde(default)]
+    code_mode_host_sha256: Option<String>,
+    #[serde(default)]
+    code_mode_host_source_commit: Option<String>,
+    #[serde(default)]
+    code_mode_host_dispatcher_sha256: Option<String>,
     official_cli: PathBuf,
 }
 fn invalid(message: &str) -> io::Error {
@@ -71,31 +78,8 @@ fn receipt(path: &Path) -> io::Result<Receipt> {
     }
     Ok(receipt)
 }
-fn run() -> io::Result<()> {
-    let launcher = env::current_exe()?;
-    let root = launcher
-        .parent()
-        .ok_or_else(|| invalid("provider launcher has no directory"))?;
-    let directory = std::fs::symlink_metadata(root)?;
-    if !directory.is_dir()
-        || directory.file_type().is_symlink()
-        || directory.uid() != unsafe { libc::geteuid() }
-        || directory.mode() & 0o077 != 0
-    {
-        return Err(invalid("provider installation must be private and owned"));
-    }
-    let receipt = receipt(&root.join("receipt.json"))?;
-    let mut args = env::args_os().skip(1).collect::<Vec<_>>();
-    if args.first().is_none_or(|arg| arg != "app-server") {
-        if !receipt.official_cli.is_absolute()
-            || std::fs::canonicalize(&receipt.official_cli)? == launcher
-        {
-            return Err(invalid("official Codex CLI is unavailable"));
-        }
-        return Err(Command::new(receipt.official_cli).args(args).exec());
-    }
-    let path = root.join("codex-app-server");
-    let mut binary = safe_file(&path, MAX_BINARY, true)?;
+fn checked_binary(path: &Path, expected_digest: &str) -> io::Result<File> {
+    let mut binary = safe_file(path, MAX_BINARY, true)?;
     let before = binary.metadata()?;
     let mut hasher = Sha256::new();
     let mut buffer = [0_u8; 65536];
@@ -107,12 +91,12 @@ fn run() -> io::Result<()> {
         }
         total += count as u64;
         if total > MAX_BINARY {
-            return Err(invalid("provider binary grew beyond its bound"));
+            return Err(invalid("provider executable grew beyond its bound"));
         }
         hasher.update(&buffer[..count]);
     }
     let after = binary.metadata()?;
-    if format!("{:x}", hasher.finalize()) != receipt.binary_sha256
+    if format!("{:x}", hasher.finalize()) != expected_digest
         || (
             before.dev(),
             before.ino(),
@@ -128,15 +112,74 @@ fn run() -> io::Result<()> {
         )
     {
         return Err(invalid(
-            "protected provider binary differs from its build receipt",
+            "protected executable differs from its build receipt",
         ));
     }
-    args.remove(0);
-    if args.first().is_some_and(|arg| arg == "--stdio") {
+    Ok(binary)
+}
+fn run() -> io::Result<()> {
+    let launcher = env::current_exe()?;
+    let root = launcher
+        .parent()
+        .ok_or_else(|| invalid("provider launcher has no directory"))?;
+    let directory = std::fs::symlink_metadata(root)?;
+    if !directory.is_dir()
+        || directory.file_type().is_symlink()
+        || directory.uid() != unsafe { libc::geteuid() }
+        || directory.mode() & 0o077 != 0
+    {
+        return Err(invalid("provider installation must be private and owned"));
+    }
+    let receipt = receipt(&root.join("receipt.json"))?;
+    let mut args = env::args_os().skip(1).collect::<Vec<_>>();
+    let helper_mode = launcher
+        .file_name()
+        .is_some_and(|name| name == "codex-code-mode-host");
+    if !helper_mode && args.first().is_none_or(|arg| arg != "app-server") {
+        if !receipt.official_cli.is_absolute()
+            || std::fs::canonicalize(&receipt.official_cli)? == launcher
+        {
+            return Err(invalid("official Codex CLI is unavailable"));
+        }
+        return Err(Command::new(receipt.official_cli).args(args).exec());
+    }
+    if receipt.code_mode_host_source_commit.as_deref() != Some(SOURCE) {
+        return Err(invalid("required code-mode helper is not bound to the reviewed source; rerun the DOXA installer"));
+    }
+    let host_digest = receipt.code_mode_host_sha256.as_deref().ok_or_else(|| {
+        invalid("required code-mode helper receipt is missing; rerun the DOXA installer")
+    })?;
+    let dispatcher_digest = receipt
+        .code_mode_host_dispatcher_sha256
+        .as_deref()
+        .ok_or_else(|| {
+            invalid("required code-mode dispatcher receipt is missing; rerun the DOXA installer")
+        })?;
+    // Upstream starts the sibling dispatcher lazily. Its helper mode verifies
+    // the payload again at actual execution and fexecve pins that checked inode.
+    let _dispatcher = checked_binary(&root.join("codex-code-mode-host"), dispatcher_digest)?;
+    let host = checked_binary(&root.join("codex-code-mode-host-payload"), host_digest)?;
+    let path = root.join(if helper_mode {
+        "codex-code-mode-host-payload"
+    } else {
+        "codex-app-server"
+    });
+    let binary = if helper_mode {
+        host
+    } else {
+        checked_binary(&path, &receipt.binary_sha256)?
+    };
+    if !helper_mode {
         args.remove(0);
+        if args.first().is_some_and(|arg| arg == "--stdio") {
+            args.remove(0);
+        }
     }
     let mut command = Command::new(&path);
-    command.args(["--listen", "stdio://"]).args(args);
+    if !helper_mode {
+        command.args(["--listen", "stdio://"]);
+    }
+    command.args(args);
     // fexecve executes the pinned inode, including when its path is replaced.
     let command_args = std::iter::once(command.get_program())
         .chain(command.get_args())
@@ -145,7 +188,13 @@ fn run() -> io::Result<()> {
             CString::new(value.as_bytes()).map_err(|_| invalid("invalid provider argument"))
         })
         .collect::<io::Result<Vec<_>>>()?;
+    let owner = if !helper_mode {
+        env::var(doxa_engines::provider_owner::CONTROL_ENV).ok()
+    } else {
+        None
+    };
     let environment = env::vars_os()
+        .filter(|(key, _)| key != doxa_engines::provider_owner::CONTROL_ENV)
         .map(|(key, value)| {
             use std::os::unix::ffi::OsStrExt;
             let mut bytes = key.as_bytes().to_vec();
@@ -164,10 +213,41 @@ fn run() -> io::Result<()> {
         .map(|value| value.as_ptr())
         .chain(std::iter::once(std::ptr::null()))
         .collect::<Vec<_>>();
-    unsafe {
-        libc::fexecve(binary.as_raw_fd(), args.as_ptr(), environment.as_ptr());
+    let exec = || {
+        unsafe {
+            libc::fexecve(binary.as_raw_fd(), args.as_ptr(), environment.as_ptr());
+        }
+        io::Error::last_os_error()
+    };
+    if let Some(owner) = owner {
+        let fd = owner
+            .parse::<i32>()
+            .ok()
+            .filter(|fd| *fd >= 3)
+            .ok_or_else(|| invalid("invalid provider owner control descriptor"))?;
+        let mut kind = 0_i32;
+        let mut size = std::mem::size_of_val(&kind) as libc::socklen_t;
+        if unsafe {
+            libc::getsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_TYPE,
+                (&mut kind as *mut i32).cast(),
+                &mut size,
+            )
+        } != 0
+            || kind != libc::SOCK_STREAM
+        {
+            return Err(invalid("provider owner control must be a stream socket"));
+        }
+        if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let code =
+            doxa_engines::provider_owner::supervise(unsafe { UnixStream::from_raw_fd(fd) }, exec)?;
+        std::process::exit(code);
     }
-    Err(io::Error::last_os_error())
+    Err(exec())
 }
 fn main() {
     if let Err(error) = run() {

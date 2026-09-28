@@ -42,7 +42,9 @@ trust gates and unavailable historical data retain their documented limits.
   trusted synchronous review hook and disabled token-budget resets. Review
   infrastructure failures stop compaction before inference/history replacement.
   Stock builds refuse protected turns; legacy exec sessions remain read only
-  until explicit migration resumes their original thread. Compiled loopback
+  until explicit migration resumes their original thread. Alpha.41 also installs
+  the matching native Code Mode host and verifies its receipt for models that
+  require Code Mode rather than direct shell tools. Compiled loopback
   tests verify the gate; successful real-account LORE review and large-context
   compaction remain unverified without Claude reviewer authentication. Native
   vendor compaction retains durable history and a reviewed summary checkpoint.

@@ -277,3 +277,52 @@ partial imports and current-stream status. Its standalone CLI, administration,
 setup, hooks, MCP and network commands were already native; the earlier migration
 claim was stale. Python remains a development oracle and provider build tooling,
 with no installed DOXA/LORE runtime dependency.
+
+## Code Mode dependency follow-up in alpha.41
+
+The fresh file-tool probe exposed a missing runtime dependency in the private
+Codex package. Official cached `gpt-6-sol` metadata requires `code_mode_only`;
+the pinned provider therefore hides direct shell tools. Its installation resolver
+looks for `codex-code-mode-host` beside the actual app server and does not fall
+back to `PATH` when the current executable is known. Alpha.40 omitted that host.
+The disabled token-budget reset feature does not cause this tool limitation.
+
+Alpha.41 builds the host from the same verified source, installs it beside the
+private server and binds it to the receipt and native startup verification.
+Existing alpha.40 receipts migrate only with unchanged trusted server/source/
+patch identity. Publication and repair preserve the complete prior installation
+on failure. The official CLI remains available for login and ordinary commands.
+
+The helper's sandbox V8 archive and generated Rust bindings are verified against
+the release manifest pinned by the official Codex source. Inherited V8 and Rust
+build overrides are cleared. The helper cache fingerprint includes those native
+input hashes. The installed receipt binds the helper payload, dispatcher and
+source; the native dispatcher checks the opened payload again when the app
+server starts it lazily, then executes that file descriptor.
+
+Three credential-free checks used the actual compiled package: a successful
+workspace read through both native dispatchers, refusal with the helper missing,
+and correlated successful command call/result/detail through DOXA and native
+LORE. Each made two loopback requests. The unpredictable file token was absent
+from the first request, the final response came from the returned tool output,
+and the source file stayed unchanged. Ten proof tests and eleven installer
+tests cover these assertions and artifact migration/repair.
+
+A subsequent two-turn authenticated check accepted `gpt-6-sol` with low effort,
+executed the actual file read and recalled its token after daemon restart on
+the same provider thread. Both turns reported complete usage. Fixtures and
+original authentication stayed unchanged; no owned processes or credential
+copies remained. Successful LORE review and large-context compaction still
+require Claude reviewer authentication.
+
+The enabled Code Mode host also exposed a lifecycle gap: a real tool process
+survived daemon shutdown after escaping the original provider process group.
+Alpha.41 gives each protected provider a private native Linux subreaper and a
+parent-owned Unix control socket. READY/G completes before provider fork; EOF
+stops and reaps the owner's kernel children across process groups, sessions and
+orphan adoption. Failed readiness retains direct-child/group cleanup. The daemon
+does not become a global subreaper. Fallible setup and child-census checks happen
+before fork; cleanup keeps the owner until its children can be reaped, while the
+driver's shutdown wait stays bounded. Kernel-uninterruptible children can retain
+that small owner until they exit. This ownership change leaves the compiled
+compaction gate and official CLI unchanged.

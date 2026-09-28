@@ -8,6 +8,8 @@ pub mod session_tools;
 #[cfg(unix)]
 pub mod codex_appserver;
 #[cfg(unix)]
+pub mod provider_owner;
+#[cfg(unix)]
 pub mod codex_compact;
 pub mod review_worker;
 pub mod compact_hook;
