@@ -2,7 +2,8 @@
 
 The example uses only fixture sessions and daemon frames. Pillow rasterizes
 its styled terminal cells; no account, daemon, provider, or terminal recording
-is involved. Run: python3 scripts/rust_gallery.py [scene ...]
+is involved. Run: python3 scripts/rust_gallery.py [scene ...]. Fixture images
+default to target/gallery-fixtures; published live screenshots are separate.
 """
 from __future__ import annotations
 
@@ -68,7 +69,7 @@ def capture(name: str, binary: Path | None = None, output_dir: Path | None = Non
             draw_branch_symbol(draw, left, top, tuple(fg))
         elif symbol.strip():
             draw.text((left, top + 1), symbol, font=font, fill=tuple(fg), stroke_width=0)
-    directory = output_dir if output_dir is not None else ROOT / "assets" / "shots"
+    directory = output_dir if output_dir is not None else ROOT / "target" / "gallery-fixtures"
     directory.mkdir(parents=True, exist_ok=True)
     dest = directory / f"rust-{name}.png"
     image.save(dest, optimize=True)
@@ -78,7 +79,7 @@ def capture(name: str, binary: Path | None = None, output_dir: Path | None = Non
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, help="Use an already compiled production gallery example")
-    parser.add_argument("--output-dir", type=Path, help="Write review captures to a separate directory")
+    parser.add_argument("--output-dir", type=Path, help="Fixture output directory (default: target/gallery-fixtures)")
     parser.add_argument("scenes", nargs="*")
     args = parser.parse_args()
     binary = args.binary.resolve() if args.binary else None
