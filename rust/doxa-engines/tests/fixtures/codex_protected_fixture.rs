@@ -8,19 +8,23 @@ fn fixture(scenario: &str) -> (tempfile::TempDir, AppServerOptions, CompactGate)
     fs::write(&executable, r#"#!/usr/bin/env python3
 import json, os, signal, socket, sys, threading, tomllib
 from pathlib import Path
-owner=socket.socket(fileno=int(os.environ.pop('DOXA_CODEX_OWNER_FD')))
-owner.set_inheritable(False)
-owner.settimeout(5)
-owner.sendall(b'DOXA_PROVIDER_OWNER_V1\n')
-if owner.recv(1)!=b'G': os._exit(80)
-owner.settimeout(None)
-fixture_group=os.getpgrp()
-def watch_owner():
-    try:
-        while owner.recv(1): pass
-    finally:
-        os.killpg(fixture_group,signal.SIGKILL)
-threading.Thread(target=watch_owner,daemon=True).start()
+def admit_fixture_owner():
+    descriptor=os.environ.pop('DOXA_CODEX_OWNER_FD',None)
+    if descriptor is None: return
+    owner=socket.socket(fileno=int(descriptor))
+    owner.set_inheritable(False)
+    owner.settimeout(5)
+    owner.sendall(b'DOXA_PROVIDER_OWNER_V1\n')
+    if owner.recv(1)!=b'G': os._exit(80)
+    owner.settimeout(None)
+    fixture_group=os.getpgrp()
+    def watch_owner():
+        try:
+            while owner.recv(1): pass
+        finally:
+            os.killpg(fixture_group,signal.SIGKILL)
+    threading.Thread(target=watch_owner,daemon=True).start()
+admit_fixture_owner()
 mode=Path('scenario').read_text()
 def read():
     line=sys.stdin.readline()

@@ -16,27 +16,34 @@ import threading
 import tomllib
 from pathlib import Path
 
-# The protected engine owns this socket. No synthetic producer or tool may
-# inherit it, and no app-server work may happen before explicit admission.
-owner = socket.socket(fileno=int(os.environ.pop('DOXA_CODEX_OWNER_FD')))
-owner.set_inheritable(False)
-owner.settimeout(5)
-owner.sendall(b'DOXA_PROVIDER_OWNER_V1\n')
-if owner.recv(1) != b'G':
-    os._exit(80)
-owner.settimeout(None)
-fixture_group = os.getpgrp()
+def admit_fixture_owner():
+    # Catalog discovery intentionally has no protected turn owner. When the
+    # engine supplies one, no app-server work may precede explicit admission.
+    descriptor = os.environ.pop('DOXA_CODEX_OWNER_FD', None)
+    if descriptor is None:
+        return
+    owner = socket.socket(fileno=int(descriptor))
+    owner.set_inheritable(False)
+    owner.settimeout(5)
+    owner.sendall(b'DOXA_PROVIDER_OWNER_V1\n')
+    if owner.recv(1) != b'G':
+        os._exit(80)
+    owner.settimeout(None)
+    fixture_group = os.getpgrp()
+
+    def watch_owner():
+        try:
+            while owner.recv(1):
+                pass
+        finally:
+            os.killpg(fixture_group, signal.SIGKILL)
+
+    # Capture socket/group in this invocation; a repeated header cannot
+    # replace the first watcher's socket after its environment FD is removed.
+    threading.Thread(target=watch_owner, daemon=True).start()
 
 
-def watch_owner():
-    try:
-        while owner.recv(1):
-            pass
-    finally:
-        os.killpg(fixture_group, signal.SIGKILL)
-
-
-threading.Thread(target=watch_owner, daemon=True).start()
+admit_fixture_owner()
 
 producer = Path(__file__).with_suffix('.turn')
 source = producer.read_text()
