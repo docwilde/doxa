@@ -1,6 +1,5 @@
 #![cfg(target_os = "linux")]
 use doxa_engines::{codex_appserver::{AppServerDriver,AppServerOptions}, codex_compact::CompactGate,codex_driver::SandboxMode};
-use serde_json::{json,Value};
 use std::{fs,os::unix::fs::PermissionsExt,time::{Duration,Instant}};
 include!("fixtures/codex_protected_fixture.rs");
 

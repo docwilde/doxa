@@ -59,7 +59,7 @@ fn spawn_owner(root: &std::path::Path) -> (Child, UnixStream) {
     let mut command = Command::new(std::env::current_exe().unwrap());
     command.args(["--exact", "owner_process_entry", "--ignored", "--nocapture"])
         .env("DOXA_OWNER_TEST_FD",fd.to_string()).env("DOXA_OWNER_TEST_ROOT",root)
-        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::inherit());
     unsafe { command.pre_exec(move || {
         if libc::fcntl(fd,libc::F_SETFD,0)<0 { return Err(std::io::Error::last_os_error()); }
         Ok(())
@@ -82,7 +82,7 @@ fn control_eof_reaps_escaped_groups_sessions_and_already_orphaned_tools_only() {
         let mut unrelated=Command::new("/usr/bin/sleep").arg("60").spawn().unwrap();
         if provider_exits {fs::write(dir.path().join("exit"),b"").unwrap();}
         let (mut owner,mut control)=spawn_owner(dir.path());ready(&mut control);control.write_all(b"G").unwrap();
-        wait_until(||dir.path().join("ready").exists());
+        wait_until(|| {if let Some(status)=owner.try_wait().unwrap() {panic!("owner exited before provider ready: {status}");} dir.path().join("ready").exists()});
         let pids:Vec<u32>=serde_json::from_slice(&fs::read(dir.path().join("ready")).unwrap()).unwrap();
         assert_eq!(pids.len(),3);
         drop(control);
