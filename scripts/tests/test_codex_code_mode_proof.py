@@ -16,6 +16,20 @@ spec.loader.exec_module(proof)
 
 
 class ProofTests(unittest.TestCase):
+    def test_native_read_requires_same_successful_completed_command_identity(self):
+        for wrong in ("orphan", "failed", "different-tool", "different-id", "wrong-detail", None):
+            with self.subTest(wrong=wrong):
+                evidence = proof.NativeToolEvidence()
+                evidence.observe({"type": "tool_call", "data": {"id": "read-1", "name": "command_execution"}}, "token")
+                detail = "wrong" if wrong == "wrong-detail" else "token\n"
+                evidence.observe({"type": "tool_result_detail", "data": {"id": "read-1", "text": detail}}, "token")
+                if wrong != "orphan":
+                    evidence.observe({"type": "tool_result", "data": {
+                        "id": "read-2" if wrong == "different-id" else "read-1",
+                        "name": "mcp_tool_call" if wrong == "different-tool" else "command_execution",
+                        "is_error": wrong == "failed"}}, "token")
+                self.assertEqual(evidence.verified, wrong is None)
+
     def test_first_request_cannot_contain_token_and_answer_is_returned_output_only(self):
         token = "a1" * 16
         with tempfile.TemporaryDirectory() as directory:

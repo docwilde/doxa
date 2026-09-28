@@ -278,6 +278,31 @@ def configure(root, peer):
     (home / "config.toml").chmod(0o600)
 
 
+class NativeToolEvidence:
+    """Require a completed successful command with matching call/detail IDs."""
+    def __init__(self):
+        self.calls = set()
+        self.completed = set()
+        self.reads = set()
+
+    def observe(self, event, token):
+        data = event.get("data", {})
+        identity = data.get("id")
+        if not isinstance(identity, str):
+            return
+        if event.get("type") == "tool_call" and data.get("name") == "command_execution":
+            self.calls.add(identity)
+        if (event.get("type") == "tool_result" and data.get("name") == "command_execution"
+                and data.get("is_error") is False):
+            self.completed.add(identity)
+        if event.get("type") == "tool_result_detail" and data.get("text", "").strip() == token:
+            self.reads.add(identity)
+
+    @property
+    def verified(self):
+        return bool(self.calls & self.completed & self.reads)
+
+
 def provider_turn(server, root, peer, token, launcher=None):
     command = ([str(launcher), "app-server", "--stdio"] if launcher else
                [str(server), "--listen", "stdio://"])
@@ -337,7 +362,7 @@ def daemon_turn(daemon, launcher, lore, root, peer, token):
         stream.sendall(json.dumps({"type": "prompt", "id": 1, "text": "Read the owned fixture file using code mode."}).encode() + b"\n")
         kinds = collections.Counter()
         text = ""
-        tool_read = False
+        tools = NativeToolEvidence()
         deadline = time.monotonic() + DEADLINE
         for _ in range(1024):
             frame = frames.read(deadline)
@@ -347,11 +372,10 @@ def daemon_turn(daemon, launcher, lore, root, peer, token):
                 kinds[kind] += 1
             if kind == "text_delta":
                 text += event.get("data", {}).get("text", "")
-            if kind == "tool_result_detail":
-                tool_read |= token in json.dumps(event.get("data", {}))
+            tools.observe(event, token)
             if kind == "turn_done":
                 return {"transport": "native-daemon", "turn_status": "failed" if event["data"].get("is_error") else "completed",
-                    "events": dict(kinds), "command_read_verified": tool_read,
+                    "events": dict(kinds), "command_read_verified": tools.verified,
                     "final_token_matches": text.strip() == token, "trusted_hook_verified": True,
                     "successful_lore_review": False}
         raise RuntimeError("owned native event count exceeded bound")
