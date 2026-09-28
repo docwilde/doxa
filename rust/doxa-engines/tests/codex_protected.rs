@@ -88,6 +88,11 @@ else:
     else: notice('hook/completed',turnId='turn-compact',run=run)
     if mode!='blocked': notice('item/completed',turnId='turn-compact',item={'id':'compact','type':'contextCompaction'})
     notice('turn/completed',turn={'id':'turn-compact','status':'completed','error':None})
+    if mode=='blocked':
+        followup=read(); assert followup['method']=='turn/start'
+        send({'id':followup['id'],'result':{'turn':{'id':'turn-followup'}}})
+        notice('turn/completed',turn={'id':'turn-followup','status':'completed','error':None})
+        Path('usable-after-blocked').write_text('verified')
     if mode=='failed':
         # Driver must stop this process, rather than merely hiding success.
         import time
@@ -130,7 +135,12 @@ async fn manual_compaction_binds_actual_thread_and_requires_review_before_comple
         assert_eq!(manifest["provider_thread"], "thread-actual");
         let mut events=Vec::new();
         let result=driver.compact(&CancellationToken::new(), |e| events.push(e)).await;
-        if mode == "blocked" { assert!(matches!(result,Err(doxa_engines::codex_appserver::AppServerError::CompactionBlocked))); }
+        if mode == "blocked" {
+            assert!(matches!(result,Err(doxa_engines::codex_appserver::AppServerError::CompactionBlocked)));
+            assert_eq!(driver.thread_id(),"thread-actual");
+            assert!(driver.run_turn("fixture followup",&CancellationToken::new(),|_|{}).await.is_ok());
+            assert!(dir.path().join("usable-after-blocked").exists());
+        }
         assert_eq!(result.is_ok(), mode=="compact");
         assert_eq!(events.iter().any(|e| e.kind=="compaction_done"),mode=="compact");
         if mode=="failed" {

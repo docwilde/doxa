@@ -698,6 +698,8 @@ impl Host for CodexHost {
                 if self.persist_thread(&id, false).is_ok() {
                     *self.active.lock().unwrap() = None;
                     emit(json!({"type":"turn_done","data":{"is_error":true,"operation":"compact","blocked":true,
+                        "model":self.initial_model(),"model_consistent":true,"usage_complete":true,
+                        "usage_source":"codex_precompact_blocked","turn_input_tokens":0,"turn_output_tokens":0,"cost_usd":0.0,
                         "error":"LORE review blocked compaction; existing context retained"}}));
                     return;
                 }
