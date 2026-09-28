@@ -192,11 +192,11 @@ fn invalid_receipts_and_changed_provider_artifacts_refuse_without_dispatch() {
             _ => unreachable!(),
         }
         let started = std::time::Instant::now();
-        let result = Command::new(dir.path().join("codex"))
-            .args(["app-server", "--stdio"])
-            .output()
-            .unwrap();
-        assert!(!result.status.success(), "{change}");
+        assert_refusal(
+            Command::new(dir.path().join("codex")).args(["app-server", "--stdio"]),
+            started + std::time::Duration::from_secs(1),
+            change,
+        );
         assert!(
             started.elapsed() < std::time::Duration::from_secs(1),
             "{change}"
@@ -253,4 +253,37 @@ fn invalid_payload_is_checked_before_dispatcher_and_valid_payload_still_requires
     let result = Command::new(dir.path().join("codex")).arg("app-server").output().unwrap();
     assert!(!result.status.success());
     assert!(String::from_utf8(result.stderr).unwrap().contains("protected executable differs from its build receipt"));
+}
+
+#[test]
+fn invalid_appserver_is_checked_before_dispatcher_and_valid_server_still_requires_dispatcher() {
+    for missing in [true, false] {
+        let dir = fixture();
+        let server = dir.path().join("codex-app-server");
+        fs::remove_file(&server).unwrap();
+        if !missing {
+            fs::copy("/usr/bin/true", &server).unwrap();
+            fs::set_permissions(&server, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        fs::write(dir.path().join("codex-code-mode-host"), b"changed dispatcher").unwrap();
+        let result = Command::new(dir.path().join("codex"))
+            .arg("app-server").output().unwrap();
+        assert!(!result.status.success());
+        let diagnostic = String::from_utf8(result.stderr).unwrap();
+        let expected = if missing {
+            std::io::Error::from_raw_os_error(libc::ENOENT).to_string()
+        } else {
+            "provider artifact must be a bounded private owned regular file".to_owned()
+        };
+        assert!(diagnostic.contains(&expected),
+            "invalid appserver must refuse before dispatcher digest mismatch: {diagnostic}");
+        if !missing { fs::remove_file(&server).unwrap(); }
+        fs::copy("/usr/bin/true", &server).unwrap();
+        fs::set_permissions(&server, fs::Permissions::from_mode(0o700)).unwrap();
+        let result = Command::new(dir.path().join("codex"))
+            .arg("app-server").output().unwrap();
+        assert!(!result.status.success());
+        assert!(String::from_utf8(result.stderr).unwrap()
+            .contains("protected executable differs from its build receipt"));
+    }
 }
