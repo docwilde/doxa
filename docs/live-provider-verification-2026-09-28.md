@@ -428,3 +428,19 @@ was unchanged; owned processes and the private run/authentication copies were
 removed. Retained evidence contains metadata only. The earlier read-only
 `get_usage` probe returned null rows before a model turn; it remains a separate
 observation and is not used to infer missing fields from this successful stream.
+
+### Output-capped streaming attempt
+
+At `2026-09-28T21:05:40Z`, the same alpha.44 candidate received one additional
+Sonnet/medium prompt with tools forbidden and an imposed 1,024-token output cap.
+Native model/effort verification passed, but the turn ended with `is_error=true`,
+four reported internal turns and 4,096 output tokens. No text or reasoning delta
+reached the native client, so this attempt establishes neither streaming fluency
+nor a DOXA buffering defect. The failure subtype was not retained.
+
+The installed CLI contains a separate output-limit recovery loop with three
+recoveries; this can continue a response independently of HTTP retry settings.
+Its presence is consistent with the four reported internal turns. Exhaustion of
+adaptive thinking is a possible explanation, not captured evidence. There was
+no additional prompt or retry by the harness. Original credentials were unchanged,
+private run/authentication stores were removed and zero owned processes remained.

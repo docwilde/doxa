@@ -47,7 +47,7 @@ passed with post-compaction recall. The following checks remain open:
 
 | Check | Required setup and evidence |
 | --- | --- |
-| Claude longer streaming and optional quota variants | Two alpha.43 turns verified native tools and controls; an alpha.44 candidate turn reported both five-hour and weekly percentages/resets after the nested-window fix. Each tiny reply produced one text delta; longer/reasoning streaming remains unverified. Overage/model-specific quota variants have fixture coverage only. |
+| Claude longer streaming and optional quota variants | Two alpha.43 turns verified native tools and controls; an alpha.44 candidate turn reported both five-hour and weekly percentages/resets after the nested-window fix. Tiny replies produced one text delta. A separate output-capped medium-effort attempt failed with no visible deltas; longer/reasoning streaming remains unverified. Overage/model-specific quota variants have fixture coverage only. |
 | DeepSeek and z.ai live turns, streaming, tools, controls and resume | Set the appropriate key through `/setup` or inherited `DEEPSEEK_API_KEY` / `ZAI_API_KEY`. Two-turn native loopback checks passed for both; account requests were not made because keys were absent. |
 | Codex default-window large-context automatic compaction | Manual compaction and real automatic compaction with a lowered 14,022-token threshold passed exact native review and recall. Representative history near the approximately 244,800-token default trigger remains unverified; the lowered-threshold run does not establish that stress coverage. |
 

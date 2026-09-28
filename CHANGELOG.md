@@ -18,8 +18,8 @@ the stable 2.0 release has not been cut.
 
 **Live parity**
 
-- Verify **alpha.43** Claude file reads, text, recall and same-session
-  model/effort changes; record read-only usage control with unknown quota rows.
+- Verify **alpha.43** Claude reads, recall and live model/effort controls;
+  alpha.44's output-capped streaming follow-up failed and establishes no fluency.
 - Verify manual and controlled automatic Codex compaction with **three real
   Haiku reviews** and retained recall across **four Codex prompts**.
 - Keep default-window stress and credential-dependent vendor checks open;
