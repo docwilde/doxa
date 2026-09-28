@@ -11,8 +11,8 @@ the stable 2.0 release has not been cut.
 
 - Install pinned **`codex-code-mode-host`** beside the private app server,
   restoring required tool support for Code Mode Only models such as **`gpt-6-sol`**.
-- Bind the helper to the private build receipt and native launch checks; repair
-  missing/corrupt installations with atomic publication and retained compaction gates.
+- Bind helper artifacts to verified receipts; atomically migrate/repair installs.
+  Stop and reap escaped tool descendants through private native **`provider_owner`**.
 - Verify Code Mode workspace reads and same-thread recall with **two live turns**;
   keep compiled refusal checks. Successful LORE review still needs Claude auth.
 

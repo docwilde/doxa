@@ -205,6 +205,11 @@ or duplicate review refuses compaction. Stock app servers refuse protected turns
 Legacy exec sessions stay read only until an explicit same-thread migration with
 `DOXA_CODEX_MIGRATE_APPSERVER=1`. The official Codex CLI is retained for login/help.
 
+Protected DOXA sessions use a private Linux provider supervisor. Its control
+handshake completes before the provider starts; control closure on cancellation,
+shutdown or daemon death stops and reaps provider descendants even across new
+process groups or sessions. The frontend daemon does not adopt other jobs.
+
 Ten tests against the compiled provider cover nine refusal cases and a successful
 allow control with a loopback model. Real-account successful LORE review and
 large-context compaction still require the reviewer's Claude authentication.

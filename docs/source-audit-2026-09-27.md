@@ -314,3 +314,15 @@ the same provider thread. Both turns reported complete usage. Fixtures and
 original authentication stayed unchanged; no owned processes or credential
 copies remained. Successful LORE review and large-context compaction still
 require Claude reviewer authentication.
+
+The enabled Code Mode host also exposed a lifecycle gap: a real tool process
+survived daemon shutdown after escaping the original provider process group.
+Alpha.41 gives each protected provider a private native Linux subreaper and a
+parent-owned Unix control socket. READY/G completes before provider fork; EOF
+stops and reaps the owner's kernel children across process groups, sessions and
+orphan adoption. Failed readiness retains direct-child/group cleanup. The daemon
+does not become a global subreaper. Fallible setup and child-census checks happen
+before fork; cleanup keeps the owner until its children can be reaped, while the
+driver's shutdown wait stays bounded. Kernel-uninterruptible children can retain
+that small owner until they exit. This ownership change leaves the compiled
+compaction gate and official CLI unchanged.
