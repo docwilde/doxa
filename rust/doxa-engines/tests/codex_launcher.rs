@@ -132,3 +132,21 @@ fn invalid_receipts_and_changed_provider_artifacts_refuse_without_dispatch() {
         );
     }
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn verified_launcher_owns_provider_after_control_handshake() {
+    use std::io::{Read, Write};
+    use std::os::unix::{io::AsRawFd, net::UnixStream, process::CommandExt};
+    let dir=fixture();let (mut parent,peer)=UnixStream::pair().unwrap();let fd=peer.as_raw_fd();
+    let mut command=Command::new(dir.path().join("codex"));
+    command.args(["app-server","--stdio"]).env(doxa_engines::provider_owner::CONTROL_ENV,fd.to_string());
+    unsafe {command.pre_exec(move || {
+        if libc::fcntl(fd,libc::F_SETFD,0)<0 {return Err(std::io::Error::last_os_error());}Ok(())
+    });}
+    let mut owner=command.spawn().unwrap();drop(peer);
+    parent.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+    let mut ready=vec![0;doxa_engines::provider_owner::READY.len()];parent.read_exact(&mut ready).unwrap();
+    assert_eq!(ready,doxa_engines::provider_owner::READY);assert!(owner.try_wait().unwrap().is_none());
+    parent.write_all(b"G").unwrap();assert!(owner.wait().unwrap().success());
+}
