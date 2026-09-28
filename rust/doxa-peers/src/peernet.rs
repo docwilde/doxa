@@ -233,8 +233,16 @@ mod tests {
             let listener=TcpListener::bind("127.0.0.1:0").unwrap();let port=listener.local_addr().unwrap().port();
             let worker=std::thread::spawn(move||{
                 let (mut stream,_)=listener.accept().unwrap();stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
-                let mut head=Vec::new();while !head.windows(4).any(|bytes|bytes==b"\r\n\r\n"){let mut byte=[0];stream.read_exact(&mut byte).unwrap();head.push(byte[0]);}
-                let head=String::from_utf8(head).unwrap();assert!(!head.to_ascii_lowercase().contains("tailscale-user-login"));
+                let mut head=Vec::new();while !head.windows(4).any(|bytes|bytes==b"\r\n\r\n"){assert!(head.len()<MAX_HEAD);let mut byte=[0];stream.read_exact(&mut byte).unwrap();head.push(byte[0]);}
+                let head=String::from_utf8(head).unwrap();assert_eq!(head.lines().next(),Some("POST /peers HTTP/1.1"));assert!(!head.to_ascii_lowercase().contains("tailscale-user-login"));
+                let lengths=head.lines().skip(1).filter_map(|line|line.split_once(':'))
+                    .filter(|(name,_)|name.eq_ignore_ascii_case("content-length"))
+                    .map(|(_,value)|value.trim().parse::<usize>().unwrap()).collect::<Vec<_>>();
+                assert_eq!(lengths.len(),1);assert!(lengths[0]<=MAX_FRAME_BYTES);
+                // Closing with unread POST bytes can reset TCP and discard the
+                // response. Consume and verify the bounded request first.
+                let mut request=vec![0;lengths[0]];stream.read_exact(&mut request).unwrap();
+                assert_eq!(serde_json::from_slice::<Value>(&request).unwrap(),json!({"op":"roster"}));
                 let body=r#"{"ok":true,"peers":[{"session_id":"12345678-1234-1234-1234-123456789012","origin":"forged","pid":1,"socket_path":"/attacker","daemon_socket":"/attacker"}]}"#;
                 let status=if redirect{"302 Found"}else{"200 OK"};
                 write!(stream,"HTTP/1.1 {status}\r\nContent-Length: {}\r\nLocation: http://127.0.0.1:1/attack\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
