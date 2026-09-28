@@ -443,7 +443,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -994,8 +994,8 @@ checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
 name = "lore-core"
-version = "0.62.0"
-source = "git+https://github.com/docwilde/LORE?rev=d8abc3e104aacda221b5df7baace13c0a1a69b53#d8abc3e104aacda221b5df7baace13c0a1a69b53"
+version = "0.62.1"
+source = "git+https://github.com/docwilde/LORE?rev=8412657eb8e06028a417ceb2e7e1a9420e881d9d#8412657eb8e06028a417ceb2e7e1a9420e881d9d"
 dependencies = [
  "fancy-regex",
  "hmac",
@@ -1203,7 +1203,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1416,7 +1416,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1716,7 +1716,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.5",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
