@@ -15,15 +15,10 @@
 > [Non-goals](#non-goals) before using it on important work.
 
 The official latest GitHub release is [v2.0.0-alpha.39](https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.39).
-Rust 2.0 leads development; its alpha version still indicates that it is evolving.
-Alpha.31 closes the audited Python 1.19 functional gaps: saved-session restoration,
-full preferences, native LORE tools, interactive fleets, plugin commands and local
-shell controls. The subsequent [source audit](docs/source-audit-2026-09-27.md)
-documents ownership/deadline fixes and controller cleanup. Alpha.37 replaces
-the remaining Python runtime paths, adds verified Claude controls and completes
-native vendor compaction. See the
+Rust 2.0 leads development and remains an evolving alpha. See the
 [parity tracker](docs/rust-1.19-parity.md) for supported provider contracts and
-retained safety boundaries.
+remaining release gates, and the [source audit](docs/source-audit-2026-09-27.md)
+for engineering findings and their follow-up fixes.
 
 **DOXA** is a terminal for coding agents. Development now leads with the
 **Rust 2.0 alpha**, built with Ratatui and a native daemon. Run Claude, Codex,
@@ -159,7 +154,7 @@ preserves conflicts in their project scope, and sorts curated entries so the
 same entry set converges to identical memory/file-map bytes. Capacity limits
 still refuse or stage oversized writes; overflow does not guarantee the same entry set.
 
-Rust CI tests the frontend, native daemon, protocol, LORE bridge, installer,
+Rust CI tests the frontend, native daemon, protocol, integrated LORE, installer,
 and compatibility paths. See the [Rust UI benchmark](docs/rust-ui-benchmark-2026-09-27.md)
 for rendering, event-loop, scrolling, and resize measurements.
 
