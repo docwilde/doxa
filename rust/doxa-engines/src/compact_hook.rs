@@ -23,16 +23,27 @@ fn identity(metadata: &fs::Metadata) -> (u64,u64,u64,i64,i64,i64,i64) {
 /// All ancestors and the final entry are canonical; no same-user JSONL path
 /// selected by a provider can substitute for the owned source after review.
 pub fn safe_read(path: &Path, limit: usize) -> io::Result<(Vec<u8>, SourceProof)> {
+    read_owned(path,limit,false)
+}
+/// Cargo uses hardlinks between its debug entrypoint and artifact. Executable
+/// trust pins the bytes and inode; hardlinks never relax transcript ownership.
+pub fn executable_digest(path:&Path)->io::Result<String>{
+    let (_,proof)=read_owned(path,256*1024*1024,true)?;Ok(proof.sha256)
+}
+fn read_owned(path: &Path, limit: usize, executable:bool) -> io::Result<(Vec<u8>, SourceProof)> {
     if !path.is_absolute() || fs::canonicalize(path)? != path { return Err(io::Error::other("noncanonical source")); }
     let mut file = fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path)?;
     let before = file.metadata()?;
-    if !before.is_file() || before.uid() != unsafe { libc::geteuid() } || before.nlink() != 1 || before.len() > limit as u64 {
+    if !before.is_file() || before.uid() != unsafe { libc::geteuid() } || (!executable && before.nlink() != 1) || before.len() > limit as u64 {
         return Err(io::Error::other("unsafe review source"));
     }
     let mut bytes = Vec::new();
     file.by_ref().take(limit as u64 + 1).read_to_end(&mut bytes)?;
     let after = file.metadata()?;
-    if bytes.len() > limit || identity(&before) != identity(&after) || identity(&after) != identity(&fs::symlink_metadata(path)?) {
+    // Creating/removing another private carrier changes link-count ctime on
+    // the immutable running image. Transcript identity still includes ctime.
+    let stable=|metadata:&fs::Metadata|{let mut fields=identity(metadata);if executable{fields.3=0;fields.4=0;}fields};
+    if bytes.len() > limit || stable(&before) != stable(&after) || stable(&after) != stable(&fs::symlink_metadata(path)?) {
         return Err(io::Error::other("review source changed"));
     }
     Ok((bytes.clone(), SourceProof { sha256:format!("{:x}",Sha256::digest(&bytes)), device:before.dev(), inode:before.ino(), size:before.len(),
@@ -85,7 +96,7 @@ pub fn hook_main(manifest: &Path, expected_digest: &str) -> Value {
     let result = std::panic::catch_unwind(|| -> io::Result<bool> {
         let deadline = Instant::now() + Duration::from_secs(210);
         let executable = fs::canonicalize(std::env::current_exe()?)?;
-        if safe_read(&executable, 256 * 1024 * 1024)?.1.sha256 != expected_digest { return Ok(false); }
+        if executable_digest(&executable)? != expected_digest { return Ok(false); }
         let event: Value = serde_json::from_slice(&read_input(deadline)?)?;
         review(manifest, &event, |metadata| {
             let remaining = deadline.saturating_duration_since(Instant::now()).min(crate::review_worker::REVIEW_TIMEOUT);
@@ -99,6 +110,15 @@ pub fn hook_main(manifest: &Path, expected_digest: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn executable_hardlinks_are_pinned_without_relaxing_transcript_sources(){
+        use std::os::unix::fs::PermissionsExt;
+        let dir=tempfile::tempdir().unwrap();let executable=dir.path().join("daemon");
+        fs::write(&executable,b"native executable fixture").unwrap();fs::set_permissions(&executable,fs::Permissions::from_mode(0o700)).unwrap();
+        fs::hard_link(&executable,dir.path().join("artifact")).unwrap();
+        assert!(executable_digest(&executable).is_ok());assert!(safe_read(&executable,1024).is_err());
+        let link=dir.path().join("symlink");std::os::unix::fs::symlink(&executable,&link).unwrap();assert!(executable_digest(&link).is_err());
+    }
     #[test]
     fn changed_rollout_and_forged_owned_source_cannot_authorize_compaction() {
         let dir = tempfile::tempdir().unwrap(); let sessions = dir.path().join("sessions"); fs::create_dir(&sessions).unwrap();

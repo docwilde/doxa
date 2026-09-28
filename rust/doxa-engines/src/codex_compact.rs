@@ -22,6 +22,7 @@ pub struct CompactGate {
     hash: String,
     verified: bool,
     directory_identity: (u64, u64),
+    carrier_identity: (u64,u64),
 }
 fn shell_quote(value: &str) -> String { format!("'{}'", value.replace('\'', "'\\''")) }
 fn string(value: &str) -> String { serde_json::to_string(value).expect("string JSON") }
@@ -53,9 +54,29 @@ impl CompactGate {
         let directory_meta = fs::symlink_metadata(directory)?;
         let directory_identity = (directory_meta.dev(), directory_meta.ino());
         let manifest = directory.join("compact-session.json");
-        let executable = fs::canonicalize(executable)?;
-        let (_, proof) = crate::compact_hook::safe_read(&executable, 256 * 1024 * 1024)?;
-        let command = [executable.display().to_string(), "__codex-precompact".into(), manifest.display().to_string(), proof.sha256]
+        let source = fs::canonicalize(executable)?;
+        let running=fs::metadata("/proc/self/exe")?;
+        let executable_digest = crate::compact_hook::executable_digest(&source)?;
+        let executable=directory.join("native-carrier");
+        match fs::hard_link(&source,&executable){
+            Ok(())=>{
+                let pinned=fs::metadata(&executable)?;
+                if (pinned.dev(),pinned.ino())!=(running.dev(),running.ino()){
+                    let _=fs::remove_file(&executable);return Err(io::Error::other("native executable changed before pinning"));
+                }
+            },
+            Err(error) if error.raw_os_error()==Some(libc::EXDEV)=>{
+                let mut input=fs::File::open(&source)?;let pinned=input.metadata()?;
+                if (pinned.dev(),pinned.ino())!=(running.dev(),running.ino()){return Err(io::Error::other("native executable changed before pinning"));}
+                let mut output=fs::OpenOptions::new().write(true).create_new(true).mode(0o700).custom_flags(libc::O_NOFOLLOW).open(&executable)?;
+                if let Err(error)=io::copy(&mut input,&mut output).and_then(|_|output.sync_all()) {let _=fs::remove_file(&executable);return Err(error);}
+            },Err(error)=>return Err(error),
+        }
+        let carrier=fs::metadata(&executable)?;let carrier_identity=(carrier.dev(),carrier.ino());
+        if crate::compact_hook::executable_digest(&executable)?!=executable_digest{
+            let _=fs::remove_file(&executable);return Err(io::Error::other("native carrier digest changed"));
+        }
+        let command = [executable.display().to_string(), "__codex-precompact".into(), manifest.display().to_string(), executable_digest]
             .iter().map(|s| shell_quote(s)).collect::<Vec<_>>().join(" ");
         let normalized = json!({"event_name":"pre_compact","matcher":MATCHER,"hooks":[{
             "type":"command","command":command,"timeout":HOOK_TIMEOUT,"async":false
@@ -64,8 +85,11 @@ impl CompactGate {
         let descriptor = json!({"version":SUPPORTED_VERSION,"provider_thread":null,"doxa_session":session_id,
             "codex_home":codex_home,"cwd":cwd,"lore_enabled":lore_enabled});
         let descriptor_bytes = serde_json::to_vec(&descriptor)?;
-        write_new(&manifest, &descriptor_bytes)?;
-        Ok(Self { directory:directory.to_owned(), manifest, descriptor, command, hash, verified:false, directory_identity })
+        if let Err(error)=write_new(&manifest, &descriptor_bytes){
+            if fs::symlink_metadata(&executable).is_ok_and(|meta|meta.is_file()&&(meta.dev(),meta.ino())==carrier_identity){let _=fs::remove_file(&executable);}
+            return Err(error);
+        }
+        Ok(Self { directory:directory.to_owned(), manifest, descriptor, command, hash, verified:false, directory_identity,carrier_identity })
     }
     /// Append as process-local `-c` overrides. These trust this single pinned
     /// command; they never set bypass_hook_trust or edit CODEX_HOME/config.toml.
@@ -122,6 +146,8 @@ impl Drop for CompactGate {
     fn drop(&mut self) {
         if fs::symlink_metadata(&self.directory).is_ok_and(|meta| meta.is_dir() && !meta.file_type().is_symlink() && (meta.dev(),meta.ino()) == self.directory_identity) {
             for name in ["compact-session.json", "compact-session.next.json"] { let _ = fs::remove_file(self.directory.join(name)); }
+            let carrier=self.directory.join("native-carrier");
+            if fs::symlink_metadata(&carrier).is_ok_and(|meta|meta.is_file()&&(meta.dev(),meta.ino())==self.carrier_identity){let _=fs::remove_file(carrier);}
             // Never recursively remove unknown content added to this directory.
             let _ = fs::remove_dir(&self.directory);
         }
@@ -152,6 +178,12 @@ mod tests {
         assert_eq!(gate.observe_completion(&run), ReviewOutcome::Failed); assert!(!gate.verified());
     }
     #[test]
+    fn cleanup_does_not_remove_a_replaced_native_carrier(){
+        let dir=tempfile::tempdir().unwrap();let gate=prepare(dir.path());let carrier=dir.path().join("native-carrier");
+        fs::rename(&carrier,dir.path().join("old-carrier")).unwrap();fs::write(&carrier,"replacement").unwrap();
+        drop(gate);assert_eq!(fs::read_to_string(carrier).unwrap(),"replacement");
+    }
+    #[test]
     fn unknown_version_and_unsafe_preparation_never_enable_gate() {
         let dir = tempfile::tempdir().unwrap();
         assert!(CompactGate::prepare(dir.path(), Path::new("python"), Path::new("codex"), Path::new("project"), "session", "0.unknown").is_err());
@@ -163,6 +195,8 @@ mod tests {
     fn native_command_is_pinned_and_cleanup_preserves_unknown_files() {
         let dir = tempfile::tempdir().unwrap(); let gate = prepare(dir.path());
         assert!(gate.command.contains("__codex-precompact"));
+        assert!(gate.command.contains("native-carrier"));
+        assert_eq!(fs::metadata(dir.path().join("native-carrier")).unwrap().ino(),fs::metadata("/proc/self/exe").unwrap().ino());
         assert!(!gate.command.contains("python"));
         assert!(!dir.path().join("precompact.py").exists());
         fs::write(dir.path().join("keep"), "unknown content").unwrap();

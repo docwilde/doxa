@@ -9,6 +9,7 @@ impl AppServerDriver {
             return Err(AppServerError::Protocol("Codex reviewed compaction gate is unavailable"));
         }
         if cancel.is_cancelled() { return Err(AppServerError::Cancelled); }
+        self.usage=None;
         let thread = self.thread_id().to_owned();
         let deadline = tokio::time::Instant::now() + self.options.turn_timeout;
         let request = self.send_request_bounded("thread/compact/start", json!({"threadId":thread}), Some(cancel), deadline).await?;
@@ -44,6 +45,7 @@ impl AppServerDriver {
             let matching = if method == "turn/completed" { params["turn"]["id"].as_str() == Some(id) } else { params["turnId"].as_str() == Some(id) };
             if !matching { continue; }
             match method {
+                "thread/tokenUsage/updated"=>{self.usage=Some(params["tokenUsage"].clone());}
                 "hook/completed" => {
                     let outcome = self.compact_gate.as_mut().map(|gate| gate.observe_completion(&params["run"])).unwrap_or(ReviewOutcome::Failed);
                     match outcome {
@@ -59,6 +61,9 @@ impl AppServerDriver {
                 }
                 "turn/completed" => {
                     if blocked && !completed {
+                        if self.usage.as_ref().is_some_and(|usage|usage["last"]["inputTokens"].as_u64()!=Some(0)||usage["last"]["outputTokens"].as_u64()!=Some(0)){
+                            self.kill_group();return Err(AppServerError::Protocol("blocked compaction unexpectedly reported provider usage"));
+                        }
                         self.turn_id = None;
                         return Err(AppServerError::CompactionBlocked);
                     }
@@ -67,7 +72,15 @@ impl AppServerDriver {
                     }
                     self.turn_id = None;
                     emit(EngineEvent::new("compaction_done", json!({"provider_turn":id,"reviewed":true})));
-                    emit(EngineEvent::new("turn_done", json!({"is_error":false,"operation":"compact","reviewed":true})));
+                    let total=self.usage.as_ref().map(|usage|&usage["total"]);
+                    emit(EngineEvent::new("turn_done", json!({"is_error":false,"operation":"compact","reviewed":true,
+                        "model":self.effective_model,"model_consistent":self.effective_model.is_some()&&self.effective_model==self.options.model,
+                        "usage_scope":"session","usage_source":"codex_app_server_token_usage_updated",
+                        "usage_complete":total.is_some_and(|value|value["inputTokens"].as_u64().is_some()&&value["outputTokens"].as_u64().is_some()),
+                        "input_tokens":total.and_then(|value|value["inputTokens"].as_u64()),
+                        "output_tokens":total.and_then(|value|value["outputTokens"].as_u64()),
+                        "cache_read_input_tokens":total.and_then(|value|value["cachedInputTokens"].as_u64()),
+                        "cost_usd":null,"session_cost_usd":null})));
                     return Ok(());
                 }
                 "error" => return Err(AppServerError::Server("Codex compaction failed".into())),
