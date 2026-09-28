@@ -5,6 +5,15 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.38 — 2026-09-28
+
+**Peer transport verification**
+
+- Fix the HTTP test fixture to consume its complete POST body before closing
+  the connection; avoid intermittent TCP resets in the remote roster test.
+- Keep the production transport unchanged. Retain the actual alpha.37 gallery
+  captures and their recorded source provenance.
+
 ## 2.0.0-alpha.37 — 2026-09-28
 
 **Native runtime**
