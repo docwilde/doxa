@@ -2,7 +2,7 @@
 
 `doxa-engines` translates Codex events into DOXA's `{ "type", "data" }`
 protocol. New daemon sessions use the app-server transport; saved CLI sessions
-keep `codex exec --json` and their original provider thread. The daemon owns
+keep their original provider thread in read-only mode until explicit migration. The daemon owns
 transcript persistence, LORE scrubbing, session recovery and spend guards.
 
 ## App server
@@ -76,6 +76,13 @@ build downloads and compiles a large Codex dependency graph; its separate cache
 is reused on subsequent installs, including the verified binary. Other hosts
 can pass `--cargo` for an existing Rust 1.95.0 toolchain. Python is not used by
 the installed dispatcher.
+
+Legacy `exec` sessions and `DOXA_CODEX_APPSERVER=0` cannot run provider turns:
+review failure cannot be blocked inside stock exec. Refusal happens before any
+prompt/thread persistence or memory snapshot. Their transcripts remain readable.
+To explicitly migrate a verified saved legacy thread without creating a new one,
+resume it with `DOXA_CODEX_MIGRATE_APPSERVER=1`; the protected server must return
+that same `thread/resume` identity. New sessions should remove the old exec flag.
 
 The provider is installed under
 `~/.local/share/doxa/providers/codex-0.156.1-precompact-v1/` (or `XDG_DATA_HOME`).
