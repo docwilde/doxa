@@ -178,7 +178,8 @@ still refuse or stage oversized writes; overflow does not guarantee the same ent
   passed **962 Rust tests**, with zero failures and four optional/harness tests
   ignored. CI also checks the installer and native launcher.
 - **Claude quota handling:** Alpha.44 preserves nested and startup window reports,
-  with seven focused quota regressions passing. Missing account values stay unknown.
+  with seven focused quota regressions passing. A live candidate turn reported
+  both five-hour and weekly percentages and resets; missing values stay unknown.
 - **Live provider evidence:** Alpha.43 verified Claude file reads, text streaming,
   recall and same-session model/effort controls. Codex passed real Claude-backed
   LORE review, manual compaction and controlled automatic compaction, with exact
@@ -188,9 +189,10 @@ still refuse or stage oversized writes; overflow does not guarantee the same ent
 
 ### Remaining live checks
 
-DeepSeek and z.ai account checks need API keys. Full Claude quota percentages,
-weekly reporting and long-form streaming remain unverified. Alpha.44 retains
-reported nested quota windows; the read-only CLI usage probe returned no rows.
+DeepSeek and z.ai account checks need API keys. Claude long-form and reasoning
+streaming remain unverified by these short probes. Alpha.44's five-hour/weekly
+quota projection passed a live check; a separate read-only CLI usage probe
+returned no rows before a model turn.
 Codex's controlled automatic test used a 14,022-token threshold; representative
 stress near its approximately 244,800-token default trigger remains unverified.
 

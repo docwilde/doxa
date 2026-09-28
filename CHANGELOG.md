@@ -13,6 +13,8 @@ the stable 2.0 release has not been cut.
   reports; use one validated projection with native CLI provenance.
 - Preserve partial window updates; clear previous utilization when reset
   periods change. **Seven focused quota regressions** pass.
+- Verify real five-hour/weekly percentages and reset times in **one alpha.44
+  candidate turn**; all **17 ClaudeHost fixtures** pass.
 
 **Live parity**
 

@@ -362,6 +362,8 @@ fields, discarding CLI `unifiedWindows` and startup rate-limit frames. Alpha.44
 normalizes legacy and nested rows through shared validation, retains startup and
 partial observations, clears prior utilization when reset periods advance, and
 labels the native CLI source. Seven focused regressions cover those boundaries.
-A read-only CLI `get_usage` check returned `rate_limits=null`; full account quota
-and default-window large-context stress remain unverified. No fallback endpoint
+A read-only CLI `get_usage` check returned `rate_limits=null` before a model turn.
+A subsequent live alpha.44 candidate turn reported both five-hour and weekly
+percentages/resets through the corrected stream. Default-window large-context
+stress and longer/reasoning streaming remain unverified. No fallback endpoint
 or inferred quota is introduced.

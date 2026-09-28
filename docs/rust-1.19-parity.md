@@ -47,7 +47,7 @@ passed with post-compaction recall. The following checks remain open:
 
 | Check | Required setup and evidence |
 | --- | --- |
-| Claude full five-hour/weekly quota and longer streaming | Two short native turns passed on Claude Code 2.1.284 with verified model/effort changes. Only a five-hour status/reset appeared in normalized events; raw CLI frames were deleted and the translator omitted nested windows. Alpha.44 fixes that omission. Read-only `get_usage` returned null quota rows; percentages/weekly and long-form/reasoning streaming remain unverified. |
+| Claude longer streaming and optional quota variants | Two alpha.43 turns verified native tools and controls; an alpha.44 candidate turn reported both five-hour and weekly percentages/resets after the nested-window fix. Each tiny reply produced one text delta; longer/reasoning streaming remains unverified. Overage/model-specific quota variants have fixture coverage only. |
 | DeepSeek and z.ai live turns, streaming, tools, controls and resume | Set the appropriate key through `/setup` or inherited `DEEPSEEK_API_KEY` / `ZAI_API_KEY`. Two-turn native loopback checks passed for both; account requests were not made because keys were absent. |
 | Codex default-window large-context automatic compaction | Manual compaction and real automatic compaction with a lowered 14,022-token threshold passed exact native review and recall. Representative history near the approximately 244,800-token default trigger remains unverified; the lowered-threshold run does not establish that stress coverage. |
 
@@ -128,6 +128,10 @@ records the newer authenticated checks, including the initial harness-only stale
 registry failure and the separate automatic run within the remaining allowance.
 Seven focused quota regressions verify alpha.44's nested-window projection,
 startup caching, partial updates, reset transitions and legacy flat compatibility.
+All 17 ClaudeHost fixtures passed. A
+[live candidate check](live-provider-verification-2026-09-28.md#alpha44-quota-candidate-follow-up)
+verified actual five-hour and weekly percentages/reset times with native CLI
+provenance and no additional tools.
 
 Alpha.31 supplied the [event-loop benchmark](rust-ui-benchmark-2026-09-27.md)
 measurements. The [gallery](rust-gallery.md) remains labelled **alpha.37**,

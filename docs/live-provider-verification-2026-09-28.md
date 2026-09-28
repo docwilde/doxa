@@ -1,8 +1,10 @@
 # Live provider verification — 2026-09-28
 
-The [latest authenticated checks](#alpha43-authenticated-follow-up--2026-09-28)
+The [alpha.43 authenticated checks](#alpha43-authenticated-follow-up--2026-09-28)
 verified Claude turns and native LORE-backed Codex manual and controlled automatic
-compaction. Earlier sections retain the account state and versions they measured.
+compaction. The [alpha.44 candidate](#alpha44-quota-candidate-follow-up) also
+verified five-hour and weekly quota projection. Earlier sections retain the
+account state and versions they measured.
 
 ## Fresh authentication and resume verification
 
@@ -407,3 +409,22 @@ DeepSeek and z.ai still lacked configured keys; their checks made zero paid
 requests. These results retain the [native runtime guide](../rust/README.md)
 and [supported boundaries](rust-1.19-parity.md#preserved-boundaries), including
 the [protected compaction contract](../rust/doxa-engines/README.md#compaction-review).
+
+## Alpha.44 quota candidate follow-up
+
+At `2026-09-28T20:57:01Z`, candidate `810bdab`'s **2.0.0-alpha.44** debug
+daemon completed one additional authenticated Sonnet/low turn with no tools or
+retry. The native stream emitted three rate-limit and three billing events:
+the limiting five-hour status/reset, nested five-hour utilization/reset, and
+nested weekly utilization/reset. Both numeric percentages reached the final
+billing cache with `claude_cli` provenance. Weekly status was unreported and
+remained unknown. This establishes the previously dropped nested-window path
+against a real provider; seven focused quota regressions and all 17 ClaudeHost
+fixtures also passed.
+
+The reply was one small text delta with no reasoning event, so it does not
+establish longer streaming fluency or reasoning emission. Original authentication
+was unchanged; owned processes and the private run/authentication copies were
+removed. Retained evidence contains metadata only. The earlier read-only
+`get_usage` probe returned null rows before a model turn; it remains a separate
+observation and is not used to infer missing fields from this successful stream.
