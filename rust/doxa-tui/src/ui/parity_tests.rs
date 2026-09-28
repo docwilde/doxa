@@ -359,6 +359,17 @@ use super::*;
             app.request_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
         }
         assert!(app.input_requests[0].review_complete.get());
+        for _ in 0..100 {
+            app.request_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+            let _ = paint(&app);
+            if app.input_requests[0].scroll == 0 { break; }
+        }
+        assert!(app.input_requests[0].review_complete.get());
+        let menu = app.active_chooser_rect().unwrap();
+        click(&mut app, menu.x + 2, menu.y + 1);
+        assert_eq!(app.pending_answers[0].2, json!({"decision":"allow"}));
+        app.pending_answers.clear();
+        app.input_requests[0].sending = false;
         app.handle(Event::Resize(20, 8));
         app.input_requests[0].require_full_review = false;
         app.request_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));

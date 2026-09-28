@@ -1686,7 +1686,7 @@ impl App {
                 request.review_seen.set(seen.max(end));
                 request
                     .review_complete
-                    .set(request.review_available && end >= total);
+                    .set(request.review_complete.get() || request.review_available && end >= total);
             }
             reviewed_body.as_str()
         } else {

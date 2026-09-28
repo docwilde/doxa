@@ -817,6 +817,7 @@ fn full_prompt_queue_preserves_draft() {
 #[test]
 fn permission_requires_explicit_allow_and_preserves_prompt_draft() {
     let mut app = App::default();
+    app.handle(Event::Resize(90, 25));
     app.apply_daemon_frame(&json!({"type":"hello", "session_id":"one", "model":"test"}));
     app.input = "unfinished prompt".into();
     app.apply_daemon_frame(&json!({"type":"event", "session_id":"one", "event":{"type":"needs_input", "data":{
@@ -859,6 +860,7 @@ fn permission_enter_selects_action_and_escape_denies() {
         (vec![KeyCode::Char('A')], "allow"),
     ] {
         let mut app = App::default();
+        app.handle(Event::Resize(90, 25));
         app.apply_daemon_frame(&json!({"type":"hello", "session_id":"one", "model":"test"}));
         app.apply_daemon_frame(&json!({"type":"event", "session_id":"one", "event":{"type":"needs_input", "data":{"id":"req", "kind":"permission", "tool_name":"Write"}}}));
         for code in keys { app.handle(key(code, KeyModifiers::NONE)); }
