@@ -6,11 +6,37 @@ real initialize/config/hooks/thread/turn RPCs, never its legacy exec transport.
 Children stay in the app-server process group for cancellation assertions.
 """
 import json
+import os
 import re
+import signal
+import socket
 import subprocess
 import sys
+import threading
 import tomllib
 from pathlib import Path
+
+# The protected engine owns this socket. No synthetic producer or tool may
+# inherit it, and no app-server work may happen before explicit admission.
+owner = socket.socket(fileno=int(os.environ.pop('DOXA_CODEX_OWNER_FD')))
+owner.set_inheritable(False)
+owner.settimeout(5)
+owner.sendall(b'DOXA_PROVIDER_OWNER_V1\n')
+if owner.recv(1) != b'G':
+    os._exit(80)
+owner.settimeout(None)
+fixture_group = os.getpgrp()
+
+
+def watch_owner():
+    try:
+        while owner.recv(1):
+            pass
+    finally:
+        os.killpg(fixture_group, signal.SIGKILL)
+
+
+threading.Thread(target=watch_owner, daemon=True).start()
 
 producer = Path(__file__).with_suffix('.turn')
 source = producer.read_text()

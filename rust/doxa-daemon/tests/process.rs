@@ -176,11 +176,19 @@ impl Process {
         Self::start_codex_with_inbound(runtime, codex, python, false)
     }
     fn start_codex_appserver(runtime: &Path, codex: &Path, _fixture_interpreter: &Path, resume: bool) -> Self {
+        // Inline peers retain their existing protocol/adversarial behavior
+        // after the same protected owner admission as the common turn peer.
+        let source = fs::read_to_string(codex).unwrap();
+        let (_, body) = source.split_once('\n').unwrap();
+        let owner = include_str!("fixtures/codex_appserver.py")
+            .split("\nproducer = ").next().unwrap();
+        let owned = codex.with_extension("owned");
+        executable(&owned, &format!("{owner}\n{body}"));
         let mut command = daemon_command();
         command.args([
             "--runtime-dir", runtime.to_str().unwrap(), "--cwd", runtime.to_str().unwrap(),
             "--session-id", "codex-session", "--linger", "10", "--engine", "codex",
-            "--codex-bin", codex.to_str().unwrap(), "--resume", if resume { "true" } else { "false" },
+            "--codex-bin", owned.to_str().unwrap(), "--resume", if resume { "true" } else { "false" },
         ]).stdout(Stdio::null()).stderr(Stdio::piped())
             .env("DOXA_HOME", runtime.join("home"))
             .env_remove("DOXA_CODEX_APPSERVER");
