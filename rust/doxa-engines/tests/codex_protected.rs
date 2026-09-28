@@ -81,12 +81,12 @@ else:
     assert operation['method']=='thread/compact/start' and operation['params']=={'threadId':'thread-actual'}
     send({'id':operation['id'],'result':{}})
     notice('turn/started',turn={'id':'turn-compact','status':'inProgress'})
-    run={'eventName':'preCompact','source':'sessionFlags','sourcePath':'/<session-flags>/config.toml','handlerType':'command','executionMode':'sync','status':'failed' if mode=='failed' else 'completed'}
+    run={'eventName':'preCompact','source':'sessionFlags','sourcePath':'/<session-flags>/config.toml','handlerType':'command','executionMode':'sync','status':'failed' if mode=='failed' else 'stopped' if mode=='blocked' else 'completed'}
     if mode=='order': notice('item/completed',turnId='turn-compact',item={'id':'compact','type':'contextCompaction'})
     if mode=='foreign': send({'method':'hook/completed','params':{'threadId':'thread-other','turnId':'turn-compact','run':run}})
     elif mode=='stale-turn': notice('hook/completed',turnId='turn-other',run=run)
     else: notice('hook/completed',turnId='turn-compact',run=run)
-    notice('item/completed',turnId='turn-compact',item={'id':'compact','type':'contextCompaction'})
+    if mode!='blocked': notice('item/completed',turnId='turn-compact',item={'id':'compact','type':'contextCompaction'})
     notice('turn/completed',turn={'id':'turn-compact','status':'completed','error':None})
     if mode=='failed':
         # Driver must stop this process, rather than merely hiding success.
@@ -123,13 +123,14 @@ async fn protected_initial_model_is_verified_before_any_turn() {
 
 #[tokio::test]
 async fn manual_compaction_binds_actual_thread_and_requires_review_before_completion() {
-    for mode in ["compact", "order", "failed", "foreign", "stale-turn"] {
+    for mode in ["compact", "order", "failed", "foreign", "stale-turn", "blocked"] {
         let (dir, options, gate) = fixture(mode);
         let mut driver = AppServerDriver::spawn_protected(options, str::to_owned, false, gate).await.unwrap();
         let manifest:Value=serde_json::from_slice(&fs::read(dir.path().join("gate/compact-session.json")).unwrap()).unwrap();
         assert_eq!(manifest["provider_thread"], "thread-actual");
         let mut events=Vec::new();
         let result=driver.compact(&CancellationToken::new(), |e| events.push(e)).await;
+        if mode == "blocked" { assert!(matches!(result,Err(doxa_engines::codex_appserver::AppServerError::CompactionBlocked))); }
         assert_eq!(result.is_ok(), mode=="compact");
         assert_eq!(events.iter().any(|e| e.kind=="compaction_done"),mode=="compact");
         if mode=="failed" {

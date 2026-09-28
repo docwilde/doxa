@@ -121,7 +121,12 @@ mod tests {
         assert!(!supervise_at(&worker, &serde_json::json!({}), "codex", Duration::from_millis(150), pipe[0]).unwrap());
         let pid: i32 = std::fs::read_to_string(pidfile).unwrap().trim().parse().unwrap();
         // A killed descendant may briefly remain a zombie, but cannot execute.
-        let state = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let state = loop {
+            let state = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+            if state.is_empty() || state.split_whitespace().nth(2) == Some("Z") || Instant::now() >= deadline { break state; }
+            std::thread::sleep(Duration::from_millis(5));
+        };
         assert!(state.is_empty() || state.split_whitespace().nth(2) == Some("Z"));
         unsafe { libc::close(pipe[1]); }
         assert!(!supervise_at(&worker, &serde_json::json!({}), "codex", Duration::from_secs(1), pipe[0]).unwrap());

@@ -119,3 +119,42 @@ fn vendor_jsonl_uses_python_shape_and_detects_half_commits() {
     fs::write(store.transcript_path(), b"{malformed\n").unwrap();
     assert!(store.verify_vendor_transcript("glm", &messages).is_err());
 }
+
+#[test]
+fn managed_context_preserves_originals_and_binds_reviewed_prefix_on_resume() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = TranscriptStore::new(dir.path(), "project", "session-1").unwrap();
+    let messages = vec![json!({"role":"user","content":"objective"}),json!({"role":"assistant","content":"done"})];
+    store.try_append_vendor_turn("glm","/project","objective","done","now",|s|Ok(s.into())).unwrap();
+    store.try_write_vendor_messages("glm","model",&messages,|s|Ok(s.into())).unwrap();
+    let transcript = fs::read(store.transcript_path()).unwrap();
+    let replay = fs::read(store.vendor_messages_path()).unwrap();
+    store.try_write_vendor_context("glm",&messages,"reviewed factual summary",&json!({"inode":1}),||Ok(true)).unwrap();
+    assert_eq!(fs::read(store.transcript_path()).unwrap(),transcript);
+    assert_eq!(fs::read(store.vendor_messages_path()).unwrap(),replay);
+    assert_eq!(store.read_vendor_context("glm",&messages).unwrap(),Some((2,"reviewed factual summary".into())));
+    let mut appended = messages.clone(); appended.extend([json!({"role":"user","content":"next"}),json!({"role":"assistant","content":"answer"})]);
+    assert!(store.read_vendor_context("glm",&appended).unwrap().is_some());
+    appended[0]["content"] = json!("changed objective");
+    assert!(store.read_vendor_context("glm",&appended).is_err());
+    assert!(store.read_vendor_context("deepseek",&messages).is_err());
+    let old = fs::read(store.vendor_context_path()).unwrap();
+    assert!(store.try_write_vendor_context("glm",&messages,"unauthorized next summary",&json!({}),||Ok(false)).is_err());
+    assert_eq!(fs::read(store.vendor_context_path()).unwrap(),old);
+    assert_eq!(fs::metadata(store.vendor_context_path()).unwrap().permissions().mode() & 0o077,0);
+}
+
+#[test]
+fn managed_context_directory_swap_cannot_mutate_replacement_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = TranscriptStore::new(dir.path(),"project","session-1").unwrap();
+    let original = dir.path().join("project"); let moved = dir.path().join("moved");
+    let messages = [json!({"role":"user","content":"objective"}),json!({"role":"assistant","content":"done"})];
+    // A source check races after the directory identity check. The write stays
+    // anchored to the original fd and never follows the swapped directory.
+    assert!(store.try_write_vendor_context("glm",&messages,"summary",&json!({}),|| {
+        fs::rename(&original,&moved)?; fs::create_dir(&original)?; Ok(true)
+    }).is_err());
+    assert!(!original.join("session-1.context.json").exists());
+    assert!(!moved.join("session-1.context.json").exists());
+}

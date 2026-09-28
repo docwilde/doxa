@@ -38,8 +38,8 @@ fn write_new(path: &Path, bytes: &[u8]) -> io::Result<()> {
     file.write_all(bytes)?; file.sync_all()
 }
 impl CompactGate {
-    /// `directory` is a fresh, private DOXA-owned session directory. Source is
-    /// compiled into this binary, never read from a user's plugin directory.
+    /// `directory` is a fresh, private DOXA-owned session directory. The native
+    /// daemon executable is pinned by digest, never from a plugin import path.
     pub fn prepare(directory: &Path, executable: &Path, codex_home: &Path, cwd: &Path, session_id: &str, version: &str) -> io::Result<Self> {
         Self::prepare_with_memory(directory, executable, codex_home, cwd, session_id, version, true)
     }
@@ -79,10 +79,10 @@ impl CompactGate {
     /// Failure means this provider must not claim protected compaction.
     pub fn verify_hooks(&mut self, result: &Value) -> io::Result<()> {
         let matches = result["data"].as_array().into_iter().flatten().flat_map(|entry| entry["hooks"].as_array().into_iter().flatten())
-            .filter(|hook| hook["key"] == HOOK_KEY && hook["command"] == self.command).collect::<Vec<_>>();
+            .filter(|hook| hook["key"] == HOOK_KEY || (hook["source"] == "sessionFlags" && hook["eventName"] == "preCompact")).collect::<Vec<_>>();
         if matches.len() != 1 { return Err(io::Error::other("DOXA PreCompact hook missing or duplicated")); }
         let hook = matches[0];
-        if hook["handlerType"] != "command" || hook["enabled"] != true || hook["trustStatus"] != "trusted" || hook["currentHash"] != self.hash || hook["eventName"] != "preCompact" || hook["source"] != "sessionFlags" || hook["timeoutSec"] != HOOK_TIMEOUT || hook["async"] != false {
+        if hook["command"] != self.command || hook["key"] != HOOK_KEY || hook["handlerType"] != "command" || hook["enabled"] != true || hook["trustStatus"] != "trusted" || hook["currentHash"] != self.hash || hook["eventName"] != "preCompact" || hook["source"] != "sessionFlags" || hook["timeoutSec"] != HOOK_TIMEOUT || hook["async"] != false {
             return Err(io::Error::other("DOXA PreCompact hook is not active with its pinned hash"));
         }
         self.verified = true; Ok(())

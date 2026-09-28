@@ -16,6 +16,7 @@ impl AppServerDriver {
         let mut turn: Option<String> = None;
         let mut reviewed = false;
         let mut completed = false;
+        let mut blocked = false;
         loop {
             let frame = if let Some((frame, bytes)) = self.pending_notifications.pop_front() {
                 self.pending_bytes = self.pending_bytes.saturating_sub(bytes); frame
@@ -47,16 +48,20 @@ impl AppServerDriver {
                     let outcome = self.compact_gate.as_mut().map(|gate| gate.observe_completion(&params["run"])).unwrap_or(ReviewOutcome::Failed);
                     match outcome {
                         ReviewOutcome::Reviewed => { reviewed = true; emit(EngineEvent::new("lore_review_completed", json!({"before":"compaction"}))); }
-                        ReviewOutcome::Blocked => { return Err(AppServerError::Server("LORE review blocked Codex compaction".into())); }
+                        ReviewOutcome::Blocked => { blocked = true; }
                         ReviewOutcome::Failed => { self.kill_group(); return Err(AppServerError::Protocol("Codex PreCompact hook failed; protected session stopped")); }
                         ReviewOutcome::Unrelated => {}
                     }
                 }
                 "item/completed" if params["item"]["type"] == "contextCompaction" => {
-                    if !reviewed { self.kill_group(); return Err(AppServerError::Protocol("compaction completed without verified LORE review")); }
+                    if blocked || !reviewed { self.kill_group(); return Err(AppServerError::Protocol("compaction completed without verified LORE review")); }
                     completed = true;
                 }
                 "turn/completed" => {
+                    if blocked && !completed {
+                        self.turn_id = None;
+                        return Err(AppServerError::CompactionBlocked);
+                    }
                     if params["turn"]["status"] != "completed" || !reviewed || !completed {
                         return Err(AppServerError::Protocol("reviewed compaction did not complete"));
                     }

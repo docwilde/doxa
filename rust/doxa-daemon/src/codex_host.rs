@@ -50,7 +50,6 @@ pub struct CodexHost {
     input: doxa_engines::codex_interaction::InputInbox,
     peer_tools: Mutex<Option<doxa_runtime::PeerToolHandler>>,
     peer_tools_allowed: bool,
-    lore_python: PathBuf,
     lore_enabled: bool,
     agent_tools: Option<Arc<crate::agent_tools::AgentTools>>,
     scrub_failed: Arc<AtomicBool>,
@@ -99,7 +98,6 @@ impl CodexHost {
 
     pub fn new(
         mut options: DriverOptions,
-        lore_python: &Path,
         session_id: &str,
         resume: bool,
     ) -> Result<Self, String> {
@@ -195,12 +193,12 @@ impl CodexHost {
             if std::env::var("DOXA_CODEX_APPSERVER").as_deref() == Ok("0") { "exec" } else { "app-server" }
         });
         let agent_tools = if transport == "app-server" && (options.resume_thread.is_none() || saved_lore_tools) {
-            crate::agent_tools::AgentTools::new(lore_python, &cwd, session_id, "codex", lore_enabled)
+            crate::agent_tools::AgentTools::new(&cwd, session_id, "codex", lore_enabled)
         } else { None };
         if saved_lore_tools && agent_tools.is_none() {
             return Err("Codex saved LORE tools are unavailable; refusing to resume the thread".into());
         }
-        if transport == "exec" { options.config_overrides = crate::agent_tools::mcp_overrides(lore_python, &cwd, session_id, lore_enabled); }
+        if transport == "exec" { options.config_overrides = crate::agent_tools::mcp_overrides(&cwd, session_id, lore_enabled); }
         let peer_tools_allowed = transport == "app-server" && (options.resume_thread.is_none() || saved_peer_tools);
         let selection = (options.model.clone(), options.effort.clone());
         let catalog_options = AppServerOptions { executable: options.executable.clone(), cwd: options.cwd.clone(),
@@ -268,7 +266,7 @@ impl CodexHost {
             runtime: Mutex::new(runtime),
             active: Mutex::new(None),
             input: Default::default(),
-            peer_tools: Mutex::new(None), peer_tools_allowed, lore_python: lore_python.to_owned(),
+            peer_tools: Mutex::new(None), peer_tools_allowed,
             scrub_failed,
             persistence_failed: AtomicBool::new(false),
             lore, lore_enabled, agent_tools,
@@ -542,6 +540,7 @@ impl Host for CodexHost {
                 .and_then(|path| codex_context::size(path, id))), id.is_none())
         };
         let thread_write_failed = Cell::new(false);
+        let compact_blocked = Cell::new(false);
         let mut terminal_event = None;
         let mut handle_event = |event: doxa_engines::EngineEvent| {
             if self.scrub_failed.load(Ordering::Acquire)
@@ -674,12 +673,13 @@ impl Host for CodexHost {
                                     })
                                 },
                             )) }.map_err(|error| match error {
+                                AppServerError::CompactionBlocked => { compact_blocked.set(true); "LORE review blocked compaction; existing context retained".to_owned() },
                                 AppServerError::Server(message) => message,
                                 AppServerError::Cancelled => "Codex turn cancelled".to_owned(),
                                 AppServerError::TimedOut => "Codex app-server turn timed out".to_owned(),
                                 _ => "Codex app-server protocol or process failed".to_owned(),
                             });
-                            if outcome.is_err() {
+                            if outcome.is_err() && !compact_blocked.get() {
                                 if let Some(app) = active.as_mut() { runtime.block_on(app.shutdown()); }
                                 *active = None;
                             }
@@ -689,6 +689,20 @@ impl Host for CodexHost {
                 }
         };
         self.input.clear();
+        // A verified blocking hook is a provider-guaranteed stop before manual
+        // compaction. Its turn was drained; no raw context was compacted. Keep
+        // the existing thread usable and clear only the temporary restart guard.
+        if compaction && compact_blocked.get() && !self.scrub_failed.load(Ordering::Acquire)
+            && !self.persistence_failed.load(Ordering::Acquire) && !thread_write_failed.get() {
+            if let Some(id) = self.driver.lock().unwrap().thread_id().map(str::to_owned) {
+                if self.persist_thread(&id, false).is_ok() {
+                    *self.active.lock().unwrap() = None;
+                    emit(json!({"type":"turn_done","data":{"is_error":true,"operation":"compact","blocked":true,
+                        "error":"LORE review blocked compaction; existing context retained"}}));
+                    return;
+                }
+            }
+        }
         // A provider error or interrupted turn can leave the provider thread
         // ahead of our durable transcript. Keep its restart guard armed.
         let turn_succeeded = result.is_ok()

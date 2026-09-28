@@ -43,6 +43,9 @@ pub enum AppServerError {
     Protocol(&'static str),
     Server(String),
     Cancelled,
+    /// A verified blocking PreCompact response stopped a manual compaction
+    /// before any context-compaction item, and its turn was fully drained.
+    CompactionBlocked,
     TimedOut,
 }
 

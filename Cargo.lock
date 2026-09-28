@@ -359,6 +359,7 @@ version = "2.0.0-alpha.36"
 dependencies = [
  "libc",
  "serde_json",
+ "sha2",
  "tempfile",
 ]
 
