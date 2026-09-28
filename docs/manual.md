@@ -1,10 +1,14 @@
 # DOXA Python 1.x manual
 
-Historical reference for the Python 1.x frontend. Rust 2.0 is the main line;
-use the [Rust guide](../rust/README.md) for current capabilities and setup.
-This document was last read against Python **1.9.3** end to end and does not
-describe the Rust frontend. For designs that are still being ported, see
-[docs/plans/](plans/).
+Historical compatibility reference for the Python 1.x frontend. The
+[Rust guide](../rust/README.md) is the primary user guide for the installed native
+runtime, current commands, setup, shortcuts and provider limits. Python CLI,
+SDK, plugin-selection and installation instructions below apply only to the
+retained Python implementation used for development interoperability.
+
+This document was last read against Python **1.9.3** end to end. Later Python
+release notes and design references remain historical; they do not describe
+Rust runtime guarantees.
 
 ## Contents
 

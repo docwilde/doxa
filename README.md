@@ -43,16 +43,16 @@ results are real. See the [capture method](docs/rust-gallery.md).*
 
 ## What you get
 
-- **Four engines:** Run Claude, Codex, DeepSeek or GLM, with supported model, reasoning effort and permission changes during a session.
+- **Four engines:** Run Claude, Codex, DeepSeek or GLM with supported model, reasoning effort and permission controls.
 - **Flexible workspace:** Group tabs, split panes horizontally or vertically, and drag dividers; each pane has its own prompt.
-- **Session recovery:** Restore saved tabs, drafts and layouts, safely resume recorded conversations, or reattach to running daemons.
-- **Clear conversations:** Follow a processing spinner and live reasoning count, expand thinking or each individual tool call, and open links with Ctrl+click.
-- **Shared memory:** Browse and filter LORE's individual user/project memories, inspect belief evidence, and accept or reject exact reviewed claims.
-- **Repo and worktree tools:** Browse folders, switch branches, inspect diffs, reject tracked hunks and perform guarded checkout recovery or cleanup.
-- **Fleets and peers:** Review multi-agent plans, coordinate supervised runs, enforce reported spend limits and inspect peer activity in the TUI or browser mesh.
+- **Session recovery:** Restore tabs, drafts and layouts, safely resume recorded conversations, or reattach to running daemons.
+- **Clear conversations:** Follow live progress, expand reasoning or individual tool calls, and open links with Ctrl+click.
+- **Shared memory:** Browse and filter LORE memory and beliefs, inspect evidence, and approve or reject fully reviewed changes.
+- **Repo and worktree tools:** Browse folders, switch branches, inspect diffs and reject tracked hunks. Recover or clean up managed checkouts with ownership checks.
+- **Fleets and peers:** Coordinate supervised agents, inspect peer activity and review requests in the TUI or browser mesh. Spend limits require complete reported accounting.
 - **Usage at a glance:** Inspect reported context, plan, quota and API balance details; unavailable values stay unknown.
-- **Keyboard and mouse:** Approve provider requests inline with A, Enter or a click; navigate tabs, chips and prompts with Tab, use slash completion, and select/copy text or paste into the prompt where supported.
-- **Setup and customization:** Manage provider login and masked API keys, plugins, categorized settings, help and updates; run private local shell commands with `!`.
+- **Keyboard and mouse:** Approve requests inline with A, Enter or a click. Navigate with Tab, complete slash commands, and copy or paste where supported.
+- **Setup and customization:** Manage provider login, masked API keys, plugins and settings. Run private local shell commands with `!`.
 
 See the [Rust guide](rust/README.md) for engine capabilities, shortcuts and
 [compaction boundaries](rust/doxa-engines/README.md#compaction-review).
@@ -128,7 +128,7 @@ launcher from `main`.
 
 ## Quickstart
 
-Check dependencies, start a session, and reattach later:
+Check dependencies and start a session:
 
 ```sh
 doxa doctor --engine codex
@@ -136,15 +136,22 @@ doxa new --engine codex
 doxa list
 ```
 
-The [Rust guide](rust/README.md) covers Claude, DeepSeek, and GLM setup.
+Ctrl+Q detaches the frontend. Use an ID or unique prefix from `doxa list` to
+reattach later:
+
+```sh
+doxa attach SESSION_ID
+```
+
+The [Rust guide](rust/README.md) is the primary user guide and covers Claude,
+DeepSeek, and GLM setup.
 
 ## Status
 
-Rust 2.0 alpha is the main line. The [Rust guide](rust/README.md) tracks
-what is implemented and what still needs porting. Existing Python 1.x releases
-and their [manual](docs/manual.md) remain available for historical reference;
-Python modules remain development compatibility references; installation and
-normal operation use the Rust runtime.
+Rust 2.0 alpha is the main line. The [Rust guide](rust/README.md) describes
+current commands, setup and provider limits. Existing Python 1.x releases and
+their [historical compatibility manual](docs/manual.md) remain reference material;
+installation and normal operation use the Rust runtime.
 LORE is integrated as a canonical Rust module; memory, beliefs,
 context, session indexing and detached review use the same existing store.
 Signed sync replays portable project memory and file-map keys across machines,
