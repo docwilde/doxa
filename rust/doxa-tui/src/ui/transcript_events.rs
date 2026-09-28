@@ -120,7 +120,7 @@ impl std::fmt::Debug for ReasoningStream {
     }
 }
 
-pub(super) fn set_reasoning_marker(session: &mut Session, stream: &ReasoningStream) {
+pub(super) fn set_reasoning_marker(session: &mut Session, stream: &ReasoningStream) -> bool {
     let marker = format!(
         "{}{}",
         transcript_tools::REASONING_PREFIX,
@@ -135,11 +135,12 @@ pub(super) fn set_reasoning_marker(session: &mut Session, stream: &ReasoningStre
             session.transcript.replace_range(start..end, &marker);
             if session.transcript.len() > MAX_TRANSCRIPT_BYTES {
                 session.transcript = transcript_tail(&session.transcript).to_owned();
+                return true;
             }
-            return;
+            return false;
         }
     }
-    append_transcript(session, &format!("\n\n{marker}\n\n"));
+    append_transcript(session, &format!("\n\n{marker}\n\n"))
 }
 
 pub(super) fn structured_event(event_type: &str, data: &serde_json::Value) -> Option<String> {

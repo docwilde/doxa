@@ -20,6 +20,29 @@ use super::{
 use crate::markdown;
 
 impl App {
+    // Positional folds are meaningful only while the retained transcript prefix
+    // is unchanged. Provider call IDs remain stable across display-tail eviction.
+    fn forget_positional_folds(&mut self, id: &str) {
+        use super::transcript_tools::FoldKey;
+        let stable = |key: &FoldKey| matches!(key, FoldKey::Tool(call) if !call.starts_with("legacy:Section("));
+        if let Some(keys) = self.expanded_tool_sections.get_mut(id) {
+            keys.retain(stable);
+        }
+        if self.selected_tool_sections.get(id).is_some_and(|key| !stable(key)) {
+            self.selected_tool_sections.remove(id);
+        }
+        if self.tool_section_hover.as_ref().is_some_and(|(owner, key)| owner == id && !stable(key)) {
+            self.tool_section_hover = None;
+        }
+    }
+
+    fn transcript_evicted(&mut self, id: &str, clipped: bool) {
+        if clipped {
+            self.forget_positional_folds(id);
+            self.notice = "Transcript tail limited to 512 KiB".into();
+        }
+    }
+
     pub(super) fn invalidate_repo(&mut self, id: &str) {
         self.repo_cache.remove(id);
         let epoch = self.repo_epoch.entry(id.to_owned()).or_default();
@@ -30,6 +53,10 @@ impl App {
         match update {
             DaemonUpdate::Upsert(mut session) => {
                 session.transcript = transcript_tail(&session.transcript).to_owned();
+                if self.sessions.iter().find(|old| old.id == session.id)
+                    .is_some_and(|old| old.transcript != session.transcript) {
+                    self.forget_positional_folds(&session.id);
+                }
                 self.offline_ids.remove(&session.id);
                 if let Some(existing) = self.sessions.iter_mut().find(|s| s.id == session.id) {
                     *existing = session;
@@ -42,8 +69,12 @@ impl App {
                 }
             }
             DaemonUpdate::Transcript { id, markdown } => {
+                let retained = transcript_tail(&markdown);
+                if self.sessions.iter().find(|s| s.id == id).is_some_and(|s| s.transcript != retained) {
+                    self.forget_positional_folds(&id);
+                }
                 if let Some(s) = self.sessions.iter_mut().find(|s| s.id == id) {
-                    s.transcript = transcript_tail(&markdown).to_owned();
+                    s.transcript = retained.to_owned();
                 }
             }
             DaemonUpdate::Status { id, text } => {
@@ -745,12 +776,12 @@ impl App {
                             return false;
                         }
                         if let Some(session) = self.sessions.iter_mut().find(|s| s.id == id) {
+                            let mut clipped = false;
                             if data["snapshot"] != true && self.streaming_text.insert(id.clone()) {
-                                append_turn_heading(session, "Assistant");
+                                clipped |= append_turn_heading(session, "Assistant");
                             }
-                            if append_transcript(session, text) {
-                                self.notice = "Transcript tail limited to 512 KiB".into();
-                            }
+                            clipped |= append_transcript(session, text);
+                            self.transcript_evicted(&id, clipped);
                             true
                         } else {
                             false
@@ -768,8 +799,9 @@ impl App {
                         {
                             if let Some(session) = self.sessions.iter_mut().find(|s| s.id == id) {
                                 let prompt = markdown::sanitize(prompt);
-                                append_turn_heading(session, "You");
-                                append_transcript(session, &prompt);
+                                let mut clipped = append_turn_heading(session, "You");
+                                clipped |= append_transcript(session, &prompt);
+                                self.transcript_evicted(&id, clipped);
                             }
                         }
                         self.session_activity.entry(id.clone()).or_default().0 = true;
@@ -789,6 +821,7 @@ impl App {
                                 "Effort verification failed · previous verified effort retained"
                                     .into();
                         }
+                        let mut clipped = false;
                         if let Some(stream) = self.reasoning_streams.get_mut(&id) {
                             stream.streaming = false;
                             if let Some(tokens) = data["reasoning_output_tokens"].as_u64() {
@@ -798,9 +831,10 @@ impl App {
                             if let Some(session) =
                                 self.sessions.iter_mut().find(|session| session.id == id)
                             {
-                                set_reasoning_marker(session, stream);
+                                clipped |= set_reasoning_marker(session, stream);
                             }
                         }
+                        self.transcript_evicted(&id, clipped);
                         self.session_telemetry
                             .entry(id.clone())
                             .or_default()
@@ -1494,12 +1528,12 @@ impl App {
         };
         let heading_needed = matches!(event_type, "tool_call" | "tool_result")
             && self.streaming_text.insert(id.to_owned());
+        let mut clipped = false;
         if heading_needed {
-            append_turn_heading(session, "Assistant");
+            clipped |= append_turn_heading(session, "Assistant");
         }
-        if append_transcript(session, &row) {
-            self.notice = "Transcript tail limited to 512 KiB".into();
-        }
+        clipped |= append_transcript(session, &row);
+        self.transcript_evicted(id, clipped);
         true
     }
 
@@ -1542,11 +1576,13 @@ impl App {
         let Some(session) = self.sessions.iter_mut().find(|session| session.id == id) else {
             return false;
         };
+        let mut clipped = false;
         if heading_needed {
-            append_turn_heading(session, "Assistant");
+            clipped |= append_turn_heading(session, "Assistant");
         }
-        set_reasoning_marker(session, stream);
+        clipped |= set_reasoning_marker(session, stream);
         stream.visible = true;
+        self.transcript_evicted(id, clipped);
         true
     }
 }
@@ -1654,4 +1690,66 @@ mod tests {
         );
         assert_eq!(typed.groups, raw.groups);
     }
+
+    fn saturated_folds() -> App {
+        use crate::ui::transcript_tools::FoldKey;
+        use std::collections::HashSet;
+        let mut app = App::default();
+        app.sessions.push(Session { id: "s".into(), title: "S".into(), collection: "repo".into(),
+            transcript: "x".repeat(crate::ui::MAX_TRANSCRIPT_BYTES), status: "Ready".into() });
+        for id in ["s", "other"] {
+            app.expanded_tool_sections.insert(id.into(), HashSet::from([
+                FoldKey::Section(0), FoldKey::Tool("legacy:Section(0):0".into()), FoldKey::Tool("provider-call".into())]));
+            app.selected_tool_sections.insert(id.into(), FoldKey::Section(0));
+        }
+        app.tool_section_hover = Some(("s".into(), FoldKey::Tool("legacy:Section(0):0".into())));
+        app
+    }
+
+    fn assert_evicted_folds(app: &App) {
+        use crate::ui::transcript_tools::FoldKey;
+        assert_eq!(app.expanded_tool_sections["s"], std::collections::HashSet::from([FoldKey::Tool("provider-call".into())]));
+        assert!(!app.selected_tool_sections.contains_key("s"));
+        assert!(app.tool_section_hover.is_none());
+        assert_eq!(app.expanded_tool_sections["other"].len(), 3);
+        assert_eq!(app.selected_tool_sections["other"], FoldKey::Section(0));
+    }
+
+    #[test]
+    fn transcript_eviction_clears_only_owner_positional_folds_for_all_append_routes() {
+        for (kind, data) in [
+            ("text_delta", json!({"text":"é"})),
+            ("turn_started", json!({"prompt":"next prompt"})),
+            ("tool_call", json!({"id":"new-call", "name":"Read", "input":{"file":"a.rs"}})),
+        ] {
+            let mut app = saturated_folds();
+            assert!(app.apply_daemon_frame(&json!({"type":"event", "session_id":"s", "event":{"type":kind,"data":data}})));
+            assert_evicted_folds(&app);
+            assert!(app.sessions[0].transcript.len() <= crate::ui::MAX_TRANSCRIPT_BYTES);
+        }
+    }
+
+    #[test]
+    fn reasoning_replacement_eviction_clears_positional_folds_at_turn_done() {
+        let mut app = saturated_folds();
+        let prefix = crate::ui::transcript_tools::REASONING_PREFIX;
+        let marker = format!("{prefix}{{}}\n\n");
+        app.sessions[0].transcript = format!("{}{marker}", "x".repeat(crate::ui::MAX_TRANSCRIPT_BYTES - marker.len()));
+        app.reasoning_streams.insert("s".into(), super::super::transcript_events::ReasoningStream {
+            text: "expanded reasoning".repeat(20), visible: true, ..Default::default()
+        });
+        assert!(app.apply_daemon_frame(&json!({"type":"event", "session_id":"s", "event":{"type":"turn_done", "data":{}}})));
+        assert_evicted_folds(&app);
+    }
+
+    #[test]
+    fn changed_snapshot_clears_positional_folds_but_exact_snapshot_keeps_them() {
+        let mut app = saturated_folds();
+        let exact = app.sessions[0].transcript.clone();
+        app.apply_update(DaemonUpdate::Transcript { id:"s".into(), markdown:exact });
+        assert!(app.selected_tool_sections.contains_key("s"));
+        app.apply_update(DaemonUpdate::Transcript { id:"s".into(), markdown:"new snapshot".into() });
+        assert_evicted_folds(&app);
+    }
+
 }
