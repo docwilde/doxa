@@ -10,6 +10,8 @@ without changing the audited interaction contracts.
 Alpha.36 moves permission requests above the prompt: select Approve/Deny, press
 Enter, or press A to approve. Requests blink until answered; complete-input review
 and original request ownership still apply.
+Each tool call expands independently within its turn's tool section. Click a
+call or focus the transcript, select with `[`/`]`, then press Enter or Space.
 Terminal images remain excluded by user preference. Provider capabilities,
 trust gates and unavailable historical data retain their documented limits.
 

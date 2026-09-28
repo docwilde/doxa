@@ -14,6 +14,9 @@ python3 scripts/rust_gallery.py
 
 Pass scene names to update individual images. The script's `SCENES` list contains
 the complete gallery. Version labels come from the compiled Rust package.
+Use `--output-dir PATH` for review captures outside the checked-in gallery.
+The `permission-request` and `tool-entries` scenes exercise pending inline
+approval and independently expanded tool details through the production handlers.
 
 ## Prompt session search
 

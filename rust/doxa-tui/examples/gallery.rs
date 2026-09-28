@@ -23,6 +23,16 @@ fn tool_activity(app: &mut App) {
     event(app,"demo-codex-01","tool_result_detail",json!({"id":"tool-2","text":"Updated src/parser.rs and src/parser_test.rs; bounds and reconnect checks passed."}));
 }
 
+fn open_first_tool(app: &mut App) {
+    app.focus = Focus::Transcript;
+    let mut terminal = Terminal::new(TestBackend::new(126, 31)).unwrap();
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+    key(app, KeyCode::Enter, KeyModifiers::NONE);
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+    key(app, KeyCode::Char(']'), KeyModifiers::NONE);
+    key(app, KeyCode::Enter, KeyModifiers::NONE);
+}
+
 // These are the normalized events emitted for a Codex webSearch whose
 // action details first become available on item/completed. The gallery drives
 // the production card reducer; it never calls an engine or browser.
@@ -111,9 +121,19 @@ fn scene(name: &str) -> App {
             event(&mut app,"demo-codex-01","text_delta",json!({"text":
                 "## Documentation check\n\nCodex reported the completed search action and its two queries."}));
             completed_web_activity(&mut app);
-            app.focus = Focus::Transcript;
-            key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+            open_first_tool(&mut app);
             app.notice = "Fixture · completed Codex web request · no browser or provider".into();
+        }
+        "tool-entries" => {
+            app.groups[0].tabs = vec!["demo-codex-01".into()];
+            if let Some(session) = app.sessions.iter_mut().find(|session| session.id == "demo-codex-01") {
+                session.transcript.clear();
+            }
+            event(&mut app, "demo-codex-01", "text_delta", json!({"text":
+                "## Parser checks\n\nBounds and reconnect checks passed. Open each tool call to inspect its input and result."}));
+            tool_activity(&mut app);
+            open_first_tool(&mut app);
+            app.notice = format!("Rust {} · individual tool entries fixture", env!("CARGO_PKG_VERSION"));
         }
         "restored-tool" => {
             app.groups[0].tabs = vec!["demo-claude-02".into()];
@@ -128,8 +148,7 @@ fn scene(name: &str) -> App {
             let bytes = records.iter().map(Value::to_string).collect::<Vec<_>>().join("\n").into_bytes();
             let markdown = history::render(&TranscriptSnapshot { bytes, earlier_bytes_omitted: false });
             event(&mut app, "demo-claude-02", "text_delta", json!({"text":markdown,"snapshot":true}));
-            app.focus = Focus::Transcript;
-            key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+            open_first_tool(&mut app);
             app.notice = "Restored session · expanded tool detail".into();
         }
         "processing" => {
@@ -298,7 +317,7 @@ fn main() {
     let name = std::env::args().nth(1).expect("scene name");
     let (width,height) = match name.as_str() {
         "welcome" => (72,18),
-        "hero" | "repo-picker" | "claude-session" | "tool-activity" | "tool-expanded" | "restored-tool" | "processing" | "reasoning" | "commands" | "help" | "needs-input" | "permissions" | "permission-request" | "effort" | "history" | "queue" | "beliefs" | "belief-hover" | "memory" | "memory-management" | "memory-change" | "fleet-review" | "fleet-view" => (126,31),
+        "hero" | "repo-picker" | "claude-session" | "tool-activity" | "tool-expanded" | "tool-entries" | "restored-tool" | "processing" | "reasoning" | "commands" | "help" | "needs-input" | "permissions" | "permission-request" | "effort" | "history" | "queue" | "beliefs" | "belief-hover" | "memory" | "memory-management" | "memory-change" | "fleet-review" | "fleet-view" => (126,31),
         _ => panic!("unknown scene"),
     };
     let mut terminal = Terminal::new(TestBackend::new(width,height)).unwrap();
