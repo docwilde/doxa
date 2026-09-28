@@ -1,6 +1,6 @@
 //! Dedicated Linux provider owner. Parent control EOF also covers parent SIGKILL.
 //! The owner is the only subreaper: the daemon never adopts unrelated children.
-use std::{io::{self, Read, Write, Seek, SeekFrom}, os::unix::{io::AsRawFd, net::UnixStream}, time::{Duration, Instant}};
+use std::{io::{self, Read, Write, Seek, SeekFrom}, os::unix::{io::AsRawFd, net::UnixStream}, time::Duration};
 
 pub const CONTROL_ENV: &str = "DOXA_CODEX_OWNER_FD";
 pub const READY: &[u8] = b"DOXA_PROVIDER_OWNER_V1\n";
@@ -30,35 +30,55 @@ pub async fn acknowledge(control: &mut UnixStream) -> io::Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-fn children(file: &mut std::fs::File) -> io::Result<Vec<libc::pid_t>> {
-    // All entries are direct, unreaped children of this dedicated process.
-    // Their IDs remain reserved until OUR waitpid. No ancestry PID guesswork.
-    let mut bytes = Vec::new();
+fn census(file: &mut std::fs::File, signal: bool) -> io::Result<bool> {
+    // Read the pinned proc file in fixed space, with no lifetime child cap.
+    // Every signaled entry is a DIRECT, unreaped kernel child of this owner.
     file.seek(SeekFrom::Start(0))?;
-    file.take(256 * 1024 + 1).read_to_end(&mut bytes)?;
-    if bytes.len() > 256 * 1024 { return Err(io::Error::other("provider child census exceeds bound")); }
-    std::str::from_utf8(&bytes).map_err(io::Error::other)?.split_whitespace()
-        .map(|pid| pid.parse::<libc::pid_t>().map_err(io::Error::other)).collect()
+    let mut bytes = [0_u8; 4096];
+    let mut token = Vec::with_capacity(12);
+    let mut any = false;
+    loop {
+        let count = file.read(&mut bytes)?;
+        for byte in bytes[..count].iter().copied().chain((count == 0).then_some(b' ')) {
+            if byte.is_ascii_whitespace() {
+                if token.is_empty() { continue; }
+                let pid = std::str::from_utf8(&token).map_err(io::Error::other)?
+                    .parse::<libc::pid_t>().map_err(io::Error::other)?;
+                if pid <= 0 { return Err(io::Error::other("invalid owned child identity")); }
+                any = true;
+                if signal {
+                    // No waitpid between reading this identity and signaling.
+                    unsafe { libc::kill(pid, libc::SIGSTOP); libc::kill(pid, libc::SIGKILL); }
+                }
+                token.clear();
+            } else {
+                if !byte.is_ascii_digit() || token.len() >= 12 {
+                    return Err(io::Error::other("invalid provider child census"));
+                }
+                token.push(byte);
+            }
+        }
+        if count == 0 { return Ok(any); }
+    }
 }
 
 #[cfg(target_os = "linux")]
-fn clean_children(file: &mut std::fs::File) -> io::Result<()> {
-    let deadline = Instant::now() + Duration::from_secs(4);
+fn clean_children(file: &mut std::fs::File) {
     loop {
-        let owned = children(file)?;
-        // Do not reap between census and signaling. Stop before killing, so
-        // live parents cannot keep forking while grandchildren are adopted.
-        for &pid in &owned { unsafe { libc::kill(pid, libc::SIGSTOP); } }
-        for &pid in &owned { unsafe { libc::kill(pid, libc::SIGKILL); } }
+        // A transient census error must never make this owner abandon live
+        // children. The parent's wait is bounded independently; only this
+        // small dedicated process persists if the kernel cannot yet reap.
+        let signaled = census(file, true);
         loop {
             let result = unsafe { libc::waitpid(-1, std::ptr::null_mut(), libc::WNOHANG) };
             if result > 0 { continue; }
             if result < 0 && io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) { continue; }
+            if result < 0 && io::Error::last_os_error().raw_os_error() == Some(libc::ECHILD) { return; }
             break;
         }
-        if children(file)?.is_empty() { return Ok(()); }
-        if Instant::now() >= deadline { return Err(io::Error::other("provider descendants did not reap within shutdown bound")); }
-        std::thread::sleep(Duration::from_millis(10));
+        // Killing direct parents adopts detached grandchildren. Repeat the
+        // census after reaping; never signal old identities after a waitpid.
+        std::thread::sleep(if signaled.is_ok() { Duration::from_millis(10) } else { Duration::from_millis(250) });
     }
 }
 
@@ -71,8 +91,8 @@ pub fn supervise(mut control: UnixStream, exec: impl FnOnce() -> io::Error) -> i
         libc::signal(libc::SIGCHLD, libc::SIG_DFL);
     }
     // Pin and preflight the ownership census before acknowledging any start.
-    let mut census = std::fs::File::open(format!("/proc/self/task/{}/children", std::process::id()))?;
-    children(&mut census)?;
+    let mut census_file = std::fs::File::open(format!("/proc/self/task/{}/children", std::process::id()))?;
+    census(&mut census_file, false)?;
     control.set_read_timeout(Some(Duration::from_secs(30)))?;
     control.write_all(READY)?;
     let mut go = [0];
@@ -106,7 +126,7 @@ pub fn supervise(mut control: UnixStream, exec: impl FnOnce() -> io::Error) -> i
         }
         std::thread::sleep(Duration::from_millis(10));
     };
-    clean_children(&mut census)?;
+    clean_children(&mut census_file);
     Ok(result)
 }
 
