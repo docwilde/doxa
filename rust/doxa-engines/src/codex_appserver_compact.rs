@@ -36,7 +36,10 @@ impl AppServerDriver {
     async fn compact_approved(&mut self, cancel: &CancellationToken, mut emit: impl FnMut(EngineEvent), job: crate::compact_hook::ReviewJob) -> Result<(), AppServerError> {
         // The private job cannot be created by adapter consumers. Recheck the
         // approved exact source immediately before submitting compaction.
-        if !job.unchanged().unwrap_or(false) { return Err(AppServerError::CompactionBlocked); }
+        if !job.unchanged().unwrap_or(false)
+            || self.compact_gate.as_ref().is_none_or(|gate| !gate.verified() || gate.pinned_carrier().is_err()) {
+            return Err(AppServerError::CompactionBlocked);
+        }
         self.usage=None;
         let thread = self.thread_id().to_owned();
         let deadline = tokio::time::Instant::now() + self.options.turn_timeout;

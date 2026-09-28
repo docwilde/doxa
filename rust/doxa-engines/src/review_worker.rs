@@ -204,7 +204,12 @@ mod tests {
         assert!(!review(&executable,&metadata,"codex",timeout,||false).unwrap());
         assert!(started.elapsed()<Duration::from_secs(5));
         let pid:i32=std::fs::read_to_string(pidfile).unwrap().trim().parse().unwrap();
-        let state=std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+        let deadline=Instant::now()+Duration::from_secs(1);
+        let state=loop {
+            let state=std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+            if state.is_empty() || state.split_whitespace().nth(2)==Some("Z") || Instant::now()>=deadline {break state;}
+            std::thread::sleep(Duration::from_millis(5));
+        };
         assert!(state.is_empty() || state.split_whitespace().nth(2)==Some("Z"));
         std::fs::write(&executable,"#!/bin/sh\nhead -c 2049 /dev/zero\n").unwrap();
         assert!(!review(&executable,&metadata,"codex",timeout,||false).unwrap());
