@@ -52,7 +52,7 @@ results are real. See the [capture method](docs/rust-gallery.md).*
 - **Fleets and peers:** Review multi-agent plans, coordinate supervised runs, enforce reported spend limits and inspect peer activity in the TUI or browser mesh.
 - **Usage at a glance:** Inspect reported context, plan, quota and API balance details; unavailable values stay unknown.
 - **Keyboard and mouse:** Approve provider requests inline with A, Enter or a click; navigate tabs, chips and prompts with Tab, use slash completion, and select/copy text or paste into the prompt where supported.
-- **Setup and customization:** Use interactive login, plugin management, categorized settings, help and updates; run private local shell commands with `!`.
+- **Setup and customization:** Manage provider login and masked API keys, plugins, categorized settings, help and updates; run private local shell commands with `!`.
 
 See the [Rust guide](rust/README.md) for engine capabilities, shortcuts and
 [compaction boundaries](rust/doxa-engines/README.md#compaction-review).
