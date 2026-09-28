@@ -360,7 +360,7 @@ mod tests {
     fn opened(source: &str) -> HashSet<FoldKey> {
         let mut keys = HashSet::from([FoldKey::Section(0)]);
         let (_, sections) = render(source, 80, Some(&keys), None);
-        keys.extend(sections.into_iter().map(|section| section.index));
+        keys.extend(sections.into_iter().map(|section| section.index).filter(|key| matches!(key, FoldKey::Tool(_))));
         keys
     }
 
