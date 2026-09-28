@@ -7,6 +7,18 @@ the stable 2.0 release has not been cut.
 
 ## 2.0.0-alpha.36 — 2026-09-28
 
+**Inline permissions.**
+
+- Show permission requests in a blinking submenu above the active prompt.
+  Select Approve or Deny with the keyboard or mouse, or press A to approve.
+- Preserve complete-input review, request identity and delivery guards when
+  approving; keep the prompt draft visible throughout.
+
+**Individual tool details.**
+
+- Expand each tool call separately inside **`transcript_tools`** sections.
+  Use keyboard selection or mouse clicks to reveal that call's input and result.
+
 **Canonical LORE sync.**
 
 - Pin **`lore-core`** to 0.61.1 in the native bridge and Python development

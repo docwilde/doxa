@@ -14,7 +14,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
 ROOT = Path(__file__).resolve().parents[1]
-SCENES = ("welcome", "hero", "repo-picker", "claude-session", "tool-activity", "tool-expanded", "restored-tool", "processing", "reasoning", "commands", "help", "needs-input", "permissions", "effort", "history", "queue", "beliefs", "belief-hover", "memory", "memory-management", "memory-change", "fleet-review", "fleet-view")
+SCENES = ("welcome", "hero", "repo-picker", "claude-session", "tool-activity", "tool-expanded", "restored-tool", "processing", "reasoning", "commands", "help", "needs-input", "permissions", "permission-request", "effort", "history", "queue", "beliefs", "belief-hover", "memory", "memory-management", "memory-change", "fleet-review", "fleet-view")
 FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
 CELL_W, CELL_H = 14, 26
 BOX_STROKES = {
@@ -48,7 +48,7 @@ def draw_branch_symbol(draw: ImageDraw.ImageDraw, left: int, top: int,
         draw.ellipse((x - 2, y - 2, x + 2, y + 2), fill=color)
 
 
-def capture(name: str, binary: Path | None = None) -> None:
+def capture(name: str, binary: Path | None = None, output_dir: Path | None = None) -> None:
     command = [str(binary), name] if binary else [
         "cargo", "run", "--quiet", "--manifest-path", "rust/doxa-tui/Cargo.toml",
         "--example", "gallery", "--", name]
@@ -68,14 +68,17 @@ def capture(name: str, binary: Path | None = None) -> None:
             draw_branch_symbol(draw, left, top, tuple(fg))
         elif symbol.strip():
             draw.text((left, top + 1), symbol, font=font, fill=tuple(fg), stroke_width=0)
-    dest = ROOT / "assets" / "shots" / f"rust-{name}.png"
+    directory = output_dir if output_dir is not None else ROOT / "assets" / "shots"
+    directory.mkdir(parents=True, exist_ok=True)
+    dest = directory / f"rust-{name}.png"
     image.save(dest, optimize=True)
-    print(f"{name}: {width}x{height} cells -> {dest.relative_to(ROOT)}")
+    print(f"{name}: {width}x{height} cells -> {dest}")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, help="Use an already compiled production gallery example")
+    parser.add_argument("--output-dir", type=Path, help="Write review captures to a separate directory")
     parser.add_argument("scenes", nargs="*")
     args = parser.parse_args()
     binary = args.binary.resolve() if args.binary else None
@@ -83,4 +86,4 @@ if __name__ == "__main__":
     for name in names:
         if name not in SCENES:
             raise SystemExit(f"unknown scene: {name}")
-        capture(name, binary)
+        capture(name, binary, args.output_dir)

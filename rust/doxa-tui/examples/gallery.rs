@@ -168,6 +168,17 @@ fn scene(name: &str) -> App {
             app.groups[0].tabs = vec!["demo-claude-02".into()];
             key(&mut app, KeyCode::Char('p'), KeyModifiers::ALT);
         }
+        "permission-request" => {
+            app.groups[0].tabs = vec!["demo-claude-02".into()];
+            app.input = "Keep this draft while reviewing the request".into();
+            event(&mut app, "demo-claude-02", "needs_input", json!({
+                "id":"permission-demo", "kind":"permission",
+                "title":"Allow this command?", "tool_name":"Bash",
+                "input_summary":"cargo test --locked -p parser",
+                "require_full_review":true
+            }));
+            app.notice = format!("Rust {} · permission request fixture", env!("CARGO_PKG_VERSION"));
+        }
         "effort" => {
             app.groups[0].tabs = vec!["demo-deepseek-03".into()];
             app.apply_daemon_frame(&json!({"type":"hello","session_id":"demo-deepseek-03",
@@ -287,7 +298,7 @@ fn main() {
     let name = std::env::args().nth(1).expect("scene name");
     let (width,height) = match name.as_str() {
         "welcome" => (72,18),
-        "hero" | "repo-picker" | "claude-session" | "tool-activity" | "tool-expanded" | "restored-tool" | "processing" | "reasoning" | "commands" | "help" | "needs-input" | "permissions" | "effort" | "history" | "queue" | "beliefs" | "belief-hover" | "memory" | "memory-management" | "memory-change" | "fleet-review" | "fleet-view" => (126,31),
+        "hero" | "repo-picker" | "claude-session" | "tool-activity" | "tool-expanded" | "restored-tool" | "processing" | "reasoning" | "commands" | "help" | "needs-input" | "permissions" | "permission-request" | "effort" | "history" | "queue" | "beliefs" | "belief-hover" | "memory" | "memory-management" | "memory-change" | "fleet-review" | "fleet-view" => (126,31),
         _ => panic!("unknown scene"),
     };
     let mut terminal = Terminal::new(TestBackend::new(width,height)).unwrap();

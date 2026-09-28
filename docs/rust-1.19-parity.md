@@ -7,6 +7,9 @@ corrections. Alpha.34 integrates canonical LORE 0.61.0 in Rust, including the
 retained SDK/MCP adapter paths, detached review and reconciliation.
 Alpha.35 separates controllers and uses typed, owner-qualified worker outcomes
 without changing the audited interaction contracts.
+Alpha.36 moves permission requests above the prompt: select Approve/Deny, press
+Enter, or press A to approve. Requests blink until answered; complete-input review
+and original request ownership still apply.
 Terminal images remain excluded by user preference. Provider capabilities,
 trust gates and unavailable historical data retain their documented limits.
 
