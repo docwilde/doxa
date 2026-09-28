@@ -305,7 +305,7 @@ impl CodexHost {
             .map_err(|_| AppServerError::Protocol("Compact gate clock unavailable"))?.as_nanos();
         let directory = root.join(format!("codex-{}-{generation}", std::process::id()));
         std::fs::DirBuilder::new().mode(0o700).create(&directory)?;
-        match doxa_engines::codex_compact::CompactGate::prepare_with_memory(&directory, &self.lore_python, &codex_home,
+        match doxa_engines::codex_compact::CompactGate::prepare_with_memory(&directory, &std::env::current_exe()?, &codex_home,
             Path::new(&self.cwd), &self.session_id, doxa_engines::codex_compact::SUPPORTED_VERSION, self.lore_enabled) {
             Ok(gate) => Ok(gate),
             Err(error) => { let _ = std::fs::remove_dir(directory); Err(AppServerError::Io(error)) }

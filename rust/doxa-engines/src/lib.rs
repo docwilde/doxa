@@ -8,6 +8,8 @@ pub mod peer_tools;
 pub mod codex_appserver;
 #[cfg(unix)]
 pub mod codex_compact;
+pub mod review_worker;
+pub mod compact_hook;
 #[cfg(unix)]
 pub mod codex_driver;
 
