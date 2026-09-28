@@ -3769,8 +3769,10 @@ for line in sys.stdin:
     #[test]
     fn stream_heading_detection_respects_longer_outer_fences() {
         let prefix = "**You:**\n\nhello\n\n**Assistant:**\n\n";
-        let source = format!("{prefix}````markdown\n\n```\n\n**Assistant:**\n\n```\n\n````\n\nend");
-        assert_eq!(streamed_turn_start(&source), prefix.find("**Assistant:**"));
+        let source = format!("{prefix}````markdown\n\n```\n\n**You:**\n\n```\n\n````\n\nend");
+        assert_eq!(streamed_turn_start(&source), Some(0));
+        let next = format!("{source}\n\n**You:**\n\nNext turn");
+        assert_eq!(streamed_turn_start(&next), next.rfind("**You:**"));
     }
 
     #[test]
