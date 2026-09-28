@@ -1,5 +1,39 @@
 # Live provider verification — 2026-09-28
 
+## Fresh authentication and resume verification
+
+The completion run used isolated worktree `codex/live-providers-20260928` at
+`ac0097f` (alpha.39), with all disposable homes and build files beneath
+`/home/docwilde/.d40`. The production guarded resolver was run again against
+the original effective DOXA home before isolation. DeepSeek and z.ai still
+reported `missing`, with no guard rejection. Both `--check` and `--live`
+returned zero paid requests; no vendor account request was sent.
+
+Claude Code 2.1.283's fresh `auth status --json` reported `loggedIn: false`,
+`authMethod: none`, and `apiProvider: firstParty`. Native LORE 0.62.1's review
+worker uses Claude for derivation even when reviewing a Codex source; an
+authenticated Codex session alone does not provide that reviewer authentication.
+A successful provider-backed LORE review remains unverified with this account
+state.
+
+At `2026-09-28T16:50:39Z`, the actual Codex 0.156.1 account catalog returned
+seven models and accepted native `set_model` / `set_effort`. Stock protected
+startup then refused the first submitted prompt with
+`Codex build has no verified DOXA compaction hook contract`. There were no
+text/tool events, no successful native turn, and no provider thread to resume
+in this fresh run. Earlier successful turns below remain historical evidence;
+they do not establish compatibility of this fresh protected startup.
+
+The vendor verifier now uses its existing **two submitted turn** allowance to
+verify resume: it completes the first file-read turn, applies the next-turn
+effort control, stops and reaps the native daemon, resumes the same session
+with the selected model and effort, then submits the retained-token turn. It
+checks the resumed hello configuration before that second prompt. This path
+has passed against the real native daemon with loopback SSE for **both**
+DeepSeek and z.ai. Live account resume remains blocked by their missing keys.
+The temporary directory prefix is shortened to leave room for native Unix
+socket paths under an explicit disk-backed `TMPDIR`.
+
 ## Native Codex and Claude
 
 These checks used the actual installed provider CLIs and the Rust DOXA daemon,
@@ -83,7 +117,8 @@ native reply, because its production URL is fixed. No fixture key is sent to a
 real provider; the native test endpoint also suppresses DeepSeek balance fetches.
 This fixture exercises startup, flat model/effort/status replies, two native
 turns, reasoning/text callbacks, one actual workspace read, aggregate token
-usage, committed history, and timeout cleanup with a SIGTERM-resistant child.
+usage, committed history, native stop/resume before the second turn for both
+providers, and timeout cleanup with a SIGTERM-resistant child.
 All five verifier fixture tests passed for the fresh build; the successful cases contain exactly
 three loopback HTTP requests per vendor. This is local fixture evidence, not
 live account verification.
@@ -185,9 +220,9 @@ capability is unavailable, it stops without guessing another paid model.
 
 Each account receives at most two submitted turns, with a 90-second deadline
 per turn and short output instructions. The first asks for exactly one read of
-the synthetic file and a short token answer. The second tests retained history
+the synthetic file and a short token answer. The second tests retained history after native daemon stop/resume
 without tool calls, after reapplying the next-turn `low` effort control for
-both providers. Tool definitions remain available so the DeepSeek check exercises
+both providers and checking the resumed configuration. Tool definitions remain available so the DeepSeek check exercises
 the documented prior-turn reasoning replay requirement. It records catalog/control results, native reasoning/text event
 counts, native completion and usage metadata, persisted paired-message roles,
 and the final native status (including DeepSeek balance when available).

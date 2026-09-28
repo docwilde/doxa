@@ -175,8 +175,8 @@ class NativeLiveVerifierTests(unittest.TestCase):
                 stack.enter_context(patch.object(verifier.tempfile, "TemporaryDirectory",
                     lambda **_kwargs: contextlib.nullcontext(str(home))))
             outcome = verifier.verify(provider, variable)
-        self.assertEqual(len(processes), 1)
-        self.assertIsNotNone(processes[0].poll())
+        self.assertEqual(len(processes), 2 if outcome.get("resume", {}).get("started") else 1)
+        self.assertTrue(all(process.poll() is not None for process in processes))
         return outcome
 
     def test_native_startup_controls_sse_tool_and_committed_history(self):
@@ -188,6 +188,9 @@ class NativeLiveVerifierTests(unittest.TestCase):
                 result = self.fixture(provider, endpoint, Path(directory))
                 self.assertEqual(result["result"], "passed", result)
                 self.assertEqual(result["submitted_turns"], 2)
+                self.assertTrue(result["resume"]["started"])
+                self.assertEqual(result["resume"]["config"]["model"], requests[0]["model"])
+                self.assertEqual(result["resume"]["config"]["effort"], "low")
                 self.assertEqual(len(requests), 3)
                 self.assertEqual(result["committed_history_roles"], ["user", "assistant"] * 2)
                 self.assertEqual(result["config_controls"][0]["model"], requests[0]["model"])
