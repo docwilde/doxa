@@ -5,6 +5,26 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.44 — 2026-09-28
+
+**Claude quotas**
+
+- Fix **`ClaudeHost`** dropping nested five-hour/weekly quotas and startup
+  reports; use one validated projection with native CLI provenance.
+- Preserve partial window updates; clear previous utilization when reset
+  periods change. **Seven focused quota regressions** pass.
+- Verify real five-hour/weekly percentages and reset times in **one alpha.44
+  candidate turn**; all **17 ClaudeHost fixtures** pass.
+
+**Live parity**
+
+- Verify **alpha.43** Claude reads, recall and live model/effort controls;
+  alpha.44's output-capped streaming follow-up failed and establishes no fluency.
+- Verify manual and controlled automatic Codex compaction with **three real
+  Haiku reviews** and retained recall across **four Codex prompts**.
+- Keep default-window stress and credential-dependent vendor checks open;
+  the automatic test used **14,022 tokens**, not the default **244,800** threshold.
+
 ## 2.0.0-alpha.43 — 2026-09-28
 
 **Documentation**

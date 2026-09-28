@@ -349,3 +349,21 @@ The same targeted audit found invalid app-server payload checks behind the
 dispatcher hash. The selected executable is now verified before the dispatcher
 in both modes, and provider refusal tests use the same deadline cleanup. All
 helper, selected-payload and dispatcher proofs remain required before execution.
+
+## Quota verification follow-up in alpha.44
+
+Fresh alpha.43 account checks passed Claude turns and current-session controls,
+and native LORE-backed Codex manual and controlled automatic compaction. Their
+[verification record](live-provider-verification-2026-09-28.md#alpha43-authenticated-follow-up--2026-09-28)
+retains exact build, account and threshold limits.
+
+The quota follow-up found that `ClaudeHost` accepted only top-level limiting-window
+fields, discarding CLI `unifiedWindows` and startup rate-limit frames. Alpha.44
+normalizes legacy and nested rows through shared validation, retains startup and
+partial observations, clears prior utilization when reset periods advance, and
+labels the native CLI source. Seven focused regressions cover those boundaries.
+A read-only CLI `get_usage` check returned `rate_limits=null` before a model turn.
+A subsequent live alpha.44 candidate turn reported both five-hour and weekly
+percentages/resets through the corrected stream. Default-window large-context
+stress and longer/reasoning streaming remain unverified. No fallback endpoint
+or inferred quota is introduced.

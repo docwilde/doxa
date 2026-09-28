@@ -1,5 +1,11 @@
 # Live provider verification — 2026-09-28
 
+The [alpha.43 authenticated checks](#alpha43-authenticated-follow-up--2026-09-28)
+verified Claude turns and native LORE-backed Codex manual and controlled automatic
+compaction. The [alpha.44 candidate](#alpha44-quota-candidate-follow-up) also
+verified five-hour and weekly quota projection. Earlier sections retain the
+account state and versions they measured.
+
 ## Fresh authentication and resume verification
 
 The completion run used isolated worktree `codex/live-providers-20260928` at
@@ -349,3 +355,92 @@ Eight focused native checks passed independently, covering launcher integrity,
 startup refusal/cancellation, escaped process groups/sessions, already orphaned
 tools, natural provider exit and preservation of an unrelated process. The
 isolated owner entry is an ignored test-harness utility invoked by those tests.
+
+## Alpha.43 authenticated follow-up — 2026-09-28
+
+Fresh checks used commit `37ad100d375b055dbaf3eae3356c1a34ad65c6c5`,
+the **2.0.0-alpha.43** debug daemon with production features, native LORE
+**0.62.2**, and the installed receipt-verified protected Codex **0.156.1**
+package. These establish behavior, not a performance comparison. Earlier
+sections remain evidence for their separately named builds and account states.
+
+Claude Code **2.1.284** completed two authenticated native Sonnet turns on the
+same running process: streamed text, a synthetic file read, within-session recall,
+and native model/effort controls passed. These short replies each produced one
+text delta; long-form streaming fluency and reasoning deltas were not established.
+A read-only CLI `get_usage` request
+succeeded with `rate_limits=null` and made no additional model turn. Raw quota
+frames were deleted; a subsequent native source review found an omission of
+nested quota windows. Consequently this run does not establish complete weekly
+quota rendering or that the upstream provider omitted a weekly window.
+
+Codex completed successful exact-source native LORE review, manual compaction,
+and retained recall. A second isolated run verified real provider automatic
+compaction and retained recall on the same owned thread. Across both runs the
+allowance was **four Codex prompts, one manual compaction, one automatic
+compaction, and three actual Haiku reviews**. Native LORE's canonical
+authentication fallback also produced three explicit `--bare` authentication
+refusals before model work; these were not additional inference turns.
+
+The first run stopped after successful manual compaction and recall when the
+harness attempted to connect through a stale owned registry during resume.
+No automatic prompt was submitted in that failed path. The exact owned stale
+registry was corrected for the separate automatic-only run, which used the
+remaining allowance without an inference retry.
+
+The automatic check lowered the threshold to **14,022 tokens**, derived from
+**15,580** reported tokens in the short synthetic conversation. It observed one
+new provider compaction checkpoint, native review completion, unchanged provider
+thread identity and exact retained recall without tools. The reported usable
+model window was **258,400 tokens**. This controlled trigger does **not** verify
+default-window large-context stress: the cached 272,000-token model window and
+pinned provider's 90% rule imply a default threshold of approximately **244,800
+tokens**. Representative owned history near that threshold, followed by actual
+automatic compaction and recall, remains unverified.
+
+All checks used private SSD workspaces and isolated memory, beliefs and proposals.
+Original authentication remained unchanged. Temporary credential copies, stores,
+runtime files and owned processes were removed; native supervision and exact
+owned process cleanup completed. Retained evidence contains metadata only, with
+no source content, prompts, replies or credentials. Reported token accounting
+does not establish a separate billed compaction cost.
+
+DeepSeek and z.ai still lacked configured keys; their checks made zero paid
+requests. These results retain the [native runtime guide](../rust/README.md)
+and [supported boundaries](rust-1.19-parity.md#preserved-boundaries), including
+the [protected compaction contract](../rust/doxa-engines/README.md#compaction-review).
+
+## Alpha.44 quota candidate follow-up
+
+At `2026-09-28T20:57:01Z`, candidate `810bdab`'s **2.0.0-alpha.44** debug
+daemon completed one additional authenticated Sonnet/low turn with no tools or
+retry. The native stream emitted three rate-limit and three billing events:
+the limiting five-hour status/reset, nested five-hour utilization/reset, and
+nested weekly utilization/reset. Both numeric percentages reached the final
+billing cache with `claude_cli` provenance. Weekly status was unreported and
+remained unknown. This establishes the previously dropped nested-window path
+against a real provider; seven focused quota regressions and all 17 ClaudeHost
+fixtures also passed.
+
+The reply was one small text delta with no reasoning event, so it does not
+establish longer streaming fluency or reasoning emission. Original authentication
+was unchanged; owned processes and the private run/authentication copies were
+removed. Retained evidence contains metadata only. The earlier read-only
+`get_usage` probe returned null rows before a model turn; it remains a separate
+observation and is not used to infer missing fields from this successful stream.
+
+### Output-capped streaming attempt
+
+At `2026-09-28T21:05:40Z`, the same alpha.44 candidate received one additional
+Sonnet/medium prompt with tools forbidden and an imposed 1,024-token output cap.
+Native model/effort verification passed, but the turn ended with `is_error=true`,
+four reported internal turns and 4,096 output tokens. No text or reasoning delta
+reached the native client, so this attempt establishes neither streaming fluency
+nor a DOXA buffering defect. The failure subtype was not retained.
+
+The installed CLI contains a separate output-limit recovery loop with three
+recoveries; this can continue a response independently of HTTP retry settings.
+Its presence is consistent with the four reported internal turns. Exhaustion of
+adaptive thinking is a possible explanation, not captured evidence. There was
+no additional prompt or retry by the harness. Original credentials were unchanged,
+private run/authentication stores were removed and zero owned processes remained.

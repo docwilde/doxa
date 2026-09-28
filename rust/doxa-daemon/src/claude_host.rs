@@ -38,6 +38,7 @@ struct Shared {
     selection: Mutex<(Option<String>, Option<String>, String)>,
     account: Mutex<Option<Value>>,
     billing: Mutex<Option<Value>>,
+    quota_limits: Mutex<Value>,
     catalog: Mutex<Value>,
     agent: Option<Arc<crate::agent_tools::AgentTools>>,
     peer: Mutex<Option<PeerToolHandler>>,
@@ -211,7 +212,12 @@ fn startup_control(
                 cli.respond(rid, Ok(response))
                     .map_err(|_| "Claude startup reply failed")?;
             }
-            Ok(frame) if matches!(frame["type"].as_str(), Some("system" | "rate_limit_event")) => {}
+            Ok(frame) if frame["type"] == "rate_limit_event" => {
+                for limit in rate_limits(&frame["rate_limit_info"]) {
+                    let _ = update_quota(shared, &limit);
+                }
+            }
+            Ok(frame) if frame["type"] == "system" => {}
             Ok(_) => return Err("unexpected Claude startup frame".into()),
             Err(Error::Timeout) => {}
             Err(_) => {
@@ -400,6 +406,7 @@ impl ClaudeHost {
             )),
             account: Mutex::new(None),
             billing: Mutex::new(None),
+            quota_limits: Mutex::new(json!({})),
             catalog: Mutex::new(Value::Null),
             agent: crate::agent_tools::AgentTools::new(&cwd, session_id, "claude", enabled),
             peer: Mutex::new(None),
@@ -441,7 +448,7 @@ impl ClaudeHost {
         *shared.selection.lock().unwrap() = (effective.0, effective.1, mode);
         *shared.account.lock().unwrap() = display_account(&initial["account"]);
         if let Some(account) = shared.account.lock().unwrap().as_ref() {
-            *shared.billing.lock().unwrap() = billing_from_account(account);
+            set_billing_account(&shared, account);
         }
         let (tx, rx) = mpsc::channel();
         let owned = shared.clone();
@@ -1334,7 +1341,7 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>) {
                     "list_models" => {
                         if let Some(account) = display_account(&value["account"]) {
                             *shared.account.lock().unwrap() = Some(account.clone());
-                            *shared.billing.lock().unwrap() = billing_from_account(&account);
+                            set_billing_account(&shared, &account);
                         }
                         *shared.catalog.lock().unwrap() = value.clone();
                         catalog(value)
@@ -1639,7 +1646,7 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>) {
             }
             Some("rate_limit_event") => {
                 let data = &frame["rate_limit_info"];
-                if let Some(projected) = rate_limit(data) {
+                for projected in rate_limits(data) {
                     send_event(&events, json!({"type":"rate_limit","data":projected}));
                     if let Some(billing) = update_quota(&shared, &projected) {
                         send_event(&events, json!({"type":"billing","data":billing}));
@@ -1704,17 +1711,24 @@ fn context_detail(value: &Value, shared: &Shared) -> Result<Value, String> {
     }
     Ok(result)
 }
-fn rate_limit(value: &Value) -> Option<Value> {
-    let window = value["rateLimitType"].as_str().filter(|s| {
-        matches!(
-            *s,
-            "five_hour" | "seven_day" | "seven_day_opus" | "seven_day_sonnet"
-        )
-    })?;
-    let status = value["status"]
-        .as_str()
-        .filter(|s| matches!(*s, "allowed" | "allowed_warning" | "rejected"))?;
-    let mut result = json!({"window":window,"status":status});
+// Both legacy limiting-window fields and modern per-window snapshots use the
+// same validation. Missing fields are partial updates; malformed present fields
+// refuse only that window, leaving independent valid windows usable.
+fn quota_window(window: &str, value: &Value, status: Option<&str>) -> Option<Value> {
+    if !matches!(
+        window,
+        "five_hour" | "seven_day" | "seven_day_opus" | "seven_day_sonnet"
+            | "seven_day_overage_included" | "overage"
+    ) || !value.is_object() {
+        return None;
+    }
+    let mut result = json!({"window":window});
+    if let Some(status) = status {
+        if !matches!(status, "allowed" | "allowed_warning" | "rejected") {
+            return None;
+        }
+        result["status"] = json!(status);
+    }
     if let Some(utilization) = value.get("utilization") {
         let utilization = utilization
             .as_f64()
@@ -1724,42 +1738,86 @@ fn rate_limit(value: &Value) -> Option<Value> {
     if let Some(reset) = value.get("resetsAt") {
         result["resets_at"] = json!(reset.as_u64().filter(|v| *v <= 253402300799)?);
     }
-    Some(result)
+    (result.as_object()?.len() > 1).then_some(result)
 }
-fn update_quota(shared: &Shared, limit: &Value) -> Option<Value> {
+fn rate_limits(value: &Value) -> Vec<Value> {
+    let mut limits = Vec::new();
+    if let (Some(window), Some(status)) =
+        (value["rateLimitType"].as_str(), value["status"].as_str())
+    {
+        if let Some(limit) = quota_window(window, value, Some(status)) {
+            limits.push(limit);
+        }
+    }
+    if let Some(windows) = value["unifiedWindows"].as_object() {
+        for window in ["five_hour", "seven_day", "seven_day_overage_included"] {
+            if let Some(row) = windows.get(window) {
+                if let Some(limit) = quota_window(window, row, None) {
+                    limits.push(limit);
+                }
+            }
+        }
+    }
+    limits
+}
+fn set_billing_account(shared: &Shared, account: &Value) {
+    *shared.billing.lock().unwrap() = billing_from_account(account);
+    let _ = render_quota(shared);
+}
+fn render_quota(shared: &Shared) -> Option<Value> {
+    let limits = shared.quota_limits.lock().ok()?.clone();
+    if limits.as_object()?.is_empty() {
+        return shared.billing.lock().ok()?.clone();
+    }
     let mut cached = shared.billing.lock().ok()?;
     let billing = cached.as_mut()?;
     if billing["mode"] != "subscription" {
         return None;
     }
-    if !billing["quota_limits"].is_object() {
-        billing["quota_limits"] = json!({});
-    }
-    let window = limit["window"].as_str()?;
-    let mut row = limit.clone();
-    row.as_object_mut()?.remove("window");
-    row["source"] = json!("sdk");
-    row["stale"] = json!(false);
-    billing["quota_limits"][window] = row;
+    billing["quota_limits"] = limits;
     let mut text = Vec::new();
     for (key, label) in [
-        ("five_hour", "5h"),
-        ("seven_day", "week"),
-        ("seven_day_opus", "opus"),
-        ("seven_day_sonnet", "sonnet"),
+        ("five_hour", "5h"), ("seven_day", "week"), ("seven_day_opus", "opus"),
+        ("seven_day_sonnet", "sonnet"), ("seven_day_overage_included", "included"), ("overage", "extra"),
     ] {
         if let Some(percent) = billing["quota_limits"][key]["percent"].as_u64() {
             text.push(format!("{label}:{percent}%"));
         }
     }
-    billing["quota"] = if text.is_empty() {
-        Value::Null
-    } else {
-        json!(text.join(" "))
-    };
-    billing["quota_source"] = json!("sdk");
+    billing["quota"] = if text.is_empty() { Value::Null } else { json!(text.join(" ")) };
+    billing["quota_source"] = json!("claude_cli");
     billing["quota_stale"] = json!(false);
     Some(billing.clone())
+}
+fn update_quota(shared: &Shared, limit: &Value) -> Option<Value> {
+    let window = limit["window"].as_str()?;
+    {
+        let mut limits = shared.quota_limits.lock().ok()?;
+        if !limits[window].is_object() {
+            limits[window] = json!({});
+        }
+        let row = limits[window].as_object_mut()?;
+        if let Some(reset) = limit.get("resets_at") {
+            if row.get("resets_at") != Some(reset) {
+                // A new period cannot inherit the previous period's utilization
+                // or limiting status. An accompanying report can replace them.
+                if limit.get("percent").is_none() {
+                    row.remove("percent");
+                }
+                if limit.get("status").is_none() {
+                    row.remove("status");
+                }
+            }
+        }
+        for (key, value) in limit.as_object()? {
+            if key != "window" {
+                row.insert(key.clone(), value.clone());
+            }
+        }
+        row.insert("source".into(), json!("claude_cli"));
+        row.insert("stale".into(), json!(false));
+    }
+    render_quota(shared)
 }
 
 fn model_applied(catalog: &Value, requested: &str, effective: Option<&str>) -> bool {
@@ -1777,6 +1835,14 @@ mod tests {
     use std::{fs, os::unix::fs::PermissionsExt};
     const SESSION: &str = "0b256c09-8d74-4865-9be0-4e6d24384551";
     fn fixture(body: &str) -> (tempfile::TempDir, Arc<ClaudeHost>) {
+        fixture_with_startup(
+            body, "pass",
+            Some(json!({"mode":"subscription","type":"max","quota":null})),
+        )
+    }
+    fn fixture_with_startup(
+        body: &str, startup: &str, initial_billing: Option<Value>,
+    ) -> (tempfile::TempDir, Arc<ClaudeHost>) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("claude");
         fs::write(&path,format!(r#"#!/usr/bin/python3
@@ -1793,6 +1859,7 @@ for line in sys.stdin:
   elif sub=='set_model': model='claude-'+request['model']+'-5' if request['model']=='sonnet' else request['model']
   elif sub=='get_context_usage':response={{'totalTokens':1234,'maxTokens':1000000,'percentage':.1234}}
   elif sub=='set_permission_mode':response={{'mode':'default' if request['mode']=='manual' else request['mode']}}
+  {startup}
   emit({{'type':'control_response','response':{{'subtype':'success','request_id':row['request_id'],'response':response}}}})
   if sub=='interrupt':emit({{'type':'result','session_id':'{SESSION}','is_error':True}})
  {body}
@@ -1816,9 +1883,8 @@ for line in sys.stdin:
                 "default".into(),
             )),
             account: Mutex::new(None),
-            billing: Mutex::new(Some(
-                json!({"mode":"subscription","type":"max","quota":null}),
-            )),
+            billing: Mutex::new(initial_billing),
+            quota_limits: Mutex::new(json!({})),
             catalog: Mutex::new(Value::Null),
             agent: None,
             peer: Mutex::new(None),
@@ -2221,18 +2287,124 @@ for line in sys.stdin:
         assert!(host.shutdown());
     }
     #[test]
+    fn quota_nested_windows_keep_limiting_status_on_its_own_window() {
+        let limits = rate_limits(&json!({"status":"allowed_warning","rateLimitType":"five_hour","resetsAt":123,
+            "unifiedWindows":{"five_hour":{"utilization":0.23,"resetsAt":123},"seven_day":{"utilization":0.47,"resetsAt":456}},"raw":"private"}));
+        let (_dir, host) = fixture("");
+        for limit in limits {
+            let _ = update_quota(&host.shared, &limit);
+        }
+        let billing = host.billing_snapshot().unwrap();
+        assert_eq!(billing["quota"], "5h:23% week:47%");
+        assert_eq!(billing["quota_limits"]["five_hour"]["status"], "allowed_warning");
+        assert!(billing["quota_limits"]["seven_day"].get("status").is_none());
+        assert_eq!(billing["quota_source"], "claude_cli");
+        assert!(!billing.to_string().contains("private"));
+        assert!(host.shutdown());
+    }
+    #[test]
+    fn quota_nested_only_and_partial_updates_preserve_other_windows() {
+        let (_dir, host) = fixture("");
+        for payload in [
+            json!({"unifiedWindows":{"five_hour":{"utilization":0.1,"resetsAt":123},"seven_day":{"utilization":0.2,"resetsAt":456}}}),
+            json!({"unifiedWindows":{"five_hour":{"utilization":0.3}}}),
+            json!({"status":"allowed","rateLimitType":"five_hour","resetsAt":789}),
+        ] {
+            for limit in rate_limits(&payload) {
+                let _ = update_quota(&host.shared, &limit);
+            }
+        }
+        let billing = host.billing_snapshot().unwrap();
+        assert_eq!(billing["quota"], "week:20%");
+        assert!(billing["quota_limits"]["five_hour"].get("percent").is_none());
+        assert_eq!(billing["quota_limits"]["five_hour"]["resets_at"], 789);
+        assert_eq!(billing["quota_limits"]["seven_day"]["resets_at"], 456);
+        // Refreshing the catalog/account must not clear observed quotas.
+        set_billing_account(&host.shared, &json!({"subscriptionType":"max"}));
+        assert_eq!(host.billing_snapshot().unwrap()["quota"], "week:20%");
+        assert!(host.shutdown());
+    }
+    #[test]
+    fn quota_reset_advance_clears_previous_percent_until_reported() {
+        let (_dir, host) = fixture("");
+        for payload in [
+            json!({"status":"allowed","rateLimitType":"five_hour","utilization":0.3,"resetsAt":123}),
+            json!({"unifiedWindows":{"five_hour":{"resetsAt":456}}}),
+        ] {
+            for limit in rate_limits(&payload) {
+                let _ = update_quota(&host.shared, &limit);
+            }
+        }
+        let billing = host.billing_snapshot().unwrap();
+        assert!(billing["quota"].is_null());
+        assert!(billing["quota_limits"]["five_hour"].get("percent").is_none());
+        assert!(billing["quota_limits"]["five_hour"].get("status").is_none());
+        for payload in [
+            json!({"unifiedWindows":{"five_hour":{"utilization":0.1}}}),
+            json!({"status":"allowed_warning","rateLimitType":"five_hour","resetsAt":456}),
+        ] {
+            for limit in rate_limits(&payload) {
+                let _ = update_quota(&host.shared, &limit);
+            }
+        }
+        let billing = host.billing_snapshot().unwrap();
+        assert_eq!(billing["quota"], "5h:10%");
+        assert_eq!(billing["quota_limits"]["five_hour"]["status"], "allowed_warning");
+        assert!(host.shutdown());
+    }
+    #[test]
+    fn quota_invalid_window_values_do_not_poison_valid_siblings() {
+        for invalid in [json!(-0.1),json!(1.01),json!(f64::NAN),json!(f64::INFINITY),json!("0.2"),Value::Null] {
+            let limits = rate_limits(&json!({"unifiedWindows":{"five_hour":{"utilization":invalid,"resetsAt":123},"seven_day":{"utilization":0.4,"resetsAt":456}}}));
+            assert_eq!(limits.len(), 1);
+            assert_eq!(limits[0]["window"], "seven_day");
+        }
+        for invalid in [json!(-1),json!(1.5),json!(253402300800u64),json!("123"),Value::Null] {
+            assert!(rate_limits(&json!({"status":"allowed","rateLimitType":"five_hour","utilization":0.2,"resetsAt":invalid})).is_empty());
+        }
+        assert!(rate_limits(&json!({"status":"invented","rateLimitType":"five_hour","utilization":0.2})).is_empty());
+        assert!(rate_limits(&json!({"unifiedWindows":{"five_hour":{},"unknown":{"utilization":0.2}}})).is_empty());
+    }
+    #[test]
+    fn quota_overage_windows_are_separate_and_do_not_invent_status() {
+        let (_dir, host) = fixture("");
+        for payload in [
+            json!({"unifiedWindows":{"seven_day_overage_included":{"utilization":0.1,"resetsAt":123}}}),
+            json!({"status":"allowed","rateLimitType":"overage","utilization":0.2,"resetsAt":456}),
+        ] {
+            for limit in rate_limits(&payload) {
+                let _ = update_quota(&host.shared, &limit);
+            }
+        }
+        let billing = host.billing_snapshot().unwrap();
+        assert_eq!(billing["quota"], "included:10% extra:20%");
+        assert!(billing["quota_limits"]["seven_day_overage_included"].get("status").is_none());
+        assert_eq!(billing["quota_limits"]["overage"]["status"], "allowed");
+        assert!(host.shutdown());
+    }
+    #[test]
+    fn quota_startup_event_survives_control_and_late_account_initialization() {
+        let startup = "emit({'type':'rate_limit_event','rate_limit_info':{'unifiedWindows':{'five_hour':{'utilization':0.23,'resetsAt':123},'seven_day':{'utilization':0.47,'resetsAt':456}}}}) if sub=='initialize' else None";
+        let (_dir, host) = fixture_with_startup("", startup, None);
+        // Production learns account billing only after initialize/get_settings.
+        assert!(host.billing_snapshot().is_none());
+        set_billing_account(&host.shared, &json!({"subscriptionType":"max"}));
+        assert_eq!(host.billing_snapshot().unwrap()["quota"], "5h:23% week:47%");
+        assert!(host.call("set_effort", &json!({"effort":"low"})).unwrap()["verified"] == true);
+        assert!(host.shutdown());
+    }
+    #[test]
     fn quota_projection_never_forwards_credentials_or_invalid_percent() {
         let (_dir, host) = fixture("");
-        let report=rate_limit(&json!({"status":"allowed_warning","rateLimitType":"five_hour","utilization":0.23,"resetsAt":123,"raw":"private"})).unwrap();
+        let report=rate_limits(&json!({"status":"allowed_warning","rateLimitType":"five_hour","utilization":0.23,"resetsAt":123,"raw":"private"})).remove(0);
         assert!(report.get("raw").is_none());
         assert_eq!(
             update_quota(&host.shared, &report).unwrap()["quota"],
             "5h:23%"
         );
-        assert!(rate_limit(
+        assert!(rate_limits(
             &json!({"status":"allowed","rateLimitType":"five_hour","utilization":1.01})
-        )
-        .is_none());
+        ).is_empty());
         assert!(host.shutdown());
     }
 }
