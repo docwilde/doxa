@@ -622,7 +622,7 @@ async fn saved_credentials_apply_to_next_turn_of_existing_history_and_stay_out_o
 #[tokio::test]
 async fn inactive_key_in_provider_tool_identity_never_reaches_gate_or_history() {
     let _credential_guard = credential_guard().await;
-    std::env::set_var("DEEPSEEK_API_KEY", "active-fixture-key");
+    std::env::set_var("DEEPSEEK_API_KEY", "primary-fixture-key");
     doxa_vendors::credentials::save(Vendor::Glm, "saved-inactive-fixture-key").unwrap();
     let tool = "data: {\"choices\":[{\"finish_reason\":\"tool_calls\",\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"saved-inactive-fixture-key\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{\\\"x\\\":1}\"}}]}}]}\n\ndata: [DONE]\n\n";
     let done = "data: {\"choices\":[{\"finish_reason\":\"stop\",\"delta\":{\"content\":\"saved-inactive-fixture-key\"}}]}\n\ndata: [DONE]\n\n";
