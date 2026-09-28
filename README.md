@@ -1,8 +1,8 @@
 <p align="center"><img src="assets/logo.png" width="560" alt="DOXA — belief earning knowledge"></p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Rust%202.0-alpha.42-f59f00" alt="Rust 2.0 alpha.42 is the main frontend">
-  <a href="https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.42"><img src="https://img.shields.io/github/v/release/docwilde/doxa?include_prereleases&amp;sort=semver&amp;label=Rust%20preview&amp;color=e8590c" alt="latest Rust preview release"></a>
+  <img src="https://img.shields.io/badge/Rust%202.0-alpha.43-f59f00" alt="Rust 2.0 alpha.43 is the main frontend">
+  <a href="https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.43"><img src="https://img.shields.io/github/v/release/docwilde/doxa?include_prereleases&amp;sort=semver&amp;label=Rust%20preview&amp;color=e8590c" alt="latest Rust preview release"></a>
   <a href="https://github.com/docwilde/doxa/actions/workflows/rust-ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/docwilde/doxa/rust-ci.yml?branch=main&label=Rust%20CI" alt="Rust CI status"></a>
   <img src="https://img.shields.io/badge/TUI-Ratatui-2f9e44" alt="Rust TUI built with Ratatui">
   <img src="https://img.shields.io/badge/auth-provider%20CLI%20or%20API%20key-2f9e44" alt="authentication follows the selected engine">
@@ -14,11 +14,12 @@
 > can edit files and run commands with your privileges. Read
 > [Non-goals](#non-goals) before using it on important work.
 
-The official latest GitHub release is [v2.0.0-alpha.42](https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.42).
+The official latest GitHub release is [v2.0.0-alpha.43](https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.43).
 Rust 2.0 leads development and remains an evolving alpha. See the
 [parity tracker](docs/rust-1.19-parity.md) for supported provider contracts and
 remaining release gates, and the [source audit](docs/source-audit-2026-09-27.md)
-for engineering findings and their follow-up fixes.
+for engineering findings and their follow-up fixes. Alpha.43 refreshes this
+documentation; runtime changes and verification below are from alpha.42 and earlier.
 
 **DOXA** is a terminal for coding agents. Development now leads with the
 **Rust 2.0 alpha**, built with Ratatui and a native daemon. Run Claude, Codex,
@@ -101,7 +102,7 @@ curl -fsSL https://raw.githubusercontent.com/docwilde/doxa/main/scripts/install.
 
 The installer builds the Rust frontend and daemon from `main` and installs the
 Rust `doxa` command in `~/.local/bin` (or `DOXA_RUST_BIN_DIR`). Pass a tag such
-as `v2.0.0-alpha.42` after `sh -s --` to pin a release. Git and Cargo build three
+as `v2.0.0-alpha.43` after `sh -s --` to pin a release. Git and Cargo build three
 native binaries: the frontend, daemon and LORE carrier. Claude requires its CLI.
 When Codex is installed, the installer also builds a private, protected Codex
 app server and its required Code Mode host; the official CLI remains available
@@ -158,16 +159,44 @@ Rust 2.0 alpha is the main line. The [Rust guide](rust/README.md) describes
 current commands, setup and provider limits. Existing Python 1.x releases and
 their [historical compatibility manual](docs/manual.md) remain reference material;
 installation and normal operation use the Rust runtime.
-LORE is integrated as a canonical Rust module; memory, beliefs,
-context, session indexing and detached review use the same existing store.
+Canonical **LORE 0.62.2** is integrated in Rust; memory, beliefs, context,
+session indexing, detached review and standalone administration use the same store.
 Signed sync replays portable project memory and file-map keys across machines,
 preserves conflicts in their project scope, and sorts curated entries so the
 same entry set converges to identical memory/file-map bytes. Capacity limits
 still refuse or stage oversized writes; overflow does not guarantee the same entry set.
 
-Rust CI tests the frontend, native daemon, protocol, integrated LORE, installer,
-and compatibility paths. See the [Rust UI benchmark](docs/rust-ui-benchmark-2026-09-27.md)
-for rendering, event-loop, scrolling, and resize measurements.
+### Completed and checked
+
+- **Rust workflows:** Sessions, split panes, inline approvals, expandable tools,
+  memory actions, worktrees, fleets and setup are implemented. The
+  [parity tracker](docs/rust-1.19-parity.md) records their supported boundaries.
+- **Protected Codex:** Alpha.40–42 add reviewed compaction, the required native
+  Code Mode host, verified installation and tool-process cleanup. See the
+  [audit follow-ups](docs/source-audit-2026-09-27.md#completion-follow-up-in-alpha40).
+- **Regression coverage:** Alpha.42's [main CI](https://github.com/docwilde/doxa/actions/runs/36472835265)
+  passed **962 Rust tests**, with zero failures and four optional/harness tests
+  ignored. CI also checks the installer and native launcher.
+- **Provider evidence:** Three compiled Code Mode scenarios passed using a local
+  model peer and zero paid requests. A separate authenticated Codex check used
+  the alpha.40 daemon with alpha.41's staged provider package: two turns proved
+  file access, model/effort controls and same-thread recall after restart. See
+  the [verification record](docs/live-provider-verification-2026-09-28.md#alpha41-code-mode-dependency-verification).
+
+### Remaining live checks
+
+Authenticated Claude streaming, tools, controls and 5-hour/weekly quota remain
+unverified with the recorded logged-out account. DeepSeek and z.ai account checks
+need API keys. Successful Claude-backed LORE review followed by manual or
+large-context automatic Codex compaction also remains unverified; an authenticated
+Codex account alone does not authenticate the LORE reviewer.
+
+Run `doxa auth login claude` and configure vendor keys through `/setup` or the
+launching environment before those checks. The
+[tracker](docs/rust-1.19-parity.md#remaining-verification) separates these checks
+from implemented features and intentional limits. See the
+[Rust UI benchmark](docs/rust-ui-benchmark-2026-09-27.md) for rendering, event-loop,
+scrolling and resize measurements; these provider checks measure behavior.
 
 ## Non-goals
 
