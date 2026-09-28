@@ -4,6 +4,7 @@
 //! validation and never silently persists unsanitized text.
 
 mod native_config;
+pub mod stream;
 
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
