@@ -191,7 +191,7 @@ pub fn resolve(vendor: Vendor) -> io::Result<Option<String>> { clean(saved(vendo
 
 /// Redact keys locally before text crosses a LORE/model/transcript boundary.
 /// Both overrides and inherited values are covered, including inactive vendors.
-pub fn redact(text: &str) -> io::Result<String> {
+pub(crate) fn known_keys() -> io::Result<Vec<String>> {
     clean((|| {
         let store = Store::open(&home()?, false)?;
         let mut keys: Vec<String> = [Vendor::DeepSeek, Vendor::Glm].into_iter().flat_map(|vendor| {
@@ -199,8 +199,12 @@ pub fn redact(text: &str) -> io::Result<String> {
             saved.into_iter().chain(environment(vendor))
         }).collect();
         keys.sort_by_key(|key| std::cmp::Reverse(key.len()));
-        Ok(keys.iter().fold(text.to_owned(), |text, key| text.replace(key, "[REDACTED]")))
+        keys.dedup();
+        Ok(keys)
     })())
+}
+pub fn redact(text: &str) -> io::Result<String> {
+    Ok(known_keys()?.iter().fold(text.to_owned(), |text, key| text.replace(key, "***")))
 }
 
 /// Reject the private credential file if a workspace tool encounters it through
@@ -346,7 +350,7 @@ mod tests {
         save(Vendor::DeepSeek, "saved-deepseek-fixture").unwrap();
         save(Vendor::Glm, "saved-zai-fixture").unwrap();
         let text = "saved-deepseek-fixture inherited-deepseek-fixture saved-zai-fixture inherited-zai-fixture ordinary";
-        assert_eq!(redact(text).unwrap(), "[REDACTED] [REDACTED] [REDACTED] [REDACTED] ordinary");
+        assert_eq!(redact(text).unwrap(), "*** *** *** *** ordinary");
         assert!(is_credential_file(&File::open(dir.path().join(FILE_NAME)).unwrap()).unwrap());
         let other = dir.path().join("other");
         fs::write(&other, "ordinary").unwrap();

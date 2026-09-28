@@ -959,6 +959,13 @@ async fn stream_at_with_key(
     timeout: Duration,
     mut on_delta: impl FnMut(Delta),
 ) -> Result<Completion, Error> {
+    // Reuse the transport's exact-known-key masking for every string in the
+    // request, including LORE snapshots, tool definitions and inactive vendors.
+    // Authentication stays frozen for a turn even if setup changes meanwhile.
+    let mut body = scrub_json(body, key);
+    for known in credentials::known_keys().map_err(|_| Error::CredentialStore)? {
+        body = scrub_json(body, &known);
+    }
     let client = reqwest::Client::builder()
         .timeout(timeout)
         .redirect(reqwest::redirect::Policy::none())

@@ -595,7 +595,8 @@ async fn saved_credentials_apply_to_next_turn_of_existing_history_and_stay_out_o
     let _credential_guard = credential_guard().await;
     std::env::set_var("DEEPSEEK_API_KEY", "inherited-fixture-key");
     std::env::set_var("ZAI_API_KEY", "inherited-zai-fixture-key");
-    let mut history = Vec::new();
+    doxa_vendors::credentials::save(Vendor::Glm, "saved-zai-fixture-key").unwrap();
+    let mut history = vec![json!({"role":"system","content":"saved-zai-fixture-key inherited-zai-fixture-key"})];
     for key in ["saved-fixture-key-one", "saved-fixture-key-two", "inherited-fixture-key"] {
         if key.starts_with("saved") { doxa_vendors::credentials::save(Vendor::DeepSeek, key).unwrap(); }
         else { doxa_vendors::credentials::remove(Vendor::DeepSeek).unwrap(); }
@@ -609,6 +610,8 @@ async fn saved_credentials_apply_to_next_turn_of_existing_history_and_stay_out_o
         let (headers, payload) = request.split_once("\r\n\r\n").unwrap();
         assert!(headers.to_ascii_lowercase().contains(&format!("authorization: bearer {key}")));
         assert!(!payload.contains(key));
+        assert!(!payload.contains("saved-zai-fixture-key"));
+        assert!(!payload.contains("inherited-zai-fixture-key"));
         assert!(!serde_json::to_string(&history).unwrap().contains(key));
     }
 }
