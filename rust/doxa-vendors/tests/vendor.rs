@@ -12,9 +12,14 @@ use std::time::Duration;
 use tokio::sync::watch;
 use tokio::sync::{Mutex, MutexGuard};
 
-async fn credential_guard() -> MutexGuard<'static, ()> {
+struct CredentialGuard { _lock: MutexGuard<'static, ()>, _home: tempfile::TempDir }
+async fn credential_guard() -> CredentialGuard {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(())).lock().await
+    let lock = LOCK.get_or_init(|| Mutex::new(())).lock().await;
+    let home = tempfile::tempdir().unwrap();
+    // No test ever opens the user's real credential store.
+    std::env::set_var("DOXA_HOME", home.path());
+    CredentialGuard { _lock: lock, _home: home }
 }
 
 fn server(response: Vec<u8>, delay: Duration) -> (String, std::thread::JoinHandle<String>) {

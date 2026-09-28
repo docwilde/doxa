@@ -52,7 +52,7 @@ pub struct VendorHost {
     turns: AtomicU64,
     closing: AtomicBool,
     balance: Arc<Mutex<Option<String>>>,
-    balance_refreshing: Arc<AtomicBool>,
+    balance_generation: Arc<AtomicU64>,
     #[cfg(feature = "local-test-server")]
     endpoint: Option<String>,
 }
@@ -68,7 +68,8 @@ impl VendorHost {
         resume: bool,
         #[cfg(feature = "local-test-server")] endpoint: Option<String>,
     ) -> Result<Self, String> {
-        if !std::env::var(vendor.env_var()).is_ok_and(|key| !key.is_empty()) {
+        if doxa_vendors::credentials::resolve(vendor)
+            .map_err(|_| "Native vendor credential store is unavailable".to_owned())?.is_none() {
             return Err(format!(
                 "{} is required for native vendor chat",
                 vendor.env_var()
@@ -89,7 +90,8 @@ impl VendorHost {
             "LORE scrub preflight failed; vendor session was not started".to_owned()
         })?;
         if lore
-            .scrub(&model)
+            .scrub(&doxa_vendors::credentials::redact(&model)
+                .map_err(|_| "Native vendor credential store is unavailable")?)
             .map_err(|_| "LORE scrub failed for vendor model")?
             != model
         {
@@ -124,7 +126,8 @@ impl VendorHost {
         for message in &mut history {
             let content = message["content"].as_str().ok_or("invalid saved message")?;
             message["content"] = json!(lore
-                .scrub(content)
+                .scrub(&doxa_vendors::credentials::redact(content)
+                    .map_err(|_| "Native vendor credential store is unavailable")?)
                 .map_err(|_| { "LORE scrub failed for saved vendor message" })?);
         }
         let lore_enabled = doxa_state::lore_enabled_default();
@@ -155,7 +158,7 @@ impl VendorHost {
             turns: AtomicU64::new(0),
             closing: AtomicBool::new(false),
             balance: Arc::new(Mutex::new(None)),
-            balance_refreshing: Arc::new(AtomicBool::new(false)),
+            balance_generation: Arc::new(AtomicU64::new(0)),
             #[cfg(feature = "local-test-server")]
             endpoint,
         };
@@ -167,20 +170,22 @@ impl VendorHost {
         if self.vendor != Vendor::DeepSeek { return; }
         #[cfg(feature = "local-test-server")]
         if self.endpoint.is_some() { return; }
-        if self.balance_refreshing.swap(true, Ordering::AcqRel) { return; }
+        let generation = self.balance_generation.fetch_add(1, Ordering::AcqRel) + 1;
         let balance = Arc::clone(&self.balance);
-        let refreshing = Arc::clone(&self.balance_refreshing);
+        let current = Arc::clone(&self.balance_generation);
         std::thread::spawn(move || {
             let latest = tokio::runtime::Builder::new_current_thread().enable_all().build()
                 .ok().and_then(|runtime| runtime.block_on(doxa_vendors::deepseek_balance()));
-            if let Ok(mut stored) = balance.lock() { *stored = latest; }
-            refreshing.store(false, Ordering::Release);
+            if let Ok(mut stored) = balance.lock() {
+                if current.load(Ordering::Acquire) == generation { *stored = latest; }
+            }
         });
     }
 
     fn scrub(&self, text: &str) -> Result<String, ()> {
-        let result = self.lore.lock().map_err(|_| ())
-            .and_then(|mut lore| lore.scrub(text).map_err(|_| ()));
+        let result = doxa_vendors::credentials::redact(text).map_err(|_| ())
+            .and_then(|text| self.lore.lock().map_err(|_| ())
+                .and_then(|mut lore| lore.scrub(&text).map_err(|_| ())));
         if result.is_err() { self.scrub_failed.store(true, Ordering::Release); }
         result
     }
@@ -588,6 +593,10 @@ impl Host for VendorHost {
         match method {
             "answer_needs_input" => self.peer_desk.answer(params["id"].as_str().ok_or("Peer request ID required")?, &params["answer"]),
             "list_models" => {
+                // A setup mutation queues this call for attached sessions. The
+                // account-scoped catalog and displayed balance must refresh.
+                if let Ok(mut balance) = self.balance.lock() { *balance = None; }
+                self.refresh_balance();
                 let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|_| "catalog runtime unavailable")?;
                 let catalog = runtime.block_on(doxa_vendors::catalog_models(self.vendor));
                 let verified = catalog.is_some();

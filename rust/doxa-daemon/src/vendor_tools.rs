@@ -51,6 +51,7 @@ impl<'a> WorkspaceReadGate<'a> {
         }
         let metadata = file.metadata().map_err(|_| ())?;
         if !metadata.is_file() || metadata.len() > MAX_READ_BYTES { return Err(()); }
+        if doxa_vendors::credentials::is_credential_file(&file).map_err(|_| ())? { return Err(()); }
         let mut bytes = Vec::new();
         file.take(MAX_READ_BYTES + 1).read_to_end(&mut bytes).map_err(|_| ())?;
         if bytes.len() as u64 > MAX_READ_BYTES { return Err(()); }

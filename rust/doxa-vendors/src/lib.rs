@@ -2,6 +2,8 @@
 //! Bounded DeepSeek/GLM chat-completions transport and SSE normalization.
 //! Tool execution deliberately belongs to a future gated engine integration.
 
+pub mod credentials;
+
 use futures_util::{future::BoxFuture, StreamExt};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
@@ -24,7 +26,7 @@ const BALANCE_BODY_MAX: usize = 4096;
 /// Optional display-only account balance. The endpoint is fixed to DeepSeek's
 /// official API and never derived from a chat-completions endpoint override.
 pub async fn deepseek_balance() -> Option<String> {
-    let key = std::env::var("DEEPSEEK_API_KEY").ok().filter(|key| !key.is_empty())?;
+    let key = credentials::resolve(Vendor::DeepSeek).ok()??;
     deepseek_balance_at(BALANCE_URL, &key).await
 }
 
@@ -175,7 +177,7 @@ pub struct ModelCapability {
 /// Bounded account-scoped model catalogue. A missing credential, network
 /// failure, or malformed body returns None so callers can label a fallback.
 pub async fn catalog_models(vendor: Vendor) -> Option<Vec<ModelCapability>> {
-    let key = std::env::var(vendor.env_var()).ok().filter(|key| !key.is_empty())?;
+    let key = credentials::resolve(vendor).ok()??;
     catalog_models_at(vendor, vendor.models_endpoint(), &key).await
 }
 
@@ -295,6 +297,7 @@ mod catalog_tests {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Error {
     MissingCredential(&'static str),
+    CredentialStore,
     InvalidEffort,
     InvalidEndpoint,
     Transport,
@@ -821,13 +824,10 @@ async fn run_turn_at(
         .iter()
         .filter_map(|d| d.pointer("/function/name").and_then(Value::as_str))
         .collect();
-    let key =
-        std::env::var(vendor.env_var()).map_err(|_| Error::MissingCredential(vendor.env_var()))?;
-    if key.is_empty() {
-        return Err(Error::MissingCredential(vendor.env_var()));
-    }
-    let mut messages = history.clone();
-    messages.push(json!({"role":"user","content":prompt}));
+    let key = credentials::resolve(vendor).map_err(|_| Error::CredentialStore)?
+        .ok_or(Error::MissingCredential(vendor.env_var()))?;
+    let mut messages = history.iter().cloned().map(|v| scrub_json(v, &key)).collect::<Vec<_>>();
+    messages.push(json!({"role":"user","content":scrub(prompt, &key)}));
     check_history(&messages)?;
     let mut outcome = TurnOutcome {
         text: String::new(),
@@ -945,12 +945,9 @@ async fn stream_at(
     timeout: Duration,
     on_delta: impl FnMut(Delta),
 ) -> Result<Completion, Error> {
-    let key =
-        std::env::var(vendor.env_var()).map_err(|_| Error::MissingCredential(vendor.env_var()))?;
-    if key.is_empty() {
-        return Err(Error::MissingCredential(vendor.env_var()));
-    }
-    stream_at_with_key(vendor, endpoint, body, &key, cancel, timeout, on_delta).await
+    let key = credentials::resolve(vendor).map_err(|_| Error::CredentialStore)?
+        .ok_or(Error::MissingCredential(vendor.env_var()))?;
+    stream_at_with_key(vendor, endpoint, scrub_json(body, &key), &key, cancel, timeout, on_delta).await
 }
 
 async fn stream_at_with_key(
