@@ -826,8 +826,13 @@ async fn run_turn_at(
         .collect();
     let key = credentials::resolve(vendor).map_err(|_| Error::CredentialStore)?
         .ok_or(Error::MissingCredential(vendor.env_var()))?;
-    let mut messages = history.iter().cloned().map(|v| scrub_json(v, &key)).collect::<Vec<_>>();
-    messages.push(json!({"role":"user","content":scrub(prompt, &key)}));
+    let mut messages = history.clone();
+    messages.push(json!({"role":"user","content":prompt}));
+    let known = credentials::known_keys().map_err(|_| Error::CredentialStore)?;
+    for message in &mut messages {
+        *message = scrub_json(std::mem::take(message), &key);
+        for key in &known { *message = scrub_json(std::mem::take(message), key); }
+    }
     check_history(&messages)?;
     let mut outcome = TurnOutcome {
         text: String::new(),

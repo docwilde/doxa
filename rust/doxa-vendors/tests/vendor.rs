@@ -612,6 +612,9 @@ async fn saved_credentials_apply_to_next_turn_of_existing_history_and_stay_out_o
         assert!(!payload.contains(key));
         assert!(!payload.contains("saved-zai-fixture-key"));
         assert!(!payload.contains("inherited-zai-fixture-key"));
-        assert!(!serde_json::to_string(&history).unwrap().contains(key));
+        let committed = serde_json::to_string(&history).unwrap();
+        assert!(!committed.contains(key));
+        assert!(!committed.contains("saved-zai-fixture-key"));
+        assert!(!committed.contains("inherited-zai-fixture-key"));
     }
 }
