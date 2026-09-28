@@ -2970,6 +2970,8 @@ for line in sys.stdin: pass
     for resume in [false, true] {
         let mut process = Process::start_codex_appserver(dir.path(), &codex, &python, resume);
         let (mut reader, mut socket) = process.connect();
+        // Native hook trust hashes the debug carrier before starting Codex.
+        reader.get_ref().set_read_timeout(Some(Duration::from_secs(10))).unwrap();
         receive(&mut reader);
         send(&mut socket, json!({"type":"attach","cursor":null}));
         for prompt_id in [1, 2] {
