@@ -140,6 +140,7 @@ mod tests {
     #[test]
     fn import_requires_both_owned_complete_logs_and_matching_identity() {
         let dir = tempfile::tempdir().unwrap();
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let config = dir.path().join("claude-cli");
         let project = config.join("projects/project");
         fs::create_dir_all(&project).unwrap();
@@ -159,7 +160,7 @@ mod tests {
         for path in [&transcript, &provider] {
             fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
         }
-        assert!(verify_legacy(&config, &transcript, id, dir.path()).is_ok());
+        verify_legacy(&config, &transcript, id, dir.path()).unwrap();
         fs::write(&provider, body.trim_end()).unwrap();
         assert!(verify_legacy(&config, &transcript, id, dir.path()).is_err());
         fs::write(&provider, &body).unwrap();

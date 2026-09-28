@@ -1,6 +1,6 @@
 //! Native Claude Code host: one CLI owner, immediate stream events, exact control replies.
 use doxa_claude::{Cli, CliOptions, Error};
-use doxa_lore::LoreClient;
+use doxa_lore::{stream::StreamScrubber, LoreClient};
 use doxa_runtime::{Host, PeerToolHandler};
 use doxa_transcript::TranscriptStore;
 use serde_json::{json, Value};
@@ -121,7 +121,9 @@ impl Shared {
             .as_ref()
             .map(|a| a.definitions())
             .unwrap_or_default();
-        if self.session_tools.lock().is_ok_and(|h|h.is_some()) { rows.extend(doxa_engines::session_tools::definitions()); }
+        if self.session_tools.lock().is_ok_and(|h| h.is_some()) {
+            rows.extend(doxa_engines::session_tools::definitions());
+        }
         if self.peer_allowed {
             rows.extend(doxa_engines::peer_tools::definitions());
         }
@@ -129,7 +131,14 @@ impl Shared {
     }
     fn tool(&self, name: &str, args: &Value) -> Result<Value, String> {
         let wire = format!("mcp__doxa__{name}");
-        if wire==doxa_engines::session_tools::SPAWN { return (self.session_tools.lock().map_err(|_|"Session tools unavailable")?.clone().ok_or("Session tools unavailable")?)(&wire,args); }
+        if wire == doxa_engines::session_tools::SPAWN {
+            return (self
+                .session_tools
+                .lock()
+                .map_err(|_| "Session tools unavailable")?
+                .clone()
+                .ok_or("Session tools unavailable")?)(&wire, args);
+        }
         if let Some(agent) = &self.agent {
             if agent.contains(&wire) {
                 return agent.call(&wire, args);
@@ -310,8 +319,13 @@ impl ClaudeHost {
                     if depth != 0 || parent.is_some() {
                         return Err("Legacy Claude lineage is unproven; restore refused".into());
                     }
-                    doxa_claude::resume::verify_legacy(&doxa_claude::isolation::config_dir(),&store.transcript_path(),session_id,Path::new(&cwd))
-                        .map_err(|error|format!("Legacy Claude restore refused: {error}"))?;
+                    doxa_claude::resume::verify_legacy(
+                        &doxa_claude::isolation::config_dir(),
+                        &store.transcript_path(),
+                        session_id,
+                        Path::new(&cwd),
+                    )
+                    .map_err(|error| format!("Legacy Claude restore refused: {error}"))?;
                     let fields = json!({"thread_id":session_id,"session_id":session_id,"engine":"claude","transport":"stream-json","cwd":cwd,"lore_enabled":enabled,"spawn_depth":0,"parent_session_id":null,"turn_incomplete":false,"legacy_imported":true,"permission_mode":"default"});
                     store
                         .try_write_thread(fields.as_object().unwrap().clone(), |s| {
@@ -519,9 +533,17 @@ impl Host for ClaudeHost {
     fn peer_tools_ready(&self) -> bool {
         self.shared.peer_allowed && self.shared.peer.lock().unwrap().is_some()
     }
-    fn set_session_tool_handler(&self,handler:PeerToolHandler)->bool {
-        if self.shared.active.load(Ordering::Acquire){return false;}
-        if let Ok(mut slot)=self.shared.session_tools.lock(){if slot.is_none(){*slot=Some(handler);return true;}}false
+    fn set_session_tool_handler(&self, handler: PeerToolHandler) -> bool {
+        if self.shared.active.load(Ordering::Acquire) {
+            return false;
+        }
+        if let Ok(mut slot) = self.shared.session_tools.lock() {
+            if slot.is_none() {
+                *slot = Some(handler);
+                return true;
+            }
+        }
+        false
     }
     fn set_peer_tool_handler(&self, handler: PeerToolHandler) -> bool {
         if !self.shared.peer_allowed || self.has_active_work() {
@@ -673,7 +695,55 @@ fn resolve(cli: &mut Cli, id: &str, request: &Value, answer: &Value) -> Result<(
     };
     cli.respond(id, Ok(response))
 }
+struct StreamOutput {
+    kind: String,
+    parent: Option<String>,
+    index: u64,
+    scrubber: StreamScrubber,
+}
+impl StreamOutput {
+    fn event(&self, text: String) -> Value {
+        let mut data = json!({"text":text});
+        if let Some(parent) = &self.parent {
+            data["parent_id"] = json!(parent);
+        }
+        json!({"type":self.kind,"data":data})
+    }
+}
+fn flush_streams(
+    streams: &mut Vec<StreamOutput>,
+    shared: &Shared,
+    events: &Option<SyncSender<Value>>,
+    filter: Option<(Option<&str>, Option<u64>)>,
+) -> bool {
+    let mut ok = true;
+    let mut i = 0;
+    while i < streams.len() {
+        if filter.is_some_and(|(parent, index)| {
+            streams[i].parent.as_deref() != parent
+                || index.is_some_and(|index| index != streams[i].index)
+        }) {
+            i += 1;
+            continue;
+        }
+        let mut stream = streams.remove(i);
+        match stream
+            .scrubber
+            .finish(|s| shared.scrub(s).map_err(io::Error::other))
+        {
+            Ok(text) if text.is_empty() => {}
+            Ok(text) => {
+                ok &= send_event(events, stream.event(text));
+            }
+            Err(_) => {
+                ok = false;
+            }
+        }
+    }
+    ok
+}
 fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>) {
+    let mut streams: Vec<StreamOutput> = Vec::new();
     let mut operations: HashMap<String, Operation> = HashMap::new();
     let mut inputs: HashMap<String, PendingInput> = HashMap::new();
     let mut events = None;
@@ -695,6 +765,7 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>) {
                     }
                 }
                 Command::Prompt(text, sink, reply) => {
+                    streams.clear();
                     events = Some(sink);
                     overflow = false;
                     compact_permit = text.trim() == "/compact";
@@ -705,8 +776,10 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>) {
                         }
                         shared.persist(json!({"type":"user","message":{"role":"user","content":text},"cwd":shared.cwd,"sessionId":shared.session,"timestamp":crate::iso_now()}))?;
                         shared.checkpoint(true)?;
+                        let public_prompt = shared.scrub(&text)?;
                         cli.prompt(&text, &shared.session)
-                            .map_err(|_| "Claude prompt write failed".to_owned())
+                            .map_err(|_| "Claude prompt write failed".to_owned())?;
+                        Ok::<_, String>(public_prompt)
                     })();
                     if let Err(reason) = admitted {
                         let _ = reply.send(Err(reason.clone()));
@@ -714,7 +787,10 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>) {
                         events = None;
                         shared.active.store(false, Ordering::Release);
                     } else {
-                        send_event(&events, json!({"type":"turn_started","data":{}}));
+                        send_event(
+                            &events,
+                            json!({"type":"turn_started","data":{"prompt":admitted.unwrap()}}),
+                        );
                         let _ = reply.send(Ok(json!({})));
                     }
                 }
@@ -1105,6 +1181,15 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>) {
             }
             Some("stream_event") => {
                 let event = &frame["event"];
+                if event["type"] == "content_block_stop" {
+                    let parent = frame["parent_tool_use_id"].as_str();
+                    let index = event["index"].as_u64().unwrap_or(0);
+                    if !flush_streams(&mut streams, &shared, &events, Some((parent, Some(index)))) {
+                        shared.failed.store(true, Ordering::Release);
+                        let _ = cli.control(json!({"subtype":"interrupt"}));
+                        turn_deadline = Some(Instant::now() + Duration::from_secs(5));
+                    }
+                }
                 let delta = &event["delta"];
                 if let Some((kind, text)) = match delta["type"].as_str() {
                     Some("text_delta") => delta["text"].as_str().map(|s| ("text_delta", s)),
@@ -1113,18 +1198,41 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>) {
                     }
                     _ => None,
                 } {
-                    let text = match shared.scrub(text) {
-                        Ok(s) => s,
-                        Err(_) => {
+                    let parent = frame["parent_tool_use_id"].as_str();
+                    let index = event["index"].as_u64().unwrap_or(0);
+                    let position = streams.iter().position(|s| {
+                        s.kind == kind && s.parent.as_deref() == parent && s.index == index
+                    });
+                    let position = match position {
+                        Some(i) => i,
+                        None if streams.len() < 32 => {
+                            streams.push(StreamOutput {
+                                kind: kind.into(),
+                                parent: parent.map(str::to_owned),
+                                index,
+                                scrubber: StreamScrubber::default(),
+                            });
+                            streams.len() - 1
+                        }
+                        None => {
+                            shared.failed.store(true, Ordering::Release);
                             let _ = cli.control(json!({"subtype":"interrupt"}));
                             continue;
                         }
                     };
-                    let mut data = json!({"text":text});
-                    if let Some(parent) = frame["parent_tool_use_id"].as_str() {
-                        data["parent_id"] = json!(parent)
-                    }
-                    if !overflow && !send_event(&events, json!({"type":kind,"data":data})) {
+                    let stream = &mut streams[position];
+                    let clean = stream
+                        .scrubber
+                        .push(text, |s| shared.scrub(s).map_err(io::Error::other));
+                    let delivered = match clean {
+                        Ok(text) if text.is_empty() => true,
+                        Ok(text) => !overflow && send_event(&events, stream.event(text)),
+                        Err(_) => {
+                            shared.failed.store(true, Ordering::Release);
+                            false
+                        }
+                    };
+                    if !delivered {
                         overflow = true;
                         let _ = cli.control(json!({"subtype":"interrupt"}));
                         turn_deadline = Some(Instant::now() + Duration::from_secs(5));
@@ -1132,6 +1240,16 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>) {
                 }
             }
             Some("assistant" | "user") => {
+                if !flush_streams(
+                    &mut streams,
+                    &shared,
+                    &events,
+                    Some((frame["parent_tool_use_id"].as_str(), None)),
+                ) {
+                    shared.failed.store(true, Ordering::Release);
+                    let _ = cli.control(json!({"subtype":"interrupt"}));
+                    turn_deadline = Some(Instant::now() + Duration::from_secs(5));
+                }
                 let kind = frame["type"].as_str().unwrap();
                 if frame["message"].is_object() {
                     let mut message = frame["message"].clone();
@@ -1160,6 +1278,9 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>) {
                 }
             }
             Some("result") => {
+                if !flush_streams(&mut streams, &shared, &events, None) {
+                    shared.failed.store(true, Ordering::Release);
+                }
                 let error =
                     frame["is_error"] == true || overflow || shared.failed.load(Ordering::Acquire);
                 for (id, request) in inputs.drain() {
@@ -1413,6 +1534,62 @@ for line in sys.stdin:
         (dir, host)
     }
     #[test]
+    fn fragmented_credentials_are_private_and_public_prompt_is_visible() {
+        let body = r#"if row['type']=='user':
+  assert row['message']['content']=='literal task sk-abcdefghijklmnopqrstuvwxyz123456'
+  for kind,field,index,parent in [('text_delta','text',0,None),('thinking_delta','thinking',1,'peer-tool')]:
+   for chunk in ['safe prose password  =  ', "'long secret ", "phrase' ", 'Bearer abcdef', 'ghijklmnopqrstuvwxyz ', 'sk-abcdefghijk', 'lmnopqrstuvwxyz123456 ', 'finished']:
+    emit({'type':'stream_event','session_id':'$SESSION','parent_tool_use_id':parent,'event':{'type':'content_block_delta','index':index,'delta':{'type':kind,field:chunk}}})
+   emit({'type':'stream_event','session_id':'$SESSION','parent_tool_use_id':parent,'event':{'type':'content_block_stop','index':index}})
+  emit({'type':'assistant','session_id':'$SESSION','message':{'role':'assistant','content':[{'type':'tool_use','id':'tool','name':'fixture','input':{}}]}})
+  emit({'type':'result','session_id':'$SESSION','is_error':False})
+"#.replace("$SESSION", SESSION);
+        let (_dir, host) = fixture(&body);
+        let mut events = Vec::new();
+        host.prompt(
+            "literal task sk-abcdefghijklmnopqrstuvwxyz123456",
+            &mut |event| events.push(event),
+        );
+        assert_eq!(events[0]["type"], "turn_started");
+        assert_eq!(
+            events[0]["data"]["prompt"],
+            "literal task [REDACTED:api-key]"
+        );
+        for kind in ["text_delta", "reasoning_delta"] {
+            let pieces = events
+                .iter()
+                .filter(|e| e["type"] == kind)
+                .collect::<Vec<_>>();
+            assert_eq!(pieces[0]["data"]["text"], "safe prose password  =  ");
+            let text = pieces
+                .iter()
+                .map(|e| e["data"]["text"].as_str().unwrap())
+                .collect::<String>();
+            assert!(text.contains("[REDACTED:value]"));
+            assert!(text.contains("[REDACTED:bearer]"));
+            assert!(text.contains("[REDACTED:api-key]"));
+            assert!(text.ends_with("finished"));
+            if kind == "reasoning_delta" {
+                assert!(pieces.iter().all(|e| e["data"]["parent_id"] == "peer-tool"));
+            }
+        }
+        let public = serde_json::to_string(&events).unwrap();
+        for secret in ["long secret", "phrase'", "abcdefgh", "lmnopqrstuvwxyz"] {
+            assert!(!public.contains(secret));
+        }
+        let tool = events
+            .iter()
+            .position(|e| e["type"] == "tool_call")
+            .unwrap();
+        assert!(events
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e["type"] == "text_delta" || e["type"] == "reasoning_delta")
+            .all(|(i, _)| i < tool));
+        assert_eq!(events.last().unwrap()["data"]["is_error"], false);
+        assert!(host.shutdown());
+    }
+    #[test]
     fn same_cli_turn_observes_verified_model_effort_and_immediate_reasoning() {
         let (_dir, host) = fixture(&format!(
             r#"if row['type']=='user':
@@ -1438,19 +1615,22 @@ for line in sys.stdin:
         );
         let mut events = Vec::new();
         host.prompt("first", &mut |e| events.push(e));
-        let first = events.iter().find(|e| e["type"] == "text_delta").unwrap()["data"]["text"]
-            .as_str()
-            .unwrap()
-            .to_owned();
+        let first = events
+            .iter()
+            .filter(|e| e["type"] == "text_delta")
+            .map(|e| e["data"]["text"].as_str().unwrap())
+            .collect::<String>();
         assert!(first.starts_with("claude-sonnet-5 low "));
         assert_eq!(events[1]["type"], "reasoning_delta");
         assert_eq!(events.last().unwrap()["data"]["ctx_tokens"], 1234);
         host.call("set_effort", &json!({"effort":"high"})).unwrap();
         let mut second = Vec::new();
         host.prompt("second", &mut |e| second.push(e));
-        let text = second.iter().find(|e| e["type"] == "text_delta").unwrap()["data"]["text"]
-            .as_str()
-            .unwrap();
+        let text = second
+            .iter()
+            .filter(|e| e["type"] == "text_delta")
+            .map(|e| e["data"]["text"].as_str().unwrap())
+            .collect::<String>();
         assert!(text.starts_with("claude-sonnet-5 high "));
         assert_eq!(
             first.split_whitespace().last(),
