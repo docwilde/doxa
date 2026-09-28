@@ -292,3 +292,18 @@ private server and binds it to the receipt and native startup verification.
 Existing alpha.40 receipts migrate only with unchanged trusted server/source/
 patch identity. Publication and repair preserve the complete prior installation
 on failure. The official CLI remains available for login and ordinary commands.
+
+The helper's sandbox V8 archive and generated Rust bindings are verified against
+the release manifest pinned by the official Codex source. Inherited V8 and Rust
+build overrides are cleared. The helper cache fingerprint includes those native
+input hashes. The installed receipt binds the helper payload, dispatcher and
+source; the native dispatcher checks the opened payload again when the app
+server starts it lazily, then executes that file descriptor.
+
+Three credential-free checks used the actual compiled package: a successful
+workspace read through both native dispatchers, refusal with the helper missing,
+and correlated successful command call/result/detail through DOXA and native
+LORE. Each made two loopback requests. The unpredictable file token was absent
+from the first request, the final response came from the returned tool output,
+and the source file stayed unchanged. Eight proof tests and eleven installer
+tests cover these assertions and artifact migration/repair.

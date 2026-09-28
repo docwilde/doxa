@@ -290,3 +290,31 @@ Current documentation was consulted without authenticating or sending prompts:
 Documentation checks do not establish authentication, account availability,
 native callback delivery, successful tool execution, billing, or turn/history
 success. All those live outcomes remain unverified for this run.
+
+## Alpha.41 Code Mode dependency verification
+
+The alpha.40 account check above did not prove file reads: its private Codex
+package omitted `codex-code-mode-host`, which `gpt-6-sol` requires for its
+`code_mode_only` tool profile. Alpha.41 builds that helper from the same pinned
+Codex source and installs it with verified V8 inputs, a receipt-bound payload
+and a native dispatcher that rechecks the payload at execution.
+
+The actual compiled package passed three credential-free scenarios:
+
+| Boundary | Observed result |
+| --- | --- |
+| Protected app server and installed helper dispatchers | Native command completed with exit zero and returned the unpredictable workspace token. |
+| Same compiled server with an owned missing-helper fault | No file read or command event; the tool output reported the missing host. |
+| Installed DOXA daemon and native LORE carrier | One correlated command call, successful result and exact output detail; final response contained the returned token. |
+
+Each scenario made exactly two local HTTP requests. The first request contained
+no fixture token; the loopback model generated its final answer only from the
+returned tool output. Fixtures stayed unchanged, no credentials or paid requests
+were used, and owned temporary directories were removed. Eight stdlib tests
+cover the proof's inventory, leakage, output and event-correlation checks.
+
+Reproduce with `scripts/codex-protected/verify_code_mode.py --help`; use the
+installed private launcher for `--server` and `--launcher`, the compiled server
+payload for `--negative-server`, and native binaries for `--daemon` and `--lore`.
+These checks establish tool execution and DOXA normalization. Authenticated
+account recall and successful LORE reviewer compaction are separate checks.

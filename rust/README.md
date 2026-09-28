@@ -197,7 +197,7 @@ it validates the original prefix before using that summary on resume.
 
 Alpha.41 requires DOXA's private Codex 0.156.1 app server and its matching
 `codex-code-mode-host`. Model-required Code Mode uses that native host; the
-launcher verifies both private artifacts before dispatch. The app-server build It flushes the
+launcher verifies both private artifacts before dispatch. The app server flushes the
 owned rollout before review and blocks local and remote compaction before
 inference or history replacement unless exactly one trusted synchronous hook
 explicitly allows continuation. Missing, failed, timed-out, malformed, asynchronous
