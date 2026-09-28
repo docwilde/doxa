@@ -502,7 +502,7 @@ fn detailed_plugin_rows(installed: &serde_json::Value, settings: &serde_json::Va
     rows
 }
 
-/// Run the installed canonical plugin policy without creating an SDK session.
+/// Run the installed canonical plugin policy without creating a provider session.
 pub fn plugins_reload() -> io::Result<String> {
     plugins_bridge(true)
 }

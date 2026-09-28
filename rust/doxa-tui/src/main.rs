@@ -505,6 +505,7 @@ fn worktrees(args: &[String]) -> io::Result<()> {
 }
 
 fn fleet(args: &[String]) -> io::Result<()> {
+    if args.iter().any(|arg|matches!(arg.as_str(),"--help"|"-h")) {print!("{}",fleet_control::HELP);return Ok(());}
     if args.first().is_some_and(|arg| arg == "start") {
         return fleet_control::start(&args[1..]);
     }

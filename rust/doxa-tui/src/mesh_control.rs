@@ -1,7 +1,7 @@
 //! Owned native loopback graph reader with compiled browser assets.
 //! Only the selected private ledger is readable; the token lives in memory.
 use crate::fleet_view;
-use std::{fs, io::{self, Read, Write}, os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt}, path::{Path, PathBuf}, sync::mpsc, time::{Duration, Instant}};
+use std::{fs, io::self, os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt}, path::{Path, PathBuf}, sync::mpsc, time::Duration};
 
 fn invalid(message: &str) -> io::Error { io::Error::new(io::ErrorKind::InvalidInput, message) }
 fn private_directory(path: &Path) -> io::Result<()> {
@@ -148,7 +148,7 @@ pub fn serve(ledger: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::TcpStream;
+    use std::{net::TcpStream,io::{Read,Write},time::Instant};
     #[test]
     fn window_mesh_is_nonblocking_and_releases_renderer_on_window_close() {
         let root = tempfile::tempdir().unwrap();

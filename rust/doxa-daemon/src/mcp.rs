@@ -21,6 +21,9 @@ pub fn serve()->io::Result<()> {
         if count==0{break;}
         if count as u64>FRAME_LIMIT{return Err(io::Error::other("MCP request exceeds limit"));}
         let request:Value=match serde_json::from_slice(&frame){Ok(value)=>value,Err(_)=>{writeln!(output,"{}",json!({"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"Invalid JSON"}}))?;output.flush()?;continue;}};
+        if request["jsonrpc"]!="2.0" || !request.is_object() {
+            writeln!(output,"{}",json!({"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"Invalid request"}}))?;output.flush()?;continue;
+        }
         let Some(id)=request.get("id").filter(|id|id.is_string()||id.is_i64()||id.is_u64()) else {continue;};
         let result=match request["method"].as_str().unwrap_or("") {
             "initialize"=>Ok(json!({"protocolVersion":match request["params"]["protocolVersion"].as_str(){Some("2025-03-26")=>"2025-03-26",Some("2025-06-18")=>"2025-06-18",Some("2025-11-25")=>"2025-11-25",_=>"2024-11-05"},"capabilities":{"tools":{}},"serverInfo":{"name":"doxa","version":env!("CARGO_PKG_VERSION")}})),

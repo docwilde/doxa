@@ -791,6 +791,8 @@ fn main() {
     let args:Vec<String>=std::env::args().skip(1).collect();
     let helper=match args.as_slice() {
         [mode] if mode=="__mcp"=>Some(mcp::serve()),
+        [mode,runtime] if mode=="__peernet-ensure"=>Some(std::env::current_exe().and_then(|executable|doxa_peers::peernet::ensure(&executable,Path::new(runtime)))),
+        [mode,runtime] if mode=="__peernet-serve"=>Some(remote_bridge::serve(Path::new(runtime))),
         [mode,manifest,digest] if mode=="__codex-precompact"=>{
             println!("{}",doxa_engines::compact_hook::hook_main(Path::new(manifest),digest));return;
         },
