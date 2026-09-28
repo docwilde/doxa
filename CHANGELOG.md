@@ -5,6 +5,15 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.43 — 2026-09-28
+
+**Documentation**
+
+- Refresh **README** and the **Rust parity tracker** through alpha.42 and
+  **LORE 0.62.2**; distinguish implemented workflows from remaining live checks.
+- Record **962 passing Rust tests** and compiled/account verification scopes;
+  preserve **alpha.37** screenshot provenance. This release changes documentation.
+
 ## 2.0.0-alpha.42 — 2026-09-28
 
 **Protected provider startup**
