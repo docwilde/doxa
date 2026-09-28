@@ -230,3 +230,20 @@ asset creation and publication use the same pinned directory descriptor. Native
 installation markers reject symlinks/hardlinks and unsafe permissions. Controlled
 provider, filesystem and installed-launcher fixtures cover these boundaries;
 live-provider and gallery checks retain their explicit provenance.
+
+## Compaction and documentation follow-up in alpha.39
+
+Manual Codex compaction now requires a native review before submission, exact
+source rechecks and a job receipt from the pinned native executable. Review
+output is bounded; missing receipts and retained stdout descendants cannot
+authorize compaction. Cancellation during source lookup retires the transport
+and preserves the saved thread when durable state commits successfully.
+Protected startup verifies that unhooked token-budget
+resets are disabled. Observing unreviewed automatic compaction stops the session;
+stock Codex infrastructure failures still prevent a fail-closed automatic claim.
+
+Current crate guides now describe the installed native runtime. Original port
+plans and the Python manual are explicitly historical, with the Rust guide
+primary. These corrections preserve the earlier audit findings and proof counts.
+The [provider verification record](live-provider-verification-2026-09-28.md)
+separates actual account checks, local fixtures and missing authentication.

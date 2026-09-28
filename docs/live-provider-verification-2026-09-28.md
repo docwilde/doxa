@@ -1,5 +1,43 @@
 # Live provider verification — 2026-09-28
 
+## Native Codex and Claude
+
+These checks used the actual installed provider CLIs and the Rust DOXA daemon,
+private SSD workspaces and isolated DOXA/LORE stores. Memory review was disabled
+for these synthetic probes. Credentials were never printed, recorded in argv
+or included in output; the temporary Codex authentication copy was removed.
+
+| Provider | Actual observations | Remaining live verification |
+| --- | --- | --- |
+| Codex 0.156.1 | Account catalog returned 7 models. Two native turns each read a synthetic local file, emitted streamed text and one tool call, and reported complete usage. Model and effort changes were accepted on the same thread. | Successful native LORE review followed by provider compaction; large-context automatic compaction. |
+| Claude Code 2.1.283 | Native initialization returned 8 models. CLI authentication reported logged out; the submitted native turn failed with no text or tool events. | Authenticated streaming, tools, current-session controls and quota. |
+
+The initial Codex turn ran on alpha.38. A second turn used the compaction
+integration build; with review disabled, `/compact` was refused and the provider
+rollout digest stayed unchanged. The alpha.39 build then resumed the same owned
+thread and refused compaction again without submitting an inference turn.
+The refusal is an expected protection result, not a successful compaction test.
+These short probes are compatibility checks, not latency benchmarks.
+
+Independent fixtures verify that stalled source lookup cancellation returns in
+under one second, sends no compaction request, preserves source bytes and clears
+the durable restart guard only after successful persistence. A follow-up turn
+resumes the original thread. Native approval receipts, carrier/manifest replacement,
+held stdout descendants and unreviewed automatic events have separate fixtures.
+
+Stock Codex's automatic hook failure behavior remains an upstream limitation:
+DOXA can stop after observing failure, without proving that automatic context
+replacement was prevented. The pinned source also contains independent triggers
+outside the configured token threshold. See the
+[engine contract](../rust/doxa-engines/README.md#compaction-review) and pinned
+[turn implementation](https://github.com/openai/codex/blob/rust-v0.156.1/codex-rs/core/src/session/turn.rs),
+[context-window cap](https://github.com/openai/codex/blob/rust-v0.156.1/codex-rs/core/src/session/context_window.rs)
+and [model threshold logic](https://github.com/openai/codex/blob/rust-v0.156.1/codex-rs/protocol/src/openai_models.rs).
+
+To unblock Claude's account check, run `doxa auth login claude` or `claude auth login`.
+Configure vendor keys in `/setup` or inherited environment before the opt-in
+checks below. Do not put credentials in project files, prompts or memory.
+
 ## Native DeepSeek and z.ai / GLM
 
 **Result: live checks blocked by missing credentials; zero paid requests.**
@@ -87,14 +125,18 @@ The touched replay reader also caps actual reads at 16 MiB plus one byte and
 rejects overflow after reading, so concurrent file growth cannot bypass the
 metadata size check.
 
-```bash
-TMPDIR=/home/docwilde/.d39 \
-CARGO_TARGET_DIR=/home/docwilde/.cache/doxa-native-target-vendor-live-fixture \
-cargo build -j 1 -p doxa-daemon --features local-test-server
+Run from the repository root. Keep builds and disposable homes on disk:
 
-TMPDIR=/home/docwilde/.d39 \
-DOXA_NATIVE_DAEMON=/home/docwilde/.cache/doxa-native-target-vendor-live-fixture/debug/doxa-daemon \
-python3 -m unittest discover -s tests -p test_native_live_vendor_verifier.py -v
+```bash
+verify_dir="$HOME/.cache/doxa-verify"
+mkdir -p "$verify_dir/tmp"
+chmod 700 "$verify_dir" "$verify_dir/tmp"
+export TMPDIR="$verify_dir/tmp"
+export CARGO_TARGET_DIR="$verify_dir/target"
+
+cargo build --locked -j 1 -p doxa-daemon --features local-test-server
+DOXA_NATIVE_DAEMON="$CARGO_TARGET_DIR/debug/doxa-daemon" \
+  python3 -m unittest discover -s tests -p test_native_live_vendor_verifier.py -v
 ```
 
 ### Reproduce safely
@@ -105,20 +147,20 @@ native provider, including saved-key precedence and unsafe-store rejection.
 Keys are resolved before disposable home isolation and passed only in the child
 environment. Do not put key values in a shell command, fixture, or log.
 
+Using the disk-backed paths above, build the production daemon and check only
+credential availability:
+
 ```bash
-TMPDIR=/home/docwilde/.d39 \
-CARGO_TARGET_DIR=/home/docwilde/.cache/doxa-native-target-credentials \
-cargo run -j 1 -q -p doxa-vendors --example verify_native_live -- --check
+cargo build --locked -j 1 -p doxa-daemon
+cargo run --locked -j 1 -q -p doxa-vendors --example verify_native_live -- --check
 ```
 
 The following is an explicit opt-in to paid requests for available accounts:
 
 ```bash
-TMPDIR=/home/docwilde/.d39 \
-CARGO_TARGET_DIR=/home/docwilde/.cache/doxa-native-target-credentials \
-DOXA_NATIVE_DAEMON=/home/docwilde/.cache/doxa-native-target-credentials/debug/doxa-daemon \
-DOXA_LORE_RS=/home/docwilde/.local/bin/lore-rs \
-cargo run -j 1 -q -p doxa-vendors --example verify_native_live -- --live
+DOXA_NATIVE_DAEMON="$CARGO_TARGET_DIR/debug/doxa-daemon" \
+DOXA_LORE_RS="$HOME/.local/bin/lore-rs" \
+  cargo run --locked -j 1 -q -p doxa-vendors --example verify_native_live -- --live
 ```
 
 The child creates a mode-0700 synthetic workspace with one random-token file.

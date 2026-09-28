@@ -35,33 +35,42 @@ match; incomplete usage cannot authorize additional budgeted turns.
 Protected native app-server sessions currently require **Codex 0.156.1**.
 Initialization checks the server's build identity and `hooks/list` verifies
 DOXA's synchronous, trusted `PreCompact` command hash before a thread starts.
-An unsupported build or missing trusted hook refuses startup with its reason.
+It also verifies that the provider's unhooked token-budget reset feature is
+disabled. An unsupported build, missing trusted hook or unverified reset
+configuration refuses startup with its reason.
 DOXA adds its own session configuration; it does not overwrite global Codex
 settings or trust unrelated user hooks.
 
 The pinned hook binds the actual provider thread and owned rollout, creates
 a scrubbed private snapshot, and waits for the configured LORE reviewer.
-Failure or a changed source returns a blocking hook decision. Manual
-`/compact` uses `thread/compact/start` and waits for matching review and
-compaction events; it is not sent as a model prompt. A failed hook notification
-stops the protected session.
+Failure or a changed source returns a blocking hook decision. Before sending
+manual `thread/compact/start`, DOXA independently reads the bound provider
+rollout, runs the native reviewer and verifies the same source identity and
+digest. Missing review, disabled memory/review, worker failure or changed proof
+refuses the request and retains the existing context. Supervisor approval
+requires a bounded receipt for the exact job; an exit code alone is insufficient.
+`/compact` cannot pass through as an ordinary provider prompt. After submission,
+DOXA still waits for matching hook and compaction events. A failed hook
+notification stops the protected session.
 
 **Provider limitation:** Codex 0.156.1 can continue compaction if the operating
 system cannot spawn a hook, or if the hook times out or returns invalid output.
 DOXA's parent can stop the process after observing failure, but this does not
-guarantee that the provider has not already compacted. Normal reviewer failures
-return a valid blocking decision before the hook deadline. Stable parity must
-retain this distinction until the provider guarantees blocking infrastructure
-failures.
+guarantee that automatic compaction was prevented. Manual requests have the
+independent review gate above. Raising a token threshold is not an automatic
+compaction disable switch: the pinned build can also compact for a full context
+window, model/context changes or recovery. Stable parity retains this upstream
+limitation until the provider guarantees blocking infrastructure failures.
 
 ## Verification
 
 ```sh
 cargo test --locked -p doxa-engines
-python -m pytest rust/doxa-engines/tests/test_codex_compact_hook.py -q
 ```
 
 Tests use local executable fixtures and fake review workers. They cover
 stream boundaries, deadlines, cancellation, exact input replies, one-action
 approvals, protected build/hook checks and compaction ordering without account
 inference. The Python 1.19 `doxa/codex.py` remains the legacy behavior reference.
+See the [provider verification record](../../docs/live-provider-verification-2026-09-28.md)
+for actual account checks and their remaining authentication requirements.

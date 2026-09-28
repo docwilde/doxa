@@ -5,6 +5,31 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.39 — 2026-09-28
+
+**Compaction protection**
+
+- Review the exact owned Codex rollout before **`thread/compact/start`**;
+  refuse missing, disabled, failed or changed review without replacing context.
+- Pin native review execution to its verified file descriptor; require a bounded
+  job receipt and stop observed automatic compaction without matching review.
+- Verify **`features.token_budget=false`**. Stock Codex 0.156.1 still permits
+  automatic compaction after some hook infrastructure failures.
+
+**Vendor protocol verification**
+
+- Fix DeepSeek's root **`reasoning_effort`** field and required thinking replay
+  for tool continuations and subsequent turns using guarded private history.
+- Add an opt-in native provider verifier with isolated stores and metadata-only
+  output. Authenticated Claude, DeepSeek and z.ai checks still need credentials.
+
+**Native documentation**
+
+- Replace retired Python bridge instructions in crate guides; mark original
+  port plans and the Python manual historical. Make the Rust guide primary.
+- Shorten **`What you get`** to concise bullets and document reattachment,
+  compaction guarantees and actual provider verification separately.
+
 ## 2.0.0-alpha.38 — 2026-09-28
 
 **API key setup**
