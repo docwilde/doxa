@@ -13,6 +13,10 @@ import subprocess
 import tempfile
 import platform
 import urllib.request
+import stat
+import fcntl
+import ctypes
+from contextlib import contextmanager
 
 SOURCE = "b412ff32c417f855c2b2d1581b77058eed87c84b"
 CONTRACT = "doxa-precompact-fail-closed-v1"
@@ -34,6 +38,49 @@ def private_directory(path):
     metadata = path.stat()
     if metadata.st_uid != os.getuid() or metadata.st_mode & 0o077:
         raise ValueError(f"provider directory must be private and owned: {path}")
+
+
+def private_read(path, limit, *, hash_only=False):
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(descriptor, "rb") as stream:
+        metadata = os.fstat(stream.fileno())
+        if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid()
+                or metadata.st_mode & 0o077 or metadata.st_nlink != 1 or metadata.st_size > limit):
+            raise ValueError("installed provider file is not private, regular and bounded")
+        if hash_only:
+            return hashlib.file_digest(stream, "sha256").hexdigest()
+        data = stream.read(limit + 1)
+        if len(data) > limit:
+            raise ValueError("installed provider file exceeded its bound")
+        return data
+
+
+@contextmanager
+def locked_directory(directory):
+    private_directory(directory)
+    descriptor = os.open(directory / ".install.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    try:
+        metadata = os.fstat(descriptor)
+        if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid()
+                or metadata.st_mode & 0o077 or metadata.st_nlink != 1):
+            raise ValueError("provider installer lock is not private and regular")
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(descriptor)
+
+
+def exchange_directories(stage, destination):
+    # Linux exchange publishes payload, dispatcher and receipt as one transaction.
+    # If unsupported, leave the installed provider unchanged and report failure.
+    libc = ctypes.CDLL(None, use_errno=True)
+    exchange = getattr(libc, "renameat2", None)
+    if exchange is None:
+        raise ValueError("atomic provider refresh requires Linux renameat2")
+    exchange.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    exchange.restype = ctypes.c_int
+    if exchange(-100, os.fsencode(stage), -100, os.fsencode(destination), 2):
+        raise OSError(ctypes.get_errno(), "atomic provider directory refresh failed")
 
 
 def run(arguments, **kwargs):
@@ -72,7 +119,14 @@ RUSTUP_SHA256 = "dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb7
 
 def toolchain(cache, cargo):
     if cargo:
-        return cargo, {}
+        executable = Path(cargo).resolve()
+        rustc = executable.parent / "rustc"
+        environment = {"RUSTC": str(rustc)}
+        for binary, prefix in [(executable, "cargo 1.95.0 "), (rustc, "rustc 1.95.0 ")]:
+            version = subprocess.check_output([str(binary), "--version"], text=True, env=build_environment(environment), timeout=10)
+            if not version.startswith(prefix):
+                raise ValueError("--cargo and its sibling rustc must both be Rust 1.95.0")
+        return str(executable), environment
     if platform.system() != "Linux" or platform.machine() != "x86_64":
         raise ValueError("automatic private toolchain bootstrap supports Linux x86_64; pass --cargo for Rust 1.95.0")
     private_directory(cache / "toolchain")
@@ -93,7 +147,21 @@ def toolchain(cache, cargo):
         print("doxa-codex-install: installing isolated Rust 1.95.0 (no global toolchain changes)", flush=True)
         run([str(bootstrap), "-y", "--no-modify-path", "--profile", "minimal", "--default-toolchain", "1.95.0"],
             env=dict(os.environ, **environment))
+    environment["RUSTC"] = str(rustc)
+    for binary, prefix in [(executable, "cargo 1.95.0 "), (rustc, "rustc 1.95.0 ")]:
+        version = subprocess.check_output([str(binary), "--version"], text=True, env=build_environment(environment), timeout=10)
+        if not version.startswith(prefix):
+            raise ValueError("private provider toolchain is not Rust 1.95.0")
     return str(executable), environment
+
+
+def build_environment(overrides):
+    environment = dict(os.environ)
+    for key in ("RUSTC", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER", "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS",
+                "RUSTUP_TOOLCHAIN", "RUSTDOC", "RUSTDOCFLAGS"):
+        environment.pop(key, None)
+    environment.update(overrides)
+    return environment
 
 
 def build(cache, cargo):
@@ -108,8 +176,8 @@ def build(cache, cargo):
             print("doxa-codex-install: reusing verified private app-server artifact", flush=True)
             return binary
     cargo, toolchain_environment = toolchain(cache, cargo)
-    environment = dict(os.environ, **toolchain_environment, CARGO_TARGET_DIR=str(cache / "target"), CARGO_BUILD_JOBS="1",
-                       RUST_TEST_THREADS="1", TMPDIR=str(cache / "scratch"), CARGO_HTTP_MULTIPLEXING="false")
+    environment = build_environment(dict(toolchain_environment, CARGO_TARGET_DIR=str(cache / "target"), CARGO_BUILD_JOBS="1",
+                       RUST_TEST_THREADS="1", TMPDIR=str(cache / "scratch"), CARGO_HTTP_MULTIPLEXING="false"))
     private_directory(cache / "scratch")
     command = [cargo, "build", "--locked", "--profile", "dev-small", "-p", "codex-app-server",
                "--bin", "codex-app-server", "-j", "1"]
@@ -145,14 +213,19 @@ def install(binary, root, official_cli, launcher):
         (stage / "receipt.json").chmod(0o600)
         # Existing installations are identical or retained until an explicit upgrade.
         if destination.exists():
-            previous = json.loads((destination / "receipt.json").read_text())
+            previous = json.loads(private_read(destination / "receipt.json", 16384))
             identity_keys = ("contract", "source_commit", "patch_sha256", "binary_sha256", "profile", "toolchain")
             if any(previous.get(key) != receipt[key] for key in identity_keys):
                 raise ValueError("provider artifact differs from installed receipt; use a new --install-root for review")
-            # Refresh the native dispatcher and official CLI path on DOXA upgrades.
-            # The reviewed provider identity is unchanged; each file swap is atomic.
-            os.replace(stage / "codex", destination / "codex")
-            os.replace(stage / "receipt.json", destination / "receipt.json")
+            # Check the actual installed payload, not only its receipt. Republish the
+            # verified stage to repair a missing/corrupt file and refresh the shim.
+            try:
+                installed_hash = private_read(destination / "codex-app-server", 1024 * 1024 * 1024, hash_only=True)
+            except (OSError, ValueError):
+                installed_hash = None
+            if installed_hash != receipt["binary_sha256"]:
+                print("doxa-codex-install: repairing installed provider payload from verified artifact", flush=True)
+            exchange_directories(stage, destination)
         else:
             stage.rename(destination)
         print(destination / "codex")
@@ -168,8 +241,18 @@ def probe(binary):
     request = json.dumps({"id": 1, "method": "initialize", "params": {
         "clientInfo": {"name": "doxa_install", "version": "1"},
         "capabilities": {"experimentalApi": True}}}) + "\n"
+    with tempfile.TemporaryDirectory(prefix=".codex-probe-", dir=binary.parent) as scratch:
+        home = Path(scratch)
+        (home / "codex").mkdir(mode=0o700)
+        environment = {"HOME": str(home), "CODEX_HOME": str(home / "codex"), "PATH": "/usr/bin:/bin",
+                       "TMPDIR": str(home), "LANG": "C.UTF-8", "DO_NOT_TRACK": "1"}
+        _probe(binary, request, home, environment)
+
+
+def _probe(binary, request, home, environment):
     process = subprocess.Popen([str(binary), "--listen", "stdio://"], stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, start_new_session=True)
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, start_new_session=True,
+        env=environment, cwd=home)
     try:
         process.stdin.write(request)
         process.stdin.flush()
@@ -226,10 +309,12 @@ def main():
     if official is None or not official.is_absolute() or not os.access(official, os.X_OK):
         parser.error("an installed official Codex CLI is required; pass --official-cli")
     official = official.resolve()
-    binary = build(options.cache, options.cargo)
     if not options.launcher.is_absolute() or not os.access(options.launcher, os.X_OK):
         parser.error("--launcher must be an absolute native launcher executable")
-    install(binary, options.install_root, official, options.launcher)
+    with locked_directory(options.cache):
+        binary = build(options.cache, options.cargo)
+        with locked_directory(options.install_root):
+            install(binary, options.install_root, official, options.launcher)
 
 
 if __name__ == "__main__":
