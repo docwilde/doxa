@@ -51,7 +51,7 @@ async fn deepseek_balance_at(endpoint: &str, key: &str) -> Option<String> {
     for info in infos.iter().take(4) {
         let currency = info["currency"].as_str()?;
         let amount = info["total_balance"].as_str()?;
-        if !valid_balance_amount(amount) { return None; }
+        if !valid_balance_amount(amount) || amount.contains(key) { return None; }
         let prefix = match currency { "USD" => "$", "CNY" => "¥", _ => return None };
         if amounts.iter().any(|(seen, _)| *seen == currency) { return None; }
         amounts.push((currency, format!("{prefix}{amount}")));
@@ -199,7 +199,7 @@ async fn catalog_models_at(vendor: Vendor, endpoint: &str, key: &str) -> Option<
     let mut models = Vec::new();
     for row in rows.iter().take(1000) {
         let Some(id) = row.get("id").and_then(Value::as_str) else { continue; };
-        if !id.is_empty() && id.len() <= 128 && id.bytes().all(|byte|
+        if !id.is_empty() && !id.contains(key) && id.len() <= 128 && id.bytes().all(|byte|
             byte.is_ascii_alphanumeric() || b"-._:/".contains(&byte))
             && !models.iter().any(|existing: &ModelCapability| existing.id == id) {
             let mut efforts = Vec::new();

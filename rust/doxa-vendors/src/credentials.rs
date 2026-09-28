@@ -9,7 +9,7 @@ use std::{ffi::CString, fs::{self, File, OpenOptions}, io::{self, Read, Write},
 
 const FILE_NAME: &str = "credentials.json";
 const LOCK_NAME: &str = ".credentials.lock";
-const MAX_BYTES: u64 = 16 * 1024;
+const MAX_BYTES: u64 = 32 * 1024;
 const MAX_KEY: usize = 4096;
 static NEXT_FILE: AtomicU64 = AtomicU64::new(0);
 
@@ -74,7 +74,7 @@ fn directory(path: &Path, create: bool) -> io::Result<Option<File>> {
 
 fn check_file(file: &File) -> io::Result<fs::Metadata> {
     let meta = file.metadata()?;
-    if !meta.is_file() || meta.uid() != unsafe { libc::geteuid() } || meta.nlink() != 1 || meta.mode() & 0o777 != 0o600 {
+    if !meta.is_file() || meta.uid() != unsafe { libc::geteuid() } || meta.nlink() != 1 || meta.mode() & 0o7777 != 0o600 {
         return Err(private_error());
     }
     Ok(meta)
@@ -89,7 +89,7 @@ fn identity(dir: &File, entry: &str) -> io::Result<Option<(u64, u64)>> {
     }
     let stat = unsafe { stat.assume_init() };
     if stat.st_mode & libc::S_IFMT != libc::S_IFREG || stat.st_uid != unsafe { libc::geteuid() }
-        || stat.st_nlink != 1 || stat.st_mode & 0o777 != 0o600 { return Err(private_error()); }
+        || stat.st_nlink != 1 || stat.st_mode & 0o7777 != 0o600 { return Err(private_error()); }
     Ok(Some((stat.st_dev, stat.st_ino)))
 }
 fn lock(dir: &File) -> io::Result<File> {

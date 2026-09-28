@@ -566,3 +566,26 @@ async fn local_override_rejects_userinfo_and_remote_hosts() {
         assert_eq!(result, Err(Error::InvalidEndpoint), "{endpoint}");
     }
 }
+
+#[tokio::test]
+async fn saved_credentials_apply_to_next_turn_of_existing_history_and_stay_out_of_context() {
+    let _credential_guard = credential_guard().await;
+    std::env::set_var("DEEPSEEK_API_KEY", "inherited-fixture-key");
+    std::env::set_var("ZAI_API_KEY", "inherited-zai-fixture-key");
+    let mut history = Vec::new();
+    for key in ["saved-fixture-key-one", "saved-fixture-key-two", "inherited-fixture-key"] {
+        if key.starts_with("saved") { doxa_vendors::credentials::save(Vendor::DeepSeek, key).unwrap(); }
+        else { doxa_vendors::credentials::remove(Vendor::DeepSeek).unwrap(); }
+        let body = format!("data: {{\"model\":\"deepseek-flash\",\"choices\":[{{\"finish_reason\":\"stop\",\"delta\":{{\"content\":\"{key}\"}}}}]}}\n\ndata: [DONE]\n\n");
+        let (url, task) = server(http("200 OK", &body, "text/event-stream"), Duration::ZERO);
+        let (_, cancel) = watch::channel(false);
+        let result = run_turn_local(Vendor::DeepSeek, &url, "deepseek-flash", "high", &mut history,
+            &format!("Question includes {key}"), None, cancel, Duration::from_secs(3), |_| {}).await.unwrap();
+        assert_eq!(result.text, "***");
+        let request = task.join().unwrap();
+        let (headers, payload) = request.split_once("\r\n\r\n").unwrap();
+        assert!(headers.to_ascii_lowercase().contains(&format!("authorization: bearer {key}")));
+        assert!(!payload.contains(key));
+        assert!(!serde_json::to_string(&history).unwrap().contains(key));
+    }
+}
