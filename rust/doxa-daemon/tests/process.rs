@@ -3144,7 +3144,11 @@ assert json.loads(sys.stdin.readline())['method']=='initialized'
 assert not sys.stdin.readline()
 "#);
     let mut process=Process::start_codex_appserver(dir.path(),&codex,&python,false);
-    let (mut reader,mut socket)=process.connect();receive(&mut reader);
+    let (mut reader,mut socket)=process.connect();
+    // Native carrier attestation and provider teardown can outlast the old
+    // two-second fixture deadline while an installer build is running.
+    reader.get_ref().set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    receive(&mut reader);
     send(&mut socket,json!({"type":"attach","cursor":null}));
     send(&mut socket,json!({"type":"prompt","id":1,"text":"never delivered to a provider"}));
     loop {
