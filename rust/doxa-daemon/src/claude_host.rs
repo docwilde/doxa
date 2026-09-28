@@ -364,7 +364,6 @@ impl ClaudeHost {
             billing: Mutex::new(None),
             catalog: Mutex::new(Value::Null),
             agent: crate::agent_tools::AgentTools::new(
-                Path::new(""),
                 &cwd,
                 session_id,
                 "claude",
