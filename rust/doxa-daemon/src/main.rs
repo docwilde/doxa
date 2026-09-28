@@ -784,6 +784,7 @@ fn run() -> io::Result<()> {
         previous_clients = clients;
         thread::sleep(Duration::from_millis(20));
     };
+    peer_host.cancel_spawns(true);
     if let Some(host) = &codex_host {
         if !host.shutdown() {
             eprintln!("doxa-daemon: Codex process did not finish after cancellation");

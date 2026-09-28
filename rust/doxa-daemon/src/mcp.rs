@@ -68,7 +68,11 @@ pub fn serve()->io::Result<()> {
             _=>Err(json!({"code":-32601,"message":"Method not found"})),
         };
         let response=match result {Ok(result)=>json!({"jsonrpc":"2.0","id":request_id,"result":result}),Err(error)=>json!({"jsonrpc":"2.0","id":request_id,"error":error})};
-        writeln!(output,"{response}")?;output.flush()?;
+        let response=serde_json::to_vec(&response).map_err(io::Error::other)?;
+        if response.len() as u64>=FRAME_LIMIT {
+            writeln!(output,"{}",json!({"jsonrpc":"2.0","id":request_id,"error":{"code":-32000,"message":"Response exceeds native tool frame limit"}}))?;
+        } else {output.write_all(&response)?;output.write_all(b"\n")?;}
+        output.flush()?;
     }
     Ok(())
 }
