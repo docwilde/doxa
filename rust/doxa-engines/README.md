@@ -69,10 +69,13 @@ contract; it never impersonates stock Codex.
 The standard installer builds a native Rust dispatcher and the pinned private
 app server. This is a separate, initially unoptimized `dev-small` provider build;
 no release-performance claim is made. The frontend/daemon keep their release
-profiles. Build tooling requires Python 3.11+, Git, Cargo/Rust 1.95.0 and a user
-systemd scope, with a 12 GiB memory cap, zero swap and one build job. The first
+profiles. Build tooling requires Python 3.11+, Git and a user
+systemd scope. The installer bootstraps a private Rust 1.95.0 toolchain on Linux
+x86_64 using checksum-pinned Rustup 1.29.1, with a 12 GiB memory cap, zero swap and one build job. The first
 build downloads and compiles a large Codex dependency graph; its separate cache
-is reused on subsequent installs. Python is not used by the installed dispatcher.
+is reused on subsequent installs, including the verified binary. Other hosts
+can pass `--cargo` for an existing Rust 1.95.0 toolchain. Python is not used by
+the installed dispatcher.
 
 The provider is installed under
 `~/.local/share/doxa/providers/codex-0.156.1-precompact-v1/` (or `XDG_DATA_HOME`).
@@ -110,5 +113,11 @@ Tests use local executable fixtures and fake review workers. They cover
 stream boundaries, deadlines, cancellation, exact input replies, one-action
 approvals, protected build/hook checks and compaction ordering without account
 inference. The Python 1.19 `doxa/codex.py` remains the legacy behavior reference.
+The credential-free compiled-provider probe is
+`scripts/codex-protected/verify_automatic.py --server PATH --scratch PRIVATE_DIR`.
+It uses a loopback Responses server, isolated credential-free homes, two synthetic
+turns and a small automatic threshold. Denied cases require exactly one original
+model request, no compaction request, no Compacted rollout record and retained
+history; the allow control requires a real replacement.
 See the [provider verification record](../../docs/live-provider-verification-2026-09-28.md)
 for actual account checks and their remaining authentication requirements.

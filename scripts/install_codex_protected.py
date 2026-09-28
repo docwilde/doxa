@@ -11,6 +11,8 @@ import selectors
 import time
 import subprocess
 import tempfile
+import platform
+import urllib.request
 
 SOURCE = "b412ff32c417f855c2b2d1581b77058eed87c84b"
 CONTRACT = "doxa-precompact-fail-closed-v1"
@@ -64,9 +66,49 @@ def prepare_source(cache):
     return source
 
 
+RUSTUP_URL = "https://static.rust-lang.org/rustup/archive/1.29.1/x86_64-unknown-linux-gnu/rustup-init"
+RUSTUP_SHA256 = "dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71"
+
+
+def toolchain(cache, cargo):
+    if cargo:
+        return cargo, {}
+    if platform.system() != "Linux" or platform.machine() != "x86_64":
+        raise ValueError("automatic private toolchain bootstrap supports Linux x86_64; pass --cargo for Rust 1.95.0")
+    private_directory(cache / "toolchain")
+    private_directory(cache / "cargo")
+    environment = dict(RUSTUP_HOME=str(cache / "toolchain"), CARGO_HOME=str(cache / "cargo"),
+                       RUSTUP_TOOLCHAIN="1.95.0")
+    executable = cache / "cargo/bin/cargo"
+    rustc = cache / "toolchain/toolchains/1.95.0-x86_64-unknown-linux-gnu/bin/rustc"
+    if not executable.exists() or not rustc.exists():
+        bootstrap = cache / "rustup-init"
+        if not bootstrap.exists() or digest(bootstrap) != RUSTUP_SHA256:
+            with urllib.request.urlopen(RUSTUP_URL, timeout=60) as response:
+                with bootstrap.open("wb") as output:
+                    shutil.copyfileobj(response, output)
+            bootstrap.chmod(0o700)
+        if digest(bootstrap) != RUSTUP_SHA256:
+            raise ValueError("private Rust bootstrap differs from its pinned checksum")
+        print("doxa-codex-install: installing isolated Rust 1.95.0 (no global toolchain changes)", flush=True)
+        run([str(bootstrap), "-y", "--no-modify-path", "--profile", "minimal", "--default-toolchain", "1.95.0"],
+            env=dict(os.environ, **environment))
+    return str(executable), environment
+
+
 def build(cache, cargo):
     source = prepare_source(cache)
-    environment = dict(os.environ, CARGO_TARGET_DIR=str(cache / "target"), CARGO_BUILD_JOBS="1",
+    binary = cache / "target/dev-small/codex-app-server"
+    fingerprint = cache / "build.json"
+    identity = {"source_commit": SOURCE, "patch_sha256": PATCH_SHA256, "profile": "dev-small", "toolchain": "1.95.0"}
+    if binary.is_file() and fingerprint.is_file():
+        prior = json.loads(fingerprint.read_text())
+        if prior == dict(identity, binary_sha256=digest(binary)):
+            probe(binary)
+            print("doxa-codex-install: reusing verified private app-server artifact", flush=True)
+            return binary
+    cargo, toolchain_environment = toolchain(cache, cargo)
+    environment = dict(os.environ, **toolchain_environment, CARGO_TARGET_DIR=str(cache / "target"), CARGO_BUILD_JOBS="1",
                        RUST_TEST_THREADS="1", TMPDIR=str(cache / "scratch"), CARGO_HTTP_MULTIPLEXING="false")
     private_directory(cache / "scratch")
     command = [cargo, "build", "--locked", "--profile", "dev-small", "-p", "codex-app-server",
@@ -77,7 +119,10 @@ def build(cache, cargo):
     else:
         raise ValueError("a user systemd scope is required for the bounded provider build")
     run(command, cwd=source / "codex-rs", env=environment)
-    return cache / "target/dev-small/codex-app-server"
+    probe(binary)
+    fingerprint.write_text(json.dumps(dict(identity, binary_sha256=digest(binary)), sort_keys=True) + "\n")
+    fingerprint.chmod(0o600)
+    return binary
 
 
 def install(binary, root, official_cli, launcher):
@@ -101,8 +146,13 @@ def install(binary, root, official_cli, launcher):
         # Existing installations are identical or retained until an explicit upgrade.
         if destination.exists():
             previous = json.loads((destination / "receipt.json").read_text())
-            if previous != receipt:
+            identity_keys = ("contract", "source_commit", "patch_sha256", "binary_sha256", "profile", "toolchain")
+            if any(previous.get(key) != receipt[key] for key in identity_keys):
                 raise ValueError("provider artifact differs from installed receipt; use a new --install-root for review")
+            # Refresh the native dispatcher and official CLI path on DOXA upgrades.
+            # The reviewed provider identity is unchanged; each file swap is atomic.
+            os.replace(stage / "codex", destination / "codex")
+            os.replace(stage / "receipt.json", destination / "receipt.json")
         else:
             stage.rename(destination)
         print(destination / "codex")
@@ -168,23 +218,15 @@ def main():
     parser.add_argument("--cache", type=Path, default=Path.home() / ".cache/doxa/codex-protected")
     parser.add_argument("--install-root", type=Path, default=Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local/share"))) / "doxa/providers")
     parser.add_argument("--official-cli", type=Path)
-    parser.add_argument("--cargo", default="cargo")
+    parser.add_argument("--cargo", help="explicit Rust 1.95.0 cargo; default bootstraps a private pinned toolchain")
     parser.add_argument("--launcher", type=Path, required=True, help="native doxa-codex-protected binary built from this DOXA checkout")
-    parser.add_argument("--built-binary", type=Path, help="install a previously built artifact from this pinned source cache")
     options = parser.parse_args()
     private_directory(options.cache)
     official = options.official_cli or (Path(found) if (found := shutil.which("codex")) else None)
     if official is None or not official.is_absolute() or not os.access(official, os.X_OK):
         parser.error("an installed official Codex CLI is required; pass --official-cli")
     official = official.resolve()
-    if options.built_binary:
-        source = prepare_source(options.cache)
-        expected = options.cache / "target/dev-small/codex-app-server"
-        if options.built_binary.resolve() != expected.resolve():
-            parser.error("--built-binary must be the artifact in the verified source cache")
-        binary = expected
-    else:
-        binary = build(options.cache, options.cargo)
+    binary = build(options.cache, options.cargo)
     if not options.launcher.is_absolute() or not os.access(options.launcher, os.X_OK):
         parser.error("--launcher must be an absolute native launcher executable")
     install(binary, options.install_root, official, options.launcher)
