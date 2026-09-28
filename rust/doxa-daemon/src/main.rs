@@ -5,6 +5,7 @@ mod claude_host;
 mod budget_host;
 mod codex_host;
 mod peer_host;
+mod session_spawn;
 mod remote_bridge;
 mod vendor_host;
 mod vendor_tools;
@@ -520,8 +521,7 @@ fn run() -> io::Result<()> {
     // saved conversation state during host startup, before registry publish.
     let _claim = SessionClaim::acquire(&options.runtime, &options.session_id)?;
     // Match Python 1.19's explicit-truthy switch. The native registry owns
-    // delivery/admission for every real host, including Claude. The SDK
-    // sidecar disables its independent inbound turn loop.
+    // delivery/admission for every real host, including Claude.
     let inbound = env::var("DOXA_PEER_INBOUND_TURNS").unwrap_or_default();
     let inbound_turns = !inbound.trim().is_empty()
         && !matches!(inbound.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off");
@@ -585,6 +585,9 @@ fn run() -> io::Result<()> {
         }
     }
     if let Some(tree) = &managed { options.cwd = tree.path().to_path_buf(); }
+    // Codex exec tools receive only this native parent runtime; the helper
+    // verifies the scoped registry and live daemon handshake before delegation.
+    env::set_var("DOXA_MCP_RUNTIME", &options.runtime);
     let mut codex_host = None;
     let mut claude_host = None;
     let mut vendor_host = None;
@@ -667,6 +670,20 @@ fn run() -> io::Result<()> {
         format!("DOXA Rust {} session", options.engine.name()),
         event_tx,
     )?);
+    let mut provider_args=Vec::new();
+    if let Some(path)=&options.codex_bin {
+        provider_args.extend(["--codex-bin".into(),path.to_str().ok_or_else(||invalid("Codex executable must be UTF-8 for child launch"))?.into()]);
+        let sandbox=match options.sandbox {SandboxMode::ReadOnly=>"read-only",SandboxMode::WorkspaceWrite=>"workspace-write",SandboxMode::DangerFullAccess=>"danger-full-access"};
+        provider_args.extend(["--sandbox".into(),sandbox.into()]);
+    }
+    if let Some(path)=&options.claude_bin {
+        provider_args.extend(["--claude-bin".into(),path.to_str().ok_or_else(||invalid("Claude executable must be UTF-8 for child launch"))?.into()]);
+    }
+    peer_host.configure_spawner(session_spawn::SpawnConfig {
+        executable:env::current_exe()?,engine:options.engine.name().into(),
+        runtime:options.runtime.clone(),cwd:options.cwd.clone(),
+        session_id:options.session_id.clone(),depth:options.spawn_depth,provider_args,
+    })?;
     peer_host.connect_provider_tools();
     let host: Arc<dyn Host> = peer_host.clone();
     let session = Session {
