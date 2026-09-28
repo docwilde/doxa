@@ -1,12 +1,17 @@
 //! Token-gated, bounded loopback HTTP/SSE reader of the private peer ledger.
 //! The directory descriptor pins the original directory across path replacement.
 use serde_json::{json, Value};
-use std::{collections::HashSet, ffi::CString, fs::{File, OpenOptions}, io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write}, net::{Shutdown, TcpListener, TcpStream}, os::{fd::{AsRawFd, FromRawFd}, unix::fs::{MetadataExt, OpenOptionsExt}}, path::Path, sync::{Arc, atomic::{AtomicBool, Ordering}}, thread::{self, JoinHandle}, time::{Duration, Instant}};
+use std::{collections::HashSet, ffi::CString, fs::{File, OpenOptions}, io::{self, BufRead, BufReader, Read, Seek, SeekFrom}, net::TcpListener, os::{fd::{AsRawFd, FromRawFd}, unix::fs::{MetadataExt, OpenOptionsExt}}, path::Path, sync::{Arc, atomic::{AtomicBool, Ordering}}, thread::{self, JoinHandle}, time::{Duration, Instant}};
 
 const LEDGER_CAP: u64 = 128 << 20;
 const LINE_CAP: usize = 1 << 20;
 const BATCH_CAP: u64 = 4 << 20;
 const WIRE_CAP: usize = 8 << 20;
+use std::convert::Infallible;
+use hyper::{Request, Response, StatusCode, body::{Bytes,Frame,Incoming}, server::conn::http1, service::service_fn};
+use hyper_util::rt::{TokioIo,TokioTimer};
+use http_body_util::{BodyExt,Full,StreamBody,combinators::UnsyncBoxBody};
+type Body=UnsyncBoxBody<Bytes,io::Error>;
 const HEADER_CAP: usize = 8192;
 const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
@@ -91,24 +96,32 @@ impl Server {
         let token:String=random.iter().map(|b|format!("{b:02x}")).collect();
         let url=format!("http://127.0.0.1:{}/{token}/",listener.local_addr()?.port());
         let stop=Arc::new(AtomicBool::new(false)); let stopping=stop.clone();
+        let runtime=tokio::runtime::Builder::new_current_thread().enable_all().max_blocking_threads(4).build()?;
         let worker=thread::spawn(move|| {
-            let mut connections:Vec<(TcpStream,JoinHandle<()>)>=vec![];
-            while !stopping.load(Ordering::Acquire) {
-                let mut i=0;
-                while i<connections.len() { if connections[i].1.is_finished() { let (_,worker)=connections.swap_remove(i); let _=worker.join(); } else {i+=1;} }
-                match listener.accept() {
-                    Ok((stream,_))=> {
-                        if connections.len()>=16 { let _=stream.shutdown(Shutdown::Both); continue; }
-                        let Ok(socket)=stream.try_clone() else {continue;};
-                        let ledger=ledger.clone();let token=token.clone();let stop=stopping.clone();
-                        let worker=thread::spawn(move||{let _=handle(stream,&token,&ledger,&stop);});
-                        connections.push((socket,worker));
-                    },
-                    Err(error) if error.kind()==io::ErrorKind::WouldBlock=>thread::sleep(Duration::from_millis(20)),
-                    Err(_)=>break,
+            runtime.block_on(async move {
+                let Ok(listener)=tokio::net::TcpListener::from_std(listener) else{return;};
+                let mut connections=tokio::task::JoinSet::new();
+                while !stopping.load(Ordering::Acquire) {
+                    while connections.try_join_next().is_some() {}
+                    tokio::select! {
+                        accepted=listener.accept()=>{
+                            let Ok((stream,_))=accepted else{break;};
+                            if connections.len()>=16 {drop(stream);continue;}
+                            let ledger=ledger.clone();let token=token.clone();let stop=stopping.clone();
+                            connections.spawn(async move {
+                                let service=service_fn(move|request|handle(request,token.clone(),ledger.clone(),stop.clone()));
+                                let mut builder=http1::Builder::new();
+                                builder.keep_alive(false).max_headers(64).max_buf_size(HEADER_CAP).timer(TokioTimer::new()).header_read_timeout(Duration::from_secs(2));
+                                // Bound connection retention; EventSource resumes from its last ID.
+                                let _=tokio::time::timeout(Duration::from_secs(60),builder.serve_connection(TokioIo::new(stream),service)).await;
+                            });
+                        },
+                        _=tokio::time::sleep(Duration::from_millis(20))=>{},
+                    }
                 }
-            }
-            for (socket,worker) in connections {let _=socket.shutdown(Shutdown::Both);let _=worker.join();}
+                connections.abort_all();while connections.join_next().await.is_some() {}
+            });
+            runtime.shutdown_timeout(Duration::from_secs(2));
         });
         Ok(Self {url,stop,worker:Some(worker)})
     }
@@ -116,48 +129,67 @@ impl Server {
     pub fn stop(&mut self) {self.stop.store(true,Ordering::Release);if let Some(worker)=self.worker.take(){let _=worker.join();}}
 }
 impl Drop for Server {fn drop(&mut self){self.stop();}}
-fn response(stream:&mut TcpStream,status:&str,content_type:&str,body:&[u8],extra:&str)->io::Result<()> {
-    write!(stream,"HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nContent-Security-Policy: {CSP}\r\n{extra}\r\n",body.len())?;
-    stream.write_all(body)
+fn full(body:impl Into<Bytes>)->Body {Full::new(body.into()).map_err(|never|match never{}).boxed_unsync()}
+fn response(status:StatusCode,kind:&str,body:impl Into<Bytes>)->Response<Body> {
+    decorate(Response::builder().status(status).header("Content-Type",kind).body(full(body)).expect("static response headers"))
+}
+fn decorate(mut response:Response<Body>)->Response<Body> {
+    for(key,value)in [("Connection","close"),("Cache-Control","no-store"),("X-Content-Type-Options","nosniff"),("Referrer-Policy","no-referrer"),("Content-Security-Policy",CSP)] {
+        response.headers_mut().insert(hyper::header::HeaderName::from_bytes(key.as_bytes()).unwrap(),hyper::header::HeaderValue::from_static(value));
+    }
+    response
 }
 fn query_number(query:&str,key:&str,default:u64)->u64 {query.split('&').find_map(|part|part.split_once('=').filter(|(k,_)|*k==key).and_then(|(_,v)|v.parse().ok())).unwrap_or(default)}
-fn handle(mut stream:TcpStream,token:&str,ledger:&Ledger,stop:&AtomicBool)->io::Result<()> {
-    stream.set_read_timeout(Some(Duration::from_millis(100)))?; stream.set_write_timeout(Some(Duration::from_secs(2)))?;
-    let deadline=Instant::now()+Duration::from_secs(2);let mut header=Vec::new();
-    while !header.ends_with(b"\r\n\r\n") {
-        if stop.load(Ordering::Acquire) {return Ok(());}
-        if header.len()>=HEADER_CAP || Instant::now()>=deadline {return response(&mut stream,"431 Request Header Fields Too Large","text/plain",b"bounded request headers","");}
-        let mut byte=[0u8;1];match stream.read(&mut byte) {Ok(0)=>return Ok(()),Ok(_)=>header.push(byte[0]),Err(e) if matches!(e.kind(),io::ErrorKind::WouldBlock|io::ErrorKind::TimedOut)=>continue,Err(e)=>return Err(e)}
+async fn handle(request:Request<Incoming>,token:String,ledger:Arc<Ledger>,stop:Arc<AtomicBool>)->Result<Response<Body>,Infallible> {
+    let refused=|status,body:&'static str|response(status,"text/plain",body);
+    if request.method()!=hyper::Method::GET {return Ok(refused(StatusCode::METHOD_NOT_ALLOWED,"GET only"));}
+    if request.headers().contains_key("transfer-encoding") || request.headers().get("content-length").is_some_and(|v|v.as_bytes()!=b"0") {
+        return Ok(refused(StatusCode::BAD_REQUEST,"GET bodies are unsupported"));
     }
-    let Ok(header)=std::str::from_utf8(&header) else {return response(&mut stream,"400 Bad Request","text/plain",b"invalid request","");};
-    let mut lines=header.split("\r\n");let request:Vec<_>=lines.next().unwrap_or("").split_whitespace().collect();
-    if request.len()!=3 || request[0]!="GET" {return response(&mut stream,"405 Method Not Allowed","text/plain",b"GET only","");}
-    let (path,query)=request[1].split_once('?').unwrap_or((request[1],""));
+    let path=request.uri().path();let query=request.uri().query().unwrap_or("");
     let prefix=format!("/{token}");
-    if path==prefix {return response(&mut stream,"301 Moved Permanently","text/plain",b"",&format!("Location: {prefix}/\r\n"));}
-    let Some(route)=path.strip_prefix(&(prefix+"/")) else {return response(&mut stream,"404 Not Found","text/plain",b"not found","");};
+    if path==prefix {
+        let mut redirect=refused(StatusCode::MOVED_PERMANENTLY,"");
+        redirect.headers_mut().insert("location",hyper::header::HeaderValue::from_str(&format!("{prefix}/")).expect("hex token"));return Ok(redirect);
+    }
+    let Some(route)=path.strip_prefix(&(prefix+"/")) else {return Ok(refused(StatusCode::NOT_FOUND,"not found"));};
     let asset=match route {""|"index.html"=>Some(("text/html; charset=utf-8",include_bytes!("../../../assets/mesh/index.html").as_slice())),"mesh.js"=>Some(("application/javascript; charset=utf-8",include_bytes!("../../../assets/mesh/mesh.js").as_slice())),"mesh.css"=>Some(("text/css; charset=utf-8",include_bytes!("../../../assets/mesh/mesh.css").as_slice())),_=>None};
-    if let Some((kind,body))=asset {return response(&mut stream,"200 OK",kind,body,"");}
-    if !matches!(route,"ledger"|"events") {return response(&mut stream,"404 Not Found","text/plain",b"not found","");}
-    let end=match ledger.size(){Ok(size)=>size,Err(_)=>return response(&mut stream,"413 Content Too Large","text/plain",b"ledger limit exceeded","")};
+    if let Some((kind,body))=asset {return Ok(response(StatusCode::OK,kind,Bytes::from_static(body)));}
+    if !matches!(route,"ledger"|"events") {return Ok(refused(StatusCode::NOT_FOUND,"not found"));}
+    let selected=ledger.clone();let end=match tokio::task::spawn_blocking(move||selected.size()).await {
+        Ok(Ok(size))=>size,_=>return Ok(refused(StatusCode::PAYLOAD_TOO_LARGE,"ledger limit exceeded"))
+    };
     let mut offset=query_number(query,"from",if route=="events"{end}else{0});
     if route=="ledger" {
-        let end=query_number(query,"until",end).min(end);
-        let (rows,next)=match ledger.batch(offset,Some(end)){Ok(batch)=>batch,Err(_)=>return response(&mut stream,"413 Content Too Large","text/plain",b"ledger limit exceeded","")};
+        let end=query_number(query,"until",end).min(end);let selected=ledger.clone();
+        let(rows,next)=match tokio::task::spawn_blocking(move||selected.batch(offset,Some(end))).await {
+            Ok(Ok(batch))=>batch,_=>return Ok(refused(StatusCode::PAYLOAD_TOO_LARGE,"ledger limit exceeded"))
+        };
         let mut value=json!({"records":rows.into_iter().map(|(row,_)|row).collect::<Vec<_>>(),"offset":next});
         if offset<next && next<end {value["more"]=json!(true);value["snapshot_end"]=json!(end);}
-        return response(&mut stream,"200 OK","application/json; charset=utf-8",&json_bytes(&value),"");
+        return Ok(response(StatusCode::OK,"application/json; charset=utf-8",json_bytes(&value)));
     }
-    for line in lines {if let Some((key,value))=line.split_once(':'){if key.eq_ignore_ascii_case("last-event-id") {let Ok(cursor)=value.trim().parse::<u64>() else{return response(&mut stream,"400 Bad Request","text/plain",b"invalid event cursor","");};offset=cursor;}}}
-    write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\nCache-Control: no-store\r\nConnection: close\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nContent-Security-Policy: {CSP}\r\n\r\n: open\n\n")?;
-    let mut heartbeat=Instant::now();
-    while !stop.load(Ordering::Acquire) {
-        let(rows,next)=ledger.batch(offset,None)?;offset=next;
-        for(row,position)in rows {write!(stream,"id: {position}\ndata: ")?;stream.write_all(&json_bytes(&row))?;stream.write_all(b"\n\n")?;heartbeat=Instant::now();}
-        if heartbeat.elapsed()>=Duration::from_secs(15){stream.write_all(b": beat\n\n")?;heartbeat=Instant::now();}
-        for _ in 0..5 {if stop.load(Ordering::Acquire){break;}thread::sleep(Duration::from_millis(50));}
+    let mut cursors=request.headers().get_all("last-event-id").iter();
+    if let Some(value)=cursors.next() {
+        let Some(cursor)=value.to_str().ok().and_then(|v|v.trim().parse::<u64>().ok()) else{return Ok(refused(StatusCode::BAD_REQUEST,"invalid event cursor"));};
+        if cursors.next().is_some(){return Ok(refused(StatusCode::BAD_REQUEST,"duplicate event cursor"));}offset=cursor;
     }
-    Ok(())
+    let stream=futures_util::stream::unfold((ledger,stop,offset,true,Instant::now()),| (ledger,stop,mut offset,first,mut heartbeat) |async move {
+        if first{return Some((Ok::<_,io::Error>(Frame::data(Bytes::from_static(b": open\n\n"))),(ledger,stop,offset,false,heartbeat)));}
+        loop {
+            if stop.load(Ordering::Acquire){return None;}
+            let selected=ledger.clone();let batch=tokio::task::spawn_blocking(move||selected.batch(offset,None)).await;
+            let(rows,next)=match batch {Ok(Ok(batch))=>batch,_=>return Some((Err(io::Error::other("mesh ledger unavailable")),(ledger,stop,offset,false,heartbeat)))};
+            offset=next;
+            if !rows.is_empty() {
+                let mut bytes=Vec::new();for(row,position)in rows {bytes.extend_from_slice(format!("id: {position}\ndata: ").as_bytes());bytes.extend_from_slice(&json_bytes(&row));bytes.extend_from_slice(b"\n\n");}
+                heartbeat=Instant::now();return Some((Ok(Frame::data(Bytes::from(bytes))),(ledger,stop,offset,false,heartbeat)));
+            }
+            if heartbeat.elapsed()>=Duration::from_secs(15){heartbeat=Instant::now();return Some((Ok(Frame::data(Bytes::from_static(b": beat\n\n"))),(ledger,stop,offset,false,heartbeat)));}
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    });
+    Ok(decorate(Response::builder().header("Content-Type","text/event-stream; charset=utf-8").body(StreamBody::new(stream).boxed_unsync()).expect("static event headers")))
 }
 
 #[cfg(test)] mod tests {

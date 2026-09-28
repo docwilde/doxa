@@ -42,7 +42,7 @@ fn explicit_engine_and_model_start_new_session_with_existing_live_session() {
     let capture = dir.path().join("argv.txt");
     executable(&daemon, "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$DOXA_CAPTURE_ARGS\"\nexit 1\n");
     let output = Command::new(env!("CARGO_BIN_EXE_doxa-rs"))
-        .args(["--engine", "deepseek", "--model", "deepseek-test", "--lore-python", "/usr/bin/python3"])
+        .args(["--engine", "deepseek", "--model", "deepseek-test", ])
         .env("DOXA_DAEMON_BIN", &daemon)
         .env("DOXA_CAPTURE_ARGS", &capture)
         .env("DOXA_RUNTIME_DIR", &runtime)

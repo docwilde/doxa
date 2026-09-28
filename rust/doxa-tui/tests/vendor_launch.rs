@@ -31,8 +31,6 @@ fn new_deepseek_passes_only_vendor_options_and_never_key() {
             "new",
             "--engine",
             "deepseek",
-            "--lore-python",
-            "/usr/bin/python3",
             "--model",
             "deepseek-test",
             "--effort",
@@ -51,14 +49,11 @@ fn new_deepseek_passes_only_vendor_options_and_never_key() {
     assert!(args.windows(2).any(|w| w == ["--engine", "deepseek"]));
     assert!(args.windows(2).any(|w| w == ["--model", "deepseek-test"]));
     assert!(args.windows(2).any(|w| w == ["--effort", "none"]));
-    let python = "/usr/bin/python3";
-    assert!(args
-        .windows(2)
-        .any(|w| w[0] == "--lore-python" && w[1] == python));
+    assert!(!args.iter().any(|arg|arg=="--lore-python"));
     assert!(!args.join(" ").contains("secret-vendor-key"));
     assert!(!args.iter().any(|a| matches!(
         a.as_str(),
-        "--codex-bin" | "--sandbox" | "--claude-python" | "--vendor-endpoint"
+        "--codex-bin" | "--sandbox" | "--claude-bin" | "--vendor-endpoint"
     )));
     assert!(!String::from_utf8_lossy(&output.stderr).contains("secret-vendor-key"));
 }
@@ -78,9 +73,7 @@ fn glm_uses_its_own_configured_model_and_doctor_checks_key_without_printing_it()
             "doctor",
             "--engine",
             "glm",
-            "--lore-python",
-            "/usr/bin/python3",
-        ])
+            ])
         .env("DOXA_DAEMON_BIN", &daemon)
         .env("DOXA_RUNTIME_DIR", dir.path().join("runtime"))
         .env("DOXA_HOME", &home)
@@ -103,9 +96,7 @@ fn glm_uses_its_own_configured_model_and_doctor_checks_key_without_printing_it()
             "new",
             "--engine",
             "glm",
-            "--lore-python",
-            "/usr/bin/python3",
-        ])
+            ])
         .env("DOXA_DAEMON_BIN", &daemon)
         .env("DOXA_CAPTURE_ARGS", &capture)
         .env("DOXA_RUNTIME_DIR", dir.path().join("runtime"))
@@ -125,7 +116,7 @@ fn glm_uses_its_own_configured_model_and_doctor_checks_key_without_printing_it()
     // Like Python's model_provenance, the explicit process-wide override
     // applies to every engine; per-engine config applies when it is absent.
     let override_launch = Command::new(env!("CARGO_BIN_EXE_doxa-rs"))
-        .args(["new", "--engine", "glm", "--lore-python", "/usr/bin/python3"])
+        .args(["new", "--engine", "glm", ])
         .env("DOXA_DAEMON_BIN", &daemon)
         .env("DOXA_CAPTURE_ARGS", &capture)
         .env("DOXA_RUNTIME_DIR", dir.path().join("runtime"))
@@ -179,9 +170,7 @@ fn vendor_resume_passes_exact_identity_and_boolean_without_credentials() {
                 engine,
                 "--resume",
                 "vendor-session-123",
-                "--lore-python",
-                "/usr/bin/python3",
-            ])
+                ])
             .env("DOXA_DAEMON_BIN", &daemon)
             .env("DOXA_CAPTURE_ARGS", &capture)
             .env("DOXA_RUNTIME_DIR", dir.path().join("runtime"))

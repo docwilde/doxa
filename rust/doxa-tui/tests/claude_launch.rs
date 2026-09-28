@@ -11,14 +11,15 @@ fn fixture() -> (
     let dir = tempfile::tempdir().unwrap();
     let daemon = dir.path().join("fake-daemon");
     let capture = dir.path().join("argv.txt");
-    let sidecar = dir.path().join("claude_sidecar.py");
+    let sidecar = dir.path().join("claude cli");
     fs::write(
         &daemon,
         "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$DOXA_CAPTURE_ARGS\"\nexit 1\n",
     )
     .unwrap();
     fs::set_permissions(&daemon, fs::Permissions::from_mode(0o700)).unwrap();
-    fs::write(&sidecar, "# fake Claude sidecar for CLI path resolution\n").unwrap();
+    fs::write(&sidecar, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(&sidecar,fs::Permissions::from_mode(0o700)).unwrap();
     (dir, daemon, capture, sidecar)
 }
 
@@ -30,9 +31,7 @@ fn new_claude_passes_explicit_identity_and_paths_to_native_daemon() {
             "new",
             "--engine",
             "claude",
-            "--claude-python",
-            "/usr/bin/python3",
-            "--claude-script",
+            "--claude-bin",
             sidecar.to_str().unwrap(),
             "--resume",
             "session-1",
@@ -60,11 +59,11 @@ fn new_claude_passes_explicit_identity_and_paths_to_native_daemon() {
     assert!(args.windows(2).any(|w| w == ["--model", "claude-test"]));
     assert!(args
         .windows(2)
-        .any(|w| w == ["--claude-script", sidecar.to_str().unwrap()]));
+        .any(|w| w == ["--claude-bin", sidecar.to_str().unwrap()]));
     assert!(!args
         .iter()
         .any(|arg| arg == "--codex-bin" || arg == "--lore-python"));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("Claude SDK and sidecar"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Claude CLI and authentication"));
 }
 
 #[test]
@@ -75,9 +74,7 @@ fn claude_doctor_checks_selected_dependencies_and_relative_script_is_rejected() 
             "doctor",
             "--engine",
             "claude",
-            "--claude-python",
-            "/usr/bin/python3",
-            "--claude-script",
+            "--claude-bin",
             sidecar.to_str().unwrap(),
         ])
         .env("DOXA_DAEMON_BIN", &daemon)
@@ -90,18 +87,15 @@ fn claude_doctor_checks_selected_dependencies_and_relative_script_is_rejected() 
         String::from_utf8_lossy(&doctor.stderr)
     );
     let output = String::from_utf8_lossy(&doctor.stdout);
-    assert!(output.contains("ok claude python:"));
-    assert!(output.contains("ok claude sidecar:"));
+    assert!(output.contains("ok claude:"));
     assert!(!output.contains("codex:"));
     let invalid = Command::new(env!("CARGO_BIN_EXE_doxa-rs"))
         .args([
             "new",
             "--engine",
             "claude",
-            "--claude-python",
-            "/usr/bin/python3",
-            "--claude-script",
-            "relative.py",
+            "--claude-bin",
+            "missing-cli",
         ])
         .env("DOXA_DAEMON_BIN", &daemon)
         .env("DOXA_CAPTURE_ARGS", &capture)

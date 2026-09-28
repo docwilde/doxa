@@ -526,7 +526,7 @@ fn spawn_inner(options: &LaunchOptions, fleet_runtime: Option<&Path>, environmen
             return Err(io::Error::other(format!(
                 "native daemon exited before startup ({status}); check {} dependencies",
                 match options.engine {
-                    Engine::Claude => "Claude SDK and sidecar",
+                    Engine::Claude => "Claude CLI and authentication",
                     Engine::Codex => "Codex authentication and LORE",
                     Engine::Fixture => "fixture",
                     Engine::DeepSeek | Engine::Glm => "vendor API key and LORE",
