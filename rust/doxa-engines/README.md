@@ -108,6 +108,17 @@ receive the helper, dispatchers and new receipt in one atomic directory exchange
 only when their reviewed server/source/patch identity still matches. Missing or
 corrupted installed helper files are repaired from that verified build artifact.
 
+Protected sessions run the native launcher as a dedicated Linux subreaper.
+A private control socket must complete its readiness/start handshake before
+it forks the verified provider. Cancellation, shutdown, Drop and daemon death
+close that socket. The owner kills only its own unreaped direct children,
+repeatedly adopts and reaps detached helpers/tools, including new sessions and
+already orphaned descendants. The daemon's shutdown wait stays bounded at five
+seconds; the small owner retains responsibility if the kernel cannot yet reap
+a child. It never makes the daemon a subreaper or signals unrelated processes.
+Old launchers that cannot acknowledge ownership are refused and killed before
+the protected session starts; rerun the installer to refresh the native shim.
+
 For a separate build/install from a checkout:
 
 ```sh
