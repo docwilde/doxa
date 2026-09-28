@@ -33,7 +33,7 @@ send({'id':query['id'],'result':{'config':{'features':{'token_budget':mode=='tok
 if mode=='token-budget':
     if sys.stdin.readline(): Path('unsafe-after-token-budget').write_text('request')
     sys.exit(0)
-query=read(); assert query['method']=='hooks/list' 
+query=read(); assert query['method']=='hooks/list'
 row={'key':key,'command':command,'handlerType':'command','enabled':True,'trustStatus':'trusted','currentHash':hooks['state'][key]['trusted_hash'],'eventName':'preCompact','source':'sessionFlags','timeoutSec':240,'async':False}
 if mode=='hash': row['currentHash']='sha256:wrong'
 send({'id':query['id'],'result':{'data':[{'cwd':str(Path.cwd()),'hooks':[row]}],'errors':[]}})

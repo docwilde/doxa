@@ -2226,11 +2226,11 @@ mod vendor_process {
             assert_eq!(receive(&mut reader)["ok"], true);
             wait_until(|| process.exited());
             let requests = server.join().unwrap();
-            let effort = |body: &Value| if vendor == "deepseek" {
-                body["thinking"]["reasoning_effort"].as_str().unwrap().to_owned()
-            } else { body["reasoning_effort"].as_str().unwrap().to_owned() };
-            assert_eq!(effort(&requests[0]), "high");
-            assert_eq!(effort(&requests[1]), "low");
+            assert_eq!(requests[0]["reasoning_effort"], "high");
+            assert_eq!(requests[1]["reasoning_effort"], "low");
+            for request in &requests {
+                assert!(request.pointer("/thinking/reasoning_effort").is_none());
+            }
         }
     }
 
