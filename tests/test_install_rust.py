@@ -139,6 +139,9 @@ shutil.copyfile(os.environ['DOXA_TEST_NATIVE'],target/binary)
            "DOXA_TEST_SHORTCUT_PATH": str(tmp_path / "shortcut.request"),
            "DOXA_TEST_PROVIDER_LOG": str(tmp_path / "provider.jsonl"),
            "DOXA_INSTALL_CACHE_DIR": str(home / ".cache/doxa/install"),
+           "DOXA_INSTALL_TARGET_DIR": str(home / ".cache/doxa/install/target"),
+           "DOXA_RUST_BIN_DIR": str(home / ".local/bin"),
+           "DOXA_INSTALL_CODEX_PROTECTED": "1", "DOXA_NO_LAUNCHER": "0",
            "XDG_DATA_HOME": str(home / ".local/share"), **(env_overrides or {})}
     proc = subprocess.run(["sh", str(INSTALL_SH), *args], cwd=tmp_path, env=env,
                           text=True, capture_output=True, timeout=20)
@@ -178,11 +181,12 @@ def test_shortcut_passes_exact_installed_path_and_refreshes_on_reinstall(tmp_pat
     repo = _source_repo(tmp_path)
     custom_bin = tmp_path / "bin dir $draft %two"
     options = {"DOXA_RUST_BIN_DIR": str(custom_bin)}
-    for _ in range(2):
+    for attempt in range(2):
         proc, _, _ = _run(tmp_path, repo, env_overrides=options)
         assert proc.returncode == 0, proc.stderr
         assert (tmp_path / "shortcut.request").read_text() == str(custom_bin / "doxa")
-        (tmp_path / "shortcut.request").write_text("stale request")
+        if attempt == 0:
+            (tmp_path / "shortcut.request").write_text("stale request")
     requests = [call for call in _calls(tmp_path / "frontend.jsonl") if call["args"][0] == "install-launcher"]
     assert [call["args"] for call in requests] == [["install-launcher", str(custom_bin / "doxa")]] * 2
 
@@ -305,3 +309,27 @@ def test_protected_builder_failure_preserves_existing_launcher(tmp_path):
     assert proc.returncode != 0
     assert (bin_dir / "doxa").read_text() == "old launcher"
     assert not (bin_dir / "doxa-rs").exists()
+
+
+def test_native_reinstall_fetches_new_source_and_updates_commit_marker(tmp_path):
+    repo = _source_repo(tmp_path)
+    first, home, _ = _run(tmp_path, repo)
+    assert first.returncode == 0, first.stderr
+    marker = home / ".local/bin/.doxa-install-sha"
+    old = marker.read_text().strip()
+    (repo / "Cargo.lock").write_text("# updated locked native graph\n")
+    new = _commit(repo, "test: updated native source fixture")
+    second, _, _ = _run(tmp_path, repo)
+    assert second.returncode == 0, second.stderr
+    assert marker.read_text().strip() == new and new != old
+    assert not list((home / ".local/bin").glob(".doxa-install.*"))
+
+
+def test_shortcut_refusal_warns_without_publishing_invalid_path(tmp_path):
+    custom_bin = tmp_path / "bin\nInjected=true"
+    proc, _, _ = _run(tmp_path, _source_repo(tmp_path),
+                      env_overrides={"DOXA_RUST_BIN_DIR": str(custom_bin)})
+    assert proc.returncode == 0, proc.stderr
+    assert "could not install desktop shortcut" in proc.stderr
+    assert (custom_bin / "doxa").exists()
+    assert not (tmp_path / "shortcut.request").exists()

@@ -52,7 +52,8 @@ if '--bin' in args:
            "TMPDIR": str(tmp_path), "DOXA_TASK_TARGET_DIR": str(tmp_path / "target"),
            "NATIVE_FIXTURE": str(native), "DOXA_LORE_RS": "/wrong-installed-carrier",
            "DOXA_DAEMON_BIN": "/wrong-installed-daemon", "CAPTURE": str(tmp_path / "cargo.jsonl"),
-           "INSTALL_CAPTURE": str(tmp_path / "install.txt"), "CARGO_BUILD_JOBS": "1"}
+           "INSTALL_CAPTURE": str(tmp_path / "install.txt"), "CARGO_BUILD_JOBS": "1",
+           "DOXA_TASK_PROFILE": "debug"}
     env.pop("DOXA_LORE_PYTHON", None)
     return source, env
 
