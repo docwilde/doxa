@@ -344,3 +344,8 @@ noticing a missing helper. Payload verification now precedes dispatcher hashing;
 both owned, verified descriptors are required before any execution. Invalid
 helper cases still have a one-second refusal limit. The test actively kills and
 reaps a command that exceeds its bound, including a future FIFO regression.
+
+The same targeted audit found invalid app-server payload checks behind the
+dispatcher hash. The selected executable is now verified before the dispatcher
+in both modes, and provider refusal tests use the same deadline cleanup. All
+helper, selected-payload and dispatcher proofs remain required before execution.

@@ -13,8 +13,8 @@ the stable 2.0 release has not been cut.
   checking state; accommodate debug-carrier hashing on slower CI runners.
 - Preserve persistence, cancellation and process-leak assertions and their
   original deadlines after preparation.
-- Reject invalid helper payloads before hashing the dispatcher; keep both
-  verified file descriptors before execution and bound refusal-test cleanup.
+- Reject invalid provider payloads before hashing the dispatcher; require
+  payload and dispatcher integrity checks before execution with bounded tests.
 
 ## 2.0.0-alpha.41 — 2026-09-28
 
