@@ -31,6 +31,8 @@ pub async fn deepseek_balance() -> Option<String> {
 }
 
 async fn deepseek_balance_at(endpoint: &str, key: &str) -> Option<String> {
+    let mut known = credentials::known_keys().ok()?;
+    known.push(key.to_owned());
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(3))
         .redirect(reqwest::redirect::Policy::none())
@@ -51,7 +53,7 @@ async fn deepseek_balance_at(endpoint: &str, key: &str) -> Option<String> {
     for info in infos.iter().take(4) {
         let currency = info["currency"].as_str()?;
         let amount = info["total_balance"].as_str()?;
-        if !valid_balance_amount(amount) || amount.contains(key) { return None; }
+        if !valid_balance_amount(amount) || known.iter().any(|key| amount.contains(key)) { return None; }
         let prefix = match currency { "USD" => "$", "CNY" => "¥", _ => return None };
         if amounts.iter().any(|(seen, _)| *seen == currency) { return None; }
         amounts.push((currency, format!("{prefix}{amount}")));
@@ -91,6 +93,7 @@ mod balance_tests {
 
     #[tokio::test]
     async fn balance_reads_only_valid_official_shape_and_uses_bearer_key() {
+        let (_guard, _home) = credentials::tests::fixture();
         let (url, worker) = mock_balance("200 OK", r#"{"is_available":true,"balance_infos":[{"currency":"CNY","total_balance":"25.50"},{"currency":"USD","total_balance":"3.25"}]}"#).await;
         assert_eq!(deepseek_balance_at(&url, "secret-key").await.as_deref(), Some("$3.25 · ¥25.50"));
         let request = worker.await.unwrap();
@@ -106,6 +109,10 @@ mod balance_tests {
             assert!(deepseek_balance_at(&url, "secret-key").await.is_none());
             worker.await.unwrap();
         }
+        credentials::save(Vendor::Glm, "12345678").unwrap();
+        let (url, worker) = mock_balance("200 OK", r#"{"is_available":true,"balance_infos":[{"currency":"USD","total_balance":"12345678"}]}"#).await;
+        assert!(deepseek_balance_at(&url, "secret-key").await.is_none());
+        worker.await.unwrap();
         let (url, worker) = mock_balance("401 Unauthorized", "{}").await;
         assert!(deepseek_balance_at(&url, "secret-key").await.is_none());
         worker.await.unwrap();
@@ -1005,9 +1012,8 @@ async fn stream_at_with_key(
     // request, including LORE snapshots, tool definitions and inactive vendors.
     // Authentication stays frozen for a turn even if setup changes meanwhile.
     let mut body = scrub_json(body, key);
-    for known in credentials::known_keys().map_err(|_| Error::CredentialStore)? {
-        body = scrub_json(body, &known);
-    }
+    let known = credentials::known_keys().map_err(|_| Error::CredentialStore)?;
+    for known in &known { body = scrub_json(body, known); }
     let client = reqwest::Client::builder()
         .timeout(timeout)
         .redirect(reqwest::redirect::Policy::none())
@@ -1043,7 +1049,7 @@ async fn stream_at_with_key(
                         v.to_string()
                     }
                 })
-                .map(|s| sanitize_code(&scrub(&s, key)));
+                .map(|s| sanitize_code(&known.iter().fold(scrub(&s, key), |s, key| scrub(&s, key))));
             return Err(Error::Http {
                 status: status.as_u16(),
                 code,

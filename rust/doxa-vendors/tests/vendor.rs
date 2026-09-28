@@ -522,6 +522,12 @@ async fn fake_server_error_code_never_exposes_key() {
         }
     );
     assert!(!format!("{error}").contains("test-secret"));
+    doxa_vendors::credentials::save(Vendor::DeepSeek, "inactive-credential-fixture").unwrap();
+    let (url, task) = server(http("401 Unauthorized", r#"{"error":{"code":"inactive-credential-fixture"}}"#, "application/json"), Duration::ZERO);
+    let (_, cancel) = watch::channel(false);
+    let error = stream_once_local(Vendor::Glm, &url, json!({}), cancel, Duration::from_secs(3), |_| {}).await.unwrap_err();
+    task.join().unwrap();
+    assert!(!format!("{error:?} {error}").contains("inactive-credential-fixture"));
 }
 #[tokio::test]
 async fn cancellation_and_timeout_abort_request() {
