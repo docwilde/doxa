@@ -1,8 +1,9 @@
-//! Bounded LORE picker data. The external sidecar owns search,
+//! Bounded LORE picker data. The integrated canonical core owns search,
 //! storage, and secret scrubbing; this module never opens LORE's store.
 
 use doxa_lore::{BeliefAction, BeliefActionResult, BeliefReview, ConsultHit, LoreClient, LoreError, PendingDecision, PendingResolution, PendingReview};
 use serde_json::Value;
+#[cfg(test)]
 use std::path::Path;
 use std::time::Duration;
 
@@ -137,7 +138,7 @@ pub fn parse_evidence(rows: Vec<Value>) -> Result<Vec<Evidence>, ()> {
 }
 
 /// Each query gets a native client. Call from a worker thread, never redraw.
-pub fn fetch(_python: &Path, query: Query) -> Result<ResultPage, &'static str> {
+pub fn fetch(query: Query) -> Result<ResultPage, &'static str> {
     fetch_with_client(LoreClient::open(Duration::from_secs(2)).map_err(|_| "LORE unavailable")?, query)
 }
 

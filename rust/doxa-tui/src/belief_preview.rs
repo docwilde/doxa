@@ -1,6 +1,6 @@
 //! Delayed read-only belief previews. Display replies never contain or grant
 //! the exact review token required by mutation APIs.
-use std::{path::PathBuf,sync::mpsc::{self,Receiver,TryRecvError},time::{Duration,Instant}};
+use std::{sync::mpsc::{self,Receiver,TryRecvError},time::{Duration,Instant}};
 use ratatui::{Frame,layout::Rect,style::Style,text::Line,widgets::{Block,Borders,Clear,Paragraph}};
 use serde_json::Value;
 use crate::theme;
@@ -36,7 +36,7 @@ impl Preview {
         }false
     }
     pub fn needs_read(&self)->bool {self.hover.as_ref().is_some_and(|hover|hover.visible&&!hover.requested&&hover.display.is_none())}
-    pub fn read(&mut self,_python:PathBuf) {
+    pub fn read(&mut self) {
         let Some(hover)=self.hover.as_mut().filter(|hover|hover.visible&&!hover.requested&&hover.display.is_none()) else{return;};
         hover.requested=true;
         let owner=hover.owner.clone();let(tx,rx)=mpsc::sync_channel(1);hover.pending=Some(rx);

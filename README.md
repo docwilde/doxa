@@ -26,7 +26,8 @@ retained safety boundaries.
 **DOXA** is a terminal for coding agents. Development now leads with the
 **Rust 2.0 alpha**, built with Ratatui and a native daemon. Run Claude, Codex,
 DeepSeek, or GLM in separate sessions; close the terminal and reattach to their
-daemons later. Claude currently uses a bundled Python SDK sidecar.
+daemons later. Claude runs through its CLI control protocol; Codex uses its app server.
+DOXA and its integrated LORE runtime are Rust.
 [LORE](https://github.com/docwilde/LORE)
 shares user and repo memory across DOXA, Claude Code, and Codex, with
 evidence-backed beliefs and an informational source-engine label. See the
@@ -103,9 +104,8 @@ curl -fsSL https://raw.githubusercontent.com/docwilde/doxa/main/scripts/install.
 
 The installer builds the Rust frontend and daemon from `main` and installs the
 Rust `doxa` command in `~/.local/bin` (or `DOXA_RUST_BIN_DIR`). Pass a tag such
-as `v2.0.0-alpha.36` after `sh -s --` to pin a release. It uses Git, Cargo,
-Python 3.11+, and `uv`; the Python environment it creates is private to the
-Claude SDK and transport adapters. No Python frontend command is installed. See the
+as `v2.0.0-alpha.36` after `sh -s --` to pin a release. It requires Git and Cargo and installs three native binaries: the frontend,
+daemon and LORE carrier. Claude and Codex additionally require their provider CLIs. See the
 [Rust guide](rust/README.md) for provider setup and current limits.
 On Linux, it also installs a per-user application menu entry and icons under
 `$XDG_DATA_HOME` (default `~/.local/share`). The entry launches the installed
@@ -117,7 +117,7 @@ would shadow its launcher.
 From a checkout, `cargo build --locked` builds the Rust frontend and daemon;
 `./task build`, `./task run`, and `./task install` provide the matching local
 launcher workflow. Install
-builds committed `HEAD` with the same locked sidecars and launcher as the
+builds committed `HEAD` with the same native binaries and launcher as the
 release installer. If an existing local `main` predates the Rust files, run
 `git pull --ff-only` after checking it out; `git checkout main` alone does not
 fetch newer commits.
@@ -141,8 +141,9 @@ The [Rust guide](rust/README.md) covers Claude, DeepSeek, and GLM setup.
 Rust 2.0 alpha is the main line. The [Rust guide](rust/README.md) tracks
 what is implemented and what still needs porting. Existing Python 1.x releases
 and their [manual](docs/manual.md) remain available for historical reference;
-the Python Claude SDK and transport adapters remain internal runtime dependencies.
-LORE 0.61.1 is now integrated as a canonical Rust module; memory, beliefs,
+Python modules remain development compatibility references; installation and
+normal operation use the Rust runtime.
+LORE is integrated as a canonical Rust module; memory, beliefs,
 context, session indexing and detached review use the same existing store.
 Signed sync replays portable project memory and file-map keys across machines,
 preserves conflicts in their project scope, and sorts curated entries so the
@@ -159,8 +160,9 @@ for rendering, event-loop, scrolling, and resize measurements.
   not load-balance or fail over between providers.
 - **Replacing LORE:** DOXA uses the same core as the Claude Code and Codex
   plugins.
-- **Full Claude plugin compatibility:** the 2.0 alpha uses a Claude SDK
-  sidecar. DOXA's [plugin API](docs/plans/plugin-api.md) remains a design.
+- **Full Claude plugin compatibility:** adoption loads reviewed commands, skills
+  and agents into a private CLI configuration. Foreign hooks and MCP servers
+  are excluded; DOXA's [plugin API](docs/plans/plugin-api.md) remains a design.
 
 ## License
 

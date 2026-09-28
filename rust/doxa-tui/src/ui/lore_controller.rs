@@ -7,7 +7,6 @@ use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyModifiers;
 use std::path::Path;
-use std::path::PathBuf;
 use std::sync::mpsc;
 use std::sync::mpsc::TryRecvError;
 use std::time::Duration;
@@ -307,18 +306,15 @@ impl App {
         }
         .into();
         picker.pending = None;
-        let python = std::env::var_os("DOXA_LORE_PYTHON")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("python3"));
         let (tx, rx) = mpsc::sync_channel(1);
         picker.pending = Some(rx);
         std::thread::spawn(move || {
-            let _ = tx.send(lore_picker::fetch(&python, query));
+            let _ = tx.send(lore_picker::fetch(query));
         });
     }
 
     /// The gallery uses this same state path with deterministic counts. Live
-    /// values arrive only through the read-only LORE sidecar query below.
+    /// values arrive only through the read-only canonical LORE query below.
     pub fn set_lore_memory_usage(
         &mut self,
         id: &str,
@@ -1439,13 +1435,10 @@ impl App {
         };
         info.owner = Some((id.clone(), cwd.clone()));
         self.memory_list.as_mut().unwrap().owner = info.owner.clone();
-        let python = std::env::var_os("DOXA_LORE_PYTHON")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("python3"));
         let (tx, rx) = mpsc::sync_channel(1);
         self.memory_menu_pending = Some((id, cwd.clone(), rx));
         std::thread::spawn(move || {
-            let result = crate::memory_menu::fetch_facts(&python, Path::new(&cwd));
+            let result = crate::memory_menu::fetch_facts(Path::new(&cwd));
             let _ = tx.send(result);
         });
     }
@@ -1503,10 +1496,7 @@ impl App {
         let mut changed = self.belief_preview.set_owner(owner, now);
         changed |= self.belief_preview.tick(now);
         if self.belief_preview.needs_read() && !self.belief_browser_fixture {
-            let python = std::env::var_os("DOXA_LORE_PYTHON")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("python3"));
-            self.belief_preview.read(python);
+            self.belief_preview.read();
         }
         changed |= self.belief_preview.poll();
         changed

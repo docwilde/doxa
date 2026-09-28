@@ -1,5 +1,6 @@
 //! Plain-launch restoration follows the saved strip, never discovery order.
 use std::io;
+#[cfg(test)]
 use std::path::PathBuf;
 use doxa_state::Tab;
 use crate::{discovery::Session, history::{self, OfflineSession}, launch::{self, LaunchOptions}, ui_state::UiStateStore};
@@ -54,17 +55,16 @@ pub fn prepare(
     if saved.len() > MAX_STARTUP_TABS || (saved.len() > crate::ui::panes::MAX_TABS && store.as_ref().is_none_or(|store|store.startup_overflow_id.is_none())) {
         return Err(io::Error::new(io::ErrorKind::Unsupported, "saved tabset exceeds the native 256-tab restore bound plus one reserved startup tab; record retained"));
     }
-    let python = PathBuf::new();
     let launch_cwd = std::env::current_dir()?;
     let mut result = plan(&saved, &live, resume,
         |tab| history::saved_session(&tab.session_id,
-            tab.cwd.as_deref().map(std::path::Path::new).unwrap_or(&launch_cwd), &python),
+            tab.cwd.as_deref().map(std::path::Path::new).unwrap_or(&launch_cwd)),
         |entry| {
             // Discovery is a hint. Recheck immediately before starting a daemon.
             if let Ok(rows) = crate::discovery::sessions() {
                 if let Some(session) = rows.into_iter().find(|session| session.id == entry.id) { return Ok(session); }
             }
-            let mut verified = history::resume_plan(entry, &python).map_err(str::to_owned)?;
+            let mut verified = history::resume_plan(entry).map_err(str::to_owned)?;
             verified.codex_bin = options.codex_bin.clone();
             verified.claude_bin = options.claude_bin.clone();
             launch::spawn(&verified).map_err(|error| error.to_string())
