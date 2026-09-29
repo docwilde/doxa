@@ -5,6 +5,38 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.46 — 2026-09-29
+
+**Sessions and interaction**
+
+- Fix **`UiStateStore::restore`** dropping unavailable tabs and blocking later
+  layout saves; retain split geometry and visible read-only placeholders.
+- Route mouse wheels to hovered transcripts and pickers. Highlight curated
+  memory rows and show full entries after a 500 ms hover delay.
+- Add Active/Pending/Clustered belief views and prompt filters. Color reported
+  subscription usage green, yellow above 66%, and red above 90%.
+
+**Provider streams**
+
+- Stream native API responses through the canonical scrubber before display;
+  preserve tool-step text boundaries and stop bounded overflow safely.
+- Fix **`ClaudeHost`** to count live provider thinking estimates without
+  exposing withheld reasoning. Resolve known model effort fallbacks centrally.
+
+**Installation and memory**
+
+- Fix **`install_codex_protected.py`** refusing verified rebuilds of the same
+  reviewed source; publish immutable artifacts and atomically select new launches.
+- Integrate **LORE 0.62.4** signed session and portable proposal sync fixes,
+  plus canonical pending clusters with individual approval gates.
+
+**Verification**
+
+- Record live Claude, DeepSeek and GLM streams and same-session vendor controls.
+  Preserve the earlier DeepSeek recall failure and platform support limits.
+- Default-window Codex stress stopped before compaction at its harness cap.
+  Historical unsigned LORE operations still require reconciliation.
+
 ## 2.0.0-alpha.45 — 2026-09-29
 
 **LORE integration**
