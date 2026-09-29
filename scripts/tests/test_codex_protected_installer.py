@@ -110,6 +110,39 @@ sys.stdin.read()
         with self.assertRaisesRegex(ValueError, "fingerprints"):
             installer.verified_artifacts(self.root, self.binary, self.helper, helper)
 
+    def test_cargo_mode_is_accepted_only_for_verified_build_outputs(self):
+        identity = {"source_commit": installer.SOURCE, "patch_sha256": installer.PATCH_SHA256,
+                    "profile": "dev-small", "toolchain": "1.95.0"}
+        helper_identity = dict(identity, product="codex-code-mode-host", v8_inputs={"fixture": "reviewed"})
+        for executable in (self.binary, self.helper):
+            executable.chmod(0o755)  # Real Cargo outputs use this mode.
+        os.link(self.binary, self.root / "cached-server-link")
+        os.link(self.helper, self.root / "cached-helper-link")
+        self.assertEqual(self.binary.stat().st_nlink, 2)
+        (self.root / "build.json").write_text(json.dumps(dict(identity, binary_sha256=installer.digest(self.binary))))
+        (self.root / "code-mode-host-build.json").write_text(json.dumps(dict(helper_identity, binary_sha256=installer.digest(self.helper))))
+        for name in ("build.json", "code-mode-host-build.json"):
+            (self.root / name).chmod(0o600)
+
+        verified = installer.verified_artifacts(self.root, self.binary, self.helper, helper_identity)
+        installed = installer.install(self.binary, self.root / "providers", Path("/usr/bin/true"),
+                                      self.launcher, self.helper, helper_identity, verified).parent
+        for name in ("codex-app-server", "codex", "codex-code-mode-host", "codex-code-mode-host-payload"):
+            self.assertEqual((installed / name).stat().st_mode & 0o777, 0o700)
+        self.assertEqual((installed / "receipt.json").stat().st_mode & 0o777, 0o600)
+
+        (installed / "codex-app-server").chmod(0o755)
+        with self.assertRaisesRegex(ValueError, "installed provider file"):
+            installer.install(self.binary, self.root / "providers", Path("/usr/bin/true"),
+                              self.launcher, self.helper, helper_identity, verified)
+        (installed / "codex-app-server").chmod(0o700)
+        self.helper.chmod(0o775)
+        with self.assertRaisesRegex(ValueError, "cached Cargo output"):
+            installer.verified_artifacts(self.root, self.binary, self.helper, helper_identity)
+        self.helper.chmod(0o644)
+        with self.assertRaisesRegex(ValueError, "cached Cargo output"):
+            installer.verified_artifacts(self.root, self.binary, self.helper, helper_identity)
+
     def test_probe_isolates_operator_home_and_credentials(self):
         with patch.dict(os.environ, {"DOXA_INSTALL_TEST_SECRET": "must-not-reach-provider", "OPENAI_API_KEY": "fixture"}):
             installer.probe(self.binary)
