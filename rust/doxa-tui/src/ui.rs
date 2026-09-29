@@ -418,7 +418,7 @@ fn chip_hint(kind: &str) -> &'static str {
     }
 }
 
-fn chooser_row_style(selected: bool) -> Style {
+pub(crate) fn chooser_row_style(selected: bool) -> Style {
     if selected {
         Style::default()
             .fg(theme::ACCENT)
@@ -1276,6 +1276,7 @@ pub struct App {
     belief_browser_fixture: bool,
     belief_button_hover: Option<Rect>,
     belief_preview: crate::belief_preview::Preview,
+    memory_preview: crate::belief_preview::Preview,
     belief_pointer: Option<(u16, u16)>,
     rendered_belief_rows: RefCell<Vec<crate::belief_preview::Owner>>,
     chip_hover: Option<ChipHit>,
@@ -1497,6 +1498,7 @@ impl Default for App {
             belief_browser_fixture: false,
             belief_button_hover: None,
             belief_preview: crate::belief_preview::Preview::default(),
+            memory_preview: crate::belief_preview::Preview::default(),
             belief_pointer: None,
             rendered_belief_rows: RefCell::new(Vec::new()),
             chip_hover: None,

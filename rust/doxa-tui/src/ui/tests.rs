@@ -5146,8 +5146,9 @@ for line in sys.stdin:
         let mut app=App::default(); app.rail_visible=false;app.handle(Event::Resize(120,40));
         for id in ["first","second"] {
             app.apply_update(DaemonUpdate::Upsert(Session{id:id.into(),title:id.into(),collection:"repo".into(),
-                transcript:(0..100).map(|n|format!("{id} line {n}\n")).collect(),status:"Offline".into()}));
+                transcript:(0..100).map(|n|format!("{id} line {n}\n\n")).collect(),status:"Offline".into()}));
         }
+        for session in &mut app.sessions {session.transcript=(0..100).map(|n|format!("{} line {n}\n\n",session.id)).collect();}
         app.groups[0].tabs=vec!["first".into()];app.groups[0].active=0;
         app.groups[1].tabs=vec!["second".into()];app.groups[1].active=0;
         app.split=Split::Vertical;app.active_group=0;app.focus=Focus::Prompt;app.input="unsent draft".into();
@@ -5176,9 +5177,45 @@ for line in sys.stdin:
     }
     #[test]
     fn wheel_over_empty_pane_or_rail_never_scrolls_focused_transcript() {
-        let mut app=App::default();app.handle(Event::Resize(120,40));app.groups[0].tabs.push("session".into());
-        app.split=Split::Vertical;let layout=app.layout(app.size);
+        let mut app=App::default();app.sidebar_auto=false;app.rail_visible=true;app.handle(Event::Resize(120,40));app.groups[0].tabs.push("session".into());
+        app.apply_update(DaemonUpdate::Upsert(Session{id:"session".into(),title:"session".into(),collection:"repo".into(),transcript:String::new(),status:"Offline".into()}));app.split=Split::Vertical;let layout=app.layout(app.size);
         assert!(!app.handle(wheel_event(MouseEventKind::ScrollUp,layout.rail.unwrap())));
         assert!(!app.handle(wheel_event(MouseEventKind::ScrollUp,app.pane_regions(1,layout.panes.unwrap()[1])[1])));
         assert_eq!(app.groups[0].scroll,0);assert_eq!(app.active_group,0);
+    }
+
+    #[test]
+    fn memory_hover_uses_full_row_background_delayed_preview_and_border_hitboxes() {
+        let mut app=App::default();app.rail_visible=false;app.handle(Event::Resize(120,40));
+        app.apply_update(DaemonUpdate::Upsert(Session{id:"memory-session".into(),title:"Memory session".into(),collection:"repo".into(),transcript:String::new(),status:"Offline".into()}));
+        app.session_cwds.insert("memory-session".into(),PathBuf::from("/fixture"));
+        let full="A complete curated fact with a hidden tail ".repeat(7)+"FULL ENTRY TAIL";
+        app.show_memory_manager_fixture(0,"user",json!({"scope":"user","key":"user","sha256":"a".repeat(64),"entries":["First fact",full],"chars":400,"cap_chars":9000})).unwrap();
+        painted_at(&app,120,40);let row=app.rendered_belief_rows.borrow()[1].clone();
+        assert!(app.handle(Event::Mouse(MouseEvent{kind:MouseEventKind::Moved,column:row.rect.x+20,row:row.rect.y,modifiers:KeyModifiers::NONE})));
+        assert_eq!(app.memory_manager.as_ref().unwrap().selected,1);
+        let now=Instant::now();assert!(!app.tick_belief_preview(now+Duration::from_millis(400)));
+        assert!(!painted_at(&app,120,40).contains("Full memory"));
+        let mut terminal=Terminal::new(TestBackend::new(120,40)).unwrap();terminal.draw(|frame|app.draw(frame)).unwrap();
+        assert_eq!(terminal.backend().buffer()[(row.rect.right()-1,row.rect.y)].bg,theme::HIGHLIGHT);
+        assert!(app.tick_belief_preview(now+Duration::from_millis(600)));
+        let displayed=painted_at(&app,120,40);assert!(displayed.contains("Full memory"));assert!(displayed.contains("FULL ENTRY TAIL"));
+        assert!(app.handle(Event::Mouse(MouseEvent{kind:MouseEventKind::Moved,column:row.menu.x,row:row.rect.y,modifiers:KeyModifiers::NONE})));
+        assert!(app.memory_preview.owner().is_none());assert!(!painted_at(&app,120,40).contains("Full memory"));
+        assert!(app.pending_prompts.is_empty());assert!(!app.memory_manager.as_ref().unwrap().editing());
+    }
+    #[test]
+    fn scrolled_memory_hover_keeps_viewport_and_preview_matches_full_visible_entry() {
+        let mut app=scrolled_picker_app();app.session_cwds.insert("session".into(),PathBuf::from("/fixture"));
+        let entries=(0..30).map(|index|format!("Curated full entry {index:02} with complete display text")).collect::<Vec<_>>();
+        app.show_memory_manager_fixture(0,"user",json!({"scope":"user","key":"user","sha256":"a".repeat(64),"entries":entries,"chars":1800,"cap_chars":9000})).unwrap();
+        app.memory_manager.as_mut().unwrap().selected=24;painted_at(&app,100,28);
+        let first=app.rendered_belief_rows.borrow()[0].clone();assert!(first.id>1);
+        app.handle(Event::Mouse(MouseEvent{kind:MouseEventKind::Moved,column:first.rect.x+4,row:first.rect.y,modifiers:KeyModifiers::NONE}));
+        let expected=first.claim.clone();assert_eq!(app.memory_manager.as_ref().unwrap().selected as u64+1,first.id);
+        painted_at(&app,100,28);assert_eq!(app.rendered_belief_rows.borrow()[0].claim,expected);
+        assert!(app.tick_belief_preview(Instant::now()+Duration::from_millis(600)));
+        assert_eq!(app.memory_preview.owner().unwrap().claim,expected);assert!(painted_at(&app,100,28).contains("Full memory"));
+        let menu=app.active_chooser_rect().unwrap();app.handle(wheel_event(MouseEventKind::ScrollDown,menu));
+        assert!(app.memory_preview.owner().is_none());
     }

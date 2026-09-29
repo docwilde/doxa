@@ -110,6 +110,9 @@ impl App {
         {
             self.belief_preview.render(frame, area);
         }
+        if self.memory_preview.owner().is_some_and(|owner| self.valid_memory_preview_owner(owner)) {
+            self.memory_preview.render_titled(frame,area," Full memory "," Memory preview ");
+        }
         self.transcript_selection
             .borrow_mut()
             .finish_paint(frame.buffer_mut());
@@ -606,6 +609,14 @@ impl App {
 
     pub(super) fn draw_chip_info(&self, frame: &mut Frame, area: Rect) {
         if let Some(manager) = &self.memory_manager {
+            let visible=usize::from(area.height.saturating_sub(4));
+            for (offset,(index,entry)) in manager.visible_entries(visible).into_iter().enumerate() {
+                self.rendered_belief_rows.borrow_mut().push(crate::belief_preview::Owner {
+                    id:index as u64+1,pane:self.active_group,session:Some(manager.owner.0.clone()),cwd:manager.owner.1.clone(),
+                    query:manager.scope.into(),offset:0,rect:Rect::new(area.x+1,area.y+2+offset as u16,area.width.saturating_sub(2),1),
+                    menu:area,subject:manager.scope.into(),claim:entry,truncated:false,
+                });
+            }
             manager.draw(frame, area);
             return;
         }

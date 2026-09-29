@@ -41,6 +41,7 @@ impl App {
                 self.size = Rect::new(0, 0, w, h);
                 self.drag = None;
                 self.belief_preview.clear();
+                self.memory_preview.clear();
                 self.belief_pointer = None;
                 self.rendered_belief_rows.borrow_mut().clear();
                 self.chip_hover = None;
@@ -1663,6 +1664,12 @@ impl App {
             || row <= menu.y
             || row >= menu.bottom().saturating_sub(1)
         {
+            return false;
+        }
+        if let Some(manager)=self.memory_manager.as_mut() {
+            if row>=menu.y+2 && row<menu.bottom().saturating_sub(2) {
+                return manager.hover(usize::from(row-menu.y-2),usize::from(menu.height.saturating_sub(4)));
+            }
             return false;
         }
         if let Some(index) = self.active_request_index() {

@@ -1482,6 +1482,18 @@ impl App {
             && self.rendered_belief_rows.borrow().contains(owner)
     }
 
+    pub(super) fn valid_memory_preview_owner(&self, owner:&crate::belief_preview::Owner)->bool {
+        let Some(manager)=self.memory_manager.as_ref().filter(|manager|!manager.editing()) else{return false;};
+        if self.active_group!=owner.pane || manager.owner.0!=owner.session.as_deref().unwrap_or("")
+            || manager.owner.1!=owner.cwd || manager.scope!=owner.query || manager.selected as u64+1!=owner.id
+            || self.active_chooser_rect()!=Some(owner.menu) {return false;}
+        let visible=usize::from(owner.menu.height.saturating_sub(4));
+        let correct=manager.visible_entries(visible).into_iter().enumerate().any(|(offset,(index,entry))| {
+            index as u64+1==owner.id && entry==owner.claim && owner.rect==ratatui::layout::Rect::new(owner.menu.x+1,owner.menu.y+2+offset as u16,owner.menu.width.saturating_sub(2),1)
+        });
+        correct && self.belief_pointer.is_some_and(|(x,y)|owner.rect.contains(ratatui::layout::Position::new(x,y)))
+            && self.rendered_belief_rows.borrow().contains(owner)
+    }
     pub(super) fn tick_belief_preview(&mut self, now: Instant) -> bool {
         let owner = self.belief_pointer.and_then(|(x, y)| {
             self.rendered_belief_rows
@@ -1499,6 +1511,10 @@ impl App {
             self.belief_preview.read();
         }
         changed |= self.belief_preview.poll();
+        let memory_owner=self.belief_pointer.and_then(|(x,y)|self.rendered_belief_rows.borrow().iter()
+            .find(|owner|owner.rect.contains(ratatui::layout::Position::new(x,y)) && self.valid_memory_preview_owner(owner)).cloned());
+        changed |= self.memory_preview.set_cached_owner(memory_owner,now);
+        changed |= self.memory_preview.tick(now);
         changed
     }
 }
