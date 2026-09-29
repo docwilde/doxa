@@ -1,8 +1,8 @@
 <p align="center"><img src="assets/logo.png" width="560" alt="DOXA — belief earning knowledge"></p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Rust%202.0-alpha.49-f59f00" alt="Rust 2.0 alpha.49 is the main frontend">
-  <a href="https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.49"><img src="https://img.shields.io/github/v/release/docwilde/doxa?include_prereleases&amp;sort=semver&amp;label=Rust%20release&amp;color=e8590c" alt="latest Rust release"></a>
+  <img src="https://img.shields.io/badge/Rust%202.0-alpha.50-f59f00" alt="Rust 2.0 alpha.50 is the main frontend">
+  <a href="https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.50"><img src="https://img.shields.io/github/v/release/docwilde/doxa?include_prereleases&amp;sort=semver&amp;label=Rust%20release&amp;color=e8590c" alt="latest Rust release"></a>
   <a href="https://github.com/docwilde/doxa/actions/workflows/rust-ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/docwilde/doxa/rust-ci.yml?branch=main&label=Rust%20CI" alt="Rust CI status"></a>
   <img src="https://img.shields.io/badge/TUI-Ratatui-2f9e44" alt="Rust TUI built with Ratatui">
   <img src="https://img.shields.io/badge/auth-provider%20CLI%20or%20API%20key-2f9e44" alt="authentication follows the selected engine">
@@ -14,13 +14,14 @@
 > can edit files and run commands with your privileges. Read
 > [Non-goals](#non-goals) before using it on important work.
 
-The official latest GitHub release is [v2.0.0-alpha.49](https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.49).
+The official latest GitHub release is [v2.0.0-alpha.50](https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.50).
 Rust 2.0 leads development and remains an evolving alpha. See the
 [parity tracker](docs/rust-1.19-parity.md) for supported provider contracts and
 remaining release gates, and the [source audit](docs/source-audit-2026-09-27.md)
 for engineering findings and their follow-up fixes. Alpha.48 adds session-scoped tool approvals,
 clickable peer history, clearer memory browsing and a block Greek welcome banner.
 Alpha.49 refreshes the docs and live terminal gallery.
+Alpha.50 adds live captures of the curated memory and belief browsers.
 
 **DOXA** is a terminal for coding agents. Development now leads with the
 **Rust 2.0 alpha**, built with Ratatui and a native daemon. Run Claude, Codex,
@@ -54,7 +55,7 @@ results are real. See the [capture method](docs/rust-gallery.md).*
 See the [Rust guide](rust/README.md) for engine capabilities, shortcuts and
 [compaction boundaries](rust/doxa-engines/README.md#compaction-review).
 
-## Gallery · alpha.49
+## Gallery · alpha.49–50
 
 ### Welcome
 
@@ -62,6 +63,20 @@ See the [Rust guide](rust/README.md) for engine capabilities, shortcuts and
 
 *The block Greek ΔΟΞΑ banner appears when a new session is ready. This frame
 uses a second isolated session in the same example repository.*
+
+### Curated memory
+
+![The live curated memory submenu shows user and project facts, a selected row, a prompt filter, and a scrollbar](assets/shots/rust-curated-memory.png)
+
+*Browse individual LORE facts by scope. Arrow keys or mouse hover select a row;
+the prompt becomes a filter, and the right scrollbar tracks longer lists.*
+
+### Beliefs
+
+![The live beliefs submenu lists claims with review actions, confidence, evidence count, recency, a selected row, and a scrollbar](assets/shots/rust-beliefs.png)
+
+*Review LORE claims with separate Accept and Reject actions. The table shows
+confidence, evidence count and update time; the prompt filters beliefs.*
 
 ### Individual tool details
 
@@ -98,8 +113,9 @@ The pending indicator blinks while the request is unresolved.*
 *Settings identify configuration defaults and values inherited from the session.
 The chips below show the active engine, model and verified low effort.*
 
-All seven frames are unedited 3068 × 1734 captures of the running alpha.49
-build. Six share one live session; the welcome frame uses another isolated session.
+All nine frames are unedited 3068 × 1734 captures of the running Rust app.
+The first seven use alpha.49; the two LORE menus use alpha.50 with an isolated
+store of example facts and beliefs.
 [Capture provenance and reproduction](docs/rust-gallery.md).
 
 ## Install
@@ -112,7 +128,7 @@ curl -fsSL https://raw.githubusercontent.com/docwilde/doxa/main/scripts/install.
 
 The installer builds the Rust frontend and daemon from `main` and installs the
 Rust `doxa` command in `~/.local/bin` (or `DOXA_RUST_BIN_DIR`). Pass a tag such
-as `v2.0.0-alpha.49` after `sh -s --` to pin a release. Git and Cargo build three
+as `v2.0.0-alpha.50` after `sh -s --` to pin a release. Git and Cargo build three
 native binaries: the frontend, daemon and LORE carrier. Claude requires its CLI.
 When Codex is installed, the installer also builds a private, protected Codex
 app server and its required Code Mode host; the official CLI remains available
