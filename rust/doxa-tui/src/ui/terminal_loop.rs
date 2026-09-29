@@ -336,6 +336,7 @@ fn run_loop(
         changed |= app.tick_clock(Instant::now());
         changed |= app.tick_chip_hover(Instant::now());
         changed |= app.tick_belief_preview(Instant::now());
+        changed |= app.peer_map.tick(Instant::now());
         if prompt_sender.is_none() {
             if let Some(id) = app.pending_peer_refresh.take() {
                 changed |= app.peer_map.roster(&id, &serde_json::json!({"ok":false}));

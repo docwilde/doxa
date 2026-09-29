@@ -214,15 +214,18 @@ impl ToolGate for NativeVendorGate<'_> {
         let start = (|| {
             let call_id = (self.scrub)(&call.id)?;
             let arguments: Value = serde_json::from_str(&(self.scrub)(&Value::Object(call.arguments.clone()).to_string())?).map_err(|_| ())?;
-            let (peer, method) = if let Some((_, handler)) = self.agent.as_ref().filter(|(rows, _)|
+            let (peer, method, dispatch_arguments) = if let Some((_, handler)) = self.agent.as_ref().filter(|(rows, _)|
                 rows.iter().any(|row| row["function"]["name"] == call.name)) {
-                (handler.clone(), call.name.clone())
-            } else { (self.peer.clone().ok_or(())?, doxa_engines::peer_tools::rpc(&call.name, &arguments).map_err(|_| ())?.to_owned()) };
+                (handler.clone(), call.name.clone(), arguments.clone())
+            } else {
+                let (method, normalized)=doxa_engines::peer_tools::validated_call(&call.name, &arguments).map_err(|_| ())?;
+                (self.peer.clone().ok_or(())?, method.to_owned(), normalized)
+            };
             let (request, reply) = self.desk.begin(&call.name, &arguments)?;
             let guard = ResolvePeer { desk:self.desk.clone(), id:request["id"].clone(), events:self.events.clone() };
             (self.emit)(json!({"type":"tool_call","data":{"id":call_id,"name":call.name,"input":arguments}}));
             (self.emit)(json!({"type":"needs_input","data":request}));
-            Ok((peer, method, arguments, reply, guard, call_id))
+            Ok((peer, method, dispatch_arguments, reply, guard, call_id))
         })();
         let scrub = self.scrub;
         let events = self.events.clone();

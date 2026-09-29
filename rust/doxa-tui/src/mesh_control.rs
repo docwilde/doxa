@@ -177,8 +177,19 @@ mod tests {
         }
         assert_eq!(handle.snapshot().url, url); // refused switch keeps existing owner
         drop(window); // an open popup handle cannot prolong the server
-        let address = url.trim_start_matches("http://").split('/').next().unwrap();
-        assert!(TcpStream::connect(address).is_err());
+        assert!(!old_token_served(&url));
+    }
+    // Parallel tests may bind the same ephemeral port immediately after a
+    // server stops. Its private token, rather than the port, is the identity.
+    fn old_token_served(url: &str) -> bool {
+        let tail = url.strip_prefix("http://").unwrap();
+        let (address, token) = tail.split_once('/').unwrap();
+        let Ok(mut stream) = TcpStream::connect(address) else { return false; };
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
+        let _ = write!(stream, "GET /{token} HTTP/1.0\r\nHost: {address}\r\n\r\n");
+        let mut response=String::new();
+        let _=stream.read_to_string(&mut response);
+        response.starts_with("HTTP/1.1 200") || response.starts_with("HTTP/1.0 200")
     }
     fn request(url: &str, route: &str) -> String {
         let tail = url.strip_prefix("http://").unwrap(); let (host, token) = tail.split_once('/').unwrap();
@@ -202,8 +213,7 @@ mod tests {
         assert_eq!(unsafe { libc::mkfifo(filename.as_ptr(), 0o600) }, 0);
         assert!(request(&old, "ledger").contains("200"));
         server.stop().unwrap();
-        let address = old.trim_start_matches("http://").split('/').next().unwrap();
-        assert!(TcpStream::connect(address).is_err());
+        assert!(!old_token_served(&old));
         std::os::unix::fs::symlink(&ledger, dir.path().join("link")).unwrap();
         assert!(MeshServer::start(&dir.path().join("link")).is_err());
     }

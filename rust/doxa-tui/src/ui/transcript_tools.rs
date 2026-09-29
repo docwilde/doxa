@@ -63,6 +63,10 @@ fn tool_name(row: &str) -> &str {
         .map(|(name, _)| name).unwrap_or_else(|| row.trim_end_matches(']'))
 }
 
+fn display_tool_name(name: &str) -> String {
+    name.replace("\\_", "_")
+}
+
 fn tool_identity(row: &str) -> (&str, Option<String>) {
     let row = row.split_once(RESTORED_TOOL_PREFIX).map_or(row, |(display, _)| display);
     let Some((display, encoded)) = row.split_once(TOOL_ID_PREFIX) else { return (row, None); };
@@ -167,7 +171,7 @@ fn render_turn(blocks: &mut Vec<Block<'_>>, lines: &mut Vec<Line<'static>>,
                 let open = expanded.is_some_and(|set| set.contains(&index));
                 let marker = if open { "▾" } else { "▸" };
                 let summary = format!("{marker} {count} tool call{} · {} · Enter",
-                    if count == 1 { "" } else { "s" }, tool_name(tools[0]));
+                    if count == 1 { "" } else { "s" }, display_tool_name(tool_name(tools[0])));
                 let summary: String = summary.chars().take(usize::from(width.saturating_sub(2))).collect();
                 let style = if selected.as_ref() == Some(&index) {
                     Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)
@@ -209,8 +213,8 @@ fn render_turn(blocks: &mut Vec<Block<'_>>, lines: &mut Vec<Line<'static>>,
                         let style = if selected.as_ref() == Some(&key) {
                             Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)
                         } else { Style::default().fg(theme::SECONDARY) };
-                        lines.push(Line::styled(format!("  {} {name} · {status} · Enter",
-                            if call_open { "▾" } else { "▸" }), style));
+                        lines.push(Line::styled(format!("  {} {} · {status} · Enter",
+                            if call_open { "▾" } else { "▸" }, display_tool_name(name)), style));
                         if !call_open { continue; }
                         if let Some(card) = card {
                             if let Some(input) = &card.input { plain_detail(lines, "Input", input, width); }

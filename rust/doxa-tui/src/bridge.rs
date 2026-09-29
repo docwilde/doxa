@@ -581,8 +581,21 @@ fn worker_loop(
                         Ok(reply) => CommandResult::PeerRoster { status: ReplyStatus::from_wire(reply), peers: wire_value(reply, "peers") },
                         Err(error) => CommandResult::PeerRoster { status: ReplyStatus::failed(error.to_string()), peers: None },
                     };
-                    if frames.send(command_frame(id, reply)).is_err() { return; }
+                    if frames.send(command_frame(id.clone(), reply)).is_err() { return; }
                     if matches!(result, Err(TransportError::Closed)) { return; }
+                    let mut params = Map::new();
+                    params.insert("limit".into(), Value::from(50));
+                    let history = client.call("peer_history", params);
+                    cursor.store(client.cursor, Ordering::Relaxed);
+                    if matches!(history, Err(TransportError::Closed)) {
+                        if let Some(guard) = roster_guard { revoke(guard); }
+                    }
+                    let reply = match &history {
+                        Ok(reply) => CommandResult::PeerHistory { status: ReplyStatus::from_wire(reply), messages: wire_value(reply, "messages") },
+                        Err(error) => CommandResult::PeerHistory { status: ReplyStatus::failed(error.to_string()), messages: None },
+                    };
+                    if frames.send(command_frame(id, reply)).is_err() { return; }
+                    if matches!(history, Err(TransportError::Closed)) { return; }
                 }
                 Ok(WorkerCommand::Message(id, target, text)) => {
                     let draft = format!("/msg {target} {text}");
@@ -948,9 +961,14 @@ for line in sys.stdin:
             line.clear();
             reader.read_line(&mut line).unwrap();
             assert_eq!(serde_json::from_str::<Value>(&line).unwrap(),
-                json!({"type":"call","id":3,"method":"msg",
+                json!({"type":"call","id":3,"method":"peer_history","params":{"limit":50}}));
+            writeln!(socket, "{}", json!({"type":"reply","id":3,"ok":true,"messages":[]})).unwrap();
+            line.clear();
+            reader.read_line(&mut line).unwrap();
+            assert_eq!(serde_json::from_str::<Value>(&line).unwrap(),
+                json!({"type":"call","id":4,"method":"msg",
                     "params":{"target":"peer-1","text":"hello"}}));
-            writeln!(socket, "{}", json!({"type":"reply","id":3,"ok":true,
+            writeln!(socket, "{}", json!({"type":"reply","id":4,"ok":true,
                 "peer":{"session_id":"peer-1","title":"Builder"},
                 "delivered_to":["peer-1"],"failed":[]})).unwrap();
         });
@@ -974,6 +992,9 @@ for line in sys.stdin:
         let peers = frames.recv_timeout(Duration::from_secs(2)).unwrap().into_legacy_value();
         assert_eq!(peers["type"], "peer_roster");
         assert_eq!(peers["peers"][0]["session_id"], "peer-1");
+        let history = frames.recv_timeout(Duration::from_secs(2)).unwrap().into_legacy_value();
+        assert_eq!(history["type"], "peer_history");
+        assert_eq!(history["messages"], json!([]));
         prompts.send(WorkerCommand::Message("session-1".into(), "peer-1".into(), "hello".into())).unwrap();
         let sent = frames.recv_timeout(Duration::from_secs(2)).unwrap().into_legacy_value();
         assert_eq!(sent["type"], "peer_message_reply");

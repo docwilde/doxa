@@ -762,6 +762,7 @@ pub struct InputRequest {
     pub selected: usize,
     pub answers: serde_json::Map<String, serde_json::Value>,
     pub sending: bool,
+    grant_on_success: bool,
     pub require_full_review: bool,
     review_available: bool,
     review_seen: Cell<usize>,
@@ -788,24 +789,23 @@ impl InputRequest {
                 data["body"].as_str().unwrap_or(""),
                 data["task"].as_str().unwrap_or("")
             )
-        } else {
+        } else if kind == "permission" {
             let mut text = String::new();
             for (label, field) in [
-                ("Title", "title"),
-                ("Tool", "tool_name"),
                 ("Display name", "display_name"),
                 ("Description", "description"),
-                ("Input", "input_summary"),
             ] {
                 if let Some(value) = data[field].as_str().filter(|value| !value.is_empty()) {
                     text.push_str(&format!("{label}: {value}\n"));
                 }
             }
-            if text.is_empty() {
-                "Permission request".into()
-            } else {
-                text
+            if let Some(input) = data["input_summary"].as_str()
+                .filter(|value| !value.is_empty() && *value != "{}" && *value != "null") {
+                text.push_str(input);
             }
+            text
+        } else {
+            String::new()
         };
         let questions = if kind == "ask_user" {
             let items = data["questions"].as_array()?;
@@ -863,6 +863,7 @@ impl InputRequest {
             selected: 1,
             answers: serde_json::Map::new(),
             sending: false,
+            grant_on_success: false,
             require_full_review: data["require_full_review"] == true,
             review_available: data["input_summary"].as_str().is_some()
                 && data["input_summary_truncated"] != true,
@@ -952,7 +953,12 @@ fn input_request_body(
             body.push_str("Question unavailable\n");
         }
     } else {
-        for (i, label) in ["Approve · A", "Deny · D / Esc"].iter().enumerate() {
+        let labels: &[&str] = if request.kind == "permission" {
+            &["Approve · A", "Deny · D / Esc", "Always approve this tool · L"]
+        } else {
+            &["Approve · A", "Deny · D / Esc"]
+        };
+        for (i, label) in labels.iter().enumerate() {
             option_rows.push(body.lines().count());
             if request.selected == i + 1 {
                 selected_row = Some(body.lines().count());
@@ -967,8 +973,10 @@ fn input_request_body(
                 label
             ));
         }
-        body.push_str("Enter select · PgUp/PgDn review\n");
-        body.push_str(&markdown::sanitize(&request.heading));
+        if !request.heading.is_empty() {
+            body.push('\n');
+            body.push_str(&markdown::sanitize(&request.heading));
+        }
     }
     if request.sending {
         body.push_str("\nSending answer…");
@@ -1348,6 +1356,7 @@ pub struct App {
     pending_peer_messages: Vec<(String, String, String)>,
     pub input_requests: Vec<InputRequest>,
     pub pending_answers: Vec<(String, String, serde_json::Value)>,
+    permission_grants: HashSet<(String, String)>,
     pub rejected_drafts: HashMap<String, Vec<String>>,
     tool_cards: ToolCards,
     tool_cards_revision: HashMap<String, u64>,
@@ -1565,6 +1574,7 @@ impl Default for App {
             pending_peer_messages: Vec::new(),
             input_requests: Vec::new(),
             pending_answers: Vec::new(),
+            permission_grants: HashSet::new(),
             rejected_drafts: HashMap::new(),
             tool_cards: ToolCards::default(),
             tool_cards_revision: HashMap::new(),

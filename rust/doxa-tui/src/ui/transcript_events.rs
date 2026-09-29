@@ -49,6 +49,17 @@ fn event_string(data: &serde_json::Value, key: &str) -> Option<String> {
         .map(event_field)
 }
 
+// Tool names are rendered as plain TUI text in fold headers. Markdown escapes
+// belong in prose fields, where a backslash would otherwise become visible.
+fn event_tool_name(data: &serde_json::Value) -> String {
+    let clean = markdown::sanitize(data["name"].as_str().unwrap_or("Tool"))
+        .replace(['\n', '\r'], " ");
+    let mut chars = clean.chars();
+    let mut name: String = chars.by_ref().take(MAX_EVENT_FIELD_CHARS).collect();
+    if chars.next().is_some() { name.push('…'); }
+    name
+}
+
 pub(super) fn transcript_tail(text: &str) -> &str {
     if text.len() <= MAX_TRANSCRIPT_BYTES {
         return text;
@@ -147,7 +158,7 @@ pub(super) fn structured_event(event_type: &str, data: &serde_json::Value) -> Op
     let field = |key| event_string(data, key).unwrap_or_default();
     let row = match event_type {
         "tool_call" => {
-            let name = field("name");
+            let name = event_tool_name(data);
             let input = data
                 .get("input")
                 .filter(|value| !value.is_null())
@@ -160,7 +171,7 @@ pub(super) fn structured_event(event_type: &str, data: &serde_json::Value) -> Op
             }
         }
         "tool_result" => {
-            let name = field("name");
+            let name = event_tool_name(data);
             let result = field("result_summary");
             let outcome = if data.get("is_error").and_then(|v| v.as_bool()) == Some(true) {
                 "failed"

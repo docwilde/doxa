@@ -9,7 +9,7 @@ use super::{
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Tabs, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Tabs, Wrap};
 use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
@@ -111,7 +111,7 @@ impl App {
             self.belief_preview.render(frame, area);
         }
         if self.memory_preview.owner().is_some_and(|owner| self.valid_memory_preview_owner(owner)) {
-            self.memory_preview.render_titled(frame,area," Full memory "," Memory preview ");
+            self.memory_preview.render_memory(frame,area);
         }
         self.transcript_selection
             .borrow_mut()
@@ -613,7 +613,7 @@ impl App {
             for (offset,(index,entry)) in manager.visible_entries(visible).into_iter().enumerate() {
                 self.rendered_belief_rows.borrow_mut().push(crate::belief_preview::Owner {
                     id:index as u64+1,pane:self.active_group,session:Some(manager.owner.0.clone()),cwd:manager.owner.1.clone(),
-                    query:manager.scope.into(),offset:0,rect:Rect::new(area.x+1,area.y+2+offset as u16,area.width.saturating_sub(2),1),
+                    query:manager.scope.into(),offset:0,rect:Rect::new(area.x+1,area.y+2+offset as u16,area.width.saturating_sub(3),1),
                     menu:area,subject:manager.scope.into(),claim:entry,truncated:false,
                 });
             }
@@ -707,7 +707,10 @@ impl App {
                     .owner
                     .as_ref()
                     .is_none_or(|(id, cwd)| current == Some((id.as_str(), cwd.as_str())));
-                let width = usize::from(area.width.saturating_sub(2));
+                let width = usize::from(area.width.saturating_sub(3));
+                let indices = list.indices();
+                let visible = usize::from(area.height.saturating_sub(3)).max(1);
+                let start = info.scroll.min(indices.len().saturating_sub(visible));
                 let mut lines = vec![Line::styled(
                     crate::lore_table::memory_header(width),
                     Style::default()
@@ -715,17 +718,22 @@ impl App {
                         .add_modifier(Modifier::BOLD),
                 )];
                 if matches {
-                    let indices = list.indices();
-                    let visible = usize::from(area.height.saturating_sub(3));
-                    let start = info.scroll.min(indices.len().saturating_sub(visible));
-                    for index in indices.iter().skip(start).take(visible) {
+                    for (offset, index) in indices.iter().enumerate().skip(start).take(visible) {
                         let fact = &list.facts[*index];
-                        lines.push(Line::from(crate::lore_table::memory_row(
+                        self.rendered_belief_rows.borrow_mut().push(crate::belief_preview::Owner {
+                            id: *index as u64 + 1, pane: self.active_group,
+                            session: list.owner.as_ref().map(|(id, _)| id.clone()),
+                            cwd: list.owner.as_ref().map_or(String::new(), |(_, cwd)| cwd.clone()),
+                            query: list.query.clone(), offset: 0,
+                            rect: Rect::new(area.x + 1, area.y + 2 + (offset - start) as u16, area.width.saturating_sub(3), 1),
+                            menu: area, subject: fact.scope.clone(), claim: fact.text.clone(), truncated: false,
+                        });
+                        lines.push(Line::styled(crate::lore_table::memory_row(
                             &fact.scope,
                             &fact.text,
                             fact.source.as_deref().unwrap_or("—"),
                             width,
-                        )));
+                        ), chooser_row_style(offset == list.selected)));
                     }
                     if indices.is_empty() {
                         lines.push(Line::from(crate::lore_table::cell(
@@ -750,6 +758,7 @@ impl App {
                         .style(Style::default().fg(theme::TEXT).bg(theme::RAISED)),
                     area,
                 );
+                if matches { draw_menu_scrollbar(frame, area, indices.len(), visible, start); }
                 return;
             }
         }
@@ -1296,7 +1305,7 @@ impl App {
             );
             return;
         }
-        let width = usize::from(area.width.saturating_sub(2));
+        let width = usize::from(area.width.saturating_sub(3));
         let mut lines = Vec::new();
         if let Some((id, evidence)) = &picker.evidence {
             lines.push(Line::from(format!(
@@ -1351,7 +1360,7 @@ impl App {
                         rect: Rect::new(
                             area.x + 1,
                             area.y + 2 + (index - start) as u16,
-                            area.width.saturating_sub(2),
+                            area.width.saturating_sub(3),
                             1,
                         ),
                         menu: area,
@@ -1386,6 +1395,11 @@ impl App {
                 .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)),
             area,
         );
+        if picker.evidence.is_none() {
+            let visible = usize::from(area.height.saturating_sub(3)).max(1);
+            let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
+            draw_menu_scrollbar(frame, area, picker.rows.len(), visible, start);
+        }
     }
 
     pub(super) fn draw_diff(&self, frame: &mut Frame, area: Rect) {
@@ -1732,6 +1746,19 @@ impl App {
                     )
                 })
                 .unwrap_or_else(|| " Choose an answer ".into())
+        } else if request.kind == "permission" {
+            let tool = request.original_payload["tool_name"]
+                .as_str()
+                .filter(|name| !name.is_empty())
+                .unwrap_or("tool");
+            format!(
+                " {}Approve {}? ",
+                if self.blink_on && !request.sending { "● " } else { "  " },
+                clipped_title(
+                    &super::markdown::sanitize(tool),
+                    usize::from(modal.width.saturating_sub(16)),
+                ).0,
+            )
         } else {
             format!(
                 " {}{} ",
@@ -2477,4 +2504,17 @@ pub(super) fn transcript_window(
 fn lore_view_title(picker: &super::LorePicker) -> Line<'static> {
     Line::from([("1 Active", !picker.proposal_mode), ("2 Pending", picker.proposal_mode && !picker.cluster_mode), ("3 Clustered", picker.cluster_mode)]
         .into_iter().map(|(label, selected)| Span::styled(format!(" {label} "), chooser_row_style(selected))).collect::<Vec<_>>())
+}
+
+fn draw_menu_scrollbar(frame: &mut Frame, area: Rect, total: usize, visible: usize, start: usize) {
+    if total <= visible || area.width < 5 || area.height < 5 { return; }
+    let rect = Rect::new(area.right() - 2, area.y + 1, 1, area.height - 2);
+    let mut state = ScrollbarState::new(total).position(start).viewport_content_length(visible);
+    frame.render_stateful_widget(
+        Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None).end_symbol(None)
+            .track_style(Style::default().fg(theme::SECONDARY))
+            .thumb_style(Style::default().fg(theme::ACCENT)),
+        rect, &mut state,
+    );
 }

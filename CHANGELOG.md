@@ -5,6 +5,24 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.48 — 2026-09-29
+
+**Peer tools and approvals**
+
+- Fix **`peer_tools::validated_call`** to accept Codex's observed
+  `session_id`/`message` peer-send pair while rejecting ambiguous or extra arguments.
+- Add per-session, per-tool approval for any arguments after one confirmed review;
+  approval choices stay inline with the tool name in the submenu title.
+- Make peer graph nodes clickable and show a scrollable, scrubbed message tail
+  for the selected peer with delayed full-message hover previews.
+
+**Terminal browsing**
+
+- Show the established full-block Greek **ΔΟΞΑ** welcome banner.
+  Tool call names now render without stray Markdown backslashes.
+- Select curated memory facts with Up/Down or mouse hover; scroll long full-fact
+  tooltips with the wheel. Belief and memory menus show a right scrollbar.
+
 ## 2.0.0-alpha.47 — 2026-09-29
 
 **Installer recovery**

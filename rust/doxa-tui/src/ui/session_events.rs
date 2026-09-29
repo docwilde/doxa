@@ -631,6 +631,10 @@ impl App {
                         *revision = revision.wrapping_add(1);
                     }
                     self.peer_map.event(&id, event_type, data);
+                    if self.map_modal && matches!(event_type, "peer_message" | "peer_sent")
+                        && self.groups[self.active_group].active_id() == Some(id.as_str()) {
+                        self.pending_peer_refresh = Some(id.clone());
+                    }
                 }
                 if event_type == "tool_result" {
                     self.request_auto_diff(&id);
@@ -854,7 +858,7 @@ impl App {
                         true
                     }
                     "needs_input" => {
-                        if let Some(request) = InputRequest::from_event(&id, data) {
+                        if let Some(mut request) = InputRequest::from_event(&id, data) {
                             if let Some(position) = self
                                 .input_requests
                                 .iter()
@@ -874,41 +878,52 @@ impl App {
                                 .iter()
                                 .any(|r| r.session_id == id && r.id == request.id)
                             {
-                                self.drag = None;
-                                self.tool_modal = false;
-                                self.model_picker = None;
-                                self.effort_picker = None;
-                                self.permission_picker = None;
-                                self.permission_confirm_dont_ask = false;
-                                self.engine_picker = false;
-                                self.stop_confirmation = None;
-                                if self.input_requests.len() < MAX_INPUT_REQUESTS {
-                                    if self.input_requests.is_empty() {
-                                        self.blink_on = true;
-                                        self.blink_at = Instant::now();
-                                    }
-                                    if self
-                                        .preferences
-                                        .should_notify("notify_needs_input", self.window_focused)
-                                    {
-                                        crate::preferences::notify(
-                                            "DOXA needs input",
-                                            &format!(
-                                                "{} · {}",
-                                                self.sessions
-                                                    .iter()
-                                                    .find(|s| s.id == id)
-                                                    .map(|s| s.title.as_str())
-                                                    .unwrap_or(&id),
-                                                request.kind
-                                            ),
-                                        );
-                                    }
+                                let auto_allow = request.kind == "permission"
+                                    && request.original_payload["tool_name"].as_str().is_some_and(|tool| {
+                                        self.permission_grants.contains(&(id.clone(), tool.to_owned()))
+                                    });
+                                if auto_allow && self.input_requests.len() < MAX_INPUT_REQUESTS {
+                                    request.sending = true;
+                                    self.pending_answers.push((id.clone(), request.id.clone(),
+                                        serde_json::json!({"decision":"allow"})));
                                     self.input_requests.push(request);
                                 } else {
-                                    self.notice =
-                                        "Too many input requests · inspect the session directly"
-                                            .into();
+                                    self.drag = None;
+                                    self.tool_modal = false;
+                                    self.model_picker = None;
+                                    self.effort_picker = None;
+                                    self.permission_picker = None;
+                                    self.permission_confirm_dont_ask = false;
+                                    self.engine_picker = false;
+                                    self.stop_confirmation = None;
+                                    if self.input_requests.len() < MAX_INPUT_REQUESTS {
+                                        if self.input_requests.is_empty() {
+                                            self.blink_on = true;
+                                            self.blink_at = Instant::now();
+                                        }
+                                        if self
+                                            .preferences
+                                            .should_notify("notify_needs_input", self.window_focused)
+                                        {
+                                            crate::preferences::notify(
+                                                "DOXA needs input",
+                                                &format!(
+                                                    "{} · {}",
+                                                    self.sessions
+                                                        .iter()
+                                                        .find(|s| s.id == id)
+                                                        .map(|s| s.title.as_str())
+                                                        .unwrap_or(&id),
+                                                    request.kind
+                                                ),
+                                            );
+                                        }
+                                        self.input_requests.push(request);
+                                    } else {
+                                        self.notice =
+                                            "Too many input requests · inspect the session directly"
+                                                .into();
+                                    }
                                 }
                             }
                         } else {
@@ -936,6 +951,7 @@ impl App {
                         self.append_event(&id, event_type, data)
                     }
                     "session_done" => {
+                        self.permission_grants.retain(|(session, _)| session != &id);
                         self.input_requests
                             .retain(|request| request.session_id != id);
                         self.pending_answers
@@ -978,6 +994,12 @@ impl App {
                     return false;
                 };
                 self.peer_map.roster(id, frame)
+            }
+            "peer_history" => {
+                let Some(id) = frame.get("session_id").and_then(|v| v.as_str()) else {
+                    return false;
+                };
+                self.peer_map.history(id, frame)
             }
             "peer_message_reply" => {
                 let Some(session) = frame["session_id"]
@@ -1359,17 +1381,25 @@ impl App {
                     .unwrap_or("");
                 let ok = frame.get("ok").and_then(|v| v.as_bool()) == Some(true);
                 let uncertain = frame.get("uncertain").and_then(|v| v.as_bool()) == Some(true);
+                let mut granted_tool = None;
                 if let Some(request) = self
                     .input_requests
                     .iter_mut()
                     .find(|r| r.session_id == session && r.id == id)
                 {
+                    if ok && request.grant_on_success && request.kind == "permission" {
+                        granted_tool = request.original_payload["tool_name"].as_str().map(str::to_owned);
+                        request.grant_on_success = false;
+                    }
                     // An AskUser answer stays on its final question until the
                     // daemon confirms delivery. A refused or unconfirmed send
                     // must leave that selection available for a manual retry.
                     if !ok && (!uncertain || request.kind == "ask_user") {
                         request.sending = false;
                     }
+                }
+                if let Some(tool) = granted_tool {
+                    self.permission_grants.insert((session.to_owned(), tool));
                 }
                 self.notice = if ok {
                     "Answer sent · awaiting resolution".into()

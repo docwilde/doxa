@@ -140,6 +140,10 @@ pub enum CommandResult {
         status: ReplyStatus,
         peers: Option<Value>,
     },
+    PeerHistory {
+        status: ReplyStatus,
+        messages: Option<Value>,
+    },
     PeerMessage {
         status: ReplyStatus,
         uncertain: Option<bool>,
@@ -301,6 +305,7 @@ impl CommandResult {
                 return frame;
             }
             Self::PeerRoster { status, peers } => ("peer_roster", status, json!({"peers":peers})),
+            Self::PeerHistory { status, messages } => ("peer_history", status, json!({"messages":messages})),
             Self::PeerMessage {
                 status,
                 uncertain,

@@ -401,6 +401,7 @@ impl App {
                     }
                 }
                 self.chip_info.as_mut().unwrap().scroll = 0;
+                list.selected = 0;
                 return true;
             }
         }
@@ -739,7 +740,25 @@ impl App {
                 self.memory_menu_pending = None;
                 return true;
             }
-            let memory_rows = self.memory_list.as_ref().map(|list| list.indices().len());
+            if self.chip_info.as_ref().is_some_and(|info| info.kind == "memory") {
+                let page = self.active_chooser_rect().map_or(1, |area| usize::from(area.height.saturating_sub(3)).max(1));
+                if let Some(list) = self.memory_list.as_mut() {
+                    let len = list.indices().len();
+                    let step = match key.code {
+                        KeyCode::Up => -1,
+                        KeyCode::Down => 1,
+                        KeyCode::PageUp => -(page as isize),
+                        KeyCode::PageDown => page as isize,
+                        _ => return false,
+                    };
+                    list.selected = list.selected.saturating_add_signed(step).min(len.saturating_sub(1));
+                    if let Some(info) = self.chip_info.as_mut() {
+                        if list.selected < info.scroll { info.scroll = list.selected; }
+                        if list.selected >= info.scroll + page { info.scroll = list.selected + 1 - page; }
+                    }
+                    return true;
+                }
+            }
             if let Some(info) = self.chip_info.as_mut().filter(|info| {
                 matches!(
                     info.kind,
@@ -748,21 +767,9 @@ impl App {
             }) {
                 match key.code {
                     KeyCode::Up => info.scroll = info.scroll.saturating_sub(1),
-                    KeyCode::Down => {
-                        info.scroll = info.scroll.saturating_add(1).min(if info.kind == "memory" {
-                            memory_rows.unwrap_or(info.lines.len()).saturating_sub(1)
-                        } else {
-                            info.lines.len().saturating_sub(1)
-                        })
-                    }
+                    KeyCode::Down => info.scroll = info.scroll.saturating_add(1).min(info.lines.len().saturating_sub(1)),
                     KeyCode::PageUp => info.scroll = info.scroll.saturating_sub(8),
-                    KeyCode::PageDown => {
-                        info.scroll = info.scroll.saturating_add(8).min(if info.kind == "memory" {
-                            memory_rows.unwrap_or(info.lines.len()).saturating_sub(1)
-                        } else {
-                            info.lines.len().saturating_sub(1)
-                        })
-                    }
+                    KeyCode::PageDown => info.scroll = info.scroll.saturating_add(8).min(info.lines.len().saturating_sub(1)),
                     _ => return false,
                 }
                 return true;
@@ -843,13 +850,18 @@ impl App {
                     true
                 }
                 KeyCode::Up => {
-                    self.peer_map.move_selected(&owner, -1);
+                    if self.peer_map.focus_messages() { self.peer_map.scroll_messages(&owner, 1); }
+                    else { self.peer_map.move_selected(&owner, -1); }
                     true
                 }
                 KeyCode::Down => {
-                    self.peer_map.move_selected(&owner, 1);
+                    if self.peer_map.focus_messages() { self.peer_map.scroll_messages(&owner, -1); }
+                    else { self.peer_map.move_selected(&owner, 1); }
                     true
                 }
+                KeyCode::Tab => { self.peer_map.toggle_focus(); true }
+                KeyCode::PageUp => { self.peer_map.scroll_messages(&owner, 5); true }
+                KeyCode::PageDown => { self.peer_map.scroll_messages(&owner, -5); true }
                 KeyCode::Char('r' | 'R') => {
                     self.pending_peer_refresh = Some(owner);
                     true
@@ -1503,23 +1515,16 @@ impl App {
         let kind = self.input_requests[index].kind.clone();
         if kind != "ask_user" {
             let page = self.active_chooser_rect().map_or(1, |menu| menu.height.saturating_sub(2).max(1));
+            let choices = if kind == "permission" { 3 } else { 2 };
             match key.code {
                 KeyCode::Up => {
-                    self.input_requests[index].selected =
-                        if self.input_requests[index].selected == 1 {
-                            2
-                        } else {
-                            1
-                        };
+                    let selected = self.input_requests[index].selected;
+                    self.input_requests[index].selected = if selected <= 1 { choices } else { selected - 1 };
                     return true;
                 }
                 KeyCode::Down => {
-                    self.input_requests[index].selected =
-                        if self.input_requests[index].selected == 1 {
-                            2
-                        } else {
-                            1
-                        };
+                    let selected = self.input_requests[index].selected;
+                    self.input_requests[index].selected = if selected >= choices { 1 } else { selected + 1 };
                     return true;
                 }
                 KeyCode::PageUp => {
@@ -1579,19 +1584,27 @@ impl App {
                 _ => None,
             }
         } else {
-            match key.code {
-                KeyCode::Esc => Some(serde_json::json!({"decision":"deny"})),
+            let choice = match key.code {
+                KeyCode::Esc => Some("deny"),
                 KeyCode::Char('d' | 'D')
                     if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
                 {
-                    Some(serde_json::json!({"decision":"deny"}))
+                    Some("deny")
                 }
-                KeyCode::Enter if self.input_requests[index].selected == 2 => {
-                    Some(serde_json::json!({"decision":"deny"}))
-                }
+                KeyCode::Enter if self.input_requests[index].selected == 2 => Some("deny"),
+                KeyCode::Enter if kind == "permission" && self.input_requests[index].selected == 3 => Some("session"),
+                KeyCode::Char('l' | 'L') if kind == "permission"
+                    && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT) => Some("session"),
                 KeyCode::Char('a' | 'A') | KeyCode::Enter
                     if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
                 {
+                    Some("once")
+                }
+                _ => None,
+            };
+            match choice {
+                Some("deny") => Some(serde_json::json!({"decision":"deny"})),
+                Some(scope) => {
                     if !self.active_chooser_rect().is_some_and(|menu| menu.width >= 20 && menu.height >= 5) {
                         self.notice = "Enlarge the active pane to review and approve".into();
                         return true;
@@ -1600,13 +1613,16 @@ impl App {
                         && (!self.input_requests[index].review_available
                             || !self.input_requests[index].review_complete.get())
                     {
-                        self.notice =
-                            "Read the complete input summary (PgDn) before approving".into();
+                        self.notice = "Read the complete request before approving".into();
                         return true;
                     }
-                    Some(serde_json::json!({"decision":"allow"}))
+                    Some(if scope == "session" {
+                        serde_json::json!({"decision":"allow","scope":"session"})
+                    } else {
+                        serde_json::json!({"decision":"allow"})
+                    })
                 }
-                _ => None,
+                None => None,
             }
         };
         if let Some(answer) = answer {
@@ -1615,6 +1631,7 @@ impl App {
                 return true;
             }
             let request = &mut self.input_requests[index];
+            request.grant_on_success = answer["scope"] == "session";
             request.sending = true;
             self.pending_answers
                 .push((request.session_id.clone(), request.id.clone(), answer));
@@ -1669,6 +1686,18 @@ impl App {
         if let Some(manager)=self.memory_manager.as_mut() {
             if row>=menu.y+2 && row<menu.bottom().saturating_sub(2) {
                 return manager.hover(usize::from(row-menu.y-2),usize::from(menu.height.saturating_sub(4)));
+            }
+            return false;
+        }
+        if self.chip_info.as_ref().is_some_and(|info| info.kind == "memory") {
+            if let (Some(info), Some(list)) = (self.chip_info.as_ref(), self.memory_list.as_mut()) {
+                if row >= menu.y + 2 && row < menu.bottom() - 1 && column < menu.right() - 2 {
+                    let index = info.scroll + usize::from(row - menu.y - 2);
+                    if index < list.indices().len() && list.selected != index {
+                        list.selected = index;
+                        return true;
+                    }
+                }
             }
             return false;
         }
@@ -1930,6 +1959,16 @@ impl App {
         false
     }
     pub(super) fn mouse(&mut self, mouse: MouseEvent) -> bool {
+        if self.map_modal {
+            let owner = self.groups[self.active_group].active_id().unwrap_or("").to_owned();
+            return self.peer_map.mouse(self.size, &owner, mouse.column, mouse.row,
+                mouse.kind, Instant::now());
+        }
+        if matches!(mouse.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown)
+            && self.memory_preview.memory_tooltip_contains(self.size,
+                ratatui::layout::Position::new(mouse.column, mouse.row)) {
+            return self.memory_preview.scroll_memory(if mouse.kind == MouseEventKind::ScrollUp { -2 } else { 2 });
+        }
         if let Some(handled) = self.wheel_chooser(mouse) { return handled; }
         let mut tool_hover_changed = false;
         if mouse.kind == MouseEventKind::Moved {
@@ -2334,13 +2373,15 @@ impl App {
                     match mouse.kind {
                         MouseEventKind::ScrollUp => {
                             info.scroll = info.scroll.saturating_sub(3);
+                            if let Some(list) = self.memory_list.as_mut() { list.selected = list.selected.min(info.scroll + usize::from(area.map_or(1, |area| area.height.saturating_sub(3)).max(1)) - 1); }
                             return true;
                         }
                         MouseEventKind::ScrollDown => {
                             info.scroll = info
                                 .scroll
                                 .saturating_add(3)
-                                .min(memory_rows.unwrap_or(info.lines.len()).saturating_sub(1));
+                                .min(memory_rows.unwrap_or(info.lines.len()).saturating_sub(usize::from(area.map_or(1, |area| area.height.saturating_sub(3)).max(1))));
+                            if let Some(list) = self.memory_list.as_mut() { list.selected = list.selected.max(info.scroll); }
                             return true;
                         }
                         _ => {}
