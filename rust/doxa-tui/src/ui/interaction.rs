@@ -1827,14 +1827,14 @@ impl App {
                 return false;
             }
             let first = if picker.proposal_mode {
-                menu.y + 4
+                menu.y + 3
             } else {
                 menu.y + 2
             };
             if row < first {
                 return false;
             }
-            let reserve = if picker.proposal_mode { 6 } else { 3 };
+            let reserve = if picker.proposal_mode { 5 } else { 3 };
             let visible = usize::from(menu.height.saturating_sub(reserve)).max(1);
             if usize::from(row - first) >= visible {
                 return false;
@@ -2636,10 +2636,10 @@ impl App {
                 return true;
             }
             if picker.proposal_mode {
-                let visible = usize::from(menu.height.saturating_sub(6)).max(1);
+                let visible = usize::from(menu.height.saturating_sub(5)).max(1);
                 match mouse.kind {
                     MouseEventKind::Down(MouseButton::Left) => {
-                        let first = menu.y + 4;
+                        let first = menu.y + 3;
                         let start = chooser_visible_start(
                             &self.chooser_view_start,
                             picker.selected,

@@ -1136,12 +1136,6 @@ impl App {
             }
             match key.code {
                 KeyCode::Esc => self.lore_picker = None,
-                KeyCode::Char('b') if picker.review.is_none() => {
-                    picker.proposal_mode = false; picker.cluster_mode = false;
-                    picker.offset = 0;
-                    picker.selected = 0;
-                    self.load_lore(lore_picker::Query::Beliefs(0));
-                }
                 KeyCode::Up => picker.selected = picker.selected.saturating_sub(1),
                 KeyCode::Down => {
                     picker.selected =

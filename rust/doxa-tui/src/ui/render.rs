@@ -1167,13 +1167,12 @@ impl App {
                     lines.push(Line::from(line.clone()));
                 }
             } else {
-                lines.push(Line::from(format!(" Filter: {} · Enter exact review · Ctrl+1/2/3 views", safe_label(&picker.query))));
                 lines.push(Line::from(format!(
                     " Page offset {} · {} rows",
                     picker.offset,
                     picker.proposals.len()
                 )));
-                let visible = usize::from(area.height.saturating_sub(6)).max(1);
+                let visible = usize::from(area.height.saturating_sub(5)).max(1);
                 let start =
                     chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
                 for (index, row) in picker
@@ -1872,7 +1871,7 @@ impl App {
             self.lore_picker
                 .as_ref()
                 .filter(|picker| {
-                    !picker.proposal_mode
+                    picker.review.is_none() && !picker.resolving && !picker.belief_acting
                         && picker.belief_review.is_none()
                         && picker.evidence.is_none()
                 })
@@ -2321,12 +2320,12 @@ impl App {
                                 " Filter memory ● "
                             } else if active
                                 && self.lore_picker.as_ref().is_some_and(|picker| {
-                                    !picker.proposal_mode
+                                    picker.review.is_none() && !picker.resolving && !picker.belief_acting
                                         && picker.belief_review.is_none()
                                         && picker.evidence.is_none()
                                 })
                             {
-                                " Filter beliefs ● "
+                                if self.lore_picker.as_ref().is_some_and(|picker| picker.proposal_mode) { " Filter pending ● " } else { " Filter beliefs ● " }
                             } else if active && self.focus == Focus::Prompt {
                                 " Prompt ● "
                             } else {

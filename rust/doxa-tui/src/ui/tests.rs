@@ -1808,7 +1808,7 @@ for line in sys.stdin:
                 retract_armed: false, belief_acting: false, result_status: None,
             });
             let menu = app.active_chooser_rect().unwrap();
-            let offset = if proposal_mode { 5 } else { 3 };
+            let offset = if proposal_mode { 4 } else { 3 };
             let rendered = painted_at(&app, 100, 28);
             let row = usize::from(menu.y + offset);
             assert!(rendered.lines().nth(row).unwrap().contains(if proposal_mode { "proposal-2" } else { "#2" }));
@@ -5300,3 +5300,23 @@ fn unavailable_saved_tabs_do_not_block_second_split_session_persistence() {
     assert!(restored.sessions.iter().all(|session| session.status.contains("unavailable")));
     assert!(reloaded.save_if_complete(&restored, &Mutex::new(true)).unwrap());
 }
+
+    #[test]
+    fn pending_filters_use_prompt_line_and_lowercase_b_preserves_draft() {
+        for clustered in [false,true] {
+            let mut app=App::default();app.size=Rect::new(0,0,120,40);
+            app.apply_daemon_frame(&json!({"type":"hello","session_id":"s","engine":"codex","model":"gpt-6-sol"}));
+            app.input="Private unsent draft".into();app.input_cursor=app.input.len();
+            app.show_belief_browser_fixture(0,&[]);
+            let rows=vec![lore_picker::Proposal {pid:"pid-b".into(),kind:"memory".into(),action:"add".into(),scope:"user".into(),summary:"blue fact".into()},lore_picker::Proposal {pid:"pid-a".into(),kind:"memory".into(),action:"add".into(),scope:"user".into(),summary:"red fact".into()}];
+            let picker=app.lore_picker.as_mut().unwrap();picker.proposal_mode=true;picker.cluster_mode=clustered;picker.all_proposals=rows.clone();picker.proposals=rows;
+            for ch in "blue".chars() {assert!(app.handle(Event::Key(KeyEvent::new(KeyCode::Char(ch),KeyModifiers::NONE))));}
+            let picker=app.lore_picker.as_ref().unwrap();assert!(picker.proposal_mode);assert_eq!(picker.cluster_mode,clustered);assert_eq!(picker.query,"blue");assert_eq!(picker.proposals.len(),1);
+            let painted=painted_at(&app,120,40);assert!(painted.contains("Filter pending"));assert!(!painted.contains("Ctrl+1/2/3") && !painted.contains("Filter:"));
+            let prompt=app.pane_regions(0,app.layout(app.size).body)[4];let mut terminal=Terminal::new(TestBackend::new(120,40)).unwrap();terminal.draw(|frame|app.draw(frame)).unwrap();
+            let buffer=terminal.backend().buffer();let prompt_text=(prompt.y..prompt.bottom()).flat_map(|y|(prompt.x..prompt.right()).map(move |x|(x,y))).map(|position|buffer[position].symbol()).collect::<String>();assert!(prompt_text.contains("blue"));assert!(!prompt_text.contains("Private unsent draft"));
+            assert_eq!(app.input,"Private unsent draft");assert!(app.handle(Event::Key(KeyEvent::new(KeyCode::Backspace,KeyModifiers::NONE))));assert_eq!(app.lore_picker.as_ref().unwrap().query,"blu");
+            app.lore_picker.as_mut().unwrap().resolving=true;assert!(!painted_at(&app,120,40).contains("Filter pending"));app.lore_picker.as_mut().unwrap().resolving=false;
+            app.handle(Event::Key(KeyEvent::new(KeyCode::Esc,KeyModifiers::NONE)));assert_eq!(app.input,"Private unsent draft");assert!(app.pending_prompts.is_empty());
+        }
+    }
