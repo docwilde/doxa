@@ -5245,3 +5245,58 @@ for line in sys.stdin:
         let menu=app.active_chooser_rect().unwrap();
         assert!(app.handle(Event::Mouse(MouseEvent{kind:MouseEventKind::Down(MouseButton::Left),column:menu.x+2,row:menu.y,modifiers:KeyModifiers::NONE}))); assert!(!app.lore_picker.as_ref().unwrap().proposal_mode); assert!(!app.lore_picker.as_ref().unwrap().cluster_mode);
     }
+#[test]
+fn unavailable_saved_tabs_do_not_block_second_split_session_persistence() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = crate::ui_state::UiStateStore::new(dir.path(), "/project", "machine").unwrap();
+    let mut original = App::default();
+    original.groups[0].tabs = vec!["offline-a".into(), "live-a".into()];
+    original.groups[0].active = 1;
+    original.groups[1].tabs = vec!["offline-b".into()];
+    original.active_group = 1;
+    original.split = Split::Vertical;
+    original.split_percent = 43;
+    store.save(&original).unwrap();
+    let original_bytes = std::fs::read(store.path()).unwrap();
+    let mut app = App::default();
+    assert!(store.restore(&mut app, &["live-a".into()]));
+    assert_eq!(app.groups[0].tabs, original.groups[0].tabs);
+    assert_eq!(app.groups[1].tabs, original.groups[1].tabs);
+    assert_eq!(app.active_group, 1);
+    assert_eq!(std::fs::read(store.path()).unwrap(), original_bytes);
+    assert!(app.sessions.iter().all(|session| session.status.contains("unavailable")));
+    assert!(app.history_entries.values().all(|entry| entry.markdown.is_empty()));
+    assert!(crate::history::resume_plan(&app.history_entries["offline-b"]).is_err());
+    let mut signature = crate::ui_state::LayoutSignature::capture(&app);
+
+    // Startup hello and delayed launch reply arrive after the user changed pane.
+    app.apply_daemon_frame(&json!({"type":"hello", "session_id":"live-a", "cwd":"/project"}));
+    app.active_group = 0;
+    app.input = "left draft".into(); app.input_cursor = 10;
+    app.input_drafts.insert((1, "offline-b".into()), ("right draft".into(), 11));
+    app.launching = true;
+    app.apply_daemon_frame(&json!({"type":"hello", "session_id":"new-second", "cwd":"/project"}));
+    app.apply_daemon_frame(&json!({"type":"launch_reply", "ok":true, "session_id":"new-second", "group":1}));
+    assert_eq!(app.active_group, 0);
+    assert_eq!(app.input, "left draft");
+    assert_eq!(app.input_drafts[&(1, "offline-b".into())].0, "right draft");
+    assert_eq!(app.groups[1].tabs, ["offline-b", "new-second"]);
+    assert!(app.pending_prompts.is_empty());
+    save_layout_if_changed(&mut app, &mut store, &Mutex::new(true), &mut signature);
+    assert_eq!(signature, crate::ui_state::LayoutSignature::capture(&app));
+    assert!(!app.notice.starts_with("Layout save skipped"));
+    drop(store);
+    drop(app);
+
+    let mut reloaded = crate::ui_state::UiStateStore::new(dir.path(), "/project", "machine").unwrap();
+    let mut restored = App::default();
+    assert!(reloaded.restore(&mut restored, &[]));
+    assert_eq!(restored.groups[0].tabs, ["offline-a", "live-a"]);
+    assert_eq!(restored.groups[1].tabs, ["offline-b", "new-second"]);
+    assert_eq!(restored.groups[0].active, 1);
+    assert_eq!(restored.groups[1].active, 1);
+    assert_eq!((restored.active_group, restored.split, restored.split_percent), (0, Split::Vertical, 43));
+    assert!(restored.pending_prompts.is_empty());
+    assert!(restored.sessions.iter().all(|session| session.status.contains("unavailable")));
+    assert!(reloaded.save_if_complete(&restored, &Mutex::new(true)).unwrap());
+}
