@@ -10,8 +10,9 @@ This document was last read against Python **1.9.3** end to end. Later Python
 release notes and design references remain historical; they do not describe
 Rust runtime guarantees.
 
-For the alpha.46 live provider checks and their remaining limits, see the
+For the latest live provider checks and their remaining limits, see the
 [2026-09-29 native verification record](live-provider-verification-2026-09-29.md).
+For current Rust UI screenshots, see the [alpha.49 gallery](rust-gallery.md).
 
 ## Contents
 
