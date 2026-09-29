@@ -45,84 +45,86 @@ sys.stdin.read()
         self.destination = self.root / "providers" / installer.PROVIDER
 
     def install(self):
-        return installer.install(self.binary, self.root / "providers", Path("/usr/bin/true"), self.launcher, self.helper)
+        result = installer.install(self.binary, self.root / "providers", Path("/usr/bin/true"), self.launcher, self.helper)
+        self.destination = result.parent
+        return result
 
-    def test_alpha40_migration_adds_helper_without_changing_trusted_server(self):
-        self.install()
-        receipt_path = self.destination / "receipt.json"
-        receipt = json.loads(receipt_path.read_text())
-        for key in ["code_mode_host_sha256", "code_mode_host_source_commit", "code_mode_host_dispatcher_sha256"]:
-            receipt.pop(key)
-        receipt_path.write_text(json.dumps(receipt))
-        (self.destination / "codex-code-mode-host").unlink()
-        (self.destination / "codex-code-mode-host-payload").unlink()
-        before = (self.destination / "codex-app-server").read_bytes()
-        self.install()
-        after = json.loads(receipt_path.read_text())
-        self.assertEqual(before, (self.destination / "codex-app-server").read_bytes())
-        for key, value in receipt.items():
-            self.assertEqual(value, after[key])
-        self.assertEqual(installer.SOURCE, after["code_mode_host_source_commit"])
-        self.assertEqual(installer.digest(self.helper), after["code_mode_host_sha256"])
-        self.assertEqual(installer.digest(self.launcher), after["code_mode_host_dispatcher_sha256"])
+    def test_unchanged_reinstall_is_idempotent(self):
+        first = self.install()
+        before = {file.name: file.read_bytes() for file in self.destination.iterdir()}
+        self.assertEqual(first, self.install())
+        self.assertEqual(before, {file.name: file.read_bytes() for file in self.destination.iterdir()})
+        self.assertEqual(self.destination, (self.root / "providers/codex-current").resolve())
 
-    def test_missing_corrupted_helper_and_dispatcher_are_atomically_repaired(self):
+    def test_legacy_install_is_preserved_during_pointer_migration(self):
         self.install()
-        for damage in ["missing", "changed"]:
-            payload = self.destination / "codex-code-mode-host-payload"
-            if damage == "missing":
-                payload.unlink()
-            else:
-                payload.write_bytes(b"changed helper")
-            (self.destination / "codex-code-mode-host").write_bytes(b"changed dispatcher")
-            self.install()
-            self.assertEqual(self.helper.read_bytes(), payload.read_bytes())
-            self.assertEqual(self.launcher.read_bytes(), (self.destination / "codex-code-mode-host").read_bytes())
+        legacy = self.root / "providers" / installer.PROVIDER
+        self.destination.rename(legacy)
+        (self.root / "providers/codex-current").unlink()
+        before = {file.name: file.read_bytes() for file in legacy.iterdir()}
+        result = self.install()
+        self.assertNotEqual(legacy, result.parent)
+        self.assertEqual(before, {file.name: file.read_bytes() for file in legacy.iterdir()})
+        self.assertEqual(result.parent, (self.root / "providers/codex-current").resolve())
 
-    def test_different_or_partial_helper_provenance_refuses_complete_refresh(self):
-        for damage in ["source", "partial"]:
-            self.install()
-            receipt_path = self.destination / "receipt.json"
-            value = json.loads(receipt_path.read_text())
-            if damage == "source":
-                value["code_mode_host_source_commit"] = "unreviewed source"
-            else:
-                value.pop("code_mode_host_source_commit")
-            receipt_path.write_text(json.dumps(value))
-            before = {file.name: file.read_bytes() for file in self.destination.iterdir()}
-            with self.assertRaisesRegex(ValueError, "helper.*differs"):
+    def test_corrupt_installed_payload_or_receipt_refuses_publication(self):
+        for damage in ("server", "helper", "dispatcher", "receipt"):
+            with self.subTest(damage=damage):
                 self.install()
-            self.assertEqual(before, {file.name: file.read_bytes() for file in self.destination.iterdir()})
-            # Restore valid provenance before the next independent corruption.
-            value["code_mode_host_source_commit"] = installer.SOURCE
-            receipt_path.write_text(json.dumps(value))
+                target = {"server": "codex-app-server", "helper": "codex-code-mode-host-payload", "dispatcher": "codex"}.get(damage)
+                path = self.destination / (target or "receipt.json")
+                original = path.read_bytes()
+                if target:
+                    path.write_bytes(b"corrupted")
+                else:
+                    value = json.loads(original)
+                    value["binary_sha256"] = "0" * 64
+                    path.write_text(json.dumps(value))
+                before = os.readlink(self.root / "providers/codex-current")
+                with self.assertRaisesRegex(ValueError, "differs"):
+                    self.install()
+                self.assertEqual(before, os.readlink(self.root / "providers/codex-current"))
+                path.write_bytes(original)
+
+    def test_verified_rebuild_publishes_new_immutable_directory(self):
+        self.install()
+        old = self.destination
+        before = {file.name: file.read_bytes() for file in old.iterdir()}
+        self.binary.write_text(self.binary.read_text() + "# independently rebuilt fixture\n")
+        self.helper.write_bytes(b"independently rebuilt helper")
+        with self.assertRaisesRegex(ValueError, "verified build provenance"):
+            self.install()
+        identity = {"source_commit": installer.SOURCE, "patch_sha256": installer.PATCH_SHA256,
+                    "profile": "dev-small", "toolchain": "1.95.0"}
+        helper = dict(identity, product="codex-code-mode-host", v8_inputs={"fixture": "reviewed"})
+        (self.root / "build.json").write_text(json.dumps(dict(identity, binary_sha256=installer.digest(self.binary))))
+        (self.root / "code-mode-host-build.json").write_text(json.dumps(dict(helper, binary_sha256=installer.digest(self.helper))))
+        for name in ("build.json", "code-mode-host-build.json"):
+            (self.root / name).chmod(0o600)
+        verified = installer.verified_artifacts(self.root, self.binary, self.helper, helper)
+        result = installer.install(self.binary, self.root / "providers", Path("/usr/bin/true"), self.launcher, self.helper, helper, verified)
+        self.assertNotEqual(old, result.parent)
+        self.assertEqual(before, {file.name: file.read_bytes() for file in old.iterdir()})
+        self.assertEqual(result.parent, (self.root / "providers/codex-current").resolve())
+        self.helper.write_bytes(b"corrupted incoming artifact")
+        with self.assertRaisesRegex(ValueError, "fingerprints"):
+            installer.verified_artifacts(self.root, self.binary, self.helper, helper)
 
     def test_probe_isolates_operator_home_and_credentials(self):
         with patch.dict(os.environ, {"DOXA_INSTALL_TEST_SECRET": "must-not-reach-provider", "OPENAI_API_KEY": "fixture"}):
             installer.probe(self.binary)
         self.assertEqual([], list(self.root.glob(".codex-probe-*")))
 
-    def test_refresh_repairs_corrupted_and_missing_installed_payload(self):
+    def test_failed_pointer_publication_keeps_old_install(self):
         self.install()
-        payload = self.destination / "codex-app-server"
-        payload.write_bytes(b"damaged")
+        old = self.destination
+        before = {file.name: file.read_bytes() for file in old.iterdir()}
         self.launcher.write_bytes(b"new dispatcher")
-        self.install()
-        self.assertEqual(self.binary.read_bytes(), payload.read_bytes())
-        self.assertEqual(self.launcher.read_bytes(), (self.destination / "codex").read_bytes())
-        payload.unlink()
-        self.install()
-        self.assertEqual(self.binary.read_bytes(), payload.read_bytes())
-
-    def test_failed_exchange_keeps_complete_old_install(self):
-        self.install()
-        before = {file.name: file.read_bytes() for file in self.destination.iterdir()}
-        self.launcher.write_bytes(b"new dispatcher")
-        with patch.object(installer, "exchange_directories", side_effect=OSError("synthetic exchange fault")):
+        with patch.object(installer.os, "replace", side_effect=OSError("synthetic publication fault")):
             with self.assertRaises(OSError):
                 self.install()
-        after = {file.name: file.read_bytes() for file in self.destination.iterdir()}
-        self.assertEqual(before, after)
+        self.assertEqual(before, {file.name: file.read_bytes() for file in old.iterdir()})
+        self.assertEqual(old, (self.root / "providers/codex-current").resolve())
         self.assertEqual([], list((self.root / "providers").glob(".codex-stage-*")))
 
     def test_explicit_wrong_compiler_refuses_and_environment_drops_overrides(self):

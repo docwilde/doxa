@@ -94,6 +94,17 @@ fn daemon_reaper() -> &'static std::sync::mpsc::Sender<Child> {
     })
 }
 
+fn installed_codex(data: &Path) -> Option<PathBuf> {
+    let providers = data.join("doxa/providers");
+    // An existing but broken pointer must fail executable resolution, not fall
+    // back to a different provider. executable() canonicalizes a valid pointer.
+    if fs::symlink_metadata(providers.join("codex-current")).is_ok() {
+        return Some(providers.join("codex-current/codex"));
+    }
+    let legacy = providers.join("codex-0.156.1-precompact-v1/codex");
+    legacy.is_file().then_some(legacy)
+}
+
 /// Resolve a command from PATH or an explicit path to its executable file.
 pub fn executable(input: &Path) -> io::Result<PathBuf> {
     let candidates: Vec<PathBuf> = if input.components().count() > 1 || input.is_absolute() {
@@ -415,8 +426,8 @@ fn spawn_inner(options: &LaunchOptions, fleet_runtime: Option<&Path>, environmen
             }
             let installed = env::var_os("XDG_DATA_HOME").map(PathBuf::from)
                 .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
-                .map(|data| data.join("doxa/providers/codex-0.156.1-precompact-v1/codex"));
-            let default = installed.as_deref().filter(|path| path.is_file()).unwrap_or(Path::new("codex"));
+                .and_then(|data| installed_codex(&data));
+            let default = installed.as_deref().unwrap_or(Path::new("codex"));
             let codex = executable(options.codex_bin.as_deref().unwrap_or(default))?;
             command.args(["--engine", "codex", "--codex-bin"]).arg(codex).args(["--sandbox", sandbox]);
             if options.resume.is_some() {
@@ -581,6 +592,26 @@ pub fn stop(session: &Session) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn installed_provider_prefers_immutable_pointer_and_refuses_broken_pointer() {
+        let dir = tempfile::tempdir().unwrap();
+        let providers = dir.path().join("doxa/providers");
+        let legacy = providers.join("codex-0.156.1-precompact-v1");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(legacy.join("codex"), "legacy").unwrap();
+        assert_eq!(installed_codex(dir.path()), Some(legacy.join("codex")));
+        let artifact = providers.join("codex-artifact-fixture");
+        fs::create_dir(&artifact).unwrap();
+        fs::write(artifact.join("codex"), "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(artifact.join("codex"), fs::Permissions::from_mode(0o700)).unwrap();
+        symlink("codex-artifact-fixture", providers.join("codex-current")).unwrap();
+        let selected = installed_codex(dir.path()).unwrap();
+        assert_eq!(executable(&selected).unwrap(), artifact.join("codex"));
+        fs::remove_file(artifact.join("codex")).unwrap();
+        assert_eq!(installed_codex(dir.path()), Some(selected.clone()));
+        assert!(executable(&selected).is_err());
+    }
+
     #[test]
     fn admitted_daemon_reaper_waits_without_stopping_live_children() {
         let child = Command::new("/bin/sleep").arg("0.2").spawn().unwrap();
