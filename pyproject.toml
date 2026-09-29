@@ -1,6 +1,6 @@
 [project]
 name = "doxa"
-version = "2.0.0a49"
+version = "2.0.0a50"
 description = "Development compatibility reference for the native DOXA terminal."
 readme = "README.md"
 requires-python = ">=3.11"
