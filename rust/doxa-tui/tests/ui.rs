@@ -588,7 +588,8 @@ fn action_menu_cannot_cover_a_pending_permission_request() {
     }}));
     app.handle(key(KeyCode::Char('p'), KeyModifiers::CONTROL));
     let visible = screen(&app, 80, 24);
-    assert!(visible.contains("Approve?"));
+    assert!(visible.contains("Approve tool?"));
+    assert!(!visible.contains("Title:"));
     assert!(!visible.contains("Actions · ↑/↓"));
     assert!(app.pending_answers.is_empty());
 }
@@ -857,7 +858,8 @@ fn permission_requires_explicit_allow_and_preserves_prompt_draft() {
         "id":"req-1", "kind":"permission", "title":"Run shell command?", "tool_name":"Bash",
         "display_name":"Execute command", "description":"Deletes a file\u{1b}[31m", "input_summary":"rm file"}}}));
     let rendered = screen(&app, 90, 25);
-    assert!(rendered.contains("Run shell command?"));
+    assert!(rendered.contains("Approve Bash?"));
+    assert!(!rendered.contains("Title:") && !rendered.contains("Tool:") && !rendered.contains("Input:"));
     assert!(rendered.contains("Execute command"));
     assert!(rendered.contains("Deletes a file"));
     assert!(!rendered.contains('\u{1b}'));
