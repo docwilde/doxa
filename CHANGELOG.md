@@ -5,6 +5,15 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.47 — 2026-09-29
+
+**Installer recovery**
+
+- Fix **`verified_artifacts`** to accept verified Cargo cache executables
+  with read/execute modes or extra links; installed artifacts stay private and single-linked.
+- Cover real cached artifact modes and link counts alongside 12 synthetic
+  installer regressions; keep old provider files unchanged during update.
+
 ## 2.0.0-alpha.46 — 2026-09-29
 
 **Sessions and interaction**

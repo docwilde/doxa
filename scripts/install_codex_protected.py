@@ -41,13 +41,21 @@ def private_directory(path):
         raise ValueError(f"provider directory must be private and owned: {path}")
 
 
-def private_read(path, limit, *, hash_only=False):
+def private_read(path, limit, *, hash_only=False, cargo_output=False):
     descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(descriptor, "rb") as stream:
         metadata = os.fstat(stream.fileno())
+        # Cargo outputs can be 0755 or hard-linked inside the owned private
+        # build cache. Verify their bytes against private build fingerprints;
+        # copied installed artifacts and receipt files still require 0700/0600
+        # and a single link to their immutable inode.
+        forbidden = 0o022 if cargo_output else 0o077
         if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid()
-                or metadata.st_mode & 0o077 or metadata.st_nlink != 1 or metadata.st_size > limit):
-            raise ValueError("installed provider file is not private, regular and bounded")
+                or metadata.st_mode & forbidden or (not cargo_output and metadata.st_nlink != 1)
+                or metadata.st_size > limit
+                or (cargo_output and not metadata.st_mode & stat.S_IXUSR)):
+            kind = "cached Cargo output" if cargo_output else "installed provider file"
+            raise ValueError(f"{kind} is not owned, regular and bounded with safe permissions")
         if hash_only:
             return hashlib.file_digest(stream, "sha256").hexdigest()
         data = stream.read(limit + 1)
@@ -278,11 +286,11 @@ def verified_artifacts(cache, binary, code_mode_host, helper_identity):
     """Bind incoming bytes to both independently checked build fingerprints."""
     identity = {"source_commit": SOURCE, "patch_sha256": PATCH_SHA256,
                 "profile": "dev-small", "toolchain": "1.95.0"}
-    server = dict(identity, binary_sha256=private_read(binary, 1024 * 1024 * 1024, hash_only=True))
+    server = dict(identity, binary_sha256=private_read(binary, 1024 * 1024 * 1024, hash_only=True, cargo_output=True))
     if (any(helper_identity.get(key) != value for key, value in identity.items())
             or helper_identity.get("product") != "codex-code-mode-host"):
         raise ValueError("code-mode helper build identity differs from reviewed source")
-    helper = dict(helper_identity, binary_sha256=private_read(code_mode_host, 1024 * 1024 * 1024, hash_only=True))
+    helper = dict(helper_identity, binary_sha256=private_read(code_mode_host, 1024 * 1024 * 1024, hash_only=True, cargo_output=True))
     if (json.loads(private_read(cache / "build.json", 16384)) != server
             or json.loads(private_read(cache / "code-mode-host-build.json", 16384)) != helper):
         raise ValueError("provider artifacts differ from verified build fingerprints")
