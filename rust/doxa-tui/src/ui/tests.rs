@@ -5137,3 +5137,48 @@ for line in sys.stdin:
         assert!(app.lore_picker.as_ref().unwrap().pending.is_none());
         assert!(!app.lore_picker.as_ref().unwrap().resolving);
     }
+
+    fn wheel_event(kind: MouseEventKind, area: Rect) -> Event {
+        Event::Mouse(MouseEvent {kind,column:area.x+2,row:area.y+2,modifiers:KeyModifiers::NONE})
+    }
+    #[test]
+    fn wheel_scrolls_hovered_unfocused_transcript_and_preserves_prompt_owner() {
+        let mut app=App::default(); app.rail_visible=false;app.handle(Event::Resize(120,40));
+        for id in ["first","second"] {
+            app.apply_update(DaemonUpdate::Upsert(Session{id:id.into(),title:id.into(),collection:"repo".into(),
+                transcript:(0..100).map(|n|format!("{id} line {n}\n")).collect(),status:"Offline".into()}));
+        }
+        app.groups[0].tabs=vec!["first".into()];app.groups[0].active=0;
+        app.groups[1].tabs=vec!["second".into()];app.groups[1].active=0;
+        app.split=Split::Vertical;app.active_group=0;app.focus=Focus::Prompt;app.input="unsent draft".into();
+        let panes=app.layout(app.size).panes.unwrap();let body=app.pane_regions(1,panes[1])[1];
+        let before=painted_at(&app,120,40);
+        assert!(app.handle(wheel_event(MouseEventKind::ScrollUp,body)));
+        assert_eq!(app.groups[1].scroll,3);assert_eq!(app.groups[0].scroll,0);
+        assert_eq!(app.active_group,0);assert_eq!(app.focus,Focus::Prompt);assert_eq!(app.input,"unsent draft");
+        assert_ne!(painted_at(&app,120,40),before);
+        assert!(app.handle(wheel_event(MouseEventKind::ScrollDown,body)));assert_eq!(app.groups[1].scroll,0);
+        let prompt=app.pane_regions(1,panes[1])[4];
+        assert!(!app.handle(Event::Mouse(MouseEvent{kind:MouseEventKind::ScrollUp,column:prompt.x+1,row:prompt.y,modifiers:KeyModifiers::NONE})));
+        assert_eq!(app.groups[0].scroll,0);assert_eq!(app.groups[1].scroll,0);
+    }
+    #[test]
+    fn wheel_navigates_scrolled_inline_model_list_without_activating_or_losing_focus() {
+        let mut app=scrolled_picker_app();app.focus=Focus::Prompt;app.input="keep draft".into();
+        app.model_picker=Some(ModelPicker{session_id:"session".into(),models:(0..30).map(|n|format!("model-{n:02}")).collect(),selected:24,note:String::new(),loading:false,catalog_pending:false});
+        let menu=app.active_chooser_rect().unwrap();painted_at(&app,100,28);
+        assert!(app.handle(wheel_event(MouseEventKind::ScrollDown,menu)));assert_eq!(app.model_picker.as_ref().unwrap().selected,25);
+        assert!(app.handle(wheel_event(MouseEventKind::ScrollUp,menu)));assert_eq!(app.model_picker.as_ref().unwrap().selected,24);
+        assert!(app.pending_model_changes.is_empty());assert_eq!(app.focus,Focus::Prompt);assert_eq!(app.input,"keep draft");
+        assert_eq!(app.groups[0].scroll,0);
+        let outside=MouseEvent{kind:MouseEventKind::ScrollDown,column:menu.right()+1,row:menu.y+2,modifiers:KeyModifiers::NONE};
+        app.handle(Event::Mouse(outside));assert_eq!(app.model_picker.as_ref().unwrap().selected,24);
+    }
+    #[test]
+    fn wheel_over_empty_pane_or_rail_never_scrolls_focused_transcript() {
+        let mut app=App::default();app.handle(Event::Resize(120,40));app.groups[0].tabs.push("session".into());
+        app.split=Split::Vertical;let layout=app.layout(app.size);
+        assert!(!app.handle(wheel_event(MouseEventKind::ScrollUp,layout.rail.unwrap())));
+        assert!(!app.handle(wheel_event(MouseEventKind::ScrollUp,app.pane_regions(1,layout.panes.unwrap()[1])[1])));
+        assert_eq!(app.groups[0].scroll,0);assert_eq!(app.active_group,0);
+    }
