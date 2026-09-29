@@ -123,7 +123,11 @@ fn split_vendor_content_is_scrubbed_as_complete_messages_and_plain_text_stays_or
         // No single credential fragment contains the entire key: check the
         // concatenated projection as well as complete durable messages.
         assert_eq!(text,expected_text);assert_eq!(reasoning,expected_reasoning);
-        assert_eq!(kinds,["reasoning_delta","text_delta"]);
+        // Text is emitted incrementally; reasoning remains quarantined until
+        // the complete turn has passed canonical scrubbing.
+        assert_eq!(kinds.last().map(String::as_str),Some("reasoning_delta"));
+        assert!(!kinds[..kinds.len()-1].is_empty());
+        assert!(kinds[..kinds.len()-1].iter().all(|kind|kind=="text_delta"));
     }
     let originals=transcript_dir(root);
     for file in ["vendor-stream.jsonl","vendor-stream.messages.json"]{

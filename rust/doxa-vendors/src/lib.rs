@@ -1002,6 +1002,13 @@ async fn run_turn_at(
                 Error::UnexpectedToolCall
             });
         }
+        // A tool step and its continuation are separate visible text spans.
+        // Emit an actual separator, never treat an SSE block stop as a lexical
+        // boundary for downstream canonical secret scrubbing.
+        if !completion.text.is_empty() {
+            outcome.text.push('\n');
+            on_delta(Delta::Text("\n".into()));
+        }
         let mut call_ids = std::collections::BTreeSet::new();
         for call in &completion.tool_calls {
             if !allowed.contains(call.name.as_str()) || !call_ids.insert(call.id.as_str()) {

@@ -1,5 +1,5 @@
 //! DeepSeek/GLM host with an explicitly enabled, read-only workspace tool.
-use doxa_lore::LoreClient;
+use doxa_lore::{stream::StreamScrubber, LoreClient};
 use doxa_runtime::Host;
 use doxa_transcript::TranscriptStore;
 use doxa_vendors::{Delta, Error, Vendor, MAX_TURN_DURATION};
@@ -13,6 +13,7 @@ use tokio::sync::watch;
 
 const MAX_CONTEXT_BYTES: usize = 64 * 1024;
 const EVENT_TEXT_CHUNK_BYTES: usize = 8 * 1024;
+const MAX_STREAM_TEXT_BYTES: usize = 8 * 1024 * 1024;
 
 fn emit_content_chunks(kind: &str, content: &str, approx_tokens: u64, emit: &mut dyn FnMut(Value)) {
     let mut start = 0;
@@ -461,11 +462,29 @@ impl Host for VendorHost {
         let mut reasoning_chars = 0u64;
         let mut reported_tokens = 0u64;
         let mut last_progress = Instant::now();
+        let mut text_scrubber = StreamScrubber::default();
+        let mut streamed_bytes = 0usize;
+        let mut stream_failed = false;
         let mut on_delta = |delta: Delta| {
             if let Ok(mut events) = tool_events.lock() {
                 for event in events.drain(..) { emit_tool(event); }
             }
-            if let Delta::Reasoning(text) = delta {
+            if let Delta::Text(text) = delta {
+                if stream_failed { return; }
+                let clean = text_scrubber.push(&text, |value| self.scrub(value)
+                    .map_err(|_| std::io::Error::other("LORE stream scrub failed")));
+                match clean {
+                    Ok(clean) if streamed_bytes.saturating_add(clean.len()) <= MAX_STREAM_TEXT_BYTES => {
+                        streamed_bytes += clean.len();
+                        emit_content_chunks("text_delta", &clean, 0, &mut **output.borrow_mut());
+                    }
+                    _ => {
+                        stream_failed = true;
+                        self.scrub_failed.store(true, Ordering::Release);
+                        self.cancel();
+                    }
+                }
+            } else if let Delta::Reasoning(text) = delta {
                 reasoning_chars = reasoning_chars.saturating_add(text.chars().count() as u64);
                 let estimate = reasoning_chars.div_ceil(4);
                 if estimate > reported_tokens && last_progress.elapsed() >= Duration::from_millis(100) {
@@ -524,11 +543,29 @@ impl Host for VendorHost {
             }
             Err(_) => Err(Error::Transport),
         };
+        drop(on_delta);
+        if result.is_ok() && !stream_failed {
+            match text_scrubber.finish(|value| self.scrub(value)
+                .map_err(|_| std::io::Error::other("LORE stream scrub failed"))) {
+                Ok(clean) if streamed_bytes.saturating_add(clean.len()) <= MAX_STREAM_TEXT_BYTES => {
+                    emit_content_chunks("text_delta", &clean, 0, &mut **output.borrow_mut());
+                }
+                _ => {
+                    stream_failed = true;
+                    self.scrub_failed.store(true, Ordering::Release);
+                    self.cancel();
+                }
+            }
+        }
         drop(output);
         if let Some(tools)=&self.agent_tools { for event in tools.take_disabled_events() { emit(event); } }
         if let Ok(mut events) = tool_events.lock() { for event in events.drain(..) { emit(event); } }
         if reasoning_chars > 0 && reasoning_chars.div_ceil(4) > reported_tokens {
             emit(json!({"type":"reasoning_progress","data":{"approx_tokens":reasoning_chars.div_ceil(4)}}));
+        }
+        if stream_failed {
+            emit(done("Vendor streamed text could not be safely scrubbed; history unchanged"));
+            return;
         }
         match result {
             Ok(outcome) => {
@@ -601,9 +638,6 @@ impl Host for VendorHost {
                         .store(committed_bytes, Ordering::Release);
                     if !reasoning.is_empty() {
                         emit_content_chunks("reasoning_delta", &reasoning, reasoning_chars.div_ceil(4), emit);
-                    }
-                    if !text.is_empty() {
-                        emit_content_chunks("text_delta", &text, 0, emit);
                     }
                     let turns = self.turns.fetch_add(1, Ordering::AcqRel) + 1;
                     self.refresh_balance();
