@@ -5,6 +5,15 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.50 — 2026-09-30
+
+**LORE gallery**
+
+- Add unedited live captures of the curated-memory and belief submenus to the
+  README using an isolated native LORE store with shareable example entries.
+- Let **`live_rust_gallery.py`** enable its isolated store with `--with-lore`;
+  document the provenance of all nine README frames.
+
 ## 2.0.0-alpha.49 — 2026-09-29
 
 **Documentation and live gallery**

@@ -235,7 +235,7 @@ wheels = [
 
 [[package]]
 name = "doxa"
-version = "2.0.0a49"
+version = "2.0.0a50"
 source = { editable = "." }
 
 [package.dev-dependencies]

@@ -6,12 +6,16 @@ These images use the production frontend and native daemon with an authenticated
 Codex session; they do not use `TestBackend`, `--demo`, a fixture engine, or
 injected daemon events. The PNGs are unedited.
 
+The gallery combines seven alpha.49 provider frames with two alpha.50 LORE
+browser frames. Both menu images show production UI querying an isolated native
+LORE store populated through `lore-rs` with shareable example entries.
+
 ## Capture provenance
 
 | Item | Recorded value |
 | --- | --- |
 | Date | 2026-09-29 |
-| Release | `2.0.0-alpha.49` |
+| Provider frames | `2.0.0-alpha.49` |
 | Frontend and daemon source | `8b7804e446887368f3b29ca172bf2f60f44dc77b` (alpha.49 version commit over alpha.48 main) |
 | Build profile | Cargo release profile, actual `doxa-rs` and `doxa-daemon` binaries |
 | LORE | Native `0.62.4`, pinned to `8250d7b037524f3e1e3f17956ba934162e8ba8cd` |
@@ -37,9 +41,20 @@ The settings submenu shows startup configuration defaults (Claude and unset
 effort) alongside the inherited session model; the live chips show Codex and
 verified low effort. Opening settings does not change the active provider.
 Displayed context and timing values are the app's reported values, not invented
-usage data. Memory is disabled and both isolated stores are empty. The approval
+usage data. In these seven frames memory is disabled and both isolated stores
+are empty. The approval
 frame contains an ephemeral command request and a private path under the example
 state directory; it contains no account credentials.
+
+The curated-memory and beliefs frames were captured on 2026-09-30 from the
+alpha.50 version commit `aa62023` in a third fresh Codex session. This session
+used `--with-lore`, which sets `DOXA_LORE=1` while keeping `LORE_ROOT` and
+`LORE_PROJECTS_DIR` inside its private gallery state. The native `lore-rs`
+carrier added 17 short user/project facts and 27 project beliefs (including
+one entry of each kind from the initial seeding probe). The menu data is
+synthetic, but the storage, carrier queries, terminal interaction and captured
+pixels are real. These two frames also measure 3068 × 1734. Both show a selected
+row and the right scrollbar; neither exposes a personal memory store.
 
 ## Reproduce a live capture
 
@@ -72,6 +87,13 @@ names it `doxa-daemon-rs`.
 The script requires system Python with GTK3/VTE, Xvfb, FFmpeg and the font above.
 It enables the terminal's normal color palette even if the invoking shell sets
 `NO_COLOR`.
+
+For the memory and belief frames, seed only the isolated `LORE_ROOT` and
+`LORE_PROJECTS_DIR` through the native `lore-rs memory add` and `lore-rs belief
+add` commands, then add `--with-lore` to `live_rust_gallery.py run`. The app
+loads those entries through its ordinary LORE carrier. Click the memory or
+Beliefs chip, use Down to select a row, and capture with the names
+`rust-curated-memory` and `rust-beliefs`.
 
 In another terminal, send normal terminal input through the owned VTE PTY:
 
