@@ -97,10 +97,7 @@ impl Shared {
             })
     }
     fn review(&self, older: bool) -> bool {
-        if !self.enabled
-            || self.failed.load(Ordering::Acquire)
-            || doxa_lore::review_disabled().unwrap_or(true)
-        {
+        if !self.enabled || self.failed.load(Ordering::Acquire) || doxa_lore::review_disabled().unwrap_or(true) {
             return false;
         }
         let metadata = json!({"cwd":self.cwd,"session_id":self.session,"transcript":self.store.transcript_path(),"older":older});
@@ -1571,6 +1568,7 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>) {
                         let _ = cli.control(json!({"subtype":"interrupt"}));
                     }
                 }
+
                 if let Some((kind, text)) = match delta["type"].as_str() {
                     Some("text_delta") => delta["text"].as_str().map(|s| ("text_delta", s)),
                     Some("thinking_delta") => {
@@ -1781,14 +1779,9 @@ fn context_detail(value: &Value, shared: &Shared) -> Result<Value, String> {
 fn quota_window(window: &str, value: &Value, status: Option<&str>) -> Option<Value> {
     if !matches!(
         window,
-        "five_hour"
-            | "seven_day"
-            | "seven_day_opus"
-            | "seven_day_sonnet"
-            | "seven_day_overage_included"
-            | "overage"
-    ) || !value.is_object()
-    {
+        "five_hour" | "seven_day" | "seven_day_opus" | "seven_day_sonnet"
+            | "seven_day_overage_included" | "overage"
+    ) || !value.is_object() {
         return None;
     }
     let mut result = json!({"window":window});
@@ -1846,22 +1839,14 @@ fn render_quota(shared: &Shared) -> Option<Value> {
     billing["quota_limits"] = limits;
     let mut text = Vec::new();
     for (key, label) in [
-        ("five_hour", "5h"),
-        ("seven_day", "week"),
-        ("seven_day_opus", "opus"),
-        ("seven_day_sonnet", "sonnet"),
-        ("seven_day_overage_included", "included"),
-        ("overage", "extra"),
+        ("five_hour", "5h"), ("seven_day", "week"), ("seven_day_opus", "opus"),
+        ("seven_day_sonnet", "sonnet"), ("seven_day_overage_included", "included"), ("overage", "extra"),
     ] {
         if let Some(percent) = billing["quota_limits"][key]["percent"].as_u64() {
             text.push(format!("{label}:{percent}%"));
         }
     }
-    billing["quota"] = if text.is_empty() {
-        Value::Null
-    } else {
-        json!(text.join(" "))
-    };
+    billing["quota"] = if text.is_empty() { Value::Null } else { json!(text.join(" ")) };
     billing["quota_source"] = json!("claude_cli");
     billing["quota_stale"] = json!(false);
     Some(billing.clone())
@@ -1913,15 +1898,12 @@ mod tests {
     const SESSION: &str = "0b256c09-8d74-4865-9be0-4e6d24384551";
     fn fixture(body: &str) -> (tempfile::TempDir, Arc<ClaudeHost>) {
         fixture_with_startup(
-            body,
-            "pass",
+            body, "pass",
             Some(json!({"mode":"subscription","type":"max","quota":null})),
         )
     }
     fn fixture_with_startup(
-        body: &str,
-        startup: &str,
-        initial_billing: Option<Value>,
+        body: &str, startup: &str, initial_billing: Option<Value>,
     ) -> (tempfile::TempDir, Arc<ClaudeHost>) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("claude");
@@ -2449,20 +2431,15 @@ for line in sys.stdin:
     }
     #[test]
     fn quota_nested_windows_keep_limiting_status_on_its_own_window() {
-        let limits = rate_limits(
-            &json!({"status":"allowed_warning","rateLimitType":"five_hour","resetsAt":123,
-            "unifiedWindows":{"five_hour":{"utilization":0.23,"resetsAt":123},"seven_day":{"utilization":0.47,"resetsAt":456}},"raw":"private"}),
-        );
+        let limits = rate_limits(&json!({"status":"allowed_warning","rateLimitType":"five_hour","resetsAt":123,
+            "unifiedWindows":{"five_hour":{"utilization":0.23,"resetsAt":123},"seven_day":{"utilization":0.47,"resetsAt":456}},"raw":"private"}));
         let (_dir, host) = fixture("");
         for limit in limits {
             let _ = update_quota(&host.shared, &limit);
         }
         let billing = host.billing_snapshot().unwrap();
         assert_eq!(billing["quota"], "5h:23% week:47%");
-        assert_eq!(
-            billing["quota_limits"]["five_hour"]["status"],
-            "allowed_warning"
-        );
+        assert_eq!(billing["quota_limits"]["five_hour"]["status"], "allowed_warning");
         assert!(billing["quota_limits"]["seven_day"].get("status").is_none());
         assert_eq!(billing["quota_source"], "claude_cli");
         assert!(!billing.to_string().contains("private"));
@@ -2482,9 +2459,7 @@ for line in sys.stdin:
         }
         let billing = host.billing_snapshot().unwrap();
         assert_eq!(billing["quota"], "week:20%");
-        assert!(billing["quota_limits"]["five_hour"]
-            .get("percent")
-            .is_none());
+        assert!(billing["quota_limits"]["five_hour"].get("percent").is_none());
         assert_eq!(billing["quota_limits"]["five_hour"]["resets_at"], 789);
         assert_eq!(billing["quota_limits"]["seven_day"]["resets_at"], 456);
         // Refreshing the catalog/account must not clear observed quotas.
@@ -2505,9 +2480,7 @@ for line in sys.stdin:
         }
         let billing = host.billing_snapshot().unwrap();
         assert!(billing["quota"].is_null());
-        assert!(billing["quota_limits"]["five_hour"]
-            .get("percent")
-            .is_none());
+        assert!(billing["quota_limits"]["five_hour"].get("percent").is_none());
         assert!(billing["quota_limits"]["five_hour"].get("status").is_none());
         for payload in [
             json!({"unifiedWindows":{"five_hour":{"utilization":0.1}}}),
@@ -2519,45 +2492,21 @@ for line in sys.stdin:
         }
         let billing = host.billing_snapshot().unwrap();
         assert_eq!(billing["quota"], "5h:10%");
-        assert_eq!(
-            billing["quota_limits"]["five_hour"]["status"],
-            "allowed_warning"
-        );
+        assert_eq!(billing["quota_limits"]["five_hour"]["status"], "allowed_warning");
         assert!(host.shutdown());
     }
     #[test]
     fn quota_invalid_window_values_do_not_poison_valid_siblings() {
-        for invalid in [
-            json!(-0.1),
-            json!(1.01),
-            json!(f64::NAN),
-            json!(f64::INFINITY),
-            json!("0.2"),
-            Value::Null,
-        ] {
-            let limits = rate_limits(
-                &json!({"unifiedWindows":{"five_hour":{"utilization":invalid,"resetsAt":123},"seven_day":{"utilization":0.4,"resetsAt":456}}}),
-            );
+        for invalid in [json!(-0.1),json!(1.01),json!(f64::NAN),json!(f64::INFINITY),json!("0.2"),Value::Null] {
+            let limits = rate_limits(&json!({"unifiedWindows":{"five_hour":{"utilization":invalid,"resetsAt":123},"seven_day":{"utilization":0.4,"resetsAt":456}}}));
             assert_eq!(limits.len(), 1);
             assert_eq!(limits[0]["window"], "seven_day");
         }
-        for invalid in [
-            json!(-1),
-            json!(1.5),
-            json!(253402300800u64),
-            json!("123"),
-            Value::Null,
-        ] {
+        for invalid in [json!(-1),json!(1.5),json!(253402300800u64),json!("123"),Value::Null] {
             assert!(rate_limits(&json!({"status":"allowed","rateLimitType":"five_hour","utilization":0.2,"resetsAt":invalid})).is_empty());
         }
-        assert!(rate_limits(
-            &json!({"status":"invented","rateLimitType":"five_hour","utilization":0.2})
-        )
-        .is_empty());
-        assert!(rate_limits(
-            &json!({"unifiedWindows":{"five_hour":{},"unknown":{"utilization":0.2}}})
-        )
-        .is_empty());
+        assert!(rate_limits(&json!({"status":"invented","rateLimitType":"five_hour","utilization":0.2})).is_empty());
+        assert!(rate_limits(&json!({"unifiedWindows":{"five_hour":{},"unknown":{"utilization":0.2}}})).is_empty());
     }
     #[test]
     fn quota_overage_windows_are_separate_and_do_not_invent_status() {
@@ -2572,9 +2521,7 @@ for line in sys.stdin:
         }
         let billing = host.billing_snapshot().unwrap();
         assert_eq!(billing["quota"], "included:10% extra:20%");
-        assert!(billing["quota_limits"]["seven_day_overage_included"]
-            .get("status")
-            .is_none());
+        assert!(billing["quota_limits"]["seven_day_overage_included"].get("status").is_none());
         assert_eq!(billing["quota_limits"]["overage"]["status"], "allowed");
         assert!(host.shutdown());
     }
@@ -2600,8 +2547,7 @@ for line in sys.stdin:
         );
         assert!(rate_limits(
             &json!({"status":"allowed","rateLimitType":"five_hour","utilization":1.01})
-        )
-        .is_empty());
+        ).is_empty());
         assert!(host.shutdown());
     }
 }
