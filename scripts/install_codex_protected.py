@@ -15,7 +15,6 @@ import platform
 import urllib.request
 import stat
 import fcntl
-import ctypes
 import tomllib
 import re
 from contextlib import contextmanager
@@ -70,19 +69,6 @@ def locked_directory(directory):
         yield
     finally:
         os.close(descriptor)
-
-
-def exchange_directories(stage, destination):
-    # Linux exchange publishes payload, dispatcher and receipt as one transaction.
-    # If unsupported, leave the installed provider unchanged and report failure.
-    libc = ctypes.CDLL(None, use_errno=True)
-    exchange = getattr(libc, "renameat2", None)
-    if exchange is None:
-        raise ValueError("atomic provider refresh requires Linux renameat2")
-    exchange.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
-    exchange.restype = ctypes.c_int
-    if exchange(-100, os.fsencode(stage), -100, os.fsencode(destination), 2):
-        raise OSError(ctypes.get_errno(), "atomic provider directory refresh failed")
 
 
 def run(arguments, **kwargs):
@@ -234,7 +220,7 @@ def build(cache, cargo):
     fingerprint = cache / "build.json"
     identity = {"source_commit": SOURCE, "patch_sha256": PATCH_SHA256, "profile": "dev-small", "toolchain": "1.95.0"}
     if binary.is_file() and fingerprint.is_file():
-        prior = json.loads(fingerprint.read_text())
+        prior = json.loads(private_read(fingerprint, 16384))
         if prior == dict(identity, binary_sha256=digest(binary)):
             probe(binary)
             print("doxa-codex-install: reusing verified private app-server artifact", flush=True)
@@ -288,12 +274,77 @@ def build_code_mode_host(cache, cargo):
     return binary, identity
 
 
-def install(binary, root, official_cli, launcher, code_mode_host, helper_identity=None):
+def verified_artifacts(cache, binary, code_mode_host, helper_identity):
+    """Bind incoming bytes to both independently checked build fingerprints."""
+    identity = {"source_commit": SOURCE, "patch_sha256": PATCH_SHA256,
+                "profile": "dev-small", "toolchain": "1.95.0"}
+    server = dict(identity, binary_sha256=private_read(binary, 1024 * 1024 * 1024, hash_only=True))
+    if (any(helper_identity.get(key) != value for key, value in identity.items())
+            or helper_identity.get("product") != "codex-code-mode-host"):
+        raise ValueError("code-mode helper build identity differs from reviewed source")
+    helper = dict(helper_identity, binary_sha256=private_read(code_mode_host, 1024 * 1024 * 1024, hash_only=True))
+    if (json.loads(private_read(cache / "build.json", 16384)) != server
+            or json.loads(private_read(cache / "code-mode-host-build.json", 16384)) != helper):
+        raise ValueError("provider artifacts differ from verified build fingerprints")
+    return {"binary_sha256": server["binary_sha256"],
+            "code_mode_host_sha256": helper["binary_sha256"], **identity,
+            "code_mode_host_v8_inputs": helper_identity["v8_inputs"]}
+
+
+def verify_installed(destination, previous):
+    """Never repair or replace an installation whose own receipt does not match."""
+    expected = {"contract": CONTRACT, "source_commit": SOURCE, "patch_sha256": PATCH_SHA256,
+                "profile": "dev-small", "toolchain": "1.95.0"}
+    if any(previous.get(key) != value for key, value in expected.items()):
+        raise ValueError("installed provider provenance differs from reviewed source")
+    helper_keys = ("code_mode_host_sha256", "code_mode_host_source_commit", "code_mode_host_dispatcher_sha256")
+    if any(key in previous for key in helper_keys) and not all(key in previous for key in helper_keys):
+        raise ValueError("partial code-mode helper provenance differs from installed receipt")
+    files = [("codex-app-server", "binary_sha256")]
+    if all(key in previous for key in helper_keys):
+        if previous["code_mode_host_source_commit"] != SOURCE:
+            raise ValueError("code-mode helper source differs from reviewed source")
+        files += [("codex-code-mode-host-payload", "code_mode_host_sha256"),
+                  ("codex-code-mode-host", "code_mode_host_dispatcher_sha256"),
+                  ("codex", "code_mode_host_dispatcher_sha256")]
+    else:
+        raise ValueError("legacy installed receipt lacks complete helper provenance; use a fresh install root")
+    for name, key in files:
+        if private_read(destination / name, 1024 * 1024 * 1024, hash_only=True) != previous.get(key):
+            raise ValueError("installed provider artifact differs from its receipt; publication refused")
+
+
+def active_installation(root):
+    active = root / "codex-current"
+    if active.is_symlink():
+        target = Path(os.readlink(active))
+        if target.is_absolute() or len(target.parts) != 1 or not target.name.startswith(PROVIDER + "-"):
+            raise ValueError("active provider pointer is not a reviewed local artifact directory")
+        destination = root / target
+        if not destination.is_dir():
+            raise ValueError("active provider artifact directory is missing")
+        private_directory(destination)
+        receipt_bytes = private_read(destination / "receipt.json", 16384)
+        if destination.name != PROVIDER + "-" + hashlib.sha256(receipt_bytes).hexdigest():
+            raise ValueError("active provider receipt differs from immutable artifact identity")
+        return destination
+    if active.exists():
+        raise ValueError("active provider pointer must be a symlink")
+    legacy = root / PROVIDER
+    if legacy.exists():
+        private_directory(legacy)
+        return legacy
+    return None
+
+
+def install(binary, root, official_cli, launcher, code_mode_host, helper_identity=None, verified=None):
     probe(binary)
     private_directory(root)
-    destination = root / PROVIDER
-    if destination.exists():
-        private_directory(destination)
+    current = active_installation(root)
+    previous = None
+    if current is not None:
+        previous = json.loads(private_read(current / "receipt.json", 16384))
+        verify_installed(current, previous)
     # Build in a sibling stage. An interrupted copy leaves the current provider intact.
     stage = Path(tempfile.mkdtemp(prefix=".codex-stage-", dir=root))
     try:
@@ -315,36 +366,33 @@ def install(binary, root, official_cli, launcher, code_mode_host, helper_identit
             receipt["code_mode_host_v8_inputs"] = helper_identity["v8_inputs"]
         (stage / "receipt.json").write_text(json.dumps(receipt, sort_keys=True) + "\n")
         (stage / "receipt.json").chmod(0o600)
-        # Existing installations are identical or retained until an explicit upgrade.
+        # A byte-changing rebuild requires independently verified build fingerprints.
+        identity_keys = ("contract", "source_commit", "patch_sha256", "binary_sha256", "profile", "toolchain", "code_mode_host_sha256")
+        if previous is not None and any(previous.get(key) != receipt[key] for key in identity_keys):
+            keys = ("source_commit", "patch_sha256", "profile", "toolchain", "binary_sha256", "code_mode_host_sha256", "code_mode_host_v8_inputs")
+            if verified is None or any(verified.get(key) != receipt.get(key) for key in keys):
+                raise ValueError("provider artifact differs from installed receipt; verified build provenance required")
+        # Receipt identity includes dispatcher and helper bytes. Never mutate a
+        # directory a running provider may still reference for helpers/attestation.
+        artifact = hashlib.sha256((stage / "receipt.json").read_bytes()).hexdigest()
+        destination = root / (PROVIDER + "-" + artifact)
         if destination.exists():
-            previous = json.loads(private_read(destination / "receipt.json", 16384))
-            identity_keys = ("contract", "source_commit", "patch_sha256", "binary_sha256", "profile", "toolchain")
-            if any(previous.get(key) != receipt[key] for key in identity_keys):
-                raise ValueError("provider artifact differs from installed receipt; use a new --install-root for review")
-            # Alpha.40 has neither helper field. Migrate only that exact reviewed
-            # server identity; partial/different helper provenance is refused.
-            helper_keys = ("code_mode_host_sha256", "code_mode_host_source_commit")
-            if "code_mode_host_dispatcher_sha256" in previous and not all(key in previous for key in helper_keys):
-                raise ValueError("partial code-mode helper provenance differs from installed receipt")
-            if any(key in previous for key in helper_keys) and any(previous.get(key) != receipt[key] for key in helper_keys):
-                raise ValueError("code-mode helper differs from installed receipt; use a new --install-root for review")
-            # Check the actual installed payload, not only its receipt. Republish the
-            # verified stage to repair a missing/corrupt file and refresh the shim.
-            try:
-                installed_hash = private_read(destination / "codex-app-server", 1024 * 1024 * 1024, hash_only=True)
-            except (OSError, ValueError):
-                installed_hash = None
-            if installed_hash != receipt["binary_sha256"]:
-                print("doxa-codex-install: repairing installed provider payload from verified artifact", flush=True)
-            try:
-                installed_host_hash = private_read(destination / "codex-code-mode-host-payload", 1024 * 1024 * 1024, hash_only=True)
-            except (OSError, ValueError):
-                installed_host_hash = None
-            if installed_host_hash != receipt["code_mode_host_sha256"]:
-                print("doxa-codex-install: installing or repairing required code-mode host", flush=True)
-            exchange_directories(stage, destination)
+            private_directory(destination)
+            existing = json.loads(private_read(destination / "receipt.json", 16384))
+            if existing != receipt:
+                raise ValueError("immutable provider receipt differs from staged artifact")
+            verify_installed(destination, existing)
         else:
             stage.rename(destination)
+        # Atomic pointer handoff affects only new launches; current_exe resolves
+        # inside the immutable directory and old installations remain available.
+        pointer = root / (".codex-current-" + artifact)
+        try:
+            pointer.symlink_to(destination.name)
+            os.replace(pointer, root / "codex-current")
+        finally:
+            if pointer.is_symlink():
+                pointer.unlink()
         print(destination / "codex")
         print(json.dumps(receipt, sort_keys=True))
         return destination / "codex"
@@ -433,8 +481,9 @@ def main():
     with locked_directory(options.cache):
         binary = build(options.cache, options.cargo)
         code_mode_host, helper_identity = build_code_mode_host(options.cache, options.cargo)
+        verified = verified_artifacts(options.cache, binary, code_mode_host, helper_identity)
         with locked_directory(options.install_root):
-            install(binary, options.install_root, official, options.launcher, code_mode_host, helper_identity)
+            install(binary, options.install_root, official, options.launcher, code_mode_host, helper_identity, verified)
 
 
 if __name__ == "__main__":

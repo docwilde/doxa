@@ -2,11 +2,15 @@
 
 Rust is the main DOXA frontend. The installer exposes `doxa`; the compiled
 frontend is `doxa-rs`. Claude uses its native CLI control protocol, Codex uses
-its app server, and API vendors use Rust HTTP clients. Canonical LORE 0.62.2 is an
+its app server, and API vendors use Rust HTTP clients. Canonical LORE 0.62.4 is an
 integrated Rust library for memory, reviews, indexing, and secret scrubbing;
 `lore-rs` also provides detached review and standalone plugin commands.
 The installed runtime requires no Python interpreter.
 The [parity tracker](../docs/rust-1.19-parity.md) records stable release gates.
+The [2026-09-29 verification record](../docs/live-provider-verification-2026-09-29.md)
+reports the alpha.46 candidate's observed behavior and remaining checks.
+Linux is verified. The full protected DOXA runtime is unsupported on macOS and
+Windows; standalone LORE macOS is unverified and Windows is unsupported.
 
 ## Build and install
 
@@ -38,12 +42,16 @@ Cargo and Rust. Binaries go to `~/.local/bin`, overridable with
 `DOXA_RUST_BIN_DIR`. Linux application-menu integration can be disabled with
 `DOXA_NO_LAUNCHER=1`. `doxa update` updates an installed launcher; source builds
 use `./task install`. `doxa help` lists CLI forms and options.
+Verified Codex updates publish a fresh immutable provider artifact and select it
+for new launches. Running providers retain their original files. Corrupt installed
+artifacts or receipts are refused rather than silently replaced.
 
 ## Sessions and worktrees
 
 Bare `doxa` restores this project's saved tabs or starts the configured engine
 (default Claude). Safe saved conversations resume without a prompt; others remain
-read only with a reason. `restore_tabs` and `resume_restored` control this behavior. `new` always
+read only with a reason. Offline restoration retains saved split layout and
+conversations. `restore_tabs` and `resume_restored` control this behavior. `new` always
 starts a session; `attach`, `stop`, and `list` manage live sessions. Select
 `--engine codex|claude|deepseek|glm`, `--model`, and supported `--effort` values.
 Claude needs the Claude Code CLI. Set DeepSeek or z.ai API keys in `/setup`,
@@ -112,7 +120,9 @@ checks before invoking canonical LORE mutations. Pending, conflict, trust, and
 detached-store gates remain authoritative. Beliefs and `/pending` use complete
 review and atomic exact-snapshot actions through the integrated canonical core.
 A missing native carrier is an explicit availability failure. DOXA does not
-implement a separate memory store.
+implement a separate memory store. Memory browsing delays entry previews;
+review view titles distinguish **Pending** from **Clustered** proposals.
+Mouse-wheel input follows the hovered pane or control.
 
 `/context` shows available official provider telemetry and reported snapshot
 metadata. Claude can report categories, memory files, tools, agents, and local
@@ -120,7 +130,8 @@ injection character counts. Codex shows verified model/window and input/cached/
 output usage; unavailable component counts remain unknown. Estimates are marked.
 `/usage` uses reported accounting; subscription quota is shown only from a
 verified source. Missing or stale provider data is not replaced with invented
-billing or component totals.
+billing or component totals. Reported quota consumption becomes yellow above
+66% and red above 90%; missing quota stays unknown.
 
 `setup` and `/setup` guide provider authentication, LORE store selection, and
 model/effort defaults. `auth login claude|codex`, `auth logout claude|codex`, and
@@ -212,7 +223,9 @@ process groups or sessions. The daemon does not adopt unrelated jobs.
 
 Ten tests against the compiled provider cover nine refusal cases and a successful
 allow control with a loopback model. Real-account successful LORE review and
-large-context compaction still require the reviewer's Claude authentication.
+large-context compaction require the reviewer's Claude authentication. Earlier
+manual and lowered-threshold automatic compaction passed native review; the
+2026-09-29 default-window stress stopped below its trigger and remains incomplete.
 See [engine contracts](doxa-engines/README.md) for transport and review details.
 
 ## Verification and gallery

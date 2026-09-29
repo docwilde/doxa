@@ -92,13 +92,11 @@ fn flat_legacy_record_keeps_offline_tab_when_live_layout_changes() {
     );
     let mut app = App::default();
     assert!(store.restore(&mut app, &live(&["a", "b"])));
-    assert_eq!(app.groups[0].tabs, ["a", "b"]);
-    assert_eq!(app.groups[0].active, 1);
+    assert_eq!(app.groups[0].tabs, ["a", "stale", "b"]);
+    assert_eq!(app.groups[0].active, 2);
     assert!(app.groups[1].tabs.is_empty());
     app.rail_width = 31;
-    let original = fs::read(store.path()).unwrap();
-    assert!(store.save_if_complete(&app, &Mutex::new(true)).is_err());
-    assert_eq!(fs::read(store.path()).unwrap(), original);
+    assert!(store.save_if_complete(&app, &Mutex::new(true)).unwrap());
     let saved: Value = serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
     assert_eq!(saved["tabs"].as_array().unwrap().len(), 3);
     assert_eq!(saved["tabs"][1]["session_id"], "stale");
@@ -118,7 +116,7 @@ fn archived_middle_tab_and_collection_survive_split_mutation() {
     }));
     let mut app = App::default();
     assert!(store.restore(&mut app, &live(&["live-a", "live-b"])));
-    assert_eq!(app.groups[0].tabs, ["live-a", "live-b"]);
+    assert_eq!(app.groups[0].tabs, ["live-a", "archived", "live-b"]);
     app.groups[0].tabs.pop();
     app.groups[1].tabs.push("live-b".into());
     app.groups[0].active = 0;
@@ -126,9 +124,7 @@ fn archived_middle_tab_and_collection_survive_split_mutation() {
     app.active_group = 1;
     app.split_percent = 65;
     app.rail_width = 34;
-    let original = fs::read(store.path()).unwrap();
-    assert!(store.save_if_complete(&app, &Mutex::new(true)).is_err());
-    assert_eq!(fs::read(store.path()).unwrap(), original);
+    assert!(store.save_if_complete(&app, &Mutex::new(true)).unwrap());
     let saved: Value = serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
     assert_eq!(
         saved["tabs"]
@@ -139,7 +135,7 @@ fn archived_middle_tab_and_collection_survive_split_mutation() {
             .collect::<Vec<_>>(),
         ["live-a", "archived", "live-b"]
     );
-    assert_eq!(saved["layout"]["groups"]["tabs"][1]["view"], "diff");
+    assert_eq!(saved["layout"]["groups"]["children"][0]["tabs"][1]["view"], "diff");
     assert_eq!(
         saved["collections"][0]["sessions"],
         json!(["live-a", "archived", "live-b"])
@@ -226,11 +222,12 @@ fn complex_future_layout_is_readable_but_never_rewritten() {
 }
 
 #[test]
-fn no_live_saved_tab_leaves_fresh_app_untouched() {
+fn no_live_saved_tab_remains_visible_with_unavailable_reason() {
     let (_dir, store) = seeded(json!({"tabs":[{"session_id":"old"}],"active_session_id":"old"}));
     let mut app = App::default();
-    assert!(!store.restore(&mut app, &live(&["current"])));
-    assert!(app.groups.iter().all(|g| g.tabs.is_empty()));
+    assert!(store.restore(&mut app, &live(&["current"])));
+    assert_eq!(app.groups[0].tabs, ["old"]);
+    assert!(app.sessions[0].status.contains("unavailable"));
 }
 
 #[test]
@@ -268,7 +265,7 @@ fn duplicate_session_in_two_panes_cannot_corrupt_group_record() {
 }
 
 #[test]
-fn stale_first_pane_collapses_to_live_second_pane() {
+fn unavailable_first_pane_preserves_live_second_pane_and_focus() {
     let (_dir, store) = seeded(
         json!({"tabs":[{"session_id":"old"},{"session_id":"live"}],"active_session_id":"live",
         "layout":{"kind":"tabs","groups":{"kind":"split","orientation":"row","weights":[0.5,0.5],"children":[
@@ -278,9 +275,10 @@ fn stale_first_pane_collapses_to_live_second_pane() {
     );
     let mut app = App::default();
     assert!(store.restore(&mut app, &live(&["live"])));
-    assert_eq!(app.groups[0].tabs, ["live"]);
-    assert!(app.groups[1].tabs.is_empty());
-    assert_eq!(app.active_group, 0);
+    assert_eq!(app.groups[0].tabs, ["old"]);
+    assert_eq!(app.groups[1].tabs, ["live"]);
+    assert_eq!(app.active_group, 1);
+    assert!(app.sessions[0].status.contains("unavailable"));
 }
 
 #[test]

@@ -110,6 +110,9 @@ impl App {
         {
             self.belief_preview.render(frame, area);
         }
+        if self.memory_preview.owner().is_some_and(|owner| self.valid_memory_preview_owner(owner)) {
+            self.memory_preview.render_titled(frame,area," Full memory "," Memory preview ");
+        }
         self.transcript_selection
             .borrow_mut()
             .finish_paint(frame.buffer_mut());
@@ -606,6 +609,14 @@ impl App {
 
     pub(super) fn draw_chip_info(&self, frame: &mut Frame, area: Rect) {
         if let Some(manager) = &self.memory_manager {
+            let visible=usize::from(area.height.saturating_sub(4));
+            for (offset,(index,entry)) in manager.visible_entries(visible).into_iter().enumerate() {
+                self.rendered_belief_rows.borrow_mut().push(crate::belief_preview::Owner {
+                    id:index as u64+1,pane:self.active_group,session:Some(manager.owner.0.clone()),cwd:manager.owner.1.clone(),
+                    query:manager.scope.into(),offset:0,rect:Rect::new(area.x+1,area.y+2+offset as u16,area.width.saturating_sub(2),1),
+                    menu:area,subject:manager.scope.into(),claim:entry,truncated:false,
+                });
+            }
             manager.draw(frame, area);
             return;
         }
@@ -1156,15 +1167,12 @@ impl App {
                     lines.push(Line::from(line.clone()));
                 }
             } else {
-                lines.push(Line::from(
-                    " Select one proposal to review its complete raw contents",
-                ));
                 lines.push(Line::from(format!(
                     " Page offset {} · {} rows",
                     picker.offset,
                     picker.proposals.len()
                 )));
-                let visible = usize::from(area.height.saturating_sub(6)).max(1);
+                let visible = usize::from(area.height.saturating_sub(5)).max(1);
                 let start =
                     chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
                 for (index, row) in picker
@@ -1193,7 +1201,7 @@ impl App {
                 lines = chooser_list_lines(lines, usize::from(area.width.saturating_sub(2)));
             }
             frame.render_widget(Paragraph::new(lines)
-                .block(Block::default().title(" LORE proposals · Enter full review · PgUp/PgDn page · B beliefs · Esc close ")
+                .block(Block::default().title(lore_view_title(picker))
                     .borders(Borders::ALL).border_style(Style::default().fg(theme::ACCENT)))
                 .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)).wrap(Wrap { trim: false }), area);
             return;
@@ -1371,7 +1379,7 @@ impl App {
             Paragraph::new(lines)
                 .block(
                     Block::default()
-                        .title(" LORE beliefs ")
+                        .title(lore_view_title(picker))
                         .borders(Borders::ALL)
                         .border_style(Style::default().fg(theme::ACCENT)),
                 )
@@ -1863,7 +1871,7 @@ impl App {
             self.lore_picker
                 .as_ref()
                 .filter(|picker| {
-                    !picker.proposal_mode
+                    picker.review.is_none() && !picker.resolving && !picker.belief_acting
                         && picker.belief_review.is_none()
                         && picker.evidence.is_none()
                 })
@@ -2250,10 +2258,12 @@ impl App {
                     .chip_hover
                     .as_ref()
                     .is_some_and(|hit| hit.group == index && hit.kind == kind);
+            let quota_color = (kind == "cost").then(|| self.session_telemetry.get(id)
+                .and_then(|telemetry| telemetry.quota_color())).flatten();
             chip_spans.push(Span::styled(
                 text,
                 Style::default()
-                    .fg(if hovered { theme::ACCENT } else { theme::TEXT })
+                    .fg(quota_color.unwrap_or(if hovered { theme::ACCENT } else { theme::TEXT }))
                     .bg(theme::HIGHLIGHT)
                     .add_modifier(if active && self.focus == Focus::Chip(kind) {
                         Modifier::BOLD | Modifier::UNDERLINED | Modifier::REVERSED
@@ -2310,12 +2320,12 @@ impl App {
                                 " Filter memory ● "
                             } else if active
                                 && self.lore_picker.as_ref().is_some_and(|picker| {
-                                    !picker.proposal_mode
+                                    picker.review.is_none() && !picker.resolving && !picker.belief_acting
                                         && picker.belief_review.is_none()
                                         && picker.evidence.is_none()
                                 })
                             {
-                                " Filter beliefs ● "
+                                if self.lore_picker.as_ref().is_some_and(|picker| picker.proposal_mode) { " Filter pending ● " } else { " Filter beliefs ● " }
                             } else if active && self.focus == Focus::Prompt {
                                 " Prompt ● "
                             } else {
@@ -2462,4 +2472,9 @@ pub(super) fn transcript_window(
         }
     }
     (window, top)
+}
+
+fn lore_view_title(picker: &super::LorePicker) -> Line<'static> {
+    Line::from([("1 Active", !picker.proposal_mode), ("2 Pending", picker.proposal_mode && !picker.cluster_mode), ("3 Clustered", picker.cluster_mode)]
+        .into_iter().map(|(label, selected)| Span::styled(format!(" {label} "), chooser_row_style(selected))).collect::<Vec<_>>())
 }

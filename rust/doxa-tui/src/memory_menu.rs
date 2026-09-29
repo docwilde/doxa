@@ -120,6 +120,7 @@ pub struct Manager {
     pub status: String,
     last_action: Option<String>,
     entries: Vec<String>,
+    view_start: std::cell::Cell<usize>,
     review: Option<serde_json::Value>,
     draft: Option<Draft>,
     pending: Option<std::sync::mpsc::Receiver<Result<Reply, String>>>,
@@ -170,7 +171,7 @@ impl ActionOutcome {
 impl Manager {
     pub fn new(owner: (String, String)) -> Self {
         let mut manager = Self { owner, scope: "project", selected: 0, scroll: 0,
-            status: String::new(), last_action: None, entries: Vec::new(), review: None, draft: None,
+            status: String::new(), last_action: None, entries: Vec::new(), view_start: std::cell::Cell::new(0), review: None, draft: None,
             pending: None, fixture: false, refresh_scope: None };
         manager.load();
         manager
@@ -180,7 +181,7 @@ impl Manager {
     #[doc(hidden)]
     pub fn from_fixture_review(owner:(String,String),scope:&'static str,value:serde_json::Value)->Result<Self,String>{
         if !matches!(scope,"project"|"user"){return Err("Invalid fixture scope".into());}
-        let mut manager=Self{owner,scope,selected:0,scroll:0,status:String::new(),last_action:None,entries:Vec::new(),review:None,draft:None,pending:None,fixture:true,refresh_scope:None};
+        let mut manager=Self{owner,scope,selected:0,scroll:0,status:String::new(),last_action:None,entries:Vec::new(),view_start:std::cell::Cell::new(0),review:None,draft:None,pending:None,fixture:true,refresh_scope:None};
         manager.accept_review(value)?;Ok(manager)
     }
 
@@ -316,10 +317,19 @@ impl Manager {
         });
     }
 
+    pub fn visible_entries(&self, visible: usize) -> Vec<(usize, String)> {
+        if self.editing() { return Vec::new(); }
+        let visible=visible.max(1);
+        let old=self.view_start.get();
+        let start=if self.selected<old {self.selected} else if self.selected>=old+visible {
+            self.selected+1-visible
+        } else {old};
+        self.view_start.set(start);
+        self.entries.iter().enumerate().skip(start).take(visible).map(|(index,entry)|(index,entry.clone())).collect()
+    }
     pub fn hover(&mut self, row: usize, visible: usize) -> bool {
         if self.draft.is_some() || self.pending.is_some() || row >= visible { return false; }
-        let start = self.selected.saturating_sub(visible.saturating_sub(1));
-        let index = start + row;
+        let Some((index,_))=self.visible_entries(visible).get(row).cloned() else { return false; };
         if index >= self.entries.len() || index == self.selected { return false; }
         self.selected = index;
         true
@@ -355,16 +365,19 @@ impl Manager {
             }
             lines.extend(body.into_iter().skip(start).take(visible));
         } else {
-            let start = self.selected.saturating_sub(visible.saturating_sub(1));
             if self.entries.is_empty() { lines.push("(empty) · A add a fact".into()); }
-            for (i, entry) in self.entries.iter().enumerate().skip(start).take(visible) {
-                lines.push(format!("{} {}", if i == self.selected { "›" } else { " " }, crate::lore_table::cell(entry, width.saturating_sub(2)).trim_end()));
+            for (i, entry) in self.visible_entries(visible) {
+                lines.push(format!("{} {}", if i == self.selected { "›" } else { " " }, crate::lore_table::cell(&entry, width.saturating_sub(2)).trim_end()));
             }
             lines.push("Enter actions: A add · E edit · D remove · Tab scope".into());
         }
         let lines: Vec<_> = lines.into_iter().enumerate().map(|(index, line)|
             if self.draft.is_some() && index > 0 { line } else { crate::lore_table::cell(&line, width).trim_end().to_owned() }).collect();
-        frame.render_widget(Paragraph::new(lines.join("\n"))
+        let lines=lines.into_iter().map(|line| {
+            let selected=self.draft.is_none() && line.starts_with('›');
+            ratatui::text::Line::styled(crate::lore_table::cell(&line,width),crate::ui::chooser_row_style(selected))
+        }).collect::<Vec<_>>();
+        frame.render_widget(Paragraph::new(lines)
             .block(Block::default().title(" LORE curated memory · Esc close ").borders(Borders::ALL)
                 .border_style(Style::default().fg(crate::theme::ACCENT)))
             .style(Style::default().fg(crate::theme::TEXT).bg(crate::theme::RAISED)), area);
@@ -399,7 +412,7 @@ mod manager_tests {
     fn key(code: KeyCode) -> KeyEvent { KeyEvent::new(code, KeyModifiers::NONE) }
     fn fixture() -> Manager {
         let mut manager = Manager { owner: ("session".into(), "/fixture".into()), scope: "user",
-            selected: 0, scroll: 0, status: String::new(), last_action: None, entries: Vec::new(), review: None,
+            selected: 0, scroll: 0, status: String::new(), last_action: None, entries: Vec::new(), view_start: std::cell::Cell::new(0), review: None,
             draft: None, pending: None, fixture: true, refresh_scope: None };
         manager.accept_review(serde_json::json!({"scope":"user","key":"user", "sha256":"a".repeat(64),
             "entries":["first fact", "long fact".repeat(80)],"chars":100,"cap_chars":9000})).unwrap();

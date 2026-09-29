@@ -174,11 +174,29 @@ impl Vendor {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModelCapability {
     pub id: String,
-    /// Only levels the provider lists and this transport can encode.
+    /// Verified provider levels, or the canonical local known-model fallback.
     pub efforts: Vec<String>,
     pub default_effort: Option<String>,
     /// An advertised list with no usable levels must not trigger a fallback.
     pub effort_metadata_present: bool,
+}
+
+impl ModelCapability {
+    /// Missing documented metadata permits only the transport's known-model
+    /// fallback. A present DeepSeek list, including an empty list, is final.
+    pub fn resolved(mut self, vendor: Vendor) -> Self {
+        if !self.effort_metadata_present {
+            self.efforts = vendor.effort_choices(&self.id).iter().map(|level| (*level).into()).collect();
+            self.default_effort = self.efforts.iter().find(|level| level.as_str() == "high")
+                .or_else(|| self.efforts.first()).cloned();
+        }
+        self
+    }
+
+    pub fn local(vendor: Vendor, id: &str) -> Self {
+        Self { id: id.into(), efforts: Vec::new(), default_effort: None,
+            effort_metadata_present: false }.resolved(vendor)
+    }
 }
 
 /// Bounded account-scoped model catalogue. A missing credential, network
@@ -229,7 +247,7 @@ async fn catalog_models_at(vendor: Vendor, endpoint: &str, key: &str) -> Option<
             let default_effort = row.pointer("/effort/default_level").and_then(Value::as_str)
                 .filter(|level| efforts.iter().any(|seen| seen == level)).map(str::to_owned);
             models.push(ModelCapability { id: id.to_owned(), efforts, default_effort,
-                effort_metadata_present });
+                effort_metadata_present }.resolved(vendor));
         }
     }
     // A valid empty catalogue is authoritative; falling back to old static
@@ -301,6 +319,29 @@ mod catalog_tests {
         assert!(models[0].efforts.is_empty());
         assert!(models[0].default_effort.is_none());
         assert!(!models[0].effort_metadata_present);
+        worker.await.unwrap();
+    }
+    #[tokio::test]
+    async fn missing_metadata_uses_only_known_local_capabilities() {
+        let (_guard, _home) = credentials::tests::fixture();
+        let body = r#"{"data":[{"id":"deepseek-flash"},{"id":"deepseek-v4-pro","effort":{"supported_levels":[]}},{"id":"unknown-model"}]}"#;
+        let (url, worker) = serve("200 OK", body.into(), "").await;
+        let rows = catalog_models_at(Vendor::DeepSeek, &url, "key").await.unwrap();
+        assert_eq!(rows[0], ModelCapability::local(Vendor::DeepSeek, "deepseek-flash"));
+        assert!(rows[1].effort_metadata_present);
+        assert!(rows[1].efforts.is_empty());
+        assert!(rows[1].default_effort.is_none());
+        assert!(rows[2].efforts.is_empty());
+        worker.await.unwrap();
+        let body = r#"{"data":[{"id":"glm-5.3-flash"},{"id":"glm-5.3","effort":{"supported_levels":["none","invented"],"default_level":"none"}},{"id":"unknown-glm","effort":{"supported_levels":["low"],"default_level":"low"}}]}"#;
+        let (url, worker) = serve("200 OK", body.into(), "").await;
+        let rows = catalog_models_at(Vendor::Glm, &url, "key").await.unwrap();
+        assert_eq!(rows[0], ModelCapability::local(Vendor::Glm, "glm-5.3-flash"));
+        assert_eq!(rows[1], ModelCapability::local(Vendor::Glm, "glm-5.3"));
+        assert_eq!(rows[0].efforts, ["low", "high", "max"]);
+        assert!(rows.iter().all(|row| !row.effort_metadata_present));
+        assert!(rows[2].efforts.is_empty());
+        assert!(rows[2].default_effort.is_none());
         worker.await.unwrap();
     }
     #[tokio::test]
@@ -960,6 +1001,13 @@ async fn run_turn_at(
             } else {
                 Error::UnexpectedToolCall
             });
+        }
+        // A tool step and its continuation are separate visible text spans.
+        // Emit an actual separator, never treat an SSE block stop as a lexical
+        // boundary for downstream canonical secret scrubbing.
+        if !completion.text.is_empty() {
+            outcome.text.push('\n');
+            on_delta(Delta::Text("\n".into()));
         }
         let mut call_ids = std::collections::BTreeSet::new();
         for call in &completion.tool_calls {

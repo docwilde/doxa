@@ -165,11 +165,16 @@ impl UiStateStore {
         if !self.startup_notice.is_empty() { app.notice = self.startup_notice.clone(); }
         let live: HashSet<&str> = live_ids.iter().map(String::as_str)
             .chain(self.startup_archives.iter().map(|archive| archive.entry.id.as_str())).collect();
-        let tabs: Vec<_> = record
-            .tabs
-            .iter()
-            .filter(|t| live.contains(t.session_id.as_str()))
-            .collect();
+        // Saved identities that discovery cannot verify must stay visible in
+        // their original panes. Dropping them also prevents every later save
+        // (the protected old record would otherwise lose an offline tab).
+        for tab in &record.tabs {
+            if !live.contains(tab.session_id.as_str()) {
+                let archive = crate::startup_restore::unavailable(tab);
+                app.restore_archive(&archive.entry, &archive.note);
+            }
+        }
+        let tabs: Vec<_> = record.tabs.iter().collect();
         let ids: Vec<String> = tabs.iter().map(|t| t.session_id.clone()).collect();
         app.collections = collections::from_json(record.raw.get("collections"), &ids.iter().cloned().collect());
         if tabs.len() > MAX_TABS + usize::from(self.startup_overflow_id.is_some()) { app.notice = "Saved tab count exceeds supported bounds".into(); return false; }

@@ -11,4 +11,5 @@ pub const TEXT: Color = Color::Rgb(0xF2, 0xE9, 0xDD);
 pub const SECONDARY: Color = Color::Rgb(0xD8, 0xCD, 0xBB);
 pub const MUTED: Color = Color::Rgb(0x8A, 0x80, 0x73);
 pub const SUCCESS: Color = Color::Rgb(0x6F, 0xCF, 0x97);
+pub const WARNING: Color = Color::Rgb(0xF2, 0xC9, 0x4C);
 pub const ERROR: Color = Color::Rgb(0xD9, 0x53, 0x4F);

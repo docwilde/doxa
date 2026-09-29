@@ -516,15 +516,11 @@ impl App {
             let mut defaults = HashMap::new();
             let mut metadata_count = 0;
             for row in live {
+                let row = row.resolved(if engine == launch::Engine::DeepSeek {
+                    doxa_vendors::Vendor::DeepSeek
+                } else { doxa_vendors::Vendor::Glm });
                 let known = vetted.contains(&row.id.as_str());
-                let mut levels = if !row.effort_metadata_present && known {
-                    effort_choices(engine_name(engine), &row.id)
-                        .iter()
-                        .map(|level| (*level).to_owned())
-                        .collect::<Vec<_>>()
-                } else {
-                    row.efforts.clone()
-                };
+                let mut levels = row.efforts.clone();
                 if row.effort_metadata_present && !row.efforts.is_empty() {
                     metadata_count += 1;
                     // The DeepSeek catalogue omits `none`, which disables thinking;

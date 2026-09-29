@@ -1,9 +1,10 @@
 # Rust 2.0 parity with DOXA 1.19.0
 
 Baseline: Python `v1.19.0` production behavior. This tracker records implementation
-through **alpha.45**, with canonical **LORE 0.62.3**, and account checks on **alpha.43**.
+through **alpha.46**, with canonical **LORE 0.62.4**. Account checks
+are bounded by their exact candidate and date.
 The Rust runtime implements the audited workflows below. Live account checks
-remain bounded by the [verification record](live-provider-verification-2026-09-28.md)
+remain bounded by the [latest verification record](live-provider-verification-2026-09-29.md)
 and the [remaining verification](#remaining-verification) section; implementation
 coverage alone does not establish authenticated compatibility for every provider.
 
@@ -34,6 +35,7 @@ coverage alone does not establish authenticated compatibility for every provider
 | Alpha.43 | README and tracker refresh with release-specific evidence and remaining live checks; no additional runtime implementation. |
 | Alpha.44 | Retain Claude's nested five-hour/weekly quota windows and startup events; preserve valid partial updates and identify native CLI provenance. Record authenticated alpha.43 verification. |
 | Alpha.45 | Share native LORE settings across embedded memory, standalone carriers and review workers; resolve the sticky store before loading saved caps, signing keys and transport preferences. |
+| Alpha.46 | Canonically scrubbed vendor text streaming and shared known-model capability fallback; approximate Claude thinking progress; immutable verified Codex updates; reported quota colors; hover wheel routing, delayed memory preview, Pending/Clustered titles and offline split restoration. |
 
 Standalone LORE administration, hooks, MCP and network operations are native Rust;
 they are not a remaining Python replacement task. See the
@@ -41,22 +43,24 @@ they are not a remaining Python replacement task. See the
 
 ## Remaining verification
 
-The latest authenticated alpha.43 checks on **2026-09-28** verified Claude file
-reads, text events, within-session recall and model/effort controls. Native
-Claude-backed LORE review and Codex manual/controlled automatic compaction also
-passed with post-compaction recall. The following checks remain open:
+The [2026-09-29 record](live-provider-verification-2026-09-29.md) reports fixed
+Claude/vendor streaming checks and the incomplete default-window Codex run.
+Historical alpha.43 manual and lowered-threshold automatic compaction remain
+verified separately.
 
-| Check | Required setup and evidence |
+| Check | Current result and remaining gate |
 | --- | --- |
-| Claude longer streaming and optional quota variants | Two alpha.43 turns verified native tools and controls; an alpha.44 candidate turn reported both five-hour and weekly percentages/resets after the nested-window fix. Tiny replies produced one text delta. A separate output-capped medium-effort attempt failed with no visible deltas; longer/reasoning streaming remains unverified. Overage/model-specific quota variants have fixture coverage only. |
-| DeepSeek and z.ai live turns, streaming, tools, controls and resume | Set the appropriate key through `/setup` or inherited `DEEPSEEK_API_KEY` / `ZAI_API_KEY`. Two-turn native loopback checks passed for both; account requests were not made because keys were absent. |
-| Codex default-window large-context automatic compaction | Manual compaction and real automatic compaction with a lowered 14,022-token threshold passed exact native review and recall. Representative history near the approximately 244,800-token default trigger remains unverified; the lowered-threshold run does not establish that stress coverage. |
+| Claude streaming and optional quota variants | Fixed debug daemon counts advanced 50 → 150 → 200 before first text, with 104 reply deltas; thinking plaintext stayed withheld. Optional overage/model-specific quota variants remain unverified live. |
+| DeepSeek recall/resume | Later three-turn streaming diagnosis passed with 316 text deltas and 81 reasoning-progress events. Earlier candidate exact-nonce failure remains unresolved. |
+| z.ai GLM usage | Three turns and same-session low → high effort passed, with 408 text deltas. Numeric usage was omitted by the collector, not measured as zero. |
+| Codex default-window automatic compaction | Stress stopped at the harness cap: 2,758,826 aggregate input tokens but 241,119 context tokens, below the ~244,800 trigger. No automatic compaction, Haiku review or post-compaction restart was verified. The successful 14,022-token controlled test does not establish this coverage. |
+| Full historic LORE replica | Persistent loopback hub transport works; owned portable replay applied 302 of 457 ops with zero failures. An unsigned oversized operation, 154 unverified ops and one deferred dependency still gate full replication. |
 
-Unknown plan, quota, balance and context values remain unknown. DeepSeek balance
-can be shown when its endpoint reports it; z.ai has no supported balance endpoint.
-The recorded CI, installer and protected provider checks cover Linux. They do not
-establish macOS or Windows compatibility. These checks are separate from the
-intentional [boundaries](#preserved-boundaries) below.
+All paid tests are stopped. Unknown plan, quota, balance and context values remain
+unknown. DeepSeek balance can be shown when its endpoint reports it; z.ai has no
+supported balance endpoint. Linux is verified. The full protected DOXA runtime
+is unsupported on macOS and Windows by its Linux ownership/supervision
+architecture. Standalone LORE macOS remains unverified; Windows is unsupported.
 
 ## Preserved boundaries
 

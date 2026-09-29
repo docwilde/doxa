@@ -1,5 +1,9 @@
 # Live provider verification — 2026-09-28
 
+The [2026-09-29 follow-up](live-provider-verification-2026-09-29.md) contains the
+latest candidate results and remaining gates. Historical evidence below retains
+its original scope.
+
 The [alpha.43 authenticated checks](#alpha43-authenticated-follow-up--2026-09-28)
 verified Claude turns and native LORE-backed Codex manual and controlled automatic
 compaction. The [alpha.44 candidate](#alpha44-quota-candidate-follow-up) also

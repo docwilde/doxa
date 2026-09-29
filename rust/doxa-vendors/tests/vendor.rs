@@ -194,7 +194,10 @@ async fn turn_runs_two_gated_tool_steps_and_preserves_history_and_usage() {
     let _credential_guard = credential_guard().await;
     std::env::set_var("DEEPSEEK_API_KEY", "test-secret-1234");
     let tool = |id: &str, x: u64| {
-        format!("data: {{\"model\":\"deepseek-flash\",\"choices\":[{{\"finish_reason\":\"tool_calls\",\"delta\":{{\"tool_calls\":[{{\"index\":0,\"id\":\"{id}\",\"function\":{{\"name\":\"lookup\",\"arguments\":\"{{\\\"x\\\":{x}}}\"}}}}]}}}}],\"usage\":{{\"prompt_tokens\":2,\"completion_tokens\":3}}}}\n\ndata: [DONE]\n\n")
+        format!("data: {}\n\ndata: [DONE]\n\n", json!({"model":"deepseek-flash",
+            "choices":[{"finish_reason":"tool_calls","delta":{"content":format!("step{x}"),
+                "tool_calls":[{"index":0,"id":id,"function":{"name":"lookup","arguments":json!({"x":x}).to_string()}}]}}],
+            "usage":{"prompt_tokens":2,"completion_tokens":3}}))
     };
     let first = tool("call-1", 1);
     let second = tool("call-2", 2);
@@ -207,6 +210,7 @@ async fn turn_runs_two_gated_tool_steps_and_preserves_history_and_usage() {
     let mut history = vec![json!({"role":"system","content":"system"})];
     let mut gate = LookupGate { calls: Vec::new() };
     let (_, cancel) = watch::channel(false);
+    let mut streamed = String::new();
     let result = run_turn_local(
         Vendor::DeepSeek,
         &url,
@@ -217,7 +221,7 @@ async fn turn_runs_two_gated_tool_steps_and_preserves_history_and_usage() {
         Some(&mut gate),
         cancel,
         Duration::from_secs(3),
-        |_| {},
+        |delta| if let Delta::Text(text) = delta { streamed.push_str(&text); },
     )
     .await
     .unwrap();
@@ -230,7 +234,9 @@ async fn turn_runs_two_gated_tool_steps_and_preserves_history_and_usage() {
         (result.usage.prompt_tokens, result.usage.completion_tokens),
         (9, 13)
     );
-    assert_eq!(result.text, "done");
+    assert_eq!(result.text, "step1\nstep2\ndone");
+    assert_eq!(streamed, result.text);
+    assert_eq!(history.last().unwrap()["content"], "done");
     assert!(requests
         .iter()
         .all(|r| r["tools"][0]["function"]["name"] == "lookup"));

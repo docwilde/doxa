@@ -29,6 +29,17 @@ impl Preview {
             Hover {owner,since:now,visible:false,requested:false,display,failed:false,pending:None}
         });true
     }
+    /// Complete scrubbed memory rows already came from the canonical read.
+    /// Reuse dwell/geometry logic without scheduling a belief display request.
+    pub fn set_cached_owner(&mut self,owner:Option<Owner>,now:Instant)->bool {
+        let changed=self.set_owner(owner,now);
+        if changed {
+            if let Some(hover)=&mut self.hover {
+                hover.display=Some(Display {subject:hover.owner.subject.clone(),claim:hover.owner.claim.clone(),complete:true});
+            }
+        }
+        changed
+    }
     pub fn tick(&mut self,now:Instant)->bool {
         let Some(hover)=&mut self.hover else {return false;};
         if !hover.visible && now.saturating_duration_since(hover.since)>=Duration::from_millis(500) {
@@ -61,11 +72,14 @@ impl Preview {
         hover.failed=hover.display.is_none();true
     }
     pub fn render(&self,frame:&mut Frame,area:Rect) {
+        self.render_titled(frame,area," Full belief "," Belief preview ");
+    }
+    pub fn render_titled(&self,frame:&mut Frame,area:Rect,full_title:&str,preview_title:&str) {
         let Some(hover)=self.hover.as_ref().filter(|hover|hover.visible) else{return;};
         let display=hover.display.clone().unwrap_or_else(||Display {subject:if hover.failed {"Full preview unavailable"}else{"Loading full belief…"}.into(),claim:String::new(),complete:false});
         let Some(plan)=plan(&hover.owner,&display,area) else{return;};
         frame.render_widget(Clear,plan.area);
-        frame.render_widget(Paragraph::new(plan.lines).block(Block::default().title(if plan.full {" Full belief "}else{" Belief preview "})
+        frame.render_widget(Paragraph::new(plan.lines).block(Block::default().title(if plan.full {full_title}else{preview_title})
             .borders(Borders::ALL).border_style(Style::default().fg(theme::ACCENT)))
             .style(Style::default().fg(theme::TEXT).bg(theme::RAISED)),plan.area);
     }

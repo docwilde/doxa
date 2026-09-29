@@ -1801,14 +1801,14 @@ for line in sys.stdin:
                     kind: "belief".into(), action: "add".into(), scope: "project".into(),
                     summary: "long summary ".repeat(80) }).collect(),
                 selected: 0, query: String::new(), offset: 0, status: "long status ".repeat(40),
-                evidence: None, pending: None, proposal_mode, review: None, review_scroll: 0,
+                evidence: None, pending: None, proposal_mode, cluster_mode: false, all_proposals: Vec::new(), review: None, review_scroll: 0,
                 review_seen: 0, review_width: 0, armed_resolution: None, can_resolve: false,
                 resolving: false, cwd: cwd.path().display().to_string(), belief_review: None, belief_intent: None,
                 can_act_on_beliefs: false, belief_action: None, belief_note: String::new(),
                 retract_armed: false, belief_acting: false, result_status: None,
             });
             let menu = app.active_chooser_rect().unwrap();
-            let offset = if proposal_mode { 5 } else { 3 };
+            let offset = if proposal_mode { 4 } else { 3 };
             let rendered = painted_at(&app, 100, 28);
             let row = usize::from(menu.y + offset);
             assert!(rendered.lines().nth(row).unwrap().contains(if proposal_mode { "proposal-2" } else { "#2" }));
@@ -3118,7 +3118,7 @@ for line in sys.stdin:
         app.action_menu = false;
         app.lore_picker = Some(LorePicker { session_id: None, rows: vec![], selected: 0, query: String::new(),
             offset: 0, status: "Ready".into(), evidence: None, pending: None,
-            proposals: Vec::new(), proposal_mode: false, review: None, review_scroll: 0,
+            proposals: Vec::new(), proposal_mode: false, cluster_mode: false, all_proposals: Vec::new(), review: None, review_scroll: 0,
             review_seen: 0, review_width: 0, armed_resolution: None,
             can_resolve: false, resolving: false, cwd: String::new(),
             belief_review: None, belief_intent: None, can_act_on_beliefs: false, belief_action: None,
@@ -4333,6 +4333,26 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn count_only_reasoning_is_folded_and_resets_for_next_turn() {
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"s"}));
+        let event = |kind:&str,data:serde_json::Value| json!({"type":"event","session_id":"s","event":{"type":kind,"data":data}});
+        app.apply_daemon_frame(&event("turn_started",json!({"prompt":"first"})));
+        app.apply_daemon_frame(&event("reasoning_progress",json!({"approx_tokens":48,"count_is_estimate":true})));
+        let (live,sections)=transcript_tools::render(&app.sessions[0].transcript,80,None,None);
+        assert_eq!(sections.len(),1);
+        assert!(live.iter().any(|line|line.to_string().contains("~48 tokens · receiving")));
+        assert!(app.reasoning_streams["s"].text.is_empty());
+        app.apply_daemon_frame(&event("turn_done",json!({"is_error":false})));
+        app.apply_daemon_frame(&event("turn_started",json!({"prompt":"second"})));
+        app.apply_daemon_frame(&event("reasoning_progress",json!({"approx_tokens":12,"count_is_estimate":true})));
+        assert_eq!(app.reasoning_streams["s"].tokens,12);
+        assert!(app.reasoning_streams["s"].text.is_empty());
+        let (live,sections)=transcript_tools::render(&app.sessions[0].transcript,80,None,None);
+        assert_eq!(sections.len(),2);
+        assert!(live.iter().any(|line|line.to_string().contains("~12 tokens · receiving")));
+    }
+    #[test]
     fn streamed_reasoning_counts_live_then_reveals_only_on_expand() {
         let mut app = App::default();
         app.apply_daemon_frame(&json!({"type":"hello", "session_id":"s"}));
@@ -4374,7 +4394,7 @@ for line in sys.stdin:
             session_id: None,
             query: String::new(), rows: Vec::new(), selected: 0, offset: 0,
             evidence: None, status: String::new(), pending: None,
-            proposals: Vec::new(), proposal_mode: false, review: None, review_scroll: 0,
+            proposals: Vec::new(), proposal_mode: false, cluster_mode: false, all_proposals: Vec::new(), review: None, review_scroll: 0,
             review_seen: 0, review_width: 0, armed_resolution: None,
             can_resolve: false, resolving: false, cwd: String::new(),
             belief_review: None, belief_intent: None, can_act_on_beliefs: false, belief_action: None,
@@ -4882,7 +4902,7 @@ for line in sys.stdin:
             query: String::new(), rows: Vec::new(), selected: 0, offset: 0,
             proposals: vec![lore_picker::Proposal { pid: "one".into(), kind: "memory".into(),
                 action: "add".into(), scope: "user".into(), summary: String::new() }],
-            proposal_mode: true, review: Some(review), review_scroll: 0,
+            proposal_mode: true, cluster_mode: false, all_proposals: Vec::new(), review: Some(review), review_scroll: 0,
             review_seen: 0, review_width: 0, armed_resolution: None,
             can_resolve, resolving: false, cwd: "/repo".into(),
             belief_review: None, belief_intent: None, can_act_on_beliefs: false, belief_action: None,
@@ -5116,4 +5136,187 @@ for line in sys.stdin:
         assert!(app.notice.contains("do not retry automatically"));
         assert!(app.lore_picker.as_ref().unwrap().pending.is_none());
         assert!(!app.lore_picker.as_ref().unwrap().resolving);
+    }
+
+    fn wheel_event(kind: MouseEventKind, area: Rect) -> Event {
+        Event::Mouse(MouseEvent {kind,column:area.x+2,row:area.y+2,modifiers:KeyModifiers::NONE})
+    }
+    #[test]
+    fn wheel_scrolls_hovered_unfocused_transcript_and_preserves_prompt_owner() {
+        let mut app=App::default(); app.rail_visible=false;app.handle(Event::Resize(120,40));
+        for id in ["first","second"] {
+            app.apply_update(DaemonUpdate::Upsert(Session{id:id.into(),title:id.into(),collection:"repo".into(),
+                transcript:(0..100).map(|n|format!("{id} line {n}\n\n")).collect(),status:"Offline".into()}));
+        }
+        for session in &mut app.sessions {session.transcript=(0..100).map(|n|format!("{} line {n}\n\n",session.id)).collect();}
+        app.groups[0].tabs=vec!["first".into()];app.groups[0].active=0;
+        app.groups[1].tabs=vec!["second".into()];app.groups[1].active=0;
+        app.split=Split::Vertical;app.active_group=0;app.focus=Focus::Prompt;app.input="unsent draft".into();
+        let panes=app.layout(app.size).panes.unwrap();let body=app.pane_regions(1,panes[1])[1];
+        let before=painted_at(&app,120,40);
+        assert!(app.handle(wheel_event(MouseEventKind::ScrollUp,body)));
+        assert_eq!(app.groups[1].scroll,3);assert_eq!(app.groups[0].scroll,0);
+        assert_eq!(app.active_group,0);assert_eq!(app.focus,Focus::Prompt);assert_eq!(app.input,"unsent draft");
+        assert_ne!(painted_at(&app,120,40),before);
+        assert!(app.handle(wheel_event(MouseEventKind::ScrollDown,body)));assert_eq!(app.groups[1].scroll,0);
+        let prompt=app.pane_regions(1,panes[1])[4];
+        assert!(!app.handle(Event::Mouse(MouseEvent{kind:MouseEventKind::ScrollUp,column:prompt.x+1,row:prompt.y,modifiers:KeyModifiers::NONE})));
+        assert_eq!(app.groups[0].scroll,0);assert_eq!(app.groups[1].scroll,0);
+    }
+    #[test]
+    fn wheel_navigates_scrolled_inline_model_list_without_activating_or_losing_focus() {
+        let mut app=scrolled_picker_app();app.focus=Focus::Prompt;app.input="keep draft".into();
+        app.model_picker=Some(ModelPicker{session_id:"session".into(),models:(0..30).map(|n|format!("model-{n:02}")).collect(),selected:24,note:String::new(),loading:false,catalog_pending:false});
+        let menu=app.active_chooser_rect().unwrap();painted_at(&app,100,28);
+        assert!(app.handle(wheel_event(MouseEventKind::ScrollDown,menu)));assert_eq!(app.model_picker.as_ref().unwrap().selected,25);
+        assert!(app.handle(wheel_event(MouseEventKind::ScrollUp,menu)));assert_eq!(app.model_picker.as_ref().unwrap().selected,24);
+        assert!(app.pending_model_changes.is_empty());assert_eq!(app.focus,Focus::Prompt);assert_eq!(app.input,"keep draft");
+        assert_eq!(app.groups[0].scroll,0);
+        let outside=MouseEvent{kind:MouseEventKind::ScrollDown,column:menu.right()+1,row:menu.y+2,modifiers:KeyModifiers::NONE};
+        app.handle(Event::Mouse(outside));assert_eq!(app.model_picker.as_ref().unwrap().selected,24);
+    }
+    #[test]
+    fn wheel_over_empty_pane_or_rail_never_scrolls_focused_transcript() {
+        let mut app=App::default();app.sidebar_auto=false;app.rail_visible=true;app.handle(Event::Resize(120,40));app.groups[0].tabs.push("session".into());
+        app.apply_update(DaemonUpdate::Upsert(Session{id:"session".into(),title:"session".into(),collection:"repo".into(),transcript:String::new(),status:"Offline".into()}));app.split=Split::Vertical;app.split_requested=true;let layout=app.layout(app.size);
+        assert!(!app.handle(wheel_event(MouseEventKind::ScrollUp,layout.rail.unwrap())));
+        assert!(!app.handle(wheel_event(MouseEventKind::ScrollUp,app.pane_regions(1,layout.panes.unwrap()[1])[1])));
+        assert_eq!(app.groups[0].scroll,0);assert_eq!(app.active_group,0);
+    }
+
+    #[test]
+    fn memory_hover_uses_full_row_background_delayed_preview_and_border_hitboxes() {
+        let mut app=App::default();app.rail_visible=false;app.handle(Event::Resize(120,40));
+        app.apply_update(DaemonUpdate::Upsert(Session{id:"memory-session".into(),title:"Memory session".into(),collection:"repo".into(),transcript:String::new(),status:"Offline".into()}));
+        app.session_cwds.insert("memory-session".into(),PathBuf::from("/fixture"));
+        let full="A complete curated fact with a hidden tail ".repeat(7)+"FULL ENTRY TAIL";
+        app.show_memory_manager_fixture(0,"user",json!({"scope":"user","key":"user","sha256":"a".repeat(64),"entries":["First fact",full],"chars":400,"cap_chars":9000})).unwrap();
+        painted_at(&app,120,40);let row=app.rendered_belief_rows.borrow()[1].clone();
+        assert!(app.handle(Event::Mouse(MouseEvent{kind:MouseEventKind::Moved,column:row.rect.x+20,row:row.rect.y,modifiers:KeyModifiers::NONE})));
+        assert_eq!(app.memory_manager.as_ref().unwrap().selected,1);
+        let now=Instant::now();assert!(!app.tick_belief_preview(now+Duration::from_millis(400)));
+        assert!(!painted_at(&app,120,40).contains("Full memory"));
+        let mut terminal=Terminal::new(TestBackend::new(120,40)).unwrap();terminal.draw(|frame|app.draw(frame)).unwrap();
+        assert_eq!(terminal.backend().buffer()[(row.rect.right()-1,row.rect.y)].bg,theme::HIGHLIGHT);
+        assert!(app.tick_belief_preview(now+Duration::from_millis(600)));
+        let displayed=painted_at(&app,120,40);assert!(displayed.contains("Full memory"));assert!(displayed.contains("FULL ENTRY TAIL"));
+        assert!(app.handle(Event::Mouse(MouseEvent{kind:MouseEventKind::Moved,column:row.menu.x,row:row.rect.y,modifiers:KeyModifiers::NONE})));
+        assert!(app.memory_preview.owner().is_none());assert!(!painted_at(&app,120,40).contains("Full memory"));
+        assert!(app.pending_prompts.is_empty());assert!(!app.memory_manager.as_ref().unwrap().editing());
+    }
+    #[test]
+    fn scrolled_memory_hover_keeps_viewport_and_preview_matches_full_visible_entry() {
+        let mut app=scrolled_picker_app();app.session_cwds.insert("session".into(),PathBuf::from("/fixture"));
+        let entries=(0..30).map(|index|format!("Curated full entry {index:02} with complete display text")).collect::<Vec<_>>();
+        app.show_memory_manager_fixture(0,"user",json!({"scope":"user","key":"user","sha256":"a".repeat(64),"entries":entries,"chars":1800,"cap_chars":9000})).unwrap();
+        app.memory_manager.as_mut().unwrap().selected=24;painted_at(&app,100,28);
+        let first=app.rendered_belief_rows.borrow()[0].clone();assert!(first.id>1);
+        app.handle(Event::Mouse(MouseEvent{kind:MouseEventKind::Moved,column:first.rect.x+4,row:first.rect.y,modifiers:KeyModifiers::NONE}));
+        let expected=first.claim.clone();assert_eq!(app.memory_manager.as_ref().unwrap().selected as u64+1,first.id);
+        painted_at(&app,100,28);assert_eq!(app.rendered_belief_rows.borrow()[0].claim,expected);
+        assert!(app.tick_belief_preview(Instant::now()+Duration::from_millis(600)));
+        assert_eq!(app.memory_preview.owner().unwrap().claim,expected);assert!(painted_at(&app,100,28).contains("Full memory"));
+        let menu=app.active_chooser_rect().unwrap();app.handle(wheel_event(MouseEventKind::ScrollDown,menu));
+        assert!(app.memory_preview.owner().is_none());
+    }
+
+    #[test]
+    fn pending_title_click_keyboard_cluster_count_and_individual_navigation() {
+        let mut app=scrolled_picker_app();
+        app.show_belief_browser_fixture(0, &[(1,"subject","claim")]);
+        let menu=app.active_chooser_rect().unwrap();
+        let click=|offset| Event::Mouse(MouseEvent {kind:MouseEventKind::Down(MouseButton::Left),column:menu.x+1+offset,row:menu.y,modifiers:KeyModifiers::NONE});
+        assert!(app.handle(click(12))); assert!(app.lore_picker.as_ref().unwrap().proposal_mode);
+        assert!(!app.lore_picker.as_ref().unwrap().cluster_mode); assert_eq!(app.drag,None);
+        app.lore_picker.as_mut().unwrap().pending=None;
+        assert!(app.handle(Event::Key(KeyEvent::new(KeyCode::Char('3'),KeyModifiers::CONTROL))));
+        assert!(app.lore_picker.as_ref().unwrap().cluster_mode);
+        let (tx,rx)=std::sync::mpsc::channel();
+        let rows=(0..25).map(|n|lore_picker::Proposal{pid:format!("pid-{n}"),kind:"memory".into(),action:"add".into(),scope:"user".into(),summary:format!("Cluster 1 · fact {n}")}).collect();
+        tx.send(Ok(lore_picker::ResultPage::ClusteredProposals(rows,1))).unwrap();
+        app.lore_picker.as_mut().unwrap().pending=Some(rx); assert!(app.poll_lore());
+        let painted=painted_at(&app,100,28); assert!(painted.contains("1 canonical memory clusters")); assert!(painted.contains("3 Clustered"));
+        assert!(app.handle(Event::Key(KeyEvent::new(KeyCode::PageDown,KeyModifiers::NONE))));
+        assert_eq!(app.lore_picker.as_ref().unwrap().selected,20); assert_eq!(app.lore_picker.as_ref().unwrap().offset,0);
+        assert!(app.handle(Event::Key(KeyEvent::new(KeyCode::Char('4'),KeyModifiers::NONE))));
+        assert_eq!(app.lore_picker.as_ref().unwrap().proposals.len(),3);
+        assert_eq!(app.lore_picker.as_ref().unwrap().proposals[0].pid,"pid-4");
+        assert!(app.lore_picker.as_ref().unwrap().review.is_none()); assert!(!app.lore_picker.as_ref().unwrap().can_resolve);
+        let menu=app.active_chooser_rect().unwrap();
+        assert!(app.handle(Event::Mouse(MouseEvent{kind:MouseEventKind::Down(MouseButton::Left),column:menu.x+2,row:menu.y,modifiers:KeyModifiers::NONE}))); assert!(!app.lore_picker.as_ref().unwrap().proposal_mode); assert!(!app.lore_picker.as_ref().unwrap().cluster_mode);
+    }
+#[test]
+fn unavailable_saved_tabs_do_not_block_second_split_session_persistence() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = crate::ui_state::UiStateStore::new(dir.path(), "/project", "machine").unwrap();
+    let mut original = App::default();
+    original.groups[0].tabs = vec!["offline-a".into(), "live-a".into()];
+    original.groups[0].active = 1;
+    original.groups[1].tabs = vec!["offline-b".into()];
+    original.active_group = 1;
+    original.split = Split::Vertical;
+    original.split_percent = 43;
+    store.save(&original).unwrap();
+    let original_bytes = std::fs::read(store.path()).unwrap();
+    let mut app = App::default();
+    assert!(store.restore(&mut app, &["live-a".into()]));
+    assert_eq!(app.groups[0].tabs, original.groups[0].tabs);
+    assert_eq!(app.groups[1].tabs, original.groups[1].tabs);
+    assert_eq!(app.active_group, 1);
+    assert_eq!(std::fs::read(store.path()).unwrap(), original_bytes);
+    assert!(app.sessions.iter().all(|session| session.status.contains("unavailable")));
+    assert!(app.history_entries.values().all(|entry| entry.markdown.is_empty()));
+    assert!(crate::history::resume_plan(&app.history_entries["offline-b"]).is_err());
+    let mut signature = crate::ui_state::LayoutSignature::capture(&app);
+
+    // Startup hello and delayed launch reply arrive after the user changed pane.
+    app.apply_daemon_frame(&json!({"type":"hello", "session_id":"live-a", "cwd":"/project"}));
+    app.active_group = 0;
+    app.input = "left draft".into(); app.input_cursor = 10;
+    app.input_drafts.insert((1, "offline-b".into()), ("right draft".into(), 11));
+    app.launching = true;
+    app.apply_daemon_frame(&json!({"type":"hello", "session_id":"new-second", "cwd":"/project"}));
+    app.apply_daemon_frame(&json!({"type":"launch_reply", "ok":true, "session_id":"new-second", "group":1}));
+    assert_eq!(app.active_group, 0);
+    assert_eq!(app.input, "left draft");
+    assert_eq!(app.input_drafts[&(1, "offline-b".into())].0, "right draft");
+    assert_eq!(app.groups[1].tabs, ["offline-b", "new-second"]);
+    assert!(app.pending_prompts.is_empty());
+    save_layout_if_changed(&mut app, &mut store, &Mutex::new(true), &mut signature);
+    assert_eq!(signature, crate::ui_state::LayoutSignature::capture(&app));
+    assert!(!app.notice.starts_with("Layout save skipped"));
+    drop(store);
+    drop(app);
+
+    let mut reloaded = crate::ui_state::UiStateStore::new(dir.path(), "/project", "machine").unwrap();
+    let mut restored = App::default();
+    assert!(reloaded.restore(&mut restored, &[]));
+    assert_eq!(restored.groups[0].tabs, ["offline-a", "live-a"]);
+    assert_eq!(restored.groups[1].tabs, ["offline-b", "new-second"]);
+    assert_eq!(restored.groups[0].active, 1);
+    assert_eq!(restored.groups[1].active, 1);
+    assert_eq!((restored.active_group, restored.split, restored.split_percent), (0, Split::Vertical, 43));
+    assert!(restored.pending_prompts.is_empty());
+    assert!(restored.sessions.iter().all(|session| session.status.contains("unavailable")));
+    assert!(reloaded.save_if_complete(&restored, &Mutex::new(true)).unwrap());
+}
+
+    #[test]
+    fn pending_filters_use_prompt_line_and_lowercase_b_preserves_draft() {
+        for clustered in [false,true] {
+            let mut app=App::default();app.size=Rect::new(0,0,120,40);
+            app.apply_daemon_frame(&json!({"type":"hello","session_id":"s","engine":"codex","model":"gpt-6-sol"}));
+            app.input="Private unsent draft".into();app.input_cursor=app.input.len();
+            app.show_belief_browser_fixture(0,&[]);
+            let rows=vec![lore_picker::Proposal {pid:"pid-b".into(),kind:"memory".into(),action:"add".into(),scope:"user".into(),summary:"blue fact".into()},lore_picker::Proposal {pid:"pid-a".into(),kind:"memory".into(),action:"add".into(),scope:"user".into(),summary:"red fact".into()}];
+            let picker=app.lore_picker.as_mut().unwrap();picker.proposal_mode=true;picker.cluster_mode=clustered;picker.all_proposals=rows.clone();picker.proposals=rows;
+            for ch in "blue".chars() {assert!(app.handle(Event::Key(KeyEvent::new(KeyCode::Char(ch),KeyModifiers::NONE))));}
+            let picker=app.lore_picker.as_ref().unwrap();assert!(picker.proposal_mode);assert_eq!(picker.cluster_mode,clustered);assert_eq!(picker.query,"blue");assert_eq!(picker.proposals.len(),1);
+            let painted=painted_at(&app,120,40);assert!(painted.contains("Filter pending"));assert!(!painted.contains("Ctrl+1/2/3") && !painted.contains("Filter:"));
+            let prompt=app.pane_regions(0,app.layout(app.size).body)[4];let mut terminal=Terminal::new(TestBackend::new(120,40)).unwrap();terminal.draw(|frame|app.draw(frame)).unwrap();
+            let buffer=terminal.backend().buffer();let prompt_text=(prompt.y..prompt.bottom()).flat_map(|y|(prompt.x..prompt.right()).map(move |x|(x,y))).map(|position|buffer[position].symbol()).collect::<String>();assert!(prompt_text.contains("blue"));assert!(!prompt_text.contains("Private unsent draft"));
+            assert_eq!(app.input,"Private unsent draft");assert!(app.handle(Event::Key(KeyEvent::new(KeyCode::Backspace,KeyModifiers::NONE))));assert_eq!(app.lore_picker.as_ref().unwrap().query,"blu");
+            app.lore_picker.as_mut().unwrap().resolving=true;assert!(!painted_at(&app,120,40).contains("Filter pending"));app.lore_picker.as_mut().unwrap().resolving=false;
+            app.handle(Event::Key(KeyEvent::new(KeyCode::Esc,KeyModifiers::NONE)));assert_eq!(app.input,"Private unsent draft");assert!(app.pending_prompts.is_empty());
+        }
     }

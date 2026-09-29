@@ -12,6 +12,21 @@ pub const MAX_STARTUP_TABS:usize=crate::ui::panes::MAX_TABS+1;
 #[derive(Clone, Debug)]
 pub struct Archive { pub entry: OfflineSession, pub note: String }
 
+/// A durable tab identity is enough to display an unavailable placeholder,
+/// never enough to resume a provider. Resume still checks native saved state.
+pub(crate) fn unavailable(tab: &Tab) -> Archive {
+    Archive {
+        entry: OfflineSession {
+            id: tab.session_id.clone(),
+            project: "Saved session".into(),
+            markdown: String::new(),
+            search_snippets: Vec::new(),
+            cwd: tab.cwd.as_ref().map(std::path::PathBuf::from),
+        },
+        note: "unavailable — saved transcript or provider state could not be verified".into(),
+    }
+}
+
 #[derive(Default)]
 struct Planned { sessions: Vec<Session>, archives: Vec<Archive>, resumed: usize, skipped: usize }
 
@@ -26,7 +41,11 @@ fn plan(
             result.sessions.push(session.clone());
             continue;
         }
-        let Some(entry) = read(tab) else { result.skipped += 1; continue; };
+        let Some(entry) = read(tab) else {
+            result.skipped += 1;
+            result.archives.push(unavailable(tab));
+            continue;
+        };
         let note = if resume {
             match start(&entry) {
                 Ok(session) => { result.sessions.push(session); result.resumed += 1; continue; }
@@ -131,6 +150,9 @@ mod tests {
         assert_eq!(p.archives[0].entry.id,"old-c");
         assert!(p.archives[0].note.contains("provider history unavailable"));
         assert_eq!((p.resumed,p.skipped),(1,1));
+        assert_eq!(p.archives[1].entry.id,"missing");
+        assert!(p.archives[1].note.contains("unavailable"));
+        assert!(p.archives[1].entry.markdown.is_empty());
     }
     #[test]
     fn resume_off_keeps_transcripts_and_never_starts_provider() {

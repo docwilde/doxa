@@ -812,6 +812,57 @@ fn resolve(cli: &mut Cli, id: &str, request: &Value, answer: &Value) -> Result<(
     };
     cli.respond(id, Ok(response))
 }
+/// Block totals are summed across messages; opaque signatures are never content.
+#[derive(Default)]
+struct ReasoningProgress {
+    tokens: u64,
+    messages: HashMap<Option<String>, u64>,
+    blocks: HashMap<(Option<String>, u64, u64), u64>,
+}
+impl ReasoningProgress {
+    fn event(&mut self, event: &Value, parent: Option<&str>) -> Option<Value> {
+        let parent = parent.map(str::to_owned);
+        if event["type"] == "message_start" {
+            if self.messages.len() < 32 || self.messages.contains_key(&parent) {
+                let message = self.messages.entry(parent).or_default();
+                *message = message.saturating_add(1);
+            }
+            return None;
+        }
+        let delta = &event["delta"];
+        if delta["type"] != "thinking_delta" {
+            return None;
+        }
+        let tokens = delta["estimated_tokens"].as_u64()?;
+        let index = match event.get("index") {
+            Some(value) => value.as_u64()?,
+            None => 0,
+        };
+        if index > 1024 || tokens == 0 || tokens > 1_000_000 {
+            return None;
+        }
+        let key = (
+            parent.clone(),
+            *self.messages.get(&parent).unwrap_or(&0),
+            index,
+        );
+        let previous = *self.blocks.get(&key).unwrap_or(&0);
+        if tokens <= previous || (!self.blocks.contains_key(&key) && self.blocks.len() >= 128) {
+            return None;
+        }
+        let total = self
+            .tokens
+            .checked_add(tokens - previous)
+            .filter(|value| *value <= 1_000_000)?;
+        self.blocks.insert(key, tokens);
+        self.tokens = total;
+        let mut data = json!({"approx_tokens":total,"count_is_estimate":true});
+        if let Some(parent) = parent {
+            data["parent_id"] = json!(parent);
+        }
+        Some(json!({"type":"reasoning_progress","data":data}))
+    }
+}
 struct StreamOutput {
     kind: String,
     parent: Option<String>,
@@ -1036,6 +1087,7 @@ fn flush_streams(
 }
 fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>) {
     let mut streams: Vec<StreamOutput> = Vec::new();
+    let mut reasoning_progress = ReasoningProgress::default();
     let mut durable = DurableTurn::default();
     let mut operations: HashMap<String, Operation> = HashMap::new();
     let mut inputs: HashMap<String, PendingInput> = HashMap::new();
@@ -1060,6 +1112,7 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>) {
                 }
                 Command::Prompt(text, sink, reply) => {
                     streams.clear();
+                    reasoning_progress = ReasoningProgress::default();
                     durable = DurableTurn::default();
                     events = Some(sink);
                     overflow = false;
@@ -1507,6 +1560,15 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>) {
                 // Provider content blocks have no guaranteed visible separator.
                 // Keep channel carry across block stops and assistant summaries.
                 let delta = &event["delta"];
+                if let Some(progress) =
+                    reasoning_progress.event(event, frame["parent_tool_use_id"].as_str())
+                {
+                    if !overflow && !send_event(&events, progress) {
+                        overflow = true;
+                        let _ = cli.control(json!({"subtype":"interrupt"}));
+                    }
+                }
+
                 if let Some((kind, text)) = match delta["type"].as_str() {
                     Some("text_delta") => delta["text"].as_str().map(|s| ("text_delta", s)),
                     Some("thinking_delta") => {
@@ -2178,6 +2240,87 @@ for line in sys.stdin:
             .all(|(i, _)| i < tool));
         assert_eq!(events.last().unwrap()["data"]["is_error"], false);
         assert!(host.shutdown());
+    }
+    #[test]
+    fn count_only_thinking_progress_is_live_bounded_and_resets_per_turn() {
+        let (_dir, host) = fixture(&format!(
+            r#"if row['type']=='user':
+  for value in [12, 24, 24, 6, None, -1, 1.5, '32', 1000001, 18446744073709551616, 48]:
+    emit({{'type':'stream_event','session_id':'{SESSION}','event':{{'type':'content_block_delta','delta':{{'type':'thinking_delta','thinking':'','estimated_tokens':value}}}}}})
+  emit({{'type':'stream_event','session_id':'{SESSION}','event':{{'type':'content_block_delta','delta':{{'type':'signature_delta','signature':'opaque-signature-fixture','estimated_tokens':100}}}}}})
+  time.sleep(.05)
+  emit({{'type':'stream_event','session_id':'{SESSION}','event':{{'type':'content_block_delta','delta':{{'type':'text_delta','text':'Answer'}}}}}})
+  emit({{'type':'result','session_id':'{SESSION}','is_error':False,'usage':{{'input_tokens':5,'output_tokens':2}}}})
+"#
+        ));
+        for prompt in ["first", "second"] {
+            let mut events = Vec::new();
+            host.prompt(prompt, &mut |event| events.push(event));
+            assert_eq!(events[0]["type"], "turn_started");
+            let progress = events
+                .iter()
+                .filter(|event| event["type"] == "reasoning_progress")
+                .collect::<Vec<_>>();
+            assert_eq!(
+                progress
+                    .iter()
+                    .map(|event| event["data"]["approx_tokens"].as_u64().unwrap())
+                    .collect::<Vec<_>>(),
+                vec![12, 24, 48]
+            );
+            assert!(progress
+                .iter()
+                .all(|event| event["data"]["count_is_estimate"] == true
+                    && event["data"].get("text").is_none()));
+            assert_eq!(events[1]["type"], "reasoning_progress");
+            let text = events
+                .iter()
+                .position(|event| event["type"] == "text_delta")
+                .unwrap();
+            assert!(events
+                .iter()
+                .enumerate()
+                .filter(|(_, event)| event["type"] == "reasoning_progress")
+                .all(|(index, _)| index < text));
+            assert!(!events
+                .iter()
+                .any(|event| event["type"] == "reasoning_delta"));
+            assert!(!serde_json::to_string(&events)
+                .unwrap()
+                .contains("opaque-signature-fixture"));
+            assert_eq!(events.last().unwrap()["type"], "turn_done");
+        }
+        assert!(host.shutdown());
+    }
+    #[test]
+    fn reasoning_progress_preserves_parent_and_ignores_signatures() {
+        let mut progress = ReasoningProgress::default();
+        let event = progress
+            .event(
+                &json!({"delta":{"type":"thinking_delta","estimated_tokens":10}}),
+                Some("tool"),
+            )
+            .unwrap();
+        assert_eq!(event["data"]["parent_id"], "tool");
+        assert!(progress.event(&json!({"delta":{"type":"signature_delta","estimated_tokens":20,"signature":"opaque"}}),None).is_none());
+        assert_eq!(progress.tokens, 10);
+        let next = progress
+            .event(
+                &json!({"index":1,"delta":{"type":"thinking_delta","estimated_tokens":5}}),
+                Some("tool"),
+            )
+            .unwrap();
+        assert_eq!(next["data"]["approx_tokens"], 15);
+        assert!(progress
+            .event(&json!({"type":"message_start"}), Some("tool"))
+            .is_none());
+        let next = progress
+            .event(
+                &json!({"index":0,"delta":{"type":"thinking_delta","estimated_tokens":2}}),
+                Some("tool"),
+            )
+            .unwrap();
+        assert_eq!(next["data"]["approx_tokens"], 17);
     }
     #[test]
     fn same_cli_turn_observes_verified_model_effort_and_immediate_reasoning() {

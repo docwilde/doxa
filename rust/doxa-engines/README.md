@@ -89,10 +89,13 @@ To explicitly migrate a verified saved legacy thread without creating a new one,
 resume it with `DOXA_CODEX_MIGRATE_APPSERVER=1`; the protected server must return
 that same `thread/resume` identity. New sessions should remove the old exec flag.
 
-The provider is installed under
-`~/.local/share/doxa/providers/codex-0.156.1-precompact-v1/` (or `XDG_DATA_HOME`).
-Normal Codex sessions select it automatically; an explicit `--codex-bin` takes
-precedence. Its native launcher verifies a private bounded receipt and executable
+Verified provider artifacts are installed in immutable receipt-digest directories
+under `~/.local/share/doxa/providers/` (or `XDG_DATA_HOME`). The atomic
+`codex-current` pointer selects new launches; existing processes retain their
+original artifact directory. A complete legacy `codex-0.156.1-precompact-v1/`
+installation remains a fallback until migrated. Normal Codex sessions resolve the
+selected executable to its real artifact path; a broken active pointer refuses
+startup rather than falling back. An explicit `--codex-bin` takes precedence. Its native launcher verifies a private bounded receipt and executable
 SHA256, then executes the same open inode. Login, version and other CLI commands
 are delegated to the recorded official Codex executable, which is never replaced.
 The sibling code-mode dispatcher also verifies its helper payload and executes
@@ -103,10 +106,14 @@ release. The pinned source authenticates that release's checksum manifest, and
 the installer verifies both input hashes before compilation. Their identity is
 recorded in the helper fingerprint and installed receipt. Inherited V8 archive,
 mirror, binding and source-build overrides cannot change these native inputs.
-Adding it reuses the existing protected server. Existing alpha.40 installations
-receive the helper, dispatchers and new receipt in one atomic directory exchange
-only when their reviewed server/source/patch identity still matches. Missing or
-corrupted installed helper files are repaired from that verified build artifact.
+Independently rebuilt bytes from the same reviewed source and patch may differ.
+Both incoming artifacts must match their private bounded build fingerprints, and
+the active receipt must match all installed server/helper/dispatcher bytes before
+publication. An unchanged reinstall reuses its immutable directory. A verified
+rebuild publishes a new directory and atomically changes only the active pointer;
+it does not overwrite the old receipt or executable. Corrupt installed artifacts,
+partial helper provenance or changed fingerprints are refused. Incomplete older
+receipts require a fresh installation root for review.
 
 Protected sessions run the native launcher as a dedicated Linux subreaper.
 A private control socket must complete its readiness/start handshake before
@@ -156,3 +163,14 @@ model request, no compaction request, no Compacted rollout record and retained
 history; the allow control requires a real replacement.
 See the [provider verification record](../../docs/live-provider-verification-2026-09-28.md)
 for actual account checks and their remaining authentication requirements.
+
+
+## Current verification limits
+
+See the [2026-09-29 record](../../docs/live-provider-verification-2026-09-29.md)
+for fixed Claude/vendor streaming observations, the incomplete default-window
+Codex stress run and remaining historical LORE replica gates. These debug daemon
+checks establish behavior only. Linux is verified; the full protected DOXA
+runtime is unsupported on macOS and Windows by its Linux supervision and
+ownership contracts. Standalone LORE macOS remains unverified; Windows is
+unsupported.

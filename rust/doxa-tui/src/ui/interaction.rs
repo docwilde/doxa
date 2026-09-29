@@ -41,6 +41,7 @@ impl App {
                 self.size = Rect::new(0, 0, w, h);
                 self.drag = None;
                 self.belief_preview.clear();
+                self.memory_preview.clear();
                 self.belief_pointer = None;
                 self.rendered_belief_rows.borrow_mut().clear();
                 self.chip_hover = None;
@@ -1665,6 +1666,12 @@ impl App {
         {
             return false;
         }
+        if let Some(manager)=self.memory_manager.as_mut() {
+            if row>=menu.y+2 && row<menu.bottom().saturating_sub(2) {
+                return manager.hover(usize::from(row-menu.y-2),usize::from(menu.height.saturating_sub(4)));
+            }
+            return false;
+        }
         if let Some(index) = self.active_request_index() {
             if self.input_requests[index].sending {
                 return false;
@@ -1820,14 +1827,14 @@ impl App {
                 return false;
             }
             let first = if picker.proposal_mode {
-                menu.y + 4
+                menu.y + 3
             } else {
                 menu.y + 2
             };
             if row < first {
                 return false;
             }
-            let reserve = if picker.proposal_mode { 6 } else { 3 };
+            let reserve = if picker.proposal_mode { 5 } else { 3 };
             let visible = usize::from(menu.height.saturating_sub(reserve)).max(1);
             if usize::from(row - first) >= visible {
                 return false;
@@ -1868,7 +1875,62 @@ impl App {
         false
     }
 
+    // Wheel targets are geometric, independent of keyboard focus. Inline
+    // chooser navigation never activates a row or changes the prompt owner.
+    fn wheel_chooser(&mut self, mouse: MouseEvent) -> Option<bool> {
+        let code = match mouse.kind {
+            MouseEventKind::ScrollUp => KeyCode::Up,
+            MouseEventKind::ScrollDown => KeyCode::Down,
+            _ => return None,
+        };
+        let point = ratatui::layout::Position::new(mouse.column, mouse.row);
+        if !self.active_chooser_rect().is_some_and(|area| area.contains(point)) {
+            return None;
+        }
+        let key = KeyEvent::new(code, KeyModifiers::NONE);
+        if self.active_request_index().is_some() { return None; }
+        if self.engine_picker { return Some(self.engine_picker_key(key)); }
+        if self.model_picker.is_some() { return Some(self.model_picker_key(key)); }
+        if self.effort_picker.is_some() { return Some(self.effort_picker_key(key)); }
+        if self.permission_picker.is_some() { return Some(self.permission_picker_key(key)); }
+        if self.settings_menu.is_some() {
+            return Some(self.settings_menu_key(key));
+        }
+        if let Some(menu) = self.operations_menu.as_mut() {
+            if menu.editing_credential() { return Some(false); }
+            menu.key(key);
+            return Some(true);
+        }
+        None
+    }
+    fn wheel_transcript(&mut self, mouse: MouseEvent) -> bool {
+        let up = match mouse.kind {
+            MouseEventKind::ScrollUp => true,
+            MouseEventKind::ScrollDown => false,
+            _ => return false,
+        };
+        let point = ratatui::layout::Position::new(mouse.column, mouse.row);
+        let layout = self.layout(self.size);
+        let panes = layout.panes.map(|panes| panes.into_iter().enumerate().collect::<Vec<_>>())
+            .unwrap_or_else(|| vec![(self.active_group, layout.body)]);
+        for (index, pane) in panes {
+            if self.diff_pane && index != self.active_group { continue; }
+            if !self.pane_regions(index, pane)[1].contains(point)
+                || self.groups[index].active_id().is_none() { continue; }
+            let old = self.groups[index].scroll;
+            self.groups[index].scroll = if up { old.saturating_add(3) } else { old.saturating_sub(3) };
+            if self.groups[index].scroll != old {
+                let owner = crate::selection::Owner {pane:index,session:self.groups[index].active_id().unwrap().to_owned()};
+                if self.transcript_selection.borrow().belongs_to(&owner) {
+                    self.transcript_selection.borrow_mut().clear();
+                }
+            }
+            return true;
+        }
+        false
+    }
     pub(super) fn mouse(&mut self, mouse: MouseEvent) -> bool {
+        if let Some(handled) = self.wheel_chooser(mouse) { return handled; }
         let mut tool_hover_changed = false;
         if mouse.kind == MouseEventKind::Moved {
             let hover = self.visible_tool_sections.borrow().iter()
@@ -2037,6 +2099,14 @@ impl App {
             self.link_hover_position = position;
             self.link_hover = link;
             return changed || moved || tool_hover_changed;
+        }
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left) && self.lore_picker.is_some() {
+            if let Some(area) = self.active_chooser_rect() {
+                if mouse.row == area.y && mouse.column > area.x {
+                    let x = mouse.column - area.x - 1;
+                    if x < 34 && mouse.column < area.right()-1 { return self.switch_lore_view(if x < 10 { 0 } else if x < 21 { 1 } else { 2 }); }
+                }
+            }
         }
         if mouse.kind == MouseEventKind::Down(MouseButton::Left)
             && self.active_chooser_rect().is_some_and(|area| {
@@ -2566,10 +2636,10 @@ impl App {
                 return true;
             }
             if picker.proposal_mode {
-                let visible = usize::from(menu.height.saturating_sub(6)).max(1);
+                let visible = usize::from(menu.height.saturating_sub(5)).max(1);
                 match mouse.kind {
                     MouseEventKind::Down(MouseButton::Left) => {
-                        let first = menu.y + 4;
+                        let first = menu.y + 3;
                         let start = chooser_visible_start(
                             &self.chooser_view_start,
                             picker.selected,
@@ -2793,6 +2863,10 @@ impl App {
             }
             return false;
         }
+        if matches!(mouse.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown)
+            && self.active_chooser_rect().is_some()
+            && self.wheel_transcript(mouse)
+        { return true; }
         if self.active_request_index().is_some()
             || self.tool_modal
             || self.map_modal
@@ -3087,16 +3161,7 @@ impl App {
                 true
             }
             MouseEventKind::Up(MouseButton::Left) => self.drag.take().is_some(),
-            MouseEventKind::ScrollUp => {
-                let p = &mut self.groups[self.active_group];
-                p.scroll = p.scroll.saturating_add(3);
-                true
-            }
-            MouseEventKind::ScrollDown => {
-                let p = &mut self.groups[self.active_group];
-                p.scroll = p.scroll.saturating_sub(3);
-                true
-            }
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => self.wheel_transcript(mouse),
             _ => false,
         }
     }
