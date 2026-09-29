@@ -479,6 +479,11 @@ fn restored_tool_id(id: &str) -> String {
     format!("{}{}", crate::ui::transcript_tools::TOOL_ID_PREFIX, serde_json::json!(id))
 }
 
+fn tool_label(value: &Value) -> String {
+    let raw = value.as_str().map(str::to_owned).unwrap_or_else(|| value.to_string());
+    crate::markdown::sanitize(&raw).replace(['\n', '\r'], " ").chars().take(400).collect()
+}
+
 fn restored_detail_marker(kind: &str, value: &Value) -> String {
     if value.is_null() { return String::new(); }
     let raw = value.as_str().map(str::to_owned).unwrap_or_else(|| value.to_string());
@@ -512,7 +517,7 @@ pub fn render(snapshot: &TranscriptSnapshot) -> String {
             let turn = turns.last_mut().unwrap();
             match kind {
                 "tool_call" => {
-                    let name = tool_detail(&data["name"]);
+                    let name = tool_label(&data["name"]);
                     let name = if name.is_empty() { "Tool".to_owned() } else { name };
                     turn.tool_names.insert(id.to_owned(), name.clone());
                     let detail = tool_detail(&data["input"]);
@@ -588,7 +593,7 @@ pub fn render(snapshot: &TranscriptSnapshot) -> String {
             match block["type"].as_str() {
                 Some("text") => append_text(&mut turn.answer, block["text"].as_str().unwrap_or("")),
                 Some("tool_use") => {
-                    let name = tool_detail(&block["name"]);
+                    let name = tool_label(&block["name"]);
                     let name = if name.is_empty() { "Tool".to_owned() } else { name };
                     if let Some(id) = block["id"].as_str() { turn.tool_names.insert(id.to_owned(), name.clone()); }
                     let detail = tool_detail(&block["input"]);
@@ -716,8 +721,8 @@ for line in sys.stdin:
         ];
         let bytes = records.iter().map(Value::to_string).collect::<Vec<_>>().join("\n").into_bytes();
         let rendered = render(&TranscriptSnapshot { bytes, earlier_bytes_omitted: false });
-        assert!(rendered.contains("Tool: command\\_execution started"));
-        assert!(rendered.contains("Tool: command\\_execution finished · short"));
+        assert!(rendered.contains("Tool: command_execution started"));
+        assert!(rendered.contains("Tool: command_execution finished · short"));
         assert!(rendered.contains("full result\\nsecond line"));
         assert!(rendered.contains("done"));
         assert_eq!(rendered.matches("**You:**").count(), 1);

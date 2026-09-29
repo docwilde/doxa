@@ -608,6 +608,94 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn curated_list_selects_visible_rows_and_shows_delayed_full_fact() {
+        let mut app = App::default();
+        app.rail_visible = false;
+        app.handle(Event::Resize(120, 28));
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"memory-session","cwd":"/fixture"}));
+        app.show_memory_menu_fixture(0, &["first"], &[], &[]);
+        let long = "Complete singular memory fact with a visible tail".repeat(3);
+        app.memory_list.as_mut().unwrap().facts = (0..30).map(|index| crate::memory_menu::Fact {
+            scope: "user".into(), text: if index == 1 { long.clone() } else { format!("Fact {index}") },
+            source: Some("codex".into()), redacted: false,
+        }).collect();
+        let menu = app.active_chooser_rect().unwrap();
+        painted_at(&app, 120, 28);
+        let mut terminal = Terminal::new(TestBackend::new(120, 28)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert_eq!(terminal.backend().buffer()[(menu.right() - 2, menu.y + 1)].fg, theme::ACCENT);
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
+        assert_eq!(app.memory_list.as_ref().unwrap().selected, 1);
+        let row = app.rendered_belief_rows.borrow()[1].clone();
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Moved,
+            column: row.rect.x + 4, row: row.rect.y, modifiers: KeyModifiers::NONE }));
+        assert!(!painted_at(&app, 120, 28).contains("Full memory"));
+        assert!(app.tick_belief_preview(Instant::now() + Duration::from_millis(600)));
+        assert!(painted_at(&app, 120, 28).contains("Full memory"));
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Moved,
+            column: row.rect.x + 4, row: row.rect.y + 1, modifiers: KeyModifiers::NONE }));
+        assert_eq!(app.memory_list.as_ref().unwrap().selected, 2);
+        assert!(!painted_at(&app, 120, 28).contains("Full memory"));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE)));
+        assert!(app.chip_info.as_ref().unwrap().scroll > 0);
+    }
+
+    #[test]
+    fn curated_fact_tooltip_stays_open_while_wheeling_to_its_last_line() {
+        let mut app=App::default();app.rail_visible=false;app.handle(Event::Resize(120,40));
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"memory-session","cwd":"/fixture"}));
+        app.show_memory_menu_fixture(0,&["first"],&[],&[]);
+        app.memory_list.as_mut().unwrap().facts[0].text=(0..40).map(|n|format!("Complete fact line {n}\n")).collect();
+        painted_at(&app,120,40);let row=app.rendered_belief_rows.borrow()[0].clone();
+        app.handle(Event::Mouse(MouseEvent {kind:MouseEventKind::Moved,column:row.rect.x+2,row:row.rect.y,modifiers:KeyModifiers::NONE}));
+        app.tick_belief_preview(Instant::now()+Duration::from_millis(600));
+        let point=(0..40).flat_map(|y|(0..120).map(move |x|(x,y)))
+            .find(|(x,y)|app.memory_preview.memory_tooltip_contains(app.size,ratatui::layout::Position::new(*x,*y))
+                && !row.rect.contains(ratatui::layout::Position::new(*x,*y))).unwrap();
+        app.handle(Event::Mouse(MouseEvent {kind:MouseEventKind::Moved,column:point.0,row:point.1,modifiers:KeyModifiers::NONE}));
+        assert!(app.memory_preview.owner().is_some());
+        for _ in 0..20 {app.handle(Event::Mouse(MouseEvent {kind:MouseEventKind::ScrollDown,column:point.0,row:point.1,modifiers:KeyModifiers::NONE}));}
+        assert!(painted_at(&app,120,40).contains("Complete fact line 39"));
+    }
+
+    #[test]
+    fn approval_grant_is_per_tool_and_session_and_only_after_acknowledgement() {
+        let mut app = App::default(); app.rail_visible = false;
+        app.handle(Event::Resize(100, 30));
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"first","cwd":"/fixture"}));
+        let request = |session: &str, id: &str, tool: &str, input: &str| json!({"type":"event","session_id":session,
+            "event":{"type":"needs_input","data":{"id":id,"kind":"permission","title":"Approve this canonical DOXA tool once?",
+                "tool_name":tool,"input_summary":input,"require_full_review":false}}});
+        app.apply_daemon_frame(&request("first", "one", "mcp__doxa__peer_list", "{}"));
+        let menu = app.active_chooser_rect().unwrap();
+        let painted = painted_at(&app, 100, 30);
+        assert!(painted.lines().nth(usize::from(menu.y)).unwrap().contains("mcp__doxa__peer_list"));
+        let (body, _, _) = input_request_body(&app.input_requests[0], 90);
+        assert!(!body.contains("Title:") && !body.contains("Tool:") && !body.contains("Input:"));
+        assert!(body.contains("Always approve this tool"));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE)));
+        assert_eq!(app.pending_answers[0].2["scope"], "session");
+        assert!(app.permission_grants.is_empty());
+        app.apply_daemon_frame(&json!({"type":"answer_reply","session_id":"first","request_id":"one","ok":true}));
+        assert!(app.permission_grants.contains(&("first".into(), "mcp__doxa__peer_list".into())));
+        app.apply_daemon_frame(&request("first", "two", "mcp__doxa__peer_list", "{\"limit\":100}"));
+        assert!(app.pending_answers.iter().any(|(_, id, answer)| id == "two" && answer["decision"] == "allow"));
+        app.apply_daemon_frame(&request("first", "three", "mcp__doxa__peer_send", "{}"));
+        assert!(!app.pending_answers.iter().any(|(_, id, _)| id == "three"));
+        app.apply_daemon_frame(&json!({"type":"event","session_id":"first","event":{"type":"session_done","data":{}}}));
+        assert!(app.permission_grants.is_empty());
+    }
+
+    #[test]
+    fn peer_tool_fold_header_keeps_literal_underscores() {
+        let row=super::transcript_events::structured_event("tool_call",&json!({
+            "name":"mcp__doxa__peer_list","input":{}
+        })).unwrap();
+        assert!(row.contains("Tool: mcp__doxa__peer_list started"));
+        assert!(!row.contains("\\_"));
+    }
+
+    #[test]
     fn clicking_filter_prompt_keeps_both_lore_menus_and_private_draft() {
         for memory in [false,true] {
             let mut app=App::default();app.rail_visible=false;app.handle(Event::Resize(120,32));
@@ -1651,14 +1739,14 @@ for line in sys.stdin:
         let mut terminal = Terminal::new(TestBackend::new(100, 32)).unwrap();
         terminal.draw(|frame| app.draw(frame)).unwrap();
         let buffer = terminal.backend().buffer();
-        let logo = buffer.content.iter().filter(|cell|cell.symbol()=="_" && cell.fg==theme::ACCENT).collect::<Vec<_>>();
+        let logo = buffer.content.iter().filter(|cell|cell.symbol()=="█" && cell.fg==theme::ACCENT).collect::<Vec<_>>();
         assert!(!logo.is_empty());
         assert!(logo.iter().all(|cell|cell.fg==theme::ACCENT && cell.bg==theme::BASE));
         let ready = painted_at(&app, 100, 32);
         assert!(ready.contains("Session ready") && ready.contains("gpt-6-sol"));
         app.sessions[0].transcript = "Actual conversation".into();
         let conversation = painted_at(&app, 100, 32);
-        assert!(conversation.contains("Actual conversation") && !conversation.contains("/________\\"));
+        assert!(conversation.contains("Actual conversation") && !conversation.contains("███████████████"));
         app.sessions[0].transcript.clear();
         app.preferences.set_test("boot_banner", "0");
         assert!(!painted_at(&app, 100, 32).contains("/________\\"));

@@ -145,13 +145,13 @@ impl Shared {
                 return agent.call(&wire, args);
             }
         }
-        let method = doxa_engines::peer_tools::rpc(&wire, args).map_err(str::to_owned)?;
+        let (method, normalized) = doxa_engines::peer_tools::validated_call(&wire, args).map_err(str::to_owned)?;
         (self
             .peer
             .lock()
             .map_err(|_| "peer tools unavailable")?
             .clone()
-            .ok_or("peer tools unavailable")?)(method, args)
+            .ok_or("peer tools unavailable")?)(method, &normalized)
     }
 }
 pub struct ClaudeHost {

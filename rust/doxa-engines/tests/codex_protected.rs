@@ -29,24 +29,25 @@ async fn protected_initial_model_is_verified_before_any_turn() {
 
 #[tokio::test]
 async fn peer_dynamic_tool_requires_matching_single_use_permission_and_cancels_pending() {
-    for mode in ["peer-allow", "peer-deny", "peer-cancel"] {
+    for mode in ["peer-allow", "peer-deny", "peer-cancel", "peer-list", "peer-alias"] {
         let (dir, options, gate)=fixture(mode);
         let mut driver=AppServerDriver::spawn_protected(options,str::to_owned,true,gate).await.unwrap();
         let inbox=Arc::new(InputInbox::default());
         let count=Arc::new(AtomicUsize::new(0)); let called=count.clone();
         let handler:doxa_engines::peer_tools::Handler=Arc::new(move |rpc:&str,args:&Value| {
-            assert_eq!(rpc,"msg"); assert_eq!(args,&json!({"target":"peer-exact","text":"hello"}));
+            if mode=="peer-list" {assert_eq!(rpc,"peers"); assert_eq!(args,&json!({}));}
+            else {assert_eq!(rpc,"msg"); assert_eq!(args,&json!({"target":"peer-exact","text":"hello"}));}
             called.fetch_add(1,Ordering::SeqCst); Ok(json!({"delivered":true}))
         });
         let cancel=CancellationToken::new(); let trigger=cancel.clone(); let input=inbox.clone();
         let result=driver.run_turn_interactive("hello",&cancel,|event| {
             if event.kind=="needs_input" {
                 if mode=="peer-cancel" { trigger.cancel(); }
-                else { input.answer(event.data["id"].as_str().unwrap(),&json!({"decision":if mode=="peer-allow" {"allow"} else {"deny"}})).unwrap(); }
+                else { input.answer(event.data["id"].as_str().unwrap(),&json!({"decision":if matches!(mode,"peer-allow"|"peer-list"|"peer-alias") {"allow"} else {"deny"}})).unwrap(); }
             }
         },|frame| inbox.begin_peer(frame,str::to_owned,handler.clone()).map(Some)).await;
         assert_eq!(result.is_ok(),mode!="peer-cancel");
-        assert_eq!(count.load(Ordering::SeqCst),usize::from(mode=="peer-allow"));
+        assert_eq!(count.load(Ordering::SeqCst),usize::from(matches!(mode,"peer-allow"|"peer-list"|"peer-alias")));
         if mode!="peer-cancel" { assert!(dir.path().join("peer-reply").exists()); }
         inbox.clear(); driver.shutdown().await;
     }

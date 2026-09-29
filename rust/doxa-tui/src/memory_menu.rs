@@ -42,7 +42,7 @@ pub fn fetch_facts(cwd:&Path)->Result<Vec<Fact>,&'static str> {
 }
 
 #[derive(Debug)]
-pub struct List {pub owner:Option<(String,String)>,pub facts:Vec<Fact>,pub query:String}
+pub struct List {pub owner:Option<(String,String)>,pub facts:Vec<Fact>,pub query:String,pub selected:usize}
 impl List {
     pub fn indices(&self)->Vec<usize> {
         let query=self.query.to_lowercase();
@@ -65,7 +65,7 @@ mod tests {
         assert_eq!(facts[0].text,"# Literal fact with \nline");
         assert_eq!(facts[1].source,None);
         assert!(facts[1].redacted);
-        let list=List {owner:None,facts,query:"codex".into()};
+        let list=List {owner:None,facts,query:"codex".into(),selected:0};
         assert_eq!(list.indices(),vec![0]);
         assert!(parse_facts(vec![serde_json::json!({"text":"safe","source":17,"redacted":false})],"user").is_err());
     }
@@ -336,8 +336,8 @@ impl Manager {
     }
 
     pub fn draw(&self, frame: &mut ratatui::Frame, area: ratatui::layout::Rect) {
-        use ratatui::{widgets::{Block, Borders, Paragraph}, style::Style};
-        let width = usize::from(area.width.saturating_sub(2)).max(1);
+        use ratatui::{widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState}, style::Style};
+        let width = usize::from(area.width.saturating_sub(3)).max(1);
         let visible = usize::from(area.height.saturating_sub(4)).max(1);
         let usage = self.review.as_ref().map(|r| format!("{} / {} chars", r["chars"], r["cap_chars"]))
             .unwrap_or_default();
@@ -381,6 +381,15 @@ impl Manager {
             .block(Block::default().title(" LORE curated memory · Esc close ").borders(Borders::ALL)
                 .border_style(Style::default().fg(crate::theme::ACCENT)))
             .style(Style::default().fg(crate::theme::TEXT).bg(crate::theme::RAISED)), area);
+        if self.draft.is_none() && self.entries.len()>visible && area.width>=5 && area.height>=5 {
+            let mut state=ScrollbarState::new(self.entries.len()).position(self.view_start.get())
+                .viewport_content_length(visible);
+            frame.render_stateful_widget(Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None).end_symbol(None)
+                .track_style(Style::default().fg(crate::theme::SECONDARY))
+                .thumb_style(Style::default().fg(crate::theme::ACCENT)),
+                ratatui::layout::Rect::new(area.right()-2,area.y+1,1,area.height-2),&mut state);
+        }
     }
 
     pub fn editing(&self) -> bool { self.draft.is_some() || self.pending.is_some() }

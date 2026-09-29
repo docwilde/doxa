@@ -111,12 +111,14 @@ elif mode.startswith('alias'):
 elif mode.startswith('peer'):
     assert operation['method']=='turn/start'
     send({'id':operation['id'],'result':{'turn':{'id':'turn-peer'}}})
-    send({'id':71,'method':'item/tool/call','params':{'threadId':'thread-actual','turnId':'turn-peer','callId':'peer-call','namespace':None,'tool':'doxa_peer_send','arguments':{'target':'peer-exact','text':'hello'}}})
+    tool='doxa_peer_list' if mode=='peer-list' else 'doxa_peer_send'
+    args={} if mode=='peer-list' else {'session_id':'peer-exact','message':'hello'} if mode=='peer-alias' else {'target':'peer-exact','text':'hello'}
+    send({'id':71,'method':'item/tool/call','params':{'threadId':'thread-actual','turnId':'turn-peer','callId':'peer-call','namespace':None,'tool':tool,'arguments':args}})
     response=read()
     if mode=='peer-cancel':
         sys.exit(0)
     assert response['id']==71
-    assert response['result']['success']==(mode=='peer-allow')
+    assert response['result']['success']==(mode in ('peer-allow','peer-list','peer-alias'))
     Path('peer-reply').write_text(json.dumps(response))
     notice('turn/completed',turn={'id':'turn-peer','status':'completed','error':None})
 else:

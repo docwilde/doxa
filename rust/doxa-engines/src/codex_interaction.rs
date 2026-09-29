@@ -42,8 +42,8 @@ impl InputInbox {
             return Err("Unsupported or oversized Codex peer tool request".into());
         }
         let name = params["tool"].as_str().ok_or("Missing Codex peer tool")?;
-        let rpc = crate::peer_tools::rpc(name, &params["arguments"])?;
-        self.begin_callback(frame, scrub, handler, rpc)
+        let (rpc, arguments) = crate::peer_tools::validated_call(name, &params["arguments"])?;
+        self.begin_callback(frame, scrub, handler, rpc, arguments)
     }
     /// A host-supplied canonical catalog is the complete permission surface.
     /// Provider arguments cannot select another daemon method or host identity.
@@ -57,10 +57,10 @@ impl InputInbox {
             || serde_json::to_vec(frame).map_or(true, |bytes| bytes.len() > MAX_REQUEST_BYTES) {
             return Err("Unavailable or oversized Codex operator request".into());
         }
-        self.begin_callback(frame, scrub, handler, name)
+        self.begin_callback(frame, scrub, handler, name, params["arguments"].clone())
     }
     fn begin_callback(&self, frame: &Value, scrub: impl Fn(&str) -> String,
-        handler: crate::peer_tools::Handler, rpc: &str)
+        handler: crate::peer_tools::Handler, rpc: &str, arguments:Value)
         -> Result<(EngineEvent, oneshot::Receiver<Value>), String> {
         let params = &frame["params"];
         let name = params["tool"].as_str().ok_or("Missing Codex tool")?;
@@ -72,7 +72,7 @@ impl InputInbox {
         let input = scrub(&params["arguments"].to_string());
         if input.len() > MAX_REQUEST_BYTES { return Err("Scrubbed peer request exceeds the review limit".into()); }
         let (reply, receiver) = oneshot::channel();
-        *pending = Some(Pending {id:id.clone(), rule:Rule::Peer{rpc:rpc.into(), arguments:params["arguments"].clone(),handler}, reply});
+        *pending = Some(Pending {id:id.clone(), rule:Rule::Peer{rpc:rpc.into(), arguments,handler}, reply});
         Ok((EngineEvent::new("needs_input", json!({"id":id,"kind":"permission","title":if rpc.starts_with("mcp__doxa__lore_") { "Allow this DOXA LORE tool once?" } else { "Allow this DOXA peer tool once?" },"tool_name":name,"input_summary":input,"require_full_review":true})), receiver))
     }
     /// The driver validates thread/turn/item identity before calling this.

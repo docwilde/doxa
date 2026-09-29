@@ -14,7 +14,7 @@ pub struct Owner {
 pub struct Display {pub subject:String,pub claim:String,pub complete:bool}
 #[derive(Debug)]
 struct Hover {owner:Owner,since:Instant,visible:bool,requested:bool,display:Option<Display>,failed:bool,
-    pending:Option<Receiver<Result<Value,()>>>}
+    pending:Option<Receiver<Result<Value,()>>>,scroll:usize}
 #[derive(Default,Debug)]
 pub struct Preview {hover:Option<Hover>}
 
@@ -26,7 +26,7 @@ impl Preview {
         self.hover=owner.map(|owner| {
             let needs_read=owner.truncated || owner.subject.len()>=4096 || owner.subject.contains("[redacted]") || owner.claim.contains("[redacted]");
             let display=(!needs_read).then(||Display {subject:owner.subject.clone(),claim:owner.claim.clone(),complete:true});
-            Hover {owner,since:now,visible:false,requested:false,display,failed:false,pending:None}
+            Hover {owner,since:now,visible:false,requested:false,display,failed:false,pending:None,scroll:0}
         });true
     }
     /// Complete scrubbed memory rows already came from the canonical read.
@@ -83,6 +83,26 @@ impl Preview {
             .borders(Borders::ALL).border_style(Style::default().fg(theme::ACCENT)))
             .style(Style::default().fg(theme::TEXT).bg(theme::RAISED)),plan.area);
     }
+    pub fn memory_tooltip_contains(&self,area:Rect,point:ratatui::layout::Position)->bool {
+        self.hover.as_ref().filter(|hover|hover.visible).and_then(|hover|hover.display.as_ref()
+            .and_then(|display|memory_plan(&hover.owner,display,area,hover.scroll)))
+            .is_some_and(|plan|plan.area.contains(point))
+    }
+    pub fn scroll_memory(&mut self,delta:isize)->bool {
+        let Some(hover)=self.hover.as_mut().filter(|hover|hover.visible) else{return false;};
+        let next=hover.scroll.saturating_add_signed(delta);
+        if next==hover.scroll {return false;}
+        hover.scroll=next;true
+    }
+    pub fn render_memory(&self,frame:&mut Frame,area:Rect) {
+        let Some(hover)=self.hover.as_ref().filter(|hover|hover.visible) else{return;};
+        let Some(display)=hover.display.as_ref() else{return;};
+        let Some(plan)=memory_plan(&hover.owner,display,area,hover.scroll) else{return;};
+        frame.render_widget(Clear,plan.area);
+        frame.render_widget(Paragraph::new(plan.lines).block(Block::default().title(" Full memory · wheel scroll ")
+            .borders(Borders::ALL).border_style(Style::default().fg(theme::ACCENT)))
+            .style(Style::default().fg(theme::TEXT).bg(theme::RAISED)),plan.area);
+    }
 }
 fn parse_display(id:u64,value:&Value)->Option<Display> {
     if value["id"].as_u64()!=Some(id) {return None;}
@@ -116,6 +136,25 @@ fn plan(owner:&Owner,display:&Display,area:Rect)->Option<Plan> {
     let y=if above>=below {owner.rect.y.saturating_sub(height+1)}else{owner.rect.bottom()+1};
     let x=owner.rect.x.min(area.right().saturating_sub(width+1)).max(area.x+1);
     Some(Plan {area:Rect::new(x,y,width,height),lines:rows.into_iter().map(Line::from).collect(),full})
+}
+
+fn memory_plan(owner:&Owner,display:&Display,area:Rect,scroll:usize)->Option<Plan> {
+    let mut base=plan(owner,display,area)?;
+    let width=usize::from(base.area.width.saturating_sub(2)).max(1);
+    let mut rows=Vec::new();
+    for source in display.claim.split('\n') {
+        let mut safe=String::with_capacity(source.len());
+        for ch in source.chars() {
+            if ch.is_control() || matches!(ch,'\u{200e}'|'\u{200f}'|'\u{202a}'..='\u{202e}'|'\u{2066}'..='\u{2069}') {
+                safe.extend(ch.escape_debug());
+            } else { safe.push(ch); }
+        }
+        rows.extend(crate::memory_menu::wrap_review(&safe,width));
+    }
+    let visible=usize::from(base.area.height.saturating_sub(2)).max(1);
+    let start=scroll.min(rows.len().saturating_sub(visible));
+    base.lines=rows.into_iter().skip(start).take(visible).map(Line::from).collect();
+    Some(base)
 }
 
 #[cfg(test)]
@@ -160,5 +199,16 @@ mod tests {
         assert!(preview.needs_read());
         assert!(preview.accept(&one,Ok(serde_json::json!({"id":7,"subject":"user","claim":"Full\nclaim","complete":true,"redacted":false}))));
         assert_eq!(preview.hover.as_ref().unwrap().display.as_ref().unwrap().claim,"Full\nclaim");
+    }
+    #[test]
+    fn long_curated_fact_remains_readable_by_scrolling_its_tooltip() {
+        let one=owner();
+        let display=Display {subject:"user".into(),claim:(0..40).map(|index|format!("Fact line {index}\n")).collect(),complete:true};
+        let area=Rect::new(0,0,100,40);
+        let first=memory_plan(&one,&display,area,0).unwrap();
+        let last=memory_plan(&one,&display,area,usize::MAX).unwrap();
+        let text=|plan:Plan|plan.lines.iter().flat_map(|line|line.spans.iter().map(|span|span.content.as_ref())).collect::<String>();
+        assert!(text(first).contains("Fact line 0"));
+        assert!(text(last).contains("Fact line 39"));
     }
 }

@@ -1,7 +1,7 @@
 # Rust 2.0 parity with DOXA 1.19.0
 
 Baseline: Python `v1.19.0` production behavior. This tracker records implementation
-through **alpha.47**, with canonical **LORE 0.62.4**. Account checks
+through **alpha.48**, with canonical **LORE 0.62.4**. Account checks
 are bounded by their exact candidate and date.
 The Rust runtime implements the audited workflows below. Live account checks
 remain bounded by the [latest verification record](live-provider-verification-2026-09-29.md)
@@ -15,11 +15,11 @@ coverage alone does not establish authenticated compatibility for every provider
 | Sessions | New/attach/stop/list; verified live and saved-tab restoration with order, labels, layout, drafts and focus; safe eager resume without a prompt; read-only fallback with reasons; resume/restore switches; exact and detached session kill |
 | Window and prompt | Nested horizontal/vertical splits, draggable dividers and submenu borders, grouped tabs and collections, per-pane prompts, mouse hover/click, keyboard focus across tabs/chips/prompt, tab transfer, prompt-line search and generated action palette |
 | Messages | Distinct user styling, clickable HTTP(S) links, processing spinner, folded tool calls and streamed reasoning counts; painted-text selection, OSC52 copy and explicit owned clipboard paste; keyboard-only `!` shell output remains private to the window |
-| Questions and permissions | Inline choices, free text/Other, request identity checks, complete permission read-through, one-request approval, restored pending snapshots and blinking input indicators |
+| Questions and permissions | Inline choices, free text/Other, request identity checks, complete permission read-through, one-request or per-tool session approval, restored pending snapshots and blinking input indicators |
 | Worktrees and diffs | Repo/worktree detection and navigation, pinned base selection and branch switch, lifecycle locks, guarded finalize/orphan cleanup/missing-checkout recovery, persistent diff and exact tracked-hunk rejection |
-| LORE | Scoped curated memory browse/add/edit/remove, per-belief Accept/Reject, exact review, evidence/graph views, pending actions; native Codex/vendor canonical tools with pending/provenance gates, provider-specific context refresh and final indexing |
+| LORE | Scoped curated memory browse/add/edit/remove with row selection, delayed full-fact previews and scrollbars; per-belief Accept/Reject, exact review, evidence/graph views, pending actions; native Codex/vendor canonical tools with pending/provenance gates, provider-specific context refresh and final indexing |
 | Models and usage | Automatically refreshed vendor-dependent model catalogs, supported current-session model/effort changes, permission picker, memory percentages, official context/usage details and measured context grid; handling of reported Claude 5-hour/weekly quota events; plan/quota/balance chips only from reported data |
-| Fleets and peers | Native startup barrier, symmetric and interactive supervised runs, budget/approval guards, durable resume, memory-off seeded assignments and quiet dwell; owned stop/detach/attach; private browser mesh; model peer opt-in, bounded broadcast/reply/history and canonical remote bridge |
+| Fleets and peers | Native startup barrier, symmetric and interactive supervised runs, budget/approval guards, durable resume, memory-off seeded assignments and quiet dwell; owned stop/detach/attach; private browser mesh; model peer opt-in, clickable peer map, bounded broadcast/reply/history and canonical remote bridge |
 | Operations | CLI/TUI setup and login/logout/device flow, first-launch setup offer, full categorized preferences and effective sources, sanitized plugin adoption/reload, adopted command completion/help/palette, doctor/update/restart and cached installation/update details |
 | Compaction | Canonical Claude review and pinned Codex synchronous PreCompact contract; review outcomes and failure boundaries remain explicit |
 
@@ -35,8 +35,9 @@ coverage alone does not establish authenticated compatibility for every provider
 | Alpha.43 | README and tracker refresh with release-specific evidence and remaining live checks; no additional runtime implementation. |
 | Alpha.44 | Retain Claude's nested five-hour/weekly quota windows and startup events; preserve valid partial updates and identify native CLI provenance. Record authenticated alpha.43 verification. |
 | Alpha.45 | Share native LORE settings across embedded memory, standalone carriers and review workers; resolve the sticky store before loading saved caps, signing keys and transport preferences. |
-| Alpha.47 | Accept verified Cargo build outputs with read/execute permissions or extra hard links while retaining strict single-link installed artifacts and receipt checks. |
 | Alpha.46 | Canonically scrubbed vendor text streaming and shared known-model capability fallback; approximate Claude thinking progress; immutable verified Codex updates; reported quota colors; hover wheel routing, delayed memory preview, Pending/Clustered titles and offline split restoration. |
+| Alpha.47 | Accept verified Cargo build outputs with read/execute permissions or extra hard links while retaining strict single-link installed artifacts and receipt checks. |
+| Alpha.48 | Fix observed Codex peer-send aliases, add per-tool session approval and clickable peer history, block Greek welcome art, and selected curated facts with delayed scrollable previews and menu scrollbars. |
 
 Standalone LORE administration, hooks, MCP and network operations are native Rust;
 they are not a remaining Python replacement task. See the
