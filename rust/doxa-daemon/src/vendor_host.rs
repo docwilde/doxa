@@ -649,7 +649,7 @@ impl Host for VendorHost {
                         Vendor::DeepSeek => &["deepseek-flash", "deepseek-v4-pro"],
                         Vendor::Glm => &["glm-4.5", "glm-4.5-air", "glm-4.6", "glm-4.7", "glm-5", "glm-5-turbo", "glm-5.1", "glm-5.2", "glm-5.3", "glm-5.3-flash"],
                     };
-                    ids.iter().map(|id| doxa_vendors::ModelCapability { id: (*id).into(), efforts: self.vendor.effort_choices(id).iter().map(|s| (*s).into()).collect(), default_effort: Some("high".into()), effort_metadata_present: false }).collect()
+                    ids.iter().map(|id| doxa_vendors::ModelCapability::local(self.vendor, id)).collect()
                 });
                 *self.catalog.lock().unwrap() = Some(rows.clone());
                 Ok(json!({"models":rows.iter().map(|r| &r.id).collect::<Vec<_>>(),
@@ -666,9 +666,9 @@ impl Host for VendorHost {
                 let catalog = self.catalog.lock().unwrap();
                 let advertised = catalog.as_ref().and_then(|rows| rows.iter().find(|row| row.id == selected));
                 if catalog.is_some() && advertised.is_none() { return Err("model is unavailable in the current provider catalog".into()); }
-                let fallback = self.vendor.effort_choices(selected);
+                let fallback = doxa_vendors::ModelCapability::local(self.vendor, selected);
                 let choices = advertised.map(|row| row.efforts.iter().map(String::as_str).collect::<Vec<_>>())
-                    .unwrap_or_else(|| fallback.to_vec());
+                    .unwrap_or_else(|| fallback.efforts.iter().map(String::as_str).collect());
                 if choices.is_empty() { return Err("model has no verified native vendor effort capability".into()); }
                 let default = advertised.and_then(|row| row.default_effort.as_deref()).filter(|level| choices.contains(level)).unwrap_or_else(|| if choices.contains(&"high") { "high" } else { choices[0] });
                 let chosen = if method == "set_effort" { params["effort"].as_str().ok_or("effort required")? }
