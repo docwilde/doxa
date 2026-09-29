@@ -2250,10 +2250,12 @@ impl App {
                     .chip_hover
                     .as_ref()
                     .is_some_and(|hit| hit.group == index && hit.kind == kind);
+            let quota_color = (kind == "cost").then(|| self.session_telemetry.get(id)
+                .and_then(|telemetry| telemetry.quota_color())).flatten();
             chip_spans.push(Span::styled(
                 text,
                 Style::default()
-                    .fg(if hovered { theme::ACCENT } else { theme::TEXT })
+                    .fg(quota_color.unwrap_or(if hovered { theme::ACCENT } else { theme::TEXT }))
                     .bg(theme::HIGHLIGHT)
                     .add_modifier(if active && self.focus == Focus::Chip(kind) {
                         Modifier::BOLD | Modifier::UNDERLINED | Modifier::REVERSED

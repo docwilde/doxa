@@ -24,6 +24,40 @@ pub(super) struct SessionTelemetry {
 }
 
 impl SessionTelemetry {
+    /// The most consumed reported window determines the subscription warning.
+    /// Unknown quotas and API billing retain the ordinary chip style.
+    pub(super) fn quota_color(&self) -> Option<ratatui::style::Color> {
+        if self.billing_mode.as_deref() != Some("subscription") {
+            return None;
+        }
+        let quota = self.quota.as_deref()?;
+        let highest = quota
+            .match_indices('%')
+            .filter_map(|(end, _)| {
+                let start = quota[..end]
+                    .char_indices()
+                    .rev()
+                    .find(|(_, c)| !c.is_ascii_digit() && *c != '.')
+                    .map(|(i, c)| i + c.len_utf8())
+                    .unwrap_or(0);
+                if quota[..start].ends_with('-') {
+                    return None;
+                }
+                quota[start..end]
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|v| v.is_finite() && (0.0..=100.0).contains(v))
+            })
+            .reduce(f64::max)?;
+        Some(if highest > 90.0 {
+            super::theme::ERROR
+        } else if highest > 66.0 {
+            super::theme::WARNING
+        } else {
+            super::theme::SUCCESS
+        })
+    }
+
     pub(super) fn update_turn(&mut self, data: &serde_json::Value) {
         let context = data["ctx_percentage"]
             .as_f64()
@@ -198,5 +232,34 @@ impl SessionTelemetry {
             },
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn subscription_quota_uses_highest_reported_window_and_exact_thresholds() {
+        let mut telemetry = SessionTelemetry::default();
+        for (quota, expected) in [
+            ("5h:0% week:65%", Some(super::super::theme::SUCCESS)),
+            ("5h:66% week:12%", Some(super::super::theme::SUCCESS)),
+            ("5h 66.1% · week 12%", Some(super::super::theme::WARNING)),
+            ("5h:12% week:90%", Some(super::super::theme::WARNING)),
+            ("5h:12% week:90.1%", Some(super::super::theme::ERROR)),
+            ("5h:100% week:12%", Some(super::super::theme::ERROR)),
+            ("unknown", None),
+            ("5h:NaN% week:101%", None),
+            ("5h:-5%", None),
+        ] {
+            telemetry.update_billing(&json!({"mode":"subscription","quota":quota}));
+            assert_eq!(telemetry.quota_color(), expected, "{quota}");
+        }
+        telemetry.update_billing(&json!({"mode":"api","quota":"5h:99%"}));
+        assert_eq!(telemetry.quota_color(), None);
+        telemetry.update_billing(&json!({"mode":"subscription","type":"Max"}));
+        assert_eq!(telemetry.quota_color(), None);
     }
 }
