@@ -183,28 +183,26 @@ still refuse or stage oversized writes; overflow does not guarantee the same ent
 - **Claude quota handling:** Alpha.44 preserves nested and startup window reports,
   with seven focused quota regressions passing. A live candidate turn reported
   both five-hour and weekly percentages and resets; missing values stay unknown.
-- **Live provider evidence:** Alpha.43 verified Claude file reads, text streaming,
-  recall and same-session model/effort controls. Codex passed real Claude-backed
-  LORE review, manual compaction and controlled automatic compaction, with exact
-  recall afterward. See the
-  [verification record](docs/live-provider-verification-2026-09-28.md#alpha43-authenticated-follow-up--2026-09-28)
-  for account checks, compiled scenarios and cleanup evidence.
+- **Latest verification:** The [2026-09-29 record](docs/live-provider-verification-2026-09-29.md)
+  covers fixed Claude and vendor streaming, GLM effort controls, and the
+  incomplete Codex default-window stress run. Earlier alpha.43 checks verified
+  real LORE review, manual compaction and controlled automatic compaction.
 
 ### Remaining live checks
 
-DeepSeek and z.ai account checks need API keys. Claude long-form and reasoning
-streaming remain unverified by these short probes. Alpha.44's five-hour/weekly
-quota projection passed a live check; a separate read-only CLI usage probe
-returned no rows before a model turn.
-Codex's controlled automatic test used a 14,022-token threshold; representative
-stress near its approximately 244,800-token default trigger remains unverified.
+Codex default-window stress stopped at 241,119 context tokens, below the
+approximately 244,800-token trigger; no automatic compaction or post-compaction
+restart was verified. DeepSeek's earlier exact-nonce failure remains unresolved.
+GLM numeric usage was omitted by the evidence collector. All paid tests are stopped.
 
-Configure vendor keys through `/setup` or the launching environment before their
-account checks. The
-[tracker](docs/rust-1.19-parity.md#remaining-verification) separates these checks
-from implemented features and intentional limits. See the
-[Rust UI benchmark](docs/rust-ui-benchmark-2026-09-27.md) for rendering, event-loop,
-scrolling and resize measurements; these provider checks measure behavior.
+LORE's persistent loopback hub transport works, but full historical replica
+parity remains gated by an unsigned oversized operation, 154 unverified operations
+and one deferred dependency. Linux is verified; the full protected DOXA runtime
+is unsupported on macOS and Windows. See the
+[tracker](docs/rust-1.19-parity.md#remaining-verification) and
+[latest record](docs/live-provider-verification-2026-09-29.md) for scope and limits.
+The [Rust UI benchmark](docs/rust-ui-benchmark-2026-09-27.md) covers rendering,
+event-loop, scrolling and resize measurements; provider checks measure behavior.
 
 ## Non-goals
 
