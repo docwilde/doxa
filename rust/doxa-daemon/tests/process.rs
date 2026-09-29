@@ -2010,6 +2010,31 @@ mod vendor_process {
     use super::*;
     use std::net::TcpListener;
 
+    // Wire chunks are not turn boundaries: StreamScrubber can release a safe
+    // prefix now and a trailing suffix only after provider completion.
+    fn finish_vendor_turn(reader: &mut BufReader<UnixStream>, started: &Value) -> (String, Value, usize) {
+        assert_eq!(started["event"]["type"], "turn_started");
+        let turn = started["turn"].as_str().expect("started turn identity");
+        assert!(!started.to_string().contains("sk-ownedCanonicalFixtureSecret1234567890"));
+        let mut text = String::new();
+        let mut chunks = 0;
+        for _ in 0..1024 {
+            let frame = receive(reader);
+            assert!(!frame.to_string().contains("sk-ownedCanonicalFixtureSecret1234567890"));
+            assert_eq!(frame["turn"].as_str(), Some(turn), "unexpected turn frame: {frame}");
+            match frame["event"]["type"].as_str() {
+                Some("text_delta") => {
+                    text.push_str(frame["event"]["data"]["text"].as_str().expect("text chunk"));
+                    chunks += 1;
+                }
+                Some("turn_done") => return (text, frame, chunks),
+                Some("reasoning_delta" | "reasoning_progress") => {},
+                _ => panic!("unexpected vendor event: {frame}"),
+            }
+        }
+        panic!("vendor turn exceeded fixture frame bound");
+    }
+
     fn fake_vendor(count: usize, answer: &str) -> (String, thread::JoinHandle<Vec<Value>>) {
         let body = format!("data: {{\"model\":\"resolved-model\",\"choices\":[{{\"finish_reason\":\"stop\",\"delta\":{{\"content\":\"{answer}\"}}}}],\"usage\":{{\"prompt_tokens\":3,\"completion_tokens\":4}}}}\n\ndata: [DONE]\n\n");
         fake_vendor_frames(vec![body; count])
@@ -2089,9 +2114,9 @@ mod vendor_process {
         send(&mut socket, json!({"type":"attach","cursor":null}));
         send(&mut socket, json!({"type":"prompt","id":1,"text":"question"}));
         assert_eq!(receive(&mut reader)["ok"], true);
-        assert_eq!(receive(&mut reader)["event"]["type"], "turn_started");
-        assert_eq!(receive(&mut reader)["event"]["type"], "text_delta");
-        let done = receive(&mut reader);
+        let started = receive(&mut reader);
+        let (text, done, _) = finish_vendor_turn(&mut reader, &started);
+        assert_eq!(text, "answer");
         assert_eq!(done["event"]["data"]["cost_usd"], 1.5);
         send(&mut socket, json!({"type":"prompt","id":2,"text":"again"}));
         assert_eq!(receive(&mut reader)["ok"], true);
@@ -2235,9 +2260,9 @@ mod vendor_process {
                 let started = receive(&mut reader);
                 assert_eq!(started["event"]["type"], "turn_started");
                 assert_eq!(started["event"]["data"]["prompt"], "[REDACTED:api-key] prompt");
-                let text = receive(&mut reader);
-                assert_eq!(text["event"]["data"]["text"], "[REDACTED:api-key] answer", "{text}");
-                let done = receive(&mut reader);
+                let (text, done, chunks) = finish_vendor_turn(&mut reader, &started);
+                assert_eq!(text, "[REDACTED:api-key] answer");
+                assert!(chunks >= 2, "safe prefix and suffix must arrive before terminal event");
                 assert_eq!(done["event"]["type"], "turn_done");
                 assert_eq!(done["event"]["data"]["is_error"], false);
                 assert_eq!(done["event"]["data"]["model"], "resolved-model");
@@ -2306,7 +2331,9 @@ mod vendor_process {
                 }
                 send(&mut socket, json!({"type":"prompt","id":id,"text":"hello"}));
                 assert_eq!(receive(&mut reader)["ok"], true);
-                for _ in 0..3 { receive(&mut reader); }
+                let started = receive(&mut reader);
+                let (_, done, _) = finish_vendor_turn(&mut reader, &started);
+                assert_eq!(done["event"]["data"]["is_error"], false);
             }
             send(&mut socket, json!({"type":"call","id":11,"method":"stop","params":{}}));
             assert_eq!(receive(&mut reader)["ok"], true);
@@ -2364,8 +2391,10 @@ mod vendor_process {
         assert_eq!(receive(&mut reader)["ok"], true);
         let started = receive(&mut reader);
         assert_eq!(started["event"]["data"]["vendor_tools"], "workspace-read, peers, lore");
-        assert_eq!(receive(&mut reader)["event"]["data"]["text"], "Final answer");
-        assert_eq!(receive(&mut reader)["event"]["data"]["is_error"], false);
+        let (text, done, chunks) = finish_vendor_turn(&mut reader, &started);
+        assert_eq!(text, "Final answer");
+        assert!(chunks >= 2);
+        assert_eq!(done["event"]["data"]["is_error"], false);
         send(&mut socket, json!({"type":"call","id":2,"method":"stop","params":{}}));
         assert_eq!(receive(&mut reader)["ok"], true);
         wait_until(|| process.exited());
@@ -2394,9 +2423,9 @@ mod vendor_process {
                 json!({"type":"prompt","id":1,"text":"sk-ownedCanonicalFixtureSecret1234567890 prompt"}),
             );
             assert_eq!(receive(&mut reader)["ok"], true);
-            for _ in 0..3 {
-                receive(&mut reader);
-            }
+            let started = receive(&mut reader);
+            let (_, done, _) = finish_vendor_turn(&mut reader, &started);
+            assert_eq!(done["event"]["data"]["is_error"], false);
             send(
                 &mut socket,
                 json!({"type":"call","id":2,"method":"stop","params":{}}),
@@ -2443,9 +2472,9 @@ mod vendor_process {
                 json!({"type":"prompt","id":1,"text":"continue"}),
             );
             assert_eq!(receive(&mut reader)["ok"], true);
-            for _ in 0..3 {
-                receive(&mut reader);
-            }
+            let started = receive(&mut reader);
+            let (_, done, _) = finish_vendor_turn(&mut reader, &started);
+            assert_eq!(done["event"]["data"]["is_error"], false);
             send(
                 &mut socket,
                 json!({"type":"call","id":2,"method":"stop","params":{}}),
@@ -2522,8 +2551,8 @@ mod vendor_process {
         send(&mut socket, json!({"type":"attach","cursor":null}));
         send(&mut socket, json!({"type":"prompt","id":1,"text":"hello"}));
         assert_eq!(receive(&mut reader)["ok"], true);
-        assert_eq!(receive(&mut reader)["event"]["type"], "turn_started");
-        let done = receive(&mut reader);
+        let started = receive(&mut reader);
+        let (_, done, _) = finish_vendor_turn(&mut reader, &started);
         assert_eq!(done["event"]["type"], "turn_done");
         assert_eq!(done["event"]["data"]["is_error"], true);
         assert!(!done.to_string().contains("sk-ownedCanonicalFixtureSecret1234567890"));
@@ -2555,8 +2584,8 @@ mod vendor_process {
         std::os::unix::fs::symlink(&target, &transcript).unwrap();
         send(&mut socket, json!({"type":"prompt","id":1,"text":"hello"}));
         assert_eq!(receive(&mut reader)["ok"], true);
-        assert_eq!(receive(&mut reader)["event"]["type"], "turn_started");
-        let done = receive(&mut reader);
+        let started = receive(&mut reader);
+        let (_, done, _) = finish_vendor_turn(&mut reader, &started);
         assert_eq!(done["event"]["data"]["is_error"], true);
         assert_eq!(fs::read(&target).unwrap(), b"untouched");
         assert!(!native_transcript(dir.path(), "vendor-session.messages.json")
