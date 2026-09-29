@@ -1801,7 +1801,7 @@ for line in sys.stdin:
                     kind: "belief".into(), action: "add".into(), scope: "project".into(),
                     summary: "long summary ".repeat(80) }).collect(),
                 selected: 0, query: String::new(), offset: 0, status: "long status ".repeat(40),
-                evidence: None, pending: None, proposal_mode, review: None, review_scroll: 0,
+                evidence: None, pending: None, proposal_mode, cluster_mode: false, all_proposals: Vec::new(), review: None, review_scroll: 0,
                 review_seen: 0, review_width: 0, armed_resolution: None, can_resolve: false,
                 resolving: false, cwd: cwd.path().display().to_string(), belief_review: None, belief_intent: None,
                 can_act_on_beliefs: false, belief_action: None, belief_note: String::new(),
@@ -3118,7 +3118,7 @@ for line in sys.stdin:
         app.action_menu = false;
         app.lore_picker = Some(LorePicker { session_id: None, rows: vec![], selected: 0, query: String::new(),
             offset: 0, status: "Ready".into(), evidence: None, pending: None,
-            proposals: Vec::new(), proposal_mode: false, review: None, review_scroll: 0,
+            proposals: Vec::new(), proposal_mode: false, cluster_mode: false, all_proposals: Vec::new(), review: None, review_scroll: 0,
             review_seen: 0, review_width: 0, armed_resolution: None,
             can_resolve: false, resolving: false, cwd: String::new(),
             belief_review: None, belief_intent: None, can_act_on_beliefs: false, belief_action: None,
@@ -4394,7 +4394,7 @@ for line in sys.stdin:
             session_id: None,
             query: String::new(), rows: Vec::new(), selected: 0, offset: 0,
             evidence: None, status: String::new(), pending: None,
-            proposals: Vec::new(), proposal_mode: false, review: None, review_scroll: 0,
+            proposals: Vec::new(), proposal_mode: false, cluster_mode: false, all_proposals: Vec::new(), review: None, review_scroll: 0,
             review_seen: 0, review_width: 0, armed_resolution: None,
             can_resolve: false, resolving: false, cwd: String::new(),
             belief_review: None, belief_intent: None, can_act_on_beliefs: false, belief_action: None,
@@ -4902,7 +4902,7 @@ for line in sys.stdin:
             query: String::new(), rows: Vec::new(), selected: 0, offset: 0,
             proposals: vec![lore_picker::Proposal { pid: "one".into(), kind: "memory".into(),
                 action: "add".into(), scope: "user".into(), summary: String::new() }],
-            proposal_mode: true, review: Some(review), review_scroll: 0,
+            proposal_mode: true, cluster_mode: false, all_proposals: Vec::new(), review: Some(review), review_scroll: 0,
             review_seen: 0, review_width: 0, armed_resolution: None,
             can_resolve, resolving: false, cwd: "/repo".into(),
             belief_review: None, belief_intent: None, can_act_on_beliefs: false, belief_action: None,
@@ -5178,7 +5178,7 @@ for line in sys.stdin:
     #[test]
     fn wheel_over_empty_pane_or_rail_never_scrolls_focused_transcript() {
         let mut app=App::default();app.sidebar_auto=false;app.rail_visible=true;app.handle(Event::Resize(120,40));app.groups[0].tabs.push("session".into());
-        app.apply_update(DaemonUpdate::Upsert(Session{id:"session".into(),title:"session".into(),collection:"repo".into(),transcript:String::new(),status:"Offline".into()}));app.split=Split::Vertical;let layout=app.layout(app.size);
+        app.apply_update(DaemonUpdate::Upsert(Session{id:"session".into(),title:"session".into(),collection:"repo".into(),transcript:String::new(),status:"Offline".into()}));app.split=Split::Vertical;app.split_requested=true;let layout=app.layout(app.size);
         assert!(!app.handle(wheel_event(MouseEventKind::ScrollUp,layout.rail.unwrap())));
         assert!(!app.handle(wheel_event(MouseEventKind::ScrollUp,app.pane_regions(1,layout.panes.unwrap()[1])[1])));
         assert_eq!(app.groups[0].scroll,0);assert_eq!(app.active_group,0);
@@ -5218,4 +5218,30 @@ for line in sys.stdin:
         assert_eq!(app.memory_preview.owner().unwrap().claim,expected);assert!(painted_at(&app,100,28).contains("Full memory"));
         let menu=app.active_chooser_rect().unwrap();app.handle(wheel_event(MouseEventKind::ScrollDown,menu));
         assert!(app.memory_preview.owner().is_none());
+    }
+
+    #[test]
+    fn pending_title_click_keyboard_cluster_count_and_individual_navigation() {
+        let mut app=scrolled_picker_app();
+        app.show_belief_browser_fixture(0, &[(1,"subject","claim")]);
+        let menu=app.active_chooser_rect().unwrap();
+        let click=|offset| Event::Mouse(MouseEvent {kind:MouseEventKind::Down(MouseButton::Left),column:menu.x+1+offset,row:menu.y,modifiers:KeyModifiers::NONE});
+        assert!(app.handle(click(12))); assert!(app.lore_picker.as_ref().unwrap().proposal_mode);
+        assert!(!app.lore_picker.as_ref().unwrap().cluster_mode); assert_eq!(app.drag,None);
+        app.lore_picker.as_mut().unwrap().pending=None;
+        assert!(app.handle(Event::Key(KeyEvent::new(KeyCode::Char('3'),KeyModifiers::CONTROL))));
+        assert!(app.lore_picker.as_ref().unwrap().cluster_mode);
+        let (tx,rx)=std::sync::mpsc::channel();
+        let rows=(0..25).map(|n|lore_picker::Proposal{pid:format!("pid-{n}"),kind:"memory".into(),action:"add".into(),scope:"user".into(),summary:format!("Cluster 1 · fact {n}")}).collect();
+        tx.send(Ok(lore_picker::ResultPage::ClusteredProposals(rows,1))).unwrap();
+        app.lore_picker.as_mut().unwrap().pending=Some(rx); assert!(app.poll_lore());
+        let painted=painted_at(&app,100,28); assert!(painted.contains("1 canonical memory clusters")); assert!(painted.contains("3 Clustered"));
+        assert!(app.handle(Event::Key(KeyEvent::new(KeyCode::PageDown,KeyModifiers::NONE))));
+        assert_eq!(app.lore_picker.as_ref().unwrap().selected,20); assert_eq!(app.lore_picker.as_ref().unwrap().offset,0);
+        assert!(app.handle(Event::Key(KeyEvent::new(KeyCode::Char('4'),KeyModifiers::NONE))));
+        assert_eq!(app.lore_picker.as_ref().unwrap().proposals.len(),3);
+        assert_eq!(app.lore_picker.as_ref().unwrap().proposals[0].pid,"pid-4");
+        assert!(app.lore_picker.as_ref().unwrap().review.is_none()); assert!(!app.lore_picker.as_ref().unwrap().can_resolve);
+        let menu=app.active_chooser_rect().unwrap();
+        assert!(app.handle(Event::Mouse(MouseEvent{kind:MouseEventKind::Down(MouseButton::Left),column:menu.x+2,row:menu.y,modifiers:KeyModifiers::NONE}))); assert!(!app.lore_picker.as_ref().unwrap().proposal_mode); assert!(!app.lore_picker.as_ref().unwrap().cluster_mode);
     }

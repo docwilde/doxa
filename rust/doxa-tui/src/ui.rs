@@ -272,6 +272,8 @@ struct LorePicker {
     rows: Vec<lore_picker::Belief>,
     proposals: Vec<lore_picker::Proposal>,
     proposal_mode: bool,
+    cluster_mode: bool,
+    all_proposals: Vec<lore_picker::Proposal>,
     review: Option<doxa_lore::PendingReview>,
     review_scroll: usize,
     review_seen: usize,

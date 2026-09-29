@@ -55,6 +55,7 @@ pub enum ResultPage {
     Search(Option<ConsultHit>),
     Evidence(u64, Vec<Evidence>),
     Proposals(Vec<Proposal>),
+    ClusteredProposals(Vec<Proposal>, usize),
     Review(PendingReview, bool),
     Resolved(PendingResolution),
     BeliefReview(BeliefReview, bool),
@@ -68,6 +69,7 @@ pub enum Query {
     Search(String),
     Evidence(u64),
     Proposals(String, u16),
+    ClusteredProposals(String),
     Review(String, String),
     Resolve(String, PendingReview, PendingDecision),
     BeliefReview(String, u64),
@@ -85,6 +87,11 @@ fn belief_error(error: LoreError) -> &'static str {
 
 fn short(value: &Value, key: &str, max: usize) -> Option<String> {
     value.get(key)?.as_str().filter(|text| text.len() <= max).map(str::to_owned)
+}
+
+fn parse_cluster_proposals(rows: Vec<Value>) -> Result<Vec<Proposal>, ()> {
+    if rows.len() > 4096 { return Err(()); }
+    rows.chunks(PAGE_SIZE as usize).map(|chunk| parse_proposals(chunk.to_vec())).collect::<Result<Vec<_>, _>>().map(|groups| groups.into_iter().flatten().collect())
 }
 
 pub fn parse_proposals(rows: Vec<Value>) -> Result<Vec<Proposal>, ()> {
@@ -158,6 +165,25 @@ fn fetch_with_client(mut client: LoreClient, query: Query) -> Result<ResultPage,
         Query::Proposals(cwd, offset) => client.pending(&cwd, offset, PAGE_SIZE)
             .map_err(|_| "Proposal list unavailable")
             .and_then(|rows| parse_proposals(rows).map(ResultPage::Proposals).map_err(|_| "Invalid LORE proposal reply")),
+        Query::ClusteredProposals(cwd) => {
+            let clusters = client.pending_clustered(&cwd).map_err(|error| match error {
+                LoreError::Remote("pending_cluster_unsupported") => "Clustered pending requires LORE 0.62.4 or newer",
+                _ => "Clustered pending unavailable",
+            })?;
+            let count = clusters.memory_clusters.len();
+            let mut rows = Vec::new();
+            for (index, group) in clusters.memory_clusters.into_iter().enumerate() {
+                for mut row in parse_cluster_proposals(group).map_err(|_| "Invalid clustered pending reply")? {
+                    row.summary = format!("Cluster {} · {}", index + 1, row.summary);
+                    rows.push(row);
+                }
+            }
+            for mut row in parse_cluster_proposals(clusters.other).map_err(|_| "Invalid clustered pending reply")? {
+                row.summary = format!("Other · {}", row.summary);
+                rows.push(row);
+            }
+            Ok(ResultPage::ClusteredProposals(rows, count))
+        }
         Query::Review(cwd, pid) => {
             let writable = client.can_resolve_reviewed();
             client.pending_review(&cwd, &pid)

@@ -24,6 +24,31 @@ pub const PROTOCOL_VERSION: u64 = 1;
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 const MAX_MEMORY_CHARS: u64 = 1024 * 1024;
 
+#[derive(Debug)]
+pub struct PendingClusters {
+    pub memory_clusters: Vec<Vec<Value>>,
+    pub other: Vec<Value>,
+}
+impl PendingClusters {
+    fn parse(value: Value) -> Result<Self, LoreError> {
+        let groups = value["memory_clusters"].as_array().ok_or(LoreError::InvalidFrame)?;
+        let other = value["other"].as_array().ok_or(LoreError::InvalidFrame)?;
+        let mut count = other.len();
+        let mut clusters = Vec::new();
+        for group in groups {
+            let rows = group.as_array().ok_or(LoreError::InvalidFrame)?;
+            count = count.checked_add(rows.len()).ok_or(LoreError::InvalidFrame)?;
+            if rows.is_empty() || count > 4096 { return Err(LoreError::InvalidFrame); }
+            clusters.push(rows.clone());
+        }
+        if count > 4096 || !clusters.iter().flatten().chain(other.iter())
+            .all(|row| row.is_object() && row["pid"].as_str().is_some_and(|pid| !pid.is_empty() && pid.len() <= 128)) {
+            return Err(LoreError::InvalidFrame);
+        }
+        Ok(Self { memory_clusters: clusters, other: other.clone() })
+    }
+}
+
 /// Effective DOXA store for native child carriers. This contains only a path;
 /// shared settings and credentials are resolved by LORE inside the child.
 pub fn carrier_root() -> Result<Option<PathBuf>, LoreError> {
@@ -569,6 +594,13 @@ impl LoreClient {
                 && !snippet.chars().any(char::is_control)).ok_or(LoreError::InvalidFrame)?;
             Ok(SessionSearchHit { session_id: id.to_owned(), project: project.to_owned(), snippet: snippet.to_owned() })
         }).collect()
+    }
+
+    /// Canonical read-only clusters. Each proposal still needs its own exact review.
+    pub fn pending_clustered(&mut self, cwd: &str) -> Result<PendingClusters, LoreError> {
+        if cwd.is_empty() || cwd.len() > 4096 || cwd.contains('\0') { return Err(LoreError::InvalidFrame); }
+        if !self.capabilities.contains("pending_cluster_v1") { return Err(LoreError::Remote("pending_cluster_unsupported")); }
+        PendingClusters::parse(self.request_value("pending_cluster_v1", json!({"cwd":cwd}))?)
     }
 
     pub fn pending(&mut self, cwd: &str, offset: u16, limit: u8) -> Result<Vec<Value>, LoreError> {
@@ -1157,5 +1189,19 @@ fn read_frames(mut reader: impl Read, tx: mpsc::Sender<ReadResult>) {
                 return;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod pending_cluster_tests {
+    use super::*;
+    #[test]
+    fn canonical_cluster_shape_and_total_bound() {
+        let row = json!({"pid":"proposal-1","kind":"memory"});
+        let parsed = PendingClusters::parse(json!({"memory_clusters":[[row.clone()]],"other":[row.clone()]})).unwrap();
+        assert_eq!(parsed.memory_clusters.len(),1); assert_eq!(parsed.other.len(),1);
+        assert!(PendingClusters::parse(json!({"memory_clusters":[[]],"other":[]})).is_err());
+        assert!(PendingClusters::parse(json!({"memory_clusters":[[{"pid":4}]],"other":[]})).is_err());
+        assert!(PendingClusters::parse(json!({"memory_clusters":[],"other":vec![row;4097]})).is_err());
     }
 }

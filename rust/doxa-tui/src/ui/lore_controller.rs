@@ -125,6 +125,21 @@ impl App {
         self.open_lore_picker_mode(true);
     }
 
+    pub(super) fn switch_lore_view(&mut self, mode: usize) -> bool {
+        let Some(picker) = self.lore_picker.as_mut() else { return false; };
+        if picker.resolving || picker.belief_acting { return true; }
+        picker.proposal_mode = mode != 0; picker.cluster_mode = mode == 2;
+        picker.pending = None; picker.query.clear(); picker.offset = 0; picker.selected = 0;
+        picker.review = None; picker.belief_review = None; picker.evidence = None;
+        picker.armed_resolution = None; picker.can_resolve = false; picker.belief_action = None;
+        picker.can_act_on_beliefs = false; picker.proposals.clear(); picker.all_proposals.clear();
+        self.belief_filter_due = None; self.belief_filter_request = None;
+        let cwd = picker.cwd.clone();
+        self.load_lore(match mode { 0 => lore_picker::Query::Beliefs(0),
+            2 => lore_picker::Query::ClusteredProposals(cwd), _ => lore_picker::Query::Proposals(cwd, 0) });
+        true
+    }
+
     pub(super) fn open_lore_picker_mode(&mut self, proposal_mode: bool) {
         self.belief_browser_fixture = false;
         self.belief_filter_due = None;
@@ -149,7 +164,7 @@ impl App {
             selected: 0,
             offset: 0,
             proposals: Vec::new(),
-            proposal_mode,
+            proposal_mode, cluster_mode: false, all_proposals: Vec::new(),
             review: None,
             review_scroll: 0,
             review_seen: 0,
@@ -199,7 +214,7 @@ impl App {
             selected: 0,
             offset: 0,
             proposals: Vec::new(),
-            proposal_mode: false,
+            proposal_mode: false, cluster_mode: false, all_proposals: Vec::new(),
             review: None,
             review_scroll: 0,
             review_seen: 0,
@@ -684,7 +699,8 @@ impl App {
                 }
             }
             Ok(lore_picker::ResultPage::Proposals(rows)) => {
-                picker.proposals = rows;
+                picker.all_proposals = rows.clone();
+                picker.proposals = rows.into_iter().filter(|row| proposal_matches(row, &picker.query)).collect();
                 picker.selected = 0;
                 picker.review = None;
                 picker.armed_resolution = None;
@@ -694,6 +710,11 @@ impl App {
                     "Staged proposals · select one to read its complete raw contents"
                 }
                 .into();
+            }
+            Ok(lore_picker::ResultPage::ClusteredProposals(rows, count)) => {
+                picker.all_proposals = rows.clone(); picker.proposals = rows.into_iter().filter(|row| proposal_matches(row, &picker.query)).collect();
+                picker.selected = 0; picker.review = None; picker.armed_resolution = None;
+                picker.status = format!("{} canonical memory clusters · {} proposals · Enter exact review", count, picker.proposals.len());
             }
             Ok(lore_picker::ResultPage::Review(review, can_resolve)) => {
                 if picker.proposal_mode
@@ -974,6 +995,10 @@ impl App {
             return true;
         }
 
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            let mode = match key.code { KeyCode::Char('1') => Some(0), KeyCode::Char('2') => Some(1), KeyCode::Char('3') => Some(2), _ => None };
+            if let Some(mode) = mode { return self.switch_lore_view(mode); }
+        }
         let review_area = self.active_chooser_rect();
         let picker = self.lore_picker.as_mut().unwrap();
         if picker.resolving {
@@ -1103,10 +1128,16 @@ impl App {
                 }
                 return true;
             }
+            if picker.cluster_mode && matches!(key.code, KeyCode::PageDown | KeyCode::PageUp) {
+                picker.selected = if key.code == KeyCode::PageDown {
+                    picker.selected.saturating_add(lore_picker::PAGE_SIZE as usize).min(picker.proposals.len().saturating_sub(1))
+                } else { picker.selected.saturating_sub(lore_picker::PAGE_SIZE as usize) };
+                return true;
+            }
             match key.code {
                 KeyCode::Esc => self.lore_picker = None,
                 KeyCode::Char('b') if picker.review.is_none() => {
-                    picker.proposal_mode = false;
+                    picker.proposal_mode = false; picker.cluster_mode = false;
                     picker.offset = 0;
                     picker.selected = 0;
                     self.load_lore(lore_picker::Query::Beliefs(0));
@@ -1132,16 +1163,29 @@ impl App {
                         .saturating_add(lore_picker::PAGE_SIZE as u16)
                         .min(10000);
                     let (cwd, offset) = (picker.cwd.clone(), picker.offset);
-                    self.load_lore(lore_picker::Query::Proposals(cwd, offset));
+                    let clustered = picker.cluster_mode;
+                    self.load_lore(if clustered { lore_picker::Query::ClusteredProposals(cwd) } else { lore_picker::Query::Proposals(cwd, offset) });
                 }
                 KeyCode::PageUp => {
                     picker.offset = picker.offset.saturating_sub(lore_picker::PAGE_SIZE as u16);
                     let (cwd, offset) = (picker.cwd.clone(), picker.offset);
-                    self.load_lore(lore_picker::Query::Proposals(cwd, offset));
+                    let clustered = picker.cluster_mode;
+                    self.load_lore(if clustered { lore_picker::Query::ClusteredProposals(cwd) } else { lore_picker::Query::Proposals(cwd, offset) });
                 }
                 KeyCode::F(5) => {
                     let (cwd, offset) = (picker.cwd.clone(), picker.offset);
-                    self.load_lore(lore_picker::Query::Proposals(cwd, offset));
+                    let clustered = picker.cluster_mode;
+                    self.load_lore(if clustered { lore_picker::Query::ClusteredProposals(cwd) } else { lore_picker::Query::Proposals(cwd, offset) });
+                }
+                KeyCode::Char(ch) if !ch.is_control() => {
+                    lore_picker::append_filter_char(&mut picker.query, ch);
+                    let query = picker.query.to_lowercase();
+                    picker.proposals = picker.all_proposals.iter().filter(|row| proposal_matches(row, &query)).cloned().collect();
+                    picker.selected = 0;
+                }
+                KeyCode::Backspace => {
+                    picker.query.pop(); let query = picker.query.to_lowercase();
+                    picker.proposals = picker.all_proposals.iter().filter(|row| proposal_matches(row, &query)).cloned().collect(); picker.selected=0;
                 }
                 _ => return false,
             }
@@ -1379,7 +1423,7 @@ impl App {
                 }
             }
             KeyCode::Char('P') if picker.evidence.is_none() => {
-                picker.proposal_mode = true;
+                picker.proposal_mode = true; picker.cluster_mode = false; picker.query.clear();
                 picker.offset = 0;
                 picker.selected = 0;
                 let cwd = picker.cwd.clone();
@@ -1517,4 +1561,9 @@ impl App {
         changed |= self.memory_preview.tick(now);
         changed
     }
+}
+
+fn proposal_matches(row: &lore_picker::Proposal, query: &str) -> bool {
+    format!("{} {} {} {} {}", row.pid, row.kind, row.action, row.scope, row.summary)
+        .to_lowercase().contains(&query.to_lowercase())
 }

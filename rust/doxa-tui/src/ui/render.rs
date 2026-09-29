@@ -1167,9 +1167,7 @@ impl App {
                     lines.push(Line::from(line.clone()));
                 }
             } else {
-                lines.push(Line::from(
-                    " Select one proposal to review its complete raw contents",
-                ));
+                lines.push(Line::from(format!(" Filter: {} · Enter exact review · Ctrl+1/2/3 views", safe_label(&picker.query))));
                 lines.push(Line::from(format!(
                     " Page offset {} · {} rows",
                     picker.offset,
@@ -1204,7 +1202,7 @@ impl App {
                 lines = chooser_list_lines(lines, usize::from(area.width.saturating_sub(2)));
             }
             frame.render_widget(Paragraph::new(lines)
-                .block(Block::default().title(" LORE proposals · Enter full review · PgUp/PgDn page · B beliefs · Esc close ")
+                .block(Block::default().title(lore_view_title(picker))
                     .borders(Borders::ALL).border_style(Style::default().fg(theme::ACCENT)))
                 .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)).wrap(Wrap { trim: false }), area);
             return;
@@ -1382,7 +1380,7 @@ impl App {
             Paragraph::new(lines)
                 .block(
                     Block::default()
-                        .title(" LORE beliefs ")
+                        .title(lore_view_title(picker))
                         .borders(Borders::ALL)
                         .border_style(Style::default().fg(theme::ACCENT)),
                 )
@@ -2475,4 +2473,9 @@ pub(super) fn transcript_window(
         }
     }
     (window, top)
+}
+
+fn lore_view_title(picker: &super::LorePicker) -> Line<'static> {
+    Line::from([("1 Active", !picker.proposal_mode), ("2 Pending", picker.proposal_mode && !picker.cluster_mode), ("3 Clustered", picker.cluster_mode)]
+        .into_iter().map(|(label, selected)| Span::styled(format!(" {label} "), chooser_row_style(selected))).collect::<Vec<_>>())
 }

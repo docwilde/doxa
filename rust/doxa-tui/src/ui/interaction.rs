@@ -2100,6 +2100,14 @@ impl App {
             self.link_hover = link;
             return changed || moved || tool_hover_changed;
         }
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left) && self.lore_picker.is_some() {
+            if let Some(area) = self.active_chooser_rect() {
+                if mouse.row == area.y && mouse.column > area.x {
+                    let x = mouse.column - area.x - 1;
+                    if x < 34 && mouse.column < area.right()-1 { return self.switch_lore_view(if x < 10 { 0 } else if x < 21 { 1 } else { 2 }); }
+                }
+            }
+        }
         if mouse.kind == MouseEventKind::Down(MouseButton::Left)
             && self.active_chooser_rect().is_some_and(|area| {
                 mouse.row == area.y && mouse.column >= area.x && mouse.column < area.right()
