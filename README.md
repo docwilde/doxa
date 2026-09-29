@@ -1,8 +1,8 @@
 <p align="center"><img src="assets/logo.png" width="560" alt="DOXA — belief earning knowledge"></p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Rust%202.0-alpha.47-f59f00" alt="Rust 2.0 alpha.47 is the main frontend">
-  <a href="https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.48"><img src="https://img.shields.io/github/v/release/docwilde/doxa?include_prereleases&amp;sort=semver&amp;label=Rust%20preview&amp;color=e8590c" alt="latest Rust preview release"></a>
+  <img src="https://img.shields.io/badge/Rust%202.0-alpha.49-f59f00" alt="Rust 2.0 alpha.49 is the main frontend">
+  <a href="https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.49"><img src="https://img.shields.io/github/v/release/docwilde/doxa?include_prereleases&amp;sort=semver&amp;label=Rust%20release&amp;color=e8590c" alt="latest Rust release"></a>
   <a href="https://github.com/docwilde/doxa/actions/workflows/rust-ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/docwilde/doxa/rust-ci.yml?branch=main&label=Rust%20CI" alt="Rust CI status"></a>
   <img src="https://img.shields.io/badge/TUI-Ratatui-2f9e44" alt="Rust TUI built with Ratatui">
   <img src="https://img.shields.io/badge/auth-provider%20CLI%20or%20API%20key-2f9e44" alt="authentication follows the selected engine">
@@ -14,13 +14,13 @@
 > can edit files and run commands with your privileges. Read
 > [Non-goals](#non-goals) before using it on important work.
 
-The official latest GitHub release is [v2.0.0-alpha.48](https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.48).
+The official latest GitHub release is [v2.0.0-alpha.49](https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.49).
 Rust 2.0 leads development and remains an evolving alpha. See the
 [parity tracker](docs/rust-1.19-parity.md) for supported provider contracts and
 remaining release gates, and the [source audit](docs/source-audit-2026-09-27.md)
 for engineering findings and their follow-up fixes. Alpha.48 adds session-scoped tool approvals,
-clickable peer history, clearer memory browsing and a block Greek welcome banner. It also
-accepts Codex peer-send argument aliases observed in a failed live turn.
+clickable peer history, clearer memory browsing and a block Greek welcome banner.
+Alpha.49 refreshes the docs and live terminal gallery.
 
 **DOXA** is a terminal for coding agents. Development now leads with the
 **Rust 2.0 alpha**, built with Ratatui and a native daemon. Run Claude, Codex,
@@ -32,7 +32,7 @@ shares user and repo memory across DOXA, Claude Code, and Codex, with
 evidence-backed beliefs and an informational source-engine label. See the
 [engine setup and capabilities](rust/README.md) guide.
 
-![Rust 2.0 alpha.37 running a real Codex session, with file reads, command approval and a completed greeting check](assets/shots/rust-hero.png)
+![Rust 2.0 alpha.49 running a real Codex session after two file reads and an approved greeting command](assets/shots/rust-hero.png)
 
 *Captured from the running Rust app in a real VTE terminal, using an authenticated
 Codex session and a small isolated example repository. The provider replies and tool
@@ -44,24 +44,31 @@ results are real. See the [capture method](docs/rust-gallery.md).*
 - **Flexible workspace:** Group tabs, split panes horizontally or vertically, and drag dividers; each pane has its own prompt.
 - **Session recovery:** Restore tabs and layouts, safely resume recorded conversations, or reattach to running daemons. Unavailable sessions stay visible; unsent drafts belong to each pane while the app is open.
 - **Clear conversations:** Follow live progress, expand reasoning or individual tool calls, and open links with Ctrl+click.
-- **Shared memory:** Browse and filter LORE memory and beliefs, inspect evidence, and approve or reject fully reviewed changes.
+- **Shared memory:** Browse and filter LORE facts and beliefs, inspect full entries and evidence, and approve or reject fully reviewed changes.
 - **Repo and worktree tools:** Browse folders, switch branches, inspect diffs and reject tracked hunks. Recover or clean up managed checkouts with ownership checks.
-- **Fleets and peers:** Coordinate supervised agents, inspect peer activity and review requests in the TUI or browser mesh. Spend limits require complete reported accounting.
+- **Fleets and peers:** Coordinate supervised agents and inspect clickable peers and recent messages in the TUI or browser mesh. Spend limits require complete reported accounting.
 - **Usage at a glance:** Inspect reported context, plan, quota and API balance details; unavailable values stay unknown.
-- **Keyboard and mouse:** Approve requests inline with A, Enter or a click. Navigate with Tab, complete slash commands, and copy or paste where supported.
+- **Keyboard and mouse:** Approve a request inline or approve the same tool for the rest of its session. Navigate with Tab, complete slash commands, and copy or paste where supported.
 - **Setup and customization:** Manage provider login, masked API keys, plugins and settings. Run private local shell commands with `!`.
 
 See the [Rust guide](rust/README.md) for engine capabilities, shortcuts and
 [compaction boundaries](rust/doxa-engines/README.md#compaction-review).
 
-## Gallery · alpha.37
+## Gallery · alpha.49
+
+### Welcome
+
+![The running Rust app opens a Codex session with the block Greek ΔΟΞΑ banner and prompt chips](assets/shots/rust-welcome.png)
+
+*The block Greek ΔΟΞΑ banner appears when a new session is ready. This frame
+uses a second isolated session in the same example repository.*
 
 ### Individual tool details
 
 ![Real Codex command calls with one tool expanded and the others collapsed](assets/shots/rust-tool-entries.png)
 
 *Open a tool section, then expand each call independently with a click or Enter.
-Here the greeting command is expanded while the earlier file reads remain collapsed.*
+Here the README read is expanded while the greeting-script read remains collapsed.*
 
 ### Inline approval
 
@@ -69,6 +76,7 @@ Here the greeting command is expanded while the earlier file reads remain collap
 
 *The real command request waits above the prompt. Select Approve or Deny with the mouse
 or keyboard; Enter submits the selection, A approves, and D or Esc denies.
+“Always approve this tool” applies to that tool in the current session only.
 The pending indicator blinks while the request is unresolved.*
 
 ### Slash completion
@@ -90,8 +98,9 @@ The pending indicator blinks while the request is unresolved.*
 *Settings identify configuration defaults and values inherited from the session.
 The chips below show the active engine, model and verified low effort.*
 
-All six frames are unedited 3068 × 1734 terminal captures from the same running
-alpha.37 build. [Capture provenance and reproduction](docs/rust-gallery.md).
+All seven frames are unedited 3068 × 1734 captures of the running alpha.49
+build. Six share one live session; the welcome frame uses another isolated session.
+[Capture provenance and reproduction](docs/rust-gallery.md).
 
 ## Install
 
@@ -103,7 +112,7 @@ curl -fsSL https://raw.githubusercontent.com/docwilde/doxa/main/scripts/install.
 
 The installer builds the Rust frontend and daemon from `main` and installs the
 Rust `doxa` command in `~/.local/bin` (or `DOXA_RUST_BIN_DIR`). Pass a tag such
-as `v2.0.0-alpha.48` after `sh -s --` to pin a release. Git and Cargo build three
+as `v2.0.0-alpha.49` after `sh -s --` to pin a release. Git and Cargo build three
 native binaries: the frontend, daemon and LORE carrier. Claude requires its CLI.
 When Codex is installed, the installer also builds a private, protected Codex
 app server and its required Code Mode host; the official CLI remains available

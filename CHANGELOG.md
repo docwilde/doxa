@@ -5,6 +5,15 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.49 — 2026-09-29
+
+**Documentation and live gallery**
+
+- Refresh the **`README.md`** and Rust guides for the current release, with
+  seven unedited 3068 × 1734 frames from the running alpha.49 app.
+- Fix **`live_rust_gallery.py`** terminal-text inspection and document the
+  isolated protected-provider capture. Runtime behavior is unchanged.
+
 ## 2.0.0-alpha.48 — 2026-09-29
 
 **Peer tools and approvals**

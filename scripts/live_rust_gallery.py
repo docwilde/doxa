@@ -114,7 +114,7 @@ def _run_terminal(args, state, display_number):
                     terminal.feed_child(action["text"].encode())
                     result["ok"] = True
                 elif kind == "text":
-                    result["text"] = terminal.get_text(lambda *unused: True)[0]
+                    result["text"] = terminal.get_text_format(Vte.Format.TEXT)
                 elif kind == "status":
                     result.update(columns=terminal.get_column_count(), rows=terminal.get_row_count(),
                                   cell_width=terminal.get_char_width(), cell_height=terminal.get_char_height())
