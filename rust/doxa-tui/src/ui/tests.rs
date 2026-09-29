@@ -4333,6 +4333,26 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn count_only_reasoning_is_folded_and_resets_for_next_turn() {
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"s"}));
+        let event = |kind:&str,data:serde_json::Value| json!({"type":"event","session_id":"s","event":{"type":kind,"data":data}});
+        app.apply_daemon_frame(&event("turn_started",json!({"prompt":"first"})));
+        app.apply_daemon_frame(&event("reasoning_progress",json!({"approx_tokens":48,"count_is_estimate":true})));
+        let (live,sections)=transcript_tools::render(&app.sessions[0].transcript,80,None,None);
+        assert_eq!(sections.len(),1);
+        assert!(live.iter().any(|line|line.to_string().contains("~48 tokens · receiving")));
+        assert!(app.reasoning_streams["s"].text.is_empty());
+        app.apply_daemon_frame(&event("turn_done",json!({"is_error":false})));
+        app.apply_daemon_frame(&event("turn_started",json!({"prompt":"second"})));
+        app.apply_daemon_frame(&event("reasoning_progress",json!({"approx_tokens":12,"count_is_estimate":true})));
+        assert_eq!(app.reasoning_streams["s"].tokens,12);
+        assert!(app.reasoning_streams["s"].text.is_empty());
+        let (live,sections)=transcript_tools::render(&app.sessions[0].transcript,80,None,None);
+        assert_eq!(sections.len(),2);
+        assert!(live.iter().any(|line|line.to_string().contains("~12 tokens · receiving")));
+    }
+    #[test]
     fn streamed_reasoning_counts_live_then_reveals_only_on_expand() {
         let mut app = App::default();
         app.apply_daemon_frame(&json!({"type":"hello", "session_id":"s"}));

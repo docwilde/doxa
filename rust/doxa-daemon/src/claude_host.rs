@@ -97,7 +97,10 @@ impl Shared {
             })
     }
     fn review(&self, older: bool) -> bool {
-        if !self.enabled || self.failed.load(Ordering::Acquire) || doxa_lore::review_disabled().unwrap_or(true) {
+        if !self.enabled
+            || self.failed.load(Ordering::Acquire)
+            || doxa_lore::review_disabled().unwrap_or(true)
+        {
             return false;
         }
         let metadata = json!({"cwd":self.cwd,"session_id":self.session,"transcript":self.store.transcript_path(),"older":older});
@@ -812,6 +815,57 @@ fn resolve(cli: &mut Cli, id: &str, request: &Value, answer: &Value) -> Result<(
     };
     cli.respond(id, Ok(response))
 }
+/// Block totals are summed across messages; opaque signatures are never content.
+#[derive(Default)]
+struct ReasoningProgress {
+    tokens: u64,
+    messages: HashMap<Option<String>, u64>,
+    blocks: HashMap<(Option<String>, u64, u64), u64>,
+}
+impl ReasoningProgress {
+    fn event(&mut self, event: &Value, parent: Option<&str>) -> Option<Value> {
+        let parent = parent.map(str::to_owned);
+        if event["type"] == "message_start" {
+            if self.messages.len() < 32 || self.messages.contains_key(&parent) {
+                let message = self.messages.entry(parent).or_default();
+                *message = message.saturating_add(1);
+            }
+            return None;
+        }
+        let delta = &event["delta"];
+        if delta["type"] != "thinking_delta" {
+            return None;
+        }
+        let tokens = delta["estimated_tokens"].as_u64()?;
+        let index = match event.get("index") {
+            Some(value) => value.as_u64()?,
+            None => 0,
+        };
+        if index > 1024 || tokens == 0 || tokens > 1_000_000 {
+            return None;
+        }
+        let key = (
+            parent.clone(),
+            *self.messages.get(&parent).unwrap_or(&0),
+            index,
+        );
+        let previous = *self.blocks.get(&key).unwrap_or(&0);
+        if tokens <= previous || (!self.blocks.contains_key(&key) && self.blocks.len() >= 128) {
+            return None;
+        }
+        let total = self
+            .tokens
+            .checked_add(tokens - previous)
+            .filter(|value| *value <= 1_000_000)?;
+        self.blocks.insert(key, tokens);
+        self.tokens = total;
+        let mut data = json!({"approx_tokens":total,"count_is_estimate":true});
+        if let Some(parent) = parent {
+            data["parent_id"] = json!(parent);
+        }
+        Some(json!({"type":"reasoning_progress","data":data}))
+    }
+}
 struct StreamOutput {
     kind: String,
     parent: Option<String>,
@@ -1036,6 +1090,7 @@ fn flush_streams(
 }
 fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>) {
     let mut streams: Vec<StreamOutput> = Vec::new();
+    let mut reasoning_progress = ReasoningProgress::default();
     let mut durable = DurableTurn::default();
     let mut operations: HashMap<String, Operation> = HashMap::new();
     let mut inputs: HashMap<String, PendingInput> = HashMap::new();
@@ -1060,6 +1115,7 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>) {
                 }
                 Command::Prompt(text, sink, reply) => {
                     streams.clear();
+                    reasoning_progress = ReasoningProgress::default();
                     durable = DurableTurn::default();
                     events = Some(sink);
                     overflow = false;
@@ -1507,6 +1563,14 @@ fn broker(mut cli: Cli, commands: Receiver<Command>, shared: Arc<Shared>) {
                 // Provider content blocks have no guaranteed visible separator.
                 // Keep channel carry across block stops and assistant summaries.
                 let delta = &event["delta"];
+                if let Some(progress) =
+                    reasoning_progress.event(event, frame["parent_tool_use_id"].as_str())
+                {
+                    if !overflow && !send_event(&events, progress) {
+                        overflow = true;
+                        let _ = cli.control(json!({"subtype":"interrupt"}));
+                    }
+                }
                 if let Some((kind, text)) = match delta["type"].as_str() {
                     Some("text_delta") => delta["text"].as_str().map(|s| ("text_delta", s)),
                     Some("thinking_delta") => {
@@ -1717,9 +1781,14 @@ fn context_detail(value: &Value, shared: &Shared) -> Result<Value, String> {
 fn quota_window(window: &str, value: &Value, status: Option<&str>) -> Option<Value> {
     if !matches!(
         window,
-        "five_hour" | "seven_day" | "seven_day_opus" | "seven_day_sonnet"
-            | "seven_day_overage_included" | "overage"
-    ) || !value.is_object() {
+        "five_hour"
+            | "seven_day"
+            | "seven_day_opus"
+            | "seven_day_sonnet"
+            | "seven_day_overage_included"
+            | "overage"
+    ) || !value.is_object()
+    {
         return None;
     }
     let mut result = json!({"window":window});
@@ -1777,14 +1846,22 @@ fn render_quota(shared: &Shared) -> Option<Value> {
     billing["quota_limits"] = limits;
     let mut text = Vec::new();
     for (key, label) in [
-        ("five_hour", "5h"), ("seven_day", "week"), ("seven_day_opus", "opus"),
-        ("seven_day_sonnet", "sonnet"), ("seven_day_overage_included", "included"), ("overage", "extra"),
+        ("five_hour", "5h"),
+        ("seven_day", "week"),
+        ("seven_day_opus", "opus"),
+        ("seven_day_sonnet", "sonnet"),
+        ("seven_day_overage_included", "included"),
+        ("overage", "extra"),
     ] {
         if let Some(percent) = billing["quota_limits"][key]["percent"].as_u64() {
             text.push(format!("{label}:{percent}%"));
         }
     }
-    billing["quota"] = if text.is_empty() { Value::Null } else { json!(text.join(" ")) };
+    billing["quota"] = if text.is_empty() {
+        Value::Null
+    } else {
+        json!(text.join(" "))
+    };
     billing["quota_source"] = json!("claude_cli");
     billing["quota_stale"] = json!(false);
     Some(billing.clone())
@@ -1836,12 +1913,15 @@ mod tests {
     const SESSION: &str = "0b256c09-8d74-4865-9be0-4e6d24384551";
     fn fixture(body: &str) -> (tempfile::TempDir, Arc<ClaudeHost>) {
         fixture_with_startup(
-            body, "pass",
+            body,
+            "pass",
             Some(json!({"mode":"subscription","type":"max","quota":null})),
         )
     }
     fn fixture_with_startup(
-        body: &str, startup: &str, initial_billing: Option<Value>,
+        body: &str,
+        startup: &str,
+        initial_billing: Option<Value>,
     ) -> (tempfile::TempDir, Arc<ClaudeHost>) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("claude");
@@ -2180,6 +2260,87 @@ for line in sys.stdin:
         assert!(host.shutdown());
     }
     #[test]
+    fn count_only_thinking_progress_is_live_bounded_and_resets_per_turn() {
+        let (_dir, host) = fixture(&format!(
+            r#"if row['type']=='user':
+  for value in [12, 24, 24, 6, None, -1, 1.5, '32', 1000001, 18446744073709551616, 48]:
+    emit({{'type':'stream_event','session_id':'{SESSION}','event':{{'type':'content_block_delta','delta':{{'type':'thinking_delta','thinking':'','estimated_tokens':value}}}}}})
+  emit({{'type':'stream_event','session_id':'{SESSION}','event':{{'type':'content_block_delta','delta':{{'type':'signature_delta','signature':'opaque-signature-fixture','estimated_tokens':100}}}}}})
+  time.sleep(.05)
+  emit({{'type':'stream_event','session_id':'{SESSION}','event':{{'type':'content_block_delta','delta':{{'type':'text_delta','text':'Answer'}}}}}})
+  emit({{'type':'result','session_id':'{SESSION}','is_error':False,'usage':{{'input_tokens':5,'output_tokens':2}}}})
+"#
+        ));
+        for prompt in ["first", "second"] {
+            let mut events = Vec::new();
+            host.prompt(prompt, &mut |event| events.push(event));
+            assert_eq!(events[0]["type"], "turn_started");
+            let progress = events
+                .iter()
+                .filter(|event| event["type"] == "reasoning_progress")
+                .collect::<Vec<_>>();
+            assert_eq!(
+                progress
+                    .iter()
+                    .map(|event| event["data"]["approx_tokens"].as_u64().unwrap())
+                    .collect::<Vec<_>>(),
+                vec![12, 24, 48]
+            );
+            assert!(progress
+                .iter()
+                .all(|event| event["data"]["count_is_estimate"] == true
+                    && event["data"].get("text").is_none()));
+            assert_eq!(events[1]["type"], "reasoning_progress");
+            let text = events
+                .iter()
+                .position(|event| event["type"] == "text_delta")
+                .unwrap();
+            assert!(events
+                .iter()
+                .enumerate()
+                .filter(|(_, event)| event["type"] == "reasoning_progress")
+                .all(|(index, _)| index < text));
+            assert!(!events
+                .iter()
+                .any(|event| event["type"] == "reasoning_delta"));
+            assert!(!serde_json::to_string(&events)
+                .unwrap()
+                .contains("opaque-signature-fixture"));
+            assert_eq!(events.last().unwrap()["type"], "turn_done");
+        }
+        assert!(host.shutdown());
+    }
+    #[test]
+    fn reasoning_progress_preserves_parent_and_ignores_signatures() {
+        let mut progress = ReasoningProgress::default();
+        let event = progress
+            .event(
+                &json!({"delta":{"type":"thinking_delta","estimated_tokens":10}}),
+                Some("tool"),
+            )
+            .unwrap();
+        assert_eq!(event["data"]["parent_id"], "tool");
+        assert!(progress.event(&json!({"delta":{"type":"signature_delta","estimated_tokens":20,"signature":"opaque"}}),None).is_none());
+        assert_eq!(progress.tokens, 10);
+        let next = progress
+            .event(
+                &json!({"index":1,"delta":{"type":"thinking_delta","estimated_tokens":5}}),
+                Some("tool"),
+            )
+            .unwrap();
+        assert_eq!(next["data"]["approx_tokens"], 15);
+        assert!(progress
+            .event(&json!({"type":"message_start"}), Some("tool"))
+            .is_none());
+        let next = progress
+            .event(
+                &json!({"index":0,"delta":{"type":"thinking_delta","estimated_tokens":2}}),
+                Some("tool"),
+            )
+            .unwrap();
+        assert_eq!(next["data"]["approx_tokens"], 17);
+    }
+    #[test]
     fn same_cli_turn_observes_verified_model_effort_and_immediate_reasoning() {
         let (_dir, host) = fixture(&format!(
             r#"if row['type']=='user':
@@ -2288,15 +2449,20 @@ for line in sys.stdin:
     }
     #[test]
     fn quota_nested_windows_keep_limiting_status_on_its_own_window() {
-        let limits = rate_limits(&json!({"status":"allowed_warning","rateLimitType":"five_hour","resetsAt":123,
-            "unifiedWindows":{"five_hour":{"utilization":0.23,"resetsAt":123},"seven_day":{"utilization":0.47,"resetsAt":456}},"raw":"private"}));
+        let limits = rate_limits(
+            &json!({"status":"allowed_warning","rateLimitType":"five_hour","resetsAt":123,
+            "unifiedWindows":{"five_hour":{"utilization":0.23,"resetsAt":123},"seven_day":{"utilization":0.47,"resetsAt":456}},"raw":"private"}),
+        );
         let (_dir, host) = fixture("");
         for limit in limits {
             let _ = update_quota(&host.shared, &limit);
         }
         let billing = host.billing_snapshot().unwrap();
         assert_eq!(billing["quota"], "5h:23% week:47%");
-        assert_eq!(billing["quota_limits"]["five_hour"]["status"], "allowed_warning");
+        assert_eq!(
+            billing["quota_limits"]["five_hour"]["status"],
+            "allowed_warning"
+        );
         assert!(billing["quota_limits"]["seven_day"].get("status").is_none());
         assert_eq!(billing["quota_source"], "claude_cli");
         assert!(!billing.to_string().contains("private"));
@@ -2316,7 +2482,9 @@ for line in sys.stdin:
         }
         let billing = host.billing_snapshot().unwrap();
         assert_eq!(billing["quota"], "week:20%");
-        assert!(billing["quota_limits"]["five_hour"].get("percent").is_none());
+        assert!(billing["quota_limits"]["five_hour"]
+            .get("percent")
+            .is_none());
         assert_eq!(billing["quota_limits"]["five_hour"]["resets_at"], 789);
         assert_eq!(billing["quota_limits"]["seven_day"]["resets_at"], 456);
         // Refreshing the catalog/account must not clear observed quotas.
@@ -2337,7 +2505,9 @@ for line in sys.stdin:
         }
         let billing = host.billing_snapshot().unwrap();
         assert!(billing["quota"].is_null());
-        assert!(billing["quota_limits"]["five_hour"].get("percent").is_none());
+        assert!(billing["quota_limits"]["five_hour"]
+            .get("percent")
+            .is_none());
         assert!(billing["quota_limits"]["five_hour"].get("status").is_none());
         for payload in [
             json!({"unifiedWindows":{"five_hour":{"utilization":0.1}}}),
@@ -2349,21 +2519,45 @@ for line in sys.stdin:
         }
         let billing = host.billing_snapshot().unwrap();
         assert_eq!(billing["quota"], "5h:10%");
-        assert_eq!(billing["quota_limits"]["five_hour"]["status"], "allowed_warning");
+        assert_eq!(
+            billing["quota_limits"]["five_hour"]["status"],
+            "allowed_warning"
+        );
         assert!(host.shutdown());
     }
     #[test]
     fn quota_invalid_window_values_do_not_poison_valid_siblings() {
-        for invalid in [json!(-0.1),json!(1.01),json!(f64::NAN),json!(f64::INFINITY),json!("0.2"),Value::Null] {
-            let limits = rate_limits(&json!({"unifiedWindows":{"five_hour":{"utilization":invalid,"resetsAt":123},"seven_day":{"utilization":0.4,"resetsAt":456}}}));
+        for invalid in [
+            json!(-0.1),
+            json!(1.01),
+            json!(f64::NAN),
+            json!(f64::INFINITY),
+            json!("0.2"),
+            Value::Null,
+        ] {
+            let limits = rate_limits(
+                &json!({"unifiedWindows":{"five_hour":{"utilization":invalid,"resetsAt":123},"seven_day":{"utilization":0.4,"resetsAt":456}}}),
+            );
             assert_eq!(limits.len(), 1);
             assert_eq!(limits[0]["window"], "seven_day");
         }
-        for invalid in [json!(-1),json!(1.5),json!(253402300800u64),json!("123"),Value::Null] {
+        for invalid in [
+            json!(-1),
+            json!(1.5),
+            json!(253402300800u64),
+            json!("123"),
+            Value::Null,
+        ] {
             assert!(rate_limits(&json!({"status":"allowed","rateLimitType":"five_hour","utilization":0.2,"resetsAt":invalid})).is_empty());
         }
-        assert!(rate_limits(&json!({"status":"invented","rateLimitType":"five_hour","utilization":0.2})).is_empty());
-        assert!(rate_limits(&json!({"unifiedWindows":{"five_hour":{},"unknown":{"utilization":0.2}}})).is_empty());
+        assert!(rate_limits(
+            &json!({"status":"invented","rateLimitType":"five_hour","utilization":0.2})
+        )
+        .is_empty());
+        assert!(rate_limits(
+            &json!({"unifiedWindows":{"five_hour":{},"unknown":{"utilization":0.2}}})
+        )
+        .is_empty());
     }
     #[test]
     fn quota_overage_windows_are_separate_and_do_not_invent_status() {
@@ -2378,7 +2572,9 @@ for line in sys.stdin:
         }
         let billing = host.billing_snapshot().unwrap();
         assert_eq!(billing["quota"], "included:10% extra:20%");
-        assert!(billing["quota_limits"]["seven_day_overage_included"].get("status").is_none());
+        assert!(billing["quota_limits"]["seven_day_overage_included"]
+            .get("status")
+            .is_none());
         assert_eq!(billing["quota_limits"]["overage"]["status"], "allowed");
         assert!(host.shutdown());
     }
@@ -2404,7 +2600,8 @@ for line in sys.stdin:
         );
         assert!(rate_limits(
             &json!({"status":"allowed","rateLimitType":"five_hour","utilization":1.01})
-        ).is_empty());
+        )
+        .is_empty());
         assert!(host.shutdown());
     }
 }
