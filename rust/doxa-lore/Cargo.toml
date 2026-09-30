@@ -1,12 +1,12 @@
 [package]
 name = "doxa-lore"
-version = "2.0.0-alpha.50"
+version = "2.0.0-alpha.51"
 edition = "2021"
 publish = false
 license = "AGPL-3.0-only"
 
 [dependencies]
-lore-core = { git = "https://github.com/docwilde/LORE", rev = "8250d7b037524f3e1e3f17956ba934162e8ba8cd" }
+lore-core = { git = "https://github.com/docwilde/LORE", rev = "ea10bbe1cb602fd7ac8a5ff5d7c66d78e417d7a2" }
 doxa-state = { path = "../doxa-state" }
 libc = "0.2"
 serde_json = "1"

@@ -5,6 +5,22 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.51 — 2026-09-30
+
+**LORE and provider verification**
+
+- Pin **`lore-core`** 0.62.5. Its native re-signing accepts receiver-valid large
+  local session operations; foreign unsigned history still needs provenance.
+- Record two-turn DeepSeek and GLM native stop/resume recall with exact synthetic
+  nonce matches and complete reported usage. The older DeepSeek failure cause remains unknown.
+
+**Measured Rust UI**
+
+- Record alpha.50 draw, PTY event-loop and fresh demo startup measurements.
+  Large transcript stream update p95 was 0.60–0.61 ms on the measured host.
+- Document the bounded Codex default-window compaction gate. A live default-window
+  compaction and restart remain unverified; no additional paid run was made.
+
 ## 2.0.0-alpha.50 — 2026-09-30
 
 **LORE gallery**
