@@ -3087,7 +3087,7 @@ send({'method':'turn/completed','params':{'threadId':'thread-1','turn':{'id':'tu
 for line in sys.stdin: pass
 "#.replace("__LOG__", log.to_str().unwrap());
     let (setup, body) = script.split_once("turn=read();").unwrap();
-    let body = format!("turn=json.loads(line);{}", body.split("for line in sys.stdin: pass").next().unwrap());
+    let body = format!("turn=json.loads(line)\nif turn['method']=='account/rateLimits/read':\n send({{'id':turn['id'],'result':{{'rateLimits':{{'limitId':'codex','primary':{{'usedPercent':35,'windowDurationMins':300}}}}}}}})\n continue\n{}", body.split("for line in sys.stdin: pass").next().unwrap().trim_start());
     let script = format!("{setup}for line in sys.stdin:\n{}", body.lines().map(|line| format!("    {line}\n")).collect::<String>());
     executable(&codex, &script);
     for resume in [false, true] {
@@ -3152,6 +3152,7 @@ for line in sys.stdin: pass
         assert!(kinds.contains(&"tool_call".to_owned()));
         assert!(kinds.contains(&"tool_result_detail".to_owned()));
         assert!(kinds.contains(&"text_delta".to_owned()));
+        assert!(kinds.contains(&"billing".to_owned()));
         }
         send(&mut socket, json!({"type":"call","id":2,"method":"stop","params":{}}));
         assert_eq!(receive(&mut reader)["ok"], true);
@@ -3573,6 +3574,9 @@ request=read();assert request['method'] in ('thread/start','thread/resume')
 send({'id':request['id'],'result':{'thread':{'id':'thread-1'},'model':'gpt-test'}})
 while True:
  request=read()
+ if request['method']=='account/rateLimits/read':
+  send({'id':request['id'],'result':{'rateLimits':{'limitId':'codex','primary':{'usedPercent':20,'windowDurationMins':300}}}})
+  continue
  if request['method']=='thread/read':
   root.joinpath('source-before').write_bytes(source.read_bytes());root.joinpath('read-requested').write_text('ready')
   time.sleep(60)

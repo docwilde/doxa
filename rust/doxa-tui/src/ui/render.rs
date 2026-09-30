@@ -1818,8 +1818,8 @@ impl App {
                             .add_modifier(Modifier::BOLD),
                     ));
                 }
-                RailRow::LooseHeading => lines.push(Line::styled(
-                    "  Sessions",
+                RailRow::ProjectHeading(project) => lines.push(Line::styled(
+                    format!("  {}", clipped_title(project, usize::from(area.width.saturating_sub(4))).0),
                     Style::default()
                         .fg(theme::ACCENT)
                         .add_modifier(Modifier::BOLD),

@@ -10,7 +10,7 @@ use ratatui::layout::Constraint;
 use ratatui::layout::Direction;
 use ratatui::layout::Layout;
 use ratatui::layout::Rect;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::time::Duration;
 use std::time::Instant;
 use unicode_width::UnicodeWidthStr;
@@ -98,12 +98,23 @@ impl App {
                 }
             }
         }
-        let loose: Vec<_> = (0..self.sessions.len())
-            .filter(|index| seen.insert(*index) && self.rail_session_visible(*index))
-            .collect();
-        if !loose.is_empty() {
-            rows.push(RailRow::LooseHeading);
-            rows.extend(loose.into_iter().map(RailRow::Session));
+        let mut projects: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        for index in 0..self.sessions.len() {
+            if seen.insert(index) && self.rail_session_visible(index) {
+                let session = &self.sessions[index];
+                let project = session.collection.trim();
+                let fallback = if project.is_empty() { "Other sessions" } else { project };
+                let label = match self.repo_cache.get(&session.id).and_then(|(status, _)| status.as_ref()) {
+                    Some(doxa_worktrees::RepoStatus::Repository { repo, .. }) => repo.as_str(),
+                    Some(doxa_worktrees::RepoStatus::Directory { name }) => name.as_str(),
+                    None => fallback,
+                };
+                projects.entry(label.to_owned()).or_default().push(index);
+            }
+        }
+        for (project, sessions) in projects {
+            rows.push(RailRow::ProjectHeading(project));
+            rows.extend(sessions.into_iter().map(RailRow::Session));
         }
         rows
     }

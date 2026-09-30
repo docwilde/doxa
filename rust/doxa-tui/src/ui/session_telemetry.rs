@@ -88,12 +88,12 @@ impl SessionTelemetry {
             .as_f64()
             .filter(|value| value.is_finite() && *value >= 0.0)
         {
-            self.cost = Some(format!("${cost:.4}"));
+            self.cost = Some(format!("${cost:.4}{}", if data["cost_is_estimate"] == true { " est" } else { "" }));
         } else if let Some(cost) = data["cost_usd"]
             .as_f64()
             .filter(|value| value.is_finite() && *value >= 0.0)
         {
-            self.cost = Some(format!("${cost:.4} turn"));
+            self.cost = Some(format!("${cost:.4} turn{}", if data["cost_is_estimate"] == true { " est" } else { "" }));
         } else if data.get("session_cost_usd").is_some() || data.get("cost_usd").is_some() {
             self.cost = None;
         }
@@ -101,7 +101,7 @@ impl SessionTelemetry {
             self.session_cost = data["session_cost_usd"]
                 .as_f64()
                 .filter(|value| value.is_finite() && *value >= 0.0)
-                .map(|cost| format!("${cost:.4}"));
+                .map(|cost| format!("${cost:.4}{}", if data["cost_is_estimate"] == true { " est" } else { "" }));
         }
     }
 
@@ -240,6 +240,14 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[test]
+    fn vendor_estimate_displays_session_sum_and_partial_turn() {
+        let mut telemetry = SessionTelemetry::default();
+        telemetry.update_turn(&json!({"cost_usd":0.5,"session_cost_usd":1.5,"cost_is_estimate":true}));
+        assert_eq!(telemetry.billing_label(Some("deepseek")).as_deref(), Some("$1.5000 est"));
+        telemetry.update_turn(&json!({"cost_usd":0.25,"session_cost_usd":null,"cost_is_estimate":true}));
+        assert_eq!(telemetry.billing_label(Some("deepseek")).as_deref(), Some("$0.2500 turn est"));
+    }
     #[test]
     fn subscription_quota_uses_highest_reported_window_and_exact_thresholds() {
         let mut telemetry = SessionTelemetry::default();

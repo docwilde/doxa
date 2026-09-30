@@ -102,6 +102,32 @@ pub struct AppServerDriver {
     tool_normalizer: CodexJsonlNormalizer,
 }
 
+fn codex_billing(reply: &Value) -> Option<Value> {
+    let bucket = reply.pointer("/rateLimitsByLimitId/codex")
+        .or_else(|| reply.get("rateLimits"))?;
+    if bucket["limitId"] != "codex" { return None; }
+    let mut windows = Vec::new();
+    for name in ["primary", "secondary"] {
+        let row = &bucket[name];
+        let Some(used) = row["usedPercent"].as_f64()
+            .filter(|used| used.is_finite() && (0.0..=100.0).contains(used)) else { continue };
+        let Some(minutes) = row["windowDurationMins"].as_u64()
+            .filter(|minutes| *minutes > 0 && *minutes <= 10_080) else { continue };
+        let window = match minutes {
+            10_080 => "week".to_owned(),
+            n if n % 60 == 0 => format!("{}h", n / 60),
+            n => format!("{n}m"),
+        };
+        windows.push(format!("{window}:{used}%"));
+    }
+    if windows.is_empty() { return None; }
+    let plan = bucket["planType"].as_str()
+        .or_else(|| reply["planType"].as_str())
+        .filter(|plan| !plan.is_empty() && plan.len() <= 32
+            && plan.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'));
+    Some(json!({"mode":"subscription","type":plan,"quota":windows.join(" · ")}))
+}
+
 impl AppServerDriver {
     /// Each driver owns one child and one provider thread, including on resume.
     pub async fn spawn(
@@ -300,6 +326,13 @@ impl AppServerDriver {
         let result = driver.list_models().await;
         driver.shutdown().await;
         result
+    }
+
+    /// Read only the documented Codex subscription bucket. API-key sessions
+    /// and malformed or unrelated buckets remain unknown.
+    pub async fn read_rate_limits(&mut self) -> Option<Value> {
+        let reply = self.request("account/rateLimits/read", json!({})).await.ok()?;
+        codex_billing(&reply)
     }
 
     pub async fn list_models(&mut self) -> Result<Vec<Value>, AppServerError> {
@@ -763,6 +796,17 @@ fn normalize_tool_item(item: &Value) -> Option<Value> {
 #[cfg(test)]
 mod web_item_tests {
     use super::*;
+
+    #[test]
+    fn billing_uses_only_measured_codex_windows() {
+        let reply = json!({"rateLimitsByLimitId":{"codex":{"limitId":"codex",
+            "planType":"plus","primary":{"usedPercent":67.2,"windowDurationMins":300},
+            "secondary":{"usedPercent":91,"windowDurationMins":10080}},
+            "codex_other":{"limitId":"codex_other","primary":{"usedPercent":100,"windowDurationMins":60}}}});
+        assert_eq!(codex_billing(&reply), Some(json!({"mode":"subscription","type":"plus","quota":"5h:67.2% · week:91%"})));
+        assert_eq!(codex_billing(&json!({"rateLimits":{"limitId":"codex_other","primary":{"usedPercent":20,"windowDurationMins":300}}})), None);
+        assert_eq!(codex_billing(&json!({"rateLimits":{"limitId":"codex","primary":{"usedPercent":101,"windowDurationMins":300}}})), None);
+    }
 
     #[test]
     fn provider_version_uses_only_the_authoritative_product_prefix() {

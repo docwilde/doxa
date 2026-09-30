@@ -65,6 +65,7 @@ pub struct CodexHost {
     selection: Mutex<(Option<String>, Option<String>)>,
     catalog: Mutex<Vec<Value>>,
     catalog_options: AppServerOptions,
+    billing: Mutex<Option<Value>>,
     rollout_path: Mutex<Option<PathBuf>>,
     transport: &'static str,
     closing: AtomicBool,
@@ -286,6 +287,7 @@ impl CodexHost {
             selection: Mutex::new(selection),
             catalog: Mutex::new(Vec::new()),
             catalog_options,
+            billing: Mutex::new(None),
             rollout_path: Mutex::new(rollout_path),
             transport,
             closing: AtomicBool::new(false),
@@ -477,6 +479,7 @@ impl Host for CodexHost {
     fn model_change_requires_idle(&self) -> bool { true }
     fn initial_model(&self) -> Option<String> { self.selection.lock().unwrap().0.clone() }
     fn initial_effort(&self) -> Option<String> { self.selection.lock().unwrap().1.clone() }
+    fn billing_snapshot(&self) -> Option<Value> { self.billing.lock().ok()?.clone() }
     fn lore_enabled(&self) -> Option<bool> { Some(self.lore_enabled) }
     fn lore_scrub_status(&self) -> Option<&'static str> {
         Some(if self.scrub_failed.load(Ordering::Acquire) { "unavailable" } else { "ready" })
@@ -722,6 +725,21 @@ impl Host for CodexHost {
                     }
                 }
         };
+        if result.is_ok() {
+            let runtime = self.runtime.lock().unwrap();
+            let mut driver = self.driver.lock().unwrap();
+            if let CodexTransport::AppServer { active: Some(app), .. } = &mut *driver {
+                // Rate-limit lookup is best effort. A stalled account service
+                // must not hold the completed turn hostage indefinitely.
+                let billing = runtime.block_on(async {
+                    tokio::time::timeout(Duration::from_secs(2), app.read_rate_limits()).await.ok().flatten()
+                });
+                if let Some(billing) = billing {
+                    *self.billing.lock().unwrap() = Some(billing.clone());
+                    emit(json!({"type":"billing","data":billing}));
+                }
+            }
+        }
         self.input.clear();
         // Native pre-request refusal sends no compaction RPC. A verified
         // blocking hook also drains its submitted turn without replacement. Keep

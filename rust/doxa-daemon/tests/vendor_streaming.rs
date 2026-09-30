@@ -103,6 +103,10 @@ fn run_case(case: &str) {
         assert_eq!(fs::read(transcript(root)).ok(), history_before, "failed stream committed private replay");
     } else {
         assert_eq!(completion["is_error"], false);
+        let estimate = completion["cost_usd"].as_f64().expect("priced provider usage");
+        assert!((estimate - 0.0000057).abs() < 0.000000001);
+        assert_eq!(completion["session_cost_usd"], completion["cost_usd"]);
+        assert_eq!(completion["cost_is_estimate"], true);
         let paired: Value = serde_json::from_slice(&fs::read(transcript(root)).unwrap()).unwrap();
         let content = paired["messages"].as_array().unwrap().last().unwrap()["content"].as_str().unwrap();
         assert_eq!(visible, content, "final response was duplicated or omitted");

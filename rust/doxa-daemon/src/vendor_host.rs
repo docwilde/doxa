@@ -15,6 +15,16 @@ const MAX_CONTEXT_BYTES: usize = 64 * 1024;
 const EVENT_TEXT_CHUNK_BYTES: usize = 8 * 1024;
 const MAX_STREAM_TEXT_BYTES: usize = 8 * 1024 * 1024;
 
+/// A provider may omit usage or return a different model. Once that happens,
+/// later turn estimates remain useful but the running session sum is unknown.
+struct CostEstimate { spent: f64, complete: bool }
+
+fn priced_turn(vendor: Vendor, model: &str, input: u64, output: u64) -> Option<f64> {
+    let price = crate::budget_host::vendor_price(vendor.engine_id(), model)?;
+    let cost = (input as f64 * price.input + output as f64 * price.output) / 1_000_000.0;
+    cost.is_finite().then_some(cost)
+}
+
 fn emit_content_chunks(kind: &str, content: &str, approx_tokens: u64, emit: &mut dyn FnMut(Value)) {
     let mut start = 0;
     while start < content.len() {
@@ -74,6 +84,7 @@ pub struct VendorHost {
     committed_bytes: AtomicU64,
     active: Mutex<Option<watch::Sender<bool>>>,
     turns: AtomicU64,
+    estimated_cost: Mutex<CostEstimate>,
     closing: AtomicBool,
     balance: Arc<Mutex<Option<String>>>,
     balance_generation: Arc<AtomicU64>,
@@ -83,6 +94,21 @@ pub struct VendorHost {
 }
 
 impl VendorHost {
+    fn record_estimated_cost(&self, model: &str, usage_complete: bool,
+        model_consistent: bool, input: u64, output: u64) -> (Option<f64>, Option<f64>) {
+        let turn = (usage_complete && model_consistent)
+            .then(|| priced_turn(self.vendor, model, input, output)).flatten();
+        let mut estimate = self.estimated_cost.lock().unwrap();
+        match turn {
+            Some(cost) => {
+                estimate.spent += cost;
+                if !estimate.spent.is_finite() { estimate.complete = false; }
+            }
+            None => estimate.complete = false,
+        }
+        (turn, estimate.complete.then_some(estimate.spent))
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         vendor: Vendor,
@@ -191,6 +217,7 @@ impl VendorHost {
             committed_bytes: AtomicU64::new(committed_bytes),
             active: Mutex::new(None),
             turns: AtomicU64::new(0),
+            estimated_cost: Mutex::new(CostEstimate { spent: 0.0, complete: !resume }),
             closing: AtomicBool::new(false),
             balance: Arc::new(Mutex::new(None)),
             balance_generation: Arc::new(AtomicU64::new(0)),
@@ -352,6 +379,17 @@ impl VendorHost {
             Ok(())
         })();
         if let Err(error) = run { final_data["error"] = json!(error); }
+        let (turn_cost, session_cost) = self.record_estimated_cost(&model,
+            final_data["usage_complete"] == true,
+            final_data["model_consistent"] == true,
+            final_data["prompt_tokens"].as_u64().unwrap_or(0),
+            final_data["completion_tokens"].as_u64().unwrap_or(0));
+        final_data["cost_usd"] = json!(turn_cost);
+        final_data["session_cost_usd"] = json!(session_cost);
+        final_data["cost_basis"] = json!("priced_conservative");
+        final_data["cost_is_estimate"] = json!(true);
+        final_data["price_source"] = json!(crate::budget_host::vendor_price(self.vendor.engine_id(), &model).map(|price| price.source));
+        final_data["price_read_on"] = json!("2026-09-30");
         emit(json!({"type":"turn_done","data":final_data}));
     }
 }
@@ -564,6 +602,7 @@ impl Host for VendorHost {
             emit(json!({"type":"reasoning_progress","data":{"approx_tokens":reasoning_chars.div_ceil(4)}}));
         }
         if stream_failed {
+            self.estimated_cost.lock().unwrap().complete = false;
             emit(done("Vendor streamed text could not be safely scrubbed; history unchanged"));
             return;
         }
@@ -641,6 +680,14 @@ impl Host for VendorHost {
                     }
                     let turns = self.turns.fetch_add(1, Ordering::AcqRel) + 1;
                     self.refresh_balance();
+                    // The provider's output counter already includes reasoning
+                    // tokens. Count it once; absent cache-hit detail means all
+                    // input is priced at the published fresh-input rate. For
+                    // DeepSeek this is the peak rate, an upper-bound estimate.
+                    let (turn_cost, session_cost) = self.record_estimated_cost(&selected_model,
+                        outcome.usage_complete,
+                        outcome.model_consistent && outcome.model.as_deref() == Some(selected_model.as_str()),
+                        outcome.usage.prompt_tokens, outcome.usage.completion_tokens);
                     emit(json!({"type":"turn_done","data":{"is_error":false,
                         "duration_ms":started.elapsed().as_millis() as u64,
                         "num_turns":turns,"model":model,
@@ -649,13 +696,18 @@ impl Host for VendorHost {
                         "usage_complete":outcome.usage_complete,
                         "model_consistent":outcome.model_consistent,
                         "usage_scope":"turn","usage_source":"vendor_response",
-                        "cost_usd":null,"session_cost_usd":null,
+                        "cost_usd":turn_cost,"session_cost_usd":session_cost,
+                        "cost_basis":"priced_conservative","cost_is_estimate":true,
+                        "price_source":crate::budget_host::vendor_price(self.vendor.engine_id(), &selected_model).map(|price| price.source),
+                        "price_read_on":"2026-09-30",
                         "ctx_percentage":null,"ctx_tokens":null,"ctx_max_tokens":null}}));
                 } else {
                     emit(done("LORE scrub failed; provider output withheld"));
                 }
             }
-            Err(error) => emit(done(match error {
+            Err(error) => {
+                self.estimated_cost.lock().unwrap().complete = false;
+                emit(done(match error {
                 Error::Cancelled => "Vendor turn cancelled",
                 Error::Timeout => "Vendor turn timed out",
                 Error::MissingCredential(_) => "Vendor credential unavailable",
@@ -664,7 +716,8 @@ impl Host for VendorHost {
                     "Vendor offered an unavailable tool"
                 }
                 _ => "Vendor turn failed",
-            })),
+                }));
+            },
         }
     }
 
@@ -746,6 +799,13 @@ fn done(message: &str) -> Value {
 #[cfg(test)]
 mod stream_tests {
     use super::*;
+
+    #[test]
+    fn published_vendor_rates_estimate_reasoning_as_output_once() {
+        assert_eq!(priced_turn(Vendor::DeepSeek, "deepseek-flash", 1_000_000, 1_000_000), Some(1.5));
+        assert_eq!(priced_turn(Vendor::Glm, "glm-5.3", 1_000_000, 1_000_000), Some(5.8));
+        assert_eq!(priced_turn(Vendor::Glm, "glm-5-turbo", 1_000_000, 1_000_000), None);
+    }
 
     #[test]
     fn balance_refresh_has_one_worker_and_reruns_for_latest_account() {
