@@ -92,20 +92,26 @@ impl App {
             rows.push(RailRow::Heading(heading));
             for id in &item.sessions {
                 if let Some(index) = self.sessions.iter().position(|session| &session.id == id) {
-                    if seen.insert(index) && !item.collapsed {
+                    if seen.insert(index) && !item.collapsed && self.rail_session_visible(index) {
                         rows.push(RailRow::Session(index));
                     }
                 }
             }
         }
         let loose: Vec<_> = (0..self.sessions.len())
-            .filter(|index| seen.insert(*index))
+            .filter(|index| seen.insert(*index) && self.rail_session_visible(*index))
             .collect();
         if !loose.is_empty() {
             rows.push(RailRow::LooseHeading);
             rows.extend(loose.into_iter().map(RailRow::Session));
         }
         rows
+    }
+
+    fn rail_session_visible(&self, index: usize) -> bool {
+        let id = &self.sessions[index].id;
+        !self.offline_ids.contains(id)
+            || self.groups.iter().any(|group| group.tabs.contains(id))
     }
 
     pub(super) fn rail_order(&self) -> Vec<usize> {

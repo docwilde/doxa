@@ -159,7 +159,6 @@ impl App {
             "detach" => {
                 if let Some(controller) = self.fleet_controller.take() {
                     let (root, id) = controller.detach();
-                    self.fleet_quit_pending = false;
                     self.open_fleet(root, Some(id));
                     self.notice="Fleet detached; it keeps running with its existing budget and approval limits".into();
                     self.input.clear();
@@ -381,9 +380,6 @@ impl App {
                         "Fleet controller exited unsuccessfully; inspect actual manifest status"
                             .into()
                     };
-                    if self.fleet_quit_pending {
-                        self.should_quit = true;
-                    }
                     changed = true;
                 }
                 Err(_) => {

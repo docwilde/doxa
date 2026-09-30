@@ -9,6 +9,7 @@ use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyModifiers;
 use std::io;
+use std::collections::HashSet;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -17,6 +18,58 @@ use std::time::Duration;
 use std::time::Instant;
 
 impl App {
+    /// Verify a disconnected, detached row against the trusted live registry
+    /// before removing it from the rail. Archived history stays searchable.
+    pub(super) fn poll_stale_detached(&mut self, now: Instant) -> bool {
+        if let Some(receiver) = self.stale_detached_pending.as_ref() {
+            match receiver.try_recv() {
+                Ok(Ok(rows)) => {
+                    self.stale_detached_pending = None;
+                    let live: HashSet<_> = rows.into_iter().map(|row| row.id).collect();
+                    return self.mark_dead_detached(&live);
+                }
+                Ok(Err(_)) | Err(TryRecvError::Disconnected) => {
+                    self.stale_detached_pending = None;
+                    return false;
+                }
+                Err(TryRecvError::Empty) => return false,
+            }
+        }
+        if now < self.stale_detached_check_at { return false; }
+        if !self.sessions.iter().any(|session| {
+            session.status == "Disconnected" && !self.offline_ids.contains(&session.id)
+                && !self.groups.iter().any(|group| group.tabs.contains(&session.id))
+        }) {
+            self.stale_detached_check_at = now + Duration::from_secs(2);
+            return false;
+        }
+        self.stale_detached_check_at = now + Duration::from_secs(5);
+        let (tx, rx) = mpsc::sync_channel(1);
+        if std::thread::Builder::new().name("stale-detached-roster".into())
+            .spawn(move || { let _ = tx.send(crate::discovery::sessions()); }).is_ok() {
+            self.stale_detached_pending = Some(rx);
+        }
+        false
+    }
+
+    pub(super) fn mark_dead_detached(&mut self, live: &HashSet<String>) -> bool {
+        let selected_id = self.rail_order().get(self.rail_selected)
+            .map(|index| self.sessions[*index].id.clone());
+        let dead: Vec<_> = self.sessions.iter()
+            .filter(|session| session.status == "Disconnected"
+                && !live.contains(&session.id)
+                && !self.groups.iter().any(|group| group.tabs.contains(&session.id)))
+            .map(|session| session.id.clone()).collect();
+        for id in &dead { self.offline_ids.insert(id.clone()); }
+        if !dead.is_empty() {
+            let rows = self.rail_order();
+            self.rail_selected = selected_id.as_ref()
+                .and_then(|id| rows.iter().position(|index| self.sessions[*index].id == *id))
+                .unwrap_or(self.rail_selected.min(rows.len().saturating_sub(1)));
+        }
+        !dead.is_empty()
+    }
+
     pub(super) fn open_live_sessions(&mut self) {
         if self.session_roster_pending.is_some() {
             self.notice = "sessions: discovery pending".into();
@@ -888,8 +941,8 @@ impl App {
         }
     }
 
-    /// Remove only the active tab. Its daemon and rail entry remain available
-    /// for reattachment; closing the final tab exits the otherwise empty UI.
+    /// Remove only the active tab. Its daemon remains available for reattachment;
+    /// Ctrl+Q is the explicit way to leave an otherwise empty window.
     pub(super) fn detach_active_tab(&mut self) {
         if self.launching || !self.attaching_ids.is_empty() || self.clear_pending.is_some() {
             self.notice = "Wait for session launch/attach/clear before closing a pane".into();
@@ -916,7 +969,13 @@ impl App {
         self.notice = format!("Tab detached · {id} remains available in sessions");
 
         if self.groups.iter().all(|group| group.tabs.is_empty()) {
-            self.should_quit = true;
+            self.pane_tree = None;
+            self.split_requested = false;
+            self.groups.truncate(2);
+            while self.groups.len() < 2 {
+                self.groups.push(PaneGroup { tabs: Vec::new(), active: 0, scroll: 0 });
+            }
+            self.active_group = 0;
         } else if self.pane_tree.is_some() && self.groups[self.active_group].tabs.is_empty() {
             let removed = self.active_group;
             self.groups.remove(removed);
@@ -1002,5 +1061,16 @@ impl App {
         let p = &mut self.groups[self.active_group];
         p.active = (p.active + 1).min(p.tabs.len().saturating_sub(1));
         p.scroll = 0;
+    }
+
+    pub(super) fn switch_prompt_pane(&mut self, forward: bool) {
+        let count = self.pane_count();
+        if count < 2 { return; }
+        self.active_group = if forward {
+            (self.active_group + 1) % count
+        } else {
+            (self.active_group + count - 1) % count
+        };
+        self.focus = Focus::Prompt;
     }
 }

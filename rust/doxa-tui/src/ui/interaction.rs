@@ -622,11 +622,16 @@ impl App {
                 return true;
             }
         }
-        if ctrl && matches!(key.code, KeyCode::Char('q' | 'c')) && self.fleet_controller.is_some() {
+        if ctrl && key.code == KeyCode::Char('c') && self.fleet_controller.is_some() {
             self.fleet_controller.as_mut().unwrap().cancel();
-            self.fleet_quit_pending |= key.code == KeyCode::Char('q');
-            self.notice =
-                "Cancelling fleet controller; waiting for slot teardown and process reaping".into();
+            self.notice = "Cancelling fleet controller; waiting for slot teardown and process reaping".into();
+            return true;
+        }
+        if ctrl && key.code == KeyCode::Char('q') && self.fleet_controller.is_some() {
+            // Controller::Drop cancels its child; detach first so quitting the
+            // frontend leaves the fleet's budgeted run alive.
+            self.fleet_controller.take().unwrap().detach();
+            self.should_quit = true;
             return true;
         }
         if key.code == KeyCode::Char('q') && ctrl {
@@ -643,7 +648,7 @@ impl App {
         if self.fleet_review.is_some() {
             return self.fleet_review_key(key);
         }
-        if key.code == KeyCode::Char('w') && ctrl {
+        if matches!(key.code, KeyCode::Char('w' | 'x')) && ctrl {
             self.detach_active_tab();
             return true;
         }
@@ -655,6 +660,7 @@ impl App {
             return true;
         }
         if self.active_request_index().is_some() {
+            if self.navigation_key(key) { return true; }
             return self.request_key(key);
         }
         if self.stop_confirmation.is_some() {
@@ -991,6 +997,7 @@ impl App {
                 _ => {}
             }
         }
+        if self.navigation_key(key) { return true; }
         if !ctrl && !alt && !key.modifiers.contains(KeyModifiers::SHIFT) {
             let suggestions = self.slash_suggestions();
             if !suggestions.is_empty() {
@@ -1280,6 +1287,21 @@ impl App {
                 }
                 true
             }
+            _ => false,
+        }
+    }
+
+    /// Window navigation remains available while a session waits for input.
+    /// The request stays owned by its original tab when focus moves away.
+    fn navigation_key(&mut self, key: KeyEvent) -> bool {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        if key.modifiers.contains(KeyModifiers::ALT) { return false; }
+        match (ctrl, shift, key.code) {
+            (true, false, KeyCode::Left) => { self.previous_tab(); self.focus = Focus::Prompt; true }
+            (true, false, KeyCode::Right) => { self.next_tab(); self.focus = Focus::Prompt; true }
+            (false, true, KeyCode::Left) => { self.switch_prompt_pane(false); true }
+            (false, true, KeyCode::Right) => { self.switch_prompt_pane(true); true }
             _ => false,
         }
     }

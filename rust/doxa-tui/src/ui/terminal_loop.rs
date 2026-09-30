@@ -304,6 +304,7 @@ fn run_loop(
             }
         }
         changed |= app.poll_sessions_roster();
+        changed |= app.poll_stale_detached(Instant::now());
         changed |= app.poll_sessions_stop();
         changed |= app.poll_fleet();
         changed |= app.poll_diff();
