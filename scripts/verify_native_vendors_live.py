@@ -30,6 +30,25 @@ def emit(value):
     print(text, flush=True)
 
 
+def nonce_evidence(reply, token):
+    """Classify a synthetic answer without retaining or printing its content."""
+    stripped = reply.strip()
+    return {
+        "exact_match": stripped == token,
+        "contains_nonce": token in stripped,
+        "nonce_occurrences": stripped.count(token),
+        "reply_length": len(stripped),
+        "expected_length": len(token),
+    }
+
+
+def reported_usage(done):
+    """Keep numeric provider counters distinct from unknown or partial usage."""
+    return {name: done.get(name) for name in (
+        "prompt_tokens", "completion_tokens", "usage_complete",
+        "model_consistent", "usage_scope", "usage_source")}
+
+
 class Wire:
     def __init__(self, path):
         self.sock = socket.socket(socket.AF_UNIX)
@@ -180,7 +199,9 @@ def verify(provider, variable):
             result["submitted_turns"] += 1
             first, text = wire.turn("Use workspace_read exactly once to read fixture.txt. Reply with only its content. "
                 "Make no other tool calls. Keep reasoning under 50 words and final answer under 20 words.")
-            first["synthetic_file_content_matches"] = text.strip() == token
+            first["nonce_evidence"] = nonce_evidence(text, token)
+            first["reported_usage"] = reported_usage(first["done"])
+            first["synthetic_file_content_matches"] = first["nonce_evidence"]["exact_match"]
             result["turns"] = [first]
             if first["done"].get("is_error") or not first["synthetic_file_content_matches"]:
                 result["result"] = "native_turn_failed_or_tool_read_unverified"
@@ -209,7 +230,9 @@ def verify(provider, variable):
             result["submitted_turns"] += 1
             second, text = wire.turn("Without tools, repeat the token from your previous answer. "
                 "Reply only with the token. Keep reasoning under 30 words.")
-            second["previous_turn_recalled"] = text.strip() == token
+            second["nonce_evidence"] = nonce_evidence(text, token)
+            second["reported_usage"] = reported_usage(second["done"])
+            second["previous_turn_recalled"] = second["nonce_evidence"]["exact_match"]
             result["turns"].append(second)
             paths = list(home.rglob("live-vendor.messages.json"))
             roles = []
