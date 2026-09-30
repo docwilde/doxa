@@ -3430,6 +3430,30 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn uncollected_sessions_group_by_recorded_project() {
+        let mut app = App::default();
+        for (id, project) in [("one", "/work/zeta"), ("two", "/work/alpha"), ("three", "/work/zeta")] {
+            app.apply_update(DaemonUpdate::Upsert(Session {
+                id: id.into(), title: id.into(), collection: project.into(),
+                transcript: String::new(), status: "Ready".into(),
+            }));
+        }
+        app.set_repo_status("one", doxa_worktrees::RepoStatus::Repository {
+            repo: "zeta".into(), base: None, checked_out: None, sha: None, worktree: None,
+        });
+        app.set_repo_status("three", doxa_worktrees::RepoStatus::Repository {
+            repo: "zeta".into(), base: None, checked_out: None, sha: None, worktree: Some("feature".into()),
+        });
+        let rows = app.rail_rows();
+        assert!(matches!(&rows[0], RailRow::ProjectHeading(label) if label == "/work/alpha"));
+        assert!(matches!(&rows[1], RailRow::Session(1)));
+        assert!(matches!(&rows[2], RailRow::ProjectHeading(label) if label == "zeta"));
+        assert!(matches!(&rows[3], RailRow::Session(0)));
+        assert!(matches!(&rows[4], RailRow::Session(2)));
+        assert_eq!(app.rail_order(), [1, 0, 2]);
+    }
+
+    #[test]
     fn collection_commands_move_active_session_and_order_rail() {
         let mut app = App::default();
         for id in ["one", "two"] {

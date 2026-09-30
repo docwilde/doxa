@@ -5,6 +5,14 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.59 — 2026-09-30
+
+**Project navigation and billing**
+
+- Group uncollected session rail entries by their reported repository or project; named collections still take precedence.
+- Estimate DeepSeek and GLM turn costs from reported token counts and published model rates. Unknown usage or model identity keeps cumulative cost unknown.
+- Read Codex subscription quota windows from its app-server after successful turns; display only the Codex bucket.
+
 ## 2.0.0-alpha.58 — 2026-09-30
 
 **Current documentation and live gallery**

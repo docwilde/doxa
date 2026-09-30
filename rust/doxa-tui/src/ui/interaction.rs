@@ -3068,7 +3068,7 @@ impl App {
                                 self.open_selected();
                                 return true;
                             }
-                            Some(RailRow::LooseHeading) => {
+                            Some(RailRow::ProjectHeading(_)) => {
                                 self.focus = Focus::Rail;
                                 return true;
                             }

@@ -46,7 +46,9 @@ doxa new --engine codex
 doxa list
 ```
 
-Ctrl+T opens the new-tab engine picker. Ctrl+X closes the active tab while its daemon keeps running; Ctrl+Q exits DOXA and leaves sessions detached. Reattach with `doxa attach SESSION_ID`. Tab reaches the session rail when visible, and the mouse wheel switches tabs over a tab header. Use `/settings` → **Keys** to change window shortcuts immediately, or `doxa settings set key_new_tab Alt+N` to change one for the next launch.
+Ctrl+T opens the new-tab engine picker. Alt+V splits side by side; Alt+H stacks panes. Ctrl+X closes the active tab while its daemon keeps running; Ctrl+Q exits DOXA and leaves sessions detached. Reattach with `doxa attach SESSION_ID`. Tab reaches the session rail when visible; uncollected sessions group under their repository or project. The mouse wheel switches tabs over a tab header. Use `/settings` → **Keys** to change window shortcuts immediately, or `doxa settings set key_new_tab Alt+N` to change one for the next launch.
+
+DeepSeek and GLM show estimated API cost from provider token counts and published model rates. The estimate uses fresh-input rates (and DeepSeek peak rates), so cache discounts and off-peak billing can make the actual charge lower. Codex subscription usage appears after its app-server reports the Codex quota windows; missing values stay unknown.
 
 `/pending` and `/lore:pending --cluster` open LORE proposals for the current project plus user scope with either engine. `lore status` reports the global pending count across all projects.
 

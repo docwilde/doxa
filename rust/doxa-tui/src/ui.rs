@@ -1199,7 +1199,7 @@ impl RenderedTranscript {
 enum RailRow {
     Heading(usize),
     Session(usize),
-    LooseHeading,
+    ProjectHeading(String),
 }
 
 #[derive(Debug)]
