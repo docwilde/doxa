@@ -258,7 +258,7 @@ dev = [
 [package.metadata.requires-dev]
 dev = [
     { name = "claude-agent-sdk", specifier = ">=0.2.144" },
-    { name = "lore-core", git = "https://github.com/docwilde/LORE?rev=125019f8bf74ac716e76333ef1ba6c14a54778e8" },
+    { name = "lore-core", git = "https://github.com/docwilde/LORE?rev=0458ea87b66852cb51a396fe01637a5dfb94a217" },
     { name = "pillow", specifier = ">=11" },
     { name = "pytest", specifier = ">=8" },
     { name = "pytest-asyncio", specifier = ">=0.24" },
@@ -376,8 +376,8 @@ wheels = [
 
 [[package]]
 name = "lore-core"
-version = "0.62.6"
-source = { git = "https://github.com/docwilde/LORE?rev=125019f8bf74ac716e76333ef1ba6c14a54778e8#125019f8bf74ac716e76333ef1ba6c14a54778e8" }
+version = "0.62.7"
+source = { git = "https://github.com/docwilde/LORE?rev=0458ea87b66852cb51a396fe01637a5dfb94a217#0458ea87b66852cb51a396fe01637a5dfb94a217" }
 
 [[package]]
 name = "markdown-it-py"
