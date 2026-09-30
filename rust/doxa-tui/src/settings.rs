@@ -3,15 +3,48 @@
 use std::{io, path::Path};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Kind { Text, Number, Bool, BoolOn, Choice, Format }
+pub enum Kind { Text, Number, Bool, BoolOn, Choice, Format, Key }
 #[derive(Debug, Clone, Copy)]
 pub struct Setting {
     pub key: &'static str, pub env: &'static str, pub label: &'static str,
     pub category: &'static str, pub kind: Kind, pub choices: &'static [&'static str],
     pub default: &'static str, pub read_only: bool, pub help: &'static str, pub note: &'static str,
 }
-pub const CATEGORIES: &[&str] = &["Session", "Memory", "Appearance", "Notifications", "Remote", "Paths", "About"];
+pub const CATEGORIES: &[&str] = &["Session", "Memory", "Appearance", "Keys", "Notifications", "Remote", "Paths", "About"];
+macro_rules! key_setting {
+    ($key:literal, $label:literal, $default:literal) => {
+        Setting { key: $key, env: "", label: $label, category: "Keys", kind: Kind::Key,
+            choices: &[], default: $default, read_only: false,
+            help: "Window shortcut: Ctrl, Alt and Shift modifiers plus a letter, arrow, Tab, comma or F1-F12; 'none' unbinds it. Takes effect when settings are saved.",
+            note: "Editing keys in the prompt and menus remain local to those controls. Duplicate shortcuts are rejected." }
+    };
+}
 pub const SETTINGS: &[Setting] = &[
+    key_setting!("key_new_tab", "new tab", "Ctrl+T"),
+    key_setting!("key_close_tab", "close tab", "Ctrl+X"),
+    key_setting!("key_close_tab_alt", "close tab alternate", "Ctrl+W"),
+    key_setting!("key_quit", "quit and detach", "Ctrl+Q"),
+    key_setting!("key_previous_tab", "previous tab", "Ctrl+Left"),
+    key_setting!("key_next_tab", "next tab", "Ctrl+Right"),
+    key_setting!("key_previous_pane", "previous pane prompt", "Shift+Left"),
+    key_setting!("key_next_pane", "next pane prompt", "Shift+Right"),
+    key_setting!("key_next_pane_alt", "next pane alternate", "Alt+Tab"),
+    key_setting!("key_tools", "tool calls", "Alt+T"),
+    key_setting!("key_palette", "action palette", "Ctrl+P"),
+    key_setting!("key_search", "session search", "Ctrl+R"),
+    key_setting!("key_settings", "settings", "Ctrl+,"),
+    key_setting!("key_peer_map", "peer map", "Ctrl+M"),
+    key_setting!("key_sidebar", "session rail", "F3"),
+    key_setting!("key_diff", "diff", "F2"),
+    key_setting!("key_diff_alt", "diff alternate", "Alt+G"),
+    key_setting!("key_split_horizontal", "stacked split", "Alt+H"),
+    key_setting!("key_split_vertical", "side-by-side split", "Alt+V"),
+    key_setting!("key_model", "model picker", "Alt+M"),
+    key_setting!("key_effort", "effort picker", "Alt+F"),
+    key_setting!("key_permission", "permission picker", "Alt+P"),
+    key_setting!("key_engine", "engine picker", "Alt+E"),
+    key_setting!("key_lore", "LORE beliefs", "Alt+L"),
+    key_setting!("key_stop", "stop session", "Alt+X"),
     Setting { key: "engine", env: "DOXA_ENGINE", label: "engine", category: "Session", kind: Kind::Choice, choices: &["", "claude", "codex", "deepseek", "glm"], default: "claude", read_only: false, help: "Which engine drives NEW sessions (doxa.engines -- `doxa --engine <id>` is the flag layer, `/engine` the in-app one)", note: "Not every session surface exists on every engine, and the ones that do not are HIDDEN rather than shown inert -- no permission-mode chip where there are no modes, no ctx chip where no window size is reported, no cost chip where no dollar figure is. `/engine` prints what each one can and cannot do, read off doxa.engines.EngineCapabilities itself rather than described here, where it would go stale. An engine is chosen at CONNECT, so a change here reaches NEW sessions and tabs and never the running one." },
     Setting { key: "model", env: "DOXA_MODEL", label: "model", category: "Session", kind: Kind::Text, choices: &[], default: "", read_only: false, help: "Model preference for the active session's engine, used by new sessions of that engine (/model switches the live session). DOXA_MODEL overrides every engine.", note: "" },
     Setting { key: "effort", env: "DOXA_EFFORT", label: "effort", category: "Session", kind: Kind::Choice, choices: &["", "low", "medium", "high", "xhigh", "max"], default: "", read_only: false, help: "Default reasoning effort for new sessions; use the effort chip or /effort for the current session", note: "Supported current-session changes require an idle provider and verified capability. Claude resumes its existing provider conversation with the selected effort; Codex applies it to the next turn." },
@@ -138,6 +171,7 @@ pub fn coerce(s: &Setting, value: Option<&str>) -> io::Result<Option<toml::Value
         },
         Kind::Choice => { if !s.choices.contains(&value) { return Err(invalid(&format!("accepts {}", s.choices.join(" | ")))); } toml::Value::String(value.into()) },
         Kind::Format => { crate::preferences::validate_clock_format(value).map_err(|_| invalid("invalid strftime format"))?; toml::Value::String(value.into()) },
+        Kind::Key => { let chord = crate::keybindings::Chord::parse(value).map_err(|e| invalid(&e.to_string()))?; toml::Value::String(chord.map(|c| c.display()).unwrap_or_else(|| "none".into())) },
         Kind::Text => toml::Value::String(value.into()),
     }))
 }
@@ -156,6 +190,7 @@ pub fn save(path: &Path, edits: &[(String, Option<String>)], engine: &str) -> io
                 if let Some(value) = value { models.insert(engine.into(),value); } else { models.remove(engine); }
             } else if let Some(value) = value { config.insert(s.key.into(),value); } else { config.remove(s.key); }
         }
+        crate::keybindings::Bindings::from_config(config)?;
         Ok(())
     })
 }
@@ -185,5 +220,31 @@ mod tests {
         let dir=tempfile::tempdir().unwrap();std::fs::set_permissions(dir.path(),std::fs::Permissions::from_mode(0o700)).unwrap();let path=dir.path().join("config.toml");std::fs::write(&path,"[broken").unwrap();
         assert!(save(&path,&[("clock_show".into(),Some("off".into()))],"claude").is_err());assert_eq!(std::fs::read_to_string(&path).unwrap(),"[broken");
         for (key,value) in [("linger_secs","NaN"),("consult_floor","-1"),("effort","invalid"),("permission_mode","bypassPermissions"),("notify","sometimes"),("clock_format","%H\n%s"),("lore","maybe")] {assert!(coerce(find(key).unwrap(),Some(value)).is_err(),"{key}");}
+    }
+    #[test]
+    fn keybinding_collision_rejects_write_and_valid_change_persists() {
+        let dir=tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(),std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path=dir.path().join("config.toml");
+        save(&path,&[("key_new_tab".into(),Some("Alt+N".into()))],"claude").unwrap();
+        let before=std::fs::read_to_string(&path).unwrap();
+        assert_eq!(doxa_state::load_config_checked(&path).unwrap()["key_new_tab"].as_str(),Some("Alt+N"));
+        assert!(save(&path,&[("key_tools".into(),Some("Alt+N".into()))],"claude").is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(),before);
+        assert!(save(&path,&[("key_new_tab".into(),Some("Ctrl+C".into()))],"claude").is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(),before);
+        save(&path,&[("key_tools".into(),Some("none".into()))],"claude").unwrap();
+        assert_eq!(doxa_state::load_config_checked(&path).unwrap()["key_tools"].as_str(),Some("none"));
+    }
+    #[test]
+    fn key_catalog_matches_runtime_registry() {
+        let catalog=SETTINGS.iter().filter(|setting| setting.kind==Kind::Key).collect::<Vec<_>>();
+        assert_eq!(catalog.len(),crate::keybindings::DEFINITIONS.len());
+        for definition in crate::keybindings::DEFINITIONS {
+            let setting=find(definition.key).unwrap();
+            assert_eq!(setting.kind,Kind::Key);
+            assert_eq!(setting.default,definition.default);
+            assert_eq!(setting.label,definition.label);
+        }
     }
 }

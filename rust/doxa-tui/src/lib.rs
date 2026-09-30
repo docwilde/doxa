@@ -29,6 +29,7 @@ pub mod mesh_control;
 mod mesh_server;
 pub mod maintenance;
 pub mod settings;
+pub mod keybindings;
 pub mod preferences;
 pub mod belief_graph;
 pub mod belief_preview;

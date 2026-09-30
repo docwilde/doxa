@@ -1204,6 +1204,7 @@ enum RailRow {
 
 #[derive(Debug)]
 pub struct App {
+    keybindings: crate::keybindings::Bindings,
     preferences: crate::preferences::Preferences,
     persist_preferences: bool,
     sidebar_auto: bool,
@@ -1438,6 +1439,7 @@ pub struct App {
 impl Default for App {
     fn default() -> Self {
         Self {
+            keybindings: crate::keybindings::Bindings::default(),
             preferences: crate::preferences::Preferences::load(),
             persist_preferences: false,
             sidebar_auto: false,

@@ -5,6 +5,16 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.57 — 2026-09-30
+
+**Configurable window shortcuts**
+
+- Add **Ctrl+T** for a new tab and move tool calls to **Alt+T**.
+- Store tab, pane, picker, search, settings and quit shortcuts in user-level
+  **`config.toml`**. The Keys settings page applies edits immediately.
+- Reject invalid or duplicate chords before saving. Use **`none`** to unbind;
+  menu editing and approval keys retain their local behavior.
+
 ## 2.0.0-alpha.56 — 2026-09-30
 
 **Session navigation**

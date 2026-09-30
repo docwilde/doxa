@@ -238,14 +238,19 @@ fn run_loop(
         }
         store.restore(&mut app, live_ids);
     }
+    match crate::keybindings::Bindings::load() {
+        Ok(bindings) => app.keybindings = bindings,
+        Err(error) => app.notice = format!("Invalid keybindings: {error}"),
+    }
     app.refresh_clock();
     if app.preferences.on("key_notice") && guard.keyboard_protocol == KeyboardProtocol::Legacy {
-        let keys = "Legacy key mode: Ctrl+, → /settings · Shift+Enter → Ctrl+J · Ctrl+Enter → /msg";
+        let keys = format!("Legacy key mode: {} → /settings · Shift+Enter → Ctrl+J · Ctrl+Enter → /msg",
+            app.keybindings.display(crate::keybindings::Action::Settings));
         if app.notice.is_empty() {
-            app.notice = keys.into();
+            app.notice = keys;
         } else {
             app.notice.push_str(" · ");
-            app.notice.push_str(keys);
+            app.notice.push_str(&keys);
         }
     }
     let mut saved_layout = crate::ui_state::LayoutSignature::capture(&app);

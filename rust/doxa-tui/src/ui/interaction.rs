@@ -543,6 +543,7 @@ impl App {
     }
 
     pub(super) fn key(&mut self, key: KeyEvent) -> bool {
+        use crate::keybindings::Action as KeyAction;
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         if self.restart_job.is_some() || self.restart_waiting {
@@ -627,14 +628,14 @@ impl App {
             self.notice = "Cancelling fleet controller; waiting for slot teardown and process reaping".into();
             return true;
         }
-        if ctrl && key.code == KeyCode::Char('q') && self.fleet_controller.is_some() {
+        if self.keybindings.matches(KeyAction::Quit, key) && self.fleet_controller.is_some() {
             // Controller::Drop cancels its child; detach first so quitting the
             // frontend leaves the fleet's budgeted run alive.
             self.fleet_controller.take().unwrap().detach();
             self.should_quit = true;
             return true;
         }
-        if key.code == KeyCode::Char('q') && ctrl {
+        if self.keybindings.matches(KeyAction::Quit, key) {
             if !self.diff_reject_queue.is_empty()
                 || self.diff_reject_active.is_some()
                 || self.diff_reject_feedback.is_some()
@@ -648,7 +649,8 @@ impl App {
         if self.fleet_review.is_some() {
             return self.fleet_review_key(key);
         }
-        if matches!(key.code, KeyCode::Char('w' | 'x')) && ctrl {
+        if self.keybindings.matches(KeyAction::CloseTab, key)
+            || self.keybindings.matches(KeyAction::CloseTabAlternate, key) {
             self.detach_active_tab();
             return true;
         }
@@ -851,7 +853,7 @@ impl App {
                 .unwrap_or("")
                 .to_owned();
             return match key.code {
-                KeyCode::Esc | KeyCode::Char('m') if key.code == KeyCode::Esc || ctrl => {
+                _ if key.code == KeyCode::Esc || self.keybindings.matches(KeyAction::PeerMap, key) => {
                     self.map_modal = false;
                     true
                 }
@@ -875,11 +877,11 @@ impl App {
                 _ => false,
             };
         }
-        if key.code == KeyCode::Char(',') && ctrl {
+        if self.keybindings.matches(KeyAction::Settings, key) {
             self.open_settings_menu();
             return true;
         }
-        if key.code == KeyCode::Char('m') && ctrl {
+        if self.keybindings.matches(KeyAction::PeerMap, key) {
             self.map_modal = true;
             self.peer_map.selected = 0;
             self.pending_peer_refresh = Some(
@@ -893,48 +895,53 @@ impl App {
         if self.tool_modal {
             return self.tool_key(key);
         }
-        if key.code == KeyCode::Char('t') && ctrl {
+        if self.keybindings.matches(KeyAction::NewTab, key) {
+            self.open_engine_picker();
+            return true;
+        }
+        if self.keybindings.matches(KeyAction::Tools, key) {
             self.tool_modal = true;
             self.tool_scroll = 0;
             self.tool_selected = self.active_tool_cards().len().saturating_sub(1);
             return true;
         }
-        if key.code == KeyCode::Char('p') && ctrl {
+        if self.keybindings.matches(KeyAction::Palette, key) {
             self.action_menu = true;
             self.action_selected = 0;
             self.action_query.clear();
             self.drag = None;
             return true;
         }
-        if key.code == KeyCode::Char('r') && ctrl {
+        if self.keybindings.matches(KeyAction::Search, key) {
             self.open_history();
             return true;
         }
-        if key.code == KeyCode::Char('l') && alt {
+        if self.keybindings.matches(KeyAction::Lore, key) {
             self.open_lore_picker();
             return true;
         }
-        if key.code == KeyCode::Char('m') && alt {
+        if self.keybindings.matches(KeyAction::Model, key) {
             self.open_model_picker();
             return true;
         }
-        if key.code == KeyCode::Char('f') && alt {
+        if self.keybindings.matches(KeyAction::Effort, key) {
             self.open_effort_picker();
             return true;
         }
-        if key.code == KeyCode::Char('p') && alt {
+        if self.keybindings.matches(KeyAction::Permission, key) {
             self.open_permission_picker();
             return true;
         }
-        if key.code == KeyCode::Char('e') && alt {
+        if self.keybindings.matches(KeyAction::Engine, key) {
             self.open_engine_picker();
             return true;
         }
-        if key.code == KeyCode::Char('x') && alt {
+        if self.keybindings.matches(KeyAction::Stop, key) {
             self.open_stop_confirmation();
             return true;
         }
-        if key.code == KeyCode::F(2) || (key.code == KeyCode::Char('g') && alt) {
+        if self.keybindings.matches(KeyAction::Diff, key)
+            || self.keybindings.matches(KeyAction::DiffAlternate, key) {
             self.open_diff();
             return true;
         }
@@ -998,6 +1005,19 @@ impl App {
             }
         }
         if self.navigation_key(key) { return true; }
+        if self.keybindings.matches(KeyAction::Sidebar, key) {
+            self.rail_visible = !self.rail_visible;
+            self.persist_sidebar();
+            return true;
+        }
+        if self.keybindings.matches(KeyAction::SplitHorizontal, key) {
+            self.split_active_pane(Split::Horizontal);
+            return true;
+        }
+        if self.keybindings.matches(KeyAction::SplitVertical, key) {
+            self.split_active_pane(Split::Vertical);
+            return true;
+        }
         if !ctrl && !alt && !key.modifiers.contains(KeyModifiers::SHIFT) {
             let suggestions = self.slash_suggestions();
             if !suggestions.is_empty() {
@@ -1026,22 +1046,6 @@ impl App {
             }
         }
         match key.code {
-            KeyCode::F(3) => {
-                self.rail_visible = !self.rail_visible;
-                self.persist_sidebar();
-                true
-            }
-            KeyCode::Tab if alt => {
-                self.active_group = (self.active_group + 1)
-                    % if self.pane_tree.is_some() {
-                        self.pane_count()
-                    } else {
-                        2
-                    };
-                self.split_requested = true;
-                self.focus = Focus::Prompt;
-                true
-            }
             KeyCode::BackTab | KeyCode::Tab => {
                 self.cycle_focus(
                     key.code == KeyCode::BackTab || key.modifiers.contains(KeyModifiers::SHIFT),
@@ -1068,14 +1072,6 @@ impl App {
             }
             KeyCode::Esc => {
                 self.focus = Focus::Prompt;
-                true
-            }
-            KeyCode::Char('h') if alt => {
-                self.split_active_pane(Split::Horizontal);
-                true
-            }
-            KeyCode::Char('v') if alt => {
-                self.split_active_pane(Split::Vertical);
                 true
             }
             KeyCode::Up if alt && self.focus == Focus::Prompt => {
@@ -1294,16 +1290,22 @@ impl App {
     /// Window navigation remains available while a session waits for input.
     /// The request stays owned by its original tab when focus moves away.
     fn navigation_key(&mut self, key: KeyEvent) -> bool {
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
-        if key.modifiers.contains(KeyModifiers::ALT) { return false; }
-        match (ctrl, shift, key.code) {
-            (true, false, KeyCode::Left) => { self.previous_tab(); self.focus = Focus::Prompt; true }
-            (true, false, KeyCode::Right) => { self.next_tab(); self.focus = Focus::Prompt; true }
-            (false, true, KeyCode::Left) => { self.switch_prompt_pane(false); true }
-            (false, true, KeyCode::Right) => { self.switch_prompt_pane(true); true }
-            _ => false,
-        }
+        use crate::keybindings::Action as KeyAction;
+        if self.keybindings.matches(KeyAction::PreviousTab, key) {
+            self.previous_tab(); self.focus = Focus::Prompt; true
+        } else if self.keybindings.matches(KeyAction::NextTab, key) {
+            self.next_tab(); self.focus = Focus::Prompt; true
+        } else if self.keybindings.matches(KeyAction::PreviousPane, key) {
+            self.switch_prompt_pane(false); true
+        } else if self.keybindings.matches(KeyAction::NextPane, key) {
+            self.switch_prompt_pane(true); true
+        } else if self.keybindings.matches(KeyAction::NextPaneAlternate, key) {
+            self.active_group = (self.active_group + 1)
+                % if self.pane_tree.is_some() { self.pane_count() } else { 2 };
+            self.split_requested = true;
+            self.focus = Focus::Prompt;
+            true
+        } else { false }
     }
 
     pub(super) fn active_tool_cards(&self) -> &[tool_cards::ToolCard] {
