@@ -3645,19 +3645,57 @@ for line in sys.stdin:
     }
 
     #[test]
-    fn model_change_updates_only_model_title_and_hello_sanitizes_id_notice() {
+    fn model_change_keeps_default_title_and_hello_sanitizes_id_notice() {
         let mut app = App::default();
         app.apply_daemon_frame(&json!({"type":"hello", "session_id":"raw\u{1b}[31m", "model":"old"}));
         assert_eq!(app.sessions[0].title, "old");
         app.apply_daemon_frame(&json!({"type":"event", "session_id":"raw\u{1b}[31m",
             "event":{"type":"model_changed", "data":{"model":"new"}}}));
-        assert_eq!(app.sessions[0].title, "new");
+        assert_eq!(app.sessions[0].title, "old");
         app.sessions[0].title = "Custom title".into();
         app.apply_daemon_frame(&json!({"type":"event", "session_id":"raw\u{1b}[31m",
             "event":{"type":"model_changed", "data":{"model":"newer"}}}));
         assert_eq!(app.sessions[0].title, "Custom title");
         app.apply_daemon_frame(&json!({"type":"hello", "session_id":"raw\u{1b}[31m"}));
         assert!(!app.notice.contains('\u{1b}'));
+    }
+
+    #[test]
+    fn registry_title_survives_attach_model_change_and_custom_rename() {
+        let mut app = App::default();
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"one",
+            "model":"gpt-6-sol", "title":"gpt-6-sol@feature/menu/doxa-2"}));
+        assert_eq!(app.sessions[0].title, "gpt-6-sol@feature/menu/doxa-2");
+        app.apply_daemon_frame(&json!({"type":"event", "session_id":"one",
+            "event":{"type":"model_changed", "data":{"model":"gpt-6-astra"}}}));
+        assert_eq!(app.sessions[0].title, "gpt-6-sol@feature/menu/doxa-2");
+        app.groups[0].tabs = vec!["one".into()];
+        app.local_rename("Manual title");
+        app.apply_daemon_frame(&json!({"type":"event", "session_id":"one",
+            "event":{"type":"model_changed", "data":{"model":"gpt-6-luna"}}}));
+        assert_eq!(app.sessions[0].title, "Manual title");
+        app.local_rename("");
+        assert_eq!(app.sessions[0].title, "gpt-6-sol@feature/menu/doxa-2");
+    }
+
+    #[test]
+    fn restored_offline_title_is_stable_and_new_session_avoids_collision() {
+        let mut app = App::default();
+        app.sessions.push(Session { id:"offline".into(), title:"gpt-6-sol@main/doxa".into(),
+            collection:String::new(), transcript:String::new(), status:"Offline".into() });
+        app.offline_ids.insert("offline".into());
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"new",
+            "model":"gpt-6-sol", "title":"gpt-6-sol@main/doxa"}));
+        assert_eq!(app.sessions.iter().find(|session| session.id == "new").unwrap().title,
+            "gpt-6-sol@main/doxa-2");
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"new",
+            "model":"gpt-6-sol", "title":"gpt-6-sol@main/doxa"}));
+        assert_eq!(app.sessions.iter().find(|session| session.id == "new").unwrap().title,
+            "gpt-6-sol@main/doxa-2");
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"offline",
+            "model":"gpt-6-sol", "title":"gpt-6-sol@main/doxa"}));
+        assert_eq!(app.sessions.iter().find(|session| session.id == "offline").unwrap().title,
+            "gpt-6-sol@main/doxa");
     }
 
     #[test]
@@ -5182,7 +5220,7 @@ for line in sys.stdin:
         app.input = "/rename".into();
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert!(app.custom_names.is_empty());
-        assert_eq!(app.sessions[0].title, "new");
+        assert_eq!(app.sessions[0].title, "old");
         for command in ["/attach bad/id", "/doctor", "/pending unsupported"] {
             app.input = command.into();
             app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));

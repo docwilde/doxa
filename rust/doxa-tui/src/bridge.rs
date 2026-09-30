@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::io;
+use std::fs;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -63,15 +64,17 @@ fn safe_queue_rows_with_client(reply: &Value, mut lore: Option<doxa_lore::LoreCl
 
 fn attach_worker(session: &Session, frames: &SyncSender<WorkerFrame>, guard: &Arc<Mutex<bool>>)
     -> io::Result<(SyncSender<WorkerCommand>, Arc<AtomicBool>, JoinHandle<()>)> {
-    let (client, snapshot) = DaemonClient::connect_for_restore(&session.socket).map_err(io::Error::other)?;
+    let (mut client, snapshot) = DaemonClient::connect_for_restore(&session.socket).map_err(io::Error::other)?;
     if client.hello["session_id"] != session.id {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "session identity changed during attach"));
     }
+    if !session.title.is_empty() { client.hello["title"] = Value::String(session.title.clone()); }
     let (tx, rx) = mpsc::sync_channel(32);
     let connected = Arc::new(AtomicBool::new(true));
     let connected_worker = Arc::clone(&connected);
     let path = session.socket.clone();
     let id = session.id.clone();
+    let title = session.title.clone();
     let frames = frames.clone();
     let guard = Arc::clone(guard);
     let worker = thread::spawn(move || {
@@ -98,7 +101,8 @@ fn attach_worker(session: &Session, frames: &SyncSender<WorkerFrame>, guard: &Ar
                     Err(mpsc::RecvTimeoutError::Timeout) => {}
                 }
                 match DaemonClient::connect(&path, Some(cursor.load(Ordering::Relaxed))) {
-                    Ok(client) if client.hello["session_id"] == id => {
+                    Ok(mut client) if client.hello["session_id"] == id => {
+                        if !title.is_empty() { client.hello["title"] = Value::String(title.clone()); }
                         connected_worker.store(true, Ordering::Release);
                         current = (client, None);
                         break;
@@ -327,8 +331,8 @@ pub fn run_socket(path: impl AsRef<Path>) -> io::Result<()> {
 }
 
 pub fn run_socket_expected(path: impl AsRef<Path>, expected: Option<&str>) -> io::Result<()> {
-    let path = path.as_ref();
-    let client = DaemonClient::connect(path, None).map_err(as_io_error)?;
+    let path = fs::canonicalize(path.as_ref())?;
+    let client = DaemonClient::connect(&path, None).map_err(as_io_error)?;
     let id = client.hello["session_id"].as_str()
         .filter(|id| crate::discovery::valid_id(id))
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid session ID"))?
@@ -337,8 +341,15 @@ pub fn run_socket_expected(path: impl AsRef<Path>, expected: Option<&str>) -> io
         return Err(io::Error::new(io::ErrorKind::InvalidData, "fleet slot session identity changed"));
     }
     drop(client);
-    run_sessions(&[Session { id, title: String::new(), socket: path.to_path_buf(), scope_key: String::new(),
-        clients: None, started_at: String::new() }], None)
+    let runtime = path.parent().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput,
+        "daemon socket has no runtime directory"))?;
+    let session = registered_socket(crate::discovery::sessions_in(runtime)?, &id, &path)?;
+    run_sessions(&[session], None)
+}
+
+fn registered_socket(sessions: Vec<Session>, id: &str, path: &Path) -> io::Result<Session> {
+    sessions.into_iter().find(|session| session.id == id && session.socket == path)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "session is not in the trusted live registry"))
 }
 
 fn as_io_error(error: TransportError) -> io::Error {
@@ -862,12 +873,14 @@ mod tests {
             assert_eq!(call["method"], "stop_if_idle");
             writeln!(socket, "{}", json!({"type":"reply", "id":call["id"], "ok":true})).unwrap();
         });
-        let session = Session { id:"old".into(), title:String::new(), socket:path,
+        let session = Session { id:"old".into(), title:"gpt-6-sol@main/doxa".into(), socket:path,
             scope_key:String::new(), clients:None, started_at:String::new() };
         let (frame_tx, frame_rx) = mpsc::sync_channel(16);
         let complete = Arc::new(Mutex::new(true));
         let (commands, _, worker) = attach_worker(&session, &frame_tx, &complete).unwrap();
-        assert_eq!(frame_rx.recv_timeout(Duration::from_secs(2)).unwrap().into_legacy_value()["type"], "hello");
+        let hello = frame_rx.recv_timeout(Duration::from_secs(2)).unwrap().into_legacy_value();
+        assert_eq!(hello["type"], "hello");
+        assert_eq!(hello["title"], "gpt-6-sol@main/doxa");
         commands.send(WorkerCommand::FinalizeForClear("old".into())).unwrap();
         let reply = frame_rx.recv_timeout(Duration::from_secs(2)).unwrap().into_legacy_value();
         assert_eq!(reply["type"], "clear_finalize_reply");
@@ -875,6 +888,24 @@ mod tests {
         worker.join().unwrap();
         server.join().unwrap();
         assert!(*complete.lock().unwrap());
+    }
+
+    #[test]
+    fn fresh_socket_attach_uses_registry_title_for_matching_identity_and_socket() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("daemon.sock");
+        let alias = dir.path().join("alias.sock");
+        let _listener = UnixListener::bind(&socket).unwrap();
+        std::os::unix::fs::symlink(&socket, &alias).unwrap();
+        let rows = vec![
+            Session { id:"new".into(), title:"wrong".into(), socket:"/other.sock".into(),
+                scope_key:String::new(), clients:None, started_at:String::new() },
+            Session { id:"new".into(), title:"opus-5-5@main/doxa".into(), socket:socket.clone(),
+                scope_key:String::new(), clients:None, started_at:String::new() },
+        ];
+        assert_eq!(registered_socket(rows.clone(), "new", &fs::canonicalize(alias).unwrap()).unwrap().title,
+            "opus-5-5@main/doxa");
+        assert!(registered_socket(rows, "new", Path::new("/missing.sock")).is_err());
     }
 
     #[test]

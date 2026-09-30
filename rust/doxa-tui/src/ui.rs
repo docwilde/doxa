@@ -523,6 +523,16 @@ fn safe_label(value: &str) -> String {
         .collect()
 }
 
+fn unique_session_title(base: &str, id: &str, sessions: &[Session]) -> String {
+    let used = |name: &str| sessions.iter().any(|session| session.id != id && session.title == name);
+    if !used(base) { return base.to_owned(); }
+    for number in 2..=sessions.len().saturating_add(2) {
+        let title = format!("{base}-{number}");
+        if !used(&title) { return title; }
+    }
+    unreachable!("a free suffix exists after at most sessions.len() + 1 attempts")
+}
+
 fn attach_matches(session: &crate::discovery::Session, query: &str) -> bool {
     let query = query.to_lowercase();
     query.is_empty()
@@ -1240,6 +1250,7 @@ pub struct App {
     requested_argument: Option<(String, &'static str, String)>,
     next_efforts: HashMap<String, String>,
     pub(crate) custom_names: HashMap<String, String>,
+    default_names: HashMap<String, String>,
     session_telemetry: HashMap<String, SessionTelemetry>,
     // LORE owns these counts. A bounded background query keeps store I/O off
     // the draw path; an unavailable sidecar leaves the chip unknown.
@@ -1478,6 +1489,7 @@ impl Default for App {
             requested_argument: None,
             next_efforts: HashMap::new(),
             custom_names: HashMap::new(),
+            default_names: HashMap::new(),
             session_telemetry: HashMap::new(),
             memory_cache: HashMap::new(),
             memory_pending: None,
