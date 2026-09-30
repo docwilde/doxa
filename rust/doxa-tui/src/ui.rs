@@ -409,7 +409,7 @@ fn chip_hint(kind: &str) -> &'static str {
         "model" => "Model for this session · click to choose",
         "repo" => "Choose a known directory for a new session tab",
         "directory" => "Choose a known directory for a new session tab",
-        "effort" => "Effort · click to select the next turn when idle",
+        "effort" => "Effort · current session; click to select the next turn when idle",
         "context" => "Current session context usage · click for details",
         "memory" => "User and scoped LORE memory · click to view entries",
         "beliefs" => "LORE beliefs · click to browse",
