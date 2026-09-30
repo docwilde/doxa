@@ -100,11 +100,13 @@ impl Chord {
     }
 
     pub fn matches(&self, event: KeyEvent) -> bool {
+        let mut modifiers = event.modifiers & (KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SHIFT);
         let code = match event.code {
             KeyCode::Char(ch) => KeyCode::Char(ch.to_ascii_lowercase()),
+            KeyCode::BackTab => { modifiers.insert(KeyModifiers::SHIFT); KeyCode::Tab },
             other => other,
         };
-        code == self.code && event.modifiers & (KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SHIFT) == self.modifiers
+        code == self.code && modifiers == self.modifiers
     }
 
     pub fn display(&self) -> String {
@@ -186,5 +188,7 @@ mod tests {
         config.insert("key_tools".into(), toml::Value::String("none".into()));
         assert!(Bindings::from_config(&config).unwrap().matches(Action::NewTab,
             KeyEvent::new(KeyCode::Char('n'), KeyModifiers::ALT)));
+        let shift_tab = Chord::parse("Shift+Tab").unwrap().unwrap();
+        assert!(shift_tab.matches(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE)));
     }
 }
