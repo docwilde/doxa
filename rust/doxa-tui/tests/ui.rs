@@ -479,7 +479,7 @@ fn tool_activity_modal_tracks_call_result_and_blocks_layout_mouse() {
         "type":"tool_result", "data":{"id":"call-1", "name":"Read", "result_summary":"ok",
             "is_error":false, "duration_ms":15}
     }}));
-    assert!(app.handle(key(KeyCode::Char('t'), KeyModifiers::CONTROL)));
+    assert!(app.handle(key(KeyCode::Char('t'), KeyModifiers::ALT)));
     let visible = screen(&app, 100, 35);
     assert!(visible.contains("Tool activity"));
     assert!(visible.contains("a.rs"));
