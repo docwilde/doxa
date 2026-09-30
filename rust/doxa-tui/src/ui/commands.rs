@@ -136,7 +136,8 @@ pub(super) const COMMANDS: &[CommandHelp] = &[
     CommandHelp { kind: LocalCommand::Cd, name: "/cd", form: "/cd <path>", summary: "Open directory", support: "local · new tab" },
     CommandHelp { kind: LocalCommand::Memory, name: "/memory", form: "/memory", summary: "LORE curated memory", support: "local · scoped entries; M to add/edit/remove" },
     CommandHelp { kind: LocalCommand::Beliefs, name: "/beliefs", form: "/beliefs", summary: "LORE beliefs", support: "local · requires LORE" },
-    CommandHelp { kind: LocalCommand::Pending, name: "/pending", form: "/pending", summary: "LORE proposals", support: "local · requires LORE" },
+    CommandHelp { kind: LocalCommand::Pending, name: "/pending", form: "/pending [--cluster]", summary: "LORE proposals for this project and user", support: "local · requires LORE" },
+    CommandHelp { kind: LocalCommand::Pending, name: "/lore:pending", form: "/lore:pending [--cluster]", summary: "LORE pending alias", support: "local · same browser for every engine" },
     CommandHelp { kind: LocalCommand::Search, name: "/search", form: "/search [terms]", summary: "Search saved sessions", support: "local · LORE index then bounded transcript scan" },
     CommandHelp { kind: LocalCommand::Resume, name: "/resume", form: "/resume [session-id]", summary: "Resume conversation", support: "local · new tab" },
     CommandHelp { kind: LocalCommand::Compact, name: "/compact", form: "/compact", summary: "Compact transcript", support: "Claude only · completed LORE review required" },
@@ -651,6 +652,13 @@ impl App {
                 self.open_pending_picker();
                 true
             }
+            LocalCommand::Pending if args.trim() == "--cluster" => {
+                self.input.clear();
+                self.input_cursor = 0;
+                self.open_pending_picker();
+                self.switch_lore_view(2);
+                true
+            }
             LocalCommand::Pending => {
                 self.notice = "Local command unavailable: /pending arguments".into();
                 true
@@ -1067,6 +1075,7 @@ mod tests {
             "/update --force",
             "/login codex --unexpected",
             "/pending extra",
+            "/lore:pending extra",
             "/img reference.png",
             "/sessions kill one two",
             "/help\nextra",
@@ -1079,6 +1088,22 @@ mod tests {
             assert!(app.pending_queue_commands.is_empty());
             assert!(app.local_shell_jobs.is_empty());
             assert!(app.operations_menu.is_none());
+        }
+    }
+
+    #[test]
+    fn lore_pending_alias_is_local_for_every_engine_and_cluster_mode() {
+        for engine in ["claude", "codex"] {
+            let mut app = App::default();
+            app.groups[0].tabs.push("session".into());
+            app.session_identity.insert("session".into(), (Some(engine.into()), None));
+            enter(&mut app, "/lore:pending");
+            assert!(app.lore_picker.as_ref().is_some_and(|picker| picker.proposal_mode && !picker.cluster_mode));
+            assert!(app.pending_prompts.is_empty());
+            app.lore_picker = None;
+            enter(&mut app, "/lore:pending --cluster");
+            assert!(app.lore_picker.as_ref().is_some_and(|picker| picker.proposal_mode && picker.cluster_mode));
+            assert!(app.pending_prompts.is_empty());
         }
     }
 

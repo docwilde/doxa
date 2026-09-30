@@ -124,6 +124,16 @@ impl App {
             .collect()
     }
 
+    pub(super) fn rail_view_start(&self, area: Rect, rows: &[RailRow]) -> usize {
+        let visible = usize::from(area.height.saturating_sub(2));
+        if visible == 0 || rows.len() <= visible {
+            return 0;
+        }
+        let selected = self.rail_order().get(self.rail_selected).copied();
+        let row = rows.iter().position(|item| matches!(item, RailRow::Session(index) if Some(*index) == selected)).unwrap_or(0);
+        row.saturating_sub(visible - 1).min(rows.len() - visible)
+    }
+
     pub(super) fn pane_count(&self) -> usize {
         if self.pane_tree.is_some() {
             self.groups.len()
@@ -546,12 +556,8 @@ impl App {
     }
 
     pub(super) fn tick_spinner(&mut self, now: Instant) -> bool {
-        if !self
-            .groups
-            .iter()
-            .filter_map(|group| group.active_id())
-            .any(|id| self.activity_label(id).is_some())
-        {
+        if !self.session_activity.values().any(|(running, queued)| *running || *queued > 0)
+            && self.local_shell_jobs.is_empty() {
             self.spinner_at = now;
             return false;
         }
@@ -578,23 +584,65 @@ impl App {
         true
     }
 
+    pub(super) fn tab_title<'a>(&'a self, id: &'a str) -> &'a str {
+        self.sessions.iter().find(|session| session.id == id)
+            .map(|session| session.title.as_str()).unwrap_or(id)
+    }
+
+    /// Keep the active tab visible when the header is narrower than all titles.
+    /// The four-cell gutters hold the hidden-tab counts and arrow controls.
+    pub(super) fn tab_window(&self, index: usize, width: u16) -> (usize, usize, bool) {
+        let group = &self.groups[index];
+        let count = group.tabs.len();
+        if count == 0 { return (0, 0, false); }
+        let inner = usize::from(width.saturating_sub(2));
+        let all_width = group.tabs.iter().map(|id| self.tab_title(id).width()).sum::<usize>()
+            + count.saturating_sub(1) * 3;
+        if all_width <= inner { return (0, count, false); }
+        let capacity = inner.saturating_sub(10).max(1);
+        let active = group.active.min(count - 1);
+        let mut start = active;
+        let mut end = active + 1;
+        let mut used = self.tab_title(&group.tabs[active]).width().min(capacity);
+        while start > 0 {
+            let next = self.tab_title(&group.tabs[start - 1]).width() + 3;
+            if used + next > capacity { break; }
+            start -= 1; used += next;
+        }
+        while end < count {
+            let next = self.tab_title(&group.tabs[end]).width() + 3;
+            if used + next > capacity { break; }
+            end += 1; used += next;
+        }
+        (start, end, true)
+    }
+
     pub(super) fn tab_at(&self, index: usize, pane: Rect, column: u16) -> Option<usize> {
-        let mut x = pane.x.saturating_add(2); // border and left tab padding
-        for (position, id) in self.groups[index].tabs.iter().enumerate() {
-            let title = self
-                .sessions
-                .iter()
-                .find(|session| &session.id == id)
-                .map(|session| session.title.as_str())
-                .unwrap_or(id);
-            let end = x.saturating_add(title.width() as u16);
-            if column >= x.saturating_sub(1) && column <= end {
-                return Some(position);
-            }
-            x = end.saturating_add(3); // right padding, divider, left padding
-            if x >= pane.right() {
-                break;
-            }
+        let header = self.pane_regions(index, pane)[0];
+        let clock_width = if index == self.active_group && !self.clock_text.is_empty() {
+            (self.clock_text.width() + 2).min(usize::from(header.width.saturating_sub(15))) as u16
+        } else { 0 };
+        let width = header.width.saturating_sub(clock_width);
+        let (start, end, overflow) = self.tab_window(index, width);
+        if start == end { return None; }
+        let inner_left = header.x.saturating_add(1);
+        let inner_right = header.x.saturating_add(width.saturating_sub(1));
+        if overflow && column < inner_left.saturating_add(5) {
+            return (start > 0).then_some(start - 1);
+        }
+        if overflow && column >= inner_right.saturating_sub(5) {
+            return (end < self.groups[index].tabs.len()).then_some(end);
+        }
+        let mut x = inner_left.saturating_add(if overflow { 5 } else { 0 });
+        let capacity = usize::from(width.saturating_sub(2 + if overflow { 10 } else { 0 }));
+        let mut remaining = capacity;
+        for position in start..end {
+            let label = self.tab_title(&self.groups[index].tabs[position]);
+            let length = label.width().min(remaining) as u16;
+            if column >= x && column < x.saturating_add(length) { return Some(position); }
+            x = x.saturating_add(length);
+            remaining = remaining.saturating_sub(usize::from(length));
+            if position + 1 < end { x = x.saturating_add(3); remaining = remaining.saturating_sub(3); }
         }
         None
     }
@@ -607,7 +655,11 @@ impl App {
             .and_then(|panes| panes.get(self.active_group))
             .copied()
             .unwrap_or(layout.body);
-        let mut ring = vec![Focus::Prompt, Focus::Tabs, Focus::Transcript];
+        let mut ring = vec![Focus::Prompt, Focus::Tabs];
+        if layout.rail.is_some() {
+            ring.push(Focus::Rail);
+        }
+        ring.push(Focus::Transcript);
         ring.extend(
             self.chip_window(
                 self.active_group,
@@ -616,9 +668,6 @@ impl App {
             .into_iter()
             .map(|(kind, _)| Focus::Chip(kind)),
         );
-        if layout.rail.is_some() {
-            ring.push(Focus::Rail);
-        }
         ring
     }
 

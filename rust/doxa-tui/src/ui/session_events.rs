@@ -795,6 +795,7 @@ impl App {
                     "reasoning_progress" => self.append_reasoning(&id, data, true),
                     "reasoning_delta" => self.append_reasoning(&id, data, false),
                     "turn_started" => {
+                        self.unread_sessions.remove(&id);
                         self.streaming_text.remove(&id);
                         self.reasoning_streams.remove(&id);
                         if let Some(prompt) = data
@@ -845,6 +846,10 @@ impl App {
                             .or_default()
                             .update_turn(data);
                         self.session_activity.entry(id.clone()).or_default().0 = false;
+                        if !self.groups.iter().take(self.pane_count())
+                            .any(|group| group.active_id() == Some(id.as_str())) {
+                            self.unread_sessions.insert(id.clone());
+                        }
                         let status = if data.get("is_error").and_then(|v| v.as_bool()) == Some(true)
                         {
                             "Error"
@@ -959,6 +964,7 @@ impl App {
                             .retain(|(session, _, _)| session != &id);
                         self.streaming_text.remove(&id);
                         self.session_activity.remove(&id);
+                        self.unread_sessions.remove(&id);
                         let before = self.diff_reject_queue.len();
                         self.diff_reject_queue.retain(|item| item.session_id != id);
                         if self.diff_reject_queue.len() != before {
@@ -1213,6 +1219,7 @@ impl App {
                         .map(|index| self.sessions[*index].id.clone());
                     self.sessions.retain(|session| session.id != id);
                     self.session_activity.remove(id);
+                    self.unread_sessions.remove(id);
                     self.session_identity.remove(id);
                     self.session_cwds.remove(id);
                     self.session_efforts.remove(id);

@@ -707,16 +707,16 @@ impl App {
                 picker.review = None;
                 picker.armed_resolution = None;
                 picker.status = if picker.proposals.is_empty() {
-                    "No staged proposals on this page"
+                    "No user or current-project proposals on this page"
                 } else {
-                    "Staged proposals · select one to read its complete raw contents"
+                    "User and current-project proposals · select one for exact review"
                 }
                 .into();
             }
             Ok(lore_picker::ResultPage::ClusteredProposals(rows, count)) => {
                 picker.all_proposals = rows.clone(); picker.proposals = rows.into_iter().filter(|row| proposal_matches(row, &picker.query)).collect();
                 picker.selected = 0; picker.review = None; picker.armed_resolution = None;
-                picker.status = format!("{} canonical memory clusters · {} proposals · Enter exact review", count, picker.proposals.len());
+                picker.status = format!("User + current project · {} memory clusters · {} proposals · Enter exact review", count, picker.proposals.len());
             }
             Ok(lore_picker::ResultPage::Review(review, can_resolve)) => {
                 if picker.proposal_mode

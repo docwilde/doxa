@@ -5,6 +5,23 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.58 — 2026-09-30
+
+**Current documentation and live gallery**
+
+- Rework **`README.md`** around the current Rust app and remove release-by-release prose.
+- Re-capture the README gallery from the running alpha.58 TUI in isolated example
+  state, including sessions, memory, beliefs, tool details and configurable Keys.
+
+**Session navigation and LORE pending**
+
+- Keep overflowing tabs visible with hidden-tab indicators and mouse-wheel
+  switching; scroll the session rail and keep its selection on the active tab.
+- Show queued prompts, running spinners, input attention and unread completion
+  states in the session rail.
+- Route `/lore:pending` and `--cluster` through the same scoped, local LORE
+  browser for Claude and Codex.
+
 ## 2.0.0-alpha.57 — 2026-09-30
 
 **Configurable window shortcuts**
