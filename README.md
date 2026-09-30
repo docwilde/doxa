@@ -50,17 +50,17 @@ Ctrl+T opens the new-tab engine picker. Alt+V splits side by side; Alt+H stacks 
 
 DeepSeek and GLM show estimated API cost from provider token counts and published model rates. The estimate uses fresh-input rates (and DeepSeek peak rates), so cache discounts and off-peak billing can make the actual charge lower. Codex subscription usage appears after its app-server reports the Codex quota windows; missing values stay unknown.
 
-`/pending` and `/lore:pending --cluster` open LORE proposals for the current project plus user scope with either engine. `lore status` reports the global pending count across all projects.
+`/pending` and `/lore:pending --cluster` open global LORE proposals plus those for the current project with either engine. `lore status` reports the whole-store pending count across all projects.
 
 ## Gallery
 
-These frames come from the running Rust TUI with isolated DOXA and LORE state. The [capture record](docs/rust-gallery.md) explains the example data and reproduction steps.
+These frames come from the running Rust TUI with isolated DOXA state. The memory frames use an isolated LORE store. The [capture record](docs/rust-gallery.md) explains the example data and reproduction steps.
 
 ### Welcome and sessions
 
 ![The Greek block DOXA banner and a ready session prompt](assets/shots/rust-welcome.png)
 
-![Three sessions in the rail with a tab overflow indicator](assets/shots/rust-sessions.png)
+![Three live sessions grouped under Harbour notes and Lighthouse notes in the rail](assets/shots/rust-sessions.png)
 
 ### Curated memory
 
@@ -78,7 +78,7 @@ These frames come from the running Rust TUI with isolated DOXA and LORE state. T
 
 ![Slash-command completion above the prompt](assets/shots/rust-commands.png)
 
-![The running app's command help](assets/shots/rust-help.png)
+![The running app's command help beside sessions grouped by repository](assets/shots/rust-help.png)
 
 ![The configurable Keys page in DOXA settings](assets/shots/rust-settings.png)
 

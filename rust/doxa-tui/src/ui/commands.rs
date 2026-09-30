@@ -136,7 +136,7 @@ pub(super) const COMMANDS: &[CommandHelp] = &[
     CommandHelp { kind: LocalCommand::Cd, name: "/cd", form: "/cd <path>", summary: "Open directory", support: "local · new tab" },
     CommandHelp { kind: LocalCommand::Memory, name: "/memory", form: "/memory", summary: "LORE curated memory", support: "local · scoped entries; M to add/edit/remove" },
     CommandHelp { kind: LocalCommand::Beliefs, name: "/beliefs", form: "/beliefs", summary: "LORE beliefs", support: "local · requires LORE" },
-    CommandHelp { kind: LocalCommand::Pending, name: "/pending", form: "/pending [--cluster]", summary: "LORE proposals for this project and user", support: "local · requires LORE" },
+    CommandHelp { kind: LocalCommand::Pending, name: "/pending", form: "/pending [--cluster]", summary: "LORE proposals: global and current project", support: "local · requires LORE" },
     CommandHelp { kind: LocalCommand::Pending, name: "/lore:pending", form: "/lore:pending [--cluster]", summary: "LORE pending alias", support: "local · same browser for every engine" },
     CommandHelp { kind: LocalCommand::Search, name: "/search", form: "/search [terms]", summary: "Search saved sessions", support: "local · LORE index then bounded transcript scan" },
     CommandHelp { kind: LocalCommand::Resume, name: "/resume", form: "/resume [session-id]", summary: "Resume conversation", support: "local · new tab" },

@@ -5,6 +5,15 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.60 — 2026-10-01
+
+**Project review and gallery**
+
+- Pin **`lore-core`** 0.62.9 and label the pending browser's scope. Project-bound
+  proposals no longer appear in unrelated DOXA review browsers.
+- Replace **`rust-sessions.png`** and **`rust-help.png`** with live alpha.59
+  captures showing three sessions under two example repositories.
+
 ## 2.0.0-alpha.59 — 2026-09-30
 
 **Project navigation and billing**
