@@ -141,10 +141,10 @@ All 17 ClaudeHost fixtures passed. A
 verified actual five-hour and weekly percentages/reset times with native CLI
 provenance and no additional tools.
 
-Alpha.31 supplied the [event-loop benchmark](rust-ui-benchmark-2026-09-27.md)
-measurements. The [gallery](rust-gallery.md) now records **alpha.49–50** live
-terminal captures, including both LORE browsers. The UI benchmark still measures its stated alpha.31 build;
-the newer screenshots do not update those performance measurements.
+Alpha.50 supplied the [current event-loop benchmark](rust-ui-benchmark-2026-09-30.md)
+measurements; the [alpha.31 baseline](rust-ui-benchmark-2026-09-27.md) remains
+available. The [gallery](rust-gallery.md) records **alpha.49–50** live terminal
+captures, including both LORE browsers.
 
 See the [source audit](source-audit-2026-09-27.md) for confirmed follow-up fixes,
 engineering debt and validation limits.

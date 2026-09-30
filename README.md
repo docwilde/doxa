@@ -227,7 +227,7 @@ and one deferred dependency. Linux is verified; the full protected DOXA runtime
 is unsupported on macOS and Windows. See the
 [tracker](docs/rust-1.19-parity.md#remaining-verification) and
 [latest record](docs/live-provider-verification-2026-09-29.md) for scope and limits.
-The [Rust UI benchmark](docs/rust-ui-benchmark-2026-09-27.md) covers rendering,
+The [Rust UI benchmark](docs/rust-ui-benchmark-2026-09-30.md) covers rendering,
 event-loop, scrolling and resize measurements; provider checks measure behavior.
 
 ## Non-goals
