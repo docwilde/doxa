@@ -1,7 +1,7 @@
 # Rust 2.0 parity with DOXA 1.19.0
 
 Baseline: Python `v1.19.0` production behavior. This tracker records implementation
-through **alpha.59**, with canonical **LORE 0.62.8**. Account checks
+through **alpha.60**, with canonical **LORE 0.62.9**. Account checks
 are bounded by their exact candidate and date.
 The Rust runtime implements the audited workflows below. Live account checks
 remain bounded by the [latest verification record](live-provider-verification-2026-09-29.md)
@@ -47,6 +47,7 @@ coverage alone does not establish authenticated compatibility for every provider
 | Alpha.56 | Close only the active tab with Ctrl+X and leave the TUI with Ctrl+Q while sessions run detached. Use Ctrl+Left/Right for tabs and Shift+Left/Right for pane prompts; verified dead detached sessions leave the rail. |
 | Alpha.57–58 | Configure window shortcuts at runtime; restore session rail focus and overflow navigation; display queued, running and unread states; route pending LORE commands to the local browser. |
 | Alpha.59 | Group uncollected sessions by project; estimate DeepSeek/GLM API spend from reported tokens and published rates; read the Codex subscription quota bucket after turns. |
+| Alpha.60 | Pin LORE 0.62.9 to keep project-bound pending proposals out of unrelated review browsers; recapture two real Rust gallery frames with two project groups. |
 
 Standalone LORE administration, hooks, MCP and network operations are native Rust;
 they are not a remaining Python replacement task. See the
@@ -155,7 +156,7 @@ provenance and no additional tools.
 Alpha.50 supplied the [current event-loop benchmark](rust-ui-benchmark-2026-09-30.md)
 measurements; the [alpha.31 baseline](rust-ui-benchmark-2026-09-27.md) remains
 available. The [gallery](rust-gallery.md) records **alpha.58** live terminal
-captures, including the session rail, tab overflow and both LORE browsers.
+captures for the memory browsers and two **alpha.59** grouped-session captures.
 
 See the [source audit](source-audit-2026-09-27.md) for confirmed follow-up fixes,
 engineering debt and validation limits.

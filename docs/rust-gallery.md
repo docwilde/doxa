@@ -1,30 +1,33 @@
 # Live Rust terminal gallery
 
 The README images were captured on 2026-09-30 from the running **DOXA
-2.0.0-alpha.58** frontend and daemon. A private Xvfb display hosts a real
-GTK3/VTE terminal; FFmpeg records its framebuffer. The gallery uses an
-authenticated Codex CLI 0.156.1, the protected DOXA app server, and native
-LORE 0.62.8. No `TestBackend`, demo engine, fixture events, or composited UI
+2.0.0-alpha.58** frontend and daemon. The grouped-session and help frames were
+recaptured with **alpha.59**, which added project headings. A private Xvfb
+display hosts a real GTK3/VTE terminal; FFmpeg records its framebuffer. The gallery uses an
+authenticated Codex CLI 0.156.1 and the protected DOXA app server. The memory
+and belief frames use native LORE 0.62.8; the two grouped-session captures leave
+LORE disabled. No `TestBackend`, demo engine, fixture events, or composited UI
 mockups appear in these images.
 
 | Image | Live state |
 | --- | --- |
 | `rust-hero.png` | Completed Codex turn with two file reads and folded tool calls |
 | `rust-welcome.png` | Fresh session and block Greek ΔΟΞΑ banner |
-| `rust-sessions.png` | Three real tabs, session rail, and a tab overflow indicator after a mouse-wheel switch |
+| `rust-sessions.png` | Three real tabs grouped under Harbour notes and Lighthouse notes in the session rail |
 | `rust-curated-memory.png` | Native LORE facts in a selectable, scrollable table |
 | `rust-beliefs.png` | Native LORE beliefs with a selected review row |
 | `rust-tool-entries.png` | One actual provider tool call expanded inside the turn |
 | `rust-commands.png` | Slash completion above the prompt |
-| `rust-help.png` | Local command help |
+| `rust-help.png` | Local command help beside the grouped session rail |
 | `rust-settings.png` | Editable Keys settings category |
 
 All nine PNGs measure **3068 × 1734** and use DejaVu Sans Mono 30. The
-captured repository, **Harbour notes**, contains only a README and a greeting
-script made for this gallery. The user and project memory and beliefs were
+captured repositories, **Harbour notes** and **Lighthouse notes**, contain only
+synthetic example files. Lighthouse notes appears only in the two grouped-session
+frames. The user and project memory and beliefs were
 seeded with synthetic statements through the native `lore-rs` carrier. DOXA
-then queried the isolated store normally. The provider read only the two
-example files; it did not edit the repository. The published images contain
+then queried the isolated store normally. The provider read only two Harbour
+notes example files; it did not edit the repository. The published images contain
 no account credentials, personal memory, or private workspace paths.
 
 ## Reproduce a capture
@@ -69,6 +72,12 @@ select a tool, and Enter to expand it. `Ctrl+T` starts the additional tabs;
 wheel input over the tab header switches them. `/help`, `/settings`, `/beliefs`,
 and `/s` expose the other captured states. The script's `text` action reads
 the actual terminal text for state checks, and `status` reports cell geometry.
+
+For `rust-sessions.png`, start a second real session from a separate synthetic
+repository with the same isolated DOXA home and runtime. Detach that TUI with
+Ctrl+Q, then `/attach` its live session from Harbour notes. Create a second
+Harbour notes tab with Ctrl+T and open the rail with `/sidebar`. The capture
+shows both repository headings and three actual session IDs.
 
 Inspect every PNG and its dimensions before copying it from
 `gallery-state/shots` to `assets/shots`. Stop the exact isolated capture
