@@ -1,7 +1,7 @@
 # Rust 2.0 parity with DOXA 1.19.0
 
 Baseline: Python `v1.19.0` production behavior. This tracker records implementation
-through **alpha.52**, with canonical **LORE 0.62.6**. Account checks
+through **alpha.53**, with canonical **LORE 0.62.6**. Account checks
 are bounded by their exact candidate and date.
 The Rust runtime implements the audited workflows below. Live account checks
 remain bounded by the [latest verification record](live-provider-verification-2026-09-29.md)
@@ -41,6 +41,7 @@ coverage alone does not establish authenticated compatibility for every provider
 | Alpha.49 | Refresh the README and user docs; recapture seven unedited frames from the real Rust app, including a new welcome frame. No runtime behavior changes. |
 | Alpha.50–51 | Capture the belief/memory browsers from the live app, rerun the Rust UI benchmark, and record bounded DeepSeek/GLM stop/resume recall and usage. |
 | Alpha.52 | Pin LORE 0.62.6 session replay repair and add a credential-free Codex default-window compaction fixture. |
+| Alpha.53 | Record the authenticated default-window Codex compaction and post-restart recall; check in the bounded verifier. |
 
 Standalone LORE administration, hooks, MCP and network operations are native Rust;
 they are not a remaining Python replacement task. See the
@@ -48,22 +49,23 @@ they are not a remaining Python replacement task. See the
 
 ## Remaining verification
 
-The [2026-09-30 record](live-provider-verification-2026-09-30.md) reports
-native vendor stop/resume recall and numeric usage. The
-[2026-09-29 record](live-provider-verification-2026-09-29.md) retains fixed
-Claude/vendor streaming checks and the incomplete default-window Codex run.
-Historical alpha.43 manual and lowered-threshold automatic compaction remain
-verified separately.
+The [2026-09-30 provider record](live-provider-verification-2026-09-30.md)
+reports native vendor stop/resume recall and numeric usage. The
+[authenticated Codex result](live-default-window-compaction-2026-09-30.md)
+now verifies one default-window compaction cycle and post-restart recall on
+alpha.52. The [2026-09-29 record](live-provider-verification-2026-09-29.md)
+retains fixed Claude/vendor streaming checks and its earlier incomplete run.
 
 | Check | Current result and remaining gate |
 | --- | --- |
 | Claude streaming and optional quota variants | Fixed debug daemon counts advanced 50 → 150 → 200 before first text, with 104 reply deltas; thinking plaintext stayed withheld. Optional overage/model-specific quota variants remain unverified live. |
 | DeepSeek recall/resume | Current two-turn native file-read and exact-nonce recall passed across daemon stop/resume with complete vendor-reported usage. Earlier candidate failure's cause remains unknown; the three-turn streaming diagnosis passed separately with 316 text deltas and 81 reasoning-progress events. |
 | z.ai GLM usage | Current two-turn native file-read and exact-nonce recall passed across stop/resume. Complete numeric vendor-reported usage was captured on both turns. Earlier three turns and same-session low → high effort passed with 408 text deltas. |
-| Codex default-window automatic compaction | The installed protected provider passed zero-cost 272k-window allow and stopped fixture paths: one checkpoint after review success, zero after review refusal. The earlier authenticated stress stopped at 241,119 context tokens below the ~244,800 trigger. Live default-window Haiku review and post-compaction restart remain unverified; the [bounded plan](codex-default-window-compaction-plan-2026-09-30.md) records the gate. |
+| Codex default-window automatic compaction | **Passed for alpha.52 and protected Codex 0.156.1 with `gpt-5.5`:** seven data turns reached one native LORE review and one checkpoint; exact first-turn token recall passed after one daemon restart. The seventh turn's aggregate input was 1,172,180 tokens. See the [measured result](live-default-window-compaction-2026-09-30.md) for scope and retained evidence. |
 | Full historic LORE replica | After re-signing 574 authentic local operations, a private direct-peer replay of 4,554 signed source ops applied 4,535, with zero unverified. Thirteen historical belief operations have null references, six remain deferred, and the cursor stays unadvanced. The existing hub retains immutable older unsigned duplicates; full historical convergence remains open. |
 
-All paid tests are stopped. Unknown plan, quota, balance and context values remain
+The one approved paid compaction cycle is complete; no further paid tests are
+running. Unknown plan, quota, balance and context values remain
 unknown. DeepSeek balance can be shown when its endpoint reports it; z.ai has no
 supported balance endpoint. Linux is verified. The full protected DOXA runtime
 is unsupported on macOS and Windows by its Linux ownership/supervision
@@ -89,8 +91,8 @@ architecture. Standalone LORE macOS remains unverified; Windows is unsupported.
   the matching native Code Mode host and verifies its receipt for models that
   require Code Mode rather than direct shell tools. Compiled loopback
   tests verify refusal gates; alpha.43 authenticated checks verify successful
-  native review and manual/controlled automatic compaction. Default-window stress
-  remains unverified. Native vendor compaction retains durable history and a
+  native review and manual/controlled automatic compaction. Alpha.52 verified
+  one authenticated default-window cycle and post-restart recall. Native vendor compaction retains durable history and a
   reviewed summary checkpoint.
 - Unreported account, plan, quota, balance and context components stay unknown.
   Fixture tests do not establish compatibility with arbitrary live provider builds.

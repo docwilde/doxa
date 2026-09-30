@@ -2,7 +2,7 @@
 
 Rust is the main DOXA frontend. The installer exposes `doxa`; the compiled
 frontend is `doxa-rs`. Claude uses its native CLI control protocol, Codex uses
-its app server, and API vendors use Rust HTTP clients. Canonical LORE 0.62.4 is an
+its app server, and API vendors use Rust HTTP clients. Canonical LORE 0.62.6 is an
 integrated Rust library for memory, reviews, indexing, and secret scrubbing;
 `lore-rs` also provides detached review and standalone plugin commands.
 The installed runtime requires no Python interpreter.
@@ -226,8 +226,10 @@ process groups or sessions. The daemon does not adopt unrelated jobs.
 Ten tests against the compiled provider cover nine refusal cases and a successful
 allow control with a loopback model. Real-account successful LORE review and
 large-context compaction require the reviewer's Claude authentication. Earlier
-manual and lowered-threshold automatic compaction passed native review; the
-2026-09-29 default-window stress stopped below its trigger and remains incomplete.
+manual and lowered-threshold automatic compaction passed native review. An
+[alpha.52 authenticated run](../docs/live-default-window-compaction-2026-09-30.md)
+also passed one default-window automatic compaction and exact recall after a
+daemon restart; the earlier September 29 run remains incomplete historical evidence.
 See [engine contracts](doxa-engines/README.md) for transport and review details.
 
 ## Verification and gallery

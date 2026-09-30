@@ -5,6 +5,20 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.53 — 2026-09-30
+
+**Authenticated Codex compaction**
+
+- Record alpha.52's native default-window cycle: one **`PreCompact`** LORE
+  review, one provider checkpoint and exact first-turn recall after restart.
+- Add bounded **`verify_live_default_window.py`** for a private, one-cycle
+  account check with numeric telemetry only. This release changes no runtime behavior.
+
+**Documentation**
+
+- Refresh the README, Rust guides and parity tracker with measured scope.
+  Full historical LORE sync still has malformed belief references and old hub copies.
+
 ## 2.0.0-alpha.52 — 2026-09-30
 
 **Historical LORE replay**

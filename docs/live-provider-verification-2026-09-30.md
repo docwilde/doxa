@@ -1,5 +1,9 @@
 # Native vendor recall and usage follow-up — 2026-09-30
 
+The later [authenticated Codex default-window check](live-default-window-compaction-2026-09-30.md)
+records one reviewed automatic compaction and recall after restart. This record
+covers the DeepSeek and z.ai checks below.
+
 This check used the alpha.50 native daemon from `5d05510` with the verifier
 instrumentation in `e524735`. The guarded launcher found saved credentials for
 DeepSeek and z.ai; it passed them only to children with disposable mode-0700

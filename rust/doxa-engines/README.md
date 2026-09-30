@@ -167,9 +167,11 @@ for actual account checks and their remaining authentication requirements.
 
 ## Current verification limits
 
-See the [2026-09-29 record](../../docs/live-provider-verification-2026-09-29.md)
-for fixed Claude/vendor streaming observations, the incomplete default-window
-Codex stress run and remaining historical LORE replica gates. These debug daemon
+See the [2026-09-30 Codex result](../../docs/live-default-window-compaction-2026-09-30.md)
+for one authenticated default-window compaction and restart recall. The
+[2026-09-29 record](../../docs/live-provider-verification-2026-09-29.md)
+retains fixed Claude/vendor streaming observations and the earlier incomplete
+stress run. These debug daemon
 checks establish behavior only. Linux is verified; the full protected DOXA
 runtime is unsupported on macOS and Windows by its Linux supervision and
 ownership contracts. Standalone LORE macOS remains unverified; Windows is
