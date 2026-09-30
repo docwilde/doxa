@@ -1,8 +1,8 @@
 <p align="center"><img src="assets/logo.png" width="560" alt="DOXA — belief earning knowledge"></p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Rust%202.0-alpha.50-f59f00" alt="Rust 2.0 alpha.50 is the main frontend">
-  <a href="https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.50"><img src="https://img.shields.io/github/v/release/docwilde/doxa?include_prereleases&amp;sort=semver&amp;label=Rust%20release&amp;color=e8590c" alt="latest Rust release"></a>
+  <img src="https://img.shields.io/badge/Rust%202.0-alpha.51-f59f00" alt="Rust 2.0 alpha.51 is the main frontend">
+  <a href="https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.51"><img src="https://img.shields.io/github/v/release/docwilde/doxa?include_prereleases&amp;sort=semver&amp;label=Rust%20release&amp;color=e8590c" alt="latest Rust release"></a>
   <a href="https://github.com/docwilde/doxa/actions/workflows/rust-ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/docwilde/doxa/rust-ci.yml?branch=main&label=Rust%20CI" alt="Rust CI status"></a>
   <img src="https://img.shields.io/badge/TUI-Ratatui-2f9e44" alt="Rust TUI built with Ratatui">
   <img src="https://img.shields.io/badge/auth-provider%20CLI%20or%20API%20key-2f9e44" alt="authentication follows the selected engine">
@@ -14,7 +14,7 @@
 > can edit files and run commands with your privileges. Read
 > [Non-goals](#non-goals) before using it on important work.
 
-The official latest GitHub release is [v2.0.0-alpha.50](https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.50).
+The official latest GitHub release is [v2.0.0-alpha.51](https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.51).
 Rust 2.0 leads development and remains an evolving alpha. See the
 [parity tracker](docs/rust-1.19-parity.md) for supported provider contracts and
 remaining release gates, and the [source audit](docs/source-audit-2026-09-27.md)
@@ -22,6 +22,7 @@ for engineering findings and their follow-up fixes. Alpha.48 adds session-scoped
 clickable peer history, clearer memory browsing and a block Greek welcome banner.
 Alpha.49 refreshes the docs and live terminal gallery.
 Alpha.50 adds live captures of the curated memory and belief browsers.
+Alpha.51 records current Rust UI and provider measurements and adopts LORE 0.62.5.
 
 **DOXA** is a terminal for coding agents. Development now leads with the
 **Rust 2.0 alpha**, built with Ratatui and a native daemon. Run Claude, Codex,
@@ -128,7 +129,7 @@ curl -fsSL https://raw.githubusercontent.com/docwilde/doxa/main/scripts/install.
 
 The installer builds the Rust frontend and daemon from `main` and installs the
 Rust `doxa` command in `~/.local/bin` (or `DOXA_RUST_BIN_DIR`). Pass a tag such
-as `v2.0.0-alpha.50` after `sh -s --` to pin a release. Git and Cargo build three
+as `v2.0.0-alpha.51` after `sh -s --` to pin a release. Git and Cargo build three
 native binaries: the frontend, daemon and LORE carrier. Claude requires its CLI.
 When Codex is installed, the installer also builds a private, protected Codex
 app server and its required Code Mode host; the official CLI remains available
@@ -209,7 +210,9 @@ still refuse or stage oversized writes; overflow does not guarantee the same ent
 - **Claude quota handling:** Alpha.44 preserves nested and startup window reports,
   with seven focused quota regressions passing. A live candidate turn reported
   both five-hour and weekly percentages and resets; missing values stay unknown.
-- **Latest verification:** The [2026-09-29 record](docs/live-provider-verification-2026-09-29.md)
+- **Latest verification:** The [2026-09-30 record](docs/live-provider-verification-2026-09-30.md)
+  covers native DeepSeek/GLM stop-resume recall and numeric usage. The
+  [2026-09-29 record](docs/live-provider-verification-2026-09-29.md)
   covers fixed Claude and vendor streaming, GLM effort controls, and the
   incomplete Codex default-window stress run. Earlier alpha.43 checks verified
   real LORE review, manual compaction and controlled automatic compaction.
@@ -218,16 +221,17 @@ still refuse or stage oversized writes; overflow does not guarantee the same ent
 
 Codex default-window stress stopped at 241,119 context tokens, below the
 approximately 244,800-token trigger; no automatic compaction or post-compaction
-restart was verified. DeepSeek's earlier exact-nonce failure remains unresolved.
-GLM numeric usage was omitted by the evidence collector. All paid tests are stopped.
+restart was verified. Current DeepSeek and GLM exact-nonce recall passed after
+native stop/resume, and numeric GLM usage was captured. The cause of an earlier
+DeepSeek candidate failure remains unknown. All paid tests are stopped.
 
 LORE's persistent loopback hub transport works, but full historical replica
 parity remains gated by an unsigned oversized operation, 154 unverified operations
 and one deferred dependency. Linux is verified; the full protected DOXA runtime
 is unsupported on macOS and Windows. See the
 [tracker](docs/rust-1.19-parity.md#remaining-verification) and
-[latest record](docs/live-provider-verification-2026-09-29.md) for scope and limits.
-The [Rust UI benchmark](docs/rust-ui-benchmark-2026-09-27.md) covers rendering,
+[latest record](docs/live-provider-verification-2026-09-30.md) for scope and limits.
+The [Rust UI benchmark](docs/rust-ui-benchmark-2026-09-30.md) covers rendering,
 event-loop, scrolling and resize measurements; provider checks measure behavior.
 
 ## Non-goals

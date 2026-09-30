@@ -203,6 +203,12 @@ class NativeLiveVerifierTests(unittest.TestCase):
                     self.assertFalse(turn["done"]["is_error"])
                     self.assertTrue(turn["done"]["usage_complete"])
                     self.assertTrue(turn["done"]["model_consistent"])
+                    self.assertTrue(turn["nonce_evidence"]["exact_match"])
+                    self.assertEqual(turn["nonce_evidence"]["nonce_occurrences"], 1)
+                    self.assertEqual(turn["reported_usage"]["prompt_tokens"],
+                                     turn["done"]["prompt_tokens"])
+                    self.assertEqual(turn["reported_usage"]["completion_tokens"],
+                                     turn["done"]["completion_tokens"])
                 self.assertEqual(result["turns"][0]["done"]["prompt_tokens"], 6)
                 self.assertEqual(result["turns"][0]["done"]["completion_tokens"], 4)
                 self.assertEqual(requests[0]["reasoning_effort"], "low")

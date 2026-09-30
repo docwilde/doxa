@@ -32,7 +32,7 @@ dev = [
     "starlette>=1,<2",
     "uvicorn>=0.52,<1",
     "websockets>=15,<17",
-    "lore-core @ git+https://github.com/docwilde/LORE@8250d7b037524f3e1e3f17956ba934162e8ba8cd",
+    "lore-core @ git+https://github.com/docwilde/LORE@ea10bbe1cb602fd7ac8a5ff5d7c66d78e417d7a2",
     "pytest>=8",
     "pytest-asyncio>=0.24",
 ]

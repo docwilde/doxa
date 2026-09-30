@@ -256,7 +256,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-claude"
-version = "2.0.0-alpha.50"
+version = "2.0.0-alpha.51"
 dependencies = [
  "doxa-state",
  "libc",
@@ -266,7 +266,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-daemon"
-version = "2.0.0-alpha.50"
+version = "2.0.0-alpha.51"
 dependencies = [
  "doxa-claude",
  "doxa-engines",
@@ -290,7 +290,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-engines"
-version = "2.0.0-alpha.50"
+version = "2.0.0-alpha.51"
 dependencies = [
  "libc",
  "serde",
@@ -303,7 +303,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-lore"
-version = "2.0.0-alpha.50"
+version = "2.0.0-alpha.51"
 dependencies = [
  "doxa-state",
  "libc",
@@ -315,7 +315,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-peers"
-version = "2.0.0-alpha.50"
+version = "2.0.0-alpha.51"
 dependencies = [
  "bytes",
  "doxa-state",
@@ -335,14 +335,14 @@ dependencies = [
 
 [[package]]
 name = "doxa-protocol"
-version = "2.0.0-alpha.50"
+version = "2.0.0-alpha.51"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "doxa-runtime"
-version = "2.0.0-alpha.50"
+version = "2.0.0-alpha.51"
 dependencies = [
  "libc",
  "serde_json",
@@ -351,7 +351,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-state"
-version = "2.0.0-alpha.50"
+version = "2.0.0-alpha.51"
 dependencies = [
  "libc",
  "serde",
@@ -364,7 +364,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-transcript"
-version = "2.0.0-alpha.50"
+version = "2.0.0-alpha.51"
 dependencies = [
  "libc",
  "serde_json",
@@ -374,7 +374,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-tui"
-version = "2.0.0-alpha.50"
+version = "2.0.0-alpha.51"
 dependencies = [
  "crossterm",
  "doxa-claude",
@@ -405,7 +405,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-vendors"
-version = "2.0.0-alpha.50"
+version = "2.0.0-alpha.51"
 dependencies = [
  "futures-util",
  "libc",
@@ -417,7 +417,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-worktrees"
-version = "2.0.0-alpha.50"
+version = "2.0.0-alpha.51"
 dependencies = [
  "doxa-state",
  "libc",
@@ -996,8 +996,8 @@ checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
 name = "lore-core"
-version = "0.62.4"
-source = "git+https://github.com/docwilde/LORE?rev=8250d7b037524f3e1e3f17956ba934162e8ba8cd#8250d7b037524f3e1e3f17956ba934162e8ba8cd"
+version = "0.62.5"
+source = "git+https://github.com/docwilde/LORE?rev=ea10bbe1cb602fd7ac8a5ff5d7c66d78e417d7a2#ea10bbe1cb602fd7ac8a5ff5d7c66d78e417d7a2"
 dependencies = [
  "fancy-regex",
  "hmac",

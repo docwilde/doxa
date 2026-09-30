@@ -46,7 +46,9 @@ they are not a remaining Python replacement task. See the
 
 ## Remaining verification
 
-The [2026-09-29 record](live-provider-verification-2026-09-29.md) reports fixed
+The [2026-09-30 record](live-provider-verification-2026-09-30.md) reports
+native vendor stop/resume recall and numeric usage. The
+[2026-09-29 record](live-provider-verification-2026-09-29.md) retains fixed
 Claude/vendor streaming checks and the incomplete default-window Codex run.
 Historical alpha.43 manual and lowered-threshold automatic compaction remain
 verified separately.
@@ -54,10 +56,10 @@ verified separately.
 | Check | Current result and remaining gate |
 | --- | --- |
 | Claude streaming and optional quota variants | Fixed debug daemon counts advanced 50 → 150 → 200 before first text, with 104 reply deltas; thinking plaintext stayed withheld. Optional overage/model-specific quota variants remain unverified live. |
-| DeepSeek recall/resume | Later three-turn streaming diagnosis passed with 316 text deltas and 81 reasoning-progress events. Earlier candidate exact-nonce failure remains unresolved. |
-| z.ai GLM usage | Three turns and same-session low → high effort passed, with 408 text deltas. Numeric usage was omitted by the collector, not measured as zero. |
-| Codex default-window automatic compaction | Stress stopped at the harness cap: 2,758,826 aggregate input tokens but 241,119 context tokens, below the ~244,800 trigger. No automatic compaction, Haiku review or post-compaction restart was verified. The successful 14,022-token controlled test does not establish this coverage. |
-| Full historic LORE replica | Persistent loopback hub transport works; owned portable replay applied 302 of 457 ops with zero failures. An unsigned oversized operation, 154 unverified ops and one deferred dependency still gate full replication. |
+| DeepSeek recall/resume | Current two-turn native file-read and exact-nonce recall passed across daemon stop/resume with complete vendor-reported usage. Earlier candidate failure's cause remains unknown; the three-turn streaming diagnosis passed separately with 316 text deltas and 81 reasoning-progress events. |
+| z.ai GLM usage | Current two-turn native file-read and exact-nonce recall passed across stop/resume. Complete numeric vendor-reported usage was captured on both turns. Earlier three turns and same-session low → high effort passed with 408 text deltas. |
+| Codex default-window automatic compaction | Stress stopped at the harness cap: 2,758,826 aggregate input tokens but 241,119 context tokens, below the ~244,800 trigger. No automatic compaction, Haiku review or post-compaction restart was verified. The successful 14,022-token controlled test does not establish this coverage. A [bounded follow-up plan](codex-default-window-compaction-plan-2026-09-30.md) records the remaining gate. |
+| Full historic LORE replica | Persistent loopback hub transport works; owned portable replay applied 302 of 457 ops with zero failures. LORE 0.62.5 can re-sign receiver-valid large local session operations; the observed oversized unsigned operation is foreign. It, 154 unverified ops and one deferred dependency still gate full replication. |
 
 All paid tests are stopped. Unknown plan, quota, balance and context values remain
 unknown. DeepSeek balance can be shown when its endpoint reports it; z.ai has no
@@ -141,10 +143,10 @@ All 17 ClaudeHost fixtures passed. A
 verified actual five-hour and weekly percentages/reset times with native CLI
 provenance and no additional tools.
 
-Alpha.31 supplied the [event-loop benchmark](rust-ui-benchmark-2026-09-27.md)
-measurements. The [gallery](rust-gallery.md) now records **alpha.49–50** live
-terminal captures, including both LORE browsers. The UI benchmark still measures its stated alpha.31 build;
-the newer screenshots do not update those performance measurements.
+Alpha.50 supplied the [current event-loop benchmark](rust-ui-benchmark-2026-09-30.md)
+measurements; the [alpha.31 baseline](rust-ui-benchmark-2026-09-27.md) remains
+available. The [gallery](rust-gallery.md) records **alpha.49–50** live terminal
+captures, including both LORE browsers.
 
 See the [source audit](source-audit-2026-09-27.md) for confirmed follow-up fixes,
 engineering debt and validation limits.
