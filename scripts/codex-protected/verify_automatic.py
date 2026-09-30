@@ -100,7 +100,7 @@ def hook_overrides(mode):
     return ["-c", "hooks={PreCompact=[" + ",".join([group] * count) + "],state={" + state + "}}"]
 
 
-def scenario(binary, scratch, mode):
+def scenario(binary, scratch, mode, *, default_window=False):
     with tempfile.TemporaryDirectory(prefix="codex-auto-", dir=scratch) as directory:
         root = Path(directory)
         codex_home = root / "codex-home"
@@ -116,7 +116,7 @@ def scenario(binary, scratch, mode):
                 requests.append((self.path, json.loads(body)))
                 count = len(requests)
                 text = "DOXA retained first fixture message" if count == 1 else "DOXA fixture summary" if count == 2 else "DOXA final fixture reply"
-                tokens = 1000 if count == 1 else 10
+                tokens = (245000 if default_window else 1000) if count == 1 else 10
                 response = "fixture-" + str(count)
                 events = [{"type": "response.created", "response": {"id": response}},
                     {"type": "response.output_item.done", "item": {"type": "message", "role": "assistant", "id": "message-" + str(count), "content": [{"type": "output_text", "text": text}]}},
@@ -130,8 +130,10 @@ def scenario(binary, scratch, mode):
         server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         worker = threading.Thread(target=server.serve_forever, daemon=True)
         worker.start()
+        compact_config = (['model_context_window=272000'] if default_window else
+            ['model_context_window=100000', 'model_auto_compact_token_limit=100'])
         config = '\n'.join(['model="gpt-5.5"', 'model_provider="doxa_fixture"',
-            'model_context_window=100000', 'model_auto_compact_token_limit=100',
+            *compact_config,
             'model_post_turn_compact_threshold_percent=0', '[features]', 'codex_hooks=true', 'token_budget=false',
             '[model_providers.doxa_fixture]', 'name="DOXA loopback fixture"',
             f'base_url="http://127.0.0.1:{server.server_port}/v1"', 'wire_api="responses"',
@@ -174,7 +176,7 @@ def scenario(binary, scratch, mode):
                 assert after.startswith(before), "owned rollout history was rewritten"
                 assert b"DOXA retained first fixture message" in after
                 assert not any(event.get("method") == "item/completed" and event.get("params", {}).get("item", {}).get("type") == "contextCompaction" for event in rpc.events)
-            return {"mode": mode, "first_status": first, "second_status": second, "http_requests": len(requests),
+            return {"mode": mode, "window": "default" if default_window else "lowered", "first_status": first, "second_status": second, "http_requests": len(requests),
                 "history_replacements": len(replacements), "hook_statuses": [event["params"]["run"]["status"] for event in completed], "paid_requests": 0}
         finally:
             rpc.close()
@@ -188,11 +190,12 @@ def main():
     parser.add_argument("--server", type=Path, required=True)
     parser.add_argument("--scratch", type=Path, required=True)
     parser.add_argument("--mode", choices=["missing", "carrier-missing", "timeout", "invalid", "empty", "plain", "stopped", "async", "duplicate", "allow"])
+    parser.add_argument("--default-window", action="store_true", help="exercise the unoverridden automatic threshold with a 272k context fixture")
     options = parser.parse_args()
     options.scratch.mkdir(parents=True, exist_ok=True, mode=0o700)
     modes = [options.mode] if options.mode else ["missing", "carrier-missing", "timeout", "invalid", "empty", "plain", "stopped", "async", "duplicate", "allow"]
     for mode in modes:
-        print(json.dumps(scenario(options.server, options.scratch, mode), sort_keys=True), flush=True)
+        print(json.dumps(scenario(options.server, options.scratch, mode, default_window=options.default_window), sort_keys=True), flush=True)
 
 
 if __name__ == "__main__":

@@ -5,6 +5,21 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.52 — 2026-09-30
+
+**Historical LORE replay**
+
+- Pin **`lore-core`** 0.62.6. Signed large session snapshots now replay in
+  sequence without the generic prior-payload text limit.
+- Record the isolated 4,554-operation peer replay: 4,535 applied; 13 signed
+  historical belief operations with null references still fail closed.
+
+**Compaction verification**
+
+- Add a default-window mode to **`verify_automatic.py`**. The credential-free
+  272k-window fixture proves allow and stop paths at the native trigger.
+- Authenticated default-window compaction and restart remain unverified.
+
 ## 2.0.0-alpha.51 — 2026-09-30
 
 **LORE and provider verification**

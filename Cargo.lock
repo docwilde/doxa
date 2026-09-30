@@ -256,7 +256,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-claude"
-version = "2.0.0-alpha.51"
+version = "2.0.0-alpha.52"
 dependencies = [
  "doxa-state",
  "libc",
@@ -266,7 +266,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-daemon"
-version = "2.0.0-alpha.51"
+version = "2.0.0-alpha.52"
 dependencies = [
  "doxa-claude",
  "doxa-engines",
@@ -290,7 +290,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-engines"
-version = "2.0.0-alpha.51"
+version = "2.0.0-alpha.52"
 dependencies = [
  "libc",
  "serde",
@@ -303,7 +303,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-lore"
-version = "2.0.0-alpha.51"
+version = "2.0.0-alpha.52"
 dependencies = [
  "doxa-state",
  "libc",
@@ -315,7 +315,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-peers"
-version = "2.0.0-alpha.51"
+version = "2.0.0-alpha.52"
 dependencies = [
  "bytes",
  "doxa-state",
@@ -335,14 +335,14 @@ dependencies = [
 
 [[package]]
 name = "doxa-protocol"
-version = "2.0.0-alpha.51"
+version = "2.0.0-alpha.52"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "doxa-runtime"
-version = "2.0.0-alpha.51"
+version = "2.0.0-alpha.52"
 dependencies = [
  "libc",
  "serde_json",
@@ -351,7 +351,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-state"
-version = "2.0.0-alpha.51"
+version = "2.0.0-alpha.52"
 dependencies = [
  "libc",
  "serde",
@@ -364,7 +364,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-transcript"
-version = "2.0.0-alpha.51"
+version = "2.0.0-alpha.52"
 dependencies = [
  "libc",
  "serde_json",
@@ -374,7 +374,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-tui"
-version = "2.0.0-alpha.51"
+version = "2.0.0-alpha.52"
 dependencies = [
  "crossterm",
  "doxa-claude",
@@ -405,7 +405,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-vendors"
-version = "2.0.0-alpha.51"
+version = "2.0.0-alpha.52"
 dependencies = [
  "futures-util",
  "libc",
@@ -417,7 +417,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-worktrees"
-version = "2.0.0-alpha.51"
+version = "2.0.0-alpha.52"
 dependencies = [
  "doxa-state",
  "libc",
@@ -445,7 +445,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -996,8 +996,8 @@ checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
 name = "lore-core"
-version = "0.62.5"
-source = "git+https://github.com/docwilde/LORE?rev=ea10bbe1cb602fd7ac8a5ff5d7c66d78e417d7a2#ea10bbe1cb602fd7ac8a5ff5d7c66d78e417d7a2"
+version = "0.62.6"
+source = "git+https://github.com/docwilde/LORE?rev=125019f8bf74ac716e76333ef1ba6c14a54778e8#125019f8bf74ac716e76333ef1ba6c14a54778e8"
 dependencies = [
  "fancy-regex",
  "hmac",
@@ -1205,7 +1205,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1418,7 +1418,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1718,7 +1718,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.5",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

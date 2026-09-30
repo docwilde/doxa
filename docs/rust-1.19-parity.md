@@ -1,7 +1,7 @@
 # Rust 2.0 parity with DOXA 1.19.0
 
 Baseline: Python `v1.19.0` production behavior. This tracker records implementation
-through **alpha.50**, with canonical **LORE 0.62.4**. Account checks
+through **alpha.52**, with canonical **LORE 0.62.6**. Account checks
 are bounded by their exact candidate and date.
 The Rust runtime implements the audited workflows below. Live account checks
 remain bounded by the [latest verification record](live-provider-verification-2026-09-29.md)
@@ -39,6 +39,8 @@ coverage alone does not establish authenticated compatibility for every provider
 | Alpha.47 | Accept verified Cargo build outputs with read/execute permissions or extra hard links while retaining strict single-link installed artifacts and receipt checks. |
 | Alpha.48 | Fix observed Codex peer-send aliases, add per-tool session approval and clickable peer history, block Greek welcome art, and selected curated facts with delayed scrollable previews and menu scrollbars. |
 | Alpha.49 | Refresh the README and user docs; recapture seven unedited frames from the real Rust app, including a new welcome frame. No runtime behavior changes. |
+| Alpha.50–51 | Capture the belief/memory browsers from the live app, rerun the Rust UI benchmark, and record bounded DeepSeek/GLM stop/resume recall and usage. |
+| Alpha.52 | Pin LORE 0.62.6 session replay repair and add a credential-free Codex default-window compaction fixture. |
 
 Standalone LORE administration, hooks, MCP and network operations are native Rust;
 they are not a remaining Python replacement task. See the
@@ -58,8 +60,8 @@ verified separately.
 | Claude streaming and optional quota variants | Fixed debug daemon counts advanced 50 → 150 → 200 before first text, with 104 reply deltas; thinking plaintext stayed withheld. Optional overage/model-specific quota variants remain unverified live. |
 | DeepSeek recall/resume | Current two-turn native file-read and exact-nonce recall passed across daemon stop/resume with complete vendor-reported usage. Earlier candidate failure's cause remains unknown; the three-turn streaming diagnosis passed separately with 316 text deltas and 81 reasoning-progress events. |
 | z.ai GLM usage | Current two-turn native file-read and exact-nonce recall passed across stop/resume. Complete numeric vendor-reported usage was captured on both turns. Earlier three turns and same-session low → high effort passed with 408 text deltas. |
-| Codex default-window automatic compaction | Stress stopped at the harness cap: 2,758,826 aggregate input tokens but 241,119 context tokens, below the ~244,800 trigger. No automatic compaction, Haiku review or post-compaction restart was verified. The successful 14,022-token controlled test does not establish this coverage. A [bounded follow-up plan](codex-default-window-compaction-plan-2026-09-30.md) records the remaining gate. |
-| Full historic LORE replica | Persistent loopback hub transport works; owned portable replay applied 302 of 457 ops with zero failures. LORE 0.62.5 can re-sign receiver-valid large local session operations; the observed oversized unsigned operation is foreign. It, 154 unverified ops and one deferred dependency still gate full replication. |
+| Codex default-window automatic compaction | The installed protected provider passed zero-cost 272k-window allow and stopped fixture paths: one checkpoint after review success, zero after review refusal. The earlier authenticated stress stopped at 241,119 context tokens below the ~244,800 trigger. Live default-window Haiku review and post-compaction restart remain unverified; the [bounded plan](codex-default-window-compaction-plan-2026-09-30.md) records the gate. |
+| Full historic LORE replica | After re-signing 574 authentic local operations, a private direct-peer replay of 4,554 signed source ops applied 4,535, with zero unverified. Thirteen historical belief operations have null references, six remain deferred, and the cursor stays unadvanced. The existing hub retains immutable older unsigned duplicates; full historical convergence remains open. |
 
 All paid tests are stopped. Unknown plan, quota, balance and context values remain
 unknown. DeepSeek balance can be shown when its endpoint reports it; z.ai has no
