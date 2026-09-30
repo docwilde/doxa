@@ -7,6 +7,7 @@ mod codex_host;
 mod peer_host;
 mod session_spawn;
 mod remote_bridge;
+mod session_title;
 mod vendor_host;
 mod vendor_tools;
 use claude_host::ClaudeHost;
@@ -24,7 +25,6 @@ use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread;
@@ -412,10 +412,12 @@ struct Registry {
     socket: String,
     daemon_socket: String,
     engine: Engine,
+    title: String,
     parent_session_id: Option<String>,
 }
 impl Registry {
-    fn new(options: &Options, socket: &Path, daemon_socket: &Path) -> io::Result<Self> {
+    fn new(options: &Options, socket: &Path, daemon_socket: &Path,
+        title: String, repo_root: Option<String>) -> io::Result<Self> {
         let dir = options.runtime.join("registry");
         owned_directory(&dir)?;
         let path = dir.join(format!("{}.json", options.session_id));
@@ -425,29 +427,6 @@ impl Registry {
                 "session registry entry already exists",
             ));
         }
-        // A linked worktree's --show-toplevel is its own checkout path. Use
-        // the shared Git directory so native sessions match Python and the
-        // Rust TUI's project scope in every worktree of the same repository.
-        let repo_root = Command::new("git")
-            .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
-            .current_dir(&options.cwd)
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| PathBuf::from(s.trim()))
-            .filter(|path| path.is_absolute())
-            .map(|common| {
-                if common.file_name().is_some_and(|name| name == ".git") {
-                    common
-                        .parent()
-                        .unwrap_or(&common)
-                        .to_string_lossy()
-                        .into_owned()
-                } else {
-                    common.to_string_lossy().into_owned()
-                }
-            });
         Ok(Self {
             path,
             identity: None,
@@ -459,13 +438,14 @@ impl Registry {
             socket: socket.to_string_lossy().into_owned(),
             daemon_socket: daemon_socket.to_string_lossy().into_owned(),
             engine: options.engine,
+            title,
             parent_session_id: options.parent_session_id.clone(),
         })
     }
     fn write(&mut self, clients: usize) -> io::Result<()> {
         let entry = json!({"session_id":self.session_id,"pid":std::process::id(),
             "socket_path":self.socket,"daemon_socket":self.daemon_socket,"cwd":self.cwd,
-            "repo_root":self.repo_root,"title":format!("DOXA Rust {} session", self.engine.name()),
+            "repo_root":self.repo_root,"title":self.title,
             "started_at":self.started_at,"heartbeat_at":iso_now(),"clients":clients,
             "engine":self.engine.name(),"parent_session_id":self.parent_session_id});
         let tmp = self
@@ -661,13 +641,18 @@ fn run() -> io::Result<()> {
         },
         None => host,
     };
+    let repo_root = session_title::repo_root(&options.cwd);
+    let base_title = session_title::base(host.initial_model().as_deref().or(options.model.as_deref()),
+        options.engine.name(), &options.cwd, repo_root.as_deref().map(Path::new));
+    let title_lock = session_title::TitleLock::acquire(&options.runtime)?;
+    let title = session_title::from_registry(&options.runtime, &options.session_id, &base_title)?;
     let (event_tx, event_rx) = mpsc::sync_channel(256);
     let peer_host = Arc::new(PeerHost::new(
         host,
         options.runtime.clone(),
         &options.cwd,
         options.session_id.clone(),
-        format!("DOXA Rust {} session", options.engine.name()),
+        title.clone(),
         event_tx,
     )?);
     let mut provider_args=Vec::new();
@@ -695,8 +680,9 @@ fn run() -> io::Result<()> {
     };
     let mut handle = Daemon::bind(&options.runtime, session, host)?.start();
     let inbox = Inbox::bind(&options.runtime, &options.session_id)?;
-    let mut registry = Registry::new(&options, inbox.path(), handle.socket_path())?;
+    let mut registry = Registry::new(&options, inbox.path(), handle.socket_path(), title, repo_root)?;
     registry.write(0)?;
+    drop(title_lock);
     let mut remote_bridge = match remote_bridge::Bootstrap::request(&options.runtime) {
         Ok(bootstrap) => bootstrap,
         Err(_) => { handle.publish(json!({"type":"remote_peer_bridge","data":{"state":"startup_failed"}})); None }

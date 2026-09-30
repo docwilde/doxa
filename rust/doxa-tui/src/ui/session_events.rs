@@ -13,7 +13,8 @@ use super::transcript_events::{
     append_transcript, append_turn_heading, set_reasoning_marker, structured_event, transcript_tail,
 };
 use super::{
-    context_detail_lines, permission_index, safe_label, session_controls, unsafe_input_char, App,
+    context_detail_lines, permission_index, safe_label, session_controls,
+    unique_session_title, unsafe_input_char, App,
     BranchPicker, ClearSwap, DaemonUpdate, InputRequest, QueueRow, Session, MAX_INPUT_BYTES,
     MAX_INPUT_REQUESTS, MAX_REASONING_DISPLAY_CHARS,
 };
@@ -586,6 +587,16 @@ impl App {
                     .find(|s| s.id == id)
                     .map(|s| s.transcript.clone())
                     .unwrap_or_default();
+                let automatic = if self.offline_ids.contains(id) {
+                    self.sessions.iter().find(|session| session.id == id)
+                        .map(|session| session.title.clone()).filter(|title| !title.is_empty() && title != id)
+                } else {
+                    self.default_names.get(id).cloned()
+                }.or_else(|| frame.get("title").and_then(|value| value.as_str()).map(safe_label)
+                    .filter(|title| !title.is_empty()))
+                    .unwrap_or_else(|| model.clone().unwrap_or_else(|| safe_label(id)));
+                let automatic = unique_session_title(&automatic, id, &self.sessions);
+                self.default_names.insert(id.to_owned(), automatic.clone());
                 self.awaiting_initial_attach = false;
                 self.startup_recovery = None;
                 self.apply_update(DaemonUpdate::Upsert(Session {
@@ -594,7 +605,7 @@ impl App {
                         .custom_names
                         .get(id)
                         .cloned()
-                        .unwrap_or_else(|| model.clone().unwrap_or_else(|| safe_label(id))),
+                        .unwrap_or(automatic),
                     collection: cwd,
                     transcript,
                     status: "Connected".into(),
@@ -702,10 +713,6 @@ impl App {
                         {
                             self.effort_picker = None;
                         }
-                        let old_model = self
-                            .session_identity
-                            .get(&id)
-                            .and_then(|identity| identity.1.clone());
                         let new_model = data
                             .get("model")
                             .and_then(|v| v.as_str())
@@ -714,15 +721,9 @@ impl App {
                         if let Some(identity) = self.session_identity.get_mut(&id) {
                             identity.1 = new_model.clone();
                         }
-                        if let Some(session) = self.sessions.iter_mut().find(|s| s.id == id) {
-                            if !self.custom_names.contains_key(&id)
-                                && old_model.as_deref() == Some(session.title.as_str())
-                            {
-                                if let Some(model) = new_model {
-                                    session.title = model;
-                                }
-                            }
-                        }
+                        // A default title names the session at creation. The
+                        // model chip shows later selection changes without
+                        // diverging from the daemon registry or peer roster.
                         true
                     }
                     "effort_changed" | "effort_verified" => {
@@ -1229,6 +1230,7 @@ impl App {
                     self.streaming_text.remove(id);
                     self.reasoning_streams.remove(id);
                     self.custom_names.remove(id);
+                    self.default_names.remove(id);
                     self.input_drafts.retain(|(_, session), _| session != id);
                     self.rejected_drafts.remove(id);
                     self.expanded_tool_sections.remove(id);

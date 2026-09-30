@@ -685,12 +685,10 @@ impl App {
         let name = args.trim();
         if name.is_empty() {
             self.custom_names.remove(&id);
-            let automatic = self
-                .session_identity
-                .get(&id)
-                .and_then(|identity| identity.1.as_deref())
-                .map(safe_label)
-                .unwrap_or_else(|| safe_label(&id));
+            let automatic = self.default_names.get(&id).cloned().unwrap_or_else(|| {
+                self.session_identity.get(&id).and_then(|identity| identity.1.as_deref())
+                    .map(safe_label).unwrap_or_else(|| safe_label(&id))
+            });
             if let Some(session) = self.sessions.iter_mut().find(|session| session.id == id) {
                 session.title = automatic;
             }

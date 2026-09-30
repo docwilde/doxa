@@ -5,6 +5,18 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.55 — 2026-09-30
+
+**Native LORE credential scrubbing**
+
+- Pin **`lore-core`** 0.62.8 in the native runtime and Python test oracle.
+  Unknown redaction-marker text in a secret field is scrubbed instead of reused.
+
+**Session titles**
+
+- Name new sessions from their model and Git branch/repo, or a short path outside
+  Git. Keep duplicate suffixes stable through attach and layout restoration.
+
 ## 2.0.0-alpha.54 — 2026-09-30
 
 **LORE historical sync convergence**
