@@ -40,7 +40,19 @@ not contradict this later successful cycle.
 
 The reproducible [bounded verifier](../scripts/codex-protected/verify_live_default_window.py)
 accepts explicit daemon, protected Codex, native LORE, account-home and private
-scratch paths. Its checked-in form additionally checks provider thread identity
-and final aggregate usage after restart. It was syntax-checked after extraction;
-the paid cycle above ran the equivalent earlier in-memory harness and was not
-repeated after that refactor.
+scratch paths. Its checked-in form additionally isolates child temporary files,
+ignores ambient Codex API keys, waits for complete rollout records, checks
+headroom before recall, and checks provider thread identity and final aggregate
+usage after restart. The checked-in script was syntax-checked and its rollout
+and path guards were exercised locally; the paid cycle above ran the equivalent
+earlier in-memory harness and was not repeated after that refactor.
+
+## Verifier review
+
+A three-model review of the checked-in verifier used Codex, DeepSeek V4.1 Flash
+and GLM 5.3. The follow-up closes the shared temporary-file and live-rollout
+findings, adds account credential isolation, private ancestor checks, reply
+validation, a pre-recall budget guard and shutdown-race handling. The Rust
+adapter's usage is session cumulative and its registry write is atomic, so
+the two claims assuming otherwise did not apply. These verifier edits were
+checked without repeating the paid provider cycle.

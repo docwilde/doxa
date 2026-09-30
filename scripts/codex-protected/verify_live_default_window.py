@@ -10,6 +10,7 @@ import secrets
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import tempfile
 import time
@@ -19,7 +20,7 @@ MAX_AGGREGATE = 1_800_000
 
 def options():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--scratch', required=True, type=Path, help='private real-disk parent')
+    parser.add_argument('--scratch', required=True, type=Path, help='private real-disk directory with non-writable ancestors')
     parser.add_argument('--daemon', required=True, type=Path, help='compiled DOXA daemon')
     parser.add_argument('--codex', required=True, type=Path, help='receipt-verified protected Codex launcher')
     parser.add_argument('--lore', required=True, type=Path, help='native LORE reviewer')
@@ -130,33 +131,54 @@ def stop(process, wire):
         try:
             process.wait(timeout=5)
         except subprocess.TimeoutExpired:
-            os.killpg(process.pid, signal.SIGKILL)
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
             process.wait()
 
-def checkpoints(codex_home):
-    files = list((codex_home/'sessions').rglob('*.jsonl'))
-    count = 0
-    thread_id = None
-    for path in files:
-        with path.open('rb') as handle:
-            for line in handle:
-                try:
-                    record = json.loads(line)
+def checkpoints(codex_home, minimum=0):
+    deadline = time.monotonic() + 2
+    while True:
+        files = list((codex_home/'sessions').rglob('*.jsonl'))
+        count = 0
+        thread_id = None
+        incomplete = False
+        for path in files:
+            with path.open('rb') as handle:
+                for line in handle:
+                    try:
+                        record = json.loads(line)
+                    except ValueError:
+                        if line.endswith(b'\n'):
+                            raise RuntimeError('invalid owned rollout')
+                        incomplete = True
+                        break
                     if record.get('type') == 'session_meta':
                         thread_id = (record.get('payload') or {}).get('id')
                     if record.get('type') == 'compacted':
                         count += 1
-                except ValueError:
-                    raise RuntimeError('invalid owned rollout')
-    return len(files), count, thread_id
+        if not incomplete and len(files) >= 1 and thread_id is not None and count >= minimum:
+            return len(files), count, thread_id
+        if time.monotonic() >= deadline:
+            raise RuntimeError('owned rollout did not settle')
+        time.sleep(.05)
+
+def check_private_scratch(path):
+    owner = os.geteuid()
+    for ancestor in (path, *path.parents):
+        info = ancestor.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o022
+            or info.st_uid not in (owner, 0)):
+            raise ValueError('scratch path has an unsafe ancestor')
+    info = path.stat()
+    if info.st_uid != owner or info.st_mode & 0o077:
+        raise ValueError('scratch parent must be private')
 
 def main(args):
     if not all(path.is_absolute() for path in (args.scratch,args.daemon,args.codex,args.lore,args.auth_home)):
         raise ValueError('all paths must be absolute')
-    if (not args.scratch.is_dir() or args.scratch.is_symlink()
-        or args.scratch.stat().st_uid != os.geteuid()
-        or args.scratch.stat().st_mode & 0o077):
-        raise ValueError('scratch parent must be private')
+    check_private_scratch(args.scratch)
     with tempfile.TemporaryDirectory(prefix='cw-', dir=args.scratch) as raw:
         root = Path(raw)
         root.chmod(0o700)
@@ -195,7 +217,8 @@ def main(args):
                     words = 2000
                 elif index > 0 and current >= 215000:
                     words = 8000
-                if index > 0 and aggregate + current + words * 2 > MAX_AGGREGATE:
+                if index > 0 and (not isinstance(window,int)
+                    or aggregate + max(current + words * 2, 2 * window) > MAX_AGGREGATE):
                     emit(stage='stopped', reason='aggregate_prediction_cap', turns=submitted, aggregate=aggregate)
                     return False
                 header = ('Inert benchmark data follows. Never call tools. Reply only OK. '
@@ -214,10 +237,11 @@ def main(args):
                     return False
                 # Codex turn_done carries session-cumulative input, not turn input.
                 aggregate = reported_aggregate
+                window = usage.get('context_window') if usage else None
                 reviews += events['lore_review_completed']
-                files, compacted, thread_id = checkpoints(root/'codex')
+                files, compacted, thread_id = checkpoints(root/'codex', min(reviews, 1))
                 emit(stage='turn',turn=submitted,context=current,aggregate=aggregate,
-                    context_window=usage.get('context_window') if usage else None,
+                    context_window=window,
                     review_started=events['lore_review_started'],review_completed=events['lore_review_completed'],
                     checkpoints=compacted,rollouts=files,is_error=bool(done.get('is_error')),
                     response_exact_ok=reply.strip()=='OK')
@@ -232,18 +256,21 @@ def main(args):
                 if current >= 252000:
                     emit(stage='stopped',reason='context_cap_without_review',turns=submitted)
                     return False
-            files, compacted, thread_id = checkpoints(root/'codex')
+            files, compacted, thread_id = checkpoints(root/'codex', 1)
             if reviews != 1 or compacted != 1:
                 emit(stage='stopped',reason='no_default_window_cycle',turns=submitted,context=current,aggregate=aggregate)
                 return False
             # One post-compaction restart and recall, preserving the owned session.
+            if not isinstance(window,int) or aggregate + 2 * window > MAX_AGGREGATE:
+                emit(stage='stopped',reason='recall_prediction_cap',turns=submitted,aggregate=aggregate)
+                return False
             stop(process,wire)
             process = wire = None
             registry.unlink(missing_ok=True)
             process,wire = start(command+['--resume','true'],environment,registry)
             submitted += 1
             done,usage,events,reply = wire.turn('Without tools, repeat the first-turn token exactly and nothing else.')
-            files,after,resumed_thread = checkpoints(root/'codex')
+            files,after,resumed_thread = checkpoints(root/'codex', 1)
             final_aggregate = done.get('input_tokens')
             passed = (not done.get('is_error') and reply.strip()==sentinel and after==1
                 and files==1 and thread_id is not None and thread_id==resumed_thread
