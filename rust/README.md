@@ -2,7 +2,7 @@
 
 Rust is the main DOXA frontend. The installer exposes `doxa`; the compiled
 frontend is `doxa-rs`. Claude uses its native CLI control protocol, Codex uses
-its app server, and API vendors use Rust HTTP clients. Canonical LORE 0.62.7 is an
+its app server, and API vendors use Rust HTTP clients. Canonical LORE 0.62.8 is an
 integrated Rust library for memory, reviews, indexing, and secret scrubbing;
 `lore-rs` also provides detached review and standalone plugin commands.
 The installed runtime requires no Python interpreter.
