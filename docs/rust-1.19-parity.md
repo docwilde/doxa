@@ -46,7 +46,9 @@ they are not a remaining Python replacement task. See the
 
 ## Remaining verification
 
-The [2026-09-29 record](live-provider-verification-2026-09-29.md) reports fixed
+The [2026-09-30 record](live-provider-verification-2026-09-30.md) reports
+native vendor stop/resume recall and numeric usage. The
+[2026-09-29 record](live-provider-verification-2026-09-29.md) retains fixed
 Claude/vendor streaming checks and the incomplete default-window Codex run.
 Historical alpha.43 manual and lowered-threshold automatic compaction remain
 verified separately.
@@ -54,8 +56,8 @@ verified separately.
 | Check | Current result and remaining gate |
 | --- | --- |
 | Claude streaming and optional quota variants | Fixed debug daemon counts advanced 50 → 150 → 200 before first text, with 104 reply deltas; thinking plaintext stayed withheld. Optional overage/model-specific quota variants remain unverified live. |
-| DeepSeek recall/resume | Later three-turn streaming diagnosis passed with 316 text deltas and 81 reasoning-progress events. Earlier candidate exact-nonce failure remains unresolved. |
-| z.ai GLM usage | Three turns and same-session low → high effort passed, with 408 text deltas. Numeric usage was omitted by the collector, not measured as zero. |
+| DeepSeek recall/resume | Current two-turn native file-read and exact-nonce recall passed across daemon stop/resume with complete vendor-reported usage. Earlier candidate failure's cause remains unknown; the three-turn streaming diagnosis passed separately with 316 text deltas and 81 reasoning-progress events. |
+| z.ai GLM usage | Current two-turn native file-read and exact-nonce recall passed across stop/resume. Complete numeric vendor-reported usage was captured on both turns. Earlier three turns and same-session low → high effort passed with 408 text deltas. |
 | Codex default-window automatic compaction | Stress stopped at the harness cap: 2,758,826 aggregate input tokens but 241,119 context tokens, below the ~244,800 trigger. No automatic compaction, Haiku review or post-compaction restart was verified. The successful 14,022-token controlled test does not establish this coverage. |
 | Full historic LORE replica | Persistent loopback hub transport works; owned portable replay applied 302 of 457 ops with zero failures. An unsigned oversized operation, 154 unverified ops and one deferred dependency still gate full replication. |
 

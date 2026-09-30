@@ -209,7 +209,9 @@ still refuse or stage oversized writes; overflow does not guarantee the same ent
 - **Claude quota handling:** Alpha.44 preserves nested and startup window reports,
   with seven focused quota regressions passing. A live candidate turn reported
   both five-hour and weekly percentages and resets; missing values stay unknown.
-- **Latest verification:** The [2026-09-29 record](docs/live-provider-verification-2026-09-29.md)
+- **Latest verification:** The [2026-09-30 record](docs/live-provider-verification-2026-09-30.md)
+  covers native DeepSeek/GLM stop-resume recall and numeric usage. The
+  [2026-09-29 record](docs/live-provider-verification-2026-09-29.md)
   covers fixed Claude and vendor streaming, GLM effort controls, and the
   incomplete Codex default-window stress run. Earlier alpha.43 checks verified
   real LORE review, manual compaction and controlled automatic compaction.
@@ -218,15 +220,16 @@ still refuse or stage oversized writes; overflow does not guarantee the same ent
 
 Codex default-window stress stopped at 241,119 context tokens, below the
 approximately 244,800-token trigger; no automatic compaction or post-compaction
-restart was verified. DeepSeek's earlier exact-nonce failure remains unresolved.
-GLM numeric usage was omitted by the evidence collector. All paid tests are stopped.
+restart was verified. Current DeepSeek and GLM exact-nonce recall passed after
+native stop/resume, and numeric GLM usage was captured. The cause of an earlier
+DeepSeek candidate failure remains unknown. All paid tests are stopped.
 
 LORE's persistent loopback hub transport works, but full historical replica
 parity remains gated by an unsigned oversized operation, 154 unverified operations
 and one deferred dependency. Linux is verified; the full protected DOXA runtime
 is unsupported on macOS and Windows. See the
 [tracker](docs/rust-1.19-parity.md#remaining-verification) and
-[latest record](docs/live-provider-verification-2026-09-29.md) for scope and limits.
+[latest record](docs/live-provider-verification-2026-09-30.md) for scope and limits.
 The [Rust UI benchmark](docs/rust-ui-benchmark-2026-09-30.md) covers rendering,
 event-loop, scrolling and resize measurements; provider checks measure behavior.
 
