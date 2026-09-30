@@ -1,5 +1,13 @@
 # Codex default-window automatic compaction: bounded verification plan
 
+**Completed later on 2026-09-30.** The authenticated alpha.52 check observed
+one native LORE review, one provider compaction checkpoint and exact recall
+after a daemon restart within eight submitted turns. See the
+[measured result](live-default-window-compaction-2026-09-30.md). The text below
+records the pre-run reasoning and caps; its earlier status is historical.
+The executed native harness used frames below 63 KiB because DOXA's daemon
+protocol caps each frame at 64 KiB, tighter than the pre-run prompt estimate.
+
 The 2026-09-29 paid stress run ended at `incomplete_harness_cap`: 2,758,826
 aggregate input tokens, but only 241,119 tokens in the current context. The
 expected automatic trigger is approximately 244,800 tokens (90% of the cached
@@ -29,16 +37,16 @@ stopped in the [live verification record](live-provider-verification-2026-09-29.
   prompt uses a capped session digest; it does not send the entire rollout to
   Haiku verbatim.
 
-## Remaining authenticated run
+## Pre-run authenticated protocol
 
 1. Start a fresh authenticated native DOXA session with the default model
    window and no threshold override. Send deterministic synthetic text in
-   chunks no larger than 40,000 estimated tokens and 750 KiB serialized per
+   frames smaller than 63 KiB, using at most 20,500 two-letter words per data
    prompt. Request a short reply. After each completed turn, record provider
    `last.totalTokens`, aggregate input, rollout size, hook events, and thread
    identity. Verify the context count increases; stop if it does not. At
-   230,000 context tokens, reduce the next chunk to at most 8,000 estimated
-   tokens, then to at most 2,000 above 240,000. Let the provider's actual
+   215,000 context tokens, reduce the next chunk to 8,000 words, then to
+   2,000 above 230,000. Let the provider's actual
    usage, rather than the estimate, control each next step.
 2. Observe the first automatic PreCompact hook, one successful native LORE
    review, one provider compaction checkpoint, and the unchanged owned thread.
