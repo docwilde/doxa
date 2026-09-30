@@ -2723,7 +2723,7 @@ for line in sys.stdin:
         let mut app = App::default();
         app.groups[0].tabs.push("s".into());
         app.handle(Event::Resize(100, 30));
-        assert_eq!(COMMANDS.len(), 43);
+        assert_eq!(COMMANDS.len(), 44);
         let mut names = std::collections::HashSet::new();
         for row in COMMANDS { assert!(names.insert(row.name)); }
         app.open_help();
@@ -5407,7 +5407,8 @@ for line in sys.stdin:
     fn wheel_over_empty_pane_or_rail_never_scrolls_focused_transcript() {
         let mut app=App::default();app.sidebar_auto=false;app.rail_visible=true;app.handle(Event::Resize(120,40));app.groups[0].tabs.push("session".into());
         app.apply_update(DaemonUpdate::Upsert(Session{id:"session".into(),title:"session".into(),collection:"repo".into(),transcript:String::new(),status:"Offline".into()}));app.split=Split::Vertical;app.split_requested=true;let layout=app.layout(app.size);
-        assert!(!app.handle(wheel_event(MouseEventKind::ScrollUp,layout.rail.unwrap())));
+        assert!(app.handle(wheel_event(MouseEventKind::ScrollUp,layout.rail.unwrap())));
+        assert_eq!(app.focus, Focus::Rail);
         assert!(!app.handle(wheel_event(MouseEventKind::ScrollUp,app.pane_regions(1,layout.panes.unwrap()[1])[1])));
         assert_eq!(app.groups[0].scroll,0);assert_eq!(app.active_group,0);
     }
@@ -5463,7 +5464,7 @@ for line in sys.stdin:
         let rows=(0..25).map(|n|lore_picker::Proposal{pid:format!("pid-{n}"),kind:"memory".into(),action:"add".into(),scope:"user".into(),summary:format!("Cluster 1 · fact {n}")}).collect();
         tx.send(Ok(lore_picker::ResultPage::ClusteredProposals(rows,1))).unwrap();
         app.lore_picker.as_mut().unwrap().pending=Some(rx); assert!(app.poll_lore());
-        let painted=painted_at(&app,100,28); assert!(painted.contains("1 canonical memory clusters")); assert!(painted.contains("3 Clustered"));
+        let painted=painted_at(&app,100,28); assert!(painted.contains("1 memory clusters")); assert!(painted.contains("3 Clustered"));
         assert!(app.handle(Event::Key(KeyEvent::new(KeyCode::PageDown,KeyModifiers::NONE))));
         assert_eq!(app.lore_picker.as_ref().unwrap().selected,20); assert_eq!(app.lore_picker.as_ref().unwrap().offset,0);
         assert!(app.handle(Event::Key(KeyEvent::new(KeyCode::Char('4'),KeyModifiers::NONE))));

@@ -11,7 +11,7 @@ elsewhere; a second matching session gets `-2`. Explicit renames stay pinned.
 The [parity tracker](../docs/rust-1.19-parity.md) records stable release gates.
 The [2026-09-29 verification record](../docs/live-provider-verification-2026-09-29.md)
 reports the alpha.46 candidate's observed provider behavior and remaining checks.
-The [alpha.49–50 gallery](../docs/rust-gallery.md) records live terminal captures;
+The [current gallery](../docs/rust-gallery.md) records live terminal captures;
 it is visual evidence, not a new provider compatibility test.
 Linux is verified. The full protected DOXA runtime is unsupported on macOS and
 Windows; standalone LORE macOS is unverified and Windows is unsupported.

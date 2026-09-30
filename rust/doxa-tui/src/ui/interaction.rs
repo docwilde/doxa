@@ -237,6 +237,16 @@ impl App {
             self.slash_selected = 0;
             self.slash_dismissed = false;
         }
+        if self.focus != Focus::Rail {
+            if let Some(position) = self.rail_order().iter().position(|index| {
+                self.sessions[*index].id == after.1
+            }) {
+                self.rail_selected = position;
+            }
+        }
+        if !after.1.is_empty() {
+            self.unread_sessions.remove(&after.1);
+        }
     }
 
     pub(super) fn clipboard_target(&self) -> crate::clipboard::Target {
@@ -3037,7 +3047,8 @@ impl App {
                         && mouse.row > rail.y
                         && mouse.row < rail.bottom().saturating_sub(1)
                     {
-                        let row = usize::from(mouse.row - rail.y - 1);
+                        let row = usize::from(mouse.row - rail.y - 1)
+                            + self.rail_view_start(rail, &self.rail_rows());
                         match self.rail_rows().get(row) {
                             Some(RailRow::Heading(index)) => {
                                 self.collections[*index].collapsed =
@@ -3226,7 +3237,39 @@ impl App {
                 true
             }
             MouseEventKind::Up(MouseButton::Left) => self.drag.take().is_some(),
-            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => self.wheel_transcript(mouse),
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                let layout = self.layout(self.size);
+                if let Some(rail) = layout.rail {
+                    if rail.contains(ratatui::layout::Position::new(mouse.column, mouse.row)) {
+                        self.focus = Focus::Rail;
+                        if mouse.kind == MouseEventKind::ScrollUp {
+                            self.rail_selected = self.rail_selected.saturating_sub(1);
+                        } else {
+                            self.rail_selected = (self.rail_selected + 1)
+                                .min(self.rail_order().len().saturating_sub(1));
+                        }
+                        return true;
+                    }
+                }
+                let pane_hits = layout.panes
+                    .map(|panes| panes.into_iter().enumerate().collect::<Vec<_>>())
+                    .unwrap_or_else(|| vec![(self.active_group, layout.body)]);
+                for (index, pane) in pane_hits {
+                    if mouse.row == pane.y.saturating_add(1)
+                        && mouse.column > pane.x && mouse.column < pane.right().saturating_sub(1)
+                    {
+                        self.active_group = index;
+                        self.focus = Focus::Tabs;
+                        if mouse.kind == MouseEventKind::ScrollUp {
+                            self.previous_tab();
+                        } else {
+                            self.next_tab();
+                        }
+                        return true;
+                    }
+                }
+                self.wheel_transcript(mouse)
+            }
             _ => false,
         }
     }

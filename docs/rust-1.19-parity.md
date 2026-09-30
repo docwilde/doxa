@@ -1,7 +1,7 @@
 # Rust 2.0 parity with DOXA 1.19.0
 
 Baseline: Python `v1.19.0` production behavior. This tracker records implementation
-through **alpha.57**, with canonical **LORE 0.62.8**. Account checks
+through **alpha.58**, with canonical **LORE 0.62.8**. Account checks
 are bounded by their exact candidate and date.
 The Rust runtime implements the audited workflows below. Live account checks
 remain bounded by the [latest verification record](live-provider-verification-2026-09-29.md)
@@ -152,8 +152,8 @@ provenance and no additional tools.
 
 Alpha.50 supplied the [current event-loop benchmark](rust-ui-benchmark-2026-09-30.md)
 measurements; the [alpha.31 baseline](rust-ui-benchmark-2026-09-27.md) remains
-available. The [gallery](rust-gallery.md) records **alpha.49–50** live terminal
-captures, including both LORE browsers.
+available. The [gallery](rust-gallery.md) records **alpha.58** live terminal
+captures, including the session rail, tab overflow and both LORE browsers.
 
 See the [source audit](source-audit-2026-09-27.md) for confirmed follow-up fixes,
 engineering debt and validation limits.

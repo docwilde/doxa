@@ -525,10 +525,14 @@ fn terminal_backtab_reverses_focus_and_alt_tab_switches_panes() {
     app.apply_update(doxa_tui::ui::DaemonUpdate::Upsert(session("two", "Work")));
     assert!(app.handle(key(KeyCode::BackTab, KeyModifiers::NONE)));
     assert_eq!(app.active_group, 0);
-    assert_eq!(app.focus, Focus::Rail);
+    assert!(matches!(app.focus, Focus::Chip(_)));
     assert!(app.handle(key(KeyCode::Tab, KeyModifiers::NONE)));
     assert_eq!(app.focus, Focus::Prompt);
     assert!(app.handle(key(KeyCode::Tab, KeyModifiers::NONE)));
+    assert_eq!(app.focus, Focus::Tabs);
+    assert!(app.handle(key(KeyCode::Tab, KeyModifiers::NONE)));
+    assert_eq!(app.focus, Focus::Rail);
+    assert!(app.handle(key(KeyCode::Tab, KeyModifiers::SHIFT)));
     assert_eq!(app.focus, Focus::Tabs);
     assert!(app.handle(key(KeyCode::Tab, KeyModifiers::SHIFT)));
     assert_eq!(app.active_group, 0);
@@ -705,7 +709,9 @@ fn tool_activity_folds_in_transcript_and_expands_by_keyboard_or_mouse() {
     assert!(!collapsed.contains("hidden-result"), "{collapsed}");
 
     app.handle(key(KeyCode::Tab, KeyModifiers::NONE)); // Tab headers.
-    app.handle(key(KeyCode::Tab, KeyModifiers::NONE));
+    app.handle(key(KeyCode::Tab, KeyModifiers::NONE)); // Session rail.
+    app.handle(key(KeyCode::Tab, KeyModifiers::NONE)); // Transcript.
+    assert_eq!(app.focus, Focus::Transcript);
     assert!(app.handle(key(KeyCode::Enter, KeyModifiers::NONE)));
     let entries = screen(&app, 110, 30);
     assert!(entries.contains("Read · finished"), "{entries}");
@@ -748,7 +754,9 @@ fn restored_tool_activity_folds_and_expands_by_keyboard_and_mouse() {
     assert!(!collapsed.contains("restored-result"));
 
     app.handle(key(KeyCode::Tab, KeyModifiers::NONE)); // Tab headers.
-    app.handle(key(KeyCode::Tab, KeyModifiers::NONE));
+    app.handle(key(KeyCode::Tab, KeyModifiers::NONE)); // Session rail.
+    app.handle(key(KeyCode::Tab, KeyModifiers::NONE)); // Transcript.
+    assert_eq!(app.focus, Focus::Transcript);
     assert!(app.handle(key(KeyCode::Enter, KeyModifiers::NONE)));
     let entries = screen(&app, 110, 30);
     assert!(entries.contains("Read · finished"), "{entries}");

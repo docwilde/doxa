@@ -120,6 +120,63 @@ use super::*;
     }
 
     #[test]
+    fn tab_focus_and_wheel_keep_rail_selection_on_the_active_session() {
+        let mut app = App::default();
+        app.size = Rect::new(0, 0, 90, 25);
+        app.sidebar_auto = false;
+        app.rail_visible = true;
+        for index in 0..5 {
+            let id = format!("s{index}");
+            app.sessions.push(Session { id: id.clone(), title: format!("long example session {index}"),
+                collection: String::new(), transcript: String::new(), status: "Ready".into() });
+            app.groups[0].tabs.push(id);
+        }
+        assert!(app.focus_ring().contains(&Focus::Rail));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+        assert_eq!(app.focus, Focus::Rail);
+        app.focus = Focus::Tabs;
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)));
+        assert_eq!(app.groups[0].active, 1);
+        assert_eq!(app.rail_selected, 1);
+        let pane = app.layout(app.size).body;
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::ScrollDown,
+            column: pane.x + 8, row: pane.y + 1, modifiers: KeyModifiers::NONE }));
+        assert_eq!(app.groups[0].active, 2);
+        assert_eq!(app.rail_selected, 2);
+    }
+
+    #[test]
+    fn overflowing_tabs_and_rail_show_hidden_entries_and_queued_work() {
+        let mut app = App::default();
+        app.size = Rect::new(0, 0, 80, 15);
+        app.sidebar_auto = false;
+        app.rail_visible = true;
+        for index in 0..20 {
+            let id = format!("s{index}");
+            app.sessions.push(Session { id: id.clone(), title: format!("example session {index:02}"),
+                collection: String::new(), transcript: String::new(), status: "Ready".into() });
+            app.groups[0].tabs.push(id);
+        }
+        app.groups[0].active = 19;
+        app.rail_selected = 19;
+        app.session_activity.insert("s19".into(), (true, 2));
+        let body = app.layout(app.size).body;
+        let header = app.pane_regions(0, body)[0];
+        let (start, end, overflow) = app.tab_window(0, header.width);
+        assert!(overflow && start > 0 && end == 20);
+        assert!(app.rail_view_start(app.layout(app.size).rail.unwrap(), &app.rail_rows()) > 0);
+        let rendered = paint(&app);
+        assert!(rendered.contains('‹'));
+        assert!(rendered.contains("[q2]"), "{rendered}");
+        app.apply_daemon_frame(&json!({"type":"event", "session_id":"s18", "event":{"type":"turn_done", "data":{}}}));
+        assert!(app.unread_sessions.contains("s18"));
+        app.groups[0].active = 18;
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+        assert!(!app.unread_sessions.contains("s18"));
+    }
+
+    #[test]
     fn attached_pending_effort_prevents_a_second_transaction_until_authoritative_clear() {
         let mut app = App::default(); app.size = Rect::new(0, 0, 150, 32);
         app.apply_daemon_frame(&json!({"type":"hello","session_id":"s","engine":"claude","model":"sonnet","effort":"high","pending_effort":"low"}));
@@ -467,4 +524,3 @@ use super::*;
         assert_eq!(app.input, "/sessions kill one two");
         assert!(app.session_stop_pending.is_none());
     }
-

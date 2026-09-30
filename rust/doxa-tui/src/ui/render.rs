@@ -9,7 +9,7 @@ use super::{
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Tabs, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap};
 use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
@@ -1800,12 +1800,16 @@ impl App {
     }
 
     pub(super) fn draw_rail(&self, frame: &mut Frame, area: Rect) {
+        let rows = self.rail_rows();
+        let start = self.rail_view_start(area, &rows);
+        let visible = usize::from(area.height.saturating_sub(2));
+        let selected = self.rail_order().get(self.rail_selected).copied();
+        let active = self.groups.get(self.active_group).and_then(|group| group.active_id());
         let mut lines = Vec::new();
-        let mut position = 0;
-        for row in self.rail_rows() {
+        for row in rows.iter().skip(start).take(visible) {
             match row {
                 RailRow::Heading(index) => {
-                    let item = &self.collections[index];
+                    let item = &self.collections[*index];
                     let mark = if item.collapsed { "▸" } else { "▾" };
                     lines.push(Line::styled(
                         format!(" {mark} {}", item.name),
@@ -1821,22 +1825,42 @@ impl App {
                         .add_modifier(Modifier::BOLD),
                 )),
                 RailRow::Session(index) => {
-                    let session = &self.sessions[index];
-                    let mark = if position == self.rail_selected {
+                    let session = &self.sessions[*index];
+                    let waiting = self.waiting_for_input(&session.id);
+                    let running = self.session_activity.get(&session.id).is_some_and(|activity| activity.0)
+                        || self.local_shell_jobs.iter().any(|job| job.session == session.id);
+                    let mark = if waiting {
+                        if self.blink_on { "●" } else { " " }
+                    } else if running {
+                        SPINNER_FRAMES[self.spinner_frame]
+                    } else if self.unread_sessions.contains(&session.id) {
+                        "●"
+                    } else if Some(*index) == selected {
                         "▸"
+                    } else if active == Some(session.id.as_str()) {
+                        "●"
                     } else {
                         " "
                     };
-                    let style = if self.waiting_for_input(&session.id) && self.blink_on {
+                    let queued = self.session_activity.get(&session.id).map(|activity| activity.1).unwrap_or(0)
+                        + self.pending_prompts.iter().filter(|(id, _)| id == &session.id).count();
+                    let badge = if queued > 0 { format!(" [q{queued}]") } else { String::new() };
+                    let title_width = usize::from(area.width.saturating_sub(5))
+                        .saturating_sub(badge.width());
+                    let title = clipped_title(&session.title, title_width).0;
+                    let style = if waiting && self.blink_on {
                         Style::default()
                             .fg(theme::TEXT)
                             .bg(theme::ERROR)
                             .add_modifier(Modifier::BOLD)
+                    } else if self.unread_sessions.contains(&session.id) && !waiting {
+                        Style::default().fg(theme::BASE).bg(theme::SUCCESS).add_modifier(Modifier::BOLD)
+                    } else if Some(*index) == selected && self.focus == Focus::Rail {
+                        Style::default().fg(theme::ACCENT).bg(theme::RAISED).add_modifier(Modifier::BOLD)
                     } else {
                         Style::default()
                     };
-                    lines.push(Line::styled(format!("{mark} {}", session.title), style));
-                    position += 1;
+                    lines.push(Line::styled(format!("{mark} {title}{badge}"), style));
                 }
             }
         }
@@ -1858,6 +1882,17 @@ impl App {
                 ),
             area,
         );
+        if rows.len() > visible && area.width >= 5 {
+            let mut state = ScrollbarState::new(rows.len()).position(start).viewport_content_length(visible);
+            frame.render_stateful_widget(
+                Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                    .begin_symbol(None).end_symbol(None)
+                    .track_style(Style::default().fg(theme::SECONDARY))
+                    .thumb_style(Style::default().fg(theme::ACCENT)),
+                Rect::new(area.right() - 2, area.y + 1, 1, area.height - 2),
+                &mut state,
+            );
+        }
     }
 
     pub(super) fn draw_group(&self, frame: &mut Frame, area: Rect, index: usize) {
@@ -1923,27 +1958,6 @@ impl App {
         };
         let inner = self.pane_regions(index, area);
         let chooser_height = inner[2].height;
-        let titles: Vec<Line> = group
-            .tabs
-            .iter()
-            .map(|id| {
-                let name = self
-                    .sessions
-                    .iter()
-                    .find(|s| &s.id == id)
-                    .map(|s| s.title.as_str())
-                    .unwrap_or(id);
-                let style = if self.waiting_for_input(id) && self.blink_on {
-                    Style::default()
-                        .fg(theme::TEXT)
-                        .bg(theme::ERROR)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                };
-                Line::styled(name.to_owned(), style)
-            })
-            .collect();
         let clock_width = if index == self.active_group && !self.clock_text.is_empty() {
             (self.clock_text.width() + 2).min(usize::from(inner[0].width.saturating_sub(15))) as u16
         } else {
@@ -1955,29 +1969,8 @@ impl App {
             inner[0].width.saturating_sub(clock_width),
             inner[0].height,
         );
-        let tabs = Tabs::new(if titles.is_empty() {
-            vec![Line::from("Empty")]
-        } else {
-            titles
-        })
-        .select(group.active.min(group.tabs.len().saturating_sub(1)))
-        .highlight_style(
-            if group
-                .active_id()
-                .is_some_and(|id| self.waiting_for_input(id))
-                && self.blink_on
-            {
-                Style::default()
-                    .fg(theme::TEXT)
-                    .bg(theme::ERROR)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-                    .fg(theme::ACCENT)
-                    .add_modifier(Modifier::BOLD)
-            },
-        )
-        .block(
+        let (start, end, overflow) = self.tab_window(index, tabs_area.width);
+        frame.render_widget(
             Block::default()
                 .title(format!(
                     " Pane {}{} ",
@@ -2005,12 +1998,44 @@ impl App {
                             theme::BORDER
                         },
                     ),
-                ),
-        );
-        frame.render_widget(
-            tabs.style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)),
+                )
+                .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)),
             tabs_area,
         );
+        let content_width = usize::from(tabs_area.width.saturating_sub(2 + if overflow { 10 } else { 0 }));
+        let mut used = 0usize;
+        let mut parts = Vec::new();
+        if group.tabs.is_empty() { parts.push(Span::raw("Empty")); }
+        for position in start..end {
+            if position > start {
+                parts.push(Span::raw(" │ "));
+                used += 3;
+            }
+            let id = &group.tabs[position];
+            let name = self.tab_title(id);
+            let label = clipped_title(name, content_width.saturating_sub(used)).0;
+            used += label.width();
+            let style = if self.waiting_for_input(id) && self.blink_on {
+                Style::default().fg(theme::TEXT).bg(theme::ERROR).add_modifier(Modifier::BOLD)
+            } else if position == group.active {
+                Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme::SECONDARY)
+            };
+            parts.push(Span::styled(label, style));
+        }
+        if tabs_area.width > 2 {
+            let left = tabs_area.x + 1;
+            let top = tabs_area.y + 1;
+            if overflow {
+                let left_label = if start > 0 { format!("‹{:>3}", start) } else { "    ".into() };
+                let right_count = group.tabs.len() - end;
+                let right_label = if right_count > 0 { format!("{:>3}›", right_count) } else { "    ".into() };
+                frame.render_widget(Paragraph::new(left_label).style(Style::default().fg(theme::ACCENT)), Rect::new(left, top, 4, 1));
+                frame.render_widget(Paragraph::new(right_label).style(Style::default().fg(theme::ACCENT)), Rect::new(tabs_area.right().saturating_sub(5), top, 4, 1));
+            }
+            frame.render_widget(Paragraph::new(Line::from(parts)), Rect::new(left + if overflow { 5 } else { 0 }, top, content_width as u16, 1));
+        }
         if clock_width > 0 {
             frame.render_widget(
                 Paragraph::new(self.clock_text.as_str())
