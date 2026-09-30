@@ -343,7 +343,20 @@ pub fn run_socket_expected(path: impl AsRef<Path>, expected: Option<&str>) -> io
     drop(client);
     let runtime = path.parent().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput,
         "daemon socket has no runtime directory"))?;
-    let session = registered_socket(crate::discovery::sessions_in(runtime)?, &id, &path)?;
+    let session = match registered_socket(crate::discovery::sessions_in(runtime)?, &id, &path) {
+        Ok(session) => session,
+        // Explicit socket attachment worked before titles lived in the
+        // registry. Retain it when an otherwise valid daemon has no entry.
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Session {
+            id,
+            title: String::new(),
+            socket: path,
+            scope_key: String::new(),
+            clients: None,
+            started_at: String::new(),
+        },
+        Err(error) => return Err(error),
+    };
     run_sessions(&[session], None)
 }
 

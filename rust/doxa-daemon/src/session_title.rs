@@ -106,12 +106,10 @@ pub(super) fn available(base: &str, existing: impl IntoIterator<Item = String>) 
 
 pub(super) fn from_registry(runtime: &Path, session_id: &str, base: &str) -> std::io::Result<String> {
     let registry = runtime.join("registry");
-    let existing = doxa_state::registry_paths(&registry)?
+    let existing = doxa_state::list_daemons(&registry, None, str::to_owned)?
         .into_iter()
-        .filter(|path| path.file_stem().and_then(|name| name.to_str()) != Some(session_id))
-        .filter_map(|path| doxa_state::read_registry_entry(&path, true).ok())
-        .filter_map(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-        .filter_map(|entry| entry["title"].as_str().map(str::to_owned));
+        .filter(|entry| entry.route.session_id != session_id)
+        .map(|entry| entry.display.title);
     Ok(available(base, existing))
 }
 
@@ -138,5 +136,16 @@ mod tests {
         assert_eq!(base(Some("deepseek-flash"), "deepseek", &cwd, None), "deepseek-flash@work/notes");
         let existing = ["gpt-6-sol@main/doxa".to_owned(), "gpt-6-sol@main/doxa-3".to_owned()];
         assert_eq!(available("gpt-6-sol@main/doxa", existing), "gpt-6-sol@main/doxa-2");
+    }
+
+    #[test]
+    fn stale_registry_entry_does_not_reserve_a_title() {
+        let runtime = tempfile::tempdir().unwrap();
+        let registry = runtime.path().join("registry");
+        std::fs::create_dir(&registry).unwrap();
+        std::fs::write(registry.join("stale.json"),
+            r#"{"session_id":"stale","title":"gpt-6-sol@main/doxa","pid":999999999}"#).unwrap();
+        assert_eq!(from_registry(runtime.path(), "new", "gpt-6-sol@main/doxa").unwrap(),
+            "gpt-6-sol@main/doxa");
     }
 }

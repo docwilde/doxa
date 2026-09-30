@@ -416,7 +416,8 @@ struct Registry {
     parent_session_id: Option<String>,
 }
 impl Registry {
-    fn new(options: &Options, socket: &Path, daemon_socket: &Path, title: String) -> io::Result<Self> {
+    fn new(options: &Options, socket: &Path, daemon_socket: &Path,
+        title: String, repo_root: Option<String>) -> io::Result<Self> {
         let dir = options.runtime.join("registry");
         owned_directory(&dir)?;
         let path = dir.join(format!("{}.json", options.session_id));
@@ -426,8 +427,6 @@ impl Registry {
                 "session registry entry already exists",
             ));
         }
-        // Linked worktrees share a project scope through their common Git dir.
-        let repo_root = session_title::repo_root(&options.cwd);
         Ok(Self {
             path,
             identity: None,
@@ -681,7 +680,7 @@ fn run() -> io::Result<()> {
     };
     let mut handle = Daemon::bind(&options.runtime, session, host)?.start();
     let inbox = Inbox::bind(&options.runtime, &options.session_id)?;
-    let mut registry = Registry::new(&options, inbox.path(), handle.socket_path(), title)?;
+    let mut registry = Registry::new(&options, inbox.path(), handle.socket_path(), title, repo_root)?;
     registry.write(0)?;
     drop(title_lock);
     let mut remote_bridge = match remote_bridge::Bootstrap::request(&options.runtime) {
