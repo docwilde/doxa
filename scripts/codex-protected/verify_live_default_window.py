@@ -160,17 +160,20 @@ def main(args):
     with tempfile.TemporaryDirectory(prefix='cw-', dir=args.scratch) as raw:
         root = Path(raw)
         root.chmod(0o700)
-        for name in ('codex','doxa','lore','workspace'):
+        for name in ('codex','doxa','lore','workspace','tmp'):
             (root/name).mkdir(mode=0o700)
         for name in ('auth.json','models_cache.json'):
             dest = root/'codex'/name
             shutil.copyfile(args.auth_home/name,dest)
             dest.chmod(0o600)
         environment = os.environ.copy()
+        # The check must use the copied account login, not an ambient API key.
+        environment.pop('OPENAI_API_KEY', None)
+        environment.pop('CODEX_API_KEY', None)
         environment.update({'DOXA_HOME':str(root/'doxa'),'CODEX_HOME':str(root/'codex'),
             'LORE_ROOT':str(root/'lore'),'LORE_PROJECTS_DIR':str(root/'projects'),
             'DOXA_LORE':'1','LORE_DISABLE_SYNC':'1','LORE_SYNC_URL':'',
-            'DOXA_LORE_RS':str(args.lore),'DOXA_AGENT_PEER_SEND':'0','TMPDIR':str(args.scratch)})
+            'DOXA_LORE_RS':str(args.lore),'DOXA_AGENT_PEER_SEND':'0','TMPDIR':str(root/'tmp')})
         session = 'live-'+secrets.token_hex(5)
         sentinel = secrets.token_hex(8)
         registry = root/'runtime/registry'/f'{session}.json'
@@ -209,6 +212,7 @@ def main(args):
                 if not isinstance(current,int) or not isinstance(reported_aggregate,int):
                     emit(stage='stopped',reason='missing_usage',turns=submitted)
                     return False
+                # Codex turn_done carries session-cumulative input, not turn input.
                 aggregate = reported_aggregate
                 reviews += events['lore_review_completed']
                 files, compacted, thread_id = checkpoints(root/'codex')
@@ -217,7 +221,8 @@ def main(args):
                     review_started=events['lore_review_started'],review_completed=events['lore_review_completed'],
                     checkpoints=compacted,rollouts=files,is_error=bool(done.get('is_error')),
                     response_exact_ok=reply.strip()=='OK')
-                if (done.get('is_error') or aggregate > MAX_AGGREGATE or reviews > 1
+                if (done.get('is_error') or reply.strip() != 'OK'
+                    or aggregate > MAX_AGGREGATE or reviews > 1
                     or events['lore_review_started'] > 1 or compacted > 1
                     or compacted > reviews or files != 1):
                     emit(stage='stopped',reason='failed_turn_or_hard_cap',turns=submitted)
