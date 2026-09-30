@@ -1440,7 +1440,8 @@ for line in sys.stdin:
         assert!(app.attaching_ids.is_empty());
         assert!(app.notice.starts_with("Attach failed"));
         app.handle(Event::Key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL)));
-        assert!(app.should_quit, "failed attach must not veto closing the owned tab");
+        assert!(app.groups[0].tabs.is_empty(), "failed attach must not veto closing the owned tab");
+        assert!(!app.should_quit);
         bridge.shutdown();
     }
 
@@ -2851,7 +2852,8 @@ for line in sys.stdin:
 
         app.input = "/detach".into();
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
-        assert!(app.should_quit);
+        assert!(app.groups[0].tabs.is_empty());
+        assert!(!app.should_quit);
     }
 
     #[test]
@@ -2874,6 +2876,83 @@ for line in sys.stdin:
         app.rail_selected = app.rail_order().iter().position(|index| app.sessions[*index].id == "second").unwrap();
         app.open_selected();
         assert_eq!(app.groups[0].active_id(), Some("second"));
+    }
+
+    #[test]
+    fn navigation_keys_keep_pane_drafts_and_quit_detaches_daemons() {
+        let mut app = App::default();
+        app.handle(Event::Resize(100, 28));
+        for id in ["first", "second", "other"] {
+            app.apply_update(DaemonUpdate::Upsert(Session {
+                id: id.into(), title: id.into(), collection: String::new(),
+                transcript: String::new(), status: "Ready".into(),
+            }));
+        }
+        app.groups[0].tabs = vec!["first".into(), "second".into()];
+        app.groups[0].active = 0;
+        app.groups[1].tabs = vec!["other".into()];
+        app.split_requested = true;
+        app.focus = Focus::Prompt;
+        app.input = "first draft".into();
+        app.input_cursor = app.input.len();
+
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL)));
+        assert_eq!(app.groups[0].active_id(), Some("second"));
+        assert!(app.input.is_empty());
+        app.input = "second draft".into();
+        app.input_cursor = app.input.len();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Right, KeyModifiers::SHIFT)));
+        assert_eq!(app.active_group, 1);
+        assert_eq!(app.focus, Focus::Prompt);
+        app.input = "other draft".into();
+        app.input_cursor = app.input.len();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT)));
+        assert_eq!(app.active_group, 0);
+        assert_eq!(app.input, "second draft");
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL)));
+        assert_eq!(app.groups[0].active_id(), Some("first"));
+        assert_eq!(app.input, "first draft");
+
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL)));
+        assert_eq!(app.groups[0].tabs, ["second"]);
+        assert!(!app.should_quit);
+        assert!(app.detached_this_run.contains(&"first".to_owned()));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)));
+        assert!(app.should_quit);
+        assert!(app.killed_this_run.is_empty());
+        assert_eq!(app.groups[0].tabs, ["second"]);
+        assert_eq!(app.groups[1].tabs, ["other"]);
+    }
+
+    #[test]
+    fn ctrl_x_last_tab_leaves_an_empty_window_for_new_sessions() {
+        let mut app = App::default();
+        app.groups[0].tabs.push("only".into());
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL)));
+        assert!(app.groups.iter().all(|group| group.tabs.is_empty()));
+        assert_eq!(app.active_group, 0);
+        assert!(!app.should_quit);
+        assert_eq!(app.detached_this_run, ["only"]);
+    }
+
+    #[test]
+    fn only_verified_dead_detached_sessions_leave_the_rail() {
+        let mut app = App::default();
+        for id in ["dead", "live", "open"] {
+            app.apply_update(DaemonUpdate::Upsert(Session {
+                id: id.into(), title: id.into(), collection: String::new(),
+                transcript: "saved transcript".into(), status: "Disconnected".into(),
+            }));
+        }
+        app.groups[0].tabs = vec!["open".into()];
+        let live = std::collections::HashSet::from(["live".to_owned()]);
+        assert!(app.mark_dead_detached(&live));
+        assert!(app.offline_ids.contains("dead"));
+        assert!(!app.offline_ids.contains("live"));
+        assert!(!app.offline_ids.contains("open"));
+        let visible: Vec<_> = app.rail_order().iter().map(|index| app.sessions[*index].id.as_str()).collect();
+        assert_eq!(visible, ["live", "open"]);
+        assert!(app.sessions.iter().any(|session| session.id == "dead" && session.transcript == "saved transcript"));
     }
 
     #[test]

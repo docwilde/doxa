@@ -5,6 +5,17 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.56 — 2026-09-30
+
+**Session navigation**
+
+- Add **Ctrl+X** to close only the active tab without stopping its daemon;
+  closing the last tab keeps DOXA open. **Ctrl+Q** exits with sessions and owned fleets detached.
+- Use **Ctrl+Left/Right** to switch tabs in the current pane and
+  **Shift+Left/Right** to focus another pane's prompt.
+- Remove disconnected detached sessions from the rail after the live daemon
+  registry confirms they are gone. Their transcripts remain in history.
+
 ## 2.0.0-alpha.55 — 2026-09-30
 
 **Native LORE credential scrubbing**

@@ -1,8 +1,8 @@
 <p align="center"><img src="assets/logo.png" width="560" alt="DOXA — belief earning knowledge"></p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Rust%202.0-alpha.55-f59f00" alt="Rust 2.0 alpha.55 is the main frontend">
-  <a href="https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.55"><img src="https://img.shields.io/github/v/release/docwilde/doxa?include_prereleases&amp;sort=semver&amp;label=Rust%20release&amp;color=e8590c" alt="latest Rust release"></a>
+  <img src="https://img.shields.io/badge/Rust%202.0-alpha.56-f59f00" alt="Rust 2.0 alpha.56 is the main frontend">
+  <a href="https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.56"><img src="https://img.shields.io/github/v/release/docwilde/doxa?include_prereleases&amp;sort=semver&amp;label=Rust%20release&amp;color=e8590c" alt="latest Rust release"></a>
   <a href="https://github.com/docwilde/doxa/actions/workflows/rust-ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/docwilde/doxa/rust-ci.yml?branch=main&label=Rust%20CI" alt="Rust CI status"></a>
   <img src="https://img.shields.io/badge/TUI-Ratatui-2f9e44" alt="Rust TUI built with Ratatui">
   <img src="https://img.shields.io/badge/auth-provider%20CLI%20or%20API%20key-2f9e44" alt="authentication follows the selected engine">
@@ -14,7 +14,7 @@
 > can edit files and run commands with your privileges. Read
 > [Non-goals](#non-goals) before using it on important work.
 
-The official latest GitHub release is [v2.0.0-alpha.55](https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.55).
+The official latest GitHub release is [v2.0.0-alpha.56](https://github.com/docwilde/doxa/releases/tag/v2.0.0-alpha.56).
 Rust 2.0 leads development and remains an evolving alpha. See the
 [parity tracker](docs/rust-1.19-parity.md) for supported provider contracts and
 remaining release gates, and the [source audit](docs/source-audit-2026-09-27.md)
@@ -46,14 +46,14 @@ results are real. See the [capture method](docs/rust-gallery.md).*
 
 - **Four engines:** Run Claude, Codex, DeepSeek or GLM with supported model, reasoning effort and permission controls.
 - **Flexible workspace:** Group tabs, split panes horizontally or vertically, and drag dividers; each pane has its own prompt.
-- **Session recovery:** Restore tabs and layouts, safely resume recorded conversations, or reattach to running daemons. Unavailable sessions stay visible; unsent drafts belong to each pane while the app is open.
+- **Session recovery:** Restore tabs and layouts, safely resume recorded conversations, or reattach to running daemons. Dead detached sessions leave the rail but remain searchable in history.
 - **Readable session titles:** New sessions use `model@branch/repo` in Git or `model@short-path` elsewhere, with stable numbers for duplicates.
 - **Clear conversations:** Follow live progress, expand reasoning or individual tool calls, and open links with Ctrl+click.
 - **Shared memory:** Browse and filter LORE facts and beliefs, inspect full entries and evidence, and approve or reject fully reviewed changes.
 - **Repo and worktree tools:** Browse folders, switch branches, inspect diffs and reject tracked hunks. Recover or clean up managed checkouts with ownership checks.
 - **Fleets and peers:** Coordinate supervised agents and inspect clickable peers and recent messages in the TUI or browser mesh. Spend limits require complete reported accounting.
 - **Usage at a glance:** Inspect reported context, plan, quota and API balance details; unavailable values stay unknown.
-- **Keyboard and mouse:** Approve a request inline or approve the same tool for the rest of its session. Navigate with Tab, complete slash commands, and copy or paste where supported.
+- **Keyboard and mouse:** Use Ctrl+Left/Right for tabs, Shift+Left/Right for pane prompts, Ctrl+X to close a tab, and Ctrl+Q to exit with sessions detached. Approve requests inline and copy or paste where supported.
 - **Setup and customization:** Manage provider login, masked API keys, plugins and settings. Run private local shell commands with `!`.
 
 See the [Rust guide](rust/README.md) for engine capabilities, shortcuts and
@@ -132,7 +132,7 @@ curl -fsSL https://raw.githubusercontent.com/docwilde/doxa/main/scripts/install.
 
 The installer builds the Rust frontend and daemon from `main` and installs the
 Rust `doxa` command in `~/.local/bin` (or `DOXA_RUST_BIN_DIR`). Pass a tag such
-as `v2.0.0-alpha.55` after `sh -s --` to pin a release. Git and Cargo build three
+as `v2.0.0-alpha.56` after `sh -s --` to pin a release. Git and Cargo build three
 native binaries: the frontend, daemon and LORE carrier. Claude requires its CLI.
 When Codex is installed, the installer also builds a private, protected Codex
 app server and its required Code Mode host; the official CLI remains available

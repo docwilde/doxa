@@ -94,7 +94,11 @@ Ctrl+R and `/search TEXT` use the prompt as the query field, with results above
 it. Indexed excerpts and bounded fallback scans are scrubbed; external entries
 without verified readable session files do not become resumable sessions.
 
-Ctrl+W detaches the current tab; Ctrl+Q detaches the frontend. Inline questions
+Ctrl+X closes the active tab and leaves its daemon running; Ctrl+W is an alias.
+Ctrl+Q exits the frontend and leaves all running sessions detached. Ctrl+Left/Right
+switches tabs in the current pane; Shift+Left/Right switches between pane prompts.
+Dead detached sessions leave the session rail after live-registry verification;
+their saved transcripts remain available through session history. Inline questions
 support selectable answers, free text, and Other drafts. Secret-input requests
 are refused until private masked input exists. Permission approval requiring
 full review is unavailable until the complete summary has been read. Reconnect
@@ -181,7 +185,7 @@ Claude and Codex usage must match the accounting model and basis.
 in the action palette. `/fleet start OPTIONS` and `/fleet resume RUN` require
 complete plan review and explicit arming before spawning an owned controller.
 Arguments are passed directly, without shell evaluation. Task text and child
-output stay private. Ctrl+C cancels a controller; Ctrl+Q waits for teardown
+output stay private. Ctrl+C cancels a controller; Ctrl+Q detaches it
 before exiting. Controller completion refreshes actual manifest state.
 
 `/peers` and Ctrl+M open the native peer map. `/msg PEER TEXT` sends
