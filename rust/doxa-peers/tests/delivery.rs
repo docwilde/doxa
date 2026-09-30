@@ -119,10 +119,30 @@ fn full_peer_connect_queue_does_not_stall_delivery() -> io::Result<()> {
         sent_at: now(), body: "hello".into(), from_repo: None, kind: None };
     let (tx, rx) = mpsc::channel();
     let started = Instant::now();
-    thread::spawn(move || { let _ = tx.send(send(&path, &frame)); });
+    let blocked_path = path.clone();
+    let blocked_frame = frame.clone();
+    thread::spawn(move || { let _ = tx.send(send(&blocked_path, &blocked_frame)); });
     let result = rx.recv_timeout(Duration::from_secs(4)).expect("peer delivery blocked on a full connect queue");
     assert!(result.is_err(), "unaccepted peer should not receive the frame");
     assert!(started.elapsed() < Duration::from_secs(4));
+
+    // A short backlog must recover without losing the next message.
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || { let _ = tx.send(send(&path, &frame)); });
+    listener.set_nonblocking(true)?;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut accepted = Vec::new();
+    let recovered = loop {
+        if let Ok(result) = rx.try_recv() { break result; }
+        match listener.accept() {
+            Ok((stream, _)) => accepted.push(stream),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {},
+            Err(error) => return Err(error),
+        }
+        assert!(Instant::now() < deadline, "peer delivery did not recover after accepting queued peers");
+        thread::sleep(Duration::from_millis(10));
+    };
+    assert!(recovered.is_ok(), "peer delivery did not recover: {recovered:?}");
     Ok(())
 }
 

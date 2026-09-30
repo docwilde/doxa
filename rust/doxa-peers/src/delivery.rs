@@ -174,39 +174,53 @@ fn connect_before(path: &Path, deadline: Instant) -> io::Result<UnixStream> {
     }
     address.sun_family = libc::AF_UNIX as libc::sa_family_t;
     for (slot, byte) in address.sun_path.iter_mut().zip(bytes) { *slot = *byte as libc::c_char; }
-    let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC, 0) };
-    if fd < 0 { return Err(io::Error::last_os_error()); }
-    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
     let size = (std::mem::offset_of!(libc::sockaddr_un, sun_path) + bytes.len() + 1) as libc::socklen_t;
-    let result = unsafe { libc::connect(fd.as_raw_fd(), (&address as *const libc::sockaddr_un).cast(), size) };
-    if result < 0 {
-        let error = io::Error::last_os_error();
-        if error.raw_os_error() != Some(libc::EINPROGRESS) { return Err(error); }
-        loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() { return Err(io::Error::new(io::ErrorKind::TimedOut, "peer connect timed out")); }
-            let mut ready = libc::pollfd { fd: fd.as_raw_fd(), events: libc::POLLOUT, revents: 0 };
-            let millis = remaining.as_millis().max(1).min(i32::MAX as u128) as i32;
-            let result = unsafe { libc::poll(&mut ready, 1, millis) };
-            if result == 0 { return Err(io::Error::new(io::ErrorKind::TimedOut, "peer connect timed out")); }
-            if result < 0 {
-                let error = io::Error::last_os_error();
-                if error.kind() == io::ErrorKind::Interrupted { continue; }
-                return Err(error);
-            }
-            let mut socket_error = 0;
-            let mut error_size = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
-            if unsafe { libc::getsockopt(fd.as_raw_fd(), libc::SOL_SOCKET, libc::SO_ERROR,
-                (&mut socket_error as *mut libc::c_int).cast(), &mut error_size) } < 0 {
-                return Err(io::Error::last_os_error());
-            }
-            if socket_error != 0 { return Err(io::Error::from_raw_os_error(socket_error)); }
-            break;
+    loop {
+        if deadline.saturating_duration_since(Instant::now()).is_zero() {
+            return Err(io::Error::new(io::ErrorKind::TimedOut, "peer connect timed out"));
         }
+        let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC, 0) };
+        if fd < 0 { return Err(io::Error::last_os_error()); }
+        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+        let result = unsafe { libc::connect(fd.as_raw_fd(), (&address as *const libc::sockaddr_un).cast(), size) };
+        if result < 0 {
+            let error = io::Error::last_os_error();
+            // Linux reports EAGAIN, rather than EINPROGRESS, when a
+            // nonblocking AF_UNIX listener's queue is full. A fresh socket
+            // can connect as soon as the listener accepts a queued peer.
+            if error.kind() == io::ErrorKind::WouldBlock {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() { return Err(io::Error::new(io::ErrorKind::TimedOut, "peer connect timed out")); }
+                std::thread::sleep(remaining.min(Duration::from_millis(10)));
+                continue;
+            }
+            if error.raw_os_error() != Some(libc::EINPROGRESS) { return Err(error); }
+            loop {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() { return Err(io::Error::new(io::ErrorKind::TimedOut, "peer connect timed out")); }
+                let mut ready = libc::pollfd { fd: fd.as_raw_fd(), events: libc::POLLOUT, revents: 0 };
+                let millis = remaining.as_millis().max(1).min(i32::MAX as u128) as i32;
+                let result = unsafe { libc::poll(&mut ready, 1, millis) };
+                if result == 0 { return Err(io::Error::new(io::ErrorKind::TimedOut, "peer connect timed out")); }
+                if result < 0 {
+                    let error = io::Error::last_os_error();
+                    if error.kind() == io::ErrorKind::Interrupted { continue; }
+                    return Err(error);
+                }
+                let mut socket_error = 0;
+                let mut error_size = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+                if unsafe { libc::getsockopt(fd.as_raw_fd(), libc::SOL_SOCKET, libc::SO_ERROR,
+                    (&mut socket_error as *mut libc::c_int).cast(), &mut error_size) } < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                if socket_error != 0 { return Err(io::Error::from_raw_os_error(socket_error)); }
+                break;
+            }
+        }
+        let stream = UnixStream::from(fd);
+        stream.set_nonblocking(false)?;
+        return Ok(stream);
     }
-    let stream = UnixStream::from(fd);
-    stream.set_nonblocking(false)?;
-    Ok(stream)
 }
 
 pub fn send(path: &Path, frame: &PeerFrame) -> io::Result<()> {
