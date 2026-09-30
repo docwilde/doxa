@@ -1,7 +1,7 @@
 # Rust 2.0 parity with DOXA 1.19.0
 
 Baseline: Python `v1.19.0` production behavior. This tracker records implementation
-through **alpha.53**, with canonical **LORE 0.62.6**. Account checks
+through **alpha.54**, with canonical **LORE 0.62.7**. Account checks
 are bounded by their exact candidate and date.
 The Rust runtime implements the audited workflows below. Live account checks
 remain bounded by the [latest verification record](live-provider-verification-2026-09-29.md)
@@ -42,6 +42,7 @@ coverage alone does not establish authenticated compatibility for every provider
 | Alpha.50–51 | Capture the belief/memory browsers from the live app, rerun the Rust UI benchmark, and record bounded DeepSeek/GLM stop/resume recall and usage. |
 | Alpha.52 | Pin LORE 0.62.6 session replay repair and add a credential-free Codex default-window compaction fixture. |
 | Alpha.53 | Record the authenticated default-window Codex compaction and post-restart recall; check in the bounded verifier. |
+| Alpha.54 | Pin LORE 0.62.7. A private fresh direct-peer replay settled 4,568 signed operations with 4,555 applied, 13 quarantined, no failed/deferred/unverified rows and a banked cursor. |
 
 Standalone LORE administration, hooks, MCP and network operations are native Rust;
 they are not a remaining Python replacement task. See the
@@ -62,7 +63,7 @@ retains fixed Claude/vendor streaming checks and its earlier incomplete run.
 | DeepSeek recall/resume | Current two-turn native file-read and exact-nonce recall passed across daemon stop/resume with complete vendor-reported usage. Earlier candidate failure's cause remains unknown; the three-turn streaming diagnosis passed separately with 316 text deltas and 81 reasoning-progress events. |
 | z.ai GLM usage | Current two-turn native file-read and exact-nonce recall passed across stop/resume. Complete numeric vendor-reported usage was captured on both turns. Earlier three turns and same-session low → high effort passed with 408 text deltas. |
 | Codex default-window automatic compaction | **Passed for alpha.52 and protected Codex 0.156.1 with `gpt-5.5`:** seven data turns reached one native LORE review and one checkpoint; exact first-turn token recall passed after one daemon restart. The seventh turn's aggregate input was 1,172,180 tokens. See the [measured result](live-default-window-compaction-2026-09-30.md) for scope and retained evidence. |
-| Full historic LORE replica | After re-signing 574 authentic local operations, a private direct-peer replay of 4,554 signed source ops applied 4,535, with zero unverified. Thirteen historical belief operations have null references, six remain deferred, and the cursor stays unadvanced. The existing hub retains immutable older unsigned duplicates; full historical convergence remains open. |
+| Full historic LORE replica | A private fresh direct-peer replay of 4,568 signed source ops settled 4,555 applied and 13 quarantined, with zero unverified, failed or deferred and an advanced cursor. Original IDs, MACs and payloads match; normalized belief, edge, evidence and session digests match. The existing hub retains immutable older unsigned copies and was not migrated. |
 
 The one approved paid compaction cycle is complete; no further paid tests are
 running. Unknown plan, quota, balance and context values remain

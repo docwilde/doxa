@@ -5,6 +5,17 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.54 — 2026-09-30
+
+**LORE historical sync convergence**
+
+- Pin **`lore-core`** 0.62.7 in the native runtime and Python test oracle.
+  Signed belief operations with missing UID references stay quarantined.
+- A private direct-peer replay settled 4,568 signed operations: 4,555 applied,
+  13 quarantined, zero failed/deferred/unverified, with the cursor advanced.
+- The existing hub still holds immutable older unsigned copies. This release
+  documents the fresh signed peer route; it does not migrate the hub.
+
 ## 2.0.0-alpha.53 — 2026-09-30
 
 **Authenticated Codex compaction**
