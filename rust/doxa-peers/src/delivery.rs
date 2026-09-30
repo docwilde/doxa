@@ -6,7 +6,8 @@ use sha2::{Digest, Sha256};
 use std::collections::VecDeque;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -165,7 +166,48 @@ impl Drop for Inbox {
         }
     }
 }
-use std::os::unix::ffi::OsStrExt;
+fn connect_before(path: &Path, deadline: Instant) -> io::Result<UnixStream> {
+    let bytes = path.as_os_str().as_bytes();
+    let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    if bytes.is_empty() || bytes.contains(&0) || bytes.len() >= address.sun_path.len() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid peer socket path"));
+    }
+    address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    for (slot, byte) in address.sun_path.iter_mut().zip(bytes) { *slot = *byte as libc::c_char; }
+    let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC, 0) };
+    if fd < 0 { return Err(io::Error::last_os_error()); }
+    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+    let size = (std::mem::offset_of!(libc::sockaddr_un, sun_path) + bytes.len() + 1) as libc::socklen_t;
+    let result = unsafe { libc::connect(fd.as_raw_fd(), (&address as *const libc::sockaddr_un).cast(), size) };
+    if result < 0 {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::EINPROGRESS) { return Err(error); }
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() { return Err(io::Error::new(io::ErrorKind::TimedOut, "peer connect timed out")); }
+            let mut ready = libc::pollfd { fd: fd.as_raw_fd(), events: libc::POLLOUT, revents: 0 };
+            let millis = remaining.as_millis().max(1).min(i32::MAX as u128) as i32;
+            let result = unsafe { libc::poll(&mut ready, 1, millis) };
+            if result == 0 { return Err(io::Error::new(io::ErrorKind::TimedOut, "peer connect timed out")); }
+            if result < 0 {
+                let error = io::Error::last_os_error();
+                if error.kind() == io::ErrorKind::Interrupted { continue; }
+                return Err(error);
+            }
+            let mut socket_error = 0;
+            let mut error_size = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+            if unsafe { libc::getsockopt(fd.as_raw_fd(), libc::SOL_SOCKET, libc::SO_ERROR,
+                (&mut socket_error as *mut libc::c_int).cast(), &mut error_size) } < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if socket_error != 0 { return Err(io::Error::from_raw_os_error(socket_error)); }
+            break;
+        }
+    }
+    let stream = UnixStream::from(fd);
+    stream.set_nonblocking(false)?;
+    Ok(stream)
+}
 
 pub fn send(path: &Path, frame: &PeerFrame) -> io::Result<()> {
     let meta = fs::symlink_metadata(path)?;
@@ -174,10 +216,22 @@ pub fn send(path: &Path, frame: &PeerFrame) -> io::Result<()> {
     let mut bytes = serde_json::to_vec(frame).map_err(io::Error::other)?;
     bytes.push(b'\n');
     if bytes.len() > MAX_FRAME_BYTES { return Err(invalid("peer frame too large")); }
-    let mut stream = UnixStream::connect(path)?;
+    let deadline = Instant::now() + TIMEOUT;
+    let mut stream = connect_before(path, deadline)?;
     same_user(&stream)?;
-    stream.set_write_timeout(Some(TIMEOUT))?;
-    stream.write_all(&bytes)
+    let mut remaining_bytes = bytes.as_slice();
+    while !remaining_bytes.is_empty() {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() { return Err(io::Error::new(io::ErrorKind::TimedOut, "peer write timed out")); }
+        stream.set_write_timeout(Some(remaining))?;
+        match stream.write(remaining_bytes) {
+            Ok(0) => return Err(io::Error::new(io::ErrorKind::WriteZero, "peer write returned zero")),
+            Ok(n) => remaining_bytes = &remaining_bytes[n..],
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
