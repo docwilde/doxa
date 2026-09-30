@@ -6,6 +6,8 @@ its app server, and API vendors use Rust HTTP clients. Canonical LORE 0.62.8 is 
 integrated Rust library for memory, reviews, indexing, and secret scrubbing;
 `lore-rs` also provides detached review and standalone plugin commands.
 The installed runtime requires no Python interpreter.
+New session titles use `model@branch/repo` in Git or `model@short-path`
+elsewhere; a second matching session gets `-2`. Explicit renames stay pinned.
 The [parity tracker](../docs/rust-1.19-parity.md) records stable release gates.
 The [2026-09-29 verification record](../docs/live-provider-verification-2026-09-29.md)
 reports the alpha.46 candidate's observed provider behavior and remaining checks.

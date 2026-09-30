@@ -47,6 +47,7 @@ results are real. See the [capture method](docs/rust-gallery.md).*
 - **Four engines:** Run Claude, Codex, DeepSeek or GLM with supported model, reasoning effort and permission controls.
 - **Flexible workspace:** Group tabs, split panes horizontally or vertically, and drag dividers; each pane has its own prompt.
 - **Session recovery:** Restore tabs and layouts, safely resume recorded conversations, or reattach to running daemons. Unavailable sessions stay visible; unsent drafts belong to each pane while the app is open.
+- **Readable session titles:** New sessions use `model@branch/repo` in Git or `model@short-path` elsewhere, with stable numbers for duplicates.
 - **Clear conversations:** Follow live progress, expand reasoning or individual tool calls, and open links with Ctrl+click.
 - **Shared memory:** Browse and filter LORE facts and beliefs, inspect full entries and evidence, and approve or reject fully reviewed changes.
 - **Repo and worktree tools:** Browse folders, switch branches, inspect diffs and reject tracked hunks. Recover or clean up managed checkouts with ownership checks.

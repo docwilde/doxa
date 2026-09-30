@@ -12,6 +12,11 @@ the stable 2.0 release has not been cut.
 - Pin **`lore-core`** 0.62.8 in the native runtime and Python test oracle.
   Unknown redaction-marker text in a secret field is scrubbed instead of reused.
 
+**Session titles**
+
+- Name new sessions from their model and Git branch/repo, or a short path outside
+  Git. Keep duplicate suffixes stable through attach and layout restoration.
+
 ## 2.0.0-alpha.54 — 2026-09-30
 
 **LORE historical sync convergence**

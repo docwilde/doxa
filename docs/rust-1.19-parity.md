@@ -43,7 +43,7 @@ coverage alone does not establish authenticated compatibility for every provider
 | Alpha.52 | Pin LORE 0.62.6 session replay repair and add a credential-free Codex default-window compaction fixture. |
 | Alpha.53 | Record the authenticated default-window Codex compaction and post-restart recall; check in the bounded verifier. |
 | Alpha.54 | Pin LORE 0.62.7. A private fresh direct-peer replay settled 4,568 signed operations with 4,555 applied, 13 quarantined, no failed/deferred/unverified rows and a banked cursor. |
-| Alpha.55 | Pin LORE 0.62.8. Native credential scrubbing now reuses only markers LORE actually emits. |
+| Alpha.55 | Pin LORE 0.62.8 with stricter native credential scrubbing. Name new sessions from model and Git context or a short path, with stable duplicate suffixes. |
 
 Standalone LORE administration, hooks, MCP and network operations are native Rust;
 they are not a remaining Python replacement task. See the
