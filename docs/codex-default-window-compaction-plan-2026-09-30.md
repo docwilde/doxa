@@ -9,16 +9,19 @@ review, or restart recovery was observed. These are separate from the successful
 14,022-token controlled automatic-compaction test. Further paid testing was
 stopped in the [live verification record](live-provider-verification-2026-09-29.md).
 
-## Zero-paid source findings
+## Zero-paid source findings and completed preflight
 
 - The protected app-server emits `context_used` from the provider's **last**
   `totalTokens` value (`rust/doxa-engines/src/codex_appserver.rs`). Aggregate
   input counts repeated requests and cannot locate the current trigger. No
   measurement defect was confirmed by this read-only audit.
 - The credential-free loopback fixture
-  (`scripts/codex-protected/verify_automatic.py`) exercises automatic review
-  refusal and an explicit allow control at a deliberately lowered threshold.
-  It does not exercise the default model threshold or real Haiku review.
+  (`scripts/codex-protected/verify_automatic.py --default-window`) now exercises
+  automatic review with a 272,000-token model context and no explicit compact
+  token override. On the installed protected provider, the allow path completed
+  one checkpoint after three loopback requests; the stopped path interrupted
+  with no checkpoint and only the first request. Both used zero paid requests.
+  A synthetic hook response cannot establish real Haiku review.
 - The pinned PreCompact hook rejects an owned rollout over 32 MiB or a JSONL
   line over 1 MiB, and its review has a 180-second worker timeout within the
   240-second hook deadline (`rust/doxa-engines/codex_compact_hook.py`). A live
@@ -26,16 +29,9 @@ stopped in the [live verification record](live-provider-verification-2026-09-29.
   prompt uses a capped session digest; it does not send the entire rollout to
   Haiku verbatim.
 
-## Proposed live run, requiring fresh authorization
+## Remaining authenticated run
 
-1. Preflight the installed receipt-verified protected Codex 0.156.1 launcher
-   and its fail-closed hook with a credential-free loopback provider at the
-   actual default threshold. Use an isolated private real-disk runtime and
-   synthetic memory; preserve the user's normal Codex configuration and LORE
-   stores. The preflight must prove the hook fires at the expected threshold,
-   refuses failed reviews without compaction inference, and permits exactly one
-   synthetic checkpoint after explicit review success.
-2. Start a fresh authenticated native DOXA session with the default model
+1. Start a fresh authenticated native DOXA session with the default model
    window and no threshold override. Send deterministic synthetic text in
    chunks no larger than 40,000 estimated tokens and 750 KiB serialized per
    prompt. Request a short reply. After each completed turn, record provider
@@ -44,7 +40,7 @@ stopped in the [live verification record](live-provider-verification-2026-09-29.
    230,000 context tokens, reduce the next chunk to at most 8,000 estimated
    tokens, then to at most 2,000 above 240,000. Let the provider's actual
    usage, rather than the estimate, control each next step.
-3. Observe the first automatic PreCompact hook, one successful native LORE
+2. Observe the first automatic PreCompact hook, one successful native LORE
    review, one provider compaction checkpoint, and the unchanged owned thread.
    Verify a synthetic sentinel is recalled after compaction and after one
    daemon restart on that thread. Retain metadata and digest evidence only;
@@ -56,6 +52,5 @@ before another prompt if the provider reports 252,000 current context tokens
 without the hook; if review fails, times out, or has unclear provenance; if a
 prompt approaches the rollout line limit; or if any telemetry needed for these
 caps is missing. Do not disable the fail-closed review to continue. A cap or
-review refusal is an incomplete result, not parity. The limits are a proposed
-future allowance, not authority to resume paid testing under the previous
-stopped run.
+review refusal is an incomplete result, not parity. No authenticated run is
+claimed by the zero-cost fixture.
