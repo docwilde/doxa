@@ -86,6 +86,7 @@ mouse dragging preserves each subtree's minimum size. Tabsets save layout,
 labels, collections, and per-session drafts; insufficient space temporarily
 collapses the display without discarding its saved topology.
 
+Ctrl+T opens the new-tab engine picker; Alt+T opens tool calls.
 Ctrl+P opens a queryable action palette generated from the command registry,
 open tabs, saved fleet views, and session actions. Typing `/` shows completion
 above the prompt. Unsupported DOXA forms remain in the draft with an error;
@@ -93,6 +94,12 @@ unknown provider/plugin commands follow the normal engine prompt path.
 Ctrl+R and `/search TEXT` use the prompt as the query field, with results above
 it. Indexed excerpts and bounded fallback scans are scrubbed; external entries
 without verified readable session files do not become resumable sessions.
+
+Window shortcuts can be changed in `/settings` under Keys, or with
+`doxa settings set key_new_tab Alt+N`. Changes saved in the TUI apply immediately;
+CLI changes apply on the next launch. Use `none` to unbind a shortcut. Duplicate
+or malformed chords are rejected without replacing the saved config. The prompt,
+approval and menu editing keys remain local to those controls.
 
 Ctrl+X closes the active tab and leaves its daemon running; Ctrl+W is an alias.
 Ctrl+Q exits the frontend and leaves all running sessions detached. Ctrl+Left/Right

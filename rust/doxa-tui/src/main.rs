@@ -61,9 +61,11 @@ Commands:
 
 Run doxa without a command to restore this project's saved tabs or start
 a session with the configured engine (Claude by default). Pass --engine or --model to start a new session.
-Ctrl+X closes the active tab without stopping its daemon. Ctrl+Q exits DOXA
+Ctrl+T opens a new tab; Alt+T opens tool calls. Ctrl+X closes the active tab
+without stopping its daemon. Ctrl+Q exits DOXA
 and leaves running sessions detached. Ctrl+Left/Right switches tabs in the
-current pane; Shift+Left/Right switches between pane prompts.
+current pane; Shift+Left/Right switches between pane prompts. Change window
+shortcuts in /settings → Keys or with `doxa settings set key_new_tab Alt+N`.
 
 New-session options: --engine codex|claude|deepseek|glm, --model NAME,
   --branch LOCAL_OR_REMOTE, --linger SECONDS, --resume FULL_SESSION_ID.

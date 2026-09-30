@@ -2936,6 +2936,29 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn new_tab_and_tool_shortcuts_can_be_reassigned_without_rebuild() {
+        let mut app = App::default();
+        app.handle(Event::Resize(100, 28));
+        let key = |ch, modifiers| Event::Key(KeyEvent::new(KeyCode::Char(ch), modifiers));
+        app.handle(key('t', KeyModifiers::CONTROL));
+        assert!(app.engine_picker);
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        assert!(!app.engine_picker);
+        app.handle(key('t', KeyModifiers::ALT));
+        assert!(app.tool_modal);
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        assert!(!app.tool_modal);
+
+        let mut config = toml::Table::new();
+        config.insert("key_new_tab".into(), toml::Value::String("Alt+N".into()));
+        app.keybindings = crate::keybindings::Bindings::from_config(&config).unwrap();
+        app.handle(key('t', KeyModifiers::CONTROL));
+        assert!(!app.engine_picker);
+        app.handle(key('n', KeyModifiers::ALT));
+        assert!(app.engine_picker);
+    }
+
+    #[test]
     fn only_verified_dead_detached_sessions_leave_the_rail() {
         let mut app = App::default();
         for id in ["dead", "live", "open"] {

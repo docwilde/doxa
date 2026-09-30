@@ -982,6 +982,7 @@ impl App {
     }
 
     pub(super) fn open_help(&mut self) {
+        use crate::keybindings::Action as KeyAction;
         let mut lines = vec![
             "Rust DOXA commands · forms shown below".to_owned(),
             "Unavailable commands stay local; unknown provider commands pass through".to_owned(),
@@ -990,11 +991,17 @@ impl App {
         lines.push(
             "Tab / Shift+Tab: focus prompt, tab headers, transcript, visible chips, sidebar".into(),
         );
-        lines.push(
-            "Focused chip: Enter opens · tab headers: ←/→ select, Enter prompt · Alt+Tab next pane"
-                .into(),
-        );
-        lines.push("Alt+P or /mode: permission picker".into());
+        lines.push(format!(
+            "Focused chip: Enter opens · tab headers: ←/→ select, Enter prompt · {} next pane",
+            self.keybindings.display(KeyAction::NextPaneAlternate)
+        ));
+        lines.push(format!(
+            "{} new tab · {} close tab · {} quit · /settings → Keys to remap",
+            self.keybindings.display(KeyAction::NewTab),
+            self.keybindings.display(KeyAction::CloseTab),
+            self.keybindings.display(KeyAction::Quit)
+        ));
+        lines.push(format!("{} or /mode: permission picker", self.keybindings.display(KeyAction::Permission)));
         lines.push("Drag transcript text to select · Ctrl+C / Ctrl+Shift+C copy · Esc clears · Ctrl+V paste into prompt".into());
         lines.push("Terminal fallback: Shift+drag, Ctrl+Shift+C / Ctrl+Shift+V; OSC52 support required for native copy".into());
         for row in COMMANDS {

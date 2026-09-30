@@ -259,9 +259,13 @@ impl App {
             }
             return true;
         }
+        if self.keybindings.matches(crate::keybindings::Action::Diff, key)
+            || self.keybindings.matches(crate::keybindings::Action::DiffAlternate, key) {
+            self.open_diff();
+            return true;
+        }
         match key.code {
-            KeyCode::Esc | KeyCode::F(2) => self.open_diff(),
-            KeyCode::Char('g') if key.modifiers.contains(KeyModifiers::ALT) => self.open_diff(),
+            KeyCode::Esc => self.open_diff(),
             KeyCode::Char('r' | 'R') => {
                 self.diff_modal = false;
                 self.open_diff();

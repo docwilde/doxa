@@ -528,6 +528,13 @@ impl App {
             crate::settings::config_path().and_then(|p| crate::settings::save(&p, &edits, &engine));
         match result {
             Ok(()) => {
+                match crate::keybindings::Bindings::load() {
+                    Ok(bindings) => self.keybindings = bindings,
+                    Err(error) => {
+                        self.notice = format!("Settings saved, but keybindings could not reload: {error}");
+                        return;
+                    }
+                }
                 let auto_diff_was_on = self.preferences.on("auto_diff");
                 self.preferences = crate::preferences::Preferences::load();
                 if !auto_diff_was_on && self.preferences.on("auto_diff") {

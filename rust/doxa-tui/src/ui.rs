@@ -409,7 +409,7 @@ fn chip_hint(kind: &str) -> &'static str {
         "model" => "Model for this session · click to choose",
         "repo" => "Choose a known directory for a new session tab",
         "directory" => "Choose a known directory for a new session tab",
-        "effort" => "Effort · current session; Alt+F selects the next turn when idle",
+        "effort" => "Effort · current session; click to select the next turn when idle",
         "context" => "Current session context usage · click for details",
         "memory" => "User and scoped LORE memory · click to view entries",
         "beliefs" => "LORE beliefs · click to browse",
@@ -1204,6 +1204,7 @@ enum RailRow {
 
 #[derive(Debug)]
 pub struct App {
+    keybindings: crate::keybindings::Bindings,
     preferences: crate::preferences::Preferences,
     persist_preferences: bool,
     sidebar_auto: bool,
@@ -1438,6 +1439,7 @@ pub struct App {
 impl Default for App {
     fn default() -> Self {
         Self {
+            keybindings: crate::keybindings::Bindings::default(),
             preferences: crate::preferences::Preferences::load(),
             persist_preferences: false,
             sidebar_auto: false,

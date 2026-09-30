@@ -1,7 +1,7 @@
 # Rust 2.0 parity with DOXA 1.19.0
 
 Baseline: Python `v1.19.0` production behavior. This tracker records implementation
-through **alpha.56**, with canonical **LORE 0.62.8**. Account checks
+through **alpha.57**, with canonical **LORE 0.62.8**. Account checks
 are bounded by their exact candidate and date.
 The Rust runtime implements the audited workflows below. Live account checks
 remain bounded by the [latest verification record](live-provider-verification-2026-09-29.md)
@@ -13,7 +13,7 @@ coverage alone does not establish authenticated compatibility for every provider
 | Area | Implemented Rust behavior |
 | --- | --- |
 | Sessions | New/attach/stop/list; verified live and saved-tab restoration with order, labels, layout, drafts and focus; safe eager resume without a prompt; read-only fallback with reasons; resume/restore switches; exact and detached session kill |
-| Window and prompt | Nested horizontal/vertical splits, draggable dividers and submenu borders, grouped tabs and collections, per-pane prompts, mouse hover/click, keyboard focus across tabs/chips/prompt, tab transfer, prompt-line search and generated action palette |
+| Window and prompt | Nested horizontal/vertical splits, draggable dividers and submenu borders, grouped tabs and collections, per-pane prompts, mouse hover/click, configurable window shortcuts, keyboard focus across tabs/chips/prompt, tab transfer, prompt-line search and generated action palette |
 | Messages | Distinct user styling, clickable HTTP(S) links, processing spinner, folded tool calls and streamed reasoning counts; painted-text selection, OSC52 copy and explicit owned clipboard paste; keyboard-only `!` shell output remains private to the window |
 | Questions and permissions | Inline choices, free text/Other, request identity checks, complete permission read-through, one-request or per-tool session approval, restored pending snapshots and blinking input indicators |
 | Worktrees and diffs | Repo/worktree detection and navigation, pinned base selection and branch switch, lifecycle locks, guarded finalize/orphan cleanup/missing-checkout recovery, persistent diff and exact tracked-hunk rejection |
