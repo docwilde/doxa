@@ -68,6 +68,21 @@ impl MeshServer {
 }
 impl Drop for MeshServer { fn drop(&mut self) { let _ = self.stop(); } }
 
+fn started_with_browser(
+    mut started: MeshServer,
+    open: impl FnOnce(&mut MeshServer) -> io::Result<()>,
+) -> (MeshServer, String) {
+    let report = match open(&mut started) {
+        Ok(()) => format!("Mesh · {}", started.ledger.display()),
+        Err(error) => format!(
+            "Mesh · {} · browser unavailable: {error} · open {} manually",
+            started.ledger.display(),
+            started.url()
+        ),
+    };
+    (started, report)
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct WindowSnapshot { pub revision: u64, pub running: bool, pub busy: bool, pub url: String, pub report: String }
 enum WindowCommand { Start(Option<String>, Option<PathBuf>), Stop, Open, Close }
@@ -98,10 +113,10 @@ impl WindowMesh {
                         let ledger = if let Some(run) = run { run_ledger(&root.map(Ok).unwrap_or_else(fleet_view::default_root)?, &run)? } else { default_ledger()? };
                         if server.as_ref().is_some_and(|s| s.ledger == ledger) { return Ok(format!("Mesh already running · {}", ledger.display())); }
                         if let Some(mut old) = server.take() { old.stop()?; }
-                        let mut started = MeshServer::start(&ledger)?;
-                        started.open_if_configured()?;
+                        let started = MeshServer::start(&ledger)?;
+                        let (started, report) = started_with_browser(started, MeshServer::open_if_configured);
                         server = Some(started);
-                        Ok(format!("Mesh · {}", ledger.display()))
+                        Ok(report)
                     })(),
                     WindowCommand::Stop => if let Some(mut old) = server.take() { old.stop().map(|_| "Mesh stopped; port released".into()) } else { Ok("No mesh server running".into()) },
                     WindowCommand::Open => server.as_mut().ok_or_else(|| invalid("No mesh server running")).and_then(|s| s.open_browser()).map(|_| "Browser launch requested".into()),
@@ -134,7 +149,11 @@ pub fn serve(ledger: &Path) -> io::Result<()> {
     let result = (|| {
         let mut server = MeshServer::start(ledger)?;
         println!("mesh: {}\n{}\nCtrl-C stops this loopback renderer.", ledger.display(), server.url());
-        if !STOP.load(std::sync::atomic::Ordering::Relaxed) { server.open_if_configured()?; }
+        if !STOP.load(std::sync::atomic::Ordering::Relaxed) {
+            if let Err(error) = server.open_if_configured() {
+                eprintln!("mesh browser unavailable: {error}; open {} manually", server.url());
+            }
+        }
         while !STOP.load(std::sync::atomic::Ordering::Relaxed) {
             if !server.server.running() { return Err(io::Error::other("mesh renderer exited")); }
             std::thread::sleep(Duration::from_millis(100));
@@ -149,6 +168,20 @@ pub fn serve(ledger: &Path) -> io::Result<()> {
 mod tests {
     use super::*;
     use std::{net::TcpStream,io::{Read,Write},time::Instant};
+    #[test]
+    fn browser_failure_keeps_started_window_mesh_available() {
+        let root = tempfile::tempdir().unwrap();
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let ledger = root.path().join("messages.jsonl");
+        let started = MeshServer::start(&ledger).unwrap();
+        let (mut server, report) = started_with_browser(started, |_| {
+            Err(io::Error::new(io::ErrorKind::NotFound, "no browser opener"))
+        });
+        assert!(report.contains("browser unavailable: no browser opener"));
+        assert!(report.contains(server.url()));
+        assert!(request(server.url(), "").contains("mesh.js"));
+        server.stop().unwrap();
+    }
     #[test]
     fn window_mesh_is_nonblocking_and_releases_renderer_on_window_close() {
         let root = tempfile::tempdir().unwrap();
