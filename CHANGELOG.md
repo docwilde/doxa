@@ -13,6 +13,8 @@ the stable 2.0 release has not been cut.
   review, one provider checkpoint and exact first-turn recall after restart.
 - Add bounded **`verify_live_default_window.py`** for a private, one-cycle
   account check with numeric telemetry only. This release changes no runtime behavior.
+- Guard account credentials and scratch paths, retry in-flight rollout records,
+  and check input headroom before submitting the recall turn.
 
 **Documentation**
 
