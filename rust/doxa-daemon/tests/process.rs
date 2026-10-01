@@ -1722,10 +1722,13 @@ fn claude_controls_verify_effective_settings_and_broadcast_changes() {
     let status=receive(&mut reader);assert_eq!(status["status"]["model"],"haiku");assert_eq!(status["status"]["effort"],"low");
     send(&mut socket,json!({"type":"call","id":5,"method":"set_permission_mode","params":{"mode":"bypassPermissions"}}));assert_eq!(receive(&mut reader)["ok"],false);
     send(&mut socket,json!({"type":"prompt","id":6,"text":"hello"}));claude_receive_until(&mut reader,|f|f["event"]["type"]=="needs_input");
-    send(&mut socket,json!({"type":"call","id":7,"method":"set_effort","params":{"effort":"high"}}));assert_eq!(receive(&mut reader)["ok"],false);
-    send(&mut socket,json!({"type":"call","id":8,"method":"answer_needs_input","params":{"id":"q","answer":{"decision":"allow"}}}));
+    send(&mut socket,json!({"type":"call","id":7,"method":"set_permission_mode","params":{"mode":"auto"}}));
+    let mode=claude_receive_until(&mut reader,|f|f["id"]==7);assert_eq!(mode["ok"],true);assert_eq!(mode["mode"],"auto");
+    let changed=claude_receive_until(&mut reader,|f|f["event"]["type"]=="permission_mode_changed");assert_eq!(changed["event"]["data"]["mode"],"auto");
+    send(&mut socket,json!({"type":"call","id":8,"method":"set_effort","params":{"effort":"high"}}));assert_eq!(receive(&mut reader)["ok"],false);
+    send(&mut socket,json!({"type":"call","id":9,"method":"answer_needs_input","params":{"id":"q","answer":{"decision":"allow"}}}));
     claude_receive_until(&mut reader,|f|f["event"]["type"]=="turn_done");
-    send(&mut socket,json!({"type":"call","id":9,"method":"stop","params":{}}));assert_eq!(claude_receive_until(&mut reader,|f|f["id"]==9)["ok"],true);wait_until(||process.exited());
+    send(&mut socket,json!({"type":"call","id":10,"method":"stop","params":{}}));assert_eq!(claude_receive_until(&mut reader,|f|f["id"]==10)["ok"],true);wait_until(||process.exited());
 }
 
 #[test]

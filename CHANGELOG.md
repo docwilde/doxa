@@ -5,6 +5,14 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.64 — 2026-10-01
+
+**Claude approval forwarding**
+
+- Register Claude's **`--permission-prompt-tool stdio`** so restricted tool calls reach DOXA's inline approval submenu instead of being denied without a prompt.
+- Apply **`set_permission_mode`** during active Claude turns; `auto` may still ask when its classifier cannot decide.
+- Clarify that DOXA's isolated Claude settings do not load user permission rules.
+
 ## 2.0.0-alpha.63 — 2026-10-01
 
 **Remote browser and macOS transport**
