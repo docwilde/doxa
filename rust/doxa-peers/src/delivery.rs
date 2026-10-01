@@ -53,12 +53,28 @@ fn same_user(stream: &UnixStream) -> io::Result<()> {
 fn read_frame(stream: &mut UnixStream) -> io::Result<PeerFrame> {
     let deadline = Instant::now() + TIMEOUT;
     let mut bytes = Vec::new();
+    stream.set_nonblocking(true)?;
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() { return Err(io::Error::new(io::ErrorKind::TimedOut, "peer frame timed out")); }
-        stream.set_read_timeout(Some(remaining))?;
         let mut buf = [0u8; 4096];
-        let n = stream.read(&mut buf)?;
+        let n = match stream.read(&mut buf) {
+            Ok(n) => n,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                let mut ready = libc::pollfd { fd: stream.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+                let millis = remaining.as_millis().max(1).min(i32::MAX as u128) as i32;
+                let result = unsafe { libc::poll(&mut ready, 1, millis) };
+                if result == 0 { return Err(io::Error::new(io::ErrorKind::TimedOut, "peer frame timed out")); }
+                if result < 0 {
+                    let error = io::Error::last_os_error();
+                    if error.kind() == io::ErrorKind::Interrupted { continue; }
+                    return Err(error);
+                }
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         if n == 0 { break; }
         bytes.extend_from_slice(&buf[..n]);
         if bytes.len() > MAX_FRAME_BYTES { return Err(invalid("peer frame too large")); }
@@ -217,6 +233,11 @@ fn connect_before(path: &Path, deadline: Instant) -> io::Result<UnixStream> {
         stream.set_nonblocking(false)?;
         return Ok(stream);
     }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn probe_socket(path: &Path) -> bool {
+    connect_before(path, Instant::now() + Duration::from_millis(100)).is_ok()
 }
 
 pub fn send(path: &Path, frame: &PeerFrame) -> io::Result<()> {
