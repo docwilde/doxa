@@ -166,8 +166,11 @@ fn config() -> Option<toml::Value> {
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
         .or_else(|| env::var_os("HOME").map(|v| PathBuf::from(v).join(".doxa")))?;
-    let source = fs::read_to_string(home.join("config.toml")).ok()?;
-    source.parse().ok()
+    config_at(&home.join("config.toml"))
+}
+
+fn config_at(path: &Path) -> Option<toml::Value> {
+    doxa_state::load_config_checked(path).ok().map(toml::Value::Table)
 }
 
 fn configured_string(key: &str, env_key: &str, config: Option<&toml::Value>) -> Option<String> {
@@ -592,6 +595,24 @@ pub fn stop(session: &Session) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn launcher_config_rejects_fifo_and_oversized_files() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "engine = 'codex'\n").unwrap();
+        assert_eq!(config_at(&path).unwrap()["engine"].as_str(), Some("codex"));
+
+        fs::File::create(&path).unwrap().set_len(doxa_state::MAX_CONFIG_BYTES + 1).unwrap();
+        assert!(config_at(&path).is_none());
+
+        fs::remove_file(&path).unwrap();
+        let name = CString::new(path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        assert!(config_at(&path).is_none());
+    }
     #[test]
     fn installed_provider_prefers_immutable_pointer_and_refuses_broken_pointer() {
         let dir = tempfile::tempdir().unwrap();

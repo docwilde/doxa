@@ -5,6 +5,14 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.61 — 2026-10-01
+
+**Startup and peer resilience**
+
+- Fix **`launch::config`** to reject FIFO and oversized config files before starting sessions.
+- Bound **`delivery::send`** socket connection and writes to two seconds, so a stalled peer inbox cannot hold the remote bridge.
+- Keep **`MeshServer`** available when browser opening fails; show the URL and a warning.
+
 ## 2.0.0-alpha.60 — 2026-10-01
 
 **Project review and gallery**

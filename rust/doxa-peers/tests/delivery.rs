@@ -2,11 +2,12 @@
 use doxa_peers::{delivery::*, now, PeerRecord, Registry};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{symlink, PermissionsExt};
-use std::os::unix::net::UnixStream;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{mpsc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -84,6 +85,64 @@ fn blocking_receive_still_waits_after_a_poll() -> io::Result<()> {
         sent_at: now(), body: "hello".into(), from_repo: None, kind: None };
     send(&path, &frame)?;
     assert_eq!(worker.join().unwrap()?.body, "hello");
+    Ok(())
+}
+
+#[test]
+fn full_peer_connect_queue_does_not_stall_delivery() -> io::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let path = temp.path().join("full.sock");
+    let listener = UnixListener::bind(&path)?;
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+    if unsafe { libc::listen(listener.as_raw_fd(), 1) } < 0 { return Err(io::Error::last_os_error()); }
+    let bytes = path.as_os_str().as_bytes();
+    let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    for (slot, byte) in address.sun_path.iter_mut().zip(bytes) { *slot = *byte as libc::c_char; }
+    let size = (std::mem::offset_of!(libc::sockaddr_un, sun_path) + bytes.len() + 1) as libc::socklen_t;
+    let mut queued = Vec::<OwnedFd>::new();
+    let mut full = false;
+    for _ in 0..32 {
+        let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC, 0) };
+        if fd < 0 { return Err(io::Error::last_os_error()); }
+        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+        let result = unsafe { libc::connect(fd.as_raw_fd(), (&address as *const libc::sockaddr_un).cast(), size) };
+        if result == 0 || io::Error::last_os_error().raw_os_error() == Some(libc::EINPROGRESS) {
+            queued.push(fd);
+        } else if io::Error::last_os_error().raw_os_error() == Some(libc::EAGAIN) {
+            full = true;
+            break;
+        } else { return Err(io::Error::last_os_error()); }
+    }
+    assert!(full, "test did not fill the peer listener queue");
+    let frame = PeerFrame { from_id: "sender".into(), from_title: "test".into(),
+        sent_at: now(), body: "hello".into(), from_repo: None, kind: None };
+    let (tx, rx) = mpsc::channel();
+    let started = Instant::now();
+    let blocked_path = path.clone();
+    let blocked_frame = frame.clone();
+    thread::spawn(move || { let _ = tx.send(send(&blocked_path, &blocked_frame)); });
+    let result = rx.recv_timeout(Duration::from_secs(4)).expect("peer delivery blocked on a full connect queue");
+    assert!(result.is_err(), "unaccepted peer should not receive the frame");
+    assert!(started.elapsed() < Duration::from_secs(4));
+
+    // A short backlog must recover without losing the next message.
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || { let _ = tx.send(send(&path, &frame)); });
+    listener.set_nonblocking(true)?;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut accepted = Vec::new();
+    let recovered = loop {
+        if let Ok(result) = rx.try_recv() { break result; }
+        match listener.accept() {
+            Ok((stream, _)) => accepted.push(stream),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {},
+            Err(error) => return Err(error),
+        }
+        assert!(Instant::now() < deadline, "peer delivery did not recover after accepting queued peers");
+        thread::sleep(Duration::from_millis(10));
+    };
+    assert!(recovered.is_ok(), "peer delivery did not recover: {recovered:?}");
     Ok(())
 }
 
