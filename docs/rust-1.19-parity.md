@@ -1,7 +1,7 @@
 # Rust 2.0 parity with DOXA 1.19.0
 
 Baseline: Python `v1.19.0` production behavior. This tracker records implementation
-through **alpha.63**, with canonical **LORE 0.62.10**. Account checks
+through **alpha.63**, with canonical **LORE 0.62.11**. Account checks
 are bounded by their exact candidate and date.
 The Rust runtime implements the audited workflows below. Live account checks
 remain bounded by the [latest verification record](live-provider-verification-2026-09-29.md)
@@ -49,7 +49,7 @@ coverage alone does not establish authenticated compatibility for every provider
 | Alpha.59 | Group uncollected sessions by project; estimate DeepSeek/GLM API spend from reported tokens and published rates; read the Codex subscription quota bucket after turns. |
 | Alpha.60 | Pin LORE 0.62.9 to keep project-bound pending proposals out of unrelated review browsers; recapture two real Rust gallery frames with two project groups. |
 | Alpha.61–62 | Harden startup config and peer delivery; keep mesh serving after browser-open failure; pin LORE 0.62.10 sync and review fixes. |
-| Alpha.63 | Add macOS native transport/build coverage and an application shortcut; attach the optional browser adapter to a kernel-attested Unix proxy. Protected Codex remains Linux-only. |
+| Alpha.63 | Add macOS native transport/build coverage and an application shortcut; pin LORE 0.62.11; attach the optional browser adapter to a kernel-attested Unix proxy. Protected Codex remains Linux-only. |
 
 Standalone LORE administration, hooks, MCP and network operations are native Rust;
 they are not a remaining Python replacement task. See the
