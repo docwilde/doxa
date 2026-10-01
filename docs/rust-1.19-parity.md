@@ -50,7 +50,7 @@ coverage alone does not establish authenticated compatibility for every provider
 | Alpha.60 | Pin LORE 0.62.9 to keep project-bound pending proposals out of unrelated review browsers; recapture two real Rust gallery frames with two project groups. |
 | Alpha.61–62 | Harden startup config and peer delivery; keep mesh serving after browser-open failure; pin LORE 0.62.10 sync and review fixes. |
 | Alpha.63 | Add macOS native transport/build coverage and an application shortcut; pin LORE 0.62.11; attach the optional browser adapter to a kernel-attested Unix proxy. Protected Codex remains Linux-only. |
-| Alpha.64 | Register Claude's stdio permission callback and allow live permission-mode changes so inline approval requests and the `auto` picker take effect during an active turn. |
+| Alpha.64 | Register Claude's stdio permission callback and allow live permission-mode changes so inline approval requests and the `auto` picker take effect during an active turn. Label Codex's fixed `on-request` policy explicitly; Codex mode switching remains unavailable in DOXA. |
 
 Standalone LORE administration, hooks, MCP and network operations are native Rust;
 they are not a remaining Python replacement task. See the

@@ -477,6 +477,12 @@ impl Host for CodexHost {
     }
     fn can_set_model(&self) -> bool { self.transport == "app-server" }
     fn model_change_requires_idle(&self) -> bool { true }
+    fn initial_permission_mode(&self) -> String {
+        // The protected app-server is started with on-request approvals.
+        // Codex has no DOXA permission-mode control, so report the actual
+        // fixed policy instead of the runtime trait's generic "default".
+        if self.transport == "app-server" { "on-request" } else { "never" }.to_owned()
+    }
     fn initial_model(&self) -> Option<String> { self.selection.lock().unwrap().0.clone() }
     fn initial_effort(&self) -> Option<String> { self.selection.lock().unwrap().1.clone() }
     fn billing_snapshot(&self) -> Option<Value> { self.billing.lock().ok()?.clone() }

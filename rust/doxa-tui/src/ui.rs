@@ -182,6 +182,11 @@ fn permission_index(mode: &str) -> Option<usize> {
         .position(|(candidate, _)| *candidate == mode)
 }
 
+fn permission_display_mode(mode: &str, engine: Option<&str>) -> bool {
+    permission_index(mode).is_some()
+        || (engine == Some("codex") && matches!(mode, "on-request" | "never"))
+}
+
 #[derive(Debug)]
 struct ModelPicker {
     session_id: String,
