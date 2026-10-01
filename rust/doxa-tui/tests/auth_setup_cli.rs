@@ -78,7 +78,7 @@ fn explicit_provider_login_logout_uses_cli_authority_and_filters_private_output(
 fn terminal_setup_wizard_persists_private_store_and_new_session_defaults() {
     let fixture=Fixture::new();
     let (mut master,mut slave)=(-1,-1);
-    assert_eq!(unsafe{libc::openpty(&mut master,&mut slave,std::ptr::null_mut(),std::ptr::null(),std::ptr::null())},0);
+    assert_eq!(unsafe{libc::openpty(&mut master,&mut slave,std::ptr::null_mut(),std::ptr::null_mut(),std::ptr::null_mut())},0);
     for fd in [master,slave] { assert_eq!(unsafe{libc::fcntl(fd,libc::F_SETFD,libc::FD_CLOEXEC)},0); }
     let mut input=unsafe{fs::File::from_raw_fd(master)};
     let terminal=unsafe{fs::File::from_raw_fd(slave)};
@@ -101,7 +101,7 @@ fn terminal_setup_refuses_symlinked_store_ancestor_before_mutating_target() {
     let fixture=Fixture::new();let outside=fixture.root.path().join("outside");fs::create_dir(&outside).unwrap();
     std::os::unix::fs::symlink(&outside,fixture.root.path().join("doxa")).unwrap();
     let (mut master,mut slave)=(-1,-1);
-    assert_eq!(unsafe{libc::openpty(&mut master,&mut slave,std::ptr::null_mut(),std::ptr::null(),std::ptr::null())},0);
+    assert_eq!(unsafe{libc::openpty(&mut master,&mut slave,std::ptr::null_mut(),std::ptr::null_mut(),std::ptr::null_mut())},0);
     for fd in [master,slave] { assert_eq!(unsafe{libc::fcntl(fd,libc::F_SETFD,libc::FD_CLOEXEC)},0); }
     let mut input=unsafe{fs::File::from_raw_fd(master)};let terminal=unsafe{fs::File::from_raw_fd(slave)};
     let child=fixture.command(&["setup"]).stdin(Stdio::from(terminal)).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
