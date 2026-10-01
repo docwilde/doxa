@@ -5,6 +5,15 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.63 — 2026-10-01
+
+**Remote browser and macOS transport**
+
+- Bind the optional **`remote_web`** adapter to a private Unix socket and attest its HTTP and WebSocket peer before accepting Tailscale identity.
+- Add macOS **`getpeereid`** checks, bounded Unix dials, a `DOXA.command` shortcut, and a macOS Rust CI job. Protected Codex remains Linux-only.
+- Pin **`lore-core`** 0.62.11 to compile native file identity proofs on macOS.
+- Update remote and platform documentation with the browser setup and current support limits.
+
 ## 2.0.0-alpha.62 — 2026-10-01
 
 **LORE sync integration**

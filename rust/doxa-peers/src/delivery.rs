@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use std::collections::VecDeque;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -45,12 +45,7 @@ impl PeerFrame {
 
 fn invalid(message: &'static str) -> io::Error { io::Error::new(io::ErrorKind::InvalidData, message) }
 fn same_user(stream: &UnixStream) -> io::Result<()> {
-    let mut cred = libc::ucred { pid: 0, uid: 0, gid: 0 };
-    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
-    let rc = unsafe { libc::getsockopt(stream.as_raw_fd(), libc::SOL_SOCKET, libc::SO_PEERCRED,
-        (&mut cred as *mut libc::ucred).cast(), &mut len) };
-    if rc != 0 { return Err(io::Error::last_os_error()); }
-    if len as usize != std::mem::size_of::<libc::ucred>() || cred.uid != unsafe { libc::geteuid() } {
+    if crate::credentials::peer_uid(stream)? != unsafe { libc::geteuid() } {
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, "peer UID differs"));
     }
     Ok(())
@@ -58,12 +53,28 @@ fn same_user(stream: &UnixStream) -> io::Result<()> {
 fn read_frame(stream: &mut UnixStream) -> io::Result<PeerFrame> {
     let deadline = Instant::now() + TIMEOUT;
     let mut bytes = Vec::new();
+    stream.set_nonblocking(true)?;
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() { return Err(io::Error::new(io::ErrorKind::TimedOut, "peer frame timed out")); }
-        stream.set_read_timeout(Some(remaining))?;
         let mut buf = [0u8; 4096];
-        let n = stream.read(&mut buf)?;
+        let n = match stream.read(&mut buf) {
+            Ok(n) => n,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                let mut ready = libc::pollfd { fd: stream.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+                let millis = remaining.as_millis().max(1).min(i32::MAX as u128) as i32;
+                let result = unsafe { libc::poll(&mut ready, 1, millis) };
+                if result == 0 { return Err(io::Error::new(io::ErrorKind::TimedOut, "peer frame timed out")); }
+                if result < 0 {
+                    let error = io::Error::last_os_error();
+                    if error.kind() == io::ErrorKind::Interrupted { continue; }
+                    return Err(error);
+                }
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         if n == 0 { break; }
         bytes.extend_from_slice(&buf[..n]);
         if bytes.len() > MAX_FRAME_BYTES { return Err(invalid("peer frame too large")); }
@@ -175,20 +186,21 @@ fn connect_before(path: &Path, deadline: Instant) -> io::Result<UnixStream> {
     address.sun_family = libc::AF_UNIX as libc::sa_family_t;
     for (slot, byte) in address.sun_path.iter_mut().zip(bytes) { *slot = *byte as libc::c_char; }
     let size = (std::mem::offset_of!(libc::sockaddr_un, sun_path) + bytes.len() + 1) as libc::socklen_t;
+    #[cfg(target_os = "macos")]
+    { address.sun_len = size as u8; }
     loop {
         if deadline.saturating_duration_since(Instant::now()).is_zero() {
             return Err(io::Error::new(io::ErrorKind::TimedOut, "peer connect timed out"));
         }
-        let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC, 0) };
-        if fd < 0 { return Err(io::Error::last_os_error()); }
-        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+        let fd = crate::credentials::nonblocking_unix_socket()?;
         let result = unsafe { libc::connect(fd.as_raw_fd(), (&address as *const libc::sockaddr_un).cast(), size) };
         if result < 0 {
             let error = io::Error::last_os_error();
             // Linux reports EAGAIN, rather than EINPROGRESS, when a
             // nonblocking AF_UNIX listener's queue is full. A fresh socket
             // can connect as soon as the listener accepts a queued peer.
-            if error.kind() == io::ErrorKind::WouldBlock {
+            if error.kind() == io::ErrorKind::WouldBlock
+                || (cfg!(target_os = "macos") && error.raw_os_error() == Some(libc::ECONNREFUSED)) {
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 if remaining.is_zero() { return Err(io::Error::new(io::ErrorKind::TimedOut, "peer connect timed out")); }
                 std::thread::sleep(remaining.min(Duration::from_millis(10)));
@@ -223,6 +235,11 @@ fn connect_before(path: &Path, deadline: Instant) -> io::Result<UnixStream> {
     }
 }
 
+#[cfg(target_os = "macos")]
+pub(crate) fn probe_socket(path: &Path) -> bool {
+    connect_before(path, Instant::now() + Duration::from_millis(100)).is_ok()
+}
+
 pub fn send(path: &Path, frame: &PeerFrame) -> io::Result<()> {
     let meta = fs::symlink_metadata(path)?;
     if !meta.file_type().is_socket() || meta.uid() != unsafe { libc::geteuid() }
@@ -231,18 +248,21 @@ pub fn send(path: &Path, frame: &PeerFrame) -> io::Result<()> {
     bytes.push(b'\n');
     if bytes.len() > MAX_FRAME_BYTES { return Err(invalid("peer frame too large")); }
     let deadline = Instant::now() + TIMEOUT;
-    let mut stream = connect_before(path, deadline)?;
-    same_user(&stream)?;
+    let mut stream = connect_before(path, deadline).map_err(|error|
+        io::Error::new(error.kind(), format!("peer connect: {error}")))?;
+    same_user(&stream).map_err(|error|
+        io::Error::new(error.kind(), format!("peer credentials: {error}")))?;
     let mut remaining_bytes = bytes.as_slice();
     while !remaining_bytes.is_empty() {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() { return Err(io::Error::new(io::ErrorKind::TimedOut, "peer write timed out")); }
-        stream.set_write_timeout(Some(remaining))?;
+        stream.set_write_timeout(Some(remaining)).map_err(|error|
+            io::Error::new(error.kind(), format!("peer write timeout setup: {error}")))?;
         match stream.write(remaining_bytes) {
             Ok(0) => return Err(io::Error::new(io::ErrorKind::WriteZero, "peer write returned zero")),
             Ok(n) => remaining_bytes = &remaining_bytes[n..],
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            Err(error) => return Err(error),
+            Err(error) => return Err(io::Error::new(error.kind(), format!("peer write: {error}"))),
         }
     }
     Ok(())

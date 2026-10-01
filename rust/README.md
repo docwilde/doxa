@@ -2,7 +2,7 @@
 
 Rust is the main DOXA frontend. The installer exposes `doxa`; the compiled
 frontend is `doxa-rs`. Claude uses its native CLI control protocol, Codex uses
-its app server, and API vendors use Rust HTTP clients. Canonical LORE 0.62.9 is an
+its app server, and API vendors use Rust HTTP clients. Canonical LORE 0.62.11 is an
 integrated Rust library for memory, reviews, indexing, and secret scrubbing;
 `lore-rs` also provides detached review and standalone plugin commands.
 The installed runtime requires no Python interpreter.
@@ -13,8 +13,12 @@ The [2026-09-29 verification record](../docs/live-provider-verification-2026-09-
 reports the alpha.46 candidate's observed provider behavior and remaining checks.
 The [current gallery](../docs/rust-gallery.md) records live terminal captures;
 it is visual evidence, not a new provider compatibility test.
-Linux is verified. The full protected DOXA runtime is unsupported on macOS and
-Windows; standalone LORE macOS is unverified and Windows is unsupported.
+Linux is live verified. macOS has native build and transport CI, with Claude,
+DeepSeek and GLM as the supported engine path; authenticated macOS provider
+sessions still need live verification. Protected Codex remains Linux-only
+because its process-owner contract has no macOS equivalent. Windows is unsupported.
+On macOS, connected client sockets attest the daemon's effective UID with
+`getpeereid`; Linux additionally attests its PID for destructive requests.
 
 ## Build and install
 
@@ -43,8 +47,10 @@ curl -fsSL https://raw.githubusercontent.com/docwilde/doxa/main/scripts/install.
 
 Append a tag or SHA after `sh -s --` to pin a ref. Installation requires Git,
 Cargo and Rust. Binaries go to `~/.local/bin`, overridable with
-`DOXA_RUST_BIN_DIR`. Linux application-menu integration can be disabled with
-`DOXA_NO_LAUNCHER=1`. `doxa update` updates an installed launcher; source builds
+`DOXA_RUST_BIN_DIR`. The installer adds a Linux application-menu entry or an
+executable `~/Applications/DOXA.command` shortcut on macOS. Disable either with
+`DOXA_NO_LAUNCHER=1`. On macOS it skips the protected Codex installer; use
+Claude or an API engine. `doxa update` updates an installed launcher; source builds
 use `./task install`. `doxa help` lists CLI forms and options.
 Verified Codex updates publish a fresh immutable provider artifact and select it
 for new launches. Running providers retain their original files. Corrupt installed

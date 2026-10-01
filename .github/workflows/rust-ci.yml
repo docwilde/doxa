@@ -8,12 +8,53 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 env:
   RUST_TEST_THREADS: "1"
   DOXA_LORE_RS: ${{ github.workspace }}/target/debug/lore-rs
   TMPDIR: /home/runner/.doxa-tests
 
 jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare private test directory
+        run: |
+          mkdir -p "$HOME/.t"
+          chmod 700 "$HOME/.t"
+          echo "TMPDIR=$HOME/.t" >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@v2
+      - name: Check native macOS build
+        run: cargo check --locked --workspace
+      - name: Build daemon and native LORE carrier for interaction tests
+        run: |
+          cargo build --locked
+          cargo build --locked --package lore-core --bin lore-rs
+      - name: Smoke macOS application shortcut
+        run: |
+          HOME="$RUNNER_TEMP/doxa-launcher-home" target/debug/doxa-rs install-launcher "$GITHUB_WORKSPACE/target/debug/doxa-rs"
+          test -x "$RUNNER_TEMP/doxa-launcher-home/Applications/DOXA.command"
+      - name: Smoke macOS browser proxy credential probe
+        run: |
+          python3 - <<'PY'
+          import os
+          import socket
+          from doxa.remote_transport import proxy_peer_uid
+
+          left, right = socket.socketpair()
+          try:
+              assert proxy_peer_uid(left) == os.getuid()
+              assert proxy_peer_uid(right) == os.getuid()
+          finally:
+              left.close()
+              right.close()
+          PY
+      - name: Test macOS transport, state and terminal
+        run: cargo test --locked -p doxa-peers -p doxa-protocol -p doxa-state -p doxa-tui
   rust:
     runs-on: ubuntu-latest
     steps:

@@ -90,7 +90,8 @@ fn identity(dir: &File, entry: &str) -> io::Result<Option<(u64, u64)>> {
     let stat = unsafe { stat.assume_init() };
     if stat.st_mode & libc::S_IFMT != libc::S_IFREG || stat.st_uid != unsafe { libc::geteuid() }
         || stat.st_nlink != 1 || stat.st_mode & 0o7777 != 0o600 { return Err(private_error()); }
-    Ok(Some((stat.st_dev, stat.st_ino)))
+    Ok(Some((u64::try_from(stat.st_dev).map_err(|_| private_error())?,
+             u64::try_from(stat.st_ino).map_err(|_| private_error())?)))
 }
 fn lock(dir: &File) -> io::Result<File> {
     let lock = open_at(dir, LOCK_NAME, libc::O_RDWR | libc::O_CREAT, 0o600)?;

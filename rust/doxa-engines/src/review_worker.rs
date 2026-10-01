@@ -38,7 +38,11 @@ pub fn review(executable: &Path, metadata: &Value, engine: &str, timeout: Durati
 
 /// Execute the already verified native inode, avoiding a path-replacement race.
 pub(crate) fn review_pinned(executable: &std::fs::File, metadata: &Value, engine: &str, timeout: Duration, cancelled: impl FnMut() -> bool) -> io::Result<bool> {
-    review_at(Path::new(&format!("/proc/self/fd/{}",executable.as_raw_fd())), metadata, engine, timeout, cancelled)
+    #[cfg(target_os = "macos")]
+    let fd_path = format!("/dev/fd/{}", executable.as_raw_fd());
+    #[cfg(not(target_os = "macos"))]
+    let fd_path = format!("/proc/self/fd/{}", executable.as_raw_fd());
+    review_at(Path::new(&fd_path), metadata, engine, timeout, cancelled)
 }
 
 fn child_status(pid: libc::pid_t) -> io::Result<Option<bool>> {

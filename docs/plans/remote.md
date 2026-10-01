@@ -1,8 +1,9 @@
 # Remote control and a web client — specification
 
-Status: **partly implemented**. The policy gate and cross-machine Unix peer
-bridge are available. The retained browser renderer is disabled until its
-transport can attest the local Tailscale proxy. The richer renderer and
+Status: **partly implemented**. The policy gate, native cross-machine peer
+bridge, and optional Python browser adapter have credential-checked Unix
+listeners. The browser remains an optional compatibility component; the Rust
+installer does not include its Python dependencies. Richer browser views and
 the remaining design work below have not shipped.
 This plan was written after looking at a colleague's `telag`, which solves
 the same user problem from the other end.
@@ -13,7 +14,7 @@ One session, reachable from more than one place: start an agent at the desk,
 pick it up on a phone, sit down and carry on in the terminal. The session must
 be the *same* session — not a copy, not a mirror.
 
-## Retained browser renderer: unavailable
+## Optional browser renderer
 
 The retained browser adapter in `doxa/remote_web.py` reads the local daemon
 registry and Unix sockets and renders HTML and a WebSocket. Its browser
@@ -23,20 +24,31 @@ yet reproduce the Textual interface's richer turn, diff, image and belief
 views or push notifications. An `◎ remote:<login>` chip names an attached
 browser driver in the local status bar and disappears when it disconnects.
 
-The cold-installed sidecar wheel has no `doxa-remote` console script.
-`python -m doxa.remote_web` now refuses to start even with opt-in and an
-allow-list, and serving its ASGI app directly also refuses every request.
-A loopback TCP caller can forge `Tailscale-User-Login`; its address and
-ASGI scope metadata cannot prove that the caller is the Tailscale proxy.
-An attested transport must be implemented before browser access is enabled.
-The machine-wide Unix peer bridge remains available with its existing
-kernel peer-credential check and canonical policy gate. Use Tailscale
-**Serve**, not public Funnel:
+The Rust installer does not install this retained Python component. From a
+source checkout with the Python development dependencies installed, set
+`DOXA_REMOTE_ENABLED=1` and `DOXA_REMOTE_ALLOWED_LOGINS=you@example.com`,
+then run `python -m doxa.remote_web`. It binds only
+`$DOXA_RUNTIME_DIR/remote-browser.sock` (or the normal DOXA runtime directory)
+with mode 0600. Point private Tailscale Serve at that absolute Unix path:
+
+```sh
+sudo tailscale serve --bg unix:/absolute/path/to/remote-browser.sock
+```
+
+The HTTP and WebSocket protocols check the connecting Unix peer's kernel UID
+before trusting exactly one `Tailscale-User-Login` header. Linux uses
+`SO_PEERCRED`; macOS uses `getpeereid`. `DOXA_REMOTE_PROXY_UID` defaults to
+root. The ordinary DOXA user's own UID cannot be configured as the proxy.
+Serving the ASGI app directly, or using TCP loopback, refuses identity headers.
+Use Tailscale **Serve**, not public Funnel:
 [Serve supplies identity headers for tailnet traffic; Funnel does not](https://tailscale.com/docs/features/tailscale-serve#identity-headers).
+
+This optional adapter has not yet been verified against an authenticated
+production Rust daemon on macOS. Keep remote access disabled until that local
+end-to-end check passes on the host where it will run.
 The retained renderer implements transcript/status reads, prompts, and pending
 input answers. Shell escapes and permission-mode changes are not browser
-operations. Browser startup instructions will return after proxy attestation
-is implemented. A detached daemon still has its normal
+operations. A detached daemon still has its normal
 `--linger` timeout when no client is attached.
 
 ## Prior art: telag, and why its architecture is not ours
@@ -75,10 +87,10 @@ That is the one real advantage DOXA has here, and the design should spend it.
 Keeping these apart is what stops this becoming a rewrite:
 
 1. **Transport** — the daemon remains on `AF_UNIX`, `chmod 0600`. The separate
-   bridge serves a WebSocket on loopback and Tailscale Serve provides the
+   bridge serves a WebSocket on a private Unix socket and Tailscale Serve provides the
    private HTTPS endpoint.
 2. **Authorization** — the local socket still uses file permissions. The
-   bridge additionally requires Serve's login header on loopback and DOXA's
+   bridge additionally requires Serve's login header from the attested Unix peer and DOXA's
    own `remote_allowed_logins` list.
 3. **Renderer** — Textual remains the full local renderer. The initial
    browser client renders transcript text and live events over the same
@@ -125,7 +137,7 @@ set, the first live daemon starts a detached machine-wide bridge, which creates
 on every request and stays alive while any session remains, so ending the first
 daemon does not remove the bridge. Configure Tailscale Serve to proxy to that
 Unix socket. The bridge accepts `Tailscale-User-Login` only when Linux
-`SO_PEERCRED` identifies the Unix peer as the configured tailscaled UID
+`SO_PEERCRED` or macOS `getpeereid` identifies the Unix peer as the configured tailscaled UID
 (`remote_proxy_uid`, default `0`), then applies DOXA's allow-list.
 Tailscaled must run as root or a distinct service UID; setting the proxy UID
 to the unprivileged DOXA user's UID is refused because another same-user
@@ -140,7 +152,7 @@ sudo tailscale serve --bg unix:/absolute/path/to/peernet.sock
 
 A loopback TCP connection cannot provide this proof: another local process can
 connect to it and forge the header. TCP bridge requests therefore fail closed,
-including requests from `127.0.0.1`. Platforms without `SO_PEERCRED` also fail
+including requests from `127.0.0.1`. Platforms without a supported Unix peer-credential API fail
 closed until they have an equivalent kernel-backed proxy identity check.
 
 ## Two candidate renderers
@@ -159,9 +171,9 @@ design worth having. An initial version now renders transcript text and live
 events. The richer views in this paragraph and cursor replay through the
 bridge remain proposed work.
 
-Recommendation: **(b)**. The retained browser renderer follows this shape,
-but its proxy-attestation transport is still unavailable;
-continuing toward a full renderer remains the work in this plan. Streaming
+Recommendation: **(b)**. The retained browser renderer follows this shape
+with a Unix proxy-attestation transport; continuing toward a native Rust
+adapter and full renderer remains the work in this plan. Streaming
 Textual as in (a) would be a separate stopgap with different limits.
 
 ## What this is not

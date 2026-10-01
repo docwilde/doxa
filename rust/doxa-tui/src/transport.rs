@@ -7,7 +7,7 @@ use std::fs::OpenOptions;
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::os::unix::net::UnixStream;
-use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -15,7 +15,13 @@ use std::time::{Duration, Instant};
 pub const PROTOCOL_NAME: &str = "doxa-daemon";
 pub use doxa_protocol::{MAX_FRAME_BYTES, PROTOCOL_VERSION};
 const MAX_QUEUED_FRAMES: usize = 1024;
+// Darwin may report a queued AF_UNIX connection as established before the
+// listener accepts it. A short hello deadline keeps a full backlog bounded.
+#[cfg(target_os = "macos")]
+const HELLO_TIMEOUT: Duration = Duration::from_millis(250);
+#[cfg(not(target_os = "macos"))]
 const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
+const CONNECT_TIMEOUT: Duration = Duration::from_millis(100);
 const REPLY_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_RESTORE_BYTES: u64 = 8 * 1024 * 1024;
 
@@ -67,17 +73,18 @@ impl From<io::Error> for TransportError {
 // descriptor is nonblocking and CLOEXEC from creation; EAGAIN means no
 // connection was queued, so it must never be treated as a usable stream.
 fn unix_connect_until(path: &Path, deadline: Instant) -> Result<UnixStream, TransportError> {
+    let deadline = deadline.min(Instant::now() + CONNECT_TIMEOUT);
     if Instant::now() >= deadline { return Err(TransportError::Timeout); }
     let bytes = path.as_os_str().as_bytes();
     let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
     if bytes.is_empty() || bytes.contains(&0) || bytes.len() >= address.sun_path.len() { return Err(TransportError::Malformed("invalid Unix socket path")); }
     address.sun_family = libc::AF_UNIX as libc::sa_family_t;
     for (out, byte) in address.sun_path.iter_mut().zip(bytes) { *out = *byte as libc::c_char; }
-    let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC, 0) };
-    if fd < 0 { return Err(io::Error::last_os_error().into()); }
-    let stream = unsafe { UnixStream::from_raw_fd(fd) };
+    let stream = UnixStream::from(doxa_peers::credentials::nonblocking_unix_socket()?);
     let fd = stream.as_raw_fd();
     let length = (std::mem::offset_of!(libc::sockaddr_un, sun_path) + bytes.len() + 1) as libc::socklen_t;
+    #[cfg(target_os = "macos")]
+    { address.sun_len = length as u8; }
     if unsafe { libc::connect(fd, (&address as *const libc::sockaddr_un).cast(), length) } != 0 {
         let error = io::Error::last_os_error();
         if error.raw_os_error() != Some(libc::EINPROGRESS) { return Err(error.into()); }
@@ -148,11 +155,9 @@ impl DaemonClient {
         let writer = stream.try_clone()?;
         writer.set_write_timeout(Some(if deadline.is_some() { remaining()? } else { REPLY_TIMEOUT }))?;
         let mut reader = BufReader::new(stream);
-        reader.get_ref().set_read_timeout(Some(remaining()?))?;
         let mut pending_bytes = Vec::new();
         let hello = read_json_until(&mut reader, &mut pending_bytes, deadline)?;
         validate_hello(&hello)?;
-        reader.get_ref().set_read_timeout(None)?;
         let snapshot = if restore { read_snapshot(&hello) } else { None };
         let attach_cursor = if snapshot.is_some() { hello["next_seq"].as_u64() } else { cursor };
         let mut client = Self {
@@ -181,9 +186,7 @@ impl DaemonClient {
         if let Some(frame) = self.queued.pop_front() {
             return Ok(Some(frame));
         }
-        self.reader.get_ref().set_read_timeout(Some(timeout))?;
         let result = self.read_frame_until(Some(Instant::now() + timeout));
-        self.reader.get_ref().set_read_timeout(None)?;
         match result {
             Err(TransportError::Timeout) => Ok(None),
             other => other.map(Some),
@@ -209,22 +212,21 @@ impl DaemonClient {
 
     /// Bind destructive requests to the process owning this connected socket.
     pub(crate) fn verify_peer(&self, expected_pid: i32) -> Result<(), TransportError> {
-        #[cfg(target_os = "linux")]
+        #[cfg(target_os = "macos")]
         {
-            let mut credentials: libc::ucred = unsafe { std::mem::zeroed() };
-            let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
-            if unsafe { libc::getsockopt(self.writer.as_raw_fd(), libc::SOL_SOCKET,
-                libc::SO_PEERCRED, (&mut credentials as *mut libc::ucred).cast(), &mut length) } != 0 {
-                return Err(io::Error::last_os_error().into());
+            let _ = expected_pid;
+            if doxa_peers::credentials::peer_uid(&self.writer)? != unsafe { libc::geteuid() } {
+                return Err(TransportError::Malformed("daemon peer owner changed"));
             }
-            if length as usize != std::mem::size_of::<libc::ucred>()
-                || credentials.uid != unsafe { libc::geteuid() } || credentials.pid != expected_pid {
-                return Err(TransportError::Malformed("daemon peer process changed"));
-            }
-            Ok(())
         }
-        #[cfg(not(target_os = "linux"))]
-        { let _ = expected_pid; Err(TransportError::Malformed("daemon peer process verification unavailable")) }
+        #[cfg(not(target_os = "macos"))]
+        {
+        let credentials = doxa_peers::credentials::peer_credentials(&self.writer)?;
+        if credentials.uid != unsafe { libc::geteuid() } || credentials.pid != expected_pid {
+            return Err(TransportError::Malformed("daemon peer process changed"));
+        }
+        }
+        Ok(())
     }
 
     pub(crate) fn call_until(&mut self, method: &str, params: Map<String, Value>, deadline: Instant) -> Result<Value, TransportError> {
@@ -267,8 +269,6 @@ impl DaemonClient {
 
     fn await_reply_until(&mut self, id: u64, deadline: Instant) -> Result<Value, TransportError> {
         let result = (|| loop {
-            let remaining = deadline.checked_duration_since(Instant::now()).ok_or(TransportError::Timeout)?;
-            self.reader.get_ref().set_read_timeout(Some(remaining))?;
             let frame = self.read_frame_until(Some(deadline))?;
             if frame["type"] == "reply" && frame["id"] == id {
                 return Ok(frame);
@@ -278,7 +278,6 @@ impl DaemonClient {
             }
             self.queued.push_back(frame);
         })();
-        self.reader.get_ref().set_read_timeout(None)?;
         result
     }
 }
@@ -309,9 +308,22 @@ fn read_snapshot(hello: &Value) -> Option<TranscriptSnapshot> {
 
 fn read_json_until(reader: &mut BufReader<UnixStream>, pending: &mut Vec<u8>, deadline: Option<Instant>) -> Result<Value, TransportError> {
     loop {
-        if let Some(deadline) = deadline {
-            let remaining = deadline.checked_duration_since(Instant::now()).filter(|time| !time.is_zero()).ok_or(TransportError::Timeout)?;
-            reader.get_ref().set_read_timeout(Some(remaining))?;
+        if reader.buffer().is_empty() {
+            let millis = match deadline {
+                Some(deadline) => deadline.checked_duration_since(Instant::now())
+                    .filter(|remaining| !remaining.is_zero())
+                    .map(|remaining| remaining.as_millis().max(1).min(i32::MAX as u128) as i32)
+                    .ok_or(TransportError::Timeout)?,
+                None => -1,
+            };
+            let mut ready = libc::pollfd { fd: reader.get_ref().as_raw_fd(), events: libc::POLLIN, revents: 0 };
+            let result = unsafe { libc::poll(&mut ready, 1, millis) };
+            if result == 0 { return Err(TransportError::Timeout); }
+            if result < 0 {
+                let error = io::Error::last_os_error();
+                if error.kind() == io::ErrorKind::Interrupted { continue; }
+                return Err(error.into());
+            }
         }
         let available = reader.fill_buf()?;
         if available.is_empty() {
@@ -377,7 +389,9 @@ mod deadline_tests {
                 else { DaemonClient::connect(&path, None).is_err() };
             let elapsed = started.elapsed(); release.join().unwrap();
             assert!(failed);
-            assert!(elapsed < Duration::from_millis(150), "connect waited for backlog release: {elapsed:?}");
+            let limit = if cfg!(target_os = "macos") { Duration::from_millis(350) }
+                else { Duration::from_millis(150) };
+            assert!(elapsed < limit, "connect waited for backlog release: {elapsed:?}");
         }
     }
     #[test]
@@ -394,12 +408,16 @@ mod deadline_tests {
                     connected.push(stream);
                 }
                 Err(TransportError::Timeout) => { full = true; break; }
+                #[cfg(target_os = "macos")]
+                Err(TransportError::Io(error)) if error.kind() == io::ErrorKind::ConnectionRefused => { full = true; break; }
                 Err(error) => panic!("unexpected backlog error: {error}"),
             }
         }
         assert!(full, "listener backlog was not filled");
         assert!(started.elapsed() < Duration::from_secs(1));
-        assert!(matches!(DaemonClient::connect_until(&path, None, Instant::now() + Duration::from_millis(100)), Err(TransportError::Timeout)));
+        let result = DaemonClient::connect_until(&path, None, Instant::now() + Duration::from_millis(100));
+        assert!(matches!(&result, Err(TransportError::Timeout))
+            || cfg!(target_os = "macos") && matches!(&result, Err(TransportError::Io(error)) if error.kind() == io::ErrorKind::ConnectionRefused));
     }
     #[test]
     fn partial_hello_cannot_reset_the_connection_deadline() {

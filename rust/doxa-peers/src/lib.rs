@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! Python-compatible, local peer presence registry and bounded local messaging.
 pub mod delivery;
+pub mod credentials;
 pub mod query;
 pub mod presence;
 pub mod remote_policy;
@@ -160,6 +161,9 @@ impl Registry {
                         if reap { remove_regular_entry(&path); self.reap_socket(&peer.socket_path, !alive); }
                         continue;
                     }
+                    #[cfg(target_os = "macos")]
+                    if probe && !delivery::probe_socket(std::path::Path::new(&peer.socket_path)) { continue; }
+                    #[cfg(not(target_os = "macos"))]
                     if probe && std::os::unix::net::UnixStream::connect(&peer.socket_path).is_err() { continue; }
                     peer.scrub_display(scrubber);
                     out.push(peer);
