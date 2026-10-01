@@ -216,10 +216,18 @@ fn run() -> io::Result<()> {
         .chain(std::iter::once(std::ptr::null()))
         .collect::<Vec<_>>();
     let exec = || {
+        #[cfg(target_os = "linux")]
+        {
         unsafe {
             libc::fexecve(binary.as_raw_fd(), args.as_ptr(), environment.as_ptr());
         }
         io::Error::last_os_error()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (&binary, &args, &environment);
+            invalid("protected Codex requires Linux process ownership and pinned execution")
+        }
     };
     if let Some(owner) = owner {
         let fd = owner
