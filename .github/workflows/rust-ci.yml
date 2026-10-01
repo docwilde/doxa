@@ -38,6 +38,21 @@ jobs:
         run: |
           HOME="$RUNNER_TEMP/doxa-launcher-home" target/debug/doxa-rs install-launcher "$GITHUB_WORKSPACE/target/debug/doxa-rs"
           test -x "$RUNNER_TEMP/doxa-launcher-home/Applications/DOXA.command"
+      - name: Smoke macOS browser proxy credential probe
+        run: |
+          python3 - <<'PY'
+          import os
+          import socket
+          from doxa.remote_transport import proxy_peer_uid
+
+          left, right = socket.socketpair()
+          try:
+              assert proxy_peer_uid(left) == os.getuid()
+              assert proxy_peer_uid(right) == os.getuid()
+          finally:
+              left.close()
+              right.close()
+          PY
       - name: Test macOS transport, state and terminal
         run: cargo test --locked -p doxa-peers -p doxa-protocol -p doxa-state -p doxa-tui
   rust:
