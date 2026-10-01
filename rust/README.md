@@ -17,6 +17,8 @@ Linux is live verified. macOS has native build and transport CI, with Claude,
 DeepSeek and GLM as the supported engine path; authenticated macOS provider
 sessions still need live verification. Protected Codex remains Linux-only
 because its process-owner contract has no macOS equivalent. Windows is unsupported.
+On macOS, connected client sockets attest the daemon's effective UID with
+`getpeereid`; Linux additionally attests its PID for destructive requests.
 
 ## Build and install
 

@@ -63,11 +63,8 @@ pub fn rosters() -> Vec<(Endpoint, io::Result<Vec<Value>>)> {
     })
 }
 
-fn credentials(stream: &UnixStream) -> io::Result<crate::credentials::PeerCredentials> {
-    crate::credentials::peer_credentials(stream)
-}
 pub fn attested_proxy(stream: &UnixStream) -> bool {
-    crate::credentials::peer_credentials(stream).is_ok_and(|cred|Some(cred.uid)==policy::proxy_uid())
+    crate::credentials::peer_uid(stream).is_ok_and(|uid|Some(uid)==policy::proxy_uid())
 }
 
 async fn parse_request(request:hyper::Request<hyper::body::Incoming>)->io::Result<(Value,Option<String>)> {
@@ -167,14 +164,14 @@ pub fn ensure(executable:&Path,runtime:&Path)->io::Result<()> {
     if !policy::remote_enabled(){return Ok(());}let _lock=StartLock::acquire(runtime)?;let socket=runtime.join("peernet.sock");
     if let Ok(meta)=fs::symlink_metadata(&socket){
         if !meta.file_type().is_socket()||meta.uid()!=unsafe{libc::geteuid()}||meta.mode()&0o077!=0{return Err(invalid("unsafe remote bridge socket"));}
-        match connect_probe(&socket){Ok(stream)=>{if credentials(&stream)?.uid!=unsafe{libc::geteuid()}{return Err(invalid("remote bridge has another owner"));}return Ok(());},Err(error) if error.raw_os_error()==Some(libc::ECONNREFUSED)=>{
+        match connect_probe(&socket){Ok(stream)=>{if crate::credentials::peer_uid(&stream)?!=unsafe{libc::geteuid()}{return Err(invalid("remote bridge has another owner"));}return Ok(());},Err(error) if error.raw_os_error()==Some(libc::ECONNREFUSED)=>{
             let current=fs::symlink_metadata(&socket)?;if (meta.dev(),meta.ino())!=(current.dev(),current.ino()){return Err(invalid("remote socket changed"));}fs::remove_file(&socket)?;
         },Err(error)=>return Err(error)}
     }
     let mut command=Command::new(executable);command.arg("__peernet-serve").arg(runtime).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     unsafe{command.pre_exec(||{if libc::setsid()<0{return Err(io::Error::last_os_error());}Ok(())});}
     let mut child=command.spawn()?;let deadline=Instant::now()+Duration::from_millis(400);
-    while Instant::now()<deadline{if let Ok(stream)=connect_probe(&socket){if credentials(&stream)?.uid!=unsafe{libc::geteuid()}{return Err(invalid("remote bridge has another owner"));}return Ok(());}if child.try_wait()?.is_some(){return Err(invalid("native remote bridge failed to start"));}std::thread::sleep(Duration::from_millis(20));}
+    while Instant::now()<deadline{if let Ok(stream)=connect_probe(&socket){if crate::credentials::peer_uid(&stream)?!=unsafe{libc::geteuid()}{return Err(invalid("remote bridge has another owner"));}return Ok(());}if child.try_wait()?.is_some(){return Err(invalid("native remote bridge failed to start"));}std::thread::sleep(Duration::from_millis(20));}
     let _=child.kill();let _=child.wait();Err(invalid("native remote bridge startup timed out"))
 }
 

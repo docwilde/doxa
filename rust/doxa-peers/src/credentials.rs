@@ -3,6 +3,22 @@ use std::{io, os::{fd::{AsRawFd, FromRawFd, OwnedFd}, unix::net::UnixStream}};
 
 pub struct PeerCredentials { pub uid: libc::uid_t, pub pid: libc::pid_t }
 
+/// Authenticate the Unix peer's effective UID. On macOS the connecting side
+/// cannot rely on LOCAL_PEERPID, although getpeereid succeeds on that socket.
+pub fn peer_uid(stream: &UnixStream) -> io::Result<libc::uid_t> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut uid = 0;
+        let mut gid = 0;
+        if unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(uid)
+    }
+    #[cfg(not(target_os = "macos"))]
+    { peer_credentials(stream).map(|credentials| credentials.uid) }
+}
+
 pub fn peer_credentials(stream: &UnixStream) -> io::Result<PeerCredentials> {
     #[cfg(target_os = "linux")]
     {
@@ -17,11 +33,7 @@ pub fn peer_credentials(stream: &UnixStream) -> io::Result<PeerCredentials> {
     }
     #[cfg(target_os = "macos")]
     {
-        let mut uid = 0; let mut gid = 0;
-        if unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) } != 0 {
-            let error = io::Error::last_os_error();
-            return Err(io::Error::new(error.kind(), format!("getpeereid: {error}")));
-        }
+        let uid = peer_uid(stream)?;
         let mut pid: libc::pid_t = 0;
         let mut len = std::mem::size_of::<libc::pid_t>() as libc::socklen_t;
         if unsafe { libc::getsockopt(stream.as_raw_fd(), libc::SOL_LOCAL, libc::LOCAL_PEERPID,

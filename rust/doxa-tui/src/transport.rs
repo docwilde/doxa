@@ -209,9 +209,19 @@ impl DaemonClient {
 
     /// Bind destructive requests to the process owning this connected socket.
     pub(crate) fn verify_peer(&self, expected_pid: i32) -> Result<(), TransportError> {
+        #[cfg(target_os = "macos")]
+        {
+            let _ = expected_pid;
+            if doxa_peers::credentials::peer_uid(&self.writer)? != unsafe { libc::geteuid() } {
+                return Err(TransportError::Malformed("daemon peer owner changed"));
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
         let credentials = doxa_peers::credentials::peer_credentials(&self.writer)?;
         if credentials.uid != unsafe { libc::geteuid() } || credentials.pid != expected_pid {
             return Err(TransportError::Malformed("daemon peer process changed"));
+        }
         }
         Ok(())
     }

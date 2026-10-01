@@ -45,7 +45,7 @@ impl PeerFrame {
 
 fn invalid(message: &'static str) -> io::Error { io::Error::new(io::ErrorKind::InvalidData, message) }
 fn same_user(stream: &UnixStream) -> io::Result<()> {
-    if crate::credentials::peer_credentials(stream)?.uid != unsafe { libc::geteuid() } {
+    if crate::credentials::peer_uid(stream)? != unsafe { libc::geteuid() } {
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, "peer UID differs"));
     }
     Ok(())
@@ -228,16 +228,6 @@ pub fn send(path: &Path, frame: &PeerFrame) -> io::Result<()> {
     if bytes.len() > MAX_FRAME_BYTES { return Err(invalid("peer frame too large")); }
     let deadline = Instant::now() + TIMEOUT;
     let mut stream = connect_before(path, deadline)?;
-    #[cfg(target_os = "macos")]
-    loop {
-        match same_user(&stream) {
-            Ok(()) => break,
-            Err(error) if error.kind() == io::ErrorKind::NotConnected
-                && Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
-            Err(error) => return Err(error),
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
     same_user(&stream)?;
     let mut remaining_bytes = bytes.as_slice();
     while !remaining_bytes.is_empty() {
