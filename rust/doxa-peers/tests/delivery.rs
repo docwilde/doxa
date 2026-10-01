@@ -109,7 +109,8 @@ fn full_peer_connect_queue_does_not_stall_delivery() -> io::Result<()> {
         let result = unsafe { libc::connect(fd.as_raw_fd(), (&address as *const libc::sockaddr_un).cast(), size) };
         if result == 0 || io::Error::last_os_error().raw_os_error() == Some(libc::EINPROGRESS) {
             queued.push(fd);
-        } else if io::Error::last_os_error().raw_os_error() == Some(libc::EAGAIN) {
+        } else if io::Error::last_os_error().raw_os_error() == Some(libc::EAGAIN)
+            || (cfg!(target_os = "macos") && io::Error::last_os_error().raw_os_error() == Some(libc::ECONNREFUSED)) {
             full = true;
             break;
         } else { return Err(io::Error::last_os_error()); }

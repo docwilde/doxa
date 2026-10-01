@@ -183,7 +183,8 @@ fn connect_before(path: &Path, deadline: Instant) -> io::Result<UnixStream> {
             // Linux reports EAGAIN, rather than EINPROGRESS, when a
             // nonblocking AF_UNIX listener's queue is full. A fresh socket
             // can connect as soon as the listener accepts a queued peer.
-            if error.kind() == io::ErrorKind::WouldBlock {
+            if error.kind() == io::ErrorKind::WouldBlock
+                || (cfg!(target_os = "macos") && error.raw_os_error() == Some(libc::ECONNREFUSED)) {
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 if remaining.is_zero() { return Err(io::Error::new(io::ErrorKind::TimedOut, "peer connect timed out")); }
                 std::thread::sleep(remaining.min(Duration::from_millis(10)));
@@ -227,6 +228,16 @@ pub fn send(path: &Path, frame: &PeerFrame) -> io::Result<()> {
     if bytes.len() > MAX_FRAME_BYTES { return Err(invalid("peer frame too large")); }
     let deadline = Instant::now() + TIMEOUT;
     let mut stream = connect_before(path, deadline)?;
+    #[cfg(target_os = "macos")]
+    loop {
+        match same_user(&stream) {
+            Ok(()) => break,
+            Err(error) if error.kind() == io::ErrorKind::NotConnected
+                && Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            Err(error) => return Err(error),
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
     same_user(&stream)?;
     let mut remaining_bytes = bytes.as_slice();
     while !remaining_bytes.is_empty() {
