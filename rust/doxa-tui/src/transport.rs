@@ -15,6 +15,11 @@ use std::time::{Duration, Instant};
 pub const PROTOCOL_NAME: &str = "doxa-daemon";
 pub use doxa_protocol::{MAX_FRAME_BYTES, PROTOCOL_VERSION};
 const MAX_QUEUED_FRAMES: usize = 1024;
+// Darwin may report a queued AF_UNIX connection as established before the
+// listener accepts it. A short hello deadline keeps a full backlog bounded.
+#[cfg(target_os = "macos")]
+const HELLO_TIMEOUT: Duration = Duration::from_millis(250);
+#[cfg(not(target_os = "macos"))]
 const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(100);
 const REPLY_TIMEOUT: Duration = Duration::from_secs(15);
@@ -384,7 +389,9 @@ mod deadline_tests {
                 else { DaemonClient::connect(&path, None).is_err() };
             let elapsed = started.elapsed(); release.join().unwrap();
             assert!(failed);
-            assert!(elapsed < Duration::from_millis(150), "connect waited for backlog release: {elapsed:?}");
+            let limit = if cfg!(target_os = "macos") { Duration::from_millis(350) }
+                else { Duration::from_millis(150) };
+            assert!(elapsed < limit, "connect waited for backlog release: {elapsed:?}");
         }
     }
     #[test]
