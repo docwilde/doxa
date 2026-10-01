@@ -16,12 +16,13 @@ env:
 jobs:
   macos:
     runs-on: macos-latest
-    env:
-      TMPDIR: ${{ runner.temp }}/doxa-tests
     steps:
       - uses: actions/checkout@v4
       - name: Prepare private test directory
-        run: mkdir -p "$TMPDIR" && chmod 700 "$TMPDIR"
+        run: |
+          mkdir -p "$RUNNER_TEMP/doxa-tests"
+          chmod 700 "$RUNNER_TEMP/doxa-tests"
+          echo "TMPDIR=$RUNNER_TEMP/doxa-tests" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
       - name: Check native macOS build
         run: cargo check --locked --workspace
