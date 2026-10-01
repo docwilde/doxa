@@ -227,18 +227,21 @@ pub fn send(path: &Path, frame: &PeerFrame) -> io::Result<()> {
     bytes.push(b'\n');
     if bytes.len() > MAX_FRAME_BYTES { return Err(invalid("peer frame too large")); }
     let deadline = Instant::now() + TIMEOUT;
-    let mut stream = connect_before(path, deadline)?;
-    same_user(&stream)?;
+    let mut stream = connect_before(path, deadline).map_err(|error|
+        io::Error::new(error.kind(), format!("peer connect: {error}")))?;
+    same_user(&stream).map_err(|error|
+        io::Error::new(error.kind(), format!("peer credentials: {error}")))?;
     let mut remaining_bytes = bytes.as_slice();
     while !remaining_bytes.is_empty() {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() { return Err(io::Error::new(io::ErrorKind::TimedOut, "peer write timed out")); }
-        stream.set_write_timeout(Some(remaining))?;
+        stream.set_write_timeout(Some(remaining)).map_err(|error|
+            io::Error::new(error.kind(), format!("peer write timeout setup: {error}")))?;
         match stream.write(remaining_bytes) {
             Ok(0) => return Err(io::Error::new(io::ErrorKind::WriteZero, "peer write returned zero")),
             Ok(n) => remaining_bytes = &remaining_bytes[n..],
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            Err(error) => return Err(error),
+            Err(error) => return Err(io::Error::new(error.kind(), format!("peer write: {error}"))),
         }
     }
     Ok(())
