@@ -2377,7 +2377,9 @@ impl App {
                                         && picker.evidence.is_none()
                                 })
                             {
-                                if self.lore_picker.as_ref().is_some_and(|picker| picker.proposal_mode) { " Filter pending ● " } else { " Filter beliefs ● " }
+                                if self.lore_picker.as_ref().is_some_and(|picker| picker.proposal_mode) { " Filter pending ● " }
+                                else if self.lore_picker.as_ref().is_some_and(|picker| picker.filter_focused) { " Filter beliefs ● " }
+                                else { " Filter beliefs (click or /) " }
                             } else if active && self.focus == Focus::Prompt {
                                 " Prompt ● "
                             } else {

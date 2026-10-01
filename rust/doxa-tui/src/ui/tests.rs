@@ -458,6 +458,14 @@ for line in sys.stdin:
         assert!(app.notice.contains("Codex uses on-request approvals"));
         assert!(app.chip_hint_for("permission", 0).contains("mode switching unavailable"));
 
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"deepseek-1",
+            "engine":"deepseek", "permission_mode":"default", "can_set_permission_mode":false}));
+        app.groups[0].tabs = vec!["deepseek-1".into()];
+        assert!(!app.chips(0).iter().any(|(kind, _)| *kind == "permission"));
+        app.open_permission_picker();
+        assert!(app.permission_picker.is_none());
+        assert!(app.notice.contains("no provider permission mode"));
+
         app.apply_daemon_frame(&json!({"type":"hello", "session_id":"claude-1",
             "engine":"claude", "permission_mode":"plan", "running":false, "queued":0,
             "can_set_permission_mode":true}));
@@ -687,6 +695,27 @@ for line in sys.stdin:
         assert!(!app.pending_answers.iter().any(|(_, id, _)| id == "three"));
         app.apply_daemon_frame(&json!({"type":"event","session_id":"first","event":{"type":"session_done","data":{}}}));
         assert!(app.permission_grants.is_empty());
+    }
+
+    #[test]
+    fn codex_provider_approvals_never_offer_or_reuse_a_session_grant() {
+        for tool in ["command_execution", "file_change", "request_permissions"] {
+            let mut app = App::default();
+            app.rail_visible = false;
+            app.handle(Event::Resize(100, 30));
+            app.apply_daemon_frame(&json!({"type":"hello","session_id":"codex-1","engine":"codex"}));
+            let request = |id: &str| json!({"type":"event","session_id":"codex-1",
+                "event":{"type":"needs_input","data":{"id":id,"kind":"permission",
+                    "tool_name":tool,"input_summary":"full request","require_full_review":false}}});
+            app.apply_daemon_frame(&request("first"));
+            assert!(!app.input_requests[0].can_grant_for_session());
+            assert!(!input_request_body(&app.input_requests[0], 90).0.contains("Always approve"));
+            app.handle(Event::Key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE)));
+            assert!(app.pending_answers.is_empty(), "{tool} must remain one-shot");
+            app.permission_grants.insert(("codex-1".into(), tool.into()));
+            app.apply_daemon_frame(&request("second"));
+            assert!(app.pending_answers.is_empty(), "stale grant must not auto-approve {tool}");
+        }
     }
 
     #[test]
@@ -1892,7 +1921,7 @@ for line in sys.stdin:
                 proposals: (1..=2).map(|id| lore_picker::Proposal { pid: format!("proposal-{id}"),
                     kind: "belief".into(), action: "add".into(), scope: "project".into(),
                     summary: "long summary ".repeat(80) }).collect(),
-                selected: 0, query: String::new(), offset: 0, status: "long status ".repeat(40),
+                selected: 0, query: String::new(), filter_focused: false, offset: 0, status: "long status ".repeat(40),
                 evidence: None, pending: None, proposal_mode, cluster_mode: false, all_proposals: Vec::new(), review: None, review_scroll: 0,
                 review_seen: 0, review_width: 0, armed_resolution: None, can_resolve: false,
                 resolving: false, cwd: cwd.path().display().to_string(), belief_review: None, belief_intent: None,
@@ -3309,7 +3338,7 @@ for line in sys.stdin:
         app.action_menu = true;
         assert_eq!(app.active_chooser_rect().unwrap().bottom(), menu.bottom());
         app.action_menu = false;
-        app.lore_picker = Some(LorePicker { session_id: None, rows: vec![], selected: 0, query: String::new(),
+        app.lore_picker = Some(LorePicker { session_id: None, rows: vec![], selected: 0, query: String::new(), filter_focused: false,
             offset: 0, status: "Ready".into(), evidence: None, pending: None,
             proposals: Vec::new(), proposal_mode: false, cluster_mode: false, all_proposals: Vec::new(), review: None, review_scroll: 0,
             review_seen: 0, review_width: 0, armed_resolution: None,
@@ -4647,7 +4676,7 @@ for line in sys.stdin:
         let mut app = App { input: "unsent draft".into(), ..Default::default() };
         app.lore_picker = Some(LorePicker {
             session_id: None,
-            query: String::new(), rows: Vec::new(), selected: 0, offset: 0,
+            query: String::new(), filter_focused: false, rows: Vec::new(), selected: 0, offset: 0,
             evidence: None, status: String::new(), pending: None,
             proposals: Vec::new(), proposal_mode: false, cluster_mode: false, all_proposals: Vec::new(), review: None, review_scroll: 0,
             review_seen: 0, review_width: 0, armed_resolution: None,
@@ -4664,6 +4693,7 @@ for line in sys.stdin:
         }]))).unwrap();
         assert!(app.poll_lore());
         assert_eq!(app.lore_picker.as_ref().unwrap().rows[0].id, 7);
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE)));
         app.handle(Event::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)));
         assert_eq!(app.lore_picker.as_ref().unwrap().query, "r");
         app.handle(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
@@ -4945,6 +4975,7 @@ for line in sys.stdin:
         assert_eq!(picker.rows[picker.selected].id, 9);
         assert_eq!(picker.belief_intent, Some(doxa_lore::BeliefAction::Retract));
         assert!(picker.pending.is_none());
+        app.lore_picker_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
         for c in "agent".chars() { app.lore_picker_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)); }
         assert_eq!(app.lore_picker.as_ref().unwrap().query, "agent");
     }
@@ -4985,6 +5016,7 @@ for line in sys.stdin:
         let row=app.rendered_belief_rows.borrow()[0].clone();
         app.handle(Event::Mouse(MouseEvent {kind:MouseEventKind::Moved,column:row.rect.x+20,row:row.rect.y,modifiers:KeyModifiers::NONE}));
         app.tick_belief_preview(Instant::now()+Duration::from_millis(500));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('/'),KeyModifiers::NONE)));
         app.handle(Event::Key(KeyEvent::new(KeyCode::Char('s'),KeyModifiers::NONE)));
         assert!(app.belief_preview.owner().is_none());
         assert!(app.lore_picker.as_ref().unwrap().belief_review.is_none());
@@ -4998,6 +5030,7 @@ for line in sys.stdin:
         app.apply_daemon_frame(&json!({"type":"hello","session_id":"s","engine":"codex","model":"gpt-6-sol"}));
         app.input="Private unsent draft".into();app.input_cursor=app.input.len();
         app.show_belief_browser_fixture(0,&[(100,"project","old unrelated"),(7,"user","recent project preference")]);
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('/'),KeyModifiers::NONE)));
         for ch in "project preference".chars() {app.handle(Event::Key(KeyEvent::new(KeyCode::Char(ch),KeyModifiers::NONE)));}
         let due=app.belief_filter_due.unwrap();
         assert!(!app.poll_belief_filter(due+Duration::from_millis(199)));
@@ -5007,7 +5040,8 @@ for line in sys.stdin:
         assert!(painted.contains("Filter beliefs") && painted.contains("project preference"));
         assert!(!painted.contains("Search:") && !painted.contains("Shift+A accept"));
         assert_eq!(app.input,"Private unsent draft");
-        app.lore_picker_key(KeyEvent::new(KeyCode::Char('R'),KeyModifiers::SHIFT));
+        app.lore_picker_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
+        app.lore_picker_key(KeyEvent::new(KeyCode::Char('r'),KeyModifiers::NONE));
         let picker=app.lore_picker.as_ref().unwrap();
         assert_eq!(picker.rows[picker.selected].id,7);
         assert_eq!(picker.belief_intent,Some(doxa_lore::BeliefAction::Retract));
@@ -5036,6 +5070,7 @@ for line in sys.stdin:
             let mut app = App::default();
             app.size = Rect::new(0, 0, 100, 40);
             app.show_belief_browser_fixture(0, &[(7, "fixture", "claim")]);
+            app.lore_picker_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
             for c in query.chars() {
                 assert!(app.lore_picker_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)));
             }
@@ -5064,6 +5099,27 @@ for line in sys.stdin:
         assert_eq!(picker.belief_intent, Some(doxa_lore::BeliefAction::Retract));
         assert!(picker.pending.is_none());
         assert!(picker.belief_action.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn belief_row_a_and_r_apply_after_exact_review_without_opening_another_menu() {
+        for (key, action) in [('a', doxa_lore::BeliefAction::Confirmed),
+                              ('r', doxa_lore::BeliefAction::Retract)] {
+            let mut app = App::default();
+            app.size = Rect::new(0, 0, 100, 40);
+            app.show_belief_browser_fixture(0, &[(7, "Fixture subject", "clipped list text")]);
+            app.lore_picker_key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE));
+            assert_eq!(app.lore_picker.as_ref().unwrap().belief_intent, Some(action));
+            let (tx, rx) = mpsc::sync_channel(1);
+            app.lore_picker.as_mut().unwrap().pending = Some(rx);
+            tx.send(Ok(lore_picker::ResultPage::BeliefReview(belief_review_fixture(), true))).unwrap();
+            assert!(app.poll_lore());
+            let picker = app.lore_picker.as_ref().unwrap();
+            assert!(picker.belief_intent.is_none());
+            assert!(picker.belief_review.is_none());
+            assert!(picker.pending.is_none(), "gallery fixture must never send an action to LORE");
+        }
     }
 
     #[test]
@@ -5154,7 +5210,7 @@ for line in sys.stdin:
         app.size = Rect::new(0, 0, 100, 40);
         app.lore_picker = Some(LorePicker {
             session_id: None,
-            query: String::new(), rows: Vec::new(), selected: 0, offset: 0,
+            query: String::new(), filter_focused: false, rows: Vec::new(), selected: 0, offset: 0,
             proposals: vec![lore_picker::Proposal { pid: "one".into(), kind: "memory".into(),
                 action: "add".into(), scope: "user".into(), summary: String::new() }],
             proposal_mode: true, cluster_mode: false, all_proposals: Vec::new(), review: Some(review), review_scroll: 0,

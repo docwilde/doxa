@@ -730,20 +730,21 @@ impl AppServerDriver {
         }
     }
 
-    /// There is no DOXA approval bridge in this slice. Deny every server
-    /// request explicitly; never silently grant shell, patch, or new tools.
+    /// Noninteractive sessions explicitly deny provider approval requests.
+    /// Unknown requests remain unsupported and fail closed.
     async fn deny_server_request(&mut self, frame: &Value, cancel: Option<&CancellationToken>, deadline: tokio::time::Instant) -> Result<(), AppServerError> {
         let Some(id) = frame.get("id") else { return Ok(()); };
         let result = match frame["method"].as_str().unwrap_or("") {
             "item/commandExecution/requestApproval" => json!({"decision":"decline"}),
             "item/fileChange/requestApproval" => json!({"decision":"decline"}),
+            "item/permissions/requestApproval" => json!({"permissions":{},"scope":"turn"}),
             _ => {
                 self.send_bounded(json!({"id":id,"error":{"code":-32601,"message":"DOXA cannot handle this server request"}}), cancel, deadline).await?;
                 return Err(AppServerError::Server("Codex requested an interactive tool or approval that DOXA cannot handle; the request was refused".to_owned()));
             }
         };
         self.send_bounded(json!({"id":id,"result":result}), cancel, deadline).await?;
-        Err(AppServerError::Server("Codex requested interactive approval; DOXA refused it because app-server approval dialogs are not supported yet".to_owned()))
+        Err(AppServerError::Server("Codex requested interactive approval; DOXA refused it because this session has no approval bridge".to_owned()))
     }
 }
 
