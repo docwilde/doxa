@@ -5,6 +5,19 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.65 — 2026-10-01
+
+**Provider approvals**
+
+- Fix **`InputInbox`** to review Codex `item/permissions/requestApproval` requests and grant only the exact profile for one turn. Unreviewed requests fail closed.
+- Limit **`InputRequest::can_grant_for_session`** to canonical peer and LORE tools. Codex shell, file-change and permission-profile requests remain one-shot.
+- Hide the permission chip for DeepSeek and GLM; their peer and LORE tool calls still require individual DOXA approval.
+
+**Belief browser**
+
+- Make **`LorePicker`** row Accept/Reject buttons and A/R keys act directly after an exact LORE belief fetch. Enter keeps detailed review and notes.
+- Move belief text filtering behind `/` or a click in the prompt field, so unmodified A/R keys work on the selected row.
+
 ## 2.0.0-alpha.64 — 2026-10-01
 
 **Claude approval forwarding**

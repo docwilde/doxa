@@ -183,8 +183,11 @@ fn permission_index(mode: &str) -> Option<usize> {
 }
 
 fn permission_display_mode(mode: &str, engine: Option<&str>) -> bool {
-    permission_index(mode).is_some()
-        || (engine == Some("codex") && matches!(mode, "on-request" | "never"))
+    match engine {
+        Some("claude") => permission_index(mode).is_some(),
+        Some("codex") => matches!(mode, "on-request" | "never"),
+        _ => false,
+    }
 }
 
 #[derive(Debug)]
@@ -274,6 +277,7 @@ struct PendingRejection {
 struct LorePicker {
     session_id: Option<String>,
     query: String,
+    filter_focused: bool,
     rows: Vec<lore_picker::Belief>,
     proposals: Vec<lore_picker::Proposal>,
     proposal_mode: bool,
@@ -898,6 +902,20 @@ impl InputRequest {
             })
     }
 
+    fn can_grant_for_session(&self) -> bool {
+        if self.kind != "permission" {
+            return false;
+        }
+        matches!(self.original_payload["tool_name"].as_str(),
+            Some(doxa_engines::peer_tools::LIST | doxa_engines::peer_tools::SEND |
+                 doxa_engines::peer_tools::HISTORY |
+                 "mcp__doxa__lore_belief_search" | "mcp__doxa__lore_belief_show" |
+                 "mcp__doxa__lore_belief_neighbours" | "mcp__doxa__lore_memory_list" |
+                 "mcp__doxa__lore_session_search" | "mcp__doxa__lore_remember" |
+                 "lore_belief_search" | "lore_belief_show" | "lore_belief_neighbours" |
+                 "lore_memory_list" | "lore_session_search" | "lore_remember"))
+    }
+
     fn option_count(&self) -> usize {
         self.questions
             .get(self.step)
@@ -968,7 +986,7 @@ fn input_request_body(
             body.push_str("Question unavailable\n");
         }
     } else {
-        let labels: &[&str] = if request.kind == "permission" {
+        let labels: &[&str] = if request.can_grant_for_session() {
             &["Approve · A", "Deny · D / Esc", "Always approve this tool · L"]
         } else {
             &["Approve · A", "Deny · D / Esc"]

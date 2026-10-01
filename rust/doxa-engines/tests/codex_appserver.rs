@@ -140,7 +140,7 @@ async fn approval_is_refused_with_a_clear_error() {
     std::fs::write(&options.executable, script).unwrap();
     let mut driver = AppServerDriver::spawn(options, |s| s.to_owned()).await.unwrap();
     let outcome = driver.run_turn("hello", &CancellationToken::new(), |_| {}).await;
-    assert!(matches!(outcome, Err(doxa_engines::codex_appserver::AppServerError::Server(ref message)) if message.contains("refused") && message.contains("not supported")));
+    assert!(matches!(outcome, Err(doxa_engines::codex_appserver::AppServerError::Server(ref message)) if message.contains("refused") && message.contains("no approval bridge")));
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(std::fs::read_to_string(marker).unwrap(), "denied");
 }
@@ -279,6 +279,11 @@ send({'id':'question-rpc','method':'item/tool/requestUserInput','params':{'threa
 a=read();assert a['id']=='question-rpc' and a['result']=={'answers':{'topic':{'answers':['Second']}}}
 send({'id':91,'method':'item/commandExecution/requestApproval','params':{'threadId':'thread_1','turnId':'turn_1','itemId':'cmd_1','command':'echo test','cwd':'/fixture'}})
 a=read();assert a['id']==91 and a['result']=={'decision':'accept'}
+send({'method':'item/started','params':{'threadId':'thread_1','turnId':'turn_1','item':{'id':'patch_1','type':'fileChange','changes':[{'path':'src/lib.rs','diff':'+safe'}]}}})
+send({'id':93,'method':'item/fileChange/requestApproval','params':{'threadId':'thread_1','turnId':'turn_1','itemId':'patch_1'}})
+a=read();assert a['id']==93 and a['result']=={'decision':'accept'}
+send({'id':92,'method':'item/permissions/requestApproval','params':{'threadId':'thread_1','turnId':'turn_1','itemId':'perms_1','startedAtMs':1,'cwd':'/fixture','reason':'network access','permissions':{'network':{'enabled':True}}}})
+a=read();assert a['id']==92 and a['result']=={'permissions':{'network':{'enabled':True}},'scope':'turn','strictAutoReview':False}
 "#);
     std::fs::write(&options.executable, script).unwrap();
     let mut driver = AppServerDriver::spawn_interactive(options, str::to_owned).await.unwrap();
@@ -293,8 +298,8 @@ a=read();assert a['id']==91 and a['result']=={'decision':'accept'}
         }
         kinds.push(event.kind);
     }, |frame| inbox.begin(frame, str::to_owned).map(Some)).await.unwrap();
-    assert_eq!(kinds.iter().filter(|kind| kind.as_str() == "needs_input").count(), 2);
-    assert_eq!(kinds.iter().filter(|kind| kind.as_str() == "needs_input_resolved").count(), 2);
+    assert_eq!(kinds.iter().filter(|kind| kind.as_str() == "needs_input").count(), 4);
+    assert_eq!(kinds.iter().filter(|kind| kind.as_str() == "needs_input_resolved").count(), 4);
     driver.shutdown().await;
 }
 

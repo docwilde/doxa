@@ -130,8 +130,9 @@ impl App {
         if picker.resolving || picker.belief_acting { return true; }
         picker.proposal_mode = mode != 0; picker.cluster_mode = mode == 2;
         picker.pending = None; picker.query.clear(); picker.offset = 0; picker.selected = 0;
+        picker.filter_focused = false;
         picker.review = None; picker.belief_review = None; picker.evidence = None;
-        picker.armed_resolution = None; picker.can_resolve = false; picker.belief_action = None;
+        picker.armed_resolution = None; picker.can_resolve = false; picker.belief_action = None; picker.belief_intent = None;
         picker.can_act_on_beliefs = false; picker.proposals.clear(); picker.all_proposals.clear();
         self.belief_filter_due = None; self.belief_filter_request = None;
         let cwd = picker.cwd.clone();
@@ -160,6 +161,7 @@ impl App {
                 .active_id()
                 .map(str::to_owned),
             query: String::new(),
+            filter_focused: false,
             rows: Vec::new(),
             selected: 0,
             offset: 0,
@@ -199,6 +201,7 @@ impl App {
         self.lore_picker = Some(LorePicker {
             session_id: None,
             query: String::new(),
+            filter_focused: false,
             rows: rows
                 .iter()
                 .map(|&(id, subject, claim)| lore_picker::Belief {
@@ -232,7 +235,7 @@ impl App {
             belief_acting: false,
             result_status: None,
             evidence: None,
-            status: "Active beliefs · Accept/Reject review the exact claim".into(),
+            status: "Active beliefs · Accept/Reject apply to the selected claim".into(),
             pending: None,
         });
         self.belief_fixture_rows = self.lore_picker.as_ref().unwrap().rows.clone();
@@ -646,12 +649,14 @@ impl App {
         picker.belief_acting = false;
         let mut urgent_resolution = false;
         let mut refresh_after_action = false;
+        let mut action_after_review = None;
         match result {
             Ok(lore_picker::ResultPage::Beliefs(rows)) => {
                 picker.rows = rows;
                 picker.selected = 0;
                 picker.evidence = None;
                 picker.belief_review = None;
+                picker.belief_intent = None;
                 picker.can_act_on_beliefs = false;
                 picker.belief_action = None;
                 picker.retract_armed = false;
@@ -680,6 +685,7 @@ impl App {
                 picker.selected = 0;
                 picker.evidence = None;
                 picker.belief_review = None;
+                picker.belief_intent = None;
                 picker.can_act_on_beliefs = false;
                 picker.belief_action = None;
                 picker.retract_armed = false;
@@ -768,19 +774,33 @@ impl App {
                         .get(picker.selected)
                         .is_some_and(|row| row.id == review.id())
                 {
-                    picker.belief_review = Some(review);
-                    picker.review_scroll = 0;
-                    picker.review_seen = 0;
-                    picker.review_width = 0;
-                    picker.belief_action = None;
-                    picker.belief_note.clear();
-                    picker.retract_armed = false;
-                    picker.can_act_on_beliefs = can_act;
-                    picker.status = if can_act { "Read the complete belief, then choose C confirmed, X contradicted, S stale, or R retract" }
-                        else { "Read only · installed LORE lacks reviewed belief actions" }.into();
+                    if let Some(action) = picker.belief_intent.take() {
+                        if can_act {
+                            let note = match action {
+                                doxa_lore::BeliefAction::Confirmed => "Accepted by user in DOXA belief browser",
+                                doxa_lore::BeliefAction::Retract => "Rejected by user in DOXA belief browser",
+                                _ => unreachable!("row buttons only accept or reject"),
+                            };
+                            action_after_review = Some((picker.cwd.clone(), review, action, note.to_owned()));
+                        } else {
+                            picker.status = "Read only · installed LORE lacks reviewed belief actions".into();
+                        }
+                    } else {
+                        picker.belief_review = Some(review);
+                        picker.review_scroll = 0;
+                        picker.review_seen = 0;
+                        picker.review_width = 0;
+                        picker.belief_action = None;
+                        picker.belief_note.clear();
+                        picker.retract_armed = false;
+                        picker.can_act_on_beliefs = can_act;
+                        picker.status = if can_act { "Read the complete belief, then choose C confirmed, X contradicted, S stale, or R retract" }
+                            else { "Read only · installed LORE lacks reviewed belief actions" }.into();
+                    }
                 } else {
                     picker.status = "Selection changed; reopen the exact belief review".into();
                     picker.can_act_on_beliefs = false;
+                    picker.belief_intent = None;
                 }
             }
             Ok(lore_picker::ResultPage::BeliefActed(result)) => {
@@ -795,6 +815,7 @@ impl App {
                     result.confirmed, result.contradicted, result.stale
                 ));
                 picker.belief_review = None;
+                picker.belief_intent = None;
                 picker.belief_action = None;
                 picker.belief_note.clear();
                 picker.retract_armed = false;
@@ -802,6 +823,7 @@ impl App {
                 refresh_after_action = true;
             }
             Err(message) => {
+                picker.belief_intent = None;
                 picker.status = if was_belief_acting {
                     message.into()
                 } else if was_resolving {
@@ -841,6 +863,9 @@ impl App {
                     .push(crate::bridge::WorkerCommand::Status(id.clone()));
             }
             self.load_lore(lore_picker::Query::FilteredBeliefs(offset, query));
+        }
+        if let Some((cwd, review, action, note)) = action_after_review {
+            self.load_lore(lore_picker::Query::BeliefAction(cwd, review, action, note));
         }
         true
     }
@@ -885,6 +910,7 @@ impl App {
                 && picker.belief_review.is_none()
                 && picker.evidence.is_none()
                 && !picker.resolving
+                && picker.filter_focused
         }) else {
             return false;
         };
@@ -958,6 +984,25 @@ impl App {
     }
 
     pub(super) fn lore_picker_key(&mut self, key: KeyEvent) -> bool {
+        if let Some(picker) = self.lore_picker.as_mut().filter(|picker| {
+            !picker.proposal_mode && picker.belief_review.is_none() && picker.evidence.is_none()
+                && picker.pending.is_none() && !picker.resolving
+        }) {
+            match key.code {
+                KeyCode::Char('/') if !picker.filter_focused && key.modifiers == KeyModifiers::NONE => {
+                    picker.filter_focused = true;
+                    return true;
+                }
+                KeyCode::Enter if picker.filter_focused => {
+                    picker.filter_focused = false;
+                    return true;
+                }
+                KeyCode::Up | KeyCode::Down if picker.filter_focused => {
+                    picker.filter_focused = false;
+                }
+                _ => {}
+            }
+        }
         if self.belief_graph_lines.is_none() && self.edit_belief_filter(key) {
             return true;
         }
@@ -1391,13 +1436,13 @@ impl App {
             KeyCode::Down if picker.evidence.is_none() => {
                 picker.selected = (picker.selected + 1).min(picker.rows.len().saturating_sub(1))
             }
-            KeyCode::Char(c @ ('A' | 'R'))
+            KeyCode::Char(c @ ('a' | 'A' | 'r' | 'R'))
                 if picker.evidence.is_none()
                     && !key
                         .modifiers
                         .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
             {
-                picker.belief_intent = Some(if matches!(c, 'R') {
+                picker.belief_intent = Some(if matches!(c, 'r' | 'R') {
                     doxa_lore::BeliefAction::Retract
                 } else {
                     doxa_lore::BeliefAction::Confirmed

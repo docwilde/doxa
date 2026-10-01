@@ -1547,9 +1547,10 @@ impl App {
             }
         }
         let kind = self.input_requests[index].kind.clone();
+        let can_grant_for_session = self.input_requests[index].can_grant_for_session();
         if kind != "ask_user" {
             let page = self.active_chooser_rect().map_or(1, |menu| menu.height.saturating_sub(2).max(1));
-            let choices = if kind == "permission" { 3 } else { 2 };
+            let choices = if can_grant_for_session { 3 } else { 2 };
             match key.code {
                 KeyCode::Up => {
                     let selected = self.input_requests[index].selected;
@@ -1626,8 +1627,8 @@ impl App {
                     Some("deny")
                 }
                 KeyCode::Enter if self.input_requests[index].selected == 2 => Some("deny"),
-                KeyCode::Enter if kind == "permission" && self.input_requests[index].selected == 3 => Some("session"),
-                KeyCode::Char('l' | 'L') if kind == "permission"
+                KeyCode::Enter if can_grant_for_session && self.input_requests[index].selected == 3 => Some("session"),
+                KeyCode::Char('l' | 'L') if can_grant_for_session
                     && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT) => Some("session"),
                 KeyCode::Char('a' | 'A') | KeyCode::Enter
                     if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
@@ -1665,7 +1666,7 @@ impl App {
                 return true;
             }
             let request = &mut self.input_requests[index];
-            request.grant_on_success = answer["scope"] == "session";
+            request.grant_on_success = can_grant_for_session && answer["scope"] == "session";
             request.sending = true;
             self.pending_answers
                 .push((request.session_id.clone(), request.id.clone(), answer));
@@ -1911,6 +1912,9 @@ impl App {
             };
             if index < count && picker.selected != index {
                 picker.selected = index;
+                if !picker.proposal_mode {
+                    picker.filter_focused = false;
+                }
                 return true;
             }
         } else if self.action_menu {
@@ -2038,6 +2042,9 @@ impl App {
                 .contains(ratatui::layout::Position::new(mouse.column, mouse.row))
             {
                 self.focus = Focus::Prompt;
+                if let Some(picker) = self.lore_picker.as_mut() {
+                    picker.filter_focused = true;
+                }
                 return true;
             }
         }
@@ -2752,6 +2759,7 @@ impl App {
                     if mouse.row >= first && mouse.row < first.saturating_add(visible as u16) {
                         let index = start + usize::from(mouse.row - first);
                         if let Some(id) = picker.rows.get(index).map(|row| row.id) {
+                            picker.filter_focused = false;
                             let action_clicked = crate::lore_table::BeliefColumns::new(
                                 usize::from(menu.width.saturating_sub(2)),
                             )

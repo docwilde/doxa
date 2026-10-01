@@ -22,6 +22,7 @@ struct Pending {
 
 enum Rule {
     Approval,
+    PermissionGrant(Value),
     Questions(Vec<Question>),
     Peer { rpc: String, arguments: Value, handler: crate::peer_tools::Handler },
 }
@@ -132,6 +133,20 @@ impl InputInbox {
                 }
                 (Rule::Approval, json!({"kind":"permission","title":"Approve these Codex file changes once?","tool_name":"file_change","input_summary":scrub(&json!({"request":params,"changes":item["changes"]}).to_string()),"require_full_review":true}))
             }
+            Some("item/permissions/requestApproval") => {
+                let profile = params["permissions"].as_object()
+                    .filter(|profile| !profile.is_empty() && profile.keys().all(|key| matches!(key.as_str(), "network" | "fileSystem")))
+                    .ok_or("Codex permission request has no reviewable profile")?;
+                let grant = Value::Object(profile.clone());
+                let raw = grant.to_string();
+                if raw.len() > MAX_ANSWER_BYTES || scrub(&raw) != raw {
+                    return Err("Codex permission grant cannot be reviewed without redaction or truncation".into());
+                }
+                (Rule::PermissionGrant(grant), json!({"kind":"permission",
+                    "title":"Approve requested Codex permissions for this turn?",
+                    "tool_name":"request_permissions","input_summary":scrub(&params.to_string()),
+                    "require_full_review":true}))
+            }
             _ => return Err("Unsupported Codex interactive request".into()),
         };
         if serde_json::to_vec(&data).map_or(true, |bytes| bytes.len() > MAX_REQUEST_BYTES) {
@@ -162,6 +177,11 @@ impl InputInbox {
                 Some("allow") => json!({"decision":"accept"}),
                 Some("deny") => json!({"decision":"decline"}),
                 _ => return Err("Invalid Codex approval decision".into()),
+            },
+            Rule::PermissionGrant(grant) => match answer["decision"].as_str() {
+                Some("allow") => json!({"permissions":grant,"scope":"turn","strictAutoReview":false}),
+                Some("deny") => json!({"permissions":{},"scope":"turn","strictAutoReview":false}),
+                _ => return Err("Invalid Codex permission decision".into()),
             },
             Rule::Questions(questions) => {
                 if answer["cancelled"] == true { json!({"answers":{}}) } else {
@@ -278,6 +298,49 @@ mod tests {
         assert!(inbox.answer(id, &json!({"decision":"acceptForSession"})).is_err());
         inbox.answer(id, &json!({"decision":"allow"})).unwrap();
         assert_eq!(receiver.try_recv().unwrap(), json!({"decision":"accept"}));
+    }
+    #[test]
+    fn file_change_approval_requires_complete_proposed_changes() {
+        let inbox = InputInbox::default();
+        let frame = json!({"method":"item/fileChange/requestApproval",
+            "params":{"threadId":"thread_1","turnId":"turn_1","itemId":"patch_1"},
+            "doxa_item":{"id":"patch_1","type":"fileChange","changes":[{"path":"src/lib.rs","diff":"+safe"}]}});
+        let mut missing = frame.clone();
+        missing.as_object_mut().unwrap().remove("doxa_item");
+        assert!(inbox.begin(&missing, str::to_owned).is_err());
+        let (event, mut receiver) = inbox.begin(&frame, str::to_owned).unwrap();
+        assert_eq!(event.data["tool_name"], "file_change");
+        assert_eq!(event.data["require_full_review"], true);
+        assert!(event.data["input_summary"].as_str().unwrap().contains("src/lib.rs"));
+        inbox.answer(event.data["id"].as_str().unwrap(), &json!({"decision":"deny"})).unwrap();
+        assert_eq!(receiver.try_recv().unwrap(), json!({"decision":"decline"}));
+    }
+    #[test]
+    fn requested_permissions_require_full_review_and_grant_only_this_turn() {
+        let inbox = InputInbox::default();
+        let frame = json!({"method":"item/permissions/requestApproval","params":{
+            "threadId":"thread_1","turnId":"turn_1","itemId":"call_1",
+            "cwd":"/workspace","reason":"network and workspace access",
+            "permissions":{"network":{"enabled":true},"fileSystem":{"write":["/workspace/output"]}}
+        }});
+        let (event, mut receiver) = inbox.begin(&frame, str::to_owned).unwrap();
+        assert_eq!(event.data["tool_name"], "request_permissions");
+        assert_eq!(event.data["require_full_review"], true);
+        assert!(event.data["input_summary"].as_str().unwrap().contains("/workspace/output"));
+        let id = event.data["id"].as_str().unwrap();
+        assert!(inbox.answer(id, &json!({"decision":"allowForSession"})).is_err());
+        inbox.answer(id, &json!({"decision":"allow"})).unwrap();
+        assert_eq!(receiver.try_recv().unwrap(), json!({"permissions":frame["params"]["permissions"],
+            "scope":"turn","strictAutoReview":false}));
+        assert!(inbox.answer(id, &json!({"decision":"allow"})).is_err());
+
+        let (event, mut receiver) = inbox.begin(&frame, str::to_owned).unwrap();
+        inbox.answer(event.data["id"].as_str().unwrap(), &json!({"decision":"deny"})).unwrap();
+        assert_eq!(receiver.try_recv().unwrap(), json!({"permissions":{},"scope":"turn","strictAutoReview":false}));
+        assert!(inbox.begin(&frame, |_| "[redacted]".into()).is_err());
+        let mut unknown = frame;
+        unknown["params"]["permissions"]["macos"] = json!({"preferences":"read_only"});
+        assert!(inbox.begin(&unknown, str::to_owned).is_err());
     }
     #[test]
     fn dropped_or_cleared_requests_cannot_receive_replayed_answers() {

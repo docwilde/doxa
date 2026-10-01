@@ -884,7 +884,7 @@ impl App {
                                 .iter()
                                 .any(|r| r.session_id == id && r.id == request.id)
                             {
-                                let auto_allow = request.kind == "permission"
+                                let auto_allow = request.can_grant_for_session()
                                     && request.original_payload["tool_name"].as_str().is_some_and(|tool| {
                                         self.permission_grants.contains(&(id.clone(), tool.to_owned()))
                                     });
@@ -1397,7 +1397,7 @@ impl App {
                     .iter_mut()
                     .find(|r| r.session_id == session && r.id == id)
                 {
-                    if ok && request.grant_on_success && request.kind == "permission" {
+                    if ok && request.grant_on_success && request.can_grant_for_session() {
                         granted_tool = request.original_payload["tool_name"].as_str().map(str::to_owned);
                         request.grant_on_success = false;
                     }

@@ -84,7 +84,7 @@ These frames come from the running Rust TUI with isolated DOXA state. The memory
 
 ## Scope and limits
 
-Rust 2.0 is the main DOXA line. Linux is the live-verified platform; macOS now has a native build and transport test job plus a `.command` launcher. Protected Codex remains Linux-only because its process-owner contract has no macOS equivalent yet. Windows remains unsupported. DOXA does not automatically route between providers, and plugin adoption excludes foreign hooks and MCP servers. The optional [browser adapter](docs/plans/remote.md#optional-browser-renderer) requires Python development dependencies and a private Tailscale Serve Unix target.
+Rust 2.0 is the main DOXA line. Linux is the live-verified platform; macOS now has a native build and transport test job plus a `.command` launcher. Protected Codex remains Linux-only because its process-owner contract has no macOS equivalent yet. Windows remains unsupported. You choose the engine: DOXA does not switch between Claude, Codex, DeepSeek, and GLM based on your prompt or a provider failure. Plugin adoption excludes foreign hooks and MCP servers. The optional [browser adapter](docs/plans/remote.md#optional-browser-renderer) requires Python development dependencies and a private Tailscale Serve Unix target.
 
 The [Rust guide](rust/README.md) covers workflows and provider limits. The [parity tracker](docs/rust-1.19-parity.md), [verification records](docs/live-provider-verification-2026-09-30.md), [source audit](docs/source-audit-2026-09-27.md), and [UI benchmark](docs/rust-ui-benchmark-2026-09-30.md) hold detailed evidence and remaining gates. Python 1.x documentation remains [historical reference](docs/manual.md); normal installation uses Rust.
 

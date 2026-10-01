@@ -118,6 +118,20 @@ full review is unavailable until the complete summary has been read. Reconnect
 snapshots restore exact pending requests; stale answers cannot apply to changed
 requests. There is no blanket Codex permission approval.
 
+Codex uses a fixed `on-request` policy in DOXA. Command, file-change, and
+permission-profile requests reach the inline review; an approved profile is
+limited to the exact request and current turn. DOXA cannot switch Codex's
+policy during a session. “Always approve this tool” applies only to canonical
+DOXA peer and LORE tools, never Codex commands, file changes, or permission
+profiles. DeepSeek and GLM have no provider permission mode;
+their peer and LORE tool calls require individual DOXA approval. The optional
+`DOXA_VENDOR_TOOLS=workspace-read` tool is read-only and enabled separately.
+
+In the belief browser, select a row and press A or R, or click its Accept or
+Reject button. DOXA fetches the exact current belief before applying the
+action. Enter opens detailed review and note editing. Press `/` or click the
+prompt field to filter the list; Enter returns from filtering to row actions.
+
 Markdown, HTTP(S) Ctrl+click links, expandable tool results and reasoning,
 processing indicators, and per-session chip menus use bounded data. `/queue`
 previews and cancels waiting prompts by stable ID. `/model [name]`,
