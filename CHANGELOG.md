@@ -5,6 +5,13 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.62 — 2026-10-01
+
+**LORE sync integration**
+
+- Pin **`lore-core`** 0.62.10 so native DOXA receives the signed sync retry,
+  skill ownership, and project belief review fixes.
+
 ## 2.0.0-alpha.61 — 2026-10-01
 
 **Startup and peer resilience**
