@@ -280,7 +280,7 @@ impl SpawnManager {
             .map_err(|_| "Invalid disk probe")?;
         let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
         let free = if unsafe { libc::statvfs(cpath.as_ptr(), &mut stat) } == 0 {
-            Some(stat.f_bavail.saturating_mul(stat.f_frsize))
+            Some(u64::from(stat.f_bavail).saturating_mul(u64::from(stat.f_frsize)))
         } else {
             None
         };

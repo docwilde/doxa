@@ -245,7 +245,7 @@ fn run_auth_cancellable(binary: &Path, args: &[&str], timeout: Duration, progres
     use std::os::fd::FromRawFd;
     if cancel.load(std::sync::atomic::Ordering::Acquire) { return Err(io::Error::new(io::ErrorKind::Interrupted, "provider authentication cancelled")); }
     let (mut master, mut slave) = (-1, -1);
-    if unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null(), std::ptr::null()) } != 0 { return Err(io::Error::last_os_error()); }
+    if unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()) } != 0 { return Err(io::Error::last_os_error()); }
     let mut reader = unsafe { std::fs::File::from_raw_fd(master) };
     let terminal = unsafe { std::fs::File::from_raw_fd(slave) };
     unsafe {
