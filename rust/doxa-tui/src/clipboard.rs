@@ -50,10 +50,10 @@ mod tests {
     use super::*;
     #[test]fn osc52_encodes_controls_and_bounds_utf8(){assert_eq!(osc52("a\x1b"),b"\x1b]52;c;YRs=\x07");assert_eq!(osc52("ab"),b"\x1b]52;c;YWI=\x07");assert!(osc52(&"界".repeat(LIMIT)).len()<=7+4*((LIMIT+2)/3)+1);}
     #[test]fn private_reader_accepts_text_and_rejects_overflow_without_system_clipboard(){
-        let mut command=Command::new("/usr/bin/python3");command.args(["-c","print('fixture', end='')"]);
+        let mut command=Command::new("python3");command.args(["-c","print('fixture', end='')"]);
         assert_eq!(read_command(&mut command,&AtomicBool::new(false),Duration::from_secs(1)).unwrap(),"fixture");
-        let mut command=Command::new("/usr/bin/python3");command.args(["-c","import sys; sys.stdout.write('x'*70000)"]);
+        let mut command=Command::new("python3");command.args(["-c","import sys; sys.stdout.write('x'*70000)"]);
         assert_eq!(read_command(&mut command,&AtomicBool::new(false),Duration::from_secs(1)).unwrap_err().kind(),io::ErrorKind::InvalidData);
     }
-    #[test]fn private_reader_times_out_and_reaps_without_reading_system_clipboard(){let mut command=Command::new("/usr/bin/python3");command.args(["-c","import time; time.sleep(10)"]);let start=Instant::now();assert_eq!(read_command(&mut command,&AtomicBool::new(false),Duration::from_millis(40)).unwrap_err().kind(),io::ErrorKind::TimedOut);assert!(start.elapsed()<Duration::from_secs(1));}
+    #[test]fn private_reader_times_out_and_reaps_without_reading_system_clipboard(){let mut command=Command::new("python3");command.args(["-c","import time; time.sleep(10)"]);let start=Instant::now();assert_eq!(read_command(&mut command,&AtomicBool::new(false),Duration::from_millis(40)).unwrap_err().kind(),io::ErrorKind::TimedOut);assert!(start.elapsed()<Duration::from_secs(1));}
 }

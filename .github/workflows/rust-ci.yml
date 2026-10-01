@@ -24,9 +24,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: Prepare private test directory
         run: |
-          mkdir -p "$RUNNER_TEMP/doxa-tests"
-          chmod 700 "$RUNNER_TEMP/doxa-tests"
-          echo "TMPDIR=$RUNNER_TEMP/doxa-tests" >> "$GITHUB_ENV"
+          mkdir -p "$HOME/.t"
+          chmod 700 "$HOME/.t"
+          echo "TMPDIR=$HOME/.t" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
       - name: Check native macOS build
         run: cargo check --locked --workspace
