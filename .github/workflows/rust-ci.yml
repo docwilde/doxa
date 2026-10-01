@@ -25,6 +25,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Check native macOS build
         run: cargo check --locked --workspace
+      - name: Build daemon and native LORE carrier for interaction tests
+        run: |
+          cargo build --locked
+          cargo build --locked --package lore-core --bin lore-rs
       - name: Test macOS transport, state and terminal
         run: cargo test --locked -p doxa-peers -p doxa-protocol -p doxa-state -p doxa-tui
   rust:
