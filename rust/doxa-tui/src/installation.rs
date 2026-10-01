@@ -1,11 +1,26 @@
 //! One bounded startup advisory. No provider connection or Python identity.
-use std::{fs, io::{self, Read}, os::unix::{fs::{MetadataExt, OpenOptionsExt}, io::AsRawFd, process::CommandExt}, path::Path, process::{Command, Stdio}, sync::{atomic::{AtomicBool, Ordering}, mpsc::{self, Receiver, TryRecvError}, Arc}, thread, time::{Duration, Instant}};
+use std::{fs, io::{self, Read}, os::unix::{fs::{MetadataExt, OpenOptionsExt, PermissionsExt}, io::AsRawFd, process::CommandExt}, path::Path, process::{Command, Stdio}, sync::{atomic::{AtomicBool, Ordering}, mpsc::{self, Receiver, TryRecvError}, Arc}, thread, time::{Duration, Instant}};
 
 pub const DEFAULT_REPO: &str = "https://github.com/docwilde/doxa";
 
 /// Install the desktop entry and compiled icons without a scripting runtime.
 pub fn install_launcher(command: &Path) -> io::Result<std::path::PathBuf> {
     if !command.is_absolute() || !command.is_file() {return Err(io::Error::other("launcher must be an absolute file"));}
+    #[cfg(target_os = "macos")]
+    {
+        let home=std::env::var_os("HOME").ok_or_else(||io::Error::other("HOME is unavailable"))?;
+        let home=std::path::PathBuf::from(home);
+        if !home.is_absolute(){return Err(io::Error::other("HOME must be absolute"));}
+        let script=home.join("Applications/DOXA.command");
+        let value=command.to_string_lossy();
+        if value.chars().any(char::is_control){return Err(io::Error::other("launcher path contains control characters"));}
+        let quoted=format!("'{}'",value.replace('\'',"'\\''"));
+        LauncherDir::open(script.parent().unwrap())?.write_mode(script.file_name().unwrap(),
+            format!("#!/bin/sh\nexec {quoted} \"$@\"\n").as_bytes(),0o700)?;
+        return Ok(script);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
     let word=desktop_word(&command.to_string_lossy())?;
     let home=std::env::var_os("HOME").ok_or_else(||io::Error::other("HOME is unavailable"))?;
     let data=std::env::var_os("XDG_DATA_HOME").filter(|v|!v.is_empty()).map(std::path::PathBuf::from).unwrap_or_else(||std::path::PathBuf::from(home).join(".local/share"));
@@ -23,6 +38,7 @@ pub fn install_launcher(command: &Path) -> io::Result<std::path::PathBuf> {
         let _=command.arg(path).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
     }
     Ok(desktop)
+    }
 }
 /// Pin both temporary creation and publication to the checked directory inode.
 /// A renamed/replaced ancestor must not redirect a desktop asset write.
@@ -42,6 +58,9 @@ impl LauncherDir {
         Ok(Self(file))
     }
     fn write(&self,name:&std::ffi::OsStr,bytes:&[u8])->io::Result<()> {
+        self.write_mode(name,bytes,0o600)
+    }
+    fn write_mode(&self,name:&std::ffi::OsStr,bytes:&[u8],mode:u32)->io::Result<()> {
         use std::{ffi::CString,os::fd::FromRawFd,io::Write};
         if name.as_encoded_bytes().contains(&b'/') {return Err(io::Error::other("invalid asset name"));}
         let target=CString::new(name.as_encoded_bytes())?;
@@ -52,7 +71,7 @@ impl LauncherDir {
         if fd<0 {return Err(io::Error::last_os_error());}
         let mut file=unsafe {fs::File::from_raw_fd(fd)};
         let result=(|| {
-            file.write_all(bytes)?;file.sync_all()?;
+            file.write_all(bytes)?;file.set_permissions(fs::Permissions::from_mode(mode))?;file.sync_all()?;
             if unsafe {libc::renameat(directory,temporary.as_ptr(),directory,target.as_ptr())}!=0 {return Err(io::Error::last_os_error());}
             self.0.sync_all()
         })();

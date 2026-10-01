@@ -7,7 +7,7 @@ use std::fs::OpenOptions;
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::os::unix::net::UnixStream;
-use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -73,11 +73,11 @@ fn unix_connect_until(path: &Path, deadline: Instant) -> Result<UnixStream, Tran
     if bytes.is_empty() || bytes.contains(&0) || bytes.len() >= address.sun_path.len() { return Err(TransportError::Malformed("invalid Unix socket path")); }
     address.sun_family = libc::AF_UNIX as libc::sa_family_t;
     for (out, byte) in address.sun_path.iter_mut().zip(bytes) { *out = *byte as libc::c_char; }
-    let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC, 0) };
-    if fd < 0 { return Err(io::Error::last_os_error().into()); }
-    let stream = unsafe { UnixStream::from_raw_fd(fd) };
+    let stream = UnixStream::from(doxa_peers::credentials::nonblocking_unix_socket()?);
     let fd = stream.as_raw_fd();
     let length = (std::mem::offset_of!(libc::sockaddr_un, sun_path) + bytes.len() + 1) as libc::socklen_t;
+    #[cfg(target_os = "macos")]
+    { address.sun_len = length as u8; }
     if unsafe { libc::connect(fd, (&address as *const libc::sockaddr_un).cast(), length) } != 0 {
         let error = io::Error::last_os_error();
         if error.raw_os_error() != Some(libc::EINPROGRESS) { return Err(error.into()); }
@@ -209,22 +209,11 @@ impl DaemonClient {
 
     /// Bind destructive requests to the process owning this connected socket.
     pub(crate) fn verify_peer(&self, expected_pid: i32) -> Result<(), TransportError> {
-        #[cfg(target_os = "linux")]
-        {
-            let mut credentials: libc::ucred = unsafe { std::mem::zeroed() };
-            let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
-            if unsafe { libc::getsockopt(self.writer.as_raw_fd(), libc::SOL_SOCKET,
-                libc::SO_PEERCRED, (&mut credentials as *mut libc::ucred).cast(), &mut length) } != 0 {
-                return Err(io::Error::last_os_error().into());
-            }
-            if length as usize != std::mem::size_of::<libc::ucred>()
-                || credentials.uid != unsafe { libc::geteuid() } || credentials.pid != expected_pid {
-                return Err(TransportError::Malformed("daemon peer process changed"));
-            }
-            Ok(())
+        let credentials = doxa_peers::credentials::peer_credentials(&self.writer)?;
+        if credentials.uid != unsafe { libc::geteuid() } || credentials.pid != expected_pid {
+            return Err(TransportError::Malformed("daemon peer process changed"));
         }
-        #[cfg(not(target_os = "linux"))]
-        { let _ = expected_pid; Err(TransportError::Malformed("daemon peer process verification unavailable")) }
+        Ok(())
     }
 
     pub(crate) fn call_until(&mut self, method: &str, params: Map<String, Value>, deadline: Instant) -> Result<Value, TransportError> {

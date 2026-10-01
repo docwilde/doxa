@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 const SESSION_RESIDENT_MB: u64 = 600;
 const MEMORY_HEADROOM_MB: u64 = 2048;
-const SOCKET_PATH_MAX: usize = 108;
+const SOCKET_PATH_MAX: usize = std::mem::size_of::<libc::sockaddr_un>() - std::mem::offset_of!(libc::sockaddr_un, sun_path);
 const SOCKET_NAME_BUDGET: usize = 40;
 const DEFAULT_RUN_ID_SHAPE: &str = "00000000T000000-0000";
 

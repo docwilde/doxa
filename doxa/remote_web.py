@@ -1,10 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-only
-"""A small browser client for daemon-hosted DOXA sessions.
-
-The retained renderer is unavailable until its transport can attest the
-Tailscale proxy. A loopback TCP address cannot authenticate identity headers.
-The machine-wide Unix peer bridge has its own kernel credential checks.
-"""
+"""A small browser client for daemon-hosted DOXA sessions over Unix Serve."""
 
 from __future__ import annotations
 
@@ -20,15 +15,10 @@ from . import peers, remote_policy, transcript
 from .client import EngineClient
 
 
-def _attested_proxy(_scope: dict) -> bool:
-    """No current ASGI transport exposes verified Unix peer credentials.
+def _attested_proxy(scope: dict) -> bool:
+    from .remote_transport import ATTESTED_KEY
 
-    Neither ``scope['client']`` nor an HTTP header proves that tailscaled
-    opened the connection. Fail closed even if the app is served directly
-    instead of through main(). Tests inject a deliberate transport attestor
-    to exercise the retained renderer independently of this missing adapter.
-    """
-    return False
+    return scope.get(ATTESTED_KEY) is True
 
 
 def _same_origin(headers: Any) -> bool:
@@ -42,6 +32,10 @@ def _same_origin(headers: Any) -> bool:
 
 
 def _decision(kind: str, scope: dict, headers: Any) -> remote_policy.Decision:
+    # A proxy and a client must never be able to disagree over which of two
+    # identity headers wins. This also rejects repeated headers on WebSockets.
+    if sum(name.lower() == b"tailscale-user-login" for name, _ in scope.get("headers", ())) != 1:
+        return remote_policy.Decision.refuse("exactly one Tailscale identity header required")
     return remote_policy.evaluate(
         kind,
         login=headers.get("tailscale-user-login"),
@@ -250,17 +244,32 @@ def create_app():
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Serve DOXA sessions to a browser through Tailscale Serve")
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=47601)
-    args = parser.parse_args(argv)
-    if args.host != "127.0.0.1":
-        parser.error("the browser bridge only binds 127.0.0.1")
+    parser.parse_args(argv)
     decision = remote_policy.remote_listening_decision(enabled=remote_policy.remote_enabled())
     if not decision.allowed:
         parser.error(decision.reason)
     if not remote_policy.allowed_logins():
         parser.error("remote_allowed_logins is empty; no one can authenticate")
-    parser.error("browser bridge unavailable: loopback TCP cannot attest the Tailscale proxy; use the credential-checked Unix peer bridge")
+    from . import remote_transport
+    from .peers import runtime_dir
+    try:
+        import uvicorn
+        listener = remote_transport.private_listener(runtime_dir() / "remote-browser.sock")
+    except (ImportError, OSError, ValueError) as exc:
+        parser.error(str(exc))
+    path = runtime_dir() / "remote-browser.sock"
+    identity = path.lstat().st_ino
+    try:
+        http, ws = remote_transport.protocols()
+        config = uvicorn.Config(create_app(), http=http, ws=ws, interface="asgi3",
+                                lifespan="off", proxy_headers=False, log_level="warning")
+        uvicorn.Server(config).run(sockets=[listener])
+    finally:
+        listener.close()
+        with contextlib.suppress(FileNotFoundError):
+            if path.lstat().st_ino == identity:
+                path.unlink()
+    return 0
 
 
 _HTML = """<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>DOXA remote</title><link rel="stylesheet" href="/remote.css"><main><header><strong>DOXA</strong><span id="status">Connecting…</span></header><nav id="sessions" aria-label="Sessions"></nav><section id="conversation" aria-live="polite"></section><section id="question" hidden></section><form id="prompt"><textarea id="prompt-text" aria-label="Message" placeholder="Message this session" rows="3"></textarea><button>Send</button></form></main><script src="/remote.js" defer></script></html>"""

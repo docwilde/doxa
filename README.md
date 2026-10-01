@@ -32,7 +32,7 @@
 curl -fsSL https://raw.githubusercontent.com/docwilde/doxa/main/scripts/install.sh | sh
 ```
 
-The installer builds the Rust frontend, daemon, and LORE carrier and places `doxa` in `~/.local/bin` by default. It also adds a Linux application-menu entry; set `DOXA_NO_LAUNCHER=1` to skip that step. Use `doxa update` for a newer build or pass a tag after `sh -s --` to pin a release.
+The installer builds the Rust frontend, daemon, and LORE carrier and places `doxa` in `~/.local/bin` by default. It adds a Linux application-menu entry or `~/Applications/DOXA.command` on macOS; set `DOXA_NO_LAUNCHER=1` to skip that step. Use `doxa update` for a newer build or pass a tag after `sh -s --` to pin a release.
 
 Claude requires its CLI. Codex uses a private protected app server; the installer builds it when Codex is present. DeepSeek and GLM use API credentials configured through `/setup` or provider environment variables. See the [Rust guide](rust/README.md) for setup, build requirements, and engine capabilities.
 
@@ -84,7 +84,7 @@ These frames come from the running Rust TUI with isolated DOXA state. The memory
 
 ## Scope and limits
 
-Rust 2.0 is the main DOXA line and Linux is the verified platform. The full protected runtime is not supported on macOS or Windows. DOXA does not automatically route between providers, and plugin adoption excludes foreign hooks and MCP servers.
+Rust 2.0 is the main DOXA line. Linux is the live-verified platform; macOS now has a native build and transport test job plus a `.command` launcher. Protected Codex remains Linux-only because its process-owner contract has no macOS equivalent yet. Windows remains unsupported. DOXA does not automatically route between providers, and plugin adoption excludes foreign hooks and MCP servers. The optional [browser adapter](docs/plans/remote.md#optional-browser-renderer) requires Python development dependencies and a private Tailscale Serve Unix target.
 
 The [Rust guide](rust/README.md) covers workflows and provider limits. The [parity tracker](docs/rust-1.19-parity.md), [verification records](docs/live-provider-verification-2026-09-30.md), [source audit](docs/source-audit-2026-09-27.md), and [UI benchmark](docs/rust-ui-benchmark-2026-09-30.md) hold detailed evidence and remaining gates. Python 1.x documentation remains [historical reference](docs/manual.md); normal installation uses Rust.
 

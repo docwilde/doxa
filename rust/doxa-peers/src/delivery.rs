@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use std::collections::VecDeque;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -45,12 +45,7 @@ impl PeerFrame {
 
 fn invalid(message: &'static str) -> io::Error { io::Error::new(io::ErrorKind::InvalidData, message) }
 fn same_user(stream: &UnixStream) -> io::Result<()> {
-    let mut cred = libc::ucred { pid: 0, uid: 0, gid: 0 };
-    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
-    let rc = unsafe { libc::getsockopt(stream.as_raw_fd(), libc::SOL_SOCKET, libc::SO_PEERCRED,
-        (&mut cred as *mut libc::ucred).cast(), &mut len) };
-    if rc != 0 { return Err(io::Error::last_os_error()); }
-    if len as usize != std::mem::size_of::<libc::ucred>() || cred.uid != unsafe { libc::geteuid() } {
+    if crate::credentials::peer_credentials(stream)?.uid != unsafe { libc::geteuid() } {
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, "peer UID differs"));
     }
     Ok(())
@@ -175,13 +170,13 @@ fn connect_before(path: &Path, deadline: Instant) -> io::Result<UnixStream> {
     address.sun_family = libc::AF_UNIX as libc::sa_family_t;
     for (slot, byte) in address.sun_path.iter_mut().zip(bytes) { *slot = *byte as libc::c_char; }
     let size = (std::mem::offset_of!(libc::sockaddr_un, sun_path) + bytes.len() + 1) as libc::socklen_t;
+    #[cfg(target_os = "macos")]
+    { address.sun_len = size as u8; }
     loop {
         if deadline.saturating_duration_since(Instant::now()).is_zero() {
             return Err(io::Error::new(io::ErrorKind::TimedOut, "peer connect timed out"));
         }
-        let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC, 0) };
-        if fd < 0 { return Err(io::Error::last_os_error()); }
-        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+        let fd = crate::credentials::nonblocking_unix_socket()?;
         let result = unsafe { libc::connect(fd.as_raw_fd(), (&address as *const libc::sockaddr_un).cast(), size) };
         if result < 0 {
             let error = io::Error::last_os_error();

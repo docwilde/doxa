@@ -403,6 +403,9 @@ impl TranscriptStore {
             "reviewed_source":reviewed_source,"summary":summary});
         // The fd keeps all writes anchored to this exact owned directory even
         // if someone swaps its path while the provider is summarizing.
+        #[cfg(target_os = "macos")]
+        let anchored = PathBuf::from(format!("/dev/fd/{}", std::os::fd::AsRawFd::as_raw_fd(&directory)));
+        #[cfg(not(target_os = "macos"))]
         let anchored = PathBuf::from(format!("/proc/self/fd/{}", std::os::fd::AsRawFd::as_raw_fd(&directory)));
         let mut temp = tempfile::Builder::new().prefix(".context-").tempfile_in(&anchored)?;
         temp.as_file().set_permissions(fs::Permissions::from_mode(0o600))?;

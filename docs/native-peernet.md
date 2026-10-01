@@ -15,7 +15,7 @@ deny everyone. The corresponding `config.toml` settings are `remote_enabled` and
 `remote_allowed_logins`; environment values take precedence.
 
 Configure Tailscale Serve to forward to the private runtime `peernet.sock`.
-The bridge checks Linux `SO_PEERCRED` before parsing HTTP and requires the
+The bridge checks Linux `SO_PEERCRED` or macOS `getpeereid` before parsing HTTP and requires the
 configured proxy UID (`DOXA_REMOTE_PROXY_UID`, default `0`). An ordinary user's
 own UID cannot be selected as the proxy. A TCP loopback connection or forwarded
 identity header cannot establish proxy identity. Only the attested proxy's

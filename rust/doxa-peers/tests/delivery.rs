@@ -2,7 +2,7 @@
 use doxa_peers::{delivery::*, now, PeerRecord, Registry};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{symlink, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -100,12 +100,12 @@ fn full_peer_connect_queue_does_not_stall_delivery() -> io::Result<()> {
     address.sun_family = libc::AF_UNIX as libc::sa_family_t;
     for (slot, byte) in address.sun_path.iter_mut().zip(bytes) { *slot = *byte as libc::c_char; }
     let size = (std::mem::offset_of!(libc::sockaddr_un, sun_path) + bytes.len() + 1) as libc::socklen_t;
+    #[cfg(target_os = "macos")]
+    { address.sun_len = size as u8; }
     let mut queued = Vec::<OwnedFd>::new();
     let mut full = false;
     for _ in 0..32 {
-        let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC, 0) };
-        if fd < 0 { return Err(io::Error::last_os_error()); }
-        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+        let fd = doxa_peers::credentials::nonblocking_unix_socket()?;
         let result = unsafe { libc::connect(fd.as_raw_fd(), (&address as *const libc::sockaddr_un).cast(), size) };
         if result == 0 || io::Error::last_os_error().raw_os_error() == Some(libc::EINPROGRESS) {
             queued.push(fd);

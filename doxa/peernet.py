@@ -88,8 +88,6 @@ import inspect
 import ipaddress
 import json
 import os
-import socket
-import struct
 import sys
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -493,22 +491,12 @@ class PeerNetServer:
     def _is_tailscaled_peer(writer: asyncio.StreamWriter) -> bool:
         """Whether the kernel identifies this Unix peer as tailscaled.
 
-        Linux exposes ``SO_PEERCRED`` only on Unix sockets.  TCP has no
-        equivalent credential in asyncio, so it always returns False.  That
-        is intentional: accepting a header from 127.0.0.1 would turn any
-        local process into an allow-listed remote user.
+        Linux uses SO_PEERCRED and macOS uses getpeereid. TCP has no
+        equivalent proof here and therefore always returns False.
         """
-        sock = writer.get_extra_info("socket")
-        if sock is None or sock.family != socket.AF_UNIX:
-            return False
-        if not hasattr(socket, "SO_PEERCRED"):
-            return False
-        try:
-            raw = sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
-            _pid, uid, _gid = struct.unpack("3i", raw)
-        except (OSError, struct.error):
-            return False
-        return uid == proxy_uid()
+        from .remote_transport import attested_socket
+
+        return attested_socket(writer.get_extra_info("socket"))
 
     async def _dispatch(
         self, body: dict, *, login: "str | None", from_loopback: bool

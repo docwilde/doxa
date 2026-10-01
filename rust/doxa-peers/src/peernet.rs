@@ -63,13 +63,12 @@ pub fn rosters() -> Vec<(Endpoint, io::Result<Vec<Value>>)> {
     })
 }
 
-fn credentials(stream: &UnixStream) -> io::Result<libc::ucred> {
-    let mut cred = libc::ucred { pid:0,uid:0,gid:0 }; let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
-    if unsafe { libc::getsockopt(stream.as_raw_fd(),libc::SOL_SOCKET,libc::SO_PEERCRED,(&mut cred as *mut libc::ucred).cast(),&mut len) } != 0
-        || len as usize != std::mem::size_of::<libc::ucred>() { return Err(invalid("Unix proxy credentials unavailable")); }
-    Ok(cred)
+fn credentials(stream: &UnixStream) -> io::Result<crate::credentials::PeerCredentials> {
+    crate::credentials::peer_credentials(stream)
 }
-pub fn attested_proxy(stream: &UnixStream) -> bool { credentials(stream).is_ok_and(|cred|Some(cred.uid)==policy::proxy_uid()) }
+pub fn attested_proxy(stream: &UnixStream) -> bool {
+    crate::credentials::peer_credentials(stream).is_ok_and(|cred|Some(cred.uid)==policy::proxy_uid())
+}
 
 async fn parse_request(request:hyper::Request<hyper::body::Incoming>)->io::Result<(Value,Option<String>)> {
     use http_body_util::BodyExt;
