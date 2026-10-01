@@ -1,6 +1,6 @@
 //! Paint the current frontend state without dispatching commands or starting jobs.
 use super::{
-    belief_review_buttons, chip_hint, chip_text, chooser_list_lines, chooser_row_style,
+    belief_review_buttons, chip_text, chooser_list_lines, chooser_row_style,
     chooser_visible_start, clipped_title, input_request_body, launch, links, raw_visual_rows,
     repo_path_label, safe_label, theme, vendor_models, App, ChipHit, Focus, RailRow,
     RenderedTranscript, ENGINE_CHOICES, MAX_RENDERED_TRANSCRIPTS, PERMISSION_CHOICES,
@@ -174,9 +174,9 @@ impl App {
         }
         let hint = if hit.kind == "repo" {
             self.repo_detail(hit.group)
-                .unwrap_or_else(|| chip_hint(hit.kind).to_owned())
+                .unwrap_or_else(|| self.chip_hint_for(hit.kind, hit.group))
         } else {
-            chip_hint(hit.kind).to_owned()
+            self.chip_hint_for(hit.kind, hit.group)
         };
         if hint.is_empty() || hit.rect.y <= hit.pane.y.saturating_add(3) {
             return;
@@ -815,7 +815,7 @@ impl App {
             return;
         }
         let title = format!(" {} · Esc close ", safe_label(info.kind));
-        let body = format!(" {}\n {}", safe_label(&info.label), chip_hint(info.kind));
+        let body = format!(" {}\n {}", safe_label(&info.label), self.chip_hint_for(info.kind, self.active_group));
         frame.render_widget(
             Paragraph::new(body)
                 .wrap(Wrap { trim: false })

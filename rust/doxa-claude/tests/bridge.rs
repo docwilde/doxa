@@ -5,7 +5,7 @@ const SESSION: &str = "5b9aac56-c75e-4b93-ab07-c59f1c5a0b39";
 fn fake(body: &str) -> (tempfile::TempDir, Cli) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("claude");
-    fs::write(&path,format!("#!/usr/bin/python3\nimport sys,json,time\nassert '--bare' not in sys.argv\nassert '--session-id' in sys.argv\nassert '--include-partial-messages' in sys.argv\n{body}\n")).unwrap();
+    fs::write(&path,format!("#!/usr/bin/python3\nimport sys,json,time\nassert '--bare' not in sys.argv\nassert '--session-id' in sys.argv\nassert '--include-partial-messages' in sys.argv\nassert sys.argv[sys.argv.index('--permission-prompts')+1] == 'host'\nassert sys.argv[sys.argv.index('--permission-prompt-tool')+1] == 'stdio'\n{body}\n")).unwrap();
     fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
     let cli = Cli::spawn(CliOptions {
         executable: &path,

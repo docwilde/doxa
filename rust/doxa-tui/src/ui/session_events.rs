@@ -13,7 +13,7 @@ use super::transcript_events::{
     append_transcript, append_turn_heading, set_reasoning_marker, structured_event, transcript_tail,
 };
 use super::{
-    context_detail_lines, permission_index, safe_label, session_controls,
+    context_detail_lines, permission_display_mode, permission_index, safe_label, session_controls,
     unique_session_title, unsafe_input_char, App,
     BranchPicker, ClearSwap, DaemonUpdate, InputRequest, QueueRow, Session, MAX_INPUT_BYTES,
     MAX_INPUT_REQUESTS, MAX_REASONING_DISPLAY_CHARS,
@@ -548,7 +548,7 @@ impl App {
                 self.session_catalogs.remove(id);
                 if let Some(mode) = frame["permission_mode"]
                     .as_str()
-                    .filter(|mode| permission_index(mode).is_some())
+                    .filter(|mode| permission_display_mode(mode, frame["engine"].as_str()))
                 {
                     self.permission_modes.insert(id.to_owned(), mode.to_owned());
                 }
@@ -1335,7 +1335,8 @@ impl App {
                             .update_session_controls(status);
                         if let Some(mode) = status["permission_mode"]
                             .as_str()
-                            .filter(|mode| permission_index(mode).is_some())
+                            .filter(|mode| permission_display_mode(mode,
+                                self.session_identity.get(id).and_then(|identity| identity.0.as_deref())))
                         {
                             self.permission_modes.insert(id.to_owned(), mode.to_owned());
                         }

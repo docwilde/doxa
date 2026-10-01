@@ -204,7 +204,12 @@ impl App {
             .get(&id)
             .is_some_and(|capabilities| capabilities.permission_modes)
         {
-            self.notice = "This session cannot change permission modes".into();
+            self.notice = if self.session_identity.get(&id).and_then(|identity| identity.0.as_deref()) == Some("codex") {
+                format!("Codex uses {} approvals; DOXA cannot change its policy",
+                    self.permission_modes.get(&id).map(String::as_str).unwrap_or("a fixed"))
+            } else {
+                "This session cannot change permission modes".into()
+            };
             return;
         }
         let selected = self

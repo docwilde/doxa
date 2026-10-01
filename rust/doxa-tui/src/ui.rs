@@ -171,8 +171,8 @@ fn new_session_preferences(
 const PERMISSION_CHOICES: [(&str, &str); 5] = [
     ("default", "Ask before dangerous calls"),
     ("acceptEdits", "Allow file edits; ask for other calls"),
-    ("plan", "Planning only; no tools run"),
-    ("auto", "Model classifier decides each call"),
+    ("plan", "Read-only tools; no edits"),
+    ("auto", "Classifier may allow, deny, or ask"),
     ("dontAsk", "Deny unapproved calls without asking"),
 ];
 
@@ -180,6 +180,11 @@ fn permission_index(mode: &str) -> Option<usize> {
     PERMISSION_CHOICES
         .iter()
         .position(|(candidate, _)| *candidate == mode)
+}
+
+fn permission_display_mode(mode: &str, engine: Option<&str>) -> bool {
+    permission_index(mode).is_some()
+        || (engine == Some("codex") && matches!(mode, "on-request" | "never"))
 }
 
 #[derive(Debug)]

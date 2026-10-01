@@ -1,6 +1,6 @@
 //! Derive pane geometry, focus order and chip hit regions from frontend state.
 use super::{
-    chip_text, clipped_title, input_request_body, memory_fill_label, panes, prompt_height,
+    chip_hint, chip_text, clipped_title, input_request_body, memory_fill_label, panes, prompt_height,
     repo_chip, safe_label, vendor_models, wrapped_rows, App, ChipHit, ChipInfo, Focus, PaneGroup,
     PaneLayout, RailRow, Split, INPUT_BLINK_INTERVAL, MIN_PANE_HEIGHT, MIN_PANE_WIDTH,
     MIN_RAIL_WIDTH, SPINNER_FRAMES, SPINNER_INTERVAL,
@@ -16,6 +16,18 @@ use std::time::Instant;
 use unicode_width::UnicodeWidthStr;
 
 impl App {
+    pub(super) fn chip_hint_for(&self, kind: &str, group: usize) -> String {
+        let id = self.groups.get(group).and_then(PaneGroup::active_id);
+        if kind == "permission"
+            && id.and_then(|id| self.session_identity.get(id))
+                .and_then(|identity| identity.0.as_deref()) == Some("codex") {
+            let policy = id.and_then(|id| self.permission_modes.get(id)).map(String::as_str).unwrap_or("?");
+            format!("Codex {policy} approvals · command and file changes ask here when requested; mode switching unavailable")
+        } else {
+            chip_hint(kind).to_owned()
+        }
+    }
+
     pub(super) fn chooser_identity(&self) -> Option<String> {
         let kind = if let Some(index) = self.active_request_index() {
             format!(
@@ -440,8 +452,8 @@ impl App {
         let identity = id.and_then(|id| self.session_identity.get(id));
         let telemetry = id.and_then(|id| self.session_telemetry.get(id));
         let mut chips = Vec::new();
-        // Permission mode (including the classifier-backed `auto` mode) is
-        // independent of the provider running this session.
+        // Display the provider-reported permission policy even when this
+        // engine does not expose a mutable mode control.
         if let Some(mode) = id.and_then(|id| self.permission_modes.get(id)) {
             chips.push(("permission", mode.clone()));
         } else if id.is_some_and(|id| {

@@ -625,7 +625,9 @@ impl Host for ClaudeHost {
         match method {
             "set_model" | "set_effort" | "set_permission_mode" => {
                 let _guard = self.admission.lock().unwrap();
-                if self.has_active_work() || self.shared.closing.load(Ordering::Acquire) {
+                if (method != "set_permission_mode" && self.has_active_work())
+                    || self.shared.closing.load(Ordering::Acquire)
+                {
                     return Err("Claude setting changes require an idle session".into());
                 }
                 if method == "set_model"

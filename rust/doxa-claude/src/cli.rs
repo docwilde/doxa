@@ -48,6 +48,8 @@ impl Cli {
             return Err(Error::Protocol);
         }
         let mut command = Command::new(o.executable);
+        // `host` alone still denies tool calls that need approval; `stdio`
+        // registers the callback that emits can_use_tool control requests.
         command.args([
             "--print",
             "--verbose",
@@ -58,6 +60,8 @@ impl Cli {
             "--include-partial-messages",
             "--permission-prompts",
             "host",
+            "--permission-prompt-tool",
+            "stdio",
             "--strict-mcp-config",
             "--mcp-config",
             "{\"mcpServers\":{}}",

@@ -450,10 +450,13 @@ for line in sys.stdin:
         let mut app = App::default();
         app.size = Rect::new(0, 0, 80, 24);
         app.apply_daemon_frame(&json!({"type":"hello", "session_id":"codex-1",
-            "engine":"codex", "permission_mode":"default", "can_set_permission_mode":false}));
+            "engine":"codex", "permission_mode":"on-request", "can_set_permission_mode":false}));
         app.groups[0].tabs = vec!["codex-1".into()];
         app.open_permission_picker();
         assert!(app.permission_picker.is_none());
+        assert_eq!(app.chips(0).iter().find(|(kind, _)| *kind == "permission").unwrap().1, "on-request");
+        assert!(app.notice.contains("Codex uses on-request approvals"));
+        assert!(app.chip_hint_for("permission", 0).contains("mode switching unavailable"));
 
         app.apply_daemon_frame(&json!({"type":"hello", "session_id":"claude-1",
             "engine":"claude", "permission_mode":"plan", "running":false, "queued":0,

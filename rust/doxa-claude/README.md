@@ -12,7 +12,10 @@ and session commands.
 `Cli::spawn(CliOptions)` requires a canonical UUID session ID and absolute cwd
 and configuration directory. It starts `claude --print --verbose` with
 `--input-format stream-json`, `--output-format stream-json`,
-`--include-partial-messages`, and `--permission-prompts host`. New sessions use
+`--include-partial-messages`, `--permission-prompts host`, and
+`--permission-prompt-tool stdio`. The latter registers the bidirectional
+permission callback; the host target alone does not emit approval requests.
+New sessions use
 `--session-id`; resumed sessions use `--resume` with the same identity. Model,
 effort, permission mode, and approved plugin directories are explicit options.
 
@@ -32,6 +35,8 @@ sets `LORE_SKIP=1`, empties inherited setting sources, and supplies an empty
 strict MCP configuration. Approved plugin adoption copies bounded command,
 skill, and agent artifacts while removing executable hook, MCP, and LSP
 configuration. The LORE plugin is excluded because DOXA owns that integration.
+Permission rules added to the private `settings.json` are not loaded; choose
+the running session's permission mode in DOXA instead.
 
 [`resume.rs`](src/resume.rs) verifies retained legacy SDK-era transcripts against
 provider logs inside DOXA's private configuration. It checks ownership, bounded
