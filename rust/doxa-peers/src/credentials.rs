@@ -19,12 +19,16 @@ pub fn peer_credentials(stream: &UnixStream) -> io::Result<PeerCredentials> {
     {
         let mut uid = 0; let mut gid = 0;
         if unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) } != 0 {
-            return Err(io::Error::last_os_error());
+            let error = io::Error::last_os_error();
+            return Err(io::Error::new(error.kind(), format!("getpeereid: {error}")));
         }
         let mut pid: libc::pid_t = 0;
         let mut len = std::mem::size_of::<libc::pid_t>() as libc::socklen_t;
         if unsafe { libc::getsockopt(stream.as_raw_fd(), libc::SOL_LOCAL, libc::LOCAL_PEERPID,
-            (&mut pid as *mut libc::pid_t).cast(), &mut len) } != 0 { return Err(io::Error::last_os_error()); }
+            (&mut pid as *mut libc::pid_t).cast(), &mut len) } != 0 {
+            let error = io::Error::last_os_error();
+            return Err(io::Error::new(error.kind(), format!("LOCAL_PEERPID: {error}")));
+        }
         if len as usize != std::mem::size_of::<libc::pid_t>() || pid <= 0 {
             return Err(io::Error::other("Unix peer PID unavailable"));
         }
