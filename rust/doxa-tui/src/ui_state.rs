@@ -23,6 +23,7 @@ pub struct LayoutSignature {
     pane_tree: Option<Tree>,
     fleet_views: Vec<crate::ui::fleet_menu::SavedView>,
     custom_names: Vec<(String, String)>,
+    default_names: Vec<(String, String)>,
     killed: Vec<String>,
     active_group: usize,
     split: Split,
@@ -40,6 +41,11 @@ impl LayoutSignature {
             fleet_views: app.fleet_views.clone(),
             custom_names: {
                 let mut names: Vec<_> = app.custom_names.iter().map(|(id, name)| (id.clone(), name.clone())).collect();
+                names.sort();
+                names
+            },
+            default_names: {
+                let mut names: Vec<_> = app.default_names.iter().map(|(id, name)| (id.clone(), name.clone())).collect();
                 names.sort();
                 names
             },
@@ -134,6 +140,13 @@ impl UiStateStore {
     }
 
     pub fn saved_tabs(&self) -> Option<&[Tab]> { self.record.as_ref().map(|record| record.tabs.as_slice()) }
+    pub(crate) fn has_open_live_session(&self, sessions: &[crate::discovery::Session]) -> bool {
+        let Some(groups) = self.record.as_ref().and_then(|record|record.raw.get("layout"))
+            .and_then(|layout|layout.get("groups")) else { return !sessions.is_empty(); };
+        if !supported_group_tree(groups) { return !sessions.is_empty(); }
+        let open = tree_ids(groups);
+        sessions.iter().any(|session|open.contains(session.id.as_str()))
+    }
     pub fn discard_loaded_layout(&mut self) { self.record = None; self.writable_layout = true; self.startup_overflow_id=None; }
 
     pub fn path(&self) -> &Path {
@@ -165,9 +178,9 @@ impl UiStateStore {
         if !self.startup_notice.is_empty() { app.notice = self.startup_notice.clone(); }
         let live: HashSet<&str> = live_ids.iter().map(String::as_str)
             .chain(self.startup_archives.iter().map(|archive| archive.entry.id.as_str())).collect();
-        // Saved identities that discovery cannot verify must stay visible in
-        // their original panes. Dropping them also prevents every later save
-        // (the protected old record would otherwise lose an offline tab).
+        // Preserve archived content for saved identities discovery cannot
+        // verify. Grouped tabs keep their panes; flat detached records do not
+        // become tabs again on restoration.
         for tab in &record.tabs {
             if !live.contains(tab.session_id.as_str()) {
                 let archive = crate::startup_restore::unavailable(tab);
@@ -190,9 +203,11 @@ impl UiStateStore {
         let mut pane_tree = None;
         let mut split = Split::Vertical;
         let mut percent = 50;
+        let mut grouped_layout = false;
         if let Some(raw) = layout.and_then(|l| l.get("groups")) {
             let owned:HashSet<_>=record.tabs.iter().map(|tab|tab.session_id.as_str()).collect();
             if let Some((projected, orientation, weight, tree)) = tree_ids(raw).iter().all(|id|owned.contains(id)).then(||parse_groups(raw,&ids)).flatten() {
+                grouped_layout = true;
                 pane_tree = tree;
                 groups = projected;
                 split = orientation;
@@ -225,9 +240,11 @@ impl UiStateStore {
             group.tabs.retain(|id| seen.insert(id.clone()));
             group.active = group.active.min(group.tabs.len().saturating_sub(1));
         }
+        let mut detached = Vec::new();
         for id in ids {
             if seen.insert(id.clone()) {
-                groups[0].tabs.push(id);
+                if grouped_layout { detached.push(id); }
+                else { groups[0].tabs.push(id); }
             }
         }
         if pane_tree.is_none() && groups[0].tabs.is_empty() && !groups[1].tabs.is_empty() {
@@ -247,9 +264,22 @@ impl UiStateStore {
         }
         app.groups = groups;
         app.pane_tree = pane_tree;
+        app.detached_this_run = detached;
         for tab in &tabs {
+            let automatic = record.raw.get("rust_ui").and_then(|ui|ui.get("default_titles"))
+                .and_then(|titles|titles.get(&tab.session_id)).and_then(Value::as_str)
+                .map(crate::ui::safe_label).filter(|title|!title.is_empty());
+            if let Some(title) = &automatic {
+                app.default_names.insert(tab.session_id.clone(), title.clone());
+            }
             if let Some(name) = tab.pinned_name.as_ref().filter(|name| !name.is_empty()) {
-                app.custom_names.insert(tab.session_id.clone(), name.clone());
+                let name = crate::ui::safe_label(name);
+                if !name.is_empty() { app.custom_names.insert(tab.session_id.clone(), name); }
+            }
+            if let Some(session) = app.sessions.iter_mut().find(|session|session.id==tab.session_id) {
+                if let Some(title) = app.custom_names.get(&tab.session_id).or(automatic.as_ref()) {
+                    session.title = title.clone();
+                }
             }
         }
         app.split = split;
@@ -296,6 +326,8 @@ impl UiStateStore {
         }
         if let Some(layout) = record.raw.get_mut("layout") { prune(layout, killed); }
         if let Some(collections) = record.raw.get_mut("collections") { prune(collections, killed); }
+        if let Some(titles) = record.raw.get_mut("rust_ui").and_then(|ui|ui.get_mut("default_titles"))
+            .and_then(Value::as_object_mut) { titles.retain(|id,_|!killed.contains(id)); }
         record.raw.insert("tabs".into(), json!(record.tabs.iter().map(|tab| json!({"session_id":tab.session_id,"pinned_name":tab.pinned_name,"cwd":tab.cwd})).collect::<Vec<_>>()));
         save_tabset(&self.path, &record)?;
         self.record = Some(record);
@@ -429,6 +461,19 @@ impl UiStateStore {
         }else{rust_ui.remove("startup_fresh_slot");}
         rust_ui.insert("rail_visible".into(),json!(app.rail_visible));
         rust_ui.insert("rail_width".into(),json!(app.rail_width.clamp(12,44)));
+        let previous_titles=rust_ui.get("default_titles").and_then(Value::as_object).cloned().unwrap_or_default();
+        let mut titles=serde_json::Map::new();
+        for tab in &record.tabs {
+            let title=app.default_names.get(&tab.session_id).cloned()
+                .or_else(||(!app.custom_names.contains_key(&tab.session_id)).then(||
+                    app.sessions.iter().find(|session|session.id==tab.session_id).map(|session|session.title.clone())).flatten())
+                .or_else(||previous_titles.get(&tab.session_id).and_then(Value::as_str).map(str::to_owned));
+            if let Some(title)=title.map(|title|crate::ui::safe_label(&title)).filter(|title|!title.is_empty()) {
+                titles.insert(tab.session_id.clone(),json!(title));
+            }
+        }
+        if titles.is_empty(){rust_ui.remove("default_titles");}
+        else{rust_ui.insert("default_titles".into(),Value::Object(titles));}
         if app.fleet_views.is_empty(){rust_ui.remove("fleet_views");}else{rust_ui.insert("fleet_views".into(),serde_json::to_value(&app.fleet_views).map_err(io::Error::other)?);}
         let keep: HashSet<String> = record.tabs.iter().map(|tab| tab.session_id.clone()).collect();
         let collections = collections::to_json(&app.collections, &keep);
@@ -710,12 +755,36 @@ mod tests {
         assert_eq!(saved.raw["layout"]["groups"]["tabs"].as_array().unwrap().len(),2);
         assert_eq!(saved.raw["rust_ui"]["rail_width"],31);
         assert_eq!(store.clear_preflight(&app,&Mutex::new(true)),Ok(()));
-        let reloaded = UiStateStore::new(dir.path(),"/project","machine").unwrap();
+        let mut reloaded = UiStateStore::new(dir.path(),"/project","machine").unwrap();
+        reloaded.startup_archives.push(crate::startup_restore::Archive {
+            entry:crate::history::OfflineSession {id:"one".into(),project:"project".into(),
+                markdown:"saved conversation".into(),search_snippets:vec![],cwd:Some("/project".into())},
+            note:String::new(),
+        });
         let mut restored = App::default();
-        assert!(reloaded.restore(&mut restored,&["one".into(),"two".into(),"fresh".into()]));
-        assert_eq!(restored.groups[0].tabs,["two","fresh","one"]);
+        assert!(reloaded.restore(&mut restored,&["two".into(),"fresh".into()]));
+        assert_eq!(restored.groups[0].tabs,["two","fresh"]);
+        assert_eq!(restored.detached_this_run,["one"]);
+        assert_eq!(restored.sessions[0].title,"Pinned");
         assert_eq!(restored.groups[0].tabs.get(restored.groups[0].active).map(String::as_str),Some("fresh"));
         assert!(restored.pending_prompts.is_empty());
+        assert!(reloaded.save_if_complete(&restored,&Mutex::new(true)).unwrap());
+        assert!(reloaded.saved_tabs().unwrap().iter().any(|tab|tab.session_id=="one"));
+    }
+
+    #[test]
+    fn generated_session_title_survives_layout_restore_and_next_hello() {
+        let dir=tempfile::tempdir().unwrap();
+        let mut store=UiStateStore::new(dir.path(),"/project","machine").unwrap();
+        let mut app=App::default();
+        app.groups[0].tabs.push("session-1".into());
+        app.default_names.insert("session-1".into(),"gpt-6-sol@main/doxa".into());
+        store.save(&app).unwrap();
+        assert_eq!(load_tabset(store.path(),"/project").unwrap().raw["rust_ui"]["default_titles"]["session-1"],"gpt-6-sol@main/doxa");
+        let mut restored=App::default();
+        assert!(store.restore(&mut restored,&["session-1".into()]));
+        restored.apply_daemon_frame(&json!({"type":"hello","session_id":"session-1","model":"gpt-6-sol"}));
+        assert_eq!(restored.sessions[0].title,"gpt-6-sol@main/doxa");
     }
     use serde_json::json;
 

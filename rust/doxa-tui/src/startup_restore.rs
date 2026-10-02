@@ -123,9 +123,10 @@ fn try_start_fresh(store:Option<&mut UiStateStore>,mut spawn:impl FnMut()->io::R
 }
 
 fn ensure_usable(result:&mut Planned,store:&mut UiStateStore,mut spawn:impl FnMut()->io::Result<Session>)->io::Result<()> {
-    if result.sessions.is_empty() && result.archives.len()<MAX_STARTUP_TABS {
+    let saved_count=result.sessions.len().saturating_add(result.archives.len());
+    if !store.has_open_live_session(&result.sessions) && saved_count<MAX_STARTUP_TABS {
         if let Some(fresh)=try_start_fresh(Some(&mut *store),&mut spawn)? {
-            if result.archives.len()==crate::ui::panes::MAX_TABS {store.startup_overflow_id=Some(fresh.id.clone());}
+            if saved_count==crate::ui::panes::MAX_TABS {store.startup_overflow_id=Some(fresh.id.clone());}
             store.startup_extra_ids.push(fresh.id.clone());result.sessions.push(fresh);
         }
     }
@@ -161,6 +162,27 @@ mod tests {
         assert_eq!(p.archives[0].entry.id,"ended");
         assert!(p.archives[0].note.is_empty());
         assert_eq!(p.sessions[0].id,"live");
+    }
+    #[test]
+    fn only_detached_live_records_reserve_a_new_active_tab() {
+        let dir=tempfile::tempdir().unwrap();
+        let mut store=UiStateStore::new(dir.path(),"/project","machine").unwrap();
+        let mut original=crate::ui::App::default();
+        original.groups[0].tabs.push("old".into());
+        store.save(&original).unwrap();
+        original.groups[0].tabs.clear();
+        original.detached_this_run.push("old".into());
+        store.save(&original).unwrap();
+        let saved=store.saved_tabs().unwrap().to_vec();
+        let mut result=plan(&saved,&[live("old")],false,|_|panic!("live record needs no archive"),
+            |_|panic!("resume was not requested"));
+        let mut spawns=0;
+        ensure_usable(&mut result,&mut store,||{spawns+=1;Ok(live("fresh"))}).unwrap();
+        assert_eq!(spawns,1);
+        let mut restored=crate::ui::App::default();
+        assert!(store.restore(&mut restored,&["old".into(),"fresh".into()]));
+        assert_eq!(restored.groups[0].tabs,["fresh"]);
+        assert_eq!(restored.detached_this_run,["old"]);
     }
     #[test]
     fn restore_off_uses_newest_live_only_and_does_not_resume_saved_tabs() {
