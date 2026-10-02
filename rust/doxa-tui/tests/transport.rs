@@ -17,10 +17,15 @@ fn socket(test: impl FnOnce(UnixStream) + Send + 'static) -> (PathBuf, thread::J
         "doxa-rust-transport-{}-{}.sock", std::process::id(), NEXT_SOCKET.fetch_add(1, Ordering::Relaxed)
     ));
     let listener = UnixListener::bind(&path).unwrap();
+    let (ready_tx, ready_rx) = mpsc::channel();
     let task = thread::spawn(move || {
+        // The macOS hello deadline is deliberately short. Start the client
+        // only after the fixture is ready to accept its connection.
+        ready_tx.send(()).unwrap();
         let (stream, _) = listener.accept().unwrap();
         test(stream);
     });
+    ready_rx.recv().unwrap();
     (path, task)
 }
 
