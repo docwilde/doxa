@@ -177,18 +177,20 @@ impl CodexHost {
                 Some(Value::Bool(enabled)) => *enabled, None => false,
                 _ => return Err("Codex LORE tool metadata is invalid".into()),
             };
-            saved_permission = match value.get("permission_mode") {
-                None => None,
-                Some(Value::String(mode)) => Some(CodexPermission::from_mode(mode)
-                    .ok_or("Codex thread record has invalid permission mode")?),
-                _ => return Err("Codex thread record has invalid permission mode".into()),
-            };
             saved_transport = match value.get("transport") {
                 None => Some("exec"),
                 Some(Value::String(transport)) if transport == "exec" => Some("exec"),
                 Some(Value::String(transport)) if transport == "app-server" => Some("app-server"),
                 _ => return Err("Codex thread record has invalid transport".to_owned()),
             };
+            if saved_transport == Some("app-server") {
+                saved_permission = match value.get("permission_mode") {
+                    None => None,
+                    Some(Value::String(mode)) => Some(CodexPermission::from_mode(mode)
+                        .ok_or("Codex thread record has invalid permission mode")?),
+                    _ => return Err("Codex thread record has invalid permission mode".into()),
+                };
+            }
             Some(thread.to_owned())
         } else {
             if resume || transcript.is_some() {
