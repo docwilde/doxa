@@ -11,6 +11,7 @@ the stable 2.0 release has not been cut.
 
 - Fix **`draw_menu_scrollbar`** coverage for scrollable pickers, settings, session history, chip details, tool activity, and approval reviews. Scrollbars appear only when content exceeds the visible rows.
 - Show the scrollbar in **`Manager::draw`** while reviewing a long curated-memory edit. The model picker render test checks overflow and scrollbar movement.
+- Keep the test peer alive during **`oversize_outbound_prompt_is_rejected_before_write`** so macOS CI can complete the handshake before checking the frame limit.
 
 ## 2.0.0-alpha.65 — 2026-10-01
 
