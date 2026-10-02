@@ -378,6 +378,10 @@ impl SettingsMenu {
             .collect()
     }
     fn visible_indices(&self, height: u16) -> Vec<usize> {
+        let (indices, start, count) = self.visible_window(height);
+        indices.into_iter().skip(start).take(count).collect()
+    }
+    fn visible_window(&self, height: u16) -> (Vec<usize>, usize, usize) {
         let indices = self.indices();
         let count = usize::from(height.saturating_sub(if height < 12 { 5 } else { 9 })).max(1);
         let position = indices
@@ -385,7 +389,7 @@ impl SettingsMenu {
             .position(|i| *i == self.selected)
             .unwrap_or(0);
         let start = position.saturating_sub(count.saturating_sub(1));
-        indices.into_iter().skip(start).take(count).collect()
+        (indices, start, count)
     }
     fn finish_draft(&mut self) {
         if let Some((key, value)) = self.draft.take() {
@@ -1053,15 +1057,9 @@ fn input_request_option_at(request: &InputRequest, menu: Rect, row: u16) -> Opti
             })
         })
         .collect();
-    let scroll = if request.require_full_review {
-        usize::from(request.scroll).min(
-            lines
-                .len()
-                .saturating_sub(usize::from(menu.height.saturating_sub(2))),
-        ) as u16
-    } else {
-        request.scroll
-    };
+    let total = wrapped_rows(&body, usize::from(menu.width.saturating_sub(2)));
+    let scroll = usize::from(request.scroll)
+        .min(total.saturating_sub(usize::from(menu.height.saturating_sub(2)))) as u16;
     let area = Rect::new(0, 0, menu.width, menu.height);
     let mut buffer = Buffer::empty(area);
     Paragraph::new(lines)

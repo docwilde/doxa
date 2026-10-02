@@ -342,6 +342,7 @@ impl Manager {
         let usage = self.review.as_ref().map(|r| format!("{} / {} chars", r["chars"], r["cap_chars"]))
             .unwrap_or_default();
         let mut lines = vec![format!("{} · {} · {}", self.scope, usage, self.last_action.as_deref().unwrap_or(&self.status))];
+        let scrollbar;
         if let Some(draft) = &self.draft {
             let mut body = Vec::new();
             if draft.preview {
@@ -356,6 +357,7 @@ impl Manager {
             }
             let body: Vec<String> = body.iter().flat_map(|line| wrap_review(line, width)).collect();
             let start = self.scroll.min(body.len().saturating_sub(visible));
+            scrollbar = (body.len(), start);
             if draft.preview {
                 let seen = draft.seen.get();
                 if start <= seen || seen == usize::MAX {
@@ -365,6 +367,7 @@ impl Manager {
             }
             lines.extend(body.into_iter().skip(start).take(visible));
         } else {
+            scrollbar = (self.entries.len(), self.view_start.get());
             if self.entries.is_empty() { lines.push("(empty) · A add a fact".into()); }
             for (i, entry) in self.visible_entries(visible) {
                 lines.push(format!("{} {}", if i == self.selected { "›" } else { " " }, crate::lore_table::cell(&entry, width.saturating_sub(2)).trim_end()));
@@ -381,8 +384,8 @@ impl Manager {
             .block(Block::default().title(" LORE curated memory · Esc close ").borders(Borders::ALL)
                 .border_style(Style::default().fg(crate::theme::ACCENT)))
             .style(Style::default().fg(crate::theme::TEXT).bg(crate::theme::RAISED)), area);
-        if self.draft.is_none() && self.entries.len()>visible && area.width>=5 && area.height>=5 {
-            let mut state=ScrollbarState::new(self.entries.len()).position(self.view_start.get())
+        if scrollbar.0 > visible && area.width>=5 && area.height>=5 {
+            let mut state=ScrollbarState::new(scrollbar.0).position(scrollbar.1)
                 .viewport_content_length(visible);
             frame.render_stateful_widget(Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .begin_symbol(None).end_symbol(None)

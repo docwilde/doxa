@@ -5,6 +5,13 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.66 — 2026-10-02
+
+**Scrollable submenus**
+
+- Fix **`draw_menu_scrollbar`** coverage for scrollable pickers, settings, session history, chip details, tool activity, and approval reviews. Scrollbars appear only when content exceeds the visible rows.
+- Show the scrollbar in **`Manager::draw`** while reviewing a long curated-memory edit. The model picker render test checks overflow and scrollbar movement.
+
 ## 2.0.0-alpha.65 — 2026-10-01
 
 **Provider approvals**

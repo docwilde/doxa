@@ -1734,6 +1734,33 @@ for line in sys.stdin:
         app
     }
 
+    #[test]
+    fn model_submenu_scrollbar_appears_only_for_overflow_and_tracks_selection() {
+        let mut app = scrolled_picker_app();
+        app.model_picker = Some(ModelPicker { session_id: "session".into(),
+            models: (0..30).map(|index| format!("model-{index:02}")).collect(),
+            selected: 0, note: "Verified models".into(), loading: false,
+            catalog_pending: false });
+        let column = |app: &App| {
+            let menu = app.active_chooser_rect().unwrap();
+            let mut terminal = Terminal::new(TestBackend::new(100, 28)).unwrap();
+            terminal.draw(|frame| app.draw(frame)).unwrap();
+            let buffer = terminal.backend().buffer();
+            (menu.y + 1..menu.bottom() - 1)
+                .map(|row| buffer[(menu.right() - 2, row)].symbol().to_owned())
+                .collect::<Vec<_>>()
+        };
+        let top = column(&app);
+        assert!(top.iter().any(|symbol| symbol != " "), "overflow needs a scrollbar");
+        app.model_picker.as_mut().unwrap().selected = 29;
+        let bottom = column(&app);
+        assert_ne!(top, bottom, "scrollbar must follow the visible models");
+        app.model_picker.as_mut().unwrap().models.truncate(2);
+        app.model_picker.as_mut().unwrap().selected = 0;
+        assert!(column(&app).iter().all(|symbol| symbol == " "),
+            "a fitting submenu should not show a scrollbar");
+    }
+
     fn hover_first_picker_row(app: &mut App, offset: u16) -> (Rect, usize) {
         painted_at(app, 100, 28);
         let start = app.chooser_view_start.get();

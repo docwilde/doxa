@@ -4,7 +4,7 @@ use super::{
     chooser_visible_start, clipped_title, input_request_body, launch, links, raw_visual_rows,
     repo_path_label, safe_label, theme, vendor_models, App, ChipHit, Focus, RailRow,
     RenderedTranscript, ENGINE_CHOICES, MAX_RENDERED_TRANSCRIPTS, PERMISSION_CHOICES,
-    REVIEW_BODY_RESERVE, SPINNER_FRAMES,
+    REVIEW_BODY_RESERVE, SPINNER_FRAMES, wrapped_rows,
 };
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -246,6 +246,7 @@ impl App {
         let modal = area;
         let mut lines = Vec::new();
         let title;
+        let mut scrollbar = None;
         if self.engine_picker {
             title = " New session · choose engine · Enter continue · Esc close ";
             if height >= 10 {
@@ -259,6 +260,7 @@ impl App {
             let visible = usize::from(height.saturating_sub(offset + 1)).max(1);
             let start =
                 chooser_visible_start(&self.chooser_view_start, self.engine_selected, visible);
+            scrollbar = Some((ENGINE_CHOICES.len(), visible, start));
             for (index, engine) in ENGINE_CHOICES.iter().enumerate().skip(start).take(visible) {
                 lines.push(Line::styled(
                     format!(
@@ -384,6 +386,7 @@ impl App {
             let offset = if height >= 10 { 4 } else { 2 };
             let visible = usize::from(height.saturating_sub(offset + 1)).max(1);
             let start = chooser_visible_start(&self.chooser_view_start, *selected, visible);
+            scrollbar = Some((PERMISSION_CHOICES.len(), visible, start));
             for (index, (mode, description)) in PERMISSION_CHOICES
                 .iter()
                 .enumerate()
@@ -419,6 +422,7 @@ impl App {
             lines.push(Line::from(""));
             let visible = usize::from(height.saturating_sub(4)).max(1);
             let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
+            scrollbar = Some((picker.levels.len(), visible, start));
             for (index, level) in picker.levels.iter().enumerate().skip(start).take(visible) {
                 lines.push(Line::styled(
                     format!(
@@ -443,6 +447,7 @@ impl App {
             }
             let visible = picker.visible_rows(height);
             let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
+            scrollbar = Some((picker.models.len(), visible, start));
             for (index, model) in picker.models.iter().enumerate().skip(start).take(visible) {
                 lines.push(Line::styled(
                     format!(
@@ -455,7 +460,7 @@ impl App {
             }
         }
         frame.render_widget(
-            Paragraph::new(lines)
+            Paragraph::new(chooser_list_lines(lines, usize::from(area.width.saturating_sub(3))))
                 .block(
                     Block::default()
                         .title(title)
@@ -465,6 +470,9 @@ impl App {
                 .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)),
             modal,
         );
+        if let Some((total, visible, start)) = scrollbar {
+            draw_menu_scrollbar(frame, modal, total, visible, start);
+        }
     }
 
     pub(super) fn draw_settings_menu(&self, frame: &mut Frame, area: Rect) {
@@ -482,7 +490,8 @@ impl App {
                 Style::default().fg(theme::ACCENT),
             ),
         ];
-        for index in menu.visible_indices(area.height) {
+        let (indices, start, visible) = menu.visible_window(area.height);
+        for &index in indices.iter().skip(start).take(visible) {
             let row = &menu.rows[index];
             let draft = menu
                 .draft
@@ -595,7 +604,7 @@ impl App {
             " Enter edit/toggle · U unset · Ctrl+S save · Esc discard/close"
         }));
         frame.render_widget(
-            Paragraph::new(lines)
+            Paragraph::new(chooser_list_lines(lines, usize::from(area.width.saturating_sub(3))))
                 .block(
                     Block::default()
                         .title(" Settings ")
@@ -605,6 +614,7 @@ impl App {
                 .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)),
             area,
         );
+        draw_menu_scrollbar(frame, area, indices.len(), visible, start);
     }
 
     pub(super) fn draw_chip_info(&self, frame: &mut Frame, area: Rect) {
@@ -621,9 +631,9 @@ impl App {
             return;
         }
         if let Some(menu) = &self.operations_menu {
-            let width = usize::from(area.width.saturating_sub(2));
-            let lines = menu
-                .lines(width)
+            let width = usize::from(area.width.saturating_sub(3));
+            let (menu_lines, scrollbar) = menu.lines_with_scroll(width, usize::from(area.height));
+            let lines = menu_lines
                 .into_iter()
                 .map(|text| {
                     if text.starts_with('›') {
@@ -645,6 +655,9 @@ impl App {
                     .style(Style::default().fg(theme::TEXT).bg(theme::RAISED)),
                 area,
             );
+            if let Some((total, visible, start)) = scrollbar {
+                draw_menu_scrollbar(frame, area, total, visible, start);
+            }
             return;
         }
         let Some(info) = &self.chip_info else {
@@ -657,7 +670,7 @@ impl App {
                 .flat_map(|line| {
                     crate::memory_menu::wrap_review(
                         line,
-                        usize::from(area.width.saturating_sub(2)).max(1),
+                        usize::from(area.width.saturating_sub(3)).max(1),
                     )
                 })
                 .collect::<Vec<_>>();
@@ -679,12 +692,15 @@ impl App {
                     .style(Style::default().fg(theme::TEXT).bg(theme::RAISED)),
                 area,
             );
+            draw_menu_scrollbar(frame, area, lines.len(), visible, start);
             return;
         }
         if info.kind == "fleet" {
+            let visible = usize::from(area.height.saturating_sub(2));
+            let start = info.scroll.min(info.lines.len().saturating_sub(visible));
             frame.render_widget(
                 Paragraph::new(info.lines.join("\n"))
-                    .scroll((info.scroll.min(u16::MAX as usize) as u16, 0))
+                    .scroll((start.min(u16::MAX as usize) as u16, 0))
                     .block(
                         Block::default()
                             .title(" Fleet · PgUp/PgDn scroll ")
@@ -693,6 +709,7 @@ impl App {
                     .style(Style::default().fg(theme::TEXT).bg(theme::RAISED)),
                 area,
             );
+            draw_menu_scrollbar(frame, area, info.lines.len(), visible, start);
             return;
         }
         if info.kind == "memory" {
@@ -792,7 +809,7 @@ impl App {
                 .iter()
                 .skip(start)
                 .take(visible)
-                .map(|line| clipped_title(line, usize::from(area.width.saturating_sub(2))).0)
+                .map(|line| clipped_title(line, usize::from(area.width.saturating_sub(3))).0)
                 .collect();
             frame.render_widget(
                 Paragraph::new(lines.join("\n"))
@@ -812,6 +829,7 @@ impl App {
                     .style(Style::default().fg(theme::TEXT).bg(theme::RAISED)),
                 area,
             );
+            draw_menu_scrollbar(frame, area, source.len(), visible, start);
             return;
         }
         let title = format!(" {} · Esc close ", safe_label(info.kind));
@@ -850,6 +868,9 @@ impl App {
             ));
         }
         let visible = usize::from(area.height.saturating_sub(3)).max(1);
+        let total = matches.iter().map(|&index| {
+            1 + self.history_snippets(&self.sessions[index].id).len().min(2)
+        }).sum();
         for (position, header, label) in self.history_rows(visible) {
             let style = if header && position == self.history_selected {
                 Style::default()
@@ -861,7 +882,7 @@ impl App {
             } else {
                 Style::default().fg(theme::MUTED)
             };
-            let label = clipped_title(&label, usize::from(area.width.saturating_sub(2))).0;
+            let label = clipped_title(&label, usize::from(area.width.saturating_sub(3))).0;
             let padded = format!(
                 "{label}{}",
                 " ".repeat(usize::from(area.width.saturating_sub(2)).saturating_sub(label.width()))
@@ -882,6 +903,7 @@ impl App {
             ),
             area,
         );
+        draw_menu_scrollbar(frame, area, total, visible, self.chooser_view_start.get());
     }
 
     pub(super) fn draw_attach_picker(&self, frame: &mut Frame, area: Rect) {
@@ -923,7 +945,7 @@ impl App {
             } else {
                 Style::default().fg(theme::SECONDARY)
             };
-            let label = clipped_title(&label, usize::from(area.width.saturating_sub(2))).0;
+            let label = clipped_title(&label, usize::from(area.width.saturating_sub(3))).0;
             let padded = format!(
                 "{label}{}",
                 " ".repeat(usize::from(area.width.saturating_sub(2)).saturating_sub(label.width()))
@@ -940,6 +962,7 @@ impl App {
             ),
             area,
         );
+        draw_menu_scrollbar(frame, area, matches.len(), visible, start);
     }
 
     pub(super) fn draw_branch_picker(&self, frame: &mut Frame, area: Rect) {
@@ -964,7 +987,7 @@ impl App {
                 safe_label(branch),
                 current
             );
-            let label = clipped_title(&label, usize::from(area.width.saturating_sub(2))).0;
+            let label = clipped_title(&label, usize::from(area.width.saturating_sub(3))).0;
             let padded = format!(
                 "{label}{}",
                 " ".repeat(usize::from(area.width.saturating_sub(2)).saturating_sub(label.width()))
@@ -989,6 +1012,7 @@ impl App {
             ),
             area,
         );
+        draw_menu_scrollbar(frame, area, picker.branches.len(), visible, start);
     }
 
     pub(super) fn draw_repo_picker(&self, frame: &mut Frame, area: Rect) {
@@ -1000,7 +1024,7 @@ impl App {
         )];
         let visible = usize::from(area.height.saturating_sub(3)).max(1);
         let start = chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
-        let width = usize::from(area.width.saturating_sub(2));
+        let width = usize::from(area.width.saturating_sub(3));
         for (index, path) in picker.paths.iter().enumerate().skip(start).take(visible) {
             let marker = if index == 0 {
                 "current"
@@ -1038,6 +1062,7 @@ impl App {
                 .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)),
             area,
         );
+        draw_menu_scrollbar(frame, area, picker.paths.len(), visible, start);
     }
 
     pub(super) fn draw_slash_suggestions(&self, frame: &mut Frame, area: Rect) {
@@ -1060,7 +1085,7 @@ impl App {
                     command,
                     description
                 );
-                let label = clipped_title(&label, usize::from(area.width.saturating_sub(2))).0;
+                let label = clipped_title(&label, usize::from(area.width.saturating_sub(3))).0;
                 let style = if index == selected {
                     Style::default()
                         .fg(theme::ACCENT)
@@ -1083,6 +1108,7 @@ impl App {
                 .style(Style::default().bg(theme::RAISED)),
             area,
         );
+        draw_menu_scrollbar(frame, area, matches.len(), visible, start);
     }
 
     pub(super) fn draw_queue_picker(&self, frame: &mut Frame, area: Rect) {
@@ -1109,7 +1135,7 @@ impl App {
                 if ambiguous { "[ambiguous ID] " } else { "" },
                 safe_label(&row.preview)
             );
-            let label = clipped_title(&label, usize::from(area.width.saturating_sub(2))).0;
+            let label = clipped_title(&label, usize::from(area.width.saturating_sub(3))).0;
             let padded = format!(
                 "{label}{}",
                 " ".repeat(usize::from(area.width.saturating_sub(2)).saturating_sub(label.width()))
@@ -1134,6 +1160,7 @@ impl App {
             ),
             area,
         );
+        draw_menu_scrollbar(frame, area, picker.rows.len(), visible, start);
     }
 
     pub(super) fn draw_lore_picker(&self, frame: &mut Frame, area: Rect) {
@@ -1142,6 +1169,7 @@ impl App {
         };
         if picker.proposal_mode {
             let label_width = usize::from(area.width.saturating_sub(3));
+            let scrollbar;
             let mut lines = vec![Line::from(format!(
                 " {}",
                 clipped_title(&picker.status, label_width).0
@@ -1172,7 +1200,9 @@ impl App {
                 // Preserve all raw content across visual rows; terminal controls
                 // are shown with visible escapes, and no field is summarized.
                 let visual_rows = raw_visual_rows(review.raw(), width);
-                for line in visual_rows.iter().skip(picker.review_scroll).take(visible) {
+                let start = picker.review_scroll.min(visual_rows.len().saturating_sub(visible));
+                scrollbar = (visual_rows.len(), visible, start);
+                for line in visual_rows.iter().skip(start).take(visible) {
                     lines.push(Line::from(line.clone()));
                 }
             } else {
@@ -1184,6 +1214,7 @@ impl App {
                 let visible = usize::from(area.height.saturating_sub(5)).max(1);
                 let start =
                     chooser_visible_start(&self.chooser_view_start, picker.selected, visible);
+                scrollbar = (picker.proposals.len(), visible, start);
                 for (index, row) in picker
                     .proposals
                     .iter()
@@ -1207,12 +1238,13 @@ impl App {
                 }
             }
             if picker.review.is_none() {
-                lines = chooser_list_lines(lines, usize::from(area.width.saturating_sub(2)));
+                lines = chooser_list_lines(lines, usize::from(area.width.saturating_sub(3)));
             }
             frame.render_widget(Paragraph::new(lines)
                 .block(Block::default().title(lore_view_title(picker))
                     .borders(Borders::ALL).border_style(Style::default().fg(theme::ACCENT)))
                 .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)).wrap(Wrap { trim: false }), area);
+            draw_menu_scrollbar(frame, area, scrollbar.0, scrollbar.1, scrollbar.2);
             return;
         }
         if let Some(review) = &picker.belief_review {
@@ -1251,10 +1283,11 @@ impl App {
             let full = format!("Subject: {}\nClaim: {}", review.subject(), review.claim());
             let visual_rows = raw_visual_rows(&full, width);
             let visible = usize::from(area.height.saturating_sub(REVIEW_BODY_RESERVE));
-            for line in visual_rows.iter().skip(picker.review_scroll).take(visible) {
+            let start = picker.review_scroll.min(visual_rows.len().saturating_sub(visible));
+            for line in visual_rows.iter().skip(start).take(visible) {
                 lines.push(Line::from(line.clone()));
             }
-            lines = chooser_list_lines(lines, usize::from(area.width.saturating_sub(2)));
+            lines = chooser_list_lines(lines, usize::from(area.width.saturating_sub(3)));
             frame.render_widget(
                 Paragraph::new(lines)
                     .block(
@@ -1274,6 +1307,7 @@ impl App {
                     rect,
                 );
             }
+            draw_menu_scrollbar(frame, area, visual_rows.len(), visible, start);
             return;
         }
         if let Some((id, graph)) = self.belief_graph_lines.as_ref().filter(|(id, _)| {
@@ -1282,12 +1316,14 @@ impl App {
                 .get(picker.selected)
                 .is_some_and(|r| r.id == *id)
         }) {
+            let visible = usize::from(area.height.saturating_sub(3));
+            let start = self.belief_graph_scroll.min(graph.len().saturating_sub(visible));
             let lines = std::iter::once(Line::from(format!(" Belief {id} · g/Esc back")))
                 .chain(
                     graph
                         .iter()
-                        .skip(self.belief_graph_scroll)
-                        .take(usize::from(area.height.saturating_sub(3)))
+                        .skip(start)
+                        .take(visible)
                         .map(|line| Line::from(safe_label(line))),
                 )
                 .collect::<Vec<_>>();
@@ -1303,6 +1339,7 @@ impl App {
                     .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)),
                 area,
             );
+            draw_menu_scrollbar(frame, area, graph.len(), visible, start);
             return;
         }
         let width = usize::from(area.width.saturating_sub(3));
@@ -1419,18 +1456,15 @@ impl App {
         );
         frame.render_widget(Clear, modal);
         let queued_rows = self.queued_diff_rows();
+        let total = self.diff_text.lines().count();
+        let visible = usize::from(height.saturating_sub(if self.diff_reject_confirm.is_some() { 3 } else { 2 }));
+        let start = self.diff_scroll.min(total.saturating_sub(visible));
         let mut rows: Vec<Line> = self
             .diff_text
             .lines()
             .enumerate()
-            .skip(self.diff_scroll)
-            .take(usize::from(height.saturating_sub(
-                if self.diff_reject_confirm.is_some() {
-                    3
-                } else {
-                    2
-                },
-            )))
+            .skip(start)
+            .take(visible)
             .map(|(row, line)| {
                 if queued_rows.contains(&row) {
                     return Line::styled(
@@ -1480,22 +1514,20 @@ impl App {
             ),
             modal,
         );
+        draw_menu_scrollbar(frame, modal, total, visible, start);
     }
 
     pub(super) fn draw_diff_pane(&self, frame: &mut Frame, area: Rect) {
         let queued_rows = self.queued_diff_rows();
+        let total = self.diff_text.lines().count();
+        let visible = usize::from(area.height.saturating_sub(if self.diff_reject_confirm.is_some() { 3 } else { 2 }));
+        let start = self.diff_scroll.min(total.saturating_sub(visible));
         let mut rows: Vec<Line> = self
             .diff_text
             .lines()
             .enumerate()
-            .skip(self.diff_scroll)
-            .take(usize::from(area.height.saturating_sub(
-                if self.diff_reject_confirm.is_some() {
-                    3
-                } else {
-                    2
-                },
-            )))
+            .skip(start)
+            .take(visible)
             .map(|(row, line)| {
                 if queued_rows.contains(&row) {
                     return Line::styled(
@@ -1540,6 +1572,7 @@ impl App {
                 .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)),
             area,
         );
+        draw_menu_scrollbar(frame, area, total, visible, start);
     }
 
     pub(super) fn draw_actions(&self, frame: &mut Frame, area: Rect) {
@@ -1568,7 +1601,7 @@ impl App {
                     row.label,
                     row.help
                 ),
-                usize::from(area.width.saturating_sub(2)),
+                usize::from(area.width.saturating_sub(3)),
             )
             .0;
             lines.push(Line::styled(
@@ -1594,6 +1627,7 @@ impl App {
                 .style(Style::default().bg(theme::RAISED)),
             area,
         );
+        draw_menu_scrollbar(frame, area, rows.len(), visible, start);
     }
 
     pub(super) fn draw_tool_cards(&self, frame: &mut Frame, area: Rect) {
@@ -1638,11 +1672,15 @@ impl App {
             body.push_str("\n\nResult:\n");
             body.push_str(card.result.as_deref().unwrap_or("(pending)"));
         }
+        let width = usize::from(modal.width.saturating_sub(3)).max(1);
+        let body_lines = body.lines().flat_map(|line| crate::memory_menu::wrap_review(line, width))
+            .collect::<Vec<_>>();
+        let visible = usize::from(modal.height.saturating_sub(2));
+        let start = usize::from(self.tool_scroll).min(body_lines.len().saturating_sub(visible));
         frame.render_widget(Clear, modal);
         frame.render_widget(
-            Paragraph::new(body)
-                .wrap(Wrap { trim: false })
-                .scroll((self.tool_scroll, 0))
+            Paragraph::new(body_lines.join("\n"))
+                .scroll((start.min(u16::MAX as usize) as u16, 0))
                 .block(
                     Block::default()
                         .title(" Tool activity · ↑/↓ select · PgUp/PgDn scroll · Esc close ")
@@ -1652,6 +1690,7 @@ impl App {
                 ),
             modal,
         );
+        draw_menu_scrollbar(frame, modal, body_lines.len(), visible, start);
     }
 
     pub(super) fn draw_request(&self, frame: &mut Frame, area: Rect, inline: bool) {
@@ -1714,6 +1753,7 @@ impl App {
         } else {
             body.as_str()
         };
+        let visible = usize::from(modal.height.saturating_sub(2));
         let lines: Vec<Line> = body
             .lines()
             .enumerate()
@@ -1784,7 +1824,7 @@ impl App {
         if !inline {
             frame.render_widget(Clear, modal);
         }
-        let widget = Paragraph::new(lines).scroll((scroll, 0)).block(
+        let widget = Paragraph::new(lines).block(
             Block::default()
                 .title(title)
                 .borders(Borders::ALL)
@@ -1796,7 +1836,14 @@ impl App {
         } else {
             widget.wrap(Wrap { trim: false })
         };
-        frame.render_widget(widget, modal);
+        let total = if request.require_full_review {
+            body.lines().count()
+        } else {
+            wrapped_rows(body, usize::from(modal.width.saturating_sub(2)))
+        };
+        scroll = scroll.min(total.saturating_sub(visible).min(u16::MAX as usize) as u16);
+        frame.render_widget(widget.scroll((scroll, 0)), modal);
+        draw_menu_scrollbar(frame, modal, total, visible, usize::from(scroll));
     }
 
     pub(super) fn draw_rail(&self, frame: &mut Frame, area: Rect) {
@@ -2534,9 +2581,9 @@ fn lore_view_title(picker: &super::LorePicker) -> Line<'static> {
 }
 
 fn draw_menu_scrollbar(frame: &mut Frame, area: Rect, total: usize, visible: usize, start: usize) {
-    if total <= visible || area.width < 5 || area.height < 5 { return; }
+    if visible == 0 || total <= visible || area.width < 5 || area.height < 5 { return; }
     let rect = Rect::new(area.right() - 2, area.y + 1, 1, area.height - 2);
-    let mut state = ScrollbarState::new(total).position(start).viewport_content_length(visible);
+    let mut state = ScrollbarState::new(total).position(start.min(total - visible)).viewport_content_length(visible);
     frame.render_stateful_widget(
         Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .begin_symbol(None).end_symbol(None)
