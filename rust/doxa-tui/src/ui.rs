@@ -168,7 +168,7 @@ fn new_session_preferences(
     (model, effort)
 }
 
-const PERMISSION_CHOICES: [(&str, &str); 5] = [
+const CLAUDE_PERMISSION_CHOICES: [(&str, &str); 5] = [
     ("default", "Ask before dangerous calls"),
     ("acceptEdits", "Allow file edits; ask for other calls"),
     ("plan", "Read-only tools; no edits"),
@@ -176,16 +176,29 @@ const PERMISSION_CHOICES: [(&str, &str); 5] = [
     ("dontAsk", "Deny unapproved calls without asking"),
 ];
 
-fn permission_index(mode: &str) -> Option<usize> {
-    PERMISSION_CHOICES
+const CODEX_PERMISSION_CHOICES: [(&str, &str); 3] = [
+    ("on-request", "Ask before protected calls"),
+    ("auto", "No prompts; sandbox enforced"),
+    ("full-access", "No prompts; no sandbox"),
+];
+
+fn permission_choices(engine: Option<&str>) -> &'static [(&'static str, &'static str)] {
+    match engine {
+        Some("codex") => &CODEX_PERMISSION_CHOICES,
+        _ => &CLAUDE_PERMISSION_CHOICES,
+    }
+}
+
+fn permission_index(mode: &str, engine: Option<&str>) -> Option<usize> {
+    permission_choices(engine)
         .iter()
         .position(|(candidate, _)| *candidate == mode)
 }
 
 fn permission_display_mode(mode: &str, engine: Option<&str>) -> bool {
     match engine {
-        Some("claude") => permission_index(mode).is_some(),
-        Some("codex") => matches!(mode, "on-request" | "never"),
+        Some("claude") => permission_index(mode, engine).is_some(),
+        Some("codex") => matches!(mode, "on-request" | "auto" | "full-access" | "never"),
         _ => false,
     }
 }

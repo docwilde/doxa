@@ -7,9 +7,8 @@ use std::time::Instant;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::{
-    effort_choices, engine_name, new_session_preferences, panes, permission_index, vendor_models,
+    effort_choices, engine_name, new_session_preferences, panes, permission_choices, permission_index, vendor_models,
     App, EffortPicker, ModelPicker, NewSession, ENGINE_CHOICES, MAX_INPUT_BYTES,
-    PERMISSION_CHOICES,
 };
 use crate::launch;
 
@@ -205,18 +204,18 @@ impl App {
             .is_some_and(|capabilities| capabilities.permission_modes)
         {
             self.notice = match self.session_identity.get(&id).and_then(|identity| identity.0.as_deref()) {
-                Some("codex") => format!("Codex uses {} approvals; DOXA cannot change its policy",
-                    self.permission_modes.get(&id).map(String::as_str).unwrap_or("a fixed")),
+                Some("codex") => "This Codex transport cannot change permission modes".into(),
                 Some("deepseek" | "glm") =>
                     "API vendors have no provider permission mode; DOXA asks for peer and LORE tool calls".into(),
                 _ => "This session cannot change permission modes".into(),
             };
             return;
         }
+        let engine = self.session_identity.get(&id).and_then(|identity| identity.0.as_deref());
         let selected = self
             .permission_modes
             .get(&id)
-            .and_then(|mode| permission_index(mode))
+            .and_then(|mode| permission_index(mode, engine))
             .unwrap_or(0);
         self.permission_picker = Some((id, selected));
         self.permission_confirm_dont_ask = false;
@@ -234,7 +233,11 @@ impl App {
             self.notice = "This session cannot change permission modes".into();
             return;
         }
-        let mode = PERMISSION_CHOICES[*selected].0;
+        let engine = self.session_identity.get(id).and_then(|identity| identity.0.as_deref());
+        let Some(mode) = permission_choices(engine).get(*selected).map(|choice| choice.0) else {
+            self.notice = "Permission selection changed; reopen the picker".into();
+            return;
+        };
         if mode == "dontAsk"
             && self
                 .permission_modes
@@ -280,8 +283,11 @@ impl App {
                 }
             }
             KeyCode::Down => {
+                let count = self.permission_picker.as_ref().map(|(id, _)| {
+                    permission_choices(self.session_identity.get(id).and_then(|identity| identity.0.as_deref())).len()
+                }).unwrap_or(0);
                 if let Some((_, selected)) = &mut self.permission_picker {
-                    *selected = (*selected + 1).min(PERMISSION_CHOICES.len() - 1);
+                    *selected = (*selected + 1).min(count.saturating_sub(1));
                     self.permission_confirm_dont_ask = false;
                 }
             }

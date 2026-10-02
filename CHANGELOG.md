@@ -13,6 +13,11 @@ the stable 2.0 release has not been cut.
 - Show the scrollbar in **`Manager::draw`** while reviewing a long curated-memory edit. The model picker render test checks overflow and scrollbar movement.
 - Keep the test peer alive during **`oversize_outbound_prompt_is_rejected_before_write`** so macOS CI can complete the handshake before checking the frame limit.
 
+**Codex permissions**
+
+- Add `on-request`, sandboxed `auto`, and `full-access` to the **Codex permission picker**. Changes on an idle session apply to its next turn.
+- Send the chosen **`approvalPolicy`** and **`sandboxPolicy`** on each Codex turn and persist the session choice for restoration. DOXA peer and LORE tool reviews remain separate.
+
 ## 2.0.0-alpha.65 — 2026-10-01
 
 **Provider approvals**

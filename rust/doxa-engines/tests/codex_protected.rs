@@ -1,5 +1,5 @@
 #![cfg(unix)]
-use doxa_engines::{codex_appserver::{AppServerDriver, AppServerOptions}, codex_compact::CompactGate, codex_driver::SandboxMode, codex_interaction::InputInbox};
+use doxa_engines::{codex_appserver::{AppServerDriver, AppServerOptions, CodexPermission}, codex_compact::CompactGate, codex_driver::SandboxMode, codex_interaction::InputInbox};
 use serde_json::{json, Value};
 use std::{fs, os::unix::fs::PermissionsExt, sync::{Arc, atomic::{AtomicUsize, Ordering}}, time::Duration};
 use tokio_util::sync::CancellationToken;

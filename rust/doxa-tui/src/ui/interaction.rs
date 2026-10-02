@@ -4,7 +4,7 @@ use super::{
     prompt_height, raw_visual_rows, safe_label, tool_cards, transcript_tools, unsafe_input_char,
     vendor_models, App, DragTarget, Focus, RailRow, Split, COMMANDS, ENGINE_CHOICES,
     MAX_ANSWER_BYTES, MAX_INPUT_BYTES, MAX_PENDING_PROMPTS, MAX_REJECT_REASON_BYTES,
-    MIN_PANE_HEIGHT, MIN_PANE_WIDTH, MIN_RAIL_WIDTH, PERMISSION_CHOICES, REVIEW_BODY_RESERVE,
+    MIN_PANE_HEIGHT, MIN_PANE_WIDTH, MIN_RAIL_WIDTH, permission_choices, REVIEW_BODY_RESERVE,
 };
 use crate::lore_picker;
 use crossterm::event::Event;
@@ -1813,7 +1813,7 @@ impl App {
                     return true;
                 }
             }
-        } else if let Some((_, selected)) = self.permission_picker.as_mut() {
+        } else if let Some((id, selected)) = self.permission_picker.as_mut() {
             let offset = if menu.height >= 10 { 4 } else { 2 };
             if row < menu.y + offset {
                 return false;
@@ -1821,7 +1821,8 @@ impl App {
             let visible = usize::from(menu.height.saturating_sub(offset + 1)).max(1);
             let start = chooser_visible_start(&self.chooser_view_start, *selected, visible);
             let index = start + usize::from(row - menu.y - offset);
-            if index < PERMISSION_CHOICES.len() && *selected != index {
+            let count = permission_choices(self.session_identity.get(id).and_then(|identity| identity.0.as_deref())).len();
+            if index < count && *selected != index {
                 *selected = index;
                 return true;
             }
@@ -2877,16 +2878,17 @@ impl App {
                 }
                 return true;
             }
-            if let Some((_, selected)) = &mut self.permission_picker {
+            if let Some((id, selected)) = &mut self.permission_picker {
+                let choices = permission_choices(self.session_identity.get(id).and_then(|identity| identity.0.as_deref()));
                 let offset = if height >= 10 { 4 } else { 2 };
                 if mouse.row >= y + offset {
                     let visible = usize::from(height.saturating_sub(offset + 1)).max(1);
                     let start = chooser_visible_start(&self.chooser_view_start, *selected, visible);
                     let row = start + usize::from(mouse.row - (y + offset));
-                    if row < PERMISSION_CHOICES.len() {
+                    if row < choices.len() {
                         *selected = row;
                         self.permission_confirm_dont_ask = false;
-                        if PERMISSION_CHOICES[row].0 == "dontAsk" {
+                        if choices[row].0 == "dontAsk" {
                             self.notice = "dontAsk denies unapproved calls silently; press Enter twice to confirm".into();
                         } else {
                             self.select_permission_mode();

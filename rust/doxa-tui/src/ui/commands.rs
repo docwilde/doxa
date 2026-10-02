@@ -549,7 +549,10 @@ impl App {
                     return true;
                 }
                 if command == LocalCommand::Mode {
-                    if let Some(index) = permission_index(target) {
+                    let engine = self.groups[self.active_group].active_id()
+                        .and_then(|id| self.session_identity.get(id))
+                        .and_then(|identity| identity.0.as_deref());
+                    if let Some(index) = permission_index(target, engine) {
                         self.open_permission_picker();
                         if let Some(picker) = &mut self.permission_picker {
                             picker.1 = index;

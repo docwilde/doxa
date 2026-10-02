@@ -148,6 +148,6 @@ else:
     fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
     let gate_dir = dir.path().join("gate"); fs::create_dir(&gate_dir).unwrap(); fs::set_permissions(&gate_dir, fs::Permissions::from_mode(0o700)).unwrap();
     let gate = CompactGate::prepare(&gate_dir, &std::env::current_exe().unwrap(), &dir.path().join("codex-home"), dir.path(), "doxa-fixture", "0.156.1").unwrap();
-    let options = AppServerOptions { executable, cwd:dir.path().to_owned(), model:None, sandbox:SandboxMode::WorkspaceWrite, resume_thread:None, turn_timeout:Duration::from_secs(3) };
+    let options = AppServerOptions { executable, cwd:dir.path().to_owned(), model:None, sandbox:SandboxMode::WorkspaceWrite, permission:CodexPermission::OnRequest, resume_thread:None, turn_timeout:Duration::from_secs(3) };
     (dir, options, gate)
 }

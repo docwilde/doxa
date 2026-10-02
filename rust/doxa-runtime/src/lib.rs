@@ -43,6 +43,7 @@ pub trait Host: Send + Sync + 'static {
     fn can_set_model(&self) -> bool { false }
     fn model_change_requires_idle(&self) -> bool { false }
     fn can_set_permission_mode(&self) -> bool { false }
+    fn permission_change_requires_idle(&self) -> bool { false }
     /// Called once before prompt admission. Returns true only when the host
     /// can expose these bounded, same-scope tools to its actual provider.
     fn set_peer_tool_handler(&self, _: PeerToolHandler) -> bool { false }
@@ -688,6 +689,10 @@ fn handle_call(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame: &Value) {
             let state = inner.state.lock().unwrap();
             state.busy || !state.prompts.is_empty() || inner.stopping.load(Ordering::Acquire)
         };
+        let refuse_permission = method == "set_permission_mode" && inner.host.permission_change_requires_idle() && {
+            let state = inner.state.lock().unwrap();
+            state.busy || !state.prompts.is_empty() || inner.stopping.load(Ordering::Acquire)
+        };
         let refuse_dont_ask = {
             let state = inner.state.lock().unwrap();
             method == "set_permission_mode" && params["mode"] == "dontAsk"
@@ -695,6 +700,8 @@ fn handle_call(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame: &Value) {
         };
         if refuse_model {
             (Err("Finish the current response and queued prompts, then change the model for the next turn".into()), None)
+        } else if refuse_permission {
+            (Err("Finish the current response and queued prompts, then change permissions for the next turn".into()), None)
         } else if refuse_dont_ask {
             (Err("dontAsk requires an idle session with no queued prompts".into()), None)
         } else {
@@ -706,7 +713,7 @@ fn handle_call(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame: &Value) {
                     !value.trim().is_empty()
                         && !value.chars().any(char::is_control)
                         && (field != "mode" ||
-                            (matches!(value, "default" | "acceptEdits" | "plan" | "auto" | "dontAsk")
+                            (matches!(value, "default" | "acceptEdits" | "plan" | "auto" | "dontAsk" | "on-request" | "full-access")
                                 && params["mode"] == value))
                 });
                 if valid { Ok(extra) } else { Err(format!("host returned invalid {field} reply")) }

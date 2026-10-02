@@ -2,8 +2,8 @@
 use super::{
     belief_review_buttons, chip_text, chooser_list_lines, chooser_row_style,
     chooser_visible_start, clipped_title, input_request_body, launch, links, raw_visual_rows,
-    repo_path_label, safe_label, theme, vendor_models, App, ChipHit, Focus, RailRow,
-    RenderedTranscript, ENGINE_CHOICES, MAX_RENDERED_TRANSCRIPTS, PERMISSION_CHOICES,
+    repo_path_label, safe_label, theme, vendor_models, permission_choices, App, ChipHit, Focus, RailRow,
+    RenderedTranscript, ENGINE_CHOICES, MAX_RENDERED_TRANSCRIPTS,
     REVIEW_BODY_RESERVE, SPINNER_FRAMES, wrapped_rows,
 };
 use ratatui::layout::Rect;
@@ -369,12 +369,22 @@ impl App {
                 chooser_row_style(form.field == prompt_field + 1),
             ));
         } else if let Some((id, selected)) = &self.permission_picker {
-            title = " Claude permissions · this session · Enter select · Esc close ";
+            let engine = self.session_identity.get(id).and_then(|identity| identity.0.as_deref());
+            let choices = permission_choices(engine);
+            title = if engine == Some("codex") {
+                " Codex permissions · next turn · Enter select · Esc close "
+            } else {
+                " Claude permissions · this session · Enter select · Esc close "
+            };
             if height >= 10 {
-                lines.push(Line::from(
-                    " Changes how Claude handles tool permission requests.",
-                ));
-                lines.push(Line::from(if self.permission_confirm_dont_ask {
+                lines.push(Line::from(if engine == Some("codex") {
+                    " Choose how Codex handles approvals and sandbox limits."
+                } else {
+                    " Changes how Claude handles tool permission requests."
+                }));
+                lines.push(Line::from(if engine == Some("codex") {
+                    " Current mode marked with ●; changes apply next turn."
+                } else if self.permission_confirm_dont_ask {
                     " dontAsk silently denies unapproved calls. Enter again to confirm."
                 } else {
                     " Current mode marked with ●; dontAsk requires confirmation."
@@ -386,8 +396,8 @@ impl App {
             let offset = if height >= 10 { 4 } else { 2 };
             let visible = usize::from(height.saturating_sub(offset + 1)).max(1);
             let start = chooser_visible_start(&self.chooser_view_start, *selected, visible);
-            scrollbar = Some((PERMISSION_CHOICES.len(), visible, start));
-            for (index, (mode, description)) in PERMISSION_CHOICES
+            scrollbar = Some((choices.len(), visible, start));
+            for (index, (mode, description)) in choices
                 .iter()
                 .enumerate()
                 .skip(start)
