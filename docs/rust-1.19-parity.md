@@ -12,7 +12,7 @@ coverage alone does not establish authenticated compatibility for every provider
 
 | Area | Implemented Rust behavior |
 | --- | --- |
-| Sessions | New/attach/stop/list; verified live and saved-tab restoration with order, labels, layout, drafts and focus; safe eager resume without a prompt; read-only fallback with reasons; resume/restore switches; exact and detached session kill; automatic project headings for uncollected rail entries |
+| Sessions | New/attach/stop/list; verified live and saved-tab restoration with order, labels, layout, drafts and focus; detached tabs stay closed on restore; past sessions appear muted below live projects; safe eager resume without a prompt; read-only fallback with reasons; resume/restore switches; exact and detached session kill |
 | Window and prompt | Nested horizontal/vertical splits, draggable dividers and submenu borders, grouped tabs and collections, per-pane prompts, mouse hover/click, configurable window shortcuts, keyboard focus across tabs/chips/prompt, tab transfer, prompt-line search and generated action palette |
 | Messages | Distinct user styling, clickable HTTP(S) links, processing spinner, folded tool calls and streamed reasoning counts; painted-text selection, OSC52 copy and explicit owned clipboard paste; keyboard-only `!` shell output remains private to the window |
 | Questions and permissions | Inline choices, free text/Other, request identity checks, complete permission read-through, one-request or per-tool session approval, restored pending snapshots and blinking input indicators |
@@ -53,6 +53,7 @@ coverage alone does not establish authenticated compatibility for every provider
 | Alpha.64 | Register Claude's stdio permission callback and allow live permission-mode changes so inline approval requests and the `auto` picker take effect during an active turn. Label Codex's fixed `on-request` policy explicitly; Codex mode switching remains unavailable in DOXA. |
 | Alpha.65 | Forward Codex permission-profile requests into the inline review and grant the exact requested profile for one turn; hide the unsupported DeepSeek/GLM permission chip. Belief-row Accept/Reject and unmodified A/R apply after an exact LORE fetch; `/` or clicking the prompt enables text filtering. |
 | Alpha.66 | Show overflow scrollbars throughout scrollable submenus. Let an idle Codex session choose `on-request`, sandboxed `auto`, or `full-access` for its next turn; restore that choice with the saved session. |
+| Alpha.67 | Scrollbar thumbs reach the last track cell at the final page. Restore flat detached records without reopening tabs, save generated labels, and show recoverable dead sessions below live projects in muted italic text. |
 
 Standalone LORE administration, hooks, MCP and network operations are native Rust;
 they are not a remaining Python replacement task. See the

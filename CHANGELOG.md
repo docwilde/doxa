@@ -5,6 +5,17 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.67 — 2026-10-02
+
+**Scrolling**
+
+- Fix **`draw_menu_scrollbar`** and the rail and memory scrollbars so the thumb reaches the last track cell on the final page.
+
+**Session rail**
+
+- Restore saved flat detached records outside active panes in **`UiStateStore::restore`**; open a fresh tab if none remain active, and preserve session labels.
+- Move recoverable dead sessions to a muted, italic **Past sessions** section below live projects. Hide unavailable empty records from the rail.
+
 ## 2.0.0-alpha.66 — 2026-10-02
 
 **Scrollable submenus**

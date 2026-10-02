@@ -367,9 +367,10 @@ impl Manager {
             }
             lines.extend(body.into_iter().skip(start).take(visible));
         } else {
+            let visible_entries = self.visible_entries(visible);
             scrollbar = (self.entries.len(), self.view_start.get());
             if self.entries.is_empty() { lines.push("(empty) · A add a fact".into()); }
-            for (i, entry) in self.visible_entries(visible) {
+            for (i, entry) in visible_entries {
                 lines.push(format!("{} {}", if i == self.selected { "›" } else { " " }, crate::lore_table::cell(&entry, width.saturating_sub(2)).trim_end()));
             }
             lines.push("Enter actions: A add · E edit · D remove · Tab scope".into());
@@ -385,7 +386,8 @@ impl Manager {
                 .border_style(Style::default().fg(crate::theme::ACCENT)))
             .style(Style::default().fg(crate::theme::TEXT).bg(crate::theme::RAISED)), area);
         if scrollbar.0 > visible && area.width>=5 && area.height>=5 {
-            let mut state=ScrollbarState::new(scrollbar.0).position(scrollbar.1)
+            let mut state=ScrollbarState::new(scrollbar.0-visible+1)
+                .position(scrollbar.1.min(scrollbar.0-visible))
                 .viewport_content_length(visible);
             frame.render_stateful_widget(Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .begin_symbol(None).end_symbol(None)
@@ -480,6 +482,17 @@ mod manager_tests {
         manager.key(key(KeyCode::Char('Y')));
         assert_eq!(manager.status,"Gallery fixture: memory writes disabled","complete exact removal reaches guarded submit at cap zero");
         assert!(manager.pending.is_none(),"fixture never mutates LORE");
+    }
+    #[test]
+    fn curated_memory_scrollbar_reaches_last_cell() {
+        let entries=(0..30).map(|index|format!("fact {index}")).collect::<Vec<_>>();
+        let mut manager=Manager::from_fixture_review(("session".into(),"/fixture".into()),"user",
+            serde_json::json!({"scope":"user","key":"user","sha256":"a".repeat(64),
+                "entries":entries,"chars":200,"cap_chars":9000})).unwrap();
+        manager.selected=29;
+        let mut terminal=ratatui::Terminal::new(ratatui::backend::TestBackend::new(80,12)).unwrap();
+        terminal.draw(|frame|manager.draw(frame,frame.area())).unwrap();
+        assert_eq!(terminal.backend().buffer()[(78,10)].symbol(),"█");
     }
     #[test]
     fn cancelling_edit_and_scope_switch_discard_draft_and_old_receiver() {

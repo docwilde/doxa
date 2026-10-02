@@ -37,8 +37,9 @@ impl App {
         }
         if now < self.stale_detached_check_at { return false; }
         if !self.sessions.iter().any(|session| {
-            session.status == "Disconnected" && !self.offline_ids.contains(&session.id)
+            !self.offline_ids.contains(&session.id)
                 && !self.groups.iter().any(|group| group.tabs.contains(&session.id))
+                && (session.status == "Disconnected" || self.detached_this_run.contains(&session.id))
         }) {
             self.stale_detached_check_at = now + Duration::from_secs(2);
             return false;
@@ -56,9 +57,10 @@ impl App {
         let selected_id = self.rail_order().get(self.rail_selected)
             .map(|index| self.sessions[*index].id.clone());
         let dead: Vec<_> = self.sessions.iter()
-            .filter(|session| session.status == "Disconnected"
+            .filter(|session| !self.offline_ids.contains(&session.id)
                 && !live.contains(&session.id)
-                && !self.groups.iter().any(|group| group.tabs.contains(&session.id)))
+                && !self.groups.iter().any(|group| group.tabs.contains(&session.id))
+                && (session.status == "Disconnected" || self.detached_this_run.contains(&session.id)))
             .map(|session| session.id.clone()).collect();
         for id in &dead { self.offline_ids.insert(id.clone()); }
         if !dead.is_empty() {

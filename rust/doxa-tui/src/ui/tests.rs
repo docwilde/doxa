@@ -1770,6 +1770,8 @@ for line in sys.stdin:
         app.model_picker.as_mut().unwrap().selected = 29;
         let bottom = column(&app);
         assert_ne!(top, bottom, "scrollbar must follow the visible models");
+        assert_eq!(bottom.last().map(String::as_str), Some("█"),
+            "the thumb must reach the final track cell at the last page");
         app.model_picker.as_mut().unwrap().models.truncate(2);
         app.model_picker.as_mut().unwrap().selected = 0;
         assert!(column(&app).iter().all(|symbol| symbol == " "),
@@ -3053,6 +3055,19 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn detached_connected_session_becomes_past_session_when_daemon_disappears() {
+        let mut app=App::default();
+        app.apply_update(DaemonUpdate::Upsert(Session {id:"old".into(),title:"Old label".into(),
+            collection:"repo".into(),transcript:"saved transcript".into(),status:"Connected".into()}));
+        app.groups[0].tabs.clear();
+        app.detached_this_run.push("old".into());
+        assert!(app.mark_dead_detached(&std::collections::HashSet::new()));
+        assert!(app.offline_ids.contains("old"));
+        assert!(matches!(app.rail_rows().as_slice(),[RailRow::PastHeading,RailRow::Session(0)]));
+        assert_eq!(app.sessions[0].title,"Old label");
+    }
+
+    #[test]
     fn detaching_last_tab_in_first_pane_preserves_other_pane_draft() {
         let mut app = App::default();
         app.handle(Event::Resize(100, 28));
@@ -3525,6 +3540,48 @@ for line in sys.stdin:
         assert!(matches!(&rows[3], RailRow::Session(0)));
         assert!(matches!(&rows[4], RailRow::Session(2)));
         assert_eq!(app.rail_order(), [1, 0, 2]);
+    }
+
+    #[test]
+    fn detached_archives_follow_live_projects_in_muted_rail_rows() {
+        let mut app = App::default();
+        app.handle(Event::Resize(80, 20));
+        for (id, title) in [("live", "Current work"), ("dead", "Saved work"), ("empty", "Unavailable")] {
+            app.apply_update(DaemonUpdate::Upsert(Session { id: id.into(), title: title.into(),
+                collection: "repo".into(), transcript: if id == "empty" { "" } else { "saved" }.into(),
+                status: "Ready".into() }));
+        }
+        app.offline_ids.extend(["dead".into(), "empty".into()]);
+        app.detached_this_run.extend(["dead".into(), "empty".into()]);
+        let rows = app.rail_rows();
+        assert!(matches!(&rows[0], RailRow::ProjectHeading(project) if project == "repo"));
+        assert!(matches!(&rows[1], RailRow::Session(0)));
+        assert!(matches!(&rows[2], RailRow::PastHeading));
+        assert!(matches!(&rows[3], RailRow::Session(1)));
+        assert_eq!(app.rail_order(), [0, 1]);
+        let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let rail = app.layout(app.size).rail.unwrap();
+        let style = terminal.backend().buffer()[(rail.x + 3, rail.y + 4)].style();
+        assert_eq!(style.fg, Some(theme::SECONDARY));
+        assert!(style.add_modifier.contains(Modifier::ITALIC));
+    }
+
+    #[test]
+    fn rail_scrollbar_reaches_bottom_at_last_session() {
+        let mut app=App::default();
+        app.handle(Event::Resize(80,20));
+        app.rail_visible=true;
+        for index in 0..30 {
+            let id=format!("session-{index}");
+            app.apply_update(DaemonUpdate::Upsert(Session {id:id.clone(),title:id,
+                collection:"repo".into(),transcript:String::new(),status:"Ready".into()}));
+        }
+        app.rail_selected=app.rail_order().len()-1;
+        let mut terminal=Terminal::new(TestBackend::new(80,20)).unwrap();
+        terminal.draw(|frame|app.draw(frame)).unwrap();
+        let rail=app.layout(app.size).rail.unwrap();
+        assert_eq!(terminal.backend().buffer()[(rail.right()-2,rail.bottom()-2)].symbol(),"█");
     }
 
     #[test]

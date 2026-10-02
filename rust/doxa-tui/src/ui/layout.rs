@@ -108,15 +108,21 @@ impl App {
             rows.push(RailRow::Heading(heading));
             for id in &item.sessions {
                 if let Some(index) = self.sessions.iter().position(|session| &session.id == id) {
-                    if seen.insert(index) && !item.collapsed && self.rail_session_visible(index) {
+                    if !self.offline_ids.contains(id) && seen.insert(index)
+                        && !item.collapsed && self.rail_session_visible(index) {
                         rows.push(RailRow::Session(index));
                     }
                 }
             }
         }
         let mut projects: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        let mut past = Vec::new();
         for index in 0..self.sessions.len() {
             if seen.insert(index) && self.rail_session_visible(index) {
+                if self.offline_ids.contains(&self.sessions[index].id) {
+                    past.push(index);
+                    continue;
+                }
                 let session = &self.sessions[index];
                 let project = session.collection.trim();
                 let fallback = if project.is_empty() { "Other sessions" } else { project };
@@ -132,6 +138,10 @@ impl App {
             rows.push(RailRow::ProjectHeading(project));
             rows.extend(sessions.into_iter().map(RailRow::Session));
         }
+        if !past.is_empty() {
+            rows.push(RailRow::PastHeading);
+            rows.extend(past.into_iter().map(RailRow::Session));
+        }
         rows
     }
 
@@ -139,6 +149,8 @@ impl App {
         let id = &self.sessions[index].id;
         !self.offline_ids.contains(id)
             || self.groups.iter().any(|group| group.tabs.contains(id))
+            || self.detached_this_run.contains(id)
+                && !self.sessions[index].transcript.is_empty()
     }
 
     pub(super) fn rail_order(&self) -> Vec<usize> {

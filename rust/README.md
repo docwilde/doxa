@@ -110,8 +110,11 @@ approval and menu editing keys remain local to those controls.
 Ctrl+X closes the active tab and leaves its daemon running; Ctrl+W is an alias.
 Ctrl+Q exits the frontend and leaves all running sessions detached. Ctrl+Left/Right
 switches tabs in the current pane; Shift+Left/Right switches between pane prompts.
-Dead detached sessions leave the session rail after live-registry verification;
-their saved transcripts remain available through session history. Inline questions
+Dead detached sessions with a saved transcript move to a muted Past sessions section
+at the bottom of the rail after live-registry verification. Unavailable empty
+records stay in session history. Detached tabs stay closed when a saved layout
+is restored; DOXA starts a fresh tab if none remain open. Saved labels remain
+visible. Inline questions
 support selectable answers, free text, and Other drafts. Secret-input requests
 are refused until private masked input exists. Permission approval requiring
 full review is unavailable until the complete summary has been read. Reconnect

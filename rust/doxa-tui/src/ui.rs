@@ -541,7 +541,7 @@ fn repo_chip(status: &doxa_worktrees::RepoStatus) -> (&'static str, String) {
     }
 }
 
-fn safe_label(value: &str) -> String {
+pub(crate) fn safe_label(value: &str) -> String {
     markdown::sanitize(value)
         .replace('\n', " ")
         .chars()
@@ -1234,6 +1234,7 @@ enum RailRow {
     Heading(usize),
     Session(usize),
     ProjectHeading(String),
+    PastHeading,
 }
 
 #[derive(Debug)]
@@ -1285,7 +1286,7 @@ pub struct App {
     requested_argument: Option<(String, &'static str, String)>,
     next_efforts: HashMap<String, String>,
     pub(crate) custom_names: HashMap<String, String>,
-    default_names: HashMap<String, String>,
+    pub(crate) default_names: HashMap<String, String>,
     session_telemetry: HashMap<String, SessionTelemetry>,
     // LORE owns these counts. A bounded background query keeps store I/O off
     // the draw path; an unavailable sidecar leaves the chip unknown.

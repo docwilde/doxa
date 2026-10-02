@@ -1881,12 +1881,19 @@ impl App {
                         .fg(theme::ACCENT)
                         .add_modifier(Modifier::BOLD),
                 )),
+                RailRow::PastHeading => lines.push(Line::styled(
+                    "  Past sessions",
+                    Style::default().fg(theme::SECONDARY).add_modifier(Modifier::ITALIC),
+                )),
                 RailRow::Session(index) => {
                     let session = &self.sessions[*index];
+                    let offline = self.offline_ids.contains(&session.id);
                     let waiting = self.waiting_for_input(&session.id);
                     let running = self.session_activity.get(&session.id).is_some_and(|activity| activity.0)
                         || self.local_shell_jobs.iter().any(|job| job.session == session.id);
-                    let mark = if waiting {
+                    let mark = if offline {
+                        if Some(*index) == selected { "▸" } else { " " }
+                    } else if waiting {
                         if self.blink_on { "●" } else { " " }
                     } else if running {
                         SPINNER_FRAMES[self.spinner_frame]
@@ -1905,7 +1912,12 @@ impl App {
                     let title_width = usize::from(area.width.saturating_sub(5))
                         .saturating_sub(badge.width());
                     let title = clipped_title(&session.title, title_width).0;
-                    let style = if waiting && self.blink_on {
+                    let style = if offline {
+                        let style = Style::default().fg(theme::SECONDARY).add_modifier(Modifier::ITALIC);
+                        if Some(*index) == selected && self.focus == Focus::Rail {
+                            style.bg(theme::RAISED)
+                        } else { style }
+                    } else if waiting && self.blink_on {
                         Style::default()
                             .fg(theme::TEXT)
                             .bg(theme::ERROR)
@@ -1940,7 +1952,8 @@ impl App {
             area,
         );
         if rows.len() > visible && area.width >= 5 {
-            let mut state = ScrollbarState::new(rows.len()).position(start).viewport_content_length(visible);
+            let mut state = ScrollbarState::new(rows.len() - visible + 1)
+                .position(start).viewport_content_length(visible);
             frame.render_stateful_widget(
                 Scrollbar::new(ScrollbarOrientation::VerticalRight)
                     .begin_symbol(None).end_symbol(None)
@@ -2593,7 +2606,10 @@ fn lore_view_title(picker: &super::LorePicker) -> Line<'static> {
 fn draw_menu_scrollbar(frame: &mut Frame, area: Rect, total: usize, visible: usize, start: usize) {
     if visible == 0 || total <= visible || area.width < 5 || area.height < 5 { return; }
     let rect = Rect::new(area.right() - 2, area.y + 1, 1, area.height - 2);
-    let mut state = ScrollbarState::new(total).position(start.min(total - visible)).viewport_content_length(visible);
+    // Ratatui expects the last position to be content_length - 1. Here the
+    // position is the first visible row, whose last value is total - visible.
+    let mut state = ScrollbarState::new(total - visible + 1)
+        .position(start.min(total - visible)).viewport_content_length(visible);
     frame.render_stateful_widget(
         Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .begin_symbol(None).end_symbol(None)
