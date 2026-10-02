@@ -1,5 +1,5 @@
 #![cfg(unix)]
-use doxa_engines::codex_appserver::{AppServerDriver, AppServerOptions};
+use doxa_engines::codex_appserver::{AppServerDriver, AppServerOptions, CodexPermission};
 use doxa_engines::codex_driver::SandboxMode;
 use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
@@ -51,7 +51,7 @@ send({'method':'turn/completed','params':{'threadId':'thread_1','turn':{'id':'tu
     std::fs::set_permissions(&executable, perms).unwrap();
     let options = AppServerOptions {
         executable, cwd: dir.path().to_path_buf(), model: None,
-        sandbox: SandboxMode::WorkspaceWrite, resume_thread: None,
+        sandbox: SandboxMode::WorkspaceWrite, permission: CodexPermission::OnRequest, resume_thread: None,
         turn_timeout: Duration::from_secs(5),
     };
     (dir, options)
@@ -88,6 +88,46 @@ async fn fake_appserver_resume_uses_the_recorded_thread() {
 }
 
 #[tokio::test]
+async fn interactive_permissions_follow_the_selected_mode_on_each_turn() {
+    let (_dir, mut options) = fake();
+    std::fs::write(&options.executable, r#"#!/usr/bin/env python3
+import json, sys
+def read(): return json.loads(sys.stdin.readline())
+def send(value): print(json.dumps(value), flush=True)
+init = read(); send({'id':init['id'],'result':{'userAgent':'fake'}})
+assert read()['method'] == 'initialized'
+thread = read()
+assert thread['method'] == 'thread/start'
+assert thread['params']['approvalPolicy'] == 'never'
+assert thread['params']['sandbox'] == 'workspace-write'
+send({'id':thread['id'],'result':{'thread':{'id':'thread_1'}}})
+for index, (prompt, approval, sandbox) in enumerate([
+    ('auto', 'never', 'workspaceWrite'),
+    ('full', 'never', 'dangerFullAccess'),
+    ('ask', 'on-request', 'workspaceWrite'),
+]):
+    turn = read()
+    assert turn['method'] == 'turn/start'
+    assert turn['params']['input'][0]['text'] == prompt
+    assert turn['params']['approvalPolicy'] == approval
+    assert turn['params']['sandboxPolicy']['type'] == sandbox
+    turn_id = 'turn_' + str(index)
+    send({'id':turn['id'],'result':{'turn':{'id':turn_id}}})
+    send({'method':'turn/completed','params':{'threadId':'thread_1','turn':{'id':turn_id,'status':'completed','error':None}}})
+"#).unwrap();
+    options.permission = CodexPermission::Auto;
+    let mut driver = AppServerDriver::spawn_interactive(options, str::to_owned).await.unwrap();
+    for (prompt, permission) in [
+        ("auto", CodexPermission::Auto),
+        ("full", CodexPermission::FullAccess),
+        ("ask", CodexPermission::OnRequest),
+    ] {
+        driver.set_permission(permission);
+        driver.run_turn(prompt, &CancellationToken::new(), |_| {}).await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn cancellation_interrupts_and_reaps_appserver_process_group() {
     let cache = std::env::var_os("TMPDIR").map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::env::var_os("XDG_CACHE_HOME").map(std::path::PathBuf::from)
@@ -117,7 +157,7 @@ time.sleep(3)
     perms.set_mode(0o700);
     std::fs::set_permissions(&executable, perms).unwrap();
     let options = AppServerOptions { executable, cwd: dir.path().to_path_buf(), model: None,
-        sandbox: SandboxMode::WorkspaceWrite, resume_thread: None,
+        sandbox: SandboxMode::WorkspaceWrite, permission: CodexPermission::OnRequest, resume_thread: None,
         turn_timeout: Duration::from_secs(5) };
     let mut driver = AppServerDriver::spawn(options, |s| s.to_owned()).await.unwrap();
     let cancel = CancellationToken::new();

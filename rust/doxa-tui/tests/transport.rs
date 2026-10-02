@@ -6,6 +6,7 @@ use std::os::unix::fs::{symlink, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
@@ -16,10 +17,15 @@ fn socket(test: impl FnOnce(UnixStream) + Send + 'static) -> (PathBuf, thread::J
         "doxa-rust-transport-{}-{}.sock", std::process::id(), NEXT_SOCKET.fetch_add(1, Ordering::Relaxed)
     ));
     let listener = UnixListener::bind(&path).unwrap();
+    let (ready_tx, ready_rx) = mpsc::channel();
     let task = thread::spawn(move || {
+        // The macOS hello deadline is deliberately short. Start the client
+        // only after the fixture is ready to accept its connection.
+        ready_tx.send(()).unwrap();
         let (stream, _) = listener.accept().unwrap();
         test(stream);
     });
+    ready_rx.recv().unwrap();
     (path, task)
 }
 
@@ -181,13 +187,17 @@ fn malformed_and_partial_frames_are_rejected() {
 
 #[test]
 fn oversize_outbound_prompt_is_rejected_before_write() {
-    let (path, task) = socket(|mut stream| {
+    let (release_tx, release_rx) = mpsc::channel();
+    let (path, task) = socket(move |mut stream| {
         hello(&mut stream);
         let mut reader = BufReader::new(stream.try_clone().unwrap());
         line(&mut reader);
+        // Keep the peer alive until the client has completed its handshake.
+        release_rx.recv().unwrap();
     });
     let mut client = DaemonClient::connect(&path, None).unwrap();
     assert!(matches!(client.prompt(&"x".repeat(MAX_FRAME_BYTES)), Err(TransportError::FrameTooLarge)));
+    release_tx.send(()).unwrap();
     finish(path, task);
 }
 

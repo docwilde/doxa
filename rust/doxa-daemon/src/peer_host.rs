@@ -433,6 +433,7 @@ impl Host for PeerHost {
     fn can_set_model(&self) -> bool { self.inner.can_set_model() }
     fn model_change_requires_idle(&self)->bool{self.inner.model_change_requires_idle()}
     fn can_set_permission_mode(&self) -> bool { self.inner.can_set_permission_mode() }
+    fn permission_change_requires_idle(&self) -> bool { self.inner.permission_change_requires_idle() }
     fn account_snapshot(&self) -> Option<Value> { self.inner.account_snapshot() }
     fn billing_snapshot(&self) -> Option<Value> { self.inner.billing_snapshot() }
     fn lore_enabled(&self) -> Option<bool> { self.inner.lore_enabled() }

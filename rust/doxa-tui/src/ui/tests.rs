@@ -455,8 +455,23 @@ for line in sys.stdin:
         app.open_permission_picker();
         assert!(app.permission_picker.is_none());
         assert_eq!(app.chips(0).iter().find(|(kind, _)| *kind == "permission").unwrap().1, "on-request");
-        assert!(app.notice.contains("Codex uses on-request approvals"));
-        assert!(app.chip_hint_for("permission", 0).contains("mode switching unavailable"));
+        assert!(app.notice.contains("cannot change permission modes"));
+
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"codex-2",
+            "engine":"codex", "permission_mode":"on-request", "can_set_permission_mode":true}));
+        app.groups[0].tabs = vec!["codex-2".into()];
+        app.open_permission_picker();
+        assert_eq!(app.permission_picker.as_ref().unwrap().1, 0);
+        let picker = painted_at(&app, 80, 24);
+        assert!(picker.contains("full-access"));
+        assert!(!picker.contains("dontAsk"));
+        app.permission_picker_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.select_permission_mode();
+        assert_eq!(app.pending_permission_changes.pop(), Some(("codex-2".into(), "auto".into())));
+        assert!(app.apply_daemon_frame(&json!({"type":"event", "session_id":"codex-2",
+            "event":{"type":"permission_mode_changed","data":{"mode":"full-access"}}})));
+        assert_eq!(app.permission_modes["codex-2"], "full-access");
+        assert!(app.chip_hint_for("permission", 0).contains("no provider approval prompts or sandbox"));
 
         app.apply_daemon_frame(&json!({"type":"hello", "session_id":"deepseek-1",
             "engine":"deepseek", "permission_mode":"default", "can_set_permission_mode":false}));
@@ -510,7 +525,7 @@ for line in sys.stdin:
                 column: x, row: chip_y, modifiers: KeyModifiers::NONE }));
         };
         click(&mut app, pane.x + 2);
-        assert_eq!(app.permission_picker.as_ref().unwrap().1, permission_index("auto").unwrap());
+        assert_eq!(app.permission_picker.as_ref().unwrap().1, permission_index("auto", Some("claude")).unwrap());
         app.permission_picker = None;
 
         let vendor_x = pane.x + chip_text(chips[0].0, &chips[0].1).width() as u16 + 3;
@@ -1732,6 +1747,33 @@ for line in sys.stdin:
         app.groups[0].tabs.push("session".into());
         app.session_capabilities.insert("session".into(), EngineCapabilities::from_session_controls(&json!({"can_set_model":true})));
         app
+    }
+
+    #[test]
+    fn model_submenu_scrollbar_appears_only_for_overflow_and_tracks_selection() {
+        let mut app = scrolled_picker_app();
+        app.model_picker = Some(ModelPicker { session_id: "session".into(),
+            models: (0..30).map(|index| format!("model-{index:02}")).collect(),
+            selected: 0, note: "Verified models".into(), loading: false,
+            catalog_pending: false });
+        let column = |app: &App| {
+            let menu = app.active_chooser_rect().unwrap();
+            let mut terminal = Terminal::new(TestBackend::new(100, 28)).unwrap();
+            terminal.draw(|frame| app.draw(frame)).unwrap();
+            let buffer = terminal.backend().buffer();
+            (menu.y + 1..menu.bottom() - 1)
+                .map(|row| buffer[(menu.right() - 2, row)].symbol().to_owned())
+                .collect::<Vec<_>>()
+        };
+        let top = column(&app);
+        assert!(top.iter().any(|symbol| symbol != " "), "overflow needs a scrollbar");
+        app.model_picker.as_mut().unwrap().selected = 29;
+        let bottom = column(&app);
+        assert_ne!(top, bottom, "scrollbar must follow the visible models");
+        app.model_picker.as_mut().unwrap().models.truncate(2);
+        app.model_picker.as_mut().unwrap().selected = 0;
+        assert!(column(&app).iter().all(|symbol| symbol == " "),
+            "a fitting submenu should not show a scrollbar");
     }
 
     fn hover_first_picker_row(app: &mut App, offset: u16) -> (Rect, usize) {

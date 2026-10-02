@@ -22,7 +22,11 @@ impl App {
             && id.and_then(|id| self.session_identity.get(id))
                 .and_then(|identity| identity.0.as_deref()) == Some("codex") {
             let policy = id.and_then(|id| self.permission_modes.get(id)).map(String::as_str).unwrap_or("?");
-            format!("Codex {policy} approvals · command and file changes ask here when requested; mode switching unavailable")
+            match policy {
+                "auto" => "Codex auto · no provider approval prompts; sandbox enforced. DOXA tools still use their own review.".into(),
+                "full-access" => "Codex full access · no provider approval prompts or sandbox. DOXA tools still use their own review.".into(),
+                _ => format!("Codex {policy} · provider approval requests appear here. Click to change for the next turn."),
+            }
         } else {
             chip_hint(kind).to_owned()
         }

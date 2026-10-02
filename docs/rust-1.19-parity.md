@@ -1,7 +1,7 @@
 # Rust 2.0 parity with DOXA 1.19.0
 
 Baseline: Python `v1.19.0` production behavior. This tracker records implementation
-through **alpha.65**, with canonical **LORE 0.62.11**. Account checks
+through **alpha.66**, with canonical **LORE 0.62.11**. Account checks
 are bounded by their exact candidate and date.
 The Rust runtime implements the audited workflows below. Live account checks
 remain bounded by the [latest verification record](live-provider-verification-2026-09-29.md)
@@ -52,6 +52,7 @@ coverage alone does not establish authenticated compatibility for every provider
 | Alpha.63 | Add macOS native transport/build coverage and an application shortcut; pin LORE 0.62.11; attach the optional browser adapter to a kernel-attested Unix proxy. Protected Codex remains Linux-only. |
 | Alpha.64 | Register Claude's stdio permission callback and allow live permission-mode changes so inline approval requests and the `auto` picker take effect during an active turn. Label Codex's fixed `on-request` policy explicitly; Codex mode switching remains unavailable in DOXA. |
 | Alpha.65 | Forward Codex permission-profile requests into the inline review and grant the exact requested profile for one turn; hide the unsupported DeepSeek/GLM permission chip. Belief-row Accept/Reject and unmodified A/R apply after an exact LORE fetch; `/` or clicking the prompt enables text filtering. |
+| Alpha.66 | Show overflow scrollbars throughout scrollable submenus. Let an idle Codex session choose `on-request`, sandboxed `auto`, or `full-access` for its next turn; restore that choice with the saved session. |
 
 Standalone LORE administration, hooks, MCP and network operations are native Rust;
 they are not a remaining Python replacement task. See the

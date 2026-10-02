@@ -1,5 +1,5 @@
 use doxa_engines::codex_driver::{CodexCliDriver, DriverError, DriverOptions};
-use doxa_engines::codex_appserver::{AppServerDriver, AppServerOptions, AppServerError};
+use doxa_engines::codex_appserver::{AppServerDriver, AppServerOptions, AppServerError, CodexPermission};
 use doxa_lore::{LoreClient, LoreError};
 use doxa_runtime::Host;
 use doxa_transcript::TranscriptStore;
@@ -63,6 +63,7 @@ pub struct CodexHost {
     session_id: String,
     cwd: String,
     selection: Mutex<(Option<String>, Option<String>)>,
+    permission: Mutex<CodexPermission>,
     catalog: Mutex<Vec<Value>>,
     catalog_options: AppServerOptions,
     billing: Mutex<Option<Value>>,
@@ -126,6 +127,7 @@ impl CodexHost {
         let mut saved_transport = None;
         let mut saved_peer_tools = false;
         let mut saved_lore_tools = false;
+        let mut saved_permission = None;
         let previous = if let Some(value) = thread_record {
             if value["lore_enabled"].as_bool().is_some_and(|recorded| recorded != lore_enabled)
                 || (!lore_enabled && value["lore_enabled"].as_bool().is_none()) {
@@ -181,6 +183,14 @@ impl CodexHost {
                 Some(Value::String(transport)) if transport == "app-server" => Some("app-server"),
                 _ => return Err("Codex thread record has invalid transport".to_owned()),
             };
+            if saved_transport == Some("app-server") {
+                saved_permission = match value.get("permission_mode") {
+                    None => None,
+                    Some(Value::String(mode)) => Some(CodexPermission::from_mode(mode)
+                        .ok_or("Codex thread record has invalid permission mode")?),
+                    _ => return Err("Codex thread record has invalid permission mode".into()),
+                };
+            }
             Some(thread.to_owned())
         } else {
             if resume || transcript.is_some() {
@@ -209,8 +219,10 @@ impl CodexHost {
         if transport == "exec" { options.config_overrides = crate::agent_tools::mcp_overrides(&cwd, session_id, lore_enabled); }
         let peer_tools_allowed = transport == "app-server" && (options.resume_thread.is_none() || saved_peer_tools);
         let selection = (options.model.clone(), options.effort.clone());
+        let permission = saved_permission.unwrap_or(CodexPermission::OnRequest);
         let catalog_options = AppServerOptions { executable: options.executable.clone(), cwd: options.cwd.clone(),
-            model: None, sandbox: options.sandbox, resume_thread: None, turn_timeout: options.turn_timeout };
+            model: None, sandbox: options.sandbox, permission: CodexPermission::OnRequest,
+            resume_thread: None, turn_timeout: options.turn_timeout };
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()
             .map_err(|_| "Codex runtime could not start".to_owned())?;
         let lore = Arc::new(Mutex::new(client));
@@ -262,7 +274,7 @@ impl CodexHost {
         let driver = if transport == "app-server" {
             CodexTransport::AppServer {
                 options: AppServerOptions { executable: options.executable.clone(), cwd: options.cwd.clone(),
-                    model: options.model.clone(), sandbox: options.sandbox,
+                    model: options.model.clone(), sandbox: options.sandbox, permission,
                     resume_thread: options.resume_thread.clone(), turn_timeout: options.turn_timeout },
                 active: None, resume_thread: options.resume_thread.clone(),
             }
@@ -285,6 +297,7 @@ impl CodexHost {
             session_id: session_id.to_owned(),
             cwd,
             selection: Mutex::new(selection),
+            permission: Mutex::new(permission),
             catalog: Mutex::new(Vec::new()),
             catalog_options,
             billing: Mutex::new(None),
@@ -352,6 +365,9 @@ impl CodexHost {
         fields.insert("model".into(), json!(selection.0));
         fields.insert("effort".into(), json!(selection.1));
         drop(selection);
+        if self.transport == "app-server" {
+            fields.insert("permission_mode".into(), json!(self.permission.lock().unwrap().mode()));
+        }
         fields.insert("transport".into(), json!(self.transport));
         fields.insert("lore_enabled".into(), json!(self.lore_enabled));
         fields.insert("lore_tools".into(), json!(self.agent_tools.is_some()));
@@ -477,11 +493,10 @@ impl Host for CodexHost {
     }
     fn can_set_model(&self) -> bool { self.transport == "app-server" }
     fn model_change_requires_idle(&self) -> bool { true }
+    fn can_set_permission_mode(&self) -> bool { self.transport == "app-server" }
+    fn permission_change_requires_idle(&self) -> bool { true }
     fn initial_permission_mode(&self) -> String {
-        // The protected app-server is started with on-request approvals.
-        // Codex has no DOXA permission-mode control, so report the actual
-        // fixed policy instead of the runtime trait's generic "default".
-        if self.transport == "app-server" { "on-request" } else { "never" }.to_owned()
+        if self.transport == "app-server" { self.permission.lock().unwrap().mode() } else { "never" }.to_owned()
     }
     fn initial_model(&self) -> Option<String> { self.selection.lock().unwrap().0.clone() }
     fn initial_effort(&self) -> Option<String> { self.selection.lock().unwrap().1.clone() }
@@ -840,6 +855,32 @@ impl Host for CodexHost {
 
     fn call(&self, method: &str, params: &Value) -> Result<Value, String> {
         match method {
+            "set_permission_mode" => {
+                if self.transport != "app-server" { return Err(LEGACY_READ_ONLY.into()); }
+                if self.active.lock().unwrap().is_some() || self.closing.load(Ordering::Acquire) {
+                    return Err("Codex permissions require an idle session; retry after the turn completes".into());
+                }
+                if self.persistence_failed.load(Ordering::Acquire) { return Err("Codex persistence failed".into()); }
+                let mode = params["mode"].as_str().and_then(CodexPermission::from_mode)
+                    .ok_or("Unsupported Codex permission mode")?;
+                let previous = std::mem::replace(&mut *self.permission.lock().unwrap(), mode);
+                let mut driver = self.driver.lock().unwrap();
+                let verified_id = match &*driver {
+                    CodexTransport::AppServer { active: Some(active), .. } => Some(active.thread_id().to_owned()),
+                    _ => None,
+                };
+                if let Some(id) = verified_id {
+                    if self.persist_thread(&id, false).is_err() {
+                        *self.permission.lock().unwrap() = previous;
+                        return Err("Codex permission persistence failed".into());
+                    }
+                }
+                if let CodexTransport::AppServer { options, active, .. } = &mut *driver {
+                    options.permission = mode;
+                    if let Some(active) = active { active.set_permission(mode); }
+                }
+                Ok(json!({"mode":mode.mode()}))
+            }
             "answer_needs_input" => {
                 let id = params["id"].as_str().ok_or("Codex answer needs an ID")?;
                 self.input.answer(id, &params["answer"])

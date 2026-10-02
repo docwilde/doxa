@@ -118,12 +118,15 @@ full review is unavailable until the complete summary has been read. Reconnect
 snapshots restore exact pending requests; stale answers cannot apply to changed
 requests. There is no blanket Codex permission approval.
 
-Codex uses a fixed `on-request` policy in DOXA. Command, file-change, and
-permission-profile requests reach the inline review; an approved profile is
-limited to the exact request and current turn. DOXA cannot switch Codex's
-policy during a session. “Always approve this tool” applies only to canonical
-DOXA peer and LORE tools, never Codex commands, file changes, or permission
-profiles. DeepSeek and GLM have no provider permission mode;
+The Codex permission chip changes an idle session for its next turn. Choose
+`on-request` to review protected command, file-change, and permission-profile
+requests inline; approved profiles last for that exact request and turn.
+Choose `auto` to skip provider approval prompts while retaining the Codex
+sandbox, or `full-access` to skip prompts and disable that sandbox. The picker
+and `/mode on-request|auto|full-access` change the current session; saved
+sessions restore the selected mode. A queued or active turn must finish first.
+“Always approve this tool” applies only to canonical DOXA peer and LORE tools,
+which keep their own review even in Codex `auto` or `full-access`. DeepSeek and GLM have no provider permission mode;
 their peer and LORE tool calls require individual DOXA approval. The optional
 `DOXA_VENDOR_TOOLS=workspace-read` tool is read-only and enabled separately.
 

@@ -44,8 +44,49 @@ pub struct AppServerOptions {
     pub cwd: PathBuf,
     pub model: Option<String>,
     pub sandbox: SandboxMode,
+    pub permission: CodexPermission,
     pub resume_thread: Option<String>,
     pub turn_timeout: Duration,
+}
+
+/// DOXA labels for Codex turn overrides. Auto skips provider approval prompts
+/// inside a sandbox; it is distinct from Claude's classifier-backed auto mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CodexPermission {
+    OnRequest,
+    Auto,
+    FullAccess,
+}
+
+impl CodexPermission {
+    pub fn from_mode(mode: &str) -> Option<Self> {
+        match mode {
+            "on-request" => Some(Self::OnRequest),
+            "auto" => Some(Self::Auto),
+            "full-access" => Some(Self::FullAccess),
+            _ => None,
+        }
+    }
+
+    pub fn mode(self) -> &'static str {
+        match self {
+            Self::OnRequest => "on-request",
+            Self::Auto => "auto",
+            Self::FullAccess => "full-access",
+        }
+    }
+
+    fn approval_policy(self) -> &'static str {
+        if self == Self::OnRequest { "on-request" } else { "never" }
+    }
+
+    fn sandbox(self, configured: SandboxMode) -> SandboxMode {
+        match self {
+            Self::FullAccess => SandboxMode::DangerFullAccess,
+            Self::Auto if configured == SandboxMode::DangerFullAccess => SandboxMode::WorkspaceWrite,
+            _ => configured,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -268,7 +309,8 @@ impl AppServerDriver {
 
     async fn start_thread(&mut self) -> Result<(), AppServerError> {
         let driver = self;
-        let approval = if driver.interactive { "on-request" } else { "never" };
+        let approval = if driver.interactive { driver.options.permission.approval_policy() } else { "never" };
+        let sandbox = if driver.interactive { driver.options.permission.sandbox(driver.options.sandbox) } else { driver.options.sandbox };
         // Codex reserves `mcp` and `mcp__*` for provider MCP tools. Keep
         // canonical host names while registering aliases only at this boundary.
         // Primary contract: codex app-server thread_processor::validate_dynamic_tools.
@@ -288,9 +330,9 @@ impl AppServerDriver {
             driver.dynamic_tool_names.push((alias, canonical));
         }
         let result = if let Some(id) = driver.options.resume_thread.clone() {
-            driver.request("thread/resume", json!({"threadId":id,"cwd":driver.options.cwd,"model":driver.options.model,"approvalPolicy":approval,"sandbox":sandbox_name(driver.options.sandbox),"excludeTurns":true})).await?
+            driver.request("thread/resume", json!({"threadId":id,"cwd":driver.options.cwd,"model":driver.options.model,"approvalPolicy":approval,"sandbox":sandbox_name(sandbox),"excludeTurns":true})).await?
         } else {
-            let mut params = json!({"cwd":driver.options.cwd,"model":driver.options.model,"approvalPolicy":approval,"sandbox":sandbox_name(driver.options.sandbox)});
+            let mut params = json!({"cwd":driver.options.cwd,"model":driver.options.model,"approvalPolicy":approval,"sandbox":sandbox_name(sandbox)});
             if !tools.is_empty() { params["dynamicTools"] = json!(tools); }
             driver.request("thread/start", params).await?
         };
@@ -364,6 +406,10 @@ impl AppServerDriver {
         self.effort = effort;
     }
 
+    pub fn set_permission(&mut self, permission: CodexPermission) {
+        self.options.permission = permission;
+    }
+
     pub fn thread_id(&self) -> &str { self.thread_id.as_deref().expect("thread start succeeded") }
 
     pub fn model(&self) -> Option<&str> { self.effective_model.as_deref() }
@@ -413,7 +459,12 @@ impl AppServerDriver {
         self.tool_normalizer.begin_turn();
         let deadline = tokio::time::Instant::now() + self.options.turn_timeout;
         let thread_id = self.thread_id().to_owned();
-        let request_id = self.send_request_bounded("turn/start", json!({"threadId":thread_id,"model":self.options.model,"effort":self.effort,"input":[{"type":"text","text":prompt,"text_elements":[]}]}), Some(cancel), deadline).await?;
+        let permission = self.options.permission;
+        let sandbox = permission.sandbox(self.options.sandbox);
+        let request_id = self.send_request_bounded("turn/start", json!({"threadId":thread_id,"model":self.options.model,"effort":self.effort,
+            "approvalPolicy":if self.interactive { permission.approval_policy() } else { "never" },
+            "sandboxPolicy":{"type":sandbox_policy_type(sandbox)},
+            "input":[{"type":"text","text":prompt,"text_elements":[]}]}), Some(cancel), deadline).await?;
         let response = self.wait_response(request_id, Some(cancel), deadline, true).await?;
         let turn_id = response.pointer("/turn/id").and_then(Value::as_str)
             .filter(|id| valid_thread_id(id))
@@ -763,6 +814,14 @@ fn sandbox_name(mode: SandboxMode) -> &'static str {
     }
 }
 
+fn sandbox_policy_type(mode: SandboxMode) -> &'static str {
+    match mode {
+        SandboxMode::ReadOnly => "readOnly",
+        SandboxMode::WorkspaceWrite => "workspaceWrite",
+        SandboxMode::DangerFullAccess => "dangerFullAccess",
+    }
+}
+
 /// Adapt only tool items to the existing scrubbed and bounded Codex tool
 /// normalizer. Message and reasoning items arrive as live deltas and must not
 /// be replayed from their final snapshots.
@@ -797,6 +856,13 @@ fn normalize_tool_item(item: &Value) -> Option<Value> {
 #[cfg(test)]
 mod web_item_tests {
     use super::*;
+
+    #[test]
+    fn auto_cannot_inherit_an_unrestricted_configured_sandbox() {
+        assert_eq!(CodexPermission::Auto.sandbox(SandboxMode::DangerFullAccess), SandboxMode::WorkspaceWrite);
+        assert_eq!(CodexPermission::Auto.approval_policy(), "never");
+        assert_eq!(CodexPermission::FullAccess.sandbox(SandboxMode::ReadOnly), SandboxMode::DangerFullAccess);
+    }
 
     #[test]
     fn billing_uses_only_measured_codex_windows() {
@@ -852,7 +918,7 @@ mod web_item_tests {
             &std::env::current_exe().unwrap(), &codex_home, dir.path(), "installed-probe",
             crate::codex_compact::SUPPORTED_VERSION).unwrap();
         let options = AppServerOptions { executable, cwd: dir.path().to_owned(), model: None,
-            sandbox: SandboxMode::WorkspaceWrite, resume_thread: None, turn_timeout: Duration::from_secs(5) };
+            sandbox: SandboxMode::WorkspaceWrite, permission: CodexPermission::OnRequest, resume_thread: None, turn_timeout: Duration::from_secs(5) };
         let mut driver = timeout(Duration::from_secs(20),
             AppServerDriver::initialize_with_gate(options, str::to_owned, Some(gate))).await.unwrap().unwrap();
         assert!(driver.thread_id.is_none(), "inventory probe must never start a provider thread");

@@ -130,6 +130,9 @@ impl Menu {
     pub fn closed(&self) -> bool { self.closed }
     pub fn busy(&self) -> bool { self.worker.is_some() || self.mesh.as_ref().is_some_and(|m| m.snapshot().busy) }
     pub fn lines(&self, width: usize) -> Vec<String> {
+        self.lines_with_scroll(width, 21).0
+    }
+    pub fn lines_with_scroll(&self, width: usize, height: usize) -> (Vec<String>, Option<(usize, usize, usize)>) {
         use unicode_width::UnicodeWidthChar;
         let width = width.max(1);
         let mut lines = vec![if self.busy() && matches!(self.kind.as_str(), "login" | "logout") {
@@ -155,10 +158,12 @@ impl Menu {
             }
             report.push(line);
         }
-        let room = 19usize.saturating_sub(lines.len());
+        let room = height.saturating_sub(2).saturating_sub(lines.len());
         let end = report.len().saturating_sub(self.scroll.min(report.len().saturating_sub(room)));
-        lines.extend(report[end.saturating_sub(room)..end].iter().cloned());
-        lines
+        let start = end.saturating_sub(room);
+        lines.extend(report[start..end].iter().cloned());
+        let scrollbar = (room > 0 && report.len() > room).then_some((report.len(), room, start));
+        (lines, scrollbar)
     }
     pub fn choice_at(&self, row: usize) -> bool { !self.busy() && !self.requested && self.editing.is_none() && if self.secret.is_some() { matches!(row, 2|3) } else { row > 0 && row <= self.rows.len() } }
     pub fn hover(&mut self, row: usize) { if self.choice_at(row) { self.selected = row - if self.secret.is_some() { 2 } else { 1 }; } }

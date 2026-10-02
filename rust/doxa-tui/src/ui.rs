@@ -168,7 +168,7 @@ fn new_session_preferences(
     (model, effort)
 }
 
-const PERMISSION_CHOICES: [(&str, &str); 5] = [
+const CLAUDE_PERMISSION_CHOICES: [(&str, &str); 5] = [
     ("default", "Ask before dangerous calls"),
     ("acceptEdits", "Allow file edits; ask for other calls"),
     ("plan", "Read-only tools; no edits"),
@@ -176,16 +176,29 @@ const PERMISSION_CHOICES: [(&str, &str); 5] = [
     ("dontAsk", "Deny unapproved calls without asking"),
 ];
 
-fn permission_index(mode: &str) -> Option<usize> {
-    PERMISSION_CHOICES
+const CODEX_PERMISSION_CHOICES: [(&str, &str); 3] = [
+    ("on-request", "Ask before protected calls"),
+    ("auto", "No prompts; sandbox enforced"),
+    ("full-access", "No prompts; no sandbox"),
+];
+
+fn permission_choices(engine: Option<&str>) -> &'static [(&'static str, &'static str)] {
+    match engine {
+        Some("codex") => &CODEX_PERMISSION_CHOICES,
+        _ => &CLAUDE_PERMISSION_CHOICES,
+    }
+}
+
+fn permission_index(mode: &str, engine: Option<&str>) -> Option<usize> {
+    permission_choices(engine)
         .iter()
         .position(|(candidate, _)| *candidate == mode)
 }
 
 fn permission_display_mode(mode: &str, engine: Option<&str>) -> bool {
     match engine {
-        Some("claude") => permission_index(mode).is_some(),
-        Some("codex") => matches!(mode, "on-request" | "never"),
+        Some("claude") => permission_index(mode, engine).is_some(),
+        Some("codex") => matches!(mode, "on-request" | "auto" | "full-access" | "never"),
         _ => false,
     }
 }
@@ -378,6 +391,10 @@ impl SettingsMenu {
             .collect()
     }
     fn visible_indices(&self, height: u16) -> Vec<usize> {
+        let (indices, start, count) = self.visible_window(height);
+        indices.into_iter().skip(start).take(count).collect()
+    }
+    fn visible_window(&self, height: u16) -> (Vec<usize>, usize, usize) {
         let indices = self.indices();
         let count = usize::from(height.saturating_sub(if height < 12 { 5 } else { 9 })).max(1);
         let position = indices
@@ -385,7 +402,7 @@ impl SettingsMenu {
             .position(|i| *i == self.selected)
             .unwrap_or(0);
         let start = position.saturating_sub(count.saturating_sub(1));
-        indices.into_iter().skip(start).take(count).collect()
+        (indices, start, count)
     }
     fn finish_draft(&mut self) {
         if let Some((key, value)) = self.draft.take() {
@@ -1053,15 +1070,9 @@ fn input_request_option_at(request: &InputRequest, menu: Rect, row: u16) -> Opti
             })
         })
         .collect();
-    let scroll = if request.require_full_review {
-        usize::from(request.scroll).min(
-            lines
-                .len()
-                .saturating_sub(usize::from(menu.height.saturating_sub(2))),
-        ) as u16
-    } else {
-        request.scroll
-    };
+    let total = wrapped_rows(&body, usize::from(menu.width.saturating_sub(2)));
+    let scroll = usize::from(request.scroll)
+        .min(total.saturating_sub(usize::from(menu.height.saturating_sub(2)))) as u16;
     let area = Rect::new(0, 0, menu.width, menu.height);
     let mut buffer = Buffer::empty(area);
     Paragraph::new(lines)
