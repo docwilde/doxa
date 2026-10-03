@@ -1,19 +1,18 @@
 # Live Rust terminal gallery
 
-The README images were captured on 2026-09-30 from the running **DOXA
-2.0.0-alpha.58** frontend and daemon. The grouped-session and help frames were
-recaptured with **alpha.59**, which added project headings. A private Xvfb
-display hosts a real GTK3/VTE terminal; FFmpeg records its framebuffer. The gallery uses an
-authenticated Codex CLI 0.156.1 and the protected DOXA app server. The memory
-and belief frames use native LORE 0.62.8; the two grouped-session captures leave
-LORE disabled. No `TestBackend`, demo engine, fixture events, or composited UI
-mockups appear in these images.
+The README images were captured on 2026-10-03 from the running **DOXA
+2.0.0-alpha.68** frontend and daemon. A private Xvfb display hosts a real
+GTK3/VTE terminal; FFmpeg records its framebuffer. The gallery uses an
+authenticated Codex CLI 0.156.1 through the protected DOXA app server and the
+native LORE 0.62.11 carrier. DOXA and LORE state are isolated from the user's
+stores. No `TestBackend`, demo engine, fixture events, or composited UI mockups
+appear in these images.
 
 | Image | Live state |
 | --- | --- |
 | `rust-hero.png` | Completed Codex turn with two file reads and folded tool calls |
 | `rust-welcome.png` | Fresh session and block Greek ΔΟΞΑ banner |
-| `rust-sessions.png` | Three real tabs grouped under Harbour notes and Lighthouse notes in the session rail |
+| `rust-sessions.png` | Two live sessions grouped by repository above one recoverable, muted Past sessions entry |
 | `rust-curated-memory.png` | Native LORE facts in a selectable, scrollable table |
 | `rust-beliefs.png` | Native LORE beliefs with a selected review row |
 | `rust-tool-entries.png` | One actual provider tool call expanded inside the turn |
@@ -21,14 +20,14 @@ mockups appear in these images.
 | `rust-help.png` | Local command help beside the grouped session rail |
 | `rust-settings.png` | Editable Keys settings category |
 
-All nine PNGs measure **3068 × 1734** and use DejaVu Sans Mono 30. The
-captured repositories, **Harbour notes** and **Lighthouse notes**, contain only
-synthetic example files. Lighthouse notes appears only in the two grouped-session
-frames. The user and project memory and beliefs were
-seeded with synthetic statements through the native `lore-rs` carrier. DOXA
-then queried the isolated store normally. The provider read only two Harbour
-notes example files; it did not edit the repository. The published images contain
-no account credentials, personal memory, or private workspace paths.
+All nine PNGs measure **3068 × 1734**. The terminal used DejaVu Sans Mono 30
+at 127 columns by 36 rows. **Harbour notes** and **Lighthouse notes** contain
+only synthetic example files. Lighthouse notes appears only in the grouped
+session and help frames. The isolated LORE store contains synthetic user and
+project facts and beliefs; DOXA queried it through the native carrier. The
+provider read only two Harbour notes files and did not edit the repository.
+The published images contain no credentials, personal memory, or private
+workspace paths.
 
 ## Reproduce a capture
 
@@ -73,11 +72,13 @@ wheel input over the tab header switches them. `/help`, `/settings`, `/beliefs`,
 and `/s` expose the other captured states. The script's `text` action reads
 the actual terminal text for state checks, and `status` reports cell geometry.
 
-For `rust-sessions.png`, start a second real session from a separate synthetic
-repository with the same isolated DOXA home and runtime. Detach that TUI with
-Ctrl+Q, then `/attach` its live session from Harbour notes. Create a second
-Harbour notes tab with Ctrl+T and open the rail with `/sidebar`. The capture
-shows both repository headings and three actual session IDs.
+For `rust-sessions.png`, create a second Harbour notes tab with Ctrl+T. Start
+another real session from Lighthouse notes using the same isolated DOXA home
+and runtime, then `/attach` it in the first TUI. Open the rail and drag its
+divider wider. Detach the completed Harbour notes tab with Ctrl+X, stop that
+exact daemon in the isolated runtime, and wait for the rail's Past sessions
+section. The capture shows two live sessions and the stopped session's retained
+label under separate repository headings.
 
 Inspect every PNG and its dimensions before copying it from
 `gallery-state/shots` to `assets/shots`. Stop the exact isolated capture
