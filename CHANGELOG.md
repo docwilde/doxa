@@ -5,6 +5,13 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.68 — 2026-10-03
+
+**Documentation**
+
+- Refresh **`README.md`** and its live Rust screenshots for the current interface, including the session rail and memory menus.
+- Update **`docs/rust-gallery.md`** with the release, capture state, and reproduction steps.
+
 ## 2.0.0-alpha.67 — 2026-10-02
 
 **Scrolling**

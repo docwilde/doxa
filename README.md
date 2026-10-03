@@ -11,15 +11,15 @@
 > [!WARNING]
 > Rust 2.0 is an alpha. Configuration and stored formats may change. Agents can edit files and run commands with your privileges; review [scope and limits](#scope-and-limits) before using DOXA on important work.
 
-![DOXA running a Codex session with an expandable tool section](assets/shots/rust-hero.png)
+![DOXA Rust running a Codex session with an expandable tool section](assets/shots/rust-hero.png)
 
-*Captured from the running Rust app in an isolated example repository. See the [capture record](docs/rust-gallery.md).*
+*Captured from the running 2.0.0-alpha.68 app in an isolated example repository. See the [capture record](docs/rust-gallery.md).*
 
 ## What you get
 
 - **Four engines.** Choose Claude, Codex, DeepSeek, or GLM per session; available models and reasoning levels follow the selected engine.
 - **A flexible workspace.** Group tabs, split panes, drag dividers, and keep a separate prompt in each pane.
-- **Recoverable sessions.** Restore saved layouts and conversations or reattach to running daemons. The rail shows queued prompts, active turns, and unread results.
+- **Recoverable sessions.** Restore saved layouts and conversations or reattach to running daemons. The rail groups sessions by project, places recoverable past sessions last, and marks queued or unread work.
 - **Readable turns.** Watch streamed responses, expand reasoning and individual tool calls, and open links with Ctrl+click.
 - **Reviewed memory.** Browse LORE facts and beliefs, inspect evidence, and accept or reject proposed beliefs.
 - **Repo tools.** Navigate repositories and worktrees, switch branches, inspect diffs, and review tracked changes.
@@ -54,13 +54,13 @@ DeepSeek and GLM show estimated API cost from provider token counts and publishe
 
 ## Gallery
 
-These frames come from the running Rust TUI with isolated DOXA state. The memory frames use an isolated LORE store. The [capture record](docs/rust-gallery.md) explains the example data and reproduction steps.
+These frames come from the running 2.0.0-alpha.68 Rust TUI with isolated DOXA and LORE state. The [capture record](docs/rust-gallery.md) explains the example data and reproduction steps.
 
 ### Welcome and sessions
 
 ![The Greek block DOXA banner and a ready session prompt](assets/shots/rust-welcome.png)
 
-![Three live sessions grouped under Harbour notes and Lighthouse notes in the rail](assets/shots/rust-sessions.png)
+![Live sessions grouped by example repository above a muted Past sessions entry](assets/shots/rust-sessions.png)
 
 ### Curated memory
 
@@ -78,7 +78,7 @@ These frames come from the running Rust TUI with isolated DOXA state. The memory
 
 ![Slash-command completion above the prompt](assets/shots/rust-commands.png)
 
-![The running app's command help beside sessions grouped by repository](assets/shots/rust-help.png)
+![DOXA command help beside live sessions grouped by repository](assets/shots/rust-help.png)
 
 ![The configurable Keys page in DOXA settings](assets/shots/rust-settings.png)
 
