@@ -5,6 +5,18 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.72 — 2026-10-05
+
+**Background browser alerts**
+
+- Add **`doxa-hub push-keygen`** and browser opt-in for encrypted Web Push after the remote page closes. Alerts identify only input requests or completed turns.
+- Serve **`remote-sw.js`** from the private hub; re-register browser subscriptions after a hub restart and remove endpoints confirmed expired by the push service.
+
+**Safety and setup**
+
+- Keep VAPID material in a private `0600` key file and require an explicit `DOXA_HUB_VAPID_SUBJECT`; background push stays off without the key.
+- Limit outbound delivery to approved HTTPS browser push services, owner-scoped subscriptions, and eight concurrent sends. Document setup in **`rust/README.md`**.
+
 ## 2.0.0-alpha.71 — 2026-10-05
 
 **Native remote tabs**

@@ -3,6 +3,7 @@ let source = null, active = null, generation = 0, currentText = null;
 const pending = new Map();
 const pendingPrompts = new Map();
 let currentQuestion = null;
+let backgroundAlerts = false;
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function confirmed(response) {
   const value = await response.json();
@@ -29,15 +30,72 @@ function line(kind, content) {
   return block;
 }
 function announce(title) {
+  if (backgroundAlerts) return;
   if (!('Notification' in window)) return;
   if (document.visibilityState === 'visible' || Notification.permission !== 'granted') return;
   try { new Notification(title, {body: 'Open DOXA to review the session', tag: active || 'doxa'}); } catch {}
 }
-el('notify').onclick = async () => {
-  if ('Notification' in window && Notification.permission === 'default') await Notification.requestPermission();
-  el('notify').textContent = Notification.permission === 'granted' ? 'Alerts on' : 'Notifications';
-};
-if (!('Notification' in window)) el('notify').hidden = true;
+function publicKeyBytes(encoded) {
+  const base64 = encoded.replace(/-/g, '+').replace(/_/g, '/');
+  const raw = atob(base64.padEnd(Math.ceil(base64.length / 4) * 4, '='));
+  return Uint8Array.from(raw, char => char.charCodeAt(0));
+}
+async function pushConfig() {
+  const response = await fetch('/api/push/config', {cache:'no-store'});
+  if (!response.ok) throw new Error('Push configuration unavailable');
+  return response.json();
+}
+function foregroundAlerts(button) {
+  button.textContent = Notification.permission === 'granted' ? 'Alerts in tab' : 'Notifications';
+  button.onclick = async () => {
+    if (Notification.permission === 'default') await Notification.requestPermission();
+    button.textContent = Notification.permission === 'granted' ? 'Alerts in tab' : 'Notifications';
+  };
+}
+async function setupAlerts(clicked = false) {
+  const button = el('notify');
+  if (!('Notification' in window)) { button.hidden = true; return; }
+  if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+    foregroundAlerts(button); return;
+  }
+  // Ask while the click still has user activation; registration and network
+  // requests below can outlive the browser's permission-prompt gesture.
+  if (clicked && Notification.permission === 'default') {
+    await Notification.requestPermission();
+  }
+  let config;
+  try { config = await pushConfig(); }
+  catch { foregroundAlerts(button); return; }
+  if (!config.enabled) { foregroundAlerts(button); return; }
+  try {
+    if (!clicked && Notification.permission !== 'granted') {
+      button.textContent = 'Enable background alerts'; return;
+    }
+    const registration = await navigator.serviceWorker.register('/remote-sw.js', {scope:'/'});
+    let subscription = await registration.pushManager.getSubscription();
+    if (clicked && subscription) {
+      const endpoint = subscription.endpoint;
+      await subscription.unsubscribe();
+      await fetch('/api/push/subscriptions', {method:'DELETE',
+        headers:{'Content-Type':'application/json'}, body:JSON.stringify({endpoint})});
+      backgroundAlerts = false; button.textContent = 'Enable background alerts'; return;
+    }
+    if (Notification.permission !== 'granted') {
+      button.textContent = 'Notifications denied'; return;
+    }
+    if (!subscription) subscription = await registration.pushManager.subscribe({
+      userVisibleOnly:true, applicationServerKey:publicKeyBytes(config.public_key)
+    });
+    const response = await fetch('/api/push/subscriptions', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body:JSON.stringify(subscription.toJSON())});
+    if (!response.ok) throw new Error('Subscription refused');
+    backgroundAlerts = true; button.textContent = 'Background alerts on';
+  } catch {
+    backgroundAlerts = false; button.textContent = 'Enable background alerts';
+  }
+}
+el('notify').onclick = () => setupAlerts(true);
+setupAlerts();
 
 async function loadSessions() {
   try {

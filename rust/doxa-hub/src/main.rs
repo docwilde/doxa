@@ -1,5 +1,6 @@
 //! Private owner-scoped server broker. No direct daemon RPC or public TCP bind.
 mod state;
+mod push;
 use bytes::Bytes;
 use doxa_peers::remote_policy as policy;
 use futures_util::stream;
@@ -67,12 +68,13 @@ fn stream_body(receiver:mpsc::Receiver<Bytes>)->Body{
         receiver.recv().await.map(|bytes|(Ok::<_,Infallible>(Frame::data(bytes)),receiver))
     });StreamBody::new(stream).boxed_unsync()
 }
-async fn handle(request:Request<Incoming>,state:Arc<Mutex<Hub>>,attested:bool)->Response<Body>{
+async fn handle(request:Request<Incoming>,state:Arc<Mutex<Hub>>,attested:bool,push:Option<Arc<push::Runtime>>)->Response<Body>{
     let method=request.method().clone();
     let path=request.uri().path().to_owned();
     let parts=path.trim_matches('/').split('/').collect::<Vec<_>>();
     let kind=match (method.clone(),parts.as_slice()){
-        (Method::GET,["api","sessions"]|[]|["remote.js"]|["remote.css"])=>"read_status",
+        (Method::GET,["api","sessions"]|["api","push","config"]|[]|["remote.js"]|["remote.css"]|["remote-sw.js"])=>"read_status",
+        (Method::POST|Method::DELETE,["api","push","subscriptions"])=>"read_status",
         (Method::GET,["api","commands",_]|["api","sessions",_,"events"])=>"read_transcript",
         (Method::POST,["api","sessions",_,"transcript"])=>"read_transcript",
         (Method::POST,["api","host","register"]|["api","host",_,"result"]|["api","host",_,"event"]|["api","host",_,"events"]|["api","host",_,"commands"]|["api","sessions",_,"prompt"])=>"send_prompt",
@@ -123,13 +125,28 @@ async fn handle(request:Request<Incoming>,state:Arc<Mutex<Hub>>,attested:bool)->
             .body(stream_body(receiver)).expect("fixed SSE response");
     }
     }
-    let body=if method==Method::POST{match input(request).await{Ok(body)=>body,Err(reply)=>return reply}}else{Value::Null};
+    let body=if method==Method::POST||method==Method::DELETE{match input(request).await{Ok(body)=>body,Err(reply)=>return reply}}else{Value::Null};
+    let hub_state=state.clone();
     let mut state=match state.lock(){Ok(state)=>state,Err(_)=>return reply(StatusCode::SERVICE_UNAVAILABLE,json!({"error":"hub unavailable"}))};
     let result=match (method,parts.as_slice()){
         (Method::GET,[])=>return response(StatusCode::OK,"text/html; charset=utf-8",include_str!("../../doxa-remote/assets/index.html")),
         (Method::GET,["remote.js"])=>return response(StatusCode::OK,"text/javascript; charset=utf-8",include_str!("../../doxa-remote/assets/remote.js")),
         (Method::GET,["remote.css"])=>return response(StatusCode::OK,"text/css; charset=utf-8",include_str!("../../doxa-remote/assets/remote.css")),
+        (Method::GET,["remote-sw.js"])=>return response(StatusCode::OK,"text/javascript; charset=utf-8",include_str!("../../doxa-remote/assets/remote-sw.js")),
         (Method::GET,["api","sessions"])=>Ok(state.list(&owner)),
+        (Method::GET,["api","push","config"])=>Ok(match push.as_ref(){
+            Some(push)=>json!({"enabled":true,"public_key":push.public_key()}),
+            None=>json!({"enabled":false}),
+        }),
+        (Method::POST,["api","push","subscriptions"])=>{
+            if push.is_none(){return unavailable("background push is disabled")}
+            match push::subscription(&body){Ok(subscription)=>state.subscribe(&owner,subscription),Err(_)=>Err("invalid push subscription")}
+        },
+        (Method::DELETE,["api","push","subscriptions"])=>{
+            if push.is_none(){return unavailable("background push is disabled")}
+            match body["endpoint"].as_str().filter(|endpoint|endpoint.len()<=2048){
+                Some(endpoint)=>Ok(state.unsubscribe(&owner,endpoint)),None=>Err("push endpoint required")}
+        },
         (Method::GET,["api","commands",id]) if valid_id(id)=>state.result(&owner,id),
         (Method::GET,["api","sessions",id,"events"])=>{
             match id.split_once('~'){Some((host,session)) if valid_id(host)&&valid_id(session)=>state.history(&owner,host,session,cursor),_=>Err("invalid session target")}
@@ -175,6 +192,19 @@ async fn handle(request:Request<Incoming>,state:Arc<Mutex<Hub>>,attested:bool)->
         },
         _=>Err("unknown hub route"),
     };
+    let deliveries=state.take_push();
+    drop(state);
+    if let Some(push)=push{
+        for (owner,subscription,kind) in deliveries{
+            let Some(permit)=push.permit() else{continue};
+            let push=push.clone();let state=hub_state.clone();
+            tokio::spawn(async move{
+                if push.send(&subscription,kind,permit).await{
+                    if let Ok(mut hub)=state.lock(){hub.unsubscribe(&owner,&subscription.endpoint);}
+                }
+            });
+        }
+    }
     match result{Ok(value)=>reply(StatusCode::OK,value),Err(message)=>unavailable(message)}
 }
 fn private_runtime(path:&Path)->io::Result<()> {
@@ -187,12 +217,19 @@ struct SocketGuard{path:PathBuf,inode:u64}
 impl Drop for SocketGuard{fn drop(&mut self){if fs::symlink_metadata(&self.path).is_ok_and(|meta|meta.file_type().is_socket()&&meta.ino()==self.inode){let _=fs::remove_file(&self.path);}}}
 #[tokio::main]
 async fn main()->io::Result<()> {
-    if !policy::remote_enabled(){return Err(io::Error::new(io::ErrorKind::PermissionDenied,"remote hub is off"));}
-    if policy::setting("remote_allowed_logins","DOXA_REMOTE_ALLOWED_LOGINS").trim().is_empty(){return Err(io::Error::new(io::ErrorKind::PermissionDenied,"remote allow-list is empty"));}
-    if policy::proxy_uid().is_none(){return Err(io::Error::new(io::ErrorKind::PermissionDenied,"unsafe proxy UID"));}
     let runtime=std::env::var_os("DOXA_HUB_RUNTIME_DIR").map(PathBuf::from)
         .ok_or_else(||io::Error::new(io::ErrorKind::InvalidInput,"DOXA_HUB_RUNTIME_DIR is required"))?;
     private_runtime(&runtime)?;
+    let args=std::env::args().skip(1).collect::<Vec<_>>();
+    if args==["push-keygen"]{
+        println!("VAPID public key: {}",push::generate(&runtime)?);
+        return Ok(());
+    }
+    if !args.is_empty(){return Err(io::Error::new(io::ErrorKind::InvalidInput,"usage: doxa-hub [push-keygen]"));}
+    if !policy::remote_enabled(){return Err(io::Error::new(io::ErrorKind::PermissionDenied,"remote hub is off"));}
+    if policy::setting("remote_allowed_logins","DOXA_REMOTE_ALLOWED_LOGINS").trim().is_empty(){return Err(io::Error::new(io::ErrorKind::PermissionDenied,"remote allow-list is empty"));}
+    if policy::proxy_uid().is_none(){return Err(io::Error::new(io::ErrorKind::PermissionDenied,"unsafe proxy UID"));}
+    let push=push::Runtime::load(&runtime)?.map(Arc::new);
     let path=runtime.join("hub.sock");
     if fs::symlink_metadata(&path).is_ok(){return Err(io::Error::new(io::ErrorKind::AlreadyExists,"hub socket already exists"));}
     let listener=UnixListener::bind(&path)?;
@@ -206,13 +243,15 @@ async fn main()->io::Result<()> {
         let (stream,_)=tokio::select!{r=listener.accept()=>r?,_=tokio::signal::ctrl_c()=>break,_=term.recv()=>break};
         let Ok(permit)=slots.clone().try_acquire_owned() else{continue};
         let state=state.clone();
+        let push=push.clone();
         tokio::spawn(async move{
             let _permit=permit;
             let std_stream=match stream.into_std(){Ok(stream)=>stream,Err(_)=>return};
             let attested=doxa_peers::credentials::peer_uid(&std_stream).is_ok_and(|uid|Some(uid)==policy::proxy_uid());
             let _=std_stream.set_nonblocking(true);
             let stream=match UnixStream::from_std(std_stream){Ok(stream)=>stream,Err(_)=>return};
-            let service=hyper::service::service_fn(move |request|{let state=state.clone();async move{Ok::<_,Infallible>(handle(request,state,attested).await)}});
+            let push=push.clone();
+            let service=hyper::service::service_fn(move |request|{let state=state.clone();let push=push.clone();async move{Ok::<_,Infallible>(handle(request,state,attested,push).await)}});
             let mut server=hyper::server::conn::http1::Builder::new();
             server.timer(hyper_util::rt::TokioTimer::new()).header_read_timeout(Duration::from_secs(3))
                 .keep_alive(false).max_headers(32).max_buf_size(8192);
@@ -230,7 +269,7 @@ async fn main()->io::Result<()> {
         let (server,mut client)=UnixStream::pair().unwrap();
         let task=tokio::spawn(async move{
             let service=hyper::service::service_fn(move |request|{
-                let state=state.clone();async move{Ok::<_,Infallible>(handle(request,state,attested).await)}
+                let state=state.clone();async move{Ok::<_,Infallible>(handle(request,state,attested,None).await)}
             });
             let mut builder=hyper::server::conn::http1::Builder::new();builder.keep_alive(false);
             builder.serve_connection(hyper_util::rt::TokioIo::new(server),service).await.unwrap();
@@ -250,6 +289,10 @@ async fn main()->io::Result<()> {
         std::env::set_var("DOXA_REMOTE_ENABLED","1");
         std::env::set_var("DOXA_REMOTE_ALLOWED_LOGINS","owner@example.com");
         let state=Arc::new(Mutex::new(Hub::new()));
+        let config=wire(state.clone(),true,
+            "GET /api/push/config HTTP/1.1\r\nHost: hub.test\r\nTailscale-User-Login: owner@example.com\r\n\r\n".into()).await;
+        assert_eq!(json_body(&config)["enabled"],false);
+        assert!(wire(state.clone(),true,request("/api/push/subscriptions","{}","owner@example.com","")).await.starts_with("HTTP/1.1 409"));
         let body=r#"{"host_id":"workstation","sessions":[{"id":"s1","title":"Session"}]}"#;
         let raw=request("/api/host/register",body,"owner@example.com","");
         assert!(wire(state.clone(),false,raw.clone()).await.starts_with("HTTP/1.1 403"));

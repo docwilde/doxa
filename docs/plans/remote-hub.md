@@ -6,7 +6,8 @@ register sessions, broker prompts/answers and forward live events across
 machines. The browser can request a bounded recent transcript from its host;
 the hub also holds a short live event ring.
 The native TUI can open remote-only tabs through `doxa remote tui HUB_URL`.
-Background Web Push and Android are not yet shipped.
+The browser can receive encrypted background Web Push after explicit opt-in;
+Android is not yet shipped.
 
 ## User journey
 
@@ -91,13 +92,20 @@ the initial private deployment must not imply it has that property.
 ## Notifications
 
 The Rust browser adapter can show notifications while its page is connected
-and hidden. True background delivery needs a service worker, a user-approved
-Push subscription, a VAPID key, and encrypted Web Push delivery. The planned
-hub extension will own subscriptions per device and send only a generic
-`needs input` or `turn done` alert; opening the app will fetch the actual
-content after authentication. Expired subscriptions will be removed. Android will use the same generic event policy
-with a platform push token; opening the app resumes from the last event cursor.
-Notifications never carry tool arguments, transcript text or approval actions.
+and hidden. The private hub also supports background Web Push through a
+service worker, user-approved subscription and server-owned VAPID key. The
+operator enables it with `doxa-hub push-keygen` in the private runtime directory,
+then sets `DOXA_HUB_VAPID_SUBJECT` to a `mailto:` address and restarts the hub.
+The hub sends an encrypted `needs_input` or `turn_done` kind to subscribed
+devices and removes endpoints after a push service confirms expiry. The payload
+contains no session ID, transcript, tool argument or approval action. Opening
+the app fetches current state after Tailscale authentication.
+
+Subscriptions remain volatile and the browser registers them again on its next
+visit after a hub restart; the VAPID key file must be retained. Outbound sends
+are limited to known HTTPS browser push services. A device needs browser Push
+API support and private hub access to enable alerts. Android will use the same
+generic event policy with a platform push token and reopen at its last cursor.
 
 ## Android client contract
 
@@ -127,9 +135,9 @@ source devices, so the initial Android path assumes a user-owned device.
 3. **Remote DOXA client:** remote-only Rust TUI tabs, bounded snapshot replay,
    stable retry IDs, and pending-input review are implemented. Persistent tab
    layouts and mixed local/remote windows remain open.
-4. **Background delivery:** Web Push with service worker and then Android push.
-   The Android app renders transcript and events, sends prompts and answers,
-   and delegates account sign-in to the private hub.
+4. **Background delivery:** private browser Web Push with service worker is
+   implemented. Android push and the Android client remain open; the app will
+   render transcript and events, send prompts and answers, and use hub sign-in.
 
 Release gates for each stage: opt-in off by default; denied and forged identity
 tests; replay, duplicate command and stale approval tests; connection-loss tests;
