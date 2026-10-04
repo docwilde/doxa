@@ -38,21 +38,6 @@ jobs:
         run: |
           HOME="$RUNNER_TEMP/doxa-launcher-home" target/debug/doxa-rs install-launcher "$GITHUB_WORKSPACE/target/debug/doxa-rs"
           test -x "$RUNNER_TEMP/doxa-launcher-home/Applications/DOXA.command"
-      - name: Smoke macOS browser proxy credential probe
-        run: |
-          python3 - <<'PY'
-          import os
-          import socket
-          from doxa.remote_transport import proxy_peer_uid
-
-          left, right = socket.socketpair()
-          try:
-              assert proxy_peer_uid(left) == os.getuid()
-              assert proxy_peer_uid(right) == os.getuid()
-          finally:
-              left.close()
-              right.close()
-          PY
       - name: Test portable macOS Rust workspace
         run: cargo test --locked --workspace --exclude doxa-daemon --features doxa-vendors/local-test-server --no-fail-fast
       - name: Test portable macOS daemon suites
@@ -67,7 +52,7 @@ jobs:
         run: |
           cargo build --locked -p doxa-daemon --features local-test-server
           DOXA_NATIVE_DAEMON="$GITHUB_WORKSPACE/target/debug/doxa-daemon" \
-            python3 -m unittest discover -s tests -p test_native_live_vendor_verifier.py -v
+            python3 -m unittest discover -s scripts/tests -p test_native_live_vendor_verifier.py -v
   rust:
     runs-on: ubuntu-latest
     steps:
@@ -93,6 +78,8 @@ jobs:
             -s scripts/tests -p test_codex_protected_installer.py -v
           python3 -W error::ResourceWarning -m unittest discover \
             -s scripts/tests -p test_codex_code_mode_proof.py -v
+          python3 -W error::ResourceWarning -m unittest discover \
+            -s scripts/tests -p test_lore_bump.py -v
       - name: Smoke installed Rust launcher without a Python environment
         run: |
           smoke_dir=$(mktemp -d "$TMPDIR/install-XXXXXXXX")

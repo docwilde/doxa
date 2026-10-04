@@ -6,7 +6,8 @@
 It includes a grouped, nested session rail; seven tab labels in two split pane
 groups; two visible transcript areas with turn headers and CommonMark-backed
 text styling; per-pane status chips; prompt boxes; dividers; and a
-modeled scroll offset. The fixture follows `scripts/bench_ui.py`: 20 sidebar
+modeled scroll offset. The fixture follows the historical `scripts/bench_ui.py`
+(available in the `v1.19.0` tag): 20 sidebar
 widths (22–41), one 120-line turn in each visible pane, 100 40-character
 append chunks in the right pane, and 100 one-row scrolls. It renders every
 operation, with 10 warmup draws per interaction run.
@@ -42,7 +43,7 @@ drawn; the first-run setup wizard is disabled, as in `bench_ui.py`.
 
 This benchmark is useful for measuring the Ratatui parse and drawing cost of a
 more representative visible screen. It must not be compared as an end-to-end
-UI speedup against `scripts/bench_ui.py`, whose samples include Textual message
+UI speedup against the historical `scripts/bench_ui.py`, whose samples include Textual message
 processing, asynchronous Markdown updates, and a compositor barrier.
 
 ## Local measurement (2026-09-24)

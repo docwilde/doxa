@@ -32,7 +32,8 @@ stopped in the [live verification record](live-provider-verification-2026-09-29.
   A synthetic hook response cannot establish real Haiku review.
 - The pinned PreCompact hook rejects an owned rollout over 32 MiB or a JSONL
   line over 1 MiB, and its review has a 180-second worker timeout within the
-  240-second hook deadline (`rust/doxa-engines/codex_compact_hook.py`). A live
+  240-second hook deadline (historical `rust/doxa-engines/codex_compact_hook.py`
+  in the `v2.0.0-alpha.72` tag). A live
   fixture must keep individual prompts below the line limit. The LORE review
   prompt uses a capped session digest; it does not send the entire rollout to
   Haiku verbatim.

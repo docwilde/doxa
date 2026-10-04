@@ -1,8 +1,7 @@
 name: LORE bump
 
 # Proposes an immutable native LORE upgrade for human review. Cargo is the
-# runtime pin; the Python dev dependency is the interoperability oracle.
-# Both pins and locks move together. This workflow never merges a proposal.
+# runtime pin. This workflow never merges a proposal.
 
 on:
   schedule:
@@ -62,9 +61,9 @@ jobs:
       - name: Check out doxa
         uses: actions/checkout@v7
 
-      # Runs on the runner's system python3 -- stdlib only, before uv exists,
+      # Runs on the runner's system python3 with stdlib only,
       # so the ordinary "nothing to do" answer costs no dependency sync.
-      # --write rewrites both pins only when the answer is
+      # --write rewrites the Cargo pin only when the answer is
       # `propose`; on `none` it changes nothing at all.
       - name: Decide whether a newer LORE tag exists
         id: decide
@@ -79,47 +78,18 @@ jobs:
           REASON: ${{ steps.decide.outputs.reason }}
         run: echo "::notice::$REASON"
 
-      - name: Install uv
-        if: steps.decide.outputs.action == 'propose'
-        # Pinned to a real release tag. astral-sh/setup-uv publishes v10.0.1
-        # but no floating v10 -- `@v10` 404s at job setup, which is how this
-        # repo's first CI workflow died. Verified against the git refs API.
-        uses: astral-sh/setup-uv@v10.0.1
-        with:
-          enable-cache: true
-          cache-dependency-glob: uv.lock
-
       - name: Select stable Rust
         if: steps.decide.outputs.action == 'propose'
         run: rustup toolchain install stable --profile minimal
 
       - name: Re-lock against the proposed LORE tag
         if: steps.decide.outputs.action == 'propose'
-        env:
-          TAG: ${{ steps.decide.outputs.tag }}
         run: |
           set -euo pipefail
-          # A lock failure here is not the signal this workflow is for. The
-          # tag was already confirmed to carry packaging metadata before we
-          # got as far as installing uv, so if uv still cannot resolve it,
-          # something is wrong with the release itself -- and there is no
-          # lockfile to propose. Fail the RUN (red, and it mails), rather
-          # than open a PR whose branch does not build.
-          if ! uv lock 2>&1 | tee uv-lock.log; then
-            echo "::error::uv could not lock lore-core at $TAG -- see log"
-            {
-              echo "### uv lock failed against \`$TAG\`"
-              echo
-              echo '```'
-              tail -n 40 uv-lock.log
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
-            exit 1
-          fi
-          # Resolve through a stable workspace package: changing the git rev
-          # removes the old lore-core package ID before cargo update can select it.
+          # The changed immutable rev must resolve and compile before a PR
+          # can be opened. Cargo updates the lock to that exact source.
           cargo +stable check --package doxa-lore
-          git --no-pager diff --stat -- rust/doxa-lore/Cargo.toml Cargo.lock pyproject.toml uv.lock
+          git --no-pager diff --stat -- rust/doxa-lore/Cargo.toml Cargo.lock
 
       # Idempotency, part one: has a human already said no to this exact
       # proposal? A closed (not merged) PR with this tag's title is a
@@ -147,7 +117,7 @@ jobs:
           echo "pr=$open_pr" >> "$GITHUB_OUTPUT"
 
           # Idempotency, part two: is the branch already carrying exactly
-          # these native/oracle manifests and locks? Then the suite has already run
+          # this native manifest and lock? Then the suite has already run
           # against it and its verdict is already in the PR body. Re-running
           # nine minutes of tests to reach the same answer is the cost this
           # check exists to avoid -- and it is checked BEFORE the suite, not
@@ -161,7 +131,7 @@ jobs:
           git fetch --no-tags origin \
             "+refs/heads/${BUMP_BRANCH}:refs/remotes/origin/${BUMP_BRANCH}" || true
           if git rev-parse --verify -q "origin/$BUMP_BRANCH" >/dev/null \
-             && git diff --quiet "origin/$BUMP_BRANCH" -- rust/doxa-lore/Cargo.toml Cargo.lock pyproject.toml uv.lock \
+             && git diff --quiet "origin/$BUMP_BRANCH" -- rust/doxa-lore/Cargo.toml Cargo.lock \
              && [ -n "$open_pr" ]; then
             echo "::notice::PR #$open_pr already proposes exactly this change; nothing to do."
             echo "skip=unchanged" >> "$GITHUB_OUTPUT"
@@ -228,7 +198,7 @@ jobs:
             echo
             echo "---"
             echo
-            echo "The native Cargo pin and Python dev interoperability oracle both use the same immutable release commit."
+            echo "The native Cargo pin uses the immutable release commit."
             echo
             echo 'These gates were run by the proposal workflow. GITHUB_TOKEN PRs do not trigger additional rust-ci.yml runs; a maintainer push triggers normal PR CI.'
             echo
@@ -247,7 +217,7 @@ jobs:
           # the reviewer; the title and the table above always name the tag
           # currently proposed.
           git checkout -b "$BUMP_BRANCH"
-          git add rust/doxa-lore/Cargo.toml Cargo.lock pyproject.toml uv.lock
+          git add rust/doxa-lore/Cargo.toml Cargo.lock
           # Identity passed per-command rather than written into the repo's
           # git config -- nothing here should outlive the step.
           git -c user.name="github-actions[bot]" \

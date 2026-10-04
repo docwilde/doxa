@@ -20,7 +20,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-SOURCE = Path(__file__).resolve().parents[1] / "scripts/verify_native_vendors_live.py"
+SOURCE = Path(__file__).resolve().parents[1] / "verify_native_vendors_live.py"
 SPEC = importlib.util.spec_from_file_location("native_live_verifier", SOURCE)
 verifier = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(verifier)

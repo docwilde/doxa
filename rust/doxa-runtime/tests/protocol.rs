@@ -6,7 +6,6 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
-use std::process::Command;
 use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -700,48 +699,6 @@ fn session_id_matches_python_identity_rule() {
     }
 }
 
-#[test]
-fn python_engine_client_attaches_replays_and_sends_prompt() {
-    let dir = tempfile::tempdir().unwrap();
-    let host = Arc::new(Fixture::new());
-    host.release();
-    let handle = Daemon::bind(dir.path(), session(), host).unwrap().start();
-    handle.publish(json!({"type":"text_delta","data":{"text":"replayed"}}));
-    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let script = r#"
-import asyncio, json, sys
-from doxa.client import EngineClient
-
-async def run():
-    client = EngineClient(sys.argv[1])
-    started = await client.start()
-    replay = await asyncio.wait_for(anext(client.peer_events()), 5)
-    events = []
-    async for event in client.send('hello from Python'):
-        events.append([event.type, event.data])
-    status = await client.refresh_status()
-    result = {'started': started.type, 'session_id': client.session_id,
-              'replay': replay.data['text'], 'events': events,
-              'status_session_id': status['session_id'], 'cursor': client.cursor}
-    await client.finalize()
-    return result
-
-print(json.dumps(asyncio.run(asyncio.wait_for(run(), 8))))
-"#;
-    let python = std::env::var("DOXA_TEST_PYTHON").unwrap_or_else(|_| "python3".into());
-    let output = Command::new(python).arg("-c").arg(script).arg(handle.socket_path())
-        .env("PYTHONPATH", repo_root).output().unwrap();
-    assert!(output.status.success(), "Python EngineClient failed: {}",
-        String::from_utf8_lossy(&output.stderr));
-    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(result["started"], "session_started");
-    assert_eq!(result["session_id"], "test-session");
-    assert_eq!(result["replay"], "replayed");
-    assert_eq!(result["events"][0], json!(["text_delta", {"text":"hello from Python"}]));
-    assert_eq!(result["events"][1][0], "turn_done");
-    assert_eq!(result["status_session_id"], "test-session");
-    assert_eq!(result["cursor"], 3);
-}
 
 struct TerminalHost { mode: &'static str }
 impl Host for TerminalHost {

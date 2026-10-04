@@ -67,3 +67,16 @@ pub fn nonblocking_unix_socket() -> io::Result<OwnedFd> {
     }
     Ok(fd)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn socketpair_reports_the_current_owner_on_both_ends() {
+        let (left, right) = UnixStream::pair().unwrap();
+        let owner = unsafe { libc::geteuid() };
+        assert_eq!(peer_uid(&left).unwrap(), owner);
+        assert_eq!(peer_uid(&right).unwrap(), owner);
+    }
+}

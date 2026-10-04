@@ -51,7 +51,4 @@ cargo test --locked -p doxa-runtime
 
 Socket fixtures cover frame shapes, replay/live order, prompt ordering,
 multiple clients, malformed and oversized input, permissions, path refusal,
-and cleanup. Development interoperability tests also use the Python
-`doxa.client.EngineClient`; that client is a compatibility fixture, not an
-installed runtime dependency. Fixture status does not establish live provider
-behavior.
+and cleanup. Fixture status does not establish live provider behavior.

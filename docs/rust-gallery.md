@@ -85,5 +85,5 @@ Inspect every PNG and its dimensions before copying it from
 sessions, then send `{"kind":"quit"}` through the control socket. The
 display and socket close on exit; session daemons have their own lifecycle.
 
-`scripts/rust_gallery.py` remains a deterministic developer renderer. Its
-fixtures go to an ignored build directory and are never used in the README.
+The gallery uses the live capture script above; the old fixture renderer has
+been removed.
