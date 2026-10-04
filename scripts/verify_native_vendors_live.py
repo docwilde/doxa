@@ -207,7 +207,17 @@ def verify(provider, variable):
                 result["result"] = "native_turn_failed_or_tool_read_unverified"
                 return result
             next_effort = "low"
-            result["next_turn_config"] = wire.call("set_effort", {"effort": next_effort})
+            # turn_done can reach this socket just before the daemon clears the
+            # finished prompt from its queue. Retry only that transient state.
+            idle_deadline = time.monotonic() + 3
+            while True:
+                result["next_turn_config"] = wire.call("set_effort", {"effort": next_effort})
+                if (result["next_turn_config"].get("ok") or
+                    result["next_turn_config"].get("error") !=
+                        "effort change requires an idle session with no queued prompts" or
+                    time.monotonic() >= idle_deadline):
+                    break
+                time.sleep(.05)
             if not result["next_turn_config"].get("ok"):
                 result["result"] = "next_turn_configuration_failed"
                 return result
