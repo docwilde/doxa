@@ -199,7 +199,8 @@ impl Drop for CompactGate {
     }
 }
 
-#[cfg(test)]
+// These carrier identity fixtures require the Linux /proc/self/exe contract.
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
     fn prepare(root: &Path) -> CompactGate {
