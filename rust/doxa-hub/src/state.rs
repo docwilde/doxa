@@ -3,6 +3,7 @@ use serde_json::{json, Value};
 use std::{collections::{HashMap, VecDeque}, time::{Duration, Instant}};
 use subtle::ConstantTimeEq;
 use uuid::Uuid;
+use crate::push::{Kind as PushKind, Subscription};
 
 const LEASE: Duration = Duration::from_secs(45);
 const COMMAND_TTL: Duration = Duration::from_secs(60);
@@ -37,9 +38,13 @@ struct Command { owner:String, host:String, session:String, op:String, payload:V
 pub struct Hub { hosts:HashMap<(String,String),Host>, commands:HashMap<String,Command>,
     requests:HashMap<(String,String),String>,
     events:HashMap<(String,String,String),VecDeque<Value>>,
-    event_order:VecDeque<((String,String,String),u64,usize)>,event_bytes:usize }
+    event_order:VecDeque<((String,String,String),u64,usize)>,event_bytes:usize,
+    subscriptions:HashMap<String,Vec<Subscription>>,
+    pending_push:VecDeque<(String,PushKind)>,
+    last_push:HashMap<(String,String,String,PushKind),Instant> }
 impl Hub {
-    pub fn new()->Self{Self{hosts:HashMap::new(),commands:HashMap::new(),requests:HashMap::new(),events:HashMap::new(),event_order:VecDeque::new(),event_bytes:0}}
+    pub fn new()->Self{Self{hosts:HashMap::new(),commands:HashMap::new(),requests:HashMap::new(),events:HashMap::new(),event_order:VecDeque::new(),event_bytes:0,
+        subscriptions:HashMap::new(),pending_push:VecDeque::new(),last_push:HashMap::new()}}
     fn reap(&mut self){
         let now=Instant::now();
         let old_hosts=self.hosts.len();
@@ -51,6 +56,7 @@ impl Hub {
         }
         self.commands.retain(|_,command|now.duration_since(command.created)<COMMAND_TTL*2);
         self.requests.retain(|_,id|self.commands.contains_key(id));
+        self.last_push.retain(|_,sent|now.duration_since(*sent)<Duration::from_secs(3600));
         for host in self.hosts.values_mut(){
             host.pending.retain(|id|self.commands.get(id).is_some_and(|command|command.state=="queued"));
         }
@@ -60,6 +66,27 @@ impl Hub {
             self.event_order.retain(|(key,_,_)|self.events.contains_key(key));
             self.event_bytes=self.event_order.iter().map(|(_,_,bytes)|bytes).sum();
         }
+    }
+    pub fn subscribe(&mut self,owner:&str,subscription:Subscription)->Result<Value,&'static str>{
+        let total=self.subscriptions.values().map(Vec::len).sum::<usize>();
+        let entries=self.subscriptions.entry(owner.to_owned()).or_default();
+        if let Some(old)=entries.iter_mut().find(|old|old.endpoint==subscription.endpoint){*old=subscription;}
+        else if entries.len()>=16||total>=256{return Err("push subscription limit reached")}
+        else{entries.push(subscription);}
+        Ok(json!({"subscribed":true}))
+    }
+    pub fn unsubscribe(&mut self,owner:&str,endpoint:&str)->Value{
+        if let Some(entries)=self.subscriptions.get_mut(owner){entries.retain(|item|item.endpoint!=endpoint);}
+        json!({"subscribed":false})
+    }
+    pub fn take_push(&mut self)->Vec<(String,Subscription,PushKind)>{
+        let mut deliveries=Vec::new();
+        while let Some((owner,kind))=self.pending_push.pop_front(){
+            if let Some(entries)=self.subscriptions.get(&owner){
+                deliveries.extend(entries.iter().cloned().map(|item|(owner.clone(),item,kind)));
+            }
+        }
+        deliveries
     }
     pub fn register(&mut self,owner:&str,id:&str,sessions:Vec<Value>,prior:Option<&str>)->Result<Value,&'static str>{
         self.reap(); if !valid_id(id){return Err("invalid host id");}
@@ -165,6 +192,14 @@ impl Hub {
         let ring=self.events.entry(key).or_default();
         if ring.back().is_some_and(|last|last["seq"].as_u64().unwrap_or(0)>=seq){return Ok(json!({"duplicate":true}));}
         ring.push_back(frame);
+        if let Some(kind)=ring.back().and_then(|frame|frame["event"]["type"].as_str()).and_then(PushKind::from_event){
+            let key=(owner.to_owned(),host_id.to_owned(),session_id.to_owned(),kind);
+            if self.subscriptions.get(owner).is_some_and(|entries|!entries.is_empty())
+                && self.last_push.get(&key).is_none_or(|sent|sent.elapsed()>=Duration::from_secs(5)){
+                self.last_push.insert(key,Instant::now());
+                if self.pending_push.len()<64{self.pending_push.push_back((owner.to_owned(),kind));}
+            }
+        }
         let key=(owner.into(),host_id.into(),session_id.into());
         self.event_order.push_back((key.clone(),seq,bytes));self.event_bytes+=bytes;
         if ring.len()>MAX_EVENTS{
@@ -203,6 +238,33 @@ impl Hub {
 
 #[cfg(test)]mod tests{
     use super::*;
+    #[test]fn push_is_owner_scoped_and_duplicate_events_do_not_notify_twice(){
+        let mut hub=Hub::new();
+        use web_push_native::jwt_simple::algorithms::{ECDSAP256PublicKeyLike,ES256KeyPair};
+        let key=ES256KeyPair::generate();
+        let public=web_push_native::p256::PublicKey::from_sec1_bytes(
+            &key.public_key().public_key().to_bytes_uncompressed()).unwrap();
+        let auth=web_push_native::Auth::clone_from_slice(&[7u8;16]);
+        hub.subscribe("owner@example.com",Subscription{
+            endpoint:"https://fcm.googleapis.com/fcm/send/owner".into(),
+            public:public.clone(),auth:auth.clone(),
+        }).unwrap();
+        hub.subscribe("other@example.com",Subscription{
+            endpoint:"https://fcm.googleapis.com/fcm/send/other".into(),
+            public,auth,
+        }).unwrap();
+        let lease=hub.register("owner@example.com","host",bounded_sessions(&json!([{"id":"session"}])).unwrap(),None).unwrap()["lease"].as_str().unwrap().to_owned();
+        let event=json!({"type":"event","seq":1,"event":{"type":"needs_input","data":{"id":"review"}}});
+        hub.event("owner@example.com","host",&lease,"session",event.clone()).unwrap();
+        hub.event("owner@example.com","host",&lease,"session",event).unwrap();
+        let deliveries=hub.take_push();
+        assert_eq!(deliveries.len(),1);
+        assert_eq!(deliveries[0].0,"owner@example.com");
+        assert_eq!(deliveries[0].2,PushKind::NeedsInput);
+        assert!(hub.take_push().is_empty());
+        hub.unsubscribe("owner@example.com",&deliveries[0].1.endpoint);
+        assert!(hub.subscriptions["owner@example.com"].is_empty());
+    }
     #[test]fn lease_owner_queue_and_no_redelivery(){
         let mut hub=Hub::new();let sessions=bounded_sessions(&json!([{"id":"session-1","title":"Session"}])).unwrap();
         let lease=hub.register("owner@example.com","host-1",sessions,None).unwrap()["lease"].as_str().unwrap().to_owned();

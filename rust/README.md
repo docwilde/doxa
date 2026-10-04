@@ -35,6 +35,15 @@ remote-only window does not mix local tabs or restore its tab layout after exit.
 Provider settings, LORE management and filesystem operations remain on the
 host. Full historical transcript fetch is still in progress; the hub brokers
 a bounded recent snapshot from the host on demand.
+To enable browser alerts after the page closes, set `DOXA_HUB_RUNTIME_DIR` to
+the same private directory and run `doxa-hub push-keygen` once. It creates a
+`0600` VAPID key file; keep this file across hub restarts. Set
+`DOXA_HUB_VAPID_SUBJECT=mailto:you@example.com`, restart `doxa-hub`, then
+choose **Enable background alerts** in the private hub browser view. Push is
+off if the key file is absent. The hub keeps subscriptions only in memory;
+the browser registers its subscription again when opened after a hub restart.
+Only Mozilla, Google FCM and Apple HTTPS push endpoints are accepted. Push
+payloads contain a generic event kind, never transcript or approval content.
 New session titles use `model@branch/repo` in Git or `model@short-path`
 elsewhere; a second matching session gets `-2`. Explicit renames stay pinned.
 The [parity tracker](../docs/rust-1.19-parity.md) records stable release gates.

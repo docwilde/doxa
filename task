@@ -30,7 +30,9 @@ Usage: ./task COMMAND [arguments]
   remote serve          Build and start the private Rust browser adapter
   remote connect URL HOST_ID
                        Connect this machine's sessions to a private hub
+  remote tui URL         Open native remote session tabs
   hub                  Build and start the private Rust server hub
+  hub push-keygen       Create a private VAPID key for browser background alerts
   test                  Run all Rust crate tests
   clean                 Remove the task's local Rust build directory
   help                  Show this help
@@ -134,13 +136,13 @@ case $command in
   run|new|doctor) launch "$command" "$@" ;;
   remote)
     case $#:${1:-} in
-      1:serve|2:list|3:connect|4:send|5:answer) launch remote "$@" ;;
-      *) fail 'usage: ./task remote serve | connect URL HOST_ID | list URL | send URL SESSION TEXT | answer URL SESSION REQUEST_ID allow|deny' ;;
+      1:serve|2:list|2:tui|3:connect|4:send|5:answer) launch remote "$@" ;;
+      *) fail 'usage: ./task remote serve | connect URL HOST_ID | tui URL | list URL | send URL SESSION TEXT | answer URL SESSION REQUEST_ID allow|deny' ;;
     esac ;;
   hub)
-    [ "$#" -eq 0 ] || fail 'hub takes no arguments'
+    [ "$#" -eq 0 ] || { [ "$#" -eq 1 ] && [ "$1" = push-keygen ]; } || fail 'usage: ./task hub [push-keygen]'
     cargo build --locked --manifest-path "$root/rust/doxa-hub/Cargo.toml" --bin doxa-hub
-    exec "$target_dir/debug/doxa-hub" ;;
+    exec "$target_dir/debug/doxa-hub" "$@" ;;
   test)
     [ "$#" -eq 0 ] || fail 'test takes no arguments'
     command -v cargo >/dev/null 2>&1 || fail 'cargo is required (install Rust first)'

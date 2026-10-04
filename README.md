@@ -70,8 +70,9 @@ bounded recent transcript and live events. Model, permission, filesystem and
 LORE controls stay on the session host.
 The [Rust guide](rust/README.md) has setup steps, and the
 [hub plan](docs/plans/remote-hub.md) covers the Android client contract.
-Browser notifications work while the page is connected. Background push and
-the Android app are still planned.
+The browser can enable encrypted background Web Push for turn completion and
+input requests. Configure a private VAPID key on the hub; notification bodies
+contain only an event kind. The Android app is still planned.
 
 ## Gallery
 
