@@ -54,7 +54,7 @@ jobs:
               right.close()
           PY
       - name: Test portable macOS Rust workspace
-        run: cargo test --locked --workspace --exclude doxa-daemon --features doxa-vendors/local-test-server
+        run: cargo test --locked --workspace --exclude doxa-daemon --features doxa-vendors/local-test-server --no-fail-fast
       - name: Test portable macOS daemon suites
         run: |
           cargo test --locked -p doxa-daemon --lib --features local-test-server
