@@ -21,6 +21,7 @@ impl App {
     /// Verify a disconnected, detached row against the trusted live registry
     /// before removing it from the rail. Archived history stays searchable.
     pub(super) fn poll_stale_detached(&mut self, now: Instant) -> bool {
+        if self.remote_mode { return false; }
         if let Some(receiver) = self.stale_detached_pending.as_ref() {
             match receiver.try_recv() {
                 Ok(Ok(rows)) => {
@@ -203,7 +204,13 @@ impl App {
                 "attach: query must be at most 200 bytes without control characters".into();
             return;
         }
-        let live = match crate::discovery::sessions() {
+        let live = if self.remote_mode {
+            Ok(self.sessions.iter().map(|session| crate::discovery::Session {
+                id:session.id.clone(), title:session.title.clone(), socket:PathBuf::new(),
+                scope_key:session.collection.clone(), clients:None, started_at:String::new(),
+            }).collect())
+        } else { crate::discovery::sessions() };
+        let live = match live {
             Ok(rows) => rows,
             Err(error) => {
                 self.notice = format!(
@@ -365,6 +372,11 @@ impl App {
         self.attach_picker = None;
         // Registry entries are hints: a row may have gone stale while the
         // picker was open. The bridge performs one more identity check.
+        if self.remote_mode {
+            if self.sessions.iter().any(|session| session.id == id) { self.attach_selected(&id); }
+            else { self.notice = "Remote session is no longer available".into(); }
+            return;
+        }
         match crate::discovery::sessions() {
             Ok(live) if live.iter().any(|session| session.id == id) => self.attach_selected(&id),
             Ok(_) => {
@@ -635,6 +647,7 @@ impl App {
     }
 
     pub(super) fn open_repo_picker(&mut self, group: usize) {
+        if self.remote_mode { self.notice = "Remote worktree is managed on the session host".into(); return; }
         self.active_group = group;
         let Some(id) = self.groups[group].active_id() else {
             self.notice = "Choose a session first".into();
@@ -956,7 +969,7 @@ impl App {
             return;
         }
         let id = group.tabs.remove(group.active);
-        if (!self.offline_ids.contains(&id) || self.history_entries.contains_key(&id))
+        if !self.remote_mode && (!self.offline_ids.contains(&id) || self.history_entries.contains_key(&id))
             && !self.detached_this_run.contains(&id)
         {
             self.detached_this_run.push(id.clone());

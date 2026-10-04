@@ -466,6 +466,17 @@ impl App {
     pub(super) fn chips(&self, index: usize) -> Vec<(&'static str, String)> {
         let id = self.groups[index].active_id();
         let identity = id.and_then(|id| self.session_identity.get(id));
+        if self.remote_mode {
+            let host = id.and_then(|id| id.split_once('~').map(|pair| pair.0)).unwrap_or("hub");
+            let mut chips = vec![("remote", format!("Remote · {host}"))];
+            if let Some(engine) = identity.and_then(|pair| pair.0.as_deref()) {
+                chips.push(("remote_engine", engine.to_owned()));
+            }
+            if let Some(model) = identity.and_then(|pair| pair.1.as_deref()) {
+                chips.push(("remote_model", model.to_owned()));
+            }
+            return chips;
+        }
         let telemetry = id.and_then(|id| self.session_telemetry.get(id));
         let mut chips = Vec::new();
         // Display the provider-reported permission policy even when this

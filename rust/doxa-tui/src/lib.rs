@@ -2,6 +2,7 @@
 
 pub mod markdown;
 pub mod bridge;
+pub mod remote_client;
 pub mod worker_frames;
 pub mod history;
 pub mod lore_picker;

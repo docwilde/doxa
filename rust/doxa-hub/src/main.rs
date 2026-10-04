@@ -94,6 +94,7 @@ async fn handle(request:Request<Incoming>,state:Arc<Mutex<Hub>>,attested:bool)->
             let hello=json!({"type":"hello","engine":"remote","model":null});
             if sender.send(sse(&hello,None)).await.is_err(){return;}
             let mut cursor=cursor;
+            let mut quiet=0u8;
             loop{
                 if !policy::evaluate("read_transcript",Some(&owner),true,None).allowed{break;}
                 let batch=state.lock().ok().and_then(|mut hub|hub.history(&owner,&host,&session,cursor).ok());
@@ -107,6 +108,13 @@ async fn handle(request:Request<Incoming>,state:Arc<Mutex<Hub>>,attested:bool)->
                     if sender.send(sse(frame,seq)).await.is_err(){return;}
                     if let Some(next)=seq.and_then(|seq|seq.checked_add(1)){cursor=next;}
                 }
+                if batch["events"].as_array().is_some_and(|events|events.is_empty()) {
+                    quiet=quiet.saturating_add(1);
+                    if quiet>=15 {
+                        if sender.send(Bytes::from_static(b": ping\n\n")).await.is_err(){break;}
+                        quiet=0;
+                    }
+                } else { quiet=0; }
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
         });

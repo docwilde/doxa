@@ -142,6 +142,7 @@ impl App {
     }
 
     pub(super) fn open_lore_picker_mode(&mut self, proposal_mode: bool) {
+        if self.remote_mode { self.notice = "LORE memory is managed on the session host".into(); return; }
         self.belief_browser_fixture = false;
         self.belief_filter_due = None;
         self.belief_filter_request = None;
@@ -1494,6 +1495,7 @@ impl App {
     }
 
     pub(super) fn open_memory_menu(&mut self, group: usize) {
+        if self.remote_mode { self.notice = "LORE memory is managed on the session host".into(); return; }
         self.memory_manager = None;
         self.retire_operations();
         self.open_chip_info("memory", group);

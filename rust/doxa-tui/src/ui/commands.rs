@@ -65,6 +65,12 @@ impl LocalCommand {
     }
 }
 
+fn remote_local_allowed(command: LocalCommand) -> bool {
+    matches!(command, LocalCommand::Help | LocalCommand::About | LocalCommand::Attach
+        | LocalCommand::Sessions | LocalCommand::Split | LocalCommand::Vsplit
+        | LocalCommand::Pane | LocalCommand::Sidebar | LocalCommand::Detach)
+}
+
 impl std::fmt::Display for LocalCommand {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(self.name())
@@ -226,6 +232,10 @@ impl App {
             return false;
         };
         let command = parsed.kind;
+        if self.remote_mode && !remote_local_allowed(command) {
+            self.notice = "This command is available on the session host, not through the remote hub".into();
+            return true;
+        }
         let name = command.name();
         let args: Vec<&str> = parsed.args.split_whitespace().collect();
         if !matches!(
@@ -323,7 +333,9 @@ impl App {
                 self.open_help();
             }
             LocalCommand::About => self.open_about(),
-            LocalCommand::Sessions => self.open_live_sessions(),
+            LocalCommand::Sessions => {
+                if self.remote_mode { self.local_attach(""); } else { self.open_live_sessions(); }
+            },
             LocalCommand::Settings => self.open_settings_menu(),
             LocalCommand::Model => self.open_model_picker(),
             LocalCommand::Effort => self.open_effort_picker(),
@@ -388,6 +400,7 @@ impl App {
     // This single call site is the prompt Enter handler, never the command
     // registry, daemon frames, remote messages or model tool callbacks.
     pub(super) fn submit_keyboard_shell(&mut self) {
+        if self.remote_mode { self.notice = "Local shell is unavailable in remote session mode".into(); return; }
         let Some(id) = self.groups[self.active_group]
             .active_id()
             .map(str::to_owned)
@@ -484,6 +497,10 @@ impl App {
             return false;
         };
         let command = parsed.kind;
+        if self.remote_mode && !remote_local_allowed(command) {
+            self.notice = "This command is available on the session host, not through the remote hub".into();
+            return true;
+        }
         let args = parsed.args;
         match command {
             LocalCommand::Doctor if args.trim().is_empty() => {
@@ -921,8 +938,13 @@ impl App {
                         self.input_cursor = self.input.len();
                         self.focus = Focus::Prompt;
                     }
-                    actions::Action::New => self.open_engine_picker(),
-                    actions::Action::Fleet(view) => self.open_fleet(view.root, Some(view.run_id)),
+                    actions::Action::New => {
+                        if self.remote_mode { self.local_attach(""); } else { self.open_engine_picker(); }
+                    }
+                    actions::Action::Fleet(view) => {
+                        if self.remote_mode { self.notice = "Fleet controls are available on the session host".into(); }
+                        else { self.open_fleet(view.root, Some(view.run_id)); }
+                    }
                     actions::Action::Tab(pane, tab) => {
                         if self.groups.get(pane).is_some_and(|g| tab < g.tabs.len()) {
                             self.active_group = pane;

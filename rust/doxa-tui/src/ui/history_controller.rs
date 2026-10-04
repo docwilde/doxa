@@ -117,6 +117,7 @@ impl App {
     }
 
     pub(super) fn open_history(&mut self) {
+        if self.remote_mode { self.notice = "Remote history is limited to the hub transcript snapshot".into(); return; }
         if !self.history_fits() {
             self.notice = "Enlarge active pane to search sessions".into();
             return;

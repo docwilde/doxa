@@ -14,6 +14,7 @@ use crate::launch;
 
 impl App {
     pub(super) fn open_model_picker(&mut self) {
+        if self.remote_mode { self.notice = "Remote model is controlled on the session host".into(); return; }
         if self.size.width > 0 && (self.size.width < 29 || self.size.height < 11) {
             self.notice = "Enlarge terminal to open model picker".into();
             return;
@@ -81,6 +82,7 @@ impl App {
     }
 
     pub(super) fn open_effort_picker(&mut self) {
+        if self.remote_mode { self.notice = "Remote reasoning effort is controlled on the session host".into(); return; }
         if self.size.width > 0 && (self.size.width < 29 || self.size.height < 11) {
             self.notice = "Enlarge terminal to open effort picker".into();
             return;
@@ -187,6 +189,7 @@ impl App {
     }
 
     pub(super) fn open_permission_picker(&mut self) {
+        if self.remote_mode { self.notice = "Remote permission mode is controlled on the session host".into(); return; }
         if self.size.width > 0 && (self.size.width < 60 || self.size.height < 15) {
             self.notice = "Enlarge terminal to open permission picker".into();
             return;
@@ -382,6 +385,7 @@ impl App {
     }
 
     pub(super) fn open_engine_picker(&mut self) {
+        if self.remote_mode { self.notice = "Remote engine is controlled on the session host".into(); return; }
         if !self.manual_tab_available() {
             return;
         }

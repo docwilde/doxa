@@ -25,6 +25,7 @@ use terminal_loop::*;
 pub use terminal_loop::{
     run, run_with_channels, run_with_channels_state, run_with_channels_state_guarded,
     run_with_frames, run_with_worker_channels, run_with_worker_channels_state_guarded,
+    run_remote_with_worker_channels,
 };
 mod session_events;
 mod session_telemetry;
@@ -430,6 +431,9 @@ struct ChipInfo {
 
 fn chip_hint(kind: &str) -> &'static str {
     match kind {
+        "remote" => "Session is controlled through a private DOXA hub",
+        "remote_engine" => "Engine reported by the remote session host",
+        "remote_model" => "Model reported by the remote session host",
         "permission" => "Permission mode for this session · click to choose",
         "engine" => "Engine for new sessions · click to choose",
         "model" => "Model for this session · click to choose",
@@ -1239,6 +1243,7 @@ enum RailRow {
 
 #[derive(Debug)]
 pub struct App {
+    remote_mode: bool,
     keybindings: crate::keybindings::Bindings,
     preferences: crate::preferences::Preferences,
     persist_preferences: bool,
@@ -1475,6 +1480,7 @@ pub struct App {
 impl Default for App {
     fn default() -> Self {
         Self {
+            remote_mode: false,
             keybindings: crate::keybindings::Bindings::default(),
             preferences: crate::preferences::Preferences::load(),
             persist_preferences: false,

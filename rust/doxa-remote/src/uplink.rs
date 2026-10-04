@@ -138,6 +138,7 @@ async fn execute(app:&Arc<App>,owner:&str,session_id:&str,op:&str,payload:&Value
             "transcript"=>{
                 let mut history=daemon::transcript(&client.hello)?;
                 history["pending_inputs"]=client.hello["pending_inputs"].clone();
+                history["pending_inputs_complete"]=client.hello["pending_inputs_complete"].clone();
                 scrub_data(&mut history,&app.lore)?;
                 Ok(bounded_history(history))
             },

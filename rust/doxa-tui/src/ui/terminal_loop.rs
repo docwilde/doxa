@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 enum FrameSource {
     Wire(Receiver<serde_json::Value>),
     Worker(Receiver<crate::worker_frames::WorkerFrame>),
+    Remote(Receiver<crate::worker_frames::WorkerFrame>),
 }
 
 impl FrameSource {
@@ -25,7 +26,7 @@ impl FrameSource {
             Self::Wire(receiver) => receiver
                 .try_recv()
                 .map(|frame| app.apply_daemon_frame(&frame)),
-            Self::Worker(receiver) => receiver
+            Self::Worker(receiver) | Self::Remote(receiver) => receiver
                 .try_recv()
                 .map(|frame| app.apply_worker_frame(frame)),
         }
@@ -185,6 +186,15 @@ pub fn run_with_worker_channels(
     run_loop(FrameSource::Worker(frames), Some(prompts), None)
 }
 
+/// Open hub sessions in the regular DOXA terminal layout with remote-only
+/// commands. The hub remains the source of session identity and transcript.
+pub fn run_remote_with_worker_channels(
+    frames: Receiver<crate::worker_frames::WorkerFrame>,
+    prompts: SyncSender<crate::bridge::WorkerCommand>,
+) -> io::Result<()> {
+    run_loop(FrameSource::Remote(frames), Some(prompts), None)
+}
+
 pub fn run_with_worker_channels_state_guarded(
     frames: Receiver<crate::worker_frames::WorkerFrame>,
     prompts: SyncSender<crate::bridge::WorkerCommand>,
@@ -218,6 +228,7 @@ fn run_loop(
             .map(|s| Rect::new(0, 0, s.width, s.height))?,
         ..Default::default()
     };
+    app.remote_mode = matches!(receiver, FrameSource::Remote(_));
     app.persist_preferences = true;
     app.plugin_refresh_dirty = true;
     app.sidebar_auto = app.preferences.value("sidebar").is_empty();

@@ -27,8 +27,14 @@ automatically replayed; inspect the daemon before sending it again.
 From a second DOXA installation, `doxa remote list HUB_URL`, `doxa remote
 send HUB_URL HOST_ID~SESSION_ID "prompt"`, and `doxa remote answer HUB_URL
 HOST_ID~SESSION_ID REQUEST_ID allow|deny` use the same owner-scoped hub API.
-Native remote tabs and full historical transcript fetch are still in progress;
-the hub brokers a bounded recent snapshot from the host on demand.
+`doxa remote tui HUB_URL` opens live hub sessions in the native DOXA tab layout.
+The first session opens immediately; `Ctrl+T` chooses another remote session.
+Prompts and pending answers use stable request IDs for uncertain delivery,
+while transcript snapshots and SSE events resume at a sequence cursor. This
+remote-only window does not mix local tabs or restore its tab layout after exit.
+Provider settings, LORE management and filesystem operations remain on the
+host. Full historical transcript fetch is still in progress; the hub brokers
+a bounded recent snapshot from the host on demand.
 New session titles use `model@branch/repo` in Git or `model@short-path`
 elsewhere; a second matching session gets `-2`. Explicit renames stay pinned.
 The [parity tracker](../docs/rust-1.19-parity.md) records stable release gates.

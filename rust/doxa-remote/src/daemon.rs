@@ -71,9 +71,11 @@ fn read_frame(reader: &mut BufReader<UnixStream>, line: &mut Vec<u8>) -> io::Res
 /// Snapshot is pinned to the daemon's hello byte boundary, so later appends
 /// cannot double-render events opened with that same `next_seq` cursor.
 pub fn transcript(hello: &Value) -> io::Result<Value> {
-    let Some(path) = hello["transcript_path"].as_str() else { return Ok(json!({"turns":[],"dropped_turns":0})); };
-    let Some(size) = hello["transcript_bytes"].as_u64() else { return Ok(json!({"turns":[],"dropped_turns":0})); };
-    if size == 0 { return Ok(json!({"turns":[],"dropped_turns":0})); }
+    let empty = || json!({"turns":[],"dropped_turns":0,
+        "next_seq":hello.get("transcript_seq").unwrap_or(&hello["next_seq"])});
+    let Some(path) = hello["transcript_path"].as_str() else { return Ok(empty()); };
+    let Some(size) = hello["transcript_bytes"].as_u64() else { return Ok(empty()); };
+    if size == 0 { return Ok(empty()); }
     let mut file = OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(Path::new(path))?;
     let meta = file.metadata()?;
     if !meta.is_file() || meta.uid() != unsafe { libc::geteuid() } || meta.nlink() != 1 || meta.len() < size {
@@ -176,5 +178,10 @@ mod tests {
         assert_eq!(result["dropped_turns"], 2);
         assert_eq!(result["turns"][0]["prompt"], "p2");
         assert_eq!(result["next_seq"], 77);
+    }
+    #[test] fn empty_transcript_keeps_replay_cursor() {
+        let result = transcript(&json!({"next_seq": 19})).unwrap();
+        assert_eq!(result["turns"], json!([]));
+        assert_eq!(result["next_seq"], 19);
     }
 }

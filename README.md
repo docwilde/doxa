@@ -24,7 +24,7 @@
 - **Reviewed memory.** Browse LORE facts and beliefs, inspect evidence, and accept or reject proposed beliefs.
 - **Repo tools.** Navigate repositories and worktrees, switch branches, inspect diffs, and review tracked changes.
 - **Peer coordination.** Inspect peer messages in the TUI or browser map and run supervised fleets with spend controls.
-- **Private remote access.** Opt in to a Rust browser view on one machine or register sessions with a private hub for browser and CLI control from another device. Live page notifications report completed turns and input requests.
+- **Private remote access.** Opt in to a Rust browser view or register sessions with a private hub for browser, CLI, and native TUI control from another device. Connected browser pages can report completed turns and input requests.
 - **Custom controls.** Manage provider login, API keys, plugins, and settings in the TUI. Remap window shortcuts without rebuilding.
 
 ## Install
@@ -63,10 +63,15 @@ follows live events, sends prompts, and resolves pending input.
 For control across machines, run `doxa-hub` on a private server and
 `doxa remote connect HUB_URL HOST_ID` on the session host. Use the browser at
 `HUB_URL` or `doxa remote list/send/answer` from another DOXA installation.
+Run `doxa remote tui HUB_URL` there to view live remote sessions in DOXA tabs,
+send prompts, and answer pending input. `Ctrl+T` selects another live remote
+session; tab and pane navigation use the usual DOXA keys. Remote tabs show a
+bounded recent transcript and live events. Model, permission, filesystem and
+LORE controls stay on the session host.
 The [Rust guide](rust/README.md) has setup steps, and the
 [hub plan](docs/plans/remote-hub.md) covers the Android client contract.
 Browser notifications work while the page is connected. Background push and
-native remote TUI tabs are still planned.
+the Android app are still planned.
 
 ## Gallery
 
