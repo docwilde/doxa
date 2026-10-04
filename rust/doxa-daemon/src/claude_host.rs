@@ -1909,7 +1909,7 @@ mod tests {
     ) -> (tempfile::TempDir, Arc<ClaudeHost>) {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("claude");
-        fs::write(&path,format!(r#"#!/usr/bin/python3
+        fs::write(&path,format!(r#"#!/usr/bin/env python3
 import sys,json,os,time
 model='claude-opus-5-5';effort='high'
 def emit(row): print(json.dumps(row),flush=True)

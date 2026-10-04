@@ -12,6 +12,7 @@ the stable 2.0 release has not been cut.
 - Run bounded alpha.68 Claude, DeepSeek and GLM native stop/resume checks; all three returned exact synthetic recall and numeric usage.
 - Expand macOS **`rust-ci.yml`** to the complete Rust workspace and the native vendor lifecycle verifier against local SSE.
 - Keep the protected Codex migration success fixture on Linux; assert macOS refuses it without starting the provider.
+- Resolve test fixture Python through **`PATH`** on macOS and allow bounded startup time in the Claude bridge test.
 - Add **`verify_native_claude_live.py`** for opt-in, metadata-only subscription checks with isolated DOXA/LORE state.
 
 **Documentation**

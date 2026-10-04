@@ -146,7 +146,7 @@ fn explicit_legacy_migration_resumes_exact_provider_thread_without_creating_one(
     let store = seed(root);
     let before = fs::read(store.transcript_path()).unwrap();
     let provider = root.join("provider");
-    fs::write(&provider,r#"#!/usr/bin/python3
+    fs::write(&provider,r#"#!/usr/bin/env python3
 import json,sys,tomllib,os,socket,threading,signal
 if 'DOXA_CODEX_OWNER_FD' in os.environ:
  control=socket.socket(fileno=int(os.environ['DOXA_CODEX_OWNER_FD']))

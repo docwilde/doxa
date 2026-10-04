@@ -105,7 +105,7 @@ const CLAUDE_SESSION: &str = "0b256c09-8d74-4865-9be0-4e6d24384551";
 // Executable stream-json fixtures are protocol peers, not SDK shims. They parse
 // the same exact control envelopes as the installed Claude Code CLI.
 fn claude_fixture(path: &Path, setup: &str, body: &str) {
-    executable(path, &format!(r#"#!/usr/bin/python3
+    executable(path, &format!(r#"#!/usr/bin/env python3
 import json,sys,os,time,signal
 from pathlib import Path
 root=Path(__file__).parent
@@ -681,7 +681,7 @@ fn legacy_registry_entry_blocks_resume_before_claude_host_starts() {
     let entry = registry.join("legacy-session.json");
     let marker = dir.path().join("claude-host-opened");
     let sidecar = dir.path().join("claude-sidecar.py");
-    executable(&sidecar, &format!("#!/usr/bin/python3\nfrom pathlib import Path\nPath({}).write_text('opened')\n",
+    executable(&sidecar, &format!("#!/usr/bin/env python3\nfrom pathlib import Path\nPath({}).write_text('opened')\n",
         serde_json::to_string(marker.to_str().unwrap()).unwrap()));
     let run_resume = || daemon_command()
         .args(["--runtime-dir", dir.path().join("runtime").to_str().unwrap(),
@@ -711,7 +711,7 @@ fn missing_unowned_resume_directory_refuses_before_claude_host_starts() {
     let missing = dir.path().join("missing-checkout");
     let marker = dir.path().join("claude-host-opened");
     let sidecar = dir.path().join("claude-sidecar.py");
-    executable(&sidecar, &format!("#!/usr/bin/python3\nfrom pathlib import Path\nPath({}).write_text('opened')\n",
+    executable(&sidecar, &format!("#!/usr/bin/env python3\nfrom pathlib import Path\nPath({}).write_text('opened')\n",
         serde_json::to_string(marker.to_str().unwrap()).unwrap()));
     let result = daemon_command()
         .args(["--runtime-dir", dir.path().join("runtime").to_str().unwrap(),
@@ -1757,7 +1757,7 @@ fn scrub_failure_withholds_provider_content_and_fails_turn() {
     let dir = tempfile::tempdir().unwrap();
     let codex = dir.path().join("codex-fixture");
     let python = Path::new("/usr/bin/python3");
-    executable(&codex,r#"#!/usr/bin/python3
+    executable(&codex,r#"#!/usr/bin/env python3
 import sys,json
 sys.stdin.read()
 print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':'sk-ownedCanonicalFixtureSecret1234567890 '+('x'*1100000)}}),flush=True)
@@ -3280,7 +3280,7 @@ fn codex_protected_startup_preserves_authoritative_build_refusal() {
     let dir=tempfile::tempdir_in(cache).unwrap();
     let codex=dir.path().join("unsupported-codex");
     let python = Path::new("/usr/bin/python3");
-    executable(&codex,r#"#!/usr/bin/python3
+    executable(&codex,r#"#!/usr/bin/env python3
 import json,sys
 init=json.loads(sys.stdin.readline())
 assert init['method']=='initialize'
@@ -3546,7 +3546,7 @@ fn native_spawn_reviews_exact_task_cancels_single_use_and_publishes_verified_chi
 #[test]
 fn cancellation_before_compaction_submission_clears_restart_guard_and_resumes_context() {
     let dir=tempfile::tempdir().unwrap(); let codex=dir.path().join("codex-source-stall");
-    executable(&codex,r#"#!/usr/bin/python3
+    executable(&codex,r#"#!/usr/bin/env python3
 import json,sys,os,tomllib,time
 from pathlib import Path
 root=Path(__file__).parent
