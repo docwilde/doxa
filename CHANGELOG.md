@@ -20,7 +20,7 @@ the stable 2.0 release has not been cut.
 
 **Runtime**
 
-- Let replay clients drain queued events before closing the write half of the socket; extend the bounded client write timeout to five seconds.
+- Set accepted Unix client sockets to blocking mode on macOS so replayed events are not cut off by inherited `O_NONBLOCK`.
 
 **Documentation**
 

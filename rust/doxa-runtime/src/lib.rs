@@ -187,6 +187,9 @@ impl Daemon {
             while !inner.stopping.load(Ordering::Acquire) {
                 match self.listener.accept() {
                     Ok((stream, _)) => {
+                        // Darwin inherits O_NONBLOCK from the listener; client
+                        // read/write timeouts require a blocking stream.
+                        if stream.set_nonblocking(false).is_err() { continue; }
                         if inner.active_connections.fetch_update(Ordering::AcqRel, Ordering::Acquire,
                             |count| (count < MAX_CONNECTIONS).then_some(count + 1)).is_err() {
                             continue;
@@ -408,18 +411,13 @@ fn handle_client(inner: Arc<Inner>, stream: UnixStream) {
             "disabled_tools":lore_status.as_ref().and_then(|value|value["disabled_tools"].as_array().cloned()),
             "lore_enabled":inner.host.lore_enabled(),"lore_scrub":lore_scrub,"billing":billing,"account":inner.host.account_snapshot()})
     };
-    // Give a full replay bounded time to drain through a busy local client.
-    if writer.set_write_timeout(Some(Duration::from_secs(5))).is_err() ||
+    if writer.set_write_timeout(Some(Duration::from_secs(2))).is_err() ||
         writer.write_all(&encode_reply(&hello)).is_err() { return; }
     let writer_thread = thread::spawn(move || {
         while let Ok(bytes) = rx.recv() {
-            if let Err(error) = writer.write_all(&bytes) {
-                #[cfg(debug_assertions)]
-                eprintln!("doxa runtime client write ended: {error}");
-                break;
-            }
+            if writer.write_all(&bytes).is_err() { break; }
         }
-        let _ = writer.shutdown(std::net::Shutdown::Write);
+        let _ = writer.shutdown(std::net::Shutdown::Both);
     });
     let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
     let mut reader = BufReader::new(stream);
@@ -429,11 +427,7 @@ fn handle_client(inner: Arc<Inner>, stream: UnixStream) {
             Ok(0) => break,
             Ok(_) => {},
             Err(err) if err.kind() == io::ErrorKind::TimedOut || err.kind() == io::ErrorKind::WouldBlock => continue,
-            Err(error) => {
-                #[cfg(debug_assertions)]
-                eprintln!("doxa runtime client read ended: {error}");
-                break;
-            },
+            Err(_) => break,
         }
         let parsed = serde_json::from_slice::<Value>(&line);
         line.clear();
