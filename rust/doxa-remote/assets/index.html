@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DOXA remote</title>
+<link rel="stylesheet" href="/remote.css">
+<main>
+  <header><strong>ΔΟΞΑ</strong><span id="status">Connecting…</span><button id="notify" type="button">Notifications</button></header>
+  <nav id="sessions" aria-label="Sessions"></nav>
+  <section id="conversation" aria-live="polite"></section>
+  <section id="question" hidden></section>
+  <form id="prompt"><textarea id="prompt-text" aria-label="Message" placeholder="Message this session" rows="3"></textarea><button>Send</button></form>
+</main>
+<script src="/remote.js" defer></script>
+</html>

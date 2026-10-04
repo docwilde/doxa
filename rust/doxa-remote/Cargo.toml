@@ -1,0 +1,28 @@
+[package]
+name = "doxa-remote"
+version = "2.0.0-alpha.70"
+edition = "2021"
+publish = false
+license = "AGPL-3.0-only"
+
+[[bin]]
+name = "doxa-remote"
+path = "src/main.rs"
+
+[dependencies]
+doxa-peers = { path = "../doxa-peers" }
+doxa-protocol = { path = "../doxa-protocol" }
+doxa-lore = { path = "../doxa-lore" }
+serde_json = "1"
+libc = "0.2"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+bytes = "1"
+futures-util = "0.3"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros", "signal"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+[dev-dependencies]
+tempfile = "3"
+doxa-runtime = { path = "../doxa-runtime" }

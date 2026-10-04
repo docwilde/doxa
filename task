@@ -13,19 +13,24 @@ esac
 root=$(CDPATH= cd -- "$script_dir" && pwd -P) || fail 'cannot find repository root'
 tui_manifest=$root/rust/doxa-tui/Cargo.toml
 daemon_manifest=$root/rust/doxa-daemon/Cargo.toml
-[ -f "$tui_manifest" ] && [ -f "$daemon_manifest" ] ||
+remote_manifest=$root/rust/doxa-remote/Cargo.toml
+[ -f "$tui_manifest" ] && [ -f "$daemon_manifest" ] && [ -f "$remote_manifest" ] ||
   fail 'run this script from the DOXA Rust source checkout'
 
 usage() {
   cat <<'EOF'
 Usage: ./task COMMAND [arguments]
 
-  build [--release]     Build the frontend, daemon and native LORE (debug by default)
+  build [--release]     Build the frontend, daemon, remote adapter and native LORE
   install               Build and install committed HEAD as the Rust doxa launcher
   codex-provider [args] Build/install the pinned protected Codex app-server
   run [doxa args]       Build and run the frontend in the current directory
   new [doxa args]       Build and start a new session in the current directory
   doctor [args]         Build and check the native launch dependencies
+  remote serve          Build and start the private Rust browser adapter
+  remote connect URL HOST_ID
+                       Connect this machine's sessions to a private hub
+  hub                  Build and start the private Rust server hub
   test                  Run all Rust crate tests
   clean                 Remove the task's local Rust build directory
   help                  Show this help
@@ -65,11 +70,13 @@ build() {
     info 'building release frontend, daemon and native LORE'
     cargo build --release --locked --manifest-path "$tui_manifest" --bin doxa-rs
     cargo build --release --locked --manifest-path "$daemon_manifest" --bin doxa-daemon
+    cargo build --release --locked --manifest-path "$remote_manifest" --bin doxa-remote
     cargo build --release --locked --manifest-path "$tui_manifest" --package lore-core --bin lore-rs
   else
     info 'building debug frontend, daemon and native LORE'
     cargo build --locked --manifest-path "$tui_manifest" --bin doxa-rs
     cargo build --locked --manifest-path "$daemon_manifest" --bin doxa-daemon
+    cargo build --locked --manifest-path "$remote_manifest" --bin doxa-remote
     cargo build --locked --manifest-path "$tui_manifest" --package lore-core --bin lore-rs
   fi
 }
@@ -84,6 +91,7 @@ launch() {
   [ -x "$binary" ] && [ -x "$daemon" ] && [ -x "$lore" ] || fail 'Cargo produced no runnable frontend, daemon or native LORE'
   export DOXA_LORE_RS=$lore
   export DOXA_DAEMON_BIN=$daemon
+  export DOXA_REMOTE_BIN=$target_dir/$profile/doxa-remote
   case $verb in
     run) exec "$binary" "$@" ;;
     *) exec "$binary" "$verb" "$@" ;;
@@ -124,6 +132,15 @@ case $command in
   install) [ "$#" -eq 0 ] || fail 'install takes no arguments'; install_committed ;;
   codex-provider) install_codex_provider "$@" ;;
   run|new|doctor) launch "$command" "$@" ;;
+  remote)
+    case $#:${1:-} in
+      1:serve|2:list|3:connect|4:send|5:answer) launch remote "$@" ;;
+      *) fail 'usage: ./task remote serve | connect URL HOST_ID | list URL | send URL SESSION TEXT | answer URL SESSION REQUEST_ID allow|deny' ;;
+    esac ;;
+  hub)
+    [ "$#" -eq 0 ] || fail 'hub takes no arguments'
+    cargo build --locked --manifest-path "$root/rust/doxa-hub/Cargo.toml" --bin doxa-hub
+    exec "$target_dir/debug/doxa-hub" ;;
   test)
     [ "$#" -eq 0 ] || fail 'test takes no arguments'
     command -v cargo >/dev/null 2>&1 || fail 'cargo is required (install Rust first)'
@@ -132,7 +149,7 @@ case $command in
     cargo build --locked --manifest-path "$tui_manifest" --package lore-core --bin lore-rs
     export DOXA_LORE_RS=$target_dir/debug/lore-rs
     [ -x "$DOXA_LORE_RS" ] || fail 'Cargo produced no native LORE executable'
-    for crate in doxa-tui doxa-engines doxa-lore doxa-peers doxa-protocol \
+    for crate in doxa-tui doxa-remote doxa-hub doxa-engines doxa-lore doxa-peers doxa-protocol \
       doxa-claude doxa-transcript doxa-state doxa-runtime doxa-daemon \
       doxa-worktrees doxa-vendors; do
       case $crate in

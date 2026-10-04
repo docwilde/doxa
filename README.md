@@ -24,6 +24,7 @@
 - **Reviewed memory.** Browse LORE facts and beliefs, inspect evidence, and accept or reject proposed beliefs.
 - **Repo tools.** Navigate repositories and worktrees, switch branches, inspect diffs, and review tracked changes.
 - **Peer coordination.** Inspect peer messages in the TUI or browser map and run supervised fleets with spend controls.
+- **Private remote access.** Opt in to a Rust browser view on one machine or register sessions with a private hub for browser and CLI control from another device. Live page notifications report completed turns and input requests.
 - **Custom controls.** Manage provider login, API keys, plugins, and settings in the TUI. Remap window shortcuts without rebuilding.
 
 ## Install
@@ -51,6 +52,21 @@ Ctrl+T opens the new-tab engine picker. Alt+V splits side by side; Alt+H stacks 
 DeepSeek and GLM show estimated API cost from provider token counts and published model rates. The estimate uses fresh-input rates (and DeepSeek peak rates), so cache discounts and off-peak billing can make the actual charge lower. Codex subscription usage appears after its app-server reports the Codex quota windows; missing values stay unknown.
 
 `/pending` and `/lore:pending --cluster` open global LORE proposals plus those for the current project with either engine. `lore status` reports the whole-store pending count across all projects.
+
+## Remote access
+
+Remote access is opt-in. Set `DOXA_REMOTE_ENABLED=1` and
+`DOXA_REMOTE_ALLOWED_LOGINS=you@example.com`, then run `doxa remote serve`
+behind private Tailscale Serve. The Rust browser view reads recent turns,
+follows live events, sends prompts, and resolves pending input.
+
+For control across machines, run `doxa-hub` on a private server and
+`doxa remote connect HUB_URL HOST_ID` on the session host. Use the browser at
+`HUB_URL` or `doxa remote list/send/answer` from another DOXA installation.
+The [Rust guide](rust/README.md) has setup steps, and the
+[hub plan](docs/plans/remote-hub.md) covers the Android client contract.
+Browser notifications work while the page is connected. Background push and
+native remote TUI tabs are still planned.
 
 ## Gallery
 
@@ -84,7 +100,7 @@ These frames come from the running 2.0.0-alpha.68 Rust TUI with isolated DOXA an
 
 ## Scope and limits
 
-Rust 2.0 is the main DOXA line. Linux has bounded live Claude, DeepSeek, GLM and Codex checks. macOS CI builds the native workspace and tests portable Rust crates, daemon suites, and local provider lifecycle fixtures; authenticated sessions have not been tested on macOS. The `.command` launcher is available there, while protected Codex remains Linux-only because its process-owner contract has no macOS equivalent yet. Windows remains unsupported; see [platform verification](docs/platform-verification.md). You choose the engine: DOXA does not switch between Claude, Codex, DeepSeek, and GLM based on your prompt or a provider failure. Plugin adoption excludes foreign hooks and MCP servers. The optional [browser adapter](docs/plans/remote.md#optional-browser-renderer) requires Python development dependencies and a private Tailscale Serve Unix target.
+Rust 2.0 is the main DOXA line. Linux has bounded live Claude, DeepSeek, GLM and Codex checks. macOS CI builds the native workspace and tests portable Rust crates, daemon suites, and local provider lifecycle fixtures; authenticated sessions have not been tested on macOS. The `.command` launcher is available there, while protected Codex remains Linux-only because its process-owner contract has no macOS equivalent yet. Windows remains unsupported; see [platform verification](docs/platform-verification.md). You choose the engine: DOXA does not switch between Claude, Codex, DeepSeek, and GLM based on your prompt or a provider failure. Plugin adoption excludes foreign hooks and MCP servers. The optional [Rust browser adapter and private hub](docs/plans/remote-hub.md) require explicit Tailscale Serve configuration; the Python browser adapter remains a compatibility reference.
 
 The [Rust guide](rust/README.md) covers workflows and provider limits. The [parity tracker](docs/rust-1.19-parity.md), [latest provider verification](docs/live-provider-verification-2026-10-04.md), [source audit](docs/source-audit-2026-09-27.md), and [UI benchmark](docs/rust-ui-benchmark-2026-09-30.md) hold detailed evidence and remaining gates. Python 1.x documentation remains [historical reference](docs/manual.md); normal installation uses Rust.
 

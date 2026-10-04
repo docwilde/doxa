@@ -385,6 +385,10 @@ fn handle_client(inner: Arc<Inner>, stream: UnixStream) {
     let id = inner.next_client_id.fetch_add(1, Ordering::Relaxed);
     let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(CLIENT_QUEUE_CAPACITY);
     let mut writer = match stream.try_clone() { Ok(s) => s, Err(_) => return };
+    // Capture the replay cursor before reading the transcript boundary.
+    // A provider can publish while the file is being inspected; using the
+    // later hello next_seq as the history cursor would omit those events.
+    let transcript_seq = inner.state.lock().unwrap().next_seq;
     let transcript = match inner.host.transcript_snapshot() {
         Ok(value) => value,
         Err(_) => return,
@@ -402,7 +406,7 @@ fn handle_client(inner: Arc<Inner>, stream: UnixStream) {
             "permission_mode":state.permission_mode, "bypass_armed":false,
             "engine":inner.session.engine, "effort":state.effort,"pending_effort":state.pending_effort, "cwd":inner.session.cwd, "next_seq":state.next_seq,
             "transcript_path":transcript.as_ref().map(|(path, _)| path.to_string_lossy().into_owned()),
-            "transcript_bytes":transcript.as_ref().map(|(_, size)| *size),
+            "transcript_bytes":transcript.as_ref().map(|(_, size)| *size),"transcript_seq":transcript_seq,
             "running":state.busy,"queued":state.prompts.len(),"remote_driver":remote_identity(&state),
             "pending_inputs":state.pending_inputs,"pending_inputs_complete":state.pending_inputs_complete,
             "can_set_model":can_set_model,
@@ -529,6 +533,13 @@ fn handle_prompt(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, client_id: u64, f
     let mut state = inner.state.lock().unwrap();
     if inner.stopping.load(Ordering::Acquire) {
         send(tx, json!({"type":"reply","id":req_id,"ok":false,"error":"daemon is stopping"})); return;
+    }
+    // The bridge checks its policy before forwarding, then the daemon checks
+    // again under the same admission lock as permission changes. A local UI
+    // cannot raise access between the bridge's status read and this prompt.
+    if frame["remote"] == true && matches!(state.permission_mode.as_str(), "bypassPermissions" | "dontAsk" | "full-access")
+        && frame["remote_allow_unrestricted"] != true {
+        send(tx,json!({"type":"reply","id":req_id,"ok":false,"error":"remote prompt refused in unrestricted permission mode"}));return;
     }
     if state.busy {
         if state.prompts.len() == PROMPT_QUEUE_CAPACITY {
@@ -860,6 +871,18 @@ mod tests {
         let state = daemon.inner.state.lock().unwrap();
         assert_eq!(state.effort.as_deref(), Some("low"));
         assert!(state.pending_effort.is_none());
+    }
+
+    #[test]
+    fn remote_prompt_gate_is_atomic_with_permission_mode() {
+        let dir=tempfile::tempdir().unwrap();
+        let daemon=Daemon::bind(dir.path(),Session{session_id:"remote-gate".into(),cwd:"/fixture".into(),
+            model:None,engine:"test".into(),doxa_version:"test".into()},Arc::new(NoopHost)).unwrap();
+        let (tx,rx)=mpsc::sync_channel(CLIENT_QUEUE_CAPACITY);
+        daemon.inner.state.lock().unwrap().permission_mode="full-access".into();
+        handle_prompt(&daemon.inner,&tx,1,&json!({"id":1,"text":"run","remote":true,"remote_allow_unrestricted":false}));
+        assert_eq!(serde_json::from_slice::<Value>(&rx.try_recv().unwrap()).unwrap()["ok"],false);
+        assert!(!daemon.inner.state.lock().unwrap().busy);
     }
 
     #[test]

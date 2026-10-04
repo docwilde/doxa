@@ -1,7 +1,7 @@
 # Rust 2.0 parity with DOXA 1.19.0
 
 Baseline: Python `v1.19.0` production behavior. This tracker records implementation
-through **alpha.69**, with canonical **LORE 0.62.11**. Account checks
+through **alpha.70**, with canonical **LORE 0.62.11**. Account checks
 are bounded by their exact candidate and date.
 The Rust runtime implements the audited workflows below. Live account checks
 remain bounded by the [latest verification record](live-provider-verification-2026-09-29.md)
@@ -56,6 +56,7 @@ coverage alone does not establish authenticated compatibility for every provider
 | Alpha.67 | Scrollbar thumbs reach the last track cell at the final page. Restore flat detached records without reopening tabs, save generated labels, and show recoverable dead sessions below live projects in muted italic text. |
 | Alpha.68 | Recapture the nine README frames from the running Rust frontend and daemon, including grouped sessions and LORE browsers. |
 | Alpha.69 | Run bounded alpha.68 Claude, DeepSeek and GLM native release checks; expand macOS CI to portable Rust crates, daemon suites, and a local SSE vendor lifecycle fixture. |
+| Alpha.70 | Add the opt-in Rust browser adapter, private hub and outbound connector; keep cross-machine history volatile and prompt admission guarded by current daemon permissions. |
 
 Standalone LORE administration, hooks, MCP and network operations are native Rust;
 they are not a remaining Python replacement task. See the
@@ -115,10 +116,11 @@ remains unsupported.
 - Native input, output, tab, roster and snapshot bounds remain enforced. Normal
   manual tab admission is bounded; restoration retains one validated reserved
   fresh-session slot rather than silently deleting an archived conversation.
-- The native remote peer bridge verifies Unix transport credentials. The retained
-  optional Python browser remote adapter now binds a private Unix socket and
-  requires the same kernel-attested proxy identity. Loopback TCP and identity
-  headers alone remain insufficient.
+- The native remote peer bridge and Rust browser adapter verify Unix transport
+  credentials. The private Rust hub brokers prompts and live events through an
+  outbound host connector; its history and commands are volatile. The retained
+  Python browser adapter is a compatibility path. Native remote tabs and
+  background push remain open.
 
 ## Commands
 

@@ -58,6 +58,14 @@ Commands:
                        Discover plugins or change sanitized adoption for new sessions
   fleet ...            Inspect or start native fleet runs
   mesh serve           Serve the private peer graph until Ctrl-C
+  remote serve         Serve live sessions to an allowed Tailscale browser
+  remote connect URL HOST_ID
+                       Register this machine's sessions with a private hub
+  remote list URL        List sessions registered with a private hub
+  remote send URL SESSION TEXT
+                       Send a prompt through the private hub
+  remote answer URL SESSION REQUEST_ID allow|deny
+                       Resolve one pending approval through the private hub
 
 Run doxa without a command to restore this project's saved tabs or start
 a session with the configured engine (Claude by default). Pass --engine or --model to start a new session.
@@ -179,6 +187,20 @@ fn run(args: &[String]) -> io::Result<()> {
                     [_, action, value] if action == "adopt" && (value == "on" || value == "off") => println!("{}", operations::plugins_change(value == "on")?),
                     _ => return Err(invalid("usage: doxa plugins [refresh | adopt on|off]")),
                 }
+                return Ok(());
+            }
+            "remote" => {
+                if !matches!(args, [first, second] if first == "remote" && second == "serve")
+                    && !matches!(args, [first, second, _, _] if first == "remote" && second == "connect")
+                    && !matches!(args, [first, second, _, _, _] if first == "remote" && second == "send")
+                    && !matches!(args, [first, second, _] if first == "remote" && second == "list")
+                    && !matches!(args, [first, second, _, _, _, _] if first == "remote" && second == "answer") {
+                    return Err(invalid("usage: doxa remote serve | connect URL HOST_ID | list URL | send URL SESSION TEXT | answer URL SESSION REQUEST_ID allow|deny"));
+                }
+                let executable = std::env::var_os("DOXA_REMOTE_BIN").map(PathBuf::from)
+                    .unwrap_or_else(|| std::env::current_exe().unwrap_or_default().with_file_name("doxa-remote"));
+                let status = Command::new(executable).args(&args[1..]).status()?;
+                if !status.success() { return Err(io::Error::other(format!("remote adapter exited with {status}"))); }
                 return Ok(());
             }
             _ => {}
