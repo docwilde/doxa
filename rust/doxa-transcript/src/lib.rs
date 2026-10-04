@@ -393,6 +393,10 @@ impl TranscriptStore {
     pub fn try_write_vendor_context(&self, engine: &str, messages: &[Value], summary: &str, reviewed_source: &Value,
         mut unchanged: impl FnMut() -> io::Result<bool>) -> io::Result<()> {
         use sha2::{Digest, Sha256};
+        use std::ffi::CString;
+        use std::os::fd::{AsRawFd, FromRawFd};
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT_CONTEXT_FILE: AtomicU64 = AtomicU64::new(0);
         owned_dir(&self.dir)?; validate_vendor_messages(messages)?;
         if messages.is_empty() || summary.trim().is_empty() || summary.len() > 64 * 1024 || !reviewed_source.is_object() { return Err(bad_data()); }
         let directory = open_directory(&self.dir)?;
@@ -401,21 +405,34 @@ impl TranscriptStore {
             "session_id":self.session_id,"compacted_messages":messages.len(),
             "prefix_sha256":format!("{:x}",Sha256::digest(serde_json::to_vec(messages)?)),
             "reviewed_source":reviewed_source,"summary":summary});
-        // The fd keeps all writes anchored to this exact owned directory even
-        // if someone swaps its path while the provider is summarizing.
-        #[cfg(target_os = "macos")]
-        let anchored = PathBuf::from(format!("/dev/fd/{}", std::os::fd::AsRawFd::as_raw_fd(&directory)));
-        #[cfg(not(target_os = "macos"))]
-        let anchored = PathBuf::from(format!("/proc/self/fd/{}", std::os::fd::AsRawFd::as_raw_fd(&directory)));
-        let mut temp = tempfile::Builder::new().prefix(".context-").tempfile_in(&anchored)?;
-        temp.as_file().set_permissions(fs::Permissions::from_mode(0o600))?;
-        temp.write_all(&serde_json::to_vec(&value)?)?; temp.as_file().sync_all()?;
-        let current = open_directory(&self.dir)?.metadata()?;
-        if (identity.dev(),identity.ino()) != (current.dev(),current.ino()) || !unchanged()? { return Err(io::Error::other("reviewed context source changed")); }
-        let current = open_directory(&self.dir)?.metadata()?;
-        if (identity.dev(),identity.ino()) != (current.dev(),current.ino()) { return Err(io::Error::other("context directory changed")); }
-        temp.persist(anchored.join(format!("{}.context.json",self.session_id))).map_err(|error| error.error)?;
-        directory.sync_all()
+        // Work through the opened directory itself. macOS /dev/fd/<dirfd> is
+        // not a usable parent for tempfile, and the original path can move.
+        let temporary = CString::new(format!(".context-{}-{}", std::process::id(),
+            NEXT_CONTEXT_FILE.fetch_add(1, Ordering::Relaxed))).unwrap();
+        let target = CString::new(format!("{}.context.json", self.session_id)).unwrap();
+        let fd = unsafe { libc::openat(directory.as_raw_fd(), temporary.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC, 0o600) };
+        if fd < 0 { return Err(io::Error::last_os_error()); }
+        let mut temp = unsafe { File::from_raw_fd(fd) };
+        let result = (|| {
+            temp.write_all(&serde_json::to_vec(&value)?)?;
+            temp.sync_all()?;
+            let current = open_directory(&self.dir)?.metadata()?;
+            if (identity.dev(),identity.ino()) != (current.dev(),current.ino()) || !unchanged()? {
+                return Err(io::Error::other("reviewed context source changed"));
+            }
+            let current = open_directory(&self.dir)?.metadata()?;
+            if (identity.dev(),identity.ino()) != (current.dev(),current.ino()) {
+                return Err(io::Error::other("context directory changed"));
+            }
+            if unsafe { libc::renameat(directory.as_raw_fd(), temporary.as_ptr(),
+                directory.as_raw_fd(), target.as_ptr()) } != 0 { return Err(io::Error::last_os_error()); }
+            directory.sync_all()
+        })();
+        if result.is_err() {
+            unsafe { libc::unlinkat(directory.as_raw_fd(), temporary.as_ptr(), 0); }
+        }
+        result
     }
 
     /// Read Python's vendor envelope. Older envelopes omit session_id/model;

@@ -7,13 +7,16 @@ the stable 2.0 release has not been cut.
 
 ## 2.0.0-alpha.69 — 2026-10-04
 
-**Platform verification**
+**Provider verification**
 
 - Run bounded alpha.68 Claude, DeepSeek and GLM native stop/resume checks; all three returned exact synthetic recall and numeric usage.
-- Expand macOS **`rust-ci.yml`** to portable Rust crates, daemon suites, and the native vendor lifecycle verifier against local SSE.
-- Keep the protected Codex migration success fixture on Linux; assert macOS refuses it without starting the provider.
-- Resolve test fixture Python through **`PATH`** on macOS and allow bounded startup time in the Claude bridge test.
 - Add **`verify_native_claude_live.py`** for opt-in, metadata-only subscription checks with isolated DOXA/LORE state.
+
+**macOS portability**
+
+- Expand **`rust-ci.yml`** to portable Rust crates, daemon suites, and native vendor lifecycle checks against local SSE.
+- Keep protected Codex success fixtures on Linux; assert macOS refuses migration without starting the provider.
+- Fix **`try_write_vendor_context`** to use directory-relative writes on macOS; resolve fixture Python through `PATH` and reset accepted HTTP sockets to blocking mode.
 
 **Documentation**
 

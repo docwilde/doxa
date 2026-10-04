@@ -408,7 +408,8 @@ fn handle_client(inner: Arc<Inner>, stream: UnixStream) {
             "disabled_tools":lore_status.as_ref().and_then(|value|value["disabled_tools"].as_array().cloned()),
             "lore_enabled":inner.host.lore_enabled(),"lore_scrub":lore_scrub,"billing":billing,"account":inner.host.account_snapshot()})
     };
-    if writer.set_write_timeout(Some(Duration::from_secs(2))).is_err() ||
+    // Give a full replay bounded time to drain through a busy local client.
+    if writer.set_write_timeout(Some(Duration::from_secs(5))).is_err() ||
         writer.write_all(&encode_reply(&hello)).is_err() { return; }
     let writer_thread = thread::spawn(move || {
         while let Ok(bytes) = rx.recv() {
