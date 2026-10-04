@@ -2,9 +2,12 @@
 
 Status: **partly implemented**. The policy gate, native cross-machine peer
 bridge, and optional Python browser adapter have credential-checked Unix
-listeners. The browser remains an optional compatibility component; the Rust
-installer does not include its Python dependencies. Richer browser views and
-the remaining design work below have not shipped.
+listeners. The Rust browser adapter under `rust/doxa-remote` is built by the
+installer; use `doxa remote serve` with private Tailscale Serve. A private Rust
+hub and outbound connector broker basic cross-machine browser and CLI control.
+The Python adapter remains a compatibility component. Native remote TUI tabs,
+background push and Android are tracked in
+the [remote hub plan](remote-hub.md).
 This plan was written after looking at a colleague's `telag`, which solves
 the same user problem from the other end.
 

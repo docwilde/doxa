@@ -6,6 +6,29 @@ its app server, and API vendors use Rust HTTP clients. Canonical LORE 0.62.11 is
 integrated Rust library for memory, reviews, indexing, and secret scrubbing;
 `lore-rs` also provides detached review and standalone plugin commands.
 The installed runtime requires no Python interpreter.
+`doxa remote serve` starts the optional Rust browser adapter on an owner-private
+Unix socket. Set `DOXA_REMOTE_ENABLED=1` and `DOXA_REMOTE_ALLOWED_LOGINS` to a
+comma-separated list of Tailscale logins, then point private Tailscale Serve at
+the printed `remote-browser.sock` path. The browser can read transcripts,
+follow live events, send prompts and answer pending requests. Remote access is
+off by default. The [remote hub plan](../docs/plans/remote-hub.md) covers
+cross-machine control and the eventual Android client.
+
+For the private hub, build `cargo build --locked -p doxa-hub` on a Unix server.
+Create an owner-private directory and set `DOXA_HUB_RUNTIME_DIR` to its absolute
+path, `DOXA_REMOTE_ENABLED=1`, and `DOXA_REMOTE_ALLOWED_LOGINS` to the owner.
+Run `doxa-hub` and point Tailscale Serve at `hub.sock`. On a workstation run
+`doxa remote connect https://SERVER.tailnet.ts.net HOST_ID` (HOST_ID contains
+letters, digits and hyphens). The host connector makes outbound requests
+to the hub and registers its live sessions. The browser at the hub URL can
+control them while both processes run. The hub is volatile: it loses presence,
+command results and its event ring on restart. An uncertain command is never
+automatically replayed; inspect the daemon before sending it again.
+From a second DOXA installation, `doxa remote list HUB_URL`, `doxa remote
+send HUB_URL HOST_ID~SESSION_ID "prompt"`, and `doxa remote answer HUB_URL
+HOST_ID~SESSION_ID REQUEST_ID allow|deny` use the same owner-scoped hub API.
+Native remote tabs and full historical transcript fetch are still in progress;
+the hub brokers a bounded recent snapshot from the host on demand.
 New session titles use `model@branch/repo` in Git or `model@short-path`
 elsewhere; a second matching session gets `-2`. Explicit renames stay pinned.
 The [parity tracker](../docs/rust-1.19-parity.md) records stable release gates.

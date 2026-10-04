@@ -5,6 +5,20 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.70 — 2026-10-04
+
+**Remote sessions**
+
+- Add **`doxa-remote`** as an installed Rust browser adapter with bounded transcript reads, SSE events, prompts and pending input answers over a private Unix socket.
+- Add **`doxa-hub`** and **`doxa remote connect`** for owner-scoped session registration, outbound event forwarding and bounded command delivery through Tailscale Serve.
+- Add **`doxa remote list/send/answer`** for basic control from a second DOXA installation.
+- Show opt-in browser notifications for completed turns and input requests while the remote page remains connected.
+
+**Safety and limits**
+
+- Gate the new listeners on an attested Unix proxy and allow-list; bind remote prompt admission to the daemon's current permission mode under its control lock.
+- Keep hub presence, command results and live events in bounded volatile memory; broker a scrubbed recent transcript on demand. Background push, native remote tabs, full history and Android remain open.
+
 ## 2.0.0-alpha.69 — 2026-10-04
 
 **Provider verification**

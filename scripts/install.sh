@@ -48,7 +48,7 @@ main() {
     trap - EXIT HUP INT TERM
     if [ "$installing" -eq 1 ]; then
       restore_failed=0
-      for name in doxa doxa-rs doxa-daemon-rs lore-rs doxa-claude-sidecar.py .doxa-sidecar-current .doxa-install-sha; do
+      for name in doxa doxa-rs doxa-daemon-rs doxa-remote lore-rs doxa-claude-sidecar.py .doxa-sidecar-current .doxa-install-sha; do
         rm -f "$bin_dir/$name" || { restore_failed=1; continue; }
         if [ -e "$stage/backup/$name" ] || [ -L "$stage/backup/$name" ]; then
           mv "$stage/backup/$name" "$bin_dir/$name" || restore_failed=1
@@ -74,7 +74,8 @@ main() {
   sha=$(git -C "$checkout" rev-parse HEAD) || exit 1
   tui_manifest="$checkout/rust/doxa-tui/Cargo.toml"
   daemon_manifest="$checkout/rust/doxa-daemon/Cargo.toml"
-  for required_file in "$tui_manifest" "$daemon_manifest" "$checkout/Cargo.lock"; do
+  remote_manifest="$checkout/rust/doxa-remote/Cargo.toml"
+  for required_file in "$tui_manifest" "$daemon_manifest" "$remote_manifest" "$checkout/Cargo.lock"; do
     [ -f "$required_file" ] || { printf 'doxa-install: missing %s\n' "$required_file" >&2; exit 1; }
   done
 
@@ -88,13 +89,15 @@ main() {
   printf 'doxa-install: building Rust frontend and daemon\n'
   CARGO_TARGET_DIR="$build_dir" cargo build --release --locked --target "$host_target" --manifest-path "$tui_manifest" --bin doxa-rs || exit 1
   CARGO_TARGET_DIR="$build_dir" cargo build --release --locked --target "$host_target" --manifest-path "$daemon_manifest" || exit 1
+  CARGO_TARGET_DIR="$build_dir" cargo build --release --locked --target "$host_target" --manifest-path "$remote_manifest" --bin doxa-remote || exit 1
   CARGO_TARGET_DIR="$build_dir" cargo build --release --locked --target "$host_target" --manifest-path "$tui_manifest" --package lore-core --bin lore-rs || exit 1
   lore_bin="$build_dir/$host_target/release/lore-rs"
   tui_bin="$build_dir/$host_target/release/doxa-rs"
   daemon_bin="$build_dir/$host_target/release/doxa-daemon-rs"
   [ -f "$daemon_bin" ] || daemon_bin="$build_dir/$host_target/release/doxa-daemon"
-  [ -f "$tui_bin" ] && [ -f "$daemon_bin" ] && [ -f "$lore_bin" ] || {
-    printf 'doxa-install: Rust build produced no frontend, daemon or native LORE carrier\n' >&2; exit 1;
+  remote_bin="$build_dir/$host_target/release/doxa-remote"
+  [ -f "$tui_bin" ] && [ -f "$daemon_bin" ] && [ -f "$remote_bin" ] && [ -f "$lore_bin" ] || {
+    printf 'doxa-install: Rust build produced no frontend, daemon, remote adapter or native LORE carrier\n' >&2; exit 1;
   }
 
   # Protected Codex uses a private provider build. Keep the official CLI for
@@ -112,14 +115,15 @@ main() {
   fi
 
   mkdir -p "$bin_dir" || exit 1
-  for name in doxa doxa-rs doxa-daemon-rs lore-rs doxa-claude-sidecar.py .doxa-sidecar-current .doxa-install-sha; do
+  for name in doxa doxa-rs doxa-daemon-rs doxa-remote lore-rs doxa-claude-sidecar.py .doxa-sidecar-current .doxa-install-sha; do
     [ ! -d "$bin_dir/$name" ] || [ -L "$bin_dir/$name" ] || { printf 'doxa-install: %s is a directory\n' "$bin_dir/$name" >&2; exit 1; }
   done
   stage=$(mktemp -d "$bin_dir/.doxa-install.XXXXXXXX") || exit 1
   cp "$tui_bin" "$stage/doxa-rs" || exit 1
   cp "$daemon_bin" "$stage/doxa-daemon-rs" || exit 1
+  cp "$remote_bin" "$stage/doxa-remote" || exit 1
   cp "$lore_bin" "$stage/lore-rs" || exit 1
-  chmod 755 "$stage/doxa-rs" "$stage/doxa-daemon-rs" "$stage/lore-rs" || exit 1
+  chmod 755 "$stage/doxa-rs" "$stage/doxa-daemon-rs" "$stage/doxa-remote" "$stage/lore-rs" || exit 1
   cat > "$stage/doxa" <<'SH'
 #!/bin/sh
 bin_dir=$(CDPATH= cd "$(dirname "$0")" && pwd) || exit 1
@@ -130,14 +134,14 @@ SH
   chmod 755 "$stage/doxa" || exit 1
   printf '%s\n' "$sha" > "$stage/.doxa-install-sha" || exit 1
   mkdir "$stage/backup" || exit 1
-  for name in doxa doxa-rs doxa-daemon-rs lore-rs doxa-claude-sidecar.py .doxa-sidecar-current .doxa-install-sha; do
+  for name in doxa doxa-rs doxa-daemon-rs doxa-remote lore-rs doxa-claude-sidecar.py .doxa-sidecar-current .doxa-install-sha; do
     if [ -e "$bin_dir/$name" ] || [ -L "$bin_dir/$name" ]; then
       cp -Pp "$bin_dir/$name" "$stage/backup/$name" || exit 1
     fi
   done
 
   installing=1
-  for name in doxa-rs doxa-daemon-rs lore-rs .doxa-install-sha doxa; do
+  for name in doxa-rs doxa-daemon-rs doxa-remote lore-rs .doxa-install-sha doxa; do
     # mv can treat a symlink to a directory as the destination directory,
     # leaving the old launcher pointer in place and writing inside its target.
     if [ -L "$bin_dir/$name" ]; then

@@ -70,6 +70,9 @@ pub fn validate(value: &Value, direction: Direction) -> Result<(), WireError> {
         (Direction::ClientToServer, "prompt") => {
             unsigned(value, "id")?;
             string(value, "text")?;
+            for key in ["remote", "remote_allow_unrestricted"] {
+                if value.get(key).is_some_and(|field| !field.is_boolean()) { return Err(WireError::InvalidField(key)); }
+            }
         }
         (Direction::ClientToServer, "call") => {
             unsigned(value, "id")?;
