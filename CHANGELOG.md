@@ -5,6 +5,18 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.69 — 2026-10-04
+
+**Platform verification**
+
+- Run bounded alpha.68 Claude, DeepSeek and GLM native stop/resume checks; all three returned exact synthetic recall and numeric usage.
+- Expand macOS **`rust-ci.yml`** to the complete Rust workspace and the native vendor lifecycle verifier against local SSE.
+- Add **`verify_native_claude_live.py`** for opt-in, metadata-only subscription checks with isolated DOXA/LORE state.
+
+**Documentation**
+
+- Update **`rust-1.19-parity.md`** with current release evidence and the available attested Unix browser adapter.
+
 ## 2.0.0-alpha.68 — 2026-10-03
 
 **Documentation**

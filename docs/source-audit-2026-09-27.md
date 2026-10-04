@@ -130,8 +130,10 @@ Python modules remain development compatibility references and test oracles.
 Live provider/account compatibility and macOS/Windows behavior remain outside
 the local fixture evidence.
 
-The optional retained browser remote adapter is deliberately unavailable until
-its transport can prove proxy identity. Alpha.40 uses a private pinned Codex
+At this audit date, the optional browser remote adapter was unavailable until
+its transport could prove proxy identity. Alpha.63 added the private Unix
+listener and kernel-attested proxy check for that adapter. Alpha.40 uses a
+private pinned Codex
 build that refuses compaction before inference/history replacement unless its
 trusted synchronous review explicitly allows it. Stock builds refuse protected
 turns. Live successful LORE review remains blocked by reviewer authentication.
