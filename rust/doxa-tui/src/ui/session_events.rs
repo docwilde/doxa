@@ -189,6 +189,20 @@ impl App {
                 self.session_telemetry.entry(session_id).or_default().lore = None;
                 true
             }
+            WorkerFrame::RemoteSnapshot { session_id, markdown, pending_inputs, pending_inputs_complete } => {
+                if !self.sessions.iter().any(|session| session.id == session_id) {
+                    false
+                } else {
+                    self.apply_update(DaemonUpdate::Transcript { id: session_id.clone(), markdown });
+                    self.restore_pending_inputs(&session_id,
+                        &serde_json::json!({"pending_inputs_complete":pending_inputs_complete,"pending_inputs":pending_inputs}));
+                    true
+                }
+            }
+            WorkerFrame::RemoteConnectivity { session_id, status } => {
+                self.apply_update(DaemonUpdate::Status { id: session_id, text: status });
+                true
+            }
             frame => self.apply_daemon_frame_inner(&frame.into_legacy_value()),
         };
         let owner_changed = before != self.prompt_owner();

@@ -906,7 +906,7 @@ impl App {
             return self.tool_key(key);
         }
         if self.keybindings.matches(KeyAction::NewTab, key) {
-            self.open_engine_picker();
+            if self.remote_mode { self.local_attach(""); } else { self.open_engine_picker(); }
             return true;
         }
         if self.keybindings.matches(KeyAction::Tools, key) {
@@ -1254,6 +1254,8 @@ impl App {
                     if let Some(id) = self.groups[self.active_group].active_id() {
                         if self.offline_ids.contains(id) {
                             self.notice = "Archived transcript is read-only".into();
+                        } else if self.remote_mode && (self.input == "/peers" || self.input == "/mesh" || self.input == "/msg" || self.input.starts_with("/msg ")) {
+                            self.notice = "Peer controls are available on the session host".into();
                         } else if self.input == "/peers" || self.input == "/mesh" {
                             self.map_modal = true;
                             self.peer_map.selected = 0;
@@ -1441,6 +1443,7 @@ impl App {
     }
 
     pub(super) fn open_stop_confirmation(&mut self) {
+        if self.remote_mode { self.notice = "Remote sessions must be stopped on their host".into(); return; }
         if !self.stop_confirmation_fits() {
             self.notice = "Enlarge terminal to confirm session stop".into();
             return;

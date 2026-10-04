@@ -14,6 +14,16 @@ pub enum WorkerFrame {
         session_id: String,
         markdown: String,
     },
+    RemoteSnapshot {
+        session_id: String,
+        markdown: String,
+        pending_inputs: Value,
+        pending_inputs_complete: bool,
+    },
+    RemoteConnectivity {
+        session_id: String,
+        status: String,
+    },
     Launch {
         group: usize,
         result: LaunchResult,
@@ -186,6 +196,12 @@ impl WorkerFrame {
                 markdown,
             } => json!({"type":"event", "session_id":session_id,
                 "event":{"type":"text_delta", "data":{"text":markdown,"snapshot":true}}}),
+            Self::RemoteSnapshot { session_id, markdown, pending_inputs, pending_inputs_complete } =>
+                json!({"type":"remote_snapshot","session_id":session_id,
+                    "markdown":markdown,"pending_inputs":pending_inputs,
+                    "pending_inputs_complete":pending_inputs_complete}),
+            Self::RemoteConnectivity { session_id, status } =>
+                json!({"type":"remote_connectivity","session_id":session_id,"status":status}),
             Self::Launch {
                 group,
                 result: LaunchResult::Attached { session_id },

@@ -5,6 +5,14 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.71 — 2026-10-05
+
+**Native remote tabs**
+
+- Add **`doxa remote tui HUB_URL`** to open private hub sessions in the Rust tab and pane layout, with bounded transcript snapshots and live SSE replay.
+- Route remote prompts and pending-input answers through owner-scoped hub commands with stable retry IDs after uncertain delivery.
+- Limit remote windows to supported controls; model, permission, filesystem and LORE actions remain on the session host. Background push and Android remain open.
+
 ## 2.0.0-alpha.70 — 2026-10-04
 
 **Remote sessions**

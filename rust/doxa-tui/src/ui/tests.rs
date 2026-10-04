@@ -5731,3 +5731,36 @@ fn unavailable_saved_tabs_do_not_block_second_split_session_persistence() {
             app.handle(Event::Key(KeyEvent::new(KeyCode::Esc,KeyModifiers::NONE)));assert_eq!(app.input,"Private unsent draft");assert!(app.pending_prompts.is_empty());
         }
     }
+
+    #[test]
+    fn remote_sessions_share_native_tabs_and_pending_review_without_local_controls() {
+        let mut app = App::default();
+        app.remote_mode = true;
+        app.size = Rect::new(0, 0, 120, 40);
+        for id in ["host~one", "host~two", "host~three"] {
+            app.apply_worker_frame(crate::worker_frames::WorkerFrame::Daemon {
+                session_id: id.into(),
+                frame: json!({"type":"hello","session_id":id,"title":id,
+                    "engine":"codex","model":"gpt-6-sol","remote":true}),
+            });
+        }
+        assert_eq!(app.groups[0].tabs, ["host~one"]);
+        assert_eq!(app.chips(0)[0], ("remote", "Remote · host".into()));
+        app.apply_worker_frame(crate::worker_frames::WorkerFrame::RemoteSnapshot {
+            session_id: "host~one".into(),
+            markdown: "**You:**\n\nQuestion\n\n**Assistant:**\n\nAnswer\n\n".into(),
+            pending_inputs: json!([{"id":"review-1","kind":"permission","title":"Approve?"}]),
+            pending_inputs_complete: true,
+        });
+        assert!(app.sessions[0].transcript.contains("Answer"));
+        assert!(app.input_requests.iter().any(|request| request.session_id == "host~one"));
+        app.local_attach("");
+        assert!(app.attach_picker.is_some());
+        app.open_selected_attach();
+        assert_eq!(app.pending_attaches.len(), 1);
+        assert_ne!(app.pending_attaches[0].0, "host~one");
+        app.input = "/model".into();
+        assert!(app.dispatch_prompt_command());
+        assert_eq!(app.input, "/model");
+        assert!(app.pending_prompts.is_empty());
+    }

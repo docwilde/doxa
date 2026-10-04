@@ -1,11 +1,12 @@
 # DOXA remote hub and Android client
 
-Status: first private implementation on this branch. The Rust browser adapter
+Status: first private implementation. The Rust browser adapter
 controls local sessions. A volatile Rust hub and outbound host connector now
 register sessions, broker prompts/answers and forward live events across
 machines. The browser can request a bounded recent transcript from its host;
 the hub also holds a short live event ring.
-Native remote DOXA tabs, background Web Push and Android are not yet shipped.
+The native TUI can open remote-only tabs through `doxa remote tui HUB_URL`.
+Background Web Push and Android are not yet shipped.
 
 ## User journey
 
@@ -56,8 +57,11 @@ The Rust browser adapter implements the last two rows against one host with
 `GET /api/sessions`, `POST` transcript snapshot, SSE events, and `POST` prompt
 and answer. The hub brokers snapshots from the host and retains bounded live
 events for reconnects. A second DOXA instance can list sessions, send
-prompts and resolve simple approvals with `doxa remote` CLI commands;
-rendering remote sessions as native TUI tabs remains to be implemented.
+prompts and resolve simple approvals with `doxa remote` CLI commands, or open
+live sessions in a separate native TUI window with `doxa remote tui HUB_URL`.
+Remote tabs use the same prompt, pane, transcript and pending-input UI. Local
+provider settings, filesystem actions and LORE management remain on the host;
+the remote tab layout is not yet persisted or mixed with local tabs.
 
 ## Authentication and authority
 
@@ -120,8 +124,9 @@ source devices, so the initial Android path assumes a user-owned device.
 2. **Private hub:** leases, owner-scoped registration, bounded command/reply
    queues, on-demand recent transcript retrieval and cursor replay are
    implemented. Add a browser E2E test across two isolated hosts and deployment QA.
-3. **Remote DOXA client:** show remote tabs in the Rust TUI, reconnect without
-   duplicate prompts, and expose the same pending approval flow.
+3. **Remote DOXA client:** remote-only Rust TUI tabs, bounded snapshot replay,
+   stable retry IDs, and pending-input review are implemented. Persistent tab
+   layouts and mixed local/remote windows remain open.
 4. **Background delivery:** Web Push with service worker and then Android push.
    The Android app renders transcript and events, sends prompts and answers,
    and delegates account sign-in to the private hub.
