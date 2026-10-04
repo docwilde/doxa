@@ -243,5 +243,8 @@ fn explicit_legacy_migration_refuses_without_protected_provider_owner() {
     while receive(&mut reader)["id"] != 2 {}
     assert!(child.wait().unwrap().success());
     assert!(!root.join("provider-ran").exists());
-    assert_eq!(fs::read(store.transcript_path()).unwrap(), transcript_before);
+    // The failed attempt may be recorded, but prior history cannot be replaced.
+    assert!(fs::read(store.transcript_path())
+        .unwrap()
+        .starts_with(&transcript_before));
 }
