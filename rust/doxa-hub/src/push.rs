@@ -83,7 +83,7 @@ impl Runtime {
             return Err(io::Error::new(io::ErrorKind::PermissionDenied, "VAPID key file must be private and owned"));
         }
         let mut encoded = String::new();
-        file.by_ref().take(4097).read_to_string(&mut encoded)?;
+        Read::by_ref(&mut file).take(4097).read_to_string(&mut encoded)?;
         if encoded.len()>4096{return Err(invalid("VAPID key file too large"));}
         let raw = URL_SAFE_NO_PAD.decode(encoded.trim_end())
             .map_err(|_| invalid("invalid VAPID private key"))?;
