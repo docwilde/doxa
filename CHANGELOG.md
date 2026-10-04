@@ -18,6 +18,10 @@ the stable 2.0 release has not been cut.
 - Keep protected Codex success fixtures on Linux; assert macOS refuses migration without starting the provider.
 - Fix **`try_write_vendor_context`** to use directory-relative writes on macOS; resolve fixture Python through `PATH` and reset accepted HTTP sockets to blocking mode.
 
+**Runtime**
+
+- Let replay clients drain queued events before closing the write half of the socket; extend the bounded client write timeout to five seconds.
+
 **Documentation**
 
 - Update **`rust-1.19-parity.md`** with current release evidence and the available attested Unix browser adapter.

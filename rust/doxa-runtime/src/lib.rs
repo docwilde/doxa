@@ -413,9 +413,13 @@ fn handle_client(inner: Arc<Inner>, stream: UnixStream) {
         writer.write_all(&encode_reply(&hello)).is_err() { return; }
     let writer_thread = thread::spawn(move || {
         while let Ok(bytes) = rx.recv() {
-            if writer.write_all(&bytes).is_err() { break; }
+            if let Err(error) = writer.write_all(&bytes) {
+                #[cfg(debug_assertions)]
+                eprintln!("doxa runtime client write ended: {error}");
+                break;
+            }
         }
-        let _ = writer.shutdown(std::net::Shutdown::Both);
+        let _ = writer.shutdown(std::net::Shutdown::Write);
     });
     let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
     let mut reader = BufReader::new(stream);
@@ -425,7 +429,11 @@ fn handle_client(inner: Arc<Inner>, stream: UnixStream) {
             Ok(0) => break,
             Ok(_) => {},
             Err(err) if err.kind() == io::ErrorKind::TimedOut || err.kind() == io::ErrorKind::WouldBlock => continue,
-            Err(_) => break,
+            Err(error) => {
+                #[cfg(debug_assertions)]
+                eprintln!("doxa runtime client read ended: {error}");
+                break;
+            },
         }
         let parsed = serde_json::from_slice::<Value>(&line);
         line.clear();
