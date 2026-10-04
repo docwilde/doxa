@@ -53,8 +53,16 @@ jobs:
               left.close()
               right.close()
           PY
-      - name: Test complete macOS native workspace
-        run: cargo test --locked --workspace --features doxa-daemon/local-test-server,doxa-vendors/local-test-server
+      - name: Test portable macOS Rust workspace
+        run: cargo test --locked --workspace --exclude doxa-daemon --features doxa-vendors/local-test-server
+      - name: Test portable macOS daemon suites
+        run: |
+          cargo test --locked -p doxa-daemon --lib --features local-test-server
+          cargo test --locked -p doxa-daemon --features local-test-server \
+            --test codex_legacy_protection \
+            --test lore_review_policy \
+            --test vendor_compaction \
+            --test vendor_streaming
       - name: Verify macOS native vendor lifecycle against local SSE
         run: |
           cargo build --locked -p doxa-daemon --features local-test-server

@@ -55,7 +55,7 @@ coverage alone does not establish authenticated compatibility for every provider
 | Alpha.66 | Show overflow scrollbars throughout scrollable submenus. Let an idle Codex session choose `on-request`, sandboxed `auto`, or `full-access` for its next turn; restore that choice with the saved session. |
 | Alpha.67 | Scrollbar thumbs reach the last track cell at the final page. Restore flat detached records without reopening tabs, save generated labels, and show recoverable dead sessions below live projects in muted italic text. |
 | Alpha.68 | Recapture the nine README frames from the running Rust frontend and daemon, including grouped sessions and LORE browsers. |
-| Alpha.69 | Run bounded alpha.68 Claude, DeepSeek and GLM native release checks; expand macOS CI to the complete Rust workspace and a local SSE vendor lifecycle fixture. |
+| Alpha.69 | Run bounded alpha.68 Claude, DeepSeek and GLM native release checks; expand macOS CI to portable Rust crates, daemon suites, and a local SSE vendor lifecycle fixture. |
 
 Standalone LORE administration, hooks, MCP and network operations are native Rust;
 they are not a remaining Python replacement task. See the
@@ -81,8 +81,8 @@ retains fixed Claude/vendor streaming checks and its earlier incomplete run.
 The one approved paid compaction cycle is complete; no further paid tests are
 running. Unknown plan, quota, balance and context values remain
 unknown. DeepSeek balance can be shown when its endpoint reports it; z.ai has no
-supported balance endpoint. Linux is live verified. macOS receives full native
-workspace and local provider lifecycle CI, but authenticated provider sessions
+supported balance endpoint. Linux is live verified. macOS receives portable native
+workspace suites and local provider lifecycle CI, but authenticated provider sessions
 remain unverified there.
 Protected Codex is Linux-only by its ownership/supervision contract. Windows
 remains unsupported.
