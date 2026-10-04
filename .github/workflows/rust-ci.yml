@@ -57,7 +57,7 @@ jobs:
         run: cargo test --locked --workspace --exclude doxa-daemon --features doxa-vendors/local-test-server --no-fail-fast
       - name: Test portable macOS daemon suites
         run: |
-          cargo test --locked -p doxa-daemon --lib --features local-test-server
+          cargo test --locked -p doxa-daemon --bin doxa-daemon --features local-test-server
           cargo test --locked -p doxa-daemon --features local-test-server \
             --test codex_legacy_protection \
             --test lore_review_policy \
