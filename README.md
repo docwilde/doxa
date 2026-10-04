@@ -53,6 +53,21 @@ DeepSeek and GLM show estimated API cost from provider token counts and publishe
 
 `/pending` and `/lore:pending --cluster` open global LORE proposals plus those for the current project with either engine. `lore status` reports the whole-store pending count across all projects.
 
+## Remote access
+
+Remote access is opt-in. Set `DOXA_REMOTE_ENABLED=1` and
+`DOXA_REMOTE_ALLOWED_LOGINS=you@example.com`, then run `doxa remote serve`
+behind private Tailscale Serve. The Rust browser view reads recent turns,
+follows live events, sends prompts, and resolves pending input.
+
+For control across machines, run `doxa-hub` on a private server and
+`doxa remote connect HUB_URL HOST_ID` on the session host. Use the browser at
+`HUB_URL` or `doxa remote list/send/answer` from another DOXA installation.
+The [Rust guide](rust/README.md) has setup steps, and the
+[hub plan](docs/plans/remote-hub.md) covers the Android client contract.
+Browser notifications work while the page is connected. Background push and
+native remote TUI tabs are still planned.
+
 ## Gallery
 
 These frames come from the running 2.0.0-alpha.68 Rust TUI with isolated DOXA and LORE state. The [capture record](docs/rust-gallery.md) explains the example data and reproduction steps.
