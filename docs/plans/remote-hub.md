@@ -5,7 +5,7 @@ controls local sessions. A volatile Rust hub and outbound host connector now
 register sessions, broker prompts/answers and forward live events across
 machines. The browser can request a bounded recent transcript from its host;
 the hub also holds a short live event ring.
-native remote DOXA tabs, background Web Push and Android are not yet shipped.
+Native remote DOXA tabs, background Web Push and Android are not yet shipped.
 
 ## User journey
 
@@ -25,20 +25,21 @@ provider session. It cannot directly read the host filesystem or daemon socket.
 
 ## Wire contract
 
-Every control command has `command_id` (a random result key), `host_id`,
-`session_id`, `kind`, `created_at`, and a bounded JSON payload. The first kinds
+The hub assigns each command a random `command_id` result key and retains its
+owner, host, session, creation time, operation, and bounded JSON payload. The first kinds
 are `prompt`, `answer`, and a read-only recent `transcript` snapshot. A client
 may supply `request_id`; reusing it with the same payload returns the same
-command during the bounded result-retention window. Replies are `accepted`, `refused`, or `expired` and
+command during the bounded result-retention window. Replies are `accepted`,
+`refused`, or `expired` and
 include the daemon's actual reply. A prompt is acknowledged as queued or started;
 it is never silently resent after an uncertain disconnect. An answer includes
 the exact pending request snapshot and is checked again by the daemon.
 
 Events carry the daemon `seq` and `turn` unchanged. A client supplies its last
 received sequence on reconnect. The host replays its bounded event ring; on a
-gap it sends an explicit `replay_gap` and a bounded transcript snapshot. The
-hub may keep a short encrypted event buffer for reconnection, but the host
-transcript is authoritative. Presence leases expire after missed heartbeats,
+gap the daemon emits `replay_gap`; the browser can then request a fresh recent
+transcript snapshot. The hub keeps a short in-memory event buffer for
+reconnection, but the host transcript is authoritative. Presence leases expire after missed heartbeats,
 and stale sessions disappear from the active list rather than accepting writes.
 
 Initial REST/SSE surface:
@@ -87,10 +88,10 @@ the initial private deployment must not imply it has that property.
 
 The Rust browser adapter can show notifications while its page is connected
 and hidden. True background delivery needs a service worker, a user-approved
-Push subscription, a VAPID key, and encrypted Web Push delivery. The hub owns
-subscriptions per device and sends only a generic `needs input` or `turn done`
-alert; opening the app fetches the actual content after authentication.
-Expired subscriptions are removed. Android uses the same generic event policy
+Push subscription, a VAPID key, and encrypted Web Push delivery. The planned
+hub extension will own subscriptions per device and send only a generic
+`needs input` or `turn done` alert; opening the app will fetch the actual
+content after authentication. Expired subscriptions will be removed. Android will use the same generic event policy
 with a platform push token; opening the app resumes from the last event cursor.
 Notifications never carry tool arguments, transcript text or approval actions.
 
