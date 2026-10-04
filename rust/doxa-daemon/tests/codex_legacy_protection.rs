@@ -139,6 +139,7 @@ fn legacy_exec_refusal_preserves_saved_thread_transcript_and_never_spawns_provid
     );
 }
 #[test]
+#[cfg(target_os = "linux")]
 fn explicit_legacy_migration_resumes_exact_provider_thread_without_creating_one() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
@@ -212,4 +213,35 @@ sys.stdin.read()
     assert!(fs::read(store.transcript_path())
         .unwrap()
         .starts_with(&before));
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn explicit_legacy_migration_refuses_without_protected_provider_owner() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let store = seed(root);
+    let transcript_before = fs::read(store.transcript_path()).unwrap();
+    let provider = root.join("provider");
+    fs::write(&provider, "#!/bin/sh\nprintf unsafe > provider-ran\nexit 1\n").unwrap();
+    fs::set_permissions(&provider, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut child = command(root, &provider)
+        .env("DOXA_CODEX_MIGRATE_APPSERVER", "1")
+        .spawn()
+        .unwrap();
+    let (mut reader, mut socket) = connect(root);
+    send(&mut socket, json!({"type":"attach","cursor":null}));
+    send(&mut socket, json!({"type":"prompt","id":1,"text":"continue the saved thread"}));
+    loop {
+        let frame = receive(&mut reader);
+        if frame["event"]["type"] == "turn_done" {
+            assert_eq!(frame["event"]["data"]["is_error"], true, "{frame}");
+            break;
+        }
+    }
+    send(&mut socket, json!({"type":"call","id":2,"method":"stop","params":{}}));
+    while receive(&mut reader)["id"] != 2 {}
+    assert!(child.wait().unwrap().success());
+    assert!(!root.join("provider-ran").exists());
+    assert_eq!(fs::read(store.transcript_path()).unwrap(), transcript_before);
 }
