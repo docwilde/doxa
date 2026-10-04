@@ -21,6 +21,7 @@ impl Client {
         let mut pending = Vec::new();
         let hello = read_frame(&mut reader, &mut pending)?;
         if hello["type"] != "hello" || hello["session_id"] != expected_id { return Err(invalid("session identity changed")); }
+        let cursor=cursor.or_else(||hello["next_seq"].as_u64());
         write_frame(&writer, &json!({"type":"attach","cursor":cursor,"remote_login":login}))?;
         Ok(Self { reader, writer, pending, hello, next_id: 1 })
     }

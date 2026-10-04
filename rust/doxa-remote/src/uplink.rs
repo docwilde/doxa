@@ -156,6 +156,9 @@ async fn forward_events(app:&Arc<App>,http:&Client,base:&Url,host:&str,lease:&st
         let cursor_key=format!("{}~{}",entry.session_id,entry.started_at);
         let cursor=cursors.get(&cursor_key).copied();
         let client=match connect(app,&entry,None,cursor).await{Ok(client)=>client,Err(_)=>continue};
+        if cursor.is_none(){
+            if let Some(next)=client.hello["next_seq"].as_u64(){cursors.insert(cursor_key.clone(),next);}
+        }
         let frames=tokio::task::spawn_blocking(move||{
             let mut client=client;let _=client.short_timeout();let mut frames=Vec::new();
             for _ in 0..32{match client.next(){Ok(frame) if frame["type"]=="event"=>frames.push(frame),Ok(_)=>{},Err(_)=>break}}
