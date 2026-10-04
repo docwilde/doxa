@@ -58,6 +58,11 @@ async function setupAlerts(clicked = false) {
   if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
     foregroundAlerts(button); return;
   }
+  // Ask while the click still has user activation; registration and network
+  // requests below can outlive the browser's permission-prompt gesture.
+  if (clicked && Notification.permission === 'default') {
+    await Notification.requestPermission();
+  }
   let config;
   try { config = await pushConfig(); }
   catch { foregroundAlerts(button); return; }
@@ -76,9 +81,7 @@ async function setupAlerts(clicked = false) {
       backgroundAlerts = false; button.textContent = 'Enable background alerts'; return;
     }
     if (Notification.permission !== 'granted') {
-      if (!clicked || await Notification.requestPermission() !== 'granted') {
-        button.textContent = 'Notifications denied'; return;
-      }
+      button.textContent = 'Notifications denied'; return;
     }
     if (!subscription) subscription = await registration.pushManager.subscribe({
       userVisibleOnly:true, applicationServerKey:publicKeyBytes(config.public_key)
