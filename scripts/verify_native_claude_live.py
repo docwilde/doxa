@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import secrets
+import shlex
 import shutil
 import subprocess
 import sys
@@ -95,6 +96,13 @@ def run():
         workspace.mkdir(mode=0o700)
         lore = root / "lore"
         lore.mkdir(mode=0o700)
+        # Keep this verification session text-only even if Claude changes its
+        # default tool permissions. The wrapper and workspace are disposable.
+        tool_free_claude = root / "claude-text-only"
+        tool_free_claude.write_text(
+            "#!/bin/sh\nexec " + shlex.quote(claude) + " --tools '' \"$@\"\n"
+        )
+        tool_free_claude.chmod(0o700)
         token = secrets.token_hex(4)
         session = str(uuid.uuid4())
         environment = {
@@ -111,7 +119,7 @@ def run():
             environment["CLAUDE_CONFIG_DIR"] = os.environ["CLAUDE_CONFIG_DIR"]
         command = [daemon, "--runtime-dir", str(root / "runtime"),
                    "--cwd", str(workspace), "--session-id", session,
-                   "--engine", "claude", "--claude-bin", claude,
+                   "--engine", "claude", "--claude-bin", str(tool_free_claude),
                    "--effort", "low", "--linger", "10"]
         result = {"started_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
                   "submitted_turns": 0, "provider": "claude"}
