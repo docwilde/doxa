@@ -1,4 +1,5 @@
-#![cfg(unix)]
+// The protected process owner and native carrier require Linux /proc.
+#![cfg(target_os = "linux")]
 use doxa_engines::{codex_appserver::{AppServerDriver, AppServerOptions, CodexPermission}, codex_compact::CompactGate, codex_driver::SandboxMode, codex_interaction::InputInbox};
 use serde_json::{json, Value};
 use std::{fs, os::unix::fs::PermissionsExt, sync::{Arc, atomic::{AtomicUsize, Ordering}}, time::Duration};

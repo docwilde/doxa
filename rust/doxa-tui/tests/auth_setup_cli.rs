@@ -8,7 +8,7 @@ impl Fixture {
             .unwrap_or_else(|| std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join(".cache/doxa-tests"));
         fs::create_dir_all(&cache).unwrap();
         let root=tempfile::tempdir_in(cache.canonicalize().unwrap()).unwrap(); let bin=root.path().join("bin"); fs::create_dir(&bin).unwrap();
-        let script=r#"#!/usr/bin/python3
+        let script=r#"#!/usr/bin/env python3
 import json,os,sys
 from pathlib import Path
 provider=Path(sys.argv[0]).name
@@ -39,7 +39,10 @@ else: sys.exit(23)
     }
     fn command(&self,args:&[&str]) -> Command {
         let mut command=Command::new(env!("CARGO_BIN_EXE_doxa-rs"));
-        command.args(args).env_clear().env("HOME",self.root.path()).env("PATH",&self.bin)
+        let inherited_path=std::env::var_os("PATH").unwrap_or_default();
+        let path=std::env::join_paths(std::iter::once(self.bin.clone())
+            .chain(std::env::split_paths(&inherited_path))).unwrap();
+        command.args(args).env_clear().env("HOME",self.root.path()).env("PATH",path)
             .env("DOXA_HOME",self.root.path().join("doxa")).env("CLAUDE_CONFIG_DIR",self.root.path().join("claude")); command
     }
 }

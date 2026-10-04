@@ -187,6 +187,9 @@ impl Daemon {
             while !inner.stopping.load(Ordering::Acquire) {
                 match self.listener.accept() {
                     Ok((stream, _)) => {
+                        // Darwin inherits O_NONBLOCK from the listener; client
+                        // read/write timeouts require a blocking stream.
+                        if stream.set_nonblocking(false).is_err() { continue; }
                         if inner.active_connections.fetch_update(Ordering::AcqRel, Ordering::Acquire,
                             |count| (count < MAX_CONNECTIONS).then_some(count + 1)).is_err() {
                             continue;

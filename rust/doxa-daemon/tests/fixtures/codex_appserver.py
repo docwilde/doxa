@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 """App-server protocol peer preserving existing adversarial turn fixtures.
 
 Only this test peer invokes the synthetic stream producer. The daemon sees

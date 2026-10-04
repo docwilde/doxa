@@ -652,9 +652,15 @@ fn ring_evicts_old_events_and_large_event_keeps_sequence() {
     let gap = recv(&mut reader);
     assert_eq!(gap["seq"], 8);
     assert_eq!(gap["event"], json!({"type":"replay_gap","data":{"from_seq":0,"to_seq":8}}));
-    assert_eq!(recv(&mut reader)["seq"], 9);
-    for _ in 0..510 { recv(&mut reader); }
-    let last = recv(&mut reader);
+    let mut last = Value::Null;
+    for expected in 9..=520 {
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        assert!(!line.is_empty(), "replay socket closed before sequence {expected}");
+        let frame: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(frame["seq"], expected, "replay sequence changed");
+        last = frame;
+    }
     assert_eq!(last["seq"], 520);
     assert_eq!(last["event"]["type"], "tool_result");
     assert_eq!(last["event"]["data"]["truncated"], true);

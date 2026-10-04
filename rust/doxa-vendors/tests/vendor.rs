@@ -37,7 +37,11 @@ fn accept(listener: &TcpListener) -> std::net::TcpStream {
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
     loop {
         match listener.accept() {
-            Ok((socket, _)) => return socket,
+            Ok((socket, _)) => {
+                // Accepted sockets inherit the listener's nonblocking mode on macOS.
+                socket.set_nonblocking(false).unwrap();
+                return socket;
+            }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock && std::time::Instant::now() < deadline => std::thread::sleep(Duration::from_millis(2)),
             Err(_) => panic!("fixture request was not accepted before deadline"),
         }

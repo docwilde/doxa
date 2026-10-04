@@ -18,7 +18,7 @@ async fn unsupported_or_silent_owner_is_killed_on_refusal_or_startup_cancellatio
         fs::write(
             &options.executable,
             format!(
-                r#"#!/usr/bin/python3
+                r#"#!/usr/bin/env python3
 import os,socket,time
 open('unsupported-owner.pid','w').write(str(os.getpid()))
 if {wrong}:

@@ -1,7 +1,7 @@
 # Rust 2.0 parity with DOXA 1.19.0
 
 Baseline: Python `v1.19.0` production behavior. This tracker records implementation
-through **alpha.66**, with canonical **LORE 0.62.11**. Account checks
+through **alpha.69**, with canonical **LORE 0.62.11**. Account checks
 are bounded by their exact candidate and date.
 The Rust runtime implements the audited workflows below. Live account checks
 remain bounded by the [latest verification record](live-provider-verification-2026-09-29.md)
@@ -54,6 +54,8 @@ coverage alone does not establish authenticated compatibility for every provider
 | Alpha.65 | Forward Codex permission-profile requests into the inline review and grant the exact requested profile for one turn; hide the unsupported DeepSeek/GLM permission chip. Belief-row Accept/Reject and unmodified A/R apply after an exact LORE fetch; `/` or clicking the prompt enables text filtering. |
 | Alpha.66 | Show overflow scrollbars throughout scrollable submenus. Let an idle Codex session choose `on-request`, sandboxed `auto`, or `full-access` for its next turn; restore that choice with the saved session. |
 | Alpha.67 | Scrollbar thumbs reach the last track cell at the final page. Restore flat detached records without reopening tabs, save generated labels, and show recoverable dead sessions below live projects in muted italic text. |
+| Alpha.68 | Recapture the nine README frames from the running Rust frontend and daemon, including grouped sessions and LORE browsers. |
+| Alpha.69 | Run bounded alpha.68 Claude, DeepSeek and GLM native release checks; expand macOS CI to portable Rust crates, daemon suites, and a local SSE vendor lifecycle fixture. |
 
 Standalone LORE administration, hooks, MCP and network operations are native Rust;
 they are not a remaining Python replacement task. See the
@@ -61,8 +63,8 @@ they are not a remaining Python replacement task. See the
 
 ## Remaining verification
 
-The [2026-09-30 provider record](live-provider-verification-2026-09-30.md)
-reports native vendor stop/resume recall and numeric usage. The
+The [2026-10-04 provider record](live-provider-verification-2026-10-04.md)
+reports fresh alpha.68 Claude and vendor stop/resume recall and numeric usage. The
 [authenticated Codex result](live-default-window-compaction-2026-09-30.md)
 now verifies one default-window compaction cycle and post-restart recall on
 alpha.52. The [2026-09-29 record](live-provider-verification-2026-09-29.md)
@@ -70,17 +72,18 @@ retains fixed Claude/vendor streaming checks and its earlier incomplete run.
 
 | Check | Current result and remaining gate |
 | --- | --- |
-| Claude streaming and optional quota variants | Fixed debug daemon counts advanced 50 → 150 → 200 before first text, with 104 reply deltas; thinking plaintext stayed withheld. Optional overage/model-specific quota variants remain unverified live. |
-| DeepSeek recall/resume | Current two-turn native file-read and exact-nonce recall passed across daemon stop/resume with complete vendor-reported usage. Earlier candidate failure's cause remains unknown; the three-turn streaming diagnosis passed separately with 316 text deltas and 81 reasoning-progress events. |
-| z.ai GLM usage | Current two-turn native file-read and exact-nonce recall passed across stop/resume. Complete numeric vendor-reported usage was captured on both turns. Earlier three turns and same-session low → high effort passed with 408 text deltas. |
+| Claude streaming and optional quota variants | Alpha.68 two-turn exact-token recall across daemon restart passed with reported usage. Each short reply used one text delta. Earlier fixed debug daemon counts advanced 50 → 150 → 200 before first text, with 104 reply deltas; thinking plaintext stayed withheld. Optional overage/model-specific quota variants remain unverified live. |
+| DeepSeek recall/resume | Alpha.68 two-turn native file-read and exact-nonce recall passed across daemon stop/resume with complete vendor-reported usage. Earlier candidate failure's cause remains unknown; the three-turn streaming diagnosis passed separately with 316 text deltas and 81 reasoning-progress events. |
+| z.ai GLM usage | Alpha.68 two-turn native file-read and exact-nonce recall passed across stop/resume. Complete numeric vendor-reported usage was captured on both turns. Earlier three turns and same-session low → high effort passed with 408 text deltas. |
 | Codex default-window automatic compaction | **Passed for alpha.52 and protected Codex 0.156.1 with `gpt-5.5`:** seven data turns reached one native LORE review and one checkpoint; exact first-turn token recall passed after one daemon restart. The seventh turn's aggregate input was 1,172,180 tokens. See the [measured result](live-default-window-compaction-2026-09-30.md) for scope and retained evidence. |
 | Full historic LORE replica | A private fresh direct-peer replay of 4,568 signed source ops settled 4,555 applied and 13 quarantined, with zero unverified, failed or deferred and an advanced cursor. Original IDs, MACs and payloads match; normalized belief, edge, evidence and session digests match. The existing hub retains immutable older unsigned copies and was not migrated. |
 
 The one approved paid compaction cycle is complete; no further paid tests are
 running. Unknown plan, quota, balance and context values remain
 unknown. DeepSeek balance can be shown when its endpoint reports it; z.ai has no
-supported balance endpoint. Linux is live verified. macOS receives build and
-transport CI but authenticated provider sessions remain unverified there.
+supported balance endpoint. Linux is live verified. macOS receives portable native
+workspace suites and local provider lifecycle CI, but authenticated provider sessions
+remain unverified there.
 Protected Codex is Linux-only by its ownership/supervision contract. Windows
 remains unsupported.
 
@@ -113,8 +116,9 @@ remains unsupported.
   manual tab admission is bounded; restoration retains one validated reserved
   fresh-session slot rather than silently deleting an archived conversation.
 - The native remote peer bridge verifies Unix transport credentials. The retained
-  Python browser remote adapter remains unavailable until its transport can
-  attest proxy identity; loopback TCP and identity headers alone are insufficient.
+  optional Python browser remote adapter now binds a private Unix socket and
+  requires the same kernel-attested proxy identity. Loopback TCP and identity
+  headers alone remain insufficient.
 
 ## Commands
 
@@ -162,8 +166,8 @@ provenance and no additional tools.
 
 Alpha.50 supplied the [current event-loop benchmark](rust-ui-benchmark-2026-09-30.md)
 measurements; the [alpha.31 baseline](rust-ui-benchmark-2026-09-27.md) remains
-available. The [gallery](rust-gallery.md) records **alpha.58** live terminal
-captures for the memory browsers and two **alpha.59** grouped-session captures.
+available. The [gallery](rust-gallery.md) records nine **alpha.68** live terminal
+captures, including grouped sessions and the memory browsers.
 
 See the [source audit](source-audit-2026-09-27.md) for confirmed follow-up fixes,
 engineering debt and validation limits.

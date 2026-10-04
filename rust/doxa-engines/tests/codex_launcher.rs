@@ -129,7 +129,9 @@ fn helper_missing_changed_or_unbound_refuses_before_provider_dispatch() {
             .success());
     }
 }
+// Provider dispatch requires the protected Linux process owner.
 #[test]
+#[cfg(target_os = "linux")]
 fn native_launcher_executes_checked_binary_and_keeps_official_cli_commands() {
     let dir = fixture();
     assert!(Command::new(dir.path().join("codex"))
@@ -205,7 +207,9 @@ fn invalid_receipts_and_changed_provider_artifacts_refuse_without_dispatch() {
 }
 
 #[cfg(target_os = "linux")]
+// The same owner must supervise the provider after the control handshake.
 #[test]
+#[cfg(target_os = "linux")]
 fn verified_launcher_owns_provider_after_control_handshake() {
     use std::io::{Read, Write};
     use std::os::unix::{io::AsRawFd, net::UnixStream, process::CommandExt};

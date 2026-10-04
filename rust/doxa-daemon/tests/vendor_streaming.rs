@@ -51,6 +51,7 @@ fn run_case(case: &str) {
                 Err(error) => panic!("{error}"),
             }
         };
+        socket.set_nonblocking(false).unwrap();
         socket.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
         let mut request = Vec::new();
         loop {

@@ -136,7 +136,8 @@ impl AppServerDriver {
     }
 }
 
-#[cfg(test)]
+// CompactGate pins the running carrier through /proc/self/exe on Linux.
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
     use crate::codex_compact::CompactGate;

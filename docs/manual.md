@@ -1081,12 +1081,11 @@ succeeded. The design, including what is deliberately not built, is
 
 `doxa/remote_policy.py` makes the authorization decision for both optional
 bridges. The machine-wide peer bridge exchanges messages across machines
-and requires explicit opt-in and an allowed Tailscale login. The retained
-browser adapter is unavailable until its transport can attest the Tailscale
-proxy; loopback TCP and identity headers alone cannot do so. The peer bridge uses
-a Unix socket and checks the proxy's kernel credentials before accepting an
-identity header. See the [remote plan](plans/remote.md) for the transport and
-browser setup.
+and requires explicit opt-in and an allowed Tailscale login. The optional
+browser adapter and peer bridge bind private Unix sockets and check the
+proxy's kernel credentials before accepting an identity header. Loopback
+TCP and identity headers alone cannot do so. See the [remote plan](plans/remote.md)
+for the transport and browser setup.
 
 Three independent questions, and every answer is a `Decision` carrying a
 reason — never a bare bool, because a refusal that cannot say why is a

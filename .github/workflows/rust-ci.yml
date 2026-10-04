@@ -53,8 +53,21 @@ jobs:
               left.close()
               right.close()
           PY
-      - name: Test macOS transport, state and terminal
-        run: cargo test --locked -p doxa-peers -p doxa-protocol -p doxa-state -p doxa-tui
+      - name: Test portable macOS Rust workspace
+        run: cargo test --locked --workspace --exclude doxa-daemon --features doxa-vendors/local-test-server --no-fail-fast
+      - name: Test portable macOS daemon suites
+        run: |
+          cargo test --locked -p doxa-daemon --bin doxa-daemon --features local-test-server
+          cargo test --locked -p doxa-daemon --features local-test-server \
+            --test codex_legacy_protection \
+            --test lore_review_policy \
+            --test vendor_compaction \
+            --test vendor_streaming
+      - name: Verify macOS native vendor lifecycle against local SSE
+        run: |
+          cargo build --locked -p doxa-daemon --features local-test-server
+          DOXA_NATIVE_DAEMON="$GITHUB_WORKSPACE/target/debug/doxa-daemon" \
+            python3 -m unittest discover -s tests -p test_native_live_vendor_verifier.py -v
   rust:
     runs-on: ubuntu-latest
     steps:
