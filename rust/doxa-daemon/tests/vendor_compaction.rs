@@ -20,6 +20,7 @@ fn serve_events(frames:Vec<Vec<Value>>)->(String,thread::JoinHandle<Vec<Value>>)
         for events in frames{
             let deadline=Instant::now()+Duration::from_secs(10);
             let mut socket=loop{match listener.accept(){Ok((stream,_))=>break stream,Err(error) if error.kind()==std::io::ErrorKind::WouldBlock=>{assert!(Instant::now()<deadline,"provider fixture request deadline");thread::sleep(Duration::from_millis(10));},Err(error)=>panic!("{error}")}};
+            socket.set_nonblocking(false).unwrap();
             socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();let mut request=vec![];
             loop{let mut bytes=[0;4096];let count=socket.read(&mut bytes).unwrap();assert!(count>0);request.extend_from_slice(&bytes[..count]);
                 if let Some(index)=request.windows(4).position(|bytes|bytes==b"\r\n\r\n"){
