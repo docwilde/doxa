@@ -9,7 +9,7 @@
 **DOXA** is a Rust terminal for coding agents. Run Claude, Codex, DeepSeek, and GLM in separate tabs or panes, then reattach to their daemons after closing the terminal. Its integrated [LORE](https://github.com/docwilde/LORE) runtime shares reviewed user and project memory across DOXA, Claude Code, and Codex.
 
 > [!WARNING]
-> Rust 2.0 is an alpha. Configuration and stored formats may change. Agents can edit files and run commands with your privileges; review [scope and limits](#scope-and-limits) before using DOXA on important work.
+> Rust 2.0 is in beta. Configuration and stored formats may change. Agents can edit files and run commands with your privileges; review [scope and limits](#scope-and-limits) before using DOXA on important work.
 
 ![DOXA Rust running a Codex session with an expandable tool section](assets/shots/rust-hero.png)
 
@@ -28,6 +28,8 @@
 - **Custom controls.** Manage provider login, API keys, plugins, and settings in the TUI. Remap window shortcuts without rebuilding.
 
 ## Install
+
+Current release: **[v2.0.0-beta.1](https://github.com/docwilde/doxa/releases/tag/v2.0.0-beta.1)**.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/docwilde/doxa/main/scripts/install.sh | sh

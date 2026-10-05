@@ -318,7 +318,7 @@ stores and controlled provider fixtures. Python is used by protected Codex
 build tooling and a few development verification scripts. Coverage
 includes layout, review gates, restoration, current-session controls, cancellation,
 interactive fleets, device login, private ledgers and malformed manifests.
-Run `./task test` for the current full suite. Alpha tests do not establish live
+Run `./task test` for the current full suite. Preview tests do not establish live
 provider compatibility beyond the explicitly verified contracts.
 
 The [gallery](../docs/rust-gallery.md) captures the real application in a VTE
