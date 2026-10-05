@@ -8,8 +8,10 @@ and pinned to CPU 2.
 
 ## Workload
 
-Run `python scripts/bench_ui.py --startup-runs 10 --interaction-runs 1` from
-the repository root with `PYTHONPATH=.`. It creates seven fake sessions in
+To reproduce this historical measurement, check out the `v1.19.0` tag and run
+`python scripts/bench_ui.py --startup-runs 10 --interaction-runs 1` from
+that repository root with `PYTHONPATH=.`. The script was removed from the
+Rust 2.0 tree. It creates seven fake sessions in
 two visible pane groups (four and three tabs) at 160 × 48 cells. The sidebar
 is visible. The two active transcripts each receive 120 fixed Markdown
 lines. The measured operations are 20 sidebar widths (22–41 cells), 100

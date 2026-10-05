@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! Narrow rendering prototype for comparison with scripts/bench_ui.py.
+//! Narrow rendering prototype for comparison with the Python 1.x benchmark
+//! in the v1.19.0 source tag.
 //! This is not a DOXA client or a port of DOXA's Textual widgets.
 
 use std::env;

@@ -1,4 +1,4 @@
-//! Python v1.19 settings catalog and native persistence. Environment overrides
+//! Native settings catalog and persistence. Environment overrides
 //! are explicit, read-only rows; writes preserve every unrelated TOML key.
 use std::{io, path::Path};
 

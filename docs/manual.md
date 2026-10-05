@@ -3,8 +3,8 @@
 Historical compatibility reference for the Python 1.x frontend. The
 [Rust guide](../rust/README.md) is the primary user guide for the installed native
 runtime, current commands, setup, shortcuts and provider limits. Python CLI,
-SDK, plugin-selection and installation instructions below apply only to the
-retained Python implementation used for development interoperability.
+SDK, plugin-selection and installation instructions below describe the
+historical 1.x implementation, available in the v1.19.0 Git tag.
 
 This document was last read against Python **1.9.3** end to end. Later Python
 release notes and design references remain historical; they do not describe

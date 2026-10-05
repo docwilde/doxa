@@ -5,6 +5,18 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha tags identify preview snapshots;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-alpha.73 — 2026-10-05
+
+**Source cleanup**
+
+- Remove the unused Python 1.x application, its tests, package manifest, lockfile, old screenshot and benchmark scripts, and SDK sidecar. The installed runtime remains Rust.
+- Retain Python only where the current protected Codex installer, provider verification, Rust gallery and benchmarks, or LORE upgrade automation still use it.
+
+**Native verification**
+
+- Replace the Python macOS proxy credential probe with a Rust socket-pair test; remove the obsolete Python client interoperability test.
+- Make the LORE bump workflow update the native Cargo pin and lock only. Keep its decision and native provider fixtures under `scripts/tests`.
+
 ## 2.0.0-alpha.72 — 2026-10-05
 
 **Background browser alerts**

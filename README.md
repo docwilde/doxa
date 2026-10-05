@@ -33,7 +33,7 @@
 curl -fsSL https://raw.githubusercontent.com/docwilde/doxa/main/scripts/install.sh | sh
 ```
 
-The installer builds the Rust frontend, daemon, and LORE carrier and places `doxa` in `~/.local/bin` by default. It adds a Linux application-menu entry or `~/Applications/DOXA.command` on macOS; set `DOXA_NO_LAUNCHER=1` to skip that step. Use `doxa update` for a newer build or pass a tag after `sh -s --` to pin a release.
+The installer builds the Rust frontend, daemon, and LORE carrier and places `doxa` in `~/.local/bin` by default. It adds a Linux application-menu entry or `~/Applications/DOXA.command` on macOS; set `DOXA_NO_LAUNCHER=1` to skip that step. Use `doxa update` for a newer build or pass a tag after `sh -s --` to pin a release. Python is needed only when building the optional protected Codex provider.
 
 Claude requires its CLI. Codex uses a private protected app server; the installer builds it when Codex is present. DeepSeek and GLM use API credentials configured through `/setup` or provider environment variables. See the [Rust guide](rust/README.md) for setup, build requirements, and engine capabilities.
 
@@ -106,9 +106,9 @@ These frames come from the running 2.0.0-alpha.68 Rust TUI with isolated DOXA an
 
 ## Scope and limits
 
-Rust 2.0 is the main DOXA line. Linux has bounded live Claude, DeepSeek, GLM and Codex checks. macOS CI builds the native workspace and tests portable Rust crates, daemon suites, and local provider lifecycle fixtures; authenticated sessions have not been tested on macOS. The `.command` launcher is available there, while protected Codex remains Linux-only because its process-owner contract has no macOS equivalent yet. Windows remains unsupported; see [platform verification](docs/platform-verification.md). You choose the engine: DOXA does not switch between Claude, Codex, DeepSeek, and GLM based on your prompt or a provider failure. Plugin adoption excludes foreign hooks and MCP servers. The optional [Rust browser adapter and private hub](docs/plans/remote-hub.md) require explicit Tailscale Serve configuration; the Python browser adapter remains a compatibility reference.
+Rust 2.0 is the main DOXA line. Linux has bounded live Claude, DeepSeek, GLM and Codex checks. macOS CI builds the native workspace and tests portable Rust crates, daemon suites, and local provider lifecycle fixtures; authenticated sessions have not been tested on macOS. The `.command` launcher is available there, while protected Codex remains Linux-only because its process-owner contract has no macOS equivalent yet. Windows remains unsupported; see [platform verification](docs/platform-verification.md). You choose the engine: DOXA does not switch between Claude, Codex, DeepSeek, and GLM based on your prompt or a provider failure. Plugin adoption excludes foreign hooks and MCP servers. The optional [Rust browser adapter and private hub](docs/plans/remote-hub.md) require explicit Tailscale Serve configuration; the Python browser adapter survives only in the historical 1.19 source tag.
 
-The [Rust guide](rust/README.md) covers workflows and provider limits. The [parity tracker](docs/rust-1.19-parity.md), [latest provider verification](docs/live-provider-verification-2026-10-04.md), [source audit](docs/source-audit-2026-09-27.md), and [UI benchmark](docs/rust-ui-benchmark-2026-09-30.md) hold detailed evidence and remaining gates. Python 1.x documentation remains [historical reference](docs/manual.md); normal installation uses Rust.
+The [Rust guide](rust/README.md) covers workflows and provider limits. The [parity tracker](docs/rust-1.19-parity.md), [latest provider verification](docs/live-provider-verification-2026-10-04.md), [source audit](docs/source-audit-2026-09-27.md), and [UI benchmark](docs/rust-ui-benchmark-2026-09-30.md) hold detailed evidence and remaining gates. The Python 1.x app has been removed from the current tree; its source remains in the [v1.19.0 tag](https://github.com/docwilde/doxa/tree/v1.19.0). The [old manual](docs/manual.md) is historical.
 
 ## License
 

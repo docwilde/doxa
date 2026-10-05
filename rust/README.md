@@ -75,7 +75,9 @@ installs committed HEAD, including the native LORE carrier. Working-tree
 changes must be committed first. Pass `--claude-bin` or `--codex-bin` to
 select a provider CLI executable. `DOXA_LORE_RS` selects a detached native
 carrier; the installer places it beside the frontend and daemon.
-Python sources and dependencies are development interoperability references.
+The Python 1.x app has been removed from the current tree. Its source remains
+in the v1.19.0 tag; the current build uses Rust crates and a few Python
+provider-build and verification scripts.
 
 The POSIX installer builds `main` by default:
 
@@ -113,7 +115,7 @@ Finalization removes only verified clean worktrees with no commits ahead of
 the pinned base. Dirty, switched, unpinned, or uncertain worktrees remain.
 `worktrees list` previews orphans; `worktrees cleanup FULL_ID --confirm`
 rechecks ownership, Git state, registry, and shared lock before deletion.
-Legacy Python sidecars without the pinned ownership contract remain survey only.
+Legacy 1.x sessions without the pinned ownership contract remain survey only.
 Saved-session recovery can recreate a deleted managed checkout from its retained
 branch only when all metadata agrees; deleted uncommitted files are unrecoverable.
 
@@ -312,8 +314,8 @@ See [engine contracts](doxa-engines/README.md) for transport and review details.
 ## Verification and gallery
 
 Rust CI verifies the workspace and a native installation using disposable
-stores and controlled provider fixtures. Python is used only by development
-compatibility tests. Coverage
+stores and controlled provider fixtures. Python is used by protected Codex
+build tooling and a few development verification scripts. Coverage
 includes layout, review gates, restoration, current-session controls, cancellation,
 interactive fleets, device login, private ledgers and malformed manifests.
 Run `./task test` for the current full suite. Alpha tests do not establish live

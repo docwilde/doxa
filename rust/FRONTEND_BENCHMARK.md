@@ -31,7 +31,8 @@ sidebar. Each repetition performs:
 | Append | Apply a daemon `text_delta` frame with a 40-character chunk, draw | 100 |
 | Scroll | Handle one Down key event from transcript focus, moving one row toward the bottom, draw | 100 |
 
-The resize series precedes transcript seeding, matching `scripts/bench_ui.py`.
+The resize series precedes transcript seeding, matching the historical
+`scripts/bench_ui.py` from the `v1.19.0` tag.
 The append and scroll series run after both visible transcripts are seeded.
 The two warmup repetitions are discarded before statistics. All operations
 check that their intended state changes occurred.

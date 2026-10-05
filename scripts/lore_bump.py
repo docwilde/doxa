@@ -3,10 +3,10 @@
 """Decide whether DOXA's pinned `lore-core` should move to a newer LORE tag.
 
 This is the brain of `.github/workflows/lore-bump.yml`; the workflow is the
-hands (git, uv, gh pr). Keeping the decision here rather than in a YAML block
+hands (git, cargo, gh pr). Keeping the decision here rather than in a YAML block
 scalar buys two things: it runs locally against the real GitHub API without a
 runner, and the rules below are ordinary functions with ordinary tests
-(tests/test_lore_bump.py) instead of shell that is only ever exercised in
+(scripts/tests/test_lore_bump.py) instead of shell that is only ever exercised in
 production.
 
     python3 scripts/lore_bump.py                 # decide and print, touch nothing
@@ -15,16 +15,14 @@ production.
 
 Why this exists at all: `lore-core` is pinned to an immutable git ref
 (rust/doxa-lore/Cargo.toml), so installs and CI are frozen at that ref until a
-human approves an upgrade. The Python dev dependency remains a compatibility
-oracle and moves to the same immutable commit.
+human approves an upgrade.
 
 Network access is `gh api` only -- gh is preinstalled and already
 authenticated both on a runner (GH_TOKEN) and on a maintainer's machine, so
 there is no token handling here and no third-party action in the workflow.
 
-Stdlib only, on purpose: it runs on the runner's system python3 before uv has
-been installed, and the cheap `no upgrade available` path should not cost a
-dependency sync.
+Stdlib only, on purpose: the cheap `no upgrade available` path should not
+cost a dependency sync.
 """
 
 from __future__ import annotations
@@ -40,17 +38,6 @@ import tomllib
 from urllib.parse import quote
 from dataclasses import dataclass
 from pathlib import Path
-
-# `lore-core @ git+https://github.com/docwilde/LORE@<ref>` -- the PEP 508
-# direct reference in pyproject.toml. Captured in three pieces so the rewrite
-# can replace only <ref> and leave the surrounding comment block, which
-# explains WHY the pin exists, exactly as a human wrote it.
-PIN_RE = re.compile(
-    r'(?P<head>"lore-core\s*@\s*git\+https://github\.com/)'
-    r"(?P<owner>[^/\"@]+)/(?P<repo>[^/\"@]+)"
-    r"@(?P<ref>[^\"]+)"
-    r'(?P<tail>")'
-)
 
 # Only plain vX.Y.Z is a candidate. A pre-release or a date tag is not
 # something to propose unattended -- LORE tags releases as v0.35.0.
@@ -72,7 +59,7 @@ class Pin:
 class RefState:
     """What a git ref of the dependency repo looks like to a packager.
 
-    `packaged` admits the native crate/CLI plus the Python dev oracle.
+    `packaged` admits the native crate and CLI.
     `version` can be None even when packaged -- a version this script could
     not read is a reason to be careful, not a reason to call the ref broken.
     """
@@ -95,25 +82,6 @@ class Decision:
 # --------------------------------------------------------------------------
 # pure logic -- no network, no filesystem
 # --------------------------------------------------------------------------
-
-
-def parse_pin(pyproject_text: str) -> Pin:
-    match = PIN_RE.search(pyproject_text)
-    if match is None:
-        raise SystemExit(
-            "no `lore-core @ git+https://github.com/<owner>/<repo>@<ref>` "
-            "dependency found in pyproject.toml -- if the pin moved, this "
-            "script's PIN_RE moved with it"
-        )
-    return Pin(match["owner"], match["repo"], match["ref"])
-
-
-def rewrite_pin(pyproject_text: str, new_ref: str) -> str:
-    return PIN_RE.sub(
-        lambda m: f"{m['head']}{m['owner']}/{m['repo']}@{new_ref}{m['tail']}",
-        pyproject_text,
-        count=1,
-    )
 
 
 def parse_native_pin(manifest: str) -> Pin:
@@ -186,13 +154,9 @@ def decide(
         )
 
     if not candidate.packaged:
-        # Today's path, and the only one that runs until LORE#46 merges and a
-        # release is cut from it. A tag with no pyproject.toml is a LORE
-        # packaging gap, not a DOXA incompatibility -- reporting it as a
-        # failed upgrade would blame the wrong repo.
         return Decision(
             "none",
-            f"the newest {slug} tag {newest} carries no native/oracle packaging, so it "
+            f"the newest {slug} tag {newest} carries no native packaging, so it "
             f"cannot be installed as lore-core at all. Packaging is not in a "
             f"tagged release yet -- nothing to propose until it is.",
             tag=newest,
@@ -242,7 +206,7 @@ def decide(
 
     if new == old and not pinned_is_tag:
         # Same code, better ref: the pin is a bare commit whose release has
-        # since been tagged. pyproject.toml's own comment asks for this.
+        # since been tagged.
         return Decision(
             "propose",
             f"{slug} {newest} is the tagged release of the pinned commit "
@@ -314,8 +278,7 @@ def fetch_native_state(slug: str, ref: str) -> RefState:
     except tomllib.TOMLDecodeError:
         return RefState(packaged=False)
     if (package.get("name") != "lore-core"
-            or fetch_text(slug, "rust/lore-core/src/bin/lore-rs.rs", ref) is None
-            or fetch_text(slug, "pyproject.toml", ref) is None):
+            or fetch_text(slug, "rust/lore-core/src/bin/lore-rs.rs", ref) is None):
         return RefState(packaged=False)
     version = package.get("version")
     return RefState(packaged=True, version=version if isinstance(version, str) else None)
@@ -326,14 +289,13 @@ def fetch_native_state(slug: str, ref: str) -> RefState:
 
 def _describe(state: RefState) -> str:
     if not state.packaged:
-        return "native crate/CLI or Python oracle packaging missing"
-    return f"native CLI and Python oracle packaged, version {state.version or '(unreadable)'}"
+        return "native crate or CLI packaging missing"
+    return f"native CLI packaged, version {state.version or '(unreadable)'}"
 
 
 def main(argv: list[str] | None = None) -> int:
     repo_root = Path(__file__).resolve().parent.parent
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--pyproject", type=Path, default=repo_root / "pyproject.toml")
     parser.add_argument("--native-manifest", type=Path, default=repo_root / "rust/doxa-lore/Cargo.toml")
     parser.add_argument(
         "--write",
@@ -345,12 +307,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--pin", help="override the current pin, for what-if runs")
     args = parser.parse_args(argv)
 
-    text = args.pyproject.read_text(encoding="utf-8")
     manifest = args.native_manifest.read_text(encoding="utf-8")
     pin = parse_native_pin(manifest)
-    oracle = parse_pin(text)
-    if oracle.slug != pin.slug:
-        raise SystemExit("native LORE and Python compatibility oracle name different repositories")
     if args.write and args.repo and args.repo != pin.slug:
         raise SystemExit("--repo is read-only for a different dependency repository")
     if args.repo:
@@ -386,12 +344,10 @@ def main(argv: list[str] | None = None) -> int:
     print(f"\ndecision: {decision.action}\nreason:   {decision.reason}")
 
     if decision.action == "propose" and args.write:
-        # Validate both rewrites before changing either file; locks are regenerated by CI.
+        # The Cargo lock is regenerated by CI after this manifest changes.
         new_manifest = rewrite_native_pin(manifest, commit)
-        new_oracle = rewrite_pin(text, commit)
         args.native_manifest.write_text(new_manifest, encoding="utf-8")
-        args.pyproject.write_text(new_oracle, encoding="utf-8")
-        print(f"\nrewrote native and Python oracle pins -> {commit} ({decision.tag})")
+        print(f"\nrewrote native pin -> {commit} ({decision.tag})")
 
     out = os.environ.get("GITHUB_OUTPUT")
     if out:
