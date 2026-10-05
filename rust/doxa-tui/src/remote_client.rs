@@ -22,7 +22,7 @@ type RetryIds = HashMap<String, (String, Instant)>;
 fn invalid(message: &'static str) -> io::Error { io::Error::new(io::ErrorKind::InvalidInput, message) }
 fn unavailable(message: &'static str) -> io::Error { io::Error::other(message) }
 
-fn valid_id(id: &str) -> bool {
+pub(crate) fn valid_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 128 && id.as_bytes()[0].is_ascii_alphanumeric()
         && id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
 }
@@ -44,7 +44,7 @@ fn retry_id(saved: &Mutex<RetryIds>, key: &str) -> Option<String> {
 fn clear_retry(saved: &Mutex<RetryIds>, key: &str) {
     saved.lock().unwrap_or_else(|poison| poison.into_inner()).remove(key);
 }
-fn hub_url(raw: &str) -> io::Result<Url> {
+pub(crate) fn hub_url(raw: &str) -> io::Result<Url> {
     let url = Url::parse(raw).map_err(|_| invalid("invalid hub URL"))?;
     if url.scheme() != "https" || !url.host_str().is_some_and(|host| host.ends_with(".ts.net"))
         || !url.username().is_empty() || url.password().is_some() || url.query().is_some()

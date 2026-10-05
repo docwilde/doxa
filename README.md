@@ -29,7 +29,7 @@
 
 ## Install
 
-Current release: **[v2.0.0-beta.1](https://github.com/docwilde/doxa/releases/tag/v2.0.0-beta.1)**.
+Current release: **[v2.0.0-beta.2](https://github.com/docwilde/doxa/releases/tag/v2.0.0-beta.2)**.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/docwilde/doxa/main/scripts/install.sh | sh
@@ -70,11 +70,27 @@ send prompts, and answer pending input. `Ctrl+T` selects another live remote
 session; tab and pane navigation use the usual DOXA keys. Remote tabs show a
 bounded recent transcript and live events. Model, permission, filesystem and
 LORE controls stay on the session host.
+Inside the local TUI, `/remote-connect HUB_URL HOST_ID` shares its live sessions
+while the window stays open; `/remote-disconnect` stops the connector. Use
+`/remote-control HUB_URL` to switch the same terminal to the hub's remote-only
+tabs, then `/local` to restore saved local tabs. The switch stops an in-window
+connector; run the CLI connector separately for persistent sharing. Local and
+remote tabs do not mix in one tab bar.
 The [Rust guide](rust/README.md) has setup steps, and the
 [hub plan](docs/plans/remote-hub.md) covers the Android client contract.
 The browser can enable encrypted background Web Push for turn completion and
 input requests. Configure a private VAPID key on the hub; push payloads
 contain only an event kind. The Android app is still planned.
+
+### Browser view
+
+These screens render the shipped Rust browser assets in Chromium with isolated
+example API responses. They show the browser interface, not an authenticated
+hub deployment; see the [capture record](docs/rust-gallery.md#remote-browser-captures).
+
+![Remote browser with two sessions, recent turns and a prompt](assets/shots/rust-remote-browser-conversation.png)
+
+![Remote browser with a pending permission request](assets/shots/rust-remote-browser-review.png)
 
 ## Gallery
 

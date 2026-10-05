@@ -21,6 +21,10 @@ enum LocalCommand {
     Msg,
     Fleet,
     Mesh,
+    RemoteConnect,
+    RemoteDisconnect,
+    RemoteControl,
+    Local,
     Img,
     Login,
     Logout,
@@ -68,7 +72,8 @@ impl LocalCommand {
 fn remote_local_allowed(command: LocalCommand) -> bool {
     matches!(command, LocalCommand::Help | LocalCommand::About | LocalCommand::Attach
         | LocalCommand::Sessions | LocalCommand::Split | LocalCommand::Vsplit
-        | LocalCommand::Pane | LocalCommand::Sidebar | LocalCommand::Detach)
+        | LocalCommand::Pane | LocalCommand::Sidebar | LocalCommand::Detach
+        | LocalCommand::RemoteControl | LocalCommand::Local)
 }
 
 impl std::fmt::Display for LocalCommand {
@@ -117,6 +122,10 @@ pub(super) const COMMANDS: &[CommandHelp] = &[
     CommandHelp { kind: LocalCommand::Msg, name: "/msg", form: "/msg <peer> <text>", summary: "Message a peer", support: "local · same project" },
     CommandHelp { kind: LocalCommand::Fleet, name: "/fleet", form: "/fleet [runs|status [RUN]|stop|detach|attach [RUN] INDEX|mesh [RUN]|start OPTIONS|resume RUN]", summary: "Fleet manifests and slots", support: "local · verified slot attachment" },
     CommandHelp { kind: LocalCommand::Mesh, name: "/mesh", form: "/mesh [RUN|stop]", summary: "Browser peer graph", support: "local · private loopback ledger" },
+    CommandHelp { kind: LocalCommand::RemoteConnect, name: "/remote-connect", form: "/remote-connect HUB_URL HOST_ID", summary: "Share local sessions with a private hub", support: "local · active while this window is open" },
+    CommandHelp { kind: LocalCommand::RemoteDisconnect, name: "/remote-disconnect", form: "/remote-disconnect", summary: "Stop sharing local sessions", support: "local · hub presence expires after its lease" },
+    CommandHelp { kind: LocalCommand::RemoteControl, name: "/remote-control", form: "/remote-control HUB_URL", summary: "Switch this terminal to remote tabs", support: "private hub · local sessions stay detached" },
+    CommandHelp { kind: LocalCommand::Local, name: "/local", form: "/local", summary: "Return to local sessions", support: "remote view · restores saved local tabs" },
     CommandHelp { kind: LocalCommand::Img, name: "/img", form: "/img [path]", summary: "Image support", support: "unavailable in Rust" },
     CommandHelp { kind: LocalCommand::Login, name: "/login", form: "/login [claude|codex] [--device-auth]", summary: "Provider login", support: "local · selectable operations menu" },
     CommandHelp { kind: LocalCommand::Logout, name: "/logout", form: "/logout [claude|codex]", summary: "Provider logout", support: "local · selectable operations menu" },
@@ -503,6 +512,65 @@ impl App {
         }
         let args = parsed.args;
         match command {
+            LocalCommand::RemoteConnect => {
+                let words = args.split_whitespace().collect::<Vec<_>>();
+                let [url, host] = words.as_slice() else {
+                    self.notice = "Usage: /remote-connect HUB_URL HOST_ID".into();
+                    return true;
+                };
+                if let Err(error) = crate::remote_client::hub_url(url) {
+                    self.notice = format!("Remote connect: {error}");
+                    return true;
+                }
+                if !crate::remote_client::valid_id(host) {
+                    self.notice = "Remote host ID must contain only letters, digits and hyphens".into();
+                    return true;
+                }
+                self.remote_connect_request = Some(((*url).into(), (*host).into()));
+                self.input.clear();
+                self.input_cursor = 0;
+                self.notice = "Connecting local sessions to the private hub…".into();
+                true
+            }
+            LocalCommand::RemoteDisconnect => {
+                if !args.trim().is_empty() {
+                    self.notice = "Usage: /remote-disconnect".into();
+                } else {
+                    self.remote_disconnect_requested = true;
+                    self.input.clear();
+                    self.input_cursor = 0;
+                }
+                true
+            }
+            LocalCommand::RemoteControl => {
+                let words = args.split_whitespace().collect::<Vec<_>>();
+                let [url] = words.as_slice() else {
+                    self.notice = "Usage: /remote-control HUB_URL".into();
+                    return true;
+                };
+                if let Err(error) = crate::remote_client::hub_url(url) {
+                    self.notice = format!("Remote control: {error}");
+                    return true;
+                }
+                self.remote_handoff = Some(super::RemoteHandoff::Hub((*url).into()));
+                self.input.clear();
+                self.input_cursor = 0;
+                self.should_quit = true;
+                true
+            }
+            LocalCommand::Local => {
+                if !args.trim().is_empty() {
+                    self.notice = "Usage: /local".into();
+                } else if self.remote_mode {
+                    self.remote_handoff = Some(super::RemoteHandoff::Local);
+                    self.input.clear();
+                    self.input_cursor = 0;
+                    self.should_quit = true;
+                } else {
+                    self.notice = "Already viewing local sessions".into();
+                }
+                true
+            }
             LocalCommand::Doctor if args.trim().is_empty() => {
                 let engine = self.groups[self.active_group]
                     .active_id()
@@ -979,6 +1047,8 @@ impl App {
                                 | "/fleet"
                                 | "/fleet start"
                                 | "/fleet attach"
+                                | "/remote-connect"
+                                | "/remote-control"
                                 | "/img"
                         ) {
                             self.action_draft = Some((

@@ -5,6 +5,17 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.2 — 2026-10-05
+
+**Remote access from the TUI**
+
+- Add `/remote-connect` and `/remote-disconnect` for a window-owned host connector, with private hub URL validation and explicit remote settings.
+- Add `/remote-control` to switch the same terminal to remote-only native tabs and `/local` to restore the saved local layout; local daemons remain detached.
+
+**Browser gallery**
+
+- Add two 3068 × 1734 captures of the shipped remote browser interface with isolated example sessions, transcript and approval, plus a reproducible capture script.
+
 ## 2.0.0-beta.1 — 2026-10-05
 
 **Beta promotion**

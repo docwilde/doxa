@@ -2799,7 +2799,7 @@ for line in sys.stdin:
         let mut app = App::default();
         app.groups[0].tabs.push("s".into());
         app.handle(Event::Resize(100, 30));
-        assert_eq!(COMMANDS.len(), 44);
+        assert_eq!(COMMANDS.len(), 48);
         let mut names = std::collections::HashSet::new();
         for row in COMMANDS { assert!(names.insert(row.name)); }
         app.open_help();
@@ -2817,6 +2817,43 @@ for line in sys.stdin:
         assert!(app.chip_info.as_ref().unwrap().scroll > 0);
         app.handle(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
         assert!(app.chip_info.is_none());
+    }
+
+    #[test]
+    fn remote_slash_commands_are_local_and_keep_invalid_drafts() {
+        let mut app = App::default();
+        app.groups[0].tabs.push("local-session".into());
+
+        app.input = "/remote-connect http://public.example.org workstation".into();
+        assert!(app.submit_local_command());
+        assert!(app.remote_connect_request.is_none());
+        assert!(app.input.starts_with("/remote-connect"));
+
+        app.input = "/remote-connect https://owner.tail.ts.net workstation".into();
+        assert!(app.submit_local_command());
+        assert_eq!(app.remote_connect_request.as_ref().unwrap().1, "workstation");
+        assert!(app.input.is_empty());
+        assert!(app.pending_prompts.is_empty());
+
+        app.input = "/remote-disconnect".into();
+        assert!(app.submit_local_command());
+        assert!(app.remote_disconnect_requested);
+        assert!(app.input.is_empty());
+
+        app.input = "/remote-control https://owner.tail.ts.net".into();
+        assert!(app.submit_local_command());
+        assert!(matches!(app.remote_handoff, Some(RemoteHandoff::Hub(_))));
+        assert!(app.should_quit);
+        assert!(app.pending_prompts.is_empty());
+
+        let mut remote = App { remote_mode: true, ..Default::default() };
+        remote.input = "/remote-connect https://owner.tail.ts.net workstation".into();
+        assert!(remote.submit_local_command());
+        assert!(remote.remote_connect_request.is_none());
+        remote.input = "/local".into();
+        assert!(remote.submit_local_command());
+        assert!(matches!(remote.remote_handoff, Some(RemoteHandoff::Local)));
+        assert!(remote.should_quit);
     }
 
     #[test]

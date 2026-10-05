@@ -35,6 +35,14 @@ remote-only window does not mix local tabs or restore its tab layout after exit.
 Provider settings, LORE management and filesystem operations remain on the
 host. Full historical transcript fetch is still in progress; the hub brokers
 a bounded recent snapshot from the host on demand.
+From the local TUI, `/remote-connect HUB_URL HOST_ID` starts the host connector
+for this window; `/remote-disconnect` stops it. `/remote-control HUB_URL`
+switches the same terminal to the remote-only tab view, detaching the local
+window while its daemons keep running. `/local` returns to the saved local
+layout. Local and remote tabs do not share one tab bar. The in-window connector
+stops when the local window closes or switches modes; run
+`doxa remote connect` separately if
+sharing must continue after the TUI exits.
 To enable browser alerts after the page closes, set `DOXA_HUB_RUNTIME_DIR` to
 the same private directory and run `doxa-hub push-keygen` once. It creates a
 `0600` VAPID key file; keep this file across hub restarts. Set
