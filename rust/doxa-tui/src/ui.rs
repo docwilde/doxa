@@ -1242,8 +1242,17 @@ enum RailRow {
 }
 
 #[derive(Debug)]
+enum RemoteHandoff {
+    Hub(String),
+    Local,
+}
+
+#[derive(Debug)]
 pub struct App {
     remote_mode: bool,
+    remote_connect_request: Option<(String, String)>,
+    remote_disconnect_requested: bool,
+    remote_handoff: Option<RemoteHandoff>,
     keybindings: crate::keybindings::Bindings,
     preferences: crate::preferences::Preferences,
     persist_preferences: bool,
@@ -1544,6 +1553,9 @@ impl Default for App {
             memory_list: None,
             operations_menu: None,
             window_mesh: None,
+            remote_connect_request: None,
+            remote_disconnect_requested: false,
+            remote_handoff: None,
             restart_executable: None,
             restart_after_update: false,
             restart_waiting: false,

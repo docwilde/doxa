@@ -87,3 +87,25 @@ display and socket close on exit; session daemons have their own lifecycle.
 
 The gallery uses the live capture script above; the old fixture renderer has
 been removed.
+
+## Remote browser captures
+
+`rust-remote-browser-conversation.png` and `rust-remote-browser-review.png`
+show the **shipped** `rust/doxa-remote/assets` HTML, CSS and JavaScript running
+in Chromium. `scripts/capture_remote_gallery.py` serves those files unchanged
+with two isolated example sessions and bounded transcript and review responses.
+It does not open a real hub, authenticate through Tailscale, or use a live
+provider. These images document the browser UI; they do not verify remote
+transport or authorization. Both PNGs are 3068 × 1734 and contain no user data.
+
+Reproduce them from the repository root on a machine with Google Chrome and
+Node.js 22 or newer:
+
+```sh
+python3 scripts/capture_remote_gallery.py
+```
+
+The script stores temporary Chrome profiles under `~/.cache/doxa`, serves only
+on `127.0.0.1` for the capture, and writes the two reviewed images to
+`assets/shots`. The native hub and browser adapter behavior is covered by
+the Rust remote suites and the [remote hub plan](plans/remote-hub.md).

@@ -31,7 +31,7 @@ fn main() -> std::process::ExitCode {
     }
 }
 
-const HELP: &str = r#"DOXA Rust 2.0 alpha
+const HELP: &str = r#"DOXA Rust 2.0 beta
 
 Usage: doxa [COMMAND] [options]
 
@@ -75,6 +75,9 @@ without stopping its daemon. Ctrl+Q exits DOXA
 and leaves running sessions detached. Ctrl+Left/Right switches tabs in the
 current pane; Shift+Left/Right switches between pane prompts. Change window
 shortcuts in /settings → Keys or with `doxa settings set key_new_tab Alt+N`.
+Inside the TUI, /remote-connect URL HOST_ID shares local sessions while this
+window is open; /remote-disconnect stops sharing. /remote-control URL switches
+this terminal to remote-only tabs; /local returns to saved local tabs.
 
 New-session options: --engine codex|claude|deepseek|glm, --model NAME,
   --branch LOCAL_OR_REMOTE, --linger SECONDS, --resume FULL_SESSION_ID.

@@ -1,5 +1,5 @@
 //! Own terminal modes, scheduling, bounded command queues and layout persistence.
-use super::{links, safe_label, App};
+use super::{links, safe_label, App, RemoteHandoff};
 use crossterm::event::{
     self, DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
     EnableFocusChange, EnableMouseCapture,
@@ -8,6 +8,8 @@ use crossterm::execute;
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::{backend::CrosstermBackend, layout::Rect, Terminal};
 use std::io::{self, IsTerminal, Stdout, Write};
+use std::process::{Child, Command, Stdio};
+use std::os::unix::process::CommandExt;
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -58,6 +60,11 @@ struct TerminalGuard {
     paste: bool,
     keyboard: bool,
     keyboard_protocol: KeyboardProtocol,
+}
+/// The in-window connector also stops if terminal I/O exits the loop early.
+struct RemoteConnector(Child);
+impl Drop for RemoteConnector {
+    fn drop(&mut self) { stop_remote_connector(&mut self.0); }
 }
 impl TerminalGuard {
     fn enter() -> io::Result<Self> {
@@ -267,6 +274,7 @@ fn run_loop(
     let mut saved_layout = crate::ui_state::LayoutSignature::capture(&app);
     terminal.draw(|frame| app.draw(frame))?;
     let mut pointer_on_link = false;
+    let mut remote_connector: Option<RemoteConnector> = None;
     let mut first_run_pending = crate::first_run::needed();
     let mut installation_worker = crate::installation::Worker::start().ok();
     if installation_worker.is_none() {
@@ -318,6 +326,44 @@ fn run_loop(
                 app.notice = "Could not open link in browser".into();
                 changed = true;
             }
+        }
+        if let Some(connector) = remote_connector.as_mut() {
+            match connector.0.try_wait() {
+                Ok(Some(status)) => {
+                    app.notice = format!("Remote connector exited ({status}) · inspect doxa remote connect from a terminal");
+                    remote_connector = None;
+                    changed = true;
+                }
+                Err(error) => {
+                    app.notice = format!("Remote connector status unavailable: {error}");
+                    remote_connector = None;
+                    changed = true;
+                }
+                Ok(None) => {}
+            }
+        }
+        if std::mem::take(&mut app.remote_disconnect_requested) {
+            app.notice = if let Some(connector) = remote_connector.take() {
+                drop(connector);
+                "Remote sharing stopped · hub presence expires after its lease".into()
+            } else {
+                "No remote connector is running in this window".into()
+            };
+            changed = true;
+        }
+        if let Some((url, host)) = app.remote_connect_request.take() {
+            app.notice = if remote_connector.is_some() {
+                "Remote connector already running · use /remote-disconnect first".into()
+            } else {
+                match start_remote_connector(&url, &host) {
+                    Ok(child) => {
+                        remote_connector = Some(RemoteConnector(child));
+                        format!("Remote connector running as {host} · verify hub registration · /remote-disconnect stops it")
+                    }
+                    Err(error) => format!("Could not start remote connector: {error}"),
+                }
+            };
+            changed = true;
         }
         changed |= app.poll_sessions_roster();
         changed |= app.poll_stale_detached(Instant::now());
@@ -449,6 +495,7 @@ fn run_loop(
             terminal.draw(|frame| app.draw(frame))?;
         }
     }
+    drop(remote_connector);
     drop(terminal);
     drop(guard);
     if app.restart_after_update {
@@ -461,7 +508,49 @@ fn run_loop(
             return Err(std::process::Command::new(executable).exec());
         }
     }
+    if let Some(handoff) = app.remote_handoff.take() {
+        use std::os::unix::process::CommandExt;
+        let executable = std::env::current_exe()?;
+        return Err(match handoff {
+            RemoteHandoff::Hub(url) => Command::new(executable).args(["remote", "tui", &url]).exec(),
+            RemoteHandoff::Local => Command::new(executable).exec(),
+        });
+    }
     Ok(())
+}
+
+fn start_remote_connector(url: &str, host: &str) -> io::Result<Child> {
+    if !doxa_peers::remote_policy::remote_enabled() {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied,
+            "enable remote access in /settings first"));
+    }
+    if doxa_peers::remote_policy::setting("remote_allowed_logins", "DOXA_REMOTE_ALLOWED_LOGINS").trim().is_empty() {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied,
+            "set allowed Tailscale logins in /settings first"));
+    }
+    let executable = std::env::var_os("DOXA_REMOTE_BIN")
+        .map(std::path::PathBuf::from)
+        .unwrap_or(std::env::current_exe()?.with_file_name("doxa-remote"));
+    Command::new(executable)
+        .args(["connect", url, host])
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+}
+
+fn stop_remote_connector(child: &mut Child) {
+    if child.try_wait().ok().flatten().is_some() { return; }
+    let group = -(child.id() as i32);
+    unsafe { libc::kill(group, libc::SIGTERM); }
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while Instant::now() < deadline {
+        if child.try_wait().ok().flatten().is_some() { return; }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    unsafe { libc::kill(group, libc::SIGKILL); }
+    let _ = child.wait();
 }
 
 pub(super) fn dispatch_launches(
