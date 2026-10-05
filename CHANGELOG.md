@@ -2,8 +2,15 @@
 
 Newest first. Versions are annotated git tags on the commit that shipped
 them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
-history, not written from memory. Rust alpha tags identify preview snapshots;
+history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
+
+## 2.0.0-beta.1 — 2026-10-05
+
+**Beta promotion**
+
+- Promote the Rust 2.0 line to beta after the Python 1.x source cleanup and native Linux/macOS checks.
+- Update the README to identify beta.1 as the current release; retain accurate alpha labels on historical screenshots and measurements.
 
 ## 2.0.0-alpha.73 — 2026-10-05
 
