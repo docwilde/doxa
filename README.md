@@ -29,7 +29,7 @@
 
 ## Install
 
-Current release: **[v2.0.0-beta.6](https://github.com/docwilde/doxa/releases/tag/v2.0.0-beta.6)**.
+Current release: **[v2.0.0-beta.7](https://github.com/docwilde/doxa/releases/tag/v2.0.0-beta.7)**.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/docwilde/doxa/main/scripts/install.sh | sh
@@ -49,7 +49,7 @@ doxa new --engine codex
 doxa list
 ```
 
-Ctrl+T opens the new-tab engine picker. Alt+V splits side by side; Alt+H stacks panes. Ctrl+X closes the active tab and hides it from the session rail while its daemon keeps running; Ctrl+Q exits DOXA and leaves sessions detached. Use `/resume` to reopen a closed or saved session. Tab reaches the session rail when visible; uncollected sessions group under their repository or project. The mouse wheel switches tabs over a tab header. Use `/settings` → **Keys** to change window shortcuts immediately, or `doxa settings set key_new_tab Alt+N` to change one for the next launch.
+Ctrl+T opens the new-tab engine picker. Alt+V splits side by side; Alt+H stacks panes. Ctrl+W closes the active tab while its daemon keeps running; Delete does the same when the tab bar has focus. Ctrl+X stops the active daemon and keeps its transcript visible. Ctrl+Delete opens a confirmation to stop the daemon and delete its DOXA transcript; provider-native history remains separate. Ctrl+Q exits DOXA and leaves sessions detached. Use `/resume` to reopen a closed or saved session. Tab reaches the session rail when visible; uncollected sessions group under their repository or project. The mouse wheel switches tabs over a tab header. Use `/settings` → **Keys** to change window shortcuts immediately, or `doxa settings set key_new_tab Alt+N` to change one for the next launch.
 
 DeepSeek and GLM show estimated API cost from provider token counts and published model rates. The estimate uses fresh-input rates (and DeepSeek peak rates), so cache discounts and off-peak billing can make the actual charge lower. Codex subscription usage appears after its app-server reports the Codex quota windows; missing values stay unknown.
 

@@ -342,11 +342,11 @@ for line in sys.stdin:
         app.groups[0].tabs = vec!["first".into(), "second".into()];
         app.groups[0].active = 0;
         app.input = "unsent draft".into();
-        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT)));
+        app.open_stop_confirmation();
         assert_eq!(app.stop_confirmation.as_deref(), Some("first"));
         app.handle(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
         assert!(app.pending_stops.is_empty());
-        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT)));
+        app.open_stop_confirmation();
         app.handle(Event::Key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)));
         assert_eq!(app.pending_stops, vec!["first"]);
         assert_eq!(app.input, "unsent draft");
@@ -381,6 +381,45 @@ for line in sys.stdin:
         assert!(app.stop_confirmation.is_none());
         app.handle(Event::Key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)));
         assert!(app.pending_stops.is_empty());
+    }
+
+    #[test]
+    fn delete_edits_prompt_but_closes_focused_tab_and_ctrl_delete_requires_confirmation() {
+        let mut app = App::default();
+        app.size = Rect::new(0, 0, 100, 28);
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"saved", "cwd":"/repo"}));
+        app.session_cwds.insert("saved".into(), PathBuf::from("/repo"));
+        app.input = "abc".into(); app.input_cursor = 1;
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE)));
+        assert_eq!(app.input, "ac");
+        assert_eq!(app.groups[0].active_id(), Some("saved"));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Delete, KeyModifiers::CONTROL)));
+        assert!(app.delete_confirmation.is_some());
+        assert_eq!(app.delete_confirmation.as_ref().unwrap().2, 1);
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(app.delete_confirmation.is_none());
+        assert!(app.session_delete_pending.is_none());
+        assert_eq!(app.groups[0].active_id(), Some("saved"));
+        app.focus = Focus::Tabs;
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE)));
+        assert!(app.groups[0].tabs.is_empty());
+        assert!(app.session_stop_pending.is_none());
+    }
+
+    #[test]
+    fn unconfirmed_daemon_retirement_never_starts_transcript_deletion() {
+        let mut app = App::default();
+        let (sender, receiver) = mpsc::sync_channel(1);
+        app.session_stop_pending = Some(receiver);
+        app.delete_after_stop = Some(("saved".into(), PathBuf::from("/missing")));
+        sender.send(crate::sessions::Report {
+            stopped: Vec::new(), requested: vec!["saved".into()],
+            failed: Vec::new(), error: None,
+        }).unwrap();
+        assert!(app.poll_sessions_stop());
+        assert!(app.delete_after_stop.is_none());
+        assert!(app.session_delete_pending.is_none());
+        assert!(app.notice.contains("Transcript preserved"));
     }
 
     #[test]
@@ -2981,7 +3020,7 @@ for line in sys.stdin:
         }
         app.groups[0].tabs.push("second".into());
         app.groups[0].active = 1;
-        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL)));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL)));
         assert_eq!(app.groups[0].tabs, ["first"]);
         assert!(!app.should_quit);
         assert!(app.sessions.iter().any(|session| session.id == "second"));
@@ -3033,7 +3072,7 @@ for line in sys.stdin:
         assert_eq!(app.groups[0].active_id(), Some("first"));
         assert_eq!(app.input, "first draft");
 
-        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL)));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL)));
         assert_eq!(app.groups[0].tabs, ["second"]);
         assert!(!app.should_quit);
         assert!(app.detached_this_run.contains(&"first".to_owned()));
@@ -3045,13 +3084,13 @@ for line in sys.stdin:
     }
 
     #[test]
-    fn ctrl_x_last_tab_leaves_an_empty_window_for_new_sessions() {
+    fn ctrl_w_last_tab_leaves_an_empty_window_for_new_sessions() {
         let mut app = App::default();
         app.apply_update(DaemonUpdate::Upsert(Session {
             id: "only".into(), title: "only".into(), collection: String::new(),
             transcript: String::new(), status: "Ready".into(),
         }));
-        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL)));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL)));
         assert!(app.groups.iter().all(|group| group.tabs.is_empty()));
         assert_eq!(app.active_group, 0);
         assert!(!app.should_quit);
@@ -3117,7 +3156,7 @@ for line in sys.stdin:
     }
 
     #[test]
-    fn ctrl_x_dismisses_a_past_session_from_the_rail() {
+    fn ctrl_w_dismisses_a_past_session_from_the_rail() {
         let mut app = App::default();
         app.apply_update(DaemonUpdate::Upsert(Session {
             id: "old".into(), title: "Old work".into(), collection: "repo".into(),
@@ -3128,7 +3167,7 @@ for line in sys.stdin:
         app.groups[0].tabs = vec!["old".into()];
         assert_eq!(app.rail_order(), [0]);
 
-        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL)));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL)));
 
         assert!(app.groups[0].tabs.is_empty());
         assert!(app.rail_order().is_empty());
@@ -5229,6 +5268,32 @@ for line in sys.stdin:
         assert!(app.lore_picker.as_ref().unwrap().belief_review.is_none());
         app.handle(Event::Key(KeyEvent::new(KeyCode::Esc,KeyModifiers::NONE)));
         assert!(app.belief_preview.owner().is_none());
+    }
+
+    #[test]
+    fn staged_and_clustered_proposals_show_delayed_full_hover_text() {
+        for clustered in [false, true] {
+            let mut app = App::default();
+            app.rail_visible = false;
+            app.handle(Event::Resize(120, 40));
+            app.show_belief_browser_fixture(0, &[]);
+            let picker = app.lore_picker.as_mut().unwrap();
+            picker.proposal_mode = true;
+            picker.cluster_mode = clustered;
+            picker.proposals = vec![lore_picker::Proposal {
+                pid: "proposal-1".into(), kind: "memory".into(), action: "add".into(),
+                scope: "user".into(), summary: "Full staged fact with hidden tail".into(),
+            }];
+            painted_at(&app, 120, 40);
+            let row = app.rendered_belief_rows.borrow()[0].clone();
+            assert!(app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Moved,
+                column: row.rect.x + 10, row: row.rect.y, modifiers: KeyModifiers::NONE })));
+            assert!(!painted_at(&app, 120, 40).contains("Full proposal"));
+            assert!(app.tick_belief_preview(Instant::now() + Duration::from_millis(600)));
+            let preview = painted_at(&app, 120, 40);
+            assert!(preview.contains("Full proposal"), "{preview}");
+            assert!(preview.contains("Full staged fact with hidden tail"), "{preview}");
+        }
     }
 
     #[test]

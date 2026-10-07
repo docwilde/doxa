@@ -8,7 +8,7 @@ pub enum Action {
     NewTab, CloseTab, CloseTabAlternate, Quit, PreviousTab, NextTab,
     PreviousPane, NextPane, NextPaneAlternate, Tools, Palette, Search,
     Settings, PeerMap, Sidebar, Diff, DiffAlternate, SplitHorizontal,
-    SplitVertical, Model, Effort, Permission, Engine, Lore, Stop,
+    SplitVertical, Model, Effort, Permission, Engine, Lore, Stop, DeleteTranscript,
 }
 
 #[derive(Clone, Copy)]
@@ -21,8 +21,8 @@ pub struct Definition {
 
 pub const DEFINITIONS: &[Definition] = &[
     Definition { action: Action::NewTab, key: "key_new_tab", default: "Ctrl+T", label: "new tab" },
-    Definition { action: Action::CloseTab, key: "key_close_tab", default: "Ctrl+X", label: "close tab" },
-    Definition { action: Action::CloseTabAlternate, key: "key_close_tab_alt", default: "Ctrl+W", label: "close tab alternate" },
+    Definition { action: Action::CloseTab, key: "key_close_tab", default: "Ctrl+W", label: "close tab" },
+    Definition { action: Action::CloseTabAlternate, key: "key_close_tab_alt", default: "Delete", label: "close focused tab" },
     Definition { action: Action::Quit, key: "key_quit", default: "Ctrl+Q", label: "quit and detach" },
     Definition { action: Action::PreviousTab, key: "key_previous_tab", default: "Ctrl+Left", label: "previous tab" },
     Definition { action: Action::NextTab, key: "key_next_tab", default: "Ctrl+Right", label: "next tab" },
@@ -44,8 +44,30 @@ pub const DEFINITIONS: &[Definition] = &[
     Definition { action: Action::Permission, key: "key_permission", default: "Alt+P", label: "permission picker" },
     Definition { action: Action::Engine, key: "key_engine", default: "Alt+E", label: "engine picker" },
     Definition { action: Action::Lore, key: "key_lore", default: "Alt+L", label: "LORE beliefs" },
-    Definition { action: Action::Stop, key: "key_stop", default: "Alt+X", label: "stop session" },
+    Definition { action: Action::Stop, key: "key_stop", default: "Ctrl+X", label: "stop session" },
+    Definition { action: Action::DeleteTranscript, key: "key_delete_transcript", default: "Ctrl+Delete", label: "delete session transcript" },
 ];
+
+/// Existing installs can have the former defaults stored explicitly. Move
+/// those values once, before validating the new distinct lifecycle shortcuts.
+pub(crate) fn migrate_legacy_defaults(config: &mut toml::Table) -> bool {
+    if config.get("keybindings_schema").and_then(toml::Value::as_integer).is_some_and(|version| version >= 2) {
+        return false;
+    }
+    let mut changed = false;
+    for (key, old, new) in [
+        ("key_close_tab", "Ctrl+X", "Ctrl+W"),
+        ("key_close_tab_alt", "Ctrl+W", "Delete"),
+        ("key_stop", "Alt+X", "Ctrl+X"),
+    ] {
+        if config.get(key).and_then(toml::Value::as_str) == Some(old) {
+            config.insert(key.into(), toml::Value::String(new.into()));
+            changed = true;
+        }
+    }
+    if changed { config.insert("keybindings_schema".into(), toml::Value::Integer(2)); }
+    changed
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Chord { code: KeyCode, modifiers: KeyModifiers }
@@ -73,17 +95,18 @@ impl Chord {
                 "left" => KeyCode::Left, "right" => KeyCode::Right,
                 "up" => KeyCode::Up, "down" => KeyCode::Down,
                 "tab" => KeyCode::Tab, "enter" => KeyCode::Enter,
+                "delete" | "del" => KeyCode::Delete,
                 "esc" | "escape" => KeyCode::Esc,
                 "," | "comma" => KeyCode::Char(','),
                 other if other.len() == 1 && other.bytes().all(|b| b.is_ascii_alphabetic()) =>
                     KeyCode::Char(other.chars().next().unwrap()),
                 other if other.starts_with('f') && other[1..].parse::<u8>().is_ok_and(|n| (1..=12).contains(&n)) =>
                     KeyCode::F(other[1..].parse().unwrap()),
-                _ => return Err(invalid("use a letter, arrow, Tab, Enter, Esc, comma or F1–F12")),
+                _ => return Err(invalid("use a letter, arrow, Delete, Tab, Enter, Esc, comma or F1–F12")),
             });
         }
         let code = key.ok_or_else(|| invalid("missing key"))?;
-        if modifiers.is_empty() && !matches!(code, KeyCode::F(_)) {
+        if modifiers.is_empty() && !matches!(code, KeyCode::F(_) | KeyCode::Delete) {
             return Err(invalid("printable and editing keys need Ctrl, Alt or Shift"));
         }
         if modifiers.contains(KeyModifiers::CONTROL)
@@ -119,7 +142,7 @@ impl Chord {
             KeyCode::Char(ch) => ch.to_ascii_uppercase().to_string(),
             KeyCode::Left => "Left".into(), KeyCode::Right => "Right".into(),
             KeyCode::Up => "Up".into(), KeyCode::Down => "Down".into(),
-            KeyCode::Tab => "Tab".into(), KeyCode::F(n) => format!("F{n}"),
+            KeyCode::Tab => "Tab".into(), KeyCode::Delete => "Delete".into(), KeyCode::F(n) => format!("F{n}"),
             _ => unreachable!(),
         });
         parts.join("+")
@@ -135,6 +158,8 @@ impl Default for Bindings {
 }
 impl Bindings {
     pub fn from_config(config: &toml::Table) -> io::Result<Self> {
+        let mut config = config.clone();
+        migrate_legacy_defaults(&mut config);
         let mut chords: Vec<Option<Chord>> = Vec::with_capacity(DEFINITIONS.len());
         for definition in DEFINITIONS {
             let raw = match config.get(definition.key) {
@@ -175,6 +200,10 @@ mod tests {
         let bindings = Bindings::default();
         assert!(bindings.matches(Action::NewTab, KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL)));
         assert!(!bindings.matches(Action::Tools, KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL)));
+        assert!(bindings.matches(Action::CloseTab, KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL)));
+        assert!(bindings.matches(Action::CloseTabAlternate, KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE)));
+        assert!(bindings.matches(Action::Stop, KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL)));
+        assert!(bindings.matches(Action::DeleteTranscript, KeyEvent::new(KeyCode::Delete, KeyModifiers::CONTROL)));
     }
     #[test]
     fn validates_collisions_and_canonicalizes_chords() {
@@ -190,5 +219,20 @@ mod tests {
             KeyEvent::new(KeyCode::Char('n'), KeyModifiers::ALT)));
         let shift_tab = Chord::parse("Shift+Tab").unwrap().unwrap();
         assert!(shift_tab.matches(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE)));
+    }
+    #[test]
+    fn old_saved_defaults_migrate_without_blocking_later_custom_remaps() {
+        let mut config = toml::Table::new();
+        for (key, value) in [("key_close_tab", "Ctrl+X"), ("key_close_tab_alt", "Ctrl+W"), ("key_stop", "Alt+X")] {
+            config.insert(key.into(), toml::Value::String(value.into()));
+        }
+        let migrated = Bindings::from_config(&config).unwrap();
+        assert_eq!(migrated.display(Action::CloseTab), "Ctrl+W");
+        assert_eq!(migrated.display(Action::CloseTabAlternate), "Delete");
+        assert_eq!(migrated.display(Action::Stop), "Ctrl+X");
+        assert!(migrate_legacy_defaults(&mut config));
+        assert_eq!(config["keybindings_schema"].as_integer(), Some(2));
+        config.insert("key_stop".into(), toml::Value::String("Alt+X".into()));
+        assert_eq!(Bindings::from_config(&config).unwrap().display(Action::Stop), "Alt+X");
     }
 }

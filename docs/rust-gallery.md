@@ -75,7 +75,7 @@ the actual terminal text for state checks, and `status` reports cell geometry.
 For `rust-sessions.png`, create a second Harbour notes tab with Ctrl+T. Start
 another real session from Lighthouse notes using the same isolated DOXA home
 and runtime, then `/attach` it in the first TUI. Open the rail and drag its
-divider wider. Detach the completed Harbour notes tab with Ctrl+X, stop that
+divider wider. Detach the completed Harbour notes tab with Ctrl+W, stop that
 exact daemon in the isolated runtime, and wait for the rail's Past sessions
 section. The capture shows two live sessions and the stopped session's retained
 label under separate repository headings.

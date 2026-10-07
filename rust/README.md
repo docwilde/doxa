@@ -169,7 +169,11 @@ CLI changes apply on the next launch. Use `none` to unbind a shortcut. Duplicate
 or malformed chords are rejected without replacing the saved config. The prompt,
 approval and menu editing keys remain local to those controls.
 
-Ctrl+X closes the active tab and leaves its daemon running; Ctrl+W is an alias.
+Ctrl+W closes the active tab and leaves its daemon running. Delete also closes a
+tab when the tab bar has focus; in the prompt it edits text.
+Ctrl+X stops the active daemon and keeps its transcript available. Ctrl+Delete
+opens an inline confirmation, stops a live daemon, and removes its verified
+DOXA JSONL transcript after shutdown. Provider-native archives remain separate.
 Ctrl+Q exits the frontend and leaves all running sessions detached. Ctrl+Left/Right
 switches tabs in the current pane; Shift+Left/Right switches between pane prompts.
 Closed tabs disappear from the session rail, including past sessions. Use

@@ -15,14 +15,14 @@ macro_rules! key_setting {
     ($key:literal, $label:literal, $default:literal) => {
         Setting { key: $key, env: "", label: $label, category: "Keys", kind: Kind::Key,
             choices: &[], default: $default, read_only: false,
-            help: "Window shortcut: Ctrl, Alt and Shift modifiers plus a letter, arrow, Tab, comma or F1-F12; 'none' unbinds it. Takes effect when settings are saved.",
+            help: "Window shortcut: Ctrl, Alt and Shift modifiers plus a letter, arrow, Delete, Tab, comma or F1-F12; 'none' unbinds it. Takes effect when settings are saved.",
             note: "Editing keys in the prompt and menus remain local to those controls. Duplicate shortcuts are rejected." }
     };
 }
 pub const SETTINGS: &[Setting] = &[
     key_setting!("key_new_tab", "new tab", "Ctrl+T"),
-    key_setting!("key_close_tab", "close tab", "Ctrl+X"),
-    key_setting!("key_close_tab_alt", "close tab alternate", "Ctrl+W"),
+    key_setting!("key_close_tab", "close tab", "Ctrl+W"),
+    key_setting!("key_close_tab_alt", "close focused tab", "Delete"),
     key_setting!("key_quit", "quit and detach", "Ctrl+Q"),
     key_setting!("key_previous_tab", "previous tab", "Ctrl+Left"),
     key_setting!("key_next_tab", "next tab", "Ctrl+Right"),
@@ -44,7 +44,8 @@ pub const SETTINGS: &[Setting] = &[
     key_setting!("key_permission", "permission picker", "Alt+P"),
     key_setting!("key_engine", "engine picker", "Alt+E"),
     key_setting!("key_lore", "LORE beliefs", "Alt+L"),
-    key_setting!("key_stop", "stop session", "Alt+X"),
+    key_setting!("key_stop", "stop session", "Ctrl+X"),
+    key_setting!("key_delete_transcript", "delete session transcript", "Ctrl+Delete"),
     Setting { key: "engine", env: "DOXA_ENGINE", label: "engine", category: "Session", kind: Kind::Choice, choices: &["", "claude", "codex", "deepseek", "glm"], default: "claude", read_only: false, help: "Which engine drives NEW sessions (doxa.engines -- `doxa --engine <id>` is the flag layer, `/engine` the in-app one)", note: "Not every session surface exists on every engine, and the ones that do not are HIDDEN rather than shown inert -- no permission-mode chip where there are no modes, no ctx chip where no window size is reported, no cost chip where no dollar figure is. `/engine` prints what each one can and cannot do, read off doxa.engines.EngineCapabilities itself rather than described here, where it would go stale. An engine is chosen at CONNECT, so a change here reaches NEW sessions and tabs and never the running one." },
     Setting { key: "model", env: "DOXA_MODEL", label: "model", category: "Session", kind: Kind::Text, choices: &[], default: "", read_only: false, help: "Model preference for the active session's engine, used by new sessions of that engine (/model switches the live session). DOXA_MODEL overrides every engine.", note: "" },
     Setting { key: "effort", env: "DOXA_EFFORT", label: "effort", category: "Session", kind: Kind::Choice, choices: &["", "low", "medium", "high", "xhigh", "max"], default: "", read_only: false, help: "Default reasoning effort for new sessions; use the effort chip or /effort for the current session", note: "Supported current-session changes require an idle provider and verified capability. Claude resumes its existing provider conversation with the selected effort; Codex applies it to the next turn." },
@@ -108,6 +109,11 @@ pub fn find(key: &str) -> io::Result<&'static Setting> {
 pub fn config_path() -> io::Result<std::path::PathBuf> { Ok(crate::operations::doxa_home()?.join("config.toml")) }
 pub fn raw_from(config: &toml::Table, setting: &Setting, override_value: Option<&str>, engine: &str) -> String {
     if let Some(value) = override_value.filter(|v| !v.trim().is_empty()) { return value.trim().into(); }
+    if setting.kind == Kind::Key {
+        let mut effective = config.clone();
+        crate::keybindings::migrate_legacy_defaults(&mut effective);
+        return doxa_state::raw_setting(None, &effective, setting.key).trim().into();
+    }
     if setting.key == "model" && engine != "claude" {
         return config.get("models").and_then(toml::Value::as_table).and_then(|v| v.get(engine)).and_then(toml::Value::as_str).unwrap_or("").trim().into();
     }
@@ -182,7 +188,9 @@ pub fn save(path: &Path, edits: &[(String, Option<String>)], engine: &str) -> io
         if std::env::var(s.env).ok().is_some_and(|v| !v.trim().is_empty()) { return Err(io::Error::new(io::ErrorKind::PermissionDenied, format!("{} overrides config.toml; unset it before changing {key}", s.env))); }
         parsed.push((s, coerce(s, value.as_deref())?));
     }
+    let key_edited = parsed.iter().any(|(setting, _)| setting.kind == Kind::Key);
     doxa_state::update_config(path, |config| {
+        crate::keybindings::migrate_legacy_defaults(config);
         for (s, value) in parsed {
             if s.key == "model" && engine != "claude" {
                 if !config.contains_key("models") { config.insert("models".into(), toml::Value::Table(toml::Table::new())); }
@@ -190,6 +198,7 @@ pub fn save(path: &Path, edits: &[(String, Option<String>)], engine: &str) -> io
                 if let Some(value) = value { models.insert(engine.into(),value); } else { models.remove(engine); }
             } else if let Some(value) = value { config.insert(s.key.into(),value); } else { config.remove(s.key); }
         }
+        if key_edited { config.insert("keybindings_schema".into(), toml::Value::Integer(2)); }
         crate::keybindings::Bindings::from_config(config)?;
         Ok(())
     })
@@ -246,5 +255,24 @@ mod tests {
             assert_eq!(setting.default,definition.default);
             assert_eq!(setting.label,definition.label);
         }
+    }
+    #[test]
+    fn saved_old_lifecycle_shortcuts_migrate_before_other_settings_are_written() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "key_close_tab='Ctrl+X'\nkey_close_tab_alt='Ctrl+W'\nkey_stop='Alt+X'\n").unwrap();
+        let old = doxa_state::load_config_checked(&path).unwrap();
+        assert_eq!(raw_from(&old, find("key_close_tab").unwrap(), None, "claude"), "Ctrl+W");
+        save(&path, &[("clock_show".into(), Some("off".into()))], "claude").unwrap();
+        let migrated = doxa_state::load_config_checked(&path).unwrap();
+        assert_eq!(migrated["keybindings_schema"].as_integer(), Some(2));
+        assert_eq!(migrated["key_close_tab"].as_str(), Some("Ctrl+W"));
+        assert_eq!(migrated["key_close_tab_alt"].as_str(), Some("Delete"));
+        assert_eq!(migrated["key_stop"].as_str(), Some("Ctrl+X"));
+        save(&path, &[("key_stop".into(), Some("Alt+X".into()))], "claude").unwrap();
+        let customized = doxa_state::load_config_checked(&path).unwrap();
+        assert_eq!(crate::keybindings::Bindings::from_config(&customized).unwrap()
+            .display(crate::keybindings::Action::Stop), "Alt+X");
     }
 }

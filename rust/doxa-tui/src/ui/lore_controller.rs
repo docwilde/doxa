@@ -1547,7 +1547,7 @@ impl App {
             return false;
         }
         let Some(picker) = self.lore_picker.as_ref().filter(|picker| {
-            !picker.proposal_mode
+            picker.review.is_none()
                 && picker.belief_review.is_none()
                 && picker.evidence.is_none()
                 && picker.pending.is_none()
@@ -1558,12 +1558,19 @@ impl App {
         if picker.cwd != owner.cwd || picker.query != owner.query || picker.offset != owner.offset {
             return false;
         }
-        if !picker.rows.get(picker.selected).is_some_and(|row| {
-            row.id == owner.id
-                && row.subject == owner.subject
-                && row.claim == owner.claim
-                && row.truncated == owner.truncated
-        }) {
+        let selected_matches = if picker.proposal_mode {
+            picker.proposals.get(picker.selected).is_some_and(|row| {
+                picker.selected as u64 + 1 == owner.id
+                    && owner.subject == format!("{} · {} · {} · {}", row.pid, row.kind, row.action, row.scope)
+                    && owner.claim == row.summary
+            })
+        } else {
+            picker.rows.get(picker.selected).is_some_and(|row| {
+                row.id == owner.id && row.subject == owner.subject
+                    && row.claim == owner.claim && row.truncated == owner.truncated
+            })
+        };
+        if !selected_matches {
             return false;
         }
         self.belief_pointer
@@ -1614,7 +1621,11 @@ impl App {
                 })
                 .cloned()
         });
-        let mut changed = self.belief_preview.set_owner(owner, now);
+        let mut changed = if self.lore_picker.as_ref().is_some_and(|picker| picker.proposal_mode) {
+            self.belief_preview.set_cached_owner(owner, now)
+        } else {
+            self.belief_preview.set_owner(owner, now)
+        };
         changed |= self.belief_preview.tick(now);
         if self.belief_preview.needs_read() && !self.belief_browser_fixture {
             self.belief_preview.read();

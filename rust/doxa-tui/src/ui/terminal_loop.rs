@@ -487,6 +487,7 @@ fn run_loop(
         changed |= app.poll_sessions_roster();
         changed |= app.poll_stale_detached(Instant::now());
         changed |= app.poll_sessions_stop();
+        changed |= app.poll_session_delete();
         changed |= app.poll_fleet();
         changed |= app.poll_diff();
         changed |= app.poll_auto_diff();
@@ -615,6 +616,12 @@ fn run_loop(
             }
         }
         changed |= app.restart_after_install(&mut state);
+        if app.should_quit && (app.delete_after_stop.is_some() || app.session_delete_pending.is_some()) {
+            app.should_quit = false;
+            app.remote_handoff = None;
+            app.notice = "Wait for transcript deletion to finish before leaving".into();
+            changed = true;
+        }
         if changed {
             terminal.draw(|frame| app.draw(frame))?;
         }
