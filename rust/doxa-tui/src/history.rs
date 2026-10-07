@@ -213,7 +213,8 @@ fn delete_exact_in(root: &Path, project: &str, id: &str) -> Result<(), &'static 
         return Err("transcript changed before deletion");
     }
     let current = unsafe { current.assume_init() };
-    if current.st_dev != meta.dev() || current.st_ino != meta.ino() {
+    if u64::try_from(current.st_dev).ok() != Some(meta.dev())
+        || u64::try_from(current.st_ino).ok() != Some(meta.ino()) {
         return Err("transcript changed before deletion");
     }
     if unsafe { libc::unlinkat(dir.as_raw_fd(), name.as_ptr(), 0) } != 0 {

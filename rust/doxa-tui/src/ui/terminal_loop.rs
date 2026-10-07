@@ -616,6 +616,12 @@ fn run_loop(
             }
         }
         changed |= app.restart_after_install(&mut state);
+        if app.should_quit && (app.delete_after_stop.is_some() || app.session_delete_pending.is_some()) {
+            app.should_quit = false;
+            app.remote_handoff = None;
+            app.notice = "Wait for transcript deletion to finish before leaving".into();
+            changed = true;
+        }
         if changed {
             terminal.draw(|frame| app.draw(frame))?;
         }
