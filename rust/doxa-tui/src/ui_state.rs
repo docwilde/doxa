@@ -35,21 +35,30 @@ pub struct LayoutSignature {
 impl LayoutSignature {
     pub fn capture(app: &App) -> Self {
         Self {
-            groups: app.groups.iter().map(|g| (g.tabs.clone(), g.active)).collect(),
+            groups: app.groups.iter().map(|g| {
+                let selected=g.tabs.get(g.active);
+                let tabs=g.tabs.iter().filter(|id|!crate::remote_client::valid_target(id)).cloned().collect::<Vec<_>>();
+                let active=selected.and_then(|id|tabs.iter().position(|tab|tab==id)).unwrap_or(0);
+                (tabs,active)
+            }).collect(),
             pane_tree: app.pane_tree.clone(),
             killed: { let mut ids: Vec<_> = app.killed_this_run.iter().cloned().collect(); ids.sort(); ids },
             fleet_views: app.fleet_views.clone(),
             custom_names: {
-                let mut names: Vec<_> = app.custom_names.iter().map(|(id, name)| (id.clone(), name.clone())).collect();
+                let mut names: Vec<_> = app.custom_names.iter().filter(|(id,_)|!crate::remote_client::valid_target(id))
+                    .map(|(id, name)| (id.clone(), name.clone())).collect();
                 names.sort();
                 names
             },
             default_names: {
-                let mut names: Vec<_> = app.default_names.iter().map(|(id, name)| (id.clone(), name.clone())).collect();
+                let mut names: Vec<_> = app.default_names.iter().filter(|(id,_)|!crate::remote_client::valid_target(id))
+                    .map(|(id, name)| (id.clone(), name.clone())).collect();
                 names.sort();
                 names
             },
-            active_group: app.active_group,
+            active_group: if app.groups.get(app.active_group).is_some_and(|g|g.tabs.iter().any(|id|!crate::remote_client::valid_target(id))){
+                app.active_group
+            }else{app.groups.iter().position(|g|g.tabs.iter().any(|id|!crate::remote_client::valid_target(id))).unwrap_or(0)},
             split: app.split,
             split_percent: app.split_percent,
             rail_visible: app.rail_visible,
@@ -344,7 +353,8 @@ impl UiStateStore {
         }
         let persisted_groups: Vec<PaneGroup> = app.groups.iter().map(|group| {
             let active_id = group.tabs.get(group.active);
-            let tabs: Vec<String> = group.tabs.iter().filter(|id| !app.killed_this_run.contains(*id)).cloned().collect();
+            let tabs: Vec<String> = group.tabs.iter().filter(|id| !app.killed_this_run.contains(*id)
+                && !crate::remote_client::valid_target(id)).cloned().collect();
             let active = active_id.and_then(|id| tabs.iter().position(|candidate| candidate == id)).unwrap_or(0);
             PaneGroup { tabs, active, scroll: group.scroll }
         }).collect();
@@ -420,8 +430,11 @@ impl UiStateStore {
             return Err(io::Error::new(io::ErrorKind::InvalidInput,"saved tab bounds exceeded including detached records"));
         }
         if tabs.is_empty() && app.fleet_views.is_empty() && app.killed_this_run.is_empty() { return Ok(()); }
+        let persisted_active=if persisted_groups.get(app.active_group).is_some_and(|g|!g.tabs.is_empty()){
+            app.active_group
+        }else{persisted_groups.iter().position(|g|!g.tabs.is_empty()).unwrap_or(0)};
         let active = persisted_groups
-            .get(app.active_group)
+            .get(persisted_active)
             .and_then(|g| g.tabs.get(g.active))
             .cloned();
         let mut record = self.record.clone().unwrap_or_else(|| TabSet {
@@ -735,6 +748,20 @@ fn parse_legacy_tree(raw: &Value, live: &[String]) -> Option<([PaneGroup; 2], Sp
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn mixed_window_persists_only_local_sessions(){
+        let dir=tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let mut store=UiStateStore::new(dir.path(),"/project","machine").unwrap();
+        let mut app=App::default();
+        app.groups[0].tabs=vec!["local-session".into(),"host~remote-session".into()];
+        app.groups[0].active=1;
+        app.default_names.insert("host~remote-session".into(),"Remote".into());
+        store.save(&app).unwrap();
+        let saved=load_tabset(store.path(),"/project").unwrap();
+        assert_eq!(saved.tabs.iter().map(|tab|tab.session_id.as_str()).collect::<Vec<_>>(),["local-session"]);
+        assert_eq!(saved.active_session_id.as_deref(),Some("local-session"));
+        assert!(!std::fs::read_to_string(store.path()).unwrap().contains("host~remote-session"));
+    }
     #[test]
     fn explicit_detach_keeps_flat_restore_record_and_allows_later_layout_saves() {
         use crossterm::event::{Event,KeyCode,KeyEvent,KeyModifiers};

@@ -26,7 +26,8 @@ pub fn bounded_sessions(value: &Value) -> Option<Vec<Value>> {
         let bounded=|key:&str,max:usize|session[key].as_str().filter(|text|text.len()<=max&&!text.chars().any(char::is_control));
         Some(json!({"id":id,"title":bounded("title",160).unwrap_or(id),
             "engine":bounded("engine",32),"model":bounded("model",128),
-            "incarnation":bounded("incarnation",64).unwrap_or("")}))
+            "incarnation":bounded("incarnation",64).unwrap_or(""),
+            "encrypted":session["encrypted"]==true}))
     }).collect()
 }
 fn same_secret(actual:&str, supplied:&str)->bool {
@@ -99,7 +100,8 @@ impl Hub {
             let changed=host.sessions.iter().filter_map(|old|{
                 let id=old["id"].as_str()?;
                 let current=sessions.iter().find(|item|item["id"]==id);
-                (current.is_none_or(|item|item["incarnation"]!=old["incarnation"])).then(||id.to_owned())
+                (current.is_none_or(|item|item["incarnation"]!=old["incarnation"]
+                    || item["encrypted"]!=old["encrypted"])).then(||id.to_owned())
             }).collect::<Vec<_>>();
             host.expires=Instant::now()+LEASE;host.sessions=sessions;
             host.pending.retain(|id|self.commands.get(id).is_some_and(|command|!changed.contains(&command.session)));
@@ -130,7 +132,8 @@ impl Hub {
         json!({"sessions":self.hosts.iter().filter(|((login,_),_)|login==owner).flat_map(|((_,host_id),host)|{
             host.sessions.iter().map(move |session|json!({"id":format!("{}~{}",host_id,session["id"].as_str().unwrap_or("")),
                 "host_id":host_id,"session_id":session["id"],"title":session["title"],
-                "engine":session["engine"],"model":session["model"]}))
+                "engine":session["engine"],"model":session["model"],
+                "encrypted":session["encrypted"]}))
         }).collect::<Vec<_>>()})
     }
     pub fn enqueue(&mut self,owner:&str,host_id:&str,session_id:&str,op:&str,payload:Value)->Result<Value,&'static str>{
@@ -148,6 +151,9 @@ impl Hub {
         if self.commands.len()>=MAX_RETAINED_COMMANDS{return Err("hub command retention limit reached");}
         let host=self.hosts.get_mut(&(owner.to_owned(),host_id.to_owned())).ok_or("host offline")?;
         if !host.sessions.iter().any(|session|session["id"]==session_id){return Err("session offline");}
+        let encrypted=host.sessions.iter().any(|session|session["id"]==session_id&&session["encrypted"]==true);
+        if encrypted && !payload["sealed"].is_object() { return Err("encrypted session requires a sealed command"); }
+        if !encrypted && payload.get("sealed").is_some() { return Err("session does not accept a sealed command"); }
         if host.pending.len()>=MAX_COMMANDS{return Err("host command queue full");}
         let id=Uuid::new_v4().to_string();
         host.pending.push_back(id.clone());
@@ -184,6 +190,9 @@ impl Hub {
     pub fn event(&mut self,owner:&str,host_id:&str,lease:&str,session_id:&str,frame:Value)->Result<Value,&'static str>{
         self.reap();let host=self.host(owner,host_id,lease)?;
         if !host.sessions.iter().any(|session|session["id"]==session_id){return Err("session offline");}
+        let encrypted=host.sessions.iter().any(|session|session["id"]==session_id&&session["encrypted"]==true);
+        if encrypted && !frame["event"]["data"]["sealed"].is_object() { return Err("encrypted event required"); }
+        if !encrypted && frame["event"]["data"].get("sealed").is_some() { return Err("unexpected encrypted event"); }
         let seq=frame["seq"].as_u64().ok_or("event sequence required")?;
         if frame["type"]!="event" || !frame["event"].is_object(){return Err("invalid event frame");}
         let bytes=serde_json::to_vec(&frame).map_err(|_|"unreadable event")?.len();
@@ -238,6 +247,21 @@ impl Hub {
 
 #[cfg(test)]mod tests{
     use super::*;
+    #[test] fn encrypted_sessions_reject_plaintext_commands_and_events(){
+        let mut hub=Hub::new();
+        let owner="owner@example.com";
+        let registration=hub.register(owner,"workstation",bounded_sessions(&json!([{
+            "id":"s1","title":"Encrypted session","encrypted":true
+        }])).unwrap(),None).unwrap();
+        let lease=registration["lease"].as_str().unwrap();
+        assert_eq!(hub.list(owner)["sessions"][0]["encrypted"],true);
+        assert!(hub.enqueue(owner,"workstation","s1","prompt",json!({"text":"secret"})).is_err());
+        assert!(hub.enqueue(owner,"workstation","s1","prompt",json!({"sealed":{"v":1}})).is_ok());
+        assert!(hub.event(owner,"workstation",lease,"s1",json!({"type":"event","seq":1,
+            "event":{"type":"text_delta","data":{"text":"secret"}}})).is_err());
+        assert!(hub.event(owner,"workstation",lease,"s1",json!({"type":"event","seq":1,
+            "event":{"type":"text_delta","data":{"sealed":{"v":1}}}})).is_ok());
+    }
     #[test]fn push_is_owner_scoped_and_duplicate_events_do_not_notify_twice(){
         let mut hub=Hub::new();
         use web_push_native::jwt_simple::algorithms::{ECDSAP256PublicKeyLike,ES256KeyPair};

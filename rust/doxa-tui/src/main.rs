@@ -63,6 +63,7 @@ Commands:
                        Register this machine's sessions with a private hub
   remote list URL        List sessions registered with a private hub
   remote tui URL         Open live hub sessions as native DOXA tabs
+  remote keygen ABS_PATH Create an owner-only shared key for encrypted remote tabs
   remote send URL SESSION TEXT
                        Send a prompt through the private hub
   remote answer URL SESSION REQUEST_ID allow|deny
@@ -76,8 +77,9 @@ and leaves running sessions detached. Ctrl+Left/Right switches tabs in the
 current pane; Shift+Left/Right switches between pane prompts. Change window
 shortcuts in /settings → Keys or with `doxa settings set key_new_tab Alt+N`.
 Inside the TUI, /remote-connect URL HOST_ID shares local sessions while this
-window is open; /remote-disconnect stops sharing. /remote-control URL switches
-this terminal to remote-only tabs; /local returns to saved local tabs.
+window is open; /remote-disconnect stops sharing. /remote-control URL adds
+remote tabs beside local tabs; /local selects an open local tab. Ctrl+R opens
+remote history, and PageUp at its top fetches older turns.
 
 New-session options: --engine codex|claude|deepseek|glm, --model NAME,
   --branch LOCAL_OR_REMOTE, --linger SECONDS, --resume FULL_SESSION_ID.
@@ -194,6 +196,13 @@ fn run(args: &[String]) -> io::Result<()> {
                 return Ok(());
             }
             "remote" => {
+                if let [first, second, path] = args {
+                    if first == "remote" && second == "keygen" {
+                        doxa_remote_wire::create_key(std::path::Path::new(path))?;
+                        println!("Remote key created at {path}. Copy it securely to the session host and set DOXA_REMOTE_E2EE_KEY_FILE on both machines.");
+                        return Ok(());
+                    }
+                }
                 if let [first, second, url] = args {
                     if first == "remote" && second == "tui" {
                         startup_message("Connecting to DOXA hub");
@@ -205,7 +214,7 @@ fn run(args: &[String]) -> io::Result<()> {
                     && !matches!(args, [first, second, _, _, _] if first == "remote" && second == "send")
                     && !matches!(args, [first, second, _] if first == "remote" && second == "list")
                     && !matches!(args, [first, second, _, _, _, _] if first == "remote" && second == "answer") {
-                    return Err(invalid("usage: doxa remote serve | connect URL HOST_ID | tui URL | list URL | send URL SESSION TEXT | answer URL SESSION REQUEST_ID allow|deny"));
+                    return Err(invalid("usage: doxa remote serve | connect URL HOST_ID | tui URL | keygen ABS_PATH | list URL | send URL SESSION TEXT | answer URL SESSION REQUEST_ID allow|deny"));
                 }
                 let executable = std::env::var_os("DOXA_REMOTE_BIN").map(PathBuf::from)
                     .unwrap_or_else(|| std::env::current_exe().unwrap_or_default().with_file_name("doxa-remote"));

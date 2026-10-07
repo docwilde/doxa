@@ -117,7 +117,18 @@ impl App {
     }
 
     pub(super) fn open_history(&mut self) {
-        if self.remote_mode { self.notice = "Remote history is limited to the hub transcript snapshot".into(); return; }
+        if self.active_remote() {
+            let Some(id)=self.groups[self.active_group].active_id().map(str::to_owned) else {return};
+            let text=self.sessions.iter().find(|session|session.id==id).map(|session|session.transcript.as_str()).unwrap_or("");
+            let width=usize::from(self.size.width.saturating_sub(6)).max(20);
+            let mut lines=text.lines().flat_map(|line|crate::memory_menu::wrap_review(line,width)).collect::<Vec<_>>();
+            if lines.is_empty(){lines.push("No remote transcript yet".into());}
+            let scroll=lines.len().saturating_sub(12);
+            self.chip_info=Some(super::ChipInfo {kind:"remote_history",label:String::new(),lines,scroll,
+                owner:Some((id,String::new()))});
+            self.notice="PageUp at the top loads older remote turns".into();
+            return;
+        }
         if !self.history_fits() {
             self.notice = "Enlarge active pane to search sessions".into();
             return;

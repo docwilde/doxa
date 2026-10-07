@@ -186,8 +186,10 @@ async fn handle(request:Request<Incoming>,state:Arc<Mutex<Hub>>,attested:bool,pu
         },
         (Method::POST,["api","sessions",id,op @ ("prompt"|"answer"|"transcript")])=>{
             let Some((host,session))=id.split_once('~').filter(|(h,s)|valid_id(h)&&valid_id(s)) else{return bad("invalid session target")};
-            if *op=="prompt"&&!body["text"].as_str().is_some_and(|text|!text.trim().is_empty()&&text.len()<=58_000){return bad("invalid prompt");}
-            if *op=="answer"&&(!body["id"].as_str().is_some_and(valid_id)||!body["answer"].is_object()){return bad("invalid answer");}
+            let encrypted=state.list(&owner)["sessions"].as_array().is_some_and(|rows|rows.iter().any(|row|row["id"]==*id&&row["encrypted"]==true));
+            if encrypted && !body["sealed"].is_object() { return bad("encrypted command required"); }
+            if !encrypted && *op=="prompt"&&!body["text"].as_str().is_some_and(|text|!text.trim().is_empty()&&text.len()<=58_000){return bad("invalid prompt");}
+            if !encrypted && *op=="answer"&&(!body["id"].as_str().is_some_and(valid_id)||!body["answer"].is_object()){return bad("invalid answer");}
             state.enqueue(&owner,host,session,op,body)
         },
         _=>Err("unknown hub route"),

@@ -5845,6 +5845,7 @@ fn unavailable_saved_tabs_do_not_block_second_split_session_persistence() {
             markdown: "**You:**\n\nQuestion\n\n**Assistant:**\n\nAnswer\n\n".into(),
             pending_inputs: json!([{"id":"review-1","kind":"permission","title":"Approve?"}]),
             pending_inputs_complete: true,
+            before:Some(100),has_more:true,
         });
         assert!(app.sessions[0].transcript.contains("Answer"));
         assert!(app.input_requests.iter().any(|request| request.session_id == "host~one"));
@@ -5857,4 +5858,44 @@ fn unavailable_saved_tabs_do_not_block_second_split_session_persistence() {
         assert!(app.dispatch_prompt_command());
         assert_eq!(app.input, "/model");
         assert!(app.pending_prompts.is_empty());
+    }
+
+    #[test]
+    fn mixed_remote_tab_uses_remote_controls_and_does_not_change_saved_local_layout() {
+        let mut app=App::default();app.size=Rect::new(0,0,120,40);
+        app.apply_worker_frame(crate::worker_frames::WorkerFrame::Daemon {session_id:"local".into(),
+            frame:json!({"type":"hello","session_id":"local","title":"Local","engine":"codex","model":"gpt"})});
+        let saved=crate::ui_state::LayoutSignature::capture(&app);
+        app.apply_worker_frame(crate::worker_frames::WorkerFrame::Daemon {session_id:"host~remote".into(),
+            frame:json!({"type":"hello","session_id":"host~remote","title":"Remote",
+                "engine":"codex","model":"gpt","remote":true,"cwd":"Remote · host"})});
+        app.groups[0].tabs.push("host~remote".into());app.groups[0].active=1;
+        assert!(app.active_remote());
+        assert!(app.tab_title("host~remote").starts_with("◎ "));
+        assert_eq!(app.chips(0)[0],("remote","Remote · host".into()));
+        assert_eq!(crate::ui_state::LayoutSignature::capture(&app),saved);
+        app.input="/model".into();assert!(app.dispatch_prompt_command());
+        assert!(app.notice.contains("session host"));
+        app.input="/local".into();assert!(app.submit_local_command());
+        assert_eq!(app.groups[0].active_id(),Some("local"));
+    }
+
+    #[test]
+    fn remote_history_pages_prepend_in_a_scrollable_submenu() {
+        let mut app=App::default();app.remote_mode=true;app.size=Rect::new(0,0,120,40);
+        let id="host~session";
+        app.apply_worker_frame(crate::worker_frames::WorkerFrame::Daemon {session_id:id.into(),
+            frame:json!({"type":"hello","session_id":id,"title":"Remote","remote":true})});
+        app.apply_worker_frame(crate::worker_frames::WorkerFrame::RemoteSnapshot {session_id:id.into(),
+            markdown:"recent turn".into(),pending_inputs:json!([]),pending_inputs_complete:true,
+            before:Some(100),has_more:true});
+        app.open_history();
+        assert_eq!(app.chip_info.as_ref().unwrap().kind,"remote_history");
+        app.chip_info.as_mut().unwrap().scroll=0;
+        app.handle(Event::Key(KeyEvent::new(KeyCode::PageUp,KeyModifiers::NONE)));
+        assert_eq!(app.pending_remote_history,vec![(id.to_owned(),100)]);
+        app.apply_worker_frame(crate::worker_frames::WorkerFrame::RemoteHistoryPage {session_id:id.into(),
+            markdown:"older turn".into(),before:None,has_more:false,error:None});
+        assert_eq!(app.chip_info.as_ref().unwrap().lines[0],"older turn");
+        assert!(!app.remote_history_before.contains_key(id));
     }

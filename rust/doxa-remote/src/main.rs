@@ -146,16 +146,25 @@ async fn handle(request: Request<Incoming>, app: Arc<App>, attested: bool) -> Re
             Err(_) => error(StatusCode::SERVICE_UNAVAILABLE,"session registry unavailable"),
         },
         (Method::GET | Method::POST, ["api","sessions",id,"transcript"]) => {
-            if request.method()==Method::POST && body_json(request).await.is_err() {
-                return error(StatusCode::BAD_REQUEST,"invalid transcript request");
-            }
+            let before = if request.method()==Method::POST {
+                match body_json(request).await {
+                    Ok(body) => match body.get("before") {
+                        None => None,
+                        Some(value) => match value.as_u64() {
+                            Some(before) => Some(before),
+                            None => return error(StatusCode::BAD_REQUEST,"invalid transcript page cursor"),
+                        },
+                    },
+                    Err(_) => return error(StatusCode::BAD_REQUEST,"invalid transcript request"),
+                }
+            } else { None };
             let entry = match app.session(id) { Ok(Some(entry))=>entry, Ok(None)=>return error(StatusCode::NOT_FOUND,"session not found"), Err(_)=>return error(StatusCode::SERVICE_UNAVAILABLE,"session registry unavailable") };
             let client = match connect(&app,&entry,None,None).await { Ok(client)=>client, Err(_)=>return error(StatusCode::SERVICE_UNAVAILABLE,"session unavailable") };
             let transcript_app = app.clone();
             let result = tokio::task::spawn_blocking(move || {
-                let mut history = daemon::transcript(&client.hello)?;
+                let mut history = daemon::transcript_page(&client.hello,before)?;
                 scrub_data(&mut history, &transcript_app.lore)?;
-                Ok::<_,io::Error>(history)
+                Ok::<_,io::Error>(uplink::bounded_history(history))
             }).await;
             match result { Ok(Ok(history))=>json_response(StatusCode::OK,history), _=>error(StatusCode::SERVICE_UNAVAILABLE,"transcript unavailable") }
         },
@@ -260,7 +269,12 @@ async fn main() -> io::Result<()> {
     match args.as_slice(){
         [mode,url,host] if mode=="connect"=>return uplink::run(app,url,host).await,
         []=>{},
-        [mode] if mode=="serve"=>{},
+        [mode] if mode=="serve"=>{
+            if doxa_remote_wire::configured_key()?.is_some(){
+                return Err(io::Error::new(io::ErrorKind::PermissionDenied,
+                    "browser adapter cannot serve encrypted sessions; use the native remote TUI"));
+            }
+        },
         _=>return Err(io::Error::new(io::ErrorKind::InvalidInput,"usage: doxa-remote serve | connect URL HOST_ID | list URL | send URL SESSION TEXT | answer URL SESSION REQUEST_ID allow|deny")),
     }
     let path=runtime.join("remote-browser.sock");

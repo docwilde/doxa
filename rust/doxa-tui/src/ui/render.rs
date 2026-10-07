@@ -791,7 +791,7 @@ impl App {
         }
         if matches!(
             info.kind,
-            "memory" | "usage" | "context" | "help" | "sessions" | "about"
+            "memory" | "usage" | "context" | "help" | "sessions" | "about" | "remote_history"
         ) {
             let current = self.groups[self.active_group].active_id().and_then(|id| {
                 self.session_cwds
@@ -829,6 +829,8 @@ impl App {
                                 " {} · ↑↓ scroll · Esc close ",
                                 if info.kind == "memory" {
                                     "LORE memory"
+                                } else if info.kind == "remote_history" {
+                                    "Remote history · PgUp at top loads older"
                                 } else {
                                     info.kind
                                 }
@@ -2089,7 +2091,7 @@ impl App {
             }
             let id = &group.tabs[position];
             let name = self.tab_title(id);
-            let label = clipped_title(name, content_width.saturating_sub(used)).0;
+            let label = clipped_title(&name, content_width.saturating_sub(used)).0;
             used += label.width();
             let style = if self.waiting_for_input(id) && self.blink_on {
                 Style::default().fg(theme::TEXT).bg(theme::ERROR).add_modifier(Modifier::BOLD)

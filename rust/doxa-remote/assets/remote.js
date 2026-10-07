@@ -1,5 +1,6 @@
 const el = id => document.getElementById(id);
 let source = null, active = null, generation = 0, currentText = null;
+let olderCursor = null, olderLoading = false;
 const pending = new Map();
 const pendingPrompts = new Map();
 let currentQuestion = null;
@@ -21,13 +22,25 @@ async function confirmed(response) {
   throw new Error('Command acknowledgement timed out; inspect the session before retrying');
 }
 
+function block(kind, content) {
+  const entry = document.createElement('div');
+  entry.className = 'turn ' + kind;
+  entry.textContent = String(content ?? '');
+  return entry;
+}
 function line(kind, content) {
-  const block = document.createElement('div');
-  block.className = 'turn ' + kind;
-  block.textContent = String(content ?? '');
-  el('conversation').append(block);
-  block.scrollIntoView({block: 'end'});
-  return block;
+  const entry = block(kind, content);
+  el('turns').append(entry);
+  entry.scrollIntoView({block: 'end'});
+  return entry;
+}
+function turnBlocks(turn) {
+  const entries = [];
+  if (turn.prompt) entries.push(block('user', turn.prompt));
+  if (turn.text) entries.push(block('assistant', turn.text));
+  for (const tool of turn.tools || [])
+    entries.push(block('tool', `${tool.name || 'Tool'}${tool.result ? ' · ' + tool.result : ''}`));
+  return entries;
 }
 function announce(title) {
   if (backgroundAlerts) return;
@@ -102,19 +115,29 @@ async function loadSessions() {
     const response = await fetch('/api/sessions', {cache:'no-store'});
     if (!response.ok) throw new Error('Access refused');
     const sessions = (await response.json()).sessions;
+    if (sessions.some(session => session.id === active && session.encrypted)) {
+      source?.close(); source = null; active = null;
+      el('turns').replaceChildren(); el('question').hidden = true;
+    }
     const nav = el('sessions'); nav.replaceChildren();
     for (const session of sessions) {
       const button = document.createElement('button');
-      button.textContent = `${session.title} · ${session.engine || 'session'}`;
+      button.textContent = `${session.encrypted ? '🔒 ' : ''}${session.title} · ${session.engine || 'session'}`;
       button.dataset.sessionId = session.id;
       button.setAttribute('aria-current', String(session.id === active));
-      button.onclick = () => selectSession(session);
+      button.onclick = () => session.encrypted
+        ? (el('status').textContent = 'Encrypted session: use the native DOXA TUI with its shared key')
+        : selectSession(session);
       nav.append(button);
     }
     if (!sessions.length) {
       source?.close(); source = null; active = null;
       el('status').textContent = 'No live sessions';
-    } else if (!sessions.some(session => session.id === active)) await selectSession(sessions[0]);
+    } else if (!sessions.some(session => session.id === active)) {
+      const usable = sessions.find(session => !session.encrypted);
+      if (usable) await selectSession(usable);
+      else el('status').textContent = 'Encrypted sessions require a separately trusted native client';
+    }
   } catch (error) { el('status').textContent = error.message || 'Disconnected'; }
 }
 function showNextQuestion() {
@@ -188,12 +211,47 @@ function handle(frame) {
     case 'replay_gap': line('notice','Earlier live events expired; reload the session for its transcript'); break;
   }
 }
+async function loadOlder() {
+  if (!active || olderCursor === null || olderLoading) return;
+  const mine = generation, sessionId = active, before = olderCursor;
+  const button = el('older');
+  olderLoading = true; button.disabled = true; button.textContent = 'Loading earlier turns…';
+  try {
+    const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/transcript`, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({before}), cache:'no-store'
+    });
+    const history = await confirmed(response);
+    if (mine !== generation) return;
+    if (!Number.isSafeInteger(history.before) || history.before >= before)
+      throw new Error('Invalid history cursor');
+    const viewport = el('conversation'), turns = el('turns');
+    const height = viewport.scrollHeight, top = viewport.scrollTop;
+    const fragment = document.createDocumentFragment();
+    for (const turn of history.turns || [])
+      for (const entry of turnBlocks(turn)) fragment.append(entry);
+    turns.prepend(fragment);
+    viewport.scrollTop = top + viewport.scrollHeight - height;
+    olderCursor = history.has_more ? history.before : null;
+    button.hidden = olderCursor === null;
+    button.title = '';
+  } catch (error) {
+    if (mine === generation) button.title = error.message;
+  } finally {
+    if (mine === generation) {
+      olderLoading = false; button.disabled = false;
+      button.textContent = button.title ? 'Retry earlier turns' : 'Load earlier turns';
+    }
+  }
+}
 async function selectSession(session) {
   const mine = ++generation;
   source?.close(); source = null; active = session.id; currentText = null;
+  olderCursor = null; olderLoading = false;
   el('prompt-text').value = '';
   pending.clear(); currentQuestion = null;
-  el('conversation').replaceChildren(); el('question').hidden = true;
+  el('turns').replaceChildren(); el('older').hidden = true;
+  el('older').title = ''; el('question').hidden = true;
   for (const button of el('sessions').children)
     button.setAttribute('aria-current', String(button.dataset.sessionId === session.id));
   el('status').textContent = `${session.title} · loading`;
@@ -204,14 +262,13 @@ async function selectSession(session) {
     });
     if (!response.ok) throw new Error('Transcript unavailable');
     const history = await confirmed(response); if (mine !== generation) return;
-    if (history.dropped_turns) line('notice',`${history.dropped_turns} earlier turns omitted`);
     for (const item of history.pending_inputs || []) pending.set(item.id,{...item,answered:false});
     showNextQuestion();
-    for (const turn of history.turns || []) {
-      if (turn.prompt) line('user',turn.prompt);
-      if (turn.text) line('assistant',turn.text);
-      for (const tool of turn.tools || []) line('tool',`${tool.name || 'Tool'}${tool.result ? ' · ' + tool.result : ''}`);
-    }
+    for (const turn of history.turns || [])
+      for (const entry of turnBlocks(turn)) el('turns').append(entry);
+    el('conversation').scrollTop = el('conversation').scrollHeight;
+    olderCursor = history.has_more && Number.isSafeInteger(history.before) ? history.before : null;
+    el('older').hidden = olderCursor === null;
     cursor = history.next_seq;
   } catch (error) { if (mine !== generation) return; line('error',error.message); }
   if (mine !== generation) return;
@@ -220,6 +277,7 @@ async function selectSession(session) {
   source.onmessage = message => { if (mine === generation) { try { handle(JSON.parse(message.data)); } catch {} } };
   source.onerror = () => { if (mine === generation) el('status').textContent = `${session.title} · reconnecting`; };
 }
+el('older').onclick = loadOlder;
 el('prompt').onsubmit = async event => {
   event.preventDefault();
   const field = el('prompt-text'), text = field.value.trim();

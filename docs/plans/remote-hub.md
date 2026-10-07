@@ -3,11 +3,11 @@
 Status: first private implementation. The Rust browser adapter
 controls local sessions. A volatile Rust hub and outbound host connector now
 register sessions, broker prompts/answers and forward live events across
-machines. The browser can request a bounded recent transcript from its host;
+machines. The browser can page historical transcripts from its host;
 the hub also holds a short live event ring.
 The native TUI can open remote-only tabs through `doxa remote tui HUB_URL` or
-switch from an open local window with `/remote-control HUB_URL`; `/local`
-restores the saved local tabs.
+mix local and remote tabs in an open window with `/remote-control HUB_URL`.
+`/local` selects an open local tab. Remote tabs use an `◎` marker.
 The browser can receive encrypted background Web Push after explicit opt-in;
 Android is not yet shipped.
 
@@ -63,11 +63,11 @@ events for reconnects. A second DOXA instance can list sessions, send
 prompts and resolve simple approvals with `doxa remote` CLI commands, or open
 live sessions in native remote-only tabs with `doxa remote tui HUB_URL`.
 From an open local TUI, `/remote-connect HUB_URL HOST_ID` starts a connector
-owned by that window and `/remote-control HUB_URL` switches the same terminal
-to remote tabs. `/local` restores its saved local layout.
+owned by that window and `/remote-control HUB_URL` adds remote tabs to the
+same terminal. `/local` selects an open local tab.
 Remote tabs use the same prompt, pane, transcript and pending-input UI. Local
 provider settings, filesystem actions and LORE management remain on the host;
-the remote tab layout is not yet persisted or mixed with local tabs.
+remote tabs mix with local tabs but are not saved in local tabsets.
 
 ## Authentication and authority
 
@@ -88,11 +88,27 @@ modes remain refused remotely by default. The host connector never forwards
 arbitrary daemon RPCs. Approvals are tied to the current pending request
 snapshot; replayed or stale answers fail.
 
-The server is trusted with session text in the first implementation. Hosting
-it outside the user's private tailnet requires a separate security review,
-durable encrypted storage policy, user authentication, rate limits and audit
-trail. End-to-end encryption between device and host is the later direction;
-the initial private deployment must not imply it has that property.
+The native TUI and CLI now offer opt-in end-to-end encryption with an owner-only
+shared key file (`DOXA_REMOTE_E2EE_KEY_FILE`) copied separately to host and
+client. The host scrubs transcript and event content before encrypting it. Each prompt, approval
+answer, transcript page, command result and live event body uses an independent
+AES-256-GCM nonce and route-bound associated data. Useful payloads are DEFLATE
+compressed before encryption; the compression flag and exact length are inside
+the ciphertext, which is padded in 4 KiB buckets. The hub sees owner identity,
+host/session IDs, operation and event kinds, timing, and bucketed ciphertext
+sizes. It cannot read or change the encrypted content without detection. It
+can still drop traffic. The host rejects repeated ciphertext nonces while its
+connector runs and refuses commands older than two minutes; a connector
+restart within that window cannot rule out every replay. Do not use a hub
+outside the private tailnet without separate availability and replay controls.
+
+The hub-served browser is deliberately unavailable for encrypted sessions: a
+hub that serves its JavaScript could replace that JavaScript and capture a
+browser key. A separately installed or pinned browser client is required for
+browser end-to-end encryption. The local Rust browser adapter also refuses to
+serve while the shared-key setting is active. Without that key setting, the
+browser and hub continue to use the original Tailscale HTTPS transport and the
+hub can read the content it brokers.
 
 ## Notifications
 
@@ -135,12 +151,12 @@ source devices, so the initial Android path assumes a user-owned device.
 1. **Local Rust bridge:** ship and live-test the Rust browser adapter on Linux
    and macOS, retire the Python adapter, and add a browser notification setting.
 2. **Private hub:** leases, owner-scoped registration, bounded command/reply
-   queues, on-demand recent transcript retrieval and cursor replay are
-   implemented. Add a browser E2E test across two isolated hosts and deployment QA.
-3. **Remote DOXA client:** remote-only Rust TUI tabs, same-terminal mode switch,
-   bounded snapshot replay, stable retry IDs, and pending-input review are
-   implemented. Persistent remote tab layouts and mixed local/remote windows
-   remain open.
+   queues, on-demand historical transcript pages and cursor replay are
+   implemented. Add deployment QA across two isolated hosts.
+3. **Remote DOXA client:** mixed local/remote tabs, bounded snapshot replay,
+   scrollable history pages, stable retry IDs, pending-input review and optional
+   compressed end-to-end encryption are implemented. Persistent remote tab
+   layouts remain open.
 4. **Background delivery:** private browser Web Push with service worker is
    implemented. Android push and the Android client remain open; the app will
    render transcript and events, send prompts and answers, and use hub sign-in.

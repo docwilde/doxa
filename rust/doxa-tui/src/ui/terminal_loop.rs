@@ -66,6 +66,50 @@ struct RemoteConnector(Child);
 impl Drop for RemoteConnector {
     fn drop(&mut self) { stop_remote_connector(&mut self.0); }
 }
+struct CommandRouter {
+    sender: SyncSender<crate::bridge::WorkerCommand>,
+    remote: Arc<Mutex<Option<SyncSender<crate::bridge::WorkerCommand>>>>,
+    errors: Receiver<crate::worker_frames::WorkerFrame>,
+    thread: std::thread::JoinHandle<()>,
+}
+fn command_target(command:&crate::bridge::WorkerCommand)->Option<&str>{
+    use crate::bridge::WorkerCommand::*;
+    match command {
+        Launch(..)=>None,
+        Attach(id,..)|Prompt(id,..)|Answer(id,..)|Peers(id)|Message(id,..)|Models(id)
+        |SetModel(id,..)|SetEffort(id,..)|SetPermissionMode(id,..)|Branch(id,..)
+        |QueueList(id)|ContextDetail(id)|RemoteHistory(id,..)|QueueCancel(id,..)|Status(id)|Stop(id)
+        |FinalizeForClear(id)=>Some(id),
+    }
+}
+impl CommandRouter {
+    fn start(local:SyncSender<crate::bridge::WorkerCommand>)->Self{
+        let (sender,commands)=mpsc::sync_channel(64);
+        let (error_tx,errors)=mpsc::sync_channel(32);
+        let remote:Arc<Mutex<Option<SyncSender<crate::bridge::WorkerCommand>>>>=Arc::new(Mutex::new(None));
+        let destination=remote.clone();
+        let thread=std::thread::spawn(move||{
+            while let Ok(command)=commands.recv(){
+                let is_remote=command_target(&command).is_some_and(crate::remote_client::valid_target);
+                let target=if is_remote {destination.lock().ok().and_then(|entry|entry.clone())} else {Some(local.clone())};
+                let failed=match target {
+                    Some(target)=>target.send(command).err().map(|failure|failure.0),
+                    None=>Some(command),
+                };
+                if let Some(command)=failed {
+                    if error_tx.send(crate::bridge::rejection_frame(command,"Remote session is disconnected")).is_err(){break;}
+                }
+            }
+        });
+        Self{sender,remote,errors,thread}
+    }
+    fn shutdown(self){
+        let Self{sender,remote,errors,thread}=self;
+        if let Ok(mut destination)=remote.lock(){*destination=None;}
+        drop(sender);drop(errors);
+        let _=thread.join();
+    }
+}
 impl TerminalGuard {
     fn enter() -> io::Result<Self> {
         let mut guard = Self {
@@ -236,6 +280,10 @@ fn run_loop(
         ..Default::default()
     };
     app.remote_mode = matches!(receiver, FrameSource::Remote(_));
+    let command_router=if matches!(receiver,FrameSource::Worker(_)) {
+        prompt_sender.take().map(CommandRouter::start)
+    }else{None};
+    if let Some(router)=command_router.as_ref(){prompt_sender=Some(router.sender.clone());}
     app.persist_preferences = true;
     app.plugin_refresh_dirty = true;
     app.sidebar_auto = app.preferences.value("sidebar").is_empty();
@@ -275,6 +323,9 @@ fn run_loop(
     terminal.draw(|frame| app.draw(frame))?;
     let mut pointer_on_link = false;
     let mut remote_connector: Option<RemoteConnector> = None;
+    let mut remote_worker:Option<crate::remote_client::RemoteWorker>=None;
+    let mut remote_start:Option<Receiver<io::Result<crate::remote_client::RemoteWorker>>>=None;
+    let mut auto_open_remote=false;
     let mut first_run_pending = crate::first_run::needed();
     let mut installation_worker = crate::installation::Worker::start().ok();
     if installation_worker.is_none() {
@@ -301,6 +352,47 @@ fn run_loop(
                 Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
             }
         }
+        if let Some(router)=command_router.as_ref(){
+            for _ in 0..32 {match router.errors.try_recv(){
+                Ok(frame)=>changed|=app.apply_worker_frame(frame),
+                Err(TryRecvError::Empty|TryRecvError::Disconnected)=>break,
+            }}
+        }
+        if let Some(worker)=remote_worker.as_ref(){
+            for _ in 0..64 {match worker.frames.try_recv(){
+                Ok(frame)=>{
+                    let opened=if auto_open_remote {
+                        match &frame {crate::worker_frames::WorkerFrame::Daemon{session_id,frame}
+                            if frame["type"]=="hello"=>Some(session_id.clone()),_=>None}
+                    }else{None};
+                    changed|=app.apply_worker_frame(frame);
+                    if let Some(id)=opened {
+                        let group=&mut app.groups[app.active_group];
+                        if !group.tabs.contains(&id){group.tabs.push(id.clone());}
+                        group.active=group.tabs.iter().position(|tab|tab==&id).unwrap();
+                        group.scroll=0;
+                        app.notice=format!("Remote tab opened · {id}");
+                        auto_open_remote=false;
+                        changed=true;
+                    }
+                },
+                Err(TryRecvError::Empty|TryRecvError::Disconnected)=>break,
+            }}
+        }
+        if let Some(start)=remote_start.as_ref(){
+            match start.try_recv(){
+                Ok(Ok(worker))=>{
+                    if let Some(router)=command_router.as_ref(){
+                        if let Ok(mut destination)=router.remote.lock(){*destination=Some(worker.commands.clone());}
+                    }
+                    remote_worker=Some(worker);remote_start=None;auto_open_remote=true;
+                    app.notice="Remote hub connected · opening first tab".into();changed=true;
+                },
+                Ok(Err(error))=>{remote_start=None;app.notice=format!("Remote hub: {error}");changed=true;},
+                Err(TryRecvError::Disconnected)=>{remote_start=None;app.notice="Remote hub startup worker stopped".into();changed=true;},
+                Err(TryRecvError::Empty)=>{},
+            }
+        }
         // A frame is ready now. Paint before waiting for terminal input so a
         // daemon update never waits through an otherwise idle input poll.
         if changed {
@@ -313,6 +405,33 @@ fn run_loop(
         );
         if event::poll(Duration::from_millis(10))? {
             changed |= app.handle(event::read()?);
+        }
+        if !app.remote_mode {
+            if let Some(RemoteHandoff::Hub(url))=app.remote_handoff.take(){
+                app.should_quit=false;
+                if command_router.is_none(){
+                    app.notice="Mixed remote tabs require the native worker transport".into();
+                }else if remote_worker.is_some()||remote_start.is_some(){
+                    if let Some(id)=app.sessions.iter().find(|session|crate::remote_client::valid_target(&session.id)).map(|session|session.id.clone()){
+                        let group=&mut app.groups[app.active_group];
+                        if !group.tabs.contains(&id){group.tabs.push(id.clone());}
+                        group.active=group.tabs.iter().position(|tab|tab==&id).unwrap();
+                        group.scroll=0;
+                        app.notice=format!("Remote tab selected · {id}");
+                    }else{app.notice="Remote hub is still connecting".into();}
+                }else{
+                    let (tx,rx)=mpsc::sync_channel(1);
+                    remote_start=Some(rx);
+                    std::thread::spawn(move||{
+                        let result=crate::remote_client::start(&url);
+                        if let Err(error)=tx.send(result){
+                            if let Ok(worker)=error.0{worker.shutdown();}
+                        }
+                    });
+                    app.notice="Connecting to remote hub…".into();
+                }
+                changed=true;
+            }
         }
         let next_pointer = app.pointer_on_link();
         if next_pointer != pointer_on_link {
@@ -451,12 +570,17 @@ fn run_loop(
                 app.notice = "Peer delivery unavailable · Alt+Up restores message".into();
                 changed = true;
             }
+            if !app.pending_remote_history.is_empty(){
+                app.pending_remote_history.clear();app.remote_history_loading.clear();
+                app.notice="Remote history unavailable · hub connection closed".into();changed=true;
+            }
         }
         if let Some(sender) = &prompt_sender {
             let disconnected = dispatch_launches(&mut app, sender);
             let disconnected = dispatch_attaches(&mut app, sender) || disconnected;
             let disconnected = dispatch_prompts(&mut app, sender) || disconnected;
             let disconnected = dispatch_answers(&mut app, sender) || disconnected;
+            let disconnected = dispatch_remote_history(&mut app,sender) || disconnected;
             let disconnected = dispatch_peer_refresh(&mut app, sender) || disconnected;
             let disconnected = dispatch_peer_messages(&mut app, sender) || disconnected;
             let disconnected = dispatch_model_controls(&mut app, sender) || disconnected;
@@ -496,6 +620,12 @@ fn run_loop(
         }
     }
     drop(remote_connector);
+    if let Some(router)=command_router.as_ref(){
+        if let Ok(mut destination)=router.remote.lock(){*destination=None;}
+    }
+    drop(prompt_sender);
+    if let Some(worker)=remote_worker{worker.shutdown();}
+    if let Some(router)=command_router{router.shutdown();}
     drop(terminal);
     drop(guard);
     if app.restart_after_update {
@@ -603,6 +733,23 @@ pub(super) fn dispatch_attaches(
                 return true;
             }
             Err(_) => unreachable!(),
+        }
+    }
+    false
+}
+
+fn dispatch_remote_history(app:&mut App,sender:&SyncSender<crate::bridge::WorkerCommand>)->bool{
+    let mut pages=std::mem::take(&mut app.pending_remote_history).into_iter();
+    while let Some((id,before))=pages.next(){
+        match sender.try_send(crate::bridge::WorkerCommand::RemoteHistory(id,before)){
+            Ok(())=>{},
+            Err(TrySendError::Full(crate::bridge::WorkerCommand::RemoteHistory(id,before)))=>{
+                app.pending_remote_history.extend(std::iter::once((id,before)).chain(pages));return false;
+            },
+            Err(TrySendError::Disconnected(_))=>{
+                app.remote_history_loading.clear();app.notice="Remote history unavailable".into();return true;
+            },
+            Err(_)=>unreachable!(),
         }
     }
     false
@@ -940,4 +1087,22 @@ pub(super) fn dispatch_peer_messages(
         }
     }
     false
+}
+
+#[cfg(test)] mod mixed_router_tests {
+    use super::*;
+    use crate::bridge::WorkerCommand;
+    #[test] fn mixed_router_sends_each_prompt_to_its_own_transport(){
+        let (local_tx,local_rx)=mpsc::sync_channel(4);
+        let (remote_tx,remote_rx)=mpsc::sync_channel(4);
+        let router=CommandRouter::start(local_tx);
+        *router.remote.lock().unwrap()=Some(remote_tx);
+        router.sender.send(WorkerCommand::Prompt("local-id".into(),"local".into())).unwrap();
+        router.sender.send(WorkerCommand::Prompt("host~remote-id".into(),"remote".into())).unwrap();
+        assert!(matches!(local_rx.recv_timeout(Duration::from_secs(1)).unwrap(),WorkerCommand::Prompt(id,_)
+            if id=="local-id"));
+        assert!(matches!(remote_rx.recv_timeout(Duration::from_secs(1)).unwrap(),WorkerCommand::Prompt(id,_)
+            if id=="host~remote-id"));
+        router.shutdown();
+    }
 }

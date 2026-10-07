@@ -241,7 +241,7 @@ impl App {
             return false;
         };
         let command = parsed.kind;
-        if self.remote_mode && !remote_local_allowed(command) {
+        if self.active_remote() && !remote_local_allowed(command) {
             self.notice = "This command is available on the session host, not through the remote hub".into();
             return true;
         }
@@ -343,7 +343,7 @@ impl App {
             }
             LocalCommand::About => self.open_about(),
             LocalCommand::Sessions => {
-                if self.remote_mode { self.local_attach(""); } else { self.open_live_sessions(); }
+                if self.active_remote() { self.local_attach(""); } else { self.open_live_sessions(); }
             },
             LocalCommand::Settings => self.open_settings_menu(),
             LocalCommand::Model => self.open_model_picker(),
@@ -409,7 +409,7 @@ impl App {
     // This single call site is the prompt Enter handler, never the command
     // registry, daemon frames, remote messages or model tool callbacks.
     pub(super) fn submit_keyboard_shell(&mut self) {
-        if self.remote_mode { self.notice = "Local shell is unavailable in remote session mode".into(); return; }
+        if self.active_remote() { self.notice = "Local shell is unavailable in remote session mode".into(); return; }
         let Some(id) = self.groups[self.active_group]
             .active_id()
             .map(str::to_owned)
@@ -506,7 +506,7 @@ impl App {
             return false;
         };
         let command = parsed.kind;
-        if self.remote_mode && !remote_local_allowed(command) {
+        if self.active_remote() && !remote_local_allowed(command) {
             self.notice = "This command is available on the session host, not through the remote hub".into();
             return true;
         }
@@ -566,6 +566,15 @@ impl App {
                     self.input.clear();
                     self.input_cursor = 0;
                     self.should_quit = true;
+                } else if self.active_remote() {
+                    let local=self.groups.iter().enumerate().find_map(|(pane,group)|group.tabs.iter()
+                        .position(|id|!crate::remote_client::valid_target(id)).map(|tab|(pane,tab)));
+                    if let Some((pane,tab))=local {
+                        self.active_group=pane;
+                        self.groups[pane].active=tab;
+                        self.input.clear();self.input_cursor=0;
+                        self.notice="Local tab selected".into();
+                    }else{self.notice="No local tab is open".into();}
                 } else {
                     self.notice = "Already viewing local sessions".into();
                 }
@@ -1007,10 +1016,10 @@ impl App {
                         self.focus = Focus::Prompt;
                     }
                     actions::Action::New => {
-                        if self.remote_mode { self.local_attach(""); } else { self.open_engine_picker(); }
+                        if self.active_remote() { self.local_attach(""); } else { self.open_engine_picker(); }
                     }
                     actions::Action::Fleet(view) => {
-                        if self.remote_mode { self.notice = "Fleet controls are available on the session host".into(); }
+                        if self.active_remote() { self.notice = "Fleet controls are available on the session host".into(); }
                         else { self.open_fleet(view.root, Some(view.run_id)); }
                     }
                     actions::Action::Tab(pane, tab) => {
