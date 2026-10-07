@@ -115,6 +115,10 @@ async function loadSessions() {
     const response = await fetch('/api/sessions', {cache:'no-store'});
     if (!response.ok) throw new Error('Access refused');
     const sessions = (await response.json()).sessions;
+    if (sessions.some(session => session.id === active && session.encrypted)) {
+      source?.close(); source = null; active = null;
+      el('turns').replaceChildren(); el('question').hidden = true;
+    }
     const nav = el('sessions'); nav.replaceChildren();
     for (const session of sessions) {
       const button = document.createElement('button');

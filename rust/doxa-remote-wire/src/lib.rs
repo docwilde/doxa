@@ -3,7 +3,8 @@ use aes_gcm::{aead::{Aead, AeadCore, KeyInit, Payload, OsRng}, Aes256Gcm, Nonce}
 use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine};
 use flate2::{read::DeflateDecoder, write::DeflateEncoder, Compression};
 use serde_json::{json, Value};
-use std::{fs::{self, OpenOptions}, io::{self, Read, Write}, os::unix::fs::{MetadataExt, PermissionsExt, OpenOptionsExt}, path::Path};
+use std::{fs::{self, OpenOptions}, io::{self, Read, Write}, os::unix::fs::{MetadataExt, PermissionsExt, OpenOptionsExt},
+    path::Path, time::{SystemTime,UNIX_EPOCH}};
 
 const MAX_PLAIN: usize = 128_000;
 const MAX_CIPHER: usize = 128_000;
@@ -11,6 +12,20 @@ const MIN_COMPRESS: usize = 1_024;
 const MAX_PADDING: usize = 4_096;
 
 fn invalid(message: &'static str) -> io::Error { io::Error::new(io::ErrorKind::InvalidData, message) }
+
+pub fn issue_command(body:&mut Value)->io::Result<()> {
+    let object=body.as_object_mut().ok_or_else(||invalid("remote command must be an object"))?;
+    let now=SystemTime::now().duration_since(UNIX_EPOCH).map_err(|_|invalid("clock unavailable"))?.as_secs();
+    object.insert("issued_at".into(),json!(now));
+    Ok(())
+}
+
+pub fn command_is_fresh(body:&Value)->bool {
+    let Some(issued)=body["issued_at"].as_u64() else{return false};
+    let Ok(now)=SystemTime::now().duration_since(UNIX_EPOCH) else{return false};
+    let now=now.as_secs();
+    issued<=now.saturating_add(30) && now.saturating_sub(issued)<=120
+}
 
 /// A copied, owner-only key file is deliberately outside the hub protocol.
 pub fn key_from_file(path: &Path) -> io::Result<[u8; 32]> {
@@ -26,6 +41,7 @@ pub fn key_from_file(path: &Path) -> io::Result<[u8; 32]> {
     let text = std::str::from_utf8(&data).map_err(|_| invalid("invalid remote key"))?.trim();
     let bytes = STANDARD_NO_PAD.decode(text).map_err(|_| invalid("invalid remote key"))?;
     let key: [u8; 32] = bytes.try_into().map_err(|_| invalid("remote key must have 32 bytes"))?;
+    if key==[0u8;32]{return Err(invalid("remote key must not be zero"));}
     Ok(key)
 }
 
@@ -156,5 +172,15 @@ pub fn open(key: &[u8; 32], context: &str, envelope: &Value) -> io::Result<Value
         forged["nonce"]=json!("AAAA");
         assert!(open(&key,"target|command|prompt",&forged).is_err());
         assert!(seal(&key,"target|result|transcript",&json!({"text":"x".repeat(MAX_PLAIN+1)})).is_err());
+    }
+    #[test] fn commands_require_a_recent_authenticated_issue_time(){
+        let mut body=json!({"text":"prompt","request_id":"request-1"});
+        assert!(!command_is_fresh(&body));
+        issue_command(&mut body).unwrap();
+        assert!(command_is_fresh(&body));
+        body["issued_at"]=json!(1);
+        assert!(!command_is_fresh(&body));
+        body["issued_at"]=json!(u64::MAX);
+        assert!(!command_is_fresh(&body));
     }
 }

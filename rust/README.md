@@ -30,11 +30,11 @@ HOST_ID~SESSION_ID REQUEST_ID allow|deny` use the same owner-scoped hub API.
 `doxa remote tui HUB_URL` opens live hub sessions in the native DOXA tab layout.
 The first session opens immediately; `Ctrl+T` chooses another remote session.
 Prompts and pending answers use stable request IDs for uncertain delivery,
-while transcript snapshots and SSE events resume at a sequence cursor. This
-remote-only window does not mix local tabs or restore its tab layout after exit.
+while transcript snapshots and SSE events resume at a sequence cursor. Ctrl+R
+opens remote history; PageUp at the top requests older pages. This remote-only
+window does not restore its tab layout after exit.
 Provider settings, LORE management and filesystem operations remain on the
-host. Full historical transcript fetch is still in progress; the hub brokers
-a bounded recent snapshot from the host on demand.
+host. The hub pages older transcript records from the host on demand.
 
 To encrypt native hub traffic end to end, create a shared key outside any
 repository with `doxa remote keygen /absolute/private/remote.key`. Copy that
@@ -48,10 +48,10 @@ Encrypted sessions cannot use the hub-served browser or `doxa remote serve`;
 use the native client until a separately trusted browser client exists.
 From the local TUI, `/remote-connect HUB_URL HOST_ID` starts the host connector
 for this window; `/remote-disconnect` stops it. `/remote-control HUB_URL`
-switches the same terminal to the remote-only tab view, detaching the local
-window while its daemons keep running. `/local` returns to the saved local
-layout. Local and remote tabs do not share one tab bar. The in-window connector
-stops when the local window closes or switches modes; run
+adds remote tabs to the current tab bar without detaching local sessions.
+The `◎` marker identifies remote tabs, and `/local` selects an open local tab.
+The local tabset saves only local sessions; remote tabs are attached afresh.
+The in-window connector stops when the local window closes; run
 `doxa remote connect` separately if
 sharing must continue after the TUI exits.
 To enable browser alerts after the page closes, set `DOXA_HUB_RUNTIME_DIR` to

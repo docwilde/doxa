@@ -483,7 +483,7 @@ impl App {
     pub(super) fn chips(&self, index: usize) -> Vec<(&'static str, String)> {
         let id = self.groups[index].active_id();
         let identity = id.and_then(|id| self.session_identity.get(id));
-        if self.remote_mode {
+        if self.pane_remote(index) {
             let host = id.and_then(|id| id.split_once('~').map(|pair| pair.0)).unwrap_or("hub");
             let mut chips = vec![("remote", format!("Remote · {host}"))];
             if let Some(engine) = identity.and_then(|pair| pair.0.as_deref()) {
@@ -651,9 +651,11 @@ impl App {
         true
     }
 
-    pub(super) fn tab_title<'a>(&'a self, id: &'a str) -> &'a str {
-        self.sessions.iter().find(|session| session.id == id)
-            .map(|session| session.title.as_str()).unwrap_or(id)
+    pub(super) fn tab_title<'a>(&'a self, id: &'a str) -> std::borrow::Cow<'a,str> {
+        let title=self.sessions.iter().find(|session| session.id == id)
+            .map(|session| session.title.as_str()).unwrap_or(id);
+        if crate::remote_client::valid_target(id){std::borrow::Cow::Owned(format!("◎ {title}"))}
+        else{std::borrow::Cow::Borrowed(title)}
     }
 
     /// Keep the active tab visible when the header is narrower than all titles.

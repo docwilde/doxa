@@ -189,13 +189,40 @@ impl App {
                 self.session_telemetry.entry(session_id).or_default().lore = None;
                 true
             }
-            WorkerFrame::RemoteSnapshot { session_id, markdown, pending_inputs, pending_inputs_complete } => {
+            WorkerFrame::RemoteSnapshot { session_id, markdown, pending_inputs, pending_inputs_complete,before,has_more } => {
                 if !self.sessions.iter().any(|session| session.id == session_id) {
                     false
                 } else {
+                    if has_more {if let Some(before)=before{self.remote_history_before.insert(session_id.clone(),before);}}
+                    else{self.remote_history_before.remove(&session_id);}
                     self.apply_update(DaemonUpdate::Transcript { id: session_id.clone(), markdown });
                     self.restore_pending_inputs(&session_id,
                         &serde_json::json!({"pending_inputs_complete":pending_inputs_complete,"pending_inputs":pending_inputs}));
+                    true
+                }
+            }
+            WorkerFrame::RemoteHistoryPage { session_id,markdown,before,has_more,error } => {
+                self.remote_history_loading.remove(&session_id);
+                if let Some(error)=error {self.notice=format!("Remote history: {}",safe_label(&error));true}
+                else {
+                    if has_more {if let Some(before)=before{self.remote_history_before.insert(session_id.clone(),before);}}
+                    else{self.remote_history_before.remove(&session_id);}
+                    if let Some(info)=self.chip_info.as_mut().filter(|info|info.kind=="remote_history"
+                        && info.owner.as_ref().is_some_and(|owner|owner.0==session_id)) {
+                        let width=usize::from(self.size.width.saturating_sub(6)).max(20);
+                        let mut older=markdown.lines().flat_map(|line|crate::memory_menu::wrap_review(line,width)).collect::<Vec<_>>();
+                        older.push("─── newer turns ───".into());
+                        info.scroll=info.scroll.saturating_add(older.len());
+                        older.append(&mut info.lines);
+                        let mut bytes=0usize;
+                        let keep=older.iter().take_while(|line|{
+                            bytes=bytes.saturating_add(line.len()+1);bytes<=1_000_000
+                        }).count();
+                        older.truncate(keep.max(1));
+                        info.scroll=info.scroll.min(older.len().saturating_sub(1));
+                        info.lines=older;
+                        self.notice=if has_more{"Older remote turns loaded · PgUp at top loads more"}else{"Beginning of remote transcript"}.into();
+                    }
                     true
                 }
             }

@@ -27,7 +27,7 @@ pub(crate) fn valid_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 128 && id.as_bytes()[0].is_ascii_alphanumeric()
         && id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
 }
-fn valid_target(id: &str) -> bool {
+pub(crate) fn valid_target(id: &str) -> bool {
     id.split_once('~').is_some_and(|(host, session)| valid_id(host) && valid_id(session))
 }
 fn retry_key(kind: &str, id: &str, content: &str) -> String {
@@ -48,6 +48,8 @@ fn retry_body(saved:&Mutex<RetryIds>, retry:&str, target:&str, operation:&str,
     let mut saved=saved.lock().unwrap_or_else(|poison|poison.into_inner());
     let Some((_,_,cached))=saved.get_mut(retry) else { return Err(invalid("remote retry expired")) };
     if let Some(request)=cached { return Ok(request.clone()); }
+    let mut body=body;
+    wire::issue_command(&mut body)?;
     let sealed=wire::seal(key,&format!("{target}|command|{operation}"),&body)?;
     let request=json!({"sealed":sealed,"request_id":body["request_id"]});
     *cached=Some(request.clone());
@@ -124,7 +126,8 @@ fn sessions(value: &Value) -> io::Result<Vec<SessionInfo>> {
 fn hello(session: &SessionInfo) -> WorkerFrame {
     WorkerFrame::Daemon { session_id: session.id.clone(), frame: json!({"type":"hello",
         "session_id":session.id,"title":format!("{} · {}",session.title,session.host),
-        "engine":session.engine,"model":session.model,"remote":true,"running":false}) }
+        "engine":session.engine,"model":session.model,"cwd":format!("Remote · {}",session.host),
+        "remote":true,"running":false}) }
 }
 
 fn snapshot_markdown(snapshot: &Value) -> io::Result<String> {
@@ -164,7 +167,11 @@ fn snapshot_markdown(snapshot: &Value) -> io::Result<String> {
 
 async fn command_result(http: &Client, base: &Url, target: &str, operation: &str, body: Value,
     key: Option<&[u8;32]>) -> io::Result<Value> {
+    let mut body=body;
+    if body.get("request_id").is_none(){body["request_id"]=json!(uuid::Uuid::new_v4().to_string());}
+    let request_id=body["request_id"].as_str().ok_or_else(||invalid("invalid remote request ID"))?.to_owned();
     let request = if body["sealed"].is_object() && key.is_some() { body } else if let Some(key)=key {
+        wire::issue_command(&mut body)?;
         let sealed=wire::seal(key,&format!("{target}|command|{operation}"),&body)?;
         json!({"sealed":sealed,"request_id":body["request_id"]})
     } else { body };
@@ -178,7 +185,7 @@ async fn command_result(http: &Client, base: &Url, target: &str, operation: &str
             Some("accepted") => {
                 let result=&status["result"];
                 let value=if let Some(key)=key {
-                    wire::open(key,&format!("{target}|result|{operation}"),&result["sealed"])
+                    wire::open(key,&format!("{target}|result|{operation}|{request_id}"),&result["sealed"])
                 } else if result.get("sealed").is_some() {
                     Err(invalid("encrypted result requires a remote key"))
                 } else { Ok(result.clone()) }?;
@@ -194,7 +201,7 @@ async fn command_result(http: &Client, base: &Url, target: &str, operation: &str
     }
     Err(unavailable("command acknowledgement timed out; inspect session before retrying"))
 }
-async fn snapshot(http: &Client, base: &Url, target: &str, key:Option<&[u8;32]>) -> io::Result<(String, Value, bool, u64)> {
+async fn snapshot(http: &Client, base: &Url, target: &str, key:Option<&[u8;32]>) -> io::Result<(String, Value, bool, u64, Option<u64>, bool)> {
     let result = command_result(http, base, target, "transcript", json!({}),key).await?;
     if result["ok"] != true { return Err(unavailable("remote transcript refused")); }
     let markdown = snapshot_markdown(&result)?;
@@ -203,7 +210,9 @@ async fn snapshot(http: &Client, base: &Url, target: &str, key:Option<&[u8;32]>)
     let complete = result["pending_inputs_complete"].as_bool()
         .ok_or_else(|| invalid("remote pending input state missing"))?;
     let cursor = result["next_seq"].as_u64().ok_or_else(|| invalid("remote cursor missing"))?;
-    Ok((markdown, Value::Array(inputs.clone()), complete, cursor))
+    let before=result["before"].as_u64();
+    let has_more=result["has_more"]==true && before.is_some_and(|cursor|cursor>0);
+    Ok((markdown, Value::Array(inputs.clone()), complete, cursor, before, has_more))
 }
 
 #[derive(Default)]
@@ -233,8 +242,8 @@ async fn session_stream(session: SessionInfo, http: Client, base: Url,
         if *cancel.borrow() { return; }
         if cursor.is_none() {
             match snapshot(&http, &base, &session.id,key.as_ref()).await {
-                Ok((markdown, pending_inputs, pending_inputs_complete, next)) => {
-                    if frames.send(WorkerFrame::RemoteSnapshot { session_id: session.id.clone(), markdown, pending_inputs, pending_inputs_complete }).await.is_err() { return; }
+                Ok((markdown, pending_inputs, pending_inputs_complete, next, before, has_more)) => {
+                    if frames.send(WorkerFrame::RemoteSnapshot { session_id: session.id.clone(), markdown, pending_inputs, pending_inputs_complete,before,has_more }).await.is_err() { return; }
                     cursor = Some(next);
                 }
                 Err(_) => {
@@ -346,13 +355,46 @@ async fn command_worker(command: WorkerCommand, http: Client, base: Url,
             let _ = frames.send(WorkerFrame::Attach { session_id:id, group,
                 result:if known { Ok(()) } else { Err("Remote session is no longer live".into()) } }).await;
         }
+        WorkerCommand::RemoteHistory(id,before) if valid_target(&id) && available.lock().unwrap_or_else(|poison|poison.into_inner()).contains(&id) => {
+            let result=command_result(&http,&base,&id,"transcript",json!({"before":before}),crypto_key.as_ref()).await;
+            let page=match result {
+                Ok(page) if page["ok"]==true=>match snapshot_markdown(&page){
+                    Ok(markdown)=>WorkerFrame::RemoteHistoryPage {session_id:id,markdown,
+                        before:page["before"].as_u64(),has_more:page["has_more"]==true,error:None},
+                    Err(error)=>WorkerFrame::RemoteHistoryPage {session_id:id,markdown:String::new(),
+                        before:None,has_more:false,error:Some(error.to_string())},
+                },
+                Ok(_)=>WorkerFrame::RemoteHistoryPage {session_id:id,markdown:String::new(),
+                    before:None,has_more:false,error:Some("remote history refused".into())},
+                Err(error)=>WorkerFrame::RemoteHistoryPage {session_id:id,markdown:String::new(),
+                    before:None,has_more:false,error:Some(error.to_string())},
+            };
+            let _=frames.send(page).await;
+        }
         other => {
             let _ = frames.send(bridge::rejection_frame(other, "Remote hub supports prompts, pending answers and transcript only")).await;
         }
     }
 }
 
-pub fn run(raw_url: &str) -> io::Result<()> {
+pub struct RemoteWorker {
+    pub frames: Receiver<WorkerFrame>,
+    pub commands: SyncSender<WorkerCommand>,
+    cancel: watch::Sender<bool>,
+    router: std::thread::JoinHandle<()>,
+    engine: std::thread::JoinHandle<()>,
+    forward: std::thread::JoinHandle<()>,
+}
+impl RemoteWorker {
+    pub fn shutdown(self) {
+        let Self { frames, commands, cancel, router, engine, forward }=self;
+        let _=cancel.send(true);
+        drop(commands);drop(frames);
+        let _=router.join();let _=engine.join();let _=forward.join();
+    }
+}
+
+pub fn start(raw_url: &str) -> io::Result<RemoteWorker> {
     let base = hub_url(raw_url)?;
     let http = http_client()?;
     let key=wire::configured_key()?;
@@ -426,12 +468,19 @@ pub fn run(raw_url: &str) -> io::Result<()> {
             }
         });
     });
-    let result = crate::ui::run_remote_with_worker_channels(frames, commands.clone());
-    drop(commands);
-    let _ = cancel_tx.send(true);
-    let _ = router.join();
-    let _ = engine.join();
-    let _ = forward.join();
+    Ok(RemoteWorker { frames, commands, cancel:cancel_tx, router, engine, forward })
+}
+
+pub fn run(raw_url: &str) -> io::Result<()> {
+    let worker=start(raw_url)?;
+    let result=crate::ui::run_remote_with_worker_channels(worker.frames,worker.commands.clone());
+    // The terminal owns the receiver until it exits; after return only worker
+    // channels remain, so cancellation can join every worker promptly.
+    let _=worker.cancel.send(true);
+    drop(worker.commands);
+    let _=worker.router.join();
+    let _=worker.engine.join();
+    let _=worker.forward.join();
     result
 }
 
@@ -492,10 +541,11 @@ mod tests {
                         let raw=request.into_body().collect().await.unwrap().to_bytes();
                         assert!(!String::from_utf8_lossy(&raw).contains("private prompt"));
                         let value:Value=serde_json::from_slice(&raw).unwrap();
+                        assert_eq!(value["request_id"],"known-id");
                         assert_eq!(wire::open(&key,"host~session|command|transcript",&value["sealed"]).unwrap()["text"],"private prompt");
                         json!({"command_id":"command-1"})
                     }else{
-                        let sealed=wire::seal(&key,"host~session|result|transcript",&json!({"ok":true,"turns":[]})).unwrap();
+                        let sealed=wire::seal(&key,"host~session|result|transcript|known-id",&json!({"ok":true,"turns":[]})).unwrap();
                         json!({"status":"accepted","result":{"ok":true,"sealed":sealed}})
                     };
                     Ok::<_,Infallible>(Response::new(Full::new(Bytes::from(body.to_string()))))
@@ -504,7 +554,7 @@ mod tests {
             }
         });
         let result=command_result(&http_client().unwrap(),&base,"host~session","transcript",
-            json!({"text":"private prompt"}),Some(&key)).await.unwrap();
+            json!({"text":"private prompt","request_id":"known-id"}),Some(&key)).await.unwrap();
         assert_eq!(result["turns"],json!([]));
         server.await.unwrap();
     }

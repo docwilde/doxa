@@ -780,9 +780,21 @@ impl App {
             if let Some(info) = self.chip_info.as_mut().filter(|info| {
                 matches!(
                     info.kind,
-                    "memory" | "usage" | "context" | "help" | "sessions" | "about"
+                    "memory" | "usage" | "context" | "help" | "sessions" | "about" | "remote_history"
                 )
             }) {
+                if info.kind=="remote_history" && key.code==KeyCode::PageUp && info.scroll==0 {
+                    let id=info.owner.as_ref().map(|owner|owner.0.clone());
+                    if let Some(id)=id {
+                        if let Some(before)=self.remote_history_before.get(&id).copied() {
+                            if self.remote_history_loading.insert(id.clone()) {
+                                self.pending_remote_history.push((id,before));
+                                self.notice="Loading older remote turns…".into();
+                            }
+                        }else{self.notice="Beginning of remote transcript".into();}
+                    }
+                    return true;
+                }
                 match key.code {
                     KeyCode::Up => info.scroll = info.scroll.saturating_sub(1),
                     KeyCode::Down => info.scroll = info.scroll.saturating_add(1).min(info.lines.len().saturating_sub(1)),
@@ -906,7 +918,7 @@ impl App {
             return self.tool_key(key);
         }
         if self.keybindings.matches(KeyAction::NewTab, key) {
-            if self.remote_mode { self.local_attach(""); } else { self.open_engine_picker(); }
+            if self.active_remote() { self.local_attach(""); } else { self.open_engine_picker(); }
             return true;
         }
         if self.keybindings.matches(KeyAction::Tools, key) {
@@ -1254,7 +1266,7 @@ impl App {
                     if let Some(id) = self.groups[self.active_group].active_id() {
                         if self.offline_ids.contains(id) {
                             self.notice = "Archived transcript is read-only".into();
-                        } else if self.remote_mode && (self.input == "/peers" || self.input == "/mesh" || self.input == "/msg" || self.input.starts_with("/msg ")) {
+                        } else if self.active_remote() && (self.input == "/peers" || self.input == "/mesh" || self.input == "/msg" || self.input.starts_with("/msg ")) {
                             self.notice = "Peer controls are available on the session host".into();
                         } else if self.input == "/peers" || self.input == "/mesh" {
                             self.map_modal = true;
@@ -1443,7 +1455,7 @@ impl App {
     }
 
     pub(super) fn open_stop_confirmation(&mut self) {
-        if self.remote_mode { self.notice = "Remote sessions must be stopped on their host".into(); return; }
+        if self.active_remote() { self.notice = "Remote sessions must be stopped on their host".into(); return; }
         if !self.stop_confirmation_fits() {
             self.notice = "Enlarge terminal to confirm session stop".into();
             return;

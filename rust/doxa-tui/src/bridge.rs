@@ -37,6 +37,7 @@ pub enum WorkerCommand {
     Branch(String, Option<String>),
     QueueList(String),
     ContextDetail(String),
+    RemoteHistory(String, u64),
     QueueCancel(String, String),
     Status(String),
     Stop(String),
@@ -250,7 +251,7 @@ pub(crate) fn connect_sessions_inner(sessions:&[Session],readonly_restore:bool)-
                 | WorkerCommand::Models(id) | WorkerCommand::SetModel(id, _) | WorkerCommand::SetEffort(id, _)
                 | WorkerCommand::SetPermissionMode(id, _) | WorkerCommand::QueueList(id) | WorkerCommand::ContextDetail(id) | WorkerCommand::Status(id)
                 | WorkerCommand::Branch(id, _)
-                | WorkerCommand::QueueCancel(id, _) => id,
+                | WorkerCommand::QueueCancel(id, _) | WorkerCommand::RemoteHistory(id,_) => id,
                 WorkerCommand::Message(id, _, _) | WorkerCommand::Stop(id)
                 | WorkerCommand::FinalizeForClear(id) => id,
                 WorkerCommand::Launch(_, _, _) | WorkerCommand::Attach(_, _) => unreachable!(),
@@ -300,6 +301,8 @@ pub(crate) fn rejection_frame(command: WorkerCommand, message: &str) -> WorkerFr
         WorkerCommand::Models(id) => command_frame(id, CommandResult::Models { status, models: None,
             note: None, loading: None, capabilities: None }),
         WorkerCommand::ContextDetail(id) => command_frame(id, CommandResult::ContextDetail { status, detail: None }),
+        WorkerCommand::RemoteHistory(session_id,_) => WorkerFrame::RemoteHistoryPage {
+            session_id,markdown:String::new(),before:None,has_more:false,error:Some(message.into()) },
         WorkerCommand::SetModel(id, _) => command_frame(id, CommandResult::SetModel { status, model: None }),
         WorkerCommand::SetEffort(id, _) => command_frame(id, CommandResult::SetEffort { status, effort: None, verification_pending: None }),
         WorkerCommand::SetPermissionMode(id, _) => command_frame(id, CommandResult::SetPermissionMode { status, mode: None }),
@@ -449,6 +452,9 @@ fn worker_loop(
                 Ok(WorkerCommand::Status(id)) => {
                     if id == session_id && !forward_status(&mut client, frames, &session_id) { return; }
                     cursor.store(client.cursor, Ordering::Relaxed);
+                }
+                Ok(WorkerCommand::RemoteHistory(id,_)) => {
+                    if frames.send(rejection_frame(WorkerCommand::RemoteHistory(id,0),"History paging is remote-only")).is_err(){return;}
                 }
                 Ok(WorkerCommand::Launch(_, _, group)) => {
                     let _ = frames.send(WorkerFrame::Launch { group, result: LaunchResult::Failed { message: "Session launch is unavailable on this connection".into(), started_session: None } });

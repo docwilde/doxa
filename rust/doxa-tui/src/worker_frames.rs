@@ -19,6 +19,15 @@ pub enum WorkerFrame {
         markdown: String,
         pending_inputs: Value,
         pending_inputs_complete: bool,
+        before: Option<u64>,
+        has_more: bool,
+    },
+    RemoteHistoryPage {
+        session_id: String,
+        markdown: String,
+        before: Option<u64>,
+        has_more: bool,
+        error: Option<String>,
     },
     RemoteConnectivity {
         session_id: String,
@@ -196,10 +205,13 @@ impl WorkerFrame {
                 markdown,
             } => json!({"type":"event", "session_id":session_id,
                 "event":{"type":"text_delta", "data":{"text":markdown,"snapshot":true}}}),
-            Self::RemoteSnapshot { session_id, markdown, pending_inputs, pending_inputs_complete } =>
+            Self::RemoteSnapshot { session_id, markdown, pending_inputs, pending_inputs_complete,before,has_more } =>
                 json!({"type":"remote_snapshot","session_id":session_id,
                     "markdown":markdown,"pending_inputs":pending_inputs,
-                    "pending_inputs_complete":pending_inputs_complete}),
+                    "pending_inputs_complete":pending_inputs_complete,"before":before,"has_more":has_more}),
+            Self::RemoteHistoryPage {session_id,markdown,before,has_more,error}=>
+                json!({"type":"remote_history_page","session_id":session_id,"markdown":markdown,
+                    "before":before,"has_more":has_more,"error":error}),
             Self::RemoteConnectivity { session_id, status } =>
                 json!({"type":"remote_connectivity","session_id":session_id,"status":status}),
             Self::Launch {

@@ -5,6 +5,23 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.4 — 2026-10-07
+
+**Remote windows**
+
+- Add **`/remote-control`** to open `◎` remote tabs beside local tabs in one TUI; `/local` selects an open local tab.
+- Keep remote tabs out of the saved local tabset. The standalone `doxa remote tui` view remains available.
+
+**History**
+
+- Page older host transcripts in the browser, and fetch older pages from the native Ctrl+R history submenu with PageUp.
+- Bound each page and the native history view; the host transcript remains authoritative.
+
+**Private transport**
+
+- Add **`doxa remote keygen`** and optional compressed AES-GCM envelopes for native prompts, approvals, results, transcripts and event content.
+- Keep encrypted sessions out of the hub-served browser; the hub still sees session presence, event kinds and padded sizes.
+
 ## 2.0.0-beta.3 — 2026-10-07
 
 **Session rail**

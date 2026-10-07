@@ -100,7 +100,8 @@ impl Hub {
             let changed=host.sessions.iter().filter_map(|old|{
                 let id=old["id"].as_str()?;
                 let current=sessions.iter().find(|item|item["id"]==id);
-                (current.is_none_or(|item|item["incarnation"]!=old["incarnation"])).then(||id.to_owned())
+                (current.is_none_or(|item|item["incarnation"]!=old["incarnation"]
+                    || item["encrypted"]!=old["encrypted"])).then(||id.to_owned())
             }).collect::<Vec<_>>();
             host.expires=Instant::now()+LEASE;host.sessions=sessions;
             host.pending.retain(|id|self.commands.get(id).is_some_and(|command|!changed.contains(&command.session)));

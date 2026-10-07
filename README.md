@@ -29,7 +29,7 @@
 
 ## Install
 
-Current release: **[v2.0.0-beta.3](https://github.com/docwilde/doxa/releases/tag/v2.0.0-beta.3)**.
+Current release: **[v2.0.0-beta.4](https://github.com/docwilde/doxa/releases/tag/v2.0.0-beta.4)**.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/docwilde/doxa/main/scripts/install.sh | sh
@@ -67,15 +67,15 @@ For control across machines, run `doxa-hub` on a private server and
 `HUB_URL` or `doxa remote list/send/answer` from another DOXA installation.
 Run `doxa remote tui HUB_URL` there to view live remote sessions in DOXA tabs,
 send prompts, and answer pending input. `Ctrl+T` selects another live remote
-session; tab and pane navigation use the usual DOXA keys. Remote tabs show a
-bounded recent transcript and live events. Model, permission, filesystem and
-LORE controls stay on the session host.
+session; tab and pane navigation use the usual DOXA keys. Remote tabs show
+live events; Ctrl+R opens a scrollable history view and PageUp at its top fetches
+older turns. Model, permission, filesystem and LORE controls stay on the host.
 Inside the local TUI, `/remote-connect HUB_URL HOST_ID` shares its live sessions
 while the window stays open; `/remote-disconnect` stops the connector. Use
-`/remote-control HUB_URL` to switch the same terminal to the hub's remote-only
-tabs, then `/local` to restore saved local tabs. The switch stops an in-window
-connector; run the CLI connector separately for persistent sharing. Local and
-remote tabs do not mix in one tab bar.
+`/remote-control HUB_URL` to add remote tabs beside local tabs in the same
+window; `/local` selects an open local tab. Remote tabs carry an `◎` marker.
+The in-window connector stops on exit; run the CLI connector separately for
+persistent sharing. Remote tabs are not saved in the local tabset.
 The [Rust guide](rust/README.md) has setup steps, and the
 [hub plan](docs/plans/remote-hub.md) covers the Android client contract.
 The browser can enable encrypted background Web Push for turn completion and

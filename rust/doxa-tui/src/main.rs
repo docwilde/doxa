@@ -77,8 +77,9 @@ and leaves running sessions detached. Ctrl+Left/Right switches tabs in the
 current pane; Shift+Left/Right switches between pane prompts. Change window
 shortcuts in /settings → Keys or with `doxa settings set key_new_tab Alt+N`.
 Inside the TUI, /remote-connect URL HOST_ID shares local sessions while this
-window is open; /remote-disconnect stops sharing. /remote-control URL switches
-this terminal to remote-only tabs; /local returns to saved local tabs.
+window is open; /remote-disconnect stops sharing. /remote-control URL adds
+remote tabs beside local tabs; /local selects an open local tab. Ctrl+R opens
+remote history, and PageUp at its top fetches older turns.
 
 New-session options: --engine codex|claude|deepseek|glm, --model NAME,
   --branch LOCAL_OR_REMOTE, --linger SECONDS, --resume FULL_SESSION_ID.
