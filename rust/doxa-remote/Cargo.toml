@@ -13,6 +13,7 @@ path = "src/main.rs"
 doxa-peers = { path = "../doxa-peers" }
 doxa-protocol = { path = "../doxa-protocol" }
 doxa-lore = { path = "../doxa-lore" }
+doxa-remote-wire = { path = "../doxa-remote-wire" }
 serde_json = "1"
 libc = "0.2"
 hyper = { version = "1", features = ["server", "http1"] }

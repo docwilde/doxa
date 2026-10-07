@@ -63,6 +63,7 @@ Commands:
                        Register this machine's sessions with a private hub
   remote list URL        List sessions registered with a private hub
   remote tui URL         Open live hub sessions as native DOXA tabs
+  remote keygen ABS_PATH Create an owner-only shared key for encrypted remote tabs
   remote send URL SESSION TEXT
                        Send a prompt through the private hub
   remote answer URL SESSION REQUEST_ID allow|deny
@@ -194,6 +195,13 @@ fn run(args: &[String]) -> io::Result<()> {
                 return Ok(());
             }
             "remote" => {
+                if let [first, second, path] = args {
+                    if first == "remote" && second == "keygen" {
+                        doxa_remote_wire::create_key(std::path::Path::new(path))?;
+                        println!("Remote key created at {path}. Copy it securely to the session host and set DOXA_REMOTE_E2EE_KEY_FILE on both machines.");
+                        return Ok(());
+                    }
+                }
                 if let [first, second, url] = args {
                     if first == "remote" && second == "tui" {
                         startup_message("Connecting to DOXA hub");
@@ -205,7 +213,7 @@ fn run(args: &[String]) -> io::Result<()> {
                     && !matches!(args, [first, second, _, _, _] if first == "remote" && second == "send")
                     && !matches!(args, [first, second, _] if first == "remote" && second == "list")
                     && !matches!(args, [first, second, _, _, _, _] if first == "remote" && second == "answer") {
-                    return Err(invalid("usage: doxa remote serve | connect URL HOST_ID | tui URL | list URL | send URL SESSION TEXT | answer URL SESSION REQUEST_ID allow|deny"));
+                    return Err(invalid("usage: doxa remote serve | connect URL HOST_ID | tui URL | keygen ABS_PATH | list URL | send URL SESSION TEXT | answer URL SESSION REQUEST_ID allow|deny"));
                 }
                 let executable = std::env::var_os("DOXA_REMOTE_BIN").map(PathBuf::from)
                     .unwrap_or_else(|| std::env::current_exe().unwrap_or_default().with_file_name("doxa-remote"));

@@ -4,6 +4,7 @@ use crate::bridge::{self, WorkerCommand};
 use crate::worker_frames::{CommandResult, PromptDelivery, WorkerFrame};
 use futures_util::StreamExt;
 use reqwest::{Client, Url};
+use doxa_remote_wire as wire;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -17,7 +18,7 @@ const MAX_SESSIONS: usize = 64;
 const MAX_JSON: usize = 128_000;
 const MAX_SSE: usize = 128_000;
 const MAX_RETRY_IDS: usize = 64;
-type RetryIds = HashMap<String, (String, Instant)>;
+type RetryIds = HashMap<String, (String, Instant, Option<Value>)>;
 
 fn invalid(message: &'static str) -> io::Error { io::Error::new(io::ErrorKind::InvalidInput, message) }
 fn unavailable(message: &'static str) -> io::Error { io::Error::other(message) }
@@ -34,12 +35,23 @@ fn retry_key(kind: &str, id: &str, content: &str) -> String {
 }
 fn retry_id(saved: &Mutex<RetryIds>, key: &str) -> Option<String> {
     let mut saved = saved.lock().unwrap_or_else(|poison| poison.into_inner());
-    saved.retain(|_, (_, created)| created.elapsed() < Duration::from_secs(120));
-    if let Some((id, _)) = saved.get(key) { return Some(id.clone()); }
+    saved.retain(|_, (_, created, _)| created.elapsed() < Duration::from_secs(120));
+    if let Some((id, _, _)) = saved.get(key) { return Some(id.clone()); }
     if saved.len() >= MAX_RETRY_IDS { return None; }
     let id = uuid::Uuid::new_v4().to_string();
-    saved.insert(key.to_owned(), (id.clone(), Instant::now()));
+    saved.insert(key.to_owned(), (id.clone(), Instant::now(), None));
     Some(id)
+}
+fn retry_body(saved:&Mutex<RetryIds>, retry:&str, target:&str, operation:&str,
+    body:Value, crypto_key:Option<&[u8;32]>) -> io::Result<Value> {
+    let Some(key)=crypto_key else { return Ok(body) };
+    let mut saved=saved.lock().unwrap_or_else(|poison|poison.into_inner());
+    let Some((_,_,cached))=saved.get_mut(retry) else { return Err(invalid("remote retry expired")) };
+    if let Some(request)=cached { return Ok(request.clone()); }
+    let sealed=wire::seal(key,&format!("{target}|command|{operation}"),&body)?;
+    let request=json!({"sealed":sealed,"request_id":body["request_id"]});
+    *cached=Some(request.clone());
+    Ok(request)
 }
 fn clear_retry(saved: &Mutex<RetryIds>, key: &str) {
     saved.lock().unwrap_or_else(|poison| poison.into_inner()).remove(key);
@@ -90,7 +102,7 @@ async fn post(http: &Client, base: &Url, path: &str, body: Value) -> io::Result<
 }
 
 #[derive(Clone, Debug)]
-struct SessionInfo { id: String, title: String, host: String, engine: String, model: String }
+struct SessionInfo { id: String, title: String, host: String, engine: String, model: String, encrypted: bool }
 fn sessions(value: &Value) -> io::Result<Vec<SessionInfo>> {
     let rows = value["sessions"].as_array().ok_or_else(|| invalid("invalid hub inventory"))?;
     if rows.len() > MAX_SESSIONS { return Err(invalid("hub session inventory exceeds bound")); }
@@ -105,7 +117,8 @@ fn sessions(value: &Value) -> io::Result<Vec<SessionInfo>> {
         };
         let title = clean("title", 160);
         Ok(SessionInfo { id: id.into(), title: if title.is_empty() { id.into() } else { title },
-            host: host.into(), engine: clean("engine", 40), model: clean("model", 100) })
+            host: host.into(), engine: clean("engine", 40), model: clean("model", 100),
+            encrypted:row["encrypted"]==true })
     }).collect()
 }
 fn hello(session: &SessionInfo) -> WorkerFrame {
@@ -149,15 +162,30 @@ fn snapshot_markdown(snapshot: &Value) -> io::Result<String> {
     Ok(output)
 }
 
-async fn command_result(http: &Client, base: &Url, target: &str, operation: &str, body: Value) -> io::Result<Value> {
-    let queued = post(http, base, &format!("api/sessions/{target}/{operation}"), body).await?;
+async fn command_result(http: &Client, base: &Url, target: &str, operation: &str, body: Value,
+    key: Option<&[u8;32]>) -> io::Result<Value> {
+    let request = if body["sealed"].is_object() && key.is_some() { body } else if let Some(key)=key {
+        let sealed=wire::seal(key,&format!("{target}|command|{operation}"),&body)?;
+        json!({"sealed":sealed,"request_id":body["request_id"]})
+    } else { body };
+    let queued = post(http, base, &format!("api/sessions/{target}/{operation}"), request).await?;
     let id = queued["command_id"].as_str().filter(|id| valid_id(id))
         .ok_or_else(|| invalid("hub did not return command ID"))?;
     for _ in 0..240 {
         tokio::time::sleep(Duration::from_millis(250)).await;
         let status = get(http, base, &format!("api/commands/{id}")).await?;
         match status["status"].as_str() {
-            Some("accepted") => return Ok(status["result"].clone()),
+            Some("accepted") => {
+                let result=&status["result"];
+                let value=if let Some(key)=key {
+                    wire::open(key,&format!("{target}|result|{operation}"),&result["sealed"])
+                } else if result.get("sealed").is_some() {
+                    Err(invalid("encrypted result requires a remote key"))
+                } else { Ok(result.clone()) }?;
+                if value["ok"]==false { return Err(io::Error::new(io::ErrorKind::PermissionDenied,
+                    value["error"].as_str().unwrap_or("remote host refused command").to_owned())); }
+                return Ok(value);
+            },
             Some("refused") => return Err(io::Error::new(io::ErrorKind::PermissionDenied,
                 status["result"]["error"].as_str().unwrap_or("host refused command").to_owned())),
             Some("expired") => return Err(unavailable("command outcome uncertain; inspect session before retrying")),
@@ -166,8 +194,8 @@ async fn command_result(http: &Client, base: &Url, target: &str, operation: &str
     }
     Err(unavailable("command acknowledgement timed out; inspect session before retrying"))
 }
-async fn snapshot(http: &Client, base: &Url, target: &str) -> io::Result<(String, Value, bool, u64)> {
-    let result = command_result(http, base, target, "transcript", json!({})).await?;
+async fn snapshot(http: &Client, base: &Url, target: &str, key:Option<&[u8;32]>) -> io::Result<(String, Value, bool, u64)> {
+    let result = command_result(http, base, target, "transcript", json!({}),key).await?;
     if result["ok"] != true { return Err(unavailable("remote transcript refused")); }
     let markdown = snapshot_markdown(&result)?;
     let inputs = result["pending_inputs"].as_array().filter(|items| items.len() <= 64)
@@ -199,12 +227,12 @@ impl SseDecoder {
 }
 
 async fn session_stream(session: SessionInfo, http: Client, base: Url,
-    frames: async_mpsc::Sender<WorkerFrame>, mut cancel: watch::Receiver<bool>) {
+    frames: async_mpsc::Sender<WorkerFrame>, mut cancel: watch::Receiver<bool>, key:Option<[u8;32]>) {
     let mut cursor = None;
     loop {
         if *cancel.borrow() { return; }
         if cursor.is_none() {
-            match snapshot(&http, &base, &session.id).await {
+            match snapshot(&http, &base, &session.id,key.as_ref()).await {
                 Ok((markdown, pending_inputs, pending_inputs_complete, next)) => {
                     if frames.send(WorkerFrame::RemoteSnapshot { session_id: session.id.clone(), markdown, pending_inputs, pending_inputs_complete }).await.is_err() { return; }
                     cursor = Some(next);
@@ -241,6 +269,18 @@ async fn session_stream(session: SessionInfo, http: Client, base: Url,
                         if seq < cursor.unwrap_or(0) { continue; }
                         if seq > cursor.unwrap_or(0) { cursor=None; break; }
                         let mut frame = frame;
+                        if let Some(key)=key.as_ref(){
+                            let kind=frame["event"]["type"].as_str().unwrap_or("");
+                            let context=format!("{}|event|{seq}|{kind}",session.id);
+                            let Ok(data)=wire::open(key,&context,&frame["event"]["data"]["sealed"]) else { cursor=None; break };
+                            frame["event"]["data"]=data;
+                        } else if frame["event"]["data"].get("sealed").is_some() { cursor=None; break; }
+                        if frame["event"]["type"]=="remote_event_omitted" {
+                            let _=frames.send(WorkerFrame::RemoteConnectivity { session_id:session.id.clone(),
+                                status:"Remote event too large; reload transcript for complete output".into() }).await;
+                            cursor=seq.checked_add(1);
+                            continue;
+                        }
                         frame["session_id"] = json!(session.id);
                         if frames.send(WorkerFrame::Daemon { session_id: session.id.clone(), frame }).await.is_err() { return; }
                         cursor = seq.checked_add(1);
@@ -256,7 +296,7 @@ async fn session_stream(session: SessionInfo, http: Client, base: Url,
 
 async fn command_worker(command: WorkerCommand, http: Client, base: Url,
     frames: async_mpsc::Sender<WorkerFrame>, uncertain: Arc<Mutex<RetryIds>>,
-    available: Arc<Mutex<HashSet<String>>>) {
+    available: Arc<Mutex<HashSet<String>>>, crypto_key:Option<[u8;32]>) {
     match command {
         WorkerCommand::Prompt(id, text) if valid_target(&id) && available.lock().unwrap_or_else(|poison| poison.into_inner()).contains(&id) => {
             let key = retry_key("prompt", &id, &text);
@@ -266,7 +306,12 @@ async fn command_worker(command: WorkerCommand, http: Client, base: Url,
                     delivery:PromptDelivery::Rejected }).await;
                 return;
             };
-            match command_result(&http, &base, &id, "prompt", json!({"text":text,"request_id":request_id})).await {
+            let request=retry_body(&uncertain,&key,&id,"prompt",json!({"text":text,"request_id":request_id}),crypto_key.as_ref());
+            let result=match request {
+                Ok(request)=>command_result(&http,&base,&id,"prompt",request,crypto_key.as_ref()).await,
+                Err(error)=>Err(error),
+            };
+            match result {
                 Ok(_) => { clear_retry(&uncertain, &key); }
                 Err(error) => {
                     let rejected = error.kind() == io::ErrorKind::PermissionDenied || error.kind() == io::ErrorKind::InvalidInput;
@@ -284,8 +329,12 @@ async fn command_worker(command: WorkerCommand, http: Client, base: Url,
                         uncertain:Some(true), message:"Too many uncertain remote commands".into() } }).await;
                 return;
             };
-            let result = command_result(&http, &base, &id, "answer",
-                json!({"id":request,"answer":answer,"request_id":request_id})).await;
+            let body=retry_body(&uncertain,&key,&id,"answer",
+                json!({"id":request,"answer":answer,"request_id":request_id}),crypto_key.as_ref());
+            let result=match body {
+                Ok(body)=>command_result(&http,&base,&id,"answer",body,crypto_key.as_ref()).await,
+                Err(error)=>Err(error),
+            };
             let uncertain_reply = result.as_ref().err().is_some_and(|error| error.kind() != io::ErrorKind::PermissionDenied);
             if !uncertain_reply { clear_retry(&uncertain, &key); }
             let _ = frames.send(WorkerFrame::Command { session_id:id,
@@ -306,8 +355,12 @@ async fn command_worker(command: WorkerCommand, http: Client, base: Url,
 pub fn run(raw_url: &str) -> io::Result<()> {
     let base = hub_url(raw_url)?;
     let http = http_client()?;
+    let key=wire::configured_key()?;
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     let initial = runtime.block_on(async { sessions(&get(&http, &base, "api/sessions").await?) })?;
+    if initial.iter().any(|session|session.encrypted!=key.is_some()) {
+        return Err(invalid("remote key configuration does not match hub sessions"));
+    }
     if initial.is_empty() { return Err(io::Error::new(io::ErrorKind::NotFound, "no live remote sessions")); }
     drop(runtime);
     let (frame_tx, frames): (SyncSender<WorkerFrame>, Receiver<WorkerFrame>) = mpsc::sync_channel(128);
@@ -350,13 +403,13 @@ pub fn run(raw_url: &str) -> io::Result<()> {
                     if tasks.contains_key(&session.id) { continue; }
                     if async_frames.send(hello(session)).await.is_err() { return; }
                     tasks.insert(session.id.clone(), tokio::spawn(session_stream(session.clone(), http.clone(), base.clone(),
-                        async_frames.clone(), cancel.clone())));
+                        async_frames.clone(), cancel.clone(), key)));
                 }
                 tokio::select! {
                     _ = cancel.changed() => break,
                     Some(command) = async_command_rx.recv() => {
                         if let Ok(permit) = command_slots.clone().try_acquire_owned() {
-                            let worker = command_worker(command, http.clone(), base.clone(), async_frames.clone(), uncertain.clone(), available.clone());
+                            let worker = command_worker(command, http.clone(), base.clone(), async_frames.clone(), uncertain.clone(), available.clone(),key);
                             tokio::spawn(async move { let _permit = permit; worker.await; });
                         } else {
                             let _ = async_frames.send(bridge::rejection_frame(command, "Remote command limit reached")).await;
@@ -364,7 +417,9 @@ pub fn run(raw_url: &str) -> io::Result<()> {
                     }
                     _ = tokio::time::sleep(Duration::from_secs(15)) => {
                         if let Ok(value) = get(&http, &base, "api/sessions").await {
-                            if let Ok(next) = sessions(&value) { current = next; }
+                            if let Ok(next) = sessions(&value) {
+                                if next.iter().all(|session|session.encrypted==key.is_some()){current = next;}
+                            }
                         }
                     }
                 }
@@ -388,6 +443,7 @@ mod tests {
     use hyper::{Request, Response};
     use hyper::service::service_fn;
     use hyper_util::rt::TokioIo;
+    use http_body_util::BodyExt;
     use std::convert::Infallible;
     use std::sync::atomic::{AtomicUsize, Ordering};
     #[test]
@@ -402,6 +458,12 @@ mod tests {
         let key = retry_key("prompt", "host~session", "private prompt");
         assert!(!key.contains("private prompt"));
         assert_eq!(retry_id(&saved, &key), retry_id(&saved, &key));
+        let id=retry_id(&saved,&key).unwrap();
+        let body=json!({"text":"private prompt","request_id":id});
+        let first=retry_body(&saved,&key,"host~session","prompt",body.clone(),Some(&[8u8;32])).unwrap();
+        let second=retry_body(&saved,&key,"host~session","prompt",body,Some(&[8u8;32])).unwrap();
+        assert_eq!(first,second);
+        assert!(!first.to_string().contains("private prompt"));
         clear_retry(&saved, &key);
         assert!(saved.lock().unwrap().is_empty());
     }
@@ -414,6 +476,37 @@ mod tests {
         assert!(decoder.push(b"id: 1\ndata: {\"type\":\"event\",\"seq\":1").unwrap().is_empty());
         assert_eq!(decoder.push(b"}\n\n").unwrap()[0]["seq"], 1);
         assert!(decoder.push(&vec![b'x'; MAX_SSE + 1]).is_err());
+    }
+
+    #[tokio::test]
+    async fn encrypted_command_is_opaque_to_hub_and_decrypted_by_client() {
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base=Url::parse(&format!("http://{}/",listener.local_addr().unwrap())).unwrap();
+        let key=[9u8;32];
+        let server=tokio::spawn(async move {
+            for _ in 0..2 {
+                let (socket,_)=listener.accept().await.unwrap();
+                let service=service_fn(move |request:Request<hyper::body::Incoming>|async move {
+                    let path=request.uri().path().to_owned();
+                    let body=if path.ends_with("/transcript") {
+                        let raw=request.into_body().collect().await.unwrap().to_bytes();
+                        assert!(!String::from_utf8_lossy(&raw).contains("private prompt"));
+                        let value:Value=serde_json::from_slice(&raw).unwrap();
+                        assert_eq!(wire::open(&key,"host~session|command|transcript",&value["sealed"]).unwrap()["text"],"private prompt");
+                        json!({"command_id":"command-1"})
+                    }else{
+                        let sealed=wire::seal(&key,"host~session|result|transcript",&json!({"ok":true,"turns":[]})).unwrap();
+                        json!({"status":"accepted","result":{"ok":true,"sealed":sealed}})
+                    };
+                    Ok::<_,Infallible>(Response::new(Full::new(Bytes::from(body.to_string()))))
+                });
+                hyper::server::conn::http1::Builder::new().keep_alive(false).serve_connection(TokioIo::new(socket),service).await.unwrap();
+            }
+        });
+        let result=command_result(&http_client().unwrap(),&base,"host~session","transcript",
+            json!({"text":"private prompt"}),Some(&key)).await.unwrap();
+        assert_eq!(result["turns"],json!([]));
+        server.await.unwrap();
     }
 
     #[tokio::test]
@@ -468,8 +561,8 @@ mod tests {
         let client = http_client().unwrap();
         let task = tokio::spawn(session_stream(SessionInfo {
             id:"host~session".into(),title:"Work".into(),host:"host".into(),
-            engine:"codex".into(),model:"gpt".into(),
-        }, client.clone(), base.clone(), frames, stop));
+            engine:"codex".into(),model:"gpt".into(),encrypted:false,
+        }, client.clone(), base.clone(), frames, stop, None));
         let first = tokio::time::timeout(Duration::from_secs(5), received.recv()).await.unwrap().unwrap();
         assert!(matches!(first, WorkerFrame::RemoteSnapshot { markdown, pending_inputs, .. }
             if markdown.contains("answer") && pending_inputs[0]["id"] == "ask-1"));
@@ -484,10 +577,10 @@ mod tests {
         let retries = Arc::new(Mutex::new(HashMap::new()));
         let (replies, mut reply_rx) = async_mpsc::channel(4);
         command_worker(WorkerCommand::Prompt("host~session".into(), "next turn".into()),
-            client.clone(), base.clone(), replies.clone(), retries.clone(), available.clone()).await;
+            client.clone(), base.clone(), replies.clone(), retries.clone(), available.clone(),None).await;
         assert_eq!(sends.load(Ordering::SeqCst), 1);
         command_worker(WorkerCommand::Answer("host~session".into(), "ask-1".into(), json!({"decision":"allow"})),
-            client, base, replies, retries, available).await;
+            client, base, replies, retries, available,None).await;
         assert!(matches!(reply_rx.recv().await, Some(WorkerFrame::Command {
             result:CommandResult::Answer { ok:true, .. }, ..
         })));

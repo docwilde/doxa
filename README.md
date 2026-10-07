@@ -82,6 +82,14 @@ The browser can enable encrypted background Web Push for turn completion and
 input requests. Configure a private VAPID key on the hub; push payloads
 contain only an event kind. The Android app is still planned.
 
+For native remote tabs, optional end-to-end encryption keeps prompts, approval
+answers, transcript pages, and event content opaque to the hub. Create a shared
+key with `doxa remote keygen ABS_PATH`, copy the owner-only file securely to the
+host and client, and set `DOXA_REMOTE_E2EE_KEY_FILE` to its absolute path on
+both. Messages above 1 KiB are compressed when useful before encryption.
+Encrypted sessions require the native TUI or CLI; the hub-served browser cannot
+read or control them. Session presence and event kinds remain visible to the hub.
+
 ### Browser view
 
 These screens render the shipped Rust browser assets in Chromium with isolated

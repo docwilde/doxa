@@ -17,6 +17,7 @@ doxa-state = { path = "../doxa-state" }
 doxa-worktrees = { path = "../doxa-worktrees" }
 doxa-vendors = { path = "../doxa-vendors" }
 doxa-lore = { path = "../doxa-lore" }
+doxa-remote-wire = { path = "../doxa-remote-wire" }
 crossterm = "0.28"
 doxa-protocol = { path = "../doxa-protocol" }
 libc = "0.2"

@@ -269,7 +269,12 @@ async fn main() -> io::Result<()> {
     match args.as_slice(){
         [mode,url,host] if mode=="connect"=>return uplink::run(app,url,host).await,
         []=>{},
-        [mode] if mode=="serve"=>{},
+        [mode] if mode=="serve"=>{
+            if doxa_remote_wire::configured_key()?.is_some(){
+                return Err(io::Error::new(io::ErrorKind::PermissionDenied,
+                    "browser adapter cannot serve encrypted sessions; use the native remote TUI"));
+            }
+        },
         _=>return Err(io::Error::new(io::ErrorKind::InvalidInput,"usage: doxa-remote serve | connect URL HOST_ID | list URL | send URL SESSION TEXT | answer URL SESSION REQUEST_ID allow|deny")),
     }
     let path=runtime.join("remote-browser.sock");

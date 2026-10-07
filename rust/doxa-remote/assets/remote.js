@@ -118,16 +118,22 @@ async function loadSessions() {
     const nav = el('sessions'); nav.replaceChildren();
     for (const session of sessions) {
       const button = document.createElement('button');
-      button.textContent = `${session.title} · ${session.engine || 'session'}`;
+      button.textContent = `${session.encrypted ? '🔒 ' : ''}${session.title} · ${session.engine || 'session'}`;
       button.dataset.sessionId = session.id;
       button.setAttribute('aria-current', String(session.id === active));
-      button.onclick = () => selectSession(session);
+      button.onclick = () => session.encrypted
+        ? (el('status').textContent = 'Encrypted session: use the native DOXA TUI with its shared key')
+        : selectSession(session);
       nav.append(button);
     }
     if (!sessions.length) {
       source?.close(); source = null; active = null;
       el('status').textContent = 'No live sessions';
-    } else if (!sessions.some(session => session.id === active)) await selectSession(sessions[0]);
+    } else if (!sessions.some(session => session.id === active)) {
+      const usable = sessions.find(session => !session.encrypted);
+      if (usable) await selectSession(usable);
+      else el('status').textContent = 'Encrypted sessions require a separately trusted native client';
+    }
   } catch (error) { el('status').textContent = error.message || 'Disconnected'; }
 }
 function showNextQuestion() {

@@ -35,6 +35,17 @@ remote-only window does not mix local tabs or restore its tab layout after exit.
 Provider settings, LORE management and filesystem operations remain on the
 host. Full historical transcript fetch is still in progress; the hub brokers
 a bounded recent snapshot from the host on demand.
+
+To encrypt native hub traffic end to end, create a shared key outside any
+repository with `doxa remote keygen /absolute/private/remote.key`. Copy that
+file through a secure channel to the session host and remote client, keep it
+owner-only (`0600`), and set `DOXA_REMOTE_E2EE_KEY_FILE` to its absolute path
+for `doxa remote connect`, `doxa remote tui`, and `doxa remote send/answer`.
+The key never goes to the hub. DOXA compresses useful payloads before AES-GCM
+encryption and pads ciphertext in 4 KiB buckets. The hub still sees session
+presence, target IDs, operation names, event kinds, timing, and bucketed sizes.
+Encrypted sessions cannot use the hub-served browser or `doxa remote serve`;
+use the native client until a separately trusted browser client exists.
 From the local TUI, `/remote-connect HUB_URL HOST_ID` starts the host connector
 for this window; `/remote-disconnect` stops it. `/remote-control HUB_URL`
 switches the same terminal to the remote-only tab view, detaching the local

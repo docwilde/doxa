@@ -88,11 +88,27 @@ modes remain refused remotely by default. The host connector never forwards
 arbitrary daemon RPCs. Approvals are tied to the current pending request
 snapshot; replayed or stale answers fail.
 
-The server is trusted with session text in the first implementation. Hosting
-it outside the user's private tailnet requires a separate security review,
-durable encrypted storage policy, user authentication, rate limits and audit
-trail. End-to-end encryption between device and host is the later direction;
-the initial private deployment must not imply it has that property.
+The native TUI and CLI now offer opt-in end-to-end encryption with an owner-only
+shared key file (`DOXA_REMOTE_E2EE_KEY_FILE`) copied separately to host and
+client. The host scrubs content before encrypting it. Each prompt, approval
+answer, transcript page, command result and live event body uses an independent
+AES-256-GCM nonce and route-bound associated data. Useful payloads are DEFLATE
+compressed before encryption; the compression flag and exact length are inside
+the ciphertext, which is padded in 4 KiB buckets. The hub sees owner identity,
+host/session IDs, operation and event kinds, timing, and bucketed ciphertext
+sizes. It cannot read or change the encrypted content without detection. It
+can still drop traffic or replay a previously accepted request; the daemon's
+pending-request checks and stable retry IDs limit, but do not fully eliminate,
+that risk. Do not use a hub outside the private tailnet without separate
+availability and replay controls.
+
+The hub-served browser is deliberately unavailable for encrypted sessions: a
+hub that serves its JavaScript could replace that JavaScript and capture a
+browser key. A separately installed or pinned browser client is required for
+browser end-to-end encryption. The local Rust browser adapter also refuses to
+serve while the shared-key setting is active. Without that key setting, the
+browser and hub continue to use the original Tailscale HTTPS transport and the
+hub can read the content it brokers.
 
 ## Notifications
 

@@ -1,6 +1,7 @@
 //! Outbound-only host connector for the private DOXA hub.
 use super::{connect, remote_dangerous, bypass_opt_in, scrub_data, daemon, App};
 use reqwest::{Client, Url};
+use doxa_remote_wire as wire;
 use serde_json::{json, Value};
 use std::{collections::HashMap, io, sync::Arc, time::{Duration,Instant}};
 
@@ -31,7 +32,7 @@ pub(super) fn bounded_history(mut history:Value)->Value{
     }
     let mut dropped=0usize;
     while history["turns"].as_array().is_some_and(|turns|turns.len()>1)
-        && serde_json::to_vec(&history).is_ok_and(|bytes|bytes.len()>100_000){
+        && serde_json::to_vec(&history).is_ok_and(|bytes|bytes.len()>80_000){
         history["turns"].as_array_mut().unwrap().remove(0);dropped+=1;
     }
     if dropped > 0 {
@@ -65,6 +66,7 @@ fn http_client()->io::Result<Client>{
 pub async fn client_action(args:&[String])->io::Result<()> {
     let [action,url,rest @ ..]=args else{return Err(invalid("usage: doxa remote list URL | send URL SESSION TEXT | answer URL SESSION REQUEST_ID allow|deny"))};
     let base=hub_url(url)?;let http=http_client()?;
+    let key=wire::configured_key()?;
     if action=="list"&&rest.is_empty(){
         let value:Value=http.get(base.join("api/sessions").map_err(|_|invalid("invalid hub route"))?)
             .send().await.map_err(|_|io::Error::other("hub unavailable"))?.error_for_status()
@@ -83,6 +85,9 @@ pub async fn client_action(args:&[String])->io::Result<()> {
         _=>return Err(invalid("usage: doxa remote list URL | send URL SESSION TEXT | answer URL SESSION REQUEST_ID allow|deny")),
     };
     let path=format!("api/sessions/{session}/{operation}");
+    let body=if let Some(key)=key.as_ref(){
+        json!({"sealed":wire::seal(key,&format!("{session}|command|{operation}"),&body)?})
+    }else{body};
     let queued=post(&http,&base,&path,body,None).await?;
     let Some(command)=queued["command_id"].as_str().filter(|id|super::valid_id(id)) else{return Err(io::Error::other("hub did not return a command ID"))};
     for _ in 0..240{
@@ -93,7 +98,13 @@ pub async fn client_action(args:&[String])->io::Result<()> {
             .map_err(|_|io::Error::other("hub command status refused"))?.json().await
             .map_err(|_|io::Error::other("unreadable command status"))?;
         match result["status"].as_str(){
-            Some("accepted")=>{println!("{}",result["result"]);return Ok(());},
+            Some("accepted")=>{
+                let value=if let Some(key)=key.as_ref(){
+                    wire::open(key,&format!("{session}|result|{operation}"),&result["result"]["sealed"])?
+                }else{result["result"].clone()};
+                if value["ok"]==false{return Err(io::Error::other(value["error"].as_str().unwrap_or("remote command refused")));}
+                println!("{value}");return Ok(());
+            },
             Some("refused")=>return Err(io::Error::other(result["result"]["error"].as_str().unwrap_or("host refused command"))),
             Some("expired")=>return Err(io::Error::other("command outcome uncertain; inspect session before retrying")),
             _=>{},
@@ -118,14 +129,22 @@ async fn publish_batch(http:&Client,base:&Url,host:&str,lease:&str,session:&str,
     if let Some(next)=last{cursors.insert(session.to_owned(),next);}
     true
 }
-async fn execute(app:&Arc<App>,owner:&str,session_id:&str,op:&str,payload:&Value)->Value{
+async fn execute(app:&Arc<App>,owner:&str,host:&str,session_id:&str,op:&str,payload:&Value,key:Option<&[u8;32]>)->Value{
+    let target=format!("{host}~{session_id}");
+    let payload=match key {
+        Some(key)=>match wire::open(key,&format!("{target}|command|{op}"),&payload["sealed"]){
+            Ok(value)=>value,Err(_)=>return json!({"ok":false,"error":"encrypted command authentication failed"}),
+        },
+        None if payload.get("sealed").is_some()=>return json!({"ok":false,"error":"encrypted command requires host key"}),
+        None=>payload.clone(),
+    };
     let kind=match op{"prompt"=>"send_prompt","answer"=>"approve_tool","transcript"=>"read_transcript",_=>return json!({"ok":false,"error":"unsupported remote command"})};
     if !doxa_peers::remote_policy::evaluate(kind,Some(owner),true,None).allowed{
         return json!({"ok":false,"error":"remote policy refused command"});
     }
     let entry=match app.session(session_id){Ok(Some(entry))=>entry,_=>return json!({"ok":false,"error":"session offline"})};
     let client=match connect(app,&entry,None,None).await{Ok(client)=>client,Err(_)=>return json!({"ok":false,"error":"session unavailable"})};
-    let op=op.to_owned();let payload=payload.clone();let app=app.clone();
+    let op=op.to_owned();let app=app.clone();
     match tokio::task::spawn_blocking(move||->io::Result<Value>{
         let mut client=client;
         match op.as_str(){
@@ -162,7 +181,7 @@ async fn execute(app:&Arc<App>,owner:&str,session_id:&str,op:&str,payload:&Value
         Err(_)=>json!({"ok":false,"error":"local command worker failed"}),
     }
 }
-async fn forward_events(app:&Arc<App>,http:&Client,base:&Url,host:&str,lease:&str,cursors:&mut HashMap<String,u64>){
+async fn forward_events(app:&Arc<App>,http:&Client,base:&Url,host:&str,lease:&str,cursors:&mut HashMap<String,u64>,key:Option<&[u8;32]>){
     let entries=match app.sessions(){Ok(entries)=>entries,Err(_)=>return};
     let live=entries.iter().map(|entry|format!("{}~{}",entry.session_id,entry.started_at)).collect::<Vec<_>>();
     cursors.retain(|key,_|live.contains(key));
@@ -182,6 +201,17 @@ async fn forward_events(app:&Arc<App>,http:&Client,base:&Url,host:&str,lease:&st
         for mut frame in frames{
             let Some(seq)=frame["seq"].as_u64() else{continue};
             if scrub_data(&mut frame["event"]["data"],&app.lore).is_err(){return;}
+            if let Some(key)=key {
+                if serde_json::to_vec(&frame["event"]["data"]).is_ok_and(|bytes|bytes.len()>38_000){
+                    frame["event"]["type"]=json!("remote_event_omitted");
+                    frame["event"]["data"]=json!({"reason":"event exceeds encrypted transport bound; reload transcript"});
+                }
+                let event_type=frame["event"]["type"].as_str().unwrap_or("").to_owned();
+                let context=format!("{host}~{}|event|{seq}|{event_type}",entry.session_id);
+                let data=frame["event"]["data"].clone();
+                let sealed=match wire::seal(key,&context,&data){Ok(sealed)=>sealed,Err(_)=>return};
+                frame["event"]["data"]=json!({"sealed":sealed});
+            }
             let item=json!({"session_id":entry.session_id,"frame":frame});
             let length=serde_json::to_vec(&item).map(|bytes|bytes.len()).unwrap_or(128_001);
             if length>120_000{return;}
@@ -197,13 +227,17 @@ pub async fn run(app:Arc<App>,url:&str,host:&str)->io::Result<()> {
     let base=hub_url(url)?;
     if !super::valid_id(host){return Err(invalid("invalid host id"));}
     let http=http_client()?;
+    let key=wire::configured_key()?;
     let mut lease:Option<String>=None;let mut owner:Option<String>=None;let mut cursors=HashMap::new();
     let mut last_refresh=Instant::now()-Duration::from_secs(60);
     loop{
         if !doxa_peers::remote_policy::remote_enabled(){return Err(io::Error::new(io::ErrorKind::PermissionDenied,"remote access disabled"));}
         if last_refresh.elapsed()>=Duration::from_secs(15){
             let sessions=app.sessions()?.into_iter().map(|entry|json!({"id":entry.session_id,
-                "title":entry.title,"engine":entry.engine,"model":entry.model,"incarnation":entry.started_at})).collect::<Vec<_>>();
+                "title":if key.is_some(){"Encrypted session"}else{&entry.title},
+                "engine":if key.is_some(){""}else{entry.engine.as_deref().unwrap_or("")},
+                "model":if key.is_some(){""}else{entry.model.as_deref().unwrap_or("")},
+                "incarnation":entry.started_at,"encrypted":key.is_some()})).collect::<Vec<_>>();
             let registration=post(&http,&base,"api/host/register",json!({"host_id":host,"sessions":sessions}),lease.as_deref()).await;
             match registration{
                 Ok(value)=>{
@@ -225,12 +259,18 @@ pub async fn run(app:Arc<App>,url:&str,host:&str)->io::Result<()> {
                 let Some(id)=command["command_id"].as_str() else{continue};
                 let session=command["session_id"].as_str().unwrap_or("");
                 let op=command["op"].as_str().unwrap_or("");
-                let result=execute(&app,active_owner,session,op,&command["payload"]).await;
+                let result=execute(&app,active_owner,host,session,op,&command["payload"],key.as_ref()).await;
+                let result=if let Some(key)=key.as_ref(){
+                    match wire::seal(key,&format!("{host}~{session}|result|{op}"),&result){
+                        Ok(sealed)=>json!({"ok":true,"sealed":sealed}),
+                        Err(_)=>json!({"ok":false,"error":"encrypted result exceeds bound"}),
+                    }
+                }else{result};
                 let path=format!("api/host/{host}/result");
                 let _=post(&http,&base,&path,json!({"command_id":id,"result":result}),Some(active_lease)).await;
             }
         }
-        forward_events(&app,&http,&base,host,active_lease,&mut cursors).await;
+        forward_events(&app,&http,&base,host,active_lease,&mut cursors,key.as_ref()).await;
         tokio::time::sleep(Duration::from_millis(150)).await;
     }
 }
