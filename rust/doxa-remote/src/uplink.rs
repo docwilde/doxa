@@ -10,7 +10,7 @@ fn shorten(value:&mut Value,limit:usize){
         *value=json!(format!("{}…",text.chars().take(limit).collect::<String>()));
     }
 }
-fn bounded_history(mut history:Value)->Value{
+pub(super) fn bounded_history(mut history:Value)->Value{
     if let Some(turns)=history["turns"].as_array_mut(){
         for turn in turns.iter_mut(){
             shorten(&mut turn["prompt"],2_000);
@@ -33,6 +33,17 @@ fn bounded_history(mut history:Value)->Value{
     while history["turns"].as_array().is_some_and(|turns|turns.len()>1)
         && serde_json::to_vec(&history).is_ok_and(|bytes|bytes.len()>100_000){
         history["turns"].as_array_mut().unwrap().remove(0);dropped+=1;
+    }
+    if dropped > 0 {
+        if let Some(before) = history["turns"][0]["_offset"].as_u64() {
+            history["before"] = json!(before);
+        }
+    }
+    if let Some(turns) = history["turns"].as_array_mut() {
+        for turn in turns { turn.as_object_mut().map(|turn|turn.remove("_offset")); }
+    }
+    if let Some(before) = history["before"].as_u64() {
+        history["has_more"] = json!(before > 0);
     }
     history["dropped_turns"]=json!(history["dropped_turns"].as_u64().unwrap_or(0)+dropped as u64);
     history["ok"]=json!(true);
@@ -136,7 +147,9 @@ async fn execute(app:&Arc<App>,owner:&str,session_id:&str,op:&str,payload:&Value
                 client.call("answer_needs_input",json!({"id":id,"answer":payload["answer"],"reviewed_request":reviewed}))
             },
             "transcript"=>{
-                let mut history=daemon::transcript(&client.hello)?;
+                let before=payload.get("before").map(|value|value.as_u64()
+                    .ok_or_else(||invalid("invalid transcript page cursor"))).transpose()?;
+                let mut history=daemon::transcript_page(&client.hello,before)?;
                 history["pending_inputs"]=client.hello["pending_inputs"].clone();
                 history["pending_inputs_complete"]=client.hello["pending_inputs_complete"].clone();
                 scrub_data(&mut history,&app.lore)?;
@@ -237,5 +250,15 @@ pub async fn run(app:Arc<App>,url:&str,host:&str)->io::Result<()> {
         assert!(history["dropped_turns"].as_u64().unwrap()>2);
         assert!(serde_json::to_vec(&history).unwrap().len()<100_000);
         assert!(history["turns"].as_array().unwrap().last().unwrap()["prompt"].as_str().unwrap().starts_with("39"));
+    }
+    #[test]fn transcript_relay_advances_page_cursor_when_dropping_turns(){
+        let turns=(0..30).map(|i|json!({"prompt":"p".repeat(2_000),
+            "text":"x".repeat(6_000),"tools":[],"_offset":i*100})).collect::<Vec<_>>();
+        let history=bounded_history(json!({"turns":turns,"before":0,"has_more":false,"dropped_turns":0}));
+        let first=history["turns"][0]["prompt"].as_str().unwrap();
+        assert!(!first.is_empty());
+        assert!(history["before"].as_u64().unwrap()>0);
+        assert_eq!(history["has_more"],true);
+        assert!(history["turns"].as_array().unwrap().iter().all(|turn|turn.get("_offset").is_none()));
     }
 }

@@ -71,32 +71,43 @@ fn read_frame(reader: &mut BufReader<UnixStream>, line: &mut Vec<u8>) -> io::Res
 /// Snapshot is pinned to the daemon's hello byte boundary, so later appends
 /// cannot double-render events opened with that same `next_seq` cursor.
 pub fn transcript(hello: &Value) -> io::Result<Value> {
-    let empty = || json!({"turns":[],"dropped_turns":0,
+    transcript_page(hello, None)
+}
+
+pub fn transcript_page(hello: &Value, before: Option<u64>) -> io::Result<Value> {
+    let empty = || json!({"turns":[],"dropped_turns":0,"before":0,"has_more":false,
         "next_seq":hello.get("transcript_seq").unwrap_or(&hello["next_seq"])});
     let Some(path) = hello["transcript_path"].as_str() else { return Ok(empty()); };
     let Some(size) = hello["transcript_bytes"].as_u64() else { return Ok(empty()); };
     if size == 0 { return Ok(empty()); }
+    let end = before.unwrap_or(size);
+    if end == 0 || end > size { return Err(invalid("invalid transcript page cursor")); }
     let mut file = OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(Path::new(path))?;
     let meta = file.metadata()?;
     if !meta.is_file() || meta.uid() != unsafe { libc::geteuid() } || meta.nlink() != 1 || meta.len() < size {
         return Err(invalid("unsafe transcript snapshot"));
     }
-    let start = size.saturating_sub(SNAPSHOT_BYTES);
+    let start = end.saturating_sub(SNAPSHOT_BYTES);
     file.seek(SeekFrom::Start(start))?;
-    let mut raw = vec![0; (size - start) as usize];
+    let mut raw = vec![0; (end - start) as usize];
     file.read_exact(&mut raw)?;
+    let mut aligned_start = start;
     if start > 0 {
         let first = raw.iter().position(|byte| *byte == b'\n').ok_or_else(|| invalid("no complete transcript line"))?;
         raw.drain(..=first);
+        aligned_start += first as u64 + 1;
     }
     let mut turns: Vec<Value> = Vec::new();
+    let mut line_offset = aligned_start;
     for line in raw.split(|byte| *byte == b'\n') {
+        let offset = line_offset;
+        line_offset = line_offset.saturating_add(line.len() as u64 + 1);
         let Ok(record) = serde_json::from_slice::<Value>(line) else { continue };
         let content = &record["message"]["content"];
         match record["type"].as_str() {
-            Some("user") if content.is_string() => turns.push(json!({"prompt":content,"text":"","tools":[]})),
+            Some("user") if content.is_string() => turns.push(json!({"prompt":content,"text":"","tools":[],"_offset":offset})),
             Some("assistant") if content.is_array() => {
-                if turns.is_empty() { turns.push(json!({"prompt":"","text":"","tools":[]})); }
+                if turns.is_empty() { turns.push(json!({"prompt":"","text":"","tools":[],"_offset":offset})); }
                 let turn = turns.last_mut().expect("created above");
                 for block in content.as_array().expect("checked above") {
                     match block["type"].as_str() {
@@ -128,7 +139,9 @@ pub fn transcript(hello: &Value) -> io::Result<Value> {
         }
     }
     let dropped = turns.len().saturating_sub(MAX_TURNS);
+    let before = turns.get(dropped).and_then(|turn| turn["_offset"].as_u64()).unwrap_or(aligned_start);
     Ok(json!({"turns":turns.into_iter().skip(dropped).collect::<Vec<_>>(),"dropped_turns":dropped,
+        "before":before,"has_more":before>0,
         "next_seq":hello.get("transcript_seq").unwrap_or(&hello["next_seq"])}))
 }
 
@@ -178,6 +191,33 @@ mod tests {
         assert_eq!(result["dropped_turns"], 2);
         assert_eq!(result["turns"][0]["prompt"], "p2");
         assert_eq!(result["next_seq"], 77);
+    }
+    #[test] fn transcript_pages_reach_every_older_turn_without_overlap() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let mut bytes = Vec::new();
+        for i in 0..95 {
+            bytes.extend_from_slice(format!("{{\"type\":\"user\",\"message\":{{\"content\":\"p{i}\"}}}}\n").as_bytes());
+        }
+        std::fs::write(&path, &bytes).unwrap();
+        let hello = json!({"transcript_path":path,"transcript_bytes":bytes.len(),"next_seq":77});
+        let mut pages = Vec::new();
+        let mut cursor = None;
+        loop {
+            let page = transcript_page(&hello, cursor).unwrap();
+            let prompts = page["turns"].as_array().unwrap().iter()
+                .map(|turn| turn["prompt"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+            assert!(!prompts.is_empty());
+            pages.push(prompts);
+            if page["has_more"] == false { break; }
+            let next = page["before"].as_u64().unwrap();
+            assert!(cursor.is_none_or(|previous| next < previous));
+            cursor = Some(next);
+        }
+        let found = pages.into_iter().rev().flatten().collect::<Vec<_>>();
+        let expected = (0..95).map(|i|format!("p{i}")).collect::<Vec<_>>();
+        assert_eq!(found, expected);
+        assert!(transcript_page(&hello, Some(bytes.len() as u64 + 1)).is_err());
     }
     #[test] fn empty_transcript_keeps_replay_cursor() {
         let result = transcript(&json!({"next_seq": 19})).unwrap();
