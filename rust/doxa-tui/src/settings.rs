@@ -109,6 +109,11 @@ pub fn find(key: &str) -> io::Result<&'static Setting> {
 pub fn config_path() -> io::Result<std::path::PathBuf> { Ok(crate::operations::doxa_home()?.join("config.toml")) }
 pub fn raw_from(config: &toml::Table, setting: &Setting, override_value: Option<&str>, engine: &str) -> String {
     if let Some(value) = override_value.filter(|v| !v.trim().is_empty()) { return value.trim().into(); }
+    if setting.kind == Kind::Key {
+        let mut effective = config.clone();
+        crate::keybindings::migrate_legacy_defaults(&mut effective);
+        return doxa_state::raw_setting(None, &effective, setting.key).trim().into();
+    }
     if setting.key == "model" && engine != "claude" {
         return config.get("models").and_then(toml::Value::as_table).and_then(|v| v.get(engine)).and_then(toml::Value::as_str).unwrap_or("").trim().into();
     }
@@ -183,7 +188,9 @@ pub fn save(path: &Path, edits: &[(String, Option<String>)], engine: &str) -> io
         if std::env::var(s.env).ok().is_some_and(|v| !v.trim().is_empty()) { return Err(io::Error::new(io::ErrorKind::PermissionDenied, format!("{} overrides config.toml; unset it before changing {key}", s.env))); }
         parsed.push((s, coerce(s, value.as_deref())?));
     }
+    let key_edited = parsed.iter().any(|(setting, _)| setting.kind == Kind::Key);
     doxa_state::update_config(path, |config| {
+        crate::keybindings::migrate_legacy_defaults(config);
         for (s, value) in parsed {
             if s.key == "model" && engine != "claude" {
                 if !config.contains_key("models") { config.insert("models".into(), toml::Value::Table(toml::Table::new())); }
@@ -191,6 +198,7 @@ pub fn save(path: &Path, edits: &[(String, Option<String>)], engine: &str) -> io
                 if let Some(value) = value { models.insert(engine.into(),value); } else { models.remove(engine); }
             } else if let Some(value) = value { config.insert(s.key.into(),value); } else { config.remove(s.key); }
         }
+        if key_edited { config.insert("keybindings_schema".into(), toml::Value::Integer(2)); }
         crate::keybindings::Bindings::from_config(config)?;
         Ok(())
     })
@@ -247,5 +255,24 @@ mod tests {
             assert_eq!(setting.default,definition.default);
             assert_eq!(setting.label,definition.label);
         }
+    }
+    #[test]
+    fn saved_old_lifecycle_shortcuts_migrate_before_other_settings_are_written() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "key_close_tab='Ctrl+X'\nkey_close_tab_alt='Ctrl+W'\nkey_stop='Alt+X'\n").unwrap();
+        let old = doxa_state::load_config_checked(&path).unwrap();
+        assert_eq!(raw_from(&old, find("key_close_tab").unwrap(), None, "claude"), "Ctrl+W");
+        save(&path, &[("clock_show".into(), Some("off".into()))], "claude").unwrap();
+        let migrated = doxa_state::load_config_checked(&path).unwrap();
+        assert_eq!(migrated["keybindings_schema"].as_integer(), Some(2));
+        assert_eq!(migrated["key_close_tab"].as_str(), Some("Ctrl+W"));
+        assert_eq!(migrated["key_close_tab_alt"].as_str(), Some("Delete"));
+        assert_eq!(migrated["key_stop"].as_str(), Some("Ctrl+X"));
+        save(&path, &[("key_stop".into(), Some("Alt+X".into()))], "claude").unwrap();
+        let customized = doxa_state::load_config_checked(&path).unwrap();
+        assert_eq!(crate::keybindings::Bindings::from_config(&customized).unwrap()
+            .display(crate::keybindings::Action::Stop), "Alt+X");
     }
 }

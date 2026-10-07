@@ -11,6 +11,7 @@ the stable 2.0 release has not been cut.
 
 - Move **`CloseTab`** to Ctrl+W; Delete also closes a focused tab header. Ctrl+X now stops the active daemon; Ctrl+Q still detaches the window.
 - Add **`DeleteTranscript`** on Ctrl+Delete with inline confirmation. DOXA deletes its verified JSONL only after daemon shutdown; provider-native history remains separate.
+- Migrate stored old shortcut defaults to the new mapping; later custom remaps remain configurable.
 
 **LORE browser**
 

@@ -48,6 +48,27 @@ pub const DEFINITIONS: &[Definition] = &[
     Definition { action: Action::DeleteTranscript, key: "key_delete_transcript", default: "Ctrl+Delete", label: "delete session transcript" },
 ];
 
+/// Existing installs can have the former defaults stored explicitly. Move
+/// those values once, before validating the new distinct lifecycle shortcuts.
+pub(crate) fn migrate_legacy_defaults(config: &mut toml::Table) -> bool {
+    if config.get("keybindings_schema").and_then(toml::Value::as_integer).is_some_and(|version| version >= 2) {
+        return false;
+    }
+    let mut changed = false;
+    for (key, old, new) in [
+        ("key_close_tab", "Ctrl+X", "Ctrl+W"),
+        ("key_close_tab_alt", "Ctrl+W", "Delete"),
+        ("key_stop", "Alt+X", "Ctrl+X"),
+    ] {
+        if config.get(key).and_then(toml::Value::as_str) == Some(old) {
+            config.insert(key.into(), toml::Value::String(new.into()));
+            changed = true;
+        }
+    }
+    if changed { config.insert("keybindings_schema".into(), toml::Value::Integer(2)); }
+    changed
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Chord { code: KeyCode, modifiers: KeyModifiers }
 
@@ -137,6 +158,8 @@ impl Default for Bindings {
 }
 impl Bindings {
     pub fn from_config(config: &toml::Table) -> io::Result<Self> {
+        let mut config = config.clone();
+        migrate_legacy_defaults(&mut config);
         let mut chords: Vec<Option<Chord>> = Vec::with_capacity(DEFINITIONS.len());
         for definition in DEFINITIONS {
             let raw = match config.get(definition.key) {
@@ -196,5 +219,20 @@ mod tests {
             KeyEvent::new(KeyCode::Char('n'), KeyModifiers::ALT)));
         let shift_tab = Chord::parse("Shift+Tab").unwrap().unwrap();
         assert!(shift_tab.matches(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE)));
+    }
+    #[test]
+    fn old_saved_defaults_migrate_without_blocking_later_custom_remaps() {
+        let mut config = toml::Table::new();
+        for (key, value) in [("key_close_tab", "Ctrl+X"), ("key_close_tab_alt", "Ctrl+W"), ("key_stop", "Alt+X")] {
+            config.insert(key.into(), toml::Value::String(value.into()));
+        }
+        let migrated = Bindings::from_config(&config).unwrap();
+        assert_eq!(migrated.display(Action::CloseTab), "Ctrl+W");
+        assert_eq!(migrated.display(Action::CloseTabAlternate), "Delete");
+        assert_eq!(migrated.display(Action::Stop), "Ctrl+X");
+        assert!(migrate_legacy_defaults(&mut config));
+        assert_eq!(config["keybindings_schema"].as_integer(), Some(2));
+        config.insert("key_stop".into(), toml::Value::String("Alt+X".into()));
+        assert_eq!(Bindings::from_config(&config).unwrap().display(Action::Stop), "Alt+X");
     }
 }
