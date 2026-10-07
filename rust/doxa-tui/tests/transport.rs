@@ -173,13 +173,17 @@ fn invalid_hello_and_frame_bounds_are_rejected() {
 #[test]
 fn malformed_and_partial_frames_are_rejected() {
     for bytes in [b"garbage\n".to_vec(), b"{\"type\":\"event\"}\n".to_vec(), b"{\"type\":\"reply\"}".to_vec()] {
+        let (release_tx, release_rx) = mpsc::channel();
         let (path, task) = socket(move |mut stream| {
             hello(&mut stream);
             let mut reader = BufReader::new(stream.try_clone().unwrap());
             line(&mut reader);
             stream.write_all(&bytes).unwrap();
+            // Keep the peer alive until connect finishes its attach handshake.
+            release_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         });
         let mut client = DaemonClient::connect(&path, None).unwrap();
+        release_tx.send(()).unwrap();
         assert!(matches!(client.next_frame(), Err(TransportError::Malformed(_))));
         finish(path, task);
     }
