@@ -163,6 +163,23 @@ impl App {
             .collect()
     }
 
+    pub(super) fn rail_session_at(&self, column: u16, row: u16) -> Option<&str> {
+        let rail = self.layout(self.size).rail?;
+        if column <= rail.x
+            || column >= rail.right().saturating_sub(1)
+            || row <= rail.y
+            || row >= rail.bottom().saturating_sub(1)
+        {
+            return None;
+        }
+        let rows = self.rail_rows();
+        let index = usize::from(row - rail.y - 1) + self.rail_view_start(rail, &rows);
+        match rows.get(index)? {
+            RailRow::Session(index) => Some(&self.sessions[*index].id),
+            _ => None,
+        }
+    }
+
     pub(super) fn rail_view_start(&self, area: Rect, rows: &[RailRow]) -> usize {
         let visible = usize::from(area.height.saturating_sub(2));
         if visible == 0 || rows.len() <= visible {

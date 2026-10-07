@@ -969,9 +969,14 @@ impl App {
             return;
         }
         let id = group.tabs.remove(group.active);
-        if !self.remote_mode && (!self.offline_ids.contains(&id) || self.history_entries.contains_key(&id))
-            && !self.detached_this_run.contains(&id)
-        {
+        let offline = self.offline_ids.contains(&id);
+        if offline {
+            self.detached_this_run.retain(|detached| detached != &id);
+            if self.rail_hover.as_deref() == Some(id.as_str()) {
+                self.rail_hover = None;
+            }
+        }
+        if !self.remote_mode && !offline && !self.detached_this_run.contains(&id) {
             self.detached_this_run.push(id.clone());
         }
         for job in &self.local_shell_jobs {
@@ -981,7 +986,11 @@ impl App {
         }
         group.active = group.active.min(group.tabs.len().saturating_sub(1));
         group.scroll = 0;
-        self.notice = format!("Tab detached · {id} remains available in sessions");
+        self.notice = if offline {
+            format!("Past session closed · {id}")
+        } else {
+            format!("Tab detached · {id} remains available in sessions")
+        };
 
         if self.groups.iter().all(|group| group.tabs.is_empty()) {
             self.pane_tree = None;
@@ -1025,6 +1034,7 @@ impl App {
             self.active_group = 0;
             self.split_requested = false;
         }
+        self.rail_selected = self.rail_selected.min(self.rail_order().len().saturating_sub(1));
         self.focus = Focus::Prompt;
     }
 

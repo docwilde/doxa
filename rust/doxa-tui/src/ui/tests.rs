@@ -3105,6 +3105,63 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn ctrl_x_dismisses_a_past_session_from_the_rail() {
+        let mut app = App::default();
+        app.apply_update(DaemonUpdate::Upsert(Session {
+            id: "old".into(), title: "Old work".into(), collection: "repo".into(),
+            transcript: "saved transcript".into(), status: "Disconnected".into(),
+        }));
+        app.offline_ids.insert("old".into());
+        app.detached_this_run.push("old".into());
+        app.groups[0].tabs = vec!["old".into()];
+        assert_eq!(app.rail_order(), [0]);
+
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL)));
+
+        assert!(app.groups[0].tabs.is_empty());
+        assert!(app.rail_order().is_empty());
+        assert!(!app.detached_this_run.contains(&"old".to_owned()));
+        assert_eq!(app.sessions[0].transcript, "saved transcript");
+        assert!(app.notice.contains("Past session closed"));
+    }
+
+    #[test]
+    fn hovering_a_rail_session_highlights_only_that_row() {
+        let mut app = App::default();
+        app.handle(Event::Resize(80, 20));
+        for id in ["one", "two"] {
+            app.apply_update(DaemonUpdate::Upsert(Session {
+                id: id.into(), title: id.into(), collection: "repo".into(),
+                transcript: String::new(), status: "Ready".into(),
+            }));
+        }
+        let rail = app.layout(app.size).rail.unwrap();
+        let rows = app.rail_rows();
+        let target = rows.iter().position(|row| matches!(row, RailRow::Session(1))).unwrap();
+        let y = rail.y + 1 + (target - app.rail_view_start(rail, &rows)) as u16;
+        let focus = app.focus;
+        let active = app.groups[app.active_group].active_id().map(str::to_owned);
+
+        assert!(app.handle(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Moved, column: rail.x + 3, row: y,
+            modifiers: KeyModifiers::NONE,
+        })));
+        assert_eq!(app.rail_hover.as_deref(), Some("two"));
+        assert_eq!(app.focus, focus);
+        assert_eq!(app.groups[app.active_group].active_id(), active.as_deref());
+        let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert_eq!(terminal.backend().buffer()[(rail.x + 3, y)].bg, theme::RAISED);
+        assert_eq!(terminal.backend().buffer()[(rail.x + 3, y - 1)].bg, theme::RAIL);
+
+        assert!(app.handle(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Moved, column: rail.right(), row: y,
+            modifiers: KeyModifiers::NONE,
+        })));
+        assert!(app.rail_hover.is_none());
+    }
+
+    #[test]
     fn detaching_last_tab_in_first_pane_preserves_other_pane_draft() {
         let mut app = App::default();
         app.handle(Event::Resize(100, 28));
