@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "DOXA Remote",
+  "description": "Open encrypted DOXA sessions from a packaged browser client.",
+  "version": "2.0.0.5",
+  "minimum_chrome_version": "103",
+  "icons": {"128": "icon.png"},
+  "action": {"default_title": "Open DOXA Remote", "default_icon": "icon.png"},
+  "background": {"service_worker": "background.js"},
+  "optional_host_permissions": ["https://*.ts.net/*"],
+  "content_security_policy": {"extension_pages": "script-src 'self'; object-src 'none'"}
+}

@@ -44,8 +44,11 @@ for `doxa remote connect`, `doxa remote tui`, and `doxa remote send/answer`.
 The key never goes to the hub. DOXA compresses useful payloads before AES-GCM
 encryption and pads ciphertext in 4 KiB buckets. The hub still sees session
 presence, target IDs, operation names, event kinds, timing, and bucketed sizes.
-Encrypted sessions cannot use the hub-served browser or `doxa remote serve`;
-use the native client until a separately trusted browser client exists.
+Encrypted sessions cannot use the hub-served browser or `doxa remote serve`.
+The separately installed [Chrome extension](../browser-extension/README.md)
+uses the same envelope protocol and keeps its key only in the open tab. The
+hub must allowlist that extension's origin while continuing to authenticate
+each request through the Tailscale proxy.
 From the local TUI, `/remote-connect HUB_URL HOST_ID` starts the host connector
 for this window; `/remote-disconnect` stops it. `/remote-control HUB_URL`
 adds remote tabs to the current tab bar without detaching local sessions.

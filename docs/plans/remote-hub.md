@@ -4,7 +4,8 @@ Status: first private implementation. The Rust browser adapter
 controls local sessions. A volatile Rust hub and outbound host connector now
 register sessions, broker prompts/answers and forward live events across
 machines. The browser can page historical transcripts from its host;
-the hub also holds a short live event ring.
+the hub also holds a short live event ring. The packaged Chrome extension can
+control encrypted sessions with code installed separately from the hub.
 The native TUI can open remote-only tabs through `doxa remote tui HUB_URL` or
 mix local and remote tabs in an open window with `/remote-control HUB_URL`.
 `/local` selects an open local tab. Remote tabs use an `◎` marker.
@@ -104,11 +105,14 @@ outside the private tailnet without separate availability and replay controls.
 
 The hub-served browser is deliberately unavailable for encrypted sessions: a
 hub that serves its JavaScript could replace that JavaScript and capture a
-browser key. A separately installed or pinned browser client is required for
-browser end-to-end encryption. The local Rust browser adapter also refuses to
-serve while the shared-key setting is active. Without that key setting, the
-browser and hub continue to use the original Tailscale HTTPS transport and the
-hub can read the content it brokers.
+browser key. The packaged Chrome extension in `browser-extension/` supplies
+its own code, imports the key only for the open tab, and requests access to one
+private hub origin. The hub accepts its writes only when that exact extension
+ID appears in `DOXA_REMOTE_EXTENSION_ORIGINS` (or `remote_extension_origins`
+in config), and still requires the attested Tailscale owner identity. The
+local Rust browser adapter also refuses to serve while the shared-key setting
+is active. Without that key setting, the hub-served browser continues to use
+Tailscale HTTPS transport and the hub can read the content it brokers.
 
 ## Notifications
 

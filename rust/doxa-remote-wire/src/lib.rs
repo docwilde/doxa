@@ -183,4 +183,12 @@ pub fn open(key: &[u8; 32], context: &str, envelope: &Value) -> io::Result<Value
         body["issued_at"]=json!(u64::MAX);
         assert!(!command_is_fresh(&body));
     }
+    #[test] fn browser_extension_envelope_opens_in_rust(){
+        let fixture:Value=serde_json::from_str(include_str!("../../../browser-extension/tests/js-envelope.json")).unwrap();
+        let key=STANDARD_NO_PAD.decode(fixture["key"].as_str().unwrap()).unwrap();
+        let key:[u8;32]=key.try_into().unwrap();
+        let value=open(&key,fixture["context"].as_str().unwrap(),&fixture["envelope"]).unwrap();
+        assert_eq!(value,fixture["value"]);
+        assert!(open(&key,"other~session|command|prompt",&fixture["envelope"]).is_err());
+    }
 }

@@ -29,7 +29,7 @@
 
 ## Install
 
-Current release: **[v2.0.0-beta.4](https://github.com/docwilde/doxa/releases/tag/v2.0.0-beta.4)**.
+Current release: **[v2.0.0-beta.5](https://github.com/docwilde/doxa/releases/tag/v2.0.0-beta.5)**.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/docwilde/doxa/main/scripts/install.sh | sh
@@ -87,8 +87,12 @@ answers, transcript pages, and event content opaque to the hub. Create a shared
 key with `doxa remote keygen ABS_PATH`, copy the owner-only file securely to the
 host and client, and set `DOXA_REMOTE_E2EE_KEY_FILE` to its absolute path on
 both. Messages above 1 KiB are compressed when useful before encryption.
-Encrypted sessions require the native TUI or CLI; the hub-served browser cannot
-read or control them. Session presence and event kinds remain visible to the hub.
+Encrypted sessions work in the native TUI, CLI, and the packaged
+[DOXA Remote Chrome extension](browser-extension/README.md). The extension's
+code is installed separately from the hub; choose the shared key file when
+opening it and allowlist its extension ID on the hub. The hub-served browser
+cannot read or control encrypted sessions. Session presence and event kinds
+remain visible to the hub.
 
 ### Browser view
 

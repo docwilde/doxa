@@ -27,6 +27,27 @@ fn reply(status:StatusCode,value:Value)->Response<Body>{
 fn bad(message:&str)->Response<Body>{reply(StatusCode::BAD_REQUEST,json!({"error":message}))}
 fn refused(message:&str)->Response<Body>{reply(StatusCode::FORBIDDEN,json!({"error":message}))}
 fn unavailable(message:&str)->Response<Body>{reply(StatusCode::CONFLICT,json!({"error":message}))}
+fn extension_origin_with_allowlist(headers:&hyper::HeaderMap,allowlist:&str)->Option<String>{
+    let mut values=headers.get_all(header::ORIGIN).iter();
+    let origin=values.next()?.to_str().ok()?;
+    if values.next().is_some(){return None;}
+    let id=origin.strip_prefix("chrome-extension://")?;
+    if id.len()!=32||!id.bytes().all(|c|(b'a'..=b'p').contains(&c)){return None;}
+    allowlist.split(',').map(str::trim).any(|allowed|allowed==origin).then(||origin.to_owned())
+}
+fn extension_origin(headers:&hyper::HeaderMap)->Option<String>{
+    extension_origin_with_allowlist(headers,
+        &policy::setting("remote_extension_origins","DOXA_REMOTE_EXTENSION_ORIGINS"))
+}
+fn extension_headers(reply:&mut Response<Body>,origin:Option<&str>){
+    if let Some(origin)=origin{
+        if let Ok(value)=hyper::header::HeaderValue::from_str(origin){
+            reply.headers_mut().insert(header::ACCESS_CONTROL_ALLOW_ORIGIN,value);
+            reply.headers_mut().insert(header::ACCESS_CONTROL_ALLOW_CREDENTIALS,hyper::header::HeaderValue::from_static("true"));
+            reply.headers_mut().insert(header::VARY,hyper::header::HeaderValue::from_static("Origin"));
+        }
+    }
+}
 fn same_origin(headers:&hyper::HeaderMap)->bool{
     let mut values=headers.get_all(header::ORIGIN).iter();
     let Some(origin)=values.next() else{return true};
@@ -34,6 +55,7 @@ fn same_origin(headers:&hyper::HeaderMap)->bool{
     let Some(origin)=origin.to_str().ok() else{return false};
     let Some(host)=headers.get(header::HOST).and_then(|h|h.to_str().ok()) else{return false};
     origin==format!("https://{host}")||origin==format!("http://{host}")
+        ||extension_origin(headers).is_some()
 }
 fn auth(request:&Request<Incoming>,attested:bool,kind:&str)->Result<String,Response<Body>>{
     if request.headers().get_all("tailscale-user-login").iter().count()!=1{return Err(refused("exactly one Tailscale identity required"));}
@@ -69,6 +91,24 @@ fn stream_body(receiver:mpsc::Receiver<Bytes>)->Body{
     });StreamBody::new(stream).boxed_unsync()
 }
 async fn handle(request:Request<Incoming>,state:Arc<Mutex<Hub>>,attested:bool,push:Option<Arc<push::Runtime>>)->Response<Body>{
+    let origin=extension_origin(request.headers());
+    if request.method()==Method::OPTIONS {
+        let allowed=origin.is_some()
+            && matches!(request.headers().get(header::ACCESS_CONTROL_REQUEST_METHOD).and_then(|v|v.to_str().ok()),Some("GET"|"POST"))
+            && request.headers().get(header::ACCESS_CONTROL_REQUEST_HEADERS).and_then(|v|v.to_str().ok())
+                .is_none_or(|v|v.eq_ignore_ascii_case("content-type"));
+        if !allowed{return refused("extension origin is not configured");}
+        let mut reply=response(StatusCode::NO_CONTENT,"text/plain",Bytes::new());
+        extension_headers(&mut reply,origin.as_deref());
+        reply.headers_mut().insert(header::ACCESS_CONTROL_ALLOW_METHODS,hyper::header::HeaderValue::from_static("GET, POST"));
+        reply.headers_mut().insert(header::ACCESS_CONTROL_ALLOW_HEADERS,hyper::header::HeaderValue::from_static("content-type"));
+        return reply;
+    }
+    let mut reply=handle_inner(request,state,attested,push).await;
+    extension_headers(&mut reply,origin.as_deref());
+    reply
+}
+async fn handle_inner(request:Request<Incoming>,state:Arc<Mutex<Hub>>,attested:bool,push:Option<Arc<push::Runtime>>)->Response<Body>{
     let method=request.method().clone();
     let path=request.uri().path().to_owned();
     let parts=path.trim_matches('/').split('/').collect::<Vec<_>>();
@@ -267,6 +307,19 @@ async fn main()->io::Result<()> {
     use super::*;
     use tokio::io::{AsyncReadExt,AsyncWriteExt};
     static ENV:std::sync::Mutex<()> = std::sync::Mutex::new(());
+    #[test] fn packaged_extension_origin_requires_exact_configured_id(){
+        let id="a".repeat(32);
+        let approved=format!("chrome-extension://{id}");
+        let mut headers=hyper::HeaderMap::new();
+        headers.insert(header::ORIGIN,approved.parse().unwrap());
+        assert_eq!(extension_origin_with_allowlist(&headers,&approved),Some(approved.clone()));
+        assert_eq!(extension_origin_with_allowlist(&headers,""),None);
+        assert_eq!(extension_origin_with_allowlist(&headers,"chrome-extension://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),None);
+        headers.insert(header::ORIGIN,"chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaq".parse().unwrap());
+        assert_eq!(extension_origin_with_allowlist(&headers,&approved),None);
+        headers.insert(header::ORIGIN,"https://hub.ts.net".parse().unwrap());
+        assert_eq!(extension_origin_with_allowlist(&headers,"https://hub.ts.net"),None);
+    }
     async fn wire(state:Arc<Mutex<Hub>>,attested:bool,raw:String)->String{
         let (server,mut client)=UnixStream::pair().unwrap();
         let task=tokio::spawn(async move{
@@ -284,6 +337,28 @@ async fn main()->io::Result<()> {
         format!("POST {path} HTTP/1.1\r\nHost: hub.test\r\nOrigin: https://hub.test\r\nTailscale-User-Login: {identity}\r\nContent-Length: {}\r\n{extra}\r\n{body}",body.len())
     }
     fn json_body(reply:&str)->Value{serde_json::from_str(reply.split("\r\n\r\n").nth(1).unwrap()).unwrap()}
+    #[tokio::test]async fn extension_preflight_is_scoped_and_post_still_requires_proxy_identity(){
+        let _guard=ENV.lock().unwrap();
+        let vars=["DOXA_REMOTE_ENABLED","DOXA_REMOTE_ALLOWED_LOGINS","DOXA_REMOTE_EXTENSION_ORIGINS"];
+        let old=vars.map(std::env::var_os);
+        let origin=format!("chrome-extension://{}","a".repeat(32));
+        std::env::set_var(vars[0],"1");
+        std::env::set_var(vars[1],"owner@example.com");
+        std::env::set_var(vars[2],&origin);
+        let state=Arc::new(Mutex::new(Hub::new()));
+        let preflight=format!("OPTIONS /api/sessions/host~session/prompt HTTP/1.1\r\nHost: hub.test\r\nOrigin: {origin}\r\nAccess-Control-Request-Method: POST\r\nAccess-Control-Request-Headers: content-type\r\n\r\n");
+        let allowed=wire(state.clone(),true,preflight).await;
+        assert!(allowed.starts_with("HTTP/1.1 204"),"{allowed}");
+        assert!(allowed.to_lowercase().contains(&format!("access-control-allow-origin: {origin}")));
+        let denied=wire(state.clone(),true,format!("OPTIONS /api/sessions/host~session/prompt HTTP/1.1\r\nHost: hub.test\r\nOrigin: chrome-extension://{}\r\nAccess-Control-Request-Method: POST\r\n\r\n","b".repeat(32))).await;
+        assert!(denied.starts_with("HTTP/1.1 403"));
+        let command=format!("POST /api/sessions/host~session/prompt HTTP/1.1\r\nHost: hub.test\r\nOrigin: {origin}\r\nTailscale-User-Login: owner@example.com\r\nContent-Length: 2\r\n\r\n{{}}");
+        assert!(wire(state.clone(),false,command.clone()).await.starts_with("HTTP/1.1 403"));
+        assert!(wire(state,true,command).await.starts_with("HTTP/1.1 400"));
+        for (name,original) in vars.into_iter().zip(old){
+            if let Some(value)=original{std::env::set_var(name,value)}else{std::env::remove_var(name)}
+        }
+    }
     #[tokio::test]async fn http_rejects_forged_identity_then_brokers_exact_owner(){
         let _guard=ENV.lock().unwrap();
         let old_enabled=std::env::var_os("DOXA_REMOTE_ENABLED");
