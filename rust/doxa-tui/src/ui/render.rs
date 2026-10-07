@@ -1887,6 +1887,7 @@ impl App {
                 )),
                 RailRow::Session(index) => {
                     let session = &self.sessions[*index];
+                    let hovered = self.rail_hover.as_deref() == Some(session.id.as_str());
                     let offline = self.offline_ids.contains(&session.id);
                     let waiting = self.waiting_for_input(&session.id);
                     let running = self.session_activity.get(&session.id).is_some_and(|activity| activity.0)
@@ -1928,6 +1929,11 @@ impl App {
                         Style::default().fg(theme::ACCENT).bg(theme::RAISED).add_modifier(Modifier::BOLD)
                     } else {
                         Style::default()
+                    };
+                    let style = if hovered {
+                        style.bg(theme::RAISED).add_modifier(Modifier::BOLD)
+                    } else {
+                        style
                     };
                     lines.push(Line::styled(format!("{mark} {title}{badge}"), style));
                 }

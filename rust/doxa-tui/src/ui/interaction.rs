@@ -2001,10 +2001,18 @@ impl App {
         false
     }
     pub(super) fn mouse(&mut self, mouse: MouseEvent) -> bool {
+        let mut rail_hover_changed = false;
+        if mouse.kind == MouseEventKind::Moved {
+            let rail_hover = (!self.link_interaction_blocked())
+                .then(|| self.rail_session_at(mouse.column, mouse.row).map(str::to_owned))
+                .flatten();
+            rail_hover_changed = self.rail_hover != rail_hover;
+            self.rail_hover = rail_hover;
+        }
         if self.map_modal {
             let owner = self.groups[self.active_group].active_id().unwrap_or("").to_owned();
             return self.peer_map.mouse(self.size, &owner, mouse.column, mouse.row,
-                mouse.kind, Instant::now());
+                mouse.kind, Instant::now()) || rail_hover_changed;
         }
         if matches!(mouse.kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown)
             && self.memory_preview.memory_tooltip_contains(self.size,
@@ -2108,7 +2116,7 @@ impl App {
                     return true;
                 }
             }
-            return false;
+            return rail_hover_changed;
         }
         if self.drag == Some(DragTarget::Chooser) {
             match mouse.kind {
@@ -2157,8 +2165,10 @@ impl App {
             let belief_hover_changed = self.belief_button_hover != hover;
             self.belief_button_hover = hover;
             if hover.is_some() {
-                let changed =
-                    belief_hover_changed || self.chip_hover.is_some() || self.link_hover.is_some();
+                let changed = rail_hover_changed
+                    || belief_hover_changed
+                    || self.chip_hover.is_some()
+                    || self.link_hover.is_some();
                 self.chip_hover = None;
                 self.link_hover = None;
                 return changed;
@@ -2182,7 +2192,7 @@ impl App {
             let moved = self.link_hover_position != position;
             self.link_hover_position = position;
             self.link_hover = link;
-            return changed || moved || tool_hover_changed;
+            return changed || moved || tool_hover_changed || rail_hover_changed;
         }
         if mouse.kind == MouseEventKind::Down(MouseButton::Left) && self.lore_picker.is_some() {
             if let Some(area) = self.active_chooser_rect() {
