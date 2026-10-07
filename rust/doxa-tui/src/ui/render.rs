@@ -60,6 +60,7 @@ impl App {
                     height,
                 );
                 if self.settings_menu.is_some()
+                    || self.delete_confirmation.is_some()
                     || self.action_menu
                     || self.lore_picker.is_some()
                     || self.repo_picker.is_some()
@@ -70,7 +71,9 @@ impl App {
                     || self.permission_picker.is_some()
                 {
                     frame.render_widget(Clear, fallback);
-                    if self.settings_menu.is_some() {
+                    if self.delete_confirmation.is_some() {
+                        self.draw_delete_confirmation(frame, fallback);
+                    } else if self.settings_menu.is_some() {
                         self.draw_settings_menu(frame, fallback);
                     } else if self.action_menu {
                         self.draw_actions(frame, fallback);
@@ -108,7 +111,11 @@ impl App {
             .owner()
             .is_some_and(|owner| self.valid_belief_preview_owner(owner))
         {
-            self.belief_preview.render(frame, area);
+            if self.lore_picker.as_ref().is_some_and(|picker| picker.proposal_mode) {
+                self.belief_preview.render_titled(frame, area, " Full proposal ", " Proposal preview ");
+            } else {
+                self.belief_preview.render(frame, area);
+            }
         }
         if self.memory_preview.owner().is_some_and(|owner| self.valid_memory_preview_owner(owner)) {
             self.memory_preview.render_memory(frame,area);
@@ -169,6 +176,7 @@ impl App {
             || self.diff_modal
             || self.tool_modal
             || self.stop_confirmation.is_some()
+            || self.delete_confirmation.is_some()
         {
             return;
         }
@@ -231,6 +239,21 @@ impl App {
                 .style(Style::default().fg(theme::TEXT).bg(theme::RAISED)),
             modal,
         );
+    }
+
+    pub(super) fn draw_delete_confirmation(&self, frame: &mut Frame, area: Rect) {
+        let Some((id, _, selected)) = &self.delete_confirmation else { return; };
+        let width = usize::from(area.width.saturating_sub(3));
+        let lines = vec![
+            Line::from(clipped_title(&format!(" Session {} · daemon stops first if live", safe_label(id)), width).0),
+            Line::styled(" Delete DOXA transcript", chooser_row_style(*selected == 0)),
+            Line::styled(" Cancel", chooser_row_style(*selected == 1)),
+            Line::from(" Provider-native history remains available separately."),
+        ];
+        frame.render_widget(Paragraph::new(lines)
+            .block(Block::default().title(" Delete session transcript ")
+                .borders(Borders::ALL).border_style(Style::default().fg(theme::ERROR)))
+            .style(Style::default().fg(theme::TEXT).bg(theme::RAISED)), area);
     }
 
     pub(super) fn draw_chip_picker(&self, frame: &mut Frame, area: Rect) {
@@ -1234,6 +1257,20 @@ impl App {
                     .skip(start)
                     .take(visible)
                 {
+                    self.rendered_belief_rows.borrow_mut().push(crate::belief_preview::Owner {
+                        id: index as u64 + 1,
+                        pane: self.active_group,
+                        session: self.groups[self.active_group].active_id().map(str::to_owned),
+                        cwd: picker.cwd.clone(),
+                        query: picker.query.clone(),
+                        offset: picker.offset,
+                        rect: Rect::new(area.x + 1, area.y + 3 + (index - start) as u16,
+                            area.width.saturating_sub(3), 1),
+                        menu: area,
+                        subject: format!("{} · {} · {} · {}", row.pid, row.kind, row.action, row.scope),
+                        claim: row.summary.clone(),
+                        truncated: false,
+                    });
                     let label = format!(
                         " {} {} · {}/{} · {} · {}",
                         if index == picker.selected { '›' } else { ' ' },
@@ -2333,6 +2370,8 @@ impl App {
             if self.active_request_index().is_some()
             {
                 self.draw_request(frame, inner[2], true);
+            } else if self.delete_confirmation.is_some() {
+                self.draw_delete_confirmation(frame, inner[2]);
             } else if self.settings_menu.is_some() {
                 self.draw_settings_menu(frame, inner[2]);
             } else if self.engine_picker

@@ -8,7 +8,7 @@ pub enum Action {
     NewTab, CloseTab, CloseTabAlternate, Quit, PreviousTab, NextTab,
     PreviousPane, NextPane, NextPaneAlternate, Tools, Palette, Search,
     Settings, PeerMap, Sidebar, Diff, DiffAlternate, SplitHorizontal,
-    SplitVertical, Model, Effort, Permission, Engine, Lore, Stop,
+    SplitVertical, Model, Effort, Permission, Engine, Lore, Stop, DeleteTranscript,
 }
 
 #[derive(Clone, Copy)]
@@ -21,8 +21,8 @@ pub struct Definition {
 
 pub const DEFINITIONS: &[Definition] = &[
     Definition { action: Action::NewTab, key: "key_new_tab", default: "Ctrl+T", label: "new tab" },
-    Definition { action: Action::CloseTab, key: "key_close_tab", default: "Ctrl+X", label: "close tab" },
-    Definition { action: Action::CloseTabAlternate, key: "key_close_tab_alt", default: "Ctrl+W", label: "close tab alternate" },
+    Definition { action: Action::CloseTab, key: "key_close_tab", default: "Ctrl+W", label: "close tab" },
+    Definition { action: Action::CloseTabAlternate, key: "key_close_tab_alt", default: "Delete", label: "close focused tab" },
     Definition { action: Action::Quit, key: "key_quit", default: "Ctrl+Q", label: "quit and detach" },
     Definition { action: Action::PreviousTab, key: "key_previous_tab", default: "Ctrl+Left", label: "previous tab" },
     Definition { action: Action::NextTab, key: "key_next_tab", default: "Ctrl+Right", label: "next tab" },
@@ -44,7 +44,8 @@ pub const DEFINITIONS: &[Definition] = &[
     Definition { action: Action::Permission, key: "key_permission", default: "Alt+P", label: "permission picker" },
     Definition { action: Action::Engine, key: "key_engine", default: "Alt+E", label: "engine picker" },
     Definition { action: Action::Lore, key: "key_lore", default: "Alt+L", label: "LORE beliefs" },
-    Definition { action: Action::Stop, key: "key_stop", default: "Alt+X", label: "stop session" },
+    Definition { action: Action::Stop, key: "key_stop", default: "Ctrl+X", label: "stop session" },
+    Definition { action: Action::DeleteTranscript, key: "key_delete_transcript", default: "Ctrl+Delete", label: "delete session transcript" },
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -73,17 +74,18 @@ impl Chord {
                 "left" => KeyCode::Left, "right" => KeyCode::Right,
                 "up" => KeyCode::Up, "down" => KeyCode::Down,
                 "tab" => KeyCode::Tab, "enter" => KeyCode::Enter,
+                "delete" | "del" => KeyCode::Delete,
                 "esc" | "escape" => KeyCode::Esc,
                 "," | "comma" => KeyCode::Char(','),
                 other if other.len() == 1 && other.bytes().all(|b| b.is_ascii_alphabetic()) =>
                     KeyCode::Char(other.chars().next().unwrap()),
                 other if other.starts_with('f') && other[1..].parse::<u8>().is_ok_and(|n| (1..=12).contains(&n)) =>
                     KeyCode::F(other[1..].parse().unwrap()),
-                _ => return Err(invalid("use a letter, arrow, Tab, Enter, Esc, comma or F1–F12")),
+                _ => return Err(invalid("use a letter, arrow, Delete, Tab, Enter, Esc, comma or F1–F12")),
             });
         }
         let code = key.ok_or_else(|| invalid("missing key"))?;
-        if modifiers.is_empty() && !matches!(code, KeyCode::F(_)) {
+        if modifiers.is_empty() && !matches!(code, KeyCode::F(_) | KeyCode::Delete) {
             return Err(invalid("printable and editing keys need Ctrl, Alt or Shift"));
         }
         if modifiers.contains(KeyModifiers::CONTROL)
@@ -119,7 +121,7 @@ impl Chord {
             KeyCode::Char(ch) => ch.to_ascii_uppercase().to_string(),
             KeyCode::Left => "Left".into(), KeyCode::Right => "Right".into(),
             KeyCode::Up => "Up".into(), KeyCode::Down => "Down".into(),
-            KeyCode::Tab => "Tab".into(), KeyCode::F(n) => format!("F{n}"),
+            KeyCode::Tab => "Tab".into(), KeyCode::Delete => "Delete".into(), KeyCode::F(n) => format!("F{n}"),
             _ => unreachable!(),
         });
         parts.join("+")
@@ -175,6 +177,10 @@ mod tests {
         let bindings = Bindings::default();
         assert!(bindings.matches(Action::NewTab, KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL)));
         assert!(!bindings.matches(Action::Tools, KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL)));
+        assert!(bindings.matches(Action::CloseTab, KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL)));
+        assert!(bindings.matches(Action::CloseTabAlternate, KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE)));
+        assert!(bindings.matches(Action::Stop, KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL)));
+        assert!(bindings.matches(Action::DeleteTranscript, KeyEvent::new(KeyCode::Delete, KeyModifiers::CONTROL)));
     }
     #[test]
     fn validates_collisions_and_canonicalizes_chords() {

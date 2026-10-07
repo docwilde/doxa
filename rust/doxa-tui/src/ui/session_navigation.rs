@@ -165,6 +165,58 @@ impl App {
         }
     }
 
+    pub(super) fn stop_active_session(&mut self) {
+        if self.active_remote() { self.notice = "Remote sessions must be stopped on their host".into(); return; }
+        let Some(id) = self.groups[self.active_group].active_id().map(str::to_owned) else {
+            self.notice = "Select a session to stop".into(); return;
+        };
+        if self.offline_ids.contains(&id) {
+            self.notice = "This session is already stopped".into(); return;
+        }
+        self.local_sessions_stop(crate::sessions::Action::Kill(id));
+    }
+
+    pub(super) fn start_session_delete(&mut self, id: String, cwd: std::path::PathBuf) {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        self.session_delete_pending = Some(receiver);
+        std::thread::spawn(move || {
+            let result = crate::history::delete_saved_session(&id, &cwd);
+            let _ = sender.send((id, result));
+        });
+        self.notice = "Deleting verified DOXA transcript…".into();
+    }
+
+    pub(super) fn poll_session_delete(&mut self) -> bool {
+        let Some(receiver) = self.session_delete_pending.as_ref() else { return false; };
+        let result = match receiver.try_recv() {
+            Ok(result) => result,
+            Err(TryRecvError::Empty) => return false,
+            Err(TryRecvError::Disconnected) => {
+                self.session_delete_pending = None;
+                self.notice = "Transcript deletion worker disconnected; saved transcript may remain".into();
+                return true;
+            }
+        };
+        self.session_delete_pending = None;
+        let (id, outcome) = result;
+        match outcome {
+            Ok(()) => {
+                self.sessions.retain(|session| session.id != id);
+                self.history_entries.remove(&id);
+                self.history_scanned_matches.remove(&id);
+                self.offline_ids.remove(&id);
+                self.detached_this_run.retain(|item| item != &id);
+                self.session_cwds.remove(&id);
+                self.killed_this_run.insert(id.clone());
+                for collection in &mut self.collections { collection.sessions.retain(|item| item != &id); }
+                self.rail_selected = self.rail_selected.min(self.rail_order().len().saturating_sub(1));
+                self.notice = format!("DOXA transcript deleted · {}", safe_label(&id));
+            }
+            Err(reason) => self.notice = format!("Transcript preserved · {reason} · use /resume to reopen"),
+        }
+        true
+    }
+
     pub(super) fn poll_sessions_stop(&mut self) -> bool {
         let Some(receiver) = self.session_stop_pending.as_ref() else {
             return false;
@@ -174,11 +226,23 @@ impl App {
             Err(TryRecvError::Empty) => return false,
             Err(TryRecvError::Disconnected) => {
                 self.session_stop_pending = None;
-                self.notice = "sessions: stop worker disconnected".into();
+                self.notice = if self.delete_after_stop.take().is_some() {
+                    "Transcript preserved · daemon shutdown could not be verified · use /resume".into()
+                } else {
+                    "sessions: stop worker disconnected".into()
+                };
                 return true;
             }
         };
         self.session_stop_pending = None;
+        let deleting = self.delete_after_stop.is_some();
+        if let Some((id, cwd)) = self.delete_after_stop.take() {
+            if report.stopped.contains(&id) {
+                self.start_session_delete(id, cwd);
+            } else {
+                self.notice = format!("Transcript preserved · daemon shutdown not verified · {} · use /resume", safe_label(&id));
+            }
+        }
         for id in report.stopped.iter().chain(report.requested.iter()) {
             self.killed_this_run.insert(id.clone());
             self.offline_ids.insert(id.clone());
@@ -195,7 +259,9 @@ impl App {
                 .into(),
             });
         }
-        self.notice = safe_label(&report.text());
+        if !deleting {
+            self.notice = safe_label(&report.text());
+        }
         true
     }
 

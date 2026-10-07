@@ -176,6 +176,52 @@ pub fn saved_session(id: &str, cwd: &Path) -> Option<OfflineSession> {
     entries.next().is_none().then_some(entry)
 }
 
+/// Remove the exact owned DOXA JSONL transcript after its daemon has stopped.
+/// Provider-native archives are independent records and are not touched here.
+pub fn delete_saved_session(id: &str, cwd: &Path) -> Result<(), &'static str> {
+    let entry = saved_session(id, cwd).ok_or("saved transcript could not be verified")?;
+    if entry.cwd.as_deref().is_some_and(|recorded| recorded != cwd) {
+        return Err("transcript records a different session directory");
+    }
+    let root = projects_dir().ok_or("transcript root unavailable")?;
+    delete_exact_in(&root, &entry.project, id)
+}
+
+fn delete_exact_in(root: &Path, project: &str, id: &str) -> Result<(), &'static str> {
+    if !crate::discovery::valid_id(id) || project.is_empty() || project.len() > 255
+        || project.contains('/') || project.contains('\\') || project.chars().any(char::is_control) {
+        return Err("invalid transcript identity");
+    }
+    let uid = unsafe { libc::geteuid() };
+    let root = OpenOptions::new().read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(root).map_err(|_| "transcript root unavailable")?;
+    if !owned_dir(&root, uid) { return Err("unsafe transcript root"); }
+    let dir = open_at(&root, OsStr::new(project), libc::O_RDONLY | libc::O_DIRECTORY)
+        .ok_or("project transcript directory unavailable")?;
+    if !owned_dir(&dir, uid) { return Err("unsafe project transcript directory"); }
+    let name = format!("{id}.jsonl");
+    let file = open_at(&dir, OsStr::new(&name), libc::O_RDONLY | libc::O_NONBLOCK)
+        .ok_or("transcript unavailable")?;
+    let meta = file.metadata().map_err(|_| "cannot inspect transcript")?;
+    if !meta.is_file() || meta.uid() != uid || meta.nlink() != 1 {
+        return Err("unsafe transcript file");
+    }
+    let name = std::ffi::CString::new(name).map_err(|_| "invalid transcript name")?;
+    let mut current = std::mem::MaybeUninit::<libc::stat>::uninit();
+    if unsafe { libc::fstatat(dir.as_raw_fd(), name.as_ptr(), current.as_mut_ptr(), libc::AT_SYMLINK_NOFOLLOW) } != 0 {
+        return Err("transcript changed before deletion");
+    }
+    let current = unsafe { current.assume_init() };
+    if current.st_dev != meta.dev() || current.st_ino != meta.ino() {
+        return Err("transcript changed before deletion");
+    }
+    if unsafe { libc::unlinkat(dir.as_raw_fd(), name.as_ptr(), 0) } != 0 {
+        return Err("could not delete transcript");
+    }
+    Ok(())
+}
+
 pub fn discover_prefix(prefix: &str) -> Vec<OfflineSession> {
     if !crate::discovery::valid_id(prefix) { return Vec::new(); }
     let Some(root) = projects_dir() else { return Vec::new(); };
@@ -1059,5 +1105,27 @@ for line in sys.stdin:
         let names = names_in(&open_dir, 10, |_| true);
         assert!(names.contains(&OsString::from("original.jsonl")));
         assert!(!names.contains(&OsString::from("replacement.jsonl")));
+    }
+
+    #[test]
+    fn exact_transcript_delete_rejects_links_and_leaves_other_history() {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        fs::create_dir(&project).unwrap();
+        let saved = project.join("saved.jsonl");
+        let other = project.join("other.jsonl");
+        fs::write(&saved, b"saved\n").unwrap();
+        fs::write(&other, b"other\n").unwrap();
+        assert!(delete_exact_in(temp.path(), "project", "saved").is_ok());
+        assert!(!saved.exists());
+        assert_eq!(fs::read(&other).unwrap(), b"other\n");
+        symlink(&other, &saved).unwrap();
+        assert!(delete_exact_in(temp.path(), "project", "saved").is_err());
+        assert_eq!(fs::read(&other).unwrap(), b"other\n");
+        fs::remove_file(&saved).unwrap();
+        fs::hard_link(&other, &saved).unwrap();
+        assert!(delete_exact_in(temp.path(), "project", "saved").is_err());
+        assert!(delete_exact_in(temp.path(), "../project", "other").is_err());
     }
 }

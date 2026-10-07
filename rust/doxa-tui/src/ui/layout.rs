@@ -40,6 +40,8 @@ impl App {
                 self.input_requests[index].id,
                 self.input_requests[index].step
             )
+        } else if self.delete_confirmation.is_some() {
+            "delete_transcript".into()
         } else if self.settings_menu.is_some() {
             "settings".into()
         } else if self.engine_picker {
@@ -368,6 +370,8 @@ impl App {
             wrapped_rows(&body, usize::from(pane.width.saturating_sub(2)))
                 .saturating_add(2)
                 .clamp(6, 18) as u16
+        } else if self.delete_confirmation.is_some() {
+            6
         } else if self.settings_menu.is_some() {
             8
         } else if self.engine_picker {
@@ -935,6 +939,7 @@ impl App {
             || self.repo_picker.is_some()
             || self.chip_info.is_some()
             || self.stop_confirmation.is_some()
+            || self.delete_confirmation.is_some()
     }
 
     pub(super) fn repo_detail(&self, group: usize) -> Option<String> {

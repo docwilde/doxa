@@ -94,6 +94,10 @@ impl App {
                     self.stop_confirmation = None;
                     self.notice = "Session stop cancelled · enlarge terminal to confirm".into();
                 }
+                if self.delete_confirmation.is_some() && self.active_chooser_rect().is_none() {
+                    self.delete_confirmation = None;
+                    self.notice = "Transcript deletion cancelled · enlarge terminal to confirm".into();
+                }
                 if ((self.model_picker.is_some()
                     || self.effort_picker.is_some()
                     || self.engine_picker
@@ -444,6 +448,7 @@ impl App {
         if self.focus != Focus::Prompt
             || self.active_request_index().is_some()
             || self.stop_confirmation.is_some()
+            || self.delete_confirmation.is_some()
             || self.lore_picker.is_some()
             || self.settings_menu.is_some()
             || self.new_session.is_some()
@@ -646,6 +651,10 @@ impl App {
             return true;
         }
         if self.keybindings.matches(KeyAction::Quit, key) {
+            if self.delete_after_stop.is_some() || self.session_delete_pending.is_some() {
+                self.notice = "Wait for transcript deletion to finish before quitting".into();
+                return true;
+            }
             if !self.diff_reject_queue.is_empty()
                 || self.diff_reject_active.is_some()
                 || self.diff_reject_feedback.is_some()
@@ -659,8 +668,20 @@ impl App {
         if self.fleet_review.is_some() {
             return self.fleet_review_key(key);
         }
+        if self.delete_confirmation.is_some() {
+            return self.delete_confirmation_key(key);
+        }
+        if self.keybindings.matches(KeyAction::DeleteTranscript, key) {
+            self.open_delete_confirmation();
+            return true;
+        }
+        if self.keybindings.matches(KeyAction::Stop, key) {
+            self.stop_active_session();
+            return true;
+        }
         if self.keybindings.matches(KeyAction::CloseTab, key)
-            || self.keybindings.matches(KeyAction::CloseTabAlternate, key) {
+            || (self.focus == Focus::Tabs
+                && self.keybindings.matches(KeyAction::CloseTabAlternate, key)) {
             self.detach_active_tab();
             return true;
         }
@@ -956,10 +977,6 @@ impl App {
         }
         if self.keybindings.matches(KeyAction::Engine, key) {
             self.open_engine_picker();
-            return true;
-        }
-        if self.keybindings.matches(KeyAction::Stop, key) {
-            self.open_stop_confirmation();
             return true;
         }
         if self.keybindings.matches(KeyAction::Diff, key)
@@ -1452,6 +1469,75 @@ impl App {
 
     pub(super) fn stop_confirmation_fits(&self) -> bool {
         self.size.width >= 40 && self.size.height >= 12
+    }
+
+    pub(super) fn open_delete_confirmation(&mut self) {
+        if self.active_remote() { self.notice = "Remote transcripts must be deleted on their host".into(); return; }
+        if self.active_request_index().is_some() {
+            self.notice = "Resolve the session input request before deleting its transcript".into(); return;
+        }
+        if self.session_stop_pending.is_some() || self.delete_after_stop.is_some() || self.session_delete_pending.is_some() {
+            self.notice = "Wait for the current session action to finish".into(); return;
+        }
+        if self.launching || !self.attaching_ids.is_empty() || self.clear_pending.is_some() {
+            self.notice = "Wait for session launch/attach/clear before deleting".into(); return;
+        }
+        let Some(id) = self.groups[self.active_group].active_id().map(str::to_owned) else {
+            self.notice = "Select a session to delete".into(); return;
+        };
+        let cwd = self.session_cwds.get(&id).cloned()
+            .or_else(|| self.history_entries.get(&id).and_then(|entry| entry.cwd.clone()));
+        let Some(cwd) = cwd else {
+            self.notice = "Transcript directory is unknown; deletion refused".into(); return;
+        };
+        self.delete_confirmation = Some((id, cwd, 1));
+        if self.active_chooser_rect().is_none() {
+            self.delete_confirmation = None;
+            self.notice = "Enlarge active pane to confirm deletion".into();
+        }
+    }
+
+    pub(super) fn delete_confirmation_key(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Esc => { self.delete_confirmation = None; true }
+            KeyCode::Up | KeyCode::Down => {
+                if let Some((_, _, selected)) = &mut self.delete_confirmation { *selected = usize::from(*selected == 0); }
+                true
+            }
+            KeyCode::Enter | KeyCode::Char('d' | 'D') => {
+                if key.code == KeyCode::Enter && self.delete_confirmation.as_ref().is_some_and(|(_, _, selected)| *selected != 0) {
+                    self.delete_confirmation = None;
+                    self.notice = "Transcript deletion cancelled".into();
+                    return true;
+                }
+                let Some((id, cwd, _)) = self.delete_confirmation.take() else { return true; };
+                if crate::history::saved_session(&id, &cwd).is_none() {
+                    self.notice = "Saved DOXA transcript could not be verified; nothing deleted".into();
+                    return true;
+                }
+                let live = match crate::discovery::sessions() {
+                    Ok(sessions) => sessions.iter().any(|session| session.id == id),
+                    Err(_) => {
+                        self.notice = "Transcript preserved · cannot verify daemon state".into();
+                        return true;
+                    }
+                };
+                self.detach_active_tab();
+                if !live {
+                    self.start_session_delete(id, cwd);
+                } else {
+                    self.local_sessions_stop(crate::sessions::Action::Kill(id.clone()));
+                    if self.session_stop_pending.is_some() {
+                        self.delete_after_stop = Some((id, cwd));
+                        self.notice = "Stopping daemon before transcript deletion…".into();
+                    } else {
+                        self.notice = "Transcript preserved; daemon stop could not start · use /resume".into();
+                    }
+                }
+                true
+            }
+            _ => true,
+        }
     }
 
     pub(super) fn open_stop_confirmation(&mut self) {
@@ -2013,6 +2099,21 @@ impl App {
         false
     }
     pub(super) fn mouse(&mut self, mouse: MouseEvent) -> bool {
+        if self.delete_confirmation.is_some() {
+            if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                let Some(area) = self.active_chooser_rect() else { self.delete_confirmation = None; return true; };
+                if mouse.column >= area.x + 1 && mouse.column < area.right().saturating_sub(1) {
+                    if mouse.row == area.y + 2 || mouse.row == area.y + 3 {
+                        if let Some((_, _, selected)) = &mut self.delete_confirmation {
+                            *selected = usize::from(mouse.row == area.y + 3);
+                        }
+                        return self.delete_confirmation_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+                    }
+                }
+                self.delete_confirmation = None;
+            }
+            return true;
+        }
         let mut rail_hover_changed = false;
         if mouse.kind == MouseEventKind::Moved {
             let rail_hover = (!self.link_interaction_blocked())
@@ -2992,6 +3093,7 @@ impl App {
             || self.permission_picker.is_some()
             || self.engine_picker
             || self.stop_confirmation.is_some()
+            || self.delete_confirmation.is_some()
             || self.new_session.is_some()
             || self.repo_picker.is_some()
         {

@@ -1113,6 +1113,11 @@ impl App {
             self.keybindings.display(KeyAction::CloseTab),
             self.keybindings.display(KeyAction::Quit)
         ));
+        lines.push(format!(
+            "{} stop daemon · {} confirm DOXA transcript deletion · Delete closes a focused tab",
+            self.keybindings.display(KeyAction::Stop),
+            self.keybindings.display(KeyAction::DeleteTranscript),
+        ));
         lines.push(format!("{} or /mode: permission picker", self.keybindings.display(KeyAction::Permission)));
         lines.push("Drag transcript text to select · Ctrl+C / Ctrl+Shift+C copy · Esc clears · Ctrl+V paste into prompt".into());
         lines.push("Terminal fallback: Shift+drag, Ctrl+Shift+C / Ctrl+Shift+V; OSC52 support required for native copy".into());

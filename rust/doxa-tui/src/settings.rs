@@ -15,14 +15,14 @@ macro_rules! key_setting {
     ($key:literal, $label:literal, $default:literal) => {
         Setting { key: $key, env: "", label: $label, category: "Keys", kind: Kind::Key,
             choices: &[], default: $default, read_only: false,
-            help: "Window shortcut: Ctrl, Alt and Shift modifiers plus a letter, arrow, Tab, comma or F1-F12; 'none' unbinds it. Takes effect when settings are saved.",
+            help: "Window shortcut: Ctrl, Alt and Shift modifiers plus a letter, arrow, Delete, Tab, comma or F1-F12; 'none' unbinds it. Takes effect when settings are saved.",
             note: "Editing keys in the prompt and menus remain local to those controls. Duplicate shortcuts are rejected." }
     };
 }
 pub const SETTINGS: &[Setting] = &[
     key_setting!("key_new_tab", "new tab", "Ctrl+T"),
-    key_setting!("key_close_tab", "close tab", "Ctrl+X"),
-    key_setting!("key_close_tab_alt", "close tab alternate", "Ctrl+W"),
+    key_setting!("key_close_tab", "close tab", "Ctrl+W"),
+    key_setting!("key_close_tab_alt", "close focused tab", "Delete"),
     key_setting!("key_quit", "quit and detach", "Ctrl+Q"),
     key_setting!("key_previous_tab", "previous tab", "Ctrl+Left"),
     key_setting!("key_next_tab", "next tab", "Ctrl+Right"),
@@ -44,7 +44,8 @@ pub const SETTINGS: &[Setting] = &[
     key_setting!("key_permission", "permission picker", "Alt+P"),
     key_setting!("key_engine", "engine picker", "Alt+E"),
     key_setting!("key_lore", "LORE beliefs", "Alt+L"),
-    key_setting!("key_stop", "stop session", "Alt+X"),
+    key_setting!("key_stop", "stop session", "Ctrl+X"),
+    key_setting!("key_delete_transcript", "delete session transcript", "Ctrl+Delete"),
     Setting { key: "engine", env: "DOXA_ENGINE", label: "engine", category: "Session", kind: Kind::Choice, choices: &["", "claude", "codex", "deepseek", "glm"], default: "claude", read_only: false, help: "Which engine drives NEW sessions (doxa.engines -- `doxa --engine <id>` is the flag layer, `/engine` the in-app one)", note: "Not every session surface exists on every engine, and the ones that do not are HIDDEN rather than shown inert -- no permission-mode chip where there are no modes, no ctx chip where no window size is reported, no cost chip where no dollar figure is. `/engine` prints what each one can and cannot do, read off doxa.engines.EngineCapabilities itself rather than described here, where it would go stale. An engine is chosen at CONNECT, so a change here reaches NEW sessions and tabs and never the running one." },
     Setting { key: "model", env: "DOXA_MODEL", label: "model", category: "Session", kind: Kind::Text, choices: &[], default: "", read_only: false, help: "Model preference for the active session's engine, used by new sessions of that engine (/model switches the live session). DOXA_MODEL overrides every engine.", note: "" },
     Setting { key: "effort", env: "DOXA_EFFORT", label: "effort", category: "Session", kind: Kind::Choice, choices: &["", "low", "medium", "high", "xhigh", "max"], default: "", read_only: false, help: "Default reasoning effort for new sessions; use the effort chip or /effort for the current session", note: "Supported current-session changes require an idle provider and verified capability. Claude resumes its existing provider conversation with the selected effort; Codex applies it to the next turn." },

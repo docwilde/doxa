@@ -944,6 +944,7 @@ impl App {
                                     self.permission_confirm_dont_ask = false;
                                     self.engine_picker = false;
                                     self.stop_confirmation = None;
+                                    self.delete_confirmation = None;
                                     if self.input_requests.len() < MAX_INPUT_REQUESTS {
                                         if self.input_requests.is_empty() {
                                             self.blink_on = true;
