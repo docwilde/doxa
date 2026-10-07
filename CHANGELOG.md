@@ -5,6 +5,18 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.5 — 2026-10-07
+
+**Encrypted browser control**
+
+- Add the packaged Chrome/Chromium **DOXA Remote** extension for encrypted transcripts, live events, prompts and approvals.
+- Keep the selected key in the open extension tab; the hub supplies data and cannot replace the packaged client code.
+
+**Hub access**
+
+- Add **`DOXA_REMOTE_EXTENSION_ORIGINS`** for exact extension-origin writes and preflight, alongside the existing Tailscale identity gate.
+- Package the extension as a release ZIP and verify Rust/browser envelope interoperability. Android remains planned.
+
 ## 2.0.0-beta.4 — 2026-10-07
 
 **Remote windows**

@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DOXA Remote</title>
+<link rel="stylesheet" href="app.css">
+<main>
+  <header><strong>ΔΟΞΑ Remote</strong><span id="status" role="status">Choose your hub and key</span><button id="disconnect" type="button" hidden>Disconnect</button></header>
+  <form id="setup">
+    <label>Hub <input id="hub" type="url" placeholder="https://your-machine.tailnet.ts.net/" required></label>
+    <label>DOXA key file <input id="key-file" type="file" accept=".key,text/plain" required></label>
+    <button type="submit">Connect</button>
+  </form>
+  <nav id="sessions" aria-label="Sessions"></nav>
+  <section id="conversation" aria-label="Conversation" aria-live="polite"><button id="older" type="button" hidden>Load earlier turns</button><div id="turns"></div></section>
+  <section id="question" hidden></section>
+  <form id="prompt" hidden><textarea id="prompt-text" aria-label="Message" placeholder="Message this session" rows="3"></textarea><button>Send</button></form>
+</main>
+<script type="module" src="app.mjs"></script>
+</html>
