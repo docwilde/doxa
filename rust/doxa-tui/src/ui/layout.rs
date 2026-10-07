@@ -147,10 +147,11 @@ impl App {
 
     fn rail_session_visible(&self, index: usize) -> bool {
         let id = &self.sessions[index].id;
-        !self.offline_ids.contains(id)
-            || self.groups.iter().any(|group| group.tabs.contains(id))
-            || self.detached_this_run.contains(id)
-                && !self.sessions[index].transcript.is_empty()
+        if self.groups.iter().any(|group| group.tabs.contains(id)) {
+            return true;
+        }
+        // Closed tabs stay resumable, but do not return to the active rail.
+        !self.offline_ids.contains(id) && !self.detached_this_run.contains(id)
     }
 
     pub(super) fn rail_order(&self) -> Vec<usize> {

@@ -2970,7 +2970,7 @@ for line in sys.stdin:
     }
 
     #[test]
-    fn detach_keeps_other_tabs_and_reopens_from_rail() {
+    fn detach_hides_closed_tab_from_rail_but_keeps_resume_target() {
         let mut app = App::default();
         app.handle(Event::Resize(100, 28));
         for id in ["first", "second"] {
@@ -2981,14 +2981,21 @@ for line in sys.stdin:
         }
         app.groups[0].tabs.push("second".into());
         app.groups[0].active = 1;
-        app.input = "/detach".into();
-        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL)));
         assert_eq!(app.groups[0].tabs, ["first"]);
         assert!(!app.should_quit);
         assert!(app.sessions.iter().any(|session| session.id == "second"));
-        app.rail_selected = app.rail_order().iter().position(|index| app.sessions[*index].id == "second").unwrap();
-        app.open_selected();
-        assert_eq!(app.groups[0].active_id(), Some("second"));
+        assert!(!app.rail_order().iter().any(|index| app.sessions[*index].id == "second"));
+        app.apply_update(DaemonUpdate::Upsert(Session {
+            id: "second".into(), title: "second".into(), collection: String::new(),
+            transcript: "still running".into(), status: "Ready".into(),
+        }));
+        assert!(!app.rail_order().iter().any(|index| app.sessions[*index].id == "second"));
+        app.history_resume = true;
+        app.history_query = "second".into();
+        assert_eq!(app.history_matches().iter().map(|index| app.sessions[*index].id.as_str()).collect::<Vec<_>>(), ["second"]);
+        app.attach_selected("second");
+        assert_eq!(app.pending_attaches, [("second".into(), 0)]);
     }
 
     #[test]
@@ -3040,12 +3047,16 @@ for line in sys.stdin:
     #[test]
     fn ctrl_x_last_tab_leaves_an_empty_window_for_new_sessions() {
         let mut app = App::default();
-        app.groups[0].tabs.push("only".into());
+        app.apply_update(DaemonUpdate::Upsert(Session {
+            id: "only".into(), title: "only".into(), collection: String::new(),
+            transcript: String::new(), status: "Ready".into(),
+        }));
         app.handle(Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL)));
         assert!(app.groups.iter().all(|group| group.tabs.is_empty()));
         assert_eq!(app.active_group, 0);
         assert!(!app.should_quit);
         assert_eq!(app.detached_this_run, ["only"]);
+        assert!(app.rail_order().is_empty());
     }
 
     #[test]
@@ -3092,7 +3103,7 @@ for line in sys.stdin:
     }
 
     #[test]
-    fn detached_connected_session_becomes_past_session_when_daemon_disappears() {
+    fn detached_connected_session_stays_hidden_when_daemon_disappears() {
         let mut app=App::default();
         app.apply_update(DaemonUpdate::Upsert(Session {id:"old".into(),title:"Old label".into(),
             collection:"repo".into(),transcript:"saved transcript".into(),status:"Connected".into()}));
@@ -3100,8 +3111,9 @@ for line in sys.stdin:
         app.detached_this_run.push("old".into());
         assert!(app.mark_dead_detached(&std::collections::HashSet::new()));
         assert!(app.offline_ids.contains("old"));
-        assert!(matches!(app.rail_rows().as_slice(),[RailRow::PastHeading,RailRow::Session(0)]));
+        assert!(app.rail_order().is_empty());
         assert_eq!(app.sessions[0].title,"Old label");
+        assert_eq!(app.sessions[0].transcript,"saved transcript");
     }
 
     #[test]
@@ -3637,7 +3649,7 @@ for line in sys.stdin:
     }
 
     #[test]
-    fn detached_archives_follow_live_projects_in_muted_rail_rows() {
+    fn closed_archives_hide_until_opened_and_use_muted_rail_rows() {
         let mut app = App::default();
         app.handle(Event::Resize(80, 20));
         for (id, title) in [("live", "Current work"), ("dead", "Saved work"), ("empty", "Unavailable")] {
@@ -3647,6 +3659,8 @@ for line in sys.stdin:
         }
         app.offline_ids.extend(["dead".into(), "empty".into()]);
         app.detached_this_run.extend(["dead".into(), "empty".into()]);
+        assert_eq!(app.rail_order(), [0]);
+        app.groups[0].tabs.push("dead".into());
         let rows = app.rail_rows();
         assert!(matches!(&rows[0], RailRow::ProjectHeading(project) if project == "repo"));
         assert!(matches!(&rows[1], RailRow::Session(0)));
