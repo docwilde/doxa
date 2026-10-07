@@ -1,6 +1,7 @@
 # Sandboxed sessions, by default, on top of worktrees — specification
 
-Status: **draft for review**. Nothing implemented.
+Status: **historical Python-era draft**. For the current Rust implementation
+plan, see [per-session Docker isolation](session-isolation-docker.md).
 
 ## What worktrees already do, and what they do not
 
