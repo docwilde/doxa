@@ -958,8 +958,8 @@ impl App {
         }
     }
 
-    /// Remove only the active tab. Its daemon remains available for reattachment;
-    /// Ctrl+Q is the explicit way to leave an otherwise empty window.
+    /// Close the active tab and hide it from the rail. The daemon and saved
+    /// history remain available through /resume; Ctrl+Q exits the window.
     pub(super) fn detach_active_tab(&mut self) {
         if self.launching || !self.attaching_ids.is_empty() || self.clear_pending.is_some() {
             self.notice = "Wait for session launch/attach/clear before closing a pane".into();
@@ -992,7 +992,7 @@ impl App {
         self.notice = if offline {
             format!("Past session closed · {id}")
         } else {
-            format!("Tab detached · {id} remains available in sessions")
+            format!("Tab closed · {id} · /resume to reopen")
         };
 
         if self.groups.iter().all(|group| group.tabs.is_empty()) {

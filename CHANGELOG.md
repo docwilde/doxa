@@ -5,6 +5,13 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.6 — 2026-10-08
+
+**Session rail**
+
+- Fix **`rail_session_visible`** so Ctrl+X hides closed live tabs from the session rail, including after daemon updates and layout restore.
+- Keep closed sessions available through **`/resume`**; **`/sessions`** still lists live daemons.
+
 ## 2.0.0-beta.5 — 2026-10-07
 
 **Encrypted browser control**
