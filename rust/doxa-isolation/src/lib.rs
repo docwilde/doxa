@@ -15,8 +15,10 @@ use std::{
 pub mod broker;
 pub mod workspace;
 pub mod migration;
+mod disk;
 mod source_git;
 pub use source_git::staged_diff;
+pub use disk::{check_disk_budget, DiskSnapshot};
 
 pub const ACTIVE_MANIFEST: &str = "DOXA_ISOLATION_MANIFEST";
 pub const SESSION_MANIFEST: &str = "DOXA_SESSION_MANIFEST";
@@ -41,6 +43,12 @@ impl Profile {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Policy {
     pub image: String, pub docker_host: String, pub memory_bytes: u64, pub cpus: f64, pub pids: u32,
+    // Omitted by beta.10 manifests. Keeping absent fields out of JSON also
+    // preserves their saved policy hash; new sessions always record both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_soft_limit_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_free_floor_bytes: Option<u64>,
 }
 impl Policy {
     pub fn configured(home: &Path) -> io::Result<Self> {
@@ -64,6 +72,8 @@ impl Policy {
                 .unwrap_or_else(|| format!("unix:///run/user/{}/docker.sock", unsafe { libc::geteuid() })),
             memory_bytes: integer("docker_memory_bytes", "DOXA_DOCKER_MEMORY_BYTES", 4 * 1024 * 1024 * 1024)?,
             cpus, pids: u32::try_from(integer("docker_pids", "DOXA_DOCKER_PIDS", 256)?).map_err(|_| error("invalid docker_pids"))?,
+            disk_soft_limit_bytes: Some(integer("docker_disk_soft_limit_bytes", "DOXA_DOCKER_DISK_SOFT_LIMIT_BYTES", 20 * 1024 * 1024 * 1024)?),
+            disk_free_floor_bytes: Some(integer("docker_disk_free_floor_bytes", "DOXA_DOCKER_DISK_FREE_FLOOR_BYTES", 2 * 1024 * 1024 * 1024)?),
         };
         policy.validate()?; Ok(policy)
     }
@@ -78,6 +88,10 @@ impl Policy {
         if self.memory_bytes < 128 * 1024 * 1024 || self.memory_bytes > 1024 * 1024 * 1024 * 1024
             || !self.cpus.is_finite() || !(0.25..=256.0).contains(&self.cpus) || !(16..=65536).contains(&self.pids) {
             return Err(error("Docker memory/CPU/PID limits are outside supported finite bounds"));
+        }
+        if self.disk_soft_limit_bytes.is_some_and(|n| !(128 * 1024 * 1024..=1024 * 1024 * 1024 * 1024).contains(&n))
+            || self.disk_free_floor_bytes.is_some_and(|n| !(512 * 1024 * 1024..=1024 * 1024 * 1024 * 1024).contains(&n)) {
+            return Err(error("Docker disk soft ceiling/floor are outside supported bounds"));
         }
         Ok(())
     }
@@ -99,16 +113,29 @@ pub struct Manifest {
 }
 impl Manifest {
     pub fn status(&self) -> Value {
-        json!({"profile":self.profile.key(),"label":self.profile.label(),"state":self.state,
+        let mut result = json!({"profile":self.profile.key(),"label":self.profile.label(),"state":self.state,
             "engine":if self.profile.docker() {"local rootless Docker"} else {"native"},
             "network":if self.profile.docker(){self.profile.network()}else{"host"},
             "image":self.policy.as_ref().map(|p|p.image.as_str()),
             "memory_bytes":self.policy.as_ref().map(|p|p.memory_bytes),
             "cpus":self.policy.as_ref().map(|p|p.cpus),"pids":self.policy.as_ref().map(|p|p.pids),
-            "disk_limit":"monitored only; no hard quota","checkout":self.checkout,
+            "disk_limit":"monitored turn gate; no hard filesystem quota","checkout":self.checkout,
+            "disk_soft_limit_bytes":self.policy.as_ref().and_then(|p|p.disk_soft_limit_bytes),
+            "disk_free_floor_bytes":self.policy.as_ref().map(|p|p.disk_free_floor_bytes.unwrap_or(2*1024*1024*1024)),
             "mounts":if self.profile.docker(){vec!["independent checkout","private home","private cache","session hook broker"]}else{vec![]},
             "credential_exposure":if self.profile.docker(){"only selected provider auth copied to private session home; visible to worker tools"}else{"native provider environment"},
-            "can_set_isolation":true})
+            "can_set_isolation":true});
+        if self.profile.docker() {
+            match disk::sample(self) {
+                Ok(sample) => {
+                    result["disk_usage_bytes"] = json!(sample.usage_bytes);
+                    result["disk_free_bytes"] = json!(sample.free_bytes);
+                    if let Err(err) = disk::enforce(sample, self.policy.as_ref().unwrap()) { result["disk_budget_error"] = json!(err.to_string()); }
+                },
+                Err(err) => result["disk_monitor_error"] = json!(err.to_string()),
+            }
+        }
+        result
     }
 }
 pub fn error(message: impl Into<String>) -> io::Error { io::Error::new(io::ErrorKind::PermissionDenied, message.into()) }
@@ -294,7 +321,7 @@ impl Runtime {
             let mut manifest = read_manifest(&path)?;
             if requested.is_some_and(|p| p != manifest.profile) { return Err(error("resume isolation differs from saved policy; attach and change it while idle or explicitly migrate the session")); }
             if source != manifest.checkout && source != manifest.source { return Err(error("resume project does not match isolation manifest")); }
-            if manifest.profile.docker() { preflight(manifest.policy.as_ref().unwrap())?; reconcile(&mut manifest, true)?; }
+            if manifest.profile.docker() { preflight(manifest.policy.as_ref().unwrap())?; check_disk_budget(&manifest)?; reconcile(&mut manifest, true)?; }
             else {manifest.state="ready".into();}
             write_manifest(&path,&manifest)?;
             return Ok(Self { path, manifest, migration_stop:false });
@@ -316,12 +343,12 @@ impl Runtime {
             manifest.policy_hash = policy.hash(profile); manifest.creation_policy_hash=manifest.policy_hash.clone(); manifest.policy = Some(policy);
             let fs_stats = fs::metadata(home)?;
             if !fs_stats.is_dir() { return Err(error("isolation home missing")); }
-            let space = free_bytes(home)?;
-            if space < 2 * 1024 * 1024 * 1024 { return Err(error("Docker isolation requires at least 2 GiB free on the session filesystem (disk usage is monitored, not quota-enforced)")); }
+            disk::check_host_floor(home, manifest.policy.as_ref().unwrap())?;
             manifest.checkout = root.join("checkout");
             for directory in [&manifest.private_home, &manifest.cache, &manifest.broker, &manifest.cache.join("tmp")] { private_directory(directory, true)?; }
             let (sha, branch) = clone_checkout(&source, &manifest.checkout, id, base)?; manifest.base_sha = sha; manifest.branch = branch;
             let meta = fs::metadata(&manifest.checkout)?; manifest.checkout_device = meta.dev(); manifest.checkout_inode = meta.ino();
+            check_disk_budget(&manifest)?;
             write_manifest(&path, &manifest)?;
             let policy = manifest.policy.as_ref().unwrap().clone();
             let mut command = docker(&policy); command.args(create_args(&manifest)?);
@@ -390,6 +417,7 @@ impl Runtime {
         if profile == self.profile() { return Ok(self.status()); }
         if !profile.docker() || !self.profile().docker() { return Err(error("native/Docker migration requires an explicit stopped-session checkout and transcript import; running provider cannot be relabeled")); }
         let policy = self.manifest.policy.as_ref().unwrap();
+        check_disk_budget(&self.manifest)?;
         inspect(&self.manifest)?;
         let id = self.manifest.container_id.as_deref().unwrap();
         if profile == Profile::DockerOffline { docker_run(policy, &["network", "disconnect", "-f", "bridge", id])?; }
@@ -420,7 +448,7 @@ impl Runtime {
         self.manifest.state = "stopped".into(); write_manifest(&self.path, &self.manifest)
     }
 }
-fn free_bytes(path: &Path) -> io::Result<u64> {
+pub(crate) fn free_bytes(path: &Path) -> io::Result<u64> {
     use std::os::unix::ffi::OsStrExt;
     let path = std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|_| error("invalid storage path"))?;
     let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
@@ -483,6 +511,20 @@ mod checkout_tests {
         git(&target,&["-c","user.name=Fixture","-c","user.email=fixture@example.invalid","commit","-m","feat: isolated change"]).unwrap();
         assert_eq!(git(&source,&["rev-parse","HEAD"]).unwrap(),base);
         assert_eq!(fs::read_to_string(source.join("README")).unwrap(),"base");
+    }
+}
+#[cfg(test)]
+mod disk_policy_compatibility_tests {
+    use super::*;
+    #[test]
+    fn beta10_policy_without_disk_fields_keeps_its_saved_hash() {
+        let old = format!(r#"{{"image":"sha256:{}","docker_host":"unix:///run/user/1000/test.sock","memory_bytes":536870912,"cpus":1.0,"pids":128}}"#, "a".repeat(64));
+        let policy: Policy = serde_json::from_str(&old).unwrap();
+        assert_eq!(policy.disk_soft_limit_bytes, None);
+        assert_eq!(serde_json::to_string(&policy).unwrap(), old);
+        let expected = format!("{:x}", Sha256::digest(format!(r#"[{old},"docker-open"]"#)));
+        assert_eq!(policy.hash(Profile::DockerOpen), expected);
+        policy.validate().unwrap();
     }
 }
 fn inspect_network(manifest: &Manifest) -> io::Result<()> {
@@ -571,6 +613,7 @@ pub fn map_frame(mut value: Value) -> io::Result<Value> {
 pub fn isolate_command(command: Command, provider: &str) -> io::Result<Command> {
     let Some(manifest) = active()? else { return Ok(command); };
     if !matches!(provider, "claude" | "codex") { return Err(error("unsupported Docker provider")); }
+    check_disk_budget(&manifest)?;
     inspect(&manifest)?; inspect_network(&manifest)?;
     let policy = manifest.policy.as_ref().unwrap();
     let mut isolated = docker(policy); isolated.args(["exec", "-i", "--workdir", "/workspace"]);

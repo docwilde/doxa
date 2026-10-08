@@ -31,9 +31,11 @@ pub const SETTINGS: &[Setting] = &[
     Setting { key: "fleet_review_threshold", env: "DOXA_FLEET_REVIEW_THRESHOLD", label: "message risk threshold", category: "Fleet", kind: Kind::Number, choices: &[], default: "0.5", read_only: false, help: "Probability threshold for semantic quarantine; review against labeled examples before enforcing.", note: "Each new fleet review shows the exact threshold. Model confidence is evidence, never permission." },
     Setting {key:"docker_image",env:"DOXA_DOCKER_IMAGE",label:"Docker worker image digest",category:"Session",kind:Kind::Text,choices:&[],default:"",read_only:false,help:"Reviewed local image pinned as sha256:CONTENT_ID or NAME@sha256:DIGEST.",note:"DOXA never builds repository Dockerfiles or pulls an unreviewed image when a session starts."},
     Setting {key:"docker_host",env:"DOXA_DOCKER_HOST",label:"local rootless Docker socket",category:"Paths",kind:Kind::Text,choices:&[],default:"",read_only:false,help:"Local unix:///run/user/UID/docker.sock endpoint; default follows the host user.",note:"Remote TCP Engines, the rootful system socket and Docker sockets inside workers are forbidden."},
-    Setting {key:"docker_memory_bytes",env:"DOXA_DOCKER_MEMORY_BYTES",label:"Docker memory ceiling (bytes)",category:"Session",kind:Kind::Number,choices:&[],default:"4294967296",read_only:false,help:"Enforced cgroup memory limit; default 4 GiB, configurable for the workload.",note:"Disk usage is monitored and has no hard quota."},
+    Setting {key:"docker_memory_bytes",env:"DOXA_DOCKER_MEMORY_BYTES",label:"Docker memory ceiling (bytes)",category:"Session",kind:Kind::Number,choices:&[],default:"4294967296",read_only:false,help:"Enforced cgroup memory limit; default 4 GiB, configurable for the workload.",note:"Disk usage has a separate monitored soft ceiling, not a hard quota."},
     Setting {key:"docker_cpus",env:"DOXA_DOCKER_CPUS",label:"Docker CPU ceiling",category:"Session",kind:Kind::Number,choices:&[],default:"2",read_only:false,help:"Enforced CPU quota; fractional CPUs are allowed.",note:"Requires effective rootless cgroup v2 delegation."},
     Setting {key:"docker_pids",env:"DOXA_DOCKER_PIDS",label:"Docker process ceiling",category:"Session",kind:Kind::Number,choices:&[],default:"256",read_only:false,help:"Enforced cgroup process count limit.",note:"Session changes do not implicitly change resources or image; these defaults apply to new sessions."},
+    Setting {key:"docker_disk_soft_limit_bytes",env:"DOXA_DOCKER_DISK_SOFT_LIMIT_BYTES",label:"Docker session disk soft ceiling (bytes)",category:"Session",kind:Kind::Number,choices:&[],default:"21474836480",read_only:false,help:"Monitored usage ceiling for a new session's checkout, private home, cache and retained migration files; default 20 GiB.",note:"Checked before each new provider turn. A running worker can exceed it before the next check; this is not a hard filesystem quota."},
+    Setting {key:"docker_disk_free_floor_bytes",env:"DOXA_DOCKER_DISK_FREE_FLOOR_BYTES",label:"Docker host free-space floor (bytes)",category:"Session",kind:Kind::Number,choices:&[],default:"2147483648",read_only:false,help:"Refuse new Docker sessions and provider turns when available space on their session filesystem falls below this floor; default 2 GiB.",note:"Measured at launch, resume and before each turn. This cannot reserve space against concurrent writers."},
     key_setting!("key_new_tab", "new tab", "Ctrl+T"),
     key_setting!("key_close_tab", "close tab", "Ctrl+W"),
     key_setting!("key_close_tab_alt", "close focused tab", "Delete"),
@@ -188,10 +190,12 @@ pub fn coerce(s: &Setting, value: Option<&str>) -> io::Result<Option<toml::Value
             if !n.is_finite() || n < 0.0 { return Err(invalid("must be a nonnegative finite number")); }
             if s.key == "linger_secs" && n > crate::launch::MAX_LINGER_SECS { return Err(invalid("must be between 0 and 31536000 seconds")); }
             if matches!(s.key, "remote_port"|"remote_proxy_uid") && n.fract() != 0.0 { return Err(invalid("must be an integer")); }
-            if matches!(s.key,"docker_memory_bytes"|"docker_pids"){
+            if matches!(s.key,"docker_memory_bytes"|"docker_pids"|"docker_disk_soft_limit_bytes"|"docker_disk_free_floor_bytes"){
                 if n.fract()!=0.0||n>i64::MAX as f64{return Err(invalid("must be a bounded integer"));}
                 if s.key=="docker_memory_bytes"&&!(134217728.0..=1099511627776.0).contains(&n){return Err(invalid("must be between 128 MiB and 1 TiB"));}
                 if s.key=="docker_pids"&&!(16.0..=65536.0).contains(&n){return Err(invalid("must be between 16 and 65536"));}
+                if s.key=="docker_disk_soft_limit_bytes"&&!(134217728.0..=1099511627776.0).contains(&n){return Err(invalid("must be between 128 MiB and 1 TiB"));}
+                if s.key=="docker_disk_free_floor_bytes"&&!(536870912.0..=1099511627776.0).contains(&n){return Err(invalid("must be between 512 MiB and 1 TiB"));}
                 return Ok(Some(toml::Value::Integer(n as i64)));
             }
             if s.key=="docker_cpus"&&!(0.25..=256.0).contains(&n){return Err(invalid("must be between 0.25 and 256"));}
@@ -251,6 +255,12 @@ mod tests {
         let dir=tempfile::tempdir().unwrap();std::fs::set_permissions(dir.path(),std::fs::Permissions::from_mode(0o700)).unwrap();let path=dir.path().join("config.toml");std::fs::write(&path,"[broken").unwrap();
         assert!(save(&path,&[("clock_show".into(),Some("off".into()))],"claude").is_err());assert_eq!(std::fs::read_to_string(&path).unwrap(),"[broken");
         for (key,value) in [("linger_secs","NaN"),("consult_floor","-1"),("effort","invalid"),("permission_mode","bypassPermissions"),("notify","sometimes"),("clock_format","%H\n%s"),("lore","maybe")] {assert!(coerce(find(key).unwrap(),Some(value)).is_err(),"{key}");}
+        for key in ["docker_disk_soft_limit_bytes","docker_disk_free_floor_bytes"] {
+            assert!(coerce(find(key).unwrap(),Some("0")).is_err());
+            assert!(coerce(find(key).unwrap(),Some("1.5")).is_err());
+            assert!(coerce(find(key).unwrap(),Some("1099511627777")).is_err());
+        }
+        assert_eq!(coerce(find("docker_disk_soft_limit_bytes").unwrap(),Some("21474836480")).unwrap().unwrap().as_integer(),Some(21474836480));
     }
     #[test]
     fn keybinding_collision_rejects_write_and_valid_change_persists() {

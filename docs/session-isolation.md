@@ -1,5 +1,16 @@
 # Session isolation
 
+## Contents
+
+- [Choose a profile](#choose-a-profile)
+- [Configure the local Engine](#configure-the-local-engine)
+- [Resource limits and disk monitoring](#resource-limits-and-disk-monitoring)
+- [Change a running session](#change-a-running-session)
+- [Boundary and recovery](#boundary-and-recovery)
+- [Integration smoke](#integration-smoke)
+
+## Choose a profile
+
 Native sessions retain the existing host provider behavior. Linux sessions can
 explicitly run their provider and its commands in one local rootless Docker
 container:
@@ -16,6 +27,8 @@ performed by the host using the selected provider API; their bounded workspace
 tool remains confined to the independent checkout. Neither Docker profile
 claims an outbound allowlist.
 
+## Configure the local Engine
+
 Configure a reviewed worker image with docker_image = "sha256:CONTENT_ID" or
 "NAME@sha256:DIGEST" in the private DOXA config. An image must contain the
 image-owned doxa-isolation-worker, Claude CLI and protected Codex launcher.
@@ -24,10 +37,40 @@ The docker_host setting accepts only a local owner-owned Unix Engine socket.
 The system rootful socket is refused; the Engine must report rootless operation
 and effective cgroup v2 memory, CPU and PID controls.
 
+## Resource limits and disk monitoring
+
 Defaults are 4 GiB memory, 2 CPUs and 256 processes. Set docker_memory_bytes,
 docker_cpus and docker_pids for your workload. These are enforced resource
-ceilings. Disk usage has no hard quota: startup checks a 2 GiB free-space floor.
-Session data belongs on real disk.
+ceilings. For **new Docker sessions**, `docker_disk_soft_limit_bytes` defaults
+to 20 GiB and `docker_disk_free_floor_bytes` to 2 GiB. Set them in private
+`DOXA_HOME/config.toml`, the settings UI, or with
+`DOXA_DOCKER_DISK_SOFT_LIMIT_BYTES` and `DOXA_DOCKER_DISK_FREE_FLOOR_BYTES`.
+The soft ceiling accepts 128 MiB–1 TiB; the floor accepts 512 MiB–1 TiB.
+Saved sessions keep their original policy. Existing beta.10 manifests have no
+soft ceiling and retain the 2 GiB floor.
+
+DOXA samples allocated blocks in the whole private session tree, including
+the independent Git checkout, provider home, cache and retained migration
+files. Hard links count once; symlink targets outside the tree are not scanned.
+It checks the smallest available space across the session root and its bind
+sources. The sample appears in the isolation chip details. Launch, resume,
+migration and each new provider turn refuse to proceed when a threshold is
+crossed or the bounded scan fails. A scan is bounded to one million entries,
+128 directory levels and ten seconds. A running worker can write between
+samples, and another process can consume host space after a check. **These
+are monitored turn gates, not a hard filesystem quota.** Keep session data
+on real disk.
+
+Docker's writable-layer `--storage-opt size` does not bound these host bind
+mounts. A hard per-session disk quota needs an administrator to enable project
+quota accounting and enforcement on the backing filesystem, assign a unique
+project ID to each private session tree, set a hard block limit, and verify
+that writes through every bind source hit that limit. For XFS, that means a
+`prjquota` mount and project setup/limit with `xfs_quota`; owner-only rootless
+Docker cannot silently provision this. Hard quotas remain an open stage.
+See [Docker bind mounts](https://docs.docker.com/engine/storage/bind-mounts/),
+[Docker's storage option requirements](https://docs.docker.com/reference/cli/docker/container/run/),
+and [XFS project quotas](https://man7.org/linux/man-pages/man8/xfs_quota.8.html).
 
 Each worker receives exactly its independent Git checkout, private home,
 private cache and session hook endpoint. It has no host home, main checkout,
@@ -38,6 +81,8 @@ unprivileged host Engine owner, and a real write probe verifies this mapping.
 CLI credentials are copied only for the selected provider; tools in that
 container can read those credentials. Canonical DOXA transcripts, LORE,
 approvals and peer routing remain in the host daemon.
+
+## Change a running session
 
 The isolation chip reports the host-verified policy. Click it for the actual
 engine, network, limits, mounts and credential exposure. While idle and without
@@ -64,6 +109,8 @@ request is refused while its original provider stays running. API vendor session
 can checkpoint and migrate before the first prompt. Workspace copies refuse special files,
 more than 100000 entries or more than 8 GiB, retaining original files.
 
+## Boundary and recovery
+
 The owner-private DOXA_HOME/isolation/SESSION_ID/manifest.json records the pinned
 image, current and creation policy hashes, base commit, checkout inode,
 container ID and creation nonce. Resume uses that manifest. Docker
@@ -79,6 +126,8 @@ an orphan provider writer when the supervisor crashes.
 Implementation limits: this is a Linux rootless Docker boundary, not a VM.
 There is no hardened egress gateway, hard disk quota or CLI credential secrecy.
 macOS Docker Desktop, remote Engines and nested privileged Docker are refused.
+
+## Integration smoke
 
 For the explicit rootless integration smoke, supply a task-local reviewed image
 and Engine socket:
