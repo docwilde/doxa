@@ -9,6 +9,10 @@ Build the worker with `cargo build --locked -p doxa-isolation`. Use a local
 rootless Docker Engine and a reviewed Debian/Ubuntu-based base image pinned
 as `NAME@sha256:DIGEST`:
 
+Rebuild the image when DOXA's isolation worker changes. An older pinned image
+cannot answer the current worker's cgroup enforcement probe, so session
+admission fails closed until its digest is updated in owner configuration.
+
 ```sh
 export TMPDIR="$HOME/ssd-cache/tmp"
 python3 scripts/build-session-image.py \

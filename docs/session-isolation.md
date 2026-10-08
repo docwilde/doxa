@@ -33,15 +33,19 @@ Configure a reviewed worker image with docker_image = "sha256:CONTENT_ID" or
 "NAME@sha256:DIGEST" in the private DOXA config. An image must contain the
 image-owned doxa-isolation-worker, Claude CLI and protected Codex launcher.
 DOXA does not pull images or build a repository's Dockerfile at session start.
+Rebuild the reviewed image with the current `doxa-isolation-worker` after upgrading
+DOXA; older workers cannot perform the required cgroup probe and are refused.
 The docker_host setting accepts only a local owner-owned Unix Engine socket.
 The system rootful socket is refused; the Engine must report rootless operation
-and effective cgroup v2 memory, CPU and PID controls.
+and cgroup v2 memory, CPU and PID support. Before admission and each CLI provider
+turn, the worker checks its own finite kernel cgroup memory, CPU, PID and swap
+limits. An unavailable controller or ineffective limit refuses the turn.
 
 ## Resource limits and disk monitoring
 
 Defaults are 4 GiB memory, 2 CPUs and 256 processes. Set docker_memory_bytes,
-docker_cpus and docker_pids for your workload. These are enforced resource
-ceilings. For **new Docker sessions**, `docker_disk_soft_limit_bytes` defaults
+docker_cpus and docker_pids for your workload. The worker verifies their
+effective ceilings in its private cgroup namespace before use. For **new Docker sessions**, `docker_disk_soft_limit_bytes` defaults
 to 20 GiB and `docker_disk_free_floor_bytes` to 2 GiB. Set them in private
 `DOXA_HOME/config.toml`, the settings UI, or with
 `DOXA_DOCKER_DISK_SOFT_LIMIT_BYTES` and `DOXA_DOCKER_DISK_FREE_FLOOR_BYTES`.
