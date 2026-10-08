@@ -3015,6 +3015,11 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}
     wait_until(|| ready.exists());
     send(&mut socket, json!({"type":"prompt","id":2,"text":"sk-ownedCanonicalFixtureSecret1234567890 queued"}));
     assert_eq!(receive(&mut reader)["queue_id"], "q1");
+    let notification = receive(&mut reader);
+    assert_eq!(notification["event"]["type"], "prompt_queued");
+    assert_eq!(notification["event"]["data"]["id"], "q1");
+    assert_eq!(notification["event"]["data"]["text"], "[REDACTED:api-key] queued");
+    assert!(!notification.to_string().contains("sk-ownedCanonicalFixtureSecret1234567890"));
     send(&mut socket, json!({"type":"call","id":3,"method":"queue","params":{}}));
     let queued = receive(&mut reader);
     assert_eq!(queued["queue"], json!([{"id":"q1","text":"[REDACTED:api-key] queued"}]));
