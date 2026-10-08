@@ -638,7 +638,7 @@ fn git_observation(cwd:&Path,args:&[&str])->io::Result<String>{
     git_read(cwd,Some(safe.path()),args)
 }
 fn git_read(cwd:&Path,git_dir:Option<&Path>,args:&[&str])->io::Result<String>{
-    use std::{os::fd::AsRawFd,process::{Command,Stdio}};
+    use std::process::Command;
     let mut command=Command::new("/usr/bin/git");
     command.env_clear().env("PATH","/usr/bin:/bin").env("GIT_CONFIG_GLOBAL","/dev/null").env("GIT_CONFIG_SYSTEM","/dev/null")
         .env("GIT_CONFIG_NOSYSTEM","1").env("GIT_ATTR_NOSYSTEM","1").env("GIT_NO_LAZY_FETCH","1").env("GIT_OPTIONAL_LOCKS","0")
