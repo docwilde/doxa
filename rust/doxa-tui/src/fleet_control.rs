@@ -730,15 +730,18 @@ fn checkpoint(store:&Store,value:&mut Value,slots:&mut [Slot],initial:bool)->io:
 fn monitor(store: &Store, value: &mut Value, slots: &mut [Slot], timeout: Option<Duration>, quiet: Duration) -> io::Result<()> {
     let started = Instant::now(); let mut quiet_since = None;
     let mut last_checkpoint=Instant::now();
+    let mut last_reviewed_handoff:Option<String>=None;
     // New manifests bind interactive lifetime independently of prompt delivery.
     // Older native no-prompt runs never dispatched the boss; preserve that arm.
     let interactive = value["interactive"].as_bool().unwrap_or_else(||
         value["mode"] == "supervisor" && value["slots"][0]["phase"] != "dispatched");
     loop {
         if STOP.load(Ordering::Relaxed) || store.stop_requested()? { value["stopped"] = json!(true); return Ok(()); }
+        let mut handoff_transition=None;
         if !value["supervision"].is_null(){
             let context:doxa_fleet::Context=serde_json::from_value(value["supervision"]["context"].clone()).map_err(|_|invalid("invalid fleet supervision context"))?;
             let state=doxa_fleet::transaction(&context,|state|Ok(state.clone()))?;
+            handoff_transition=state.recent_messages.iter().rev().find(|message|matches!(message.kind,doxa_fleet::Kind::Handoff|doxa_fleet::Kind::Ack|doxa_fleet::Kind::Confirm)).map(|message|message.message_id.clone()).filter(|id|last_reviewed_handoff.as_ref()!=Some(id));
             value["supervision"]["paused"]=json!(state.paused);value["supervision"]["reason"]=json!(state.reason);
             if !state.paused&&value["slots"].as_array().is_some_and(|rows|rows.iter().all(|row|row["phase"]=="started")){
                 checkpoint(store,value,slots,true)?;
@@ -746,7 +749,7 @@ fn monitor(store: &Store, value: &mut Value, slots: &mut [Slot], timeout: Option
             }
         }
         let review_interval=value["supervision"]["context"]["review"]["interval_s"].as_u64().unwrap_or(60);
-        if !value["supervision"].is_null() && last_checkpoint.elapsed()>=Duration::from_secs(review_interval){checkpoint(store,value,slots,false)?;last_checkpoint=Instant::now();}
+        if !value["supervision"].is_null() && last_checkpoint.elapsed()>=Duration::from_secs(review_interval){checkpoint(store,value,slots,false)?;last_checkpoint=Instant::now();if handoff_transition.is_some(){last_reviewed_handoff=handoff_transition.take();}}
         let mut milestone=false;
         let mut any_busy = false;
         for (index, slot) in slots.iter_mut().enumerate() {
@@ -805,7 +808,7 @@ fn monitor(store: &Store, value: &mut Value, slots: &mut [Slot], timeout: Option
             slot.busy = state["running"] == true || state["queued"].as_u64().unwrap_or(0) > 0;
             any_busy |= slot.busy || !slot.pending.is_empty();
         }
-        if milestone&&!value["supervision"].is_null()&&last_checkpoint.elapsed()>=Duration::from_secs(5){checkpoint(store,value,slots,false)?;last_checkpoint=Instant::now();}
+        if (milestone||handoff_transition.is_some())&&!value["supervision"].is_null()&&last_checkpoint.elapsed()>=Duration::from_secs(5){checkpoint(store,value,slots,false)?;last_checkpoint=Instant::now();last_reviewed_handoff=handoff_transition;}
         value["heartbeat_at"] = json!(now()); store.save(value)?;
         if any_busy { quiet_since = None; } else if quiet_since.is_none() { quiet_since = Some(Instant::now()); }
         if value["supervision"]["paused"]==true {quiet_since=None;}

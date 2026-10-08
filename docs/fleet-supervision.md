@@ -60,6 +60,8 @@ confirmation must reference the preceding message UUID and echo the same host
 artifact IDs. The host checks direction, ancestry and exact IDs. The message
 body still needs human or semantic review for meaning; a matching ACK proves
 the artifact reference was returned, not that a model understood the work.
+Handoff transitions request a bounded supervisor checkpoint in addition to
+turn milestones and the configured timer.
 
 The fast judge reviews each outgoing fleet message once. Its private cached
 verdict binds the exact envelope hash; the receiving host rechecks deterministic
