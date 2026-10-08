@@ -48,6 +48,7 @@ jobs:
             --test lore_review_policy \
             --test vendor_compaction \
             --test vendor_streaming
+          cargo test --locked -p doxa-daemon --features local-test-server --test process
       - name: Verify macOS native vendor lifecycle against local SSE
         run: |
           cargo build --locked -p doxa-daemon --features local-test-server
