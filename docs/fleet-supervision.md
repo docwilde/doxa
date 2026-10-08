@@ -14,13 +14,15 @@ Example (the dry run makes no model calls):
 doxa fleet start --pool deepseek:deepseek-flash -n 2 \
   --prompt 'Implement the approved change within src/' \
   --allowed-path src --run-budget 10 --review-budget 1 \
-  --alignment-supervisor claude:claude-sonnet-5-5 \
+  --alignment-supervisor claude:YOUR_SUPERVISOR_MODEL \
   --message-review shadow --message-judge jev:jev-1.13.0 --dry-run
 ```
 
 Reviewer providers `claude`, `codex`, `deepseek`, and `glm` use stateless API
 calls and their API keys (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
-`DEEPSEEK_API_KEY`, and `ZAI_API_KEY`). These are independent of Claude Code or
+`DEEPSEEK_API_KEY`, and `ZAI_API_KEY`). DeepSeek and GLM also use the
+private API keys saved through `/setup`, with the same explicit override policy
+as ordinary vendor sessions. These are independent of Claude Code or
 Codex subscription sessions. Jev uses `TYPESAFE_API_KEY`. Reviewer calls expose
 no tools and retain no worker conversation history. Selecting reviewers opts
 the LORE-scrubbed charter, assignment, messages, and host snapshots into those

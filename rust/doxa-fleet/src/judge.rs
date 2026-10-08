@@ -64,10 +64,18 @@ fn reserve(context:&Context,model:&Model,request:&Value)->io::Result<(f64,f64,f6
         if state.observations.len()>256{state.observations.remove(0);}Ok(())
     })?;Ok((cost,input_rate,output_rate))
 }
+fn credential(model: &Model) -> io::Result<String> {
+    let resolved = match model.provider.as_str() {
+        "deepseek" => doxa_vendors::credentials::resolve(doxa_vendors::Vendor::DeepSeek),
+        "glm" => doxa_vendors::credentials::resolve(doxa_vendors::Vendor::Glm),
+        _ => Ok(std::env::var(model.service().1).ok()),
+    }.map_err(|_| invalid("independent review credential unavailable"))?;
+    resolved.filter(|key| (8..=4096).contains(&key.len()) && key.bytes().all(|byte| byte.is_ascii_graphic()))
+        .ok_or_else(|| invalid("independent review credential unavailable"))
+}
 pub fn evaluate(context:&Context,model:&Model,instructions:&str,input:&Value)->io::Result<Response>{
     let body=request(model,instructions,input)?;
-    let (endpoint,key_name)=model.service();let key=std::env::var(key_name).map_err(|_|invalid("independent review credential unavailable"))?;
-    if key.trim().is_empty(){return Err(invalid("independent review credential unavailable"));}
+    let (endpoint,_)=model.service();let key=credential(model)?;
     let (reserved,input_rate,output_rate)=reserve(context,model,&body)?;
     let response=call_at(model,endpoint,&key,&body);
     match &response {
@@ -124,6 +132,35 @@ pub fn supervise(context:&Context,input:&Value)->Result<SupervisorVerdict,String
 mod tests {
     use super::*;
     use std::{io::{Read,Write},net::TcpListener};
+    #[test]
+    fn review_credentials_use_private_setup_store_and_refuse_unsafe_store() {
+        use std::os::unix::fs::PermissionsExt;
+        const FIXTURE: &str = "DOXA_FLEET_CREDENTIAL_FIXTURE";
+        if std::env::var_os(FIXTURE).is_none() {
+            let root = tempfile::tempdir().unwrap();
+            let path = std::fs::canonicalize(root.path()).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "judge::tests::review_credentials_use_private_setup_store_and_refuse_unsafe_store", "--nocapture"])
+                .env_clear().env("PATH", "/usr/bin:/bin").env(FIXTURE, "1").env("DOXA_HOME", &path)
+                .env("DEEPSEEK_API_KEY", "fixture-environment-key").env("ZAI_API_KEY", "fixture-zai-key")
+                .output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+            return;
+        }
+        let model = Model::parse("deepseek:fixture").unwrap();
+        assert_eq!(credential(&model).unwrap(), "fixture-environment-key");
+        doxa_vendors::credentials::save(doxa_vendors::Vendor::DeepSeek, "fixture-saved-key").unwrap();
+        assert_eq!(credential(&model).unwrap(), "fixture-saved-key");
+        assert_eq!(credential(&Model::parse("glm:fixture").unwrap()).unwrap(), "fixture-zai-key");
+        doxa_vendors::credentials::remove(doxa_vendors::Vendor::DeepSeek).unwrap();
+        assert_eq!(credential(&model).unwrap(), "fixture-environment-key");
+        let store = std::path::PathBuf::from(std::env::var_os("DOXA_HOME").unwrap()).join("credentials.json");
+        std::fs::set_permissions(store, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let error = credential(&model).unwrap_err().to_string();
+        assert_eq!(error, "independent review credential unavailable");
+        assert!(!error.contains("fixture-environment-key"));
+    }
     #[test]
     fn documented_jev_http_wire_is_typed_bounded_and_no_tools(){
         let model=Model::parse("jev:jev-1.13.0").unwrap();let body=request(&model,SEMANTIC_INSTRUCTIONS,&json!({"message":"scrubbed"})).unwrap();
