@@ -779,6 +779,15 @@ impl Host for VendorHost {
                 self.cancel();
                 Ok(json!({}))
             }
+            "checkpoint_for_migration" => {
+                let active=self.active.lock().unwrap();
+                if active.is_some()||self.closing.load(Ordering::Acquire)||self.storage_uncertain.load(Ordering::Acquire){return Err("vendor checkpoint requires a complete idle session".into());}
+                let history=self.history.lock().unwrap();let model=self.model.lock().unwrap();
+                self.store.verify_vendor_transcript(self.vendor.engine_id(),&history).map_err(|_|"vendor checkpoint diverged from committed conversation")?;
+                self.store.try_write_vendor_messages(self.vendor.engine_id(),&model,&history,|value|self.scrub(value).map_err(|_|std::io::Error::other("LORE scrub failed")))
+                    .map_err(|_|"vendor checkpoint could not be safely saved")?;
+                Ok(json!({"checkpointed":true}))
+            }
             "stop" => {
                 self.shutdown();
                 Ok(json!({}))

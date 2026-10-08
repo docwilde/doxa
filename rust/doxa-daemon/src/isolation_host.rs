@@ -36,6 +36,9 @@ impl Host for IsolationHost {
         if method=="isolation_migration_stop"{
             let plan=self.migration_plan()?;
             if params["confirmed"]!=true||params["expected"]!=plan{return Err("isolation migration snapshot changed; review it again".into());}
+            if matches!(self.launch["engine"].as_str(),Some("glm"|"deepseek")){
+                self.inner.call("checkpoint_for_migration",&json!({}))?;
+            }
             self.inner.call("stop",&json!({}))?;
             self.runtime.lock().unwrap().mark_migration_stop();
             return Ok(json!({"migration_plan":plan}));
