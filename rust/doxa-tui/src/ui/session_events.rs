@@ -606,18 +606,21 @@ impl App {
                     let path = PathBuf::from(raw);
                     if path.is_absolute() && raw.len() <= 4096 {
                         if self.session_cwds.get(id) != Some(&path) {
+                            self.image_store.borrow_mut().clear();
                             self.memory_cache.remove(id);
                             self.memory_repo.remove(id);
                             self.invalidate_repo(id);
                         }
                         self.session_cwds.insert(id.to_owned(), path);
                     } else {
+                        self.image_store.borrow_mut().clear();
                         self.session_cwds.remove(id);
                         self.memory_cache.remove(id);
                         self.memory_repo.remove(id);
                         self.invalidate_repo(id);
                     }
                 } else {
+                    self.image_store.borrow_mut().clear();
                     self.session_cwds.remove(id);
                     self.memory_cache.remove(id);
                     self.memory_repo.remove(id);

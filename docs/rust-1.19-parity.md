@@ -92,8 +92,10 @@ remains unsupported.
 
 ## Preserved boundaries
 
-- Terminal images are excluded by user preference. Missing historical provider
-  data cannot be reconstructed from a newer runtime.
+- Standalone local Markdown images now render in the Rust transcript with
+  bounded previews and alt-text fallback; see [terminal images](terminal-images.md).
+  Provider binary attachments and inline Mermaid rendering remain open.
+  Missing historical provider data cannot be reconstructed from a newer runtime.
 - Only verified owned session, transcript, worktree and ledger identities authorize
   resume or mutation. Unknown legacy ownership stays protected. Deleted work
   that was never committed or recorded cannot be recovered.

@@ -86,6 +86,22 @@ fn scene(name: &str) -> App {
                 worktree: Some("feat".into()),
             });
         }
+        "image-preview" => {
+            app.groups[0].tabs = vec!["demo-codex-01".into()];
+            if let Some(session) = app.sessions.iter_mut().find(|session| session.id == "demo-codex-01") {
+                session.transcript.clear();
+            }
+            let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../..").canonicalize().expect("gallery repository");
+            app.apply_daemon_frame(&json!({"type":"hello","session_id":"demo-codex-01",
+                "engine":"codex","model":"gpt-6-sol","cwd":repo}));
+            let image = repo.join("assets/favicon-64.png")
+                .canonicalize().expect("checked-in image fixture");
+            event(&mut app, "demo-codex-01", "text_delta", json!({"text":format!(
+                "## Image preview\n\nA local image appears inside the transcript with its alt text.\n\n![DOXA mark](<{}>)\n\nThe Markdown and clickable links below keep their layout. [Guide](https://ratatui.rs/)",
+                image.display())}));
+            app.notice = "Fixture · local image · halfblock backend".into();
+        }
         "repo-picker" => {
             app.groups[0].tabs = vec!["demo-codex-01".into()];
             let cwd = std::env::current_dir().expect("gallery repository directory");
@@ -317,7 +333,7 @@ fn main() {
     let name = std::env::args().nth(1).expect("scene name");
     let (width,height) = match name.as_str() {
         "welcome" => (72,18),
-        "hero" | "repo-picker" | "claude-session" | "tool-activity" | "tool-expanded" | "tool-entries" | "restored-tool" | "processing" | "reasoning" | "commands" | "help" | "needs-input" | "permissions" | "permission-request" | "effort" | "history" | "queue" | "beliefs" | "belief-hover" | "memory" | "memory-management" | "memory-change" | "fleet-review" | "fleet-view" => (126,31),
+        "hero" | "image-preview" | "repo-picker" | "claude-session" | "tool-activity" | "tool-expanded" | "tool-entries" | "restored-tool" | "processing" | "reasoning" | "commands" | "help" | "needs-input" | "permissions" | "permission-request" | "effort" | "history" | "queue" | "beliefs" | "belief-hover" | "memory" | "memory-management" | "memory-change" | "fleet-review" | "fleet-view" => (126,31),
         _ => panic!("unknown scene"),
     };
     let mut terminal = Terminal::new(TestBackend::new(width,height)).unwrap();
@@ -333,8 +349,19 @@ fn main() {
             frame.render_widget(Paragraph::new(lines).style(Style::default().bg(doxa_tui::theme::BASE)),inner);
         }).unwrap();
     } else {
+        if name == "image-preview" { std::env::set_var("DOXA_IMAGE_MODE", "halfblock"); }
         let app=scene(&name);
+        if name == "image-preview" { app.configure_terminal_images("halfblock"); }
         terminal.draw(|frame| app.draw(frame)).unwrap();
+        if name == "image-preview" {
+            for _ in 0..100 {
+                if app.poll_terminal_images() { break; }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            terminal.draw(|frame| app.draw(frame)).unwrap();
+            assert!(terminal.backend().buffer().content().iter().any(|cell|
+                cell.symbol() == "▀" || cell.symbol() == "▄"), "image fixture did not render");
+        }
     }
     let cells: Vec<Value> = (0..height).flat_map(|y| (0..width).map(move |x| (x,y)))
         .map(|(x,y)| {

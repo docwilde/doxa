@@ -5,6 +5,7 @@
 use std::collections::HashSet;
 
 use ratatui::{style::{Modifier, Style}, text::Line};
+use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 use unicode_width::UnicodeWidthChar;
 
 use crate::{markdown, theme};
@@ -25,12 +26,47 @@ pub(super) struct Section {
     pub line: usize,
 }
 
+pub(super) const IMAGE_ROWS: u16 = 4;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct ImagePlacement {
+    pub row: usize,
+    pub source: String,
+    pub alt: String,
+}
+
 enum Block<'a> {
     Prose(&'a str),
+    Image { source: String, alt: String },
     Shell(crate::shell::Result),
     Heading(&'a str),
     Tools(Vec<&'a str>),
     Reasoning { text: String, tokens: u64, streaming: bool, exact: bool },
+}
+
+/// A local file attachment must be the whole Markdown paragraph. Ordinary
+/// prose, remote URLs and fenced examples keep the existing Markdown path.
+fn standalone_local_image(paragraph: &str) -> Option<(String, String)> {
+    let mut events = Parser::new(paragraph);
+    if !matches!(events.next()?, Event::Start(Tag::Paragraph)) { return None; }
+    let Event::Start(Tag::Image { dest_url, .. }) = events.next()? else { return None; };
+    let source = dest_url.to_string();
+    if source.len() > 4096 || source.chars().any(char::is_control)
+        || !std::path::Path::new(&source).is_absolute() { return None; }
+    let mut alt = String::new();
+    loop {
+        match events.next()? {
+            Event::Text(text) | Event::Code(text) => alt.push_str(&text),
+            Event::End(TagEnd::Image) => break,
+            _ => return None,
+        }
+        if alt.len() > 512 { return None; }
+    }
+    if !matches!(events.next()?, Event::End(TagEnd::Paragraph)) || events.next().is_some() {
+        return None;
+    }
+    let alt = markdown::sanitize(&alt);
+    Some((source, if alt.trim().is_empty() { "image".into() } else { alt }))
 }
 
 fn reasoning_block(paragraph: &str) -> Option<Block<'_>> {
@@ -112,7 +148,8 @@ fn append_markdown(lines: &mut Vec<Line<'static>>, links: &mut Vec<markdown::Lin
 }
 
 fn render_turn(blocks: &mut Vec<Block<'_>>, lines: &mut Vec<Line<'static>>,
-               sections: &mut Vec<Section>, links: &mut Vec<markdown::LinkRegion>, width: u16,
+               sections: &mut Vec<Section>, links: &mut Vec<markdown::LinkRegion>,
+               images: &mut Vec<ImagePlacement>, image_rows: u16, width: u16,
                expanded: Option<&HashSet<FoldKey>>, selected: Option<FoldKey>, cards: &[ToolCard], section_offset: usize) {
     let mut prose = String::new();
     let mut speaker = None;
@@ -156,6 +193,16 @@ fn render_turn(blocks: &mut Vec<Block<'_>>, lines: &mut Vec<Line<'static>>,
             Block::Prose(paragraph) => {
                 if !prose.is_empty() { prose.push_str("\n\n"); }
                 prose.push_str(paragraph);
+            }
+            Block::Image { source, alt } => {
+                flush_prose(&mut prose, lines, links, speaker);
+                let label = format!(" Image: {alt}");
+                let label = label.chars().take(usize::from(width)).collect::<String>();
+                lines.push(Line::styled(label, Style::default().fg(theme::SECONDARY)));
+                if image_rows > 0 {
+                    images.push(ImagePlacement { row: lines.len(), source, alt });
+                    lines.extend((0..image_rows).map(|_| Line::default()));
+                }
             }
             Block::Tools(tools) => {
                 flush_prose(&mut prose, lines, links, speaker);
@@ -306,13 +353,14 @@ pub(super) fn render_with_links(
     render_with_links_from(source, width, expanded, selected, cards, 0)
 }
 
-pub(super) fn render_with_links_from(
+pub(super) fn render_with_images(
     source: &str, width: u16, expanded: Option<&HashSet<FoldKey>>,
-    selected: Option<FoldKey>, cards: &[ToolCard], section_offset: usize,
-) -> (Vec<Line<'static>>, Vec<Section>, Vec<markdown::LinkRegion>) {
+    selected: Option<FoldKey>, cards: &[ToolCard], image_rows: u16, section_offset: usize,
+) -> (Vec<Line<'static>>, Vec<Section>, Vec<markdown::LinkRegion>, Vec<ImagePlacement>) {
     let mut lines = Vec::new();
     let mut sections = Vec::new();
     let mut links = Vec::new();
+    let mut images = Vec::new();
     let mut blocks = Vec::new();
     let mut tool_index: Option<usize> = None;
     let mut fence: Option<&str> = None;
@@ -321,12 +369,14 @@ pub(super) fn render_with_links_from(
         if paragraph.is_empty() { continue; }
         if fence.is_none() && matches!(paragraph, "**You:**" | "**Assistant:**") {
             if paragraph == "**You:**" {
-                render_turn(&mut blocks, &mut lines, &mut sections, &mut links, width, expanded, selected.clone(), cards, section_offset);
+                render_turn(&mut blocks, &mut lines, &mut sections, &mut links, &mut images, image_rows,
+                    width, expanded, selected.clone(), cards, section_offset);
                 tool_index = None;
             }
             blocks.push(Block::Heading(paragraph));
         } else if fence.is_none() && paragraph.starts_with(SHELL_PREFIX) {
-            render_turn(&mut blocks, &mut lines, &mut sections, &mut links, width, expanded, selected.clone(), cards, section_offset);
+            render_turn(&mut blocks, &mut lines, &mut sections, &mut links, &mut images, image_rows,
+                width, expanded, selected.clone(), cards, section_offset);
             tool_index = None;
             if let Ok(result) = serde_json::from_str(paragraph.strip_prefix(SHELL_PREFIX).unwrap()) { blocks.push(Block::Shell(result)); }
             else { blocks.push(Block::Prose("Local shell output unavailable")); }
@@ -341,6 +391,12 @@ pub(super) fn render_with_links_from(
                 blocks.push(Block::Tools(vec![paragraph]));
             }
         } else {
+            if fence.is_none() {
+                if let Some((source, alt)) = standalone_local_image(paragraph) {
+                    blocks.push(Block::Image { source, alt });
+                    continue;
+                }
+            }
             blocks.push(Block::Prose(paragraph));
             for line in paragraph.lines() {
                 let line = line.trim_start();
@@ -354,7 +410,17 @@ pub(super) fn render_with_links_from(
             }
         }
     }
-    render_turn(&mut blocks, &mut lines, &mut sections, &mut links, width, expanded, selected.clone(), cards, section_offset);
+    render_turn(&mut blocks, &mut lines, &mut sections, &mut links, &mut images, image_rows,
+        width, expanded, selected.clone(), cards, section_offset);
+    (lines, sections, links, images)
+}
+
+pub(super) fn render_with_links_from(
+    source: &str, width: u16, expanded: Option<&HashSet<FoldKey>>,
+    selected: Option<FoldKey>, cards: &[ToolCard], section_offset: usize,
+) -> (Vec<Line<'static>>, Vec<Section>, Vec<markdown::LinkRegion>) {
+    let (lines, sections, links, _) =
+        render_with_images(source, width, expanded, selected, cards, 0, section_offset);
     (lines, sections, links)
 }
 
@@ -363,6 +429,36 @@ mod tests {
     use super::*;
     use super::super::tool_cards::ToolCards;
     use serde_json::json;
+
+    #[test]
+    fn local_attachment_reserves_rows_without_moving_link_targets() {
+        let source = "**You:**\n\n![chart](/home/user/chart.png)\n\n**Assistant:**\n\nSee [details](https://example.com).";
+        let (lines, _, links, images) =
+            render_with_images(source, 34, None, None, &[], IMAGE_ROWS, 0);
+        assert_eq!(images, vec![ImagePlacement {
+            row: 1, source: "/home/user/chart.png".into(), alt: "chart".into(),
+        }]);
+        assert!(lines[0].to_string().contains("Image: chart"));
+        assert!(lines[1..=4].iter().all(|line| line.spans.is_empty()));
+        assert_eq!(links.len(), 1);
+        assert_eq!(lines[links[0].row].to_string().trim(), "See details.");
+        assert_eq!(links[0].url.as_ref(), "https://example.com");
+        let (text_lines, _, _, text_images) =
+            render_with_images(source, 34, None, None, &[], 0, 0);
+        assert!(text_images.is_empty());
+        assert_eq!(text_lines.len() + usize::from(IMAGE_ROWS) - 1, lines.len());
+    }
+
+    #[test]
+    fn fenced_and_remote_images_keep_the_plain_markdown_path() {
+        let source = "```md\n![example](/home/user/example.png)\n```\n\n![remote](https://example.com/a.png)";
+        let (lines, _, _, images) =
+            render_with_images(source, 40, None, None, &[], IMAGE_ROWS, 0);
+        assert!(images.is_empty());
+        let displayed = shown(&lines);
+        assert!(displayed.contains("![example]"));
+        assert!(displayed.contains("remote"));
+    }
 
     fn shown(lines: &[Line<'_>]) -> String {
         lines.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n")
