@@ -134,15 +134,23 @@ pub struct ModuleEdge {
     pub column: usize,
     pub module: String,
     pub target: Option<String>,
+    /// A unique file observed for a cfg-gated declaration. It is never a
+    /// verified target because this query does not evaluate compilation cfg.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conditional_candidate: Option<String>,
     pub resolution: &'static str,
     pub reason: &'static str,
     pub source_sha256: String,
     pub source_read_unix_ms: u128,
     pub target_sha256: Option<String>,
     pub target_read_unix_ms: Option<u128>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conditional_candidate_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conditional_candidate_read_unix_ms: Option<u128>,
 }
 
-const NOTE: &str = "Rust syntax only. Call candidates match a final name segment, not Rust bindings; even one candidate is unverified. Imports are declarations. Module edges resolve file layout only, not compilation reachability. cfg, macro expansion, local definitions/imports, other expression calls, references, and non-Rust languages are not resolved.";
+const NOTE: &str = "Rust syntax only. Call candidates match a final name segment, not Rust bindings; even one candidate is unverified. Imports are declarations. Module edges resolve file layout only, not compilation reachability; cfg-gated files are candidates, never verified targets. cfg predicates, cfg_attr, macro expansion, local definitions/imports, other expression calls, references, and non-Rust languages are not resolved.";
 
 fn source_language(path: &str) -> Option<&'static str> {
     match Path::new(path).extension().and_then(|s| s.to_str()) {
@@ -240,7 +248,55 @@ struct ModuleDecl {
     line: usize,
     column: usize,
     inline: bool,
-    attribute: bool,
+    attributes: ModuleAttributes,
+}
+
+#[derive(Clone)]
+enum ModuleAttributes {
+    Plain,
+    Conditional,
+    LiteralPath(PathBuf),
+    ConditionalLiteralPath(PathBuf),
+    Unresolved,
+}
+
+fn literal_module_path(value: &str) -> Option<PathBuf> {
+    let path = Path::new(value);
+    if value.is_empty() || value.len() > MAX_PATH_BYTES || value.chars().any(char::is_control)
+        || path.extension().and_then(|extension| extension.to_str()) != Some("rs") {
+        return None;
+    }
+    let components = path.components().collect::<Vec<_>>();
+    if components.is_empty() || !components.iter().all(|part| matches!(part, std::path::Component::Normal(_))) {
+        return None;
+    }
+    Some(components.iter().map(|part| part.as_os_str()).collect())
+}
+
+fn module_attributes(attrs: &[syn::Attribute]) -> ModuleAttributes {
+    let mut conditional = false;
+    let mut path = None;
+    for attr in attrs {
+        if attr.path().is_ident("cfg") && matches!(&attr.meta, syn::Meta::List(_)) {
+            conditional = true;
+        } else if attr.path().is_ident("path") {
+            let syn::Meta::NameValue(meta) = &attr.meta else { return ModuleAttributes::Unresolved; };
+            let syn::Expr::Lit(expr) = &meta.value else { return ModuleAttributes::Unresolved; };
+            let syn::Lit::Str(value) = &expr.lit else { return ModuleAttributes::Unresolved; };
+            let Some(value) = literal_module_path(&value.value()) else { return ModuleAttributes::Unresolved; };
+            if path.replace(value).is_some() { return ModuleAttributes::Unresolved; }
+        } else {
+            // cfg_attr can insert or replace a path; arbitrary attributes may
+            // be macros. Do not infer a target from either.
+            return ModuleAttributes::Unresolved;
+        }
+    }
+    match (conditional, path) {
+        (false, None) => ModuleAttributes::Plain,
+        (true, None) => ModuleAttributes::Conditional,
+        (false, Some(path)) => ModuleAttributes::LiteralPath(path),
+        (true, Some(path)) => ModuleAttributes::ConditionalLiteralPath(path),
+    }
 }
 
 struct Parsed {
@@ -413,7 +469,7 @@ fn parse_rust(content: &str, file: &str, sha: &str, read_unix_ms: u128,
             let at = module.ident.span().start();
             parsed.modules.push(ModuleDecl {
                 name: module.ident.to_string(), line: at.line, column: at.column,
-                inline: module.content.is_some(), attribute: !module.attrs.is_empty(),
+                inline: module.content.is_some(), attributes: module_attributes(&module.attrs),
             });
             if let Some((_, children)) = &module.content {
                 parsed.nested_modules += nested_module_count(children);
@@ -474,27 +530,40 @@ fn module_edges(root: &Path, source: &str, declarations: &[ModuleDecl],
     source_sha: &str, source_read_unix_ms: u128, listed: &BTreeSet<String>,
     facts: &BTreeMap<String, SourceFact>) -> (Vec<ModuleEdge>, usize) {
     let base = module_base(source);
+    let source_parent = Path::new(source).parent().unwrap_or_else(|| Path::new(""));
     let mut counts = BTreeMap::<&str, usize>::new();
     for declaration in declarations { *counts.entry(&declaration.name).or_default() += 1; }
     let mut edges = Vec::new();
     for declaration in declarations {
         let mut edge = ModuleEdge {
             source: source.into(), line: declaration.line, column: declaration.column,
-            module: declaration.name.clone(), target: None,
+            module: declaration.name.clone(), target: None, conditional_candidate: None,
             resolution: "unknown", reason: "no_listed_candidate",
             source_sha256: source_sha.into(), source_read_unix_ms,
             target_sha256: None, target_read_unix_ms: None,
+            conditional_candidate_sha256: None, conditional_candidate_read_unix_ms: None,
         };
         if counts[declaration.name.as_str()] > 1 {
             edge.reason = "duplicate_declaration";
         } else if declaration.inline {
             edge.reason = "inline_module_skipped";
-        } else if declaration.attribute {
+        } else if matches!(&declaration.attributes, ModuleAttributes::Unresolved) {
             edge.reason = "module_attribute_unresolved";
         } else {
-            let direct = base.join(format!("{}.rs", declaration.name));
-            let directory = base.join(&declaration.name).join("mod.rs");
-            let candidates = [direct, directory].map(|path| path.to_string_lossy().into_owned());
+            let (candidates, conditional, explicit_path) = match &declaration.attributes {
+                ModuleAttributes::Plain | ModuleAttributes::Conditional => {
+                    let direct = base.join(format!("{}.rs", declaration.name));
+                    let directory = base.join(&declaration.name).join("mod.rs");
+                    (vec![direct, directory], matches!(&declaration.attributes, ModuleAttributes::Conditional), false)
+                }
+                ModuleAttributes::LiteralPath(path) | ModuleAttributes::ConditionalLiteralPath(path) => {
+                    (vec![source_parent.join(path)],
+                        matches!(&declaration.attributes, ModuleAttributes::ConditionalLiteralPath(_)), true)
+                }
+                ModuleAttributes::Unresolved => unreachable!(),
+            };
+            let candidates = candidates.into_iter().map(|path| path.to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
             let present = candidates.iter().filter(|path| listed.contains(path.as_str()))
                 .collect::<Vec<_>>();
             // An ignored or generated-on-disk sibling may change Rust's layout
@@ -508,11 +577,20 @@ fn module_edges(root: &Path, source: &str, declarations: &[ModuleDecl],
             } else if let Some(target) = present.first() {
                 match facts.get(target.as_str()) {
                     Some(SourceFact::Parsed { sha256, read_unix_ms }) => {
-                        edge.target = Some((*target).clone());
-                        edge.resolution = "structural_only";
-                        edge.reason = "unique_plain_file_layout";
-                        edge.target_sha256 = Some(sha256.clone());
-                        edge.target_read_unix_ms = Some(*read_unix_ms);
+                        if conditional {
+                            edge.conditional_candidate = Some((*target).clone());
+                            edge.reason = if explicit_path { "cfg_literal_path_candidate" }
+                                else { "cfg_layout_candidate" };
+                            edge.conditional_candidate_sha256 = Some(sha256.clone());
+                            edge.conditional_candidate_read_unix_ms = Some(*read_unix_ms);
+                        } else {
+                            edge.target = Some((*target).clone());
+                            edge.resolution = "structural_only";
+                            edge.reason = if explicit_path { "literal_path_file" }
+                                else { "unique_plain_file_layout" };
+                            edge.target_sha256 = Some(sha256.clone());
+                            edge.target_read_unix_ms = Some(*read_unix_ms);
+                        }
                     }
                     Some(SourceFact::Skipped) => edge.reason = "candidate_skipped",
                     Some(SourceFact::Unparseable) => edge.reason = "candidate_unparseable",
@@ -841,7 +919,7 @@ mod tests {
     }
 
     #[test]
-    fn modules_mark_attributes_duplicates_inline_nested_and_layout_ambiguity_unknown() {
+    fn modules_keep_cfg_candidates_distinct_from_literal_path_targets_and_unknown_declarations() {
         let root = worktree();
         fs::create_dir_all(root.path().join("src/both")).unwrap();
         fs::write(root.path().join("src/lib.rs"), "mod both;\nmod repeat;\nmod repeat;\n#[cfg(unix)] mod conditional;\n#[path = \"elsewhere.rs\"] mod routed;\nmod inline { mod hidden; }\n").unwrap();
@@ -855,12 +933,54 @@ mod tests {
         assert_eq!(answer.module_edges[0].reason, "ambiguous_layout");
         assert_eq!(answer.module_edges[1].reason, "duplicate_declaration");
         assert_eq!(answer.module_edges[2].reason, "duplicate_declaration");
-        assert_eq!(answer.module_edges[3].reason, "module_attribute_unresolved");
-        assert_eq!(answer.module_edges[4].reason, "module_attribute_unresolved");
+        assert_eq!(answer.module_edges[3].reason, "cfg_layout_candidate");
+        assert_eq!(answer.module_edges[3].resolution, "unknown");
+        assert!(answer.module_edges[3].target.is_none());
+        assert_eq!(answer.module_edges[3].conditional_candidate.as_deref(), Some("src/conditional.rs"));
+        assert!(answer.module_edges[3].conditional_candidate_sha256.is_some());
+        assert_eq!(answer.module_edges[4].reason, "literal_path_file");
+        assert_eq!(answer.module_edges[4].resolution, "structural_only");
+        assert_eq!(answer.module_edges[4].target.as_deref(), Some("src/elsewhere.rs"));
         assert_eq!(answer.module_edges[5].reason, "inline_module_skipped");
         assert_eq!(answer.skipped_nested_modules, 1);
+        assert!([0, 1, 2, 5].iter().all(|index| answer.module_edges[*index].resolution == "unknown"
+            && answer.module_edges[*index].target.is_none()
+            && answer.module_edges[*index].conditional_candidate.is_none()));
+    }
+
+    #[test]
+    fn literal_path_is_relative_to_containing_file_and_cfg_path_remains_a_candidate() {
+        let root = worktree();
+        fs::create_dir_all(root.path().join("src/alternate")).unwrap();
+        fs::write(root.path().join("src/parent.rs"), "#[path = \"alternate/leaf.rs\"] mod leaf;\n#[cfg(unix)] #[path = \"alternate/conditional.rs\"] mod conditional;\n").unwrap();
+        fs::write(root.path().join("src/alternate/leaf.rs"), "pub fn leaf() {}\n").unwrap();
+        fs::write(root.path().join("src/alternate/conditional.rs"), "pub fn conditional() {}\n").unwrap();
+        let answer = query(root.path(), Query::Modules("src/parent.rs".into())).unwrap();
+        assert_eq!(answer.module_edges[0].target.as_deref(), Some("src/alternate/leaf.rs"));
+        assert_eq!(answer.module_edges[0].reason, "literal_path_file");
+        assert_eq!(answer.module_edges[1].resolution, "unknown");
+        assert!(answer.module_edges[1].target.is_none());
+        assert_eq!(answer.module_edges[1].conditional_candidate.as_deref(),
+            Some("src/alternate/conditional.rs"));
+        assert_eq!(answer.module_edges[1].reason, "cfg_literal_path_candidate");
+    }
+
+    #[test]
+    fn path_overrides_that_are_unsafe_or_not_exactly_scanned_remain_unknown() {
+        let root = worktree();
+        fs::create_dir_all(root.path().join("src/alternate")).unwrap();
+        fs::write(root.path().join(".gitignore"), "src/alternate/ignored.rs\n").unwrap();
+        fs::write(root.path().join("src/lib.rs"), "#[cfg_attr(unix, path = \"alternate/other.rs\")] mod cfg_attr;\n#[path = \"../outside.rs\"] mod traversal;\n#[path = \"/absolute.rs\"] mod absolute;\n#[path = concat!(\"alternate/\", \"other.rs\")] mod macro_path;\n#[path = \"alternate/ignored.rs\"] mod ignored;\n#[path = \"alternate/broken.rs\"] mod broken;\n").unwrap();
+        fs::write(root.path().join("src/alternate/other.rs"), "pub fn other() {}\n").unwrap();
+        fs::write(root.path().join("src/alternate/ignored.rs"), "pub fn ignored() {}\n").unwrap();
+        fs::write(root.path().join("src/alternate/broken.rs"), "fn {\n").unwrap();
+        let answer = query(root.path(), Query::Modules("src/lib.rs".into())).unwrap();
+        assert_eq!(answer.module_edges.len(), 6);
+        assert!(answer.module_edges[..4].iter().all(|edge| edge.reason == "module_attribute_unresolved"));
+        assert_eq!(answer.module_edges[4].reason, "unlisted_candidate_exists");
+        assert_eq!(answer.module_edges[5].reason, "candidate_unparseable");
         assert!(answer.module_edges.iter().all(|edge| edge.resolution == "unknown"
-            && edge.target.is_none() && edge.target_sha256.is_none()));
+            && edge.target.is_none() && edge.conditional_candidate.is_none()));
     }
 
     #[test]

@@ -1,7 +1,7 @@
 # Code graph: native syntax-query slice
 
 Status: **read-only syntax queries implemented**. DOXA can query current Rust
-source for definitions, imports, conservative call-site candidates, and plain
+source for definitions, imports, conservative call-site candidates, and bounded
 top-level module-file layout. It does
 not build a resolved dependency graph or write anything to LORE.
 
@@ -21,14 +21,21 @@ returns bounded JSON. With no `--root`, it uses the current Git worktree.
 `imports` lists the syntactic `use` and `extern crate` declarations in one
 file. `modules` lists top-level `mod child;` declarations and resolves a unique
 listed, readable, parseable `child.rs` or `child/mod.rs` with source and target
-hashes. It uses the containing directory for `lib.rs`, `main.rs`, `mod.rs`,
+hashes. A literal `#[path = "relative/file.rs"]` can resolve a top-level module
+against the containing source file's directory; only relative, traversal-free
+Rust paths enter this query. A `#[cfg(...)]` declaration can report a unique
+hashed **conditional candidate**, while `target` and `resolution` stay unknown.
+The query never evaluates the cfg predicate. This follows the
+[Rust module path rules](https://doc.rust-lang.org/reference/items/modules.html)
+and [conditional attribute rules](https://doc.rust-lang.org/reference/conditional-compilation.html).
+Plain modules use the containing directory for `lib.rs`, `main.rs`, `mod.rs`,
 `build.rs`, and common Cargo roots under `src/bin`, `tests`, `examples`, and
 `benches`; another `parent.rs` uses `parent/child.rs` or `parent/child/mod.rs`.
-Each result says `structural_only`: it does not establish compilation
-reachability. Attributes (including `cfg` and `path`), duplicate declarations,
-both layout candidates, symlinks, ignored/generated files on disk, missing
-targets, and unparseable targets yield `unknown` with a reason. Inline modules
-are reported as skipped; nested modules are counted and not resolved.
+Resolved targets say `structural_only`: they do not establish compilation
+reachability. `cfg_attr`, nonliteral or unsafe paths, other attributes, duplicate
+declarations, both layout candidates, symlinks, ignored/generated files on disk,
+missing targets, and unparseable targets yield `unknown` with a reason. Inline
+modules are reported as skipped; nested modules are counted and not resolved.
 `calls` lists direct function-path and method-call expressions within
 file-level functions, trait defaults, and simple `impl` methods. A second
 `doxa-codegraph` binary exposes the same queries for development.
@@ -87,8 +94,9 @@ This slice lives in `rust/doxa-codegraph` and is callable through the installed
 - Coordinate a LORE-owned persisted graph and curated `purpose` file-map field
   with LORE's write gate, including worktree lifecycle and freshness checks.
 - Resolve imports and actual Rust call bindings with crate, trait, type, and
-  conditional-compilation context. The current module edges stop at plain file
-  layout, and call candidates stop at spelling matches.
+  conditional-compilation context. Module edges remain top-level and structural;
+  `cfg_attr` and conditional reachability are unresolved. Call candidates stop
+  at spelling matches.
 - Add a reviewed agent tool and optional persistent TUI tree/chip after the
   shared LORE operator exists. The current TUI viewer is a direct syntax query.
 - Decide whether other languages justify a parser dependency and coverage bar.
