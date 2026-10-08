@@ -830,6 +830,18 @@ pub fn dependency_evidence(root:&Path,id:&str,worker:usize)->io::Result<Value>{
     Ok(json!({"worker_index":worker,"assignment_id":assignment.id,"host_checkpoints":checkpoints}))
 }
 
+fn host_test_changed_paths(cwd:&Path,baseline:&str)->io::Result<Vec<String>> {
+    let paths=git_observation(cwd,&["-c","core.quotepath=false","diff","--no-ext-diff","--no-textconv","--name-only",baseline])?;
+    let untracked=git_observation(cwd,&["-c","core.quotepath=false","ls-files","--others","--exclude-standard"])?;
+    let mut changed=paths.lines().chain(untracked.lines()).map(str::to_owned).collect::<Vec<_>>();
+    changed.sort();changed.dedup();
+    if changed.is_empty()||changed.len()>4096||changed.iter().any(|path|path.is_empty()||path.starts_with('/')
+        ||path.split('/').any(|part|part=="..")||path.chars().any(char::is_control)) {
+        return Err(invalid("host test changed paths are empty or invalid"));
+    }
+    Ok(changed)
+}
+
 /// The owner invokes this host command after a worker turn. It uses a copied
 /// Git-visible tree in a separate offline rootless Docker container; worker
 /// prose and project files cannot select a command or sign the resulting IDs.
@@ -862,12 +874,9 @@ pub fn run_host_test(root:&Path,id:&str,worker:usize)->io::Result<Value>{
     if manifest.session_id!=session_id||manifest.profile!=doxa_isolation::Profile::DockerOffline||manifest.checkout!=cwd{
         return Err(invalid("host test must use the worker's offline Docker checkout"));
     }
-    let paths=git_observation(cwd,&["-c","core.quotepath=false","diff","--no-ext-diff","--no-textconv","--name-only",baseline])?;
-    let untracked=git_observation(cwd,&["-c","core.quotepath=false","ls-files","--others","--exclude-standard"])?;
-    let mut changed=paths.lines().chain(untracked.lines()).map(str::to_owned).collect::<Vec<_>>();
-    changed.sort();changed.dedup();
-    if changed.is_empty()||changed.len()>4096||changed.iter().any(|path|!assignment.permits(&context.charter,path)){
-        return Err(invalid("host test diff is empty, oversized or outside the approved scope"));
+    let changed=host_test_changed_paths(cwd,baseline)?;
+    if changed.iter().any(|path|!assignment.permits(&context.charter,path)){
+        return Err(invalid("host test diff is outside the approved scope"));
     }
     let temp=tempfile::Builder::new().prefix(".fleet-test-").tempdir_in(&run)?;
     let source=temp.path().join("source");fs::DirBuilder::new().mode(0o700).create(&source)?;
@@ -879,6 +888,10 @@ pub fn run_host_test(root:&Path,id:&str,worker:usize)->io::Result<Value>{
         ||doxa_fleet::hash(&after["slots"][worker]["last_turn"])?!=turn_hash
         ||doxa_isolation::test_runner::capture(cwd,None)?.sha256!=captured.sha256{
         return Err(invalid("fleet source or completed turn changed during host test"));
+    }
+    if host_test_changed_paths(cwd,baseline)?!=changed
+        ||doxa_isolation::test_runner::capture(cwd,None)?.sha256!=captured.sha256 {
+        return Err(invalid("fleet changed-path scope or source changed during host test"));
     }
     let live=rpc(&mut client,"get_state",json!({}))?;
     if live["running"]==true||live["queued"].as_u64()!=Some(0){return Err(invalid("worker became active during host test"));}
@@ -1150,6 +1163,11 @@ mod tests {
         let diff=git_observation(&repo,&["diff","--no-ext-diff","--no-textconv","--name-only",baseline.trim()]).unwrap();
         let untracked=git_observation(&repo,&["ls-files","--others","--exclude-standard"]).unwrap();
         assert!(diff.contains("tracked.txt"));assert!(untracked.contains("new.txt"));
+        let approved=host_test_changed_paths(&repo,baseline.trim()).unwrap();
+        fs::write(repo.join("outside.txt"),"late untracked change\n").unwrap();
+        let late=host_test_changed_paths(&repo,baseline.trim()).unwrap();
+        assert_ne!(approved,late,"a newly added path invalidates the reviewed test diff");
+        assert!(late.contains(&"outside.txt".to_owned()));
         assert!(!monitor_marker.exists(),"worker fsmonitor escaped onto the host");assert!(!filter_marker.exists(),"worker filter escaped onto the host");
     }
     #[test]

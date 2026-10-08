@@ -112,7 +112,7 @@ fn hmac_sha256(key: &[u8; KEY_BYTES], data: &[u8]) -> String {
 
 pub fn issue(context: &Context, kind: &str, payload: Value) -> io::Result<(String, Value)> {
     if !matches!(kind, "git_diff" | "test_result") { return Err(invalid("unsupported fleet evidence kind")); }
-    let material = json!({"kind":kind,"payload":payload});
+    let material = json!({"kind":kind,"host_verified":true,"payload":payload});
     let receipt = Receipt { kind: kind.into(), host_verified: true, payload,
         mac: hmac_sha256(&key(context)?, &serde_json::to_vec(&material)?) };
     let value = serde_json::to_value(receipt)?;
@@ -133,7 +133,7 @@ fn verify(context: &Context, id: &str, value: &Value) -> io::Result<Receipt> {
     if !receipt.host_verified || !matches!(receipt.kind.as_str(), "git_diff" | "test_result") || !valid_digest(&receipt.mac) {
         return Err(invalid("fleet evidence is not a signed host receipt"));
     }
-    let material = json!({"kind":receipt.kind,"payload":receipt.payload});
+    let material = json!({"kind":receipt.kind,"host_verified":receipt.host_verified,"payload":receipt.payload});
     let expected = hmac_sha256(&key(context)?, &serde_json::to_vec(&material)?);
     // Fixed-length byte comparison avoids exposing a partial MAC match.
     if receipt.mac.bytes().zip(expected.bytes()).fold(0u8, |acc, (a, b)| acc | (a ^ b)) != 0 {
