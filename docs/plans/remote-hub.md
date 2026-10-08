@@ -9,8 +9,10 @@ control encrypted sessions with code installed separately from the hub.
 The native TUI can open remote-only tabs through `doxa remote tui HUB_URL` or
 mix local and remote tabs in an open window with `/remote-control HUB_URL`.
 `/local` selects an open local tab. Remote tabs use an `◎` marker.
-The browser can receive encrypted background Web Push after explicit opt-in;
-Android is not yet shipped.
+The browser can receive encrypted background Web Push after explicit opt-in.
+An Android Kotlin/Compose client project is now in `android-client/`; its
+Android SDK build and device integration gate remain open, so Android is not
+yet shipped.
 
 ## User journey
 
@@ -162,8 +164,9 @@ source devices, so the initial Android path assumes a user-owned device.
    compressed end-to-end encryption are implemented. Persistent remote tab
    layouts remain open.
 4. **Background delivery:** private browser Web Push with service worker is
-   implemented. Android push and the Android client remain open; the app will
-   render transcript and events, send prompts and answers, and use hub sign-in.
+   implemented. The Android client project renders transcript and events,
+   sends prompts and answers, and uses the existing Serve sign-in. Android SDK
+   build/device QA and Android push remain open.
 
 Release gates for each stage: opt-in off by default; denied and forged identity
 tests; replay, duplicate command and stale approval tests; connection-loss tests;
