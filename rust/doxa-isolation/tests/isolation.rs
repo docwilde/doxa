@@ -56,6 +56,7 @@ fn docker_launch_contains_only_four_private_mounts_and_enforced_controls(){
     assert_eq!(args.iter().filter(|arg|arg.as_str()=="--mount").count(),4);
     assert!(args.iter().any(|arg|arg.ends_with("dst=/run/doxa/session,readonly")));
     assert!(args.contains(&"--cap-drop=ALL".into()));assert!(args.contains(&"--read-only".into()));
+    assert!(args.contains(&"--cgroupns=private".into()));
     assert!(args.contains(&"--pids-limit".into()));assert!(args.contains(&"--memory-swap".into()));
     assert!(args.contains(&"--security-opt=no-new-privileges:true".into()));
     let mounts=args.windows(2).filter(|pair|pair[0]=="--mount").map(|pair|pair[1].clone()).collect::<Vec<_>>();
@@ -73,7 +74,8 @@ fn inspection_rejects_extra_mounts_host_namespaces_and_weakened_limits(){
     validate_inspect(&value,&baseline).unwrap();
     for (field,replacement) in [("Privileged",json!(true)),("ReadonlyRootfs",json!(false)),("Memory",json!(0)),
         ("NanoCpus",json!(0)),("PidsLimit",json!(-1)),("PidMode",json!("host")),("IpcMode",json!("host")),
-        ("CapDrop",json!([])),("CapAdd",json!(["SYS_ADMIN"])),("Devices",json!([{"PathOnHost":"/dev/sda"}]))]{
+        ("CapDrop",json!([])),("CapAdd",json!(["SYS_ADMIN"])),("Devices",json!([{"PathOnHost":"/dev/sda"}])),
+        ("CgroupnsMode",json!("host"))]{
         let mut actual=baseline.clone();actual["HostConfig"][field]=replacement;assert!(validate_inspect(&value,&actual).is_err(),"{field}");
     }
     let mut actual=baseline.clone();actual["Mounts"].as_array_mut().unwrap().push(json!({"Type":"bind","Source":"/home","Destination":"/host","RW":true}));

@@ -11,7 +11,11 @@ fn run() -> io::Result<()> {
             println!("doxa-isolation-worker self-test ok");Ok(())
         },
         Some("hold") if args.len() == 1 => loop { std::thread::park(); },
-        Some("probe") if args.len() == 1 => {
+        Some("probe") if args.len() == 4 => {
+            let memory = args[1].parse().map_err(|_| io::Error::other("invalid expected memory ceiling"))?;
+            let cpus = args[2].parse().map_err(|_| io::Error::other("invalid expected CPU ceiling"))?;
+            let pids = args[3].parse().map_err(|_| io::Error::other("invalid expected PID ceiling"))?;
+            doxa_isolation::cgroup::verify_limits(memory, cpus, pids)?;
             for directory in ["/workspace", "/home/doxa", "/work-cache"] {
                 let path = std::path::Path::new(directory).join(format!(".doxa-write-probe-{}", std::process::id()));
                 let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&path)?;
@@ -80,7 +84,7 @@ fn run() -> io::Result<()> {
             let mut bytes = vec![0;size]; stream.read_exact(&mut bytes)?;
             let result: serde_json::Value = serde_json::from_slice(&bytes)?; println!("{result}"); Ok(())
         },
-        _ => Err(io::Error::other("usage: doxa-isolation-worker hold|probe|exec PROVIDER [ARGS]|hook SOCKET CAPABILITY")),
+        _ => Err(io::Error::other("usage: doxa-isolation-worker hold|probe MEMORY_BYTES CPUS PIDS|exec PROVIDER [ARGS]|hook SOCKET CAPABILITY")),
     }
 }
 fn main() {

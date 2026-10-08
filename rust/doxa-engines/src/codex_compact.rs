@@ -266,7 +266,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap(); let gate = prepare(dir.path());
         assert!(gate.command.contains("__codex-precompact"));
         assert!(gate.command.contains("native-carrier"));
-        assert_eq!(fs::metadata(dir.path().join("native-carrier")).unwrap().ino(),fs::metadata("/proc/self/exe").unwrap().ino());
+        let carrier = dir.path().join("native-carrier");
+        let carrier_meta = fs::metadata(&carrier).unwrap();
+        let running_meta = fs::metadata("/proc/self/exe").unwrap();
+        let running = std::env::current_exe().unwrap().canonicalize().unwrap();
+        assert_eq!(crate::compact_hook::executable_digest(&carrier).unwrap(),
+            crate::compact_hook::executable_digest(&running).unwrap());
+        if carrier_meta.dev() == running_meta.dev() {
+            assert_eq!(carrier_meta.ino(), running_meta.ino());
+        }
         assert!(!gate.command.contains("python"));
         assert!(!dir.path().join("precompact.py").exists());
         fs::write(dir.path().join("keep"), "unknown content").unwrap();

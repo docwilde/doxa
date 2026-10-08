@@ -812,7 +812,8 @@ impl App {
             self.plugin_refresh = None;
             if !self.plugin_refresh_dirty {
                 let mut rows = result.unwrap_or_default();
-                rows.retain(|row| !COMMANDS.iter().any(|builtin| builtin.name == row.name));
+                rows.retain(|row| !COMMANDS.iter().any(|builtin| builtin.name == row.name)
+                    && !self.native_plugin_commands.iter().any(|native| native.name == row.name));
                 rows.sort_by(|left, right| left.name.cmp(&right.name));
                 rows.dedup_by(|left, right| left.name == right.name);
                 self.plugin_commands = rows;

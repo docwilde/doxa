@@ -593,7 +593,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-claude"
-version = "2.0.0-beta.12"
+version = "2.0.0-beta.13"
 dependencies = [
  "doxa-isolation",
  "doxa-state",
@@ -603,8 +603,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "doxa-codegraph"
+version = "2.0.0-beta.13"
+dependencies = [
+ "libc",
+ "proc-macro2",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "syn 2.0.119",
+ "tempfile",
+]
+
+[[package]]
 name = "doxa-daemon"
-version = "2.0.0-beta.12"
+version = "2.0.0-beta.13"
 dependencies = [
  "doxa-claude",
  "doxa-engines",
@@ -630,7 +643,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-engines"
-version = "2.0.0-beta.12"
+version = "2.0.0-beta.13"
 dependencies = [
  "doxa-isolation",
  "libc",
@@ -644,7 +657,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-fleet"
-version = "2.0.0-beta.12"
+version = "2.0.0-beta.13"
 dependencies = [
  "doxa-vendors",
  "libc",
@@ -659,7 +672,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-hub"
-version = "2.0.0-beta.12"
+version = "2.0.0-beta.13"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -680,7 +693,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-isolation"
-version = "2.0.0-beta.12"
+version = "2.0.0-beta.13"
 dependencies = [
  "errno",
  "libc",
@@ -693,7 +706,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-lore"
-version = "2.0.0-beta.12"
+version = "2.0.0-beta.13"
 dependencies = [
  "doxa-state",
  "libc",
@@ -705,7 +718,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-peers"
-version = "2.0.0-beta.12"
+version = "2.0.0-beta.13"
 dependencies = [
  "bytes",
  "doxa-isolation",
@@ -726,14 +739,14 @@ dependencies = [
 
 [[package]]
 name = "doxa-protocol"
-version = "2.0.0-beta.12"
+version = "2.0.0-beta.13"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "doxa-remote"
-version = "2.0.0-beta.12"
+version = "2.0.0-beta.13"
 dependencies = [
  "bytes",
  "doxa-lore",
@@ -755,7 +768,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-remote-wire"
-version = "2.0.0-beta.12"
+version = "2.0.0-beta.13"
 dependencies = [
  "aes-gcm 0.10.3",
  "base64 0.22.1",
@@ -767,7 +780,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-runtime"
-version = "2.0.0-beta.12"
+version = "2.0.0-beta.13"
 dependencies = [
  "libc",
  "serde_json",
@@ -776,7 +789,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-state"
-version = "2.0.0-beta.12"
+version = "2.0.0-beta.13"
 dependencies = [
  "libc",
  "serde",
@@ -789,7 +802,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-transcript"
-version = "2.0.0-beta.12"
+version = "2.0.0-beta.13"
 dependencies = [
  "libc",
  "serde_json",
@@ -799,10 +812,11 @@ dependencies = [
 
 [[package]]
 name = "doxa-tui"
-version = "2.0.0-beta.12"
+version = "2.0.0-beta.13"
 dependencies = [
  "crossterm",
  "doxa-claude",
+ "doxa-codegraph",
  "doxa-engines",
  "doxa-fleet",
  "doxa-isolation",
@@ -837,7 +851,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-vendors"
-version = "2.0.0-beta.12"
+version = "2.0.0-beta.13"
 dependencies = [
  "futures-util",
  "libc",
@@ -849,7 +863,7 @@ dependencies = [
 
 [[package]]
 name = "doxa-worktrees"
-version = "2.0.0-beta.12"
+version = "2.0.0-beta.13"
 dependencies = [
  "doxa-isolation",
  "doxa-state",

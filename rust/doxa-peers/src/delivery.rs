@@ -94,7 +94,7 @@ fn parse_frame(bytes: &[u8]) -> io::Result<PeerFrame> {
 }
 
 /// A receiving socket is created exclusively. An existing path, even a dead socket, is never unlinked by this API.
-struct PendingFrame { pid: i32, stream: UnixStream, bytes: Vec<u8>, started: Instant }
+struct PendingFrame { pid: Option<i32>, stream: UnixStream, bytes: Vec<u8>, started: Instant }
 pub struct Inbox { listener: UnixListener, path: PathBuf, inode: u64, device: u64, pending: Mutex<Option<PendingFrame>> }
 impl Inbox {
     pub fn bind(runtime: &Path, session_id: &str) -> io::Result<Self> {
@@ -126,7 +126,7 @@ impl Inbox {
                 Err(error) => return Err(error),
             };
             same_user(&stream)?;
-            let pid = crate::credentials::peer_credentials(&stream).map(|credentials|credentials.pid).unwrap_or(0);
+            let pid = crate::credentials::peer_credentials(&stream).ok().map(|credentials|credentials.pid);
             stream.set_nonblocking(true)?;
             *pending = Some(PendingFrame { pid, stream, bytes: Vec::new(), started: Instant::now() });
         }
@@ -149,7 +149,7 @@ impl Inbox {
             }
             if n == 0 || frame.bytes.contains(&b'\n') {
                 let bytes = std::mem::take(&mut frame.bytes);
-                let authenticated_pid = Some(frame.pid);
+                let authenticated_pid = frame.pid;
                 *pending = None;
                 return match parse_frame(&bytes) {
                     Ok(mut frame) => { frame.authenticated_pid = authenticated_pid; Ok(Some(frame.scrub(scrubber))) },

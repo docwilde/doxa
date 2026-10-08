@@ -46,7 +46,7 @@ Commands:
   worktrees [list]     Preview orphaned managed worktrees
   worktrees cleanup FULL_ID --confirm
                        Remove one verified clean Rust orphan
-  doctor               Check provider and launcher dependencies
+  doctor               Check provider, launcher, and configured Mermaid renderer
   setup                Interactive authentication, LORE store, and defaults wizard
   settings             Show native settings and their effective sources
   settings set KEY VALUE | unset KEY
@@ -56,6 +56,8 @@ Commands:
                        Run the explicitly selected provider authentication
   plugins [refresh | adopt on|off]
                        Discover plugins or change sanitized adoption for new sessions
+  codegraph [--root WORKTREE] file PATH | symbol NAME | imports PATH | calls PATH
+                       Query current Rust syntax with source hashes and coverage
   fleet ...            Inspect or start native fleet runs
   mesh serve           Serve the private peer graph until Ctrl-C
   remote serve         Serve live sessions to an allowed Tailscale browser
@@ -157,6 +159,11 @@ fn run(args: &[String]) -> io::Result<()> {
             "update" => {
                 if args.len() != 1 { return Err(invalid("update takes no arguments")); }
                 return update();
+            }
+            "codegraph" => {
+                let answer = doxa_codegraph::query_cli(&args[1..]).map_err(invalid)?;
+                println!("{}", serde_json::to_string(&answer).map_err(io::Error::other)?);
+                return Ok(());
             }
             "setup" => {
                 if args.len() != 1 { return Err(invalid("setup takes no arguments")); }
@@ -446,6 +453,21 @@ fn run(args: &[String]) -> io::Result<()> {
                 }
             }
             let live = discovery::sessions()?;
+            let workspaces = live.iter().map(|session| PathBuf::from(&session.scope_key)).collect::<Vec<_>>();
+            match doxa_tui::ui::transcript_mermaid::diagnose(
+                &doxa_tui::settings::raw("mermaid_renderer"),
+                &doxa_tui::settings::raw("mermaid_renderer_root"),
+                &workspaces,
+            ) {
+                doxa_tui::ui::transcript_mermaid::DoctorResult::Disabled =>
+                    println!("disabled mermaid: local renderer is not configured"),
+                doxa_tui::ui::transcript_mermaid::DoctorResult::Available =>
+                    println!("ok mermaid: bounded PNG smoke render succeeded in sandbox (CLI parity unverified)"),
+                doxa_tui::ui::transcript_mermaid::DoctorResult::Unavailable(reason) => {
+                    println!("missing mermaid: {reason}");
+                    missing = true;
+                }
+            }
             println!("live sessions: {}", live.len());
             let ids: HashSet<String> = live.iter().map(|session| session.id.clone()).collect();
             let orphans = doxa_worktrees::list_orphans(&ids);
@@ -592,6 +614,19 @@ fn fleet(args: &[String]) -> io::Result<()> {
         ["status", run] => println!("{}", fleet_view::status(&root, run)?),
         ["resume", run] => return fleet_control::resume(&root, run),
         ["continue", run, charter_hash] => println!("{}", fleet_control::continue_run(&root,run,charter_hash)?),
+        ["dependency-review", run, worker] => {
+            let worker=worker.parse().map_err(|_|invalid("dependency worker must be a slot number"))?;
+            let reviewed=fleet_control::dependency_review(&root,run,worker)?;
+            println!("{}\nReview token: {}",serde_json::to_string_pretty(&reviewed.request)?,reviewed.token);
+        },
+        ["dependency-evidence", run, worker] => {
+            let worker=worker.parse().map_err(|_|invalid("dependency worker must be a slot number"))?;
+            println!("{}",serde_json::to_string_pretty(&fleet_control::dependency_evidence(&root,run,worker)?)?);
+        },
+        ["dependency-release", run, worker, token] => {
+            let worker=worker.parse().map_err(|_|invalid("dependency worker must be a slot number"))?;
+            println!("{}",fleet_control::release_dependency(&root,run,worker,token)?);
+        },
         ["review", run, slot, request] => {
             let slot = slot.parse().map_err(|_| invalid("fleet slot must be a number"))?;
             let reviewed = fleet_control::review(&root, run, slot, request)?;
@@ -614,7 +649,7 @@ fn fleet(args: &[String]) -> io::Result<()> {
             let (socket, session_id) = fleet_view::slot_socket(&root, run, slot)?;
             return bridge::run_socket_expected(socket, Some(&session_id));
         }
-        _ => return Err(invalid("usage: doxa fleet start --pool ENGINE:MODEL --prompt TEXT -n N --run-budget USD|preflight --sessions N --run-budget USD [--supervisor ENGINE[:MODEL]] [--approve none|peer|all] [--approval-grace SECONDS] [--root ABSOLUTE_PATH]|runs|status RUN_ID|stop RUN_ID|attach RUN_ID SLOT [--root ABSOLUTE_PATH]")),
+        _ => return Err(invalid("usage: doxa fleet start --pool ENGINE:MODEL --prompt TEXT -n N --run-budget USD [--worker-after INDEX:PREDECESSOR] | preflight | runs | status RUN | dependency-evidence RUN SLOT | dependency-review RUN SLOT | dependency-release RUN SLOT TOKEN | resume RUN | stop RUN | attach RUN SLOT [--root ABSOLUTE_PATH]")),
     }
     Ok(())
 }

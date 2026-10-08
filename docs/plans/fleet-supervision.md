@@ -3,9 +3,11 @@
 Status: **native host implementation shipped in 2.0.0-beta.10**. Independent
 supervisor and fast message-judge models are selectable; the host applies
 typed admission, shared review budgets and an immutable charter. See [the operator guide](../fleet-supervision.md) for supported interfaces and
-remaining limits. An offline labeled-verdict threshold report is available;
-real-message labeling, holdout evaluation and automatic trusted test-evidence
-collection remain open.
+remaining limits. The native dependency slice adds reviewed predecessor edges,
+durable waiting slots and a human-owned release after a typed coordinator
+handoff. An offline labeled-verdict threshold report is available. Real-message
+labeling, holdout evaluation, automatic trusted test-evidence collection and
+in-TUI release review remain open; see the [operator procedure](../fleet-supervision.md).
 
 This plan complements
 [per-session Docker isolation](session-isolation-docker.md). Containers limit

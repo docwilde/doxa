@@ -44,7 +44,7 @@ Claude needs a signed-in Claude Code CLI. Codex needs a signed-in CLI and the pr
 
 Git sessions normally get managed linked worktrees. `DOXA_WORKTREE=0` or `worktree_per_session=false` disables them. `new --branch NAME` selects a base; `/branch [name]` changes an idle, clean worktree. `/diff` or F2 opens a bounded diff, and F4 keeps it beside the session. `worktrees list` previews orphans; `worktrees cleanup FULL_ID --confirm` deletes only after ownership and Git state are rechecked. [Lifecycle contract](../docs/worktree-lifecycle.md).
 
-Start with `--isolation native|docker-open|docker-offline` or choose a profile in the new-session picker. Linux Docker profiles require a local rootless Engine and a pinned image. Their chip shows verified network, mounts, and resource policy. `/isolation PROFILE --confirm` changes an idle session; a backend change verifies and resumes the same conversation. [Setup and limits](../docs/session-isolation.md).
+Start with `--isolation native|docker-open|docker-offline` or choose a profile in the new-session picker. Linux Docker profiles require a local rootless Engine and a pinned image. The worker checks effective cgroup memory, CPU, PID, and swap limits before admission and CLI provider turns; the chip shows the verified policy. `/isolation PROFILE --confirm` changes an idle session; a backend change verifies and resumes the same conversation. [Setup and limits](../docs/session-isolation.md).
 
 ## Use the workspace
 
@@ -70,7 +70,7 @@ Codex's permission chip offers `on-request`, `auto`, and `full-access`. `on-requ
 
 Permission answers bind to an exact pending request. Complete summaries must be read before full approval; changed or stale requests cannot inherit an answer. Secret-input requests wait for a private masked-input interface. Ctrl+Delete asks before stopping a daemon and removing its verified DOXA transcript; provider archives remain separate. Diff hunk rejection checks the current patch and staged state again before applying it.
 
-Links, Markdown, reasoning, and individual tool calls render in the transcript. Standalone local images inside the session workspace have bounded previews. Mermaid fences can render through an explicitly configured local sandboxed renderer; source remains visible otherwise. [Image and diagram limits](../docs/terminal-images.md) explain both paths. Ctrl+click opens HTTP(S) links. Review panes and tool output have bounded sizes. Search uses scrubbed indexed excerpts and bounded fallback scans. Unverified external entries cannot become resumable sessions.
+Links, Markdown, reasoning, and individual tool calls render in the transcript. Standalone local images inside the session workspace have bounded previews. Mermaid fences can render through an explicitly configured local sandboxed renderer; source remains visible otherwise. `doxa doctor` checks its path policy and runs a bounded PNG smoke render, but does not certify Mermaid CLI fidelity. [Image and diagram limits](../docs/terminal-images.md) explain both paths. Ctrl+click opens HTTP(S) links. Review panes and tool output have bounded sizes. Search uses scrubbed indexed excerpts and bounded fallback scans. Unverified external entries cannot become resumable sessions.
 
 ## Memory and context
 
@@ -78,11 +78,15 @@ The memory chip browses user and project facts; the belief browser supports evid
 
 `/context` shows reported provider telemetry and snapshot details. `/usage` uses reported accounting and labels estimates. Missing or stale component counts and quota stay unknown. DeepSeek and GLM costs are estimates based on reported tokens and dated rates. Saved API keys are redacted before transcripts or memory boundaries. [LORE](https://github.com/docwilde/LORE) · [Engine accounting](../docs/engine-capabilities.md#review-and-accounting).
 
-`/setup` handles provider credentials and defaults. `/plugins` and `/reload-plugins` control sanitized Claude plugin adoption for future sessions. `/settings` edits validated preferences; environment overrides remain read-only.
+`doxa codegraph file PATH`, `symbol NAME`, `imports PATH`, and `calls PATH` return bounded, fresh Rust syntax queries from the current Git worktree. Call targets are lexical candidates, not resolved bindings; other languages are unsupported and nothing is written to LORE. [Query limits](../docs/plans/code-graph.md).
+
+`/setup` handles provider credentials and defaults. `/plugins` and `/reload-plugins` control sanitized Claude plugin adoption for future sessions. Separately, owner-approved [native text plugins](../docs/native-plugins.md) add read-only local slash commands from private TOML manifests; executable native plugins remain open work. `/settings` edits validated preferences; environment overrides remain read-only.
 
 ## Fleets and peers
 
 `fleet preflight` checks capacity, spend ceiling, and socket paths before `fleet start`. Use `--worker-task INDEX:TEXT` to give each worker a frozen deliverable and optional `--worker-path INDEX:RELATIVE_PREFIX` to narrow its file scope. `fleet runs|status|attach|stop|resume` operate on owned manifests and verified slots. `/fleet` shows runs in the TUI; starting or resuming there requires reviewing and arming the complete plan. Budgeted resume needs complete persisted accounting. [Fleet guide](../docs/fleet.md).
+
+Use `--worker-after INDEX:PREDECESSOR` to hold a worker until its predecessor finishes and the operator reviews the host-recorded checkpoint and typed handoff. Dependency plans require an acting coordinator, independent review, and Docker isolation. `fleet dependency-evidence`, `dependency-review`, then `dependency-release` expose the explicit release flow; the review reports `tests_verified: false`. [Dependency gate](../docs/fleet-supervision.md).
 
 Select an independent supervisor with `--alignment-supervisor PROVIDER:MODEL`. Choose a separate fast message judge with `--message-judge llm:PROVIDER:MODEL` or `jev:MODEL`, and choose `--message-review off|shadow|enforce`. `/settings` → **Fleet** stores defaults. The acting `--supervisor` is a worker; the independent reviewer reads evidence and cannot grant its own approvals. Host gates bind peer traffic to the approved charter and assignments. [Supervisor contract](../docs/fleet-supervision.md).
 
@@ -94,7 +98,7 @@ Remote access is off by default. For a private browser view on the session host,
 
 For cross-machine control, run `doxa-hub` behind Tailscale Serve on a private server, then `doxa remote connect HUB_URL HOST_ID` on the session host. The hub browser, `doxa remote list/send/answer`, and `doxa remote tui HUB_URL` can control registered sessions. Remote TUI tabs use the normal keys; Ctrl+R opens history and PageUp fetches older records. `/remote-connect HUB_URL HOST_ID` shares sessions while the local window stays open; `/remote-control HUB_URL` adds remote tabs marked `◎` beside local ones. The hub is volatile, so inspect an uncertain command before retrying it. [Remote hub design](../docs/plans/remote-hub.md).
 
-For native end-to-end encryption, generate a shared key with `doxa remote keygen /absolute/private/remote.key`. Keep it owner-only and set `DOXA_REMOTE_E2EE_KEY_FILE` to its path on both host and client. Transcript and control content stays opaque to the hub; session presence and event metadata remain visible. Encrypted sessions work in the native TUI, CLI, and separately installed [Chrome extension](../browser-extension/README.md), but not the hub-served browser. The hub can also deliver generic Web Push completion and input alerts when configured with a private VAPID key. An Android client remains planned.
+For native end-to-end encryption, generate a shared key with `doxa remote keygen /absolute/private/remote.key`. Keep it owner-only and set `DOXA_REMOTE_E2EE_KEY_FILE` to its path on both host and client. Transcript and control content stays opaque to the hub; session presence and event metadata remain visible. Encrypted sessions work in the native TUI, CLI, and separately installed [Chrome extension](../browser-extension/README.md), but not the hub-served browser. The hub can also deliver generic Web Push completion and input alerts when configured with a private VAPID key. The [Android source client](../android-client/README.md) can control private hub sessions and show generic local alerts while connected; device and two-host tailnet QA remain open, and native background push is not implemented.
 
 ## Verification and limits
 

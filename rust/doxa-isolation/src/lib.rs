@@ -15,6 +15,7 @@ use std::{
 pub mod broker;
 pub mod workspace;
 pub mod migration;
+pub mod cgroup;
 mod disk;
 mod source_git;
 pub use source_git::staged_diff;
@@ -293,7 +294,7 @@ pub fn create_args(manifest: &Manifest) -> io::Result<Vec<OsString>> {
     let mut args: Vec<OsString> = ["create", "--name"].into_iter().map(Into::into).collect();
     args.push(format!("doxa-{}-{}", manifest.session_id, &manifest.nonce[..12]).into());
     for value in ["--init", "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges:true",
-        "--user=0:0", "--ipc=private", "--network", manifest.profile.network(),
+        "--user=0:0", "--ipc=private", "--cgroupns=private", "--network", manifest.profile.network(),
         "--tmpfs=/tmp:rw,nosuid,nodev,size=134217728,mode=1777"] { args.push(value.into()); }
     for (flag, value) in [("--memory", policy.memory_bytes.to_string()), ("--memory-swap", policy.memory_bytes.to_string()),
         ("--cpus", policy.cpus.to_string()), ("--pids-limit", policy.pids.to_string()),
@@ -474,6 +475,7 @@ pub fn validate_inspect(manifest: &Manifest, actual: &Value) -> io::Result<()> {
         || host["NanoCpus"].as_u64() != Some((policy.cpus * 1_000_000_000.0) as u64)
         || host["PidsLimit"] != policy.pids || config["User"] != "0:0"
         || host["PidMode"].as_str().is_none_or(|mode| !mode.is_empty()) || host["IpcMode"] != "private"
+        || host["CgroupnsMode"] == "host"
         || host["CapDrop"] != json!(["ALL"]) || host["CapAdd"].as_array().is_some_and(|rows| !rows.is_empty())
         || host["SecurityOpt"]!=json!(["no-new-privileges:true"])
         || host["Devices"].as_array().is_some_and(|rows| !rows.is_empty()) {
@@ -535,6 +537,13 @@ fn inspect_network(manifest: &Manifest) -> io::Result<()> {
     if !valid { return Err(error("container network differs from requested isolation policy")); }
     Ok(())
 }
+fn probe_worker(manifest: &Manifest) -> io::Result<()> {
+    let policy = manifest.policy.as_ref().ok_or_else(|| error("Docker policy missing"))?;
+    docker_run(policy, &["exec", manifest.container_id.as_deref().ok_or_else(|| error("container identity unavailable"))?,
+        "/usr/local/bin/doxa-isolation-worker", "probe", &policy.memory_bytes.to_string(),
+        &policy.cpus.to_string(), &policy.pids.to_string()])?;
+    Ok(())
+}
 fn reconcile(manifest: &mut Manifest, start: bool) -> io::Result<()> {
     let policy = manifest.policy.as_ref().unwrap();
     let listed = docker_run(policy, &["ps", "-aq", "--filter", &format!("label=doxa.session={}", manifest.session_id)])?;
@@ -546,7 +555,7 @@ fn reconcile(manifest: &mut Manifest, start: bool) -> io::Result<()> {
     inspect_network(manifest)?;
     if actual["State"]["Running"] != true && start { docker_run(policy, &["start", manifest.container_id.as_deref().unwrap()])?; }
     // Real rootless UID mapping and all writable bind sources are probed.
-    docker_run(policy, &["exec", manifest.container_id.as_deref().unwrap(), "/usr/local/bin/doxa-isolation-worker", "probe"])?;
+    probe_worker(manifest)?;
     manifest.state = "ready".into(); Ok(())
 }
 
@@ -615,6 +624,7 @@ pub fn isolate_command(command: Command, provider: &str) -> io::Result<Command> 
     if !matches!(provider, "claude" | "codex") { return Err(error("unsupported Docker provider")); }
     check_disk_budget(&manifest)?;
     inspect(&manifest)?; inspect_network(&manifest)?;
+    probe_worker(&manifest)?;
     let policy = manifest.policy.as_ref().unwrap();
     let mut isolated = docker(policy); isolated.args(["exec", "-i", "--workdir", "/workspace"]);
     for (key, value) in command.get_envs() {

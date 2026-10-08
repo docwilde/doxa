@@ -504,6 +504,7 @@ impl App {
                         | "fleet"
                         | "fleet_review"
                         | "isolation"
+                        | "native_plugin"
                 ) {
                     (info.lines.len() + 2).clamp(7, 19) as u16
                 } else {

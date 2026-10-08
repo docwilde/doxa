@@ -25,6 +25,10 @@ pub struct Proposal {
     pub action: String,
     pub scope: String,
     pub summary: String,
+    /// Source provenance from LORE's scrubbed pending row. This is not a
+    /// current-pending signal: the list is paginated without a revision.
+    pub source_session_id: Option<String>,
+    pub source_project: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -105,12 +109,21 @@ pub fn parse_proposals(rows: Vec<Value>) -> Result<Vec<Proposal>, ()> {
                 Some(_) => short(row, key, 4096).ok_or(()),
             }
         };
+        let origin = |key| -> Result<Option<String>, ()> {
+            match row.get(key) {
+                None | Some(Value::Null) => Ok(None),
+                Some(_) => short(row, key, 255)
+                    .filter(|text| !text.is_empty() && !text.chars().any(char::is_control))
+                    .map(Some).ok_or(()),
+            }
+        };
         let summary = ["text", "claim", "path", "name", "description", "reason"]
             .iter().find_map(|key| row.get(*key).and_then(Value::as_str))
             .unwrap_or("");
         if summary.len() > 4096 { return Err(()); }
         Ok(Proposal { pid, kind: field("kind")?, action: field("action")?,
-            scope: field("scope")?, summary: summary.to_owned() })
+            scope: field("scope")?, summary: summary.to_owned(),
+            source_session_id: origin("session_id")?, source_project: origin("project")? })
     }).collect()
 }
 
@@ -240,6 +253,12 @@ mod tests {
         assert!(parse_evidence(vec![json!({"session_id":"s","project":"p","note":"n","note_truncated":false,"created":"2026","trail_truncated":"yes"})]).is_err());
         let proposals = parse_proposals(vec![json!({"pid":"one-1","kind":"memory","action":"add","scope":"user","text":"[redacted]"})]).unwrap();
         assert_eq!(proposals[0].summary, "[redacted]");
+        assert_eq!(proposals[0].source_session_id, None);
+        let sourced = parse_proposals(vec![json!({"pid":"one-2","kind":"memory","scope":"project","session_id":"session-7","project":"project-7"})]).unwrap();
+        assert_eq!(sourced[0].source_session_id.as_deref(), Some("session-7"));
+        assert_eq!(sourced[0].source_project.as_deref(), Some("project-7"));
+        assert!(parse_proposals(vec![json!({"pid":"one-3","session_id":7})]).is_err());
+        assert!(parse_proposals(vec![json!({"pid":"one-3","project":"wrong\nproject"})]).is_err());
         assert!(parse_proposals(vec![json!({"pid":"../outside","text":"unsafe"})]).is_err());
         assert!(parse_proposals(vec![json!({"pid":"one","text":"x".repeat(4097)})]).is_err());
     }

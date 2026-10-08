@@ -8,7 +8,10 @@ settings and commands. A bounded allocated-block scan now gates launches,
 resumes, migrations and new turns against a saved soft ceiling and host
 free-space floor. The chip reports usage as monitoring, not a hard quota.
 Hard quotas still require administrator-managed filesystem project quotas and
-verified enforcement across bind mounts. Hardened egress, macOS Docker Desktop,
+verified enforcement across bind mounts. New Docker sessions request a private
+cgroup namespace, and the worker checks actual cgroup v2 memory, swap, CPU and
+PID ceilings before admission and each CLI provider turn; live rootless enforcement
+still needs the explicit integration smoke. Hardened egress, macOS Docker Desktop,
 remote Engines and a containerized controller remain open.
 
 Target: Linux first. This

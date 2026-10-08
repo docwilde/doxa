@@ -9,8 +9,10 @@ control encrypted sessions with code installed separately from the hub.
 The native TUI can open remote-only tabs through `doxa remote tui HUB_URL` or
 mix local and remote tabs in an open window with `/remote-control HUB_URL`.
 `/local` selects an open local tab. Remote tabs use an `◎` marker.
-The browser can receive encrypted background Web Push after explicit opt-in;
-Android is not yet shipped.
+The browser can receive encrypted background Web Push after explicit opt-in.
+An Android Kotlin/Compose client project is now in `android-client/`. Its debug
+APK and protocol tests build locally; device integration and private-tailnet
+QA remain open, so Android is not yet shipped.
 
 ## User journey
 
@@ -129,8 +131,11 @@ the app fetches current state after Tailscale authentication.
 Subscriptions remain volatile and the browser registers them again on its next
 visit after a hub restart; the VAPID key file must be retained. Outbound sends
 are limited to known HTTPS browser push services. A device needs browser Push
-API support and private hub access to enable alerts. Android will use the same
-generic event policy with a platform push token and reopen at its last cursor.
+API support and private hub access to enable alerts. Android now has opt-in
+generic local alerts while its SSE connection survives. Native background
+push needs a Firebase app configuration and an authenticated FCM sender; an
+FCM token cannot use the existing Web Push endpoint. A future receiver will
+reopen at the last cursor and fetch current state.
 
 ## Android client contract
 
@@ -162,8 +167,10 @@ source devices, so the initial Android path assumes a user-owned device.
    compressed end-to-end encryption are implemented. Persistent remote tab
    layouts remain open.
 4. **Background delivery:** private browser Web Push with service worker is
-   implemented. Android push and the Android client remain open; the app will
-   render transcript and events, send prompts and answers, and use hub sign-in.
+   implemented. The Android client project renders transcript and events,
+   sends prompts and answers, and uses the existing Serve sign-in. Android SDK
+   debug APK build passes. Device QA and Android background push remain open.
+   Generic Android alerts from a live SSE connection are implemented.
 
 Release gates for each stage: opt-in off by default; denied and forged identity
 tests; replay, duplicate command and stale approval tests; connection-loss tests;

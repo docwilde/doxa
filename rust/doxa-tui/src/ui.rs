@@ -62,7 +62,7 @@ use doxa_engines::EngineCapabilities;
 
 mod links;
 mod transcript_images;
-mod transcript_mermaid;
+pub mod transcript_mermaid;
 mod tool_cards;
 mod transcript_roles;
 pub(crate) mod transcript_tools;
@@ -1395,6 +1395,8 @@ pub struct App {
     local_shell_jobs: Vec<crate::shell::Job>,
     next_shell_id: u64,
     plugin_commands: Vec<crate::operations::PluginCommand>,
+    native_plugin_commands: Vec<crate::native_plugins::Command>,
+    native_plugin_failures: Vec<String>,
     plugin_refresh: Option<crate::operations::PluginRefresh>,
     plugin_refresh_dirty: bool,
     fleet_menu: Option<fleet_menu::Menu>,
@@ -1678,6 +1680,8 @@ impl Default for App {
             local_shell_jobs: Vec::new(),
             next_shell_id: 1,
             plugin_commands: Vec::new(),
+            native_plugin_commands: Vec::new(),
+            native_plugin_failures: Vec::new(),
             plugin_refresh: None,
             plugin_refresh_dirty: false,
             fleet_menu: None,

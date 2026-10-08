@@ -68,6 +68,16 @@ mod model_fact_tests {
         let unknown = model_fact_lines("claude", "gpt-5.6-sol");
         assert!(unknown[1].contains("in ? (unknown) · out ? (unknown)"));
         assert!(!unknown[1].contains("developers.openai.com"));
+
+        let deepseek = model_fact_lines("deepseek", "deepseek-flash");
+        assert!(deepseek[0].contains("ctx 1048576 [api-docs.deepseek.com 2026-10-08]"));
+        assert!(deepseek[0].contains("thinking optional [api-docs.deepseek.com 2026-10-08]"));
+        assert!(deepseek[1].contains("in $0.3/M · out $1.2/M"));
+        let glm = model_fact_lines("glm", "glm-5.3-flash");
+        assert!(glm[0].contains("ctx ? (unknown) · thinking mandatory [docs.z.ai 2026-10-08]"));
+        let guessed = model_fact_lines("glm", "glm-5.3-flash-latest");
+        assert!(guessed[0].contains("ctx ? (unknown) · thinking ? (unknown)"));
+        assert!(guessed[1].contains("in ? (unknown) · out ? (unknown)"));
     }
 }
 
@@ -884,7 +894,7 @@ impl App {
         }
         if matches!(
             info.kind,
-            "memory" | "usage" | "context" | "help" | "sessions" | "about" | "remote_history" | "isolation"
+            "memory" | "usage" | "context" | "help" | "sessions" | "about" | "remote_history" | "isolation" | "native_plugin"
         ) {
             let current = self.groups[self.active_group].active_id().and_then(|id| {
                 self.session_cwds

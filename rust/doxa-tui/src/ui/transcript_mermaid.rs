@@ -179,15 +179,107 @@ fn root_exposes_private_paths(root:&Path,workspaces:&[PathBuf])->Option<bool>{
 }
 
 fn reviewed_paths(renderer: &str, root: &str, workspaces:&[PathBuf]) -> Option<(PathBuf, PathBuf, PathBuf)> {
+    checked_paths(renderer, root, workspaces).ok()
+}
+
+fn checked_paths(renderer: &str, root: &str, workspaces:&[PathBuf]) -> Result<(PathBuf, PathBuf, PathBuf), &'static str> {
     let root = Path::new(root);
     let renderer = Path::new(renderer);
-    if !root.is_absolute() || !renderer.is_absolute() { return None; }
-    let root = root.canonicalize().ok()?;
-    if root == Path::new("/") || !root.is_dir() || root_exposes_private_paths(&root,workspaces)? { return None; }
-    let renderer = renderer.canonicalize().ok()?;
-    let relative = renderer.strip_prefix(&root).ok()?.to_path_buf();
-    if !renderer.is_file() || renderer.metadata().ok()?.permissions().mode() & 0o111 == 0 { return None; }
-    Some((renderer, root, relative))
+    if !root.is_absolute() || !renderer.is_absolute() { return Err("renderer and package root must be absolute paths"); }
+    let root = root.canonicalize().map_err(|_| "renderer package root is unavailable")?;
+    if root == Path::new("/") || !root.is_dir() { return Err("renderer package root is unsafe or not a directory"); }
+    match root_exposes_private_paths(&root, workspaces) {
+        Some(true) => return Err("renderer package root overlaps private state or a repository"),
+        None => return Err("renderer package root cannot be reviewed safely"),
+        Some(false) => {}
+    }
+    let renderer = renderer.canonicalize().map_err(|_| "renderer executable is unavailable")?;
+    let relative = renderer.strip_prefix(&root).map_err(|_| "renderer executable is outside its package root")?.to_path_buf();
+    if !renderer.is_file() || renderer.metadata().map_err(|_| "renderer executable is unavailable")?.permissions().mode() & 0o111 == 0 {
+        return Err("renderer executable is not an executable file");
+    }
+    Ok((renderer, root, relative))
+}
+
+/// A bounded, local diagnostic. Messages deliberately contain no configured paths
+/// or renderer output, which can include secrets from the operator's environment.
+#[derive(Debug, PartialEq, Eq)]
+pub enum DoctorResult {
+    Disabled,
+    Available,
+    Unavailable(&'static str),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum RunResult { Success, Failed, TimedOut, SpawnFailed }
+
+fn run_sandbox(mut command: Command, cancel: &AtomicBool) -> RunResult {
+    let Ok(mut child) = command.spawn() else { return RunResult::SpawnFailed; };
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        if cancel.load(Ordering::Relaxed) || Instant::now() >= deadline {
+            unsafe { libc::killpg(child.id() as i32, libc::SIGKILL); }
+            let _ = child.wait();
+            return RunResult::TimedOut;
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => return if status.success() { RunResult::Success } else { RunResult::Failed },
+            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+            Err(_) => {
+                unsafe { libc::killpg(child.id() as i32, libc::SIGKILL); }
+                let _ = child.wait();
+                return RunResult::Failed;
+            }
+        }
+    }
+}
+
+/// Check the same path policy and sandbox used for transcript previews, then
+/// smoke-render a fixed diagram. This does not establish Mermaid CLI parity.
+pub fn diagnose(renderer: &str, root: &str, workspaces: &[PathBuf]) -> DoctorResult {
+    if renderer.is_empty() && root.is_empty() { return DoctorResult::Disabled; }
+    if renderer.is_empty() || root.is_empty() {
+        return DoctorResult::Unavailable("renderer executable and package root must both be configured");
+    }
+    let (_, root, relative) = match checked_paths(renderer, root, workspaces) {
+        Ok(paths) => paths,
+        Err(reason) => return DoctorResult::Unavailable(reason),
+    };
+    if !Path::new(BWRAP).is_file() || !fs::metadata(BWRAP).is_ok_and(|meta| meta.permissions().mode() & 0o111 != 0) {
+        return DoctorResult::Unavailable("bubblewrap is unavailable or not executable");
+    }
+    let Some(temp_root) = private_temp_root() else { return DoctorResult::Unavailable("private render directory is unavailable"); };
+    let Ok(work) = tempfile::Builder::new().prefix("doxa-mermaid-doctor-").tempdir_in(temp_root) else {
+        return DoctorResult::Unavailable("private render directory is unavailable");
+    };
+    match run_sandbox(sandbox_command(Path::new("/usr"), Path::new("bin/true"), work.path()), &AtomicBool::new(false)) {
+        RunResult::Success => {}
+        RunResult::TimedOut => return DoctorResult::Unavailable("bubblewrap capability probe timed out"),
+        RunResult::Failed | RunResult::SpawnFailed => return DoctorResult::Unavailable("bubblewrap or unprivileged user namespaces are unavailable"),
+    }
+    let input = work.path().join("input.mmd");
+    let Ok(mut file) = OpenOptions::new().write(true).create_new(true).mode(0o600).open(input) else {
+        return DoctorResult::Unavailable("private render input could not be created");
+    };
+    if file.write_all(b"graph TD\nA-->B\n").is_err() {
+        return DoctorResult::Unavailable("private render input could not be written");
+    }
+    drop(file);
+    match run_sandbox(sandbox_command(&root, &relative, work.path()), &AtomicBool::new(false)) {
+        RunResult::TimedOut => return DoctorResult::Unavailable("renderer timed out in sandbox"),
+        RunResult::Failed => return DoctorResult::Unavailable("renderer exited unsuccessfully in sandbox"),
+        RunResult::SpawnFailed => return DoctorResult::Unavailable("renderer sandbox could not start"),
+        RunResult::Success => {}
+    }
+    let Some(file) = open_png(&work.path().join("output.png")) else {
+        return DoctorResult::Unavailable("renderer did not produce a valid bounded PNG");
+    };
+    let mut picker = Picker::from_fontsize((8, 16));
+    picker.set_protocol_type(ratatui_image::picker::ProtocolType::Halfblocks);
+    if transcript_images::decode_file(file, 24, &picker).is_none() {
+        return DoctorResult::Unavailable("renderer did not produce a valid bounded PNG");
+    }
+    DoctorResult::Available
 }
 
 fn sandbox_command(root: &Path, relative: &Path, work: &Path) -> Command {
@@ -226,22 +318,12 @@ fn render_source(source: &str, width: u16, renderer: &str, root: &str,
     let mut file = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&input).ok()?;
     file.write_all(source.as_bytes()).ok()?;
     drop(file);
-    let mut child = sandbox_command(&root, &relative, work.path()).spawn().ok()?;
-    let deadline = Instant::now() + TIMEOUT;
-    let success = loop {
-        if cancel.load(Ordering::Relaxed) || Instant::now() >= deadline {
-            unsafe { libc::killpg(child.id() as i32, libc::SIGKILL); }
-            let _ = child.wait();
-            break false;
-        }
-        match child.try_wait() {
-            Ok(Some(status)) => break status.success(),
-            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
-            Err(_) => break false,
-        }
-    };
-    if !success { return None; }
-    let output = work.path().join("output.png");
+    if run_sandbox(sandbox_command(&root, &relative, work.path()), cancel) != RunResult::Success { return None; }
+    let file = open_png(&work.path().join("output.png"))?;
+    transcript_images::decode_file(file, width, picker)
+}
+
+fn open_png(output: &Path) -> Option<File> {
     let mut file: File = OpenOptions::new().read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
         .open(output).ok()?;
@@ -250,7 +332,7 @@ fn render_source(source: &str, width: u16, renderer: &str, root: &str,
     file.read_exact(&mut signature).ok()?;
     if signature != [137, 80, 78, 71, 13, 10, 26, 10] { return None; }
     file.seek(SeekFrom::Start(0)).ok()?;
-    transcript_images::decode_file(file, width, picker)
+    Some(file)
 }
 
 #[cfg(test)]
@@ -278,6 +360,58 @@ mod tests {
         let work = tempfile::tempdir_in(private_temp_root().unwrap()).unwrap();
         sandbox_command(Path::new("/usr"), Path::new("bin/true"), work.path())
             .status().is_ok_and(|status| status.success())
+    }
+
+    #[test]
+    fn doctor_reports_optional_and_invalid_configuration_without_spawning() {
+        assert_eq!(diagnose("", "", &[]), DoctorResult::Disabled);
+        assert_eq!(diagnose("/missing/renderer", "", &[]), DoctorResult::Unavailable(
+            "renderer executable and package root must both be configured"));
+        let (package, renderer) = fixture("exit 99");
+        assert_eq!(diagnose(&renderer, "/missing/package", &[]), DoctorResult::Unavailable(
+            "renderer package root is unavailable"));
+        let home = std::env::var("HOME").unwrap();
+        assert_eq!(diagnose(&renderer, &home, &[]), DoctorResult::Unavailable(
+            "renderer package root overlaps private state or a repository"));
+        assert_eq!(diagnose("/missing/renderer", package.path().to_str().unwrap(), &[]),
+            DoctorResult::Unavailable("renderer executable is unavailable"));
+        assert_eq!(diagnose(&renderer, package.path().to_str().unwrap(), &[package.path().to_path_buf()]),
+            DoctorResult::Unavailable("renderer package root overlaps private state or a repository"));
+    }
+
+    #[test]
+    fn doctor_smoke_render_failure_timeout_and_invalid_png_are_distinct() {
+        if !sandbox_available() { return; }
+        let (package, renderer) = fixture("cp /renderer/pixel.png \"$4\"");
+        image::RgbaImage::from_pixel(8, 8, image::Rgba([100, 140, 220, 255]))
+            .save(package.path().join("pixel.png")).unwrap();
+        assert_eq!(diagnose(&renderer, package.path().to_str().unwrap(), &[]), DoctorResult::Available);
+
+        let (package, renderer) = fixture("exit 7");
+        assert_eq!(diagnose(&renderer, package.path().to_str().unwrap(), &[]),
+            DoctorResult::Unavailable("renderer exited unsuccessfully in sandbox"));
+
+        let (package, renderer) = fixture("printf 'not png' > \"$4\"");
+        assert_eq!(diagnose(&renderer, package.path().to_str().unwrap(), &[]),
+            DoctorResult::Unavailable("renderer did not produce a valid bounded PNG"));
+
+        let (package, renderer) = fixture("sleep 30");
+        let started = Instant::now();
+        assert_eq!(diagnose(&renderer, package.path().to_str().unwrap(), &[]),
+            DoctorResult::Unavailable("renderer timed out in sandbox"));
+        assert!(started.elapsed() < TIMEOUT + Duration::from_secs(2));
+    }
+
+    #[test]
+    fn doctor_never_echoes_configured_paths_or_renderer_output() {
+        let secret = "SECRET_RENDERER_PATH_TOKEN_4821";
+        let result = diagnose(&format!("/missing/{secret}"), "/missing/package", &[]);
+        assert!(!format!("{result:?}").contains(secret));
+        if !sandbox_available() { return; }
+        let (package, renderer) = fixture(&format!("echo {secret} >&2\nexit 8"));
+        let result = diagnose(&renderer, package.path().to_str().unwrap(), &[]);
+        assert!(!format!("{result:?}").contains(secret));
+        assert!(!format!("{result:?}").contains(&renderer));
     }
 
     #[test]

@@ -1,8 +1,9 @@
 # Collection triage — colour, default labels, and ordering by urgency
 
 Status: **The Python 1.x implementation shipped Parts 0, 1 and 1b. The native
-Rust rail in v2.0.0-beta.11 uses a different session-row model. This branch
-adds derived collection names and settled, opt-in group ordering to Rust.**
+Rust rail in v2.0.0-beta.11 uses a different session-row model. Beta.12
+adds derived collection names and settled, opt-in group ordering to Rust;
+beta.13 preserves LORE proposal source provenance.**
 
 Native Rust behavior: `/collection new` without a name uses a configured
 customer from `[project_customers]` for the exact session workspace path,
@@ -14,7 +15,33 @@ completed-unseen. Unknown context contributes no urgency. Equal ranks keep
 the existing group order; member order and saved layout stay intact. An
 unseen LORE proposal count is not a reliable current per-session state, so
 staged proposals remain outside native urgency ranking until a scoped,
-resolvable pending signal exists.
+resolvable pending signal exists. The native picker now retains LORE's
+optional `session_id` and `project` source provenance in each parsed row;
+it does not turn those fields into a rail mark.
+
+### Pending proposal signal audit (LORE 0.62.17)
+
+The read-only `pending` operation accepts `cwd`, `offset`, and `limit`.
+LORE filters project-bound proposals by the canonical project slug and
+returns scrubbed rows with optional `session_id` and `project` fields.
+DOXA passes its daemon session ID to LORE's indexing and derivation paths,
+so an exact source-ID match can identify some proposals. It cannot prove a
+session has **no** current proposals: pages have at most 50 rows and an
+offset ceiling of 10,000, and the operation exposes no total, revision,
+snapshot cursor, or server-side session filter. Concurrent approval,
+rejection, sync, or staging can shift offset pages mid-scan. User-scoped
+proposals from another project can also appear in a `cwd` listing; a
+proposal's `project` may be its target rather than its source project.
+The `derive_done` event reports how many proposals were just staged, but
+it cannot report later resolutions or imported proposals.
+
+A rail indicator needs a bounded canonical read returning the complete
+pending proposal IDs/count for an exact `(session_id, source project)`
+identity, with one consistent revision (or snapshot cursor), an explicit
+completion flag, and a change notification or bounded refresh policy.
+Unknown, truncated, or unavailable results must remain unranked. The rail
+must also distinguish local and remote LORE stores. Until that contract
+exists, a staged count would be a stale or incomplete urgency claim.
 
 The order updates only after 1.5 seconds without a rank change or rail
 interaction, and never while the pointer is in the rail or its keyboard

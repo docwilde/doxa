@@ -847,7 +847,7 @@ impl App {
             if let Some(info) = self.chip_info.as_mut().filter(|info| {
                 matches!(
                     info.kind,
-                    "memory" | "usage" | "context" | "help" | "sessions" | "about" | "remote_history"
+                    "memory" | "usage" | "context" | "help" | "sessions" | "about" | "remote_history" | "native_plugin"
                 )
             }) {
                 if info.kind=="remote_history" && key.code==KeyCode::PageUp && info.scroll==0 {
@@ -1311,13 +1311,17 @@ impl App {
                             .input
                             .split_whitespace()
                             .next()
-                            .is_some_and(|name| COMMANDS.iter().any(|row| row.name == name))
+                            .is_some_and(|name| COMMANDS.iter().any(|row| row.name == name)
+                                || self.native_plugin_commands.iter().any(|row| row.name == name))
                     {
                         self.notice = "DOXA commands must be a single line".into();
                         return true;
                     }
                     if self.input.starts_with('!') {
                         self.submit_keyboard_shell();
+                        return true;
+                    }
+                    if self.dispatch_native_plugin_command() {
                         return true;
                     }
                     if self.dispatch_prompt_command() {

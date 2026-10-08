@@ -303,14 +303,18 @@ fn scene(name: &str) -> App {
             }
             app.notice="Fixture · curated memory · writes disabled".into();
         }
-        "fleet-review" => {
+        "fleet-review" | "fleet-dependency" => {
             app.groups[0].tabs=vec!["demo-codex-01".into()];
             app.sessions.iter_mut().for_each(|session|session.transcript.clear());
-            app.show_fleet_review_fixture(&json!({"review_version":1,"run_id":"parser-checks","root":"/demo/fleet","cwd":"/demo/project","mode":"symmetric","isolation":"docker-open","workers":2,"sessions":2,"seed":7,"run_budget_usd":6.0,"allow_unbudgeted":false,"approval_policy":"peer","approval_grace_s":30,"dry_run":false,"prompt_sha256":"a".repeat(64),"charter_sha256":"b".repeat(64),"quiescence_timeout_s":1800,"quiescence_grace_s":5,"preflight":"Planned 2 workers; budget bounded","independent_review":{"supervisor":"claude:claude-sonnet-5-5","supervisor_mode":"enforce","message_judge":"jev:jev-1.13.0","message_mode":"shadow","budget_usd":1.5,"max_calls":20,"interval_s":60,"input_usd_per_million":0.4,"output_usd_per_million":0.8,"risk_threshold":0.7},"slots":[{"index":0,"engine":"codex","model":"gpt-6-sol","role":"worker","lore":true},{"index":1,"engine":"claude","model":"claude-sonnet-4","role":"worker","lore":true}]})).unwrap();
+            app.show_fleet_review_fixture(&json!({"review_version":1,"run_id":"parser-checks","root":"/demo/fleet","cwd":"/demo/project","mode":"supervisor","isolation":"docker-open","workers":2,"sessions":3,"seed":7,"run_budget_usd":6.0,"allow_unbudgeted":false,"approval_policy":"peer","approval_grace_s":30,"dry_run":false,"prompt_sha256":"a".repeat(64),"charter_sha256":"b".repeat(64),"assignments_sha256":"c".repeat(64),"quiescence_timeout_s":1800,"quiescence_grace_s":5,"preflight":"Planned coordinator + 2 workers; budget bounded","independent_review":{"supervisor":"claude:claude-sonnet-5-5","supervisor_mode":"enforce","message_judge":"jev:jev-1.13.0","message_mode":"shadow","budget_usd":1.5,"max_calls":20,"interval_s":60,"input_usd_per_million":0.4,"output_usd_per_million":0.8,"risk_threshold":0.7},"slots":[{"index":0,"engine":"codex","model":"gpt-6-sol","role":"supervisor","lore":true},{"index":1,"engine":"claude","model":"claude-sonnet-4","role":"worker","lore":true,"task_sha256":"d".repeat(64),"allowed_paths":["src/parser.rs"],"depends_on":[]},{"index":2,"engine":"codex","model":"gpt-6-sol","role":"worker","lore":true,"task_sha256":"e".repeat(64),"allowed_paths":["src/parser_test.rs"],"depends_on":[1]}]})).unwrap();
             // Drive the same reducer/visibility watermark used by the live menu.
             let mut terminal=Terminal::new(TestBackend::new(126,31)).unwrap();
             terminal.draw(|frame|app.draw(frame)).unwrap();
             key(&mut app,KeyCode::PageDown,KeyModifiers::NONE);
+            if name == "fleet-dependency" {
+                key(&mut app,KeyCode::PageDown,KeyModifiers::NONE);
+                key(&mut app,KeyCode::PageDown,KeyModifiers::NONE);
+            }
             app.notice="Fixture · fleet launch review · controller disabled".into();
         }
         "fleet-view" => {
@@ -319,9 +323,11 @@ fn scene(name: &str) -> App {
             app.show_fleet_view_fixture("parser-checks",&[
                 "Fleet · ↑/↓ select · Enter open · B runs · R refresh · Esc close",
                 "fleet parser-checks — monitoring",
-                "charter approved · isolation docker-open · sessions 2",
-                "  slot 0 · worker · active · demo-codex-01",
+                "charter approved · isolation docker-open · sessions 3",
+                "  slot 0 · coordinator · active · demo-codex-01",
                 "  slot 1 · worker · active · demo-claude-02",
+                "  slot 2 · worker · dependency_waiting",
+                "Dependency 2 after 1 · human review required · tests_verified: false",
                 "Independent supervisor: claude:claude-sonnet-5-5 · enforce",
                 "Fast message judge: jev:jev-1.13.0 · shadow",
                 "Native controller phase: monitoring",
@@ -353,7 +359,7 @@ fn main() {
     let name = std::env::args().nth(1).expect("scene name");
     let (width,height) = match name.as_str() {
         "welcome" => (72,18),
-        "hero" | "image-preview" | "isolation" | "repo-picker" | "claude-session" | "tool-activity" | "tool-expanded" | "tool-entries" | "restored-tool" | "processing" | "reasoning" | "commands" | "help" | "needs-input" | "permissions" | "permission-request" | "effort" | "history" | "queue" | "beliefs" | "belief-hover" | "memory" | "memory-management" | "memory-change" | "fleet-review" | "fleet-view" => (126,31),
+        "hero" | "image-preview" | "isolation" | "repo-picker" | "claude-session" | "tool-activity" | "tool-expanded" | "tool-entries" | "restored-tool" | "processing" | "reasoning" | "commands" | "help" | "needs-input" | "permissions" | "permission-request" | "effort" | "history" | "queue" | "beliefs" | "belief-hover" | "memory" | "memory-management" | "memory-change" | "fleet-review" | "fleet-dependency" | "fleet-view" => (126,31),
         _ => panic!("unknown scene"),
     };
     let mut terminal = Terminal::new(TestBackend::new(width,height)).unwrap();
