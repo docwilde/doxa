@@ -5,7 +5,7 @@ use std::os::unix::fs::PermissionsExt;
 fn fixture()->(tempfile::TempDir,Context){
     let dir=tempfile::tempdir().unwrap();std::fs::set_permissions(dir.path(),std::fs::Permissions::from_mode(0o700)).unwrap();
     let charter=Charter{version:1,fleet_id:"run".into(),task:"Implement scoped feature".into(),repo:"/repo".into(),allowed_paths:vec!["src".into()],required_evidence:vec!["host tests".into()],worker_limit:2,run_budget_usd:Some(10.0),deadline:unix_now()+3600,human_actions:vec!["authority changes".into()]};
-    let context=Context{charter_sha256:hash(&charter).unwrap(),charter,assignments:vec![Assignment{id:"assignment-a".into(),session_id:"a".into(),pid:101,role:"worker".into(),task:"Scoped task".into(),cwd:"/repo-a".into(),base_commit:None,allowed_paths:vec![]},Assignment{id:"assignment-b".into(),session_id:"b".into(),pid:102,role:"worker".into(),task:"Scoped task".into(),cwd:"/repo-b".into(),base_commit:None,allowed_paths:vec![]}],review:ReviewConfig{message_mode:Mode::Enforce,message_judge:Some(judge::Model::parse("jev:jev-1.13.0").unwrap()),budget_usd:1.0,..Default::default()},state_path:dir.path().join("state.json")};
+    let context=Context{charter_sha256:hash(&charter).unwrap(),charter,assignments:vec![Assignment{id:"assignment-a".into(),session_id:"a".into(),pid:101,role:"worker".into(),task:"Scoped task".into(),cwd:"/repo-a".into(),base_commit:None,allowed_paths:vec![],depends_on:vec![]},Assignment{id:"assignment-b".into(),session_id:"b".into(),pid:102,role:"worker".into(),task:"Scoped task".into(),cwd:"/repo-b".into(),base_commit:None,allowed_paths:vec![],depends_on:vec![]}],review:ReviewConfig{message_mode:Mode::Enforce,message_judge:Some(judge::Model::parse("jev:jev-1.13.0").unwrap()),budget_usd:1.0,..Default::default()},state_path:dir.path().join("state.json")};
     (dir,context)
 }
 fn envelope(context:&Context,kind:Kind)->Envelope{Envelope::issue(context,"a","b",kind,"On-scope report".into(),None).unwrap()}
@@ -122,4 +122,46 @@ fn handoff_requires_host_artifact_echo_and_sender_confirmation() {
     let mut forged=Envelope::issue(&context,"b","a",Kind::Ack,"Fake follow-up".into(),Some(confirm.message_id)).unwrap();
     forged.artifact_refs=vec!["host-output".into()];
     assert!(!admit(&context,&forged,"a",102,None).unwrap().delivered);
+}
+
+#[test]
+fn dependent_worker_waits_for_host_dispatch_and_human_released_handoff() {
+    let (_dir,mut context)=fixture();
+    context.review.message_mode=Mode::Off;
+    context.assignments[0].role="coordinator".into();
+    context.assignments[0].id="coordinator".into();
+    context.assignments[1].id="predecessor".into();
+    context.assignments.push(Assignment{id:"dependent".into(),session_id:"c".into(),pid:103,
+        role:"worker".into(),task:"Consume accepted output".into(),cwd:"/repo-c".into(),
+        base_commit:None,allowed_paths:vec![],depends_on:vec!["predecessor".into()]});
+    context.validate().unwrap();
+    let early=Envelope::issue(&context,"b","c",Kind::Status,"Start now".into(),None).unwrap();
+    assert!(!admit(&context,&early,"c",102,None).unwrap().delivered);
+    transaction(&context,|state|{
+        state.artifacts.insert("host-checkpoint".into(),json!({"kind":"host_checkpoint",
+            "assignment_id":"predecessor","session_id":"b","git_observation_available":true,
+            "changed_paths":"src/parser.rs\n","last_turn":{"done":true},"running":false,"queued":0,"tests_verified":false}));Ok(())
+    }).unwrap();
+    let mut handoff=Envelope::issue(&context,"b","a",Kind::Handoff,"Ready for review".into(),None).unwrap();
+    handoff.artifact_refs=vec!["host-checkpoint".into()];
+    assert!(admit(&context,&handoff,"a",102,None).unwrap().delivered);
+    let mut ack=Envelope::issue(&context,"a","b",Kind::Ack,"Accepted for owner review".into(),Some(handoff.message_id.clone())).unwrap();
+    ack.artifact_refs=handoff.artifact_refs.clone();
+    assert!(admit(&context,&ack,"b",101,None).unwrap().delivered);
+    let mut confirm=Envelope::issue(&context,"b","a",Kind::Confirm,"Confirmed".into(),Some(ack.message_id.clone())).unwrap();
+    confirm.artifact_refs=handoff.artifact_refs.clone();
+    assert!(admit(&context,&confirm,"a",102,None).unwrap().delivered);
+    let state=transaction(&context,|state|Ok(state.clone())).unwrap();
+    let accepted=accepted_handoff(&context,&state,"predecessor").unwrap();
+    assert_eq!(accepted.handoff_id,handoff.message_id);
+    assert!(!predecessor_released(&context,&state,"predecessor","turn-hash"));
+    transaction(&context,|state|{state.dependency_releases.insert("predecessor".into(),
+        DependencyRelease{assignment_id:"predecessor".into(),handoff_id:handoff.message_id.clone(),
+            artifact_refs:handoff.artifact_refs.clone(),last_turn_sha256:"turn-hash".into(),at:unix_now()});
+        state.dispatched_assignments.insert("dependent".into(),true);Ok(())}).unwrap();
+    let state=transaction(&context,|state|Ok(state.clone())).unwrap();
+    assert!(predecessor_released(&context,&state,"predecessor","turn-hash"));
+    assert!(!predecessor_released(&context,&state,"predecessor","later-turn"));
+    let admitted=Envelope::issue(&context,"b","c",Kind::Status,"Ready now".into(),None).unwrap();
+    assert!(admit(&context,&admitted,"c",102,None).unwrap().delivered);
 }

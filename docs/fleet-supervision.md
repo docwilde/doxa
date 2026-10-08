@@ -54,6 +54,33 @@ that worker change paths outside its scope. Without worker tasks, each worker
 inherits the shared prompt. Per-worker path enforcement requires independent
 review; a plain unsupervised fleet has no host scope checkpoint.
 
+Add `--worker-after INDEX:PREDECESSOR` for a worker that must wait for an
+earlier worker (repeat it for several predecessors). Dependencies require an
+acting `--supervisor` and independent review. The launch review shows every
+edge and binds it into the assignment digest. Waiting workers have live,
+budgeted daemons but receive no initial task; supervised peer delivery to them
+is refused until host dispatch. `fleet status RUN` shows `dependency_waiting`.
+On resume, waiting slots stay waiting, while an uncertain `dispatch_pending`
+slot is refused rather than prompted twice.
+
+The release is explicitly human-owned because the host does not yet run
+trusted project tests. After the predecessor finishes a turn, the host records
+a checkpoint. The operator can inspect its ID and changed paths with
+`doxa fleet dependency-evidence RUN SLOT`, give that ID to the predecessor in
+a subsequent turn, and ask it to send a typed `handoff` to the acting
+coordinator. The coordinator sends a matching `ack`; the worker sends
+`confirm` with the same artifact references. Once that turn finishes, run
+`doxa fleet dependency-review RUN SLOT`. That review shows paths, handoff and
+assignment identities, a completed turn hash, dependent slots, and
+`tests_verified: false`. Only after reading it should the operator call
+`doxa fleet dependency-release RUN SLOT REVIEW_TOKEN`. A changed token,
+active predecessor, missing accepted handoff, pause, or changed turn keeps the
+dependency blocked. Each predecessor needs its own release. The host then
+dispatches ready workers once and journals `dispatch_pending` before prompt
+admission. Human release accepts scheduling evidence; it does not certify
+test quality or grant new scope. If a predecessor starts another turn after
+review, the release token becomes stale and the operator must review again.
+
 Supervised workers can use `fleet_kind=handoff` with host artifact IDs, followed
 by the recipient's `ack` and the original sender's `confirm`. The ACK and
 confirmation must reference the preceding message UUID and echo the same host
@@ -135,11 +162,10 @@ threshold; a high score on the same examples used to choose it is not a
 real-fleet safety result. The command reads at most 2 MiB and prints no message
 content. Apply a reviewed choice with `--review-threshold` on a new fleet.
 
-Open coordination work includes dependency-based dispatch, objective artifact
-handoff acceptance, automatic trusted test results, and collecting and labeling
-real fleet messages for calibration. The current supervisor receives assignment tasks and
-host checkpoints, but it does not infer that a handoff is accepted merely
-because an ACK was delivered.
+Open coordination work includes automatic trusted project test evidence,
+calibration against real fleet messages, and an in-TUI dependency release
+review. The host checks the typed handoff chain and checkpoint provenance;
+the operator decides whether that evidence is sufficient to release a worker.
 
 References: [TypeSafe API](https://docs.typesafe.ai/api),
 [Jev models and pricing](https://docs.typesafe.ai/models),

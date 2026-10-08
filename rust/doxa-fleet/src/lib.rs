@@ -54,7 +54,7 @@ pub struct Charter {
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-pub struct Assignment { pub id:String, pub session_id:String, pub pid:i32, pub role:String, pub task:String, pub cwd:String, #[serde(default)] pub base_commit:Option<String>, #[serde(default)] pub allowed_paths:Vec<String> }
+pub struct Assignment { pub id:String, pub session_id:String, pub pid:i32, pub role:String, pub task:String, pub cwd:String, #[serde(default)] pub base_commit:Option<String>, #[serde(default)] pub allowed_paths:Vec<String>, #[serde(default,skip_serializing_if="Vec::is_empty")] pub depends_on:Vec<String> }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Context { pub charter:Charter, pub charter_sha256:String, pub assignments:Vec<Assignment>, pub review:ReviewConfig, pub state_path:PathBuf }
@@ -66,6 +66,11 @@ impl Context {
         for (index,row) in self.assignments.iter().enumerate() {
             if row.pid<=0 || row.id.is_empty() || row.session_id.is_empty() || !matches!(row.role.as_str(),"worker"|"coordinator") || row.task.trim().is_empty() || row.task.len()>64*1024 || row.base_commit.as_ref().is_some_and(|id|!(40..=64).contains(&id.len())||!id.bytes().all(|byte|byte.is_ascii_hexdigit())) || self.assignments[..index].iter().any(|prior|prior.id==row.id||prior.session_id==row.session_id||prior.pid==row.pid) {return Err(invalid("invalid host-issued fleet assignment"));}
             if row.allowed_paths.iter().any(|path| path.is_empty() || path.starts_with('/') || path.len()>512 || path.split('/').any(|part|part=="..") || path.chars().any(char::is_control) || !self.charter.allowed_paths.iter().any(|prefix| path_within(path,prefix))) {return Err(invalid("assignment path exceeds the owner-approved charter"));}
+            if row.depends_on.len()>64 || (!row.depends_on.is_empty() && row.role!="worker") || row.depends_on.iter().any(|id|self.assignments[..index].iter().all(|prior|prior.id!=*id||prior.role!="worker")) || row.depends_on.iter().enumerate().any(|(at,id)|row.depends_on[..at].contains(id)) {return Err(invalid("assignment dependencies must reference unique earlier workers"));}
+        }
+        if self.assignments.iter().any(|row|!row.depends_on.is_empty())
+            && self.assignments.iter().filter(|row|row.role=="coordinator").count()!=1 {
+            return Err(invalid("dependent assignments require one host-issued coordinator"));
         }
         Ok(())
     }
@@ -111,11 +116,47 @@ pub struct State {
     pub observations:Vec<Value>,pub artifacts:BTreeMap<String,Value>,pub last_supervisor_at:u64,
     #[serde(default)] pub semantic_cache:BTreeMap<String,CachedSemantic>,
     #[serde(default)] pub traces:BTreeMap<String,MessageTrace>,
+    #[serde(default)] pub dependency_releases:BTreeMap<String,DependencyRelease>,
+    #[serde(default)] pub dispatched_assignments:BTreeMap<String,bool>,
     #[serde(default)] pub recent_messages:Vec<Envelope>,
 }
 #[derive(Clone,Debug,Serialize,Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct MessageTrace {pub from:String,pub to:String,pub hop:u8,#[serde(default)] pub kind:Kind,#[serde(default)] pub artifact_refs:Vec<String>}
+pub struct MessageTrace {pub from:String,pub to:String,pub hop:u8,#[serde(default)] pub kind:Kind,#[serde(default)] pub artifact_refs:Vec<String>,#[serde(default,skip_serializing_if="Option::is_none")] pub in_reply_to:Option<String>}
+#[derive(Clone,Debug,Serialize,Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DependencyRelease {pub assignment_id:String,pub handoff_id:String,pub artifact_refs:Vec<String>,pub last_turn_sha256:String,pub at:u64}
+#[derive(Clone,Debug,PartialEq,Eq,Serialize,Deserialize)]
+pub struct AcceptedHandoff {pub handoff_id:String,pub artifact_refs:Vec<String>,pub checkpoint_id:String}
+
+/// A coordinator's ACK and the sender's confirmation must echo the same
+/// host-owned checkpoint. This is provenance, not a model judgment of quality.
+pub fn accepted_handoff(context:&Context,state:&State,predecessor:&str)->Option<AcceptedHandoff>{
+    let worker=context.assignments.iter().find(|row|row.id==predecessor&&row.role=="worker")?;
+    let coordinator=context.assignments.iter().find(|row|row.role=="coordinator")?;
+    for confirm in state.traces.values().filter(|row|row.kind==Kind::Confirm&&row.from==worker.session_id&&row.to==coordinator.session_id){
+        let Some(ack)=confirm.in_reply_to.as_deref().and_then(|id|state.traces.get(id)) else {continue;};
+        let Some(handoff_id)=ack.in_reply_to.as_deref() else {continue;};
+        let Some(handoff)=state.traces.get(handoff_id) else {continue;};
+        if ack.kind!=Kind::Ack||ack.from!=coordinator.session_id||ack.to!=worker.session_id
+            ||handoff.kind!=Kind::Handoff||handoff.from!=worker.session_id||handoff.to!=coordinator.session_id
+            ||handoff.artifact_refs.is_empty()||ack.artifact_refs!=handoff.artifact_refs||confirm.artifact_refs!=handoff.artifact_refs {continue;}
+        let Some(checkpoint)=handoff.artifact_refs.iter().find(|id|state.artifacts.get(*id).is_some_and(|row|
+            row["kind"]=="host_checkpoint"&&row["assignment_id"]==worker.id
+            &&row["session_id"]==worker.session_id&&row["git_observation_available"]==true
+            &&row["changed_paths"].is_string()&&!row["last_turn"].is_null()
+            &&row["running"]==false&&row["queued"].as_u64()==Some(0))) else {continue;};
+        return Some(AcceptedHandoff{handoff_id:handoff_id.into(),artifact_refs:handoff.artifact_refs.clone(),checkpoint_id:checkpoint.clone()});
+    }
+    None
+}
+
+pub fn predecessor_released(context:&Context,state:&State,predecessor:&str,last_turn_sha256:&str)->bool{
+    let Some(release)=state.dependency_releases.get(predecessor) else{return false;};
+    release.assignment_id==predecessor && release.last_turn_sha256==last_turn_sha256
+        && accepted_handoff(context,state,predecessor).is_some_and(|handoff|
+            handoff.handoff_id==release.handoff_id&&handoff.artifact_refs==release.artifact_refs)
+}
 #[derive(Clone,Debug,Serialize,Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CachedSemantic {pub envelope_sha256:String,pub result:Result<SemanticVerdict,String>}
@@ -175,7 +216,8 @@ pub fn cached_semantic(context:&Context,envelope:&Envelope)->io::Result<Option<R
 }
 
 fn deterministic(context:&Context,envelope:&Envelope,recipient:&str,pid:i32,state:&mut State)->io::Result<()> {
-    let from=context.assignment(&envelope.from_session)?;context.assignment(recipient)?;
+    let from=context.assignment(&envelope.from_session)?;let target=context.assignment(recipient)?;
+    if !target.depends_on.is_empty()&&!state.dispatched_assignments.get(&target.id).copied().unwrap_or(false){return Err(invalid("dependent worker awaits host dispatch"));}
     if envelope.v!=1||envelope.fleet_id!=context.charter.fleet_id||envelope.charter_sha256!=context.charter_sha256||envelope.to_session!=recipient||from.pid!=pid||envelope.assignment_id!=from.id||envelope.from_session==recipient||uuid::Uuid::parse_str(&envelope.message_id).is_err(){return Err(invalid("fleet sender, assignment or scope is not verified"));}
     if envelope.body.trim().is_empty()||envelope.body.len()>MAX_BODY||envelope.hop>4||!envelope.artifact_refs.iter().all(|id|state.artifacts.contains_key(id))||envelope.artifact_refs.len()>8{return Err(invalid("fleet message bounds or artifact provenance refused"));}
     if let Some(parent)=&envelope.in_reply_to{
@@ -221,7 +263,7 @@ pub fn admit(context:&Context,envelope:&Envelope,recipient:&str,pid:i32,semantic
             }
         }
         if admission.delivered{
-            state.received.insert(envelope.message_id.clone(),unix_now());state.traces.insert(envelope.message_id.clone(),MessageTrace{from:envelope.from_session.clone(),to:recipient.into(),hop:envelope.hop,kind:envelope.kind,artifact_refs:envelope.artifact_refs.clone()});state.message_count+=1;state.total_bytes+=envelope.body.len() as u64;
+            state.received.insert(envelope.message_id.clone(),unix_now());state.traces.insert(envelope.message_id.clone(),MessageTrace{from:envelope.from_session.clone(),to:recipient.into(),hop:envelope.hop,kind:envelope.kind,artifact_refs:envelope.artifact_refs.clone(),in_reply_to:envelope.in_reply_to.clone()});state.message_count+=1;state.total_bytes+=envelope.body.len() as u64;
             state.recent_messages.push(envelope.clone());while state.recent_messages.len()>8||state.recent_messages.iter().map(|row|row.body.len()).sum::<usize>()>12*1024{state.recent_messages.remove(0);}
         }
         record(state,json!({"event":"admission","admission":admission,"from":envelope.from_session,"to":recipient,"kind":envelope.kind,"input_sha256":hash(envelope)?,"at":unix_now()}));

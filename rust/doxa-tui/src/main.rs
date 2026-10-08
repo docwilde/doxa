@@ -592,6 +592,19 @@ fn fleet(args: &[String]) -> io::Result<()> {
         ["status", run] => println!("{}", fleet_view::status(&root, run)?),
         ["resume", run] => return fleet_control::resume(&root, run),
         ["continue", run, charter_hash] => println!("{}", fleet_control::continue_run(&root,run,charter_hash)?),
+        ["dependency-review", run, worker] => {
+            let worker=worker.parse().map_err(|_|invalid("dependency worker must be a slot number"))?;
+            let reviewed=fleet_control::dependency_review(&root,run,worker)?;
+            println!("{}\nReview token: {}",serde_json::to_string_pretty(&reviewed.request)?,reviewed.token);
+        },
+        ["dependency-evidence", run, worker] => {
+            let worker=worker.parse().map_err(|_|invalid("dependency worker must be a slot number"))?;
+            println!("{}",serde_json::to_string_pretty(&fleet_control::dependency_evidence(&root,run,worker)?)?);
+        },
+        ["dependency-release", run, worker, token] => {
+            let worker=worker.parse().map_err(|_|invalid("dependency worker must be a slot number"))?;
+            println!("{}",fleet_control::release_dependency(&root,run,worker,token)?);
+        },
         ["review", run, slot, request] => {
             let slot = slot.parse().map_err(|_| invalid("fleet slot must be a number"))?;
             let reviewed = fleet_control::review(&root, run, slot, request)?;
@@ -614,7 +627,7 @@ fn fleet(args: &[String]) -> io::Result<()> {
             let (socket, session_id) = fleet_view::slot_socket(&root, run, slot)?;
             return bridge::run_socket_expected(socket, Some(&session_id));
         }
-        _ => return Err(invalid("usage: doxa fleet start --pool ENGINE:MODEL --prompt TEXT -n N --run-budget USD|preflight --sessions N --run-budget USD [--supervisor ENGINE[:MODEL]] [--approve none|peer|all] [--approval-grace SECONDS] [--root ABSOLUTE_PATH]|runs|status RUN_ID|stop RUN_ID|attach RUN_ID SLOT [--root ABSOLUTE_PATH]")),
+        _ => return Err(invalid("usage: doxa fleet start --pool ENGINE:MODEL --prompt TEXT -n N --run-budget USD [--worker-after INDEX:PREDECESSOR] | preflight | runs | status RUN | dependency-evidence RUN SLOT | dependency-review RUN SLOT | dependency-release RUN SLOT TOKEN | resume RUN | stop RUN | attach RUN SLOT [--root ABSOLUTE_PATH]")),
     }
     Ok(())
 }

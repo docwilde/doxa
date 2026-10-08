@@ -92,7 +92,10 @@ fn review_lines(title:&str,value:&Value)->Vec<String>{
     let mut counts:BTreeMap<(String,String,String,String),usize>=BTreeMap::new();
     for slot in value["slots"].as_array().into_iter().flatten(){let key=(slot["role"].as_str().unwrap_or("worker").into(),slot["engine"].as_str().unwrap_or("unknown").into(),slot["model"].as_str().unwrap_or("provider default").into(),match slot["lore"].as_bool(){Some(true)=>"on",Some(false)=>"off",None=>"unknown"}.into());*counts.entry(key).or_default()+=1;}
     for ((role,engine,model,lore),count)in counts{lines.push(format!("Planned {count} × {role}: {engine}:{model} · memory {lore}"));}
-    for slot in value["slots"].as_array().into_iter().flatten(){if let Some(digest)=slot["task_sha256"].as_str(){lines.push(format!("Worker {} task SHA256: {digest}; paths: {}",slot["index"],slot["allowed_paths"]));}}
+    for slot in value["slots"].as_array().into_iter().flatten(){if let Some(digest)=slot["task_sha256"].as_str(){lines.push(format!("Worker {} task SHA256: {digest}; paths: {}; predecessors: {}",slot["index"],slot["allowed_paths"],slot["depends_on"]));}}
+    if value["slots"].as_array().is_some_and(|slots|slots.iter().any(|slot|slot["depends_on"].as_array().is_some_and(|rows|!rows.is_empty()))){
+        lines.push("Dependent workers wait for coordinator-accepted host evidence and explicit human dependency release. Tests are not automatically verified.".into());
+    }
     lines.push("Task text stays private; controller output is suppressed. Ctrl+C cancels the controller and waits for teardown.".into());
     lines.into_iter().map(|line|crate::markdown::sanitize(&line.replace('\n',"\\n").replace('\t',"\\t"))).collect()
 }
