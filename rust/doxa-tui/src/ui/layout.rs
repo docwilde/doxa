@@ -2,7 +2,7 @@
 use super::{
     chip_hint, chip_text, clipped_title, input_request_body, memory_fill_label, panes, prompt_height,
     repo_chip, safe_label, vendor_models, wrapped_rows, App, ChipHit, ChipInfo, Focus, PaneGroup,
-    PaneLayout, RailRow, Split, INPUT_BLINK_INTERVAL, MIN_PANE_HEIGHT, MIN_PANE_WIDTH,
+    PaneLayout, RailGroupKey, RailRow, Split, INPUT_BLINK_INTERVAL, MIN_PANE_HEIGHT, MIN_PANE_WIDTH,
     MIN_RAIL_WIDTH, SPINNER_FRAMES, SPINNER_INTERVAL,
 };
 use crate::launch;
@@ -16,6 +16,57 @@ use std::time::Instant;
 use unicode_width::UnicodeWidthStr;
 
 impl App {
+    fn rail_urgency(&self, index: usize) -> u8 {
+        let id = &self.sessions[index].id;
+        if self.waiting_for_input(id) { return 3; }
+        // An unreported or invalid limit is unknown, never zero percent.
+        if self.session_telemetry.get(id).and_then(|t| t.context_percent)
+            .is_some_and(|percent| percent >= 50.0) { return 2; }
+        if self.unread_sessions.contains(id) { return 1; }
+        0
+    }
+
+    pub(super) fn rail_groups(&self) -> Vec<(RailGroupKey, Vec<RailRow>, u8)> {
+        let mut groups = Vec::new();
+        let mut seen = HashSet::new();
+        for (heading, item) in self.collections.iter().enumerate() {
+            let mut rows = vec![RailRow::Heading(heading)];
+            let mut urgency = 0;
+            for id in &item.sessions {
+                if let Some(index) = self.sessions.iter().position(|session| &session.id == id) {
+                    if !self.offline_ids.contains(id) && seen.insert(index)
+                        && self.rail_session_visible(index) {
+                        urgency = urgency.max(self.rail_urgency(index));
+                        if !item.collapsed { rows.push(RailRow::Session(index)); }
+                    }
+                }
+            }
+            groups.push((RailGroupKey::Collection(item.name.clone()), rows, urgency));
+        }
+        let mut projects: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        for index in 0..self.sessions.len() {
+            if seen.insert(index) && self.rail_session_visible(index)
+                && !self.offline_ids.contains(&self.sessions[index].id) {
+                let session = &self.sessions[index];
+                let project = session.collection.trim();
+                let fallback = if project.is_empty() { "Other sessions" } else { project };
+                let label = match self.repo_cache.get(&session.id).and_then(|(status, _)| status.as_ref()) {
+                    Some(doxa_worktrees::RepoStatus::Repository { repo, .. }) => repo.as_str(),
+                    Some(doxa_worktrees::RepoStatus::Directory { name }) => name.as_str(),
+                    None => fallback,
+                };
+                projects.entry(label.to_owned()).or_default().push(index);
+            }
+        }
+        for (project, sessions) in projects {
+            let urgency = sessions.iter().map(|index| self.rail_urgency(*index)).max().unwrap_or(0);
+            let mut rows = vec![RailRow::ProjectHeading(project.clone())];
+            rows.extend(sessions.into_iter().map(RailRow::Session));
+            groups.push((RailGroupKey::Project(project), rows, urgency));
+        }
+        groups
+    }
+
     pub(super) fn chip_hint_for(&self, kind: &str, group: usize) -> String {
         if kind=="isolation" { return self.isolation_hint(group); }
         let id = self.groups.get(group).and_then(PaneGroup::active_id);
@@ -105,47 +156,65 @@ impl App {
     }
 
     pub(super) fn rail_rows(&self) -> Vec<RailRow> {
-        let mut rows = Vec::new();
+        let mut groups = self.rail_groups();
+        if self.preferences.value("collection_sort") == "urgency" {
+            groups.sort_by_key(|(key, _, _)| self.rail_sort_order.iter().position(|saved| saved == key).unwrap_or(usize::MAX));
+        }
+        let mut rows: Vec<_> = groups.into_iter().flat_map(|(_, rows, _)| rows).collect();
         let mut seen = HashSet::new();
-        for (heading, item) in self.collections.iter().enumerate() {
-            rows.push(RailRow::Heading(heading));
+        for item in &self.collections {
             for id in &item.sessions {
                 if let Some(index) = self.sessions.iter().position(|session| &session.id == id) {
-                    if !self.offline_ids.contains(id) && seen.insert(index)
-                        && !item.collapsed && self.rail_session_visible(index) {
-                        rows.push(RailRow::Session(index));
-                    }
+                    if !self.offline_ids.contains(id) { seen.insert(index); }
                 }
             }
         }
-        let mut projects: BTreeMap<String, Vec<usize>> = BTreeMap::new();
         let mut past = Vec::new();
         for index in 0..self.sessions.len() {
-            if seen.insert(index) && self.rail_session_visible(index) {
-                if self.offline_ids.contains(&self.sessions[index].id) {
-                    past.push(index);
-                    continue;
-                }
-                let session = &self.sessions[index];
-                let project = session.collection.trim();
-                let fallback = if project.is_empty() { "Other sessions" } else { project };
-                let label = match self.repo_cache.get(&session.id).and_then(|(status, _)| status.as_ref()) {
-                    Some(doxa_worktrees::RepoStatus::Repository { repo, .. }) => repo.as_str(),
-                    Some(doxa_worktrees::RepoStatus::Directory { name }) => name.as_str(),
-                    None => fallback,
-                };
-                projects.entry(label.to_owned()).or_default().push(index);
-            }
-        }
-        for (project, sessions) in projects {
-            rows.push(RailRow::ProjectHeading(project));
-            rows.extend(sessions.into_iter().map(RailRow::Session));
+            if seen.insert(index) && self.rail_session_visible(index)
+                && self.offline_ids.contains(&self.sessions[index].id) { past.push(index); }
         }
         if !past.is_empty() {
             rows.push(RailRow::PastHeading);
             rows.extend(past.into_iter().map(RailRow::Session));
         }
         rows
+    }
+
+    /// Keep the displayed group order frozen while marks change, blink, or a
+    /// person has the pointer/keyboard in the rail. Child session order is never
+    /// sorted. The baseline order breaks equal-urgency ties deterministically.
+    pub(super) fn tick_rail_sort(&mut self, now: Instant) -> bool {
+        if self.preferences.value("collection_sort") != "urgency" {
+            self.rail_sort_signature.clear();
+            self.rail_sort_order.clear();
+            return false;
+        }
+        if self.layout(self.size).rail.is_none() { return false; }
+        let groups = self.rail_groups();
+        let signature = groups.iter().map(|(key, _, urgency)| (key.clone(), *urgency)).collect::<Vec<_>>();
+        if self.rail_sort_signature != signature {
+            self.rail_sort_signature = signature;
+            self.rail_sort_changed_at = now;
+            return false;
+        }
+        if self.rail_pointer_inside || self.focus == super::Focus::Rail
+            || now.saturating_duration_since(self.rail_sort_changed_at) < Duration::from_millis(1500)
+            || now.saturating_duration_since(self.rail_last_interaction) < Duration::from_millis(1500) {
+            return false;
+        }
+        let mut sorted = groups.iter().map(|(key, _, rank)| (key.clone(), *rank)).collect::<Vec<_>>();
+        sorted.sort_by_key(|(_, rank)| std::cmp::Reverse(*rank));
+        let next = sorted.into_iter().map(|(key, _)| key).collect::<Vec<_>>();
+        if next == self.rail_sort_order { return false; }
+        let selected = self.rail_order().get(self.rail_selected).map(|index| self.sessions[*index].id.clone());
+        self.rail_sort_order = next;
+        if let Some(selected) = selected {
+            if let Some(index) = self.rail_order().iter().position(|index| self.sessions[*index].id == selected) {
+                self.rail_selected = index;
+            }
+        }
+        true
     }
 
     fn rail_session_visible(&self, index: usize) -> bool {
@@ -390,11 +459,11 @@ impl App {
         } else if self.permission_picker.is_some() {
             10
         } else if let Some(picker) = &self.model_picker {
-            (4 + picker.models.len()
+            (6 + picker.models.len()
                 + usize::from(
                     picker.catalog_pending || !picker.loading && picker.models.is_empty(),
                 ))
-            .clamp(5, 13) as u16
+            .clamp(7, 15) as u16
         } else if let Some(picker) = &self.repo_picker {
             (picker.paths.len() + 3).clamp(5, 15) as u16
         } else if let Some(picker) = &self.lore_picker {

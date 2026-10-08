@@ -540,7 +540,7 @@ impl App {
                 let image_mode_before = self.preferences.value("image_mode").to_owned();
                 self.preferences = crate::preferences::Preferences::load();
                 if image_mode_before != self.preferences.value("image_mode") {
-                    self.image_store.borrow_mut().configure(self.preferences.value("image_mode"));
+                    self.configure_terminal_images(self.preferences.value("image_mode"));
                 }
                 if !auto_diff_was_on && self.preferences.on("auto_diff") {
                     for id in self

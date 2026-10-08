@@ -1,6 +1,7 @@
 //! Host-owned fleet authority, communication admission, and independent review.
 //! Reviewers receive bounded data and have no tools or mutable worker history.
 pub mod judge;
+pub mod calibration;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};

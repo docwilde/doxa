@@ -2035,8 +2035,8 @@ for line in sys.stdin:
         let models: Vec<_> = (0..30).map(|i| format!("model-{i:02}")).collect();
         app.model_picker = Some(ModelPicker { session_id: "session".into(), models: models.clone(),
             selected: 24, note: "Verified models".into(), loading: false, catalog_pending: false });
-        let (menu, start) = hover_first_picker_row(&mut app, 3);
-        click_picker_row(&mut app, menu, 3);
+        let (menu, start) = hover_first_picker_row(&mut app, 5);
+        click_picker_row(&mut app, menu, 5);
         assert_eq!(app.pending_model_changes, vec![("session".into(), models[start].clone())]);
     }
 
@@ -2047,19 +2047,19 @@ for line in sys.stdin:
         app.model_picker = Some(ModelPicker { session_id: "session".into(), models: models.clone(),
             selected: 24, note: "Verified models".into(), loading: false, catalog_pending: true });
         let menu = app.active_chooser_rect().unwrap();
-        click_picker_row(&mut app, menu, 3);
+        click_picker_row(&mut app, menu, 5);
         assert!(app.pending_model_changes.is_empty(), "probe text is not a model");
         assert!(app.model_picker.is_some());
         let picker = app.model_picker.as_ref().unwrap();
         let start = chooser_visible_start(&app.chooser_view_start, picker.selected, picker.visible_rows(menu.height));
         let text = painted_at(&app, 100, 28);
-        assert!(text.lines().nth(usize::from(menu.y + 4)).unwrap().contains(&models[start]));
+        assert!(text.lines().nth(usize::from(menu.y + 6)).unwrap().contains(&models[start]));
         app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Moved,
-            column: menu.x + 2, row: menu.y + 4, modifiers: KeyModifiers::NONE }));
+            column: menu.x + 2, row: menu.y + 6, modifiers: KeyModifiers::NONE }));
         assert_eq!(app.model_picker.as_ref().unwrap().selected, start);
         let hovered = painted_at(&app, 100, 28);
-        assert!(hovered.lines().nth(usize::from(menu.y + 4)).unwrap().contains(&models[start]));
-        click_picker_row(&mut app, menu, 4);
+        assert!(hovered.lines().nth(usize::from(menu.y + 6)).unwrap().contains(&models[start]));
+        click_picker_row(&mut app, menu, 6);
         assert_eq!(app.pending_model_changes, vec![("session".into(), models[start].clone())]);
     }
 
@@ -2120,11 +2120,11 @@ for line in sys.stdin:
         app.engine_picker = false;
         app.model_picker = Some(ModelPicker { session_id: "session".into(), models: vec!["one".into(), "two".into()],
             selected: 0, note: String::new(), loading: false, catalog_pending: false });
-        assert_eq!(app.active_chooser_rect().unwrap().height, 6);
+        assert_eq!(app.active_chooser_rect().unwrap().height, 8);
         app.chooser_height_override.set(Some(5));
         app.active_group = 1;
         app.groups[1].tabs.push("other".into());
-        assert_eq!(app.active_chooser_rect().unwrap().height, 6);
+        assert_eq!(app.active_chooser_rect().unwrap().height, 8);
     }
 
     #[test]
@@ -2352,7 +2352,7 @@ for line in sys.stdin:
             models: vec!["first".into(), "second".into()], selected: 0,
             note: "Verified models".into(), loading: false, catalog_pending: false });
         let menu = app.active_chooser_rect().unwrap();
-        let row = menu.y + 4;
+        let row = menu.y + app.model_picker.as_ref().unwrap().row_offset() + 1;
         assert!(app.mouse(MouseEvent { kind: MouseEventKind::Moved,
             column: menu.x + 2, row, modifiers: KeyModifiers::NONE }));
         assert_eq!(app.model_picker.as_ref().unwrap().selected, 1);
@@ -2632,23 +2632,39 @@ for line in sys.stdin:
     fn image_rows_survive_streaming_and_width_changes() {
         let source = "**You:**\n\n![chart](/home/user/chart.png)\n\n**Assistant:**\n\nInitial";
         let mut cached = RenderedTranscript::render_media(
-            0, "s", source, 30, None, None, 0, &[], transcript_tools::IMAGE_ROWS);
+            0, "s", source, 30, None, None, 0, &[], transcript_tools::IMAGE_ROWS, 0, None);
         assert_eq!(cached.images.len(), 1);
         let initial_row = cached.images[0].row;
         let extended = format!("{source} response with [reference](https://example.com)");
-        cached.update_media(&extended, 30, None, None, 0, &[], transcript_tools::IMAGE_ROWS);
+        cached.update_media(&extended, 30, None, None, 0, &[], transcript_tools::IMAGE_ROWS, 0, None);
         assert_eq!(cached.images[0].row, initial_row);
         let full = RenderedTranscript::render_media(
-            0, "s", &extended, 30, None, None, 0, &[], transcript_tools::IMAGE_ROWS);
+            0, "s", &extended, 30, None, None, 0, &[], transcript_tools::IMAGE_ROWS, 0, None);
         assert_eq!(cached.lines, full.lines);
         assert_eq!(cached.links, full.links);
         assert_eq!(cached.images, full.images);
-        cached.update_media(&extended, 18, None, None, 0, &[], transcript_tools::IMAGE_ROWS);
+        cached.update_media(&extended, 18, None, None, 0, &[], transcript_tools::IMAGE_ROWS, 0, None);
         let resized = RenderedTranscript::render_media(
-            0, "s", &extended, 18, None, None, 0, &[], transcript_tools::IMAGE_ROWS);
+            0, "s", &extended, 18, None, None, 0, &[], transcript_tools::IMAGE_ROWS, 0, None);
         assert_eq!(cached.lines, resized.lines);
         assert_eq!(cached.links, resized.links);
         assert_eq!(cached.images, resized.images);
+    }
+
+    #[test]
+    fn completed_mermaid_rebuilds_cached_lines_and_preserves_link_targets() {
+        let body = "graph TD\nA-->B";
+        let source = format!("**Assistant:**\n\n```mermaid\n{body}\n```\n\n[Next](https://example.com)");
+        let mut cached = RenderedTranscript::render_media(
+            0, "s", &source, 30, None, None, 0, &[], transcript_tools::IMAGE_ROWS, 0, None);
+        assert!(cached.mermaids.is_empty());
+        assert!(cached.lines.iter().any(|line| line.to_string().contains("graph TD")));
+        let ready = HashSet::from([transcript_tools::mermaid_key(body)]);
+        cached.update_media(&source, 30, None, None, 0, &[], transcript_tools::IMAGE_ROWS, 1, Some(&ready));
+        assert_eq!(cached.mermaids.len(), 1);
+        assert!(!cached.lines.iter().any(|line| line.to_string().contains("graph TD")));
+        assert_eq!(cached.links[0].url.as_ref(), "https://example.com");
+        assert_eq!(cached.lines[cached.links[0].row].to_string().trim(), "Next");
     }
 
     #[test]
@@ -3756,6 +3772,95 @@ for line in sys.stdin:
         app.apply_daemon_frame(&json!({"type":"event", "session_id":"third",
             "event":{"type":"needs_input_resolved", "data":{"id":"req"}}}));
         assert_eq!(draw(&app), (theme::RAIL, theme::RAIL));
+    }
+
+    #[test]
+    fn urgency_sort_waits_for_quiet_and_never_moves_a_group_under_interaction() {
+        let mut app = App::default();
+        app.handle(Event::Resize(100, 24));
+        app.sidebar_auto = false;
+        app.rail_visible = true;
+        app.preferences.set_for_test("collection_sort", "urgency");
+        for id in ["a", "b"] {
+            app.apply_update(DaemonUpdate::Upsert(Session { id:id.into(), title:id.into(),
+                collection:id.into(), transcript:String::new(), status:"Ready".into() }));
+        }
+        app.collections = vec![
+            crate::collections::Collection { name:"A".into(), sessions:vec!["a".into()], collapsed:false },
+            crate::collections::Collection { name:"B".into(), sessions:vec!["b".into()], collapsed:false },
+        ];
+        app.rail_selected = 1;
+        app.session_telemetry.entry("b".into()).or_default().context_percent = Some(60.0);
+        let start = Instant::now();
+        assert!(!app.tick_rail_sort(start));
+        assert!(matches!(app.rail_rows()[0], RailRow::Heading(0)));
+        app.blink_on = false; // phase changes cannot re-rank a waiting group
+        assert!(app.tick_rail_sort(start + Duration::from_secs(2)));
+        assert!(matches!(app.rail_rows()[0], RailRow::Heading(1)));
+        assert_eq!(app.sessions[app.rail_order()[app.rail_selected]].id, "b");
+        let mut terminal = Terminal::new(TestBackend::new(25, 8)).unwrap();
+        terminal.draw(|frame| app.draw_rail(frame, Rect::new(0, 0, 25, 8))).unwrap();
+        let rendered = terminal.backend().buffer().content.iter().map(|cell| cell.symbol()).collect::<String>();
+        assert!(rendered.contains("ctx B"));
+
+        app.session_telemetry.get_mut("b").unwrap().context_percent = None;
+        assert!(!app.tick_rail_sort(start + Duration::from_millis(2100)));
+        let rail = app.layout(app.size).rail.unwrap();
+        app.mouse(MouseEvent { kind:MouseEventKind::Moved, column:rail.x+2, row:rail.y+1,
+            modifiers:KeyModifiers::NONE });
+        assert!(app.rail_pointer_inside);
+        assert!(!app.tick_rail_sort(start + Duration::from_secs(5)));
+        assert!(matches!(app.rail_rows()[0], RailRow::Heading(1)));
+        app.mouse(MouseEvent { kind:MouseEventKind::Moved, column:rail.right(), row:rail.y+1,
+            modifiers:KeyModifiers::NONE });
+        app.focus = Focus::Rail;
+        assert!(!app.tick_rail_sort(start + Duration::from_secs(6)));
+        app.focus = Focus::Prompt;
+        assert!(app.tick_rail_sort(start + Duration::from_secs(8)));
+        assert!(matches!(app.rail_rows()[0], RailRow::Heading(0))); // original tie order
+        assert_eq!(app.sessions[app.rail_order()[app.rail_selected]].id, "b");
+    }
+
+    #[test]
+    fn project_urgency_sort_keeps_child_order_and_unknown_context_unranked() {
+        let mut app = App::default();
+        app.handle(Event::Resize(100, 24));
+        app.sidebar_auto = false; app.rail_visible = true;
+        app.preferences.set_for_test("collection_sort", "urgency");
+        for (id, project) in [("a1", "alpha"), ("z", "zeta"), ("a2", "alpha")] {
+            app.apply_update(DaemonUpdate::Upsert(Session { id:id.into(), title:id.into(),
+                collection:project.into(), transcript:String::new(), status:"Ready".into() }));
+        }
+        app.session_telemetry.entry("a1".into()).or_default().context_percent = None;
+        app.apply_daemon_frame(&json!({"type":"event", "session_id":"z",
+            "event":{"type":"needs_input", "data":{"id":"req", "kind":"ask_user",
+                "title":"Choose", "questions":[{"question":"Choose","options":[]}]}}}));
+        let start = Instant::now();
+        assert!(!app.tick_rail_sort(start));
+        assert!(app.tick_rail_sort(start + Duration::from_secs(2)));
+        let rows = app.rail_rows();
+        assert!(matches!(&rows[0], RailRow::ProjectHeading(name) if name == "zeta"));
+        assert!(matches!(&rows[1], RailRow::Session(1)));
+        assert!(matches!(&rows[2], RailRow::ProjectHeading(name) if name == "alpha"));
+        assert!(matches!(&rows[3], RailRow::Session(0)));
+        assert!(matches!(&rows[4], RailRow::Session(2)));
+    }
+
+    #[test]
+    fn unnamed_collection_uses_known_project_and_task_without_changing_explicit_names() {
+        let mut app = App::default();
+        app.apply_update(DaemonUpdate::Upsert(Session { id:"s".into(), title:"Fix picker".into(),
+            collection:"/fixture/collection-triage-repo".into(), transcript:String::new(), status:"Ready".into() }));
+        app.groups[0].tabs.push("s".into());
+        app.session_cwds.insert("s".into(), PathBuf::from("/fixture/collection-triage-repo"));
+        app.set_repo_status("s", doxa_worktrees::RepoStatus::Repository {
+            repo:"doxa".into(), base:None, checked_out:None, sha:None, worktree:None });
+        app.local_collection("new");
+        assert!(app.collections[0].name.ends_with("doxa · Fix picker"));
+        app.local_collection("new");
+        assert_ne!(app.collections[0].name, app.collections[1].name);
+        app.local_collection("new Chosen name");
+        assert_eq!(app.collections[2].name, "Chosen name");
     }
 
     #[test]

@@ -28,6 +28,15 @@ BINARY = os.environ.get("DOXA_NATIVE_DAEMON")
 ORIGINAL_POPEN = subprocess.Popen
 
 
+def process_exited_or_zombie(pid):
+    stat = Path(f"/proc/{pid}/stat")
+    if stat.exists():
+        return stat.read_text().split(") ", 1)[1][0] == "Z"
+    state = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)],
+                           capture_output=True, text=True, timeout=2)
+    return not state.stdout.strip() or state.stdout.lstrip().startswith("Z")
+
+
 @contextlib.contextmanager
 def vendor_server(hang=False, resumed_reasoning=None, first_reasoning="Finish the synthetic token answer."):
     requests = []
@@ -299,13 +308,19 @@ class NativeLiveVerifierTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=parent) as directory, vendor_server(hang=True) as (endpoint, requests):
             root = Path(directory)
             pidfile = root / "descendant.pid"
+            ready = root / "descendant.ready"
             wrapper = root / "native-with-child"
             # No credential text in the wrapper. This child intentionally
             # survives SIGTERM to prove cleanup escalates for descendants.
+            child_code = ("import signal,time;from pathlib import Path;"
+                "signal.signal(signal.SIGTERM,signal.SIG_IGN);"
+                f"Path({str(ready)!r}).write_text('ready');time.sleep(60)")
             wrapper.write_text("#!/usr/bin/python3\nimport os,subprocess,sys\n"
-                "child=subprocess.Popen([sys.executable,'-c',"
-                "'import signal,time;signal.signal(signal.SIGTERM,signal.SIG_IGN);time.sleep(60)'])\n"
+                f"child=subprocess.Popen([sys.executable,'-c',{child_code!r}])\n"
                 f"open({str(pidfile)!r},'w').write(str(child.pid))\n"
+                f"import time\nfor _ in range(500):\n"
+                f" if os.path.exists({str(ready)!r}): break\n time.sleep(.01)\n"
+                f"else: sys.exit(2)\n"
                 f"os.execv({BINARY!r},[{BINARY!r}]+sys.argv[1:])\n")
             wrapper.chmod(0o700)
             with patch.object(verifier, "TURN_TIMEOUT", .3):
@@ -316,8 +331,7 @@ class NativeLiveVerifierTests(unittest.TestCase):
             pid = int(pidfile.read_text())
             deadline = time.monotonic() + 5
             while time.monotonic() < deadline:
-                path = Path(f"/proc/{pid}/stat")
-                if not path.exists() or path.read_text().split(") ", 1)[1][0] == "Z":
+                if process_exited_or_zombie(pid):
                     break
                 time.sleep(.01)
             else:
@@ -329,12 +343,18 @@ class NativeLiveVerifierTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=parent) as directory, vendor_server() as (endpoint, requests):
             root = Path(directory)
             pidfile = root / "resume-child.pid"
+            ready = root / "resume-child.ready"
             wrapper = root / "resume-failure"
+            child_code = ("import signal,time;from pathlib import Path;"
+                "signal.signal(signal.SIGTERM,signal.SIG_IGN);"
+                f"Path({str(ready)!r}).write_text('ready');time.sleep(60)")
             wrapper.write_text("#!/usr/bin/python3\nimport os,subprocess,sys\n"
                 "if '--resume' in sys.argv:\n"
-                " child=subprocess.Popen([sys.executable,'-c',"
-                "'import signal,time;signal.signal(signal.SIGTERM,signal.SIG_IGN);time.sleep(60)'])\n"
+                f" child=subprocess.Popen([sys.executable,'-c',{child_code!r}])\n"
                 f" open({str(pidfile)!r},'w').write(str(child.pid))\n"
+                f" import time\n for _ in range(500):\n"
+                f"  if os.path.exists({str(ready)!r}): break\n  time.sleep(.01)\n"
+                f" else: sys.exit(2)\n"
                 " sys.exit(1)\n"
                 f"os.execv({BINARY!r},[{BINARY!r}]+sys.argv[1:])\n")
             wrapper.chmod(0o700)
@@ -345,8 +365,7 @@ class NativeLiveVerifierTests(unittest.TestCase):
             pid = int(pidfile.read_text())
             deadline = time.monotonic() + 5
             while time.monotonic() < deadline:
-                path = Path(f"/proc/{pid}/stat")
-                if not path.exists() or path.read_text().split(") ", 1)[1][0] == "Z":
+                if process_exited_or_zombie(pid):
                     break
                 time.sleep(.01)
             else:

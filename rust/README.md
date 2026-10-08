@@ -62,13 +62,15 @@ Tab reaches the project rail when visible. `/split`, `/vsplit`, `/pane`, and `/m
 
 Typing `/` shows completion; unsupported DOXA commands stay in the draft with an error. `/model`, `/effort`, `/mode`, and `/engine` show supported choices. Live model and mode changes require an idle session and empty queue; selecting another engine starts a new session. `/queue` previews or cancels waiting prompts. `/cd PATH` opens a tab in a verified directory without moving an existing daemon.
 
+The session rail groups uncollected sessions by project and keeps named collections in saved order. `/collection new` suggests a name from the active task and known project; add an explicit customer in `[project_customers]` in `~/.doxa/config.toml`, keyed by the session's absolute workspace path. Missing context is omitted, and `/collection new NAME` and `/collection rename` keep your chosen labels. `/collection sort urgency` orders whole groups by needs-input (`!`), reported context at least 50% (`ctx`), then completed-unseen (`new`); `/collection sort manual` restores the saved order. Sorting is off by default and waits until activity settles and the pointer and keyboard leave the rail. Session rows within each group never move. LORE proposal counts are not a per-session current state, so they do not affect this order.
+
 ## Review and permissions
 
 Codex's permission chip offers `on-request`, `auto`, and `full-access`. `on-request` reviews protected commands, file changes, and profile requests inline. `auto` keeps the Codex sandbox; `full-access` disables it. The choice applies to the idle session's next turn and restores with that session. DOXA peer and LORE tools retain separate review in every mode. DeepSeek and GLM have no provider permission mode; their peer and LORE calls require individual approval. [Engine capabilities](../docs/engine-capabilities.md#review-and-accounting).
 
 Permission answers bind to an exact pending request. Complete summaries must be read before full approval; changed or stale requests cannot inherit an answer. Secret-input requests wait for a private masked-input interface. Ctrl+Delete asks before stopping a daemon and removing its verified DOXA transcript; provider archives remain separate. Diff hunk rejection checks the current patch and staged state again before applying it.
 
-Links, Markdown, reasoning, and individual tool calls render in the transcript. Standalone local images inside the session workspace have bounded previews; [image settings and limits](../docs/terminal-images.md) explain the supported terminals. Ctrl+click opens HTTP(S) links. Review panes and tool output have bounded sizes. Search uses scrubbed indexed excerpts and bounded fallback scans. Unverified external entries cannot become resumable sessions.
+Links, Markdown, reasoning, and individual tool calls render in the transcript. Standalone local images inside the session workspace have bounded previews. Mermaid fences can render through an explicitly configured local sandboxed renderer; source remains visible otherwise. [Image and diagram limits](../docs/terminal-images.md) explain both paths. Ctrl+click opens HTTP(S) links. Review panes and tool output have bounded sizes. Search uses scrubbed indexed excerpts and bounded fallback scans. Unverified external entries cannot become resumable sessions.
 
 ## Memory and context
 

@@ -2145,6 +2145,16 @@ impl App {
         false
     }
     pub(super) fn mouse(&mut self, mouse: MouseEvent) -> bool {
+        if matches!(mouse.kind, MouseEventKind::Moved | MouseEventKind::Down(_)
+            | MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) {
+            let inside = self.layout(self.size).rail.is_some_and(|rail|
+                mouse.column > rail.x && mouse.column < rail.right().saturating_sub(1)
+                && mouse.row > rail.y && mouse.row < rail.bottom().saturating_sub(1));
+            if inside || self.rail_pointer_inside != inside {
+                self.rail_last_interaction = Instant::now();
+            }
+            self.rail_pointer_inside = inside;
+        }
         if mouse.kind == MouseEventKind::Down(MouseButton::Left)
             && self.rail_session_at(mouse.column, mouse.row).is_none() {
             self.last_rail_click = None;

@@ -122,6 +122,12 @@ def terminate_group(process):
         os.killpg(process.pid, signal.SIGKILL)
     except ProcessLookupError:
         pass
+    except PermissionError:
+        # Darwin can report EPERM when the group contains only an unreaped
+        # descendant zombie. Every live daemon child runs under our UID, so
+        # there is no remaining process we could signal in that case.
+        if sys.platform != "darwin":
+            raise
     process.wait(timeout=5)
 
 

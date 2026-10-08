@@ -1,7 +1,28 @@
 # Collection triage — colour, default labels, and ordering by urgency
 
-Status: **Parts 0, 1 and 1b SHIPPED in v1.2.0. Parts 2 and 3 are NOT
-implemented.**
+Status: **The Python 1.x implementation shipped Parts 0, 1 and 1b. The native
+Rust rail in v2.0.0-beta.11 uses a different session-row model. This branch
+adds derived collection names and settled, opt-in group ordering to Rust.**
+
+Native Rust behavior: `/collection new` without a name uses a configured
+customer from `[project_customers]` for the exact session workspace path,
+the known repository/directory name, and the active session title. Missing
+components are omitted; explicit labels remain untouched. `collection_sort`
+is `manual` by default. `urgency` sorts whole manual and project groups by
+verified needs-input, provider-reported context use at least 50%, then
+completed-unseen. Unknown context contributes no urgency. Equal ranks keep
+the existing group order; member order and saved layout stay intact. An
+unseen LORE proposal count is not a reliable current per-session state, so
+staged proposals remain outside native urgency ranking until a scoped,
+resolvable pending signal exists.
+
+The order updates only after 1.5 seconds without a rank change or rail
+interaction, and never while the pointer is in the rail or its keyboard
+selection has focus. Blink phase changes do not change rank. This is a
+settling boundary, not a timer that repeatedly reorders a live list.
+
+The remainder of this document is the historical Python design and uses
+Python module/test names. Its shipped labels do not describe the Rust rail.
 
 What shipped: the two status glyphs and the named `CTX_GLYPH_PCT`
 threshold (Part 0); project colour assigned by a stable hash of

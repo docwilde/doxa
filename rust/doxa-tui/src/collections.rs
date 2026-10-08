@@ -1,7 +1,7 @@
 //! Python-compatible named session collections. The flat tab list remains
 //! authoritative; collections only order and label its members.
 
-use std::collections::HashSet;
+use std::{collections::HashSet, path::Path};
 use serde_json::{json, Value};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -18,6 +18,32 @@ fn clean_name(raw: &str) -> String {
 }
 
 fn key(raw: &str) -> String { clean_name(raw).to_lowercase() }
+
+/// A suggested name is only a starting point. Customer is supplied by the
+/// owner's config, never inferred from a directory convention.
+pub fn suggested_name(customer: Option<&str>, project: Option<&str>, task: Option<&str>) -> String {
+    let parts = [customer, project, task].into_iter().flatten()
+        .map(clean_name).filter(|part| !part.is_empty()).collect::<Vec<_>>();
+    let label = if parts.is_empty() { "New collection".to_owned() } else { parts.join(" · ") };
+    clean_name(&label)
+}
+
+pub fn configured_customer<'a>(config: &'a toml::Table, root: &Path) -> Option<&'a str> {
+    config.get("project_customers")?.as_table()?
+        .get(root.to_str()?)?.as_str().filter(|name| !name.trim().is_empty())
+}
+
+pub fn unique_name(items: &[Collection], suggested: &str) -> String {
+    let label = clean_name(suggested);
+    if !items.iter().any(|item| key(&item.name) == key(&label)) { return label; }
+    for suffix in 2.. {
+        let suffix = format!(" {suffix}");
+        let stem = label.chars().take(48 - suffix.len()).collect::<String>();
+        let candidate = format!("{stem}{suffix}");
+        if !items.iter().any(|item| key(&item.name) == key(&candidate)) { return candidate; }
+    }
+    unreachable!()
+}
 
 pub fn from_json(value: Option<&Value>, keep: &HashSet<String>) -> Vec<Collection> {
     let mut names = HashSet::new();
@@ -134,5 +160,18 @@ mod tests {
             Collection { name:"Dead".into(), sessions:vec!["gone".into()], collapsed:false },
         ];
         assert!(to_json(&items, &HashSet::new()).is_empty());
+    }
+
+    #[test]
+    fn suggested_names_omit_unknown_context_and_never_replace_manual_names() {
+        assert_eq!(suggested_name(Some("Acme"), Some("doxa"), Some("Fix picker")), "Acme · doxa · Fix picker");
+        assert_eq!(suggested_name(None, Some("doxa"), None), "doxa");
+        assert_eq!(suggested_name(None, None, None), "New collection");
+        let items = vec![Collection { name: "doxa".into(), sessions: vec![], collapsed: false }];
+        assert_eq!(unique_name(&items, "doxa"), "doxa 2");
+        assert_eq!(items[0].name, "doxa");
+        let config = "[project_customers]\n'/repo' = 'Acme'\n".parse::<toml::Table>().unwrap();
+        assert_eq!(configured_customer(&config, Path::new("/repo")), Some("Acme"));
+        assert_eq!(configured_customer(&config, Path::new("/other")), None);
     }
 }

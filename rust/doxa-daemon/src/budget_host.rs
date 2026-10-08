@@ -17,38 +17,14 @@ pub struct BudgetHost {
     journal: Option<Journal>,
 }
 
-/// Rates copied from the sourced Python 1.19 sheet (doxa/prices.py,
-/// checked against provider pages 2026-09-30). Native vendor accounting deliberately charges every
+/// Rates come from the exact-model registry. Native vendor accounting deliberately charges every
 /// prompt token at the fresh-input rate: cached tokens are a subset of the
 /// prompt, and the published cached rate is lower for every row below.
 #[derive(Clone, Copy)]
 pub(super) struct Pricing { pub(super) input: f64, pub(super) output: f64, pub(super) source: &'static str }
 
 pub(super) fn vendor_price(engine: &str, model: &str) -> Option<Pricing> {
-    let (input, output) = match (engine, model) {
-        ("codex", "gpt-6-astra") => (20.0, 100.0),
-        ("codex", "gpt-5.6-sol") => (8.0, 40.0),
-        ("codex", "gpt-5.6-terra") => (4.0, 24.0),
-        ("codex", "gpt-5.6-luna") => (0.4, 2.4),
-        ("codex", "gpt-5.5") => (12.5, 75.0),
-        ("codex", "gpt-5.3-codex") => (3.5, 28.0),
-        ("deepseek", "deepseek-flash") => (0.3, 1.2),
-        ("deepseek", "deepseek-v4-pro") => (1.32, 3.96),
-        ("glm", "glm-5.3-flash") => (0.15, 0.5),
-        ("glm", "glm-5.3-flashx") => (0.37, 1.25),
-        ("glm", "glm-5.3" | "glm-5.2" | "glm-5.1") => (1.4, 4.4),
-        ("glm", "glm-5") => (1.0, 3.2),
-        ("glm", "glm-4.7" | "glm-4.6" | "glm-4.5") => (0.6, 2.2),
-        ("glm", "glm-4.7-flashx") => (0.07, 0.4),
-        ("glm", "glm-4.5-air") => (0.2, 1.1),
-        _ => return None,
-    };
-    let source = match engine {
-        "codex" => "https://developers.openai.com/api/docs/pricing",
-        "deepseek" => "https://api-docs.deepseek.com/quick_start/pricing",
-        "glm" => "https://docs.z.ai/guides/overview/pricing",
-        _ => return None,
-    };
+    let (input, output, source, _) = doxa_engines::model_registry::lookup(engine, model).priced_pair()?;
     Some(Pricing { input, output, source })
 }
 

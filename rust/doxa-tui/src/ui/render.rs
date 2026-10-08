@@ -2,7 +2,7 @@
 use super::{
     belief_review_buttons, chip_text, chooser_list_lines, chooser_row_style,
     chooser_visible_start, clipped_title, input_request_body, launch, links, raw_visual_rows,
-    repo_path_label, safe_label, theme, vendor_models, permission_choices, App, ChipHit, Focus, RailRow,
+    repo_path_label, safe_label, theme, vendor_models, permission_choices, App, ChipHit, Focus, RailGroupKey, RailRow,
     RenderedTranscript, ENGINE_CHOICES, MAX_RENDERED_TRANSCRIPTS,
     REVIEW_BODY_RESERVE, SPINNER_FRAMES, wrapped_rows,
 };
@@ -12,6 +12,64 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap};
 use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
+use doxa_engines::model_registry::{self, Fact, Provenance, Thinking};
+
+fn fact_source(provenance: Provenance) -> String {
+    match provenance {
+        Provenance::Unknown => "unknown".into(),
+        Provenance::Static { source, as_of } => {
+            let host = source.split("://").nth(1).unwrap_or(source).split('/').next().unwrap_or(source);
+            format!("{host} {as_of}")
+        }
+    }
+}
+
+fn model_fact_lines(engine: &str, model: &str) -> [String; 2] {
+    let facts = model_registry::lookup(engine, model);
+    let context = match facts.context_window {
+        Fact { value: Some(value), provenance } => format!("ctx {value} [{}]", fact_source(provenance)),
+        _ => "ctx ? (unknown)".into(),
+    };
+    let thinking = match facts.thinking {
+        Fact { value: Some(value), provenance } => {
+            let behavior = match value { Thinking::Unsupported => "unsupported", Thinking::Optional => "optional", Thinking::Mandatory => "mandatory" };
+            format!("thinking {behavior} [{}]", fact_source(provenance))
+        }
+        _ => "thinking ? (unknown)".into(),
+    };
+    let prices = match facts.priced_pair() {
+        Some((input, output, _, _)) => {
+            let source = fact_source(facts.input_usd_per_million.provenance);
+            format!("in ${input}/M · out ${output}/M [{source}]")
+        }
+        None => {
+            let one = |name: &str, fact: Fact<f64>| match fact {
+                Fact { value: Some(value), provenance: Provenance::Static { .. } } =>
+                    format!("{name} ${value}/M [{}]", fact_source(fact.provenance)),
+                _ => format!("{name} ? (unknown)"),
+            };
+            format!("{} · {}", one("in", facts.input_usd_per_million), one("out", facts.output_usd_per_million))
+        }
+    };
+    [format!(" {context} · {thinking}"), format!(" {prices}")]
+}
+
+#[cfg(test)]
+mod model_fact_tests {
+    use super::model_fact_lines;
+
+    #[test]
+    fn picker_shows_field_level_unknowns_and_dated_price_source() {
+        let known = model_fact_lines("codex", "gpt-5.6-sol");
+        assert!(known[0].contains("ctx ? (unknown) · thinking ? (unknown)"));
+        assert!(known[1].contains("in $8/M · out $40/M"));
+        assert!(known[1].contains("developers.openai.com 2026-09-30"));
+
+        let unknown = model_fact_lines("claude", "gpt-5.6-sol");
+        assert!(unknown[1].contains("in ? (unknown) · out ? (unknown)"));
+        assert!(!unknown[1].contains("developers.openai.com"));
+    }
+}
 
 impl App {
     pub fn draw(&self, frame: &mut Frame) {
@@ -474,6 +532,14 @@ impl App {
             title = " Model · this session · R retry · Enter select · Esc close ";
             let picker = self.model_picker.as_ref().unwrap();
             lines.push(Line::from(format!(" {}", picker.note)));
+            if let Some(model) = picker.models.get(picker.selected) {
+                let engine = self.session_identity.get(&picker.session_id)
+                    .and_then(|identity| identity.0.as_deref()).unwrap_or("");
+                for detail in model_fact_lines(engine, model) { lines.push(Line::from(detail)); }
+            } else {
+                lines.push(Line::from(""));
+                lines.push(Line::from(""));
+            }
             lines.push(Line::from(""));
             if picker.catalog_pending {
                 lines.push(Line::from(
@@ -1927,6 +1993,13 @@ impl App {
 
     pub(super) fn draw_rail(&self, frame: &mut Frame, area: Rect) {
         let rows = self.rail_rows();
+        let ranks = self.rail_groups().into_iter().map(|(key, _, rank)| (key, rank)).collect::<Vec<_>>();
+        let badge = |key: &RailGroupKey| match ranks.iter().find(|(candidate, _)| candidate == key).map(|(_, rank)| *rank).unwrap_or(0) {
+            3 => "!",        // stopped for a human
+            2 => "ctx",      // provider-reported context use >= 50%
+            1 => "new",      // completed but unseen
+            _ => "",
+        };
         let start = self.rail_view_start(area, &rows);
         let visible = usize::from(area.height.saturating_sub(2));
         let selected = self.rail_order().get(self.rail_selected).copied();
@@ -1937,19 +2010,25 @@ impl App {
                 RailRow::Heading(index) => {
                     let item = &self.collections[*index];
                     let mark = if item.collapsed { "▸" } else { "▾" };
+                    let urgency = badge(&RailGroupKey::Collection(item.name.clone()));
+                    let label = if urgency.is_empty() { format!(" {mark} {}", item.name) }
+                        else { format!(" {mark} {urgency} {}", item.name) };
                     lines.push(Line::styled(
-                        format!(" {mark} {}", item.name),
+                        label,
                         Style::default()
                             .fg(theme::ACCENT)
                             .add_modifier(Modifier::BOLD),
                     ));
                 }
-                RailRow::ProjectHeading(project) => lines.push(Line::styled(
-                    format!("  {}", clipped_title(project, usize::from(area.width.saturating_sub(4))).0),
-                    Style::default()
-                        .fg(theme::ACCENT)
-                        .add_modifier(Modifier::BOLD),
-                )),
+                RailRow::ProjectHeading(project) => {
+                    let urgency = badge(&RailGroupKey::Project(project.clone()));
+                    let prefix = if urgency.is_empty() { "  ".to_owned() } else { format!("  {urgency} ") };
+                    lines.push(Line::styled(
+                        format!("{}{}", prefix, clipped_title(project,
+                            usize::from(area.width).saturating_sub(prefix.len() + 2)).0),
+                        Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD),
+                    ));
+                },
                 RailRow::PastHeading => lines.push(Line::styled(
                     "  Past sessions",
                     Style::default().fg(theme::SECONDARY).add_modifier(Modifier::ITALIC),
@@ -2215,7 +2294,17 @@ impl App {
         } else {
             super::transcript_tools::IMAGE_ROWS
         };
-        let (lines, sections, link_regions, images, top) = {
+        let content_width = inner[1].width.saturating_sub(2);
+        let (mermaid_revision, ready_mermaids) = {
+            let picker = self.image_store.borrow().picker();
+            let mut store = self.mermaid_store.borrow_mut();
+            store.observe(content, content_width,
+                self.preferences.value("mermaid_renderer"),
+                self.preferences.value("mermaid_renderer_root"),
+                &self.session_cwds.values().cloned().collect::<Vec<_>>(), picker);
+            (store.revision(), store.ready_keys(content_width))
+        };
+        let (lines, sections, link_regions, images, mermaids, top) = {
             let mut cache = self.rendered_transcripts.borrow_mut();
             let position = cache
                 .iter()
@@ -2239,6 +2328,8 @@ impl App {
                     cards_revision,
                     self.tool_cards.for_session(id),
                     image_rows,
+                    mermaid_revision,
+                    Some(&ready_mermaids),
                 ));
                 cache.len() - 1
             };
@@ -2250,6 +2341,8 @@ impl App {
                 cards_revision,
                 self.tool_cards.for_session(id),
                 image_rows,
+                mermaid_revision,
+                Some(&ready_mermaids),
             );
             let (window, top) = transcript_window(
                 &cache[position].lines,
@@ -2283,6 +2376,7 @@ impl App {
                     Vec::new(),
                     Vec::new(),
                     Vec::new(),
+                    Vec::new(),
                     0,
                 )
             } else {
@@ -2302,6 +2396,7 @@ impl App {
                         })
                         .collect::<Vec<_>>(),
                     cache[position].images.clone(),
+                    cache[position].mermaids.clone(),
                     top,
                 )
             }
@@ -2414,6 +2509,28 @@ impl App {
                     let text = format!("Image clipped: {} · scroll to view", image.alt);
                     frame.render_widget(
                         Paragraph::new(text).style(Style::default().fg(theme::MUTED)),
+                        Rect::new(area.x, area.y, area.width, 1),
+                    );
+                }
+            }
+            drop(store);
+            let store = self.mermaid_store.borrow();
+            for diagram in mermaids {
+                let start = diagram.row.max(top);
+                let end = (diagram.row + usize::from(image_rows)).min(top + viewport);
+                if start >= end { continue; }
+                let area = Rect::new(
+                    inner[1].x.saturating_add(1),
+                    inner[1].y.saturating_add((start - top) as u16),
+                    inner[1].width.saturating_sub(2),
+                    (end - start) as u16,
+                );
+                if start == diagram.row && end == diagram.row + usize::from(image_rows) {
+                    store.draw(frame, area, &diagram.key);
+                } else {
+                    frame.render_widget(
+                        Paragraph::new("Diagram clipped · scroll to view")
+                            .style(Style::default().fg(theme::MUTED)),
                         Rect::new(area.x, area.y, area.width, 1),
                     );
                 }

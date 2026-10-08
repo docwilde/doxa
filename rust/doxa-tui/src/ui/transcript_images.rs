@@ -48,6 +48,8 @@ impl std::fmt::Debug for Store {
 impl Store {
     pub fn clear(&mut self) { self.previews.clear(); }
 
+    pub fn picker(&self) -> Option<Picker> { self.picker.clone() }
+
     pub fn configure(&mut self, mode: &str) {
         self.previews.clear();
         if matches!(mode, "text" | "off") {
@@ -170,7 +172,13 @@ fn open_workspace_file(source: &str, root: &Path) -> Option<File> {
 }
 
 fn load(source: &str, root: &Path, width: u16, picker: &Picker) -> Option<Protocol> {
-    let mut file = open_workspace_file(source, root)?;
+    let file = open_workspace_file(source, root)?;
+    decode_file(file, width, picker)
+}
+
+/// The Mermaid sandbox owns this file. Callers must open it with O_NOFOLLOW;
+/// otherwise a renderer-authored symlink could escape after the sandbox exits.
+pub(super) fn decode_file(mut file: File, width: u16, picker: &Picker) -> Option<Protocol> {
     let metadata = file.metadata().ok()?;
     if !metadata.is_file() || metadata.len() > MAX_FILE_BYTES { return None; }
     let reader = image::ImageReader::new(BufReader::new(&mut file))

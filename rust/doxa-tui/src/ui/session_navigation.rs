@@ -791,10 +791,49 @@ impl App {
             self.input_cursor = 0;
             return;
         }
+        if verb == "sort" {
+            let mode = if rest.is_empty() {
+                if self.preferences.value("collection_sort") == "urgency" { "manual" } else { "urgency" }
+            } else { rest };
+            if !["manual", "urgency"].contains(&mode) {
+                self.notice = "Usage: /collection sort [manual|urgency]".into();
+                return;
+            }
+            self.notice = match crate::settings::config_path().and_then(|path|
+                crate::settings::save(&path, &[("collection_sort".into(), Some(mode.into()))], "claude")) {
+                Ok(()) => {
+                    self.preferences = crate::preferences::Preferences::load();
+                    self.rail_sort_signature.clear();
+                    self.rail_sort_order.clear();
+                    self.input.clear(); self.input_cursor = 0;
+                    format!("Collection order: {mode}")
+                }
+                Err(error) => format!("Collection order unchanged: {error}"),
+            };
+            return;
+        }
         let active = self.groups[self.active_group]
             .active_id()
             .map(str::to_owned);
-        let result = crate::collections::edit(&mut self.collections, verb, rest, active.as_deref());
+        let name = if verb == "new" && rest.is_empty() {
+            let cwd = active.as_deref().and_then(|id| self.session_cwds.get(id));
+            let config = crate::settings::config_path().map(|path| doxa_state::load_config(&path)).unwrap_or_default();
+            let customer = cwd.and_then(|root| crate::collections::configured_customer(&config, root));
+            let project = active.as_deref().and_then(|id| self.repo_cache.get(id))
+                .and_then(|(status, _)| status.as_ref())
+                .and_then(|status| match status {
+                    doxa_worktrees::RepoStatus::Repository { repo, .. } => Some(repo.as_str()),
+                    doxa_worktrees::RepoStatus::Directory { name } => Some(name.as_str()),
+                })
+                .or_else(|| cwd.and_then(|path| path.file_name()).and_then(|name| name.to_str()));
+            let task = active.as_deref().and_then(|id| self.sessions.iter().find(|session| session.id == id))
+                .map(|session| session.title.as_str())
+                .filter(|title| !title.trim().is_empty() && Some(*title) != active.as_deref()
+                    && *title != "New session");
+            Some(crate::collections::unique_name(&self.collections,
+                &crate::collections::suggested_name(customer, project, task)))
+        } else { None };
+        let result = crate::collections::edit(&mut self.collections, verb, name.as_deref().unwrap_or(rest), active.as_deref());
         self.notice = match result {
             Ok(note) => {
                 self.input.clear();

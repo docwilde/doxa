@@ -557,6 +557,13 @@ fn worktrees(args: &[String]) -> io::Result<()> {
 
 fn fleet(args: &[String]) -> io::Result<()> {
     if args.iter().any(|arg|matches!(arg.as_str(),"--help"|"-h")) {print!("{}",fleet_control::HELP);return Ok(());}
+    if let [command, path] = args {
+        if command == "calibrate" {
+            let report = doxa_fleet::calibration::evaluate_file(Path::new(path))?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            return Ok(());
+        }
+    }
     if args.first().is_some_and(|arg| arg == "start") {
         return fleet_control::start(&args[1..]);
     }

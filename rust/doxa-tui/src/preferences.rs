@@ -13,6 +13,8 @@ impl Preferences {
         }).collect(); Self { values }
     }
     pub fn value(&self,key:&str)->&str { self.values.get(key).map(String::as_str).unwrap_or("") }
+    #[cfg(test)]
+    pub(crate) fn set_for_test(&mut self,key:&'static str,value:&str) { self.values.insert(key,value.into()); }
     pub fn on(&self,key:&str)->bool { let v=self.value(key); !v.is_empty() && !matches!(v.to_ascii_lowercase().as_str(),"0"|"false"|"off"|"no") }
     pub fn sidebar_width(&self)->u16 { self.value("sidebar_width").parse::<f64>().ok().filter(|v|v.is_finite()).unwrap_or(25.0).clamp(22.0,41.0) as u16 }
     pub fn clock_format(&self)->String {
