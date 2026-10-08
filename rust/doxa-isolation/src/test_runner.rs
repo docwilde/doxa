@@ -238,7 +238,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let source = root.path().join("worker"); fs::create_dir(&source).unwrap();
         let git = |args: &[&str]| {
-            let status = Command::new("/usr/bin/git").env_clear().env("PATH", "/usr/bin:/bin")
+            let status = Command::new("git").env_clear().env("PATH", std::env::var_os("PATH").unwrap_or_default())
                 .current_dir(&source).args(args).status().unwrap();
             assert!(status.success(), "{args:?}");
         };

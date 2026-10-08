@@ -1116,8 +1116,8 @@ mod tests {
     #[test]
     fn host_test_rejects_ignored_changes_outside_assignment_scope() {
         let root=tempfile::tempdir().unwrap();let repo=root.path().join("worker");fs::create_dir(&repo).unwrap();
-        let git=|args:&[&str]|{let status=std::process::Command::new("/usr/bin/git")
-            .env_clear().env("PATH","/usr/bin:/bin").current_dir(&repo).args(args)
+        let git=|args:&[&str]|{let status=std::process::Command::new("git")
+            .env_clear().env("PATH",std::env::var_os("PATH").unwrap_or_default()).current_dir(&repo).args(args)
             .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().unwrap();
             assert!(status.success(),"{args:?}");};
         git(&["init","-q"]);git(&["config","user.name","Fixture"]);
