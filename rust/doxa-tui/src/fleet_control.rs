@@ -193,6 +193,9 @@ impl Spec {
         if worker_after.iter().any(|row|!row.is_empty())&&(preflight.supervisor.is_none()||review.supervisor.is_none()){
             return Err(invalid("worker dependencies require an acting coordinator and independent alignment supervisor"));
         }
+        if worker_after.iter().any(|row|!row.is_empty())&&!isolation.docker(){
+            return Err(invalid("worker dependencies require Docker-isolated fleet sessions; native workers can invoke owner-local release commands"));
+        }
         memory_off = memory_off.min(preflight.sessions);
         Ok(Self { review, allowed_paths, worker_tasks, worker_paths, worker_after, preflight, isolation, pool, prompt, cwd, seed, timeout, quiet, dry_run, memory_off, lore_enabled: doxa_state::lore_enabled_default() })
     }
@@ -404,6 +407,8 @@ pub fn resume(root: &Path, id: &str) -> io::Result<()> {
         (total_budget.is_none() && value["spec"]["allow_unbudgeted"] != true) { return Err(invalid("fleet resume budget is not verifiable")); }
     let review_budget = value["supervision"]["context"]["review"]["budget_usd"].as_f64().unwrap_or(0.0);
     let budget = total_budget.map(|total| (total-review_budget) / rows.len() as f64);
+    let has_dependencies=value["supervision"]["context"]["assignments"].as_array()
+        .is_some_and(|assignments|assignments.iter().any(|row|row["depends_on"].as_array().is_some_and(|deps|!deps.is_empty())));
     let mut slots = Vec::new();
     for (index, row) in rows.iter().enumerate() {
         ensure_active(&store)?;
@@ -415,6 +420,7 @@ pub fn resume(root: &Path, id: &str) -> io::Result<()> {
         let session = discovery::Session { id:session_id, title:String::new(), socket, scope_key:String::new(), clients:None, started_at:String::new() };
         let mut slot = connect(session, &assigned, budget, value["spec"]["isolation"].as_str().map(doxa_isolation::Profile::parse).transpose()?)?;
         resumable_slot_phase(row,slot.busy)?;
+        if has_dependencies{verify_dependency_container(&root.join(value["run_id"].as_str().ok_or_else(||invalid("fleet run identity unavailable"))?),&slot.session.id)?;}
         if value["ledger_path"].is_string() {
             let capability = rpc(&mut slot.client, "peer_tools_status", json!({}))?;
             if capability["ledger_path"] != value["ledger_path"] { return Err(invalid("fleet private ledger identity changed; resume withheld")); }
@@ -503,6 +509,19 @@ fn teardown_sessions(sessions: impl Iterator<Item=(usize, discovery::Session)>) 
 }
 
 struct Slot { session: discovery::Session, client: DaemonClient, pending: Vec<(Value, Instant)>, busy: bool }
+fn verify_dependency_container(run:&Path,session_id:&str)->io::Result<()> {
+    let home=doxa_isolation::home()?;
+    let manifest=doxa_isolation::read_manifest(&doxa_isolation::manifest_path(&home,session_id)?)?;
+    if !manifest.profile.docker()||manifest.state!="ready"||manifest.container_id.is_none(){
+        return Err(invalid("dependent fleet session has no ready Docker container"));
+    }
+    let run=fs::canonicalize(run)?;
+    if [&manifest.checkout,&manifest.private_home,&manifest.cache,&manifest.broker]
+        .into_iter().any(|mount|run.starts_with(mount)){
+        return Err(invalid("fleet run root is visible inside a worker container"));
+    }
+    Ok(())
+}
 fn connect(session: discovery::Session, expected: &Choice, budget: Option<f64>, isolation:Option<doxa_isolation::Profile>) -> io::Result<Slot> {
     let mut client = DaemonClient::connect(&session.socket, None).map_err(io::Error::other)?;
     if client.hello["session_id"] != session.id || client.hello["engine"] != engine_name(expected.engine) { return Err(invalid("fleet daemon identity changed")); }
@@ -569,6 +588,7 @@ pub fn start(args: &[String]) -> io::Result<()> {
             store.save(&value)?;
             ensure_active(&store)?;
             let mut slot = connect(session, assigned, budget, Some(spec.isolation))?;
+            if spec.worker_after.iter().any(|row|!row.is_empty()){verify_dependency_container(&store.run,&slot.session.id)?;}
             if spec.preflight.supervisor.is_some() {
                 let capability = rpc(&mut slot.client, "peer_tools_status", json!({}))?;
                 if capability["provider_peer_tools"] != true { return Err(invalid("supervisor barrier withheld: slot has no verified provider peer tools")); }
@@ -1066,7 +1086,7 @@ mod tests {
     #[test]
     fn reviewed_dependency_plan_requires_earlier_workers_and_a_coordinator() {
         let args:Vec<String>=["--pool","claude:worker","--supervisor","claude:boss","--prompt","Shared goal",
-            "-n3","--run-budget","10","--alignment-supervisor","deepseek:reviewer",
+            "-n3","--run-budget","10","--isolation","docker-open","--alignment-supervisor","deepseek:reviewer",
             "--review-budget","1","--worker-after","2:1","--worker-after","3:2"]
             .into_iter().map(str::to_owned).collect();
         let spec=Spec::parse(&args).unwrap();
@@ -1083,6 +1103,8 @@ mod tests {
         assert!(Spec::parse(&no_boss).is_err());
         let mut no_independent=args.clone();let at=no_independent.iter().position(|value|value=="--alignment-supervisor").unwrap();no_independent.drain(at..at+2);
         assert!(Spec::parse(&no_independent).is_err());
+        let mut native=args.clone();let at=native.iter().position(|value|value=="--isolation").unwrap();native[at+1]="native".into();
+        assert!(Spec::parse(&native).is_err());
     }
     #[test]
     fn human_dependency_release_binds_a_live_completed_turn_and_accepted_handoff() {

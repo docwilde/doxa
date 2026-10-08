@@ -61,7 +61,11 @@ edge and binds it into the assignment digest. Waiting workers have live,
 budgeted daemons but receive no initial task; supervised peer delivery to them
 is refused until host dispatch. `fleet status RUN` shows `dependency_waiting`.
 On resume, waiting slots stay waiting, while an uncertain `dispatch_pending`
-slot is refused rather than prompted twice.
+slot is refused rather than prompted twice. Dependency plans require
+`--isolation docker-open` or `docker-offline`; `native` is rejected. The host
+checks each session's ready Docker manifest and refuses a fleet root inside a
+container mount. Docker workers see their private checkout, home, cache and
+restricted broker, while the owner fleet root and CLI stay on the host.
 
 The release is explicitly human-owned because the host does not yet run
 trusted project tests. After the predecessor finishes a turn, the host records
@@ -80,6 +84,12 @@ dispatches ready workers once and journals `dispatch_pending` before prompt
 admission. Human release accepts scheduling evidence; it does not certify
 test quality or grant new scope. If a predecessor starts another turn after
 review, the release token becomes stale and the operator must review again.
+The CLI token binds the reviewed evidence; it does not authenticate a human.
+Native-profile workers share the operator's Unix account and could invoke
+local fleet commands, so dependency plans refuse that profile. The Docker
+boundary assumes the owner does not expose the host's fleet root or control
+services into containers through separate mounts or network configuration.
+A separate UI-owned approval channel remains open work.
 
 Supervised workers can use `fleet_kind=handoff` with host artifact IDs, followed
 by the recipient's `ack` and the original sender's `confirm`. The ACK and
