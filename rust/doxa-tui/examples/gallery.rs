@@ -340,6 +340,20 @@ fn scene(name: &str) -> App {
             ]);
             app.notice="Fixture · recorded fleet view · no live controller".into();
         }
+        "fleet-release-review" => {
+            app.groups[0].tabs=vec!["demo-codex-01".into()];
+            app.sessions.iter_mut().for_each(|session|session.transcript.clear());
+            app.show_fleet_dependency_review_fixture(json!({
+                "run_id":"parser-checks", "worker_index":1,
+                "charter_sha256":"c".repeat(64), "assignment_id":"assignment-parser-1",
+                "task_sha256":"t".repeat(64), "checkpoint_id":"checkpoint-parser-1",
+                "handoff_id":"handoff-parser-1", "artifact_refs":["src/parser.rs"],
+                "changed_paths":"src/parser.rs\nsrc/parser_test.rs",
+                "last_turn_sha256":"l".repeat(64), "dependent_workers":[2],
+                "git_observation_available":true, "tests_verified":false,
+            })).unwrap();
+            app.notice="Fixture · host evidence · release disabled".into();
+        }
         _ => panic!("unknown scene: {name}"),
     }
     app
@@ -359,7 +373,7 @@ fn main() {
     let name = std::env::args().nth(1).expect("scene name");
     let (width,height) = match name.as_str() {
         "welcome" => (72,18),
-        "hero" | "image-preview" | "isolation" | "repo-picker" | "claude-session" | "tool-activity" | "tool-expanded" | "tool-entries" | "restored-tool" | "processing" | "reasoning" | "commands" | "help" | "needs-input" | "permissions" | "permission-request" | "effort" | "history" | "queue" | "beliefs" | "belief-hover" | "memory" | "memory-management" | "memory-change" | "fleet-review" | "fleet-dependency" | "fleet-view" => (126,31),
+        "hero" | "image-preview" | "isolation" | "repo-picker" | "claude-session" | "tool-activity" | "tool-expanded" | "tool-entries" | "restored-tool" | "processing" | "reasoning" | "commands" | "help" | "needs-input" | "permissions" | "permission-request" | "effort" | "history" | "queue" | "beliefs" | "belief-hover" | "memory" | "memory-management" | "memory-change" | "fleet-review" | "fleet-dependency" | "fleet-view" | "fleet-release-review" => (126,31),
         _ => panic!("unknown scene"),
     };
     let mut terminal = Terminal::new(TestBackend::new(width,height)).unwrap();

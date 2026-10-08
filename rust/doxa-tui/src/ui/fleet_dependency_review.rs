@@ -15,6 +15,7 @@ pub(super) struct Prepared {
     pub seen: Cell<usize>,
     pub complete: Cell<bool>,
     pub armed: bool,
+    fixture: bool,
 }
 
 impl Prepared {
@@ -47,7 +48,20 @@ impl Prepared {
         }
         let lines = review_lines(request);
         Ok(Self { root, run_id: run_id.to_owned(), worker, token: review.token,
-            lines, seen: Cell::new(0), complete: Cell::new(false), armed: false })
+            lines, seen: Cell::new(0), complete: Cell::new(false), armed: false, fixture: false })
+    }
+
+    pub(super) fn from_fixture_review(request: Value) -> io::Result<Self> {
+        let run_id = request["run_id"].as_str().ok_or_else(|| invalid("fixture run ID missing"))?.to_owned();
+        let worker = request["worker_index"].as_u64()
+            .and_then(|index| usize::try_from(index).ok())
+            .ok_or_else(|| invalid("fixture worker missing"))?;
+        let mut prepared = Self::from_host_review(
+            PathBuf::from("/nonexistent-doxa-gallery-fixture"), &run_id, worker,
+            fleet_control::Review { request, token: "f".repeat(64) },
+        )?;
+        prepared.fixture = true;
+        Ok(prepared)
     }
 
     pub fn reset_visibility(&mut self) {
@@ -57,6 +71,9 @@ impl Prepared {
     }
 
     pub fn release(self) -> io::Result<Value> {
+        if self.fixture {
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, "Gallery fixture cannot release a worker"));
+        }
         if !self.armed || !self.complete.get() {
             return Err(io::Error::new(io::ErrorKind::PermissionDenied, "Read and explicitly confirm the complete dependency review"));
         }
@@ -98,6 +115,13 @@ mod tests {
             "last_turn_sha256":"l".repeat(64), "dependent_workers":[2],
             "git_observation_available":true, "tests_verified":false
         }), token: "a".repeat(64) }
+    }
+    #[test]
+    fn gallery_fixture_cannot_release_even_after_review() {
+        let mut prepared = Prepared::from_fixture_review(review().request).unwrap();
+        prepared.complete.set(true);
+        prepared.armed = true;
+        assert!(prepared.release().unwrap_err().to_string().contains("Gallery fixture cannot release"));
     }
     #[test]
     fn exact_host_identity_and_unverified_tests_are_required() {

@@ -11,7 +11,7 @@
 > [!WARNING]
 > Rust 2.0 is in beta. Agents can edit files and run commands with your privileges. Choose a [session isolation profile](docs/session-isolation.md) and review the [platform limits](#platform-and-scope) before using DOXA on important work.
 
-![DOXA Rust beta.13 workspace with three engine tabs and a Markdown turn](assets/shots/rust-2.0.0-beta.13-hero.png)
+![DOXA Rust beta.14 workspace with three engine tabs and a Markdown turn](assets/shots/rust-2.0.0-beta.14-hero.png)
 
 [How the gallery was captured](docs/rust-gallery.md)
 
@@ -63,7 +63,7 @@ The [Rust guide](rust/README.md) covers keys, session recovery, worktrees, setti
 
 [Engine capability matrix](docs/engine-capabilities.md) lists model, permission, cost, compaction, and platform support. The picker distinguishes sourced model facts from unknown context or thinking support. DOXA does not silently switch engines during a session.
 
-Fleets can run an acting coordinator and workers under a reviewed charter, typed host gates, and spending limits. A separately selected alignment supervisor and fast LLM or Jev message judge can inspect work and messages. Dependent Docker-isolated workers wait for a reviewed handoff and explicit human release; project tests are not certified automatically. Offline threshold calibration is available for labeled judge results. [Fleet supervision](docs/fleet-supervision.md).
+Fleets can run an acting coordinator and workers under a reviewed charter, typed host gates, and spending limits. A separately selected alignment supervisor and fast LLM or Jev message judge can inspect work and messages. Dependent Docker-isolated workers wait for a host checkpoint, accepted handoff, and explicit human release. `/fleet dependency-review` shows the evidence in the TUI; it does not certify project tests. Offline threshold calibration is available for labeled judge results. [Fleet supervision](docs/fleet-supervision.md).
 
 ## Remote access
 
@@ -73,11 +73,11 @@ Remote control is opt in. `doxa remote serve` exposes a private Rust browser vie
 
 ## Gallery
 
-These beta.13 frames render the production Ratatui app with deterministic example events. They show the interface without opening a provider, Docker container, or user store. The [capture record](docs/rust-gallery.md) includes more views and exact reproduction steps.
+These beta.14 frames render the production Ratatui app with deterministic example events. They show the interface without opening a provider, Docker container, or user store. The [capture record](docs/rust-gallery.md) includes more views and exact reproduction steps.
 
-| Image preview | Isolation details | Fleet dependency review |
+| Image preview | Isolation details | Fleet release review |
 | --- | --- | --- |
-| ![A local image preview in the transcript](assets/shots/rust-2.0.0-beta.13-image-preview.png) | ![Docker isolation policy details in a fixture menu](assets/shots/rust-2.0.0-beta.13-isolation.png) | ![A fleet plan showing the dependent-worker handoff gate](assets/shots/rust-2.0.0-beta.13-fleet-dependency.png) |
+| ![A local image preview in the transcript](assets/shots/rust-2.0.0-beta.14-image-preview.png) | ![Docker isolation policy details in a fixture menu](assets/shots/rust-2.0.0-beta.14-isolation.png) | ![Synthetic checkpoint and handoff evidence in the fleet release modal](assets/shots/rust-2.0.0-beta.14-fleet-release-review.png) |
 
 ## Platform and scope
 

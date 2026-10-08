@@ -778,6 +778,23 @@ impl App {
         self.fleet_review = Some(prepared);
         Ok(())
     }
+    /// Render synthetic host evidence through the production dependency modal;
+    /// its release path is permanently disabled.
+    #[doc(hidden)]
+    pub fn show_fleet_dependency_review_fixture(&mut self, request: serde_json::Value) -> Result<(), String> {
+        let prepared = fleet_dependency_review::Prepared::from_fixture_review(request)
+            .map_err(|error| error.to_string())?;
+        let lines = prepared.lines.clone();
+        self.fleet_dependency_review = Some(prepared);
+        self.chip_info = Some(ChipInfo {
+            kind: "fleet_dependency_review",
+            label: String::new(),
+            lines,
+            scroll: 0,
+            owner: None,
+        });
+        Ok(())
+    }
     /// Render a manifest-status fixture without disk access or saved run state.
     /// Render a manifest-status fixture without disk access or saved run state.
     #[doc(hidden)]
