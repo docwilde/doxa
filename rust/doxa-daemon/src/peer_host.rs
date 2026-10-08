@@ -376,13 +376,15 @@ impl PeerHost {
     }
 
     pub fn inbound_event(&self, frame: PeerFrame) -> Result<Value, String> {
-        let sender=frame.from_id.clone();let body_hash=doxa_fleet::hash(&frame.body).unwrap_or_default();
+        let sender=frame.from_id.chars().take(128).collect::<String>();let body_hash=doxa_fleet::hash(&frame.body).unwrap_or_default();
+        let context=self.fleet.lock().map_err(|_|"Fleet guard unavailable")?.clone();
         let result=self.inbound_checked(frame);
         if let Err(reason)=&result {
-            if let Ok(guard)=self.fleet.lock(){if let Some(context)=guard.as_ref(){
-                let _=doxa_fleet::transaction(context,|state|{state.observations.push(json!({"event":"inbound_rejected","sender_claim":sender,"body_sha256":body_hash,"reason":reason,"at":doxa_fleet::unix_now()}));if state.observations.len()>256{state.observations.remove(0);}Ok(())});
+            let reason=reason.chars().take(512).collect::<String>();
+            if let Some(context)=context.as_ref(){
                 let _=self.events.try_send(json!({"type":"fleet_guard","data":{"delivered":false,"sender_claim":sender,"reason":reason}}));
-            }}
+                let _=doxa_fleet::transaction(context,|state|{state.observations.push(json!({"event":"inbound_rejected","sender_claim":sender,"body_sha256":body_hash,"reason":reason,"at":doxa_fleet::unix_now()}));if state.observations.len()>256{state.observations.remove(0);}Ok(())});
+            }
         }
         result
     }
@@ -427,7 +429,8 @@ impl PeerHost {
                 frame.kind.as_deref().map(|s| clean(lore, s)).transpose()?,
             ))
         })?;
-        let (body, fleet_admission) = if let Some(context)=self.fleet.lock().map_err(|_|"Fleet guard unavailable")?.clone() {
+        let fleet_context=self.fleet.lock().map_err(|_|"Fleet guard unavailable")?.clone();
+        let (body, fleet_admission) = if let Some(context)=fleet_context {
             let mut envelope=doxa_fleet::Envelope::parse(&body).map_err(|error|error.to_string())?;
             if envelope.from_session!=frame.from_id {return Err("Fleet serialized sender differs from transport sender".into());}
             let pid=frame.authenticated_pid.ok_or("Fleet kernel sender identity unavailable")?;
