@@ -40,7 +40,8 @@ fn model_fact_lines(engine: &str, model: &str) -> [String; 2] {
     let prices = match facts.priced_pair() {
         Some((input, output, _, _)) => {
             let source = fact_source(facts.input_usd_per_million.provenance);
-            format!("in ${input}/M · out ${output}/M [{source}]")
+            let label = if engine == "codex" { "API std " } else { "" };
+            format!("{label}in ${input}/M · out ${output}/M [{source}]")
         }
         None => {
             let one = |name: &str, fact: Fact<f64>| match fact {
@@ -63,8 +64,8 @@ mod model_fact_tests {
         let known = model_fact_lines("codex", "gpt-5.6-sol");
         assert!(known[0].contains("ctx 1050000 [developers.openai.com 2026-10-09]"));
         assert!(known[0].contains("thinking optional [developers.openai.com 2026-10-09]"));
-        assert!(known[1].contains("in $8/M · out $40/M"));
-        assert!(known[1].contains("developers.openai.com 2026-09-30"));
+        assert!(known[1].contains("API std in $4/M · out $20/M"));
+        assert!(known[1].contains("developers.openai.com 2026-10-09"));
 
         let unknown = model_fact_lines("claude", "gpt-5.6-sol");
         assert!(unknown[1].contains("in ? (unknown) · out ? (unknown)"));

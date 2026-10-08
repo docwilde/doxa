@@ -9,15 +9,15 @@ sourced facts to an exact `(engine, model)` key; it never grants availability.
 - [Current design](#current-design)
 - [What is known](#what-is-known)
 - [Where it appears](#where-it-appears)
-- [Price review needed](#price-review-needed)
+- [Token-budget bounds](#token-budget-bounds)
 - [Remaining work](#remaining-work)
 
 ## Current design
 
 [`doxa-engines/src/model_registry.rs`](../../rust/doxa-engines/src/model_registry.rs)
-returns one fact for each of context window, fresh input price, output price,
-and thinking behavior. Each fact carries its own value and provenance. A field
-without evidence is `unknown`, with no numeric or behavioral default. Known
+returns facts for context, Standard API fresh-input and output prices, native
+budget input/output bounds, and thinking behavior. Each fact carries its own
+value and provenance. A field without evidence is `unknown`, with no default. Known
 static facts include their source URL and the date checked. Lookup requires an
 exact engine and model ID; aliases do not inherit facts.
 
@@ -25,19 +25,21 @@ The connected engine's `list_models` result remains the authority for picker
 availability and effort choices. The registry is advisory, and neither model
 selection nor the provider's session controls depend on it.
 
-The daemon's existing native price rows now live in this single registry.
-`BudgetHost` consumes a price pair only if both fields share a source and date
+The daemon's native price rows live in this single registry. `BudgetHost`
+consumes a separate budget-bound pair only if both fields share a source and date
 and contain finite, nonnegative values. Its effective-model, complete-usage,
 and durable admission checks remain in place. An unknown price still refuses
 native priced-budget admission; it never means zero cost. The session journal's
-historical `price_read_on` identity is unchanged for existing resumes.
+historical journal identity is unchanged for non-Codex resumes. Changed Codex
+bounds invalidate old journals rather than resuming with a different rate.
 
 ## What is known
 
 The native budget table documents exact price rows for selected Codex,
-DeepSeek and GLM models, checked on 2026-09-30. They are fresh input and output
-USD per million tokens; cached-input discounts are omitted for conservative
-budget accounting.
+DeepSeek and GLM models. OpenAI Standard API prices were checked on 2026-10-09;
+the other vendor rows were checked on 2026-09-30. Values are USD per million
+tokens. The picker labels the OpenAI prices as Standard API rates; they are not
+the rates used for budget admission.
 
 Additional fields were checked on 2026-10-08. DeepSeek's [model-list example](https://api-docs.deepseek.com/api/list-models/)
 gives a 1,048,576-token context for exact IDs `deepseek-flash` and
@@ -79,32 +81,38 @@ price fields with their source host and check date when known. Selection still
 sends the exact catalog model ID. The registry does not change the fleet's
 owner-approved price ceiling or its fail-closed accounting behavior.
 
-## Price review needed
+## Token-budget bounds
 
-The 2026-09-30 conservative OpenAI price rows are no longer the current
-Standard API rates shown on the model pages checked 2026-10-09. Values below
-are fresh input / output USD per million tokens; the `>272K` column applies
-to the **whole request** when input exceeds 272,000 tokens.
+OpenAI's [pricing table](https://developers.openai.com/api/docs/pricing)
+and [Fast](https://developers.openai.com/api/docs/guides/fast-mode) and
+[Ultrafast](https://developers.openai.com/api/docs/guides/ultrafast-mode) guides
+were checked on 2026-10-09. For tiered models, each budget-bound input field
+uses the highest documented long-context cache-write rate; each output field
+uses the highest long-context output rate. A 10% regional uplift is included
+where relevant. GPT-5.3-Codex uses its specialized Fast rate.
+The bound applies to **all** input/output tokens in each Codex turn because
+the turn reports neither individual request sizes nor service tiers. This
+overestimates short requests and cache reads but does not miss a long-context
+token premium for admitted models.
 
-| Exact model ID | Stored rate | Current Standard API rate | `>272K` rate |
-| --- | ---: | ---: | ---: |
-| [`gpt-6-astra`](https://developers.openai.com/api/docs/models/gpt-6-astra) | 20 / 100 | 10 / 50 | 20 / 75 |
-| [`gpt-5.6-sol`](https://developers.openai.com/api/docs/models/gpt-5.6-sol) | 8 / 40 | 4 / 20 | 8 / 30 |
-| [`gpt-5.6-terra`](https://developers.openai.com/api/docs/models/gpt-5.6-terra) | 4 / 24 | 2 / 12 | 4 / 18 |
-| [`gpt-5.6-luna`](https://developers.openai.com/api/docs/models/gpt-5.6-luna) | 0.4 / 2.4 | 0.2 / 1.2 | 0.4 / 1.8 |
-| [`gpt-5.5`](https://developers.openai.com/api/docs/models/gpt-5.5) | 12.5 / 75 | 5 / 30 | 10 / 45 |
-| [`gpt-5.3-codex`](https://developers.openai.com/api/docs/models/gpt-5.3-codex) | 3.5 / 28 | 1.75 / 14 | Not stated on its model page |
+| Exact model ID | Standard API input / output | Budget bound input / output | Basis |
+| --- | ---: | ---: | --- |
+| [`gpt-6-astra`](https://developers.openai.com/api/docs/models/gpt-6-astra) | 10 / 50 | 165 / 495 | Ultrafast long cache write 150 / output 450, ×1.10 |
+| [`gpt-5.6-sol`](https://developers.openai.com/api/docs/models/gpt-5.6-sol) | 4 / 20 | Unknown | Preview Ultrafast price not published |
+| [`gpt-5.6-terra`](https://developers.openai.com/api/docs/models/gpt-5.6-terra) | 2 / 12 | 11 / 39.6 | Fast long cache write 10 / output 36, ×1.10 |
+| [`gpt-5.6-luna`](https://developers.openai.com/api/docs/models/gpt-5.6-luna) | 0.2 / 1.2 | 1.1 / 3.96 | Fast long cache write 1 / output 3.6, ×1.10 |
+| [`gpt-5.5`](https://developers.openai.com/api/docs/models/gpt-5.5) | 5 / 30 | Unknown | Fast long-context price not established |
+| [`gpt-5.3-codex`](https://developers.openai.com/api/docs/models/gpt-5.3-codex) | 1.75 / 14 | 3.5 / 28 | Specialized Fast rate; no long tier published |
 
-`BudgetHost` currently charges all prompt tokens at one stored rate and admits
-another turn while recorded spend is below the ceiling. Every stored row
-exceeds its displayed Standard rate; the five tiered rows also exceed their
-documented long-context rates. This can exhaust the ceiling early. For
-`gpt-5.5`, it instead makes accounting unknown and withholds
-later turns when aggregate turn input reaches 272,000 tokens. The provider's
-threshold is per request, which the aggregate turn does not establish. A
-correct refresh needs per-request tier evidence, effective billing mode and
-resume-safe price identity; replacing these pairs with short-context rates
-alone would risk admitting turns that exceed the ceiling.
+Unknown bounds refuse native priced-budget admission at session start.
+The [prompt-caching guide](https://developers.openai.com/api/docs/guides/prompt-caching)
+confirms cache writes can exceed fresh input rates for GPT-5.6 and later.
+These bounds estimate **model token charges** only: separate API tool fees,
+contract-specific pricing, and Codex subscription credits are outside this
+counter. The host still requires complete, model-consistent usage and marks
+spend unknown after an unaccountable turn. A single admitted turn can exceed
+the ceiling before its usage arrives; the next turn is withheld. A provider-reported bill and
+per-request tier would allow tighter accounting in a later slice.
 
 ## Remaining work
 
@@ -116,5 +124,5 @@ alone would risk admitting turns that exceed the ceiling.
 - Consider an operator-facing refresh and stale-fact review flow before using
   the registry for automatic task routing. No quality or benchmark score is
   planned without a maintained, task-specific evaluation method.
-- Review the tiered price rows above and their budget admission behavior before
-  changing accounting rates.
+- Capture provider billing mode and per-request tier when available so a budget
+  can use an exact billed rate rather than the documented upper token bound.

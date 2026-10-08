@@ -17,15 +17,17 @@ pub struct BudgetHost {
     journal: Option<Journal>,
 }
 
-/// Rates come from the exact-model registry. Native vendor accounting deliberately charges every
-/// prompt token at the fresh-input rate: cached tokens are a subset of the
-/// prompt, and the published cached rate is lower for every row below.
+/// Rates come from the exact-model registry. For tiered OpenAI models these
+/// are upper rates, including possible cache writes, not picker display rates.
 #[derive(Clone, Copy)]
-pub(super) struct Pricing { pub(super) input: f64, pub(super) output: f64, pub(super) source: &'static str }
+pub(super) struct Pricing { pub(super) input: f64, pub(super) output: f64, pub(super) source: &'static str, pub(super) as_of: &'static str, pub(super) journal_date: &'static str }
 
 pub(super) fn vendor_price(engine: &str, model: &str) -> Option<Pricing> {
-    let (input, output, source, _) = doxa_engines::model_registry::lookup(engine, model).priced_pair()?;
-    Some(Pricing { input, output, source })
+    let (input, output, source, as_of) = doxa_engines::model_registry::lookup(engine, model).budget_bound_pair()?;
+    // Existing non-Codex journals used this historical identity date. Keep
+    // their exact identity while recording the real field date in new events.
+    let journal_date = if engine == "codex" { as_of } else { "2026-09-21" };
+    Some(Pricing { input, output, source, as_of, journal_date })
 }
 
 pub(super) fn priced_vendor_model(engine: &str, model: &str) -> bool {
@@ -47,7 +49,7 @@ impl BudgetHost {
 
     pub fn new_priced(inner: Arc<dyn Host>, ceiling: f64, engine: &str, model: &str) -> Result<Self, String> {
         let pricing = vendor_price(engine, model)
-            .ok_or_else(|| format!("no native budget price for {engine}:{model}"))?;
+            .ok_or_else(|| format!("no complete native budget rate bound for {engine}:{model}"))?;
         Ok(Self { inner, ceiling, pricing: Some(pricing), priced_model: Some(model.to_owned()), state: Mutex::new(BudgetState::default()), journal: None })
     }
 }
@@ -76,7 +78,7 @@ impl BudgetHost {
         let parent = path.parent().ok_or_else(|| io::Error::other("no budget directory"))?.to_path_buf();
         fs::DirBuilder::new().recursive(true).mode(0o700).create(&parent)?;
         identity["accounting"] = match self.pricing {
-            Some(price) => json!({"basis":"priced_conservative","model":self.priced_model,"input_rate":price.input,"output_rate":price.output,"source":price.source,"read_on":"2026-09-21"}),
+            Some(price) => json!({"basis":"priced_conservative","model":self.priced_model,"input_rate":price.input,"output_rate":price.output,"source":price.source,"read_on":price.journal_date}),
             None => {
                 // A billing-party reported dollar amount is model independent.
                 // Model changes do not reset this session's spent allowance.
@@ -172,12 +174,7 @@ impl Host for BudgetHost {
                                     })
                                 }
                             } else { data["prompt_tokens"].as_u64().zip(data["completion_tokens"].as_u64()) };
-                            tokens
-                                // The inherited sourced row covers GPT-5.5
-                                // prompts below 272K (doxa/prices.py priority row: <272K). Aggregate turn input is
-                                // an upper bound for every call in that turn.
-                                .filter(|(input, _)| self.priced_model.as_deref() != Some("gpt-5.5") || *input < 272_000)
-                                .map(|(input, output)| (input as f64 * price.input + output as f64 * price.output) / 1_000_000.0)
+                            tokens.map(|(input, output)| (input as f64 * price.input + output as f64 * price.output) / 1_000_000.0)
                         } else { None }
                     }
                 };
@@ -192,7 +189,7 @@ impl Host for BudgetHost {
                             event["data"]["cost_basis"] = json!("priced_conservative");
                             event["data"]["cost_is_estimate"] = json!(true);
                             event["data"]["price_source"] = json!(price.source);
-                            event["data"]["price_read_on"] = json!("2026-09-21");
+                            event["data"]["price_read_on"] = json!(price.as_of);
                         }
                     }
                     _ => state.unknown = true,
@@ -288,7 +285,7 @@ mod tests {
         host.prompt("hello", &mut |event| events.push(event));
         assert_eq!(events[0]["data"]["cost_usd"], 1.5);
         assert_eq!(events[0]["data"]["cost_basis"], "priced_conservative");
-        assert_eq!(events[0]["data"]["price_read_on"], "2026-09-21");
+        assert_eq!(events[0]["data"]["price_read_on"], "2026-09-30");
         assert_eq!(events[1]["type"], "turn_refused");
         assert!(host.call("set_model", &json!({"model":"glm-5-turbo"})).is_err());
         assert!(!host.can_set_model());
@@ -301,6 +298,8 @@ mod tests {
         assert!(vendor_price("glm", "glm-5.3-flash-latest").is_none());
         assert!(vendor_price("glm", "glm-5.3-turbo").is_none());
         assert!(vendor_price("claude", "glm-5.3").is_none());
+        assert!(vendor_price("codex", "gpt-5.6-sol").is_none());
+        assert!(vendor_price("codex", "gpt-5.5").is_none());
     }
     #[test]
     fn priced_vendor_requires_complete_usage_and_consistent_model() {
@@ -340,6 +339,28 @@ mod tests {
             .durable(path, json!({"session":"other"}), true).is_err());
     }
     #[test]
+    fn codex_budget_journal_pins_new_bound_and_source_date() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("private/state.json");
+        let host = BudgetHost::new_priced(
+            Arc::new(VendorCostHost(json!({}))), 100.0, "codex", "gpt-6-astra"
+        ).unwrap().durable(path.clone(), json!({"session":"priced"}), false).unwrap();
+        let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["identity"]["accounting"]["input_rate"], 165.0);
+        assert_eq!(saved["identity"]["accounting"]["output_rate"], 495.0);
+        assert_eq!(saved["identity"]["accounting"]["read_on"], "2026-10-09");
+        drop(host);
+        assert!(BudgetHost::new_priced(
+            Arc::new(VendorCostHost(json!({}))), 100.0, "codex", "gpt-6-astra"
+        ).unwrap().durable(path.clone(), json!({"session":"priced"}), true).is_ok());
+        let mut stale = saved;
+        stale["identity"]["accounting"]["read_on"] = json!("2026-09-21");
+        fs::write(&path, serde_json::to_vec(&stale).unwrap()).unwrap();
+        assert!(BudgetHost::new_priced(
+            Arc::new(VendorCostHost(json!({}))), 100.0, "codex", "gpt-6-astra"
+        ).unwrap().durable(path, json!({"session":"priced"}), true).is_err());
+    }
+    #[test]
     fn interrupted_budget_marker_and_missing_journal_fail_closed() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("private/state.json");
@@ -358,16 +379,17 @@ mod tests {
 
     #[test]
     fn codex_price_requires_model_and_complete_usage_then_charges_turn_deltas() {
-        let data = json!({"model":"gpt-5.6-sol","model_consistent":true,"usage_complete":true,
+        let data = json!({"model":"gpt-5.6-terra","model_consistent":true,"usage_complete":true,
             "usage_source":"codex_cli_turn_completed","turn_input_tokens":1_000_000,"turn_output_tokens":1_000_000});
-        let host = BudgetHost::new_priced(Arc::new(VendorCostHost(data.clone())), 47.0, "codex", "gpt-5.6-sol").unwrap();
+        let host = BudgetHost::new_priced(Arc::new(VendorCostHost(data.clone())), 50.0, "codex", "gpt-5.6-terra").unwrap();
         let mut events = Vec::new(); host.prompt("hello", &mut |event| events.push(event));
         host.prompt("hello", &mut |event| events.push(event));
-        assert_eq!(events[0]["data"]["cost_usd"], 48.0);
+        assert_eq!(events[0]["data"]["cost_usd"], 50.6);
+        assert_eq!(events[0]["data"]["price_read_on"], "2026-10-09");
         assert_eq!(events[1]["type"], "turn_refused");
         for field in ["model_consistent", "usage_complete"] {
             let mut broken = data.clone(); broken[field] = json!(false);
-            let host = BudgetHost::new_priced(Arc::new(VendorCostHost(broken)), 100.0, "codex", "gpt-5.6-sol").unwrap();
+            let host = BudgetHost::new_priced(Arc::new(VendorCostHost(broken)), 100.0, "codex", "gpt-5.6-terra").unwrap();
             let mut events = Vec::new(); host.prompt("hello", &mut |event| events.push(event));
             host.prompt("hello", &mut |event| events.push(event));
             assert_eq!(events[1]["type"], "turn_refused");
@@ -390,28 +412,29 @@ mod tests {
     }
 
     #[test]
-    fn codex_long_context_outside_published_row_fails_closed_at_boundary() {
-        for (input, priced) in [(271_999, true), (272_000, false), (272_001, false)] {
-            let data = json!({"model":"gpt-5.5","model_consistent":true,"usage_complete":true,
-                "usage_source":"codex_cli_turn_completed","turn_input_tokens":input,"turn_output_tokens":0});
-            let host = BudgetHost::new_priced(Arc::new(VendorCostHost(data)), 100.0, "codex", "gpt-5.5").unwrap();
-            let mut events = Vec::new(); host.prompt("hello", &mut |event| events.push(event));
-            host.prompt("hello", &mut |event| events.push(event));
-            assert_eq!(events[0]["data"]["cost_usd"].is_number(), priced);
-            assert_eq!(events[1]["type"] == "turn_refused", !priced);
-        }
+    fn codex_long_context_charges_bound_for_every_turn_token() {
+        let data = json!({"model":"gpt-6-astra","model_consistent":true,"usage_complete":true,
+            "usage_source":"codex_cli_turn_completed","turn_input_tokens":300_000,"turn_output_tokens":100_000});
+        let host = BudgetHost::new_priced(Arc::new(VendorCostHost(data)), 90.0, "codex", "gpt-6-astra").unwrap();
+        let mut events = Vec::new(); host.prompt("hello", &mut |event| events.push(event));
+        host.prompt("hello", &mut |event| events.push(event));
+        assert_eq!(events[0]["data"]["cost_usd"], 99.0);
+        assert_eq!(events[1]["type"], "turn_refused");
+        assert_eq!(events[1]["data"]["spent_usd"], 99.0);
+        assert!(BudgetHost::new_priced(Arc::new(VendorCostHost(json!({}))), 90.0, "codex", "gpt-5.5").is_err());
+        assert!(BudgetHost::new_priced(Arc::new(VendorCostHost(json!({}))), 90.0, "codex", "gpt-5.6-sol").is_err());
     }
 
     #[test]
     fn verified_initial_model_mismatch_is_refused_before_provider_admission() {
         struct InitialModelHost(std::sync::atomic::AtomicUsize);
         impl Host for InitialModelHost {
-            fn initial_model(&self) -> Option<String> { Some("gpt-5.6-sol".into()) }
+            fn initial_model(&self) -> Option<String> { Some("gpt-5.6-terra".into()) }
             fn prompt(&self, _: &str, _: &mut dyn FnMut(Value)) { self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
             fn call(&self, _: &str, _: &Value) -> Result<Value, String> { Ok(json!({})) }
         }
         let inner = Arc::new(InitialModelHost(std::sync::atomic::AtomicUsize::new(0)));
-        let host = BudgetHost::new_priced(inner.clone(), 1.0, "codex", "gpt-5.5").unwrap();
+        let host = BudgetHost::new_priced(inner.clone(), 1.0, "codex", "gpt-6-astra").unwrap();
         let mut events = Vec::new(); host.prompt("must not infer", &mut |event| events.push(event));
         assert_eq!(inner.0.load(std::sync::atomic::Ordering::Relaxed), 0);
         assert_eq!(events[0]["type"], "turn_refused"); assert_eq!(events[0]["data"]["reason"], "budget");
