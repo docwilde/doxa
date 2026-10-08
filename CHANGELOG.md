@@ -5,6 +5,19 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.12 — 2026-10-08
+
+**Terminal and organization**
+
+- Render complete Mermaid fences through an explicitly configured local renderer in a networkless Linux sandbox. Keep the source visible while loading and on failure; a real Mermaid CLI and graphics terminal still need validation.
+- Suggest collection names from explicit customer, project and task data. Offer opt-in urgency ordering that settles before moving groups and preserves child order.
+- Refresh the deterministic Rust gallery from the final beta.12 UI.
+
+**Models and fleet**
+
+- Add an exact-engine/model fact registry with dated per-field sources. Budget accounting shares its sourced prices; the model picker marks unknown context and thinking facts rather than inferring them.
+- Add offline `doxa fleet calibrate` metrics for labeled message-judge results across thresholds. Real-message labeling and holdout evaluation remain necessary before enforcement.
+
 ## 2.0.0-beta.11 — 2026-10-08
 
 **Terminal and documentation**

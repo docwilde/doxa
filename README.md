@@ -11,7 +11,7 @@
 > [!WARNING]
 > Rust 2.0 is in beta. Agents can edit files and run commands with your privileges. Choose a [session isolation profile](docs/session-isolation.md) and review the [platform limits](#platform-and-scope) before using DOXA on important work.
 
-![DOXA Rust beta.11 workspace with three engine tabs and a Markdown turn](assets/shots/rust-2.0.0-beta.11-hero.png)
+![DOXA Rust beta.12 workspace with three engine tabs and a Markdown turn](assets/shots/rust-2.0.0-beta.12-hero.png)
 
 [How the gallery was captured](docs/rust-gallery.md)
 
@@ -47,7 +47,7 @@ Choose an installed engine in place of `codex`. Claude needs its CLI; protected 
 
 - **Work in parallel.** Open tabs with Ctrl+T, split with Alt+V or Alt+H, and keep a prompt in each pane. The project rail groups live and recoverable sessions. Saved layouts restore on launch.
 - **Detach and return.** Ctrl+W closes a tab while its daemon runs; Ctrl+Q exits the window and leaves sessions detached. `/resume` finds saved sessions, including closed tabs. Ctrl+X stops the active daemon and retains its transcript.
-- **Review the work.** Expand reasoning and individual tool calls, inspect diffs and worktrees, and use the action palette or slash commands for navigation. LORE facts, beliefs, and pending proposals have review controls in the TUI.
+- **Review the work.** Expand reasoning and tool calls, inspect diffs and worktrees, and use the action palette or slash commands. LORE facts, beliefs, and pending proposals have TUI review controls. Local images and opt-in Mermaid previews appear in the transcript; collection groups can sort by settled urgency.
 - **Choose isolation.** Start in `native`, `docker-open`, or `docker-offline`. Linux Docker profiles use a private rootless worker and checkout. The isolation chip shows the verified policy. Change an idle session with `/isolation PROFILE --confirm`. [Setup and limits](docs/session-isolation.md).
 
 The [Rust guide](rust/README.md) covers keys, session recovery, worktrees, settings, and review behavior.
@@ -61,9 +61,9 @@ The [Rust guide](rust/README.md) covers keys, session recovery, worktrees, setti
 | DeepSeek | Rust API client | Supply an API key. |
 | GLM | Rust API client | Supply a z.ai API key. |
 
-[Engine capability matrix](docs/engine-capabilities.md) lists model, permission, cost, compaction, and platform support. DOXA does not silently switch engines during a session.
+[Engine capability matrix](docs/engine-capabilities.md) lists model, permission, cost, compaction, and platform support. The picker distinguishes sourced model facts from unknown context or thinking support. DOXA does not silently switch engines during a session.
 
-Fleets can run an acting coordinator and workers under a reviewed charter, typed host gates, and spending limits. A separately selected alignment supervisor and fast LLM or Jev message judge can inspect work and messages. [Fleet guide](docs/fleet.md) · [Independent supervision](docs/fleet-supervision.md).
+Fleets can run an acting coordinator and workers under a reviewed charter, typed host gates, and spending limits. A separately selected alignment supervisor and fast LLM or Jev message judge can inspect work and messages. Offline threshold calibration is available for labeled judge results. [Fleet guide](docs/fleet.md) · [Independent supervision](docs/fleet-supervision.md).
 
 ## Remote access
 
@@ -73,11 +73,11 @@ Remote control is opt in. `doxa remote serve` exposes a private Rust browser vie
 
 ## Gallery
 
-These beta.11 frames render the production Ratatui app with deterministic example events. They show the interface without opening a provider, Docker container, or user store. The [capture record](docs/rust-gallery.md) includes more views and exact reproduction steps.
+These beta.12 frames render the production Ratatui app with deterministic example events. They show the interface without opening a provider, Docker container, or user store. The [capture record](docs/rust-gallery.md) includes more views and exact reproduction steps.
 
 | Image preview | Isolation details | Fleet launch review |
 | --- | --- | --- |
-| ![A local image preview in the transcript](assets/shots/rust-2.0.0-beta.11-image-preview.png) | ![Docker isolation policy details in a fixture menu](assets/shots/rust-2.0.0-beta.11-isolation.png) | ![A fleet plan with independent supervision and message review](assets/shots/rust-2.0.0-beta.11-fleet-review.png) |
+| ![A local image preview in the transcript](assets/shots/rust-2.0.0-beta.12-image-preview.png) | ![Docker isolation policy details in a fixture menu](assets/shots/rust-2.0.0-beta.12-isolation.png) | ![A fleet plan with independent supervision and message review](assets/shots/rust-2.0.0-beta.12-fleet-review.png) |
 
 ## Platform and scope
 
