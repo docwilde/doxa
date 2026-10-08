@@ -46,7 +46,7 @@ Commands:
   worktrees [list]     Preview orphaned managed worktrees
   worktrees cleanup FULL_ID --confirm
                        Remove one verified clean Rust orphan
-  doctor               Check provider and launcher dependencies
+  doctor               Check provider, launcher, and configured Mermaid renderer
   setup                Interactive authentication, LORE store, and defaults wizard
   settings             Show native settings and their effective sources
   settings set KEY VALUE | unset KEY
@@ -453,6 +453,21 @@ fn run(args: &[String]) -> io::Result<()> {
                 }
             }
             let live = discovery::sessions()?;
+            let workspaces = live.iter().map(|session| PathBuf::from(&session.scope_key)).collect::<Vec<_>>();
+            match doxa_tui::ui::transcript_mermaid::diagnose(
+                &doxa_tui::settings::raw("mermaid_renderer"),
+                &doxa_tui::settings::raw("mermaid_renderer_root"),
+                &workspaces,
+            ) {
+                doxa_tui::ui::transcript_mermaid::DoctorResult::Disabled =>
+                    println!("disabled mermaid: local renderer is not configured"),
+                doxa_tui::ui::transcript_mermaid::DoctorResult::Available =>
+                    println!("ok mermaid: bounded PNG smoke render succeeded in sandbox (CLI parity unverified)"),
+                doxa_tui::ui::transcript_mermaid::DoctorResult::Unavailable(reason) => {
+                    println!("missing mermaid: {reason}");
+                    missing = true;
+                }
+            }
             println!("live sessions: {}", live.len());
             let ids: HashSet<String> = live.iter().map(|session| session.id.clone()).collect();
             let orphans = doxa_worktrees::list_orphans(&ids);

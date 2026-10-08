@@ -49,6 +49,19 @@ eight results cached in the TUI process. A resized pane may render again.
 `image_mode=text` always shows source. This path has stub-renderer coverage;
 full Mermaid CLI and a graphics terminal have not been validated here.
 
+Run `doxa doctor` to check a configured renderer. It validates the executable
+and canonical package root against the same path policy as the TUI, including
+currently discovered session repositories, then probes
+bubblewrap and unprivileged user namespaces, then renders a fixed diagram to a
+PNG inside the sandbox with a five-second limit per process. It reports a
+specific static failure reason without printing configured paths or renderer
+output. With no renderer configured, Mermaid is reported as disabled and
+doctor can still pass. A configured but broken renderer makes doctor fail.
+Passing the smoke check proves only that this command produced a decodable
+bounded PNG in the sandbox; it does not validate Mermaid CLI compatibility,
+Chromium, or a terminal graphics protocol. DOXA still has no managed renderer
+installer or browser provisioning.
+
 Provider binary attachments, screenshots pasted into the prompt and remote
 image URLs still need separate input paths. Terminal protocol quality depends
 on the emulator, tmux and SSH path; halfblock is the portable fallback.

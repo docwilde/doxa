@@ -62,7 +62,7 @@ use doxa_engines::EngineCapabilities;
 
 mod links;
 mod transcript_images;
-mod transcript_mermaid;
+pub mod transcript_mermaid;
 mod tool_cards;
 mod transcript_roles;
 pub(crate) mod transcript_tools;
