@@ -3986,21 +3986,49 @@ for line in sys.stdin:
         }
         let (tx, receiver) = mpsc::sync_channel(1);
         app.lore_pending_request = Some(LorePendingRequest {
-            scope: crate::memory_menu::scope_path(&cwd).0.to_str().unwrap().into(),
             sessions: vec![("empty".into(), cwd.clone()), ("positive".into(), cwd.clone())], receiver,
         });
-        tx.send(Ok(doxa_lore::PendingSessions {
+        tx.send(LorePendingBatch { sessions: vec![("empty".into(), cwd.clone()), ("positive".into(), cwd.clone())],
+            response: Ok(doxa_lore::PendingSessions {
             source_project_slug: "fixture".into(), snapshot: "a".repeat(64), complete: false,
             sessions: vec![
                 doxa_lore::PendingSession { session_id:"empty".into(), pending_pids:vec![], complete:false },
                 doxa_lore::PendingSession { session_id:"positive".into(), pending_pids:vec!["p".into()], complete:false },
             ],
-        })).unwrap();
+        }) }).unwrap();
         assert!(app.poll_lore_pending());
         assert_eq!(app.lore_pending_cache["empty"].pending, None);
         assert_eq!(app.lore_pending_cache["positive"].pending, Some(true));
         assert_eq!(app.rail_urgency(0), 0);
         assert_eq!(app.rail_urgency(1), 2);
+    }
+
+    #[test]
+    fn lore_pending_worker_only_updates_its_selected_scope() {
+        let mut app = App::default();
+        let own = PathBuf::from("/fixture/own");
+        let other = PathBuf::from("/fixture/other");
+        for (id, cwd) in [("own", &own), ("other", &other)] {
+            app.apply_update(DaemonUpdate::Upsert(Session { id:id.into(), title:id.into(),
+                collection:id.into(), transcript:String::new(), status:"Ready".into() }));
+            app.session_cwds.insert(id.into(), cwd.clone());
+        }
+        let (tx, receiver) = mpsc::sync_channel(1);
+        app.lore_pending_request = Some(LorePendingRequest {
+            sessions: vec![("own".into(), own.clone()), ("other".into(), other.clone())], receiver,
+        });
+        tx.send(LorePendingBatch {
+            sessions: vec![("own".into(), own.clone())],
+            response: Ok(doxa_lore::PendingSessions {
+                source_project_slug:"fixture".into(), snapshot:"a".repeat(64), complete:true,
+                sessions:vec![doxa_lore::PendingSession {
+                    session_id:"own".into(), pending_pids:vec!["p".into()], complete:true,
+                }],
+            }),
+        }).unwrap();
+        assert!(app.poll_lore_pending());
+        assert_eq!(app.lore_pending_cache["own"].pending, Some(true));
+        assert!(!app.lore_pending_cache.contains_key("other"));
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! Coordinate exact LORE review menus, filtering and scoped memory workers.
 use super::{
-    raw_visual_rows, safe_label, unsafe_input_char, App, ChipInfo, LorePendingRequest,
-    LorePendingSignal, LorePicker, REVIEW_BODY_RESERVE,
+    raw_visual_rows, safe_label, unsafe_input_char, App, ChipInfo, LorePendingBatch,
+    LorePendingRequest, LorePendingSignal, LorePicker, REVIEW_BODY_RESERVE,
 };
 use crate::lore_picker;
 use crossterm::event::KeyCode;
@@ -28,13 +28,12 @@ impl App {
         let mut changed = false;
         if let Some(request) = self.lore_pending_request.take() {
             match request.receiver.try_recv() {
-                Ok(result) => {
-                    let rows = result.ok().map(|response| response.sessions);
-                    for (index, (id, cwd)) in request.sessions.into_iter().enumerate() {
+                Ok(batch) => {
+                    let rows = batch.response.ok().map(|response| response.sessions);
+                    for (index, (id, cwd)) in batch.sessions.into_iter().enumerate() {
                         if self.session_cwds.get(&id) != Some(&cwd)
                             || crate::remote_client::valid_target(&id)
-                            || self.offline_ids.contains(&id)
-                            || crate::memory_menu::scope_path(&cwd).0.to_str() != Some(request.scope.as_str()) {
+                            || self.offline_ids.contains(&id) {
                             continue;
                         }
                         let pending = rows.as_ref().and_then(|rows| rows.get(index)).and_then(|row| {
@@ -62,7 +61,6 @@ impl App {
                 }
             }
         }
-        let mut scope = None;
         let mut sessions = Vec::new();
         for session in &self.sessions {
             let id = &session.id;
@@ -70,23 +68,36 @@ impl App {
             let Some(cwd) = self.session_cwds.get(id) else { continue; };
             if self.lore_pending_cache.get(id).is_some_and(|old| old.cwd == *cwd
                 && now.saturating_duration_since(old.checked) < REFRESH) { continue; }
-            let (project, _) = crate::memory_menu::scope_path(cwd);
-            let Some(project) = project.to_str() else { continue; };
-            if scope.is_none() { scope = Some(project.to_owned()); }
-            if scope.as_deref() != Some(project) { continue; }
             sessions.push((id.clone(), cwd.clone()));
             if sessions.len() == 64 { break; }
         }
-        if let Some(scope) = scope {
-            let ids = sessions.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>();
+        if !sessions.is_empty() {
             let (tx, receiver) = mpsc::sync_channel(1);
-            let worker_scope = scope.clone();
+            let candidates = sessions.clone();
             std::thread::spawn(move || {
-                let result = doxa_lore::LoreClient::open(Duration::from_secs(2))
-                    .and_then(|mut lore| lore.pending_for_sessions(&worker_scope, &ids));
-                let _ = tx.send(result);
+                // Git root discovery can execute an unbounded child process. Resolve
+                // all scopes on this worker, never in the terminal event loop.
+                let first_scope = crate::memory_menu::scope_path(&candidates[0].1).0;
+                let mut selected = vec![candidates[0].clone()];
+                selected.extend(candidates.into_iter().skip(1).filter(|(_, cwd)| {
+                    crate::memory_menu::scope_path(cwd).0 == first_scope
+                }));
+                let mut response = match first_scope.to_str() {
+                    Some(scope) => {
+                        let ids = selected.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>();
+                        doxa_lore::LoreClient::open(Duration::from_secs(2))
+                            .and_then(|mut lore| lore.pending_for_sessions(scope, &ids))
+                    }
+                    None => Err(doxa_lore::LoreError::InvalidFrame),
+                };
+                if selected.iter().any(|(_, cwd)| {
+                    crate::memory_menu::scope_path(cwd).0 != first_scope
+                }) {
+                    response = Err(doxa_lore::LoreError::InvalidFrame);
+                }
+                let _ = tx.send(LorePendingBatch { sessions: selected, response });
             });
-            self.lore_pending_request = Some(LorePendingRequest { scope, sessions, receiver });
+            self.lore_pending_request = Some(LorePendingRequest { sessions, receiver });
         }
         changed
     }

@@ -1312,9 +1312,14 @@ struct LorePendingSignal {
 
 #[derive(Debug)]
 struct LorePendingRequest {
-    scope: String,
     sessions: Vec<(String, PathBuf)>,
-    receiver: Receiver<Result<doxa_lore::PendingSessions, doxa_lore::LoreError>>,
+    receiver: Receiver<LorePendingBatch>,
+}
+
+#[derive(Debug)]
+struct LorePendingBatch {
+    sessions: Vec<(String, PathBuf)>,
+    response: Result<doxa_lore::PendingSessions, doxa_lore::LoreError>,
 }
 
 #[derive(Debug)]
