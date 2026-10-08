@@ -299,7 +299,7 @@ mod tests {
         let output=execute_bounded(Command::new("/usr/bin/yes"),2,||{cleaned.set(true);Ok(())}).unwrap();
         assert!(cleaned.get() && !output.passed && output.output_bytes>MAX_OUTPUT_BYTES as u64);
         cleaned.set(false);
-        let timed=execute_bounded({let mut c=Command::new("/usr/bin/sleep");c.arg("2");c},1,||{cleaned.set(true);Ok(())}).unwrap();
+        let timed=execute_bounded({let mut c=Command::new("sleep");c.arg("2");c},1,||{cleaned.set(true);Ok(())}).unwrap();
         assert!(cleaned.get() && !timed.passed && timed.duration_ms>=1000);
     }
 }
