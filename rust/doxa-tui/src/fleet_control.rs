@@ -808,7 +808,7 @@ fn monitor(store: &Store, value: &mut Value, slots: &mut [Slot], timeout: Option
             slot.busy = state["running"] == true || state["queued"].as_u64().unwrap_or(0) > 0;
             any_busy |= slot.busy || !slot.pending.is_empty();
         }
-        if (milestone||handoff_transition.is_some())&&!value["supervision"].is_null()&&last_checkpoint.elapsed()>=Duration::from_secs(5){checkpoint(store,value,slots,false)?;last_checkpoint=Instant::now();last_reviewed_handoff=handoff_transition;}
+        if (milestone||handoff_transition.is_some())&&!value["supervision"].is_null()&&last_checkpoint.elapsed()>=Duration::from_secs(5){checkpoint(store,value,slots,false)?;last_checkpoint=Instant::now();if handoff_transition.is_some(){last_reviewed_handoff=handoff_transition;}}
         value["heartbeat_at"] = json!(now()); store.save(value)?;
         if any_busy { quiet_since = None; } else if quiet_since.is_none() { quiet_since = Some(Instant::now()); }
         if value["supervision"]["paused"]==true {quiet_since=None;}
