@@ -43,7 +43,7 @@ pub fn serve(runtime:&Path)->io::Result<()> {
                 if Path::new(&peer.socket_path).parent()!=Some(runtime)||peer.daemon_socket.as_deref()==Some(&peer.socket_path){return Err(io::Error::other("target has no native peer inbox"));}
                 let text=body["body"].as_str().filter(|s|!s.trim().is_empty()&&s.chars().count()<=delivery::MAX_BODY_CHARS).ok_or_else(||io::Error::other("bounded remote message required"))?;
                 let from=body["from_id"].as_str().filter(|s|doxa_transcript::valid_session_id(s)).ok_or_else(||io::Error::other("remote sender identity required"))?;
-                let mut frame=serde_json::to_value(PeerFrame{from_id:from.into(),from_title:body["from_title"].as_str().unwrap_or("remote peer").into(),body:text.into(),from_repo:body["from_repo"].as_str().map(str::to_owned),sent_at:doxa_peers::now(),kind:Some(body["kind"].as_str().filter(|s|matches!(*s,"direct"|"broadcast")).unwrap_or("direct").into())})?;
+                let mut frame=serde_json::to_value(PeerFrame{authenticated_pid:None,from_id:from.into(),from_title:body["from_title"].as_str().unwrap_or("remote peer").into(),body:text.into(),from_repo:body["from_repo"].as_str().map(str::to_owned),sent_at:doxa_peers::now(),kind:Some(body["kind"].as_str().filter(|s|matches!(*s,"direct"|"broadcast")).unwrap_or("direct").into())})?;
                 scrub_value(&mut frame,&mut lore)?;
                 if frame["from_id"]!=from{return Err(io::Error::other("LORE changed remote sender identity"));}
                 let frame=serde_json::from_value(frame)?;delivery::send(Path::new(&peer.socket_path),&frame)?;

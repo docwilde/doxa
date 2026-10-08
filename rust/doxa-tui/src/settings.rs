@@ -10,7 +10,7 @@ pub struct Setting {
     pub category: &'static str, pub kind: Kind, pub choices: &'static [&'static str],
     pub default: &'static str, pub read_only: bool, pub help: &'static str, pub note: &'static str,
 }
-pub const CATEGORIES: &[&str] = &["Session", "Memory", "Appearance", "Keys", "Notifications", "Remote", "Paths", "About"];
+pub const CATEGORIES: &[&str] = &["Session", "Fleet", "Memory", "Appearance", "Keys", "Notifications", "Remote", "Paths", "About"];
 macro_rules! key_setting {
     ($key:literal, $label:literal, $default:literal) => {
         Setting { key: $key, env: "", label: $label, category: "Keys", kind: Kind::Key,
@@ -20,6 +20,14 @@ macro_rules! key_setting {
     };
 }
 pub const SETTINGS: &[Setting] = &[
+    Setting { key: "fleet_alignment_supervisor", env: "DOXA_FLEET_ALIGNMENT_SUPERVISOR", label: "independent supervisor model", category: "Fleet", kind: Kind::Text, choices: &[], default: "", read_only: false, help: "Provider:model for independent read-only fleet review. Empty disables it; claude, codex, deepseek or glm.", note: "These stateless calls use API credentials, separate from CLI subscription sessions. Model has no tools or worker conversation history. Review budget is mandatory." },
+    Setting { key: "fleet_supervision_mode", env: "DOXA_FLEET_SUPERVISION_MODE", label: "independent supervisor action", category: "Fleet", kind: Kind::Choice, choices: &["shadow", "enforce"], default: "enforce", read_only: false, help: "Shadow records verdicts; enforce pauses delegation for uncertainty, drift or blocked work.", note: "Reviewer outages pause new delegation in both modes. Only an explicit human continue clears the pause." },
+    Setting { key: "fleet_message_review", env: "DOXA_FLEET_MESSAGE_REVIEW", label: "fleet message review", category: "Fleet", kind: Kind::Choice, choices: &["off", "shadow", "enforce"], default: "off", read_only: false, help: "Fast semantic admission mode for actual fleet peer messages.", note: "Selecting a mode opts scrubbed charter, assignments and messages into the selected external judgment service. Deterministic scope and provenance gates always apply to reviewed fleets." },
+    Setting { key: "fleet_message_judge", env: "DOXA_FLEET_MESSAGE_JUDGE", label: "fast message judge model", category: "Fleet", kind: Kind::Text, choices: &[], default: "", read_only: false, help: "Choose jev:jev-1.13.0 or llm:provider:model independently of the supervisor.", note: "Jev needs TYPESAFE_API_KEY. LLM providers: claude, codex, deepseek, glm; these require API credentials. Results cannot approve new authority or task changes." },
+    Setting { key: "fleet_review_budget", env: "DOXA_FLEET_REVIEW_BUDGET", label: "fleet review budget ($)", category: "Fleet", kind: Kind::Number, choices: &[], default: "", read_only: false, help: "Dollar allocation for all independent supervisor and message judge calls in each new fleet.", note: "Subtracted from the worker budget. Shared conservative token reservations and call ceilings include failed calls. Reserved estimates are not invoices." },
+    Setting { key: "fleet_review_input_price", env: "DOXA_FLEET_REVIEW_INPUT_PRICE", label: "review input price ($/Mtok)", category: "Fleet", kind: Kind::Number, choices: &[], default: "100", read_only: false, help: "Conservative owner-approved input rate for the selected LLM reviewer.", note: "Unknown model rates never imply free work. The default is deliberately conservative. Pinned Jev 1.13 uses documented input-only pricing." },
+    Setting { key: "fleet_review_output_price", env: "DOXA_FLEET_REVIEW_OUTPUT_PRICE", label: "review output price ($/Mtok)", category: "Fleet", kind: Kind::Number, choices: &[], default: "100", read_only: false, help: "Conservative owner-approved output rate for the selected LLM reviewer.", note: "Every LLM call has a hard 512 output token limit." },
+    Setting { key: "fleet_review_threshold", env: "DOXA_FLEET_REVIEW_THRESHOLD", label: "message risk threshold", category: "Fleet", kind: Kind::Number, choices: &[], default: "0.5", read_only: false, help: "Probability threshold for semantic quarantine; review against labeled examples before enforcing.", note: "Each new fleet review shows the exact threshold. Model confidence is evidence, never permission." },
     key_setting!("key_new_tab", "new tab", "Ctrl+T"),
     key_setting!("key_close_tab", "close tab", "Ctrl+W"),
     key_setting!("key_close_tab_alt", "close focused tab", "Delete"),

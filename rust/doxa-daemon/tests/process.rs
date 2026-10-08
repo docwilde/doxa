@@ -2859,7 +2859,7 @@ fn native_inbox_emits_scrubbed_peer_message_and_cleans_socket() {
     doxa_peers::delivery::send(
         &peer_socket,
         &doxa_peers::delivery::PeerFrame {
-            from_id: "sender".into(),
+            authenticated_pid: None,            from_id: "sender".into(),
             from_title: "sk-ownedCanonicalFixtureSecret1234567890 title".into(),
             sent_at: peer_now(),
             body: "sk-ownedCanonicalFixtureSecret1234567890 body".into(),
@@ -2882,6 +2882,35 @@ fn native_inbox_emits_scrubbed_peer_message_and_cleans_socket() {
 }
 
 #[test]
+fn fleet_guard_rejects_forged_scope_false_completion_replay_and_cached_drift_before_turns(){
+    use doxa_fleet::{Assignment,Charter,Context,Envelope,Kind,Mode,ReviewConfig,SemanticVerdict};
+    let dir=tempfile::tempdir().unwrap();let codex=dir.path().join("codex-fixture");
+    executable(&codex,"#!/bin/sh\ncat >/dev/null\necho '{\"type\":\"thread.started\",\"thread_id\":\"thread-1\"}'\necho '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"done\"}}'\n");
+    let (_sender_listener,_)=registry_peer(dir.path(),"sender",dir.path().to_str().unwrap(),"sender");
+    let mut process=Process::start_codex_with_inbound(dir.path(),&codex,Path::new("/usr/bin/python3"),true);
+    let peer_socket=PathBuf::from(process.entry()["socket_path"].as_str().unwrap());
+    let charter=Charter{version:1,fleet_id:"reviewed-run".into(),task:"Scoped task".into(),repo:dir.path().display().to_string(),allowed_paths:vec![String::new()],required_evidence:vec!["host tests".into()],worker_limit:2,run_budget_usd:Some(10.0),deadline:doxa_fleet::unix_now()+3600,human_actions:vec!["authority changes".into()]};
+    let context=Context{charter_sha256:doxa_fleet::hash(&charter).unwrap(),charter,assignments:vec![Assignment{id:"sender-assignment".into(),session_id:"sender".into(),pid:std::process::id() as i32,role:"worker".into(),task:"Scoped task".into(),cwd:dir.path().display().to_string()},Assignment{id:"recipient-assignment".into(),session_id:"codex-session".into(),pid:process.child.id() as i32,role:"worker".into(),task:"Scoped task".into(),cwd:dir.path().display().to_string()}],review:ReviewConfig{message_mode:Mode::Enforce,message_judge:Some(doxa_fleet::judge::Model::parse("jev:jev-1.13.0").unwrap()),budget_usd:1.0,..Default::default()},state_path:dir.path().join("guard-state.json")};
+    let(mut reader,mut socket)=process.connect();receive(&mut reader);send(&mut socket,json!({"type":"attach","cursor":null}));
+    send(&mut socket,json!({"type":"call","id":1,"method":"fleet_configure","params":context}));assert_eq!(receive(&mut reader)["ok"],true);
+    let make=|kind|Envelope::issue(&context,"sender","codex-session",kind,"Scoped status".into(),None).unwrap();
+    let wire=|envelope:&Envelope|doxa_peers::delivery::PeerFrame{authenticated_pid:None,from_id:"sender".into(),from_title:"sender".into(),sent_at:peer_now(),body:envelope.wire().unwrap(),from_repo:Some(dir.path().display().to_string()),kind:Some("direct".into())};
+    for alteration in 0..3{
+        let mut envelope=make(Kind::Status);match alteration{0=>envelope.fleet_id="forged".into(),1=>envelope.assignment_id="stale".into(),_=>envelope.kind=Kind::Completion};
+        doxa_peers::delivery::send(&peer_socket,&wire(&envelope)).unwrap();let event=receive(&mut reader);assert_eq!(event["event"]["type"],"fleet_guard");assert_eq!(event["event"]["data"]["delivered"],false);
+    }
+    let good=make(Kind::Status);let safe=SemanticVerdict{within_assignment:1.0,asks_for_authority_change:0.0,contains_instructions_for_recipient:0.0,likely_secret:0.0,needs_human_review:0.0};doxa_fleet::cache_semantic(&context,&good,Ok(safe)).unwrap();
+    doxa_peers::delivery::send(&peer_socket,&wire(&good)).unwrap();let mut saw_peer=false;let mut saw_done=false;
+    for _ in 0..16{let event=receive(&mut reader);match event["event"]["type"].as_str(){Some("peer_message")=>{saw_peer=true;assert_eq!(event["event"]["data"]["fleet_admission"]["unreviewed"],false);},Some("turn_done")=>{saw_done=true;break;},_=>{}}}
+    assert!(saw_peer&&saw_done);
+    doxa_peers::delivery::send(&peer_socket,&wire(&good)).unwrap();loop{let event=receive(&mut reader);if event["event"]["type"]=="fleet_guard"&&event["event"]["data"]["delivered"]==false{assert!(event["event"]["data"]["reason"].as_str().unwrap().contains("duplicate"));break;}}
+    let risky=make(Kind::Question);let risk=SemanticVerdict{within_assignment:0.0,asks_for_authority_change:1.0,contains_instructions_for_recipient:1.0,likely_secret:0.0,needs_human_review:1.0};assert!(doxa_fleet::cache_semantic(&context,&risky,Ok(risk)).is_err());
+    doxa_peers::delivery::send(&peer_socket,&wire(&risky)).unwrap();let event=receive(&mut reader);assert_eq!(event["event"]["type"],"fleet_guard");assert_eq!(event["event"]["data"]["delivered"],false);
+    send(&mut socket,json!({"type":"call","id":4,"method":"get_state","params":{}}));let state=receive(&mut reader);assert_eq!(state["running"],false);assert_eq!(state["queued"],0);
+    send(&mut socket,json!({"type":"call","id":5,"method":"stop","params":{}}));assert_eq!(receive(&mut reader)["ok"],true);wait_until(||process.exited());
+}
+
+#[test]
 fn inbound_direct_peer_starts_scrubbed_turn_but_broadcast_does_not() {
     let dir = tempfile::tempdir().unwrap();
     let codex = dir.path().join("codex-fixture");
@@ -2899,7 +2928,7 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}
     receive(&mut reader);
     send(&mut socket, json!({"type":"attach","cursor":null}));
     let frame = |kind, body: &str| doxa_peers::delivery::PeerFrame {
-        from_id: "sender".into(), from_title: "sk-ownedCanonicalFixtureSecret1234567890 title".into(),
+            authenticated_pid: None,        from_id: "sender".into(), from_title: "sk-ownedCanonicalFixtureSecret1234567890 title".into(),
         sent_at: peer_now(), body: body.into(),
         from_repo: Some(dir.path().display().to_string()), kind,
     };
@@ -2962,7 +2991,7 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}
     assert_eq!(receive(&mut reader)["ok"], true);
     assert_eq!(receive(&mut reader)["event"]["type"], "turn_started");
     doxa_peers::delivery::send(&peer_socket, &doxa_peers::delivery::PeerFrame {
-        from_id: "sender".into(), from_title: "sender".into(), sent_at: peer_now(),
+            authenticated_pid: None,        from_id: "sender".into(), from_title: "sender".into(), sent_at: peer_now(),
         body: "peer task".into(), from_repo: None, kind: Some("direct".into()),
     }).unwrap();
     assert_eq!(receive(&mut reader)["event"]["type"], "peer_message");

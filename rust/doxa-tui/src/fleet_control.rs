@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
-pub const HELP: &str = "Native DOXA fleet coordinator\n\nUsage: doxa fleet start --pool ENGINE[:MODEL][@WEIGHT],... [OPTIONS]\n\n  --prompt TEXT | --prompt-file PATH   Shared task (file takes precedence)\n  -n, --sessions N                    Worker count\n  --supervisor ENGINE[:MODEL]          Additional supervisor; task may be interactive\n  --cwd PATH --root PATH --run-id ID   Workspace and isolated run identity\n  --seed INTEGER                      Recorded deterministic assignment seed\n  --memory-off N                      Number of workers with memory disabled\n  --run-budget USD | --allow-unbudgeted\n  --approve none|peer|all              Permission policy; questions/spawns require a human\n  --approval-grace SECONDS             Human review window before policy applies\n  --quiescence-timeout SECONDS         Total wait deadline\n  --quiet-dwell SECONDS                Quiet period (alias: --quiescence-grace)\n  --force                             Override memory capacity refusal\n  --dry-run                           Review capacity and assignments without launching\n\nOther commands: preflight, runs, status, resume, review, answer, attach, stop\n";
+pub const HELP: &str = "Native DOXA fleet coordinator\n\nUsage: doxa fleet start --pool ENGINE[:MODEL][@WEIGHT],... [OPTIONS]\n\n  --prompt TEXT | --prompt-file PATH   Shared task (file takes precedence)\n  -n, --sessions N                    Worker count\n  --supervisor ENGINE[:MODEL]          Acting coordinator; task may be interactive\n  --alignment-supervisor PROVIDER:MODEL Independent read-only alignment model\n  --supervision-mode shadow|enforce     Independent review action (default enforce)\n  --message-review off|shadow|enforce   Fast semantic admission mode\n  --message-judge llm:PROVIDER:MODEL | jev:MODEL\n  --review-budget USD                  Reserved from the total run budget\n  --review-max-calls N --review-interval SECONDS\n  --review-input-price USD_PER_MTOK --review-output-price USD_PER_MTOK\n  --review-threshold PROBABILITY        Explicit enforcement threshold\n  --strict-unreviewed                  Hold every message if its judge is unavailable\n  --allowed-path RELATIVE_PREFIX       Approved scope (repeatable; default repository)\n  --cwd PATH --root PATH --run-id ID   Workspace and isolated run identity\n  --seed INTEGER                      Recorded deterministic assignment seed\n  --memory-off N                      Number of workers with memory disabled\n  --run-budget USD | --allow-unbudgeted\n  --approve none|peer|all              Permission policy; questions/spawns require a human\n  --approval-grace SECONDS             Human review window before policy applies\n  --quiescence-timeout SECONDS         Total wait deadline\n  --quiet-dwell SECONDS                Quiet period (alias: --quiescence-grace)\n  --force                             Override memory capacity refusal\n  --dry-run                           Review capacity and assignments without launching\n\nOther commands: preflight, runs, status, resume, continue RUN CHARTER_HASH, review, answer, attach, stop\n";
 
 fn invalid(message: impl Into<String>) -> io::Error { io::Error::new(io::ErrorKind::InvalidInput, message.into()) }
 fn now() -> String { OffsetDateTime::now_utc().format(&Rfc3339).unwrap_or_default() }
@@ -73,7 +73,7 @@ fn engine_name(engine: launch::Engine) -> &'static str { match engine { launch::
 
 pub struct Spec {
     preflight: fleet_plan::Preflight, pool: Vec<Choice>, prompt: String, cwd: PathBuf,
-    seed: u64, timeout: Option<Duration>, quiet: Duration, dry_run: bool, memory_off: u64, lore_enabled: bool,
+    review: doxa_fleet::ReviewConfig, allowed_paths:Vec<String>, seed: u64, timeout: Option<Duration>, quiet: Duration, dry_run: bool, memory_off: u64, lore_enabled: bool,
 }
 impl Spec {
     pub fn parse(args: &[String]) -> io::Result<Self> {
@@ -85,6 +85,14 @@ impl Spec {
             vec![arg.clone()]
         }).collect::<Vec<_>>();
         let args = &expanded;
+        let mut review=doxa_fleet::ReviewConfig::default();
+        let supervisor=crate::settings::raw("fleet_alignment_supervisor");if !supervisor.is_empty(){review.supervisor=Some(doxa_fleet::judge::Model::parse(&supervisor)?);}
+        let mode=crate::settings::raw("fleet_message_review");if !mode.is_empty(){review.message_mode=doxa_fleet::Mode::parse(&mode)?;}
+        let judge=crate::settings::raw("fleet_message_judge");if !judge.is_empty(){review.message_judge=Some(doxa_fleet::judge::Model::parse(&judge)?);}
+        let budget=crate::settings::raw("fleet_review_budget");if !budget.is_empty(){review.budget_usd=budget.parse().map_err(|_|invalid("invalid review budget"))?;}
+        let mode=crate::settings::raw("fleet_supervision_mode");if !mode.is_empty(){review.supervisor_mode=doxa_fleet::Mode::parse(&mode)?;}
+        for (key,target) in [("fleet_review_input_price",&mut review.input_usd_per_million),("fleet_review_output_price",&mut review.output_usd_per_million),("fleet_review_threshold",&mut review.risk_threshold)]{let value=crate::settings::raw(key);if !value.is_empty(){*target=value.parse().map_err(|_|invalid("invalid fleet review price or threshold"))?;}}
+        let mut allowed_paths=Vec::new();
         let mut base = Vec::new(); let mut pool = None; let mut prompt = String::new(); let mut prompt_file = None;
         let mut cwd = std::env::current_dir()?; let mut seed = 0; let mut timeout = None;
         let mut quiet = Duration::from_secs(20); let mut dry_run = false; let mut memory_off = 0; let mut index = 0;
@@ -92,9 +100,21 @@ impl Spec {
             let key = args[index].as_str();
             if matches!(key, "--force" | "--allow-unbudgeted") { base.push(key.into()); }
             else if key == "--dry-run" { dry_run = true; }
+            else if key == "--strict-unreviewed" {review.strict_unavailable=true;}
             else {
                 index += 1; let value = args.get(index).ok_or_else(|| invalid(format!("missing value for {key}")))?;
                 match key {
+                    "--alignment-supervisor" => review.supervisor=if value=="off"{None}else{Some(doxa_fleet::judge::Model::parse(value)?)},
+                    "--supervision-mode" => {review.supervisor_mode=doxa_fleet::Mode::parse(value)?;if review.supervisor_mode==doxa_fleet::Mode::Off{return Err(invalid("supervision mode must be shadow or enforce"));}},
+                    "--message-review" => review.message_mode=doxa_fleet::Mode::parse(value)?,
+                    "--message-judge" => review.message_judge=if value=="off"{None}else{Some(doxa_fleet::judge::Model::parse(value)?)},
+                    "--review-budget" => review.budget_usd=value.parse().map_err(|_|invalid("invalid review budget"))?,
+                    "--review-max-calls" => review.max_calls=value.parse().map_err(|_|invalid("invalid review call limit"))?,
+                    "--review-interval" => review.interval_s=value.parse().map_err(|_|invalid("invalid review interval"))?,
+                    "--review-input-price" => review.input_usd_per_million=value.parse().map_err(|_|invalid("invalid review input price"))?,
+                    "--review-output-price" => review.output_usd_per_million=value.parse().map_err(|_|invalid("invalid review output price"))?,
+                    "--review-threshold" => review.risk_threshold=value.parse().map_err(|_|invalid("invalid review threshold"))?,
+                    "--allowed-path" => {if value.starts_with('/')||value.split('/').any(|part|part=="..")||value.chars().any(char::is_control)||value.len()>512{return Err(invalid("allowed fleet paths must be bounded relative prefixes"));}allowed_paths.push(value.clone());},
                     "--pool" => pool = Some(value.split(',').map(choice).collect::<io::Result<Vec<_>>>()?),
                     "--prompt" => prompt = value.clone(), "--prompt-file" => prompt_file = Some(PathBuf::from(value)),
                     "--cwd" => cwd = PathBuf::from(value),
@@ -135,15 +155,20 @@ impl Spec {
         }
         let cwd = fs::canonicalize(cwd)?;
         if !cwd.is_dir() { return Err(invalid("fleet cwd must be a directory")); }
+        review.validate()?;
+        if review.enabled() && (preflight.sessions>64 || prompt.len()>16*1024){return Err(invalid("independent review supports up to 64 workers and a 16 KiB approved task"));}
+        if review.enabled() && prompt.trim().is_empty(){return Err(invalid("independent review needs the approved task at launch"));}
+        if review.enabled() && preflight.run_budget_usd.is_some_and(|total|review.budget_usd>=total){return Err(invalid("review budget must leave a positive worker budget"));}
+        if allowed_paths.is_empty(){allowed_paths.push(String::new());}
         memory_off = memory_off.min(preflight.sessions);
-        Ok(Self { preflight, pool, prompt, cwd, seed, timeout, quiet, dry_run, memory_off, lore_enabled: doxa_state::lore_enabled_default() })
+        Ok(Self { review, allowed_paths, preflight, pool, prompt, cwd, seed, timeout, quiet, dry_run, memory_off, lore_enabled: doxa_state::lore_enabled_default() })
     }
     /// Complete validation and a readable launch review without provider
     /// discovery, session creation, prompt text or filesystem mutations.
     pub fn review(&self) -> io::Result<Value> {
         let preflight = fleet_plan::check(&self.preflight, fleet_plan::available_memory_mb())?;
         let assignments = self.assignments()?;
-        Ok(json!({"review_version":1,"prompt_sha256":format!("{:x}", Sha256::digest(self.prompt.as_bytes())),"run_id":self.preflight.run_id,"root":self.preflight.root,"cwd":self.cwd,
+        Ok(json!({"review_version":1,"independent_review":self.review,"allowed_paths":self.allowed_paths,"prompt_sha256":format!("{:x}", Sha256::digest(self.prompt.as_bytes())),"run_id":self.preflight.run_id,"root":self.preflight.root,"cwd":self.cwd,
             "mode":if self.preflight.supervisor.is_some() { "supervisor" } else { "symmetric" },
             "interactive":self.preflight.supervisor.is_some() && self.prompt.trim().is_empty(),
             "workers":self.preflight.sessions,"sessions":assignments.len(),"run_budget_usd":self.preflight.run_budget_usd,
@@ -313,7 +338,8 @@ pub fn resume(root: &Path, id: &str) -> io::Result<()> {
     let total_budget = value["spec"]["run_budget_usd"].as_f64();
     if total_budget.is_some_and(|budget| !budget.is_finite() || budget <= 0.0) ||
         (total_budget.is_none() && value["spec"]["allow_unbudgeted"] != true) { return Err(invalid("fleet resume budget is not verifiable")); }
-    let budget = total_budget.map(|total| total / rows.len() as f64);
+    let review_budget = value["supervision"]["context"]["review"]["budget_usd"].as_f64().unwrap_or(0.0);
+    let budget = total_budget.map(|total| (total-review_budget) / rows.len() as f64);
     let mut slots = Vec::new();
     for (index, row) in rows.iter().enumerate() {
         ensure_active(&store)?;
@@ -350,6 +376,11 @@ pub fn resume(root: &Path, id: &str) -> io::Result<()> {
     }
     let timeout = value["spec"]["quiescence_timeout_s"].as_f64().map(|seconds| seconds.to_string()).map(|value| seconds(&value)).transpose()?;
     let quiet = seconds(&value["spec"]["quiescence_grace_s"].as_f64().or_else(|| value["spec"]["quiet_dwell_s"].as_f64()).unwrap_or(5.0).to_string())?;
+    if !value["supervision"].is_null() {
+        let context:doxa_fleet::Context=serde_json::from_value(value["supervision"]["context"].clone()).map_err(|_|invalid("fleet supervision context is invalid"))?;
+        context.validate()?;
+        for slot in &mut slots {let state=rpc(&mut slot.client,"fleet_state",json!({}))?;if state["charter_sha256"]!=context.charter_sha256{return Err(invalid("fleet approved charter changed during resume"));}let identity=rpc(&mut slot.client,"fleet_identity",json!({}))?;if identity["pid"].as_i64()!=Some(context.assignment(&slot.session.id)?.pid as i64){return Err(invalid("fleet authenticated host identity changed during resume"));}}
+    }
     let result = monitor(&store, &mut value, &mut slots, timeout, quiet);
     let result = cancellation_result(result, &mut value, &store);
     let stop_failed = teardown_sessions(slots.iter().enumerate().map(|(index, slot)| (index, slot.session.clone())));
@@ -436,7 +467,8 @@ pub fn start(args: &[String]) -> io::Result<()> {
     let runtime = store.run.join("rt"); fs::DirBuilder::new().mode(0o700).create(&runtime)?;
     let ledger_home = store.run.join("home"); fs::DirBuilder::new().mode(0o700).create(&ledger_home)?;
     fs::DirBuilder::new().mode(0o700).create(ledger_home.join("peers"))?;
-    let budget = spec.preflight.run_budget_usd.map(|total| total / assigned.len() as f64);
+    let review_budget=if spec.review.enabled(){spec.review.budget_usd}else{0.0};
+    let budget = spec.preflight.run_budget_usd.map(|total| (total-review_budget) / assigned.len() as f64);
     let mut value = json!({"native_version":1,"run_id":spec.preflight.run_id,"ledger_path":ledger_home.join("peers/messages.jsonl"),"started_at":now(),"heartbeat_at":now(),
         "live":true,"phase":"starting","mode":if spec.preflight.supervisor.is_some() { "supervisor" } else { "symmetric" },
         "interactive":spec.preflight.supervisor.is_some() && spec.prompt.trim().is_empty(),
@@ -471,6 +503,18 @@ pub fn start(args: &[String]) -> io::Result<()> {
             ensure_active(&store)?;
             let capability = rpc(&mut slot.client, "peer_tools_status", json!({}))?;
             if capability["ledger_path"] != value["ledger_path"] { return Err(invalid("fleet private ledger identity not verified; barrier withheld")); }
+        }
+        if spec.review.enabled() {
+            let charter=doxa_fleet::Charter{version:1,fleet_id:spec.preflight.run_id.clone(),task:spec.prompt.clone(),repo:spec.cwd.to_string_lossy().into_owned(),allowed_paths:spec.allowed_paths.clone(),required_evidence:vec!["host-observed changes and test results before completion".into()],worker_limit:spec.preflight.sessions,run_budget_usd:spec.preflight.run_budget_usd,deadline:spec.timeout.map(|duration|doxa_fleet::unix_now()+duration.as_secs()).unwrap_or(0),human_actions:vec!["authority, task, scope, spawn, credential, deployment and charter changes".into()]};
+            let charter_sha256=doxa_fleet::hash(&charter)?;
+            let mut assignments=Vec::new();
+            for (index,slot) in slots.iter_mut().enumerate(){let identity=rpc(&mut slot.client,"fleet_identity",json!({}))?;assignments.push(doxa_fleet::Assignment{id:format!("{}-{index}",spec.preflight.run_id),session_id:slot.session.id.clone(),pid:identity["pid"].as_i64().ok_or_else(||invalid("fleet host PID unavailable"))? as i32,role:if spec.preflight.supervisor.is_some()&&index==0{"coordinator"}else{"worker"}.into(),task:"Work within the immutable approved charter and its path scope".into(),cwd:identity["cwd"].as_str().ok_or_else(||invalid("fleet host cwd unavailable"))?.into()});}
+            let context=doxa_fleet::Context{charter,charter_sha256,assignments,review:spec.review.clone(),state_path:store.run.join("guard-state.json")};
+            context.validate()?;
+            value["supervision"]=json!({"context":context,"status":"pending"});store.save(&value)?;
+            for slot in &mut slots {let reply=rpc(&mut slot.client,"fleet_configure",serde_json::to_value(&context)?)?;if reply["charter_sha256"]!=context.charter_sha256{return Err(invalid("fleet charter installation failed"));}}
+            checkpoint(&store,&mut value,&mut slots,true)?;
+            if value["supervision"]["paused"]==true {value["phase"]=json!("monitoring");store.save(&value)?;return monitor(&store,&mut value,&mut slots,spec.timeout,spec.quiet);}
         }
         value["phase"] = json!("barrier_ready"); store.save(&value)?;
         if spec.preflight.supervisor.is_some() || !spec.prompt.trim().is_empty() {
@@ -545,14 +589,78 @@ pub fn may_auto_approve(policy: &str, kind: &str, tool: &str) -> bool {
     kind == "permission" && (policy == "all" || (policy == "peer" && matches!(tool,
         "mcp__doxa__peer_list" | "mcp__doxa__peer_history" | "mcp__doxa__peer_send")))
 }
+
+/// Explicit owner recovery binds the exact approved charter. A model verdict
+/// never clears a paused guard or grants permission on this path.
+pub fn continue_run(root:&Path,id:&str,charter_hash:&str)->io::Result<Value>{
+    let value=snapshot(root,id)?;
+    if value["phase"]!="monitoring"||value["live"]!=true||value["supervision"]["context"]["charter_sha256"]!=charter_hash{return Err(invalid("continue requires a live run and its reviewed charter hash"));}
+    let (socket,session_id)=fleet_view::slot_socket(root,id,0)?;
+    let mut client=DaemonClient::connect(socket,None).map_err(io::Error::other)?;
+    if client.hello["session_id"]!=session_id{return Err(invalid("fleet daemon identity changed"));}
+    rpc(&mut client,"fleet_resume",json!({"charter_sha256":charter_hash}))
+}
+fn git_observation(cwd:&Path,args:&[&str])->io::Result<String>{
+    use std::{os::fd::AsRawFd,process::{Command,Stdio}};
+    let mut child=Command::new("git").current_dir(cwd).args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn()?;
+    let mut output=child.stdout.take().ok_or_else(||invalid("Git observation unavailable"))?;
+    if unsafe{libc::fcntl(output.as_raw_fd(),libc::F_SETFL,libc::O_NONBLOCK)}<0{let _=child.kill();let _=child.wait();return Err(io::Error::last_os_error());}
+    let deadline=Instant::now()+Duration::from_secs(3);let mut bytes=Vec::new();
+    let result=(||->io::Result<String>{loop{let mut buf=[0;4096];match output.read(&mut buf){Ok(0)=>{if let Some(status)=child.try_wait()?{if !status.success(){return Err(invalid("Git observation failed"));}break;}},Ok(count)=>{bytes.extend_from_slice(&buf[..count]);if bytes.len()>16*1024{return Err(invalid("Git observation exceeds bounds"));}},Err(err) if err.kind()==io::ErrorKind::WouldBlock=>{},Err(err)=>return Err(err)}if Instant::now()>=deadline{return Err(invalid("Git observation timed out"));}std::thread::sleep(Duration::from_millis(5));}String::from_utf8(bytes).map_err(|_|invalid("Git paths are not UTF-8"))})();
+    if result.is_err(){let _=child.kill();}let _=child.wait();result
+}
+fn checkpoint(store:&Store,value:&mut Value,slots:&mut [Slot],initial:bool)->io::Result<()> {
+    let context:doxa_fleet::Context=serde_json::from_value(value["supervision"]["context"].clone()).map_err(|_|invalid("invalid fleet supervision context"))?;
+    context.validate()?;
+    let current=doxa_fleet::transaction(&context,|state|Ok(state.clone()))?;
+    if current.paused&&!initial{value["supervision"]["paused"]=json!(true);value["supervision"]["reason"]=json!(current.reason);return Ok(());}
+    let mut artifacts=Vec::new();let mut out_of_scope=false;
+    for (index,slot) in slots.iter_mut().enumerate(){
+        let state=rpc(&mut slot.client,"get_state",json!({}))?;
+        let cwd=Path::new(context.assignments[index].cwd.as_str());
+        let paths=git_observation(cwd,&["-c","core.quotepath=false","diff","--no-ext-diff","--no-textconv","--name-only","HEAD"]);
+        let untracked=git_observation(cwd,&["-c","core.quotepath=false","ls-files","--others","--exclude-standard"]);
+        let changed=match (&paths,&untracked){(Ok(paths),Ok(untracked))=>Some(format!("{paths}{untracked}")),_=>None};
+        if let Some(changed)=&changed{for path in changed.lines(){if !context.charter.allowed_paths.iter().any(|prefix|prefix.is_empty()||path==prefix||path.starts_with(&format!("{}/",prefix.trim_end_matches('/')))){out_of_scope=true;}}}
+        let artifact=json!({"kind":"host_checkpoint","session_id":slot.session.id,"assignment_id":context.assignments[index].id,"changed_paths":changed,"git_observation_available":paths.is_ok()&&untracked.is_ok(),"running":state["running"],"queued":state["queued"],"last_turn":value["slots"][index]["last_turn"],"tests_verified":false});
+        let id=format!("host-{}",doxa_fleet::hash(&artifact)?);artifacts.push((id,artifact));
+    }
+    let snapshot=doxa_fleet::transaction(&context,|state|{
+        for (id,artifact) in &artifacts{state.artifacts.insert(id.clone(),artifact.clone());}
+        if state.artifacts.len()>512{state.paused=true;state.reason="fleet host evidence journal ceiling reached".into();}
+        if out_of_scope{state.paused=true;state.reason="host observed changes outside the approved path scope".into();state.supervisor_status="drifted".into();}
+        Ok(json!({"charter":context.charter,"assignments":context.assignments,"artifacts":artifacts.iter().map(|(id,artifact)|json!({"id":id,"evidence":artifact})).collect::<Vec<_>>(),"guard_observations":state.observations.iter().rev().take(16).collect::<Vec<_>>(),"budget":{"review_reserved_usd":state.reserved_usd,"review_budget_usd":context.review.budget_usd,"run_budget_usd":context.charter.run_budget_usd},"elapsed_deadline":context.charter.deadline,"phase":value["phase"]}))
+    })?;
+    if context.review.supervisor.is_some()&&!out_of_scope {
+        let clean=rpc(&mut slots[0].client,"fleet_scrub",json!({"snapshot":snapshot}));
+        let result=match clean {Ok(clean)=>doxa_fleet::judge::supervise(&context,&clean["snapshot"]),Err(_)=>Err("independent supervisor snapshot scrub unavailable".into())};
+        doxa_fleet::apply_supervisor(&context,result)?;
+    }
+    let state=doxa_fleet::transaction(&context,|state|Ok(state.clone()))?;
+    value["supervision"]["status"]=json!(state.supervisor_status);value["supervision"]["paused"]=json!(state.paused);value["supervision"]["reason"]=json!(state.reason);
+    value["supervision"]["review_reserved_usd"]=json!(state.reserved_usd);value["supervision"]["review_estimated_usd"]=json!(state.actual_estimated_usd);value["supervision"]["calls"]=json!(state.calls);
+    value["supervision"]["last_checkpoint"]=json!(now());store.save(value)
+}
 fn monitor(store: &Store, value: &mut Value, slots: &mut [Slot], timeout: Option<Duration>, quiet: Duration) -> io::Result<()> {
     let started = Instant::now(); let mut quiet_since = None;
+    let mut last_checkpoint=Instant::now();
     // New manifests bind interactive lifetime independently of prompt delivery.
     // Older native no-prompt runs never dispatched the boss; preserve that arm.
     let interactive = value["interactive"].as_bool().unwrap_or_else(||
         value["mode"] == "supervisor" && value["slots"][0]["phase"] != "dispatched");
     loop {
         if STOP.load(Ordering::Relaxed) || store.stop_requested()? { value["stopped"] = json!(true); return Ok(()); }
+        if !value["supervision"].is_null(){
+            let context:doxa_fleet::Context=serde_json::from_value(value["supervision"]["context"].clone()).map_err(|_|invalid("invalid fleet supervision context"))?;
+            let state=doxa_fleet::transaction(&context,|state|Ok(state.clone()))?;
+            value["supervision"]["paused"]=json!(state.paused);value["supervision"]["reason"]=json!(state.reason);
+            if !state.paused&&value["slots"].as_array().is_some_and(|rows|rows.iter().all(|row|row["phase"]=="started")){
+                checkpoint(store,value,slots,true)?;
+                if value["supervision"]["paused"]!=true{dispatch(store,value,slots,&context.charter.task)?;value["phase"]=json!("monitoring");store.save(value)?;}
+            }
+        }
+        let review_interval=value["supervision"]["context"]["review"]["interval_s"].as_u64().unwrap_or(60);
+        if !value["supervision"].is_null() && last_checkpoint.elapsed()>=Duration::from_secs(review_interval){checkpoint(store,value,slots,false)?;last_checkpoint=Instant::now();}
         let mut any_busy = false;
         for (index, slot) in slots.iter_mut().enumerate() {
             for _ in 0..256 {
@@ -590,7 +698,7 @@ fn monitor(store: &Store, value: &mut Value, slots: &mut [Slot], timeout: Option
             let mut unresolved = Vec::new();
             for (ask, when) in std::mem::take(&mut slot.pending) {
                 let kind = ask["kind"].as_str().unwrap_or(""); let tool = ask["tool_name"].as_str().unwrap_or("");
-                let allow = may_auto_approve(&policy, kind, tool);
+                let allow = value["supervision"]["paused"]!=true && may_auto_approve(&policy, kind, tool);
                 if !allow && when.elapsed().as_secs_f64() < grace { unresolved.push((ask, when)); continue; }
                 let reason = format!("DOXA native fleet {} slot {index}: --approve {policy}; nobody answered within {grace:.0}s. Questions and session spawns require a human.", value["run_id"].as_str().unwrap_or("?"));
                 let answer = if allow { json!({"decision":"allow"}) } else if kind == "ask_user" { json!({"declined":true,"cancelled":true,"reason":reason}) } else { json!({"decision":"deny","reason":reason}) };
@@ -612,6 +720,7 @@ fn monitor(store: &Store, value: &mut Value, slots: &mut [Slot], timeout: Option
         }
         value["heartbeat_at"] = json!(now()); store.save(value)?;
         if any_busy { quiet_since = None; } else if quiet_since.is_none() { quiet_since = Some(Instant::now()); }
+        if value["supervision"]["paused"]==true {quiet_since=None;}
         if !interactive && quiet_since.is_some_and(|since| since.elapsed() >= quiet) { value["quiesced"] = json!(true); return Ok(()); }
         if timeout.is_some_and(|timeout| started.elapsed() >= timeout) { value["timed_out"] = json!(true); return Ok(()); }
         std::thread::sleep(Duration::from_millis(100));

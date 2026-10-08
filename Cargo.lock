@@ -580,6 +580,7 @@ version = "2.0.0-beta.9"
 dependencies = [
  "doxa-claude",
  "doxa-engines",
+ "doxa-fleet",
  "doxa-isolation",
  "doxa-lore",
  "doxa-peers",
@@ -611,6 +612,20 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "doxa-fleet"
+version = "2.0.0-beta.8"
+dependencies = [
+ "libc",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -759,6 +774,7 @@ dependencies = [
  "crossterm",
  "doxa-claude",
  "doxa-engines",
+ "doxa-fleet",
  "doxa-isolation",
  "doxa-lore",
  "doxa-peers",

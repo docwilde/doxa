@@ -24,7 +24,7 @@ pub fn words(text:&str)->io::Result<Vec<String>>{
     if out.len()>512{return Err(invalid("Too many fleet arguments"));}Ok(out)
 }
 
-fn has_option(args:&[String],name:&str)->bool{let mut index=0;while index<args.len(){let key=args[index].as_str();if key==name{return true;}index+=if matches!(key,"--force"|"--allow-unbudgeted"|"--dry-run"){1}else{2};}false}
+fn has_option(args:&[String],name:&str)->bool{let mut index=0;while index<args.len(){let key=args[index].as_str();if key==name{return true;}index+=if matches!(key,"--force"|"--allow-unbudgeted"|"--dry-run"|"--strict-unreviewed"){1}else{2};}false}
 
 pub struct Prepared {
     pub root:PathBuf,pub id:String,pub lines:Vec<String>,args:Vec<String>,resume_snapshot:Option<Value>,
@@ -56,7 +56,7 @@ impl Prepared {
     pub fn resume(root:PathBuf,id:&str)->io::Result<Self>{
         let snapshot=crate::fleet_control::snapshot(&root,id)?;
         if snapshot["phase"]!="monitoring"||snapshot["live"]!=true{return Err(invalid("Only a native live monitoring run can resume"));}
-        let review=json!({"run_id":id,"root":root,"cwd":snapshot["spec"]["cwd"],"mode":snapshot["mode"],"sessions":snapshot["spec"]["sessions"],"run_budget_usd":snapshot["spec"]["run_budget_usd"],"allow_unbudgeted":snapshot["spec"]["allow_unbudgeted"],"approval_policy":snapshot["approvals"]["policy"],"memory_off":snapshot["spec"]["memory_off"],"lore_enabled":snapshot["spec"]["lore_enabled"],"approval_grace_s":snapshot["approvals"]["grace_s"],"slots":snapshot["slots"]});
+        let review=json!({"run_id":id,"root":root,"cwd":snapshot["spec"]["cwd"],"mode":snapshot["mode"],"sessions":snapshot["spec"]["sessions"],"run_budget_usd":snapshot["spec"]["run_budget_usd"],"allow_unbudgeted":snapshot["spec"]["allow_unbudgeted"],"approval_policy":snapshot["approvals"]["policy"],"memory_off":snapshot["spec"]["memory_off"],"lore_enabled":snapshot["spec"]["lore_enabled"],"approval_grace_s":snapshot["approvals"]["grace_s"],"slots":snapshot["slots"],"independent_review":snapshot["supervision"]["context"]["review"],"charter_sha256":snapshot["supervision"]["context"]["charter_sha256"]});
         Ok(Self{lines:review_lines("Resume native fleet",&review),root:root.clone(),id:id.into(),args:vec!["resume".into(),id.into(),"--root".into(),root.to_string_lossy().into_owned()],resume_snapshot:Some(snapshot),prompt_digest:None,lore_default:None,seen:Cell::new(0),complete:Cell::new(false),armed:false})
     }
     pub fn launch(self,exe:&Path)->io::Result<Controller>{
@@ -85,6 +85,8 @@ fn review_lines(title:&str,value:&Value)->Vec<String>{
     for (label,key)in [("Run","run_id"),("Root","root"),("Directory","cwd"),("Mode","mode"),("Workers","workers"),("Sessions","sessions"),("Seed","seed"),("Workers with memory off","memory_off"),("Memory default enabled","lore_enabled"),("Total budget USD","run_budget_usd"),("Allow unbudgeted","allow_unbudgeted"),("Approval policy","approval_policy"),("Approval grace seconds","approval_grace_s"),("Dry run","dry_run"),("Preflight","preflight"),("Task digest","prompt_sha256"),("Quiescence deadline seconds","quiescence_timeout_s"),("Quiescence grace seconds","quiescence_grace_s")]{
         if !value[key].is_null(){lines.push(format!("{label}: {}",value[key].as_str().map(str::to_owned).unwrap_or_else(||value[key].to_string())));}
     }
+    if value["independent_review"].is_object(){let review=&value["independent_review"];for(label,key)in [("Independent supervisor model","supervisor"),("Supervisor action","supervisor_mode"),("Fast message judge","message_judge"),("Message review mode","message_mode"),("Review allocation USD","budget_usd"),("Maximum review calls","max_calls"),("Checkpoint interval seconds","interval_s"),("Input rate USD/Mtok","input_usd_per_million"),("Output rate USD/Mtok","output_usd_per_million"),("Message risk threshold","risk_threshold")]{lines.push(format!("{label}: {}",review[key]));}lines.push("Independent models use API credentials; review data is LORE-scrubbed, stateless and has no tools.".into());}
+    if let Some(hash)=value["charter_sha256"].as_str(){lines.push(format!("Approved charter SHA256: {hash}"));}
     let mut counts:BTreeMap<(String,String,String,String),usize>=BTreeMap::new();
     for slot in value["slots"].as_array().into_iter().flatten(){let key=(slot["role"].as_str().unwrap_or("worker").into(),slot["engine"].as_str().unwrap_or("unknown").into(),slot["model"].as_str().unwrap_or("provider default").into(),match slot["lore"].as_bool(){Some(true)=>"on",Some(false)=>"off",None=>"unknown"}.into());*counts.entry(key).or_default()+=1;}
     for ((role,engine,model,lore),count)in counts{lines.push(format!("Planned {count} × {role}: {engine}:{model} · memory {lore}"));}

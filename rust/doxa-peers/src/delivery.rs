@@ -22,6 +22,9 @@ const TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct PeerFrame {
+    /// Kernel-observed sender identity; serialized claims never fill this field.
+    #[serde(skip)]
+    pub authenticated_pid: Option<i32>,
     pub from_id: String,
     pub from_title: String,
     pub sent_at: String,
@@ -91,7 +94,7 @@ fn parse_frame(bytes: &[u8]) -> io::Result<PeerFrame> {
 }
 
 /// A receiving socket is created exclusively. An existing path, even a dead socket, is never unlinked by this API.
-struct PendingFrame { stream: UnixStream, bytes: Vec<u8>, started: Instant }
+struct PendingFrame { pid: i32, stream: UnixStream, bytes: Vec<u8>, started: Instant }
 pub struct Inbox { listener: UnixListener, path: PathBuf, inode: u64, device: u64, pending: Mutex<Option<PendingFrame>> }
 impl Inbox {
     pub fn bind(runtime: &Path, session_id: &str) -> io::Result<Self> {
@@ -123,8 +126,9 @@ impl Inbox {
                 Err(error) => return Err(error),
             };
             same_user(&stream)?;
+            let pid = crate::credentials::peer_credentials(&stream)?.pid;
             stream.set_nonblocking(true)?;
-            *pending = Some(PendingFrame { stream, bytes: Vec::new(), started: Instant::now() });
+            *pending = Some(PendingFrame { pid, stream, bytes: Vec::new(), started: Instant::now() });
         }
         let frame = pending.as_mut().expect("pending peer connection");
         if frame.started.elapsed() >= TIMEOUT {
@@ -145,9 +149,10 @@ impl Inbox {
             }
             if n == 0 || frame.bytes.contains(&b'\n') {
                 let bytes = std::mem::take(&mut frame.bytes);
+                let authenticated_pid = Some(frame.pid);
                 *pending = None;
                 return match parse_frame(&bytes) {
-                    Ok(frame) => Ok(Some(frame.scrub(scrubber))),
+                    Ok(mut frame) => { frame.authenticated_pid = authenticated_pid; Ok(Some(frame.scrub(scrubber))) },
                     Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => Ok(None),
                     Err(error) => Err(error),
                 };
@@ -160,7 +165,7 @@ impl Inbox {
             let (mut stream, _) = self.listener.accept()?;
             same_user(&stream)?;
             match read_frame(&mut stream) {
-                Ok(frame) => return Ok(frame.scrub(scrubber)),
+                Ok(mut frame) => { frame.authenticated_pid = Some(crate::credentials::peer_credentials(&stream)?.pid); return Ok(frame.scrub(scrubber)); },
                 Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => continue, // discovery probe
                 Err(e) => return Err(e),
             }
@@ -435,7 +440,7 @@ pub fn deliver_with_reply(registry: &Registry, sender: &PeerRecord, recipients: 
     }
     limiter.lock().map_err(|_| io::Error::other("peer rate limiter poisoned"))?
         .charge(turn_id, targets.len())?;
-    let frame = PeerFrame { from_id: sender.session_id.clone(), from_title: sender.title.clone(), sent_at: now(), body: body.to_owned(),
+    let frame = PeerFrame { authenticated_pid: None, from_id: sender.session_id.clone(), from_title: sender.title.clone(), sent_at: now(), body: body.to_owned(),
         from_repo: Some(sender.scope_key().to_owned()), kind: (kind != "direct").then(|| kind.to_owned()) }.scrub(scrubber);
     let mut result = DeliveryResult { delivered: Vec::new(), failed: Vec::new(), record: None, ledger_error: None };
     for peer in targets {

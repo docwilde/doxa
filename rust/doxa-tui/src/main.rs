@@ -584,6 +584,7 @@ fn fleet(args: &[String]) -> io::Result<()> {
         ["runs"] => println!("{}", fleet_view::runs(&root)?),
         ["status", run] => println!("{}", fleet_view::status(&root, run)?),
         ["resume", run] => return fleet_control::resume(&root, run),
+        ["continue", run, charter_hash] => println!("{}", fleet_control::continue_run(&root,run,charter_hash)?),
         ["review", run, slot, request] => {
             let slot = slot.parse().map_err(|_| invalid("fleet slot must be a number"))?;
             let reviewed = fleet_control::review(&root, run, slot, request)?;
