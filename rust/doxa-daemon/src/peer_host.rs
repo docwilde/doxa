@@ -690,8 +690,11 @@ mod provider_target_tests {
     #[test]
     fn fleet_guard_blocks_both_migration_rpcs_before_forwarding_to_the_isolation_host() {
         use super::*;use std::sync::atomic::{AtomicUsize,Ordering};
+        use std::os::unix::fs::PermissionsExt;
         struct Recorder(AtomicUsize);impl Host for Recorder{fn prompt(&self,_:&str,_:&mut dyn FnMut(Value)){}fn call(&self,_:&str,_:&Value)->Result<Value,String>{self.0.fetch_add(1,Ordering::Relaxed);Ok(json!({"forwarded":true}))}}
-        let dir=tempfile::tempdir().unwrap();let inner=Arc::new(Recorder(AtomicUsize::new(0)));let(tx,_)=std::sync::mpsc::sync_channel(1);
+        let dir=tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(),std::fs::Permissions::from_mode(0o700)).unwrap();
+        let inner=Arc::new(Recorder(AtomicUsize::new(0)));let(tx,_)=std::sync::mpsc::sync_channel(1);
         let peer=PeerHost::new(inner.clone(),dir.path().into(),dir.path(),"session".into(),"session".into(),tx).unwrap();
         assert_eq!(peer.call("isolation_migration_plan",&json!({})).unwrap()["forwarded"],true);
         let charter=doxa_fleet::Charter{version:1,fleet_id:"run".into(),task:"Frozen task".into(),repo:dir.path().display().to_string(),allowed_paths:vec![String::new()],required_evidence:vec!["host tests".into()],worker_limit:1,run_budget_usd:Some(1.0),deadline:doxa_fleet::unix_now()+3600,human_actions:vec!["identity changes".into()]};
