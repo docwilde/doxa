@@ -1,8 +1,8 @@
 # Code graph: native syntax-query slice
 
-Status: **first read-only slice implemented**. DOXA can query current Rust
-source for file-level definitions and imports. It does not yet build a resolved
-dependency graph or write anything to LORE.
+Status: **read-only syntax queries implemented**. DOXA can query current Rust
+source for definitions, imports, and conservative call-site candidates. It does
+not build a resolved dependency graph or write anything to LORE.
 
 ## Contents
 
@@ -13,18 +13,26 @@ dependency graph or write anything to LORE.
 
 ## Shipped surface
 
-`doxa codegraph [--root WORKTREE] file PATH | symbol NAME | imports PATH`
+`doxa codegraph [--root WORKTREE] file PATH | symbol NAME | imports PATH | calls PATH`
 returns bounded JSON. With no `--root`, it uses the current Git worktree.
 `file` lists parsed definitions and import declarations in one Rust file;
 `symbol` finds all exact name or qualified-name matches across that worktree;
 `imports` lists the syntactic `use` and `extern crate` declarations in one
-file. A second `doxa-codegraph` binary exposes the same queries for development.
+file. `calls` lists direct function-path and method-call expressions within
+file-level functions, trait defaults, and simple `impl` methods. A second
+`doxa-codegraph` binary exposes the same queries for development.
 
 The parser is [Syn's Rust source parser](https://docs.rs/syn/latest/syn/fn.parse_file.html).
 It records top-level definitions, inline modules, trait methods, and methods
 whose `impl` self type is a simple path. Imports are declarations, not resolved
-file dependencies. The query deliberately does not infer calls, references,
-macro expansion, conditional compilation, or function-local declarations.
+file dependencies. A call edge records its lexical caller and spelled target.
+Direct paths carry up to eight function or method definitions whose final name
+segment matches; `candidate_only` means one such declaration was observed,
+**not** that Rust would bind the call to it. Multiple matches are `ambiguous`;
+no match and receiver-method calls are `unresolved`. The answer counts omitted
+candidates. Calls through variables, closures, macros, function-local items,
+and qualified-self paths are not resolved. Neither macro expansion nor
+conditional compilation is evaluated.
 A Python, TypeScript, or other recognized non-Rust source file is reported as
 unsupported rather than silently treated as empty.
 
@@ -32,13 +40,16 @@ unsupported rather than silently treated as empty.
 
 Every query enumerates the current tracked **and untracked, nonignored** Git
 files and reads Rust bytes afresh. There is no index that can lag an edit.
-Each row carries its file, line, SHA-256 of the parsed bytes, and read time.
+Each row and call edge carries its file, line, SHA-256 of the parsed bytes, and
+read time. Candidate declarations carry their own source hashes and read times.
 The answer names its worktree and reports parsed files, unsupported languages,
 syntax errors, skipped files, and unsupported syntax. Same-name definitions
 remain separate candidates. A no-hit answer names a live-search fallback.
 
 Work is bounded: at most 20,000 files, 1 MiB per Rust file, 64 MiB total Rust
-source, 100 result rows, and a 64 KiB reply. The answer counts omitted rows.
+source, 100 result rows or call edges, 10,000 call sites in the requested file,
+100,000 candidate declarations, and a 64 KiB reply. The answer counts omitted
+rows, edges, and per-edge candidates.
 When enumeration or the total scan budget fails, the command returns an error
 instead of a partial result. Oversized, changed-during-read, symlinked, and
 unparseable files are named in bounded issue summaries. A file hash is evidence
@@ -58,8 +69,9 @@ This slice lives in `rust/doxa-codegraph` and is callable through the installed
 
 - Coordinate a LORE-owned persisted graph and curated `purpose` file-map field
   with LORE's write gate, including worktree lifecycle and freshness checks.
-- Resolve one-hop import dependencies and add references/calls only where the
-  language semantics make the target decidable; report ambiguity explicitly.
+- Resolve one-hop import dependencies and actual Rust call bindings with module,
+  crate, trait, type, and conditional-compilation context. The current call
+  candidates intentionally stop at spelling matches.
 - Add a reviewed agent tool and optional TUI tree/chip after the shared LORE
   operator exists. The CLI is the current operator surface.
 - Decide whether other languages justify a parser dependency and coverage bar.

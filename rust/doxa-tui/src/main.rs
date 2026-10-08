@@ -56,7 +56,7 @@ Commands:
                        Run the explicitly selected provider authentication
   plugins [refresh | adopt on|off]
                        Discover plugins or change sanitized adoption for new sessions
-  codegraph [--root WORKTREE] file PATH | symbol NAME | imports PATH
+  codegraph [--root WORKTREE] file PATH | symbol NAME | imports PATH | calls PATH
                        Query current Rust syntax with source hashes and coverage
   fleet ...            Inspect or start native fleet runs
   mesh serve           Serve the private peer graph until Ctrl-C

@@ -12,6 +12,8 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
+use syn::spanned::Spanned;
+use syn::visit::{self, Visit};
 
 const MAX_FILES: usize = 20_000;
 const MAX_PATH_BYTES: usize = 4_096;
@@ -21,8 +23,11 @@ const MAX_TOTAL_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_ROWS: usize = 100;
 const MAX_ISSUE_EXAMPLES: usize = 20;
 const MAX_REPLY_BYTES: usize = 64 * 1024;
+const MAX_CALL_SITES: usize = 10_000;
+const MAX_CANDIDATE_SYMBOLS: usize = 100_000;
+const MAX_EDGE_CANDIDATES: usize = 8;
 
-pub enum Query { File(String), Symbol(String), Imports(String) }
+pub enum Query { File(String), Symbol(String), Imports(String), Calls(String) }
 
 pub fn query_cli(args: &[String]) -> Result<Answer, String> {
     let (root, rest) = if args.first().is_some_and(|arg| arg == "--root") {
@@ -33,7 +38,8 @@ pub fn query_cli(args: &[String]) -> Result<Answer, String> {
         [kind, value] if kind == "file" => Query::File(value.clone()),
         [kind, value] if kind == "symbol" => Query::Symbol(value.clone()),
         [kind, value] if kind == "imports" => Query::Imports(value.clone()),
-        _ => return Err("usage: doxa codegraph [--root WORKTREE] file PATH | symbol NAME | imports PATH".into()),
+        [kind, value] if kind == "calls" => Query::Calls(value.clone()),
+        _ => return Err("usage: doxa codegraph [--root WORKTREE] file PATH | symbol NAME | imports PATH | calls PATH".into()),
     };
     query(&root, request)
 }
@@ -48,6 +54,8 @@ pub struct Answer {
     pub coverage: Coverage,
     pub rows: Vec<Row>,
     pub omitted_rows: usize,
+    pub edges: Vec<CallEdge>,
+    pub omitted_edges: usize,
     pub note: &'static str,
     pub fallback: Option<&'static str>,
 }
@@ -90,7 +98,32 @@ pub struct Row {
     pub read_unix_ms: u128,
 }
 
-const NOTE: &str = "Rust syntax only; imports are declarations, not resolved dependencies. cfg and macro expansion are not evaluated. Function-local definitions and imports, references, calls, and non-Rust languages are not indexed.";
+#[derive(Clone, Debug, Serialize)]
+pub struct CallEdge {
+    pub file: String,
+    pub line: usize,
+    pub column: usize,
+    pub caller: String,
+    pub target: String,
+    pub form: &'static str,
+    pub binding: &'static str,
+    pub reason: &'static str,
+    pub candidates: Vec<CallCandidate>,
+    pub omitted_candidates: usize,
+    pub sha256: String,
+    pub read_unix_ms: u128,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct CallCandidate {
+    pub file: String,
+    pub line: usize,
+    pub qualified: String,
+    pub sha256: String,
+    pub read_unix_ms: u128,
+}
+
+const NOTE: &str = "Rust syntax only. Call candidates match a final name segment, not Rust bindings; even one candidate is unverified. Imports are declarations. cfg, macro expansion, local definitions/imports, other expression calls, references, and non-Rust languages are not resolved.";
 
 fn source_language(path: &str) -> Option<&'static str> {
     match Path::new(path).extension().and_then(|s| s.to_str()) {
@@ -182,7 +215,54 @@ fn file_bytes(root: &Path, relative: &str) -> Result<(String, String, u128), Str
     Ok((content, sha, read_unix_ms))
 }
 
-struct Parsed { symbols: Vec<Row>, imports: Vec<Row>, macro_items: usize, unsupported_syntax: usize }
+struct Parsed { symbols: Vec<Row>, imports: Vec<Row>, calls: Vec<CallEdge>, macro_items: usize, unsupported_syntax: usize }
+
+struct CallCollector<'a> {
+    file: &'a str,
+    caller: &'a str,
+    sha: &'a str,
+    read_unix_ms: u128,
+    calls: &'a mut Vec<CallEdge>,
+}
+impl CallCollector<'_> {
+    fn push(&mut self, line: usize, column: usize, target: String, form: &'static str,
+        reason: &'static str) {
+        self.calls.push(CallEdge {
+            file: self.file.into(), line, column, caller: self.caller.into(), target,
+            form, binding: "unresolved", reason, candidates: Vec::new(),
+            omitted_candidates: 0, sha256: self.sha.into(), read_unix_ms: self.read_unix_ms,
+        });
+    }
+}
+impl<'ast> Visit<'ast> for CallCollector<'_> {
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        if let syn::Expr::Path(path) = node.func.as_ref() {
+            let target = path.path.segments.iter().map(|part| part.ident.to_string())
+                .collect::<Vec<_>>().join("::");
+            let target = if path.path.leading_colon.is_some() { format!("::{target}") } else { target };
+            let at = node.func.span().start();
+            self.push(at.line, at.column, target, "function_path",
+                if path.qself.is_some() { "qualified_self_type_unknown" } else { "pending_name_match" });
+        }
+        visit::visit_expr_call(self, node);
+    }
+
+    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+        let at = node.method.span().start();
+        self.push(at.line, at.column, node.method.to_string(), "method_receiver",
+            "receiver_type_unknown");
+        visit::visit_expr_method_call(self, node);
+    }
+
+    // A nested item has its own lexical caller. It is outside this slice's
+    // definition inventory, so do not attribute its calls to the outer item.
+    fn visit_item(&mut self, _: &'ast syn::Item) {}
+}
+
+fn collect_calls(block: &syn::Block, caller: &str, file: &str, sha: &str,
+    read_unix_ms: u128, parsed: &mut Parsed) {
+    CallCollector { file, caller, sha, read_unix_ms, calls: &mut parsed.calls }.visit_block(block);
+}
 fn row(kind: &'static str, file: &str, line: usize, name: String, qualified: String,
     alias: Option<String>, glob: bool, sha: &str, read_unix_ms: u128) -> Row {
     Row { kind, file: file.into(), line, name, qualified, alias, glob, sha256: sha.into(), read_unix_ms }
@@ -221,10 +301,14 @@ fn add_symbol(parsed: &mut Parsed, kind: &'static str, ident: &syn::Ident, scope
     let name = ident.to_string();
     parsed.symbols.push(row(kind, file, ident.span().start().line, name.clone(), qualified(scope, &name), None, false, sha, read_unix_ms));
 }
-fn walk_items(items: &[syn::Item], scope: &str, file: &str, sha: &str, read_unix_ms: u128, parsed: &mut Parsed) {
+fn walk_items(items: &[syn::Item], scope: &str, file: &str, sha: &str, read_unix_ms: u128,
+    collect: bool, parsed: &mut Parsed) {
     for item in items {
         match item {
-            syn::Item::Fn(value) => add_symbol(parsed, "function", &value.sig.ident, scope, file, sha, read_unix_ms),
+            syn::Item::Fn(value) => {
+                add_symbol(parsed, "function", &value.sig.ident, scope, file, sha, read_unix_ms);
+                if collect { collect_calls(&value.block, &qualified(scope, &value.sig.ident.to_string()), file, sha, read_unix_ms, parsed); }
+            }
             syn::Item::Struct(value) => add_symbol(parsed, "struct", &value.ident, scope, file, sha, read_unix_ms),
             syn::Item::Enum(value) => add_symbol(parsed, "enum", &value.ident, scope, file, sha, read_unix_ms),
             syn::Item::Union(value) => add_symbol(parsed, "union", &value.ident, scope, file, sha, read_unix_ms),
@@ -235,14 +319,21 @@ fn walk_items(items: &[syn::Item], scope: &str, file: &str, sha: &str, read_unix
                 add_symbol(parsed, "trait", &value.ident, scope, file, sha, read_unix_ms);
                 let owner = qualified(scope, &value.ident.to_string());
                 for child in &value.items {
-                    if let syn::TraitItem::Fn(method) = child { add_symbol(parsed, "trait_method", &method.sig.ident, &owner, file, sha, read_unix_ms); }
+                    if let syn::TraitItem::Fn(method) = child {
+                        add_symbol(parsed, "trait_method", &method.sig.ident, &owner, file, sha, read_unix_ms);
+                        if collect {
+                            if let Some(body) = &method.default {
+                                collect_calls(body, &qualified(&owner, &method.sig.ident.to_string()), file, sha, read_unix_ms, parsed);
+                            }
+                        }
+                    }
                 }
             }
             syn::Item::Mod(value) => {
                 add_symbol(parsed, if value.content.is_some() { "inline_module" } else { "module_decl" }, &value.ident, scope, file, sha, read_unix_ms);
                 if let Some((_, nested)) = &value.content {
                     let next = qualified(scope, &value.ident.to_string());
-                    walk_items(nested, &next, file, sha, read_unix_ms, parsed);
+                    walk_items(nested, &next, file, sha, read_unix_ms, collect, parsed);
                 }
             }
             syn::Item::Impl(value) => {
@@ -252,7 +343,10 @@ fn walk_items(items: &[syn::Item], scope: &str, file: &str, sha: &str, read_unix
                     } else { format!("impl[{target}]") };
                     let owner = qualified(scope, &owner);
                     for child in &value.items {
-                        if let syn::ImplItem::Fn(method) = child { add_symbol(parsed, "method", &method.sig.ident, &owner, file, sha, read_unix_ms); }
+                        if let syn::ImplItem::Fn(method) = child {
+                            add_symbol(parsed, "method", &method.sig.ident, &owner, file, sha, read_unix_ms);
+                            if collect { collect_calls(&method.block, &qualified(&owner, &method.sig.ident.to_string()), file, sha, read_unix_ms, parsed); }
+                        }
                     }
                 } else { parsed.unsupported_syntax += 1; }
             }
@@ -269,10 +363,12 @@ fn walk_items(items: &[syn::Item], scope: &str, file: &str, sha: &str, read_unix
         }
     }
 }
-fn parse_rust(content: &str, file: &str, sha: &str, read_unix_ms: u128) -> Result<Parsed, String> {
+fn parse_rust(content: &str, file: &str, sha: &str, read_unix_ms: u128,
+    collect: bool) -> Result<Parsed, String> {
     let syntax = syn::parse_file(content).map_err(|e| format!("Rust parse error: {e}"))?;
-    let mut parsed = Parsed { symbols: Vec::new(), imports: Vec::new(), macro_items: 0, unsupported_syntax: 0 };
-    walk_items(&syntax.items, "", file, sha, read_unix_ms, &mut parsed);
+    let mut parsed = Parsed { symbols: Vec::new(), imports: Vec::new(), calls: Vec::new(), macro_items: 0, unsupported_syntax: 0 };
+    walk_items(&syntax.items, "", file, sha, read_unix_ms, collect, &mut parsed);
+    parsed.calls.sort_by_key(|edge| (edge.line, edge.column));
     Ok(parsed)
 }
 
@@ -281,7 +377,7 @@ pub fn query(root: &Path, request: Query) -> Result<Answer, String> {
     let paths = listed_files(&root)?;
     let (kind, value) = match request {
         Query::File(value) => ("file", value), Query::Symbol(value) => ("symbol", value),
-        Query::Imports(value) => ("imports", value),
+        Query::Imports(value) => ("imports", value), Query::Calls(value) => ("calls", value),
     };
     if value.is_empty() || value.len() > MAX_PATH_BYTES || value.chars().any(char::is_control) {
         return Err("invalid query value".into());
@@ -290,9 +386,12 @@ pub fn query(root: &Path, request: Query) -> Result<Answer, String> {
     let mut answer = Answer { scope: root.to_string_lossy().into_owned(), query: kind, value: value.clone(),
         observed_unix_ms: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis(),
         status: "ok".into(), coverage: Coverage::default(), rows: Vec::new(), omitted_rows: 0,
+        edges: Vec::new(), omitted_edges: 0,
         note: NOTE, fallback: None };
     answer.coverage.enumerated_files = paths.len();
     let mut total = 0u64;
+    let mut candidates: BTreeMap<String, Vec<Row>> = BTreeMap::new();
+    let mut candidate_count = 0usize;
     for path in paths {
         match source_language(&path) {
             Some("rust") => {
@@ -302,13 +401,32 @@ pub fn query(root: &Path, request: Query) -> Result<Answer, String> {
                 };
                 total = total.saturating_add(content.len() as u64);
                 if total > MAX_TOTAL_SOURCE_BYTES { return Err("Rust source scan exceeded 64 MiB; no partial answer".into()); }
-                let parsed = match parse_rust(&content, &path, &sha, read_unix_ms) {
+                let parsed = match parse_rust(&content, &path, &sha, read_unix_ms,
+                    kind == "calls" && path == value) {
                     Ok(result) => result,
                     Err(reason) => { answer.coverage.unparseable.add(&path, reason); if path == value { answer.status = "unparseable".into(); } continue; }
                 };
                 answer.coverage.parsed_rust_files += 1;
                 answer.coverage.macro_items += parsed.macro_items;
                 answer.coverage.unsupported_syntax += parsed.unsupported_syntax;
+                if kind == "calls" {
+                    for symbol in parsed.symbols.iter().filter(|row| matches!(row.kind,
+                        "function" | "method" | "trait_method")) {
+                        candidate_count += 1;
+                        if candidate_count > MAX_CANDIDATE_SYMBOLS {
+                            return Err("call candidate inventory exceeds 100,000; no partial answer".into());
+                        }
+                        candidates.entry(symbol.name.clone()).or_default().push(symbol.clone());
+                    }
+                    if path == value {
+                        if parsed.calls.len() > MAX_CALL_SITES {
+                            return Err("file contains more than 10,000 supported call sites; no partial answer".into());
+                        }
+                        answer.omitted_edges = parsed.calls.len().saturating_sub(MAX_ROWS);
+                        answer.edges = parsed.calls.into_iter().take(MAX_ROWS).collect();
+                    }
+                    continue;
+                }
                 let relevant = if kind == "symbol" {
                     parsed.symbols.into_iter().filter(|row| row.name == value || row.qualified == value).collect::<Vec<_>>()
                 } else if path == value && kind == "imports" { parsed.imports }
@@ -325,7 +443,25 @@ pub fn query(root: &Path, request: Query) -> Result<Answer, String> {
             None => { answer.coverage.other_files += 1; if path == value { answer.status = "unsupported:unknown".into(); } }
         }
     }
-    if answer.rows.is_empty() && answer.status == "ok" {
+    if kind == "calls" {
+        for edge in &mut answer.edges {
+            if edge.reason != "pending_name_match" { continue; }
+            let name = edge.target.rsplit("::").next().unwrap_or_default();
+            let matches = candidates.get(name).map(Vec::as_slice).unwrap_or_default();
+            edge.binding = match matches.len() {
+                0 => "unresolved", 1 => "candidate_only", _ => "ambiguous",
+            };
+            edge.reason = match matches.len() {
+                0 => "no_observed_name_match", 1 => "one_observed_name_match", _ => "multiple_observed_name_matches",
+            };
+            edge.omitted_candidates = matches.len().saturating_sub(MAX_EDGE_CANDIDATES);
+            edge.candidates = matches.iter().take(MAX_EDGE_CANDIDATES).map(|row| CallCandidate {
+                file: row.file.clone(), line: row.line, qualified: row.qualified.clone(),
+                sha256: row.sha256.clone(), read_unix_ms: row.read_unix_ms,
+            }).collect();
+        }
+    }
+    if answer.rows.is_empty() && answer.edges.is_empty() && answer.status == "ok" {
         answer.fallback = Some("Search the live worktree with rg; query syntax excludes generated code and unsupported languages.");
     }
     if serde_json::to_vec(&answer).map_err(|e| e.to_string())?.len() > MAX_REPLY_BYTES {
@@ -426,5 +562,87 @@ mod tests {
         assert_eq!(answer.rows.len(), MAX_ROWS);
         assert_eq!(answer.omitted_rows, 7);
         assert_eq!(answer.coverage.parsed_rust_files, 1);
+    }
+
+    #[test]
+    fn call_edges_preserve_ambiguous_candidates_and_unresolved_receivers() {
+        let root = worktree();
+        fs::write(root.path().join("caller.rs"), "fn run(x: &str) { same(); only(); absent(); x.len(); }\nfn only() {}\n").unwrap();
+        fs::write(root.path().join("left.rs"), "mod left { fn same() {} }\n").unwrap();
+        fs::write(root.path().join("right.rs"), "mod right { fn same() {} }\n").unwrap();
+        let answer = query(root.path(), Query::Calls("caller.rs".into())).unwrap();
+        assert_eq!(answer.edges.len(), 4);
+        let same = &answer.edges[0];
+        assert_eq!(same.caller, "run");
+        assert_eq!(same.target, "same");
+        assert_eq!(same.binding, "ambiguous");
+        assert_eq!(same.reason, "multiple_observed_name_matches");
+        assert_eq!(same.candidates.len(), 2);
+        assert_eq!(same.candidates[0].qualified, "left::same");
+        assert_eq!(same.candidates[1].qualified, "right::same");
+        assert_eq!(same.candidates[0].file, "left.rs");
+        assert!(same.candidates.iter().all(|item| item.sha256.len() == 64 && item.read_unix_ms > 0));
+        assert_eq!(answer.edges[1].binding, "candidate_only");
+        assert_eq!(answer.edges[1].candidates[0].file, "caller.rs");
+        assert_eq!(answer.edges[2].binding, "unresolved");
+        assert_eq!(answer.edges[2].reason, "no_observed_name_match");
+        assert_eq!(answer.edges[3].form, "method_receiver");
+        assert_eq!(answer.edges[3].reason, "receiver_type_unknown");
+        assert!(answer.edges[3].candidates.is_empty());
+        assert!(answer.edges.iter().all(|edge| edge.file == "caller.rs" && edge.line == 1
+            && edge.sha256.len() == 64 && edge.read_unix_ms > 0));
+    }
+
+    #[test]
+    fn call_candidates_follow_renames_and_never_read_symlink_targets() {
+        let root = worktree();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("caller.rs"), "fn run() { moved(); outside(); }\n").unwrap();
+        fs::write(root.path().join("target.rs"), "fn moved() {}\n").unwrap();
+        let first = query(root.path(), Query::Calls("caller.rs".into())).unwrap();
+        assert_eq!(first.edges[0].candidates[0].file, "target.rs");
+        fs::rename(root.path().join("target.rs"), root.path().join("renamed.rs")).unwrap();
+        let renamed = query(root.path(), Query::Calls("caller.rs".into())).unwrap();
+        assert_eq!(renamed.edges[0].candidates[0].file, "renamed.rs");
+        assert_eq!(renamed.edges[0].candidates[0].sha256, first.edges[0].candidates[0].sha256);
+        fs::write(outside.path().join("secret.rs"), "fn outside() {}\n").unwrap();
+        symlink(outside.path().join("secret.rs"), root.path().join("linked.rs")).unwrap();
+        let symlinked = query(root.path(), Query::Calls("caller.rs".into())).unwrap();
+        assert_eq!(symlinked.edges[1].binding, "unresolved");
+        assert!(symlinked.edges[1].candidates.is_empty());
+        assert!(symlinked.coverage.skipped.examples.iter().any(|issue| issue.file == "linked.rs"));
+        fs::remove_file(root.path().join("renamed.rs")).unwrap();
+        symlink(outside.path().join("secret.rs"), root.path().join("renamed.rs")).unwrap();
+        let replaced = query(root.path(), Query::Calls("caller.rs".into())).unwrap();
+        assert_eq!(replaced.edges[0].binding, "unresolved");
+        assert!(replaced.coverage.skipped.examples.iter().any(|issue| issue.file == "renamed.rs"));
+    }
+
+    #[test]
+    fn nested_local_items_are_not_attributed_to_the_outer_caller() {
+        let root = worktree();
+        fs::write(root.path().join("local.rs"), "fn outer() { fn inner() { hidden(); } shown(); }\n").unwrap();
+        let answer = query(root.path(), Query::Calls("local.rs".into())).unwrap();
+        assert_eq!(answer.edges.len(), 1);
+        assert_eq!(answer.edges[0].target, "shown");
+        assert_eq!(answer.edges[0].caller, "outer");
+    }
+
+    #[test]
+    fn call_pages_and_candidate_fanout_report_omissions() {
+        let root = worktree();
+        let mut caller = "fn run() { many();\n".to_owned();
+        caller.push_str(&"missing();\n".repeat(MAX_ROWS + 2));
+        caller.push_str("}\n");
+        fs::write(root.path().join("caller.rs"), caller).unwrap();
+        for number in 0..MAX_EDGE_CANDIDATES + 1 {
+            fs::write(root.path().join(format!("candidate_{number}.rs")), "fn many() {}\n").unwrap();
+        }
+        let answer = query(root.path(), Query::Calls("caller.rs".into())).unwrap();
+        assert_eq!(answer.edges.len(), MAX_ROWS);
+        assert_eq!(answer.omitted_edges, 3);
+        assert_eq!(answer.edges[0].binding, "ambiguous");
+        assert_eq!(answer.edges[0].candidates.len(), MAX_EDGE_CANDIDATES);
+        assert_eq!(answer.edges[0].omitted_candidates, 1);
     }
 }
