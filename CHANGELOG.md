@@ -5,6 +5,24 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.13 — 2026-10-09
+
+**Fleet and isolation**
+
+- Gate Docker-isolated dependent workers on a host checkpoint, typed handoff, and explicit operator release. Native dependency plans are refused; trusted project tests and in-TUI release remain open.
+- Verify actual cgroup v2 memory, swap, CPU and PID ceilings at launch, resume and each provider turn; refuse ineffective limits. Rootless live checks, hard disk quotas and hardened egress remain open.
+
+**Code and extensions**
+
+- Add read-only Rust code graph queries for files, symbols, imports and bounded call-site candidates with source hashes and explicit ambiguity. Resolved bindings and LORE storage remain open.
+- Load owner-approved, data-only native text commands from private allowlisted manifests. Executable plugins, hooks and provider extensions remain open.
+
+**Remote, models and diagnostics**
+
+- Add a Compose Android hub client for private session control and connected-only generic alerts. The SDK build passes; device QA and FCM background push remain open.
+- Add sourced DeepSeek context/thinking and GLM thinking facts, leaving unverified GLM context unknown. Preserve source session and project IDs for LORE pending-proposal review.
+- Add a sandboxed Mermaid renderer doctor and macOS daemon process coverage. Real CLI/Chromium and authenticated macOS provider checks remain open.
+
 ## 2.0.0-beta.12 — 2026-10-08
 
 **Terminal and organization**
