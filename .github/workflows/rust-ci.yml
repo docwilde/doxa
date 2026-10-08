@@ -89,6 +89,8 @@ jobs:
             -s scripts/tests -p test_codex_code_mode_proof.py -v
           python3 -W error::ResourceWarning -m unittest discover \
             -s scripts/tests -p test_lore_bump.py -v
+          python3 -W error::ResourceWarning -m unittest discover \
+            -s scripts/tests -p test_session_image_package.py -v
       - name: Smoke installed Rust launcher without a Python environment
         run: |
           smoke_dir=$(mktemp -d "$TMPDIR/install-XXXXXXXX")
@@ -101,6 +103,7 @@ jobs:
             DOXA_NO_LAUNCHER=1 \
             sh scripts/install.sh HEAD
           (cd / && "$smoke_dir/bin/doxa" --version)
+          "$smoke_dir/bin/doxa-isolation-worker" --self-test
           test ! -e "$smoke_dir/home/sidecars"
           test ! -e "$smoke_dir/bin/.doxa-sidecar-current"
           HOME="$smoke_dir/owned-home" "$smoke_dir/bin/lore-rs" memory show
