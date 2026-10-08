@@ -361,6 +361,12 @@ fn commit_oid(cwd: &Path, revision: &str) -> Result<String, String> {
 }
 
 fn base_for(cwd: &Path) -> Result<(String, &'static str), String> {
+    if let Some(manifest) = doxa_isolation::workspace::manifest_for(cwd).map_err(|error| error.to_string())? {
+        if !manifest.base_sha.is_empty() {
+            if !valid_oid(&manifest.base_sha) { return Err("Recorded isolation base is invalid.".into()); }
+            return commit_oid(cwd, &manifest.base_sha).map(|oid| (oid, "recorded isolation base"));
+        }
+    }
     let head = || commit_oid(cwd, "HEAD").map(|oid| (oid, "HEAD (uncommitted only)"));
     let Some(path) = sidecar(cwd) else { return head(); };
     let Ok(file) = OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW).open(path)
@@ -605,6 +611,40 @@ mod tests {
         let cached = Command::new("git").args(["show", ":tracked.txt"])
             .current_dir(dir.path()).output().unwrap();
         assert_eq!(cached.stdout, b"new\n");
+    }
+
+    #[test]
+    fn retained_isolation_checkout_keeps_committed_changes_in_the_diff() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().canonicalize().unwrap().join("home");
+        let checkout = home.join("isolation/session/checkout");
+        std::fs::create_dir_all(&checkout).unwrap();
+        std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(checkout.parent().unwrap(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git").args(args).current_dir(&checkout).output().unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        };
+        git(&["init", "-q"]);
+        std::fs::write(checkout.join("tracked.txt"), "old\n").unwrap();
+        git(&["add", "tracked.txt"]);
+        git(&["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "test: baseline"]);
+        let base = git(&["rev-parse", "HEAD"]);
+        let runtime = doxa_isolation::Runtime::prepare(&home, "session", &checkout,
+            Some(doxa_isolation::Profile::Native), false, None).unwrap();
+        let mut saved = serde_json::to_value(runtime.manifest()).unwrap();
+        saved["base_sha"] = serde_json::json!(base);
+        let path = doxa_isolation::manifest_path(&home, "session").unwrap();
+        std::fs::write(&path, serde_json::to_vec(&saved).unwrap()).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::write(checkout.join("tracked.txt"), "committed session change\n").unwrap();
+        git(&["add", "tracked.txt"]);
+        git(&["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "test: session change"]);
+        let snapshot = read(&checkout);
+        assert_eq!(snapshot.base, base);
+        assert!(snapshot.text.contains("+committed session change"), "{}", snapshot.text);
     }
 
     #[test]
