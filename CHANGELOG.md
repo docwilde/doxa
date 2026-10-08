@@ -5,6 +5,20 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.10 — 2026-10-08
+
+**Session isolation**
+
+- Add **`doxa-isolation`** rootless Docker workers with private Git clones, pinned images and enforced memory, CPU and PID limits. Native, open-egress and offline profiles appear in the session form and TUI chip.
+- Add idle **`/isolation`** controls and checkpoint-verified native/Docker migration preserving workspace edits and conversation identity. Busy sessions refuse changes.
+- Package **`doxa-isolation-worker`** and reviewed provider images. Keep workspace Git inside Docker; session diffs include committed edits. Linux only; disk quotas and restricted egress remain planned.
+
+**Fleet review**
+
+- Add selectable **`--alignment-supervisor`** and separate **`--message-judge`** LLM/Jev reviewers with shadow/enforce modes. Stateless API review has no worker tools or approval authority.
+- Bind typed peer messages to host-issued charters, assignments and sender PIDs. Enforced drift pauses delegation; explicit human continuation is required. Review calls use a separate bounded allocation.
+- Show review events and unreviewed messages in the TUI. Completion requires host-verified evidence; automatic trusted test collection and semantic calibration remain open.
+
 ## 2.0.0-beta.9 — 2026-10-08
 
 **Native memory**

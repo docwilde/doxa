@@ -31,7 +31,7 @@
 
 ## Install
 
-Current release: **[v2.0.0-beta.9](https://github.com/docwilde/doxa/releases/tag/v2.0.0-beta.9)**.
+Current release: **[v2.0.0-beta.10](https://github.com/docwilde/doxa/releases/tag/v2.0.0-beta.10)**.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/docwilde/doxa/main/scripts/install.sh | sh
