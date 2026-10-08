@@ -184,12 +184,12 @@ fn legacy_memory_off_and_quiet_dwell_reach_isolated_native_daemons() {
     let fixture = Fixture::new();
     let mut child = fixture.command().env("DOXA_LORE", "1")
         .args(["fleet", "start", "--pool", "fixture", "--prompt", "same bounded fixture task",
-            "-n", "4", "--seed", "19", "--memory-off", "2", "--quiet-dwell", "0.2",
+            "-n", "4", "--seed", "19", "--memory-off", "2", "--quiet-dwell", "30",
             "--allow-unbudgeted", "--run-id", "run", "--root", fixture.root.to_str().unwrap()])
         .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::inherit()).spawn().unwrap();
     let running = fixture.wait_monitoring();
     assert_eq!(running["spec"]["memory_off"], 2);
-    assert_eq!(running["spec"]["quiet_dwell_s"], 0.2);
+    assert_eq!(running["spec"]["quiet_dwell_s"], 30.0);
     assert_eq!(running["slots"].as_array().unwrap().iter().filter(|row| row["lore"] == false).count(), 2);
     for row in running["slots"].as_array().unwrap() {
         let mut client = DaemonClient::connect(row["socket_path"].as_str().unwrap(), None).unwrap();
@@ -197,6 +197,9 @@ fn legacy_memory_off_and_quiet_dwell_reach_isolated_native_daemons() {
         let state = client.call("peer_tools_status", Default::default()).unwrap();
         assert_eq!(state["ledger_path"], running["ledger_path"]);
     }
+    // Keep the runtime alive while inspecting each slot; a 0.2-second dwell
+    // can tear it down between connect and call on a loaded CI runner.
+    unsafe { assert_eq!(libc::kill(child.id() as libc::pid_t, libc::SIGINT), 0); }
     finish(&mut child);
     assert!(sockets_gone(&fixture.manifest()));
 }
