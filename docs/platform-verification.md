@@ -17,15 +17,17 @@ The exploratory [2026-10-04 macOS run](https://github.com/docwilde/doxa/actions/
 passed 45 of 72 process tests. Of its 27 failures, 24 entered the unsupported
 protected Codex path; the authoritative refusal case now asserts the macOS
 failure rather than expecting a Linux build-version check. The three remaining
-macOS cases are visibly ignored in this target and stay open under
+macOS cases remain visibly ignored under
 [issue #197](https://github.com/docwilde/doxa/issues/197): two fake peer socket
 receivers saw `EINVAL` during full-stream reads, and native vendor finalization
-indexed zero messages where four were expected. The newly enabled fleet
-process fixture also cannot verify its sender PID after the test closes the
-Unix socket; fleet admission fails closed. The SQLite probe now reports query
-errors instead of silently treating all errors as zero. A green macOS job
-therefore covers the portable process path, but does not yet verify those
-four interactions or authenticated provider sessions.
+indexed zero messages where four were expected. The fleet process fixture now
+holds its sender socket open long enough to verify kernel PID admission, then
+asserts the expected protected Codex startup refusal on macOS. Production peer
+delivery still closes after writing, so live macOS fleet delivery remains
+unverified. The SQLite probe reports query errors instead of treating all
+errors as zero. A green macOS job covers the portable process path, but not
+those three ignored interactions, live fleet delivery or authenticated provider
+sessions.
 
 Bounded authenticated Claude, DeepSeek and GLM start, turn, stop/resume and
 usage checks passed on Linux with alpha.68; see

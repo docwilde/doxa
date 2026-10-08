@@ -10,6 +10,7 @@ the stable 2.0 release has not been cut.
 **Fleet review**
 
 - Review a dependent worker's host checkpoint, handoff and changed paths in the TUI before explicitly arming and releasing it. The existing token-bound host check runs again at confirmation; tests remain unverified.
+- Verify macOS fleet PID admission with a retained fixture socket, while keeping production sender lifetime and protected Codex turns on macOS open.
 
 **Code and isolation**
 

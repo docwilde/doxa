@@ -2957,9 +2957,14 @@ fn fleet_guard_rejects_forged_scope_false_completion_replay_and_cached_drift_bef
     send(&mut socket,json!({"type":"call","id":1,"method":"fleet_configure","params":context}));assert_eq!(receive(&mut reader)["ok"],true);
     let make=|kind|Envelope::issue(&context,"sender","codex-session",kind,"Scoped status".into(),None).unwrap();
     let wire=|envelope:&Envelope|doxa_peers::delivery::PeerFrame{authenticated_pid:None,from_id:"sender".into(),from_title:"sender".into(),sent_at:peer_now(),body:envelope.wire().unwrap(),from_repo:Some(dir.path().display().to_string()),kind:Some("direct".into())};
-    // Keep the sender alive through kernel credential lookup on macOS. A
-    // closed fixture socket cannot establish the peer PID for fleet admission.
-    let send_held=|envelope:&Envelope|{let mut stream=UnixStream::connect(&peer_socket).unwrap();let mut bytes=serde_json::to_vec(&wire(envelope)).unwrap();bytes.push(b'\n');stream.write_all(&bytes).unwrap();stream};
+    // macOS needs the fixture sender alive through kernel credential lookup.
+    // Linux continues to exercise the normal production delivery path.
+    let send_held=|envelope:&Envelope|{
+        #[cfg(target_os="macos")]
+        {let mut stream=UnixStream::connect(&peer_socket).unwrap();let mut bytes=serde_json::to_vec(&wire(envelope)).unwrap();bytes.push(b'\n');stream.write_all(&bytes).unwrap();Some(stream)}
+        #[cfg(not(target_os="macos"))]
+        {doxa_peers::delivery::send(&peer_socket,&wire(envelope)).unwrap();None::<UnixStream>}
+    };
     let mut held=Vec::new();
     for alteration in 0..3{
         let mut envelope=make(Kind::Status);match alteration{0=>envelope.fleet_id="forged".into(),1=>envelope.assignment_id="stale".into(),_=>envelope.kind=Kind::Completion};
