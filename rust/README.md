@@ -68,7 +68,7 @@ Codex's permission chip offers `on-request`, `auto`, and `full-access`. `on-requ
 
 Permission answers bind to an exact pending request. Complete summaries must be read before full approval; changed or stale requests cannot inherit an answer. Secret-input requests wait for a private masked-input interface. Ctrl+Delete asks before stopping a daemon and removing its verified DOXA transcript; provider archives remain separate. Diff hunk rejection checks the current patch and staged state again before applying it.
 
-Links, Markdown, reasoning, and individual tool calls render in the transcript. Ctrl+click opens HTTP(S) links. Review panes and tool output have bounded sizes. Search uses scrubbed indexed excerpts and bounded fallback scans. Unverified external entries cannot become resumable sessions.
+Links, Markdown, reasoning, and individual tool calls render in the transcript. Standalone local images inside the session workspace have bounded previews; [image settings and limits](../docs/terminal-images.md) explain the supported terminals. Ctrl+click opens HTTP(S) links. Review panes and tool output have bounded sizes. Search uses scrubbed indexed excerpts and bounded fallback scans. Unverified external entries cannot become resumable sessions.
 
 ## Memory and context
 
@@ -80,7 +80,7 @@ The memory chip browses user and project facts; the belief browser supports evid
 
 ## Fleets and peers
 
-`fleet preflight` checks capacity, spend ceiling, and socket paths before `fleet start`. `fleet runs|status|attach|stop|resume` operate on owned manifests and verified slots. `/fleet` shows runs in the TUI; starting or resuming there requires reviewing and arming the complete plan. Budgeted resume needs complete persisted accounting. [Fleet guide](../docs/fleet.md).
+`fleet preflight` checks capacity, spend ceiling, and socket paths before `fleet start`. Use `--worker-task INDEX:TEXT` to give each worker a frozen deliverable and optional `--worker-path INDEX:RELATIVE_PREFIX` to narrow its file scope. `fleet runs|status|attach|stop|resume` operate on owned manifests and verified slots. `/fleet` shows runs in the TUI; starting or resuming there requires reviewing and arming the complete plan. Budgeted resume needs complete persisted accounting. [Fleet guide](../docs/fleet.md).
 
 Select an independent supervisor with `--alignment-supervisor PROVIDER:MODEL`. Choose a separate fast message judge with `--message-judge llm:PROVIDER:MODEL` or `jev:MODEL`, and choose `--message-review off|shadow|enforce`. `/settings` → **Fleet** stores defaults. The acting `--supervisor` is a worker; the independent reviewer reads evidence and cannot grant its own approvals. Host gates bind peer traffic to the approved charter and assignments. [Supervisor contract](../docs/fleet-supervision.md).
 
