@@ -111,7 +111,7 @@ impl CodexHost {
         client
             .scrub("DOXA scrub preflight")
             .map_err(|_| "LORE scrub preflight failed; Codex session was not started".to_owned())?;
-        let cwd = options.cwd.to_string_lossy().into_owned();
+        let cwd = doxa_isolation::context_cwd(&options.cwd).map_err(|e|e.to_string())?.to_string_lossy().into_owned();
         let (projects_dir, slug) = client.transcript_identity(&cwd).map_err(|_| {
             "LORE transcript identity unavailable; Codex session was not started".to_owned()
         })?;
@@ -166,7 +166,7 @@ impl CodexHost {
             let thread = value["thread_id"].as_str()
                 .filter(|id| doxa_engines::codex_driver::valid_thread_id(id))
                 .ok_or("existing session has no valid Codex thread ID")?;
-            rollout_path = value["rollout_path"].as_str().map(PathBuf::from)
+            rollout_path = doxa_isolation::resume_rollout().map_err(|e|e.to_string())?.or_else(||value["rollout_path"].as_str().map(PathBuf::from))
                 .filter(|path| codex_context::size(path, thread).is_some());
             saved_peer_tools = match value.get("peer_tools") {
                 Some(Value::Bool(enabled)) => *enabled,

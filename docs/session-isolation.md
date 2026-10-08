@@ -41,15 +41,25 @@ approvals and peer routing remain in the host daemon.
 
 The isolation chip reports the host-verified policy. Click it for the actual
 engine, network, limits, mounts and credential exposure. While idle and without
-queued turns or pending approvals, explicitly change the Docker network:
+queued turns or pending approvals, explicitly change the isolation profile:
 
     /isolation docker-offline --confirm
     /isolation docker-open --confirm
+    /isolation native --confirm
 
-The same provider process, checkout and conversation remain attached; the chip
-changes after Docker inspection and durable manifest persistence. A failed
-change preserves or restores the preceding policy. The Codex permission
-picker remains independent of the container boundary.
+Docker network changes retain the provider process and checkout. Native/Docker
+changes stop and checkpoint the provider, preserve the original native checkout,
+copy its complete workspace into an independent clone, import the selected
+provider context, and verify same-session resume. Staged and working changes,
+deletions, ignored/untracked files and symlinks are preserved. Docker-to-native
+continues in the private clone and provider home. Conversation ID, transcript,
+LORE project identity, model, effort and permissions remain attached. The chip
+changes after backend and resume verification. A failed migration restores the
+preceding profile and resumes its original checkpoint; any incomplete recovery
+is reported explicitly. The Codex permission picker remains independent of the
+container boundary. Legacy Codex exec sessions require their explicit protected
+app-server upgrade before migrating. Workspace copies refuse special files,
+more than 100000 entries or more than 8 GiB, retaining original files.
 
 The owner-private DOXA_HOME/isolation/SESSION_ID/manifest.json records the pinned
 image, current and creation policy hashes, base commit, checkout inode,

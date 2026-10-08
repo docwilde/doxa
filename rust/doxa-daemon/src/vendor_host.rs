@@ -76,6 +76,7 @@ pub struct VendorHost {
     compact_context: Mutex<Option<(usize, String)>>,
     store: TranscriptStore,
     cwd: String,
+    workspace:PathBuf,
     workspace_read: bool,
     peer_tools: Mutex<Option<doxa_runtime::PeerToolHandler>>,
     session_tools: Mutex<Option<doxa_runtime::PeerToolHandler>>,
@@ -148,7 +149,9 @@ impl VendorHost {
         {
             return Err("vendor model cannot be stored without redaction".to_owned());
         }
-        let cwd = cwd.to_string_lossy();
+        let workspace=cwd.to_owned();
+        let logical_cwd=doxa_isolation::context_cwd(cwd).map_err(|e|e.to_string())?;
+        let cwd = logical_cwd.to_string_lossy();
         let (projects_dir, slug) = lore.transcript_identity(&cwd).map_err(|_| {
             "LORE transcript identity unavailable; vendor session was not started".to_owned()
         })?;
@@ -209,6 +212,7 @@ impl VendorHost {
             compact_context: Mutex::new(compact_context),
             store,
             cwd: cwd.into_owned(),
+            workspace,
             workspace_read,
             peer_tools: Mutex::new(None),
             session_tools: Mutex::new(None),
@@ -489,7 +493,7 @@ impl Host for VendorHost {
             } }
             (output.borrow_mut())(event)
         };
-        let mut gate = NativeVendorGate::new(Path::new(&self.cwd), self.workspace_read, peer,
+        let mut gate = NativeVendorGate::new(&self.workspace, self.workspace_read, peer,
             self.peer_desk.clone(), &scrub_tool, &emit_tool, tool_events.clone());
         let mut definitions=self.agent_tools.as_ref().map(|tools|tools.vendor_definitions()).unwrap_or_default();
         let agent=self.agent_tools.as_ref().map(|tools|tools.vendor_handler());let session=self.session_tools.lock().unwrap().clone();

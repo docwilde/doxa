@@ -554,7 +554,9 @@ fn run() -> io::Result<()> {
             Some(profile), options.resume, options.base_branch.as_deref())?;
         options.cwd = runtime.checkout().to_owned(); runtime.prepare_provider(options.engine.name())?; runtime.activate(); Some(runtime)
     } else { None };
-    let use_worktrees = !profile.docker() && (options.engine != Engine::Fixture || manage_fixture);
+    let retained_private_checkout = recorded_isolation.is_some() && doxa_isolation::read_manifest(
+        &doxa_isolation::manifest_path(&isolation_home,&options.session_id)?)?.context_cwd.is_some();
+    let use_worktrees = !profile.docker() && !retained_private_checkout && (options.engine != Engine::Fixture || manage_fixture);
     let mut managed = if use_worktrees && options.resume && !options.cwd.exists() {
         Some(doxa_worktrees::recover_missing(&options.cwd, &options.session_id)
             .map_err(|message| invalid(&format!("managed worktree recovery refused: {message}")))?)
@@ -585,12 +587,14 @@ fn run() -> io::Result<()> {
     if isolation.is_none() && options.engine != Engine::Fixture {
         let runtime = doxa_isolation::Runtime::prepare(&isolation_home, &options.session_id, &options.cwd,
             Some(profile), options.resume, None)?;
+        options.cwd=runtime.checkout().to_owned();
         runtime.activate(); isolation = Some(runtime);
     }
     // Fixture native launches never inherit a worker manifest from another
     // process. They keep baseline test behavior without durable user writes.
     if options.engine == Engine::Fixture && !profile.docker() {
         env::remove_var(doxa_isolation::ACTIVE_MANIFEST); env::remove_var("DOXA_ISOLATION_HOME");
+        env::remove_var(doxa_isolation::SESSION_MANIFEST);
     }
     let isolation = isolation.map(|runtime| Arc::new(std::sync::Mutex::new(runtime)));
     // Codex exec tools receive only this native parent runtime; the helper
@@ -658,7 +662,14 @@ fn run() -> io::Result<()> {
         }
     };
     let host: Arc<dyn Host> = match &isolation {
-        Some(runtime) => Arc::new(isolation_host::IsolationHost::new(host, runtime.clone())),
+        Some(runtime) => Arc::new(isolation_host::IsolationHost::new(host, runtime.clone(),json!({
+            "engine":options.engine.name(),"runtime":options.runtime,"linger":options.linger.as_secs_f64(),
+            "home":isolation_home,"environment":(["DOXA_HOME","DOXA_PEER_LEDGER","DOXA_AGENT_PEER_SEND","LORE_STORE_DIR","LORE_DATA_DIR","LORE_RUNTIME_DIR"].into_iter().filter_map(|key|env::var(key).ok().map(|value|(key.to_owned(),json!(value)))).collect::<serde_json::Map<_,_>>()),
+            "claude_home":doxa_claude::isolation::config_dir(),
+            "codex_bin":options.codex_bin,"claude_bin":options.claude_bin,"sandbox":if options.engine==Engine::Codex {Some(match options.sandbox {
+                SandboxMode::ReadOnly=>"read-only",SandboxMode::WorkspaceWrite=>"workspace-write",SandboxMode::DangerFullAccess=>"danger-full-access"})}else{None},
+            "spawn_depth":options.spawn_depth,"parent_session_id":options.parent_session_id,
+            "inbound":inbound_turns,"ceiling":ceiling,"lore":doxa_state::lore_enabled_default()}))),
         None => host,
     };
     let host: Arc<dyn Host> = match ceiling {
@@ -668,7 +679,7 @@ fn run() -> io::Result<()> {
                 .map_err(|error| invalid(&error))?
             } else { BudgetHost::new(host, value) };
             let identity = json!({"session_id":options.session_id,"engine":options.engine.name(),
-                "model":options.model,"cwd":options.cwd,"ceiling_usd":value});
+                "model":options.model,"cwd":doxa_isolation::context_cwd(&options.cwd)?,"ceiling_usd":value});
             Arc::new(budget.durable(budget_path, identity, options.resume)?)
         },
         None => host,
@@ -820,7 +831,8 @@ fn run() -> io::Result<()> {
     }
     handle.shutdown();
     if let Some(runtime) = &isolation { runtime.lock().unwrap().stop()?; }
-    if let Some(tree) = &mut managed {
+    let preserve_checkout=isolation.as_ref().is_some_and(|runtime|runtime.lock().unwrap().preserves_native_checkout());
+    if let Some(tree) = managed.as_mut().filter(|_|!preserve_checkout) {
         let note = tree.finish();
         if !note.is_empty() { eprintln!("doxa-daemon: {note}"); }
     }

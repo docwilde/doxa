@@ -84,7 +84,7 @@ pub fn runtime_dir() -> PathBuf {
 
 /// Main worktree checkout is the shared scope; outside git, use the cwd.
 pub fn scope_for_cwd(cwd: &Path) -> io::Result<String> {
-    if let Some(manifest) = doxa_isolation::active()? {
+    if let Some(manifest) = doxa_isolation::session_manifest()?.or(doxa_isolation::active()?) {
         if cwd.starts_with(&manifest.checkout) {
             return scope_without_isolation(&manifest.source);
         }

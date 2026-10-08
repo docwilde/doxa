@@ -34,10 +34,12 @@ impl App {
         }
         lines.push(format!("Disk: {}",value["disk_limit"].as_str().unwrap_or("unknown")));
         lines.push(format!("Credentials: {}",value["credential_exposure"].as_str().unwrap_or("unknown")));
-        lines.extend([String::new(),"While idle, explicitly change Docker network with:".into(),
+        lines.extend([String::new(),"While idle, explicitly change isolation with:".into(),
             "/isolation docker-offline --confirm".into(),"/isolation docker-open --confirm".into(),
+            "/isolation native --confirm".into(),
             "Provider, approvals and conversation identity remain attached.".into(),
-            "Native/Docker changes require verified checkout + transcript migration.".into()]);
+            "Backend changes checkpoint the stopped provider, copy the workspace and verify same-session resume.".into(),
+            "Native resume retains the private clone; failed migration restores the original profile.".into()]);
         self.chip_info=Some(ChipInfo{kind:"isolation",label:String::new(),lines,scroll:0,owner:None});
     }
     pub(super) fn dispatch_isolation_command(&mut self)->bool{

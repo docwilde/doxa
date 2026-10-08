@@ -302,7 +302,9 @@ impl ClaudeHost {
             .map_err(|_| "Native LORE scrub unavailable")?;
         lore.scrub("Claude scrub preflight")
             .map_err(|_| "Native LORE scrub unavailable")?;
-        let cwd = cwd
+        let workspace=cwd.to_owned();
+        let logical_cwd=doxa_isolation::context_cwd(cwd).map_err(|e|e.to_string())?;
+        let cwd = logical_cwd
             .to_str()
             .ok_or("Claude workspace must be UTF-8")?
             .to_owned();
@@ -417,7 +419,7 @@ impl ClaudeHost {
         });
         let mut cli = Cli::spawn(CliOptions {
             executable,
-            cwd: Path::new(&cwd),
+            cwd: &workspace,
             session_id,
             resume,
             model: requested_model.as_deref(),

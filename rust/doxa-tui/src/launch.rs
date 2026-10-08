@@ -249,7 +249,7 @@ fn saved_budget(session_id: &str) -> io::Result<Option<f64>> {
 }
 
 pub fn spawn(options: &LaunchOptions) -> io::Result<Session> {
-    spawn_inner(options, None, &[])
+    spawn_inner(options, None, &[],None)
 }
 
 /// Fleet-scoped child environment without changing the frontend process.
@@ -269,10 +269,22 @@ pub fn spawn_fleet(options: &LaunchOptions, runtime: &Path, budget: Option<f64>,
         }
     }
     environment.push(("DOXA_PEER_LEDGER", ledger.to_string_lossy().into_owned()));
-    spawn_inner(options, Some(runtime), &environment)
+    spawn_inner(options, Some(runtime), &environment,None)
 }
 
-fn spawn_inner(options: &LaunchOptions, fleet_runtime: Option<&Path>, environment: &[(&str, String)]) -> io::Result<Session> {
+/// Reattach the same stopped conversation with its original admission policy.
+pub(crate) fn spawn_migrated(options:&LaunchOptions,record:&serde_json::Value)->io::Result<Session>{
+    let runtime=Path::new(record["runtime"].as_str().ok_or_else(||invalid("migration runtime missing"))?);
+    let mut environment=vec![("DOXA_PEER_INBOUND_TURNS",if record["inbound"]==true{"1"}else{"0"}.into()),
+        ("DOXA_LORE",if record["lore"]==true{"1"}else{"0"}.into()),
+        ("DOXA_SESSION_BUDGET_USD",record["ceiling"].as_f64().map(|n|n.to_string()).unwrap_or_default())];
+    for key in ["DOXA_HOME","DOXA_PEER_LEDGER","DOXA_AGENT_PEER_SEND","LORE_STORE_DIR","LORE_DATA_DIR","LORE_RUNTIME_DIR"]{
+        if let Some(value)=record["environment"][key].as_str(){environment.push((key,value.to_owned()));}
+    }
+    spawn_inner(options,Some(runtime),&environment,Some(record))
+}
+
+fn spawn_inner(options: &LaunchOptions, fleet_runtime: Option<&Path>, environment: &[(&str, String)], migration:Option<&serde_json::Value>) -> io::Result<Session> {
     let startup_seconds = if options.engine == Engine::Claude {
         doxa_state::claude_startup_seconds(env::var("CLAUDE_CODE_STREAM_CLOSE_TIMEOUT").ok().as_deref())
             .map_err(invalid)?.1
@@ -409,6 +421,11 @@ fn spawn_inner(options: &LaunchOptions, fleet_runtime: Option<&Path>, environmen
         &linger.to_string(),
     ]);
     if let Some(profile) = options.isolation { command.args(["--isolation", profile.key()]); }
+    if let Some(record)=migration{
+        let depth=record["spawn_depth"].as_u64().ok_or_else(||invalid("migration lineage missing"))?;
+        command.args(["--spawn-depth",&depth.to_string()]);
+        if let Some(parent)=record["parent_session_id"].as_str(){command.args(["--parent-session-id",parent]);}
+    }
     if let Some(base) = &branch { command.args(["--base-branch", base]); }
     match options.engine {
         Engine::Fixture => {

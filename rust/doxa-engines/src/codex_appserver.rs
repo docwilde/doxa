@@ -331,7 +331,9 @@ impl AppServerDriver {
             driver.dynamic_tool_names.push((alias, canonical));
         }
         let result = if let Some(id) = driver.options.resume_thread.clone() {
-            driver.request("thread/resume", json!({"threadId":id,"cwd":driver.options.cwd,"model":driver.options.model,"approvalPolicy":approval,"sandbox":sandbox_name(sandbox),"excludeTurns":true})).await?
+            let mut params=json!({"threadId":id,"cwd":driver.options.cwd,"model":driver.options.model,"approvalPolicy":approval,"sandbox":sandbox_name(sandbox),"excludeTurns":true});
+            if let Some(path)=doxa_isolation::resume_rollout().map_err(AppServerError::Io)? {params["path"]=json!(path);}
+            driver.request("thread/resume",params).await?
         } else {
             let mut params = json!({"cwd":driver.options.cwd,"model":driver.options.model,"approvalPolicy":approval,"sandbox":sandbox_name(sandbox)});
             if !tools.is_empty() { params["dynamicTools"] = json!(tools); }

@@ -14,8 +14,10 @@ use std::{
 };
 pub mod broker;
 pub mod workspace;
+pub mod migration;
 
 pub const ACTIVE_MANIFEST: &str = "DOXA_ISOLATION_MANIFEST";
+pub const SESSION_MANIFEST: &str = "DOXA_SESSION_MANIFEST";
 const MAX_MANIFEST: u64 = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -85,6 +87,8 @@ impl Policy {
 pub struct Manifest {
     pub version: u32, pub session_id: String, pub profile: Profile, pub policy: Option<Policy>,
     pub policy_hash: String, pub source: PathBuf, pub checkout: PathBuf,
+    #[serde(default)] pub context_cwd: Option<PathBuf>,
+    #[serde(default)] pub provider_rollout: Option<PathBuf>,
     pub creation_policy_hash: String,
     pub checkout_device: u64, pub checkout_inode: u64, pub base_sha: String, pub branch: String,
     pub private_home: PathBuf, pub cache: PathBuf, pub broker: PathBuf,
@@ -101,7 +105,7 @@ impl Manifest {
             "disk_limit":"monitored only; no hard quota","checkout":self.checkout,
             "mounts":if self.profile.docker(){vec!["independent checkout","private home","private cache","session hook broker"]}else{vec![]},
             "credential_exposure":if self.profile.docker(){"only selected provider auth copied to private session home; visible to worker tools"}else{"native provider environment"},
-            "can_set_isolation":self.profile.docker()})
+            "can_set_isolation":true})
     }
 }
 pub fn error(message: impl Into<String>) -> io::Error { io::Error::new(io::ErrorKind::PermissionDenied, message.into()) }
@@ -149,18 +153,22 @@ pub fn read_manifest(path: &Path) -> io::Result<Manifest> {
     let manifest: Manifest = serde_json::from_slice(&bytes)?;
     if manifest.version != 1 || !valid_id(&manifest.session_id)
         || path.parent().and_then(Path::file_name).is_none_or(|name| name != manifest.session_id.as_str()) { return Err(error("isolation manifest identity mismatch")); }
-    if manifest.profile.docker() {
+    if manifest.profile.docker() || manifest.context_cwd.is_some() {
         let root = path.parent().unwrap();
         if manifest.checkout != root.join("checkout") || manifest.private_home != root.join("home")
             || manifest.cache != root.join("cache") || manifest.broker != root.join("broker") { return Err(error("manifest mount escapes its private session root")); }
         for directory in [&manifest.checkout, &manifest.private_home, &manifest.cache, &manifest.broker] { private_directory(directory, false)?; }
         let meta = fs::metadata(&manifest.checkout)?;
         if (meta.dev(), meta.ino()) != (manifest.checkout_device, manifest.checkout_inode) { return Err(error("isolated checkout identity changed")); }
+        if manifest.profile.docker() {
             let policy = manifest.policy.as_ref().ok_or_else(|| error("Docker manifest has no policy"))?; policy.validate()?;
             if policy.hash(manifest.profile) != manifest.policy_hash { return Err(error("isolation policy hash changed")); }
             if ![policy.hash(Profile::DockerOpen),policy.hash(Profile::DockerOffline)].contains(&manifest.creation_policy_hash) {
                 return Err(error("invalid immutable creation policy hash"));
             }
+        }
+        if manifest.context_cwd.as_ref().is_some_and(|path|!path.is_absolute()||path.components().any(|c|matches!(c,Component::ParentDir))){return Err(error("invalid logical session cwd"));}
+        if manifest.provider_rollout.as_ref().is_some_and(|path|!path.starts_with(manifest.private_home.join("codex/sessions"))){return Err(error("provider rollout escapes private session home"));}
     }
     Ok(manifest)
 }
@@ -270,7 +278,7 @@ pub fn create_args(manifest: &Manifest) -> io::Result<Vec<OsString>> {
     Ok(args)
 }
 
-pub struct Runtime { path: PathBuf, manifest: Manifest }
+pub struct Runtime { path: PathBuf, manifest: Manifest, migration_stop: bool }
 impl Runtime {
     pub fn prepare(home: &Path, id: &str, source: &Path, requested: Option<Profile>, resume: bool, base: Option<&str>) -> io::Result<Self> {
         let path = manifest_path(home, id)?;
@@ -282,7 +290,7 @@ impl Runtime {
             if manifest.profile.docker() { preflight(manifest.policy.as_ref().unwrap())?; reconcile(&mut manifest, true)?; }
             else {manifest.state="ready".into();}
             write_manifest(&path,&manifest)?;
-            return Ok(Self { path, manifest });
+            return Ok(Self { path, manifest, migration_stop:false });
         }
         let profile = requested.unwrap_or(configured_profile(home)?);
         if resume && profile.docker() { return Err(error("saved native session has no Docker manifest; automatic backend migration is forbidden")); }
@@ -292,6 +300,7 @@ impl Runtime {
         let project_source = active()?.filter(|parent| parent.checkout == source).map(|parent|parent.source).unwrap_or_else(||source.clone());
         let mut manifest = Manifest { version: 1, session_id: id.into(), profile, policy: None,
             policy_hash: String::new(), creation_policy_hash:String::new(), source: project_source, checkout: source.clone(),
+            context_cwd:None, provider_rollout:None,
             checkout_device: 0, checkout_inode: 0, base_sha: String::new(), branch: String::new(),
             private_home: root.join("home"), cache: root.join("cache"), broker: root.join("broker"),
             container_id: None, nonce: nonce()?, state: "preparing".into() };
@@ -319,12 +328,14 @@ impl Runtime {
             }
         } else { manifest.state = "ready".into(); }
         write_manifest(&path, &manifest)?;
-        Ok(Self { path, manifest })
+        Ok(Self { path, manifest, migration_stop:false })
     }
     pub fn checkout(&self) -> &Path { &self.manifest.checkout }
     pub fn profile(&self) -> Profile { self.manifest.profile }
     pub fn status(&self) -> Value { self.manifest.status() }
     pub fn manifest(&self) -> &Manifest { &self.manifest }
+    pub fn mark_migration_stop(&mut self) { self.migration_stop=true; }
+    pub fn preserves_native_checkout(&self) -> bool { self.migration_stop }
     pub fn record_native_checkout(&mut self, checkout: &Path) -> io::Result<()> {
         if self.profile().docker() { return Err(error("cannot replace a Docker checkout")); }
         self.manifest.checkout = checkout.to_owned(); write_manifest(&self.path, &self.manifest)
@@ -351,10 +362,20 @@ impl Runtime {
     }
     pub fn activate(&self) {
         // Called once by the trusted daemon before any provider threads exist.
+        std::env::set_var(SESSION_MANIFEST,&self.path);
+        if self.manifest.context_cwd.is_some() && self.manifest.private_home.is_dir() {
+            std::env::set_var("DOXA_ISOLATION_HOME",&self.manifest.private_home);
+            if self.manifest.private_home.join("codex").is_dir() {
+                std::env::set_var("CODEX_HOME",self.manifest.private_home.join("codex"));
+            }
+        }
         if self.profile().docker() {
             std::env::set_var(ACTIVE_MANIFEST, &self.path);
             std::env::set_var("DOXA_ISOLATION_HOME", &self.manifest.private_home);
-        } else { std::env::remove_var(ACTIVE_MANIFEST); std::env::remove_var("DOXA_ISOLATION_HOME"); }
+        } else {
+            std::env::remove_var(ACTIVE_MANIFEST);
+            if self.manifest.context_cwd.is_none() { std::env::remove_var("DOXA_ISOLATION_HOME"); }
+        }
     }
     pub fn set_profile(&mut self, profile: Profile, confirmed: bool) -> io::Result<Value> {
         if !confirmed { return Err(error("isolation changes require explicit confirmation")); }
@@ -383,7 +404,7 @@ impl Runtime {
         Ok(self.status())
     }
     pub fn stop(&mut self) -> io::Result<()> {
-        if let Some(policy) = self.manifest.policy.as_ref() {
+        if let Some(policy) = self.manifest.policy.as_ref().filter(|_|self.profile().docker()) {
             inspect(&self.manifest)?;
             self.manifest.state = "stopping".into(); write_manifest(&self.path, &self.manifest)?;
             docker_run(policy, &["stop", "--time", "5", self.manifest.container_id.as_deref().unwrap()])?;
@@ -482,6 +503,28 @@ fn reconcile(manifest: &mut Manifest, start: bool) -> io::Result<()> {
 /// This is present only in the trusted daemon process, never worker env.
 pub fn active() -> io::Result<Option<Manifest>> {
     std::env::var_os(ACTIVE_MANIFEST).map(|path| read_manifest(Path::new(&path))).transpose()
+}
+/// A trusted host-only identity, separate from the provider's physical cwd.
+pub fn session_manifest() -> io::Result<Option<Manifest>> {
+    std::env::var_os(SESSION_MANIFEST).map(|path|read_manifest(Path::new(&path))).transpose()
+}
+pub fn context_cwd(workspace:&Path) -> io::Result<PathBuf> {
+    match session_manifest()? {
+        Some(manifest) if manifest.checkout==workspace => Ok(manifest.context_cwd.unwrap_or(manifest.checkout)),
+        Some(_) => Err(error("session workspace differs from its verified isolation identity")),
+        None => Ok(workspace.to_owned()),
+    }
+}
+pub fn resume_rollout() -> io::Result<Option<PathBuf>> {
+    let Some(manifest)=session_manifest()? else{return Ok(None);};
+    let Some(path)=manifest.provider_rollout else{return Ok(None);};
+    if !path.starts_with(manifest.private_home.join("codex/sessions")) {return Err(error("imported rollout escaped private provider home"));}
+    let file=OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW|libc::O_NONBLOCK).open(&path)?;
+    let meta=file.metadata()?;
+    if !meta.is_file()||meta.uid()!=unsafe{libc::geteuid()}||meta.nlink()!=1||meta.mode()&0o077!=0 {
+        return Err(error("imported rollout is not a private owned regular file"));
+    }
+    Ok(Some(path))
 }
 pub fn worker_path(path: &Path) -> io::Result<PathBuf> {
     let Some(manifest) = active()? else { return Ok(path.to_owned()); };

@@ -9,7 +9,7 @@ fn manifest(root:&Path)->Manifest{
     for directory in dirs{fs::create_dir(root.join(directory)).unwrap();fs::set_permissions(root.join(directory),fs::Permissions::from_mode(0o700)).unwrap();}
     let meta=fs::metadata(root.join("checkout")).unwrap();
     Manifest{version:1,session_id:"session".into(),profile:Profile::DockerOpen,policy:Some(policy()),policy_hash:"hash".into(),
-        creation_policy_hash:"created".into(),source:root.into(),checkout:root.join("checkout"),checkout_device:meta.dev(),checkout_inode:meta.ino(),
+        creation_policy_hash:"created".into(),context_cwd:None,provider_rollout:None,source:root.into(),checkout:root.join("checkout"),checkout_device:meta.dev(),checkout_inode:meta.ino(),
         base_sha:"a".repeat(40),branch:"doxa/session".into(),private_home:root.join("home"),cache:root.join("cache"),broker:root.join("broker"),
         container_id:Some("b".repeat(64)),nonce:"c".repeat(48),state:"ready".into()}
 }

@@ -102,7 +102,10 @@ fn attach_worker(session: &Session, frames: &SyncSender<WorkerFrame>, guard: &Ar
                     Ok(command) => { let _ = frames.send(rejection_frame(command, "Daemon reconnecting")); }
                     Err(mpsc::RecvTimeoutError::Timeout) => {}
                 }
-                match DaemonClient::connect(&path, Some(cursor.load(Ordering::Relaxed))) {
+                let runtime=path.parent().unwrap_or(Path::new("/"));
+                let reconnect=crate::discovery::sessions_in(runtime).ok().and_then(|sessions|sessions.into_iter().find(|session|session.id==id)).map(|session|session.socket).unwrap_or_else(||path.clone());
+                let replay=if reconnect==path{Some(cursor.load(Ordering::Relaxed))}else{None};
+                match DaemonClient::connect(&reconnect, replay) {
                     Ok(mut client) if client.hello["session_id"] == id => {
                         if !title.is_empty() { client.hello["title"] = Value::String(title.clone()); }
                         connected_worker.store(true, Ordering::Release);
@@ -406,7 +409,7 @@ fn worker_loop(
         .as_str()
         .unwrap_or_default()
         .to_owned();
-    let live_from_seq = client.hello["next_seq"].as_u64().unwrap_or(u64::MAX);
+    let mut live_from_seq = client.hello["next_seq"].as_u64().unwrap_or(u64::MAX);
     if frames.send(WorkerFrame::Daemon { session_id: session_id.clone(), frame: client.hello.clone() }).is_err() {
         return;
     }
@@ -506,6 +509,24 @@ fn worker_loop(
                     if frames.send(command_frame(id, reply)).is_err() { return; }
                 }
                 Ok(WorkerCommand::SetIsolation(id, profile)) => {
+                    let migration=doxa_isolation::Profile::parse(&profile).ok().filter(|target| {
+                        client.hello["isolation"]["profile"].as_str().and_then(|profile|doxa_isolation::Profile::parse(profile).ok()).is_some_and(|current|current.docker()!=target.docker())
+                    });
+                    if id==session_id {
+                        if let Some(target)=migration{
+                            let reply=match crate::isolation_migration::change(&mut client,target){
+                                Ok((resumed,isolation))=>{
+                                    client=resumed;live_from_seq=client.hello["next_seq"].as_u64().unwrap_or(u64::MAX);
+                                    cursor.store(client.cursor,Ordering::Relaxed);
+                                    if frames.send(WorkerFrame::Daemon{session_id:session_id.clone(),frame:client.hello.clone()}).is_err(){return;}
+                                    CommandResult::SetIsolation{status:ReplyStatus{ok:true,error:None},isolation:Some(isolation)}
+                                }
+                                Err(error)=>CommandResult::SetIsolation{status:ReplyStatus::failed(error.to_string()),isolation:None},
+                            };
+                            if frames.send(command_frame(id,reply)).is_err(){return;}
+                            continue;
+                        }
+                    }
                     let result = if id == session_id {
                         let mut params = Map::new();
                         params.insert("profile".into(),Value::String(profile)); params.insert("confirmed".into(),Value::Bool(true));

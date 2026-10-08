@@ -5,9 +5,21 @@ use doxa_runtime::{Host, PeerToolHandler};
 use serde_json::{json, Value};
 use std::{io, path::PathBuf, sync::{Arc, Mutex}};
 
-pub struct IsolationHost { inner: Arc<dyn Host>, runtime: Arc<Mutex<Runtime>> }
+pub struct IsolationHost { inner: Arc<dyn Host>, runtime: Arc<Mutex<Runtime>>, launch:Value }
 impl IsolationHost {
-    pub fn new(inner: Arc<dyn Host>, runtime: Arc<Mutex<Runtime>>) -> Self { Self { inner, runtime } }
+    pub fn new(inner: Arc<dyn Host>, runtime: Arc<Mutex<Runtime>>, launch:Value) -> Self { Self { inner, runtime, launch } }
+    fn migration_plan(&self)->Result<Value,String>{
+        if self.inner.has_active_work(){return Err("isolation migration requires an idle provider".into());}
+        let snapshot=self.inner.transcript_snapshot().map_err(|e|e.to_string())?;
+        let fingerprint=snapshot.as_ref().map(|(path,bytes)|doxa_isolation::migration::fingerprint(path,*bytes)).transpose().map_err(|e|e.to_string())?;
+        let runtime=self.runtime.lock().unwrap();
+        Ok(json!({"manifest":runtime.manifest(),"launch":self.launch,
+            "transcript_path":snapshot.as_ref().map(|(path,_)|path),
+            "transcript_bytes":snapshot.as_ref().map(|(_,bytes)|bytes),
+            "transcript_sha256":fingerprint,
+            "model":self.inner.initial_model(),"effort":self.inner.initial_effort(),
+            "permission_mode":self.inner.initial_permission_mode()}))
+    }
 }
 impl Host for IsolationHost {
     fn prompt(&self,text:&str,emit:&mut dyn FnMut(Value)) {
@@ -20,15 +32,13 @@ impl Host for IsolationHost {
         self.inner.prompt(text,emit)
     }
     fn call(&self,method:&str,params:&Value)->Result<Value,String> {
-        if method=="isolation_migration_plan"{
-            if self.inner.has_active_work(){return Err("isolation migration requires an idle provider".into());}
-            let snapshot=self.inner.transcript_snapshot().map_err(|e|e.to_string())?;
-            let runtime=self.runtime.lock().unwrap();
-            return Ok(json!({"manifest":runtime.manifest(),
-                "transcript_path":snapshot.as_ref().map(|(path,_)|path),
-                "transcript_bytes":snapshot.as_ref().map(|(_,bytes)|bytes),
-                "model":self.inner.initial_model(),"effort":self.inner.initial_effort(),
-                "permission_mode":self.inner.initial_permission_mode()}));
+        if method=="isolation_migration_plan"{return self.migration_plan();}
+        if method=="isolation_migration_stop"{
+            let plan=self.migration_plan()?;
+            if params["confirmed"]!=true||params["expected"]!=plan{return Err("isolation migration snapshot changed; review it again".into());}
+            self.inner.call("stop",&json!({}))?;
+            self.runtime.lock().unwrap().mark_migration_stop();
+            return Ok(json!({"migration_plan":plan}));
         }
         if method == "set_isolation" {
             let profile = Profile::parse(params["profile"].as_str().ok_or("missing isolation profile")?).map_err(|e|e.to_string())?;
