@@ -7,6 +7,7 @@ use std::collections::HashSet;
 use ratatui::{style::{Modifier, Style}, text::Line};
 use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 use unicode_width::UnicodeWidthChar;
+use sha2::{Digest, Sha256};
 
 use crate::{markdown, theme};
 use super::transcript_roles::{self, Speaker};
@@ -35,9 +36,83 @@ pub(super) struct ImagePlacement {
     pub alt: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct MermaidPlacement { pub row: usize, pub key: String }
+
+pub(super) const MAX_MERMAID_SOURCE: usize = 16 * 1024;
+
+pub(super) fn mermaid_key(source: &str) -> String {
+    format!("{:x}", Sha256::digest(source.as_bytes()))
+}
+
+fn fence_marker(line: &str) -> Option<(u8, usize, &str)> {
+    let indent = line.bytes().take_while(|byte| *byte == b' ').count();
+    if indent > 3 { return None; }
+    let line = &line[indent..];
+    let marker = *line.as_bytes().first()?;
+    if marker != b'`' && marker != b'~' { return None; }
+    let count = line.bytes().take_while(|byte| *byte == marker).count();
+    (count >= 3).then_some((marker, count, &line[count..]))
+}
+
+fn standalone_mermaid(paragraphs: &[&str], start: usize) -> Option<(usize, String, String)> {
+    let first = paragraphs.get(start)?.trim_matches('\n');
+    let (marker, count, language) = fence_marker(first.lines().next()?)?;
+    if !language.trim().eq_ignore_ascii_case("mermaid") { return None; }
+    let mut raw = String::new();
+    for (end, paragraph) in paragraphs.iter().enumerate().skip(start) {
+        if !raw.is_empty() { raw.push_str("\n\n"); }
+        raw.push_str(paragraph.trim_matches('\n'));
+        if raw.len() > MAX_MERMAID_SOURCE + 128 { return None; }
+        let mut lines = raw.lines();
+        lines.next();
+        let rest: Vec<&str> = lines.collect();
+        let Some(last) = rest.last() else { continue; };
+        let closing = |line: &str| fence_marker(line).is_some_and(|(kind, n, tail)|
+            kind == marker && n >= count && tail.trim().is_empty());
+        if rest[..rest.len() - 1].iter().any(|line| closing(line)) { return None; }
+        if !closing(last) { continue; }
+        let body = rest[..rest.len() - 1].join("\n");
+        if body.trim().is_empty() || body.len() > MAX_MERMAID_SOURCE { return None; }
+        return Some((end, raw, body));
+    }
+    None
+}
+
+/// Complete, standalone fences only. The same parser drives scheduling and
+/// layout, so an outer code fence never starts an unseen renderer job.
+pub(super) fn mermaid_sources(source: &str) -> Vec<String> {
+    let paragraphs: Vec<_> = source.split("\n\n").collect();
+    let mut found = Vec::new();
+    let mut index = 0;
+    let mut outer: Option<(u8, usize)> = None;
+    while index < paragraphs.len() {
+        let paragraph = paragraphs[index].trim_matches('\n');
+        if outer.is_none() {
+            if let Some((end, _, body)) = standalone_mermaid(&paragraphs, index) {
+                found.push(body);
+                index = end + 1;
+                continue;
+            }
+        }
+        for line in paragraph.lines() {
+            if let Some((kind, count, tail)) = fence_marker(line) {
+                match outer {
+                    Some((open, minimum)) if open == kind && count >= minimum && tail.trim().is_empty() => outer = None,
+                    None => outer = Some((kind, count)),
+                    _ => {}
+                }
+            }
+        }
+        index += 1;
+    }
+    found
+}
+
 enum Block<'a> {
     Prose(&'a str),
     Image { source: String, alt: String },
+    Mermaid { raw: String, key: String },
     Shell(crate::shell::Result),
     Heading(&'a str),
     Tools(Vec<&'a str>),
@@ -149,7 +224,8 @@ fn append_markdown(lines: &mut Vec<Line<'static>>, links: &mut Vec<markdown::Lin
 
 fn render_turn(blocks: &mut Vec<Block<'_>>, lines: &mut Vec<Line<'static>>,
                sections: &mut Vec<Section>, links: &mut Vec<markdown::LinkRegion>,
-               images: &mut Vec<ImagePlacement>, image_rows: u16, width: u16,
+               images: &mut Vec<ImagePlacement>, mermaids: &mut Vec<MermaidPlacement>,
+               ready_mermaids: Option<&HashSet<String>>, image_rows: u16, width: u16,
                expanded: Option<&HashSet<FoldKey>>, selected: Option<FoldKey>, cards: &[ToolCard], section_offset: usize) {
     let mut prose = String::new();
     let mut speaker = None;
@@ -202,6 +278,17 @@ fn render_turn(blocks: &mut Vec<Block<'_>>, lines: &mut Vec<Line<'static>>,
                 if image_rows > 0 {
                     images.push(ImagePlacement { row: lines.len(), source, alt });
                     lines.extend((0..image_rows).map(|_| Line::default()));
+                }
+            }
+            Block::Mermaid { raw, key } => {
+                if image_rows > 0 && ready_mermaids.is_some_and(|ready| ready.contains(&key)) {
+                    flush_prose(&mut prose, lines, links, speaker);
+                    lines.push(Line::styled(" Mermaid diagram", Style::default().fg(theme::SECONDARY)));
+                    mermaids.push(MermaidPlacement { row: lines.len(), key });
+                    lines.extend((0..image_rows).map(|_| Line::default()));
+                } else {
+                    if !prose.is_empty() { prose.push_str("\n\n"); }
+                    prose.push_str(&raw);
                 }
             }
             Block::Tools(tools) => {
@@ -357,26 +444,47 @@ pub(super) fn render_with_images(
     source: &str, width: u16, expanded: Option<&HashSet<FoldKey>>,
     selected: Option<FoldKey>, cards: &[ToolCard], image_rows: u16, section_offset: usize,
 ) -> (Vec<Line<'static>>, Vec<Section>, Vec<markdown::LinkRegion>, Vec<ImagePlacement>) {
+    let (lines, sections, links, images, _) = render_with_media(
+        source, width, expanded, selected, cards, image_rows, section_offset, None);
+    (lines, sections, links, images)
+}
+
+pub(super) fn render_with_media(
+    source: &str, width: u16, expanded: Option<&HashSet<FoldKey>>,
+    selected: Option<FoldKey>, cards: &[ToolCard], image_rows: u16, section_offset: usize,
+    ready_mermaids: Option<&HashSet<String>>,
+) -> (Vec<Line<'static>>, Vec<Section>, Vec<markdown::LinkRegion>, Vec<ImagePlacement>, Vec<MermaidPlacement>) {
     let mut lines = Vec::new();
     let mut sections = Vec::new();
     let mut links = Vec::new();
     let mut images = Vec::new();
+    let mut mermaids = Vec::new();
     let mut blocks = Vec::new();
     let mut tool_index: Option<usize> = None;
-    let mut fence: Option<&str> = None;
-    for paragraph in source.split("\n\n") {
-        let paragraph = paragraph.trim_matches('\n');
+    let mut fence: Option<(u8, usize)> = None;
+    let paragraphs: Vec<_> = source.split("\n\n").collect();
+    let mut index = 0;
+    while index < paragraphs.len() {
+        let paragraph = paragraphs[index].trim_matches('\n');
+        if fence.is_none() {
+            if let Some((end, raw, body)) = standalone_mermaid(&paragraphs, index) {
+                blocks.push(Block::Mermaid { raw, key: mermaid_key(&body) });
+                index = end + 1;
+                continue;
+            }
+        }
+        index += 1;
         if paragraph.is_empty() { continue; }
         if fence.is_none() && matches!(paragraph, "**You:**" | "**Assistant:**") {
             if paragraph == "**You:**" {
-                render_turn(&mut blocks, &mut lines, &mut sections, &mut links, &mut images, image_rows,
-                    width, expanded, selected.clone(), cards, section_offset);
+                render_turn(&mut blocks, &mut lines, &mut sections, &mut links, &mut images, &mut mermaids,
+                    ready_mermaids, image_rows, width, expanded, selected.clone(), cards, section_offset);
                 tool_index = None;
             }
             blocks.push(Block::Heading(paragraph));
         } else if fence.is_none() && paragraph.starts_with(SHELL_PREFIX) {
-            render_turn(&mut blocks, &mut lines, &mut sections, &mut links, &mut images, image_rows,
-                width, expanded, selected.clone(), cards, section_offset);
+            render_turn(&mut blocks, &mut lines, &mut sections, &mut links, &mut images, &mut mermaids,
+                ready_mermaids, image_rows, width, expanded, selected.clone(), cards, section_offset);
             tool_index = None;
             if let Ok(result) = serde_json::from_str(paragraph.strip_prefix(SHELL_PREFIX).unwrap()) { blocks.push(Block::Shell(result)); }
             else { blocks.push(Block::Prose("Local shell output unavailable")); }
@@ -399,20 +507,19 @@ pub(super) fn render_with_images(
             }
             blocks.push(Block::Prose(paragraph));
             for line in paragraph.lines() {
-                let line = line.trim_start();
-                if line.starts_with("```") {
-                    if fence == Some("```") { fence = None; }
-                    else if fence.is_none() { fence = Some("```"); }
-                } else if line.starts_with("~~~") {
-                    if fence == Some("~~~") { fence = None; }
-                    else if fence.is_none() { fence = Some("~~~"); }
+                if let Some((kind, count, tail)) = fence_marker(line) {
+                    match fence {
+                        Some((open, minimum)) if open == kind && count >= minimum && tail.trim().is_empty() => fence = None,
+                        None => fence = Some((kind, count)),
+                        _ => {}
+                    }
                 }
             }
         }
     }
-    render_turn(&mut blocks, &mut lines, &mut sections, &mut links, &mut images, image_rows,
-        width, expanded, selected.clone(), cards, section_offset);
-    (lines, sections, links, images)
+    render_turn(&mut blocks, &mut lines, &mut sections, &mut links, &mut images, &mut mermaids,
+        ready_mermaids, image_rows, width, expanded, selected.clone(), cards, section_offset);
+    (lines, sections, links, images, mermaids)
 }
 
 pub(super) fn render_with_links_from(
@@ -429,6 +536,48 @@ mod tests {
     use super::*;
     use super::super::tool_cards::ToolCards;
     use serde_json::json;
+
+    #[test]
+    fn mermaid_fence_stays_markdown_without_a_ready_local_render() {
+        let source = "**Assistant:**\n\nBefore [link](https://example.com).\n\n```mermaid\ngraph TD\nA-->B\n```\n\nAfter.";
+        let (baseline, sections, links, images) = render_with_images(
+            source, 40, None, None, &[], IMAGE_ROWS, 0);
+        let (fallback, fallback_sections, fallback_links, fallback_images, diagrams) =
+            render_with_media(source, 40, None, None, &[], IMAGE_ROWS, 0, Some(&HashSet::new()));
+        assert_eq!(fallback, baseline);
+        assert_eq!(fallback_sections, sections);
+        assert_eq!(fallback_links, links);
+        assert_eq!(fallback_images, images);
+        assert!(diagrams.is_empty());
+        assert!(baseline.iter().any(|line| line.to_string().contains("graph TD")));
+    }
+
+    #[test]
+    fn ready_mermaid_uses_bounded_rows_and_moves_link_geometry() {
+        let source = "**Assistant:**\n\n```mermaid\ngraph TD\n\nA-->B\n```\n\nSee [details](https://example.com).";
+        let diagrams = mermaid_sources(source);
+        assert_eq!(diagrams, vec!["graph TD\n\nA-->B"]);
+        let key = mermaid_key(&diagrams[0]);
+        let ready = HashSet::from([key.clone()]);
+        let (lines, _, links, _, placements) =
+            render_with_media(source, 40, None, None, &[], IMAGE_ROWS, 0, Some(&ready));
+        assert_eq!(placements, vec![MermaidPlacement { row: 1, key }]);
+        assert!(lines[1..=4].iter().all(|line| line.spans.is_empty()));
+        assert_eq!(lines[links[0].row].to_string().trim(), "See details.");
+        assert_eq!(links[0].url.as_ref(), "https://example.com");
+        let (text, _, _, _, placements) =
+            render_with_media(source, 40, None, None, &[], 0, 0, Some(&ready));
+        assert!(placements.is_empty());
+        assert!(text.iter().any(|line| line.to_string().contains("graph TD")));
+    }
+
+    #[test]
+    fn mermaid_inside_outer_fence_and_incomplete_fence_are_not_scheduled() {
+        let nested = "````md\n```mermaid\ngraph TD\nA-->B\n```\n````";
+        assert!(mermaid_sources(nested).is_empty());
+        assert!(mermaid_sources("```mermaid\ngraph TD\nA-->B").is_empty());
+        assert!(mermaid_sources("Prefix\n```mermaid\ngraph TD\nA-->B\n```").is_empty());
+    }
 
     #[test]
     fn local_attachment_reserves_rows_without_moving_link_targets() {

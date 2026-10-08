@@ -94,7 +94,8 @@ remains unsupported.
 
 - Standalone local Markdown images now render in the Rust transcript with
   bounded previews and alt-text fallback; see [terminal images](terminal-images.md).
-  Provider binary attachments and inline Mermaid rendering remain open.
+  Provider binary attachments remain open. Mermaid has opt-in local preview
+  support, with real CLI and terminal validation still open.
   Missing historical provider data cannot be reconstructed from a newer runtime.
 - Only verified owned session, transcript, worktree and ledger identities authorize
   resume or mutation. Unknown legacy ownership stays protected. Deleted work

@@ -70,7 +70,7 @@ Codex's permission chip offers `on-request`, `auto`, and `full-access`. `on-requ
 
 Permission answers bind to an exact pending request. Complete summaries must be read before full approval; changed or stale requests cannot inherit an answer. Secret-input requests wait for a private masked-input interface. Ctrl+Delete asks before stopping a daemon and removing its verified DOXA transcript; provider archives remain separate. Diff hunk rejection checks the current patch and staged state again before applying it.
 
-Links, Markdown, reasoning, and individual tool calls render in the transcript. Standalone local images inside the session workspace have bounded previews; [image settings and limits](../docs/terminal-images.md) explain the supported terminals. Ctrl+click opens HTTP(S) links. Review panes and tool output have bounded sizes. Search uses scrubbed indexed excerpts and bounded fallback scans. Unverified external entries cannot become resumable sessions.
+Links, Markdown, reasoning, and individual tool calls render in the transcript. Standalone local images inside the session workspace have bounded previews. Mermaid fences can render through an explicitly configured local sandboxed renderer; source remains visible otherwise. [Image and diagram limits](../docs/terminal-images.md) explain both paths. Ctrl+click opens HTTP(S) links. Review panes and tool output have bounded sizes. Search uses scrubbed indexed excerpts and bounded fallback scans. Unverified external entries cannot become resumable sessions.
 
 ## Memory and context
 

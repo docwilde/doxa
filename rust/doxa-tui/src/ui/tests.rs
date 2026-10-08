@@ -2632,23 +2632,39 @@ for line in sys.stdin:
     fn image_rows_survive_streaming_and_width_changes() {
         let source = "**You:**\n\n![chart](/home/user/chart.png)\n\n**Assistant:**\n\nInitial";
         let mut cached = RenderedTranscript::render_media(
-            0, "s", source, 30, None, None, 0, &[], transcript_tools::IMAGE_ROWS);
+            0, "s", source, 30, None, None, 0, &[], transcript_tools::IMAGE_ROWS, 0, None);
         assert_eq!(cached.images.len(), 1);
         let initial_row = cached.images[0].row;
         let extended = format!("{source} response with [reference](https://example.com)");
-        cached.update_media(&extended, 30, None, None, 0, &[], transcript_tools::IMAGE_ROWS);
+        cached.update_media(&extended, 30, None, None, 0, &[], transcript_tools::IMAGE_ROWS, 0, None);
         assert_eq!(cached.images[0].row, initial_row);
         let full = RenderedTranscript::render_media(
-            0, "s", &extended, 30, None, None, 0, &[], transcript_tools::IMAGE_ROWS);
+            0, "s", &extended, 30, None, None, 0, &[], transcript_tools::IMAGE_ROWS, 0, None);
         assert_eq!(cached.lines, full.lines);
         assert_eq!(cached.links, full.links);
         assert_eq!(cached.images, full.images);
-        cached.update_media(&extended, 18, None, None, 0, &[], transcript_tools::IMAGE_ROWS);
+        cached.update_media(&extended, 18, None, None, 0, &[], transcript_tools::IMAGE_ROWS, 0, None);
         let resized = RenderedTranscript::render_media(
-            0, "s", &extended, 18, None, None, 0, &[], transcript_tools::IMAGE_ROWS);
+            0, "s", &extended, 18, None, None, 0, &[], transcript_tools::IMAGE_ROWS, 0, None);
         assert_eq!(cached.lines, resized.lines);
         assert_eq!(cached.links, resized.links);
         assert_eq!(cached.images, resized.images);
+    }
+
+    #[test]
+    fn completed_mermaid_rebuilds_cached_lines_and_preserves_link_targets() {
+        let body = "graph TD\nA-->B";
+        let source = format!("**Assistant:**\n\n```mermaid\n{body}\n```\n\n[Next](https://example.com)");
+        let mut cached = RenderedTranscript::render_media(
+            0, "s", &source, 30, None, None, 0, &[], transcript_tools::IMAGE_ROWS, 0, None);
+        assert!(cached.mermaids.is_empty());
+        assert!(cached.lines.iter().any(|line| line.to_string().contains("graph TD")));
+        let ready = HashSet::from([transcript_tools::mermaid_key(body)]);
+        cached.update_media(&source, 30, None, None, 0, &[], transcript_tools::IMAGE_ROWS, 1, Some(&ready));
+        assert_eq!(cached.mermaids.len(), 1);
+        assert!(!cached.lines.iter().any(|line| line.to_string().contains("graph TD")));
+        assert_eq!(cached.links[0].url.as_ref(), "https://example.com");
+        assert_eq!(cached.lines[cached.links[0].row].to_string().trim(), "Next");
     }
 
     #[test]

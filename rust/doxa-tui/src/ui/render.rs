@@ -2294,7 +2294,16 @@ impl App {
         } else {
             super::transcript_tools::IMAGE_ROWS
         };
-        let (lines, sections, link_regions, images, top) = {
+        let content_width = inner[1].width.saturating_sub(2);
+        let (mermaid_revision, ready_mermaids) = {
+            let picker = self.image_store.borrow().picker();
+            let mut store = self.mermaid_store.borrow_mut();
+            store.observe(content, content_width,
+                self.preferences.value("mermaid_renderer"),
+                self.preferences.value("mermaid_renderer_root"), picker);
+            (store.revision(), store.ready_keys(content_width))
+        };
+        let (lines, sections, link_regions, images, mermaids, top) = {
             let mut cache = self.rendered_transcripts.borrow_mut();
             let position = cache
                 .iter()
@@ -2318,6 +2327,8 @@ impl App {
                     cards_revision,
                     self.tool_cards.for_session(id),
                     image_rows,
+                    mermaid_revision,
+                    Some(&ready_mermaids),
                 ));
                 cache.len() - 1
             };
@@ -2329,6 +2340,8 @@ impl App {
                 cards_revision,
                 self.tool_cards.for_session(id),
                 image_rows,
+                mermaid_revision,
+                Some(&ready_mermaids),
             );
             let (window, top) = transcript_window(
                 &cache[position].lines,
@@ -2362,6 +2375,7 @@ impl App {
                     Vec::new(),
                     Vec::new(),
                     Vec::new(),
+                    Vec::new(),
                     0,
                 )
             } else {
@@ -2381,6 +2395,7 @@ impl App {
                         })
                         .collect::<Vec<_>>(),
                     cache[position].images.clone(),
+                    cache[position].mermaids.clone(),
                     top,
                 )
             }
@@ -2493,6 +2508,28 @@ impl App {
                     let text = format!("Image clipped: {} · scroll to view", image.alt);
                     frame.render_widget(
                         Paragraph::new(text).style(Style::default().fg(theme::MUTED)),
+                        Rect::new(area.x, area.y, area.width, 1),
+                    );
+                }
+            }
+            drop(store);
+            let store = self.mermaid_store.borrow();
+            for diagram in mermaids {
+                let start = diagram.row.max(top);
+                let end = (diagram.row + usize::from(image_rows)).min(top + viewport);
+                if start >= end { continue; }
+                let area = Rect::new(
+                    inner[1].x.saturating_add(1),
+                    inner[1].y.saturating_add((start - top) as u16),
+                    inner[1].width.saturating_sub(2),
+                    (end - start) as u16,
+                );
+                if start == diagram.row && end == diagram.row + usize::from(image_rows) {
+                    store.draw(frame, area, &diagram.key);
+                } else {
+                    frame.render_widget(
+                        Paragraph::new("Diagram clipped · scroll to view")
+                            .style(Style::default().fg(theme::MUTED)),
                         Rect::new(area.x, area.y, area.width, 1),
                     );
                 }
