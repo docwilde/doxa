@@ -37,14 +37,22 @@ fn unsupported_profiles_and_unpinned_images_fail_closed(){
 }
 #[test]
 fn docker_launch_contains_only_four_private_mounts_and_enforced_controls(){
-    let root=tempfile::tempdir().unwrap();let value=manifest(root.path());
+    // CI uses .doxa-tests as its temporary parent; a substring in an owned
+    // private path is not a mount of the user's DOXA store.
+    let root=tempfile::Builder::new().prefix(".doxa-tests-").tempdir().unwrap();let value=manifest(root.path());
     let args=create_args(&value).unwrap().into_iter().map(|v|v.to_string_lossy().into_owned()).collect::<Vec<_>>();
     assert_eq!(args.iter().filter(|arg|arg.as_str()=="--mount").count(),4);
     assert!(args.iter().any(|arg|arg.ends_with("dst=/run/doxa/session,readonly")));
     assert!(args.contains(&"--cap-drop=ALL".into()));assert!(args.contains(&"--read-only".into()));
     assert!(args.contains(&"--pids-limit".into()));assert!(args.contains(&"--memory-swap".into()));
     assert!(args.contains(&"--security-opt=no-new-privileges:true".into()));
-    assert!(!args.iter().any(|arg|arg.contains("docker.sock")||arg.contains("/.doxa")||arg.contains("type=volume")));
+    let mounts=args.windows(2).filter(|pair|pair[0]=="--mount").map(|pair|pair[1].clone()).collect::<Vec<_>>();
+    assert_eq!(mounts,vec![
+        format!("type=bind,src={},dst=/workspace",value.checkout.display()),
+        format!("type=bind,src={},dst=/home/doxa",value.private_home.display()),
+        format!("type=bind,src={},dst=/work-cache",value.cache.display()),
+        format!("type=bind,src={},dst=/run/doxa/session,readonly",value.broker.display()),
+    ],"only the four session-private paths may enter the worker");
     assert!(!args.contains(&"--privileged".into()));assert!(!args.contains(&"host".into()));
 }
 #[test]
