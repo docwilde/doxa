@@ -168,8 +168,10 @@ mod tests {
 
     #[test]
     fn preflight_parses_without_creating_any_run_state() {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().join("fleet");
+        // Read-only preflight needs no existing directory. Keep its success
+        // fixture independent of long SSD or macOS tempfile roots.
+        let root = PathBuf::from(format!("/doxa-preflight-{}", std::process::id()));
+        assert!(!root.exists());
         let args = vec!["--sessions".into(), "3".into(), "--run-budget".into(), "6".into(),
             "--supervisor".into(), "claude:opus".into(), "--approve".into(), "peer".into(),
             "--approval-grace".into(), "15".into()];
@@ -180,6 +182,25 @@ mod tests {
         assert!(!root.exists());
         assert!(parse(&["--approve".into(), "all".into()], &root).is_ok());
         assert!(parse(&["--unknown".into()], &root).is_err());
+    }
+
+    #[test]
+    fn socket_budget_counts_path_bytes_and_force_cannot_bypass_it() {
+        let mut spec = plan();
+        spec.run_id = "r".into();
+        spec.force = true;
+        spec.allow_unbudgeted = true;
+        spec.run_budget_usd = None;
+        let suffix = "/r/rt".len() + 1 + SOCKET_NAME_BUDGET;
+        let root_bytes = SOCKET_PATH_MAX - suffix;
+        spec.root = PathBuf::from(format!("/{}", "x".repeat(root_bytes - 1)));
+        assert!(check(&spec, Some(1)).unwrap().contains(
+            &format!("socket path budget {SOCKET_PATH_MAX}/{SOCKET_PATH_MAX} bytes")));
+        spec.root = PathBuf::from(format!("/{}", "x".repeat(root_bytes)));
+        assert!(check(&spec, Some(1)).unwrap_err().to_string().contains("socket path budget"));
+        // UTF-8 is measured in bytes, regardless of visible character count.
+        spec.root = PathBuf::from(format!("/{}", "é".repeat(root_bytes - 1)));
+        assert!(check(&spec, Some(1)).unwrap_err().to_string().contains("socket path budget"));
     }
 
     #[test]

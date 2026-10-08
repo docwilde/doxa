@@ -152,13 +152,26 @@ mod tests{
 
     #[test]
     fn exact_native_spec_review_requires_explicit_arm_and_hides_task(){
-        let temp=tempfile::Builder::new().prefix("u").tempdir().unwrap();
-        let args=vec!["--pool".into(),"fixture:fixture-v1".into(),"--prompt".into(),"PRIVATE-TASK-SENTINEL".into(),"-n".into(),"1".into(),"--run-budget".into(),"1".into(),"--root".into(),temp.path().to_string_lossy().into_owned()];
+        // Review is read-only; a synthetic short root keeps its success case
+        // independent of the host's tempfile pathname length.
+        let root=PathBuf::from(format!("/doxa-review-{}",std::process::id()));
+        assert!(!root.exists());
+        let args=vec!["--pool".into(),"fixture:fixture-v1".into(),"--prompt".into(),"PRIVATE-TASK-SENTINEL".into(),"-n".into(),"1".into(),"--run-budget".into(),"1".into(),"--root".into(),root.to_string_lossy().into_owned()];
         let prepared=Prepared::start(args,None).unwrap();
         assert!(!prepared.lines.join("\n").contains("PRIVATE-TASK-SENTINEL"));assert!(prepared.prompt_digest.is_some());
         assert!(prepared.launch(Path::new("/nonexistent-fixture-executable")).unwrap_err().to_string().contains("explicitly confirm"));
-        assert!(!temp.path().join("manifest.json").exists());
+        assert!(!root.exists());
         assert!(!public_plan_error(invalid("unsupported native fleet option PRIVATE-SECRET")).to_string().contains("PRIVATE-SECRET"));
+    }
+
+    #[test]
+    fn native_review_refuses_long_runtime_paths_without_exposing_the_task(){
+        let root=PathBuf::from(format!("/doxa-review-{}-{}",std::process::id(),"x".repeat(120)));
+        let args=vec!["--pool".into(),"fixture:fixture-v1".into(),"--prompt".into(),"PRIVATE-TASK-SENTINEL".into(),"-n".into(),"1".into(),"--run-budget".into(),"1".into(),"--root".into(),root.to_string_lossy().into_owned(),"--force".into()];
+        let error=Prepared::start(args,None).unwrap_err().to_string();
+        assert!(error.contains("Fleet socket path too long"));
+        assert!(!error.contains("PRIVATE-TASK-SENTINEL"));
+        assert!(!root.exists());
     }
 
 }

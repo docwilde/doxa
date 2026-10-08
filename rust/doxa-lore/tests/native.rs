@@ -14,6 +14,24 @@ fn native_scrub_is_lazy_and_never_creates_memory_store() {
 }
 
 #[test]
+fn native_large_text_scrubs_before_returning_without_opening_the_store() {
+    let owned = tempfile::tempdir().unwrap();
+    let root = owned.path().join("memory-off-store");
+    let mut client = LoreClient::open_config(lore_core::config::Config::for_root(root.clone()),
+        Duration::from_secs(1)).unwrap();
+    // This size exhausted the old canonical scrubber's cumulative backtracking
+    // budget even though it fits the bridge's unchanged frame limit.
+    let filler = "the token for this secret _key is rotated weekly. ".repeat(3000);
+    let text = format!("{filler} password='long secret phrase' {filler}");
+    assert!(text.len() > 100_000 && text.len() < doxa_lore::MAX_FRAME_BYTES);
+    let clean = client.scrub(&text).unwrap();
+    assert!(clean.contains("password='[REDACTED:value]'"));
+    assert!(!clean.contains("long secret phrase"));
+    assert!(clean.starts_with(&filler) && clean.ends_with(&filler));
+    assert!(!root.exists());
+}
+
+#[test]
 fn native_backend_retains_protocol_request_bounds_without_python() {
     let owned = tempfile::tempdir().unwrap();
     let root = owned.path().join("store");
