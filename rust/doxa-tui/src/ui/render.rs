@@ -61,13 +61,19 @@ mod model_fact_tests {
     #[test]
     fn picker_shows_field_level_unknowns_and_dated_price_source() {
         let known = model_fact_lines("codex", "gpt-5.6-sol");
-        assert!(known[0].contains("ctx ? (unknown) · thinking ? (unknown)"));
+        assert!(known[0].contains("ctx 1050000 [developers.openai.com 2026-10-09]"));
+        assert!(known[0].contains("thinking optional [developers.openai.com 2026-10-09]"));
         assert!(known[1].contains("in $8/M · out $40/M"));
         assert!(known[1].contains("developers.openai.com 2026-09-30"));
 
         let unknown = model_fact_lines("claude", "gpt-5.6-sol");
         assert!(unknown[1].contains("in ? (unknown) · out ? (unknown)"));
         assert!(!unknown[1].contains("developers.openai.com"));
+        let astra = model_fact_lines("codex", "gpt-6-astra");
+        assert!(astra[0].contains("thinking mandatory [developers.openai.com 2026-10-09]"));
+        let old_codex = model_fact_lines("codex", "gpt-5.3-codex");
+        assert!(old_codex[0].contains("ctx 400000 [developers.openai.com 2026-10-09]"));
+        assert!(old_codex[0].contains("thinking ? (unknown)"));
 
         let deepseek = model_fact_lines("deepseek", "deepseek-flash");
         assert!(deepseek[0].contains("ctx 1048576 [api-docs.deepseek.com 2026-10-08]"));

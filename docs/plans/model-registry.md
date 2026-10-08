@@ -9,6 +9,7 @@ sourced facts to an exact `(engine, model)` key; it never grants availability.
 - [Current design](#current-design)
 - [What is known](#what-is-known)
 - [Where it appears](#where-it-appears)
+- [Price review needed](#price-review-needed)
 - [Remaining work](#remaining-work)
 
 ## Current design
@@ -48,11 +49,27 @@ Its [thinking guide](https://docs.z.ai/guides/capabilities/thinking-mode)
 documents an off switch for `glm-5.2`, `glm-5.1`, `glm-5`, and `glm-4.7`.
 Each populated field retains its own source and check date.
 
+On 2026-10-09, official OpenAI API model pages supplied exact model windows for
+[`gpt-6-astra`](https://developers.openai.com/api/docs/models/gpt-6-astra),
+[`gpt-5.6-sol`](https://developers.openai.com/api/docs/models/gpt-5.6-sol),
+[`gpt-5.6-terra`](https://developers.openai.com/api/docs/models/gpt-5.6-terra),
+[`gpt-5.6-luna`](https://developers.openai.com/api/docs/models/gpt-5.6-luna),
+[`gpt-5.5`](https://developers.openai.com/api/docs/models/gpt-5.5) (1,050,000
+tokens each), and [`gpt-5.3-codex`](https://developers.openai.com/api/docs/models/gpt-5.3-codex)
+(400,000 tokens). The first four GPT-5.x pages explicitly allow `none`
+reasoning effort, so thinking is optional. OpenAI's
+[reasoning guide](https://developers.openai.com/api/docs/guides/reasoning)
+explicitly refuses `none` for `gpt-6-astra`, so thinking is mandatory. Each
+context and thinking field cites its own page and check date.
+
 Z.AI describes model context as “1M,” “200K,” or “128K” without a precise
-integer token count, so those fields remain unknown. Codex context and thinking
-facts also remain unknown. Runtime observations and effort labels do not
-establish maximum context or thinking behavior. No benchmark score, speed
-tier, or inferred family capability is recorded.
+integer token count, so those fields remain unknown. The `gpt-5.3-codex`
+thinking off switch remains unknown. OpenAI API model specifications describe
+the model, not the effective context allocation or effort choices in a
+particular Codex session; the live provider catalog remains authoritative for
+those controls. Runtime observations and effort labels do not establish an
+unknown field. No benchmark score, speed tier, or inferred family capability
+is recorded.
 
 ## Where it appears
 
@@ -61,6 +78,33 @@ selected row, it displays context and thinking as known or unknown, plus both
 price fields with their source host and check date when known. Selection still
 sends the exact catalog model ID. The registry does not change the fleet's
 owner-approved price ceiling or its fail-closed accounting behavior.
+
+## Price review needed
+
+The 2026-09-30 conservative OpenAI price rows are no longer the current
+Standard API rates shown on the model pages checked 2026-10-09. Values below
+are fresh input / output USD per million tokens; the `>272K` column applies
+to the **whole request** when input exceeds 272,000 tokens.
+
+| Exact model ID | Stored rate | Current Standard API rate | `>272K` rate |
+| --- | ---: | ---: | ---: |
+| [`gpt-6-astra`](https://developers.openai.com/api/docs/models/gpt-6-astra) | 20 / 100 | 10 / 50 | 20 / 75 |
+| [`gpt-5.6-sol`](https://developers.openai.com/api/docs/models/gpt-5.6-sol) | 8 / 40 | 4 / 20 | 8 / 30 |
+| [`gpt-5.6-terra`](https://developers.openai.com/api/docs/models/gpt-5.6-terra) | 4 / 24 | 2 / 12 | 4 / 18 |
+| [`gpt-5.6-luna`](https://developers.openai.com/api/docs/models/gpt-5.6-luna) | 0.4 / 2.4 | 0.2 / 1.2 | 0.4 / 1.8 |
+| [`gpt-5.5`](https://developers.openai.com/api/docs/models/gpt-5.5) | 12.5 / 75 | 5 / 30 | 10 / 45 |
+| [`gpt-5.3-codex`](https://developers.openai.com/api/docs/models/gpt-5.3-codex) | 3.5 / 28 | 1.75 / 14 | Not stated on its model page |
+
+`BudgetHost` currently charges all prompt tokens at one stored rate and admits
+another turn while recorded spend is below the ceiling. Every stored row
+exceeds its displayed Standard rate; the five tiered rows also exceed their
+documented long-context rates. This can exhaust the ceiling early. For
+`gpt-5.5`, it instead makes accounting unknown and withholds
+later turns when aggregate turn input reaches 272,000 tokens. The provider's
+threshold is per request, which the aggregate turn does not establish. A
+correct refresh needs per-request tier evidence, effective billing mode and
+resume-safe price identity; replacing these pairs with short-context rates
+alone would risk admitting turns that exceed the ceiling.
 
 ## Remaining work
 
@@ -72,3 +116,5 @@ owner-approved price ceiling or its fail-closed accounting behavior.
 - Consider an operator-facing refresh and stale-fact review flow before using
   the registry for automatic task routing. No quality or benchmark score is
   planned without a maintained, task-specific evaluation method.
+- Review the tiered price rows above and their budget admission behavior before
+  changing accounting rates.

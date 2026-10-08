@@ -99,6 +99,29 @@ pub fn lookup(engine: &str, model: &str) -> ModelFacts {
         output_usd_per_million: Fact::static_value(output, source, "2026-09-30"),
         ..ModelFacts::unknown()
     };
+    // OpenAI's API model pages specify the window for these exact IDs. This
+    // describes the model, not a Codex account's effective session allocation.
+    let codex_model_page = match (engine, model) {
+        ("codex", "gpt-6-astra") => Some(("https://developers.openai.com/api/docs/models/gpt-6-astra", 1_050_000)),
+        ("codex", "gpt-5.6-sol") => Some(("https://developers.openai.com/api/docs/models/gpt-5.6-sol", 1_050_000)),
+        ("codex", "gpt-5.6-terra") => Some(("https://developers.openai.com/api/docs/models/gpt-5.6-terra", 1_050_000)),
+        ("codex", "gpt-5.6-luna") => Some(("https://developers.openai.com/api/docs/models/gpt-5.6-luna", 1_050_000)),
+        ("codex", "gpt-5.5") => Some(("https://developers.openai.com/api/docs/models/gpt-5.5", 1_050_000)),
+        ("codex", "gpt-5.3-codex") => Some(("https://developers.openai.com/api/docs/models/gpt-5.3-codex", 400_000)),
+        _ => None,
+    };
+    if let Some((source, window)) = codex_model_page {
+        facts.context_window = Fact::static_value(window, source, "2026-10-09");
+    }
+    if (engine, model) == ("codex", "gpt-6-astra") {
+        facts.thinking = Fact::static_value(
+            Thinking::Mandatory, "https://developers.openai.com/api/docs/guides/reasoning", "2026-10-09"
+        );
+    } else if engine == "codex" && matches!(model, "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna" | "gpt-5.5") {
+        if let Some((source, _)) = codex_model_page {
+            facts.thinking = Fact::static_value(Thinking::Optional, source, "2026-10-09");
+        }
+    }
     // DeepSeek's documented /models example gives an exact integer for these
     // IDs. Its "1M" marketing label alone would not distinguish 1,000,000
     // from 1,048,576 tokens.
@@ -137,8 +160,8 @@ mod tests {
     fn lookup_uses_exact_engine_and_model_without_inferred_capabilities() {
         let known = lookup("codex", "gpt-5.6-sol");
         assert_eq!(known.priced_pair(), Some((8.0, 40.0, "https://developers.openai.com/api/docs/pricing", "2026-09-30")));
-        assert_eq!(known.context_window, Fact::unknown());
-        assert_eq!(known.thinking, Fact::unknown());
+        assert_eq!(known.context_window.value, Some(1_050_000));
+        assert_eq!(known.thinking.value, Some(Thinking::Optional));
         for (engine, model) in [("claude", "gpt-5.6-sol"), ("codex", "gpt-5.6-sol-latest"), ("codex", "GPT-5.6-SOL")] {
             assert_eq!(lookup(engine, model), ModelFacts::unknown());
             assert!(lookup(engine, model).priced_pair().is_none());
@@ -191,5 +214,35 @@ mod tests {
         unpriced.input_usd_per_million = Fact::unknown();
         assert_eq!(unpriced.thinking.value, Some(Thinking::Mandatory));
         assert!(unpriced.priced_pair().is_none());
+    }
+
+    #[test]
+    fn openai_model_pages_supply_only_exact_dated_capabilities() {
+        let astra = lookup("codex", "gpt-6-astra");
+        assert_eq!(astra.context_window, Fact::static_value(
+            1_050_000, "https://developers.openai.com/api/docs/models/gpt-6-astra", "2026-10-09"
+        ));
+        assert_eq!(astra.thinking, Fact::static_value(
+            Thinking::Mandatory, "https://developers.openai.com/api/docs/guides/reasoning", "2026-10-09"
+        ));
+        for (model, page) in [
+            ("gpt-5.6-sol", "https://developers.openai.com/api/docs/models/gpt-5.6-sol"),
+            ("gpt-5.6-terra", "https://developers.openai.com/api/docs/models/gpt-5.6-terra"),
+            ("gpt-5.6-luna", "https://developers.openai.com/api/docs/models/gpt-5.6-luna"),
+            ("gpt-5.5", "https://developers.openai.com/api/docs/models/gpt-5.5"),
+        ] {
+            let facts = lookup("codex", model);
+            assert_eq!(facts.context_window, Fact::static_value(1_050_000, page, "2026-10-09"));
+            assert_eq!(facts.thinking, Fact::static_value(Thinking::Optional, page, "2026-10-09"));
+            assert!(facts.priced_pair().is_some(), "capability update must not change price admission");
+        }
+        let codex = lookup("codex", "gpt-5.3-codex");
+        assert_eq!(codex.context_window, Fact::static_value(
+            400_000, "https://developers.openai.com/api/docs/models/gpt-5.3-codex", "2026-10-09"
+        ));
+        assert_eq!(codex.thinking, Fact::unknown(), "the model page does not establish a thinking off switch");
+        for (engine, model) in [("codex", "gpt-5.6"), ("codex", "gpt-6-astra-latest"), ("claude", "gpt-6-astra")] {
+            assert_eq!(lookup(engine, model), ModelFacts::unknown());
+        }
     }
 }
