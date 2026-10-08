@@ -3,10 +3,10 @@
 use super::{error, free_bytes, private_directory, Manifest, Policy};
 use std::{
     collections::HashSet,
-    ffi::CString,
-    fs::{self, File, OpenOptions},
+    ffi::{CStr, CString},
+    fs::{File, OpenOptions},
     io,
-    os::{fd::{AsRawFd, FromRawFd}, unix::{ffi::OsStrExt, fs::{MetadataExt, OpenOptionsExt}}},
+    os::{fd::{AsRawFd, FromRawFd}, unix::fs::{MetadataExt, OpenOptionsExt}},
     path::Path,
     time::{Duration, Instant},
 };
@@ -56,13 +56,46 @@ fn open_directory(path: &Path) -> io::Result<File> {
     OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC).open(path)
 }
 
+struct DirectoryStream(*mut libc::DIR);
+impl DirectoryStream {
+    fn open(dir: &File) -> io::Result<Self> {
+        // fdopendir owns its fd. Open "." relative to the already verified
+        // directory so enumeration stays anchored and the fd cannot leak into
+        // a concurrent provider process.
+        let fd = unsafe { libc::openat(dir.as_raw_fd(), b".\0".as_ptr().cast(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
+        if fd < 0 { return Err(io::Error::last_os_error()); }
+        let stream = unsafe { libc::fdopendir(fd) };
+        if stream.is_null() {
+            let error = io::Error::last_os_error();
+            unsafe { libc::close(fd); }
+            return Err(error);
+        }
+        Ok(Self(stream))
+    }
+    fn next_name(&mut self) -> io::Result<Option<CString>> {
+        errno::set_errno(errno::Errno(0));
+        let entry = unsafe { libc::readdir(self.0) };
+        if entry.is_null() {
+            let code = errno::errno().0;
+            return if code == 0 { Ok(None) } else { Err(io::Error::from_raw_os_error(code)) };
+        }
+        // readdir owns this buffer and may overwrite it on the next call.
+        let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
+        Ok(Some(name.to_owned()))
+    }
+}
+impl Drop for DirectoryStream {
+    fn drop(&mut self) { unsafe { libc::closedir(self.0); } }
+}
+
 fn scan_directory(dir: &File, state: &mut Scan, depth: usize) -> io::Result<()> {
     if depth >= MAX_DEPTH { return Err(error("session disk scan exceeded its directory depth bound; new turns refused")); }
     // Enumeration follows a stable directory descriptor. fstatat/openat stay
     // anchored there even if a worker renames a child during the scan.
-    let entries = fs::read_dir(format!("/proc/self/fd/{}", dir.as_raw_fd()))?;
-    for entry in entries {
-        let name = CString::new(entry?.file_name().as_bytes()).map_err(|_| error("invalid session file name"))?;
+    let mut entries = DirectoryStream::open(dir)?;
+    while let Some(name) = entries.next_name()? {
+        if name.as_bytes() == b"." || name.as_bytes() == b".." { continue; }
         let mut raw = std::mem::MaybeUninit::<libc::stat>::uninit();
         if unsafe { libc::fstatat(dir.as_raw_fd(), name.as_ptr(), raw.as_mut_ptr(), libc::AT_SYMLINK_NOFOLLOW) } != 0 {
             return Err(io::Error::last_os_error());
@@ -169,5 +202,8 @@ mod tests {
         fs::hard_link(root.path().join("content"), root.path().join("same-content")).unwrap();
         let twice = usage(root.path()).unwrap();
         assert_eq!(once, twice);
+        fs::create_dir(root.path().join("nested")).unwrap();
+        fs::write(root.path().join("nested/.hidden"), vec![b'y'; 8192]).unwrap();
+        assert!(usage(root.path()).unwrap() > twice);
     }
 }

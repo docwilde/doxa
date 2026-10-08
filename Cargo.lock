@@ -682,6 +682,7 @@ dependencies = [
 name = "doxa-isolation"
 version = "2.0.0-beta.11"
 dependencies = [
+ "errno",
  "libc",
  "serde",
  "serde_json",
