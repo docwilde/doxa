@@ -3,6 +3,8 @@
 Baseline: Python `v1.19.0` production behavior. This tracker records implementation
 through **alpha.70**, with canonical **LORE 0.62.11**. Account checks
 are bounded by their exact candidate and date.
+Beta.9 upgrades the canonical native core to **LORE 0.62.17** and verifies
+large scrub frames; the dated provider checks below retain their original scope.
 The Rust runtime implements the audited workflows below. Live account checks
 remain bounded by the [latest verification record](live-provider-verification-2026-09-29.md)
 and the [remaining verification](#remaining-verification) section; implementation
