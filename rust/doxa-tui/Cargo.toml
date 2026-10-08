@@ -10,6 +10,7 @@ name = "doxa-rs"
 path = "src/main.rs"
 
 [dependencies]
+doxa-codegraph = { path = "../doxa-codegraph" }
 doxa-fleet = { path = "../doxa-fleet" }
 doxa-isolation = { path = "../doxa-isolation" }
 doxa-claude = { path = "../doxa-claude" }

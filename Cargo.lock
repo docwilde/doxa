@@ -603,6 +603,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "doxa-codegraph"
+version = "2.0.0-beta.11"
+dependencies = [
+ "proc-macro2",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "syn 2.0.119",
+ "tempfile",
+]
+
+[[package]]
 name = "doxa-daemon"
 version = "2.0.0-beta.12"
 dependencies = [
@@ -803,6 +815,7 @@ version = "2.0.0-beta.12"
 dependencies = [
  "crossterm",
  "doxa-claude",
+ "doxa-codegraph",
  "doxa-engines",
  "doxa-fleet",
  "doxa-isolation",

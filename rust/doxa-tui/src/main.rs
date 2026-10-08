@@ -56,6 +56,8 @@ Commands:
                        Run the explicitly selected provider authentication
   plugins [refresh | adopt on|off]
                        Discover plugins or change sanitized adoption for new sessions
+  codegraph [--root WORKTREE] file PATH | symbol NAME | imports PATH
+                       Query current Rust syntax with source hashes and coverage
   fleet ...            Inspect or start native fleet runs
   mesh serve           Serve the private peer graph until Ctrl-C
   remote serve         Serve live sessions to an allowed Tailscale browser
@@ -157,6 +159,11 @@ fn run(args: &[String]) -> io::Result<()> {
             "update" => {
                 if args.len() != 1 { return Err(invalid("update takes no arguments")); }
                 return update();
+            }
+            "codegraph" => {
+                let answer = doxa_codegraph::query_cli(&args[1..]).map_err(invalid)?;
+                println!("{}", serde_json::to_string(&answer).map_err(io::Error::other)?);
+                return Ok(());
             }
             "setup" => {
                 if args.len() != 1 { return Err(invalid("setup takes no arguments")); }
