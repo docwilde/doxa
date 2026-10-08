@@ -45,15 +45,34 @@ reloads the host transcript and pending inputs. Transcript and event text are
 bounded in memory and rendered as plain text. The Android client never calls
 the daemon or provider directly.
 
+## Local alerts and background push
+
+With explicit permission, the app can show generic Android notifications for
+`needs_input` and turn completion while its live SSE connection continues and
+the app is hidden. Notifications contain no session ID, transcript, tool
+content, or answer action. They are rate-limited per kind. Android can stop the
+process and connection at any time, so these are local live alerts, not
+reliable background push.
+
+The hub's `/api/push/subscriptions` endpoint accepts browser Web Push
+subscriptions with endpoint and `p256dh`/`auth` keys. A native Android FCM
+registration token is a different protocol and cannot use that endpoint.
+Reliable Android push needs a Firebase project configuration in the app and
+an authenticated FCM sender on the hub. Neither is configured here, and the
+app does not register a token or add a token-only endpoint that cannot send.
+
 ## Scope and verification
 
-There is no Android push registration, background service, persistent key,
-file browser, or host command endpoint in this client. It has not yet been
-installed on a device or exercised against a two-host private tailnet. The
-required remaining gate is an Android SDK build and device test covering
+There is no Android background push registration, background service, persistent key,
+file browser, or host command endpoint in this client. The debug APK builds
+with SDK 37.0 and its protocol tests pass. It has not yet been installed on a
+device or exercised against a two-host private tailnet. The remaining gate is
+a device test covering
 Tailscale authentication, encrypted/plaintext sessions, reconnect, duplicate
 request, stale approval, and host loss.
 
 The build versions follow the [Android Compose setup guide](https://developer.android.com/develop/ui/compose/setup-compose-dependencies-and-compiler),
 [AGP 9.1 compatibility table](https://developer.android.com/build/releases/agp-9-1-0-release-notes),
 and [Gradle wrapper guidance](https://docs.gradle.org/current/userguide/gradle_wrapper.html).
+The push boundary follows [Firebase's Android registration guidance](https://firebase.google.com/docs/cloud-messaging/android/get-started)
+and [FCM server authorization requirements](https://firebase.google.com/docs/cloud-messaging/send/v1-api).

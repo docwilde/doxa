@@ -1,6 +1,9 @@
 package ai.ampiric.doxa.remote
 
+import android.Manifest
+import android.content.pm.PackageManager
 import android.content.SharedPreferences
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -23,7 +26,8 @@ import java.io.ByteArrayOutputStream
 private data class Entry(val kind: String, val text: String)
 private class ReplayGap : Exception()
 
-private class RemoteController(private val prefs: SharedPreferences, private val scope: CoroutineScope) {
+private class RemoteController(private val prefs: SharedPreferences, private val scope: CoroutineScope,
+                               private val alerts: LocalAlerts) {
     var origin by mutableStateOf(prefs.getString("hub", "") ?: "")
     var status by mutableStateOf("Connect through your user-owned Tailscale device")
         private set
@@ -65,7 +69,7 @@ private class RemoteController(private val prefs: SharedPreferences, private val
 
     fun statusMessage(message: String) { status = message }
 
-    fun setDraft(value: String) {
+    fun updateDraft(value: String) {
         draft = value.take(58_000)
         prefs.edit().putString("draft", draft).apply()
     }
@@ -268,6 +272,7 @@ private class RemoteController(private val prefs: SharedPreferences, private val
             "tool_call" -> append("Tool", data.optString("name", data.optString("tool_name", "Tool")))
             "tool_result" -> data.optString("result").takeIf(String::isNotBlank)?.let { append("Tool", it) }
         }
+        alerts.onEvent(kind)
         cursor = maxOf(cursor, seq + 1)
         prefs.edit().putLong("cursor", cursor).apply()
     }
@@ -334,7 +339,7 @@ private class RemoteController(private val prefs: SharedPreferences, private val
         try {
             client.submit(command, command.encrypted)
             uncertain = null
-            if (command.operation == "prompt" && draft.trim() == command.payload.optString("text")) setDraft("")
+            if (command.operation == "prompt" && draft.trim() == command.payload.optString("text")) updateDraft("")
             status = if (command.operation == "prompt") "Prompt delivered" else "Answer delivered"
         } catch (error: RemoteRefusal) {
             uncertain = null
@@ -382,7 +387,7 @@ private class RemoteController(private val prefs: SharedPreferences, private val
                 uncertain = fresh
                 client.submit(fresh, session.encrypted)
                 uncertain = null
-                if (prior.operation == "prompt" && draft.trim() == prior.payload.optString("text")) setDraft("")
+                if (prior.operation == "prompt" && draft.trim() == prior.payload.optString("text")) updateDraft("")
                 status = "New request delivered"
             } catch (error: RemoteRefusal) {
                 uncertain = null
@@ -396,6 +401,10 @@ private class RemoteController(private val prefs: SharedPreferences, private val
 class MainActivity : ComponentActivity() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private lateinit var state: RemoteController
+    private lateinit var alerts: LocalAlerts
+    private val notifications = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        alerts.updateEnabled(granted)
+    }
     private val chooseKey = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null) try {
             val bytes = ByteArrayOutputStream()
@@ -414,9 +423,23 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        state = RemoteController(getSharedPreferences("doxa-remote", MODE_PRIVATE), scope)
-        setContent { MaterialTheme { RemoteScreen(state) { chooseKey.launch(arrayOf("text/plain", "application/octet-stream")) } } }
+        val prefs = getSharedPreferences("doxa-remote", MODE_PRIVATE)
+        alerts = LocalAlerts(this, prefs)
+        state = RemoteController(prefs, scope, alerts)
+        setContent { MaterialTheme {
+            RemoteScreen(state, alerts,
+                onChooseKey = { chooseKey.launch(arrayOf("text/plain", "application/octet-stream")) },
+                onEnableAlerts = {
+                    if (Build.VERSION.SDK_INT >= 33 &&
+                        checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
+                        notifications.launch(Manifest.permission.POST_NOTIFICATIONS)
+                    else alerts.updateEnabled(true)
+                })
+        } }
     }
+
+    override fun onStart() { super.onStart(); if (::alerts.isInitialized) alerts.visible = true }
+    override fun onStop() { if (::alerts.isInitialized) alerts.visible = false; super.onStop() }
 
     override fun onDestroy() {
         state.close()
@@ -426,7 +449,8 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun RemoteScreen(state: RemoteController, onChooseKey: () -> Unit) {
+private fun RemoteScreen(state: RemoteController, alerts: LocalAlerts,
+                         onChooseKey: () -> Unit, onEnableAlerts: () -> Unit) {
     val session = state.selected
     val question = state.pending.firstOrNull()
     Column(Modifier.fillMaxSize().padding(16.dp)) {
@@ -448,6 +472,11 @@ private fun RemoteScreen(state: RemoteController, onChooseKey: () -> Unit) {
                 OutlinedButton(onClick = state::refresh, enabled = !state.busy) { Text("Refresh") }
                 OutlinedButton(onClick = state::disconnect, enabled = !state.busy) { Text("Disconnect") }
             }
+            OutlinedButton(onClick = { if (alerts.enabled) alerts.updateEnabled(false) else onEnableAlerts() }) {
+                Text(if (alerts.enabled) "Local alerts on" else "Enable local alerts")
+            }
+            Text("Alerts need this app's live connection; they stop if Android closes it.",
+                style = MaterialTheme.typography.bodySmall)
             LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 items(state.sessions, key = { it.id }) { item ->
                     FilterChip(selected = session?.id == item.id, onClick = { state.select(item) },
@@ -472,7 +501,7 @@ private fun RemoteScreen(state: RemoteController, onChooseKey: () -> Unit) {
                 }
                 if (question != null) PendingInput(state, question)
                 HorizontalDivider()
-                OutlinedTextField(value = state.draft, onValueChange = state::setDraft,
+                OutlinedTextField(value = state.draft, onValueChange = state::updateDraft,
                     label = { Text("Prompt") }, minLines = 2, maxLines = 5,
                     enabled = !state.busy,
                     modifier = Modifier.fillMaxWidth())
