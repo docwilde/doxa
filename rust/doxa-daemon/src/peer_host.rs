@@ -392,6 +392,17 @@ impl PeerHost {
         if frame.from_id == self.session_id {
             return Err("self peer frame".into());
         }
+        // Transport authority is typed data, not display prose. Canonical LORE
+        // redacts long hex strings, so verify immutable metadata before scrub
+        // and pass only the peer's body through that text transformation.
+        let fleet_context=self.fleet.lock().map_err(|_|"Fleet guard unavailable")?.clone();
+        let parsed_envelope=if let Some(context)=fleet_context.as_ref(){
+            let envelope=doxa_fleet::Envelope::parse(&frame.body).map_err(|error|error.to_string())?;
+            if envelope.from_session!=frame.from_id{return Err("Fleet serialized sender differs from transport sender".into());}
+            let pid=frame.authenticated_pid.ok_or("Fleet kernel sender identity unavailable")?;
+            doxa_fleet::validate_before_review(context,&envelope,&self.session_id,pid).map_err(|error|error.to_string())?;
+            Some(envelope)
+        }else{None};
         let roster = self.with_lore(|lore| self.roster(lore))?;
         let remote_origin=if roster.iter().any(|p|p.session_id==frame.from_id){None}else{
             let peers=self.with_lore(|lore|self.remote_roster(lore).map(|(rows,_)|rows))?;
@@ -419,7 +430,7 @@ impl PeerHost {
             };
             Ok((
                 clean(lore, &frame.from_title)?,
-                clean(lore, &frame.body)?,
+                clean(lore, parsed_envelope.as_ref().map(|envelope|envelope.body.as_str()).unwrap_or(&frame.body))?,
                 frame
                     .from_repo
                     .as_deref()
@@ -429,13 +440,11 @@ impl PeerHost {
                 frame.kind.as_deref().map(|s| clean(lore, s)).transpose()?,
             ))
         })?;
-        let fleet_context=self.fleet.lock().map_err(|_|"Fleet guard unavailable")?.clone();
         let (body, fleet_admission) = if let Some(context)=fleet_context {
-            let mut envelope=doxa_fleet::Envelope::parse(&body).map_err(|error|error.to_string())?;
-            if envelope.from_session!=frame.from_id {return Err("Fleet serialized sender differs from transport sender".into());}
+            let mut envelope=parsed_envelope.ok_or("Fleet typed envelope unavailable")?;
+            envelope.body=body;
             let pid=frame.authenticated_pid.ok_or("Fleet kernel sender identity unavailable")?;
             doxa_fleet::validate_before_review(&context,&envelope,&self.session_id,pid).map_err(|error|error.to_string())?;
-            envelope.body=self.with_lore(|lore|lore.scrub(&envelope.body).map_err(|_|"LORE scrub unavailable".into()))?;
             let semantic=if context.review.message_mode!=doxa_fleet::Mode::Off {
                 let recent=doxa_fleet::transaction(&context,|state|Ok(state.recent_messages.clone())).map_err(|error|error.to_string())?;
                 let snapshot=json!({"recent_untrusted_messages":recent,"charter":context.charter,"assignment":context.assignment(&envelope.from_session).map_err(|error|error.to_string())?,"message":envelope});

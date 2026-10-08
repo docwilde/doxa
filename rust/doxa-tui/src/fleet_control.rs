@@ -672,7 +672,7 @@ fn checkpoint(store:&Store,value:&mut Value,slots:&mut [Slot],initial:bool)->io:
         missing_git_evidence |= changed.is_none();
         if let Some(changed)=&changed{for path in changed.lines(){if !context.charter.allowed_paths.iter().any(|prefix|prefix.is_empty()||path==prefix||path.starts_with(&format!("{}/",prefix.trim_end_matches('/')))){out_of_scope=true;}}}
         let artifact=json!({"kind":"host_checkpoint","session_id":slot.session.id,"assignment_id":context.assignments[index].id,"changed_paths":changed,"git_observation_available":paths.is_ok()&&untracked.is_ok(),"running":state["running"],"queued":state["queued"],"last_turn":value["slots"][index]["last_turn"],"tests_verified":false});
-        let id=format!("host-{}",doxa_fleet::hash(&artifact)?);artifacts.push((id,artifact));
+        let id=doxa_fleet::evidence_id(&artifact)?;artifacts.push((id,artifact));
     }
     let snapshot=doxa_fleet::transaction(&context,|state|{
         for (id,artifact) in &artifacts{state.artifacts.insert(id.clone(),artifact.clone());}

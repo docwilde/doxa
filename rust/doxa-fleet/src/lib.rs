@@ -11,6 +11,9 @@ pub const MAX_BODY: usize = 6_000;
 pub const MAX_STATE: u64 = 4 * 1024 * 1024;
 pub fn invalid(message: &str) -> io::Error { io::Error::new(io::ErrorKind::InvalidData, message) }
 pub fn hash(value: &impl Serialize) -> io::Result<String> { Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(value)?))) }
+/// Stable public evidence identity. Short digest groups survive canonical text
+/// scrubbing; the underlying host-owned artifact still binds the full SHA256.
+pub fn evidence_id(value:&impl Serialize)->io::Result<String>{let digest=hash(value)?;Ok(format!("host-{}-{}-{}-{}",&digest[..16],&digest[16..32],&digest[32..48],&digest[48..]))}
 pub fn unix_now() -> u64 { SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
