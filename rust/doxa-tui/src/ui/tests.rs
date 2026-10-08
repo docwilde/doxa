@@ -4032,6 +4032,34 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn lore_scope_lookup_does_not_block_terminal_poll() {
+        use std::os::unix::fs::PermissionsExt;
+        const CHILD: &str = "DOXA_TEST_SLOW_LORE_GIT";
+        if std::env::var_os(CHILD).is_none() {
+            let dir = tempfile::tempdir().unwrap();
+            let git = dir.path().join("git");
+            std::fs::write(&git, b"#!/bin/sh\n/bin/sleep 2\nexit 1\n").unwrap();
+            std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "ui::tests::lore_scope_lookup_does_not_block_terminal_poll"])
+                .env(CHILD, "1").env("PATH", dir.path()).env("DOXA_TEST_LORE_CWD", dir.path())
+                .output().unwrap();
+            assert!(output.status.success(), "{}{}", String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr));
+            return;
+        }
+        let mut app = App::default();
+        let cwd = PathBuf::from(std::env::var_os("DOXA_TEST_LORE_CWD").unwrap());
+        app.apply_update(DaemonUpdate::Upsert(Session { id:"local".into(), title:"Local".into(),
+            collection:"Local".into(), transcript:String::new(), status:"Ready".into() }));
+        app.session_cwds.insert("local".into(), cwd);
+        let started = Instant::now();
+        app.poll_lore_pending();
+        assert!(started.elapsed() < Duration::from_millis(750),
+            "Git scope discovery blocked the terminal event loop");
+    }
+
+    #[test]
     fn unnamed_collection_uses_known_project_and_task_without_changing_explicit_names() {
         let mut app = App::default();
         app.apply_update(DaemonUpdate::Upsert(Session { id:"s".into(), title:"Fix picker".into(),
