@@ -23,7 +23,7 @@ CELL = (24, 54)
 ORIGIN = ((SIZE[0] - GRID[0] * CELL[0]) // 2, (SIZE[1] - GRID[1] * CELL[1]) // 2)
 SCENES = (
     "hero", "image-preview", "isolation", "fleet-review", "fleet-dependency", "fleet-release-review", "fleet-view",
-    "beliefs", "tool-entries", "memory-management", "commands", "help",
+    "beliefs", "tool-entries", "memory-management", "commands", "help", "codegraph",
 )
 FONT = Path("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf")
 FONT_BOLD = Path("/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf")

@@ -354,6 +354,36 @@ fn scene(name: &str) -> App {
             })).unwrap();
             app.notice="Fixture · host evidence · release disabled".into();
         }
+        "codegraph" => {
+            app.groups[0].tabs=vec!["demo-codex-01".into()];
+            app.sessions.iter_mut().for_each(|session|session.transcript.clear());
+            app.show_codegraph_fixture(&[
+                "modules src/parser.rs · syntax_only",
+                "Worktree: /demo/project",
+                "Observed: fixture · example source",
+                "Coverage: 5 listed · 4 parsed Rust · 1 skipped · 0 unparseable",
+                "Syntax only · declarations and call candidates are not resolved Rust bindings",
+                "",
+                "module · src/parser.rs:3:1 · ast",
+                "  file · conventional module file",
+                "  target: src/parser/ast.rs",
+                "  source SHA-256: a1b2c3d4e5f60718293a4b5c6d7e8f90123456789abcdef0011223344556677",
+                "  target SHA-256: 00112233445566778899aabbccddeeff0123456789abcdef0123456789abcdef",
+                "",
+                "module · src/parser.rs:8:1 · platform",
+                "  unknown · conditional module declaration",
+                "  target: unknown",
+                "  source SHA-256: a1b2c3d4e5f60718293a4b5c6d7e8f90123456789abcdef0011223344556677",
+                "",
+                "Structural file modules only · cfg branches remain unknown",
+            ]);
+            key(&mut app, KeyCode::PageDown, KeyModifiers::NONE);
+            key(&mut app, KeyCode::PageDown, KeyModifiers::NONE);
+            key(&mut app, KeyCode::PageDown, KeyModifiers::NONE);
+            key(&mut app, KeyCode::PageDown, KeyModifiers::NONE);
+            key(&mut app, KeyCode::Down, KeyModifiers::NONE);
+            app.notice="Fixture · read-only code graph · no repository scan".into();
+        }
         _ => panic!("unknown scene: {name}"),
     }
     app
@@ -373,7 +403,7 @@ fn main() {
     let name = std::env::args().nth(1).expect("scene name");
     let (width,height) = match name.as_str() {
         "welcome" => (72,18),
-        "hero" | "image-preview" | "isolation" | "repo-picker" | "claude-session" | "tool-activity" | "tool-expanded" | "tool-entries" | "restored-tool" | "processing" | "reasoning" | "commands" | "help" | "needs-input" | "permissions" | "permission-request" | "effort" | "history" | "queue" | "beliefs" | "belief-hover" | "memory" | "memory-management" | "memory-change" | "fleet-review" | "fleet-dependency" | "fleet-view" | "fleet-release-review" => (126,31),
+        "hero" | "image-preview" | "isolation" | "repo-picker" | "claude-session" | "tool-activity" | "tool-expanded" | "tool-entries" | "restored-tool" | "processing" | "reasoning" | "commands" | "help" | "needs-input" | "permissions" | "permission-request" | "effort" | "history" | "queue" | "beliefs" | "belief-hover" | "memory" | "memory-management" | "memory-change" | "fleet-review" | "fleet-dependency" | "fleet-view" | "fleet-release-review" | "codegraph" => (126,31),
         _ => panic!("unknown scene"),
     };
     let mut terminal = Terminal::new(TestBackend::new(width,height)).unwrap();

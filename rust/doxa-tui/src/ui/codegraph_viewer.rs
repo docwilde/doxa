@@ -93,6 +93,15 @@ pub(super) fn wrapped_lines(lines: &[String], width: usize) -> Vec<String> {
 }
 
 impl App {
+    /// Render a deterministic syntax-query example through the production modal.
+    /// The gallery caller supplies inert text; no worktree scan is started.
+    #[doc(hidden)]
+    pub fn show_codegraph_fixture(&mut self, lines: &[&str]) {
+        self.chip_info = Some(ChipInfo { kind: "codegraph", label: String::new(),
+            lines: lines.iter().map(|line| (*line).to_owned()).collect(),
+            scroll: 0, owner: None });
+    }
+
     pub(super) fn open_codegraph(&mut self, args: &str) {
         let request = match request(args) {
             Ok(value) => value,
