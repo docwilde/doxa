@@ -1,8 +1,9 @@
 # Collection triage — colour, default labels, and ordering by urgency
 
 Status: **The Python 1.x implementation shipped Parts 0, 1 and 1b. The native
-Rust rail in v2.0.0-beta.11 uses a different session-row model. This branch
-adds derived collection names and settled, opt-in group ordering to Rust.**
+Rust rail in v2.0.0-beta.11 uses a different session-row model. Beta.12
+adds derived collection names and settled, opt-in group ordering to Rust;
+beta.13 preserves LORE proposal source provenance.**
 
 Native Rust behavior: `/collection new` without a name uses a configured
 customer from `[project_customers]` for the exact session workspace path,

@@ -1,20 +1,20 @@
 # Plan status
 
-Audited against the native Rust tree on 2026-10-08. A Python-era plan's
+Audited against the native Rust tree on 2026-10-09. A Python-era plan's
 "shipped" label describes that historical release; it is not evidence that
 every proposed extension exists in Rust.
 
 | Work | Current status |
 | --- | --- |
-| [Session Docker isolation](session-isolation-docker.md) | Linux native/open-egress/no-network profiles, private clones, idle backend migration and TUI controls shipped in beta.10. Beta.11 adds monitored disk limits. Hardened egress, hard quotas, remote Engines and Docker Desktop remain open. See the [operator guide](../session-isolation.md). |
-| [Independent fleet supervision](fleet-supervision.md) | Beta.10 added typed host admission and selectable independent review; beta.11 adds frozen scopes and handoffs, beta.12 offline threshold calibration. This branch adds reviewed dependency waits and explicit operator release. Labeled real-message evaluation, trusted test evidence and in-TUI release review remain open. See the [operator guide](../fleet-supervision.md). |
-| [Remote hub and Android](remote-hub.md) | Native/browser control, the packaged encrypted Chrome client and browser Web Push exist. The Android client and Android push remain open. |
+| [Session Docker isolation](session-isolation-docker.md) | Linux native/open-egress/no-network profiles, private clones, idle backend migration and TUI controls shipped in beta.10. Beta.11 added monitored disk limits; beta.13 checks effective cgroup resource ceilings before admission and turns. Hardened egress, hard quotas, remote Engines and Docker Desktop remain open. See the [operator guide](../session-isolation.md). |
+| [Independent fleet supervision](fleet-supervision.md) | Beta.10 added typed host admission and selectable independent review; beta.11 added frozen scopes and handoffs; beta.12 added offline threshold calibration. Beta.13 adds Docker-isolated dependency waits and explicit operator release. Labeled real-message evaluation, trusted test evidence and in-TUI release review remain open. See the [operator guide](../fleet-supervision.md). |
+| [Remote hub and Android](remote-hub.md) | Native/browser control, the packaged encrypted Chrome client and browser Web Push exist. Beta.13 adds an Android source client whose debug APK and protocol tests build, plus opt-in local alerts while its SSE connection survives. Device/tailnet QA and native background push remain open. |
 | [Model registry](model-registry.md) | Beta.12 adds exact-model sourced facts shared by budget accounting and the picker. Context and thinking remain unknown until independently sourced; provider catalogs still control availability. |
-| [Code graph](code-graph.md) | This branch adds read-only Rust file/symbol/import queries and conservative call-site candidates with source hashes. Resolved dependencies/bindings, LORE storage/operator, a TUI viewer and other languages remain open. |
-| [DOXA plugin API](plugin-api.md) | Draft; there is no DOXA extension loader. Adoption of selected provider plugins is already supported. |
-| [Mermaid transcript diagrams](mermaid.md) | Opt-in local sandboxed previews implemented; pinned CLI/Chromium validation, installer and doctor support remain open. |
-| [Collection triage](collection-triage.md) | Beta.12 adds suggested names and settled, opt-in group sorting to the native rail. Current per-session LORE proposal state, Python-era colour and pane-group aggregation remain open for Rust. |
-| [macOS daemon process coverage](https://github.com/docwilde/doxa/issues/197) | Open portability work. Portable crates and selected daemon/local-provider suites run in macOS CI. Authenticated macOS provider checks remain unverified. |
+| [Code graph](code-graph.md) | Beta.13 adds read-only Rust file, symbol, import and conservative call-site queries with source hashes. Resolved dependencies/bindings, LORE storage/operator, a TUI viewer and other languages remain open. |
+| [DOXA plugin API](plugin-api.md) | Beta.13 adds owner-allowlisted, data-only native text commands. Executable plugins, hooks and provider extensions remain open. Adoption of selected Claude provider plugins is separate. |
+| [Mermaid transcript diagrams](mermaid.md) | Opt-in local sandboxed previews and a bounded `doxa doctor` PNG smoke check exist. Pinned CLI/Chromium validation and an optional installer remain open. |
+| [Collection triage](collection-triage.md) | Beta.12 added suggested names and settled, opt-in group sorting to the native rail; beta.13 preserves source provenance on parsed LORE proposals. A complete current per-session pending signal, Python-era colour and pane-group aggregation remain open for Rust. |
+| [macOS daemon process coverage](https://github.com/docwilde/doxa/issues/197) | Portable crates and daemon process tests run in macOS CI. Protected Codex success and authenticated macOS provider checks remain unverified. |
 
 Native UI, LORE, provider and remote parity is tracked in
 [the Rust parity record](../rust-1.19-parity.md). Older split-pane, rail,
