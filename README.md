@@ -24,6 +24,8 @@
 - **Reviewed memory.** Browse LORE facts and beliefs, inspect evidence, and accept or reject proposed beliefs.
 - **Repo tools.** Navigate repositories and worktrees, switch branches, inspect diffs, and review tracked changes.
 - **Peer coordination.** Inspect peer messages in the TUI or browser map and run supervised fleets with spend controls.
+- **Session isolation.** Select native execution or a private Linux rootless Docker worker, with open egress or no network. The TUI chip shows the verified policy; idle changes preserve the session. See [configuration and limits](docs/session-isolation.md).
+- **Independent fleet review.** Select an alignment supervisor and a separate fast LLM or Jev message judge. Typed host gates, an approved charter and review budgets control admission. See [fleet supervision](docs/fleet-supervision.md).
 - **Private remote access.** Opt in to a Rust browser view or register sessions with a private hub for browser, CLI, and native TUI control from another device. Connected browser pages can report completed turns and input requests.
 - **Custom controls.** Manage provider login, API keys, plugins, and settings in the TUI. Remap window shortcuts without rebuilding.
 
@@ -35,7 +37,7 @@ Current release: **[v2.0.0-beta.9](https://github.com/docwilde/doxa/releases/tag
 curl -fsSL https://raw.githubusercontent.com/docwilde/doxa/main/scripts/install.sh | sh
 ```
 
-The installer builds the Rust frontend, daemon, and LORE carrier and places `doxa` in `~/.local/bin` by default. It adds a Linux application-menu entry or `~/Applications/DOXA.command` on macOS; set `DOXA_NO_LAUNCHER=1` to skip that step. Use `doxa update` for a newer build or pass a tag after `sh -s --` to pin a release. Python is needed only when building the optional protected Codex provider.
+The installer builds the Rust frontend, daemon, remote adapter, isolation worker and LORE carrier and places `doxa` in `~/.local/bin` by default. It adds a Linux application-menu entry or `~/Applications/DOXA.command` on macOS; set `DOXA_NO_LAUNCHER=1` to skip that step. Use `doxa update` for a newer build or pass a tag after `sh -s --` to pin a release. Python is needed only when building the optional protected Codex provider.
 
 Claude requires its CLI. Codex uses a private protected app server; the installer builds it when Codex is present. DeepSeek and GLM use API credentials configured through `/setup` or provider environment variables. See the [Rust guide](rust/README.md) for setup, build requirements, and engine capabilities.
 

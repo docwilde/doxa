@@ -120,6 +120,14 @@ artifacts or receipts are refused rather than silently replaced.
 
 ## Sessions and worktrees
 
+Select `--isolation native|docker-open|docker-offline` at launch, or use the
+new-session TUI picker. Linux Docker sessions use a pinned reviewed image,
+a local rootless Engine and an independent checkout with private Git metadata.
+The isolation chip reports the verified network, mounts and resource limits.
+`/isolation PROFILE --confirm` changes an idle session; cross-backend changes
+stop, verify, copy and resume the same conversation. See
+[session isolation](../docs/session-isolation.md) for setup and limitations.
+
 Bare `doxa` restores this project's saved tabs or starts the configured engine
 (default Claude). Safe saved conversations resume without a prompt; others remain
 read only with a reason. Offline restoration retains saved split layout and
@@ -266,6 +274,15 @@ and `/settings` edit the full categorized preference catalog; environment
 shadows remain read only. Settings are validated against the categorized catalog before they are saved.
 
 ## Fleets and peers
+
+Select an independent read-only model with `--alignment-supervisor PROVIDER:MODEL`.
+Choose a separate fast message judge with `--message-judge llm:PROVIDER:MODEL`
+or `jev:MODEL`, and `--message-review off|shadow|enforce`. `/settings` → Fleet
+exposes these defaults. Reviewers use separate API credentials and a reserved
+budget; the acting coordinator selected by `--supervisor` remains a worker.
+Host gates bind messages to the approved charter and authenticated assignments.
+See [independent fleet supervision](../docs/fleet-supervision.md) for recovery,
+evidence requirements and the distinction between estimates and billed spend.
 
 Native `fleet start` accepts pool, prompt/file, worker count, supervisor, budget,
 approval policy, and quiescence options. `fleet preflight` validates capacity,
