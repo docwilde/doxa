@@ -724,6 +724,48 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn delegated_session_approval_uses_reviewed_task_and_body() {
+        for (code, modifiers) in [
+            (KeyCode::Char('a'), KeyModifiers::NONE),
+            (KeyCode::Char('A'), KeyModifiers::SHIFT),
+            (KeyCode::Enter, KeyModifiers::NONE),
+        ] {
+            let mut app = App::default();
+            app.rail_visible = false;
+            app.handle(Event::Resize(100, 30));
+            app.groups[0].tabs.push("parent".into());
+            app.input_requests.push(InputRequest::from_event("parent", &json!({
+                "id":"spawn-one", "kind":"spawn", "title":"Start delegated session?",
+                "task":"Review the parser", "body":"Engine: codex\nThis starts a billed session.",
+                "require_full_review":true
+            })).unwrap());
+            app.handle(Event::Key(KeyEvent::new(code, modifiers)));
+            assert!(app.pending_answers.is_empty());
+            painted_at(&app, 100, 30);
+            assert!(app.input_requests[0].review_complete.get());
+            if code == KeyCode::Enter {
+                app.handle(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)));
+                app.handle(Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)));
+                assert_eq!(app.input_requests[0].selected, 1);
+            }
+            app.handle(Event::Key(KeyEvent::new(code, modifiers)));
+            assert_eq!(app.pending_answers, vec![("parent".into(), "spawn-one".into(),
+                json!({"decision":"allow"}))]);
+        }
+        let mut app = App::default();
+        app.handle(Event::Resize(100, 30));
+        app.groups[0].tabs.push("parent".into());
+        app.input_requests.push(InputRequest::from_event("parent", &json!({
+            "id":"incomplete", "kind":"spawn", "task":"Review", "require_full_review":true
+        })).unwrap());
+        painted_at(&app, 100, 30);
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)));
+        assert!(app.pending_answers.is_empty());
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        assert_eq!(app.pending_answers[0].2, json!({"decision":"deny"}));
+    }
+
+    #[test]
     fn approval_grant_is_per_tool_and_session_and_only_after_acknowledgement() {
         let mut app = App::default(); app.rail_visible = false;
         app.handle(Event::Resize(100, 30));
@@ -1746,10 +1788,10 @@ for line in sys.stdin:
             checked_out: Some("feature".into()), sha: Some("abcdef0".into()),
             worktree: None,
         });
-        assert!(app.chips(0).contains(&("repo", "project ⎇ main [wt doxa/a] @1234567".into())));
+        assert!(app.chips(0).contains(&("repo", "project ⎇ main @1234567".into())));
         assert_eq!(app.repo_detail(0).as_deref(), Some("base main · HEAD doxa/a · managed worktree doxa/a"));
         let rendered = painted_at(&app, 220, 32);
-        assert!(rendered.contains("project ⎇ main [wt doxa/a] @1234567"));
+        assert!(rendered.contains("project ⎇ main @1234567"));
         assert!(rendered.contains("u ? · scope ?"));
         assert!(app.chips(1).contains(&("repo", "other ⎇ feature @abcdef0".into())));
         app.groups[0].active = 1;
@@ -4083,6 +4125,19 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn resumed_session_adopts_repo_branch_title_without_overwriting_pinned_name() {
+        let mut app = App::default();
+        app.default_names.insert("one".into(), "gpt-6-sol@doxa/old-worktree".into());
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"one",
+            "model":"gpt-6-sol", "title":"gpt-6-sol@doxa:main"}));
+        assert_eq!(app.sessions[0].title, "gpt-6-sol@doxa:main");
+        app.custom_names.insert("one".into(), "Pinned name".into());
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"one",
+            "model":"gpt-6-sol", "title":"gpt-6-sol@doxa:feature"}));
+        assert_eq!(app.sessions[0].title, "Pinned name");
+    }
+
+    #[test]
     fn restored_offline_title_is_stable_and_new_session_avoids_collision() {
         let mut app = App::default();
         app.sessions.push(Session { id:"offline".into(), title:"gpt-6-sol@main/doxa".into(),
@@ -4142,6 +4197,7 @@ for line in sys.stdin:
         let snapshot = diff_view::read(dir.path());
         let mut app = App::default();
         app.groups[0].tabs.push("session".into());
+        app.session_cwds.insert("session".into(), dir.path().to_path_buf());
         app.diff_target = Some("session".into());
         app.diff_scroll = snapshot.rejectable[0].row;
         app.diff_snapshot = Some(snapshot);
@@ -4199,6 +4255,7 @@ for line in sys.stdin:
         let snapshot = diff_view::read(dir.path());
         let mut app = App::default();
         app.groups[0].tabs.push("session".into());
+        app.session_cwds.insert("session".into(), dir.path().to_path_buf());
         app.diff_target = Some("session".into());
         app.diff_scroll = snapshot.rejectable[0].row;
         app.diff_snapshot = Some(snapshot);
@@ -4291,6 +4348,184 @@ for line in sys.stdin:
         app.load_diff();
         assert!(app.diff_files.is_empty());
         assert!(app.diff_hunks.is_empty());
+    }
+
+    #[test]
+    fn live_diff_refresh_preserves_scroll_and_waits_for_rejection_decision() {
+        let mut app = App::default();
+        app.apply_update(DaemonUpdate::Upsert(Session { id: "session".into(), title: "Session".into(),
+            collection: "repo".into(), transcript: String::new(), status: "Ready".into() }));
+        let cwd = PathBuf::from("/owned/repo");
+        app.session_cwds.insert("session".into(), cwd.clone());
+        app.diff_pane = true;
+        app.diff_target = Some("session".into());
+        app.diff_snapshot = Some(diff_view::DiffSnapshot::message("old\nline\nend".into()));
+        app.diff_text = "old\nline\nend".into();
+        app.diff_scroll = 2;
+        app.diff_reject_confirm = Some(RejectDraft { index: 0, reason: "keep reading".into() });
+        let (tx, rx) = mpsc::sync_channel(1);
+        app.diff_pending = Some(("session".into(), cwd, rx));
+        tx.send(diff_view::DiffSnapshot::message("new\nline\nend\nextra".into())).unwrap();
+        assert!(!app.poll_diff());
+        assert_eq!(app.diff_text, "old\nline\nend");
+        assert_eq!(app.diff_reject_confirm.as_ref().unwrap().reason, "keep reading");
+        app.diff_reject_confirm = None;
+        assert!(app.poll_diff());
+        assert_eq!(app.diff_text, "new\nline\nend\nextra");
+        assert_eq!(app.diff_scroll, 2);
+        assert!(app.diff_refresh_due.is_some());
+
+        app.diff_refresh_due = Some(Instant::now() - Duration::from_millis(1));
+        assert!(!app.poll_diff());
+        assert!(app.diff_pending.is_some());
+
+        let (tx, rx) = mpsc::sync_channel(1);
+        app.diff_pending = Some(("session".into(), PathBuf::from("/owned/repo"), rx));
+        tx.send(diff_view::DiffSnapshot::message("new\nline\nend\nextra".into())).unwrap();
+        assert!(!app.poll_diff());
+        assert_eq!(app.diff_scroll, 2);
+    }
+
+    #[test]
+    fn open_diff_refreshes_after_a_tracked_file_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| assert!(std::process::Command::new("git").args(args)
+            .current_dir(dir.path()).status().unwrap().success());
+        git(&["init", "-q"]);
+        std::fs::write(dir.path().join("tracked.txt"), "old\n").unwrap();
+        git(&["add", "tracked.txt"]);
+        git(&["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "test: baseline"]);
+        let mut app = App::default();
+        app.groups[0].tabs.push("session".into());
+        app.session_cwds.insert("session".into(), dir.path().to_path_buf());
+        app.diff_modal = true;
+        app.load_diff();
+        for _ in 0..100 {
+            app.poll_diff();
+            if app.diff_pending.is_none() { break; }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(app.diff_pending.is_none());
+        assert!(app.diff_text.contains("No tracked changes"));
+
+        std::fs::write(dir.path().join("tracked.txt"), "new\n").unwrap();
+        app.diff_refresh_due = Some(Instant::now() - Duration::from_millis(1));
+        app.poll_diff();
+        for _ in 0..100 {
+            app.poll_diff();
+            if app.diff_text.contains("+new") { break; }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(app.diff_text.contains("+new"));
+        assert!(app.diff_snapshot.as_ref().is_some_and(|snapshot| !snapshot.rejectable.is_empty()));
+    }
+
+    #[test]
+    fn diff_block_mouse_actions_comment_and_reject_exact_hunks() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::default();
+        app.handle(Event::Resize(100, 28));
+        app.apply_update(DaemonUpdate::Upsert(Session { id: "session".into(), title: "Session".into(),
+            collection: "repo".into(), transcript: String::new(), status: "Ready".into() }));
+        app.session_cwds.insert("session".into(), dir.path().to_path_buf());
+        app.session_activity.insert("session".into(), (false, 0));
+        app.diff_pane = true;
+        app.diff_target = Some("session".into());
+        let patch = "Base: HEAD\ndiff --git a/one b/one\n--- a/one\n+++ b/one\n@@ -1 +1 @@\n-old\n+new\ndiff --git a/two b/two\n--- a/two\n+++ b/two\n@@ -1 +1 @@\n-before\n+after\nUntracked files (names only; contents are not read):\nloose.txt";
+        app.diff_snapshot = Some(diff_view::DiffSnapshot::test_patch(patch, dir.path().to_path_buf(),
+            vec![1, 7], vec![4, 10]));
+        app.diff_text = patch.into();
+        let pane = app.layout(app.size).panes.unwrap()[(app.active_group + 1) % 2];
+        let pointer = |kind, row| Event::Mouse(MouseEvent { kind, column: pane.x + 5,
+            row: pane.y + 1 + row, modifiers: KeyModifiers::NONE });
+        app.handle(pointer(MouseEventKind::Moved, 6));
+        assert_eq!(app.diff_hover, Some(0));
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Moved,
+            column: pane.x.saturating_sub(1), row: pane.y + 7, modifiers: KeyModifiers::NONE }));
+        assert_eq!(app.diff_hover, None);
+        app.handle(pointer(MouseEventKind::Moved, 6));
+        app.handle(pointer(MouseEventKind::Down(MouseButton::Left), 6));
+        assert_eq!(app.diff_selected, Some(0));
+        let view = painted(&app);
+        assert!(view.contains("[Reject]"));
+        assert!(view.contains("[Comment]"));
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: pane.x + 12, row: pane.bottom() - 2, modifiers: KeyModifiers::NONE }));
+        assert_eq!(app.diff_comment_draft.as_ref().map(|draft| draft.index), Some(0));
+        app.handle(Event::Paste("Please simplify this".into()));
+        let rail = app.layout(app.size).rail.unwrap();
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: rail.x + 2, row: rail.y + 1, modifiers: KeyModifiers::NONE }));
+        assert!(app.diff_comment_draft.is_some());
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert!(app.diff_comment_draft.is_none());
+        assert_eq!(app.pending_prompts.len(), 1);
+        assert!(app.pending_prompts[0].1.contains("Please simplify this"));
+        assert!(app.pending_prompts[0].1.contains("-old\n+new"));
+
+        app.handle(pointer(MouseEventKind::Down(MouseButton::Left), 7));
+        assert_eq!(app.diff_selected, Some(1));
+        app.handle(pointer(MouseEventKind::Down(MouseButton::Left), 12));
+        assert_eq!(app.diff_selected, Some(1));
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: pane.x + 2, row: pane.bottom() - 2, modifiers: KeyModifiers::NONE }));
+        assert_eq!(app.diff_reject_confirm.as_ref().map(|draft| draft.index), Some(1));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        assert!(app.diff_reject_confirm.is_none());
+        app.handle(pointer(MouseEventKind::Down(MouseButton::Left), 14));
+        assert_eq!(app.diff_selected, None);
+    }
+
+    #[test]
+    fn modal_diff_click_actions_and_refresh_wait_for_comment() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::default();
+        app.handle(Event::Resize(100, 28));
+        app.apply_update(DaemonUpdate::Upsert(Session { id: "session".into(), title: "Session".into(),
+            collection: "repo".into(), transcript: String::new(), status: "Ready".into() }));
+        let cwd = dir.path().to_path_buf();
+        app.session_cwds.insert("session".into(), cwd.clone());
+        app.diff_modal = true;
+        app.diff_target = Some("session".into());
+        let patch = "Base: HEAD\ndiff --git a/one b/one\n--- a/one\n+++ b/one\n@@ -1 +1 @@\n-old\n+new";
+        app.diff_snapshot = Some(diff_view::DiffSnapshot::test_patch(patch, cwd.clone(), vec![1], vec![4]));
+        app.diff_text = patch.into();
+        let modal = App::diff_modal_area(app.size).unwrap();
+        let mouse = |kind, column, row| Event::Mouse(MouseEvent { kind, column, row,
+            modifiers: KeyModifiers::NONE });
+        app.handle(mouse(MouseEventKind::Moved, modal.x + 5, modal.y + 6));
+        assert_eq!(app.diff_hover, Some(0));
+        app.handle(mouse(MouseEventKind::Down(MouseButton::Left), modal.x + 5, modal.y + 6));
+        assert_eq!(app.diff_selected, Some(0));
+        assert!(painted(&app).contains("[Comment]"));
+        app.handle(mouse(MouseEventKind::Down(MouseButton::Left), modal.x + 12, modal.bottom() - 2));
+        assert!(app.diff_comment_draft.is_some());
+        let (tx, rx) = mpsc::sync_channel(1);
+        app.diff_pending = Some(("session".into(), cwd, rx));
+        tx.send(diff_view::DiffSnapshot::message("changed".into())).unwrap();
+        assert!(!app.poll_diff());
+        assert_eq!(app.diff_text, patch);
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        assert!(app.poll_diff());
+        assert_eq!(app.diff_text, "changed");
+        assert_eq!(app.diff_selected, None);
+    }
+
+    #[test]
+    fn selecting_bottom_diff_row_keeps_it_visible_above_actions() {
+        let mut app = App::default();
+        app.handle(Event::Resize(40, 12));
+        app.diff_modal = true;
+        let patch = "Base: HEAD\ndiff --git a/one b/one\n--- a/one\n+++ b/one\n@@ -1 +1 @@\n-old\n+new";
+        app.diff_snapshot = Some(diff_view::DiffSnapshot::test_patch(patch, PathBuf::from("/repo"),
+            vec![1], vec![4]));
+        app.diff_text = patch.into();
+        let modal = App::diff_modal_area(app.size).unwrap();
+        assert_eq!(app.diff_window(modal), (6, 0));
+        app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: modal.x + 5, row: modal.bottom() - 2, modifiers: KeyModifiers::NONE }));
+        assert_eq!(app.diff_selected, Some(0));
+        assert_eq!(app.diff_window(modal), (5, 1));
     }
 
     #[test]
@@ -4600,9 +4835,11 @@ for line in sys.stdin:
         let mut app = App::default();
         app.apply_daemon_frame(&json!({"type":"hello", "session_id":"a", "queued":0}));
         app.apply_daemon_frame(&json!({"type":"reply", "session_id":"a", "ok":true, "queued":true}));
+        let prompt = format!("{} visible ending", "a".repeat(500));
         app.apply_daemon_frame(&json!({"type":"event", "session_id":"a",
-            "event":{"type":"prompt_queued", "data":{"id":"q"}}}));
+            "event":{"type":"prompt_queued", "data":{"id":"q", "text":prompt}}}));
         assert_eq!(app.session_activity["a"].1, 1);
+        assert!(app.sessions[0].transcript.contains("visible ending"));
         app.apply_daemon_frame(&json!({"type":"event", "session_id":"a",
             "event":{"type":"prompt_dequeued", "data":{"id":"q"}}}));
         assert_eq!(app.session_activity["a"].1, 0);
@@ -5661,6 +5898,50 @@ for line in sys.stdin:
         assert!(app.attach_picker.is_none());
         assert!(app.pending_attaches.is_empty());
         assert!(app.notice.starts_with("attach:"));
+    }
+
+    #[test]
+    fn rail_double_click_edits_name_and_preserves_prompt_draft() {
+        let mut app = App::default();
+        app.handle(Event::Resize(100, 30));
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"s", "title":"sol@doxa:main", "cwd":"/repo"}));
+        let rail = app.layout(app.size).rail.unwrap();
+        let row = app.rail_rows().iter().position(|row| matches!(row, RailRow::Session(_))).unwrap();
+        let click = || Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: rail.x + 2, row: rail.y + 1 + row as u16, modifiers: KeyModifiers::NONE });
+        app.input = "unfinished prompt".into();
+        app.input_cursor = app.input.len();
+        app.handle(click());
+        app.handle(click());
+        assert_eq!(app.input, "/rename sol@doxa:main");
+        assert_eq!(app.focus, Focus::Prompt);
+        app.input = "/rename Review session".into();
+        app.input_cursor = app.input.len();
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        assert_eq!(app.sessions[0].title, "Review session");
+        assert_eq!(app.input, "unfinished prompt");
+        assert!(app.pending_prompts.is_empty());
+        app.handle(click());
+        app.handle(click());
+        assert_eq!(app.input, "/rename Review session");
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        assert_eq!(app.input, "unfinished prompt");
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"other", "title":"Other", "cwd":"/other"}));
+        app.groups[0].tabs = vec!["s".into(), "other".into()];
+        app.groups[0].active = 0;
+        let s_row = app.rail_rows().iter().position(|row| matches!(row,
+            RailRow::Session(index) if app.sessions[*index].id == "s")).unwrap();
+        let other_row = app.rail_rows().iter().position(|row| matches!(row,
+            RailRow::Session(index) if app.sessions[*index].id == "other")).unwrap();
+        let s_click = || Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: rail.x + 2, row: rail.y + 1 + s_row as u16, modifiers: KeyModifiers::NONE });
+        let other_click = Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
+            column: rail.x + 2, row: rail.y + 1 + other_row as u16, modifiers: KeyModifiers::NONE });
+        app.handle(s_click());
+        app.handle(s_click());
+        app.handle(other_click);
+        app.handle(s_click());
+        assert_eq!(app.input, "unfinished prompt");
     }
 
     #[test]

@@ -279,6 +279,12 @@ struct RejectDraft {
     reason: String,
 }
 
+#[derive(Clone, Debug)]
+struct DiffCommentDraft {
+    index: usize,
+    text: String,
+}
+
 #[derive(Debug)]
 struct PendingRejection {
     session_id: String,
@@ -515,21 +521,12 @@ fn repo_chip(status: &doxa_worktrees::RepoStatus) -> (&'static str, String) {
             base,
             checked_out,
             sha,
-            worktree,
+            ..
         } => {
             let mut label = safe_label(repo);
             if let Some(branch) = base.as_deref().or(checked_out.as_deref()) {
                 label.push_str(" ⎇ ");
                 label.push_str(&safe_label(branch));
-            }
-            if let Some(worktree) = worktree {
-                if worktree == "linked worktree" {
-                    label.push_str(" [wt]");
-                } else {
-                    label.push_str(" [wt ");
-                    label.push_str(&safe_label(checked_out.as_deref().unwrap_or("detached")));
-                    label.push(']');
-                }
             }
             if let Some(sha) = sha.as_ref().filter(|sha| {
                 !base
@@ -905,8 +902,13 @@ impl InputRequest {
             sending: false,
             grant_on_success: false,
             require_full_review: data["require_full_review"] == true,
-            review_available: data["input_summary"].as_str().is_some()
-                && data["input_summary_truncated"] != true,
+            review_available: match kind {
+                "spawn" => data["task"].as_str().is_some_and(|value| !value.trim().is_empty())
+                    && data["body"].as_str().is_some_and(|value| !value.trim().is_empty()),
+                "permission" => data["input_summary"].as_str().is_some()
+                    && data["input_summary_truncated"] != true,
+                _ => false,
+            },
             review_seen: Cell::new(0),
             review_complete: Cell::new(false),
             free_text: String::new(),
@@ -1289,6 +1291,9 @@ pub struct App {
     pub rail_width: u16,
     pub rail_selected: usize,
     rail_hover: Option<String>,
+    last_rail_click: Option<(String, Instant)>,
+    pending_rename: Option<String>,
+    rename_draft_backup: Option<((usize, String), String, usize)>,
     pub focus: Focus,
     pub input: String,
     input_cursor: usize,
@@ -1478,9 +1483,13 @@ pub struct App {
     diff_text: String,
     diff_files: Vec<usize>,
     diff_hunks: Vec<usize>,
-    diff_pending: Option<Receiver<(String, diff_view::DiffSnapshot)>>,
+    diff_pending: Option<(String, PathBuf, Receiver<diff_view::DiffSnapshot>)>,
+    diff_refresh_due: Option<Instant>,
     diff_snapshot: Option<diff_view::DiffSnapshot>,
+    diff_hover: Option<usize>,
+    diff_selected: Option<usize>,
     diff_reject_confirm: Option<RejectDraft>,
+    diff_comment_draft: Option<DiffCommentDraft>,
     diff_reject_queue: VecDeque<PendingRejection>,
     diff_reject_active: Option<PendingRejection>,
     diff_reject_feedback: Option<(String, String)>,
@@ -1547,6 +1556,9 @@ impl Default for App {
             rail_width: 25,
             rail_selected: 0,
             rail_hover: None,
+            last_rail_click: None,
+            pending_rename: None,
+            rename_draft_backup: None,
             focus: Focus::Prompt,
             input: String::new(),
             input_cursor: 0,
@@ -1716,8 +1728,12 @@ impl Default for App {
             diff_files: Vec::new(),
             diff_hunks: Vec::new(),
             diff_pending: None,
+            diff_refresh_due: None,
             diff_snapshot: None,
+            diff_hover: None,
+            diff_selected: None,
             diff_reject_confirm: None,
+            diff_comment_draft: None,
             diff_reject_queue: VecDeque::new(),
             diff_reject_active: None,
             diff_reject_feedback: None,

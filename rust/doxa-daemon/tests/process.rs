@@ -376,6 +376,7 @@ fn daemon_runs_in_managed_worktree_and_cleans_it_on_real_exit() {
     let worktree = home.join("worktrees/repo-session1");
     assert_eq!(row["cwd"], worktree.to_str().unwrap());
     assert_eq!(row["repo_root"], main.to_str().unwrap());
+    assert!(row["title"].as_str().unwrap().ends_with("@repo:main"));
     assert!(worktree.join("README").exists());
     unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM); }
     wait_until(|| child.try_wait().unwrap().is_some());
@@ -425,6 +426,8 @@ fn requested_base_branch_is_honored_and_invalid_requests_never_fall_back() {
         .stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
     let registry = runtime.join("registry/branch123.json");
     wait_until(|| registry.exists());
+    let row: Value = serde_json::from_slice(&fs::read(&registry).unwrap()).unwrap();
+    assert!(row["title"].as_str().unwrap().ends_with("@repo:feature"));
     let worktree = home.join("worktrees/repo-branch12");
     assert_eq!(fs::read_to_string(worktree.join("README")).unwrap(), "feature\n");
     let meta: Value = serde_json::from_slice(&fs::read(home.join("worktrees/.meta/repo-branch12.json")).unwrap()).unwrap();

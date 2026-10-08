@@ -399,7 +399,7 @@ fn hello_replay_live_and_call_shapes() {
 }
 
 #[test]
-fn prompt_reply_precedes_events_and_queue_notifies_only_other_client() {
+fn prompt_reply_precedes_queue_event_for_every_client() {
     let dir = tempfile::tempdir().unwrap();
     let host = Arc::new(Fixture::new());
     let handle = Daemon::bind(dir.path(), session(), host.clone()).unwrap().start();
@@ -418,6 +418,9 @@ fn prompt_reply_precedes_events_and_queue_notifies_only_other_client() {
     let queued = recv(&mut a);
     assert_eq!(queued["queued"], true);
     assert_eq!(queued["queue_id"], "q1");
+    let local = recv(&mut a);
+    assert_eq!(local["event"]["type"], "prompt_queued");
+    assert_eq!(local["event"]["data"]["text"], "second");
     let other = recv(&mut b);
     assert_eq!(other["event"]["type"], "prompt_queued");
     assert_eq!(other["event"]["data"]["text"], "second");
@@ -470,6 +473,9 @@ fn queue_rpc_lists_scrubbed_fifo_and_cancels_exactly_once() {
     for (request, id, text) in [(2, "q1", "second secret"), (3, "q2", "third secret")] {
         send(&mut aw, json!({"type":"prompt","id":request,"text":text}));
         assert_eq!(recv(&mut a)["queue_id"], id);
+        let local = recv(&mut a);
+        assert_eq!(local["event"]["type"], "prompt_queued");
+        assert!(!local.to_string().contains("secret"));
         let broadcast = recv(&mut b);
         assert_eq!(broadcast["event"]["type"], "prompt_queued");
         assert!(!broadcast.to_string().contains("secret"));
@@ -532,6 +538,9 @@ fn stale_position_cannot_cancel_next_item_after_dequeue() {
     for (request, text) in [(1, "running"), (2, "queued one"), (3, "queued two")] {
         send(&mut writer, json!({"type":"prompt","id":request,"text":text}));
         assert_eq!(recv(&mut reader)["ok"], true);
+        if request > 1 {
+            assert_eq!(recv(&mut reader)["event"]["type"], "prompt_queued");
+        }
     }
     send(&mut writer, json!({"type":"call","id":4,"method":"queue"}));
     assert_eq!(recv(&mut reader)["queue"], json!([

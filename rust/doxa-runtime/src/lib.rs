@@ -452,7 +452,7 @@ fn handle_client(inner: Arc<Inner>, stream: UnixStream) {
             Some("prompt") | Some("call") if !inner.state.lock().unwrap().clients.contains_key(&id) => {
                 send(&tx, json!({"type":"reply","id":frame["id"],"ok":false,"error":"attach required"}));
             }
-            Some("prompt") => handle_prompt(&inner, &tx, id, &frame),
+            Some("prompt") => handle_prompt(&inner, &tx, &frame),
             Some("call") => handle_call(&inner, &tx, &frame),
             _ => {}
         }
@@ -510,7 +510,7 @@ fn attach_client_with_identity(inner: &Inner, id: u64, cursor: Option<u64>, tx: 
     true
 }
 
-fn handle_prompt(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, client_id: u64, frame: &Value) {
+fn handle_prompt(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame: &Value) {
     let Some(req_id) = frame["id"].as_u64() else { return; };
     let Some(text) = frame["text"].as_str() else {
         send(tx, json!({"type":"reply","id":req_id,"ok":false,"error":"invalid prompt"})); return;
@@ -551,9 +551,10 @@ fn handle_prompt(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, client_id: u64, f
         if !send(tx, json!({"type":"reply","id":req_id,"ok":true,"queued":true,"position":position,"queue_id":queue_id})) { return; }
         state.prompts.push_back(Prompt { text: text.to_owned(), public_text: queue_preview(&display), queue_id: queue_id.clone(), peer_origin: None });
         drop(state);
-        // Origin client receives its queue notification in the reply only.
+        // The reply acknowledges admission; the event also lets the origin
+        // display the queued prompt alongside every other attached client.
         let event = json!({"type":"prompt_queued","data":{"id":queue_id,"text":display,"position":position}});
-        publish_except(inner, client_id, event);
+        inner.publish(None, event);
     } else {
         let turn = format!("r{:011}", state.next_turn_id);
         if !send(tx, json!({"type":"reply","id":req_id,"ok":true,"turn":turn})) { return; }
@@ -562,17 +563,6 @@ fn handle_prompt(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, client_id: u64, f
         drop(state);
         inner.start_turn(text.to_owned(), turn);
     }
-}
-
-fn publish_except(inner: &Inner, excluded: u64, event: Value) {
-    let mut state = inner.state.lock().unwrap();
-    let seq = state.next_seq;
-    let Some(next) = seq.checked_add(1) else { return; };
-    state.next_seq = next;
-    let bytes = encode_event(&json!({"type":"event","seq":seq,"turn":null,"event":event}));
-    state.ring.push_back((seq, bytes.clone()));
-    if state.ring.len() > RING_CAPACITY { state.ring.pop_front(); }
-    state.clients.retain(|id, tx| *id == excluded || tx.try_send(bytes.clone()).is_ok());
 }
 
 fn handle_call(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame: &Value) {
@@ -846,7 +836,7 @@ mod tests {
         assert_eq!(serde_json::from_slice::<Value>(&rx.try_recv().unwrap()).unwrap()["ok"], true);
         assert_eq!(host.0.load(Ordering::Relaxed), 1);
         let prompt = json!({"id":2,"text":"late prompt"});
-        handle_prompt(&daemon.inner, &tx, 1, &prompt);
+        handle_prompt(&daemon.inner, &tx, &prompt);
         assert_eq!(serde_json::from_slice::<Value>(&rx.try_recv().unwrap()).unwrap()["ok"], false);
     }
 
@@ -880,7 +870,7 @@ mod tests {
             model:None,engine:"test".into(),doxa_version:"test".into()},Arc::new(NoopHost)).unwrap();
         let (tx,rx)=mpsc::sync_channel(CLIENT_QUEUE_CAPACITY);
         daemon.inner.state.lock().unwrap().permission_mode="full-access".into();
-        handle_prompt(&daemon.inner,&tx,1,&json!({"id":1,"text":"run","remote":true,"remote_allow_unrestricted":false}));
+        handle_prompt(&daemon.inner,&tx,&json!({"id":1,"text":"run","remote":true,"remote_allow_unrestricted":false}));
         assert_eq!(serde_json::from_slice::<Value>(&rx.try_recv().unwrap()).unwrap()["ok"],false);
         assert!(!daemon.inner.state.lock().unwrap().busy);
     }

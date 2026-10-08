@@ -5,6 +5,24 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.8 — 2026-10-08
+
+**Session labels and prompts**
+
+- Change **`session_title::base`** to `model@repo:branch`, using the managed worktree's base branch. Remove worktree names from the repository chip.
+- Add double-click session renaming in the rail; preserve the unfinished prompt when renaming or cancelling.
+- Fix **`handle_prompt`** to notify the submitting client when a prompt is queued. Show its submitted text while the current request runs.
+
+**Diff review**
+
+- Refresh open diff panes and dialogs every second after file changes; preserve scroll and defer refresh while editing a comment or rejection reason.
+- Add hunk hover and click selection with **Reject** and **Comment** buttons. Comments send the selected block and feedback to its session.
+- Keep rejection guarded by the exact tracked hunk and an idle session; file-level changes and truncated patches remain unavailable for rejection.
+
+**Approvals**
+
+- Fix **`InputRequest::from_event`** to review delegated-session task and body fields. A and Enter now approve after the complete request is shown; incomplete review data remains blocked.
+
 ## 2.0.0-beta.7 — 2026-10-08
 
 **Session lifecycle**

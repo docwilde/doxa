@@ -161,6 +161,19 @@ impl App {
             self.retire_operations();
         }
         self.finish_prompt_owner_transition(before);
+        if let Some(id) = self.pending_rename.take() {
+            if self.groups[self.active_group].active_id() == Some(id.as_str()) {
+                if self.rename_draft_backup.as_ref().is_none_or(|(owner, _, _)| *owner != self.prompt_owner()) {
+                    self.rename_draft_backup = Some((self.prompt_owner(), self.input.clone(), self.input_cursor));
+                }
+                if let Some(session) = self.sessions.iter().find(|session| session.id == id) {
+                    self.input = format!("/rename {}", session.title);
+                    self.input_cursor = self.input.len();
+                    self.focus = Focus::Prompt;
+                    self.notice = "Edit the session name and press Enter · Esc cancels".into();
+                }
+            }
+        }
         if self.input.is_empty() && self.action_draft.is_some() {
             let (owner, draft, cursor) = self.action_draft.take().unwrap();
             if owner
@@ -204,6 +217,12 @@ impl App {
     /// session together; moving a tab deliberately carries its active draft.
     pub(super) fn finish_prompt_owner_transition(&mut self, before: (usize, String)) {
         let after = self.prompt_owner();
+        if before != after && self.rename_draft_backup.as_ref().is_some_and(|(owner, _, _)| owner == &before) {
+            if let Some((_, draft, cursor)) = self.rename_draft_backup.take() {
+                self.input = draft;
+                self.input_cursor = cursor;
+            }
+        }
         if self.operations_menu.as_ref().is_some_and(|menu| menu.editing_credential())
             && before != after {
             self.retire_operations(); self.chip_info = None;
@@ -250,6 +269,15 @@ impl App {
         }
         if !after.1.is_empty() {
             self.unread_sessions.remove(&after.1);
+        }
+    }
+
+    pub(super) fn restore_rename_draft(&mut self) {
+        if let Some((owner, draft, cursor)) = self.rename_draft_backup.take() {
+            if owner == self.prompt_owner() {
+                self.input = draft;
+                self.input_cursor = cursor;
+            }
         }
     }
 
@@ -432,6 +460,12 @@ impl App {
             request.free_cursor += clean.len();
             return true;
         }
+        if self.diff_comment_draft.is_some() {
+            for ch in text.chars() {
+                self.append_diff_comment(if ch.is_whitespace() { ' ' } else { ch });
+            }
+            return true;
+        }
         if self.diff_reject_confirm.is_some() {
             for ch in text.chars() {
                 self.append_reject_reason(if ch.is_whitespace() { ' ' } else { ch });
@@ -559,6 +593,18 @@ impl App {
 
     pub(super) fn key(&mut self, key: KeyEvent) -> bool {
         use crate::keybindings::Action as KeyAction;
+        if self.rename_draft_backup.is_some() && self.focus == Focus::Prompt {
+            if key.code == KeyCode::Esc {
+                self.restore_rename_draft();
+                self.notice = "Rename cancelled".into();
+                return true;
+            }
+            if key.code == KeyCode::Enter
+                && self.input != "/rename" && !self.input.starts_with("/rename ") {
+                self.notice = "Rename editor: keep /rename before the name, or press Esc".into();
+                return true;
+            }
+        }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         if self.restart_job.is_some() || self.restart_waiting {
@@ -887,7 +933,7 @@ impl App {
             }
             return true;
         }
-        if self.diff_pane && self.diff_reject_confirm.is_some() {
+        if self.diff_pane && (self.diff_reject_confirm.is_some() || self.diff_comment_draft.is_some()) {
             return self.diff_key(key);
         }
         if self.map_modal {
@@ -2099,6 +2145,10 @@ impl App {
         false
     }
     pub(super) fn mouse(&mut self, mouse: MouseEvent) -> bool {
+        if mouse.kind == MouseEventKind::Down(MouseButton::Left)
+            && self.rail_session_at(mouse.column, mouse.row).is_none() {
+            self.last_rail_click = None;
+        }
         if self.delete_confirmation.is_some() {
             if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
                 let Some(area) = self.active_chooser_rect() else { self.delete_confirmation = None; return true; };
@@ -2113,6 +2163,31 @@ impl App {
                 self.delete_confirmation = None;
             }
             return true;
+        }
+        if self.diff_modal {
+            if let Some(area) = Self::diff_modal_area(self.size) {
+                return self.diff_mouse(area, mouse);
+            }
+            return false;
+        }
+        if self.diff_pane && (self.diff_comment_draft.is_some() || self.diff_reject_confirm.is_some())
+            && mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+            if let Some(panes) = self.layout(self.size).panes {
+                let pane = panes[(self.active_group + 1) % panes.len()];
+                if !pane.contains(ratatui::layout::Position::new(mouse.column, mouse.row)) {
+                    self.notice = "Finish or cancel the diff action before switching panes".into();
+                    return true;
+                }
+            }
+        }
+        if self.diff_pane && mouse.kind == MouseEventKind::Moved && !self.link_interaction_blocked() {
+            if let Some(panes) = self.layout(self.size).panes {
+                let pane = panes[(self.active_group + 1) % panes.len()];
+                let changed = self.diff_mouse(pane, mouse);
+                if changed || pane.contains(ratatui::layout::Position::new(mouse.column, mouse.row)) {
+                    return changed;
+                }
+            }
         }
         let mut rail_hover_changed = false;
         if mouse.kind == MouseEventKind::Moved {
@@ -3137,22 +3212,9 @@ impl App {
         if self.diff_pane {
             if let Some(panes) = self.layout(self.size).panes {
                 let pane = panes[(self.active_group + 1) % panes.len()];
-                if mouse.column > pane.x
-                    && mouse.column < pane.right().saturating_sub(1)
-                    && mouse.row > pane.y
-                    && mouse.row < pane.bottom().saturating_sub(1)
-                {
-                    match mouse.kind {
-                        MouseEventKind::ScrollUp => {
-                            self.diff_scroll = self.diff_scroll.saturating_sub(3)
-                        }
-                        MouseEventKind::ScrollDown => {
-                            self.diff_scroll = self.diff_scroll.saturating_add(3)
-                        }
-                        MouseEventKind::Down(MouseButton::Left) => {}
-                        _ => return false,
-                    }
-                    return true;
+                if pane.contains(ratatui::layout::Position::new(mouse.column, mouse.row)) {
+                    return self.diff_mouse(pane, mouse)
+                        || mouse.kind == MouseEventKind::Down(MouseButton::Left);
                 }
             }
         }
@@ -3197,12 +3259,20 @@ impl App {
                                 return true;
                             }
                             Some(RailRow::Session(index)) => {
+                                let id = self.sessions[*index].id.clone();
+                                let now = Instant::now();
+                                let double_click = self.last_rail_click.as_ref().is_some_and(|(previous, at)|
+                                    previous == &id && now.duration_since(*at) <= std::time::Duration::from_millis(500));
+                                self.last_rail_click = if double_click { None } else { Some((id.clone(), now)) };
                                 self.rail_selected = self
                                     .rail_order()
                                     .iter()
                                     .position(|visible| visible == index)
                                     .unwrap_or(0);
                                 self.open_selected();
+                                if double_click {
+                                    self.pending_rename = Some(id);
+                                }
                                 return true;
                             }
                             Some(RailRow::ProjectHeading(_) | RailRow::PastHeading) => {
