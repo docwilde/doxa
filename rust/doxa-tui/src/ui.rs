@@ -1,6 +1,7 @@
 //! Terminal shell for the Rust frontend. Daemon adapters can feed [`App::apply_update`].
 mod actions;
 mod commands;
+mod codegraph_viewer;
 mod diff_controller;
 mod fleet_dependency_review;
 pub(crate) mod fleet_menu;
@@ -1452,6 +1453,7 @@ pub struct App {
     visible_links: RefCell<Vec<(Rect, String)>>,
     pending_open_urls: Vec<String>,
     chip_info: Option<ChipInfo>,
+    codegraph_pending: Option<(String, PathBuf, Receiver<Result<doxa_codegraph::Answer, String>>)>,
     // Mouse coordinates must come from the last painted frame, which may
     // differ from the terminal size reported by an earlier resize event.
     rendered_chip_hits: RefCell<Option<Vec<ChipHit>>>,
@@ -1730,6 +1732,7 @@ impl Default for App {
             visible_links: RefCell::new(Vec::new()),
             pending_open_urls: Vec::new(),
             chip_info: None,
+            codegraph_pending: None,
             rendered_chip_hits: RefCell::new(None),
             blink_on: true,
             blink_at: Instant::now(),

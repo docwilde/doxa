@@ -32,6 +32,12 @@ are reported as skipped; nested modules are counted and not resolved.
 `calls` lists direct function-path and method-call expressions within
 file-level functions, trait defaults, and simple `impl` methods. A second
 `doxa-codegraph` binary exposes the same queries for development.
+Inside the local TUI, `/codegraph file|symbol|imports|calls|modules VALUE` opens
+a scrollable, read-only answer for the active session's Git worktree. Its query
+runs outside the input loop; the viewer shows source hashes, scan coverage,
+omitted counts, and explicit `ambiguous`, `unresolved`, or `unknown` labels.
+The answer is a snapshot of bytes read during that query, not a live binding
+or a persisted graph.
 
 The parser is [Syn's Rust source parser](https://docs.rs/syn/latest/syn/fn.parse_file.html).
 It records top-level definitions, inline modules, trait methods, and methods
@@ -83,8 +89,8 @@ This slice lives in `rust/doxa-codegraph` and is callable through the installed
 - Resolve imports and actual Rust call bindings with crate, trait, type, and
   conditional-compilation context. The current module edges stop at plain file
   layout, and call candidates stop at spelling matches.
-- Add a reviewed agent tool and optional TUI tree/chip after the shared LORE
-  operator exists. The CLI is the current operator surface.
+- Add a reviewed agent tool and optional persistent TUI tree/chip after the
+  shared LORE operator exists. The current TUI viewer is a direct syntax query.
 - Decide whether other languages justify a parser dependency and coverage bar.
   Python support from the old plan has **not** shipped.
 - Benchmark scan latency on large repositories before using this query in an

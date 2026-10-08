@@ -15,6 +15,7 @@ enum LocalCommand {
     Split,
     Vsplit,
     Diff,
+    Codegraph,
     Pane,
     Movepane,
     Sidebar,
@@ -116,6 +117,7 @@ pub(super) const COMMANDS: &[CommandHelp] = &[
     CommandHelp { kind: LocalCommand::Split, name: "/split", form: "/split", summary: "Stacked pane split", support: "local" },
     CommandHelp { kind: LocalCommand::Vsplit, name: "/vsplit", form: "/vsplit", summary: "Side-by-side pane split", support: "local" },
     CommandHelp { kind: LocalCommand::Diff, name: "/diff", form: "/diff", summary: "Worktree diff", support: "local · active worktree" },
+    CommandHelp { kind: LocalCommand::Codegraph, name: "/codegraph", form: "/codegraph file|symbol|imports|calls|modules VALUE", summary: "Read-only Rust syntax viewer", support: "local · active worktree · bounded, fresh syntax query" },
     CommandHelp { kind: LocalCommand::Pane, name: "/pane", form: "/pane [number]", summary: "Switch pane", support: "local · numbered pane groups" },
     CommandHelp { kind: LocalCommand::Movepane, name: "/movepane", form: "/movepane [number]", summary: "Move active tab", support: "local · source retains its final tab" },
     CommandHelp { kind: LocalCommand::Sidebar, name: "/sidebar", form: "/sidebar [on|off|wider|narrower|width N]", summary: "Session rail", support: "local" },
@@ -564,6 +566,10 @@ impl App {
         }
         let args = parsed.args;
         match command {
+            LocalCommand::Codegraph => {
+                self.open_codegraph(args);
+                true
+            }
             LocalCommand::RemoteConnect => {
                 let words = args.split_whitespace().collect::<Vec<_>>();
                 let [url, host] = words.as_slice() else {

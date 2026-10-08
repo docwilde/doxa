@@ -846,6 +846,17 @@ impl App {
             draw_menu_scrollbar(frame, area, info.lines.len(), visible, start);
             return;
         }
+        if info.kind == "codegraph" {
+            let lines = super::codegraph_viewer::wrapped_lines(&info.lines, usize::from(area.width.saturating_sub(3)).max(1));
+            let visible = usize::from(area.height.saturating_sub(2)).max(1);
+            let start = info.scroll.min(lines.len().saturating_sub(visible));
+            let body = lines.iter().skip(start).take(visible).cloned().collect::<Vec<_>>().join("\n");
+            frame.render_widget(Paragraph::new(body)
+                .block(Block::default().title(" Code graph · ↑↓/PgUp/PgDn scroll · Esc close ").borders(Borders::ALL))
+                .style(Style::default().fg(theme::TEXT).bg(theme::RAISED)), area);
+            draw_menu_scrollbar(frame, area, lines.len(), visible, start);
+            return;
+        }
         if info.kind == "memory" {
             if let Some(list) = &self.memory_list {
                 let current = self.groups[self.active_group].active_id().and_then(|id| {
