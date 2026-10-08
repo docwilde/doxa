@@ -1,6 +1,6 @@
 [package]
 name = "doxa-tui"
-version = "2.0.0-beta.9"
+version = "2.0.0-beta.10"
 edition = "2021"
 publish = false
 license = "AGPL-3.0-only"
@@ -10,6 +10,8 @@ name = "doxa-rs"
 path = "src/main.rs"
 
 [dependencies]
+doxa-fleet = { path = "../doxa-fleet" }
+doxa-isolation = { path = "../doxa-isolation" }
 doxa-claude = { path = "../doxa-claude" }
 doxa-engines = { path = "../doxa-engines" }
 doxa-peers = { path = "../doxa-peers" }

@@ -76,6 +76,30 @@ fn native_symmetric_fleet_dispatches_all_slots_and_tears_down_isolated_runtime()
 }
 
 #[test]
+fn reviewed_native_fleet_freezes_guard_context_budget_and_host_evidence_without_model_calls(){
+    let fixture=Fixture::new();
+    let mut child=fixture.command().args(["fleet","start","--pool","fixture","--prompt","bounded fixture task","-n","2","--run-budget","4","--review-budget","1","--message-review","enforce","--message-judge","jev:jev-1.13.0","--run-id","run","--quiescence-grace","0.1","--root",fixture.root.to_str().unwrap()]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::inherit()).spawn().unwrap();
+    finish(&mut child);let manifest=fixture.manifest();
+    let context:doxa_fleet::Context=serde_json::from_value(manifest["supervision"]["context"].clone()).unwrap();context.validate().unwrap();
+    assert_eq!(context.assignments.len(),2);assert_eq!(context.charter.task,"bounded fixture task");assert_eq!(context.review.message_mode,doxa_fleet::Mode::Enforce);
+    assert_eq!(manifest["supervision"]["calls"],0);assert_eq!(manifest["supervision"]["review_reserved_usd"],0.0);assert_eq!(manifest["phase"],"finished");
+    let state:doxa_fleet::State=doxa_fleet::read_private(&context.state_path,doxa_fleet::MAX_STATE).unwrap();assert!(!state.artifacts.is_empty());assert_eq!(state.charter_sha256,context.charter_sha256);assert_eq!(state.calls,0);
+    assert!(context.assignments.iter().all(|row|row.pid>0&&row.role=="worker"));assert!(sockets_gone(&manifest));
+}
+
+#[test]
+fn reviewed_native_fleet_missing_git_evidence_holds_supervisor_without_model_calls(){
+    let fixture=Fixture::new();
+    let mut child=fixture.command().args(["fleet","start","--pool","fixture","--prompt","bounded fixture task","-n","1","--run-budget","4","--review-budget","1","--alignment-supervisor","codex:fixture-no-live-model","--supervision-mode","enforce","--run-id","run","--quiescence-grace","0.1","--root",fixture.root.to_str().unwrap()]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::inherit()).spawn().unwrap();
+    let manifest=fixture.wait_monitoring();assert_eq!(manifest["supervision"]["paused"],true);assert_eq!(manifest["supervision"]["status"],"uncertain");assert_eq!(manifest["supervision"]["calls"],0);assert!(manifest["supervision"]["reason"].as_str().unwrap().contains("Git evidence unavailable"));
+    assert!(manifest["slots"].as_array().unwrap().iter().all(|slot|slot["phase"]!="dispatched"));
+    let context:doxa_fleet::Context=serde_json::from_value(manifest["supervision"]["context"].clone()).unwrap();
+    let aligned=doxa_fleet::SupervisorVerdict{verdict:doxa_fleet::Alignment::Aligned,evidence_refs:vec![],charter_clause:"task".into(),reason:"unsupported completion claim".into(),recommended_action:"continue".into()};
+    assert!(doxa_fleet::apply_supervisor(&context,Ok(aligned)).unwrap().paused,"a model must not erase missing host evidence");
+    assert!(fleet_view::stop(&fixture.root,"run").unwrap().complete);finish(&mut child);assert!(sockets_gone(&fixture.manifest()));
+}
+
+#[test]
 fn controller_interrupt_reaches_verified_slot_teardown() {
     let fixture = Fixture::new(); let mut child = fixture.start("30"); fixture.wait_monitoring();
     unsafe { assert_eq!(libc::kill(child.id() as libc::pid_t, libc::SIGINT), 0); }

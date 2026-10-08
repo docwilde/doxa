@@ -17,6 +17,7 @@ use unicode_width::UnicodeWidthStr;
 
 impl App {
     pub(super) fn chip_hint_for(&self, kind: &str, group: usize) -> String {
+        if kind=="isolation" { return self.isolation_hint(group); }
         let id = self.groups.get(group).and_then(PaneGroup::active_id);
         if kind == "permission"
             && id.and_then(|id| self.session_identity.get(id))
@@ -378,11 +379,11 @@ impl App {
             7
         } else if let Some(form) = &self.new_session {
             if !vendor_models(form.engine).is_empty() {
-                9
+                10
             } else if form.engine == launch::Engine::Claude {
-                8
+                9
             } else {
-                7
+                8
             }
         } else if let Some(picker) = &self.effort_picker {
             (4 + picker.levels.len()).clamp(5, 10) as u16
@@ -433,6 +434,7 @@ impl App {
                         | "about"
                         | "fleet"
                         | "fleet_review"
+                        | "isolation"
                 ) {
                     (info.lines.len() + 2).clamp(7, 19) as u16
                 } else {
@@ -527,6 +529,9 @@ impl App {
             .map(String::as_str)
             .unwrap_or("?");
         chips.push(("effort", effort.to_owned()));
+        if let Some(value)=telemetry.and_then(|t|t.isolation.as_ref()) {
+            chips.push(("isolation",value["label"].as_str().unwrap_or("unavailable").into()));
+        }
         if let Some(status) = id
             .and_then(|id| self.repo_cache.get(id))
             .and_then(|(status, _)| status.as_ref())
@@ -765,6 +770,7 @@ impl App {
             "engine" => self.open_engine_picker(),
             "model" => self.open_model_picker(),
             "effort" => self.open_effort_picker(),
+            "isolation" => self.open_isolation_info(group),
             "beliefs" => self.open_lore_picker(),
             "repo" | "directory" => self.open_repo_picker(group),
             "memory" => self.open_memory_menu(group),

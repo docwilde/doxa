@@ -111,6 +111,7 @@ pub struct QueueRow {
 
 #[derive(Debug)]
 pub enum CommandResult {
+    SetIsolation { status: ReplyStatus, isolation: Option<Value> },
     Models {
         status: ReplyStatus,
         models: Option<Value>,
@@ -279,6 +280,7 @@ impl WorkerFrame {
 impl CommandResult {
     fn into_legacy_value(self, session_id: String) -> Value {
         let (kind, status, mut fields) = match self {
+            Self::SetIsolation { status, isolation } => ("set_isolation_reply",status,json!({"isolation":isolation})),
             Self::Models {
                 status,
                 models,

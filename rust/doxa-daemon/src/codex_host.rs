@@ -111,7 +111,7 @@ impl CodexHost {
         client
             .scrub("DOXA scrub preflight")
             .map_err(|_| "LORE scrub preflight failed; Codex session was not started".to_owned())?;
-        let cwd = options.cwd.to_string_lossy().into_owned();
+        let cwd = doxa_isolation::context_cwd(&options.cwd).map_err(|e|e.to_string())?.to_string_lossy().into_owned();
         let (projects_dir, slug) = client.transcript_identity(&cwd).map_err(|_| {
             "LORE transcript identity unavailable; Codex session was not started".to_owned()
         })?;
@@ -166,8 +166,13 @@ impl CodexHost {
             let thread = value["thread_id"].as_str()
                 .filter(|id| doxa_engines::codex_driver::valid_thread_id(id))
                 .ok_or("existing session has no valid Codex thread ID")?;
-            rollout_path = value["rollout_path"].as_str().map(PathBuf::from)
+            let imported=doxa_isolation::resume_rollout().map_err(|e|e.to_string())?;
+            let recorded=value["rollout_path"].as_str().map(PathBuf::from)
                 .filter(|path| codex_context::size(path, thread).is_some());
+            rollout_path=match (recorded,imported){
+                (Some(path),Some(imported))=>if doxa_isolation::select_resume_rollout(&path).map_err(|e|e.to_string())?{Some(path)}else{Some(imported)},
+                (recorded,None)=>recorded,(None,imported)=>imported,
+            }.filter(|path|codex_context::size(path,thread).is_some());
             saved_peer_tools = match value.get("peer_tools") {
                 Some(Value::Bool(enabled)) => *enabled,
                 None => false,
@@ -210,6 +215,9 @@ impl CodexHost {
         } else { saved_transport.unwrap_or_else(|| {
             if std::env::var("DOXA_CODEX_APPSERVER").as_deref() == Ok("0") { "exec" } else { "app-server" }
         }) };
+        if doxa_isolation::active().map_err(|e| e.to_string())?.is_some() && transport != "app-server" {
+            return Err("Docker Codex requires the protected app-server transport; legacy exec cannot preserve its host compaction boundary".into());
+        }
         let agent_tools = if transport == "app-server" && (options.resume_thread.is_none() || saved_lore_tools) {
             crate::agent_tools::AgentTools::new(&cwd, session_id, "codex", lore_enabled)
         } else { None };
@@ -316,7 +324,10 @@ impl CodexHost {
         use std::os::unix::fs::{DirBuilderExt, MetadataExt};
         let home = std::env::var_os("HOME").map(PathBuf::from).ok_or(AppServerError::Protocol("HOME is unavailable for the compact gate"))?;
         let doxa_home = std::env::var_os("DOXA_HOME").map(PathBuf::from).unwrap_or_else(|| home.join(".doxa"));
-        let codex_home = std::env::var_os("CODEX_HOME").map(PathBuf::from).unwrap_or_else(|| home.join(".codex"));
+        let codex_home = match doxa_isolation::active()? {
+            Some(manifest) => manifest.private_home.join("codex"),
+            None => std::env::var_os("CODEX_HOME").map(PathBuf::from).unwrap_or_else(|| home.join(".codex")),
+        };
         if !doxa_home.is_absolute() || !codex_home.is_absolute() { return Err(AppServerError::Protocol("Compact gate requires absolute DOXA and Codex homes")); }
         let root = doxa_home.join("compact-hooks");
         std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&root)?;
@@ -330,7 +341,7 @@ impl CodexHost {
         std::fs::DirBuilder::new().mode(0o700).create(&directory)?;
         match doxa_engines::codex_compact::CompactGate::prepare_with_memory(&directory, &std::env::current_exe()?, &codex_home,
             Path::new(&self.cwd), &self.session_id, doxa_engines::codex_compact::SUPPORTED_VERSION, self.lore_enabled) {
-            Ok(gate) => Ok(gate),
+            Ok(mut gate) => { gate.isolate_hook()?; Ok(gate) },
             Err(error) => { let _ = std::fs::remove_dir(directory); Err(AppServerError::Io(error)) }
         }
     }
@@ -855,6 +866,75 @@ impl Host for CodexHost {
 
     fn call(&self, method: &str, params: &Value) -> Result<Value, String> {
         match method {
+            "verify_resume" => {
+                if self.transport != "app-server" { return Err(LEGACY_READ_ONLY.into()); }
+                if self.active.lock().unwrap().is_some() || self.closing.load(Ordering::Acquire) {
+                    return Err("Codex resume verification requires an idle session".into());
+                }
+                if self.persistence_failed.load(Ordering::Acquire) || self.scrub_failed.load(Ordering::Acquire) {
+                    return Err("Codex persistence or scrub failed; resume cannot be verified".into());
+                }
+                let record = self.store.read_thread().map_err(|_| "Codex checkpoint is unreadable")?
+                    .ok_or("Codex resume verification requires a saved provider thread")?;
+                if record["turn_incomplete"] != false || record["session_id"].as_str() != Some(self.session_id.as_str())
+                    || record["cwd"].as_str() != Some(self.cwd.as_str()) {
+                    return Err("Codex resume checkpoint is incomplete or belongs to another session".into());
+                }
+                self.store.verify_thread_checkpoint(&record).map_err(|_| "Codex resume transcript checkpoint differs")?;
+                let expected = record["thread_id"].as_str().filter(|id| doxa_engines::codex_driver::valid_thread_id(id))
+                    .ok_or("Codex resume checkpoint has no valid thread")?.to_owned();
+                let runtime = self.runtime.lock().unwrap();
+                let mut driver = self.driver.lock().unwrap();
+                let CodexTransport::AppServer { options, active, resume_thread } = &mut *driver else {
+                    return Err(LEGACY_READ_ONLY.into());
+                };
+                if options.resume_thread.as_deref() != Some(expected.as_str())
+                    || resume_thread.as_deref() != Some(expected.as_str()) {
+                    return Err("Codex resume provider selection differs from its checkpoint".into());
+                }
+                if active.is_none() {
+                    let lore = self.lore.clone();
+                    let failed = self.scrub_failed.clone();
+                    let scrub = move |text: &str| match lore.lock().unwrap().scrub(text) {
+                        Ok(clean) => clean,
+                        Err(_) => { failed.store(true, Ordering::Release); SCRUB_FAILURE.to_owned() }
+                    };
+                    let token = CancellationToken::new();
+                    *self.active.lock().unwrap() = Some(token.clone());
+                    let peer_tools_enabled = self.peer_tools.lock().unwrap().is_some();
+                    let result = runtime.block_on(async {
+                        tokio::select! {
+                            biased;
+                            _ = token.cancelled() => Err(AppServerError::Cancelled),
+                            result = tokio::time::timeout(Duration::from_secs(45), async {
+                                let gate = self.compact_gate()?;
+                                let mut tools = self.agent_tools.as_ref().map(|tools| tools.definitions()).unwrap_or_default();
+                                if self.session_tools.lock().unwrap().is_some() { tools.extend(doxa_engines::session_tools::definitions()); }
+                                AppServerDriver::spawn_protected_with_agent_tools(options.clone(), scrub, peer_tools_enabled, gate, tools).await
+                            }) => result.unwrap_or(Err(AppServerError::TimedOut)),
+                        }
+                    });
+                    *self.active.lock().unwrap() = None;
+                    let mut app = result.map_err(|error| match error {
+                        AppServerError::Protocol(message) => message.to_owned(),
+                        AppServerError::Server(message) => message,
+                        _ => "Codex protected provider resume could not be verified".into(),
+                    })?;
+                    if app.thread_id() != expected || self.closing.load(Ordering::Acquire) {
+                        runtime.block_on(app.shutdown());
+                        return Err("Codex resumed provider identity differs or the session is closing".into());
+                    }
+                    let selected = self.selection.lock().unwrap().clone();
+                    app.set_selection(selected.0, selected.1);
+                    *active = Some(app);
+                }
+                if active.as_ref().is_none_or(|app| app.thread_id() != expected) {
+                    return Err("Codex active provider does not match the saved thread".into());
+                }
+                // Verification sends no turn and rewrites neither transcript nor
+                // thread checkpoint. Migration may still need to roll back.
+                Ok(json!({"verified":true,"thread_id":expected}))
+            }
             "set_permission_mode" => {
                 if self.transport != "app-server" { return Err(LEGACY_READ_ONLY.into()); }
                 if self.active.lock().unwrap().is_some() || self.closing.load(Ordering::Acquire) {

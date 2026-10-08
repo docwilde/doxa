@@ -238,20 +238,21 @@ impl AppServerDriver {
         if options.resume_thread.as_deref().is_some_and(|id| !valid_thread_id(id)) {
             return Err(AppServerError::Protocol("invalid resume thread ID"));
         }
-        let supervised = compact_gate.is_some();
+        let isolated = doxa_isolation::active()?.is_some();
+        let supervised = compact_gate.is_some() && !isolated;
         let (mut owner_control, owner_peer) = if supervised {
             let (parent, child) = UnixStream::pair()?;
             (Some(parent), Some(child))
         } else { (None, None) };
         let owner_fd = owner_peer.as_ref().map(AsRawFd::as_raw_fd);
-        let mut command = Command::new(&options.executable);
-        command.arg("app-server").arg("--stdio")
-            .current_dir(&options.cwd).stdin(Stdio::piped())
-            .stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(!supervised);
-        if let Some(fd) = owner_fd { command.env(crate::provider_owner::CONTROL_ENV, fd.to_string()); }
+        let mut provider_command = std::process::Command::new(&options.executable);
+        provider_command.arg("app-server").arg("--stdio").current_dir(&options.cwd);
         if let Some(gate) = &compact_gate {
-            for value in gate.cli_overrides() { command.arg("-c").arg(value); }
+            for value in gate.cli_overrides() { provider_command.arg("-c").arg(value); }
         }
+        let mut command = Command::from(doxa_isolation::isolate_command(provider_command, "codex")?);
+        command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(!supervised);
+        if let Some(fd) = owner_fd { command.env(crate::provider_owner::CONTROL_ENV, fd.to_string()); }
         unsafe {
             command.as_std_mut().pre_exec(move || {
                 if let Some(fd) = owner_fd {
@@ -330,7 +331,9 @@ impl AppServerDriver {
             driver.dynamic_tool_names.push((alias, canonical));
         }
         let result = if let Some(id) = driver.options.resume_thread.clone() {
-            driver.request("thread/resume", json!({"threadId":id,"cwd":driver.options.cwd,"model":driver.options.model,"approvalPolicy":approval,"sandbox":sandbox_name(sandbox),"excludeTurns":true})).await?
+            let mut params=json!({"threadId":id,"cwd":driver.options.cwd,"model":driver.options.model,"approvalPolicy":approval,"sandbox":sandbox_name(sandbox),"excludeTurns":true});
+            if let Some(path)=doxa_isolation::resume_rollout().map_err(AppServerError::Io)? {params["path"]=json!(path);}
+            driver.request("thread/resume",params).await?
         } else {
             let mut params = json!({"cwd":driver.options.cwd,"model":driver.options.model,"approvalPolicy":approval,"sandbox":sandbox_name(sandbox)});
             if !tools.is_empty() { params["dynamicTools"] = json!(tools); }
@@ -729,6 +732,7 @@ impl AppServerDriver {
 
     async fn send_bounded(&mut self, frame: Value, cancel: Option<&CancellationToken>, deadline: tokio::time::Instant) -> Result<(), AppServerError> {
         if cancel.is_some_and(CancellationToken::is_cancelled) { return Err(AppServerError::Cancelled); }
+        let frame = doxa_isolation::map_frame(frame)?;
         let mut encoded = serde_json::to_vec(&frame).map_err(io::Error::other)?;
         if encoded.len() > MAX_FRAME_BYTES { return Err(AppServerError::Protocol("outgoing frame too large")); }
         encoded.push(b'\n');

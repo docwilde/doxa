@@ -18,6 +18,7 @@ pub mod ui_state;
 pub mod collections;
 
 pub mod launch;
+pub mod isolation_migration;
 pub mod operations;
 
 pub mod peer_map;

@@ -290,6 +290,7 @@ impl App {
             return;
         }
         match words.as_slice(){
+            ["continue",id,hash]=>match crate::fleet_control::continue_run(&root,id,hash){Ok(_)=>{self.notice="Fleet resumed with its approved charter".into();self.open_fleet(root,Some((*id).into()));},Err(error)=>self.notice=format!("Fleet: {}",safe_label(&error.to_string()))},
             ["mesh",id]=>self.local_mesh(id,Some(root)),
             []|["runs"]=>self.open_fleet(root,None),
             ["status",id]if doxa_state::valid_session_id(id)=>self.open_fleet(root,Some((*id).into())),

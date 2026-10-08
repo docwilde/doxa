@@ -34,6 +34,7 @@ pub enum WorkerCommand {
     SetModel(String, String),
     SetEffort(String, String),
     SetPermissionMode(String, String),
+    SetIsolation(String, String),
     Branch(String, Option<String>),
     QueueList(String),
     ContextDetail(String),
@@ -101,7 +102,10 @@ fn attach_worker(session: &Session, frames: &SyncSender<WorkerFrame>, guard: &Ar
                     Ok(command) => { let _ = frames.send(rejection_frame(command, "Daemon reconnecting")); }
                     Err(mpsc::RecvTimeoutError::Timeout) => {}
                 }
-                match DaemonClient::connect(&path, Some(cursor.load(Ordering::Relaxed))) {
+                let runtime=path.parent().unwrap_or(Path::new("/"));
+                let reconnect=crate::discovery::sessions_in(runtime).ok().and_then(|sessions|sessions.into_iter().find(|session|session.id==id)).map(|session|session.socket).unwrap_or_else(||path.clone());
+                let replay=if reconnect==path{Some(cursor.load(Ordering::Relaxed))}else{None};
+                match DaemonClient::connect(&reconnect, replay) {
                     Ok(mut client) if client.hello["session_id"] == id => {
                         if !title.is_empty() { client.hello["title"] = Value::String(title.clone()); }
                         connected_worker.store(true, Ordering::Release);
@@ -249,7 +253,7 @@ pub(crate) fn connect_sessions_inner(sessions:&[Session],readonly_restore:bool)-
             let id = match &command {
                 WorkerCommand::Prompt(id, _) | WorkerCommand::Answer(id, _, _) | WorkerCommand::Peers(id)
                 | WorkerCommand::Models(id) | WorkerCommand::SetModel(id, _) | WorkerCommand::SetEffort(id, _)
-                | WorkerCommand::SetPermissionMode(id, _) | WorkerCommand::QueueList(id) | WorkerCommand::ContextDetail(id) | WorkerCommand::Status(id)
+                | WorkerCommand::SetPermissionMode(id, _) | WorkerCommand::SetIsolation(id, _) | WorkerCommand::QueueList(id) | WorkerCommand::ContextDetail(id) | WorkerCommand::Status(id)
                 | WorkerCommand::Branch(id, _)
                 | WorkerCommand::QueueCancel(id, _) | WorkerCommand::RemoteHistory(id,_) => id,
                 WorkerCommand::Message(id, _, _) | WorkerCommand::Stop(id)
@@ -306,6 +310,7 @@ pub(crate) fn rejection_frame(command: WorkerCommand, message: &str) -> WorkerFr
         WorkerCommand::SetModel(id, _) => command_frame(id, CommandResult::SetModel { status, model: None }),
         WorkerCommand::SetEffort(id, _) => command_frame(id, CommandResult::SetEffort { status, effort: None, verification_pending: None }),
         WorkerCommand::SetPermissionMode(id, _) => command_frame(id, CommandResult::SetPermissionMode { status, mode: None }),
+        WorkerCommand::SetIsolation(id, _) => command_frame(id, CommandResult::SetIsolation { status, isolation: None }),
         WorkerCommand::Branch(id, _) => command_frame(id, CommandResult::Branch { status, base: None, branches: None, message: None }),
         WorkerCommand::QueueList(id) => command_frame(id, CommandResult::QueueList { status, rows: Vec::new() }),
         WorkerCommand::Status(session_id) => WorkerFrame::TelemetryUnavailable { session_id },
@@ -404,7 +409,7 @@ fn worker_loop(
         .as_str()
         .unwrap_or_default()
         .to_owned();
-    let live_from_seq = client.hello["next_seq"].as_u64().unwrap_or(u64::MAX);
+    let mut live_from_seq = client.hello["next_seq"].as_u64().unwrap_or(u64::MAX);
     if frames.send(WorkerFrame::Daemon { session_id: session_id.clone(), frame: client.hello.clone() }).is_err() {
         return;
     }
@@ -502,6 +507,37 @@ fn worker_loop(
                         Err(error) => CommandResult::SetEffort { status: ReplyStatus::failed(error.to_string()), effort: None, verification_pending: None },
                     };
                     if frames.send(command_frame(id, reply)).is_err() { return; }
+                }
+                Ok(WorkerCommand::SetIsolation(id, profile)) => {
+                    let migration=doxa_isolation::Profile::parse(&profile).ok().filter(|target| {
+                        client.hello["isolation"]["profile"].as_str().and_then(|profile|doxa_isolation::Profile::parse(profile).ok()).is_some_and(|current|current.docker()!=target.docker())
+                    });
+                    if id==session_id {
+                        if let Some(target)=migration{
+                            let reply=match crate::isolation_migration::change(&mut client,target){
+                                Ok((resumed,isolation))=>{
+                                    client=resumed;live_from_seq=client.hello["next_seq"].as_u64().unwrap_or(u64::MAX);
+                                    cursor.store(client.cursor,Ordering::Relaxed);
+                                    if frames.send(WorkerFrame::Daemon{session_id:session_id.clone(),frame:client.hello.clone()}).is_err(){return;}
+                                    CommandResult::SetIsolation{status:ReplyStatus{ok:true,error:None},isolation:Some(isolation)}
+                                }
+                                Err(error)=>CommandResult::SetIsolation{status:ReplyStatus::failed(error.to_string()),isolation:None},
+                            };
+                            if frames.send(command_frame(id,reply)).is_err(){return;}
+                            continue;
+                        }
+                    }
+                    let result = if id == session_id {
+                        let mut params = Map::new();
+                        params.insert("profile".into(),Value::String(profile)); params.insert("confirmed".into(),Value::Bool(true));
+                        client.call("set_isolation",params)
+                    } else { Err(TransportError::Malformed("isolation target is not attached")) };
+                    cursor.store(client.cursor,Ordering::Relaxed);
+                    let reply=match result {
+                        Ok(reply)=>CommandResult::SetIsolation{status:ReplyStatus::from_wire(&reply),isolation:wire_value(&reply,"isolation")},
+                        Err(error)=>CommandResult::SetIsolation{status:ReplyStatus::failed(error.to_string()),isolation:None},
+                    };
+                    if frames.send(command_frame(id,reply)).is_err(){return;}
                 }
                 Ok(WorkerCommand::SetPermissionMode(id, mode)) => {
                     let result = if id == session_id {

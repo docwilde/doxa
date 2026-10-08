@@ -40,6 +40,21 @@ pub enum RepoStatus {
 pub fn repo_status(cwd: &Path) -> Option<RepoStatus> {
     let cwd = cwd.canonicalize().ok()?;
     if !cwd.is_dir() { return None; }
+    if let Some(manifest) = doxa_isolation::workspace::manifest_for(&cwd).ok()? {
+        if manifest.profile.docker() {
+            // Container Git paths name /workspace, not a host directory. The
+            // host-owned manifest supplies location; Git supplies only bounded
+            // branch/commit values through the container transport below.
+            let checked_out = git_text(&cwd, &["symbolic-ref", "--quiet", "--short", "HEAD"])
+                .filter(|branch| safe_ref(branch));
+            let sha = git_text(&cwd, &["rev-parse", "--verify", "HEAD^{commit}"])
+                .filter(|oid| valid_commit_oid(oid)).map(|oid| oid[..7].to_owned());
+            let repo = manifest.source.file_name()?.to_str()?.to_owned();
+            let base = valid_commit_oid(&manifest.base_sha).then(|| manifest.base_sha[..7].to_owned());
+            return Some(RepoStatus::Repository { repo, base, checked_out, sha,
+                worktree: Some("independent Docker checkout".into()) });
+        }
+    }
     let top = git_text(&cwd, &["rev-parse", "--show-toplevel"])
         .and_then(|top| PathBuf::from(top).canonicalize().ok());
     let Some(checkout) = top else {
@@ -73,6 +88,9 @@ pub struct Managed {
 }
 impl Managed {
     pub fn path(&self) -> &Path { &self.path }
+    /// Retain this checkout and its ownership sidecar across a backend
+    /// migration. Keep its lifecycle lock until the handle is dropped.
+    pub fn preserve(&mut self) { self.finished = true; }
     pub fn finish(&mut self) -> String {
         if self.finished || !self.created { return String::new(); }
         self.finished = true;
@@ -113,10 +131,15 @@ fn git(cwd: &Path, args: &[&str], timeout: Duration) -> Option<(bool, Vec<u8>)> 
     git_program(Path::new("git"), cwd, args, timeout)
 }
 fn git_program(program: &Path, cwd: &Path, args: &[&str], timeout: Duration) -> Option<(bool, Vec<u8>)> {
-    let mut child = Command::new(program).args(args).current_dir(cwd).process_group(0)
+    let mut command = Command::new(program);
+    command.args(args).current_dir(cwd)
         .env_remove("GIT_DIR").env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_COMMON_DIR").env_remove("GIT_INDEX_FILE")
-        .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
+        .env_remove("GIT_COMMON_DIR").env_remove("GIT_INDEX_FILE");
+    let mut command = if program == Path::new("git") {
+        doxa_isolation::workspace::command(command).ok()?
+    } else { command };
+    let mut child = command.process_group(0).stdin(Stdio::null())
+        .stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
     let pid = child.id() as i32;
     let result = (|| {
         let mut stdout = child.stdout.take()?;
@@ -877,6 +900,20 @@ mod tests {
         let mut created = create(&main, "lock0001session").unwrap();
         assert_eq!(created.path(), path);
         assert!(created.finish().is_empty());
+    }
+    #[test]
+    fn admitted_migration_preserves_clean_worktree_and_sidecar_after_drop(){
+        let _serial=TEST_ENV_LOCK.lock().unwrap_or_else(|poison|poison.into_inner());
+        let old_home=env::var_os("DOXA_HOME");let old_enabled=env::var_os("DOXA_WORKTREE");
+        let dir=tempfile::tempdir().unwrap();env::set_var("DOXA_HOME",dir.path().join("home"));env::set_var("DOXA_WORKTREE","1");
+        let main=dir.path().join("repo");fs::create_dir(&main).unwrap();run_git(&main,&["init","-q","-b","main"]);
+        fs::write(main.join("file"),"base\n").unwrap();run_git(&main,&["add","file"]);run_git(&main,&["-c","user.name=Test","-c","user.email=test@example.invalid","commit","-qm","test: base"]);
+        let mut tree=create(&main,"migr0001session").unwrap();let path=tree.path().to_owned();let sidecar=meta_path(&path).unwrap();let before=fs::read(&sidecar).unwrap();
+        assert_eq!(git_text(&path,&["status","--porcelain"]).as_deref(),Some(""));tree.preserve();
+        assert!(lock_worktree(&path).is_none(),"migration must retain ownership until daemon teardown");drop(tree);
+        assert_eq!(fs::read_to_string(path.join("file")).unwrap(),"base\n");assert_eq!(fs::read(&sidecar).unwrap(),before);
+        let reused=create(&path,"migr0001session").expect("retained clean worktree remains resumable");drop(reused);assert!(path.is_dir());
+        for (key,value) in [("DOXA_HOME",old_home),("DOXA_WORKTREE",old_enabled)]{match value{Some(value)=>env::set_var(key,value),None=>env::remove_var(key)}}
     }
 
     #[test]

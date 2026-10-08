@@ -87,7 +87,10 @@ impl Cli {
             .env("CLAUDE_CONFIG_DIR", o.config_dir)
             .env("LORE_SKIP", "1")
             .env("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1")
-            .env("DOXA_PEER_INBOUND_TURNS", "0")
+            .env("DOXA_PEER_INBOUND_TURNS", "0");
+        let mut command = doxa_isolation::isolate_command(command, "claude")?;
+        command
+            .current_dir(o.cwd)
             .env_remove("CLAUDE_CODE_SIMPLE")
             .env_remove("CLAUDE_CODE_SAFE_MODE")
             .process_group(0)

@@ -31,6 +31,8 @@ pub struct PeerHost {
     events: SyncSender<Value>,
     pending: Mutex<VecDeque<Value>>,
     spawner: Mutex<Option<Arc<crate::session_spawn::SpawnManager>>>,
+    fleet: Mutex<Option<doxa_fleet::Context>>,
+    fleet_path: PathBuf,
 }
 
 impl PeerHost {
@@ -56,6 +58,7 @@ impl PeerHost {
             self.inner.set_session_tool_handler(Arc::new(move|name,args|{
                 if !matches!(name,"spawn_session"|doxa_engines::session_tools::SPAWN){return Err("Unsupported session operator".into());}
                 let peer=weak.upgrade().ok_or("Parent session closed")?;
+                if peer.fleet.lock().map_err(|_|"Fleet guard unavailable")?.is_some(){return Err("Fleet charter forbids agent session spawning".into());}
                 let manager=peer.spawner.lock().map_err(|_|"Spawner unavailable")?.clone().ok_or("Spawner unavailable")?;
                 manager.spawn(args,&*peer.inner)
             }));
@@ -87,7 +90,19 @@ impl PeerHost {
         let ledger = std::env::var_os("DOXA_PEER_LEDGER").filter(|value| !value.is_empty()).map(PathBuf::from)
             .unwrap_or_else(|| home.join("peers/messages.jsonl"));
         if !ledger.is_absolute() { return Err(io::Error::new(io::ErrorKind::InvalidInput, "peer ledger must be absolute")); }
+        let fleet_path = runtime.join(format!("fleet-{session_id}.json"));
+        let fleet = match doxa_fleet::read_private::<doxa_fleet::Context>(&fleet_path, doxa_fleet::MAX_STATE) {
+            Ok(context) => {
+                context.validate()?;
+                let own=context.assignment(&session_id)?;
+                if own.pid!=std::process::id() as i32||own.cwd!=cwd.to_string_lossy(){return Err(doxa_fleet::invalid("persisted fleet host identity changed; stop and review a new run"));}
+                Some(context)
+            },
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
         Ok(Self {
+            fleet: Mutex::new(fleet), fleet_path,
             inner,
             agent_tools_enabled,
             lore: Mutex::new(None),
@@ -212,6 +227,33 @@ impl PeerHost {
         if clean_body.chars().count() > delivery::MAX_BODY_CHARS {
             return Err("message too long after scrubbing".into());
         }
+        // Fleet identities and envelopes are host-owned. Ordinary peer prose
+        // cannot be forwarded into a supervised fleet or over a remote bridge.
+        let fleet_context = self.fleet.lock().map_err(|_| "Fleet guard unavailable")?.clone();
+        if fleet_context.is_some() && broadcast { return Err("Supervised fleet broadcasts require host fanout review".into()); }
+        let fleet_wire = if let Some(context) = &fleet_context {
+            let recipients: Vec<_> = roster.iter().filter(|peer| target_matches(&peer.session_id,target,exact)).collect();
+            if recipients.len()!=1 {return Err("Fleet recipient must be one live local member".into());}
+            let recipient=&recipients[0].session_id;
+            context.assignment(recipient).map_err(|error|error.to_string())?;
+            let kind=doxa_fleet::Kind::parse(params["fleet_kind"].as_str().unwrap_or("status")).map_err(|error|error.to_string())?;
+            let mut envelope=doxa_fleet::Envelope::issue(context,&self.session_id,recipient,kind,clean_body.clone(),in_reply_to.map(str::to_owned)).map_err(|error|error.to_string())?;
+            if let Some(refs)=params.get("artifact_refs"){envelope.artifact_refs=serde_json::from_value(refs.clone()).map_err(|_|"Invalid host artifact references")?;}
+            doxa_fleet::validate_before_review(context,&envelope,recipient,std::process::id() as i32).map_err(|error|error.to_string())?;
+            if context.review.message_mode!=doxa_fleet::Mode::Off {
+                let recent=doxa_fleet::transaction(context,|state|Ok(state.recent_messages.clone())).map_err(|error|error.to_string())?;
+                let snapshot=json!({"recent_untrusted_messages":recent,"charter":context.charter,"assignment":context.assignment(&self.session_id).map_err(|error|error.to_string())?,"message":envelope});
+                let clean=self.with_lore(|lore|lore.scrub(&snapshot.to_string()).map_err(|_|"LORE scrub unavailable".into()))?;
+                let clean:Value=serde_json::from_str(&clean).map_err(|_|"Scrubbed fleet review snapshot is invalid")?;
+                let verdict=doxa_fleet::judge::semantic(context,&clean);
+                if let Err(error)=doxa_fleet::cache_semantic(context,&envelope,verdict){let _=self.events.try_send(json!({"type":"fleet_guard","data":{"delivered":false,"reason":error.to_string(),"message_id":envelope.message_id}}));return Err(error.to_string());}
+            }
+            Some(envelope.wire().map_err(|error|error.to_string())?)
+        } else {None};
+        let guarded_body=fleet_wire.clone().unwrap_or_else(||body.to_owned());
+        let body=guarded_body.as_str();
+        let fleet_message_id=fleet_wire.as_deref().and_then(|wire|doxa_fleet::Envelope::parse(wire).ok()).map(|envelope|envelope.message_id);
+        let clean_body=fleet_wire.unwrap_or(clean_body);
         let remote=self.with_lore(|lore|self.remote_roster(lore).map(|(rows,_)|rows))?;
         let remote_matches=remote.into_iter().filter(|(_,peer)|broadcast||peer["session_id"].as_str().is_some_and(|id|target_matches(id,target,exact))).collect::<Vec<_>>();
         let matches:Vec<_>=roster.iter().filter(|peer|broadcast||target_matches(&peer.session_id,target,exact)).collect();
@@ -326,17 +368,41 @@ impl PeerHost {
         }
         let _ = self.events.try_send(json!({"type":"peer_sent","data":{
             "to":result.delivered,"kind":kind,"in_reply_to":in_reply_to,
-            "message_id":result.record.as_ref().map(|r| r.id.as_str())}}));
+            "message_id":fleet_message_id.as_deref().or_else(||result.record.as_ref().map(|r|r.id.as_str()))}}));
         Ok(json!({"peer":if broadcast { None } else { peer_infos.first() },"peer_count":recipients.len(),"kind":kind,"in_reply_to":in_reply_to,"trust":PEER_UNTRUSTED_INTRO,"untrusted_peer_data":true,
             "delivered_to":result.delivered,"failed":result.failed,
-            "message_id":result.record.as_ref().map(|r| r.id.as_str()),
+            "message_id":fleet_message_id.as_deref().or_else(||result.record.as_ref().map(|r|r.id.as_str())),
             "ledger_error":result.ledger_error}))
     }
 
     pub fn inbound_event(&self, frame: PeerFrame) -> Result<Value, String> {
+        let sender=frame.from_id.chars().take(128).collect::<String>();let body_hash=doxa_fleet::hash(&frame.body).unwrap_or_default();
+        let context=self.fleet.lock().map_err(|_|"Fleet guard unavailable")?.clone();
+        let result=self.inbound_checked(frame);
+        if let Err(reason)=&result {
+            let reason=reason.chars().take(512).collect::<String>();
+            if let Some(context)=context.as_ref(){
+                let _=self.events.try_send(json!({"type":"fleet_guard","data":{"delivered":false,"sender_claim":sender,"reason":reason}}));
+                let _=doxa_fleet::transaction(context,|state|{state.observations.push(json!({"event":"inbound_rejected","sender_claim":sender,"body_sha256":body_hash,"reason":reason,"at":doxa_fleet::unix_now()}));if state.observations.len()>256{state.observations.remove(0);}Ok(())});
+            }
+        }
+        result
+    }
+    fn inbound_checked(&self, frame: PeerFrame) -> Result<Value, String> {
         if frame.from_id == self.session_id {
             return Err("self peer frame".into());
         }
+        // Transport authority is typed data, not display prose. Canonical LORE
+        // redacts long hex strings, so verify immutable metadata before scrub
+        // and pass only the peer's body through that text transformation.
+        let fleet_context=self.fleet.lock().map_err(|_|"Fleet guard unavailable")?.clone();
+        let parsed_envelope=if let Some(context)=fleet_context.as_ref(){
+            let envelope=doxa_fleet::Envelope::parse(&frame.body).map_err(|error|error.to_string())?;
+            if envelope.from_session!=frame.from_id{return Err("Fleet serialized sender differs from transport sender".into());}
+            let pid=frame.authenticated_pid.ok_or("Fleet kernel sender identity unavailable")?;
+            doxa_fleet::validate_before_review(context,&envelope,&self.session_id,pid).map_err(|error|error.to_string())?;
+            Some(envelope)
+        }else{None};
         let roster = self.with_lore(|lore| self.roster(lore))?;
         let remote_origin=if roster.iter().any(|p|p.session_id==frame.from_id){None}else{
             let peers=self.with_lore(|lore|self.remote_roster(lore).map(|(rows,_)|rows))?;
@@ -364,7 +430,7 @@ impl PeerHost {
             };
             Ok((
                 clean(lore, &frame.from_title)?,
-                clean(lore, &frame.body)?,
+                clean(lore, parsed_envelope.as_ref().map(|envelope|envelope.body.as_str()).unwrap_or(&frame.body))?,
                 frame
                     .from_repo
                     .as_deref()
@@ -374,9 +440,29 @@ impl PeerHost {
                 frame.kind.as_deref().map(|s| clean(lore, s)).transpose()?,
             ))
         })?;
+        let (body, fleet_admission) = if let Some(context)=fleet_context {
+            let mut envelope=parsed_envelope.ok_or("Fleet typed envelope unavailable")?;
+            envelope.body=body;
+            let pid=frame.authenticated_pid.ok_or("Fleet kernel sender identity unavailable")?;
+            doxa_fleet::validate_before_review(&context,&envelope,&self.session_id,pid).map_err(|error|error.to_string())?;
+            let semantic=if context.review.message_mode!=doxa_fleet::Mode::Off {
+                let recent=doxa_fleet::transaction(&context,|state|Ok(state.recent_messages.clone())).map_err(|error|error.to_string())?;
+                let snapshot=json!({"recent_untrusted_messages":recent,"charter":context.charter,"assignment":context.assignment(&envelope.from_session).map_err(|error|error.to_string())?,"message":envelope});
+                let clean=self.with_lore(|lore|lore.scrub(&snapshot.to_string()).map_err(|_|"LORE scrub unavailable".into()))?;
+                let clean:Value=serde_json::from_str(&clean).map_err(|_|"Scrubbed fleet review snapshot is invalid")?;
+                Some(doxa_fleet::cached_semantic(&context,&envelope).map_err(|error|error.to_string())?.unwrap_or_else(||doxa_fleet::judge::semantic(&context,&clean)))
+            }else{None};
+            let admission=doxa_fleet::admit(&context,&envelope,&self.session_id,pid,semantic).map_err(|error|error.to_string())?;
+            let _=self.events.try_send(json!({"type":"fleet_guard","data":admission}));
+            if !admission.delivered {return Err(admission.reason);}
+            (envelope.body,Some(admission))
+        }else{
+            if body.starts_with(doxa_fleet::PREFIX){return Err("Fleet message cannot enter an unsupervised session".into());}
+            (body,None)
+        };
         Ok(
-            json!({"type":"peer_message","data":{"from_id":frame.from_id,
-            "from_title":title,"body":body,"from_repo":repo,"sent_at":sent_at,"kind":kind,"origin":remote_origin}}),
+            json!({"type":"peer_message","data":{"fleet_admission":fleet_admission,"from_id":frame.from_id,
+            "from_title":title,"body":body,"from_repo":repo,"sent_at":sent_at,"kind":kind,"origin":remote_origin,"message_id":fleet_admission.as_ref().map(|row|row.message_id.as_str())}}),
         )
     }
 
@@ -402,7 +488,10 @@ impl PeerHost {
         let machine=data["origin"].as_str().map(|value|format!(" · machine {value}")).unwrap_or_default();
         let origin = format!("--- peer message · {} ({}) · {} · {}{} ---", title,
             id.chars().take(8).collect::<String>(), repo, sent_at,machine);
-        Some((format!("{origin}\n{body}"), origin))
+        let review = if data["fleet_admission"]["unreviewed"] == true {
+            "\n[Host admission: semantic review unavailable; unreviewed peer data.]"
+        } else { "" };
+        Some((format!("{origin}{review}\n{body}"), origin))
     }
 
     fn execute_prompt(&self, text: &str, emit: &mut dyn FnMut(Value)) {
@@ -425,6 +514,7 @@ impl PeerHost {
 }
 
 impl Host for PeerHost {
+    fn isolation_status(&self) -> Option<Value> { self.inner.isolation_status() }
     fn has_active_work(&self) -> bool { self.inner.has_active_work() || self.spawner.lock().map_or(true,|manager|manager.as_ref().is_some_and(|manager|manager.is_active())) }
     fn peer_tools_ready(&self) -> bool { self.agent_tools_enabled && self.inner.peer_tools_ready() }
     fn initial_model(&self) -> Option<String> { self.inner.initial_model() }
@@ -479,6 +569,10 @@ impl Host for PeerHost {
         self.inner.public_prompt(text)
     }
     fn call(&self, method: &str, params: &Value) -> Result<Value, String> {
+        if matches!(method,"isolation_migration_plan"|"isolation_migration_stop")
+            && self.fleet.lock().map_err(|_|"Fleet guard unavailable")?.is_some() {
+            return Err("Fleet assignments freeze daemon identity; stop and review a new run to migrate isolation".into());
+        }
         if matches!(method,"interrupt"|"stop"){self.cancel_spawns(method=="stop");}
         if method=="answer_needs_input"&&params["id"].as_str().is_some_and(|id|id.starts_with("spawn-")) {
             return self.spawner.lock().map_err(|_|"Spawner unavailable")?.as_ref()
@@ -487,7 +581,38 @@ impl Host for PeerHost {
         }
 
         match method {
-            "spawn_session" => { let manager=self.spawner.lock().map_err(|_|"Spawner unavailable")?.clone().ok_or("Spawner unavailable")?;manager.spawn(params,&*self.inner) },
+            "fleet_identity" => Ok(json!({"session_id":self.session_id,"pid":std::process::id(),"cwd":self.cwd})),
+            "fleet_configure" => {
+                let context:doxa_fleet::Context=serde_json::from_value(params.clone()).map_err(|_|"Invalid fleet context")?;
+                context.validate().map_err(|error|error.to_string())?;
+                let own=context.assignment(&self.session_id).map_err(|error|error.to_string())?;
+                if own.pid!=std::process::id() as i32 || own.cwd!=self.cwd.to_string_lossy() {return Err("Fleet host identity changed".into());}
+                let mut fleet=self.fleet.lock().map_err(|_|"Fleet guard unavailable")?;
+                if fleet.as_ref().is_some_and(|old|old!=&context){return Err("Only the owner can replace an approved fleet charter; stop and review a new run".into());}
+                doxa_fleet::save_private(&self.fleet_path,&context).map_err(|error|error.to_string())?;
+                doxa_fleet::transaction(&context,|_|Ok(())).map_err(|error|error.to_string())?;
+                *fleet=Some(context.clone());Ok(json!({"charter_sha256":context.charter_sha256,"configured":true}))
+            },
+            "fleet_state" => {
+                let context=self.fleet.lock().map_err(|_|"Fleet guard unavailable")?.clone().ok_or("Session has no fleet guard")?;
+                let state=doxa_fleet::transaction(&context,|state|Ok(state.clone())).map_err(|error|error.to_string())?;
+                Ok(json!({"charter_sha256":context.charter_sha256,"state":state}))
+            },
+            "fleet_resume" => {
+                let context=self.fleet.lock().map_err(|_|"Fleet guard unavailable")?.clone().ok_or("Session has no fleet guard")?;
+                let state=doxa_fleet::resume_review(&context,params["charter_sha256"].as_str().unwrap_or("")).map_err(|error|error.to_string())?;
+                Ok(json!({"charter_sha256":context.charter_sha256,"state":state}))
+            },
+            "fleet_scrub" => {
+                if self.fleet.lock().map_err(|_|"Fleet guard unavailable")?.is_none(){return Err("Session has no fleet guard".into());}
+                let text=params["snapshot"].to_string();if text.len()>doxa_fleet::judge::MAX_INPUT{return Err("Fleet review snapshot exceeds bounds".into());}
+                let clean=self.with_lore(|lore|lore.scrub(&text).map_err(|_|"LORE scrub unavailable".into()))?;
+                let clean:Value=serde_json::from_str(&clean).map_err(|_|"Scrubbed fleet review snapshot is invalid")?;
+                Ok(json!({"snapshot":clean}))
+            },
+            "spawn_session" => {
+                if self.fleet.lock().map_err(|_|"Fleet guard unavailable")?.is_some(){return Err("Fleet charter forbids agent session spawning".into());}
+ let manager=self.spawner.lock().map_err(|_|"Spawner unavailable")?.clone().ok_or("Spawner unavailable")?;manager.spawn(params,&*self.inner) },
             "peer_tools_status" => Ok(json!({"provider_peer_tools":self.peer_tools_ready(),"ledger_path":self.ledger_path})),
             "peers" => self.peers(params),
             "msg" => self.msg(params),
@@ -554,6 +679,35 @@ mod provider_target_tests {
         assert!(!target_matches("peer-replacement", "peer", true));
         assert!(target_matches("peer-original", "peer-original", true));
         assert!(!target_matches("peer-replacement", "peer-original", true));
+    }
+    #[test]
+    fn provider_prompt_marks_unreviewed_peer_data_without_copying_reviewer_prose() {
+        let event=serde_json::json!({"data":{"from_title":"Worker","from_id":"worker","sent_at":"now","body":"status report","fleet_admission":{"unreviewed":true,"reason":"UNTRUSTED-REVIEWER-PROSE"}}});
+        let (prompt,_)=super::PeerHost::peer_prompt(&event).unwrap();
+        assert!(prompt.contains("Host admission: semantic review unavailable; unreviewed peer data."));
+        assert!(prompt.contains("status report"));assert!(!prompt.contains("UNTRUSTED-REVIEWER-PROSE"));
+    }
+    #[test]
+    fn fleet_guard_blocks_both_migration_rpcs_before_forwarding_to_the_isolation_host() {
+        use super::*;use std::sync::atomic::{AtomicUsize,Ordering};
+        use std::os::unix::fs::PermissionsExt;
+        struct Recorder(AtomicUsize);impl Host for Recorder{fn prompt(&self,_:&str,_:&mut dyn FnMut(Value)){}fn call(&self,_:&str,_:&Value)->Result<Value,String>{self.0.fetch_add(1,Ordering::Relaxed);Ok(json!({"forwarded":true}))}}
+        let dir=tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(),std::fs::Permissions::from_mode(0o700)).unwrap();
+        let inner=Arc::new(Recorder(AtomicUsize::new(0)));let(tx,_)=std::sync::mpsc::sync_channel(1);
+        let peer=PeerHost::new(inner.clone(),dir.path().into(),dir.path(),"session".into(),"session".into(),tx).unwrap();
+        assert_eq!(peer.call("isolation_migration_plan",&json!({})).unwrap()["forwarded"],true);
+        let charter=doxa_fleet::Charter{version:1,fleet_id:"run".into(),task:"Frozen task".into(),repo:dir.path().display().to_string(),allowed_paths:vec![String::new()],required_evidence:vec!["host tests".into()],worker_limit:1,run_budget_usd:Some(1.0),deadline:doxa_fleet::unix_now()+3600,human_actions:vec!["identity changes".into()]};
+        let context=doxa_fleet::Context{charter_sha256:doxa_fleet::hash(&charter).unwrap(),charter,assignments:vec![doxa_fleet::Assignment{id:"assignment".into(),session_id:"session".into(),pid:std::process::id() as i32,role:"worker".into(),task:"Frozen task".into(),cwd:dir.path().display().to_string(),base_commit:None}],review:Default::default(),state_path:dir.path().join("guard-state.json")};
+        assert_eq!(peer.call("fleet_configure",&serde_json::to_value(context).unwrap()).unwrap()["configured"],true);
+        for method in ["isolation_migration_plan","isolation_migration_stop"]{assert!(peer.call(method,&json!({})).unwrap_err().contains("freeze daemon identity"));}
+        assert_eq!(inner.0.load(Ordering::Relaxed),1,"migration plan or stop leaked into the host");
+        assert_eq!(peer.call("set_isolation",&json!({"profile":"docker-offline"})).unwrap()["forwarded"],true,"same-container network changes retain daemon identity");
+        let mut persisted:doxa_fleet::Context=doxa_fleet::read_private(&peer.fleet_path,doxa_fleet::MAX_STATE).unwrap();persisted.assignments[0].pid+=1;
+        doxa_fleet::save_private(&peer.fleet_path,&persisted).unwrap();let(tx,_)=std::sync::mpsc::sync_channel(1);
+        assert!(PeerHost::new(inner.clone(),dir.path().into(),dir.path(),"session".into(),"session".into(),tx).err().unwrap().to_string().contains("persisted fleet host identity changed"));
+        persisted.assignments[0].pid=std::process::id() as i32;persisted.assignments[0].cwd=dir.path().join("replacement-cwd").display().to_string();doxa_fleet::save_private(&peer.fleet_path,&persisted).unwrap();let(tx,_)=std::sync::mpsc::sync_channel(1);
+        assert!(PeerHost::new(inner,dir.path().into(),dir.path(),"session".into(),"session".into(),tx).err().unwrap().to_string().contains("persisted fleet host identity changed"));
     }
     #[test]
     fn model_peer_tools_are_off_by_default_and_freeze_the_host_setting() {

@@ -168,6 +168,32 @@ pub fn status(root: &Path, prefix: &str) -> io::Result<String> {
     if let Some(messages) = value["ledger"]["messages"].as_u64() {
         lines.push(format!("ledger messages {messages}"));
     }
+    if value["supervision"].is_object() {
+        let guard = &value["supervision"];
+        let review = &guard["context"]["review"];
+        for (label, value) in [
+            ("Independent supervisor", &review["supervisor"]),
+            ("Supervisor action", &review["supervisor_mode"]),
+            ("Alignment", &guard["status"]), ("Paused", &guard["paused"]),
+            ("Pause reason", &guard["reason"]), ("Fast judge", &review["message_judge"]),
+            ("Message review", &review["message_mode"]),
+            ("Review allocation USD", &review["budget_usd"]),
+            ("Input reservation rate USD/Mtok", &review["input_usd_per_million"]),
+            ("Output reservation rate USD/Mtok", &review["output_usd_per_million"]),
+            ("Message risk threshold", &review["risk_threshold"]),
+            ("Review reservation USD (estimate)", &guard["review_reserved_usd"]),
+            ("Review usage USD (estimated from tokens)", &guard["review_estimated_usd"]),
+            ("Review calls", &guard["calls"]),
+            ("Charter hash", &guard["context"]["charter_sha256"]),
+        ] {
+            if !value.is_null() { lines.push(format!("{label}: {value}")); }
+        }
+        if guard["paused"] == true {
+            if let Some(hash) = guard["context"]["charter_sha256"].as_str() {
+                lines.push(format!("Human recovery: /fleet continue {id} {hash}"));
+            }
+        }
+    }
     if let Some(slots) = value["slots"].as_array() {
         for slot in slots.iter().take(32) {
             let index = slot["index"].as_u64().map_or("?".into(), |n| n.to_string());
@@ -379,6 +405,15 @@ mod tests {
     use super::*;
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixListener;
+
+    #[test]
+    fn fleet_status_shows_independent_models_limits_and_explicit_human_recovery() {
+        let temp=tempfile::tempdir().unwrap();let run=temp.path().join("review-run");fs::create_dir(&run).unwrap();
+        let manifest=serde_json::json!({"run_id":"review-run","live":true,"supervision":{"status":"drifted","paused":true,"reason":"outside scope","context":{"charter_sha256":"frozen-hash","review":{"supervisor":{"provider":"claude","model":"claude-sonnet-5-5"},"supervisor_mode":"enforce","message_judge":{"provider":"jev","model":"jev-1.13.0"},"message_mode":"shadow","budget_usd":2,"input_usd_per_million":100,"output_usd_per_million":100,"risk_threshold":0.7}},"review_reserved_usd":0.2,"review_estimated_usd":0.1,"calls":3}});
+        let path=run.join("manifest.json");fs::write(&path,manifest.to_string()).unwrap();fs::set_permissions(path,fs::Permissions::from_mode(0o600)).unwrap();
+        let text=status(temp.path(),"review-run").unwrap();
+        for visible in ["claude-sonnet-5-5","jev-1.13.0","Paused: true","outside scope","Review reservation USD (estimate): 0.2","Review calls: 3","/fleet continue review-run frozen-hash"]{assert!(text.contains(visible),"{visible}");}
+    }
 
     #[test]
     fn manifest_rejects_fifo_without_waiting_for_a_writer_and_hard_links() {

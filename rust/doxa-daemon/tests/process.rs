@@ -2,6 +2,7 @@ use doxa_peers::{now as peer_now, PeerRecord, Registry as PeerRegistry};
 use serde_json::{json, Value};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -98,6 +99,28 @@ fn wait_until(mut predicate: impl FnMut() -> bool) {
             Instant::now() < deadline,
             "timed out waiting for daemon state"
         );
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+#[track_caller]
+fn wait_for_registry(child: &mut Child, registry: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !registry.exists() {
+        if let Some(status) = child.try_wait().unwrap() {
+            let mut stderr = Vec::new();
+            if let Some(pipe) = child.stderr.take() {
+                let flags = unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_GETFL) };
+                if flags < 0 || unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+                    stderr.extend_from_slice(b"stderr pipe could not be made nonblocking");
+                } else if let Err(error) = pipe.take(8192).read_to_end(&mut stderr) {
+                    if error.kind() != std::io::ErrorKind::WouldBlock {
+                        stderr.extend_from_slice(format!(" [stderr read failed: {error}]").as_bytes());
+                    }
+                }
+            }
+            panic!("daemon exited before publishing {} ({status}): {}", registry.display(), String::from_utf8_lossy(&stderr));
+        }
+        assert!(Instant::now() < deadline, "timed out waiting for daemon registry {}", registry.display());
         thread::sleep(Duration::from_millis(10));
     }
 }
@@ -234,9 +257,27 @@ impl Process {
             .env("DOXA_HOME", runtime.join("home"))
             .env_remove("DOXA_CODEX_APPSERVER");
         if inbound { command.env("DOXA_PEER_INBOUND_TURNS", "yes"); }
-        let child = command.spawn().unwrap();
+        let manifest_path = runtime.join("home/isolation/codex-session/manifest.json");
+        match fs::symlink_metadata(&manifest_path) {
+            Ok(_) => {
+                // Repeated-start fixtures reopen their exact saved native
+                // conversation. A first start has no manifest and remains
+                // a fresh launch; production collision refusal stays intact.
+                let saved = doxa_isolation::read_manifest(&manifest_path).expect("owned fixture isolation manifest");
+                let cwd = runtime.canonicalize().unwrap();
+                assert_eq!(saved.session_id, "codex-session");
+                assert_eq!(saved.profile, doxa_isolation::Profile::Native);
+                assert_eq!(saved.state, "stopped");
+                assert_eq!(saved.checkout, cwd);
+                assert_eq!(saved.source, cwd);
+                command.args(["--resume", "true"]);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+            Err(error) => panic!("fixture isolation manifest unavailable: {error}"),
+        }
+        let mut child = command.spawn().unwrap();
         let registry = runtime.join("registry/codex-session.json");
-        wait_until(|| registry.exists());
+        wait_for_registry(&mut child, &registry);
         let entry: Value = serde_json::from_slice(&fs::read(&registry).unwrap()).unwrap();
         let socket = PathBuf::from(entry["daemon_socket"].as_str().unwrap());
         Self {
@@ -2859,6 +2900,7 @@ fn native_inbox_emits_scrubbed_peer_message_and_cleans_socket() {
     doxa_peers::delivery::send(
         &peer_socket,
         &doxa_peers::delivery::PeerFrame {
+            authenticated_pid: None,
             from_id: "sender".into(),
             from_title: "sk-ownedCanonicalFixtureSecret1234567890 title".into(),
             sent_at: peer_now(),
@@ -2882,6 +2924,47 @@ fn native_inbox_emits_scrubbed_peer_message_and_cleans_socket() {
 }
 
 #[test]
+fn fleet_guard_rejects_forged_scope_false_completion_replay_and_cached_drift_before_turns(){
+    use doxa_fleet::{Assignment,Charter,Context,Envelope,Kind,Mode,ReviewConfig,SemanticVerdict};
+    let dir=tempfile::tempdir().unwrap();let codex=dir.path().join("codex-fixture");
+    let captured=dir.path().join("captured-fleet-prompt");
+    executable(&codex,&format!("#!/bin/sh\ncat > '{}'\necho '{{\"type\":\"thread.started\",\"thread_id\":\"thread-1\"}}'\necho '{{\"type\":\"item.completed\",\"item\":{{\"type\":\"agent_message\",\"text\":\"done\"}}}}'\n",captured.display()));
+    let (_sender_listener,_)=registry_peer(dir.path(),"sender",dir.path().to_str().unwrap(),"sender");
+    let mut process=Process::start_codex_with_inbound(dir.path(),&codex,Path::new("/usr/bin/python3"),true);
+    let peer_socket=PathBuf::from(process.entry()["socket_path"].as_str().unwrap());
+    let charter=Charter{version:1,fleet_id:"reviewed-run".into(),task:"Scoped task".into(),repo:dir.path().display().to_string(),allowed_paths:vec![String::new()],required_evidence:vec!["host tests".into()],worker_limit:2,run_budget_usd:Some(10.0),deadline:doxa_fleet::unix_now()+3600,human_actions:vec!["authority changes".into()]};
+    let context=Context{charter_sha256:doxa_fleet::hash(&charter).unwrap(),charter,assignments:vec![Assignment{id:"sender-assignment".into(),session_id:"sender".into(),pid:std::process::id() as i32,role:"worker".into(),task:"Scoped task".into(),cwd:dir.path().display().to_string(),base_commit:None},Assignment{id:"recipient-assignment".into(),session_id:"codex-session".into(),pid:process.child.id() as i32,role:"worker".into(),task:"Scoped task".into(),cwd:dir.path().display().to_string(),base_commit:None}],review:ReviewConfig{message_mode:Mode::Enforce,message_judge:Some(doxa_fleet::judge::Model::parse("jev:jev-1.13.0").unwrap()),budget_usd:1.0,..Default::default()},state_path:dir.path().join("guard-state.json")};
+    let(mut reader,mut socket)=process.connect();receive(&mut reader);send(&mut socket,json!({"type":"attach","cursor":null}));
+    send(&mut socket,json!({"type":"call","id":1,"method":"fleet_configure","params":context}));assert_eq!(receive(&mut reader)["ok"],true);
+    let make=|kind|Envelope::issue(&context,"sender","codex-session",kind,"Scoped status".into(),None).unwrap();
+    let wire=|envelope:&Envelope|doxa_peers::delivery::PeerFrame{authenticated_pid:None,from_id:"sender".into(),from_title:"sender".into(),sent_at:peer_now(),body:envelope.wire().unwrap(),from_repo:Some(dir.path().display().to_string()),kind:Some("direct".into())};
+    for alteration in 0..3{
+        let mut envelope=make(Kind::Status);match alteration{0=>envelope.fleet_id="forged".into(),1=>envelope.assignment_id="stale".into(),_=>envelope.kind=Kind::Completion};
+        doxa_peers::delivery::send(&peer_socket,&wire(&envelope)).unwrap();let event=receive(&mut reader);assert_eq!(event["event"]["type"],"fleet_guard");assert_eq!(event["event"]["data"]["delivered"],false);
+    }
+    send(&mut socket,json!({"type":"call","id":2,"method":"fleet_state","params":{}}));let guard=receive(&mut reader);assert_eq!(guard["state"]["paused"],false,"deterministic denials unexpectedly paused the fixture: {guard}");assert_eq!(guard["state"]["calls"],0);
+    let good=make(Kind::Status);let safe=SemanticVerdict{within_assignment:1.0,asks_for_authority_change:0.0,contains_instructions_for_recipient:0.0,likely_secret:0.0,needs_human_review:0.0};doxa_fleet::cache_semantic(&context,&good,Ok(safe)).unwrap();
+    doxa_peers::delivery::send(&peer_socket,&wire(&good)).unwrap();let mut saw_peer=false;let mut saw_done=false;
+    for _ in 0..16{let event=receive(&mut reader);eprintln!("fleet good status event: {event}");match event["event"]["type"].as_str(){Some("fleet_guard")=>assert_eq!(event["event"]["data"]["delivered"],true,"known-safe cached status was denied: {event}"),Some("peer_message")=>{saw_peer=true;assert_eq!(event["event"]["data"]["fleet_admission"]["unreviewed"],false);},Some("turn_refused")=>panic!("known-safe status turn refused: {event}"),Some("turn_done")=>{assert_ne!(event["event"]["data"]["is_error"],true,"fixture provider failed: {event}");saw_done=true;break;},_=>{}}}
+    assert!(saw_peer&&saw_done);
+    let mut unreviewed=make(Kind::Status);let fixture_secret="sk-ownedCanonicalFixtureSecret1234567890";unreviewed.body=format!("Status contains {fixture_secret}");
+    let evidence_id=doxa_fleet::evidence_id(&json!({"kind":"host_checkpoint","running":false})).unwrap();
+    send(&mut socket,json!({"type":"call","id":3,"method":"fleet_scrub","params":{"snapshot":{"body":unreviewed.body,"evidence_id":evidence_id,"charter_sha256":context.charter_sha256}}}));
+    let scrubbed=loop{let event=receive(&mut reader);if event["type"]=="reply"&&event["id"]==3{break event;}assert_eq!(event["event"]["type"],"fleet_guard","unexpected event before scrub reply: {event}");assert_eq!(event["event"]["data"]["delivered"],true);};
+    let clean_body=scrubbed["snapshot"]["body"].as_str().unwrap();assert!(!clean_body.contains(fixture_secret));assert!(clean_body.contains("[REDACTED:"));assert_eq!(scrubbed["snapshot"]["evidence_id"],evidence_id);assert_ne!(scrubbed["snapshot"]["charter_sha256"],context.charter_sha256,"reviewer snapshots must retain canonical scrub behavior");
+    let mut reviewed_unreviewed=unreviewed.clone();reviewed_unreviewed.body=clean_body.into();doxa_fleet::cache_semantic(&context,&reviewed_unreviewed,Err("fixture reviewer outage".into())).unwrap();
+    doxa_peers::delivery::send(&peer_socket,&wire(&unreviewed)).unwrap();let mut saw_unreviewed=false;let mut saw_done=false;
+    for _ in 0..16{let event=receive(&mut reader);eprintln!("fleet unreviewed status event: {event}");match event["event"]["type"].as_str(){Some("fleet_guard")=>assert_eq!(event["event"]["data"]["delivered"],true,"ordinary unreviewed status was denied: {event}"),Some("peer_message")=>{saw_unreviewed=true;assert_eq!(event["event"]["data"]["fleet_admission"]["unreviewed"],true);},Some("turn_refused")=>panic!("unreviewed status turn refused: {event}"),Some("turn_done")=>{assert_ne!(event["event"]["data"]["is_error"],true,"fixture provider failed: {event}");saw_done=true;break;},_=>{}}}
+    assert!(saw_unreviewed&&saw_done);let provider_prompt=fs::read_to_string(&captured).unwrap();assert!(provider_prompt.contains("semantic review unavailable; unreviewed peer data"));assert!(provider_prompt.contains("[REDACTED:"));assert!(!provider_prompt.contains(fixture_secret));
+    let guard=doxa_fleet::transaction(&context,|state|Ok(state.clone())).unwrap();assert_eq!(guard.charter_sha256,context.charter_sha256);assert!(guard.received.contains_key(&good.message_id)&&guard.received.contains_key(&unreviewed.message_id));assert_eq!(guard.calls,0,"cached reviewer decisions should make no API calls");
+    doxa_peers::delivery::send(&peer_socket,&wire(&good)).unwrap();loop{let event=receive(&mut reader);if event["event"]["type"]=="fleet_guard"&&event["event"]["data"]["delivered"]==false{assert!(event["event"]["data"]["reason"].as_str().unwrap().contains("duplicate"));break;}}
+    let risky=make(Kind::Question);let risk=SemanticVerdict{within_assignment:0.0,asks_for_authority_change:1.0,contains_instructions_for_recipient:1.0,likely_secret:0.0,needs_human_review:1.0};assert!(doxa_fleet::cache_semantic(&context,&risky,Ok(risk)).is_err());
+    doxa_peers::delivery::send(&peer_socket,&wire(&risky)).unwrap();let event=receive(&mut reader);assert_eq!(event["event"]["type"],"fleet_guard");assert_eq!(event["event"]["data"]["delivered"],false);
+    send(&mut socket,json!({"type":"call","id":4,"method":"get_state","params":{}}));let state=receive(&mut reader);assert_eq!(state["running"],false);assert_eq!(state["queued"],0);
+    send(&mut socket,json!({"type":"call","id":5,"method":"stop","params":{}}));assert_eq!(receive(&mut reader)["ok"],true);wait_until(||process.exited());
+}
+
+#[test]
 fn inbound_direct_peer_starts_scrubbed_turn_but_broadcast_does_not() {
     let dir = tempfile::tempdir().unwrap();
     let codex = dir.path().join("codex-fixture");
@@ -2899,6 +2982,7 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}
     receive(&mut reader);
     send(&mut socket, json!({"type":"attach","cursor":null}));
     let frame = |kind, body: &str| doxa_peers::delivery::PeerFrame {
+            authenticated_pid: None,
         from_id: "sender".into(), from_title: "sk-ownedCanonicalFixtureSecret1234567890 title".into(),
         sent_at: peer_now(), body: body.into(),
         from_repo: Some(dir.path().display().to_string()), kind,
@@ -2962,6 +3046,7 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}
     assert_eq!(receive(&mut reader)["ok"], true);
     assert_eq!(receive(&mut reader)["event"]["type"], "turn_started");
     doxa_peers::delivery::send(&peer_socket, &doxa_peers::delivery::PeerFrame {
+            authenticated_pid: None,
         from_id: "sender".into(), from_title: "sender".into(), sent_at: peer_now(),
         body: "peer task".into(), from_repo: None, kind: Some("direct".into()),
     }).unwrap();
@@ -3108,6 +3193,28 @@ for line in sys.stdin: pass
         reader.get_ref().set_read_timeout(Some(CODEX_PREPARATION_TIMEOUT)).unwrap();
         receive(&mut reader);
         send(&mut socket, json!({"type":"attach","cursor":null}));
+        let transcript_path = native_transcript(dir.path(), "codex-session.jsonl");
+        let checkpoint_path = native_transcript(dir.path(), "codex-session.codex.json");
+        let transcript_before = fs::read(&transcript_path).ok();
+        let checkpoint_before = fs::read(&checkpoint_path).ok();
+        for _ in 0..2 {
+            send(&mut socket, json!({"type":"call","id":90,"method":"verify_resume","params":{}}));
+            loop {
+                let reply = receive(&mut reader);
+                if reply["type"] == "reply" && reply["id"] == 90 {
+                    assert_eq!(reply["ok"], resume, "{reply}");
+                    if resume {
+                        assert_eq!(reply["verified"], true);
+                        assert_eq!(reply["thread_id"], "thread-1");
+                    }
+                    break;
+                }
+            }
+        }
+        assert_eq!(fs::read(&transcript_path).ok(), transcript_before, "verification submitted or recorded a turn");
+        assert_eq!(fs::read(&checkpoint_path).ok(), checkpoint_before, "verification rewrote its durable checkpoint");
+        if resume { assert_eq!(fs::read_to_string(&log).unwrap(), "thread/start\nthread/resume\n"); }
+        else { assert!(!log.exists(), "fresh-session verification started a new provider thread"); }
         for prompt_id in [1, 2] {
         if prompt_id == 2 {
             for (method, params, expected) in [

@@ -13,6 +13,9 @@ fn unsafe_path() -> io::Error {
     )
 }
 pub fn config_dir() -> PathBuf {
+    if let Some(home) = std::env::var_os("DOXA_ISOLATION_HOME") {
+        return PathBuf::from(home).join("claude");
+    }
     std::env::var_os("DOXA_HOME")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)

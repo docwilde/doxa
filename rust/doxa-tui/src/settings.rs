@@ -10,7 +10,7 @@ pub struct Setting {
     pub category: &'static str, pub kind: Kind, pub choices: &'static [&'static str],
     pub default: &'static str, pub read_only: bool, pub help: &'static str, pub note: &'static str,
 }
-pub const CATEGORIES: &[&str] = &["Session", "Memory", "Appearance", "Keys", "Notifications", "Remote", "Paths", "About"];
+pub const CATEGORIES: &[&str] = &["Session", "Fleet", "Memory", "Appearance", "Keys", "Notifications", "Remote", "Paths", "About"];
 macro_rules! key_setting {
     ($key:literal, $label:literal, $default:literal) => {
         Setting { key: $key, env: "", label: $label, category: "Keys", kind: Kind::Key,
@@ -20,6 +20,20 @@ macro_rules! key_setting {
     };
 }
 pub const SETTINGS: &[Setting] = &[
+    Setting { key: "session_isolation", env: "DOXA_SESSION_ISOLATION", label: "new-session isolation", category: "Session", kind: Kind::Choice, choices: &["native", "docker-open", "docker-offline"], default: "native", read_only: false, help: "Default execution boundary for new sessions; the new-session form can override it.", note: "Docker requires a reviewed pinned image and local rootless Engine. Saved sessions retain their recorded policy. No-network Docker blocks online CLI inference; API-vendor HTTP stays on the trusted host." },
+    Setting { key: "fleet_alignment_supervisor", env: "DOXA_FLEET_ALIGNMENT_SUPERVISOR", label: "independent supervisor model", category: "Fleet", kind: Kind::Text, choices: &[], default: "", read_only: false, help: "Provider:model for independent read-only fleet review. Empty disables it; claude, codex, deepseek or glm.", note: "These stateless calls use API credentials, separate from CLI subscription sessions. Model has no tools or worker conversation history. Review budget is mandatory." },
+    Setting { key: "fleet_supervision_mode", env: "DOXA_FLEET_SUPERVISION_MODE", label: "independent supervisor action", category: "Fleet", kind: Kind::Choice, choices: &["shadow", "enforce"], default: "enforce", read_only: false, help: "Shadow records verdicts; enforce pauses delegation for uncertainty, drift or blocked work.", note: "Enforce mode pauses new delegation on reviewer outages. Shadow records outages. Only an explicit human continue clears an enforced pause." },
+    Setting { key: "fleet_message_review", env: "DOXA_FLEET_MESSAGE_REVIEW", label: "fleet message review", category: "Fleet", kind: Kind::Choice, choices: &["off", "shadow", "enforce"], default: "off", read_only: false, help: "Fast semantic admission mode for actual fleet peer messages.", note: "Selecting a mode opts scrubbed charter, assignments and messages into the selected external judgment service. Deterministic scope and provenance gates always apply to reviewed fleets." },
+    Setting { key: "fleet_message_judge", env: "DOXA_FLEET_MESSAGE_JUDGE", label: "fast message judge model", category: "Fleet", kind: Kind::Text, choices: &[], default: "", read_only: false, help: "Choose jev:jev-1.13.0 or llm:provider:model independently of the supervisor.", note: "Jev needs TYPESAFE_API_KEY. LLM providers: claude, codex, deepseek, glm; these require API credentials. Results cannot approve new authority or task changes." },
+    Setting { key: "fleet_review_budget", env: "DOXA_FLEET_REVIEW_BUDGET", label: "fleet review budget ($)", category: "Fleet", kind: Kind::Number, choices: &[], default: "", read_only: false, help: "Dollar allocation for all independent supervisor and message judge calls in each new fleet.", note: "Subtracted from the worker budget. Shared conservative token reservations and call ceilings include failed calls. Reserved estimates are not invoices." },
+    Setting { key: "fleet_review_input_price", env: "DOXA_FLEET_REVIEW_INPUT_PRICE", label: "review input price ($/Mtok)", category: "Fleet", kind: Kind::Number, choices: &[], default: "100", read_only: false, help: "Conservative owner-approved input rate for the selected LLM reviewer.", note: "Unknown model rates never imply free work. The default is deliberately conservative. Pinned Jev 1.13 uses documented input-only pricing." },
+    Setting { key: "fleet_review_output_price", env: "DOXA_FLEET_REVIEW_OUTPUT_PRICE", label: "review output price ($/Mtok)", category: "Fleet", kind: Kind::Number, choices: &[], default: "100", read_only: false, help: "Conservative owner-approved output rate for the selected LLM reviewer.", note: "Every LLM call has a hard 512 output token limit." },
+    Setting { key: "fleet_review_threshold", env: "DOXA_FLEET_REVIEW_THRESHOLD", label: "message risk threshold", category: "Fleet", kind: Kind::Number, choices: &[], default: "0.5", read_only: false, help: "Probability threshold for semantic quarantine; review against labeled examples before enforcing.", note: "Each new fleet review shows the exact threshold. Model confidence is evidence, never permission." },
+    Setting {key:"docker_image",env:"DOXA_DOCKER_IMAGE",label:"Docker worker image digest",category:"Session",kind:Kind::Text,choices:&[],default:"",read_only:false,help:"Reviewed local image pinned as sha256:CONTENT_ID or NAME@sha256:DIGEST.",note:"DOXA never builds repository Dockerfiles or pulls an unreviewed image when a session starts."},
+    Setting {key:"docker_host",env:"DOXA_DOCKER_HOST",label:"local rootless Docker socket",category:"Paths",kind:Kind::Text,choices:&[],default:"",read_only:false,help:"Local unix:///run/user/UID/docker.sock endpoint; default follows the host user.",note:"Remote TCP Engines, the rootful system socket and Docker sockets inside workers are forbidden."},
+    Setting {key:"docker_memory_bytes",env:"DOXA_DOCKER_MEMORY_BYTES",label:"Docker memory ceiling (bytes)",category:"Session",kind:Kind::Number,choices:&[],default:"4294967296",read_only:false,help:"Enforced cgroup memory limit; default 4 GiB, configurable for the workload.",note:"Disk usage is monitored and has no hard quota."},
+    Setting {key:"docker_cpus",env:"DOXA_DOCKER_CPUS",label:"Docker CPU ceiling",category:"Session",kind:Kind::Number,choices:&[],default:"2",read_only:false,help:"Enforced CPU quota; fractional CPUs are allowed.",note:"Requires effective rootless cgroup v2 delegation."},
+    Setting {key:"docker_pids",env:"DOXA_DOCKER_PIDS",label:"Docker process ceiling",category:"Session",kind:Kind::Number,choices:&[],default:"256",read_only:false,help:"Enforced cgroup process count limit.",note:"Session changes do not implicitly change resources or image; these defaults apply to new sessions."},
     key_setting!("key_new_tab", "new tab", "Ctrl+T"),
     key_setting!("key_close_tab", "close tab", "Ctrl+W"),
     key_setting!("key_close_tab_alt", "close focused tab", "Delete"),
@@ -170,15 +184,23 @@ pub fn coerce(s: &Setting, value: Option<&str>) -> io::Result<Option<toml::Value
         },
         Kind::Number => {
             let n = if s.key == "derive_secs" && value == "off" { 0.0 } else { value.parse::<f64>().map_err(|_| invalid("must be a nonnegative finite number"))? };
+            if s.key=="fleet_review_threshold"&&n>1.0{return Err(invalid("must be between 0 and 1"));}
             if !n.is_finite() || n < 0.0 { return Err(invalid("must be a nonnegative finite number")); }
             if s.key == "linger_secs" && n > crate::launch::MAX_LINGER_SECS { return Err(invalid("must be between 0 and 31536000 seconds")); }
             if matches!(s.key, "remote_port"|"remote_proxy_uid") && n.fract() != 0.0 { return Err(invalid("must be an integer")); }
+            if matches!(s.key,"docker_memory_bytes"|"docker_pids"){
+                if n.fract()!=0.0||n>i64::MAX as f64{return Err(invalid("must be a bounded integer"));}
+                if s.key=="docker_memory_bytes"&&!(134217728.0..=1099511627776.0).contains(&n){return Err(invalid("must be between 128 MiB and 1 TiB"));}
+                if s.key=="docker_pids"&&!(16.0..=65536.0).contains(&n){return Err(invalid("must be between 16 and 65536"));}
+                return Ok(Some(toml::Value::Integer(n as i64)));
+            }
+            if s.key=="docker_cpus"&&!(0.25..=256.0).contains(&n){return Err(invalid("must be between 0.25 and 256"));}
             toml::Value::Float(if s.key == "sidebar_width" { n.clamp(22.0,41.0) } else { n })
         },
         Kind::Choice => { if !s.choices.contains(&value) { return Err(invalid(&format!("accepts {}", s.choices.join(" | ")))); } toml::Value::String(value.into()) },
         Kind::Format => { crate::preferences::validate_clock_format(value).map_err(|_| invalid("invalid strftime format"))?; toml::Value::String(value.into()) },
         Kind::Key => { let chord = crate::keybindings::Chord::parse(value).map_err(|e| invalid(&e.to_string()))?; toml::Value::String(chord.map(|c| c.display()).unwrap_or_else(|| "none".into())) },
-        Kind::Text => toml::Value::String(value.into()),
+        Kind::Text => {if matches!(s.key,"fleet_alignment_supervisor"|"fleet_message_judge"){let model=doxa_fleet::judge::Model::parse(value).map_err(|_|invalid("requires a supported provider:model"))?;if s.key=="fleet_alignment_supervisor"&&model.provider=="jev"{return Err(invalid("Jev judges messages; select an LLM supervisor"));}}toml::Value::String(value.into())},
     }))
 }
 pub fn save(path: &Path, edits: &[(String, Option<String>)], engine: &str) -> io::Result<()> {

@@ -82,6 +82,7 @@ remote tabs beside local tabs; /local selects an open local tab. Ctrl+R opens
 remote history, and PageUp at its top fetches older turns.
 
 New-session options: --engine codex|claude|deepseek|glm, --model NAME,
+  --isolation native|docker-open|docker-offline,
   --branch LOCAL_OR_REMOTE, --linger SECONDS, --resume FULL_SESSION_ID.
 Codex: --sandbox read-only|workspace-write|danger-full-access, --codex-bin PATH.
 Claude: --claude-bin PATH, --effort low|medium|high|xhigh|max.
@@ -258,12 +259,16 @@ fn run(args: &[String]) -> io::Result<()> {
             }
             "--session" | "--socket" | "--engine" | "--model" | "--effort" | "--linger"
             | "--sandbox" | "--codex-bin" | "--claude-bin"
-             | "--resume" | "--branch" => {
+             | "--resume" | "--branch" | "--isolation" => {
                 index += 1;
                 let value = args
                     .get(index)
                     .ok_or_else(|| invalid(format!("missing value for {arg}")))?;
                 match arg {
+                    "--isolation" => {
+                        explicit_launch = true;
+                        options.isolation = Some(doxa_isolation::Profile::parse(value)?);
+                    }
                     "--session" => {
                         if prefix.is_some() {
                             return Err(invalid("session ID specified twice"));
@@ -579,6 +584,7 @@ fn fleet(args: &[String]) -> io::Result<()> {
         ["runs"] => println!("{}", fleet_view::runs(&root)?),
         ["status", run] => println!("{}", fleet_view::status(&root, run)?),
         ["resume", run] => return fleet_control::resume(&root, run),
+        ["continue", run, charter_hash] => println!("{}", fleet_control::continue_run(&root,run,charter_hash)?),
         ["review", run, slot, request] => {
             let slot = slot.parse().map_err(|_| invalid("fleet slot must be a number"))?;
             let reviewed = fleet_control::review(&root, run, slot, request)?;

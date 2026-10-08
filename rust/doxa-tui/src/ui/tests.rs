@@ -171,6 +171,22 @@ use super::*;
         app.preferences.set_test("background","transparent");let mut terminal=Terminal::new(ratatui::backend::TestBackend::new(90,30)).unwrap();terminal.draw(|f|app.draw(f)).unwrap();assert_eq!(terminal.backend().buffer().cell((1,1)).unwrap().bg,Color::Reset);
     }
     #[test]
+    fn isolation_popup_renders_verified_policy_and_idle_change_commands() {
+        let mut app = App::default();
+        app.handle(Event::Resize(140, 40));
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"isolated", "cwd":"/fixture",
+            "isolation":{"profile":"docker-open", "state":"ready", "label":"docker · open egress",
+                "engine":"rootless Docker", "network":"bridge", "memory_bytes":4294967296_u64,
+                "cpus":2, "pids":256, "image":"sha256:fixture", "disk_limit":"no quota"}}));
+        app.open_isolation_info(0);
+        assert_eq!(app.chip_info.as_ref().map(|info| info.kind), Some("isolation"));
+        let rendered = painted_at(&app, 140, 40);
+        for expected in ["Memory: 4096 MiB", "Mounts: independent Git checkout", "Image: sha256:fixture",
+            "/isolation docker-offline --confirm", "/isolation docker-open --confirm"] {
+            assert!(rendered.contains(expected), "missing {expected}: {rendered}");
+        }
+    }
+    #[test]
     fn graph_reply_checks_selected_identity_and_ascii_expansion_keeps_prompt() {
         let mut app=App::default();app.size=Rect::new(0,0,140,32);app.show_belief_browser_fixture(0,&[(1,"user","first"),(2,"user","second")]);app.input="private draft".into();
         let(tx,rx)=mpsc::sync_channel(1);app.belief_graph_pending=Some((1,String::new(),false,rx));app.lore_picker.as_mut().unwrap().selected=1;
@@ -824,6 +840,19 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn fleet_admission_notices_and_unreviewed_status_are_visible_in_the_transcript() {
+        let mut app=App::default();
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"s","cwd":"/demo"}));
+        app.apply_daemon_frame(&json!({"type":"event","session_id":"s","event":{"type":"fleet_guard","data":{"delivered":false,"reason":"outside approved assignment"}}}));
+        app.apply_daemon_frame(&json!({"type":"event","session_id":"s","event":{"type":"peer_message","data":{"from_title":"Worker","body":"status only","fleet_admission":{"delivered":true,"unreviewed":true}}}}));
+        let transcript=&app.sessions[0].transcript;
+        assert!(transcript.contains("Fleet message quarantined: outside approved assignment"));
+        assert!(transcript.contains("Worker [unreviewed fleet message]: status only"));
+        let row=super::transcript_events::structured_event("fleet_guard",&json!({"delivered":false,"reason":"hold\nfor human\u{1b}"})).unwrap();
+        assert!(!row.contains('\u{1b}'));
+    }
+
+    #[test]
     fn clicking_filter_prompt_keeps_both_lore_menus_and_private_draft() {
         for memory in [false,true] {
             let mut app=App::default();app.rail_visible=false;app.handle(Event::Resize(120,32));
@@ -1078,7 +1107,7 @@ for line in sys.stdin:
         let rendered = painted(&app);
         assert!(rendered.contains("Start session"));
         app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
-            column: form.x + 2, row: first + 2, modifiers: KeyModifiers::NONE }));
+            column: form.x + 2, row: first + 3, modifiers: KeyModifiers::NONE }));
         assert!(app.new_session.is_some());
         let (options, prompt, _) = app.pending_launches.pop().unwrap();
         assert_eq!(options.engine, launch::Engine::Claude);
@@ -1097,6 +1126,7 @@ for line in sys.stdin:
         assert_eq!(app.new_session.as_ref().unwrap().model, "deepseek-flash");
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert_eq!(app.new_session.as_ref().unwrap().effort.as_deref(), Some("high"));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         for c in "Explain this".chars() {
             app.handle(Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)));
@@ -1122,7 +1152,7 @@ for line in sys.stdin:
         app.engine_selected = 1; // Claude
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert_eq!(app.new_session.as_ref().unwrap().engine, launch::Engine::Claude);
-        app.new_session.as_mut().unwrap().field = 1;
+        app.new_session.as_mut().unwrap().field = 2;
         app.new_session.as_mut().unwrap().prompt = "Private first prompt".into();
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert!(app.launching && app.new_session.is_some());
@@ -1397,7 +1427,7 @@ for line in sys.stdin:
         assert!(app.new_session.as_ref().unwrap().models.is_empty());
         assert!(app.new_session.as_ref().unwrap().model.is_empty());
         assert!(app.new_session.as_ref().unwrap().catalog_note.contains("choose another engine"));
-        app.new_session.as_mut().unwrap().field = 2;
+        app.new_session.as_mut().unwrap().field = 3;
         app.new_session_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(app.pending_launches.is_empty());
         assert!(app.notice.contains("No verified models"));
@@ -1701,7 +1731,7 @@ for line in sys.stdin:
         assert!(app.manual_tab_available());
         // A form opened earlier must also recheck admission at submission.
         app.killed_this_run.clear();
-        app.new_session = Some(NewSession { engine:launch::Engine::Codex,model:"model".into(),models:Vec::new(),
+        app.new_session = Some(NewSession { isolation:doxa_isolation::Profile::Native,engine:launch::Engine::Codex,model:"model".into(),models:Vec::new(),
             model_efforts:HashMap::new(),catalog_note:String::new(),catalog_pending:false,launch_error:None,retry_allowed:true,effort:None,prompt:String::new(),field:1 });
         app.new_session_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
         assert!(app.pending_launches.is_empty()); assert!(app.new_session.is_some());

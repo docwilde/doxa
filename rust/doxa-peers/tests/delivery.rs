@@ -58,7 +58,7 @@ fn polling_idle_peer_does_not_stall_and_retains_partial_frame() -> io::Result<()
     let started = Instant::now();
     assert!(inbox.poll_receive(&|s: &str| s.to_owned())?.is_none());
     assert!(started.elapsed() < Duration::from_millis(250));
-    let frame = PeerFrame { from_id: "sender".into(), from_title: "test".into(),
+    let frame = PeerFrame { authenticated_pid: None, from_id: "sender".into(), from_title: "test".into(),
         sent_at: now(), body: "SECRET".into(), from_repo: None, kind: None };
     let mut bytes = serde_json::to_vec(&frame)?;
     bytes.push(b'\n');
@@ -81,7 +81,7 @@ fn blocking_receive_still_waits_after_a_poll() -> io::Result<()> {
     assert!(inbox.poll_receive(&|s: &str| s.to_owned())?.is_none());
     let path = inbox.path().to_owned();
     let worker = thread::spawn(move || inbox.receive(&|s: &str| s.to_owned()));
-    let frame = PeerFrame { from_id: "sender".into(), from_title: "test".into(),
+    let frame = PeerFrame { authenticated_pid: None, from_id: "sender".into(), from_title: "test".into(),
         sent_at: now(), body: "hello".into(), from_repo: None, kind: None };
     send(&path, &frame)?;
     assert_eq!(worker.join().unwrap()?.body, "hello");
@@ -116,7 +116,7 @@ fn full_peer_connect_queue_does_not_stall_delivery() -> io::Result<()> {
         } else { return Err(io::Error::last_os_error()); }
     }
     assert!(full, "test did not fill the peer listener queue");
-    let frame = PeerFrame { from_id: "sender".into(), from_title: "test".into(),
+    let frame = PeerFrame { authenticated_pid: None, from_id: "sender".into(), from_title: "test".into(),
         sent_at: now(), body: "hello".into(), from_repo: None, kind: None };
     let (tx, rx) = mpsc::channel();
     let started = Instant::now();
@@ -176,7 +176,7 @@ fn rejects_oversize_and_unsafe_paths_and_bounds_budget() -> io::Result<()> {
     fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700))?;
     let inbox = Inbox::bind(&runtime, "recipient")?;
     assert_eq!(Inbox::bind(&runtime, "recipient").err().unwrap().kind(), io::ErrorKind::AlreadyExists);
-    let frame = PeerFrame { from_id: "sender".into(), from_title: "test".into(), sent_at: now(), body: "x".repeat(MAX_FRAME_BYTES), from_repo: None, kind: None };
+    let frame = PeerFrame { authenticated_pid: None, from_id: "sender".into(), from_title: "test".into(), sent_at: now(), body: "x".repeat(MAX_FRAME_BYTES), from_repo: None, kind: None };
     assert!(send(inbox.path(), &frame).is_err());
     let link = runtime.join("link.sock");
     symlink(inbox.path(), &link)?;

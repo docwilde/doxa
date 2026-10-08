@@ -353,7 +353,15 @@ impl SpawnManager {
             "--linger",
             "900",
         ]);
-        command.args(&self.config.provider_args);
+        let mut provider_args = self.config.provider_args.clone();
+        if let Some(manifest) = doxa_isolation::active().map_err(|e|e.to_string())? {
+            // Parent network changes cannot leave cached child launch policy
+            // weaker than its current isolation.
+            if let Some(index) = provider_args.iter().position(|arg|arg=="--isolation") {
+                if let Some(value) = provider_args.get_mut(index+1) { *value=manifest.profile.key().into(); }
+            } else { provider_args.extend(["--isolation".into(),manifest.profile.key().into()]); }
+        }
+        command.args(&provider_args);
         if let Some(model) = &model {
             command.args(["--model", model]);
         }

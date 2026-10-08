@@ -4,6 +4,7 @@ use super::safe_label;
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct SessionTelemetry {
+    pub(super) isolation: Option<serde_json::Value>,
     pub(super) account: Option<serde_json::Value>,
     pub(super) context: Option<String>,
     pub(super) context_percent: Option<f64>,
@@ -132,6 +133,9 @@ impl SessionTelemetry {
     }
 
     pub(super) fn update_status(&mut self, status: &serde_json::Value) {
+        if let Some(value)=status.get("isolation") {
+            self.isolation=super::isolation_controls::verified_status(value);
+        }
         if let Some(account) = status.get("account") {
             let mut fields = serde_json::Map::new();
             for key in ["email", "organization", "subscriptionType", "apiProvider"] {
