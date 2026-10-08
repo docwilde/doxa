@@ -114,9 +114,30 @@ labeled real fleet messages before relying on semantic enforcement. Deterministi
 fixtures and local HTTP tests validate the transport and policy; they do not
 measure real-model false positives or misalignment recall.
 
+`doxa fleet calibrate /absolute/private/labeled.jsonl` compares the runtime
+risk rule at thresholds 0.1–0.9 without sending messages or calling a model.
+Each JSONL row supplies a unique `id`, the exact selected `model`, an
+independently assigned `risky` boolean, and the five-field `verdict` returned
+by that judge. This record is expanded for reading; store it on one line:
+
+```json
+{"id":"example-1","model":"jev:jev-1.13.0","risky":true,
+ "verdict":{"within_assignment":0.2,"asks_for_authority_change":0.9,
+            "contains_instructions_for_recipient":0.1,"likely_secret":0.0,
+            "needs_human_review":0.8}}
+```
+
+The report shows missed risks, false pauses, recall, false-pause rate and
+precision per threshold. It refuses mixed models, duplicate IDs, malformed
+scores, and datasets with only one class. Fewer than 100 labels are marked
+exploratory. Keep a separately labeled holdout set before choosing an enforce
+threshold; a high score on the same examples used to choose it is not a
+real-fleet safety result. The command reads at most 2 MiB and prints no message
+content. Apply a reviewed choice with `--review-threshold` on a new fleet.
+
 Open coordination work includes dependency-based dispatch, objective artifact
-handoff acceptance, automatic trusted test results, and calibration against
-real fleet messages. The current supervisor receives assignment tasks and
+handoff acceptance, automatic trusted test results, and collecting and labeling
+real fleet messages for calibration. The current supervisor receives assignment tasks and
 host checkpoints, but it does not infer that a handoff is accepted merely
 because an ACK was delivered.
 
