@@ -3759,6 +3759,95 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn urgency_sort_waits_for_quiet_and_never_moves_a_group_under_interaction() {
+        let mut app = App::default();
+        app.handle(Event::Resize(100, 24));
+        app.sidebar_auto = false;
+        app.rail_visible = true;
+        app.preferences.set_for_test("collection_sort", "urgency");
+        for id in ["a", "b"] {
+            app.apply_update(DaemonUpdate::Upsert(Session { id:id.into(), title:id.into(),
+                collection:id.into(), transcript:String::new(), status:"Ready".into() }));
+        }
+        app.collections = vec![
+            crate::collections::Collection { name:"A".into(), sessions:vec!["a".into()], collapsed:false },
+            crate::collections::Collection { name:"B".into(), sessions:vec!["b".into()], collapsed:false },
+        ];
+        app.rail_selected = 1;
+        app.session_telemetry.entry("b".into()).or_default().context_percent = Some(60.0);
+        let start = Instant::now();
+        assert!(!app.tick_rail_sort(start));
+        assert!(matches!(app.rail_rows()[0], RailRow::Heading(0)));
+        app.blink_on = false; // phase changes cannot re-rank a waiting group
+        assert!(app.tick_rail_sort(start + Duration::from_secs(2)));
+        assert!(matches!(app.rail_rows()[0], RailRow::Heading(1)));
+        assert_eq!(app.sessions[app.rail_order()[app.rail_selected]].id, "b");
+        let mut terminal = Terminal::new(TestBackend::new(25, 8)).unwrap();
+        terminal.draw(|frame| app.draw_rail(frame, Rect::new(0, 0, 25, 8))).unwrap();
+        let rendered = terminal.backend().buffer().content.iter().map(|cell| cell.symbol()).collect::<String>();
+        assert!(rendered.contains("ctx B"));
+
+        app.session_telemetry.get_mut("b").unwrap().context_percent = None;
+        assert!(!app.tick_rail_sort(start + Duration::from_millis(2100)));
+        let rail = app.layout(app.size).rail.unwrap();
+        app.mouse(MouseEvent { kind:MouseEventKind::Moved, column:rail.x+2, row:rail.y+1,
+            modifiers:KeyModifiers::NONE });
+        assert!(app.rail_pointer_inside);
+        assert!(!app.tick_rail_sort(start + Duration::from_secs(5)));
+        assert!(matches!(app.rail_rows()[0], RailRow::Heading(1)));
+        app.mouse(MouseEvent { kind:MouseEventKind::Moved, column:rail.right(), row:rail.y+1,
+            modifiers:KeyModifiers::NONE });
+        app.focus = Focus::Rail;
+        assert!(!app.tick_rail_sort(start + Duration::from_secs(6)));
+        app.focus = Focus::Prompt;
+        assert!(app.tick_rail_sort(start + Duration::from_secs(8)));
+        assert!(matches!(app.rail_rows()[0], RailRow::Heading(0))); // original tie order
+        assert_eq!(app.sessions[app.rail_order()[app.rail_selected]].id, "b");
+    }
+
+    #[test]
+    fn project_urgency_sort_keeps_child_order_and_unknown_context_unranked() {
+        let mut app = App::default();
+        app.handle(Event::Resize(100, 24));
+        app.sidebar_auto = false; app.rail_visible = true;
+        app.preferences.set_for_test("collection_sort", "urgency");
+        for (id, project) in [("a1", "alpha"), ("z", "zeta"), ("a2", "alpha")] {
+            app.apply_update(DaemonUpdate::Upsert(Session { id:id.into(), title:id.into(),
+                collection:project.into(), transcript:String::new(), status:"Ready".into() }));
+        }
+        app.session_telemetry.entry("a1".into()).or_default().context_percent = None;
+        app.apply_daemon_frame(&json!({"type":"event", "session_id":"z",
+            "event":{"type":"needs_input", "data":{"id":"req", "kind":"ask_user",
+                "title":"Choose", "questions":[{"question":"Choose","options":[]}]}}}));
+        let start = Instant::now();
+        assert!(!app.tick_rail_sort(start));
+        assert!(app.tick_rail_sort(start + Duration::from_secs(2)));
+        let rows = app.rail_rows();
+        assert!(matches!(&rows[0], RailRow::ProjectHeading(name) if name == "zeta"));
+        assert!(matches!(&rows[1], RailRow::Session(1)));
+        assert!(matches!(&rows[2], RailRow::ProjectHeading(name) if name == "alpha"));
+        assert!(matches!(&rows[3], RailRow::Session(0)));
+        assert!(matches!(&rows[4], RailRow::Session(2)));
+    }
+
+    #[test]
+    fn unnamed_collection_uses_known_project_and_task_without_changing_explicit_names() {
+        let mut app = App::default();
+        app.apply_update(DaemonUpdate::Upsert(Session { id:"s".into(), title:"Fix picker".into(),
+            collection:"/fixture/collection-triage-repo".into(), transcript:String::new(), status:"Ready".into() }));
+        app.groups[0].tabs.push("s".into());
+        app.session_cwds.insert("s".into(), PathBuf::from("/fixture/collection-triage-repo"));
+        app.set_repo_status("s", doxa_worktrees::RepoStatus::Repository {
+            repo:"doxa".into(), base:None, checked_out:None, sha:None, worktree:None });
+        app.local_collection("new");
+        assert!(app.collections[0].name.ends_with("doxa · Fix picker"));
+        app.local_collection("new");
+        assert_ne!(app.collections[0].name, app.collections[1].name);
+        app.local_collection("new Chosen name");
+        assert_eq!(app.collections[2].name, "Chosen name");
+    }
+
+    #[test]
     fn uncollected_sessions_group_by_recorded_project() {
         let mut app = App::default();
         for (id, project) in [("one", "/work/zeta"), ("two", "/work/alpha"), ("three", "/work/zeta")] {

@@ -1280,6 +1280,12 @@ enum RailRow {
     PastHeading,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RailGroupKey {
+    Collection(String),
+    Project(String),
+}
+
 #[derive(Debug)]
 enum RemoteHandoff {
     Hub(String),
@@ -1328,6 +1334,11 @@ pub struct App {
     pub rail_width: u16,
     pub rail_selected: usize,
     rail_hover: Option<String>,
+    rail_pointer_inside: bool,
+    rail_last_interaction: Instant,
+    rail_sort_signature: Vec<(RailGroupKey, u8)>,
+    rail_sort_changed_at: Instant,
+    rail_sort_order: Vec<RailGroupKey>,
     last_rail_click: Option<(String, Instant)>,
     pending_rename: Option<String>,
     rename_draft_backup: Option<((usize, String), String, usize)>,
@@ -1606,6 +1617,11 @@ impl Default for App {
             rail_width: 25,
             rail_selected: 0,
             rail_hover: None,
+            rail_pointer_inside: false,
+            rail_last_interaction: Instant::now(),
+            rail_sort_signature: Vec::new(),
+            rail_sort_changed_at: Instant::now(),
+            rail_sort_order: Vec::new(),
             last_rail_click: None,
             pending_rename: None,
             rename_draft_backup: None,

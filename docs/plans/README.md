@@ -13,7 +13,7 @@ every proposed extension exists in Rust.
 | [Code graph](code-graph.md) | Draft; no native code-graph extraction/query feature is shipped. LORE belief browsing is a separate feature. |
 | [DOXA plugin API](plugin-api.md) | Draft; there is no DOXA extension loader. Adoption of selected provider plugins is already supported. |
 | [Mermaid transcript diagrams](mermaid.md) | Draft; terminal diagram rendering is not implemented. Beta.11 adds bounded local image previews, which do not render Mermaid source. |
-| [Collection triage](collection-triage.md) | Historical partial plan. Automatic collection labels and settling-based urgency reordering remain deferred; native session labels are a separate shipped feature. |
+| [Collection triage](collection-triage.md) | This branch adds honest default names and settled, opt-in group sorting to the native rail. Per-session current LORE proposal state, Python-era colour and pane-group aggregation remain open for Rust. |
 | [macOS daemon process coverage](https://github.com/docwilde/doxa/issues/197) | Open portability work. Portable crates and selected daemon/local-provider suites run in macOS CI. Authenticated macOS provider checks remain unverified. |
 
 Native UI, LORE, provider and remote parity is tracked in

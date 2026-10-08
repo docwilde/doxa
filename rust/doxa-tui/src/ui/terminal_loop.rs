@@ -517,6 +517,7 @@ fn run_loop(
         changed |= app.poll_vendor_catalog();
         changed |= app.poll_model_catalog(Instant::now());
         changed |= app.tick_blink(Instant::now());
+        changed |= app.tick_rail_sort(Instant::now());
         changed |= app.tick_spinner(Instant::now());
         changed |= app.tick_clock(Instant::now());
         changed |= app.tick_chip_hover(Instant::now());
