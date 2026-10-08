@@ -33,7 +33,7 @@ charter SHA256 and all review settings. Each daemon binds the assignment to its
 host PID. Incoming fleet envelopes must match the kernel-observed Unix sender
 PID, current fleet, recipient, charter, and assignment. Unknown kinds/fields,
 cross-fleet messages, direct task changes, unknown artifact references,
-unsupported completion claims, duplicates, and exhausted limits are refused
+completion without host-verified diff and passing test evidence, duplicates, and exhausted limits are refused
 before a peer message can start a billed turn. Other peer sessions retain their
 ordinary messaging behavior and cannot enter the supervised fleet as free text.
 
@@ -69,8 +69,9 @@ The Fleet view shows model selections, mode, alignment, pause reason, charter
 hash, reservation estimates, and calls. After reviewing the evidence, explicitly
 continue with `/fleet continue RUN CHARTER_SHA256` (or `doxa fleet continue`).
 Resume revalidates daemon identity and the frozen charter; a changed host PID or
-unknown spend requires investigation. A reviewer failure preserves live worker
-state and holds new delegation until human recovery. Stop remains available.
+unknown spend requires investigation. In enforce mode, a reviewer failure preserves live worker
+state and holds new delegation until human recovery. Shadow records outages
+without imposing a semantic pause. Stop remains available.
 
 Current bounds are 64 workers, a 16 KiB approved task, 6 KiB fleet message bodies,
 60 admitted messages/minute, 10,000 message IDs, 8 MiB total admitted body bytes,

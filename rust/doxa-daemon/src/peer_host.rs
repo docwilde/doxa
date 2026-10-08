@@ -236,7 +236,8 @@ impl PeerHost {
             if let Some(refs)=params.get("artifact_refs"){envelope.artifact_refs=serde_json::from_value(refs.clone()).map_err(|_|"Invalid host artifact references")?;}
             doxa_fleet::validate_before_review(context,&envelope,recipient,std::process::id() as i32).map_err(|error|error.to_string())?;
             if context.review.message_mode!=doxa_fleet::Mode::Off {
-                let snapshot=json!({"charter":context.charter,"assignment":context.assignment(&self.session_id).map_err(|error|error.to_string())?,"message":envelope});
+                let recent=doxa_fleet::transaction(context,|state|Ok(state.recent_messages.clone())).map_err(|error|error.to_string())?;
+                let snapshot=json!({"recent_untrusted_messages":recent,"charter":context.charter,"assignment":context.assignment(&self.session_id).map_err(|error|error.to_string())?,"message":envelope});
                 let clean=self.with_lore(|lore|lore.scrub(&snapshot.to_string()).map_err(|_|"LORE scrub unavailable".into()))?;
                 let clean:Value=serde_json::from_str(&clean).map_err(|_|"Scrubbed fleet review snapshot is invalid")?;
                 let verdict=doxa_fleet::judge::semantic(context,&clean);
@@ -428,7 +429,8 @@ impl PeerHost {
             doxa_fleet::validate_before_review(&context,&envelope,&self.session_id,pid).map_err(|error|error.to_string())?;
             envelope.body=self.with_lore(|lore|lore.scrub(&envelope.body).map_err(|_|"LORE scrub unavailable".into()))?;
             let semantic=if context.review.message_mode!=doxa_fleet::Mode::Off {
-                let snapshot=json!({"charter":context.charter,"assignment":context.assignment(&envelope.from_session).map_err(|error|error.to_string())?,"message":envelope});
+                let recent=doxa_fleet::transaction(&context,|state|Ok(state.recent_messages.clone())).map_err(|error|error.to_string())?;
+                let snapshot=json!({"recent_untrusted_messages":recent,"charter":context.charter,"assignment":context.assignment(&envelope.from_session).map_err(|error|error.to_string())?,"message":envelope});
                 let clean=self.with_lore(|lore|lore.scrub(&snapshot.to_string()).map_err(|_|"LORE scrub unavailable".into()))?;
                 let clean:Value=serde_json::from_str(&clean).map_err(|_|"Scrubbed fleet review snapshot is invalid")?;
                 Some(doxa_fleet::cached_semantic(&context,&envelope).map_err(|error|error.to_string())?.unwrap_or_else(||doxa_fleet::judge::semantic(&context,&clean)))

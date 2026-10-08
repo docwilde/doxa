@@ -78,7 +78,8 @@ pub struct Envelope {
 impl Envelope {
     pub fn issue(context:&Context,from:&str,to:&str,kind:Kind,body:String,reply:Option<String>)->io::Result<Self>{
         let row=context.assignment(from)?;context.assignment(to)?;
-        Ok(Self{v:1,fleet_id:context.charter.fleet_id.clone(),message_id:uuid::Uuid::new_v4().to_string(),from_session:from.into(),to_session:to.into(),kind,assignment_id:row.id.clone(),charter_sha256:context.charter_sha256.clone(),in_reply_to:reply,body,artifact_refs:Vec::new(),requested_action:None,hop:0})
+        let hop=if let Some(parent)=&reply{transaction(context,|state|state.traces.get(parent).map(|trace|trace.hop.saturating_add(1)).ok_or_else(||invalid("unknown fleet reply ancestry")))?}else{0};
+        Ok(Self{v:1,fleet_id:context.charter.fleet_id.clone(),message_id:uuid::Uuid::new_v4().to_string(),from_session:from.into(),to_session:to.into(),kind,assignment_id:row.id.clone(),charter_sha256:context.charter_sha256.clone(),in_reply_to:reply,body,artifact_refs:Vec::new(),requested_action:None,hop})
     }
     pub fn wire(&self)->io::Result<String>{Ok(format!("{PREFIX}{}",serde_json::to_string(self)?))}
     pub fn parse(wire:&str)->io::Result<Self>{if wire.len()>24*1024{return Err(invalid("fleet envelope exceeds bounds"));}serde_json::from_str(wire.strip_prefix(PREFIX).ok_or_else(||invalid("free-form message cannot enter a supervised fleet"))?).map_err(|_|invalid("invalid fleet envelope schema"))}
@@ -92,7 +93,12 @@ pub struct State {
     pub received:BTreeMap<String,u64>,pub minute:u64,pub message_count:u64,pub total_bytes:u64,
     pub observations:Vec<Value>,pub artifacts:BTreeMap<String,Value>,pub last_supervisor_at:u64,
     #[serde(default)] pub semantic_cache:BTreeMap<String,CachedSemantic>,
+    #[serde(default)] pub traces:BTreeMap<String,MessageTrace>,
+    #[serde(default)] pub recent_messages:Vec<Envelope>,
 }
+#[derive(Clone,Debug,Serialize,Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MessageTrace {pub from:String,pub to:String,pub hop:u8}
 #[derive(Clone,Debug,Serialize,Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CachedSemantic {pub envelope_sha256:String,pub result:Result<SemanticVerdict,String>}
@@ -151,9 +157,18 @@ fn deterministic(context:&Context,envelope:&Envelope,recipient:&str,pid:i32,stat
     let from=context.assignment(&envelope.from_session)?;context.assignment(recipient)?;
     if envelope.v!=1||envelope.fleet_id!=context.charter.fleet_id||envelope.charter_sha256!=context.charter_sha256||envelope.to_session!=recipient||from.pid!=pid||envelope.assignment_id!=from.id||envelope.from_session==recipient||uuid::Uuid::parse_str(&envelope.message_id).is_err(){return Err(invalid("fleet sender, assignment or scope is not verified"));}
     if envelope.body.trim().is_empty()||envelope.body.len()>MAX_BODY||envelope.hop>4||!envelope.artifact_refs.iter().all(|id|state.artifacts.contains_key(id))||envelope.artifact_refs.len()>8{return Err(invalid("fleet message bounds or artifact provenance refused"));}
-    if envelope.in_reply_to.as_ref().is_some_and(|id|!state.received.contains_key(id)){return Err(invalid("unknown fleet reply ancestry"));}
+    if let Some(parent)=&envelope.in_reply_to{
+        let trace=state.traces.get(parent).ok_or_else(||invalid("unknown fleet reply ancestry"))?;
+        let same_pair=(trace.from==envelope.from_session&&trace.to==recipient)||(trace.to==envelope.from_session&&trace.from==recipient);
+        if !same_pair||envelope.hop!=trace.hop.saturating_add(1){return Err(invalid("fleet reply provenance or hop count changed"));}
+    }else if envelope.hop!=0{return Err(invalid("root fleet message cannot claim reply hops"));}
     if envelope.requested_action.is_some()||matches!(envelope.kind,Kind::TaskRequest){return Err(invalid("task changes require host-issued assignment and human review"));}
-    if matches!(envelope.kind,Kind::Completion)&&envelope.artifact_refs.is_empty(){return Err(invalid("completion requires host-observed artifact evidence"));}
+    if matches!(envelope.kind,Kind::Completion){
+                let evidence:Vec<_>=envelope.artifact_refs.iter().filter_map(|id|state.artifacts.get(id)).collect();
+                let diff=evidence.iter().any(|row|row["kind"]=="git_diff"&&row["host_verified"]==true);
+                let tests=evidence.iter().any(|row|row["kind"]=="test_result"&&row["host_verified"]==true&&row["passed"]==true);
+                if !diff||!tests{return Err(invalid("completion requires host-verified diff and passing test evidence; human review required"));}
+            }
     if context.charter.deadline>0&&unix_now()>=context.charter.deadline{return Err(invalid("fleet charter deadline reached"));}
     if state.received.contains_key(&envelope.message_id){return Err(invalid("duplicate fleet message; turn not started"));}
     if state.received.len()>=10_000||state.total_bytes.saturating_add(envelope.body.len() as u64)>8*1024*1024{return Err(invalid("fleet message journal or byte ceiling reached"));}
@@ -175,7 +190,10 @@ pub fn admit(context:&Context,envelope:&Envelope,recipient:&str,pid:i32,semantic
                 _=>{admission.unreviewed=true;admission.reason="semantic review unavailable".into();if context.review.message_mode==Mode::Enforce&&(context.review.strict_unavailable||!envelope.kind.ordinary()){admission.delivered=false;state.paused=true;state.reason=admission.reason.clone();}},
             }
         }
-        if admission.delivered{state.received.insert(envelope.message_id.clone(),unix_now());state.message_count+=1;state.total_bytes+=envelope.body.len() as u64;}
+        if admission.delivered{
+            state.received.insert(envelope.message_id.clone(),unix_now());state.traces.insert(envelope.message_id.clone(),MessageTrace{from:envelope.from_session.clone(),to:recipient.into(),hop:envelope.hop});state.message_count+=1;state.total_bytes+=envelope.body.len() as u64;
+            state.recent_messages.push(envelope.clone());while state.recent_messages.len()>8||state.recent_messages.iter().map(|row|row.body.len()).sum::<usize>()>12*1024{state.recent_messages.remove(0);}
+        }
         record(state,json!({"event":"admission","admission":admission,"from":envelope.from_session,"to":recipient,"kind":envelope.kind,"input_sha256":hash(envelope)?,"at":unix_now()}));
         Ok(admission)
     })
@@ -200,7 +218,7 @@ pub fn apply_supervisor(context:&Context,result:Result<SupervisorVerdict,String>
                 if context.review.supervisor_mode==Mode::Enforce&&verdict.verdict!=Alignment::Aligned{state.paused=true;state.reason=verdict.reason.clone();}
                 json!({"event":"supervisor_verdict","verdict":verdict,"at":unix_now()})
             },
-            _=>{state.supervisor_status="unavailable".into();state.paused=true;state.reason="independent supervisor failed or returned unverifiable evidence".into();json!({"event":"supervisor_unavailable","at":unix_now()})},
+            _=>{state.supervisor_status="unavailable".into();if context.review.supervisor_mode==Mode::Enforce{state.paused=true;state.reason="independent supervisor failed or returned unverifiable evidence".into();}json!({"event":"supervisor_unavailable","at":unix_now()})},
         };
         state.last_supervisor_at=unix_now();record(state,verdict);Ok(state.clone())
     })

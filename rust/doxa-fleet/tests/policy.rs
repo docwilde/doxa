@@ -42,8 +42,8 @@ fn replay_rate_deadline_and_completion_evidence_are_host_enforced(){
     let (_dir,mut context)=fixture();context.review.message_mode=Mode::Off;
     let message=envelope(&context,Kind::Status);assert!(admit(&context,&message,"b",101,None).unwrap().delivered);assert!(!admit(&context,&message,"b",101,None).unwrap().delivered);
     assert!(!admit(&context,&envelope(&context,Kind::Completion),"b",101,None).unwrap().delivered);
-    transaction(&context,|state|{state.artifacts.insert("host-test".into(),json!({"tests":"passed"}));Ok(())}).unwrap();
-    let mut completion=envelope(&context,Kind::Completion);completion.artifact_refs.push("host-test".into());assert!(admit(&context,&completion,"b",101,None).unwrap().delivered);
+    transaction(&context,|state|{state.artifacts.insert("host-test".into(),json!({"kind":"test_result","host_verified":true,"passed":true}));state.artifacts.insert("host-diff".into(),json!({"kind":"git_diff","host_verified":true}));Ok(())}).unwrap();
+    let mut completion=envelope(&context,Kind::Completion);completion.artifact_refs.push("host-test".into());completion.artifact_refs.push("host-diff".into());assert!(admit(&context,&completion,"b",101,None).unwrap().delivered);
     transaction(&context,|state|{state.message_count=60;state.minute=unix_now()/60;Ok(())}).unwrap();assert!(!admit(&context,&envelope(&context,Kind::Status),"b",101,None).unwrap().delivered);
     context.charter.deadline=unix_now()-1;context.charter_sha256=hash(&context.charter).unwrap();assert!(admit(&context,&envelope(&context,Kind::Status),"b",101,None).is_err());
 }
@@ -64,4 +64,27 @@ fn durable_state_recovers_dedup_and_refuses_charter_edits_symlinks_and_unknown_s
     let mut changed=context.clone();changed.charter.task="new goal".into();assert!(changed.validate().is_err());changed.charter_sha256=hash(&changed.charter).unwrap();assert!(transaction(&changed,|_|Ok(())).is_err());
     transaction(&context,|state|{state.accounting_unknown=true;Ok(())}).unwrap();assert!(resume_review(&context,&context.charter_sha256).is_err());
     let symlink=dir.path().join("linked");std::os::unix::fs::symlink(&context.state_path,&symlink).unwrap();assert!(read_private::<State>(&symlink,MAX_STATE).is_err());
+}
+
+#[test]
+fn supervisor_shadow_outage_is_observed_without_blocking_and_status_artifacts_cannot_prove_done(){
+    let (_dir,mut context)=fixture();context.review.supervisor=Some(judge::Model::parse("deepseek:reviewer").unwrap());context.review.supervisor_mode=Mode::Shadow;
+    let state=apply_supervisor(&context,Err("outage".into())).unwrap();assert!(!state.paused);assert_eq!(state.supervisor_status,"unavailable");
+    transaction(&context,|state|{state.artifacts.insert("host-status".into(),json!({"kind":"host_checkpoint","running":false,"tests_verified":false}));Ok(())}).unwrap();
+    let mut completion=envelope(&context,Kind::Completion);completion.artifact_refs.push("host-status".into());
+    assert!(!admit(&context,&completion,"b",101,Some(Ok(safe()))).unwrap().delivered);
+    assert!(transaction(&context,|state|Ok(state.received.is_empty())).unwrap());
+}
+
+#[test]
+fn host_reply_hops_survive_recovery_and_cannot_be_reset_by_a_peer(){
+    let (_dir,mut context)=fixture();context.review.message_mode=Mode::Off;
+    let root=envelope(&context,Kind::Status);assert!(admit(&context,&root,"b",101,None).unwrap().delivered);
+    let mut parent=root.message_id;
+    for hop in 1..=5{
+        let (from,to,pid)=if hop%2==1{("b","a",102)}else{("a","b",101)};
+        let mut reply=Envelope::issue(&context,from,to,Kind::Status,"bounded reply".into(),Some(parent.clone())).unwrap();assert_eq!(reply.hop,hop);
+        let actual=reply.hop;reply.hop=0;assert!(validate_before_review(&context,&reply,to,pid).is_err());reply.hop=actual;
+        let accepted=admit(&context,&reply,to,pid,None).unwrap();assert_eq!(accepted.delivered,hop<=4);parent=reply.message_id;
+    }
 }
