@@ -243,6 +243,9 @@ mod tests {
         crate::git(&source, &["worktree", "add", "--detach", linked.to_str().unwrap()]).unwrap();
         let snapshot = snapshot(&linked, true).unwrap();
         assert_eq!(crate::git(snapshot.path(), &["rev-parse", "HEAD"]).unwrap(), crate::git(&source, &["rev-parse", "HEAD"]).unwrap());
+        let independent = root.join("independent-linked");
+        crate::clone_checkout(&linked, &independent, "linked-safe", None).unwrap();
+        assert_eq!(fs::read_to_string(independent.join("README.txt")).unwrap(), "base\n");
         assert!(super::snapshot(&linked, false).is_err());
         let gitdir = source.join(".git/worktrees/linked");
         fs::write(gitdir.join("gitdir"), source.join(".git").to_str().unwrap()).unwrap();
