@@ -425,6 +425,7 @@ impl PeerHost {
 }
 
 impl Host for PeerHost {
+    fn isolation_status(&self) -> Option<Value> { self.inner.isolation_status() }
     fn has_active_work(&self) -> bool { self.inner.has_active_work() || self.spawner.lock().map_or(true,|manager|manager.as_ref().is_some_and(|manager|manager.is_active())) }
     fn peer_tools_ready(&self) -> bool { self.agent_tools_enabled && self.inner.peer_tools_ready() }
     fn initial_model(&self) -> Option<String> { self.inner.initial_model() }

@@ -77,7 +77,7 @@ fn command_target(command:&crate::bridge::WorkerCommand)->Option<&str>{
     match command {
         Launch(..)=>None,
         Attach(id,..)|Prompt(id,..)|Answer(id,..)|Peers(id)|Message(id,..)|Models(id)
-        |SetModel(id,..)|SetEffort(id,..)|SetPermissionMode(id,..)|Branch(id,..)
+        |SetModel(id,..)|SetEffort(id,..)|SetPermissionMode(id,..)|SetIsolation(id,..)|Branch(id,..)
         |QueueList(id)|ContextDetail(id)|RemoteHistory(id,..)|QueueCancel(id,..)|Status(id)|Stop(id)
         |FinalizeForClear(id)=>Some(id),
     }

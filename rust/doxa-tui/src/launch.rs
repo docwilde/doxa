@@ -55,6 +55,7 @@ impl Engine {
 
 #[derive(Debug, Default, Clone)]
 pub struct LaunchOptions {
+    pub isolation: Option<doxa_isolation::Profile>,
     pub engine: Engine,
     /// Recorded project directory for a verified historical resume.
     pub cwd: Option<PathBuf>,
@@ -407,6 +408,7 @@ fn spawn_inner(options: &LaunchOptions, fleet_runtime: Option<&Path>, environmen
         "--linger",
         &linger.to_string(),
     ]);
+    if let Some(profile) = options.isolation { command.args(["--isolation", profile.key()]); }
     if let Some(base) = &branch { command.args(["--base-branch", base]); }
     match options.engine {
         Engine::Fixture => {

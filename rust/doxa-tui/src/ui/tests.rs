@@ -1078,7 +1078,7 @@ for line in sys.stdin:
         let rendered = painted(&app);
         assert!(rendered.contains("Start session"));
         app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left),
-            column: form.x + 2, row: first + 2, modifiers: KeyModifiers::NONE }));
+            column: form.x + 2, row: first + 3, modifiers: KeyModifiers::NONE }));
         assert!(app.new_session.is_some());
         let (options, prompt, _) = app.pending_launches.pop().unwrap();
         assert_eq!(options.engine, launch::Engine::Claude);
@@ -1097,6 +1097,7 @@ for line in sys.stdin:
         assert_eq!(app.new_session.as_ref().unwrap().model, "deepseek-flash");
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert_eq!(app.new_session.as_ref().unwrap().effort.as_deref(), Some("high"));
+        app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         for c in "Explain this".chars() {
             app.handle(Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)));
@@ -1122,7 +1123,7 @@ for line in sys.stdin:
         app.engine_selected = 1; // Claude
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert_eq!(app.new_session.as_ref().unwrap().engine, launch::Engine::Claude);
-        app.new_session.as_mut().unwrap().field = 1;
+        app.new_session.as_mut().unwrap().field = 2;
         app.new_session.as_mut().unwrap().prompt = "Private first prompt".into();
         app.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
         assert!(app.launching && app.new_session.is_some());
@@ -1397,7 +1398,7 @@ for line in sys.stdin:
         assert!(app.new_session.as_ref().unwrap().models.is_empty());
         assert!(app.new_session.as_ref().unwrap().model.is_empty());
         assert!(app.new_session.as_ref().unwrap().catalog_note.contains("choose another engine"));
-        app.new_session.as_mut().unwrap().field = 2;
+        app.new_session.as_mut().unwrap().field = 3;
         app.new_session_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(app.pending_launches.is_empty());
         assert!(app.notice.contains("No verified models"));
@@ -1701,7 +1702,7 @@ for line in sys.stdin:
         assert!(app.manual_tab_available());
         // A form opened earlier must also recheck admission at submission.
         app.killed_this_run.clear();
-        app.new_session = Some(NewSession { engine:launch::Engine::Codex,model:"model".into(),models:Vec::new(),
+        app.new_session = Some(NewSession { isolation:doxa_isolation::Profile::Native,engine:launch::Engine::Codex,model:"model".into(),models:Vec::new(),
             model_efforts:HashMap::new(),catalog_note:String::new(),catalog_pending:false,launch_error:None,retry_allowed:true,effort:None,prompt:String::new(),field:1 });
         app.new_session_key(KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE));
         assert!(app.pending_launches.is_empty()); assert!(app.new_session.is_some());

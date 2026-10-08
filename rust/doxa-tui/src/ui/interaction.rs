@@ -1949,9 +1949,9 @@ impl App {
         } else if let Some(form) = self.new_session.as_mut() {
             let first = menu.y + if menu.height >= 8 { 4 } else { 2 };
             let fields = if vendor_models(form.engine).is_empty() {
-                2
-            } else {
                 3
+            } else {
+                4
             };
             if row >= first && usize::from(row - first) <= fields {
                 let index = usize::from(row - first);
@@ -3056,9 +3056,9 @@ impl App {
             if let Some(form) = self.new_session.as_mut() {
                 let first = y + if height >= 8 { 4 } else { 2 };
                 let fields = if vendor_models(form.engine).is_empty() {
-                    2
-                } else {
                     3
+                } else {
+                    4
                 };
                 if mouse.row >= first && usize::from(mouse.row - first) <= fields {
                     form.field = usize::from(mouse.row - first);

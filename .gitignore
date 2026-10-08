@@ -6,3 +6,4 @@ pr-body.md
 out.txt
 /rust/**/target/
 /target/
+/.target/

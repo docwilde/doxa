@@ -31,6 +31,7 @@ const MAX_CONNECTIONS: usize = 64;
 pub type PeerToolHandler = Arc<dyn Fn(&str, &Value) -> Result<Value, String> + Send + Sync>;
 
 pub trait Host: Send + Sync + 'static {
+    fn isolation_status(&self) -> Option<Value> { None }
     fn prompt(&self, text: &str, emit: &mut dyn FnMut(Value));
     fn call(&self, method: &str, params: &Value) -> Result<Value, String>;
     fn initial_model(&self) -> Option<String> { None }
@@ -410,7 +411,7 @@ fn handle_client(inner: Arc<Inner>, stream: UnixStream) {
             "running":state.busy,"queued":state.prompts.len(),"remote_driver":remote_identity(&state),
             "pending_inputs":state.pending_inputs,"pending_inputs_complete":state.pending_inputs_complete,
             "can_set_model":can_set_model,
-            "can_set_permission_mode":can_set_permission_mode,"peer_tools_ready":peer_tools_ready,
+            "can_set_permission_mode":can_set_permission_mode,"peer_tools_ready":peer_tools_ready,"isolation":inner.host.isolation_status(),
             "belief_count":lore_status.as_ref().and_then(|value|value["belief_count"].as_u64()),
             "disabled_tools":lore_status.as_ref().and_then(|value|value["disabled_tools"].as_array().cloned()),
             "lore_enabled":inner.host.lore_enabled(),"lore_scrub":lore_scrub,"billing":billing,"account":inner.host.account_snapshot()})
@@ -569,7 +570,7 @@ fn handle_call(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame: &Value) {
     let Some(req_id) = frame["id"].as_u64() else { return; };
     let Some(method) = frame["method"].as_str() else { return; };
     let params = frame.get("params").filter(|v| v.is_object()).cloned().unwrap_or_else(|| json!({}));
-    let _control_guard = matches!(method, "set_model" | "set_effort" | "set_permission_mode" | "switch_branch" | "stop" | "stop_if_idle")
+    let _control_guard = matches!(method, "set_isolation" | "isolation_migration_plan" | "set_model" | "set_effort" | "set_permission_mode" | "switch_branch" | "stop" | "stop_if_idle")
         .then(|| inner.controls.lock().unwrap());
     let (result, changed) = if method == "answer_needs_input" {
         let reviewed = params.get("reviewed_request");
@@ -637,10 +638,23 @@ fn handle_call(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame: &Value) {
             "model":state.model,"permission_mode":state.permission_mode,
             "engine":inner.session.engine,"effort":state.effort,"pending_effort":state.pending_effort,"running":state.busy,"queued":state.prompts.len(),"remote_driver":remote_identity(&state),
             "can_set_model":can_set_model,
-            "can_set_permission_mode":can_set_permission_mode,"peer_tools_ready":peer_tools_ready,
+            "can_set_permission_mode":can_set_permission_mode,"peer_tools_ready":peer_tools_ready,"isolation":inner.host.isolation_status(),
             "belief_count":lore_status.as_ref().and_then(|value|value["belief_count"].as_u64()),
             "disabled_tools":lore_status.as_ref().and_then(|value|value["disabled_tools"].as_array().cloned()),
             "lore_enabled":inner.host.lore_enabled(),"lore_scrub":lore_scrub,"billing":billing,"account":inner.host.account_snapshot()}})), None)
+    } else if matches!(method,"set_isolation"|"isolation_migration_plan") {
+        let idle = {
+            let state = inner.state.lock().unwrap();
+            !state.busy && state.prompts.is_empty() && state.pending_inputs.is_empty() && !inner.stopping.load(Ordering::Acquire)
+        };
+        if !idle { (Err("isolation changes require an idle session with no queued prompts or pending approvals".into()),None) }
+        else {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(||inner.host.call(method,&params)))
+                .unwrap_or_else(|_|Err("isolation host failed".into()));
+            let changed=result.as_ref().ok().filter(|_|method=="set_isolation").and_then(|reply|reply.get("isolation"))
+                .map(|value|json!({"type":"isolation_changed","data":{"isolation":value}}));
+            (result,changed)
+        }
     } else if method == "switch_branch" {
         let idle = {
             let state = inner.state.lock().unwrap();

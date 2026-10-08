@@ -357,11 +357,11 @@ impl App {
                 chooser_row_style(form.field == 0),
             ));
             let prompt_field = if vendor_models(form.engine).is_empty() {
-                1
-            } else {
                 2
+            } else {
+                3
             };
-            if prompt_field == 2 {
+            if prompt_field == 3 {
                 lines.push(Line::styled(
                     format!(
                         " {} Effort: {}",
@@ -371,6 +371,10 @@ impl App {
                     chooser_row_style(form.field == 1),
                 ));
             }
+            lines.push(Line::styled(
+                format!(" {} Isolation: {} · Left/Right select",if form.field==prompt_field-1{'›'}else{' '},form.isolation.label()),
+                chooser_row_style(form.field==prompt_field-1),
+            ));
             lines.push(Line::styled(
                 format!(
                     " {} First prompt: {}",

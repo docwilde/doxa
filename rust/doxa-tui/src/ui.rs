@@ -15,6 +15,7 @@ mod credential_editor;
 pub(crate) mod panes;
 mod render;
 mod session_controls;
+mod isolation_controls;
 mod session_navigation;
 mod terminal_loop;
 use render::context_detail_lines;
@@ -328,6 +329,7 @@ struct LorePicker {
 
 #[derive(Debug, Clone)]
 struct NewSession {
+    isolation: doxa_isolation::Profile,
     engine: launch::Engine,
     model: String,
     models: Vec<String>,

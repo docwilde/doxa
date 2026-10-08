@@ -237,6 +237,7 @@ impl App {
     /// provider and plugin commands still pass through. Known unsupported
     /// forms stay in the draft.
     pub(super) fn dispatch_prompt_command(&mut self) -> bool {
+        if self.dispatch_isolation_command() { return true; }
         let Some(parsed) = ParsedCommand::parse(self.input.trim()) else {
             return false;
         };

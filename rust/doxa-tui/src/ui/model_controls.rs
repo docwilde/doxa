@@ -469,6 +469,7 @@ impl App {
         self.vendor_catalog_pending = None;
         let catalog_pending = self.request_vendor_catalog(engine);
         self.new_session = Some(NewSession {
+            isolation: doxa_isolation::home().and_then(|home|doxa_isolation::configured_profile(&home)).unwrap_or_default(),
             engine,
             model,
             models: models.iter().map(|name| (*name).to_owned()).collect(),
@@ -609,12 +610,19 @@ impl App {
         }
         let form = self.new_session.as_mut().unwrap();
         let vendor = !vendor_models(form.engine).is_empty();
-        let fields = if vendor { 3 } else { 2 };
+        let fields = if vendor { 4 } else { 3 };
+        let isolation_field = fields - 2;
         let prompt_field = fields - 1;
         match key.code {
             KeyCode::Esc => self.new_session = None,
             KeyCode::Tab | KeyCode::Down => form.field = (form.field + 1) % fields,
             KeyCode::BackTab | KeyCode::Up => form.field = (form.field + fields - 1) % fields,
+            KeyCode::Left | KeyCode::Right if form.field == isolation_field => {
+                let profiles = [doxa_isolation::Profile::Native,doxa_isolation::Profile::DockerOpen,doxa_isolation::Profile::DockerOffline];
+                let current = profiles.iter().position(|p|*p==form.isolation).unwrap_or(0);
+                let next = if key.code==KeyCode::Right {(current+1)%profiles.len()}else{(current+profiles.len()-1)%profiles.len()};
+                form.isolation=profiles[next];
+            }
             KeyCode::Left | KeyCode::Right if vendor && form.field <= 1 => {
                 if form.field == 0 {
                     let choices = &form.models;
@@ -714,6 +722,7 @@ impl App {
                 }
                 let form = self.new_session.as_ref().unwrap().clone();
                 let mut options = launch::LaunchOptions {
+                    isolation: Some(form.isolation),
                     engine: form.engine,
                     ..Default::default()
                 };

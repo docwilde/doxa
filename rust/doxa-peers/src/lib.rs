@@ -84,6 +84,14 @@ pub fn runtime_dir() -> PathBuf {
 
 /// Main worktree checkout is the shared scope; outside git, use the cwd.
 pub fn scope_for_cwd(cwd: &Path) -> io::Result<String> {
+    if let Some(manifest) = doxa_isolation::active()? {
+        if cwd.starts_with(&manifest.checkout) {
+            return scope_without_isolation(&manifest.source);
+        }
+    }
+    scope_without_isolation(cwd)
+}
+fn scope_without_isolation(cwd: &Path) -> io::Result<String> {
     let output = std::process::Command::new("git")
         .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
         .current_dir(cwd).output();

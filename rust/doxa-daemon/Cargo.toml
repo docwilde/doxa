@@ -6,6 +6,7 @@ publish = false
 license = "AGPL-3.0-only"
 
 [dependencies]
+doxa-isolation = { path = "../doxa-isolation" }
 doxa-state = { path = "../doxa-state" }
 doxa-runtime = { path = "../doxa-runtime" }
 doxa-engines = { path = "../doxa-engines" }

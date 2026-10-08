@@ -210,6 +210,9 @@ impl CodexHost {
         } else { saved_transport.unwrap_or_else(|| {
             if std::env::var("DOXA_CODEX_APPSERVER").as_deref() == Ok("0") { "exec" } else { "app-server" }
         }) };
+        if doxa_isolation::active().map_err(|e| e.to_string())?.is_some() && transport != "app-server" {
+            return Err("Docker Codex requires the protected app-server transport; legacy exec cannot preserve its host compaction boundary".into());
+        }
         let agent_tools = if transport == "app-server" && (options.resume_thread.is_none() || saved_lore_tools) {
             crate::agent_tools::AgentTools::new(&cwd, session_id, "codex", lore_enabled)
         } else { None };
@@ -316,7 +319,10 @@ impl CodexHost {
         use std::os::unix::fs::{DirBuilderExt, MetadataExt};
         let home = std::env::var_os("HOME").map(PathBuf::from).ok_or(AppServerError::Protocol("HOME is unavailable for the compact gate"))?;
         let doxa_home = std::env::var_os("DOXA_HOME").map(PathBuf::from).unwrap_or_else(|| home.join(".doxa"));
-        let codex_home = std::env::var_os("CODEX_HOME").map(PathBuf::from).unwrap_or_else(|| home.join(".codex"));
+        let codex_home = match doxa_isolation::active()? {
+            Some(manifest) => manifest.private_home.join("codex"),
+            None => std::env::var_os("CODEX_HOME").map(PathBuf::from).unwrap_or_else(|| home.join(".codex")),
+        };
         if !doxa_home.is_absolute() || !codex_home.is_absolute() { return Err(AppServerError::Protocol("Compact gate requires absolute DOXA and Codex homes")); }
         let root = doxa_home.join("compact-hooks");
         std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&root)?;
@@ -330,7 +336,7 @@ impl CodexHost {
         std::fs::DirBuilder::new().mode(0o700).create(&directory)?;
         match doxa_engines::codex_compact::CompactGate::prepare_with_memory(&directory, &std::env::current_exe()?, &codex_home,
             Path::new(&self.cwd), &self.session_id, doxa_engines::codex_compact::SUPPORTED_VERSION, self.lore_enabled) {
-            Ok(gate) => Ok(gate),
+            Ok(mut gate) => { gate.isolate_hook()?; Ok(gate) },
             Err(error) => { let _ = std::fs::remove_dir(directory); Err(AppServerError::Io(error)) }
         }
     }

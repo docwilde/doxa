@@ -16,6 +16,7 @@ pub const HOOK_KEY: &str = "/<session-flags>/config.toml:pre_compact:0:0";
 const MATCHER: &str = "^(auto|manual)$";
 
 pub struct CompactGate {
+    broker: Option<doxa_isolation::broker::HookBroker>,
     directory: PathBuf,
     manifest: PathBuf,
     descriptor: Value,
@@ -93,8 +94,31 @@ impl CompactGate {
             return Err(error);
         }
         let manifest_meta = fs::symlink_metadata(&manifest)?;
-        Ok(Self { directory:directory.to_owned(), manifest, descriptor, command, hash, verified:false, directory_identity,carrier_identity,
+        Ok(Self { broker:None, directory:directory.to_owned(), manifest, descriptor, command, hash, verified:false, directory_identity,carrier_identity,
             carrier_digest: executable_digest, manifest_identity: (manifest_meta.dev(),manifest_meta.ino()) })
+    }
+    /// The command inside Docker can only submit a bounded compaction event
+    /// to this session's host gate; it cannot launch host commands or read LORE.
+    pub fn isolate_hook(&mut self) -> io::Result<()> {
+        let manifest = self.manifest.clone();
+        let executable = fs::canonicalize(std::env::current_exe()?)?;
+        let broker = doxa_isolation::broker::HookBroker::start(move |event, _| {
+            let result = crate::compact_hook::review(&manifest, &event, |metadata| {
+                let deadline = std::time::Instant::now() + crate::review_worker::REVIEW_TIMEOUT;
+                crate::review_worker::review(&executable, metadata, "codex", crate::review_worker::REVIEW_TIMEOUT, || std::time::Instant::now() >= deadline)
+            }).unwrap_or(false);
+            if result { json!({"continue":true,"suppressOutput":true}) }
+            else { json!({"continue":false,"suppressOutput":true,"stopReason":"DOXA host LORE review did not complete; compaction blocked"}) }
+        })?;
+        if let Some(broker) = broker {
+            self.command = broker.command().to_owned();
+            let normalized = json!({"event_name":"pre_compact","matcher":MATCHER,"hooks":[{
+                "type":"command","command":self.command,"timeout":HOOK_TIMEOUT,"async":false
+            }]});
+            self.hash = format!("sha256:{}", digest(&serde_json::to_vec(&normalized)?));
+            self.broker = Some(broker);
+        }
+        Ok(())
     }
     /// Append as process-local `-c` overrides. These trust this single pinned
     /// command; they never set bypass_hook_trust or edit CODEX_HOME/config.toml.

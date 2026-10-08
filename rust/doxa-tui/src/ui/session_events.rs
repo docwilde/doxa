@@ -242,6 +242,7 @@ impl App {
     }
 
     fn apply_daemon_frame_inner(&mut self, frame: &serde_json::Value) -> bool {
+        if let Some(changed)=self.apply_isolation_reply(frame){return changed;}
         let Some(kind) = frame.get("type").and_then(|v| v.as_str()) else {
             return false;
         };
@@ -772,6 +773,12 @@ impl App {
                         // A default title names the session at creation. The
                         // model chip shows later selection changes without
                         // diverging from the daemon registry or peer roster.
+                        true
+                    }
+                    "isolation_changed" => {
+                        if let Some(value)=super::isolation_controls::verified_status(&data["isolation"]){
+                            self.session_telemetry.entry(id.clone()).or_default().isolation=Some(value);
+                        }
                         true
                     }
                     "effort_changed" | "effort_verified" => {

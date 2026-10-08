@@ -567,6 +567,7 @@ dependencies = [
 name = "doxa-claude"
 version = "2.0.0-beta.9"
 dependencies = [
+ "doxa-isolation",
  "doxa-state",
  "libc",
  "serde_json",
@@ -579,6 +580,7 @@ version = "2.0.0-beta.9"
 dependencies = [
  "doxa-claude",
  "doxa-engines",
+ "doxa-isolation",
  "doxa-lore",
  "doxa-peers",
  "doxa-runtime",
@@ -601,6 +603,7 @@ dependencies = [
 name = "doxa-engines"
 version = "2.0.0-beta.9"
 dependencies = [
+ "doxa-isolation",
  "libc",
  "serde",
  "serde_json",
@@ -632,6 +635,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "doxa-isolation"
+version = "2.0.0-beta.8"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "toml",
+]
+
+[[package]]
 name = "doxa-lore"
 version = "2.0.0-beta.9"
 dependencies = [
@@ -648,6 +663,7 @@ name = "doxa-peers"
 version = "2.0.0-beta.9"
 dependencies = [
  "bytes",
+ "doxa-isolation",
  "doxa-state",
  "http-body-util",
  "hyper",
@@ -743,6 +759,7 @@ dependencies = [
  "crossterm",
  "doxa-claude",
  "doxa-engines",
+ "doxa-isolation",
  "doxa-lore",
  "doxa-peers",
  "doxa-protocol",

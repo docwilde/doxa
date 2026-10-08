@@ -34,6 +34,7 @@ pub enum WorkerCommand {
     SetModel(String, String),
     SetEffort(String, String),
     SetPermissionMode(String, String),
+    SetIsolation(String, String),
     Branch(String, Option<String>),
     QueueList(String),
     ContextDetail(String),
@@ -249,7 +250,7 @@ pub(crate) fn connect_sessions_inner(sessions:&[Session],readonly_restore:bool)-
             let id = match &command {
                 WorkerCommand::Prompt(id, _) | WorkerCommand::Answer(id, _, _) | WorkerCommand::Peers(id)
                 | WorkerCommand::Models(id) | WorkerCommand::SetModel(id, _) | WorkerCommand::SetEffort(id, _)
-                | WorkerCommand::SetPermissionMode(id, _) | WorkerCommand::QueueList(id) | WorkerCommand::ContextDetail(id) | WorkerCommand::Status(id)
+                | WorkerCommand::SetPermissionMode(id, _) | WorkerCommand::SetIsolation(id, _) | WorkerCommand::QueueList(id) | WorkerCommand::ContextDetail(id) | WorkerCommand::Status(id)
                 | WorkerCommand::Branch(id, _)
                 | WorkerCommand::QueueCancel(id, _) | WorkerCommand::RemoteHistory(id,_) => id,
                 WorkerCommand::Message(id, _, _) | WorkerCommand::Stop(id)
@@ -306,6 +307,7 @@ pub(crate) fn rejection_frame(command: WorkerCommand, message: &str) -> WorkerFr
         WorkerCommand::SetModel(id, _) => command_frame(id, CommandResult::SetModel { status, model: None }),
         WorkerCommand::SetEffort(id, _) => command_frame(id, CommandResult::SetEffort { status, effort: None, verification_pending: None }),
         WorkerCommand::SetPermissionMode(id, _) => command_frame(id, CommandResult::SetPermissionMode { status, mode: None }),
+        WorkerCommand::SetIsolation(id, _) => command_frame(id, CommandResult::SetIsolation { status, isolation: None }),
         WorkerCommand::Branch(id, _) => command_frame(id, CommandResult::Branch { status, base: None, branches: None, message: None }),
         WorkerCommand::QueueList(id) => command_frame(id, CommandResult::QueueList { status, rows: Vec::new() }),
         WorkerCommand::Status(session_id) => WorkerFrame::TelemetryUnavailable { session_id },
@@ -502,6 +504,19 @@ fn worker_loop(
                         Err(error) => CommandResult::SetEffort { status: ReplyStatus::failed(error.to_string()), effort: None, verification_pending: None },
                     };
                     if frames.send(command_frame(id, reply)).is_err() { return; }
+                }
+                Ok(WorkerCommand::SetIsolation(id, profile)) => {
+                    let result = if id == session_id {
+                        let mut params = Map::new();
+                        params.insert("profile".into(),Value::String(profile)); params.insert("confirmed".into(),Value::Bool(true));
+                        client.call("set_isolation",params)
+                    } else { Err(TransportError::Malformed("isolation target is not attached")) };
+                    cursor.store(client.cursor,Ordering::Relaxed);
+                    let reply=match result {
+                        Ok(reply)=>CommandResult::SetIsolation{status:ReplyStatus::from_wire(&reply),isolation:wire_value(&reply,"isolation")},
+                        Err(error)=>CommandResult::SetIsolation{status:ReplyStatus::failed(error.to_string()),isolation:None},
+                    };
+                    if frames.send(command_frame(id,reply)).is_err(){return;}
                 }
                 Ok(WorkerCommand::SetPermissionMode(id, mode)) => {
                     let result = if id == session_id {
