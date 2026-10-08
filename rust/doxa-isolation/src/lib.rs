@@ -260,7 +260,8 @@ pub fn create_args(manifest: &Manifest) -> io::Result<Vec<OsString>> {
         (&manifest.cache, "/work-cache"), (&manifest.broker, "/run/doxa/session")] {
         private_directory(source, false)?;
         let source = source.to_str().filter(|s| !s.contains(',') && !s.contains('\n')).ok_or_else(|| error("mount path cannot contain comma or newline"))?;
-        args.extend(["--mount".into(), format!("type=bind,src={source},dst={target}").into()]);
+        let access=if target=="/run/doxa/session"{",readonly"}else{""};
+        args.extend(["--mount".into(), format!("type=bind,src={source},dst={target}{access}").into()]);
     }
     args.extend(["--env".into(), "HOME=/home/doxa".into(), "--env".into(), "TMPDIR=/work-cache/tmp".into(),
         "--workdir".into(), "/workspace".into(), "--entrypoint".into(), "/usr/local/bin/doxa-isolation-worker".into(),
@@ -421,12 +422,12 @@ pub fn validate_inspect(manifest: &Manifest, actual: &Value) -> io::Result<()> {
         return Err(error("container image/identity/hardening/resources differ from manifest; quarantined"));
     }
     let mounts = actual["Mounts"].as_array().ok_or_else(|| error("container has no mount list"))?;
-    let expected = [(&manifest.checkout, "/workspace"), (&manifest.private_home, "/home/doxa"), (&manifest.cache, "/work-cache"), (&manifest.broker, "/run/doxa/session")];
-    if mounts.len() != expected.len() || expected.iter().any(|(source, target)| !mounts.iter().any(|row|
-        row["Type"] == "bind" && row["Source"].as_str() == source.to_str() && row["Destination"] == *target && row["RW"] == true)) {
+    let expected = [(&manifest.checkout, "/workspace",true), (&manifest.private_home, "/home/doxa",true), (&manifest.cache, "/work-cache",true), (&manifest.broker, "/run/doxa/session",false)];
+    if mounts.len() != expected.len() || expected.iter().any(|(source, target,writable)| !mounts.iter().any(|row|
+        row["Type"] == "bind" && row["Source"].as_str() == source.to_str() && row["Destination"] == *target && row["RW"] == *writable)) {
         return Err(error("container mounts differ from the four private session mounts"));
     }
-    for (source, _) in expected { private_directory(source, false)?; }
+    for (source, _,_) in expected { private_directory(source, false)?; }
     let meta = fs::metadata(&manifest.checkout)?;
     if (meta.dev(), meta.ino()) != (manifest.checkout_device, manifest.checkout_inode) { return Err(error("checkout bind identity changed")); }
     Ok(())

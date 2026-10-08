@@ -12,10 +12,15 @@ fn run() -> io::Result<()> {
         },
         Some("hold") if args.len() == 1 => loop { std::thread::park(); },
         Some("probe") if args.len() == 1 => {
-            for directory in ["/workspace", "/home/doxa", "/work-cache", "/run/doxa/session"] {
+            for directory in ["/workspace", "/home/doxa", "/work-cache"] {
                 let path = std::path::Path::new(directory).join(format!(".doxa-write-probe-{}", std::process::id()));
                 let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&path)?;
                 file.write_all(b"rootless write mapping")?; file.sync_all()?; std::fs::remove_file(path)?;
+            }
+            if !std::fs::metadata("/run/doxa/session")?.is_dir(){return Err(io::Error::other("session broker mount missing"));}
+            if std::fs::OpenOptions::new().write(true).create_new(true).open("/run/doxa/session/.worker-write-probe").is_ok(){
+                let _=std::fs::remove_file("/run/doxa/session/.worker-write-probe");
+                return Err(io::Error::other("session broker directory must be read-only to worker"));
             }
             for path in ["/var/run/docker.sock", "/run/docker.sock", "/home/docwilde", "/root/.ssh", "/root/.doxa"] {
                 if std::path::Path::new(path).exists() { return Err(io::Error::other("worker exposes a forbidden host path")); }

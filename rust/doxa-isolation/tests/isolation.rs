@@ -22,7 +22,7 @@ fn inspection(manifest:&Manifest)->Value{
         "Mounts":[{"Type":"bind","Source":manifest.checkout,"Destination":"/workspace","RW":true},
             {"Type":"bind","Source":manifest.private_home,"Destination":"/home/doxa","RW":true},
             {"Type":"bind","Source":manifest.cache,"Destination":"/work-cache","RW":true},
-            {"Type":"bind","Source":manifest.broker,"Destination":"/run/doxa/session","RW":true}]})
+            {"Type":"bind","Source":manifest.broker,"Destination":"/run/doxa/session","RW":false}]})
 }
 #[test]
 fn unsupported_profiles_and_unpinned_images_fail_closed(){
@@ -39,6 +39,7 @@ fn docker_launch_contains_only_four_private_mounts_and_enforced_controls(){
     let root=tempfile::tempdir().unwrap();let value=manifest(root.path());
     let args=create_args(&value).unwrap().into_iter().map(|v|v.to_string_lossy().into_owned()).collect::<Vec<_>>();
     assert_eq!(args.iter().filter(|arg|arg.as_str()=="--mount").count(),4);
+    assert!(args.iter().any(|arg|arg.ends_with("dst=/run/doxa/session,readonly")));
     assert!(args.contains(&"--cap-drop=ALL".into()));assert!(args.contains(&"--read-only".into()));
     assert!(args.contains(&"--pids-limit".into()));assert!(args.contains(&"--memory-swap".into()));
     assert!(args.contains(&"--security-opt=no-new-privileges:true".into()));
