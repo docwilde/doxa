@@ -20,10 +20,12 @@ failure rather than expecting a Linux build-version check. The three remaining
 macOS cases are visibly ignored in this target and stay open under
 [issue #197](https://github.com/docwilde/doxa/issues/197): two fake peer socket
 receivers saw `EINVAL` during full-stream reads, and native vendor finalization
-indexed zero messages where four were expected. The SQLite probe now reports
-query errors instead of silently treating all errors as zero. A green macOS
-job therefore covers the portable process path, but does not yet verify those
-three interactions or authenticated provider sessions.
+indexed zero messages where four were expected. The newly enabled fleet
+process fixture also cannot verify its sender PID after the test closes the
+Unix socket; fleet admission fails closed. The SQLite probe now reports query
+errors instead of silently treating all errors as zero. A green macOS job
+therefore covers the portable process path, but does not yet verify those
+four interactions or authenticated provider sessions.
 
 Bounded authenticated Claude, DeepSeek and GLM start, turn, stop/resume and
 usage checks passed on Linux with alpha.68; see

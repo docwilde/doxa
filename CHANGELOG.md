@@ -21,7 +21,7 @@ the stable 2.0 release has not been cut.
 
 - Add a Compose Android hub client for private session control and connected-only generic alerts. The SDK build passes; device QA and FCM background push remain open.
 - Add sourced DeepSeek context/thinking and GLM thinking facts, leaving unverified GLM context unknown. Preserve source session and project IDs for LORE pending-proposal review.
-- Add a sandboxed Mermaid renderer doctor and macOS daemon process coverage. Real CLI/Chromium and authenticated macOS provider checks remain open.
+- Add a sandboxed Mermaid renderer doctor and macOS daemon process coverage. Real CLI/Chromium, fleet sender PID and authenticated provider checks on macOS remain open.
 
 ## 2.0.0-beta.12 — 2026-10-08
 
