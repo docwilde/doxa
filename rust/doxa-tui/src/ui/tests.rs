@@ -2982,6 +2982,33 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn owner_status_chip_opens_local_refresh_ledger_without_provider_dispatch() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let plugin_dir = dir.path().join("native-plugins");
+        std::fs::create_dir(&plugin_dir).unwrap();
+        std::fs::set_permissions(&plugin_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        for (path, body) in [
+            (dir.path().join("config.toml"), "native_plugins = ['demo']\n"),
+            (plugin_dir.join("demo.toml"), "api_version = 1\nname = 'demo'\nversion = '1.0'\n[status]\nproducer = 'owner-file-v1'\nlabel = 'Queue'\nrefresh_seconds = 5\n"),
+        ] {
+            std::fs::write(&path, body).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let inventory = crate::native_plugins::load(dir.path(), &[]).unwrap();
+        let mut app = App::default();
+        app.handle(Event::Resize(100, 28));
+        app.groups[0].tabs.push("s".into());
+        app.native_status = crate::native_plugins::StatusRuntime::new(inventory.statuses);
+        assert!(app.chips(0).iter().any(|(kind, label)| *kind == "native_status" && label == "Queue: ?"));
+        app.open_chip_info("native_status", 0);
+        assert_eq!(app.chip_info.as_ref().map(|info| info.kind), Some("native_status"));
+        assert!(app.chip_info.as_ref().unwrap().lines.iter().any(|line| line.contains("failure ledger") || line.contains("ledger:")));
+        assert!(app.pending_prompts.is_empty());
+    }
+
+    #[test]
     fn shell_is_keyboard_only_and_never_provider_or_command_dispatch() {
         let root = tempfile::tempdir().unwrap(); let proof = root.path().join("proof");
         let mut app = App::default();

@@ -1201,6 +1201,10 @@ impl App {
         for command in &self.native_plugin_commands {
             lines.push(format!("{} · {} · owner-approved native text", command.name, command.summary));
         }
+        if self.native_status.chip_label().is_some() {
+            lines.push("Native status · owner-file-v1 · click its chip for value, refresh cost and failure ledger".into());
+            lines.extend(self.native_status.ledger_lines());
+        }
         for failure in &self.native_plugin_failures {
             lines.push(format!("Native plugin rejected: {failure}"));
         }

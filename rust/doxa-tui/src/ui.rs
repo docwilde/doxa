@@ -457,6 +457,7 @@ fn chip_hint(kind: &str) -> &'static str {
         "beliefs" => "LORE beliefs · click to browse",
         "cost" => "Provider billing and quota information",
         "balance" => "Current DeepSeek API account balance",
+        "native_status" => "Owner-approved native status · click for refresh cost and failure ledger",
         "more" => "More chips · click to reveal hidden chips",
         _ => "",
     }
@@ -1423,6 +1424,7 @@ pub struct App {
     plugin_commands: Vec<crate::operations::PluginCommand>,
     native_plugin_commands: Vec<crate::native_plugins::Command>,
     native_plugin_failures: Vec<String>,
+    native_status: crate::native_plugins::StatusRuntime,
     plugin_refresh: Option<crate::operations::PluginRefresh>,
     plugin_refresh_dirty: bool,
     fleet_menu: Option<fleet_menu::Menu>,
@@ -1712,6 +1714,7 @@ impl Default for App {
             plugin_commands: Vec::new(),
             native_plugin_commands: Vec::new(),
             native_plugin_failures: Vec::new(),
+            native_status: crate::native_plugins::StatusRuntime::default(),
             plugin_refresh: None,
             plugin_refresh_dirty: false,
             fleet_menu: None,

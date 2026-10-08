@@ -933,7 +933,7 @@ impl App {
         }
         if matches!(
             info.kind,
-            "memory" | "usage" | "context" | "help" | "sessions" | "about" | "remote_history" | "isolation" | "native_plugin"
+            "memory" | "usage" | "context" | "help" | "sessions" | "about" | "remote_history" | "isolation" | "native_plugin" | "native_status"
         ) {
             let current = self.groups[self.active_group].active_id().and_then(|id| {
                 self.session_cwds

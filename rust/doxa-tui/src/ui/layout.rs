@@ -512,6 +512,7 @@ impl App {
                         | "fleet_dependency_review"
                         | "isolation"
                         | "native_plugin"
+                        | "native_status"
                 ) {
                     (info.lines.len() + 2).clamp(7, 19) as u16
                 } else {
@@ -590,6 +591,9 @@ impl App {
                 .is_some_and(|capabilities| capabilities.permission_modes)
         }) {
             chips.push(("permission", "?".to_owned()));
+        }
+        if let Some(label) = self.native_status.chip_label() {
+            chips.push(("native_status", label));
         }
         if let Some(engine) = identity.and_then(|pair| pair.0.as_deref()) {
             chips.push(("engine", engine.to_owned()));
@@ -1069,6 +1073,7 @@ impl App {
             .find(|(candidate, _)| *candidate == kind)
             .map(|(_, label)| label)
             .unwrap_or_default();
+        let lines = if kind == "native_status" { self.native_status.ledger_lines() } else { Vec::new() };
         if kind == "repo" {
             if let Some(detail) = self.repo_detail(group) {
                 label.push_str(" · ");
@@ -1079,7 +1084,7 @@ impl App {
         self.chip_info = Some(ChipInfo {
             kind,
             label,
-            lines: Vec::new(),
+            lines,
             scroll: 0,
             owner: None,
         });

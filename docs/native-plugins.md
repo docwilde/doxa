@@ -1,6 +1,6 @@
 # Native text plugins
 
-Native text plugins add local, read-only slash commands to the Rust TUI. They
+Native data plugins add local, read-only slash commands or status values to the Rust TUI. They
 do not run code or contact a provider. Claude Code plugin adoption under
 `/plugins` is separate.
 
@@ -39,3 +39,34 @@ The loader rejects symlinks, loose permissions, unsupported API versions,
 unknown fields and control characters. A rejected plugin is reported in the
 TUI notice and `/help`; fix the file and restart the TUI. The limit is 16
 plugins, eight commands per plugin and 4 KiB of text per command.
+
+For a status-only plugin, replace the `[[commands]]` section with:
+
+```toml
+[status]
+producer = "owner-file-v1"
+label = "Queue"
+refresh_seconds = 30
+```
+
+The owner must arrange and supervise an external producer process; DOXA never
+starts or manages it. That process should atomically replace the private
+`$DOXA_HOME/native-plugins/team.status.toml` file:
+
+```toml
+value = "Ready"
+```
+
+The producer must rewrite the file at least once every three configured refresh
+intervals, even when its value has not changed. Older or future-dated files
+fail closed, and a cached value also disappears after three intervals without a
+successful refresh. DOXA reads this file as data only: at most 1 KiB per
+attempt and 96 bytes of display text, every 5–300 seconds as configured, in a background worker with a
+250 ms read budget. Click
+the status chip for its source digest and a refresh ledger (attempts, bytes,
+time, failures and cache expirations). Three consecutive failed or slow reads disable that status
+until restart; the chip then says **disabled**. Missing, linked, loosely
+permissioned, malformed and control-character values count as failures. The
+status never enters an agent prompt or runs plugin code.
+At most eight allowlisted statuses are active. The same manifest may also
+declare static commands.

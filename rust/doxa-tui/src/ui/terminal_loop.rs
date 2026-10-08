@@ -293,6 +293,7 @@ fn run_loop(
         Ok(inventory) => {
             app.native_plugin_commands = inventory.commands;
             app.native_plugin_failures = inventory.failures;
+            app.native_status = crate::native_plugins::StatusRuntime::new(inventory.statuses);
             if !app.native_plugin_failures.is_empty() {
                 app.notice = format!("Native plugin rejected: {}", app.native_plugin_failures.join(" · "));
             }
@@ -533,6 +534,16 @@ fn run_loop(
             changed = true;
         }
         changed |= app.poll_plugin_commands();
+        if !app.remote_mode {
+            let status = app.native_status.poll(Instant::now());
+            if let Some(plugin) = status.newly_disabled {
+                app.notice = format!("Native plugin status {plugin} disabled after repeated refresh failures");
+            }
+            if status.changed && app.chip_info.as_ref().is_some_and(|info| info.kind == "native_status") {
+                if let Some(info) = app.chip_info.as_mut() { info.lines = app.native_status.ledger_lines(); }
+            }
+            changed |= status.changed;
+        }
         changed |= app.poll_vendor_catalog();
         changed |= app.poll_model_catalog(Instant::now());
         changed |= app.tick_blink(Instant::now());
