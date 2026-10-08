@@ -1,6 +1,11 @@
 # Fleet communication and independent supervision
 
-Status: **implementation specification; not shipped**. This plan complements
+Status: **native host implementation in release preparation**. Independent
+supervisor and fast message-judge models are selectable; the host applies
+typed admission, shared review budgets and an immutable charter. The operator
+guide will record the final supported interfaces and remaining limits.
+
+This plan complements
 [per-session Docker isolation](session-isolation-docker.md). Containers limit
 what a worker can reach; fleet supervision limits what workers can ask one
 another to do and detects drift from the owner's task. Neither replaces human

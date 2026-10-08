@@ -1,6 +1,13 @@
 # Per-session Docker isolation for DOXA Rust
 
-Status: **implementation specification; not shipped**. Target: Linux first. This
+Status: **Linux implementation in release preparation**. Native, Docker with
+open egress and Docker with no network are implemented; the TUI shows the
+host-verified profile. See [the operator guide](../session-isolation.md) and
+[reviewed image packaging](../../containers/session/README.md) for current
+settings and commands. Hardened egress, hard disk quotas, macOS Docker Desktop,
+remote Engines and a containerized controller remain open.
+
+Target: Linux first. This
 spec covers both a DOXA controller running on the host and a DOXA controller
 packaged in Docker. The latter does not imply that a privileged Docker daemon
 must run inside the controller container.
@@ -181,7 +188,7 @@ operations, not broad credential or socket mounts.
 ## User-facing contract
 
 Owner configuration in `DOXA_HOME/config.toml` selects
-`session_isolation = "native" | "docker"`; a CLI flag and TUI picker can
+`session_isolation = "native" | "docker-open" | "docker-offline"`; a CLI flag and TUI picker can
 override it for a **new** session. Repository files and agent tools cannot
 weaken it. A saved session records its backend, image digest, policy hash,
 checkout identity, container ID and host runtime paths in an owner-private
