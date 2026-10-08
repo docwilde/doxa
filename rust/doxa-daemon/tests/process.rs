@@ -2886,7 +2886,8 @@ fn native_inbox_emits_scrubbed_peer_message_and_cleans_socket() {
 fn fleet_guard_rejects_forged_scope_false_completion_replay_and_cached_drift_before_turns(){
     use doxa_fleet::{Assignment,Charter,Context,Envelope,Kind,Mode,ReviewConfig,SemanticVerdict};
     let dir=tempfile::tempdir().unwrap();let codex=dir.path().join("codex-fixture");
-    executable(&codex,"#!/bin/sh\ncat >/dev/null\necho '{\"type\":\"thread.started\",\"thread_id\":\"thread-1\"}'\necho '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"done\"}}'\n");
+    let captured=dir.path().join("captured-fleet-prompt");
+    executable(&codex,&format!("#!/bin/sh\ncat > '{}'\necho '{{\"type\":\"thread.started\",\"thread_id\":\"thread-1\"}}'\necho '{{\"type\":\"item.completed\",\"item\":{{\"type\":\"agent_message\",\"text\":\"done\"}}}}'\n",captured.display()));
     let (_sender_listener,_)=registry_peer(dir.path(),"sender",dir.path().to_str().unwrap(),"sender");
     let mut process=Process::start_codex_with_inbound(dir.path(),&codex,Path::new("/usr/bin/python3"),true);
     let peer_socket=PathBuf::from(process.entry()["socket_path"].as_str().unwrap());
@@ -2904,6 +2905,10 @@ fn fleet_guard_rejects_forged_scope_false_completion_replay_and_cached_drift_bef
     doxa_peers::delivery::send(&peer_socket,&wire(&good)).unwrap();let mut saw_peer=false;let mut saw_done=false;
     for _ in 0..16{let event=receive(&mut reader);match event["event"]["type"].as_str(){Some("peer_message")=>{saw_peer=true;assert_eq!(event["event"]["data"]["fleet_admission"]["unreviewed"],false);},Some("turn_done")=>{saw_done=true;break;},_=>{}}}
     assert!(saw_peer&&saw_done);
+    let unreviewed=make(Kind::Status);doxa_fleet::cache_semantic(&context,&unreviewed,Err("fixture reviewer outage".into())).unwrap();
+    doxa_peers::delivery::send(&peer_socket,&wire(&unreviewed)).unwrap();let mut saw_unreviewed=false;let mut saw_done=false;
+    for _ in 0..16{let event=receive(&mut reader);match event["event"]["type"].as_str(){Some("peer_message")=>{saw_unreviewed=true;assert_eq!(event["event"]["data"]["fleet_admission"]["unreviewed"],true);},Some("turn_done")=>{saw_done=true;break;},_=>{}}}
+    assert!(saw_unreviewed&&saw_done);assert!(fs::read_to_string(&captured).unwrap().contains("semantic review unavailable; unreviewed peer data"));
     doxa_peers::delivery::send(&peer_socket,&wire(&good)).unwrap();loop{let event=receive(&mut reader);if event["event"]["type"]=="fleet_guard"&&event["event"]["data"]["delivered"]==false{assert!(event["event"]["data"]["reason"].as_str().unwrap().contains("duplicate"));break;}}
     let risky=make(Kind::Question);let risk=SemanticVerdict{within_assignment:0.0,asks_for_authority_change:1.0,contains_instructions_for_recipient:1.0,likely_secret:0.0,needs_human_review:1.0};assert!(doxa_fleet::cache_semantic(&context,&risky,Ok(risk)).is_err());
     doxa_peers::delivery::send(&peer_socket,&wire(&risky)).unwrap();let event=receive(&mut reader);assert_eq!(event["event"]["type"],"fleet_guard");assert_eq!(event["event"]["data"]["delivered"],false);

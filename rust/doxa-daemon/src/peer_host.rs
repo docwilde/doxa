@@ -471,7 +471,10 @@ impl PeerHost {
         let machine=data["origin"].as_str().map(|value|format!(" · machine {value}")).unwrap_or_default();
         let origin = format!("--- peer message · {} ({}) · {} · {}{} ---", title,
             id.chars().take(8).collect::<String>(), repo, sent_at,machine);
-        Some((format!("{origin}\n{body}"), origin))
+        let review = if data["fleet_admission"]["unreviewed"] == true {
+            "\n[Host admission: semantic review unavailable; unreviewed peer data.]"
+        } else { "" };
+        Some((format!("{origin}{review}\n{body}"), origin))
     }
 
     fn execute_prompt(&self, text: &str, emit: &mut dyn FnMut(Value)) {
@@ -549,6 +552,10 @@ impl Host for PeerHost {
         self.inner.public_prompt(text)
     }
     fn call(&self, method: &str, params: &Value) -> Result<Value, String> {
+        if matches!(method,"isolation_migration_plan"|"isolation_migration_stop")
+            && self.fleet.lock().map_err(|_|"Fleet guard unavailable")?.is_some() {
+            return Err("Fleet assignments freeze daemon identity; stop and review a new run to migrate isolation".into());
+        }
         if matches!(method,"interrupt"|"stop"){self.cancel_spawns(method=="stop");}
         if method=="answer_needs_input"&&params["id"].as_str().is_some_and(|id|id.starts_with("spawn-")) {
             return self.spawner.lock().map_err(|_|"Spawner unavailable")?.as_ref()
@@ -655,6 +662,27 @@ mod provider_target_tests {
         assert!(!target_matches("peer-replacement", "peer", true));
         assert!(target_matches("peer-original", "peer-original", true));
         assert!(!target_matches("peer-replacement", "peer-original", true));
+    }
+    #[test]
+    fn provider_prompt_marks_unreviewed_peer_data_without_copying_reviewer_prose() {
+        let event=serde_json::json!({"data":{"from_title":"Worker","from_id":"worker","sent_at":"now","body":"status report","fleet_admission":{"unreviewed":true,"reason":"UNTRUSTED-REVIEWER-PROSE"}}});
+        let (prompt,_)=super::PeerHost::peer_prompt(&event).unwrap();
+        assert!(prompt.contains("Host admission: semantic review unavailable; unreviewed peer data."));
+        assert!(prompt.contains("status report"));assert!(!prompt.contains("UNTRUSTED-REVIEWER-PROSE"));
+    }
+    #[test]
+    fn fleet_guard_blocks_both_migration_rpcs_before_forwarding_to_the_isolation_host() {
+        use super::*;use std::sync::atomic::{AtomicUsize,Ordering};
+        struct Recorder(AtomicUsize);impl Host for Recorder{fn prompt(&self,_:&str,_:&mut dyn FnMut(Value)){}fn call(&self,_:&str,_:&Value)->Result<Value,String>{self.0.fetch_add(1,Ordering::Relaxed);Ok(json!({"forwarded":true}))}}
+        let dir=tempfile::tempdir().unwrap();let inner=Arc::new(Recorder(AtomicUsize::new(0)));let(tx,_)=std::sync::mpsc::sync_channel(1);
+        let peer=PeerHost::new(inner.clone(),dir.path().into(),dir.path(),"session".into(),"session".into(),tx).unwrap();
+        assert_eq!(peer.call("isolation_migration_plan",&json!({})).unwrap()["forwarded"],true);
+        let charter=doxa_fleet::Charter{version:1,fleet_id:"run".into(),task:"Frozen task".into(),repo:dir.path().display().to_string(),allowed_paths:vec![String::new()],required_evidence:vec!["host tests".into()],worker_limit:1,run_budget_usd:Some(1.0),deadline:doxa_fleet::unix_now()+3600,human_actions:vec!["identity changes".into()]};
+        let context=doxa_fleet::Context{charter_sha256:doxa_fleet::hash(&charter).unwrap(),charter,assignments:vec![doxa_fleet::Assignment{id:"assignment".into(),session_id:"session".into(),pid:std::process::id() as i32,role:"worker".into(),task:"Frozen task".into(),cwd:dir.path().display().to_string(),base_commit:None}],review:Default::default(),state_path:dir.path().join("guard-state.json")};
+        assert_eq!(peer.call("fleet_configure",&serde_json::to_value(context).unwrap()).unwrap()["configured"],true);
+        for method in ["isolation_migration_plan","isolation_migration_stop"]{assert!(peer.call(method,&json!({})).unwrap_err().contains("freeze daemon identity"));}
+        assert_eq!(inner.0.load(Ordering::Relaxed),1,"migration plan or stop leaked into the host");
+        assert_eq!(peer.call("set_isolation",&json!({"profile":"docker-offline"})).unwrap()["forwarded"],true,"same-container network changes retain daemon identity");
     }
     #[test]
     fn model_peer_tools_are_off_by_default_and_freeze_the_host_setting() {

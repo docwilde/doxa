@@ -661,7 +661,7 @@ fn checkpoint(store:&Store,value:&mut Value,slots:&mut [Slot],initial:bool)->io:
     context.validate()?;
     let current=doxa_fleet::transaction(&context,|state|Ok(state.clone()))?;
     if current.paused&&!initial{value["supervision"]["paused"]=json!(true);value["supervision"]["reason"]=json!(current.reason);return Ok(());}
-    let mut artifacts=Vec::new();let mut out_of_scope=false;
+    let mut artifacts=Vec::new();let mut out_of_scope=false;let mut missing_git_evidence=false;
     for (index,slot) in slots.iter_mut().enumerate(){
         let state=rpc(&mut slot.client,"get_state",json!({}))?;
         let cwd=Path::new(context.assignments[index].cwd.as_str());
@@ -669,6 +669,7 @@ fn checkpoint(store:&Store,value:&mut Value,slots:&mut [Slot],initial:bool)->io:
         let paths=git_observation(cwd,&["-c","core.quotepath=false","diff","--no-ext-diff","--no-textconv","--name-only",baseline]);
         let untracked=git_observation(cwd,&["-c","core.quotepath=false","ls-files","--others","--exclude-standard"]);
         let changed=match (&paths,&untracked){(Ok(paths),Ok(untracked))=>Some(format!("{paths}{untracked}")),_=>None};
+        missing_git_evidence |= changed.is_none();
         if let Some(changed)=&changed{for path in changed.lines(){if !context.charter.allowed_paths.iter().any(|prefix|prefix.is_empty()||path==prefix||path.starts_with(&format!("{}/",prefix.trim_end_matches('/')))){out_of_scope=true;}}}
         let artifact=json!({"kind":"host_checkpoint","session_id":slot.session.id,"assignment_id":context.assignments[index].id,"changed_paths":changed,"git_observation_available":paths.is_ok()&&untracked.is_ok(),"running":state["running"],"queued":state["queued"],"last_turn":value["slots"][index]["last_turn"],"tests_verified":false});
         let id=format!("host-{}",doxa_fleet::hash(&artifact)?);artifacts.push((id,artifact));
@@ -677,9 +678,12 @@ fn checkpoint(store:&Store,value:&mut Value,slots:&mut [Slot],initial:bool)->io:
         for (id,artifact) in &artifacts{state.artifacts.insert(id.clone(),artifact.clone());}
         if state.artifacts.len()>512{state.paused=true;state.reason="fleet host evidence journal ceiling reached".into();}
         if out_of_scope{state.paused=true;state.reason="host observed changes outside the approved path scope".into();state.supervisor_status="drifted".into();}
+        if missing_git_evidence&&context.review.supervisor.is_some()&&context.review.supervisor_mode==doxa_fleet::Mode::Enforce{
+            state.paused=true;state.reason="host Git evidence unavailable; human review required".into();state.supervisor_status="uncertain".into();
+        }
         Ok(json!({"charter":context.charter,"assignments":context.assignments,"artifacts":artifacts.iter().map(|(id,artifact)|json!({"id":id,"evidence":artifact})).collect::<Vec<_>>(),"guard_observations":state.observations.iter().rev().take(16).collect::<Vec<_>>(),"budget":{"review_reserved_usd":state.reserved_usd,"review_budget_usd":context.review.budget_usd,"run_budget_usd":context.charter.run_budget_usd},"elapsed_deadline":context.charter.deadline,"phase":value["phase"]}))
     })?;
-    if context.review.supervisor.is_some()&&!out_of_scope {
+    if context.review.supervisor.is_some()&&!out_of_scope&&!(missing_git_evidence&&context.review.supervisor_mode==doxa_fleet::Mode::Enforce) {
         let clean=rpc(&mut slots[0].client,"fleet_scrub",json!({"snapshot":snapshot}));
         let result=match clean {Ok(clean)=>doxa_fleet::judge::supervise(&context,&clean["snapshot"]),Err(_)=>Err("independent supervisor snapshot scrub unavailable".into())};
         doxa_fleet::apply_supervisor(&context,result)?;
