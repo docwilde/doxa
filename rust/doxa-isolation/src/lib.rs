@@ -15,6 +15,8 @@ use std::{
 pub mod broker;
 pub mod workspace;
 pub mod migration;
+mod source_git;
+pub use source_git::staged_diff;
 
 pub const ACTIVE_MANIFEST: &str = "DOXA_ISOLATION_MANIFEST";
 pub const SESSION_MANIFEST: &str = "DOXA_SESSION_MANIFEST";
@@ -231,21 +233,25 @@ fn preflight(policy: &Policy) -> io::Result<()> {
 fn git(cwd: &Path, args: &[&str]) -> io::Result<String> {
     let mut command = Command::new("git");
     command.arg("-c").arg("core.hooksPath=/dev/null").args(args).current_dir(cwd)
-        .env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null").env_remove("GIT_CONFIG_PARAMETERS").env_remove("GIT_CONFIG_COUNT").env_remove("GIT_TEMPLATE_DIR")
-        .env_remove("GIT_DIR").env_remove("GIT_WORK_TREE").env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES").env_remove("GIT_OBJECT_DIRECTORY");
+        .env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_NO_REPLACE_OBJECTS", "1").env_remove("GIT_CONFIG_PARAMETERS").env_remove("GIT_CONFIG_COUNT").env_remove("GIT_TEMPLATE_DIR")
+        .env_remove("GIT_DIR").env_remove("GIT_WORK_TREE").env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES").env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_COMMON_DIR").env_remove("GIT_INDEX_FILE").env_remove("GIT_SHALLOW_FILE");
     String::from_utf8(run(command)?).map(|s| s.trim().to_owned()).map_err(|_| error("Git output is not UTF-8"))
 }
 fn clone_checkout(source: &Path, checkout: &Path, id: &str, base: Option<&str>) -> io::Result<(String, String)> {
-    let sha = git(source, &["rev-parse", "--verify", &format!("{}^{{commit}}", base.unwrap_or("HEAD"))])?;
-    if sha.len() != 40 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) { return Err(error("invalid checkout base SHA")); }
-    // clone from a Git checkout requires its actual main worktree, not a linked
-    // .git file. --no-local copies object data and never creates alternates.
     let source = fs::canonicalize(source)?;
+    let allow_linked = active()?.is_none_or(|manifest| !manifest.profile.docker() || manifest.checkout != source);
+    // Host Git never reads mutable source config, hooks, linked objects or
+    // replacement refs. Only a descriptor-anchored sanitized snapshot is used.
+    let snapshot = source_git::snapshot(&source, allow_linked)?;
+    let sha = git(snapshot.path(), &["rev-parse", "--verify", &format!("{}^{{commit}}", base.unwrap_or("HEAD"))])?;
+    if sha.len() != 40 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) { return Err(error("invalid checkout base SHA")); }
     let mut command = Command::new("git");
     command.args(["-c", "core.hooksPath=/dev/null", "clone", "--no-local", "--no-hardlinks", "--no-checkout", "--template=", "--"])
-        .arg(&source).arg(checkout).env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .arg(snapshot.path()).arg(checkout).env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_NO_REPLACE_OBJECTS", "1")
         .env_remove("GIT_CONFIG_PARAMETERS").env_remove("GIT_CONFIG_COUNT").env_remove("GIT_TEMPLATE_DIR")
-        .env_remove("GIT_DIR").env_remove("GIT_WORK_TREE").env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES").env_remove("GIT_OBJECT_DIRECTORY");
+        .env_remove("GIT_DIR").env_remove("GIT_WORK_TREE").env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES").env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_COMMON_DIR").env_remove("GIT_INDEX_FILE").env_remove("GIT_SHALLOW_FILE");
     run(command)?;
     fs::set_permissions(checkout, fs::Permissions::from_mode(0o700))?;
     git(checkout, &["remote", "remove", "origin"])?;

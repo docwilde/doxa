@@ -143,10 +143,10 @@ fn copy_checkout(source:&Path,destination:&Path)->io::Result<()> {
     }
     walk(source,destination,&mut 0,&mut 0)?;
     // Preserve staged changes separately from the copied working tree.
-    let patch=git(source,&["diff","--cached","--binary","--no-ext-diff","--no-textconv"])?;
+    let patch=staged_diff(source)?;
     if !patch.is_empty(){
         let mut file=tempfile::NamedTempFile::new_in(destination.parent().unwrap())?;
-        writeln!(file,"{patch}")?;file.flush()?;
+        file.write_all(&patch)?;file.flush()?;
         git(destination,&["apply","--cached","--binary",file.path().to_str().ok_or_else(||error("non-UTF8 patch path"))?])?;
     }
     File::open(destination)?.sync_all()
