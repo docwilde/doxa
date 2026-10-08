@@ -6,8 +6,8 @@ every proposed extension exists in Rust.
 
 | Work | Current status |
 | --- | --- |
-| [Session Docker isolation](session-isolation-docker.md) | Linux native/open-egress/no-network profiles, per-session clones and TUI policy controls are in release preparation. Hardened egress, disk quotas, remote Engines and Docker Desktop remain open. See the [operator guide](../session-isolation.md). |
-| [Independent fleet supervision](fleet-supervision.md) | Typed host admission, immutable charters, selectable alignment and message-review models, Jev support and review budgets are in release preparation. Real-message semantic calibration and automatic trusted test-evidence collection remain open. See the [operator guide](../fleet-supervision.md). |
+| [Session Docker isolation](session-isolation-docker.md) | Shipped in 2.0.0-beta.10: Linux native/open-egress/no-network profiles, per-session clones, idle backend migration and TUI policy controls. Hardened egress, disk quotas, remote Engines and Docker Desktop remain open. See the [operator guide](../session-isolation.md). |
+| [Independent fleet supervision](fleet-supervision.md) | Shipped in 2.0.0-beta.10: typed host admission, immutable charters, selectable alignment and message-review models, Jev support and review budgets. Real-message semantic calibration and automatic trusted test-evidence collection remain open. See the [operator guide](../fleet-supervision.md). |
 | [Remote hub and Android](remote-hub.md) | Native/browser control, the packaged encrypted Chrome client and browser Web Push exist. The Android client and Android push remain open. |
 | [Model registry](model-registry.md) | The draft is open. Native provider model listings exist; the proposed shared properties/provenance registry is not implemented. |
 | [Code graph](code-graph.md) | Draft; no native code-graph extraction/query feature is shipped. LORE belief browsing is a separate feature. |

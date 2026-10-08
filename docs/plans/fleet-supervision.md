@@ -1,9 +1,10 @@
 # Fleet communication and independent supervision
 
-Status: **native host implementation in release preparation**. Independent
+Status: **native host implementation shipped in 2.0.0-beta.10**. Independent
 supervisor and fast message-judge models are selectable; the host applies
-typed admission, shared review budgets and an immutable charter. The operator
-guide will record the final supported interfaces and remaining limits.
+typed admission, shared review budgets and an immutable charter. See [the operator guide](../fleet-supervision.md) for supported interfaces and
+remaining limits. Real-message calibration and automatic trusted test-evidence
+collection remain open.
 
 This plan complements
 [per-session Docker isolation](session-isolation-docker.md). Containers limit

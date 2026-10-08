@@ -1,6 +1,6 @@
 # Per-session Docker isolation for DOXA Rust
 
-Status: **Linux implementation in release preparation**. Native, Docker with
+Status: **Linux implementation shipped in 2.0.0-beta.10**. Native, Docker with
 open egress and Docker with no network are implemented; the TUI shows the
 host-verified profile. See [the operator guide](../session-isolation.md) and
 [reviewed image packaging](../../containers/session/README.md) for current
