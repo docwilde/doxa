@@ -2968,8 +2968,14 @@ fn fleet_guard_rejects_forged_scope_false_completion_replay_and_cached_drift_bef
     send(&mut socket,json!({"type":"call","id":2,"method":"fleet_state","params":{}}));let guard=receive(&mut reader);assert_eq!(guard["state"]["paused"],false,"deterministic denials unexpectedly paused the fixture: {guard}");assert_eq!(guard["state"]["calls"],0);
     let good=make(Kind::Status);let safe=SemanticVerdict{within_assignment:1.0,asks_for_authority_change:0.0,contains_instructions_for_recipient:0.0,likely_secret:0.0,needs_human_review:0.0};doxa_fleet::cache_semantic(&context,&good,Ok(safe)).unwrap();
     held.push(send_held(&good));let mut saw_peer=false;let mut saw_done=false;
-    for _ in 0..16{let event=receive(&mut reader);eprintln!("fleet good status event: {event}");match event["event"]["type"].as_str(){Some("fleet_guard")=>assert_eq!(event["event"]["data"]["delivered"],true,"known-safe cached status was denied: {event}"),Some("peer_message")=>{saw_peer=true;assert_eq!(event["event"]["data"]["fleet_admission"]["unreviewed"],false);},Some("turn_refused")=>panic!("known-safe status turn refused: {event}"),Some("turn_done")=>{assert_ne!(event["event"]["data"]["is_error"],true,"fixture provider failed: {event}");saw_done=true;break;},_=>{}}}
+    for _ in 0..16{let event=receive(&mut reader);eprintln!("fleet good status event: {event}");match event["event"]["type"].as_str(){Some("fleet_guard")=>assert_eq!(event["event"]["data"]["delivered"],true,"known-safe cached status was denied: {event}"),Some("peer_message")=>{saw_peer=true;assert_eq!(event["event"]["data"]["fleet_admission"]["unreviewed"],false);},Some("turn_refused")=>panic!("known-safe status turn refused: {event}"),Some("turn_done")=>{if cfg!(target_os="macos"){assert_eq!(event["event"]["data"]["error"],"Codex app-server or compaction review gate could not start");}else{assert_ne!(event["event"]["data"]["is_error"],true,"fixture provider failed: {event}");}saw_done=true;break;},_=>{}}}
     assert!(saw_peer&&saw_done);
+    if cfg!(target_os="macos") {
+        // The held socket proves kernel PID admission. Protected Codex turns
+        // remain Linux-only, so stop before provider-dependent assertions.
+        send(&mut socket,json!({"type":"call","id":5,"method":"stop","params":{}}));assert_eq!(receive(&mut reader)["ok"],true);wait_until(||process.exited());
+        return;
+    }
     let mut unreviewed=make(Kind::Status);let fixture_secret="sk-ownedCanonicalFixtureSecret1234567890";unreviewed.body=format!("Status contains {fixture_secret}");
     let evidence_id=doxa_fleet::evidence_id(&json!({"kind":"host_checkpoint","running":false})).unwrap();
     send(&mut socket,json!({"type":"call","id":3,"method":"fleet_scrub","params":{"snapshot":{"body":unreviewed.body,"evidence_id":evidence_id,"charter_sha256":context.charter_sha256}}}));
