@@ -861,6 +861,75 @@ impl Host for CodexHost {
 
     fn call(&self, method: &str, params: &Value) -> Result<Value, String> {
         match method {
+            "verify_resume" => {
+                if self.transport != "app-server" { return Err(LEGACY_READ_ONLY.into()); }
+                if self.active.lock().unwrap().is_some() || self.closing.load(Ordering::Acquire) {
+                    return Err("Codex resume verification requires an idle session".into());
+                }
+                if self.persistence_failed.load(Ordering::Acquire) || self.scrub_failed.load(Ordering::Acquire) {
+                    return Err("Codex persistence or scrub failed; resume cannot be verified".into());
+                }
+                let record = self.store.read_thread().map_err(|_| "Codex checkpoint is unreadable")?
+                    .ok_or("Codex resume verification requires a saved provider thread")?;
+                if record["turn_incomplete"] != false || record["session_id"].as_str() != Some(self.session_id.as_str())
+                    || record["cwd"].as_str() != Some(self.cwd.as_str()) {
+                    return Err("Codex resume checkpoint is incomplete or belongs to another session".into());
+                }
+                self.store.verify_thread_checkpoint(&record).map_err(|_| "Codex resume transcript checkpoint differs")?;
+                let expected = record["thread_id"].as_str().filter(|id| doxa_engines::codex_driver::valid_thread_id(id))
+                    .ok_or("Codex resume checkpoint has no valid thread")?.to_owned();
+                let runtime = self.runtime.lock().unwrap();
+                let mut driver = self.driver.lock().unwrap();
+                let CodexTransport::AppServer { options, active, resume_thread } = &mut *driver else {
+                    return Err(LEGACY_READ_ONLY.into());
+                };
+                if options.resume_thread.as_deref() != Some(expected.as_str())
+                    || resume_thread.as_deref() != Some(expected.as_str()) {
+                    return Err("Codex resume provider selection differs from its checkpoint".into());
+                }
+                if active.is_none() {
+                    let lore = self.lore.clone();
+                    let failed = self.scrub_failed.clone();
+                    let scrub = move |text: &str| match lore.lock().unwrap().scrub(text) {
+                        Ok(clean) => clean,
+                        Err(_) => { failed.store(true, Ordering::Release); SCRUB_FAILURE.to_owned() }
+                    };
+                    let token = CancellationToken::new();
+                    *self.active.lock().unwrap() = Some(token.clone());
+                    let peer_tools_enabled = self.peer_tools.lock().unwrap().is_some();
+                    let result = runtime.block_on(async {
+                        tokio::select! {
+                            biased;
+                            _ = token.cancelled() => Err(AppServerError::Cancelled),
+                            result = tokio::time::timeout(Duration::from_secs(45), async {
+                                let gate = self.compact_gate()?;
+                                let mut tools = self.agent_tools.as_ref().map(|tools| tools.definitions()).unwrap_or_default();
+                                if self.session_tools.lock().unwrap().is_some() { tools.extend(doxa_engines::session_tools::definitions()); }
+                                AppServerDriver::spawn_protected_with_agent_tools(options.clone(), scrub, peer_tools_enabled, gate, tools).await
+                            }) => result.unwrap_or(Err(AppServerError::TimedOut)),
+                        }
+                    });
+                    *self.active.lock().unwrap() = None;
+                    let mut app = result.map_err(|error| match error {
+                        AppServerError::Protocol(message) => message.to_owned(),
+                        AppServerError::Server(message) => message,
+                        _ => "Codex protected provider resume could not be verified".into(),
+                    })?;
+                    if app.thread_id() != expected || self.closing.load(Ordering::Acquire) {
+                        runtime.block_on(app.shutdown());
+                        return Err("Codex resumed provider identity differs or the session is closing".into());
+                    }
+                    let selected = self.selection.lock().unwrap().clone();
+                    app.set_selection(selected.0, selected.1);
+                    *active = Some(app);
+                }
+                if active.as_ref().is_none_or(|app| app.thread_id() != expected) {
+                    return Err("Codex active provider does not match the saved thread".into());
+                }
+                // Verification sends no turn and rewrites neither transcript nor
+                // thread checkpoint. Migration may still need to roll back.
+                Ok(json!({"verified":true,"thread_id":expected}))
+            }
             "set_permission_mode" => {
                 if self.transport != "app-server" { return Err(LEGACY_READ_ONLY.into()); }
                 if self.active.lock().unwrap().is_some() || self.closing.load(Ordering::Acquire) {

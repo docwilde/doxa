@@ -570,7 +570,7 @@ fn handle_call(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame: &Value) {
     let Some(req_id) = frame["id"].as_u64() else { return; };
     let Some(method) = frame["method"].as_str() else { return; };
     let params = frame.get("params").filter(|v| v.is_object()).cloned().unwrap_or_else(|| json!({}));
-    let _control_guard = matches!(method, "set_isolation" | "isolation_migration_plan" | "set_model" | "set_effort" | "set_permission_mode" | "switch_branch" | "stop" | "stop_if_idle")
+    let _control_guard = matches!(method, "set_isolation" | "isolation_migration_plan" | "verify_resume" | "set_model" | "set_effort" | "set_permission_mode" | "switch_branch" | "stop" | "stop_if_idle")
         .then(|| inner.controls.lock().unwrap());
     let (result, changed) = if method == "answer_needs_input" {
         let reviewed = params.get("reviewed_request");
@@ -642,7 +642,7 @@ fn handle_call(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame: &Value) {
             "belief_count":lore_status.as_ref().and_then(|value|value["belief_count"].as_u64()),
             "disabled_tools":lore_status.as_ref().and_then(|value|value["disabled_tools"].as_array().cloned()),
             "lore_enabled":inner.host.lore_enabled(),"lore_scrub":lore_scrub,"billing":billing,"account":inner.host.account_snapshot()}})), None)
-    } else if matches!(method,"set_isolation"|"isolation_migration_plan") {
+    } else if matches!(method,"set_isolation"|"isolation_migration_plan"|"verify_resume") {
         let idle = {
             let state = inner.state.lock().unwrap();
             !state.busy && state.prompts.is_empty() && state.pending_inputs.is_empty() && !inner.stopping.load(Ordering::Acquire)

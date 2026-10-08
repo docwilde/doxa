@@ -3140,6 +3140,28 @@ for line in sys.stdin: pass
         reader.get_ref().set_read_timeout(Some(CODEX_PREPARATION_TIMEOUT)).unwrap();
         receive(&mut reader);
         send(&mut socket, json!({"type":"attach","cursor":null}));
+        let transcript_path = native_transcript(dir.path(), "codex-session.jsonl");
+        let checkpoint_path = native_transcript(dir.path(), "codex-session.codex.json");
+        let transcript_before = fs::read(&transcript_path).ok();
+        let checkpoint_before = fs::read(&checkpoint_path).ok();
+        for _ in 0..2 {
+            send(&mut socket, json!({"type":"call","id":90,"method":"verify_resume","params":{}}));
+            loop {
+                let reply = receive(&mut reader);
+                if reply["type"] == "reply" && reply["id"] == 90 {
+                    assert_eq!(reply["ok"], resume, "{reply}");
+                    if resume {
+                        assert_eq!(reply["verified"], true);
+                        assert_eq!(reply["thread_id"], "thread-1");
+                    }
+                    break;
+                }
+            }
+        }
+        assert_eq!(fs::read(&transcript_path).ok(), transcript_before, "verification submitted or recorded a turn");
+        assert_eq!(fs::read(&checkpoint_path).ok(), checkpoint_before, "verification rewrote its durable checkpoint");
+        if resume { assert_eq!(fs::read_to_string(&log).unwrap(), "thread/start\nthread/resume\n"); }
+        else { assert!(!log.exists(), "fresh-session verification started a new provider thread"); }
         for prompt_id in [1, 2] {
         if prompt_id == 2 {
             for (method, params, expected) in [
