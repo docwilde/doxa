@@ -29,6 +29,11 @@ the LORE-scrubbed charter, assignment, messages, and host snapshots into those
 external services. The model ID is explicit; unavailable models pause review
 rather than silently switching providers.
 
+Use `--isolation native|docker-open|docker-offline` to select each worker's
+execution boundary. The launch review and manifest record it; the owner's
+new-session default applies when omitted. Cross-backend migration is held while
+a supervised fleet binds a daemon PID; idle Docker network changes retain it.
+
 The controller freezes the task, approved path prefixes, run budget, deadline,
 human-only actions, and assignments before dispatch. Its manifest records the
 charter SHA256 and all review settings. Each daemon binds the assignment to its
