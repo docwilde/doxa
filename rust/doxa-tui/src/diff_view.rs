@@ -195,6 +195,7 @@ fn apply_patch(cwd: &Path, patch: &[u8], check: bool) -> Result<(), String> {
     command.args(["--no-pager", "apply", "--reverse", "--recount"]);
     if check { command.arg("--check"); }
     command.arg("-").current_dir(cwd).env("GIT_OPTIONAL_LOCKS", "0");
+    let mut command = doxa_isolation::workspace::command(command).map_err(|error| error.to_string())?;
     let (status, _, _) = run_git(&mut command, Some(patch), 0, GIT_TIMEOUT)
         .map_err(|_| "Git apply timed out or failed; inspect the worktree before retrying.".to_owned())?;
     if status.success() { Ok(()) }
@@ -286,6 +287,7 @@ fn run_git(command: &mut Command, input: Option<&[u8]>, limit: usize, timeout: D
 fn git_output(cwd: &Path, args: &[&str], limit: usize) -> Result<(Vec<u8>, bool), String> {
     let mut command = Command::new("git");
     command.args(args).current_dir(cwd).env("GIT_OPTIONAL_LOCKS", "0");
+    let mut command = doxa_isolation::workspace::command(command).map_err(|error| error.to_string())?;
     let (status, bytes, truncated) = run_git(&mut command,None,limit,GIT_TIMEOUT)
         .map_err(|_| "Git timed out or could not inspect this worktree.".to_owned())?;
     if !status.success() { return Err("Git could not inspect this worktree.".into()); }

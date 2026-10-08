@@ -13,6 +13,7 @@ use std::{
     time::{Duration, Instant},
 };
 pub mod broker;
+pub mod workspace;
 
 pub const ACTIVE_MANIFEST: &str = "DOXA_ISOLATION_MANIFEST";
 const MAX_MANIFEST: u64 = 64 * 1024;

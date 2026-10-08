@@ -113,10 +113,15 @@ fn git(cwd: &Path, args: &[&str], timeout: Duration) -> Option<(bool, Vec<u8>)> 
     git_program(Path::new("git"), cwd, args, timeout)
 }
 fn git_program(program: &Path, cwd: &Path, args: &[&str], timeout: Duration) -> Option<(bool, Vec<u8>)> {
-    let mut child = Command::new(program).args(args).current_dir(cwd).process_group(0)
+    let mut command = Command::new(program);
+    command.args(args).current_dir(cwd)
         .env_remove("GIT_DIR").env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_COMMON_DIR").env_remove("GIT_INDEX_FILE")
-        .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
+        .env_remove("GIT_COMMON_DIR").env_remove("GIT_INDEX_FILE");
+    let mut command = if program == Path::new("git") {
+        doxa_isolation::workspace::command(command).ok()?
+    } else { command };
+    let mut child = command.process_group(0).stdin(Stdio::null())
+        .stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
     let pid = child.id() as i32;
     let result = (|| {
         let mut stdout = child.stdout.take()?;
