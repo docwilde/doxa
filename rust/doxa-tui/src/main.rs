@@ -623,6 +623,10 @@ fn fleet(args: &[String]) -> io::Result<()> {
             let worker=worker.parse().map_err(|_|invalid("dependency worker must be a slot number"))?;
             println!("{}",serde_json::to_string_pretty(&fleet_control::dependency_evidence(&root,run,worker)?)?);
         },
+        ["test", run, worker] => {
+            let worker=worker.parse().map_err(|_|invalid("host test worker must be a slot number"))?;
+            println!("{}",serde_json::to_string_pretty(&fleet_control::run_host_test(&root,run,worker)?)?);
+        },
         ["dependency-release", run, worker, token] => {
             let worker=worker.parse().map_err(|_|invalid("dependency worker must be a slot number"))?;
             println!("{}",fleet_control::release_dependency(&root,run,worker,token)?);
@@ -649,7 +653,7 @@ fn fleet(args: &[String]) -> io::Result<()> {
             let (socket, session_id) = fleet_view::slot_socket(&root, run, slot)?;
             return bridge::run_socket_expected(socket, Some(&session_id));
         }
-        _ => return Err(invalid("usage: doxa fleet start --pool ENGINE:MODEL --prompt TEXT -n N --run-budget USD [--worker-after INDEX:PREDECESSOR] | preflight | runs | status RUN | dependency-evidence RUN SLOT | dependency-review RUN SLOT | dependency-release RUN SLOT TOKEN | resume RUN | stop RUN | attach RUN SLOT [--root ABSOLUTE_PATH]")),
+        _ => return Err(invalid("usage: doxa fleet start --pool ENGINE:MODEL --prompt TEXT -n N --run-budget USD [--worker-after INDEX:PREDECESSOR] [--test-recipe ABSOLUTE_JSON_PATH] | preflight | runs | status RUN | test RUN SLOT | dependency-evidence RUN SLOT | dependency-review RUN SLOT | dependency-release RUN SLOT TOKEN | resume RUN | stop RUN | attach RUN SLOT [--root ABSOLUTE_PATH]")),
     }
     Ok(())
 }

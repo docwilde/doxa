@@ -2,6 +2,7 @@
 //! Reviewers receive bounded data and have no tools or mutable worker history.
 pub mod judge;
 pub mod calibration;
+pub mod evidence;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -51,6 +52,8 @@ pub struct Charter {
     pub allowed_paths:Vec<String>, pub required_evidence:Vec<String>,
     pub worker_limit:u64, pub run_budget_usd:Option<f64>, pub deadline:u64,
     pub human_actions:Vec<String>,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub test_recipe:Option<evidence::TestRecipe>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -61,6 +64,7 @@ pub struct Context { pub charter:Charter, pub charter_sha256:String, pub assignm
 impl Context {
     pub fn validate(&self) -> io::Result<()> {
         self.review.validate()?;
+        if let Some(recipe)=&self.charter.test_recipe { recipe.validate()?; }
         if self.charter.version!=1 || self.charter.task.trim().is_empty() || self.charter.task.len()>64*1024 || self.charter_sha256!=hash(&self.charter)? || !self.state_path.is_absolute() || self.assignments.is_empty() || self.assignments.len()>1025
             || self.charter.allowed_paths.is_empty() || self.charter.allowed_paths.iter().any(|path|path.starts_with('/')||path.len()>512||path.split('/').any(|part|part=="..")||path.chars().any(char::is_control)) {return Err(invalid("invalid immutable fleet charter"));}
         for (index,row) in self.assignments.iter().enumerate() {
@@ -236,11 +240,8 @@ fn deterministic(context:&Context,envelope:&Envelope,recipient:&str,pid:i32,stat
     }
     if envelope.requested_action.is_some()||matches!(envelope.kind,Kind::TaskRequest){return Err(invalid("task changes require host-issued assignment and human review"));}
     if matches!(envelope.kind,Kind::Completion){
-                let evidence:Vec<_>=envelope.artifact_refs.iter().filter_map(|id|state.artifacts.get(id)).collect();
-                let diff=evidence.iter().any(|row|row["kind"]=="git_diff"&&row["host_verified"]==true);
-                let tests=evidence.iter().any(|row|row["kind"]=="test_result"&&row["host_verified"]==true&&row["passed"]==true);
-                if !diff||!tests{return Err(invalid("completion requires host-verified diff and passing test evidence; human review required"));}
-            }
+        evidence::completion_snapshot(context,state,envelope)?;
+    }
     if context.charter.deadline>0&&unix_now()>=context.charter.deadline{return Err(invalid("fleet charter deadline reached"));}
     if state.received.contains_key(&envelope.message_id){return Err(invalid("duplicate fleet message; turn not started"));}
     if state.received.len()>=10_000||state.total_bytes.saturating_add(envelope.body.len() as u64)>8*1024*1024{return Err(invalid("fleet message journal or byte ceiling reached"));}

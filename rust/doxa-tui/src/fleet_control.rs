@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
-pub const HELP: &str = "Native DOXA fleet coordinator\n\nUsage: doxa fleet start --pool ENGINE[:MODEL][@WEIGHT],... [OPTIONS]\n\n  --prompt TEXT | --prompt-file PATH   Shared task (file takes precedence)\n  -n, --sessions N                    Worker count\n  --supervisor ENGINE[:MODEL]          Acting coordinator; task may be interactive\n  --alignment-supervisor PROVIDER:MODEL Independent read-only alignment model\n  --supervision-mode shadow|enforce     Independent review action (default enforce)\n  --message-review off|shadow|enforce   Fast semantic admission mode\n  --message-judge llm:PROVIDER:MODEL | jev:MODEL\n  --review-budget USD                  Reserved from the total run budget\n  --review-max-calls N --review-interval SECONDS\n  --review-input-price USD_PER_MTOK --review-output-price USD_PER_MTOK\n  --review-threshold PROBABILITY        Explicit enforcement threshold\n  --strict-unreviewed                  Hold every message if its judge is unavailable\n  --allowed-path RELATIVE_PREFIX       Approved scope (repeatable; default repository)\n  --worker-task INDEX:TEXT             Frozen task for each worker (1-based; specify all)\n  --worker-path INDEX:RELATIVE_PREFIX  Narrow one worker's approved paths (repeatable)\n  --worker-after INDEX:PREDECESSOR    Wait for an earlier worker (repeatable)\n  --isolation native|docker-open|docker-offline\n  --cwd PATH --root PATH --run-id ID   Workspace and isolated run identity\n  --seed INTEGER                      Recorded deterministic assignment seed\n  --memory-off N                      Number of workers with memory disabled\n  --run-budget USD | --allow-unbudgeted\n  --approve none|peer|all              Permission policy; questions/spawns require a human\n  --approval-grace SECONDS             Human review window before policy applies\n  --quiescence-timeout SECONDS         Total wait deadline\n  --quiet-dwell SECONDS                Quiet period (alias: --quiescence-grace)\n  --force                             Override memory capacity refusal\n  --dry-run                           Review capacity and assignments without launching\n\nOther commands: preflight, runs, status, resume, continue RUN CHARTER_HASH, dependency-evidence, dependency-review, dependency-release, review, answer, attach, stop\n  calibrate LABELED_JSONL               Offline threshold metrics; no model calls\n";
+pub const HELP: &str = "Native DOXA fleet coordinator\n\nUsage: doxa fleet start --pool ENGINE[:MODEL][@WEIGHT],... [OPTIONS]\n\n  --prompt TEXT | --prompt-file PATH   Shared task (file takes precedence)\n  -n, --sessions N                    Worker count\n  --supervisor ENGINE[:MODEL]          Acting coordinator; task may be interactive\n  --alignment-supervisor PROVIDER:MODEL Independent read-only alignment model\n  --supervision-mode shadow|enforce     Independent review action (default enforce)\n  --message-review off|shadow|enforce   Fast semantic admission mode\n  --message-judge llm:PROVIDER:MODEL | jev:MODEL\n  --review-budget USD                  Reserved from the total run budget\n  --review-max-calls N --review-interval SECONDS\n  --review-input-price USD_PER_MTOK --review-output-price USD_PER_MTOK\n  --review-threshold PROBABILITY        Explicit enforcement threshold\n  --strict-unreviewed                  Hold every message if its judge is unavailable\n  --allowed-path RELATIVE_PREFIX       Approved scope (repeatable; default repository)\n  --worker-task INDEX:TEXT             Frozen task for each worker (1-based; specify all)\n  --worker-path INDEX:RELATIVE_PREFIX  Narrow one worker's approved paths (repeatable)\n  --worker-after INDEX:PREDECESSOR    Wait for an earlier worker (repeatable)\n  --test-recipe ABSOLUTE_JSON_PATH    Frozen offline Docker test command\n  --isolation native|docker-open|docker-offline\n  --cwd PATH --root PATH --run-id ID   Workspace and isolated run identity\n  --seed INTEGER                      Recorded deterministic assignment seed\n  --memory-off N                      Number of workers with memory disabled\n  --run-budget USD | --allow-unbudgeted\n  --approve none|peer|all              Permission policy; questions/spawns require a human\n  --approval-grace SECONDS             Human review window before policy applies\n  --quiescence-timeout SECONDS         Total wait deadline\n  --quiet-dwell SECONDS                Quiet period (alias: --quiescence-grace)\n  --force                             Override memory capacity refusal\n  --dry-run                           Review capacity and assignments without launching\n\nOther commands: preflight, runs, status, test RUN SLOT, resume, continue RUN CHARTER_HASH, dependency-evidence, dependency-review, dependency-release, review, answer, attach, stop\n  calibrate LABELED_JSONL               Offline threshold metrics; no model calls\n";
 
 fn invalid(message: impl Into<String>) -> io::Error { io::Error::new(io::ErrorKind::InvalidInput, message.into()) }
 fn now() -> String { OffsetDateTime::now_utc().format(&Rfc3339).unwrap_or_default() }
@@ -73,7 +73,7 @@ fn engine_name(engine: launch::Engine) -> &'static str { match engine { launch::
 
 pub struct Spec {
     preflight: fleet_plan::Preflight, isolation:doxa_isolation::Profile, pool: Vec<Choice>, prompt: String, cwd: PathBuf,
-    review: doxa_fleet::ReviewConfig, allowed_paths:Vec<String>, worker_tasks:Vec<String>, worker_paths:Vec<Vec<String>>, worker_after:Vec<Vec<usize>>, seed: u64, timeout: Option<Duration>, quiet: Duration, dry_run: bool, memory_off: u64, lore_enabled: bool,
+    review: doxa_fleet::ReviewConfig, allowed_paths:Vec<String>, worker_tasks:Vec<String>, worker_paths:Vec<Vec<String>>, worker_after:Vec<Vec<usize>>, test_recipe:Option<doxa_fleet::evidence::TestRecipe>, seed: u64, timeout: Option<Duration>, quiet: Duration, dry_run: bool, memory_off: u64, lore_enabled: bool,
 }
 impl Spec {
     pub fn parse(args: &[String]) -> io::Result<Self> {
@@ -95,7 +95,7 @@ impl Spec {
         let mut isolation=doxa_isolation::configured_profile(&doxa_isolation::home()?)?;
         let mut allowed_paths=Vec::new();
         let mut task_options=Vec::new(); let mut path_options=Vec::new(); let mut after_options=Vec::new();
-        let mut base = Vec::new(); let mut pool = None; let mut prompt = String::new(); let mut prompt_file = None;
+        let mut base = Vec::new(); let mut pool = None; let mut prompt = String::new(); let mut prompt_file = None; let mut test_recipe = None;
         let mut cwd = std::env::current_dir()?; let mut seed = 0; let mut timeout = None;
         let mut quiet = Duration::from_secs(20); let mut dry_run = false; let mut memory_off = 0; let mut index = 0;
         while index < args.len() {
@@ -121,6 +121,18 @@ impl Spec {
                     "--worker-task" => task_options.push(value.clone()),
                     "--worker-path" => path_options.push(value.clone()),
                     "--worker-after" => after_options.push(value.clone()),
+                    "--test-recipe" => {
+                        if test_recipe.is_some() { return Err(invalid("fleet accepts one frozen test recipe")); }
+                        let path=Path::new(value);
+                        if !path.is_absolute(){return Err(invalid("fleet test recipe path must be absolute"));}
+                        let mut file=fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW|libc::O_NONBLOCK).open(path)?;
+                        let meta=file.metadata()?;
+                        if !meta.is_file()||meta.len()>8192||meta.uid()!=unsafe{libc::geteuid()}{return Err(invalid("fleet test recipe must be an owner file at most 8 KiB"));}
+                        let mut bytes=Vec::new();Read::by_ref(&mut file).take(8193).read_to_end(&mut bytes)?;
+                        if bytes.len()>8192{return Err(invalid("fleet test recipe exceeds 8 KiB"));}
+                        let recipe:doxa_fleet::evidence::TestRecipe=serde_json::from_slice(&bytes).map_err(|_|invalid("invalid fleet test recipe"))?;
+                        recipe.validate()?;test_recipe=Some(recipe);
+                    },
                     "--pool" => pool = Some(value.split(',').map(choice).collect::<io::Result<Vec<_>>>()?),
                     "--prompt" => prompt = value.clone(), "--prompt-file" => prompt_file = Some(PathBuf::from(value)),
                     "--cwd" => cwd = PathBuf::from(value),
@@ -161,6 +173,7 @@ impl Spec {
         }
         let cwd = fs::canonicalize(cwd)?;
         if !cwd.is_dir() { return Err(invalid("fleet cwd must be a directory")); }
+        if test_recipe.is_some() && (isolation!=doxa_isolation::Profile::DockerOffline || !review.enabled()) {return Err(invalid("host test evidence requires a supervised docker-offline fleet"));}
         review.validate()?;
         if review.enabled() && (preflight.sessions>64 || prompt.len()>16*1024){return Err(invalid("independent review supports up to 64 workers and a 16 KiB approved task"));}
         if review.enabled() && prompt.trim().is_empty(){return Err(invalid("independent review needs the approved task at launch"));}
@@ -197,14 +210,14 @@ impl Spec {
             return Err(invalid("worker dependencies require Docker-isolated fleet sessions; native workers can invoke owner-local release commands"));
         }
         memory_off = memory_off.min(preflight.sessions);
-        Ok(Self { review, allowed_paths, worker_tasks, worker_paths, worker_after, preflight, isolation, pool, prompt, cwd, seed, timeout, quiet, dry_run, memory_off, lore_enabled: doxa_state::lore_enabled_default() })
+        Ok(Self { review, allowed_paths, worker_tasks, worker_paths, worker_after, test_recipe, preflight, isolation, pool, prompt, cwd, seed, timeout, quiet, dry_run, memory_off, lore_enabled: doxa_state::lore_enabled_default() })
     }
     /// Complete validation and a readable launch review without provider
     /// discovery, session creation, prompt text or filesystem mutations.
     pub fn review(&self) -> io::Result<Value> {
         let preflight = fleet_plan::check(&self.preflight, fleet_plan::available_memory_mb())?;
         let assignments = self.assignments()?;
-        Ok(json!({"review_version":1,"isolation":self.isolation.key(),"independent_review":self.review,"allowed_paths":self.allowed_paths,"prompt_sha256":format!("{:x}", Sha256::digest(self.prompt.as_bytes())),"assignments_sha256":self.assignment_plan_hash()?,"run_id":self.preflight.run_id,"root":self.preflight.root,"cwd":self.cwd,
+        Ok(json!({"review_version":1,"isolation":self.isolation.key(),"independent_review":self.review,"allowed_paths":self.allowed_paths,"test_recipe":self.test_recipe,"prompt_sha256":format!("{:x}", Sha256::digest(self.prompt.as_bytes())),"assignments_sha256":self.assignment_plan_hash()?,"run_id":self.preflight.run_id,"root":self.preflight.root,"cwd":self.cwd,
             "mode":if self.preflight.supervisor.is_some() { "supervisor" } else { "symmetric" },
             "interactive":self.preflight.supervisor.is_some() && self.prompt.trim().is_empty(),
             "workers":self.preflight.sessions,"sessions":assignments.len(),"run_budget_usd":self.preflight.run_budget_usd,
@@ -509,6 +522,15 @@ fn teardown_sessions(sessions: impl Iterator<Item=(usize, discovery::Session)>) 
 }
 
 struct Slot { session: discovery::Session, client: DaemonClient, pending: Vec<(Value, Instant)>, busy: bool }
+fn evidence_store_outside_mounts(run:&Path,mounts:&[&Path])->io::Result<()> {
+    for name in ["guard-state.json","guard-state.lock","evidence.key"] {
+        let artifact=run.join(name);
+        if mounts.iter().any(|mount|artifact.starts_with(mount)) {
+            return Err(invalid("fleet guard and signing key are visible inside a worker mount"));
+        }
+    }
+    Ok(())
+}
 fn verify_dependency_container(run:&Path,session_id:&str)->io::Result<()> {
     let home=doxa_isolation::home()?;
     let manifest=doxa_isolation::read_manifest(&doxa_isolation::manifest_path(&home,session_id)?)?;
@@ -516,11 +538,7 @@ fn verify_dependency_container(run:&Path,session_id:&str)->io::Result<()> {
         return Err(invalid("dependent fleet session has no ready Docker container"));
     }
     let run=fs::canonicalize(run)?;
-    if [&manifest.checkout,&manifest.private_home,&manifest.cache,&manifest.broker]
-        .into_iter().any(|mount|run.starts_with(mount)){
-        return Err(invalid("fleet run root is visible inside a worker container"));
-    }
-    Ok(())
+    evidence_store_outside_mounts(&run,&[&manifest.checkout,&manifest.private_home,&manifest.cache,&manifest.broker])
 }
 fn connect(session: discovery::Session, expected: &Choice, budget: Option<f64>, isolation:Option<doxa_isolation::Profile>) -> io::Result<Slot> {
     let mut client = DaemonClient::connect(&session.socket, None).map_err(io::Error::other)?;
@@ -605,12 +623,13 @@ pub fn start(args: &[String]) -> io::Result<()> {
             if capability["ledger_path"] != value["ledger_path"] { return Err(invalid("fleet private ledger identity not verified; barrier withheld")); }
         }
         if spec.review.enabled() {
-            let charter=doxa_fleet::Charter{version:1,fleet_id:spec.preflight.run_id.clone(),task:spec.prompt.clone(),repo:spec.cwd.to_string_lossy().into_owned(),allowed_paths:spec.allowed_paths.clone(),required_evidence:vec!["host-observed changes and test results before completion".into()],worker_limit:spec.preflight.sessions,run_budget_usd:spec.preflight.run_budget_usd,deadline:spec.timeout.map(|duration|doxa_fleet::unix_now()+duration.as_secs()).unwrap_or(0),human_actions:vec!["authority, task, scope, spawn, credential, deployment and charter changes".into()]};
+            let charter=doxa_fleet::Charter{version:1,fleet_id:spec.preflight.run_id.clone(),task:spec.prompt.clone(),repo:spec.cwd.to_string_lossy().into_owned(),allowed_paths:spec.allowed_paths.clone(),required_evidence:vec!["host-observed changes and test results before completion".into()],worker_limit:spec.preflight.sessions,run_budget_usd:spec.preflight.run_budget_usd,deadline:spec.timeout.map(|duration|doxa_fleet::unix_now()+duration.as_secs()).unwrap_or(0),human_actions:vec!["authority, task, scope, spawn, credential, deployment and charter changes".into()],test_recipe:spec.test_recipe.clone()};
             let charter_sha256=doxa_fleet::hash(&charter)?;
             let mut assignments=Vec::new();
             for (index,slot) in slots.iter_mut().enumerate(){let identity=rpc(&mut slot.client,"fleet_identity",json!({}))?;let worker=index.checked_sub(usize::from(spec.preflight.supervisor.is_some()));assignments.push(doxa_fleet::Assignment{id:format!("{}-{index}",spec.preflight.run_id),session_id:slot.session.id.clone(),pid:identity["pid"].as_i64().ok_or_else(||invalid("fleet host PID unavailable"))? as i32,role:if worker.is_some(){"worker"}else{"coordinator"}.into(),task:worker.and_then(|slot|spec.worker_tasks.get(slot)).cloned().unwrap_or_else(||"Coordinate the approved worker assignments and integrate evidence".into()),cwd:identity["cwd"].as_str().ok_or_else(||invalid("fleet host cwd unavailable"))?.into(),base_commit:git_observation(Path::new(identity["cwd"].as_str().unwrap()),&["rev-parse","HEAD"]).ok().map(|id|id.trim().to_owned()),allowed_paths:worker.and_then(|slot|spec.worker_paths.get(slot)).cloned().unwrap_or_default(),depends_on:worker.and_then(|slot|spec.worker_after.get(slot)).map(|rows|rows.iter().map(|predecessor|format!("{}-{predecessor}",spec.preflight.run_id)).collect()).unwrap_or_default()});}
             let context=doxa_fleet::Context{charter,charter_sha256,assignments,review:spec.review.clone(),state_path:store.run.join("guard-state.json")};
             context.validate()?;
+            doxa_fleet::evidence::create_key(&context)?;
             value["supervision"]=json!({"context":context,"status":"pending"});store.save(&value)?;
             for slot in &mut slots {let reply=rpc(&mut slot.client,"fleet_configure",serde_json::to_value(&context)?)?;if reply["charter_sha256"]!=context.charter_sha256{return Err(invalid("fleet charter installation failed"));}}
             checkpoint(&store,&mut value,&mut slots,true)?;
@@ -809,6 +828,75 @@ pub fn dependency_evidence(root:&Path,id:&str,worker:usize)->io::Result<Value>{
         &&artifact["git_observation_available"]==true).take(16)
         .map(|(key,artifact)|json!({"id":key,"changed_paths":artifact["changed_paths"],"tests_verified":false})).collect::<Vec<_>>();
     Ok(json!({"worker_index":worker,"assignment_id":assignment.id,"host_checkpoints":checkpoints}))
+}
+
+/// The owner invokes this host command after a worker turn. It uses a copied
+/// Git-visible tree in a separate offline rootless Docker container; worker
+/// prose and project files cannot select a command or sign the resulting IDs.
+pub fn run_host_test(root:&Path,id:&str,worker:usize)->io::Result<Value>{
+    let before=snapshot(root,id)?;
+    if before["phase"]!="monitoring"||before["live"]!=true||before["supervision"].is_null()
+        ||before["spec"]["isolation"]!="docker-offline" {return Err(invalid("host tests require a live supervised offline Docker fleet"));}
+    let context:doxa_fleet::Context=serde_json::from_value(before["supervision"]["context"].clone()).map_err(|_|invalid("fleet charter unavailable"))?;
+    context.validate()?;
+    let recipe=context.charter.test_recipe.as_ref().ok_or_else(||invalid("fleet charter has no owner-approved test recipe"))?;
+    recipe.validate()?;
+    let assignment=context.assignments.get(worker).filter(|row|row.role=="worker").ok_or_else(||invalid("host test slot is not a worker"))?;
+    let baseline=assignment.base_commit.as_deref().ok_or_else(||invalid("host test has no baseline commit"))?;
+    let row=&before["slots"][worker];
+    if row["phase"]!="dispatched"||row["last_turn_kind"]!="turn_done"||row["last_turn"].is_null(){return Err(invalid("host test needs an observed completed worker turn"));}
+    let turn_hash=doxa_fleet::hash(&row["last_turn"])?;
+    let (socket,session_id)=fleet_view::slot_socket(root,id,worker)?;
+    let mut client=DaemonClient::connect(socket,None).map_err(io::Error::other)?;
+    if client.hello["session_id"]!=session_id||session_id!=assignment.session_id{return Err(invalid("host test worker identity changed"));}
+    let identity=rpc(&mut client,"fleet_identity",json!({}))?;
+    if identity["pid"].as_i64()!=Some(assignment.pid as i64){return Err(invalid("host test worker host PID changed"));}
+    let state=rpc(&mut client,"get_state",json!({}))?;
+    if state["running"]==true||state["queued"].as_u64()!=Some(0){return Err(invalid("host test worker is still active"));}
+    let current=doxa_fleet::transaction(&context,|state|Ok(state.clone()))?;
+    if current.paused{return Err(invalid("fleet is paused; test receipt withheld"));}
+    let run=root.join(id);
+    verify_dependency_container(&run,&session_id)?;
+    let cwd=Path::new(&assignment.cwd);
+    let manifest=doxa_isolation::workspace::manifest_for(cwd)?.ok_or_else(||invalid("host test worker has no isolation manifest"))?;
+    if manifest.session_id!=session_id||manifest.profile!=doxa_isolation::Profile::DockerOffline||manifest.checkout!=cwd{
+        return Err(invalid("host test must use the worker's offline Docker checkout"));
+    }
+    let paths=git_observation(cwd,&["-c","core.quotepath=false","diff","--no-ext-diff","--no-textconv","--name-only",baseline])?;
+    let untracked=git_observation(cwd,&["-c","core.quotepath=false","ls-files","--others","--exclude-standard"])?;
+    let mut changed=paths.lines().chain(untracked.lines()).map(str::to_owned).collect::<Vec<_>>();
+    changed.sort();changed.dedup();
+    if changed.is_empty()||changed.len()>4096||changed.iter().any(|path|!assignment.permits(&context.charter,path)){
+        return Err(invalid("host test diff is empty, oversized or outside the approved scope"));
+    }
+    let temp=tempfile::Builder::new().prefix(".fleet-test-").tempdir_in(&run)?;
+    let source=temp.path().join("source");fs::DirBuilder::new().mode(0o700).create(&source)?;
+    let captured=doxa_isolation::test_runner::capture(cwd,Some(&source))?;
+    if doxa_isolation::test_runner::capture(cwd,None)?.sha256!=captured.sha256{return Err(invalid("fleet source changed while copying test snapshot"));}
+    let result=doxa_isolation::test_runner::run_offline(&manifest,&source,&recipe.argv,&recipe.cwd_relative,recipe.timeout_s)?;
+    let after=snapshot(root,id)?;
+    if after["phase"]!="monitoring"||after["live"]!=true||after["slots"][worker]["last_turn_kind"]!="turn_done"
+        ||doxa_fleet::hash(&after["slots"][worker]["last_turn"])?!=turn_hash
+        ||doxa_isolation::test_runner::capture(cwd,None)?.sha256!=captured.sha256{
+        return Err(invalid("fleet source or completed turn changed during host test"));
+    }
+    let live=rpc(&mut client,"get_state",json!({}))?;
+    if live["running"]==true||live["queued"].as_u64()!=Some(0){return Err(invalid("worker became active during host test"));}
+    let binding=doxa_fleet::evidence::Binding{fleet_id:context.charter.fleet_id.clone(),charter_sha256:context.charter_sha256.clone(),assignment_id:assignment.id.clone(),session_id:assignment.session_id.clone(),base_commit:baseline.into(),snapshot_sha256:captured.sha256.clone()};
+    let (diff_id,diff)=doxa_fleet::evidence::issue(&context,"git_diff",serde_json::to_value(doxa_fleet::evidence::DiffEvidence{binding:binding.clone(),changed_paths:changed})?)?;
+    let (test_id,test)=doxa_fleet::evidence::issue(&context,"test_result",serde_json::to_value(doxa_fleet::evidence::TestEvidence{
+        binding,recipe_sha256:doxa_fleet::hash(recipe)?,runner_image:manifest.policy.as_ref().unwrap().image.clone(),
+        exit_code:result.exit_code,passed:result.passed,duration_ms:result.duration_ms,
+        output_sha256:result.output_sha256,output_bytes:result.output_bytes})?)?;
+    doxa_fleet::transaction(&context,|state|{
+        if state.paused||state.artifacts.len()>510{return Err(invalid("fleet evidence journal cannot accept test result"));}
+        state.artifacts.insert(diff_id.clone(),diff);
+        state.artifacts.insert(test_id.clone(),test);
+        Ok(())
+    })?;
+    Ok(json!({"diff_id":diff_id,"test_id":test_id,"passed":result.passed,"exit_code":result.exit_code,
+        "snapshot_sha256":captured.sha256,"source_files":captured.files,"source_bytes":captured.bytes,
+        "output_bytes":result.output_bytes,"duration_ms":result.duration_ms}))
 }
 
 pub fn release_dependency(root:&Path,id:&str,worker:usize,token:&str)->io::Result<Value>{
@@ -1011,6 +1099,29 @@ fn monitor(store: &Store, value: &mut Value, slots: &mut [Slot], timeout: Option
 mod tests {
     use super::*;
     #[test]
+    fn worker_mounts_cannot_expose_guard_receipts_or_signing_key() {
+        let run=Path::new("/owner/fleet/run");
+        assert!(evidence_store_outside_mounts(run,&[Path::new("/worker/checkout"),Path::new("/worker/home")]).is_ok());
+        assert!(evidence_store_outside_mounts(run,&[Path::new("/owner/fleet")]).is_err());
+        assert!(evidence_store_outside_mounts(run,&[run]).is_err());
+    }
+    #[test]
+    fn launch_freezes_owner_test_recipe_and_refuses_native_runner() {
+        let dir=tempfile::tempdir().unwrap();
+        let recipe=dir.path().join("recipe.json");
+        fs::write(&recipe,r#"{"argv":["/usr/bin/true"],"cwd_relative":"","timeout_s":5}"#).unwrap();
+        let mut args=vec!["--pool".into(),"fixture:fixture-v1".into(),"--prompt".into(),"task".into(),
+            "--run-budget".into(),"1".into(),"--review-budget".into(),"0.1".into(),
+            "--alignment-supervisor".into(),"deepseek:reviewer".into(),
+            "--isolation".into(),"docker-offline".into(),"--test-recipe".into(),recipe.to_string_lossy().into_owned(),"--dry-run".into()];
+        let spec=Spec::parse(&args).unwrap();
+        assert_eq!(spec.review().unwrap()["test_recipe"]["argv"][0],"/usr/bin/true");
+        fs::write(&recipe,r#"{"argv":["/usr/bin/false"],"cwd_relative":"","timeout_s":5}"#).unwrap();
+        assert_eq!(spec.test_recipe.as_ref().unwrap().argv[0],"/usr/bin/true","recipe bytes are frozen at launch");
+        let at=args.iter().position(|arg|arg=="--isolation").unwrap()+1;args[at]="native".into();
+        assert!(Spec::parse(&args).is_err());
+    }
+    #[test]
     fn isolation_is_explicit_in_the_read_only_fleet_launch_review() {
         let args = vec!["--pool".into(), "fixture:fixture-v1".into(), "--prompt".into(), "task".into(),
             "--run-budget".into(), "1".into(), "--root".into(), format!("/fr-{}",std::process::id()),
@@ -1132,7 +1243,7 @@ mod tests {
                 }
             }
         });
-        let charter=doxa_fleet::Charter{version:1,fleet_id:"dependency-test".into(),task:"Build then consume".into(),repo:"/repo".into(),allowed_paths:vec![String::new()],required_evidence:vec![],worker_limit:2,run_budget_usd:Some(10.0),deadline:0,human_actions:vec![]};
+        let charter=doxa_fleet::Charter{version:1,fleet_id:"dependency-test".into(),task:"Build then consume".into(),repo:"/repo".into(),allowed_paths:vec![String::new()],required_evidence:vec![],worker_limit:2,run_budget_usd:Some(10.0),deadline:0,human_actions:vec![],test_recipe:None};
         let context=doxa_fleet::Context{charter_sha256:doxa_fleet::hash(&charter).unwrap(),charter,
             assignments:vec![
                 doxa_fleet::Assignment{id:"boss-id".into(),session_id:"boss".into(),pid:1,role:"coordinator".into(),task:"Coordinate".into(),cwd:"/repo".into(),base_commit:None,allowed_paths:vec![],depends_on:vec![]},
@@ -1189,7 +1300,7 @@ mod tests {
         use std::os::unix::net::UnixListener;
         let root=tempfile::tempdir().unwrap();fs::set_permissions(root.path(),fs::Permissions::from_mode(0o700)).unwrap();
         let store=Store::create(root.path(),"dispatch-dependency").unwrap();
-        let charter=doxa_fleet::Charter{version:1,fleet_id:"dispatch-dependency".into(),task:"Build then consume".into(),repo:"/repo".into(),allowed_paths:vec![String::new()],required_evidence:vec![],worker_limit:2,run_budget_usd:Some(10.0),deadline:0,human_actions:vec![]};
+        let charter=doxa_fleet::Charter{version:1,fleet_id:"dispatch-dependency".into(),task:"Build then consume".into(),repo:"/repo".into(),allowed_paths:vec![String::new()],required_evidence:vec![],worker_limit:2,run_budget_usd:Some(10.0),deadline:0,human_actions:vec![],test_recipe:None};
         let context=doxa_fleet::Context{charter_sha256:doxa_fleet::hash(&charter).unwrap(),charter,
             assignments:vec![
                 doxa_fleet::Assignment{id:"boss-id".into(),session_id:"boss".into(),pid:1,role:"coordinator".into(),task:"Coordinate".into(),cwd:"/repo".into(),base_commit:None,allowed_paths:vec![],depends_on:vec![]},

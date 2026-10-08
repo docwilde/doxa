@@ -316,7 +316,9 @@ mod tests {
     use std::{os::unix::fs::PermissionsExt, sync::atomic::AtomicUsize};
 
     fn fixture_dir() -> tempfile::TempDir {
-        let root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        // The checkout may exceed AF_UNIX's path budget in an agent worktree.
+        // Callers choose a short real-disk TMPDIR for these socket fixtures.
+        let root = tempfile::tempdir().unwrap();
         fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
         root
     }

@@ -15,6 +15,7 @@ use std::{
 pub mod broker;
 pub mod egress;
 pub mod workspace;
+pub mod test_runner;
 pub mod migration;
 pub mod cgroup;
 mod disk;
