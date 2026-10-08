@@ -1492,35 +1492,28 @@ impl App {
         if !self.diff_modal {
             return;
         }
-        let width = area.width.saturating_sub(4).min(120);
-        let height = area.height.saturating_sub(4).min(36);
-        if width < 24 || height < 8 {
-            return;
-        }
-        let modal = Rect::new(
-            area.x + (area.width - width) / 2,
-            area.y + (area.height - height) / 2,
-            width,
-            height,
-        );
+        let Some(modal) = Self::diff_modal_area(area) else { return; };
         frame.render_widget(Clear, modal);
         let queued_rows = self.queued_diff_rows();
         let total = self.diff_text.lines().count();
-        let visible = usize::from(height.saturating_sub(if self.diff_reject_confirm.is_some() { 3 } else { 2 }));
-        let start = self.diff_scroll.min(total.saturating_sub(visible));
-        let mut rows: Vec<Line> = self
+        let (visible, start) = self.diff_window(modal);
+        let rows: Vec<Line> = self
             .diff_text
             .lines()
             .enumerate()
             .skip(start)
             .take(visible)
             .map(|(row, line)| {
+                let hunk = self.diff_snapshot.as_ref().and_then(|snapshot| snapshot.hunk_at_row(row));
+                let background = if hunk.is_some() && hunk == self.diff_selected { Some(theme::BORDER) }
+                    else if hunk.is_some() && hunk == self.diff_hover { Some(theme::HIGHLIGHT) }
+                    else { None };
                 if queued_rows.contains(&row) {
+                    let mut style = Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD);
+                    if let Some(bg) = background { style = style.bg(bg); }
                     return Line::styled(
                         format!("⏳ {line}"),
-                        Style::default()
-                            .fg(theme::ACCENT)
-                            .add_modifier(Modifier::BOLD),
+                        style,
                     );
                 }
                 let color = if line.starts_with('+') && !line.starts_with("+++") {
@@ -1532,21 +1525,14 @@ impl App {
                 } else {
                     theme::SECONDARY
                 };
-                Line::styled(line.to_owned(), Style::default().fg(color))
+                let mut style = Style::default().fg(color);
+                if let Some(bg) = background { style = style.bg(bg); }
+                Line::styled(line.to_owned(), style)
             })
             .collect();
-        if let Some(draft) = &self.diff_reject_confirm {
-            rows.push(Line::styled(
-                format!(
-                    " Reason (optional): {}_ · Enter confirm · Esc cancel",
-                    draft.reason
-                ),
-                Style::default().fg(theme::ACCENT),
-            ));
-        }
         let pending = self.rejections_for_target();
         let title = format!(
-            " Worktree diff{} · N/P files · J/K hunks · X reject · R refresh · F2/Esc close ",
+            " Worktree diff{} · click a hunk · N/P files · J/K hunks · F2/Esc close ",
             if pending == 0 {
                 String::new()
             } else {
@@ -1563,27 +1549,36 @@ impl App {
             ),
             modal,
         );
-        draw_menu_scrollbar(frame, modal, total, visible, start);
+        if let Some(footer) = self.diff_footer(usize::from(modal.width.saturating_sub(2))) {
+            frame.render_widget(Paragraph::new(footer).style(Style::default().bg(theme::RAISED)),
+                Rect::new(modal.x + 1, modal.bottom() - 2, modal.width - 2, 1));
+        }
+        let scroll_area = Rect::new(modal.x, modal.y, modal.width,
+            modal.height.saturating_sub(u16::from(self.diff_has_footer())));
+        draw_menu_scrollbar(frame, scroll_area, total, visible, start);
     }
 
     pub(super) fn draw_diff_pane(&self, frame: &mut Frame, area: Rect) {
         let queued_rows = self.queued_diff_rows();
         let total = self.diff_text.lines().count();
-        let visible = usize::from(area.height.saturating_sub(if self.diff_reject_confirm.is_some() { 3 } else { 2 }));
-        let start = self.diff_scroll.min(total.saturating_sub(visible));
-        let mut rows: Vec<Line> = self
+        let (visible, start) = self.diff_window(area);
+        let rows: Vec<Line> = self
             .diff_text
             .lines()
             .enumerate()
             .skip(start)
             .take(visible)
             .map(|(row, line)| {
+                let hunk = self.diff_snapshot.as_ref().and_then(|snapshot| snapshot.hunk_at_row(row));
+                let background = if hunk.is_some() && hunk == self.diff_selected { Some(theme::BORDER) }
+                    else if hunk.is_some() && hunk == self.diff_hover { Some(theme::HIGHLIGHT) }
+                    else { None };
                 if queued_rows.contains(&row) {
+                    let mut style = Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD);
+                    if let Some(bg) = background { style = style.bg(bg); }
                     return Line::styled(
                         format!("⏳ {line}"),
-                        Style::default()
-                            .fg(theme::ACCENT)
-                            .add_modifier(Modifier::BOLD),
+                        style,
                     );
                 }
                 let color = if line.starts_with('+') && !line.starts_with("+++") {
@@ -1595,20 +1590,13 @@ impl App {
                 } else {
                     theme::SECONDARY
                 };
-                Line::styled(line.to_owned(), Style::default().fg(color))
+                let mut style = Style::default().fg(color);
+                if let Some(bg) = background { style = style.bg(bg); }
+                Line::styled(line.to_owned(), style)
             })
             .collect();
-        if let Some(draft) = &self.diff_reject_confirm {
-            rows.push(Line::styled(
-                format!(
-                    " Reason (optional): {}_ · Enter confirm · Esc cancel",
-                    draft.reason
-                ),
-                Style::default().fg(theme::ACCENT),
-            ));
-        }
         let pending = self.rejections_for_target();
-        let title = format!(" Worktree diff{} · Alt+N/B files · Alt+J/K hunks · Alt+R reject · F5 refresh · F4 close ",
+        let title = format!(" Worktree diff{} · click a hunk · Alt+R reject · F4 close ",
             if pending == 0 { String::new() } else { format!(" · {pending} queued") });
         frame.render_widget(
             Paragraph::new(rows)
@@ -1621,7 +1609,45 @@ impl App {
                 .style(Style::default().fg(theme::SECONDARY).bg(theme::RAISED)),
             area,
         );
-        draw_menu_scrollbar(frame, area, total, visible, start);
+        if let Some(footer) = self.diff_footer(usize::from(area.width.saturating_sub(2))) {
+            frame.render_widget(Paragraph::new(footer).style(Style::default().bg(theme::RAISED)),
+                Rect::new(area.x + 1, area.bottom() - 2, area.width - 2, 1));
+        }
+        let scroll_area = Rect::new(area.x, area.y, area.width,
+            area.height.saturating_sub(u16::from(self.diff_has_footer())));
+        draw_menu_scrollbar(frame, scroll_area, total, visible, start);
+    }
+
+    fn diff_footer(&self, width: usize) -> Option<Line<'static>> {
+        if let Some(draft) = &self.diff_reject_confirm {
+            let (prefix, suffix) = if width < 45 {
+                (" R: ", "_ Enter/Esc")
+            } else { (" Reason: ", "_ · Enter reject · Esc cancel") };
+            let available = width.saturating_sub(prefix.len() + suffix.len());
+            let tail = draft.reason.chars().rev().take(available).collect::<String>()
+                .chars().rev().collect::<String>();
+            return Some(Line::styled(format!("{prefix}{tail}{suffix}"), Style::default().fg(theme::ACCENT)));
+        }
+        if let Some(draft) = &self.diff_comment_draft {
+            let (prefix, suffix) = if width < 45 {
+                (" C: ", "_ Enter/Esc")
+            } else { (" Comment: ", "_ · Enter send · Esc cancel") };
+            let available = width.saturating_sub(prefix.len() + suffix.len());
+            let tail = draft.text.chars().rev().take(available).collect::<String>()
+                .chars().rev().collect::<String>();
+            return Some(Line::styled(format!("{prefix}{tail}{suffix}"), Style::default().fg(theme::ACCENT)));
+        }
+        let index = self.diff_selected?;
+        let snapshot = self.diff_snapshot.as_ref()?;
+        let reject_style = if snapshot.rejectable_for_hunk(index).is_some() {
+            Style::default().fg(theme::ERROR).add_modifier(Modifier::BOLD)
+        } else { Style::default().fg(theme::SECONDARY) };
+        let header = snapshot.hunks.get(index).and_then(|row| snapshot.text.lines().nth(*row)).unwrap_or("");
+        Some(Line::from(vec![
+            Span::styled(" [Reject] ", reject_style),
+            Span::styled(" [Comment] ", Style::default().fg(theme::ACCENT).add_modifier(Modifier::BOLD)),
+            Span::styled(clipped_title(header, width.saturating_sub(23)).0, Style::default().fg(theme::SECONDARY)),
+        ]))
     }
 
     pub(super) fn draw_actions(&self, frame: &mut Frame, area: Rect) {

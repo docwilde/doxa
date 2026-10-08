@@ -6,11 +6,16 @@ use crate::markdown;
 const MAX_EVENT_FIELD_CHARS: usize = 320;
 
 // Structured event fields are untrusted Markdown as well as terminal text.
-// Keep each row small even when a daemon sends a very large JSON value.
+// Keep ordinary event rows small. A queued prompt uses the input budget so
+// the submitted text remains visible while the current turn is running.
 fn event_field(value: &str) -> String {
+    event_field_with_limit(value, MAX_EVENT_FIELD_CHARS)
+}
+
+fn event_field_with_limit(value: &str, limit: usize) -> String {
     let clean = markdown::sanitize(value).replace(['\n', '\r'], " ");
     let mut chars = clean.chars();
-    let mut clipped: String = chars.by_ref().take(MAX_EVENT_FIELD_CHARS).collect();
+    let mut clipped: String = chars.by_ref().take(limit).collect();
     if chars.next().is_some() {
         clipped.push('…');
     }
@@ -198,7 +203,13 @@ pub(super) fn structured_event(event_type: &str, data: &serde_json::Value) -> Op
         "needs_input_resolved" => "Input request resolved".into(),
         "turn_refused" => format!("Turn refused: {}", field("message")),
         "session_done" => "Session ended".into(),
-        "prompt_queued" => "Prompt queued".into(),
+        "prompt_queued" => {
+            let preview = data.get("text").and_then(|value| value.as_str())
+                .map(|value| event_field_with_limit(value, super::MAX_INPUT_BYTES))
+                .unwrap_or_default();
+            if preview.is_empty() { "Prompt queued".into() }
+            else { format!("Prompt queued: {preview}") }
+        }
         "prompt_dequeued" => "Queued prompt started".into(),
         "prompt_cancelled" => "Queued prompt cancelled".into(),
         "prompt_discarded" => "Queued prompt discarded".into(),

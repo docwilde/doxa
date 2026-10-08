@@ -88,7 +88,11 @@ pub(super) fn base(model: Option<&str>, engine: &str, cwd: &Path, repo_root: Opt
         let name = repo.file_name().map(|value| value.to_string_lossy()).unwrap_or_default();
         let name = safe_part(&name, 48);
         if !name.is_empty() {
-            return format!("{model}@{}/{}", branch(cwd), name);
+            let base_branch = match doxa_worktrees::repo_status(cwd) {
+                Some(doxa_worktrees::RepoStatus::Repository { base: Some(base), .. }) => base,
+                _ => branch(cwd),
+            };
+            return format!("{model}@{name}:{}", safe_part(&base_branch, 80));
         }
     }
     format!("{model}@{}", short_path(cwd))
@@ -125,8 +129,8 @@ mod tests {
         let git = |args: &[&str]| assert!(Command::new("git").args(args).current_dir(&repo).status().unwrap().success());
         git(&["init", "-q"]);
         git(&["symbolic-ref", "HEAD", "refs/heads/feature/menu"]);
-        assert_eq!(base(Some("claude-opus-5-5"), "claude", &repo, Some(&repo)), "opus-5-5@feature/menu/sample-repo");
-        assert_eq!(base(Some("gpt-6-sol"), "codex", &repo, Some(&repo)), "gpt-6-sol@feature/menu/sample-repo");
+        assert_eq!(base(Some("claude-opus-5-5"), "claude", &repo, Some(&repo)), "opus-5-5@sample-repo:feature/menu");
+        assert_eq!(base(Some("gpt-6-sol"), "codex", &repo, Some(&repo)), "gpt-6-sol@sample-repo:feature/menu");
     }
 
     #[test]
@@ -134,8 +138,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cwd = dir.path().join("work").join("notes");
         assert_eq!(base(Some("deepseek-flash"), "deepseek", &cwd, None), "deepseek-flash@work/notes");
-        let existing = ["gpt-6-sol@main/doxa".to_owned(), "gpt-6-sol@main/doxa-3".to_owned()];
-        assert_eq!(available("gpt-6-sol@main/doxa", existing), "gpt-6-sol@main/doxa-2");
+        let existing = ["gpt-6-sol@doxa:main".to_owned(), "gpt-6-sol@doxa:main-3".to_owned()];
+        assert_eq!(available("gpt-6-sol@doxa:main", existing), "gpt-6-sol@doxa:main-2");
     }
 
     #[test]

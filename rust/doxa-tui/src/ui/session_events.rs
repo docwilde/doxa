@@ -628,13 +628,20 @@ impl App {
                     .find(|s| s.id == id)
                     .map(|s| s.transcript.clone())
                     .unwrap_or_default();
-                let automatic = if self.offline_ids.contains(id) {
+                let registry_title = frame.get("title").and_then(|value| value.as_str()).map(safe_label)
+                    .filter(|title| !title.is_empty());
+                let saved_title = if self.offline_ids.contains(id) {
                     self.sessions.iter().find(|session| session.id == id)
                         .map(|session| session.title.clone()).filter(|title| !title.is_empty() && title != id)
                 } else {
                     self.default_names.get(id).cloned()
-                }.or_else(|| frame.get("title").and_then(|value| value.as_str()).map(safe_label)
-                    .filter(|title| !title.is_empty()))
+                };
+                // A resumed daemon can replace the old model@worktree/repo
+                // default with model@repo:base. Pinned names remain separate.
+                let new_format = registry_title.as_ref().is_some_and(|title| title.split_once('@')
+                    .is_some_and(|(_, location)| location.contains(':')));
+                let automatic = (if new_format { registry_title.or(saved_title) }
+                    else { saved_title.or(registry_title) })
                     .unwrap_or_else(|| model.clone().unwrap_or_else(|| safe_label(id)));
                 let automatic = unique_session_title(&automatic, id, &self.sessions);
                 self.default_names.insert(id.to_owned(), automatic.clone());

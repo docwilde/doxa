@@ -21,6 +21,7 @@ pub struct DiffSnapshot {
     pub files: Vec<usize>,
     pub hunks: Vec<usize>,
     pub rejectable: Vec<RejectableHunk>,
+    patch_rows: usize,
     cwd: Option<PathBuf>,
     base: String,
 }
@@ -60,8 +61,53 @@ impl RejectableHunk {
 }
 
 impl DiffSnapshot {
-    fn message(text: String) -> Self {
-        Self { text, files: Vec::new(), hunks: Vec::new(), rejectable: Vec::new(), cwd: None, base: String::new() }
+    pub(crate) fn message(text: String) -> Self {
+        Self { text, files: Vec::new(), hunks: Vec::new(), rejectable: Vec::new(), patch_rows: 0, cwd: None, base: String::new() }
+    }
+    #[cfg(test)]
+    pub(crate) fn test_patch(text: &str, cwd: PathBuf, files: Vec<usize>, hunks: Vec<usize>) -> Self {
+        let rejectable = hunks.iter().map(|row| RejectableHunk {
+            row: *row, header: "@@ test @@".into(), path: "tracked.txt".into(), patch: Vec::new(),
+        }).collect();
+        let patch_rows = text.lines().position(|line| line.starts_with("Untracked files (names only"))
+            .unwrap_or_else(|| text.lines().count());
+        Self { text: text.into(), files, hunks, rejectable, patch_rows,
+            cwd: Some(cwd), base: "HEAD".into() }
+    }
+    pub fn belongs_to(&self, cwd: &Path) -> bool {
+        self.cwd.as_ref() == cwd.canonicalize().ok().as_ref()
+    }
+    fn hunk_end(&self, index: usize) -> Option<usize> {
+        let start = *self.hunks.get(index)?;
+        Some(self.hunks.get(index + 1).copied().unwrap_or(self.patch_rows)
+            .min(self.files.iter().copied().find(|row| *row > start).unwrap_or(self.patch_rows))
+            .min(self.patch_rows))
+    }
+    pub fn hunk_at_row(&self, row: usize) -> Option<usize> {
+        if row >= self.patch_rows { return None; }
+        if let Some(index) = self.hunks.partition_point(|start| *start <= row).checked_sub(1) {
+            if row < self.hunk_end(index)? { return Some(index); }
+        }
+        let file = self.files.iter().copied().take_while(|start| *start <= row).last()?;
+        let next_file = self.files.iter().copied().find(|start| *start > file).unwrap_or(self.patch_rows);
+        self.hunks.iter().position(|start| *start > row && *start < next_file)
+    }
+    pub fn rejectable_for_hunk(&self, index: usize) -> Option<usize> {
+        let row = *self.hunks.get(index)?;
+        self.rejectable.iter().position(|hunk| hunk.row == row)
+    }
+    pub fn comment_message(&self, index: usize, comment: &str) -> Option<String> {
+        let start = *self.hunks.get(index)?;
+        let end = self.hunk_end(index)?;
+        let lines: Vec<&str> = self.text.lines().collect();
+        let file_row = self.files.iter().copied().take_while(|row| *row < start).last()?;
+        let file = lines.get(file_row)?.chars().take(300).collect::<String>();
+        let header = lines.get(start)?.chars().take(300).collect::<String>();
+        let excerpt = lines.get(start..end)?.iter()
+            .filter(|line| line.starts_with('+') || line.starts_with('-') || line.starts_with("@@"))
+            .take(12).map(|line| line.chars().take(240).collect::<String>())
+            .collect::<Vec<_>>().join("\n");
+        Some(format!("I have a comment on this diff block in {file}, {header}:\n\n{comment}\n\nDiff excerpt:\n```diff\n{excerpt}\n```\nPlease review this block and respond to the comment. Re-read the current file before editing."))
     }
     pub fn same_hunk(&self, index: usize, other: &Self, other_index: usize) -> bool {
         self.cwd == other.cwd && self.base == other.base
@@ -368,12 +414,13 @@ pub fn read(cwd: &Path) -> DiffSnapshot {
     let mut out = format!("Base: {base} ({source})\n");
     if text.is_empty() { out.push_str("No tracked changes in this comparison.\n"); }
     else { out.push_str(&text); }
+    let patch_rows = out.lines().count();
     if truncated { out.push_str("\n[Diff view truncated at 256 KiB; inspect the worktree for the full patch.]\n"); }
     match git_output(&cwd, &["ls-files", "--others", "--exclude-standard", "-z", "--"], MAX_UNTRACKED_BYTES) {
         Ok((names, truncated)) => out.push_str(&untracked_names(&names, truncated)),
         Err(_) => out.push_str("\n[Untracked names unavailable.]\n"),
     }
-    DiffSnapshot { text: out, files, hunks, rejectable, cwd: Some(cwd), base }
+    DiffSnapshot { text: out, files, hunks, rejectable, patch_rows, cwd: Some(cwd), base }
 }
 
 #[cfg(test)]

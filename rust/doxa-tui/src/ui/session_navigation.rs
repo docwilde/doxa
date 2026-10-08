@@ -837,8 +837,12 @@ impl App {
             }
             self.notice = "Tab renamed and pinned".into();
         }
-        self.input.clear();
-        self.input_cursor = 0;
+        if self.rename_draft_backup.is_some() {
+            self.restore_rename_draft();
+        } else {
+            self.input.clear();
+            self.input_cursor = 0;
+        }
     }
 
     pub(super) fn open_queue(&mut self) {
