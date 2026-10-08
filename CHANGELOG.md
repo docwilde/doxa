@@ -5,6 +5,18 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.15 — 2026-10-09
+
+**Memory and navigation**
+
+- Pin LORE 0.62.18 and rank verified source-session pending proposals in the local rail. Incomplete or stale summaries remain unknown.
+- Add a read-only `/codegraph` viewer for file, symbol, import, call and module syntax queries, with source hashes and explicit ambiguity.
+
+**Fleet and macOS**
+
+- Run an owner-frozen test recipe on a bounded, offline Docker source snapshot; signed receipts bind completion evidence to that snapshot. Rootless live validation remains open.
+- Keep macOS peer senders connected until the receiver reads the frame and samples its kernel PID; production-send fleet admission now passes macOS CI.
+
 ## 2.0.0-beta.14 — 2026-10-09
 
 **Fleet review**
