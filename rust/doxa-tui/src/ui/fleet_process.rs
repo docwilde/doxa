@@ -177,4 +177,17 @@ mod tests{
         assert!(!root.exists());
     }
 
+    #[test]
+    fn selectable_review_models_modes_rates_and_strict_flag_keep_exact_native_arguments(){
+        let temp=tempfile::Builder::new().prefix("r").tempdir().unwrap();
+        let raw="--pool fixture:fixture-v1 --prompt 'PRIVATE-TASK' -n 1 --run-budget 10 --alignment-supervisor claude:claude-sonnet-5-5 --supervision-mode shadow --message-review enforce --message-judge llm:deepseek:deepseek-flash --review-budget 2 --review-max-calls 20 --review-interval 30 --review-input-price 0.42 --review-output-price 0.84 --review-threshold 0.7 --strict-unreviewed --allowed-path src";
+        let mut args=words(raw).unwrap();args.extend(["--root".into(),temp.path().to_string_lossy().into_owned()]);
+        let prepared=Prepared::start(args.clone(),None).unwrap();
+        assert_eq!(&prepared.args[1..1+args.len()],args);
+        let review=prepared.lines.join("\n");
+        for visible in ["claude-sonnet-5-5","deepseek-flash","shadow","enforce","Input rate USD/Mtok: 0.42","Output rate USD/Mtok: 0.84","Message risk threshold: 0.7","API credentials"]{assert!(review.contains(visible),"{visible}");}
+        assert!(!review.contains("PRIVATE-TASK"));
+        let mut invalid=args.clone();let model=invalid.iter().position(|arg|arg=="--alignment-supervisor").unwrap()+1;invalid[model]="jev:jev-1.13.0".into();assert!(Prepared::start(invalid,None).is_err());
+    }
+
 }

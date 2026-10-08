@@ -604,8 +604,35 @@ pub fn continue_run(root:&Path,id:&str,charter_hash:&str)->io::Result<Value>{
     rpc(&mut client,"fleet_resume",json!({"charter_sha256":charter_hash}))
 }
 fn git_observation(cwd:&Path,args:&[&str])->io::Result<String>{
+    // Resolve metadata with a builtin that never refreshes files or runs filters.
+    // All worktree observations then use a private Git directory with no worker
+    // configuration, hooks, attributes drivers, remotes or executable filters.
+    if args==["rev-parse","HEAD"] {return git_read(cwd,None,args);}
+    let head=git_read(cwd,None,&["rev-parse","HEAD"])?;let head=head.trim();
+    if !(40..=64).contains(&head.len())||!head.bytes().all(|byte|byte.is_ascii_hexdigit()){return Err(invalid("invalid Git observation HEAD"));}
+    let objects=git_read(cwd,None,&["rev-parse","--path-format=absolute","--git-path","objects"])?;
+    let index=git_read(cwd,None,&["rev-parse","--path-format=absolute","--git-path","index"])?;
+    let safe=tempfile::Builder::new().prefix("doxa-git-observation-").tempdir()?;
+    fs::set_permissions(safe.path(),fs::Permissions::from_mode(0o700))?;
+    fs::create_dir(safe.path().join("refs"))?;
+    fs::write(safe.path().join("HEAD"),format!("{head}\n"))?;
+    let format=if head.len()==64{"[core]\nrepositoryformatversion=1\nbare=false\n[extensions]\nobjectformat=sha256\n"}else{"[core]\nrepositoryformatversion=0\nbare=false\n"};
+    fs::write(safe.path().join("config"),format)?;
+    std::os::unix::fs::symlink(Path::new(objects.trim()),safe.path().join("objects"))?;
+    let mut source=fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW|libc::O_NONBLOCK).open(Path::new(index.trim()))?;
+    let meta=source.metadata()?;if !meta.is_file()||meta.len()>64*1024*1024{return Err(invalid("invalid Git observation index"));}
+    let mut bytes=Vec::new();Read::by_ref(&mut source).take(64*1024*1024+1).read_to_end(&mut bytes)?;
+    if bytes.len()>64*1024*1024{return Err(invalid("Git observation index exceeds bound"));}fs::write(safe.path().join("index"),bytes)?;
+    git_read(cwd,Some(safe.path()),args)
+}
+fn git_read(cwd:&Path,git_dir:Option<&Path>,args:&[&str])->io::Result<String>{
     use std::{os::fd::AsRawFd,process::{Command,Stdio}};
-    let mut child=Command::new("git").current_dir(cwd).args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn()?;
+    let mut command=Command::new("/usr/bin/git");
+    command.env_clear().env("PATH","/usr/bin:/bin").env("GIT_CONFIG_GLOBAL","/dev/null").env("GIT_CONFIG_SYSTEM","/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM","1").env("GIT_ATTR_NOSYSTEM","1").env("GIT_NO_LAZY_FETCH","1").env("GIT_OPTIONAL_LOCKS","0")
+        .current_dir(cwd).args(["-c","core.fsmonitor=false","-c","core.hooksPath=/dev/null","-c","core.attributesFile=/dev/null"]);
+    if let Some(dir)=git_dir{command.arg("--git-dir").arg(dir).arg("--work-tree").arg(cwd);}
+    let mut child=command.args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn()?;
     let mut output=child.stdout.take().ok_or_else(||invalid("Git observation unavailable"))?;
     if unsafe{libc::fcntl(output.as_raw_fd(),libc::F_SETFL,libc::O_NONBLOCK)}<0{let _=child.kill();let _=child.wait();return Err(io::Error::last_os_error());}
     let deadline=Instant::now()+Duration::from_secs(3);let mut bytes=Vec::new();
@@ -736,6 +763,24 @@ fn monitor(store: &Store, value: &mut Value, slots: &mut [Slot], timeout: Option
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn host_git_observations_never_execute_worker_fsmonitor_or_clean_filters() {
+        let dir=tempfile::tempdir().unwrap();let repo=dir.path().join("worker");fs::create_dir(&repo).unwrap();
+        let git=|args:&[&str]|{let status=std::process::Command::new("/usr/bin/git").env_clear().env("PATH","/usr/bin:/bin").env("GIT_CONFIG_GLOBAL","/dev/null").env("GIT_CONFIG_NOSYSTEM","1").current_dir(&repo).args(args).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().unwrap();assert!(status.success(),"{args:?}");};
+        git(&["init","-q"]);git(&["config","user.name","Fixture"]);git(&["config","user.email","fixture@example.invalid"]);
+        fs::write(repo.join("tracked.txt"),"before\n").unwrap();fs::write(repo.join(".gitattributes"),"tracked.txt filter=trap\n").unwrap();
+        git(&["add","tracked.txt",".gitattributes"]);git(&["commit","-qm","test: initial fixture"]);
+        let baseline=git_observation(&repo,&["rev-parse","HEAD"]).unwrap();
+        let monitor_marker=dir.path().join("host-fsmonitor-executed");let filter_marker=dir.path().join("host-filter-executed");
+        let monitor=dir.path().join("monitor.sh");let filter=dir.path().join("filter.sh");
+        fs::write(&monitor,format!("printf attacked > '{}'\n",monitor_marker.display())).unwrap();fs::write(&filter,format!("printf attacked > '{}'\ncat\n",filter_marker.display())).unwrap();
+        git(&["config","core.fsmonitor",&format!("sh {}",monitor.display())]);git(&["config","filter.trap.clean",&format!("sh {}",filter.display())]);
+        git(&["config","filter.trap.required","true"]);fs::write(repo.join("tracked.txt"),"after\n").unwrap();fs::write(repo.join("new.txt"),"untracked\n").unwrap();
+        let diff=git_observation(&repo,&["diff","--no-ext-diff","--no-textconv","--name-only",baseline.trim()]).unwrap();
+        let untracked=git_observation(&repo,&["ls-files","--others","--exclude-standard"]).unwrap();
+        assert!(diff.contains("tracked.txt"));assert!(untracked.contains("new.txt"));
+        assert!(!monitor_marker.exists(),"worker fsmonitor escaped onto the host");assert!(!filter_marker.exists(),"worker filter escaped onto the host");
+    }
     #[test]
     fn native_parser_accepts_equals_short_counts_and_signed_seed() {
         let args = ["--pool=fixture","--prompt=task","-n2","--seed=-7","--allow-unbudgeted","--quiet-dwell=0.1"]

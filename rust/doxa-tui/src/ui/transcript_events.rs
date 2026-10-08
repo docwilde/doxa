@@ -196,7 +196,18 @@ pub(super) fn structured_event(event_type: &str, data: &serde_json::Value) -> Op
         }
         "peer_joined" => format!("Peer joined: {}", field("title")),
         "peer_left" => format!("Peer left: {}", field("session_id")),
-        "peer_message" => format!("Peer {}: {}", field("from_title"), field("body")),
+        "peer_message" => {
+            let marker = if data["fleet_admission"]["unreviewed"] == true {
+                " [unreviewed fleet message]"
+            } else { "" };
+            format!("Peer {}{marker}: {}", field("from_title"), field("body"))
+        }
+        "fleet_guard" => {
+            let outcome = if data["delivered"] == true {
+                if data["unreviewed"] == true { "unreviewed" } else { "admitted" }
+            } else { "quarantined" };
+            format!("Fleet message {outcome}: {}", field("reason"))
+        }
         "peer_sent" => "Peer message sent".into(),
         "tool_disabled" => format!("Tool disabled: {} · {}", field("name"), field("reason")),
         "needs_input" => format!("Needs input: {} · {}", field("kind"), field("tool_name")),

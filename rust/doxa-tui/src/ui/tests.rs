@@ -840,6 +840,19 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn fleet_admission_notices_and_unreviewed_status_are_visible_in_the_transcript() {
+        let mut app=App::default();
+        app.apply_daemon_frame(&json!({"type":"hello","session_id":"s","cwd":"/demo"}));
+        app.apply_daemon_frame(&json!({"type":"event","session_id":"s","event":{"type":"fleet_guard","data":{"delivered":false,"reason":"outside approved assignment"}}}));
+        app.apply_daemon_frame(&json!({"type":"event","session_id":"s","event":{"type":"peer_message","data":{"from_title":"Worker","body":"status only","fleet_admission":{"delivered":true,"unreviewed":true}}}}));
+        let transcript=&app.sessions[0].transcript;
+        assert!(transcript.contains("Fleet message quarantined: outside approved assignment"));
+        assert!(transcript.contains("Worker [unreviewed fleet message]: status only"));
+        let row=super::transcript_events::structured_event("fleet_guard",&json!({"delivered":false,"reason":"hold\nfor human\u{1b}"})).unwrap();
+        assert!(!row.contains('\u{1b}'));
+    }
+
+    #[test]
     fn clicking_filter_prompt_keeps_both_lore_menus_and_private_draft() {
         for memory in [false,true] {
             let mut app=App::default();app.rail_visible=false;app.handle(Event::Resize(120,32));

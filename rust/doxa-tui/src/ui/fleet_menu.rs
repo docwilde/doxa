@@ -58,11 +58,6 @@ impl Menu {
                             if let Some(first)=actual.first_mut(){*first=format!("fleet {} — {}",super::safe_label(&id),super::safe_label(phase));}
                             text=actual.join("\n");
                             text.push_str(&format!("\nNative controller phase: {}",super::safe_label(phase)));
-                            if snapshot["supervision"].is_object(){
-                                let guard=&snapshot["supervision"];let review=&guard["context"]["review"];
-                                for(label,value)in [("Independent supervisor",&review["supervisor"]),("Alignment",&guard["status"]),("Paused",&guard["paused"]),("Pause reason",&guard["reason"]),("Fast judge",&review["message_judge"]),("Message review",&review["message_mode"]),("Review reservation USD (estimate)",&guard["review_reserved_usd"]),("Review usage USD (estimated from tokens)",&guard["review_estimated_usd"]),("Review calls",&guard["calls"]),("Charter hash",&guard["context"]["charter_sha256"])]{if !value.is_null(){text.push_str(&format!("\n{label}: {}",super::safe_label(&value.to_string())));}}
-                                if guard["paused"]==true{if let Some(hash)=guard["context"]["charter_sha256"].as_str(){text.push_str(&format!("\nHuman recovery: /fleet continue {id} {hash}"));}}
-                            }
                             for(label,value)in [("Total budget USD",&snapshot["spec"]["run_budget_usd"]),("Approval policy",&snapshot["approvals"]["policy"]),("Approvals asked",&snapshot["approvals"]["asked"]),("Auto approved",&snapshot["approvals"]["auto_approved"]),("Refused",&snapshot["approvals"]["refused"]) ]{if !value.is_null(){text.push_str(&format!("\n{label}: {}",super::safe_label(&value.to_string())));}}
                         }
                     }

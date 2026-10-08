@@ -36,6 +36,7 @@ impl ReviewConfig {
         if self.message_mode != Mode::Off && self.message_judge.is_none() { return Err(invalid("message review requires a selected judge")); }
         if !(1..=10_000).contains(&self.max_calls) || !(5..=3600).contains(&self.interval_s) || ![self.input_usd_per_million,self.output_usd_per_million,self.risk_threshold].iter().all(|v| v.is_finite()) || self.input_usd_per_million <= 0.0 || self.output_usd_per_million <= 0.0 || !(0.0..=1.0).contains(&self.risk_threshold) { return Err(invalid("invalid fleet review limits or prices")); }
         if self.supervisor.as_ref().is_some_and(|model|model.provider=="jev") { return Err(invalid("Jev is a message judge; select an LLM alignment supervisor")); }
+        if self.supervisor.is_some() && self.supervisor_mode == Mode::Off { return Err(invalid("selected alignment supervisor requires shadow or enforce mode")); }
         Ok(())
     }
 }
