@@ -2,9 +2,54 @@
 //! Every mutable entry is opened relative to an already-open directory with
 //! O_NOFOLLOW. No source config, hooks, alternates or replace refs enter Git.
 use crate::{error, run};
-use std::{ffi::{CString, OsStr}, fs::{self, File, OpenOptions}, io::{self, Read, Write},
+use std::{ffi::{CStr, CString, OsStr, OsString}, fs::{self, File, OpenOptions}, io::{self, Read, Write},
     os::{fd::{AsRawFd, FromRawFd}, unix::{ffi::OsStrExt, fs::{MetadataExt, OpenOptionsExt, PermissionsExt}}},
-    path::{Path, PathBuf}, process::Command};
+    path::{Path, PathBuf}, process::Command, time::{Duration, Instant}};
+
+const MAX_SNAPSHOT_ENTRIES: usize = 100_000;
+const MAX_SNAPSHOT_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+struct Budget { entries: usize, bytes: u64, limit: u64, deadline: Instant }
+impl Budget {
+    fn charge(&mut self, bytes: u64) -> io::Result<()> {
+        self.entries += 1;
+        self.bytes = self.bytes.checked_add(bytes).ok_or_else(|| error("Git snapshot byte count overflow"))?;
+        self.check()
+    }
+    fn check(&self) -> io::Result<()> {
+        if self.entries > MAX_SNAPSHOT_ENTRIES || self.bytes > self.limit || Instant::now() > self.deadline {
+            return Err(error("Git snapshot exceeds bounded file, byte or time budget; source is retained"));
+        }
+        Ok(())
+    }
+}
+fn names(directory: &File) -> io::Result<Vec<OsString>> {
+    // fdopendir/readdir work on Linux and macOS without /proc or /dev/fd.
+    let fd = unsafe { libc::fcntl(directory.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+    if fd < 0 { return Err(io::Error::last_os_error()); }
+    let handle = unsafe { libc::fdopendir(fd) };
+    if handle.is_null() { let error = io::Error::last_os_error(); unsafe { libc::close(fd); } return Err(error); }
+    struct Directory(*mut libc::DIR);
+    impl Drop for Directory { fn drop(&mut self) { unsafe { libc::closedir(self.0); } } }
+    let handle = Directory(handle);
+    let mut names = Vec::new();
+    loop {
+        #[cfg(target_os = "linux")]
+        unsafe { *libc::__errno_location() = 0; }
+        #[cfg(target_os = "macos")]
+        unsafe { *libc::__error() = 0; }
+        let row = unsafe { libc::readdir(handle.0) };
+        if row.is_null() {
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            if io::Error::last_os_error().raw_os_error().is_some_and(|value| value != 0) { return Err(io::Error::last_os_error()); }
+            break;
+        }
+        let name = unsafe { CStr::from_ptr((*row).d_name.as_ptr()) }.to_bytes();
+        if name == b"." || name == b".." { continue; }
+        if names.len() >= MAX_SNAPSHOT_ENTRIES { return Err(error("Git snapshot directory exceeds entry budget")); }
+        names.push(OsStr::from_bytes(name).to_os_string());
+    }
+    Ok(names)
+}
 
 fn open_entry(parent: &File, name: &OsStr) -> io::Result<File> {
     let name = CString::new(name.as_bytes()).map_err(|_| error("invalid Git entry"))?;
@@ -54,30 +99,34 @@ fn metadata(source: &Path, allow_linked: bool) -> io::Result<(File, File)> {
     if backlink != source.join(".git") { return Err(error("native linked Git backlink differs from its checkout")); }
     Ok((gitdir, directory(&common)?))
 }
-fn copy_file(mut file: File, target: &Path) -> io::Result<()> {
+fn copy_file(mut file: File, target: &Path, budget: &mut Budget) -> io::Result<()> {
     let before = file.metadata()?;
     if !before.is_file() || before.nlink() != 1 { return Err(error("Git snapshot contains shared or special files")); }
+    budget.charge(before.len())?;
     let mut output = OpenOptions::new().write(true).create_new(true).open(target)?;
     output.set_permissions(fs::Permissions::from_mode(0o600))?;
-    io::copy(&mut file, &mut output)?;
+    if io::copy(&mut Read::by_ref(&mut file).take(before.len().saturating_add(1)), &mut output)? != before.len() {
+        return Err(error("Git metadata grew or shrank while snapshotting"));
+    }
     let after = file.metadata()?;
     if (before.len(), before.mtime(), before.mtime_nsec(), before.ctime(), before.ctime_nsec())
         != (after.len(), after.mtime(), after.mtime_nsec(), after.ctime(), after.ctime_nsec()) {
         return Err(error("Git metadata changed while snapshotting; retry after writers stop"));
     }
+    budget.check()?;
     Ok(())
 }
-fn copy_tree(source: File, target: &Path, depth: usize) -> io::Result<()> {
+fn copy_tree(source: File, target: &Path, depth: usize, budget: &mut Budget) -> io::Result<()> {
     if !source.metadata()?.is_dir() || depth > 32 { return Err(error("Git tree is invalid or too deep")); }
+    budget.charge(0)?;
     fs::create_dir(target)?; fs::set_permissions(target, fs::Permissions::from_mode(0o700))?;
-    for entry in fs::read_dir(format!("/proc/self/fd/{}", source.as_raw_fd()))? {
-        let name = entry?.file_name();
+    for name in names(&source)? {
         if matches!(name.to_str(), Some("alternates" | "http-alternates" | "replace")) {
             return Err(error("Git snapshot refuses alternates or replacement refs"));
         }
         let file = open_entry(&source, &name)?;
-        if file.metadata()?.is_dir() { copy_tree(file, &target.join(&name), depth + 1)?; }
-        else { copy_file(file, &target.join(&name))?; }
+        if file.metadata()?.is_dir() { copy_tree(file, &target.join(&name), depth + 1, budget)?; }
+        else { copy_file(file, &target.join(&name), budget)?; }
     }
     Ok(())
 }
@@ -85,12 +134,27 @@ pub(crate) fn snapshot(source: &Path, allow_linked: bool) -> io::Result<tempfile
     let (gitdir, common) = metadata(source, allow_linked)?;
     let snapshot = tempfile::Builder::new().prefix("doxa-git-snapshot-").tempdir()?;
     fs::set_permissions(snapshot.path(), fs::Permissions::from_mode(0o700))?;
-    copy_tree(open_entry(&common, OsStr::new("objects"))?, &snapshot.path().join("objects"), 0)?;
-    copy_tree(open_entry(&common, OsStr::new("refs"))?, &snapshot.path().join("refs"), 0)?;
-    copy_file(open_entry(&gitdir, OsStr::new("HEAD"))?, &snapshot.path().join("HEAD"))?;
+    let available = crate::free_bytes(snapshot.path())?.saturating_sub(2 * 1024 * 1024 * 1024) / 2;
+    // Reserve room both for the snapshot and its independent clone, leaving
+    // the startup free-space floor intact. This is a bound, not a disk quota.
+    let mut budget = Budget { entries: 0, bytes: 0, limit: MAX_SNAPSHOT_BYTES.min(available), deadline: Instant::now() + Duration::from_secs(45) };
+    copy_tree(open_entry(&common, OsStr::new("objects"))?, &snapshot.path().join("objects"), 0, &mut budget)?;
+    copy_tree(open_entry(&common, OsStr::new("refs"))?, &snapshot.path().join("refs"), 0, &mut budget)?;
+    copy_file(open_entry(&gitdir, OsStr::new("HEAD"))?, &snapshot.path().join("HEAD"), &mut budget)?;
     for (parent, name) in [(&common, "packed-refs"), (&gitdir, "index")] {
         match open_entry(parent, OsStr::new(name)) {
-            Ok(file) => copy_file(file, &snapshot.path().join(name))?,
+            Ok(mut file) => {
+                if name == "packed-refs" {
+                    if file.metadata()?.len() > 16 * 1024 * 1024 { return Err(error("packed Git refs exceed metadata budget")); }
+                    let mut refs = Vec::new(); Read::by_ref(&mut file).take(16 * 1024 * 1024 + 1).read_to_end(&mut refs)?;
+                    if refs.len() > 16 * 1024 * 1024 || refs.split(|byte| *byte == b'\n').any(|line|
+                        line.split(|byte| byte.is_ascii_whitespace()).any(|word| word.starts_with(b"refs/replace/") || word == b"refs/replace")) {
+                        return Err(error("packed Git refs contain replacement refs or grew beyond budget"));
+                    }
+                    use std::io::{Seek, SeekFrom}; file.seek(SeekFrom::Start(0))?;
+                }
+                copy_file(file, &snapshot.path().join(name), &mut budget)?;
+            },
             Err(error) if error.kind() == io::ErrorKind::NotFound => {},
             Err(error) => return Err(error),
         }
@@ -160,6 +224,17 @@ mod tests {
         fs::rename(source.join(".git"), root.path().join("outside-git")).unwrap();
         std::os::unix::fs::symlink(root.path().join("outside-git"), source.join(".git")).unwrap();
         assert!(snapshot(&source, true).is_err());
+    }
+    #[test]
+    fn snapshot_rejects_packed_replacement_refs_and_oversized_object_data() {
+        let root = tempfile::tempdir().unwrap(); let source = fixture(root.path());
+        let head = crate::git(&source, &["rev-parse", "HEAD"]).unwrap();
+        let packed = source.join(".git/packed-refs");
+        fs::write(&packed, format!("{head} refs/replace/{head}\n")).unwrap();
+        assert!(snapshot(&source, false).is_err()); fs::remove_file(packed).unwrap();
+        let sparse = File::create(source.join(".git/objects/oversized")).unwrap();
+        sparse.set_len(MAX_SNAPSHOT_BYTES + 1).unwrap();
+        assert!(snapshot(&source, false).is_err(), "oversized source object was copied into host cache");
     }
     #[test]
     fn native_linked_worktree_snapshot_is_verified_but_worker_redirect_is_refused() {
