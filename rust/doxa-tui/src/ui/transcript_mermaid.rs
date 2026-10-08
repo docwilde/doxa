@@ -96,6 +96,7 @@ impl Store {
             if self.previews.len() >= MAX_CACHED {
                 if let Some(position) = self.previews.iter().position(|entry| !matches!(entry.state, State::Loading(_))) {
                     self.previews.remove(position);
+                    self.revision = self.revision.wrapping_add(1);
                 } else { break; }
             }
             let (sender, receiver) = mpsc::sync_channel(1);
@@ -118,7 +119,7 @@ impl Store {
             .find(|entry| entry.key == key && entry.width == area.width) {
             frame.render_widget(Image::new(protocol), area);
         } else {
-            frame.render_widget(Paragraph::new("Diagram source available above")
+            frame.render_widget(Paragraph::new("Diagram unavailable")
                 .style(Style::default().fg(theme::MUTED)), area);
         }
     }
@@ -282,5 +283,23 @@ mod tests {
             .save(root.path().join("pixel.png")).unwrap();
         assert!(render_source("graph TD; A-->B", 24, &renderer,
             root.path().to_str().unwrap(), &picker(), &AtomicBool::new(false)).is_some());
+    }
+
+    #[test]
+    fn evicting_a_cached_result_invalidates_transcript_layout() {
+        if !Path::new(BWRAP).is_file() { return; }
+        let (root, renderer) = fixture("exit 7");
+        let package = root.path().to_string_lossy().into_owned();
+        let mut store = Store { renderer: renderer.clone(), root: package.clone(),
+            previews: Vec::new(), revision: 0 };
+        for index in 0..MAX_CACHED {
+            store.previews.push(Preview { key: format!("old-{index}"), width: 24,
+                cancel: Arc::new(AtomicBool::new(false)), state: State::Unavailable });
+        }
+        store.observe("```mermaid\ngraph TD\nA-->B\n```", 24,
+            &renderer, &package, Some(picker()));
+        assert_eq!(store.previews.len(), MAX_CACHED);
+        assert!(store.revision() > 0);
+        store.clear();
     }
 }
