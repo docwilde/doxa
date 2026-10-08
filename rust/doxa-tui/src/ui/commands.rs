@@ -7,7 +7,8 @@ use super::{
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 /// Every reserved DOXA slash command has one identity in the registry. Unknown
-/// provider and plugin commands are intentionally absent; `!` is keyboard-only.
+/// provider and Claude plugin commands are intentionally absent; owner-approved
+/// native text commands are handled before this built-in registry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum LocalCommand {
     Peers,
@@ -217,7 +218,55 @@ impl App {
                     .filter(|row| row.name.starts_with(query))
                     .map(|row| (row.name.as_str(), row.summary.as_str())),
             )
+            .chain(
+                self.native_plugin_commands
+                    .iter()
+                    .filter(|row| row.name.starts_with(query))
+                    .map(|row| (row.name.as_str(), row.summary.as_str())),
+            )
             .collect()
+    }
+
+    pub(super) fn open_native_plugin_command(&mut self, name: &str, args: &str) -> bool {
+        let Some(command) = self.native_plugin_commands.iter().find(|row| row.name == name).cloned() else {
+            return false;
+        };
+        if !args.trim().is_empty() {
+            self.notice = format!("Usage: {} (no arguments)", command.name);
+            return true;
+        }
+        self.chip_info = Some(ChipInfo {
+            kind: "native_plugin",
+            label: command.name.clone(),
+            lines: std::iter::once(format!("{} · {}", command.name, command.summary))
+                .chain(command.body.lines().map(str::to_owned))
+                .chain([
+                    String::new(),
+                    format!("Owner-approved native plugin: {}", command.plugin),
+                    format!("Source: {}", safe_label(&command.source.display().to_string())),
+                    format!("SHA-256: {} · inode {}:{}", command.sha256, command.device, command.inode),
+                ])
+                .collect(),
+            scroll: 0,
+            owner: None,
+        });
+        if self.active_chooser_rect().is_none() {
+            self.chip_info = None;
+            self.notice = "Enlarge active pane to open native plugin command".into();
+        }
+        true
+    }
+
+    pub(super) fn dispatch_native_plugin_command(&mut self) -> bool {
+        if self.input.contains('\n') { return false; }
+        let line = self.input.trim().to_owned();
+        let (name, args) = line.split_once(char::is_whitespace).unwrap_or((&line, ""));
+        if !self.open_native_plugin_command(name, args) { return false; }
+        if args.trim().is_empty() {
+            self.input.clear();
+            self.input_cursor = 0;
+        }
+        true
     }
 
     pub(super) fn complete_slash(&mut self) -> bool {
@@ -1001,6 +1050,9 @@ impl App {
                 let action = entry.action.clone();
                 self.action_menu = false;
                 match action {
+                    actions::Action::NativePlugin(command) => {
+                        self.open_native_plugin_command(&command, "");
+                    }
                     actions::Action::Plugin(command) => {
                         self.action_draft = Some((
                             (
@@ -1138,6 +1190,12 @@ impl App {
                 command.summary,
                 command.plugin
             ));
+        }
+        for command in &self.native_plugin_commands {
+            lines.push(format!("{} · {} · owner-approved native text", command.name, command.summary));
+        }
+        for failure in &self.native_plugin_failures {
+            lines.push(format!("Native plugin rejected: {failure}"));
         }
         lines.push("Local keyboard shell: !<command> · current session directory; output is neither sent nor saved".into());
         for (command, description) in FLEET_ACTIONS {

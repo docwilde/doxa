@@ -286,6 +286,23 @@ fn run_loop(
     if let Some(router)=command_router.as_ref(){prompt_sender=Some(router.sender.clone());}
     app.persist_preferences = true;
     app.plugin_refresh_dirty = true;
+    match crate::operations::doxa_home().and_then(|home| {
+        let reserved: Vec<&str> = super::COMMANDS.iter().map(|row| row.name).collect();
+        crate::native_plugins::load(&home, &reserved)
+    }) {
+        Ok(inventory) => {
+            app.native_plugin_commands = inventory.commands;
+            app.native_plugin_failures = inventory.failures;
+            if !app.native_plugin_failures.is_empty() {
+                app.notice = format!("Native plugin rejected: {}", app.native_plugin_failures.join(" · "));
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            app.native_plugin_failures.push(format!("loader: {error}"));
+            app.notice = format!("Native plugins unavailable: {error}");
+        }
+    }
     app.sidebar_auto = app.preferences.value("sidebar").is_empty();
     app.rail_width = app.preferences.sidebar_width();
     app.rail_visible = match app.preferences.value("sidebar") {

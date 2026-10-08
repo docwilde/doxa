@@ -8,6 +8,7 @@ pub mod history;
 pub mod lore_picker;
 pub mod lore_table;
 pub mod memory_menu;
+pub mod native_plugins;
 pub mod diff_view;
 pub mod discovery;
 pub mod sessions;
