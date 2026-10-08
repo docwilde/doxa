@@ -13,6 +13,10 @@ the stable 2.0 release has not been cut.
 - Suggest collection names from explicit customer, project and task data. Offer opt-in urgency ordering that settles before moving groups and preserves child order.
 - Refresh the deterministic Rust gallery from the final beta.12 UI.
 
+**Session lifecycle**
+
+- Fix **`turn_done`** ordering so the daemon updates idle admission before clients see completion; immediate model, effort and prompt changes no longer race the previous turn.
+
 **Models and fleet**
 
 - Add an exact-engine/model fact registry with dated per-field sources. Budget accounting shares its sourced prices; the model picker marks unknown context and thinking facts rather than inferring them.

@@ -341,28 +341,38 @@ impl Inner {
     fn start_turn(self: &Arc<Self>, text: String, turn: String) {
         let inner = self.clone();
         thread::spawn(move || {
-            let mut terminal_emitted = false;
+            // The terminal event is an idle/readiness boundary for clients.
+            // Keep it until the host returns and the admission state advances;
+            // otherwise a client can see turn_done and immediately have its
+            // next control call refused as "busy" or its prompt queued.
+            let mut terminal: Option<Value> = None;
             let mut emit = |event: Value| {
-                if terminal_emitted { return; }
-                terminal_emitted = matches!(event["type"].as_str(), Some("turn_done" | "turn_refused"));
-                inner.publish(Some(&turn), event);
+                if terminal.is_some() { return; }
+                if matches!(event["type"].as_str(), Some("turn_done" | "turn_refused")) {
+                    terminal = Some(event);
+                } else {
+                    inner.publish(Some(&turn), event);
+                }
             };
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| inner.host.prompt(&text, &mut emit)));
-            if result.is_err() && !terminal_emitted {
-                inner.publish(Some(&turn), json!({"type":"turn_done", "data":{"is_error":true,"error":"host panicked"}}));
-            } else if !terminal_emitted {
-                inner.publish(Some(&turn), json!({"type":"turn_done", "data":{}}));
-            }
+            let terminal = terminal.unwrap_or_else(|| if result.is_err() {
+                json!({"type":"turn_done", "data":{"is_error":true,"error":"host panicked"}})
+            } else { json!({"type":"turn_done", "data":{}}) });
             let next = {
                 let _admission = inner.controls.lock().unwrap();
                 let mut state = inner.state.lock().unwrap();
-                if inner.stopping.load(Ordering::Acquire) {
+                let next = if inner.stopping.load(Ordering::Acquire) {
                     state.prompts.clear(); state.busy = false; None
                 } else if let Some(prompt) = state.prompts.pop_front() {
                     let turn = format!("{}r{:011}", if prompt.peer_origin.is_some() { "peer-" } else { "" }, state.next_turn_id);
                     state.next_turn_id += 1;
                     Some((prompt, turn))
-                } else { state.busy = false; None }
+                } else { state.busy = false; None };
+                drop(state);
+                // Publish under the admission lock so a newly admitted turn
+                // cannot overtake this terminal event in the client stream.
+                inner.publish(Some(&turn), terminal);
+                next
             };
             if let Some((prompt, turn)) = next {
                 let display = std::panic::catch_unwind(std::panic::AssertUnwindSafe(||
@@ -859,6 +869,49 @@ mod tests {
     impl Host for NoopHost {
         fn prompt(&self, _: &str, _: &mut dyn FnMut(Value)) {}
         fn call(&self, _: &str, _: &Value) -> Result<Value, String> { Ok(json!({})) }
+    }
+
+    struct DelayedTerminalHost {
+        emitted: SyncSender<()>,
+        release: Mutex<mpsc::Receiver<()>>,
+    }
+    impl Host for DelayedTerminalHost {
+        fn prompt(&self, _: &str, emit: &mut dyn FnMut(Value)) {
+            emit(json!({"type":"turn_done","data":{}}));
+            self.emitted.send(()).unwrap();
+            self.release.lock().unwrap().recv().unwrap();
+        }
+        fn call(&self, _: &str, _: &Value) -> Result<Value, String> { Ok(json!({})) }
+    }
+
+    #[test]
+    fn turn_done_is_published_only_after_the_session_becomes_idle() {
+        let dir = tempfile::tempdir().unwrap();
+        let (emitted_tx, emitted_rx) = mpsc::sync_channel(1);
+        let (release_tx, release_rx) = mpsc::sync_channel(1);
+        let host = Arc::new(DelayedTerminalHost { emitted: emitted_tx, release: Mutex::new(release_rx) });
+        let daemon = Daemon::bind(dir.path(), Session {
+            session_id: "terminal-boundary".into(), cwd: "/fixture".into(), model: None,
+            engine: "test".into(), doxa_version: "test".into(),
+        }, host).unwrap();
+        daemon.inner.state.lock().unwrap().busy = true;
+        daemon.inner.start_turn("hello".into(), "r1".into());
+        emitted_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(daemon.inner.state.lock().unwrap().ring.iter().all(|(_, bytes)|
+            !String::from_utf8_lossy(bytes).contains("turn_done")));
+        release_tx.send(()).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let state = daemon.inner.state.lock().unwrap();
+            let visible = state.ring.iter().any(|(_, bytes)| String::from_utf8_lossy(bytes).contains("turn_done"));
+            if visible {
+                assert!(!state.busy, "a visible terminal event must release idle admission");
+                break;
+            }
+            drop(state);
+            assert!(std::time::Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(5));
+        }
     }
 
     #[test]
