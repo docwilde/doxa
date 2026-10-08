@@ -166,8 +166,13 @@ impl CodexHost {
             let thread = value["thread_id"].as_str()
                 .filter(|id| doxa_engines::codex_driver::valid_thread_id(id))
                 .ok_or("existing session has no valid Codex thread ID")?;
-            rollout_path = doxa_isolation::resume_rollout().map_err(|e|e.to_string())?.or_else(||value["rollout_path"].as_str().map(PathBuf::from))
+            let imported=doxa_isolation::resume_rollout().map_err(|e|e.to_string())?;
+            let recorded=value["rollout_path"].as_str().map(PathBuf::from)
                 .filter(|path| codex_context::size(path, thread).is_some());
+            rollout_path=match (recorded,imported){
+                (Some(path),Some(imported))=>if doxa_isolation::select_resume_rollout(&path).map_err(|e|e.to_string())?{Some(path)}else{Some(imported)},
+                (recorded,None)=>recorded,(None,imported)=>imported,
+            }.filter(|path|codex_context::size(path,thread).is_some());
             saved_peer_tools = match value.get("peer_tools") {
                 Some(Value::Bool(enabled)) => *enabled,
                 None => false,

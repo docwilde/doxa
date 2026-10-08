@@ -18,6 +18,7 @@ pub mod migration;
 
 pub const ACTIVE_MANIFEST: &str = "DOXA_ISOLATION_MANIFEST";
 pub const SESSION_MANIFEST: &str = "DOXA_SESSION_MANIFEST";
+const RESUME_ROLLOUT: &str = "DOXA_CODEX_RESUME_ROLLOUT";
 const MAX_MANIFEST: u64 = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -361,6 +362,7 @@ impl Runtime {
         output.write_all(&bytes)?; output.sync_all()
     }
     pub fn activate(&self) {
+        std::env::remove_var(RESUME_ROLLOUT);
         // Called once by the trusted daemon before any provider threads exist.
         std::env::set_var(SESSION_MANIFEST,&self.path);
         if self.manifest.context_cwd.is_some() && self.manifest.private_home.is_dir() {
@@ -517,14 +519,26 @@ pub fn context_cwd(workspace:&Path) -> io::Result<PathBuf> {
 }
 pub fn resume_rollout() -> io::Result<Option<PathBuf>> {
     let Some(manifest)=session_manifest()? else{return Ok(None);};
-    let Some(path)=manifest.provider_rollout else{return Ok(None);};
+    let Some(path)=std::env::var_os(RESUME_ROLLOUT).map(PathBuf::from).or_else(||manifest.provider_rollout.clone()) else{return Ok(None);};
+    validate_resume_rollout(&manifest,&path)?;Ok(Some(path))
+}
+/// Prefer the latest saved rollout when a provider returned a new owned path
+/// after an earlier import. The selection stays in the trusted host process.
+pub fn select_resume_rollout(path:&Path)->io::Result<bool>{
+    let Some(manifest)=session_manifest()? else{return Ok(false);};
+    if manifest.provider_rollout.is_none()||!path.starts_with(manifest.private_home.join("codex/sessions")){return Ok(false);}
+    validate_resume_rollout(&manifest,path)?;
+    std::env::set_var(RESUME_ROLLOUT,path);Ok(true)
+}
+fn validate_resume_rollout(manifest:&Manifest,path:&Path)->io::Result<()>{
     if !path.starts_with(manifest.private_home.join("codex/sessions")) {return Err(error("imported rollout escaped private provider home"));}
+    if fs::canonicalize(path)?!=path{return Err(error("imported rollout contains symlink components"));}
     let file=OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW|libc::O_NONBLOCK).open(&path)?;
     let meta=file.metadata()?;
     if !meta.is_file()||meta.uid()!=unsafe{libc::geteuid()}||meta.nlink()!=1||meta.mode()&0o077!=0 {
         return Err(error("imported rollout is not a private owned regular file"));
     }
-    Ok(Some(path))
+    Ok(())
 }
 pub fn worker_path(path: &Path) -> io::Result<PathBuf> {
     let Some(manifest) = active()? else { return Ok(path.to_owned()); };

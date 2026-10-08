@@ -160,7 +160,7 @@ fn import_context(plan:&Value,previous:&Manifest,next:&mut Manifest)->io::Result
             ||record["transcript_bytes"]!=plan["transcript_bytes"]||record["transport"]!="app-server"{
             return Err(error("migration requires the exact clean protected Codex checkpoint"));
         }
-        let source=previous.provider_rollout.clone().or_else(||record["rollout_path"].as_str().map(PathBuf::from))
+        let source=record["rollout_path"].as_str().map(PathBuf::from).or_else(||previous.provider_rollout.clone())
             .ok_or_else(||error("Codex rollout unavailable; original backend remains resumable"))?;
         let content=bytes(&source,64*1024*1024)?;
         let first=content.split(|b|*b==b'\n').find(|row|!row.is_empty()).ok_or_else(||error("empty Codex rollout"))?;
@@ -168,7 +168,11 @@ fn import_context(plan:&Value,previous:&Manifest,next:&mut Manifest)->io::Result
         if identity["type"]!="session_meta"||identity["payload"]["id"]!=record["thread_id"]||content.last()!=Some(&b'\n'){
             return Err(error("provider rollout does not prove the saved Codex thread"));
         }
-        let destination=next.private_home.join("codex/sessions").join(format!("import-{}.jsonl",previous.session_id));
+        let thread=record["thread_id"].as_str().filter(|id|!id.is_empty()&&id.len()<=128&&id.bytes().all(|b|b.is_ascii_alphanumeric()||matches!(b,b'-'|b'_'))).ok_or_else(||error("invalid provider thread identity"))?;
+        // Keep the dated rollout shape required by the protected context
+        // reader. The file is still selected solely by its verified thread.
+        let relative=Path::new("1970/01/01").join(format!("rollout-migration-{thread}.jsonl"));
+        let destination=next.private_home.join("codex/sessions").join(relative);
         write_copy(&destination,&content)?;next.provider_rollout=Some(destination);
     }else if engine=="claude"{
         let home=PathBuf::from(plan["launch"]["claude_home"].as_str().ok_or_else(||error("Claude context home missing"))?);
