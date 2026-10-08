@@ -17,6 +17,10 @@ the stable 2.0 release has not been cut.
 - Run an owner-frozen test recipe on a bounded, offline Docker source snapshot; signed receipts bind completion evidence to that snapshot. Rootless live validation remains open.
 - Keep macOS peer senders connected until the receiver reads the frame and samples its kernel PID; production-send fleet admission now passes macOS CI.
 
+**Isolation fixture**
+
+- Require exact TLS SNI on the restricted-egress CONNECT fixture and rootless, network-none state before its guarded start. A production hardened profile remains unavailable.
+
 ## 2.0.0-beta.14 — 2026-10-09
 
 **Fleet review**
