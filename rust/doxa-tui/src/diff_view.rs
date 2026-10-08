@@ -621,6 +621,7 @@ mod tests {
         let checkout = home.join("isolation/session/checkout");
         std::fs::create_dir_all(&checkout).unwrap();
         std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(home.join("isolation"), std::fs::Permissions::from_mode(0o700)).unwrap();
         std::fs::set_permissions(checkout.parent().unwrap(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let git = |args: &[&str]| {
             let output = Command::new("git").args(args).current_dir(&checkout).output().unwrap();
