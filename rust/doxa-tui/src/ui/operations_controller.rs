@@ -1,6 +1,6 @@
 //! Coordinate explicit setup, settings, fleet and maintenance operations.
 use super::{
-    fleet_menu, fleet_process, operations_menu, safe_label, App, ChipInfo, SettingsMenu, COMMANDS,
+    fleet_dependency_review, fleet_menu, fleet_process, operations_menu, safe_label, App, ChipInfo, SettingsMenu, COMMANDS,
     MAX_PENDING_PROMPTS,
 };
 use crossterm::event::KeyCode;
@@ -230,6 +230,7 @@ impl App {
             }
             index += 1;
         }
+        let root_was_explicit = custom_root.is_some();
         let root = match custom_root
             .map(Ok)
             .unwrap_or_else(crate::fleet_view::default_root)
@@ -289,6 +290,40 @@ impl App {
             }
             return;
         }
+        if words.first() == Some(&"dependency-review") {
+            let target = match words.as_slice() {
+                ["dependency-review", slot] => current
+                    .as_ref()
+                    .filter(|(selected_root, _)| !root_was_explicit || *selected_root == root)
+                    .and_then(|(selected_root, run)| slot.parse::<usize>().ok().map(|slot| (selected_root.clone(), run.clone(), slot))),
+                ["dependency-review", run, slot] if doxa_state::valid_session_id(run) =>
+                    slot.parse::<usize>().ok().map(|slot| (root.clone(), (*run).to_owned(), slot)),
+                _ => None,
+            };
+            let Some((target_root, run, slot)) = target else {
+                self.notice = "Usage: /fleet dependency-review [RUN] SLOT (select that run or name it exactly)".into();
+                return;
+            };
+            match fleet_dependency_review::Prepared::load(target_root, &run, slot) {
+                Ok(prepared) => {
+                    let lines = prepared.lines.clone();
+                    self.fleet_dependency_review = Some(prepared);
+                    self.fleet_review = None;
+                    self.fleet_menu = None;
+                    self.chip_info = Some(ChipInfo { kind: "fleet_dependency_review", label: String::new(), lines, scroll: 0, owner: None });
+                    if self.active_chooser_rect().is_none() {
+                        self.fleet_dependency_review = None;
+                        self.chip_info = None;
+                        self.notice = "Enlarge terminal before reviewing dependency release".into();
+                    } else {
+                        self.input.clear();
+                        self.input_cursor = 0;
+                    }
+                }
+                Err(error) => self.notice = format!("Fleet dependency review refused: {}", safe_label(&error.to_string())),
+            }
+            return;
+        }
         match words.as_slice(){
             ["continue",id,hash]=>match crate::fleet_control::continue_run(&root,id,hash){Ok(_)=>{self.notice="Fleet resumed with its approved charter".into();self.open_fleet(root,Some((*id).into()));},Err(error)=>self.notice=format!("Fleet: {}",safe_label(&error.to_string()))},
             ["mesh",id]=>self.local_mesh(id,Some(root)),
@@ -296,7 +331,7 @@ impl App {
             ["status",id]if doxa_state::valid_session_id(id)=>self.open_fleet(root,Some((*id).into())),
             ["attach",id,index]=>match index.parse::<usize>().ok().and_then(|index|crate::fleet_view::slot_socket(&root,id,index).ok()){
                 Some((_,session))=>self.attach_selected(&session),None=>self.notice="Fleet slot attachment refused; verify run and live slot".into()},
-            _=>self.notice="Usage: /fleet [runs|status [RUN]|stop|detach|attach [RUN] INDEX|mesh [RUN]|start OPTIONS|resume RUN]".into()
+            _=>self.notice="Usage: /fleet [runs|status [RUN]|stop|detach|attach [RUN] INDEX|dependency-review [RUN] SLOT|mesh [RUN]|start OPTIONS|resume RUN]".into()
         }
     }
     pub(super) fn fleet_review_key(&mut self, key: KeyEvent) -> bool {
@@ -346,6 +381,48 @@ impl App {
                                 format!("Fleet launch refused: {}", safe_label(&error.to_string()));
                         }
                     }
+                }
+            }
+            _ => {}
+        }
+        true
+    }
+    pub(super) fn fleet_dependency_review_key(&mut self, key: KeyEvent) -> bool {
+        let review = self.fleet_dependency_review.as_mut().unwrap();
+        match key.code {
+            KeyCode::Esc => {
+                self.fleet_dependency_review = None;
+                self.chip_info = None;
+            }
+            KeyCode::Up | KeyCode::PageUp => {
+                let info = self.chip_info.as_mut().unwrap();
+                info.scroll = info.scroll.saturating_sub(if key.code == KeyCode::Up { 1 } else { 8 });
+            }
+            KeyCode::Down | KeyCode::PageDown => {
+                let info = self.chip_info.as_mut().unwrap();
+                info.scroll = info.scroll.saturating_add(if key.code == KeyCode::Down { 1 } else { 8 });
+            }
+            KeyCode::Char('A') if key.modifiers == KeyModifiers::SHIFT => {
+                if review.complete.get() {
+                    review.armed = true;
+                    self.notice = "Dependency release armed · Shift+Y confirms".into();
+                } else {
+                    self.notice = "Read the complete host dependency evidence before arming".into();
+                }
+            }
+            KeyCode::Char('Y') if key.modifiers == KeyModifiers::SHIFT => {
+                if review.armed && review.complete.get() {
+                    let prepared = self.fleet_dependency_review.take().unwrap();
+                    let root = prepared.root.clone();
+                    let run = prepared.run_id.clone();
+                    let result = prepared.release();
+                    self.open_fleet(root, Some(run));
+                    self.notice = match result {
+                        Ok(_) => "Dependency released; refreshing host fleet status · tests remain unverified".into(),
+                        Err(error) => format!("Dependency release refused: {}", safe_label(&error.to_string())),
+                    };
+                } else {
+                    self.notice = "Read all evidence, then Shift+A arm before Shift+Y".into();
                 }
             }
             _ => {}

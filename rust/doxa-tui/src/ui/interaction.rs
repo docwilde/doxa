@@ -56,10 +56,15 @@ impl App {
                         info.scroll = 0;
                     }
                 }
+                if let Some(review) = &mut self.fleet_dependency_review {
+                    review.reset_visibility();
+                    if let Some(info) = &mut self.chip_info { info.scroll = 0; }
+                }
                 if self.chip_info.is_some() && self.active_chooser_rect().is_none() {
                     self.retire_operations();
                     self.chip_info = None;
                     self.fleet_review = None;
+                    self.fleet_dependency_review = None;
                 }
                 if self.history_modal && self.active_chooser_rect().is_none() {
                     self.history_modal = false;
@@ -713,6 +718,9 @@ impl App {
         }
         if self.fleet_review.is_some() {
             return self.fleet_review_key(key);
+        }
+        if self.fleet_dependency_review.is_some() {
+            return self.fleet_dependency_review_key(key);
         }
         if self.delete_confirmation.is_some() {
             return self.delete_confirmation_key(key);
@@ -2314,6 +2322,23 @@ impl App {
                 }
                 if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
                     self.fleet_review = None;
+                    self.chip_info = None;
+                    return true;
+                }
+            }
+            return rail_hover_changed;
+        }
+        if self.fleet_dependency_review.is_some() {
+            if let Some(area) = self.active_chooser_rect() {
+                if area.contains(ratatui::layout::Position::new(mouse.column, mouse.row)) {
+                    match mouse.kind {
+                        MouseEventKind::ScrollUp => return self.fleet_dependency_review_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
+                        MouseEventKind::ScrollDown => return self.fleet_dependency_review_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+                        _ => return true,
+                    }
+                }
+                if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                    self.fleet_dependency_review = None;
                     self.chip_info = None;
                     return true;
                 }

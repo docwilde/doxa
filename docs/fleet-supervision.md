@@ -74,10 +74,18 @@ a checkpoint. The operator can inspect its ID and changed paths with
 a subsequent turn, and ask it to send a typed `handoff` to the acting
 coordinator. The coordinator sends a matching `ack`; the worker sends
 `confirm` with the same artifact references. Once that turn finishes, run
-`doxa fleet dependency-review RUN SLOT`. That review shows paths, handoff and
-assignment identities, a completed turn hash, dependent slots, and
-`tests_verified: false`. Only after reading it should the operator call
-`doxa fleet dependency-release RUN SLOT REVIEW_TOKEN`. A changed token,
+`doxa fleet dependency-review RUN SLOT`, or open
+`/fleet dependency-review [RUN] SLOT` in the native TUI. With RUN omitted,
+the command uses this window's current fleet controller; name RUN explicitly
+for a detached or saved fleet (and pass `--root ABSOLUTE_PATH` if needed).
+The TUI modal shows the host-returned
+checkpoint and accepted handoff IDs, artifact references, changed paths,
+assignment and turn hashes, dependent slots, and `tests_verified: false`.
+Scroll through every row, press Shift+A to arm, then Shift+Y to release;
+Escape or a terminal resize disarms it. The TUI sends the stored host review
+token through the same `release_dependency` call and refreshes fleet status.
+The CLI equivalent is `doxa fleet dependency-release RUN SLOT REVIEW_TOKEN`
+after reading its review. A changed token,
 active predecessor, missing accepted handoff, pause, or changed turn keeps the
 dependency blocked. Each predecessor needs its own release. The host then
 dispatches ready workers once and journals `dispatch_pending` before prompt
@@ -89,7 +97,8 @@ Native-profile workers share the operator's Unix account and could invoke
 local fleet commands, so dependency plans refuse that profile. The Docker
 boundary assumes the owner does not expose the host's fleet root or control
 services into containers through separate mounts or network configuration.
-A separate UI-owned approval channel remains open work.
+The TUI review is an owner-operated control on the host; the review token
+binds evidence but is not a separate authentication credential.
 
 Supervised workers can use `fleet_kind=handoff` with host artifact IDs, followed
 by the recipient's `ack` and the original sender's `confirm`. The ACK and
@@ -172,9 +181,8 @@ threshold; a high score on the same examples used to choose it is not a
 real-fleet safety result. The command reads at most 2 MiB and prints no message
 content. Apply a reviewed choice with `--review-threshold` on a new fleet.
 
-Open coordination work includes automatic trusted project test evidence,
-calibration against real fleet messages, and an in-TUI dependency release
-review. The host checks the typed handoff chain and checkpoint provenance;
+Open coordination work includes automatic trusted project test evidence and
+calibration against real fleet messages. The host checks the typed handoff chain and checkpoint provenance;
 the operator decides whether that evidence is sufficient to release a worker.
 
 References: [TypeSafe API](https://docs.typesafe.ai/api),

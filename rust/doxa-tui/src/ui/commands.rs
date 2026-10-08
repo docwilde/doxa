@@ -121,7 +121,7 @@ pub(super) const COMMANDS: &[CommandHelp] = &[
     CommandHelp { kind: LocalCommand::Sidebar, name: "/sidebar", form: "/sidebar [on|off|wider|narrower|width N]", summary: "Session rail", support: "local" },
     CommandHelp { kind: LocalCommand::Collection, name: "/collection", form: "/collection [action] [name]", summary: "Organize sessions", support: "local · new derives a name; sort manual|urgency" },
     CommandHelp { kind: LocalCommand::Msg, name: "/msg", form: "/msg <peer> <text>", summary: "Message a peer", support: "local · same project" },
-    CommandHelp { kind: LocalCommand::Fleet, name: "/fleet", form: "/fleet [runs|status [RUN]|stop|detach|attach [RUN] INDEX|mesh [RUN]|start OPTIONS|resume RUN]", summary: "Fleet manifests and slots", support: "local · verified slot attachment" },
+    CommandHelp { kind: LocalCommand::Fleet, name: "/fleet", form: "/fleet [runs|status [RUN]|stop|detach|attach [RUN] INDEX|dependency-review [RUN] SLOT|mesh [RUN]|start OPTIONS|resume RUN]", summary: "Fleet manifests and slots", support: "local · verified slot attachment" },
     CommandHelp { kind: LocalCommand::Mesh, name: "/mesh", form: "/mesh [RUN|stop]", summary: "Browser peer graph", support: "local · private loopback ledger" },
     CommandHelp { kind: LocalCommand::RemoteConnect, name: "/remote-connect", form: "/remote-connect HUB_URL HOST_ID", summary: "Share local sessions with a private hub", support: "local · active while this window is open" },
     CommandHelp { kind: LocalCommand::RemoteDisconnect, name: "/remote-disconnect", form: "/remote-disconnect", summary: "Stop sharing local sessions", support: "local · hub presence expires after its lease" },
@@ -169,6 +169,7 @@ pub(super) const FLEET_ACTIONS: &[(&str, &str)] = &[
     ("/fleet continue", "Resume a paused fleet with its approved charter hash"),
     ("/fleet status", "Inspect current run"),
     ("/fleet attach", "Choose a current-run slot"),
+    ("/fleet dependency-review", "Read host evidence and release a dependent slot"),
     ("/fleet mesh", "Open current run graph"),
     ("/fleet stop", "Stop this window's controller"),
     (

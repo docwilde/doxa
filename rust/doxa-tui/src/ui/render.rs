@@ -808,6 +808,27 @@ impl App {
             draw_menu_scrollbar(frame, area, lines.len(), visible, start);
             return;
         }
+        if let Some(review) = &self.fleet_dependency_review {
+            let lines = info.lines.iter().flat_map(|line| {
+                crate::memory_menu::wrap_review(line, usize::from(area.width.saturating_sub(3)).max(1))
+            }).collect::<Vec<_>>();
+            let visible = usize::from(area.height.saturating_sub(2));
+            let start = info.scroll.min(lines.len().saturating_sub(visible));
+            let end = (start + visible).min(lines.len());
+            if visible > 0 && start <= review.seen.get() {
+                review.seen.set(review.seen.get().max(end));
+                review.complete.set(review.complete.get() || end >= lines.len());
+            }
+            frame.render_widget(
+                Paragraph::new(lines.join("\n"))
+                    .scroll((start.min(u16::MAX as usize) as u16, 0))
+                    .block(Block::default().title(" Fleet dependency release review ").borders(Borders::ALL))
+                    .style(Style::default().fg(theme::TEXT).bg(theme::RAISED)),
+                area,
+            );
+            draw_menu_scrollbar(frame, area, lines.len(), visible, start);
+            return;
+        }
         if info.kind == "fleet" {
             let visible = usize::from(area.height.saturating_sub(2));
             let start = info.scroll.min(info.lines.len().saturating_sub(visible));
