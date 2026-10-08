@@ -2075,7 +2075,7 @@ for line in sys.stdin:
                     evidence_count: None, recency:None }).collect(),
                 proposals: (1..=2).map(|id| lore_picker::Proposal { pid: format!("proposal-{id}"),
                     kind: "belief".into(), action: "add".into(), scope: "project".into(),
-                    summary: "long summary ".repeat(80) }).collect(),
+                    summary: "long summary ".repeat(80), source_session_id: None, source_project: None }).collect(),
                 selected: 0, query: String::new(), filter_focused: false, offset: 0, status: "long status ".repeat(40),
                 evidence: None, pending: None, proposal_mode, cluster_mode: false, all_proposals: Vec::new(), review: None, review_scroll: 0,
                 review_seen: 0, review_width: 0, armed_resolution: None, can_resolve: false,
@@ -5513,7 +5513,7 @@ for line in sys.stdin:
         let picker = app.lore_picker.as_mut().unwrap();
         picker.proposal_mode = true;
         picker.proposals = (1..=30).map(|index| lore_picker::Proposal { pid: index.to_string(),
-            kind: "memory".into(), action: "add".into(), scope: "user".into(), summary: "summary".into() }).collect();
+            kind: "memory".into(), action: "add".into(), scope: "user".into(), summary: "summary".into(), source_session_id: None, source_project: None }).collect();
         let menu = app.active_chooser_rect().unwrap();
         let footer = menu.y + 4 + menu.height.saturating_sub(6);
         app.mouse(MouseEvent { kind: MouseEventKind::Moved,
@@ -5723,6 +5723,7 @@ for line in sys.stdin:
             picker.proposals = vec![lore_picker::Proposal {
                 pid: "proposal-1".into(), kind: "memory".into(), action: "add".into(),
                 scope: "user".into(), summary: "Full staged fact with hidden tail".into(),
+                source_session_id: None, source_project: None,
             }];
             painted_at(&app, 120, 40);
             let row = app.rendered_belief_rows.borrow()[0].clone();
@@ -5924,7 +5925,7 @@ for line in sys.stdin:
             session_id: None,
             query: String::new(), filter_focused: false, rows: Vec::new(), selected: 0, offset: 0,
             proposals: vec![lore_picker::Proposal { pid: "one".into(), kind: "memory".into(),
-                action: "add".into(), scope: "user".into(), summary: String::new() }],
+                action: "add".into(), scope: "user".into(), summary: String::new(), source_session_id: None, source_project: None }],
             proposal_mode: true, cluster_mode: false, all_proposals: Vec::new(), review: Some(review), review_scroll: 0,
             review_seen: 0, review_width: 0, armed_resolution: None,
             can_resolve, resolving: false, cwd: "/repo".into(),
@@ -6300,7 +6301,7 @@ for line in sys.stdin:
         assert!(app.handle(Event::Key(KeyEvent::new(KeyCode::Char('3'),KeyModifiers::CONTROL))));
         assert!(app.lore_picker.as_ref().unwrap().cluster_mode);
         let (tx,rx)=std::sync::mpsc::channel();
-        let rows=(0..25).map(|n|lore_picker::Proposal{pid:format!("pid-{n}"),kind:"memory".into(),action:"add".into(),scope:"user".into(),summary:format!("Cluster 1 · fact {n}")}).collect();
+        let rows=(0..25).map(|n|lore_picker::Proposal{pid:format!("pid-{n}"),kind:"memory".into(),action:"add".into(),scope:"user".into(),summary:format!("Cluster 1 · fact {n}"),source_session_id:None,source_project:None}).collect();
         tx.send(Ok(lore_picker::ResultPage::ClusteredProposals(rows,1))).unwrap();
         app.lore_picker.as_mut().unwrap().pending=Some(rx); assert!(app.poll_lore());
         let painted=painted_at(&app,100,28); assert!(painted.contains("1 memory clusters")); assert!(painted.contains("3 Clustered"));
@@ -6376,7 +6377,7 @@ fn unavailable_saved_tabs_do_not_block_second_split_session_persistence() {
             app.apply_daemon_frame(&json!({"type":"hello","session_id":"s","engine":"codex","model":"gpt-6-sol"}));
             app.input="Private unsent draft".into();app.input_cursor=app.input.len();
             app.show_belief_browser_fixture(0,&[]);
-            let rows=vec![lore_picker::Proposal {pid:"pid-b".into(),kind:"memory".into(),action:"add".into(),scope:"user".into(),summary:"blue fact".into()},lore_picker::Proposal {pid:"pid-a".into(),kind:"memory".into(),action:"add".into(),scope:"user".into(),summary:"red fact".into()}];
+            let rows=vec![lore_picker::Proposal {pid:"pid-b".into(),kind:"memory".into(),action:"add".into(),scope:"user".into(),summary:"blue fact".into(),source_session_id:None,source_project:None},lore_picker::Proposal {pid:"pid-a".into(),kind:"memory".into(),action:"add".into(),scope:"user".into(),summary:"red fact".into(),source_session_id:None,source_project:None}];
             let picker=app.lore_picker.as_mut().unwrap();picker.proposal_mode=true;picker.cluster_mode=clustered;picker.all_proposals=rows.clone();picker.proposals=rows;
             for ch in "blue".chars() {assert!(app.handle(Event::Key(KeyEvent::new(KeyCode::Char(ch),KeyModifiers::NONE))));}
             let picker=app.lore_picker.as_ref().unwrap();assert!(picker.proposal_mode);assert_eq!(picker.cluster_mode,clustered);assert_eq!(picker.query,"blue");assert_eq!(picker.proposals.len(),1);
