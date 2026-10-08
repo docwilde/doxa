@@ -195,7 +195,7 @@ mod tests {
         use crate::{Assignment,Charter,ReviewConfig};use std::os::unix::fs::PermissionsExt;
         let dir=tempfile::tempdir().unwrap();std::fs::set_permissions(dir.path(),std::fs::Permissions::from_mode(0o700)).unwrap();
         let charter=Charter{version:1,fleet_id:"run".into(),task:"task".into(),repo:"/repo".into(),allowed_paths:vec![String::new()],required_evidence:vec![],worker_limit:1,run_budget_usd:Some(10.0),deadline:0,human_actions:vec![]};
-        let mut context=Context{charter_sha256:hash(&charter).unwrap(),charter,assignments:vec![Assignment{id:"a".into(),session_id:"a".into(),pid:1,role:"worker".into(),task:"task".into(),cwd:"/repo".into(),base_commit:None}],review:ReviewConfig{budget_usd:1.0,max_calls:1,..Default::default()},state_path:dir.path().join("state.json")};
+        let mut context=Context{charter_sha256:hash(&charter).unwrap(),charter,assignments:vec![Assignment{id:"a".into(),session_id:"a".into(),pid:1,role:"worker".into(),task:"task".into(),cwd:"/repo".into(),base_commit:None,allowed_paths:vec![]}],review:ReviewConfig{budget_usd:1.0,max_calls:1,..Default::default()},state_path:dir.path().join("state.json")};
         let model=Model::parse("jev:jev-1.13.0").unwrap();let body=request(&model,SEMANTIC_INSTRUCTIONS,&json!({"message":"bounded"})).unwrap();let reserved=reserve(&context,&model,&body).unwrap().0;
         assert!(reserved>0.0);assert!(reserve(&context,&model,&body).is_err());let state=transaction(&context,|state|Ok(state.clone())).unwrap();assert_eq!(state.calls,1);assert_eq!(state.reserved_usd,reserved);assert!(state.paused);
         context.review.max_calls=10;context.review.budget_usd=reserved;assert!(reserve(&context,&model,&body).is_err());

@@ -53,24 +53,36 @@ pub struct Charter {
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-pub struct Assignment { pub id:String, pub session_id:String, pub pid:i32, pub role:String, pub task:String, pub cwd:String, #[serde(default)] pub base_commit:Option<String> }
+pub struct Assignment { pub id:String, pub session_id:String, pub pid:i32, pub role:String, pub task:String, pub cwd:String, #[serde(default)] pub base_commit:Option<String>, #[serde(default)] pub allowed_paths:Vec<String> }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Context { pub charter:Charter, pub charter_sha256:String, pub assignments:Vec<Assignment>, pub review:ReviewConfig, pub state_path:PathBuf }
 impl Context {
     pub fn validate(&self) -> io::Result<()> {
         self.review.validate()?;
-        if self.charter.version!=1 || self.charter.task.trim().is_empty() || self.charter.task.len()>64*1024 || self.charter_sha256!=hash(&self.charter)? || !self.state_path.is_absolute() || self.assignments.is_empty() || self.assignments.len()>1025 {return Err(invalid("invalid immutable fleet charter"));}
+        if self.charter.version!=1 || self.charter.task.trim().is_empty() || self.charter.task.len()>64*1024 || self.charter_sha256!=hash(&self.charter)? || !self.state_path.is_absolute() || self.assignments.is_empty() || self.assignments.len()>1025
+            || self.charter.allowed_paths.is_empty() || self.charter.allowed_paths.iter().any(|path|path.starts_with('/')||path.len()>512||path.split('/').any(|part|part=="..")||path.chars().any(char::is_control)) {return Err(invalid("invalid immutable fleet charter"));}
         for (index,row) in self.assignments.iter().enumerate() {
-            if row.pid<=0 || row.id.is_empty() || row.session_id.is_empty() || !matches!(row.role.as_str(),"worker"|"coordinator") || row.task.len()>64*1024 || row.base_commit.as_ref().is_some_and(|id|!(40..=64).contains(&id.len())||!id.bytes().all(|byte|byte.is_ascii_hexdigit())) || self.assignments[..index].iter().any(|prior|prior.id==row.id||prior.session_id==row.session_id||prior.pid==row.pid) {return Err(invalid("invalid host-issued fleet assignment"));}
+            if row.pid<=0 || row.id.is_empty() || row.session_id.is_empty() || !matches!(row.role.as_str(),"worker"|"coordinator") || row.task.trim().is_empty() || row.task.len()>64*1024 || row.base_commit.as_ref().is_some_and(|id|!(40..=64).contains(&id.len())||!id.bytes().all(|byte|byte.is_ascii_hexdigit())) || self.assignments[..index].iter().any(|prior|prior.id==row.id||prior.session_id==row.session_id||prior.pid==row.pid) {return Err(invalid("invalid host-issued fleet assignment"));}
+            if row.allowed_paths.iter().any(|path| path.is_empty() || path.starts_with('/') || path.len()>512 || path.split('/').any(|part|part=="..") || path.chars().any(char::is_control) || !self.charter.allowed_paths.iter().any(|prefix| path_within(path,prefix))) {return Err(invalid("assignment path exceeds the owner-approved charter"));}
         }
         Ok(())
     }
     pub fn assignment(&self,id:&str)->io::Result<&Assignment>{self.assignments.iter().find(|row|row.session_id==id).ok_or_else(||invalid("session is outside the approved fleet"))}
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub fn path_within(path:&str,prefix:&str)->bool { prefix.is_empty() || path==prefix || path.starts_with(&format!("{}/",prefix.trim_end_matches('/'))) }
+impl Assignment {
+    pub fn permits(&self,charter:&Charter,path:&str)->bool {
+        charter.allowed_paths.iter().any(|prefix|path_within(path,prefix)) &&
+            (self.allowed_paths.is_empty() || self.allowed_paths.iter().any(|prefix|path_within(path,prefix)))
+    }
+    pub fn effective_paths<'a>(&'a self,charter:&'a Charter)->&'a [String] {
+        if self.allowed_paths.is_empty(){&charter.allowed_paths}else{&self.allowed_paths}
+    }
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all="snake_case")]
-pub enum Kind { Status, Question, Evidence, Proposal, TaskRequest, Completion }
+pub enum Kind { #[default] Status, Question, Evidence, Proposal, TaskRequest, Completion, Handoff, Ack, Confirm }
 impl Kind { pub fn parse(value:&str)->io::Result<Self>{serde_json::from_value(json!(value)).map_err(|_|invalid("unknown fleet message kind"))} pub fn ordinary(self)->bool{matches!(self,Self::Status|Self::Evidence)} }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -92,7 +104,7 @@ impl Envelope {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct State {
-    pub charter_sha256:String,pub paused:bool,pub reason:String,pub supervisor_status:String,
+    pub charter_sha256:String,#[serde(default)] pub assignments_sha256:String,pub paused:bool,pub reason:String,pub supervisor_status:String,
     pub reserved_usd:f64,pub actual_estimated_usd:f64,pub calls:u64,pub accounting_unknown:bool,
     pub received:BTreeMap<String,u64>,pub minute:u64,pub message_count:u64,pub total_bytes:u64,
     pub observations:Vec<Value>,pub artifacts:BTreeMap<String,Value>,pub last_supervisor_at:u64,
@@ -102,7 +114,7 @@ pub struct State {
 }
 #[derive(Clone,Debug,Serialize,Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct MessageTrace {pub from:String,pub to:String,pub hop:u8}
+pub struct MessageTrace {pub from:String,pub to:String,pub hop:u8,#[serde(default)] pub kind:Kind,#[serde(default)] pub artifact_refs:Vec<String>}
 #[derive(Clone,Debug,Serialize,Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CachedSemantic {pub envelope_sha256:String,pub result:Result<SemanticVerdict,String>}
@@ -127,8 +139,12 @@ pub fn transaction<T>(context:&Context,work:impl FnOnce(&mut State)->io::Result<
     let meta=lock.metadata()?;
     if !meta.is_file()||meta.nlink()!=1||meta.uid()!=unsafe{libc::geteuid()}||meta.mode()&0o077!=0{return Err(invalid("untrusted fleet state lock"));}
     if unsafe{libc::flock(lock.as_raw_fd(),libc::LOCK_EX)}!=0{return Err(io::Error::last_os_error());}
-    let mut state=match read_private::<State>(&context.state_path,MAX_STATE){Ok(state)=>state,Err(err) if err.kind()==io::ErrorKind::NotFound=>State{charter_sha256:context.charter_sha256.clone(),supervisor_status:if context.review.supervisor.is_some(){"pending"}else{"off"}.into(),..Default::default()},Err(err)=>return Err(err)};
+    let assignments_sha256=hash(&context.assignments)?;
+    let mut state=match read_private::<State>(&context.state_path,MAX_STATE){Ok(state)=>state,Err(err) if err.kind()==io::ErrorKind::NotFound=>State{charter_sha256:context.charter_sha256.clone(),assignments_sha256:assignments_sha256.clone(),supervisor_status:if context.review.supervisor.is_some(){"pending"}else{"off"}.into(),..Default::default()},Err(err)=>return Err(err)};
     if state.charter_sha256!=context.charter_sha256{return Err(invalid("fleet charter changed; admission withheld"));}
+    // Older private journals gain this binding on their first beta.11 read.
+    if state.assignments_sha256.is_empty(){state.assignments_sha256=assignments_sha256.clone();}
+    if state.assignments_sha256!=assignments_sha256{return Err(invalid("fleet assignments changed; admission withheld"));}
     let result=work(&mut state);save_private(&context.state_path,&state)?;result
 }
 fn record(state:&mut State,value:Value){state.observations.push(value);if state.observations.len()>256{state.observations.remove(0);}}
@@ -165,7 +181,16 @@ fn deterministic(context:&Context,envelope:&Envelope,recipient:&str,pid:i32,stat
         let trace=state.traces.get(parent).ok_or_else(||invalid("unknown fleet reply ancestry"))?;
         let same_pair=(trace.from==envelope.from_session&&trace.to==recipient)||(trace.to==envelope.from_session&&trace.from==recipient);
         if !same_pair||envelope.hop!=trace.hop.saturating_add(1){return Err(invalid("fleet reply provenance or hop count changed"));}
+        match envelope.kind {
+            Kind::Ack if trace.kind==Kind::Handoff && trace.to==envelope.from_session && trace.from==recipient && envelope.artifact_refs==trace.artifact_refs => {},
+            Kind::Confirm if trace.kind==Kind::Ack && trace.to==envelope.from_session && trace.from==recipient && envelope.artifact_refs==trace.artifact_refs => {},
+            Kind::Ack|Kind::Confirm => return Err(invalid("handoff acknowledgment must echo the parent's host artifacts and reverse direction")),
+            _ => {},
+        }
     }else if envelope.hop!=0{return Err(invalid("root fleet message cannot claim reply hops"));}
+    if matches!(envelope.kind,Kind::Handoff) && (envelope.in_reply_to.is_some() || envelope.artifact_refs.is_empty()) || matches!(envelope.kind,Kind::Ack|Kind::Confirm) && envelope.in_reply_to.is_none() {
+        return Err(invalid("handoff requires host artifacts and a bounded acknowledgment chain"));
+    }
     if envelope.requested_action.is_some()||matches!(envelope.kind,Kind::TaskRequest){return Err(invalid("task changes require host-issued assignment and human review"));}
     if matches!(envelope.kind,Kind::Completion){
                 let evidence:Vec<_>=envelope.artifact_refs.iter().filter_map(|id|state.artifacts.get(id)).collect();
@@ -195,7 +220,7 @@ pub fn admit(context:&Context,envelope:&Envelope,recipient:&str,pid:i32,semantic
             }
         }
         if admission.delivered{
-            state.received.insert(envelope.message_id.clone(),unix_now());state.traces.insert(envelope.message_id.clone(),MessageTrace{from:envelope.from_session.clone(),to:recipient.into(),hop:envelope.hop});state.message_count+=1;state.total_bytes+=envelope.body.len() as u64;
+            state.received.insert(envelope.message_id.clone(),unix_now());state.traces.insert(envelope.message_id.clone(),MessageTrace{from:envelope.from_session.clone(),to:recipient.into(),hop:envelope.hop,kind:envelope.kind,artifact_refs:envelope.artifact_refs.clone()});state.message_count+=1;state.total_bytes+=envelope.body.len() as u64;
             state.recent_messages.push(envelope.clone());while state.recent_messages.len()>8||state.recent_messages.iter().map(|row|row.body.len()).sum::<usize>()>12*1024{state.recent_messages.remove(0);}
         }
         record(state,json!({"event":"admission","admission":admission,"from":envelope.from_session,"to":recipient,"kind":envelope.kind,"input_sha256":hash(envelope)?,"at":unix_now()}));
