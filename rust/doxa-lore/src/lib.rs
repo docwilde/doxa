@@ -51,23 +51,23 @@ impl PendingSessions {
     fn parse(value: Value, cwd: &str, requested: &[String]) -> Result<Self, LoreError> {
         let object = value.as_object().filter(|object| object.len() == 4)
             .ok_or(LoreError::InvalidFrame)?;
-        let source_project_slug = object["source_project_slug"].as_str()
+        let source_project_slug = object.get("source_project_slug").and_then(Value::as_str)
             .filter(|slug| *slug == lore_core::config::project_slug(Path::new(cwd)))
             .ok_or(LoreError::InvalidFrame)?.to_owned();
-        let snapshot = object["snapshot"].as_str().filter(|digest| valid_digest(digest))
+        let snapshot = object.get("snapshot").and_then(Value::as_str).filter(|digest| valid_digest(digest))
             .ok_or(LoreError::InvalidFrame)?.to_owned();
-        let complete = object["complete"].as_bool().ok_or(LoreError::InvalidFrame)?;
-        let rows = object["sessions"].as_array().filter(|rows| rows.len() == requested.len())
+        let complete = object.get("complete").and_then(Value::as_bool).ok_or(LoreError::InvalidFrame)?;
+        let rows = object.get("sessions").and_then(Value::as_array).filter(|rows| rows.len() == requested.len())
             .ok_or(LoreError::InvalidFrame)?;
         let mut sessions = Vec::with_capacity(rows.len());
         let mut seen_pids = HashSet::new();
         for (row, expected) in rows.iter().zip(requested) {
             let row = row.as_object().filter(|row| row.len() == 3)
                 .ok_or(LoreError::InvalidFrame)?;
-            let session_id = row["session_id"].as_str()
+            let session_id = row.get("session_id").and_then(Value::as_str)
                 .filter(|id| *id == expected).ok_or(LoreError::InvalidFrame)?.to_owned();
-            let row_complete = row["complete"].as_bool().ok_or(LoreError::InvalidFrame)?;
-            let pids = row["pending_pids"].as_array().filter(|pids| pids.len() <= 4096)
+            let row_complete = row.get("complete").and_then(Value::as_bool).ok_or(LoreError::InvalidFrame)?;
+            let pids = row.get("pending_pids").and_then(Value::as_array).filter(|pids| pids.len() <= 4096)
                 .ok_or(LoreError::InvalidFrame)?;
             let mut pending_pids = Vec::with_capacity(pids.len());
             for pid in pids {
@@ -1308,6 +1308,14 @@ mod pending_sessions_tests {
         assert!(PendingSessions::parse(wrong, cwd, &ids).is_err());
         let mut wrong = valid.clone();
         wrong["complete"] = json!(true);
+        assert!(PendingSessions::parse(wrong, cwd, &ids).is_err());
+        let mut wrong = valid.clone();
+        wrong.as_object_mut().unwrap().remove("snapshot");
+        wrong["unrelated"] = json!("a".repeat(64));
+        assert!(PendingSessions::parse(wrong, cwd, &ids).is_err());
+        let mut wrong = valid.clone();
+        wrong["sessions"][0].as_object_mut().unwrap().remove("complete");
+        wrong["sessions"][0]["unrelated"] = json!(true);
         assert!(PendingSessions::parse(wrong, cwd, &ids).is_err());
         let mut wrong = valid;
         wrong["sessions"][1]["pending_pids"] = json!(["proposal-1"]);
