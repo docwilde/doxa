@@ -27,7 +27,7 @@ const MAX_CALL_SITES: usize = 10_000;
 const MAX_CANDIDATE_SYMBOLS: usize = 100_000;
 const MAX_EDGE_CANDIDATES: usize = 8;
 
-pub enum Query { File(String), Symbol(String), Imports(String), Calls(String) }
+pub enum Query { File(String), Symbol(String), Imports(String), Calls(String), Modules(String) }
 
 pub fn query_cli(args: &[String]) -> Result<Answer, String> {
     let (root, rest) = if args.first().is_some_and(|arg| arg == "--root") {
@@ -39,7 +39,8 @@ pub fn query_cli(args: &[String]) -> Result<Answer, String> {
         [kind, value] if kind == "symbol" => Query::Symbol(value.clone()),
         [kind, value] if kind == "imports" => Query::Imports(value.clone()),
         [kind, value] if kind == "calls" => Query::Calls(value.clone()),
-        _ => return Err("usage: doxa codegraph [--root WORKTREE] file PATH | symbol NAME | imports PATH | calls PATH".into()),
+        [kind, value] if kind == "modules" => Query::Modules(value.clone()),
+        _ => return Err("usage: doxa codegraph [--root WORKTREE] file PATH | symbol NAME | imports PATH | calls PATH | modules PATH".into()),
     };
     query(&root, request)
 }
@@ -56,6 +57,9 @@ pub struct Answer {
     pub omitted_rows: usize,
     pub edges: Vec<CallEdge>,
     pub omitted_edges: usize,
+    pub module_edges: Vec<ModuleEdge>,
+    pub omitted_module_edges: usize,
+    pub skipped_nested_modules: usize,
     pub note: &'static str,
     pub fallback: Option<&'static str>,
 }
@@ -123,7 +127,22 @@ pub struct CallCandidate {
     pub read_unix_ms: u128,
 }
 
-const NOTE: &str = "Rust syntax only. Call candidates match a final name segment, not Rust bindings; even one candidate is unverified. Imports are declarations. cfg, macro expansion, local definitions/imports, other expression calls, references, and non-Rust languages are not resolved.";
+#[derive(Clone, Debug, Serialize)]
+pub struct ModuleEdge {
+    pub source: String,
+    pub line: usize,
+    pub column: usize,
+    pub module: String,
+    pub target: Option<String>,
+    pub resolution: &'static str,
+    pub reason: &'static str,
+    pub source_sha256: String,
+    pub source_read_unix_ms: u128,
+    pub target_sha256: Option<String>,
+    pub target_read_unix_ms: Option<u128>,
+}
+
+const NOTE: &str = "Rust syntax only. Call candidates match a final name segment, not Rust bindings; even one candidate is unverified. Imports are declarations. Module edges resolve file layout only, not compilation reachability. cfg, macro expansion, local definitions/imports, other expression calls, references, and non-Rust languages are not resolved.";
 
 fn source_language(path: &str) -> Option<&'static str> {
     match Path::new(path).extension().and_then(|s| s.to_str()) {
@@ -215,7 +234,28 @@ fn file_bytes(root: &Path, relative: &str) -> Result<(String, String, u128), Str
     Ok((content, sha, read_unix_ms))
 }
 
-struct Parsed { symbols: Vec<Row>, imports: Vec<Row>, calls: Vec<CallEdge>, macro_items: usize, unsupported_syntax: usize }
+#[derive(Clone)]
+struct ModuleDecl {
+    name: String,
+    line: usize,
+    column: usize,
+    inline: bool,
+    attribute: bool,
+}
+
+struct Parsed {
+    symbols: Vec<Row>, imports: Vec<Row>, calls: Vec<CallEdge>,
+    modules: Vec<ModuleDecl>, nested_modules: usize,
+    macro_items: usize, unsupported_syntax: usize,
+}
+
+fn nested_module_count(items: &[syn::Item]) -> usize {
+    items.iter().map(|item| match item {
+        syn::Item::Mod(module) => 1 + module.content.as_ref()
+            .map(|(_, children)| nested_module_count(children)).unwrap_or(0),
+        _ => 0,
+    }).sum()
+}
 
 struct CallCollector<'a> {
     file: &'a str,
@@ -366,10 +406,125 @@ fn walk_items(items: &[syn::Item], scope: &str, file: &str, sha: &str, read_unix
 fn parse_rust(content: &str, file: &str, sha: &str, read_unix_ms: u128,
     collect: bool) -> Result<Parsed, String> {
     let syntax = syn::parse_file(content).map_err(|e| format!("Rust parse error: {e}"))?;
-    let mut parsed = Parsed { symbols: Vec::new(), imports: Vec::new(), calls: Vec::new(), macro_items: 0, unsupported_syntax: 0 };
+    let mut parsed = Parsed { symbols: Vec::new(), imports: Vec::new(), calls: Vec::new(),
+        modules: Vec::new(), nested_modules: 0, macro_items: 0, unsupported_syntax: 0 };
+    for item in &syntax.items {
+        if let syn::Item::Mod(module) = item {
+            let at = module.ident.span().start();
+            parsed.modules.push(ModuleDecl {
+                name: module.ident.to_string(), line: at.line, column: at.column,
+                inline: module.content.is_some(), attribute: !module.attrs.is_empty(),
+            });
+            if let Some((_, children)) = &module.content {
+                parsed.nested_modules += nested_module_count(children);
+            }
+        }
+    }
     walk_items(&syntax.items, "", file, sha, read_unix_ms, collect, &mut parsed);
     parsed.calls.sort_by_key(|edge| (edge.line, edge.column));
     Ok(parsed)
+}
+
+enum SourceFact {
+    Parsed { sha256: String, read_unix_ms: u128 },
+    Skipped,
+    Unparseable,
+}
+
+fn module_base(source: &str) -> PathBuf {
+    let path = Path::new(source);
+    let parent = path.parent().unwrap_or_else(|| Path::new(""));
+    let name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
+    let cargo_root = parent.ends_with("src/bin")
+        || ["tests", "examples", "benches"].iter().any(|segment| parent.ends_with(segment));
+    if matches!(name, "lib.rs" | "main.rs" | "mod.rs" | "build.rs") || cargo_root {
+        parent.to_path_buf()
+    } else {
+        parent.join(path.file_stem().unwrap_or_default())
+    }
+}
+
+fn possible_unlisted_candidate(root: &Path, relative: &str) -> bool {
+    // Only test for presence. Never read ignored files or follow a candidate's
+    // symlinked parent: an unsafe/indeterminate path blocks a positive edge.
+    let Ok(mut directory) = fs::OpenOptions::new().read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(root) else { return true; };
+    let parts = Path::new(relative).components().map(|part| match part {
+        std::path::Component::Normal(name) => CString::new(name.as_bytes()).ok(),
+        _ => None,
+    }).collect::<Option<Vec<_>>>();
+    let Some(parts) = parts else { return true; };
+    let Some((last, parents)) = parts.split_last() else { return true; };
+    for part in parents {
+        let fd = unsafe { libc::openat(directory.as_raw_fd(), part.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
+        if fd < 0 {
+            return std::io::Error::last_os_error().raw_os_error() != Some(libc::ENOENT);
+        }
+        directory = unsafe { File::from_raw_fd(fd) };
+    }
+    let mut metadata = std::mem::MaybeUninit::<libc::stat>::uninit();
+    let status = unsafe { libc::fstatat(directory.as_raw_fd(), last.as_ptr(),
+        metadata.as_mut_ptr(), libc::AT_SYMLINK_NOFOLLOW) };
+    status == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ENOENT)
+}
+
+fn module_edges(root: &Path, source: &str, declarations: &[ModuleDecl],
+    source_sha: &str, source_read_unix_ms: u128, listed: &BTreeSet<String>,
+    facts: &BTreeMap<String, SourceFact>) -> (Vec<ModuleEdge>, usize) {
+    let base = module_base(source);
+    let mut counts = BTreeMap::<&str, usize>::new();
+    for declaration in declarations { *counts.entry(&declaration.name).or_default() += 1; }
+    let mut edges = Vec::new();
+    for declaration in declarations {
+        let mut edge = ModuleEdge {
+            source: source.into(), line: declaration.line, column: declaration.column,
+            module: declaration.name.clone(), target: None,
+            resolution: "unknown", reason: "no_listed_candidate",
+            source_sha256: source_sha.into(), source_read_unix_ms,
+            target_sha256: None, target_read_unix_ms: None,
+        };
+        if counts[declaration.name.as_str()] > 1 {
+            edge.reason = "duplicate_declaration";
+        } else if declaration.inline {
+            edge.reason = "inline_module_skipped";
+        } else if declaration.attribute {
+            edge.reason = "module_attribute_unresolved";
+        } else {
+            let direct = base.join(format!("{}.rs", declaration.name));
+            let directory = base.join(&declaration.name).join("mod.rs");
+            let candidates = [direct, directory].map(|path| path.to_string_lossy().into_owned());
+            let present = candidates.iter().filter(|path| listed.contains(path.as_str()))
+                .collect::<Vec<_>>();
+            // An ignored or generated-on-disk sibling may change Rust's layout
+            // choice, so a single listed candidate is not enough in that case.
+            let unlisted_exists = candidates.iter().filter(|path| !listed.contains(path.as_str()))
+                .any(|path| possible_unlisted_candidate(root, path));
+            if present.len() > 1 {
+                edge.reason = "ambiguous_layout";
+            } else if unlisted_exists {
+                edge.reason = "unlisted_candidate_exists";
+            } else if let Some(target) = present.first() {
+                match facts.get(target.as_str()) {
+                    Some(SourceFact::Parsed { sha256, read_unix_ms }) => {
+                        edge.target = Some((*target).clone());
+                        edge.resolution = "structural_only";
+                        edge.reason = "unique_plain_file_layout";
+                        edge.target_sha256 = Some(sha256.clone());
+                        edge.target_read_unix_ms = Some(*read_unix_ms);
+                    }
+                    Some(SourceFact::Skipped) => edge.reason = "candidate_skipped",
+                    Some(SourceFact::Unparseable) => edge.reason = "candidate_unparseable",
+                    None => edge.reason = "candidate_not_scanned",
+                }
+            }
+        }
+        edges.push(edge);
+    }
+    let omitted = edges.len().saturating_sub(MAX_ROWS);
+    edges.truncate(MAX_ROWS);
+    (edges, omitted)
 }
 
 pub fn query(root: &Path, request: Query) -> Result<Answer, String> {
@@ -378,6 +533,7 @@ pub fn query(root: &Path, request: Query) -> Result<Answer, String> {
     let (kind, value) = match request {
         Query::File(value) => ("file", value), Query::Symbol(value) => ("symbol", value),
         Query::Imports(value) => ("imports", value), Query::Calls(value) => ("calls", value),
+        Query::Modules(value) => ("modules", value),
     };
     if value.is_empty() || value.len() > MAX_PATH_BYTES || value.chars().any(char::is_control) {
         return Err("invalid query value".into());
@@ -387,28 +543,38 @@ pub fn query(root: &Path, request: Query) -> Result<Answer, String> {
         observed_unix_ms: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis(),
         status: "ok".into(), coverage: Coverage::default(), rows: Vec::new(), omitted_rows: 0,
         edges: Vec::new(), omitted_edges: 0,
+        module_edges: Vec::new(), omitted_module_edges: 0, skipped_nested_modules: 0,
         note: NOTE, fallback: None };
     answer.coverage.enumerated_files = paths.len();
     let mut total = 0u64;
     let mut candidates: BTreeMap<String, Vec<Row>> = BTreeMap::new();
     let mut candidate_count = 0usize;
-    for path in paths {
+    let mut source_facts = BTreeMap::<String, SourceFact>::new();
+    let mut requested_modules = None;
+    for path in &paths {
         match source_language(&path) {
             Some("rust") => {
                 let (content, sha, read_unix_ms) = match file_bytes(&root, &path) {
                     Ok(result) => result,
-                    Err(reason) => { answer.coverage.skipped.add(&path, reason); if path == value { answer.status = "skipped".into(); } continue; }
+                    Err(reason) => { answer.coverage.skipped.add(&path, reason); source_facts.insert(path.clone(), SourceFact::Skipped); if path == &value { answer.status = "skipped".into(); } continue; }
                 };
                 total = total.saturating_add(content.len() as u64);
                 if total > MAX_TOTAL_SOURCE_BYTES { return Err("Rust source scan exceeded 64 MiB; no partial answer".into()); }
                 let parsed = match parse_rust(&content, &path, &sha, read_unix_ms,
-                    kind == "calls" && path == value) {
+                    kind == "calls" && path == &value) {
                     Ok(result) => result,
-                    Err(reason) => { answer.coverage.unparseable.add(&path, reason); if path == value { answer.status = "unparseable".into(); } continue; }
+                    Err(reason) => { answer.coverage.unparseable.add(&path, reason); source_facts.insert(path.clone(), SourceFact::Unparseable); if path == &value { answer.status = "unparseable".into(); } continue; }
                 };
+                source_facts.insert(path.clone(), SourceFact::Parsed { sha256: sha.clone(), read_unix_ms });
                 answer.coverage.parsed_rust_files += 1;
                 answer.coverage.macro_items += parsed.macro_items;
                 answer.coverage.unsupported_syntax += parsed.unsupported_syntax;
+                if kind == "modules" {
+                    if path == &value {
+                        requested_modules = Some((parsed.modules, parsed.nested_modules, sha, read_unix_ms));
+                    }
+                    continue;
+                }
                 if kind == "calls" {
                     for symbol in parsed.symbols.iter().filter(|row| matches!(row.kind,
                         "function" | "method" | "trait_method")) {
@@ -418,7 +584,7 @@ pub fn query(root: &Path, request: Query) -> Result<Answer, String> {
                         }
                         candidates.entry(symbol.name.clone()).or_default().push(symbol.clone());
                     }
-                    if path == value {
+                    if path == &value {
                         if parsed.calls.len() > MAX_CALL_SITES {
                             return Err("file contains more than 10,000 supported call sites; no partial answer".into());
                         }
@@ -429,8 +595,8 @@ pub fn query(root: &Path, request: Query) -> Result<Answer, String> {
                 }
                 let relevant = if kind == "symbol" {
                     parsed.symbols.into_iter().filter(|row| row.name == value || row.qualified == value).collect::<Vec<_>>()
-                } else if path == value && kind == "imports" { parsed.imports }
-                else if path == value { parsed.symbols.into_iter().chain(parsed.imports).collect::<Vec<_>>() }
+                } else if path == &value && kind == "imports" { parsed.imports }
+                else if path == &value { parsed.symbols.into_iter().chain(parsed.imports).collect::<Vec<_>>() }
                 else { Vec::new() };
                 for row in relevant {
                     if answer.rows.len() < MAX_ROWS { answer.rows.push(row); } else { answer.omitted_rows += 1; }
@@ -438,10 +604,15 @@ pub fn query(root: &Path, request: Query) -> Result<Answer, String> {
             }
             Some(language) => {
                 *answer.coverage.unsupported_languages.entry(language.into()).or_default() += 1;
-                if path == value { answer.status = format!("unsupported:{language}"); }
+                if path == &value { answer.status = format!("unsupported:{language}"); }
             }
-            None => { answer.coverage.other_files += 1; if path == value { answer.status = "unsupported:unknown".into(); } }
+            None => { answer.coverage.other_files += 1; if path == &value { answer.status = "unsupported:unknown".into(); } }
         }
+    }
+    if let Some((declarations, nested, sha, read_unix_ms)) = requested_modules {
+        answer.skipped_nested_modules = nested;
+        (answer.module_edges, answer.omitted_module_edges) = module_edges(
+            &root, &value, &declarations, &sha, read_unix_ms, &paths, &source_facts);
     }
     if kind == "calls" {
         for edge in &mut answer.edges {
@@ -461,7 +632,7 @@ pub fn query(root: &Path, request: Query) -> Result<Answer, String> {
             }).collect();
         }
     }
-    if answer.rows.is_empty() && answer.edges.is_empty() && answer.status == "ok" {
+    if answer.rows.is_empty() && answer.edges.is_empty() && answer.module_edges.is_empty() && answer.status == "ok" {
         answer.fallback = Some("Search the live worktree with rg; query syntax excludes generated code and unsupported languages.");
     }
     if serde_json::to_vec(&answer).map_err(|e| e.to_string())?.len() > MAX_REPLY_BYTES {
@@ -644,5 +815,119 @@ mod tests {
         assert_eq!(answer.edges[0].binding, "ambiguous");
         assert_eq!(answer.edges[0].candidates.len(), MAX_EDGE_CANDIDATES);
         assert_eq!(answer.edges[0].omitted_candidates, 1);
+    }
+
+    #[test]
+    fn modules_resolve_plain_root_mod_rs_and_child_layout_with_hashes() {
+        let root = worktree();
+        fs::create_dir_all(root.path().join("src/folder")).unwrap();
+        fs::create_dir_all(root.path().join("src/direct")).unwrap();
+        fs::write(root.path().join("src/lib.rs"), "mod direct;\nmod folder;\n").unwrap();
+        fs::write(root.path().join("src/direct.rs"), "mod leaf;\n").unwrap();
+        fs::write(root.path().join("src/direct/leaf.rs"), "pub fn leaf() {}\n").unwrap();
+        fs::write(root.path().join("src/folder/mod.rs"), "mod nested;\n").unwrap();
+        fs::write(root.path().join("src/folder/nested.rs"), "pub fn nested() {}\n").unwrap();
+        let root_answer = query(root.path(), Query::Modules("src/lib.rs".into())).unwrap();
+        assert_eq!(root_answer.module_edges.len(), 2);
+        assert_eq!(root_answer.module_edges[0].target.as_deref(), Some("src/direct.rs"));
+        assert_eq!(root_answer.module_edges[1].target.as_deref(), Some("src/folder/mod.rs"));
+        assert!(root_answer.module_edges.iter().all(|edge| edge.resolution == "structural_only"
+            && edge.source_sha256.len() == 64 && edge.target_sha256.as_ref().is_some_and(|sha| sha.len() == 64)
+            && edge.source_read_unix_ms > 0 && edge.target_read_unix_ms.is_some_and(|time| time > 0)));
+        let direct = query(root.path(), Query::Modules("src/direct.rs".into())).unwrap();
+        assert_eq!(direct.module_edges[0].target.as_deref(), Some("src/direct/leaf.rs"));
+        let mod_rs = query(root.path(), Query::Modules("src/folder/mod.rs".into())).unwrap();
+        assert_eq!(mod_rs.module_edges[0].target.as_deref(), Some("src/folder/nested.rs"));
+    }
+
+    #[test]
+    fn modules_mark_attributes_duplicates_inline_nested_and_layout_ambiguity_unknown() {
+        let root = worktree();
+        fs::create_dir_all(root.path().join("src/both")).unwrap();
+        fs::write(root.path().join("src/lib.rs"), "mod both;\nmod repeat;\nmod repeat;\n#[cfg(unix)] mod conditional;\n#[path = \"elsewhere.rs\"] mod routed;\nmod inline { mod hidden; }\n").unwrap();
+        fs::write(root.path().join("src/both.rs"), "").unwrap();
+        fs::write(root.path().join("src/both/mod.rs"), "").unwrap();
+        fs::write(root.path().join("src/repeat.rs"), "").unwrap();
+        fs::write(root.path().join("src/conditional.rs"), "").unwrap();
+        fs::write(root.path().join("src/elsewhere.rs"), "").unwrap();
+        let answer = query(root.path(), Query::Modules("src/lib.rs".into())).unwrap();
+        assert_eq!(answer.module_edges.len(), 6);
+        assert_eq!(answer.module_edges[0].reason, "ambiguous_layout");
+        assert_eq!(answer.module_edges[1].reason, "duplicate_declaration");
+        assert_eq!(answer.module_edges[2].reason, "duplicate_declaration");
+        assert_eq!(answer.module_edges[3].reason, "module_attribute_unresolved");
+        assert_eq!(answer.module_edges[4].reason, "module_attribute_unresolved");
+        assert_eq!(answer.module_edges[5].reason, "inline_module_skipped");
+        assert_eq!(answer.skipped_nested_modules, 1);
+        assert!(answer.module_edges.iter().all(|edge| edge.resolution == "unknown"
+            && edge.target.is_none() && edge.target_sha256.is_none()));
+    }
+
+    #[test]
+    fn modules_skip_symlinks_ignored_files_and_unlisted_siblings() {
+        let root = worktree();
+        let outside = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("src/visible")).unwrap();
+        fs::write(root.path().join(".gitignore"), "src/ignored.rs\nsrc/visible/mod.rs\n").unwrap();
+        fs::write(root.path().join("src/lib.rs"), "mod linked;\nmod ignored;\nmod visible;\nmod parentlink;\n").unwrap();
+        fs::write(outside.path().join("secret.rs"), "pub fn secret() {}\n").unwrap();
+        symlink(outside.path().join("secret.rs"), root.path().join("src/linked.rs")).unwrap();
+        fs::write(root.path().join("src/ignored.rs"), "").unwrap();
+        fs::write(root.path().join("src/visible.rs"), "").unwrap();
+        fs::write(root.path().join("src/visible/mod.rs"), "").unwrap();
+        fs::write(root.path().join("src/parentlink.rs"), "").unwrap();
+        fs::create_dir(outside.path().join("module_dir")).unwrap();
+        fs::write(outside.path().join("module_dir/mod.rs"), "").unwrap();
+        symlink(outside.path().join("module_dir"), root.path().join("src/parentlink")).unwrap();
+        let answer = query(root.path(), Query::Modules("src/lib.rs".into())).unwrap();
+        assert_eq!(answer.module_edges[0].reason, "candidate_skipped");
+        assert_eq!(answer.module_edges[1].reason, "unlisted_candidate_exists");
+        assert_eq!(answer.module_edges[2].reason, "unlisted_candidate_exists");
+        assert_eq!(answer.module_edges[3].reason, "unlisted_candidate_exists");
+        assert!(answer.module_edges.iter().all(|edge| edge.target_sha256.is_none()));
+        assert!(answer.coverage.skipped.examples.iter().any(|issue| issue.file == "src/linked.rs"));
+    }
+
+    #[test]
+    fn modules_follow_target_edits_and_layout_renames() {
+        let root = worktree();
+        fs::create_dir_all(root.path().join("src/child")).unwrap();
+        fs::write(root.path().join("src/main.rs"), "mod child;\n").unwrap();
+        fs::write(root.path().join("src/child.rs"), "pub fn first() {}\n").unwrap();
+        let first = query(root.path(), Query::Modules("src/main.rs".into())).unwrap();
+        let first_sha = first.module_edges[0].target_sha256.clone().unwrap();
+        fs::write(root.path().join("src/child.rs"), "pub fn changed() {}\n").unwrap();
+        let changed = query(root.path(), Query::Modules("src/main.rs".into())).unwrap();
+        assert_ne!(changed.module_edges[0].target_sha256.as_deref(), Some(first_sha.as_str()));
+        fs::rename(root.path().join("src/child.rs"), root.path().join("src/child/mod.rs")).unwrap();
+        let renamed = query(root.path(), Query::Modules("src/main.rs".into())).unwrap();
+        assert_eq!(renamed.module_edges[0].target.as_deref(), Some("src/child/mod.rs"));
+        fs::remove_file(root.path().join("src/child/mod.rs")).unwrap();
+        let missing = query(root.path(), Query::Modules("src/main.rs".into())).unwrap();
+        assert_eq!(missing.module_edges[0].reason, "no_listed_candidate");
+    }
+
+    #[test]
+    fn module_page_counts_omissions_and_obeys_reply_cap() {
+        let root = worktree();
+        let content = (0..MAX_ROWS + 7).map(|n| format!("mod child{n};\n")).collect::<String>();
+        fs::write(root.path().join("lib.rs"), content).unwrap();
+        let answer = query(root.path(), Query::Modules("lib.rs".into())).unwrap();
+        assert_eq!(answer.module_edges.len(), MAX_ROWS);
+        assert_eq!(answer.omitted_module_edges, 7);
+        assert!(serde_json::to_vec(&answer).unwrap().len() <= MAX_REPLY_BYTES);
+    }
+
+    #[test]
+    fn module_reply_rejects_over_64_kib_instead_of_truncating_silently() {
+        let root = worktree();
+        let deep = ["a".repeat(180), "b".repeat(180), "c".repeat(180), "d".repeat(180)]
+            .join("/");
+        fs::create_dir_all(root.path().join(&deep)).unwrap();
+        let source = format!("{deep}/lib.rs");
+        let content = (0..MAX_ROWS).map(|n| format!("mod child{n};\n")).collect::<String>();
+        fs::write(root.path().join(&source), content).unwrap();
+        assert_eq!(query(root.path(), Query::Modules(source)).unwrap_err(),
+            "query reply exceeds 64 KiB; narrow the query");
     }
 }
