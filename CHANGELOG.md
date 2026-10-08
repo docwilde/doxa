@@ -5,6 +5,18 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.14 — 2026-10-09
+
+**Fleet review**
+
+- Review a dependent worker's host checkpoint, handoff and changed paths in the TUI before explicitly arming and releasing it. The existing token-bound host check runs again at confirmation; tests remain unverified.
+- Verify macOS fleet PID admission with a retained fixture socket, while keeping production sender lifetime and protected Codex turns on macOS open.
+
+**Code and isolation**
+
+- Add a bounded `doxa codegraph modules PATH` query for plain Rust file-module edges, with source and target hashes. Conditional, inline, nested and ambiguous modules remain unknown; this does not establish compilation reachability.
+- Add a fixture-only CONNECT egress gateway with exact hostname and port checks, reserved-address denial and a network-none worker loopback adapter. No production hardened profile is exposed before rootless Docker and provider streaming validation.
+
 ## 2.0.0-beta.13 — 2026-10-09
 
 **Fleet and isolation**

@@ -503,6 +503,7 @@ impl App {
                         | "about"
                         | "fleet"
                         | "fleet_review"
+                        | "fleet_dependency_review"
                         | "isolation"
                         | "native_plugin"
                 ) {

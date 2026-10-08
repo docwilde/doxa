@@ -56,8 +56,8 @@ Commands:
                        Run the explicitly selected provider authentication
   plugins [refresh | adopt on|off]
                        Discover plugins or change sanitized adoption for new sessions
-  codegraph [--root WORKTREE] file PATH | symbol NAME | imports PATH | calls PATH
-                       Query current Rust syntax with source hashes and coverage
+  codegraph [--root WORKTREE] file PATH | symbol NAME | imports PATH | calls PATH | modules PATH
+                       Query current Rust syntax and structural module files with source hashes
   fleet ...            Inspect or start native fleet runs
   mesh serve           Serve the private peer graph until Ctrl-C
   remote serve         Serve live sessions to an allowed Tailscale browser

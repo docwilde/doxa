@@ -2,6 +2,7 @@
 mod actions;
 mod commands;
 mod diff_controller;
+mod fleet_dependency_review;
 pub(crate) mod fleet_menu;
 mod fleet_process;
 mod history_controller;
@@ -1402,6 +1403,7 @@ pub struct App {
     fleet_menu: Option<fleet_menu::Menu>,
     pub(crate) fleet_views: Vec<fleet_menu::SavedView>,
     fleet_review: Option<fleet_process::Prepared>,
+    fleet_dependency_review: Option<fleet_dependency_review::Prepared>,
     fleet_controller: Option<fleet_process::Controller>,
     memory_menu_pending: Option<(
         String,
@@ -1687,6 +1689,7 @@ impl Default for App {
             fleet_menu: None,
             fleet_views: Vec::new(),
             fleet_review: None,
+            fleet_dependency_review: None,
             fleet_controller: None,
             repo_cache: HashMap::new(),
             repo_pending: None,

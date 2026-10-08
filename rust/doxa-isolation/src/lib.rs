@@ -13,6 +13,7 @@ use std::{
     time::{Duration, Instant},
 };
 pub mod broker;
+pub mod egress;
 pub mod workspace;
 pub mod migration;
 pub mod cgroup;

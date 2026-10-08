@@ -1,7 +1,8 @@
 # Code graph: native syntax-query slice
 
 Status: **read-only syntax queries implemented**. DOXA can query current Rust
-source for definitions, imports, and conservative call-site candidates. It does
+source for definitions, imports, conservative call-site candidates, and plain
+top-level module-file layout. It does
 not build a resolved dependency graph or write anything to LORE.
 
 ## Contents
@@ -13,12 +14,22 @@ not build a resolved dependency graph or write anything to LORE.
 
 ## Shipped surface
 
-`doxa codegraph [--root WORKTREE] file PATH | symbol NAME | imports PATH | calls PATH`
+`doxa codegraph [--root WORKTREE] file PATH | symbol NAME | imports PATH | calls PATH | modules PATH`
 returns bounded JSON. With no `--root`, it uses the current Git worktree.
 `file` lists parsed definitions and import declarations in one Rust file;
 `symbol` finds all exact name or qualified-name matches across that worktree;
 `imports` lists the syntactic `use` and `extern crate` declarations in one
-file. `calls` lists direct function-path and method-call expressions within
+file. `modules` lists top-level `mod child;` declarations and resolves a unique
+listed, readable, parseable `child.rs` or `child/mod.rs` with source and target
+hashes. It uses the containing directory for `lib.rs`, `main.rs`, `mod.rs`,
+`build.rs`, and common Cargo roots under `src/bin`, `tests`, `examples`, and
+`benches`; another `parent.rs` uses `parent/child.rs` or `parent/child/mod.rs`.
+Each result says `structural_only`: it does not establish compilation
+reachability. Attributes (including `cfg` and `path`), duplicate declarations,
+both layout candidates, symlinks, ignored/generated files on disk, missing
+targets, and unparseable targets yield `unknown` with a reason. Inline modules
+are reported as skipped; nested modules are counted and not resolved.
+`calls` lists direct function-path and method-call expressions within
 file-level functions, trait defaults, and simple `impl` methods. A second
 `doxa-codegraph` binary exposes the same queries for development.
 
@@ -47,7 +58,7 @@ syntax errors, skipped files, and unsupported syntax. Same-name definitions
 remain separate candidates. A no-hit answer names a live-search fallback.
 
 Work is bounded: at most 20,000 files, 1 MiB per Rust file, 64 MiB total Rust
-source, 100 result rows or call edges, 10,000 call sites in the requested file,
+source, 100 result rows, call edges, or module declarations, 10,000 call sites in the requested file,
 100,000 candidate declarations, and a 64 KiB reply. The answer counts omitted
 rows, edges, and per-edge candidates.
 When enumeration or the total scan budget fails, the command returns an error
@@ -69,9 +80,9 @@ This slice lives in `rust/doxa-codegraph` and is callable through the installed
 
 - Coordinate a LORE-owned persisted graph and curated `purpose` file-map field
   with LORE's write gate, including worktree lifecycle and freshness checks.
-- Resolve one-hop import dependencies and actual Rust call bindings with module,
-  crate, trait, type, and conditional-compilation context. The current call
-  candidates intentionally stop at spelling matches.
+- Resolve imports and actual Rust call bindings with crate, trait, type, and
+  conditional-compilation context. The current module edges stop at plain file
+  layout, and call candidates stop at spelling matches.
 - Add a reviewed agent tool and optional TUI tree/chip after the shared LORE
   operator exists. The CLI is the current operator surface.
 - Decide whether other languages justify a parser dependency and coverage bar.

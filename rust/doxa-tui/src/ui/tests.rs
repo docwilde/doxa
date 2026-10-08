@@ -6,6 +6,58 @@ use super::*;
     use serde_json::json;
 
     #[test]
+    fn dependency_release_modal_requires_contiguous_read_arm_and_confirm() {
+        let mut app = App::default();
+        app.handle(Event::Resize(84, 28));
+        let host = crate::fleet_control::Review {
+            request: json!({
+                "run_id":"review-run", "worker_index":1,
+                "charter_sha256":"c".repeat(64), "assignment_id":"assignment-1",
+                "task_sha256":"t".repeat(64), "checkpoint_id":"checkpoint-1",
+                "handoff_id":"handoff-1", "artifact_refs":["artifact-1"],
+                "changed_paths":(0..40).map(|i| format!("src/very-long-component-{i}/implementation.rs\n")).collect::<Vec<_>>().join(""),
+                "last_turn_sha256":"l".repeat(64), "dependent_workers":[2,3],
+                "git_observation_available":true, "tests_verified":false
+            }), token: "a".repeat(64),
+        };
+        let prepared = fleet_dependency_review::Prepared::from_host_review(
+            PathBuf::from("/unused"), "review-run", 1, host,
+        ).unwrap();
+        let lines = prepared.lines.clone();
+        app.fleet_dependency_review = Some(prepared);
+        app.chip_info = Some(ChipInfo { kind: "fleet_dependency_review", label: String::new(), lines,
+            scroll: 0, owner: None });
+        let mut terminal = Terminal::new(TestBackend::new(84, 28)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert!(!app.fleet_dependency_review.as_ref().unwrap().complete.get());
+        app.key(KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT));
+        assert!(!app.fleet_dependency_review.as_ref().unwrap().armed);
+        app.key(KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::SHIFT));
+        assert!(app.fleet_dependency_review.is_some());
+        // Jumping to the bottom cannot skip unseen rows.
+        app.chip_info.as_mut().unwrap().scroll = 10_000;
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        assert!(!app.fleet_dependency_review.as_ref().unwrap().complete.get());
+        app.chip_info.as_mut().unwrap().scroll = 0;
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        for _ in 0..40 {
+            if app.fleet_dependency_review.as_ref().unwrap().complete.get() { break; }
+            app.key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+            terminal.draw(|frame| app.draw(frame)).unwrap();
+        }
+        assert!(app.fleet_dependency_review.as_ref().unwrap().complete.get());
+        app.key(KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT));
+        assert!(app.fleet_dependency_review.as_ref().unwrap().armed);
+        app.handle(Event::Resize(84, 27));
+        let review = app.fleet_dependency_review.as_ref().unwrap();
+        assert!(!review.armed && !review.complete.get());
+        app.key(KeyEvent::new(KeyCode::Char('Y'), KeyModifiers::SHIFT));
+        assert!(app.fleet_dependency_review.is_some());
+        app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.fleet_dependency_review.is_none() && app.chip_info.is_none());
+    }
+
+    #[test]
     fn credential_ui_transient_routes() {
         use doxa_vendors::{credentials, Vendor};
         use std::os::unix::fs::PermissionsExt;
@@ -3001,7 +3053,7 @@ for line in sys.stdin:
         let info = app.chip_info.as_ref().unwrap();
         assert_eq!(info.kind, "help");
         for form in ["/collection [action] [name]", "/usage", "/context", "/compact",
-            "/fleet [runs|status [RUN]|stop|detach|attach [RUN] INDEX|mesh [RUN]|start OPTIONS|resume RUN]", "/help"] {
+            "/fleet [runs|status [RUN]|stop|detach|attach [RUN] INDEX|dependency-review [RUN] SLOT|mesh [RUN]|start OPTIONS|resume RUN]", "/help"] {
             assert!(info.lines.iter().any(|line| line.starts_with(form)), "missing {form}");
         }
         assert!(info.lines.iter().any(|line| line.contains("unavailable in Rust")));

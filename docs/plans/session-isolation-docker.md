@@ -182,6 +182,31 @@ If the gateway cannot enforce the declared policy, hardened startup fails;
 it does not silently fall back to open egress. A fixture worker can run with
 `network=none` from the first stage.
 
+A **fixture-only gateway core** now lives in `doxa-isolation::egress`. The host
+binds `egress.sock` beside the private session broker and accepts HTTP/1.1
+`CONNECT` for exact owner-listed DNS hostnames on port 443. It resolves each
+name on the host, rejects any private/reserved answer (including mixed public
+and private answers), connects to the checked IP, and relays TLS bytes without
+interception. The worker's `egress-proxy PORT` command can bridge loopback
+HTTP proxy traffic to that Unix socket in a `network=none` fixture. A fixture
+can explicitly set `HTTP_PROXY` and `HTTPS_PROXY` to its loopback port. The
+gateway socket is session-private; losing it produces a proxy error, and
+dropping the gateway closes live fixture tunnels. Fake-upstream tests cover
+the CONNECT handshake, binary relay, malformed/unknown targets, DNS answers,
+socket replacement and gateway loss.
+
+No production profile starts the gateway or injects proxy variables yet.
+Before a `docker-hardened` profile can be offered, run actual Claude, Codex
+and API-vendor streaming/login/refresh flows through the proxy in a rootless
+`network=none` container; verify that each provider honors the proxy for
+every outbound path, handles redirects without bypass, and cannot reach the
+network by any alternative route. Bind the allowlist to a reviewed per-session
+policy/manifest, audit resolver behavior and operational limits, and test
+gateway death/restart and resume across container lifecycle transitions.
+Because TLS is not intercepted, the gateway checks the CONNECT destination,
+not the encrypted request or SNI; provider-specific destination behavior must
+be reviewed before treating this as a hardened boundary.
+
 API vendor keys stay in the host supervisor; it performs provider HTTP calls
 or grants a narrowly scoped per-session provider proxy. Claude and Codex may
 need session-private auth files for their native CLIs. Those copies are never
