@@ -2,6 +2,7 @@ use doxa_peers::{now as peer_now, PeerRecord, Registry as PeerRegistry};
 use serde_json::{json, Value};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -98,6 +99,28 @@ fn wait_until(mut predicate: impl FnMut() -> bool) {
             Instant::now() < deadline,
             "timed out waiting for daemon state"
         );
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+#[track_caller]
+fn wait_for_registry(child: &mut Child, registry: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !registry.exists() {
+        if let Some(status) = child.try_wait().unwrap() {
+            let mut stderr = Vec::new();
+            if let Some(pipe) = child.stderr.take() {
+                let flags = unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_GETFL) };
+                if flags < 0 || unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+                    stderr.extend_from_slice(b"stderr pipe could not be made nonblocking");
+                } else if let Err(error) = pipe.take(8192).read_to_end(&mut stderr) {
+                    if error.kind() != std::io::ErrorKind::WouldBlock {
+                        stderr.extend_from_slice(format!(" [stderr read failed: {error}]").as_bytes());
+                    }
+                }
+            }
+            panic!("daemon exited before publishing {} ({status}): {}", registry.display(), String::from_utf8_lossy(&stderr));
+        }
+        assert!(Instant::now() < deadline, "timed out waiting for daemon registry {}", registry.display());
         thread::sleep(Duration::from_millis(10));
     }
 }
@@ -234,9 +257,27 @@ impl Process {
             .env("DOXA_HOME", runtime.join("home"))
             .env_remove("DOXA_CODEX_APPSERVER");
         if inbound { command.env("DOXA_PEER_INBOUND_TURNS", "yes"); }
-        let child = command.spawn().unwrap();
+        let manifest_path = runtime.join("home/isolation/codex-session/manifest.json");
+        match fs::symlink_metadata(&manifest_path) {
+            Ok(_) => {
+                // Repeated-start fixtures reopen their exact saved native
+                // conversation. A first start has no manifest and remains
+                // a fresh launch; production collision refusal stays intact.
+                let saved = doxa_isolation::read_manifest(&manifest_path).expect("owned fixture isolation manifest");
+                let cwd = runtime.canonicalize().unwrap();
+                assert_eq!(saved.session_id, "codex-session");
+                assert_eq!(saved.profile, doxa_isolation::Profile::Native);
+                assert_eq!(saved.state, "stopped");
+                assert_eq!(saved.checkout, cwd);
+                assert_eq!(saved.source, cwd);
+                command.args(["--resume", "true"]);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+            Err(error) => panic!("fixture isolation manifest unavailable: {error}"),
+        }
+        let mut child = command.spawn().unwrap();
         let registry = runtime.join("registry/codex-session.json");
-        wait_until(|| registry.exists());
+        wait_for_registry(&mut child, &registry);
         let entry: Value = serde_json::from_slice(&fs::read(&registry).unwrap()).unwrap();
         let socket = PathBuf::from(entry["daemon_socket"].as_str().unwrap());
         Self {
