@@ -2300,7 +2300,8 @@ impl App {
             let mut store = self.mermaid_store.borrow_mut();
             store.observe(content, content_width,
                 self.preferences.value("mermaid_renderer"),
-                self.preferences.value("mermaid_renderer_root"), picker);
+                self.preferences.value("mermaid_renderer_root"),
+                &self.session_cwds.values().cloned().collect::<Vec<_>>(), picker);
             (store.revision(), store.ready_keys(content_width))
         };
         let (lines, sections, link_regions, images, mermaids, top) = {

@@ -32,6 +32,12 @@ be an absolute path within a dedicated, reviewed package directory and accept
 `-i INPUT -o OUTPUT` like Mermaid CLI. DOXA does not install or search for it.
 Linux `/usr/bin/bwrap` is required. Without a configured renderer, bwrap, or
 graphics mode, the original fence remains readable.
+DOXA refuses a package root that would mount all of the user's home, DOXA
+state, the active session repository, or the default fleet state, including
+roots reached through symlinks. A dedicated package directory beneath home is
+allowed if it is outside DOXA state and the session repository. A custom fleet
+root outside DOXA state still requires operator review before selecting a
+package root.
 
 Each diagram is limited to 16 KiB of source. A worker runs the renderer for at
 most five seconds in a private directory, with network and host filesystem

@@ -33,6 +33,7 @@ enum State { Loading(Receiver<Option<Protocol>>), Ready(Protocol), Unavailable }
 pub(super) struct Store {
     renderer: String,
     root: String,
+    workspace: Vec<PathBuf>,
     previews: Vec<Preview>,
     revision: u64,
 }
@@ -79,11 +80,14 @@ impl Store {
     }
 
     pub fn observe(&mut self, transcript: &str, width: u16,
-        renderer: &str, root: &str, picker: Option<Picker>) {
-        if self.renderer != renderer || self.root != root {
+        renderer: &str, root: &str, workspaces: &[PathBuf], picker: Option<Picker>) {
+        let mut workspace_key=workspaces.to_vec();
+        workspace_key.sort();
+        if self.renderer != renderer || self.root != root || self.workspace != workspace_key {
             self.clear();
             self.renderer = renderer.to_owned();
             self.root = root.to_owned();
+            self.workspace = workspace_key;
         }
         let Some(picker) = picker else { return; };
         if renderer.is_empty() || root.is_empty() || !Path::new(BWRAP).is_file() { return; }
@@ -105,8 +109,9 @@ impl Store {
             let worker_picker = picker.clone();
             let renderer = renderer.to_owned();
             let root = root.to_owned();
+            let workspaces = workspaces.to_vec();
             std::thread::spawn(move || {
-                let result = render_source(&source, width, &renderer, &root, &worker_picker, &worker_cancel);
+                let result = render_source(&source, width, &renderer, &root, &workspaces, &worker_picker, &worker_cancel);
                 let _ = sender.send(result);
             });
             self.previews.push(Preview { key, width, cancel, state: State::Loading(receiver) });
@@ -132,12 +137,53 @@ fn private_temp_root() -> Option<PathBuf> {
     Some(base)
 }
 
-fn reviewed_paths(renderer: &str, root: &str) -> Option<(PathBuf, PathBuf, PathBuf)> {
+fn canonical_allow_missing(path:&Path)->Option<PathBuf>{
+    if let Ok(found)=path.canonicalize(){return Some(found);}
+    let ancestor=path.ancestors().find(|ancestor|ancestor.exists())?;
+    let relative=path.strip_prefix(ancestor).ok()?;
+    if relative.components().any(|part|!matches!(part,std::path::Component::Normal(_))){return None;}
+    Some(ancestor.canonicalize().ok()?.join(relative))
+}
+
+fn repository_root(workspace:&Path)->Option<PathBuf>{
+    let workspace=workspace.canonicalize().ok()?;
+    Some(workspace.ancestors().find(|path|fs::symlink_metadata(path.join(".git")).is_ok())
+        .unwrap_or(&workspace).to_path_buf())
+}
+
+fn private_overlap(root:&Path,home:&Path,doxa_home:&Path,workspace:&Path,fleet:&Path)->bool{
+    home.starts_with(root)
+        || [doxa_home,workspace,fleet].iter().any(|private|
+            private.starts_with(root)||root.starts_with(private))
+}
+
+fn root_exposes_private_paths(root:&Path,workspaces:&[PathBuf])->Option<bool>{
+    let home=PathBuf::from(std::env::var_os("HOME")?);
+    if !home.is_absolute(){return None;}
+    let home=home.canonicalize().ok()?;
+    let doxa_home=std::env::var_os("DOXA_HOME").map(PathBuf::from).unwrap_or_else(||home.join(".doxa"));
+    if !doxa_home.is_absolute(){return None;}
+    let doxa_home=canonical_allow_missing(&doxa_home)?;
+    let fleet=canonical_allow_missing(&doxa_home.join("fleet"))?;
+    // A dedicated package may live below HOME, but mounting HOME itself or
+    // any ancestor would expose every private file. DOXA state, the current
+    // repository and fleet state are refused in either direction.
+    let current=std::env::current_dir().ok()?;
+    let current_repo=repository_root(&current)?;
+    if private_overlap(root,&home,&doxa_home,&current_repo,&fleet){return Some(true);}
+    for workspace in workspaces {
+        let repo=repository_root(workspace)?;
+        if private_overlap(root,&home,&doxa_home,&repo,&fleet){return Some(true);}
+    }
+    Some(false)
+}
+
+fn reviewed_paths(renderer: &str, root: &str, workspaces:&[PathBuf]) -> Option<(PathBuf, PathBuf, PathBuf)> {
     let root = Path::new(root);
     let renderer = Path::new(renderer);
     if !root.is_absolute() || !renderer.is_absolute() { return None; }
     let root = root.canonicalize().ok()?;
-    if root == Path::new("/") || !root.is_dir() { return None; }
+    if root == Path::new("/") || !root.is_dir() || root_exposes_private_paths(&root,workspaces)? { return None; }
     let renderer = renderer.canonicalize().ok()?;
     let relative = renderer.strip_prefix(&root).ok()?.to_path_buf();
     if !renderer.is_file() || renderer.metadata().ok()?.permissions().mode() & 0o111 == 0 { return None; }
@@ -171,9 +217,9 @@ fn sandbox_command(root: &Path, relative: &Path, work: &Path) -> Command {
 }
 
 fn render_source(source: &str, width: u16, renderer: &str, root: &str,
-    picker: &Picker, cancel: &AtomicBool) -> Option<Protocol> {
+    workspaces:&[PathBuf], picker: &Picker, cancel: &AtomicBool) -> Option<Protocol> {
     if source.len() > transcript_tools::MAX_MERMAID_SOURCE || cancel.load(Ordering::Relaxed) { return None; }
-    let (_, root, relative) = reviewed_paths(renderer, root)?;
+    let (_, root, relative) = reviewed_paths(renderer, root, workspaces)?;
     let work = tempfile::Builder::new().prefix("doxa-mermaid-")
         .tempdir_in(private_temp_root()?).ok()?;
     let input = work.path().join("input.mmd");
@@ -210,6 +256,7 @@ fn render_source(source: &str, width: u16, renderer: &str, root: &str,
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::symlink;
     use ratatui_image::picker::ProtocolType;
 
     fn fixture(script: &str) -> (tempfile::TempDir, String) {
@@ -234,13 +281,51 @@ mod tests {
     }
 
     #[test]
+    fn broad_private_roots_are_refused_before_renderer_spawn() {
+        let home=Path::new("/home/operator");
+        let state=home.join(".doxa");
+        let repo=home.join("projects/app");
+        let fleet=state.join("fleet");
+        for root in [Path::new("/"),home,state.as_path(),&state.join("settings"),
+            repo.as_path(),&repo.join("tools/mermaid"),fleet.as_path(),&fleet.join("run-1")] {
+            assert!(private_overlap(root,home,&state,&repo,&fleet),"{} was not refused",root.display());
+        }
+        assert!(!private_overlap(&home.join("tools/mermaid"),home,&state,&repo,&fleet));
+        let (package,renderer)=fixture("exit 99");
+        let home=std::env::var_os("HOME").map(PathBuf::from).unwrap().canonicalize().unwrap();
+        assert!(reviewed_paths(&renderer,home.to_str().unwrap(),&[]).is_none());
+        assert!(render_source("graph TD; A-->B",24,&renderer,home.to_str().unwrap(),&[],
+            &picker(),&AtomicBool::new(false)).is_none());
+        assert!(package.path().exists());
+    }
+
+    #[test]
+    fn repository_and_symlink_alias_roots_are_refused() {
+        let base=tempfile::tempdir_in(private_temp_root().unwrap()).unwrap();
+        let repo=base.path().join("project");fs::create_dir(&repo).unwrap();
+        fs::create_dir(repo.join(".git")).unwrap();
+        let package=repo.join("renderer");fs::create_dir(&package).unwrap();
+        let executable=package.join("mmdc");fs::write(&executable,"#!/bin/sh\nexit 99\n").unwrap();
+        fs::set_permissions(&executable,fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(reviewed_paths(executable.to_str().unwrap(),package.to_str().unwrap(),&[repo.clone()]).is_none());
+        let alias=base.path().join("package-alias");symlink(&package,&alias).unwrap();
+        assert!(reviewed_paths(&alias.join("mmdc").to_string_lossy(),&alias.to_string_lossy(),&[repo.clone()]).is_none());
+        assert!(render_source("graph TD; A-->B",24,&alias.join("mmdc").to_string_lossy(),
+            &alias.to_string_lossy(),&[repo.clone()],&picker(),&AtomicBool::new(false)).is_none());
+        let safe=base.path().join("separate-package");fs::create_dir(&safe).unwrap();
+        let safe_executable=safe.join("mmdc");fs::write(&safe_executable,"#!/bin/sh\nexit 99\n").unwrap();
+        fs::set_permissions(&safe_executable,fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(reviewed_paths(&safe_executable.to_string_lossy(),&safe.to_string_lossy(),&[repo.clone()]).is_some());
+    }
+
+    #[test]
     fn successful_stub_renders_inside_sandbox() {
         if !sandbox_available() { return; }
         let (root, renderer) = fixture("cp /renderer/pixel.png \"$4\"");
         image::RgbaImage::from_pixel(16, 16, image::Rgba([180, 80, 40, 255]))
             .save(root.path().join("pixel.png")).unwrap();
         let result = render_source("graph TD; A-->B", 24, &renderer,
-            root.path().to_str().unwrap(), &picker(), &AtomicBool::new(false));
+            root.path().to_str().unwrap(), &[], &picker(), &AtomicBool::new(false));
         assert!(result.is_some());
         assert!(result.unwrap().area().height > 0);
     }
@@ -249,8 +334,8 @@ mod tests {
     fn failed_and_missing_renderer_leave_source_available() {
         let (root, renderer) = fixture("exit 7");
         assert!(render_source("graph TD; A-->B", 24, &renderer,
-            root.path().to_str().unwrap(), &picker(), &AtomicBool::new(false)).is_none());
-        assert!(reviewed_paths("/missing/renderer", root.path().to_str().unwrap()).is_none());
+            root.path().to_str().unwrap(), &[], &picker(), &AtomicBool::new(false)).is_none());
+        assert!(reviewed_paths("/missing/renderer", root.path().to_str().unwrap(), &[]).is_none());
     }
 
     #[test]
@@ -259,7 +344,7 @@ mod tests {
         let (root, renderer) = fixture("sleep 30");
         let started = Instant::now();
         assert!(render_source("graph TD; A-->B", 24, &renderer,
-            root.path().to_str().unwrap(), &picker(), &AtomicBool::new(false)).is_none());
+            root.path().to_str().unwrap(), &[], &picker(), &AtomicBool::new(false)).is_none());
         assert!(started.elapsed() < TIMEOUT + Duration::from_secs(2));
     }
 
@@ -268,7 +353,7 @@ mod tests {
         if !sandbox_available() { return; }
         let (root, renderer) = fixture("ln -s /etc/passwd \"$4\"");
         assert!(render_source("graph TD; A-->B", 24, &renderer,
-            root.path().to_str().unwrap(), &picker(), &AtomicBool::new(false)).is_none());
+            root.path().to_str().unwrap(), &[], &picker(), &AtomicBool::new(false)).is_none());
     }
 
     #[test]
@@ -282,7 +367,7 @@ mod tests {
         image::RgbaImage::from_pixel(8, 8, image::Rgba([100, 140, 220, 255]))
             .save(root.path().join("pixel.png")).unwrap();
         assert!(render_source("graph TD; A-->B", 24, &renderer,
-            root.path().to_str().unwrap(), &picker(), &AtomicBool::new(false)).is_some());
+            root.path().to_str().unwrap(), &[], &picker(), &AtomicBool::new(false)).is_some());
     }
 
     #[test]
@@ -291,13 +376,13 @@ mod tests {
         let (root, renderer) = fixture("exit 7");
         let package = root.path().to_string_lossy().into_owned();
         let mut store = Store { renderer: renderer.clone(), root: package.clone(),
-            previews: Vec::new(), revision: 0 };
+            workspace: Vec::new(), previews: Vec::new(), revision: 0 };
         for index in 0..MAX_CACHED {
             store.previews.push(Preview { key: format!("old-{index}"), width: 24,
                 cancel: Arc::new(AtomicBool::new(false)), state: State::Unavailable });
         }
         store.observe("```mermaid\ngraph TD\nA-->B\n```", 24,
-            &renderer, &package, Some(picker()));
+            &renderer, &package, &[], Some(picker()));
         assert_eq!(store.previews.len(), MAX_CACHED);
         assert!(store.revision() > 0);
         store.clear();
