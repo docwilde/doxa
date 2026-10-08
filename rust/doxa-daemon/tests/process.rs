@@ -2859,7 +2859,8 @@ fn native_inbox_emits_scrubbed_peer_message_and_cleans_socket() {
     doxa_peers::delivery::send(
         &peer_socket,
         &doxa_peers::delivery::PeerFrame {
-            authenticated_pid: None,            from_id: "sender".into(),
+            authenticated_pid: None,
+            from_id: "sender".into(),
             from_title: "sk-ownedCanonicalFixtureSecret1234567890 title".into(),
             sent_at: peer_now(),
             body: "sk-ownedCanonicalFixtureSecret1234567890 body".into(),
@@ -2890,7 +2891,7 @@ fn fleet_guard_rejects_forged_scope_false_completion_replay_and_cached_drift_bef
     let mut process=Process::start_codex_with_inbound(dir.path(),&codex,Path::new("/usr/bin/python3"),true);
     let peer_socket=PathBuf::from(process.entry()["socket_path"].as_str().unwrap());
     let charter=Charter{version:1,fleet_id:"reviewed-run".into(),task:"Scoped task".into(),repo:dir.path().display().to_string(),allowed_paths:vec![String::new()],required_evidence:vec!["host tests".into()],worker_limit:2,run_budget_usd:Some(10.0),deadline:doxa_fleet::unix_now()+3600,human_actions:vec!["authority changes".into()]};
-    let context=Context{charter_sha256:doxa_fleet::hash(&charter).unwrap(),charter,assignments:vec![Assignment{id:"sender-assignment".into(),session_id:"sender".into(),pid:std::process::id() as i32,role:"worker".into(),task:"Scoped task".into(),cwd:dir.path().display().to_string()},Assignment{id:"recipient-assignment".into(),session_id:"codex-session".into(),pid:process.child.id() as i32,role:"worker".into(),task:"Scoped task".into(),cwd:dir.path().display().to_string()}],review:ReviewConfig{message_mode:Mode::Enforce,message_judge:Some(doxa_fleet::judge::Model::parse("jev:jev-1.13.0").unwrap()),budget_usd:1.0,..Default::default()},state_path:dir.path().join("guard-state.json")};
+    let context=Context{charter_sha256:doxa_fleet::hash(&charter).unwrap(),charter,assignments:vec![Assignment{id:"sender-assignment".into(),session_id:"sender".into(),pid:std::process::id() as i32,role:"worker".into(),task:"Scoped task".into(),cwd:dir.path().display().to_string(),base_commit:None},Assignment{id:"recipient-assignment".into(),session_id:"codex-session".into(),pid:process.child.id() as i32,role:"worker".into(),task:"Scoped task".into(),cwd:dir.path().display().to_string(),base_commit:None}],review:ReviewConfig{message_mode:Mode::Enforce,message_judge:Some(doxa_fleet::judge::Model::parse("jev:jev-1.13.0").unwrap()),budget_usd:1.0,..Default::default()},state_path:dir.path().join("guard-state.json")};
     let(mut reader,mut socket)=process.connect();receive(&mut reader);send(&mut socket,json!({"type":"attach","cursor":null}));
     send(&mut socket,json!({"type":"call","id":1,"method":"fleet_configure","params":context}));assert_eq!(receive(&mut reader)["ok"],true);
     let make=|kind|Envelope::issue(&context,"sender","codex-session",kind,"Scoped status".into(),None).unwrap();
@@ -2928,7 +2929,8 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}
     receive(&mut reader);
     send(&mut socket, json!({"type":"attach","cursor":null}));
     let frame = |kind, body: &str| doxa_peers::delivery::PeerFrame {
-            authenticated_pid: None,        from_id: "sender".into(), from_title: "sk-ownedCanonicalFixtureSecret1234567890 title".into(),
+            authenticated_pid: None,
+        from_id: "sender".into(), from_title: "sk-ownedCanonicalFixtureSecret1234567890 title".into(),
         sent_at: peer_now(), body: body.into(),
         from_repo: Some(dir.path().display().to_string()), kind,
     };
@@ -2991,7 +2993,8 @@ echo '{{"type":"item.completed","item":{{"type":"agent_message","text":"done"}}}
     assert_eq!(receive(&mut reader)["ok"], true);
     assert_eq!(receive(&mut reader)["event"]["type"], "turn_started");
     doxa_peers::delivery::send(&peer_socket, &doxa_peers::delivery::PeerFrame {
-            authenticated_pid: None,        from_id: "sender".into(), from_title: "sender".into(), sent_at: peer_now(),
+            authenticated_pid: None,
+        from_id: "sender".into(), from_title: "sender".into(), sent_at: peer_now(),
         body: "peer task".into(), from_repo: None, kind: Some("direct".into()),
     }).unwrap();
     assert_eq!(receive(&mut reader)["event"]["type"], "peer_message");

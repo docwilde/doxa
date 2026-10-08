@@ -73,6 +73,7 @@ impl Prepared {
 fn public_plan_error(error:io::Error)->io::Error{
     let text=error.to_string();let message=if text.contains("socket path budget"){"Fleet socket path too long; use a short absolute --root"}
         else if text.contains("budget"){"Fleet budget refused; specify a valid --run-budget or explicitly review --allow-unbudgeted"}
+        else if text.contains("review")||text.contains("supervision"){"Fleet review refused; choose a supported independent model, message judge and positive review budget"}
         else if text.contains("pool"){"Fleet pool refused; use --pool ENGINE:MODEL"}
         else if text.contains("prompt"){"Fleet task refused; check --prompt or bounded --prompt-file"}
         else if text.contains("memory"){"Fleet memory plan refused; reduce workers or review --force"}

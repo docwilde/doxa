@@ -508,7 +508,7 @@ pub fn start(args: &[String]) -> io::Result<()> {
             let charter=doxa_fleet::Charter{version:1,fleet_id:spec.preflight.run_id.clone(),task:spec.prompt.clone(),repo:spec.cwd.to_string_lossy().into_owned(),allowed_paths:spec.allowed_paths.clone(),required_evidence:vec!["host-observed changes and test results before completion".into()],worker_limit:spec.preflight.sessions,run_budget_usd:spec.preflight.run_budget_usd,deadline:spec.timeout.map(|duration|doxa_fleet::unix_now()+duration.as_secs()).unwrap_or(0),human_actions:vec!["authority, task, scope, spawn, credential, deployment and charter changes".into()]};
             let charter_sha256=doxa_fleet::hash(&charter)?;
             let mut assignments=Vec::new();
-            for (index,slot) in slots.iter_mut().enumerate(){let identity=rpc(&mut slot.client,"fleet_identity",json!({}))?;assignments.push(doxa_fleet::Assignment{id:format!("{}-{index}",spec.preflight.run_id),session_id:slot.session.id.clone(),pid:identity["pid"].as_i64().ok_or_else(||invalid("fleet host PID unavailable"))? as i32,role:if spec.preflight.supervisor.is_some()&&index==0{"coordinator"}else{"worker"}.into(),task:"Work within the immutable approved charter and its path scope".into(),cwd:identity["cwd"].as_str().ok_or_else(||invalid("fleet host cwd unavailable"))?.into()});}
+            for (index,slot) in slots.iter_mut().enumerate(){let identity=rpc(&mut slot.client,"fleet_identity",json!({}))?;assignments.push(doxa_fleet::Assignment{id:format!("{}-{index}",spec.preflight.run_id),session_id:slot.session.id.clone(),pid:identity["pid"].as_i64().ok_or_else(||invalid("fleet host PID unavailable"))? as i32,role:if spec.preflight.supervisor.is_some()&&index==0{"coordinator"}else{"worker"}.into(),task:"Work within the immutable approved charter and its path scope".into(),cwd:identity["cwd"].as_str().ok_or_else(||invalid("fleet host cwd unavailable"))?.into(),base_commit:git_observation(Path::new(identity["cwd"].as_str().unwrap()),&["rev-parse","HEAD"]).ok().map(|id|id.trim().to_owned())});}
             let context=doxa_fleet::Context{charter,charter_sha256,assignments,review:spec.review.clone(),state_path:store.run.join("guard-state.json")};
             context.validate()?;
             value["supervision"]=json!({"context":context,"status":"pending"});store.save(&value)?;
@@ -618,7 +618,8 @@ fn checkpoint(store:&Store,value:&mut Value,slots:&mut [Slot],initial:bool)->io:
     for (index,slot) in slots.iter_mut().enumerate(){
         let state=rpc(&mut slot.client,"get_state",json!({}))?;
         let cwd=Path::new(context.assignments[index].cwd.as_str());
-        let paths=git_observation(cwd,&["-c","core.quotepath=false","diff","--no-ext-diff","--no-textconv","--name-only","HEAD"]);
+        let baseline=context.assignments[index].base_commit.as_deref().unwrap_or("HEAD");
+        let paths=git_observation(cwd,&["-c","core.quotepath=false","diff","--no-ext-diff","--no-textconv","--name-only",baseline]);
         let untracked=git_observation(cwd,&["-c","core.quotepath=false","ls-files","--others","--exclude-standard"]);
         let changed=match (&paths,&untracked){(Ok(paths),Ok(untracked))=>Some(format!("{paths}{untracked}")),_=>None};
         if let Some(changed)=&changed{for path in changed.lines(){if !context.charter.allowed_paths.iter().any(|prefix|prefix.is_empty()||path==prefix||path.starts_with(&format!("{}/",prefix.trim_end_matches('/')))){out_of_scope=true;}}}
@@ -661,6 +662,7 @@ fn monitor(store: &Store, value: &mut Value, slots: &mut [Slot], timeout: Option
         }
         let review_interval=value["supervision"]["context"]["review"]["interval_s"].as_u64().unwrap_or(60);
         if !value["supervision"].is_null() && last_checkpoint.elapsed()>=Duration::from_secs(review_interval){checkpoint(store,value,slots,false)?;last_checkpoint=Instant::now();}
+        let mut milestone=false;
         let mut any_busy = false;
         for (index, slot) in slots.iter_mut().enumerate() {
             for _ in 0..256 {
@@ -673,7 +675,7 @@ fn monitor(store: &Store, value: &mut Value, slots: &mut [Slot], timeout: Option
                 let event = &frame["event"]; let data = &event["data"];
                 match event["type"].as_str() {
                     Some("turn_start") => slot.busy = true,
-                    Some("turn_done" | "turn_refused") => { slot.busy = false; value["slots"][index]["last_turn"] = data.clone(); },
+                    Some("turn_done" | "turn_refused") => { milestone=true;slot.busy = false; value["slots"][index]["last_turn"] = data.clone(); },
                     Some("needs_input") => {
                         if data["id"].as_str().is_some() && !slot.pending.iter().any(|(ask, _)| ask["id"] == data["id"]) {
                             if slot.pending.len() >= 64 { return Err(io::Error::other("fleet approval desk overflow")); }
@@ -718,10 +720,11 @@ fn monitor(store: &Store, value: &mut Value, slots: &mut [Slot], timeout: Option
             slot.busy = state["running"] == true || state["queued"].as_u64().unwrap_or(0) > 0;
             any_busy |= slot.busy || !slot.pending.is_empty();
         }
+        if milestone&&!value["supervision"].is_null()&&last_checkpoint.elapsed()>=Duration::from_secs(5){checkpoint(store,value,slots,false)?;last_checkpoint=Instant::now();}
         value["heartbeat_at"] = json!(now()); store.save(value)?;
         if any_busy { quiet_since = None; } else if quiet_since.is_none() { quiet_since = Some(Instant::now()); }
         if value["supervision"]["paused"]==true {quiet_since=None;}
-        if !interactive && quiet_since.is_some_and(|since| since.elapsed() >= quiet) { value["quiesced"] = json!(true); return Ok(()); }
+        if !interactive && quiet_since.is_some_and(|since| since.elapsed() >= quiet) {if !value["supervision"].is_null(){checkpoint(store,value,slots,false)?;if value["supervision"]["paused"]==true{quiet_since=None;continue;}}value["quiesced"] = json!(true); return Ok(());}
         if timeout.is_some_and(|timeout| started.elapsed() >= timeout) { value["timed_out"] = json!(true); return Ok(()); }
         std::thread::sleep(Duration::from_millis(100));
     }

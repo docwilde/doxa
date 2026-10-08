@@ -126,7 +126,7 @@ impl Inbox {
                 Err(error) => return Err(error),
             };
             same_user(&stream)?;
-            let pid = crate::credentials::peer_credentials(&stream)?.pid;
+            let pid = crate::credentials::peer_credentials(&stream).map(|credentials|credentials.pid).unwrap_or(0);
             stream.set_nonblocking(true)?;
             *pending = Some(PendingFrame { pid, stream, bytes: Vec::new(), started: Instant::now() });
         }
@@ -165,7 +165,7 @@ impl Inbox {
             let (mut stream, _) = self.listener.accept()?;
             same_user(&stream)?;
             match read_frame(&mut stream) {
-                Ok(mut frame) => { frame.authenticated_pid = Some(crate::credentials::peer_credentials(&stream)?.pid); return Ok(frame.scrub(scrubber)); },
+                Ok(mut frame) => { frame.authenticated_pid = crate::credentials::peer_credentials(&stream).ok().map(|credentials|credentials.pid); return Ok(frame.scrub(scrubber)); },
                 Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => continue, // discovery probe
                 Err(e) => return Err(e),
             }

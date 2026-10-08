@@ -165,6 +165,7 @@ pub(super) const COMMANDS: &[CommandHelp] = &[
 /// and the command palette. No controller action is dispatched by a model.
 pub(super) const FLEET_ACTIONS: &[(&str, &str)] = &[
     ("/fleet start", "Prepare a pool, task and reviewed plan"),
+    ("/fleet continue", "Resume a paused fleet with its approved charter hash"),
     ("/fleet status", "Inspect current run"),
     ("/fleet attach", "Choose a current-run slot"),
     ("/fleet mesh", "Open current run graph"),

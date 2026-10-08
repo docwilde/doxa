@@ -55,7 +55,7 @@ pub fn request(model:&Model,instructions:&str,input:&Value)->io::Result<Value>{
 fn reserve(context:&Context,model:&Model,request:&Value)->io::Result<(f64,f64,f64)>{
     let input_bound=serde_json::to_vec(request)?.len() as f64;
     if input_bound>MAX_INPUT as f64+8_000.0{return Err(invalid("review request exceeds token bound"));}
-    let (input_rate,output_rate)=if model.provider=="jev"&&(model.model=="jev-1.13.0"||model.model=="jev-latest"){(0.042,0.0)}else{(context.review.input_usd_per_million,context.review.output_usd_per_million)};
+    let (input_rate,output_rate)=if model.provider=="jev"&&(model.model=="jev-1.13.0"){(0.042,0.0)}else{(context.review.input_usd_per_million,context.review.output_usd_per_million)};
     let cost=(input_bound*input_rate+OUTPUT_TOKENS as f64*output_rate)/1_000_000.0;
     transaction(context,|state|{
         if state.accounting_unknown||state.calls>=context.review.max_calls||state.reserved_usd+cost>context.review.budget_usd{state.paused=true;state.reason="independent review budget or call ceiling reached".into();return Err(invalid("independent review budget or call ceiling reached"));}
@@ -99,11 +99,17 @@ pub fn parse_response(model:&Model,value:&Value,latency_ms:u128)->io::Result<Res
             let mut result=serde_json::Map::new();for (name,_) in NOUL_FIELDS{let row=answers.get(name).ok_or_else(||invalid("missing Jev answer"))?;if row["type"]!="noul"||row.as_object().is_none_or(|fields|fields.len()!=2){return Err(invalid("invalid Jev answer type"));}let score=row["noul"].as_f64().filter(|score|score.is_finite()&&(0.0..=1.0).contains(score)).ok_or_else(||invalid("invalid Jev probability"))?;result.insert(name.into(),json!(score));}
             (Value::Object(result),usage["input_tokens"].as_u64(),usage["output_tokens"].as_u64())
         },
-        "claude"=>{let content=value["content"].as_array().filter(|rows|rows.len()==1).ok_or_else(||invalid("reviewer attempted tools or invalid content"))?;if content[0]["type"]!="text"{return Err(invalid("reviewer tool output refused"));}(parse_text(&content[0]["text"])? ,usage["input_tokens"].as_u64(),usage["output_tokens"].as_u64())},
-        "codex"=>{let output=value["output"].as_array().ok_or_else(||invalid("invalid OpenAI review output"))?;let mut text=None;for row in output{match row["type"].as_str(){Some("reasoning")=>{},Some("message")=>{let contents=row["content"].as_array().filter(|rows|rows.len()==1).ok_or_else(||invalid("invalid OpenAI review content"))?;if text.is_some()||contents[0]["type"]!="output_text"{return Err(invalid("invalid OpenAI review text"));}text=Some(parse_text(&contents[0]["text"])?);},_=>return Err(invalid("reviewer tool output refused"))}}(text.ok_or_else(||invalid("missing OpenAI review text"))?,usage["input_tokens"].as_u64(),usage["output_tokens"].as_u64())},
+        "claude"=>{if value["stop_reason"]!="end_turn"{return Err(invalid("incomplete Claude review output"));}let content=value["content"].as_array().filter(|rows|!rows.is_empty()&&rows.len()<=8).ok_or_else(||invalid("reviewer attempted tools or invalid content"))?;let mut text=None;for row in content{match row["type"].as_str(){Some("thinking"|"redacted_thinking")=>{},Some("text") if text.is_none()=>text=Some(parse_text(&row["text"])?),_=>return Err(invalid("reviewer tool output refused"))}}(text.ok_or_else(||invalid("review text unavailable"))?,usage["input_tokens"].as_u64(),usage["output_tokens"].as_u64())},
+        "codex"=>{if value["status"]!="completed"||value.get("incomplete_details").is_some_and(|details|!details.is_null()){return Err(invalid("incomplete OpenAI review output"));}let output=value["output"].as_array().ok_or_else(||invalid("invalid OpenAI review output"))?;let mut text=None;for row in output{match row["type"].as_str(){Some("reasoning")=>{},Some("message")=>{let contents=row["content"].as_array().filter(|rows|rows.len()==1).ok_or_else(||invalid("invalid OpenAI review content"))?;if text.is_some()||contents[0]["type"]!="output_text"{return Err(invalid("invalid OpenAI review text"));}text=Some(parse_text(&contents[0]["text"])?);},_=>return Err(invalid("reviewer tool output refused"))}}(text.ok_or_else(||invalid("missing OpenAI review text"))?,usage["input_tokens"].as_u64(),usage["output_tokens"].as_u64())},
         _=>{let rows=value["choices"].as_array().filter(|rows|rows.len()==1).ok_or_else(||invalid("invalid LLM review choice"))?;if rows[0]["message"].get("tool_calls").is_some()||rows[0]["finish_reason"]!="stop"{return Err(invalid("incomplete or tool-bearing LLM review"));}(parse_text(&rows[0]["message"]["content"])? ,usage["prompt_tokens"].as_u64(),usage["completion_tokens"].as_u64())},
     };
     let model_name=value["model"].as_str().filter(|name|!name.is_empty()&&name.len()<=128).ok_or_else(||invalid("review model provenance unavailable"))?;
+    let provenance=match model.provider.as_str(){
+        "jev" if matches!(model.model.as_str(),"jev-latest"|"jev-preview")=>model_name.starts_with("jev-"),
+        "claude" if matches!(model.model.as_str(),"sonnet"|"opus"|"haiku")=>model_name.starts_with(&format!("claude-{}-",model.model)),
+        _=>model_name==model.model||model_name.starts_with(&format!("{}-",model.model)),
+    };
+    if !provenance{return Err(invalid("review response model does not match the selected model"));}
     Ok(Response{result,model:model_name.into(),input_tokens:input_tokens.ok_or_else(||invalid("review input usage unavailable"))?,output_tokens:output_tokens.ok_or_else(||invalid("review output usage unavailable"))?,latency_ms})
 }
 fn parse_text(value:&Value)->io::Result<Value>{let text=value.as_str().filter(|text|text.len()<=MAX_BODY).ok_or_else(||invalid("invalid review text"))?;serde_json::from_str(text).map_err(|_|invalid("reviewer did not return strict JSON"))}
@@ -137,5 +143,24 @@ mod tests {
         let good=json!({"model":"reviewer","choices":[{"finish_reason":"stop","message":{"content":verdict.to_string()}}],"usage":{"prompt_tokens":100,"completion_tokens":50}});assert!(parse_response(&model,&good,1).is_ok());
         for change in 0..4{let mut bad=good.clone();match change{0=>bad["choices"][0]["message"]["tool_calls"]=json!([]),1=>bad["choices"][0]["finish_reason"]=json!("length"),2=>bad["choices"][0]["message"]["content"]=json!("```json\n{}\n```"),_=>bad["usage"]=json!({})};assert!(parse_response(&model,&bad,1).is_err());}
         for provider in ["claude","codex","deepseek","glm"]{let model=Model::parse(&format!("{provider}:custom-id")).unwrap();let body=request(&model,SUPERVISOR_INSTRUCTIONS,&json!({"charter":"bounded"})).unwrap();assert!(!body.to_string().contains("previous_response_id"));assert!(!body.to_string().contains("conversation"));if provider=="codex"{assert_eq!(body["tools"],json!([]));assert_eq!(body["store"],false);}}
+    }
+    #[test]
+    fn truncated_but_valid_json_never_passes_claude_or_responses_review(){
+        let text=json!({"verdict":"aligned","evidence_refs":[],"charter_clause":"task","reason":"on scope","recommended_action":"continue"}).to_string();
+        let claude=Model::parse("claude:claude-sonnet-fixture").unwrap();
+        let response=json!({"model":"claude-sonnet-fixture","stop_reason":"end_turn","content":[{"type":"text","text":text}],"usage":{"input_tokens":10,"output_tokens":20}});assert!(parse_response(&claude,&response,1).is_ok());
+        let mut truncated=response.clone();truncated["stop_reason"]=json!("max_tokens");assert!(parse_response(&claude,&truncated,1).is_err());
+        let codex=Model::parse("codex:gpt-fixture").unwrap();let response=json!({"model":"gpt-fixture","status":"completed","incomplete_details":null,"output":[{"type":"message","content":[{"type":"output_text","text":text}]}],"usage":{"input_tokens":10,"output_tokens":20}});assert!(parse_response(&codex,&response,1).is_ok());
+        for field in ["status","incomplete_details","model"]{let mut bad=response.clone();bad[field]=json!("foreign");assert!(parse_response(&codex,&bad,1).is_err());}
+    }
+    #[test]
+    fn shared_review_reservation_survives_failure_and_reaches_call_ceiling(){
+        use crate::{Assignment,Charter,ReviewConfig};use std::os::unix::fs::PermissionsExt;
+        let dir=tempfile::tempdir().unwrap();std::fs::set_permissions(dir.path(),std::fs::Permissions::from_mode(0o700)).unwrap();
+        let charter=Charter{version:1,fleet_id:"run".into(),task:"task".into(),repo:"/repo".into(),allowed_paths:vec![String::new()],required_evidence:vec![],worker_limit:1,run_budget_usd:Some(10.0),deadline:0,human_actions:vec![]};
+        let mut context=Context{charter_sha256:hash(&charter).unwrap(),charter,assignments:vec![Assignment{id:"a".into(),session_id:"a".into(),pid:1,role:"worker".into(),task:"task".into(),cwd:"/repo".into(),base_commit:None}],review:ReviewConfig{budget_usd:1.0,max_calls:1,..Default::default()},state_path:dir.path().join("state.json")};
+        let model=Model::parse("jev:jev-1.13.0").unwrap();let body=request(&model,SEMANTIC_INSTRUCTIONS,&json!({"message":"bounded"})).unwrap();let reserved=reserve(&context,&model,&body).unwrap().0;
+        assert!(reserved>0.0);assert!(reserve(&context,&model,&body).is_err());let state=transaction(&context,|state|Ok(state.clone())).unwrap();assert_eq!(state.calls,1);assert_eq!(state.reserved_usd,reserved);assert!(state.paused);
+        context.review.max_calls=10;context.review.budget_usd=reserved;assert!(reserve(&context,&model,&body).is_err());
     }
 }

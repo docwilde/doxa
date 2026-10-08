@@ -49,7 +49,7 @@ pub struct Charter {
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-pub struct Assignment { pub id:String, pub session_id:String, pub pid:i32, pub role:String, pub task:String, pub cwd:String }
+pub struct Assignment { pub id:String, pub session_id:String, pub pid:i32, pub role:String, pub task:String, pub cwd:String, #[serde(default)] pub base_commit:Option<String> }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Context { pub charter:Charter, pub charter_sha256:String, pub assignments:Vec<Assignment>, pub review:ReviewConfig, pub state_path:PathBuf }
@@ -58,7 +58,7 @@ impl Context {
         self.review.validate()?;
         if self.charter.version!=1 || self.charter.task.trim().is_empty() || self.charter.task.len()>64*1024 || self.charter_sha256!=hash(&self.charter)? || !self.state_path.is_absolute() || self.assignments.is_empty() || self.assignments.len()>1025 {return Err(invalid("invalid immutable fleet charter"));}
         for (index,row) in self.assignments.iter().enumerate() {
-            if row.pid<=0 || row.id.is_empty() || row.session_id.is_empty() || !matches!(row.role.as_str(),"worker"|"coordinator") || row.task.len()>64*1024 || self.assignments[..index].iter().any(|prior|prior.id==row.id||prior.session_id==row.session_id||prior.pid==row.pid) {return Err(invalid("invalid host-issued fleet assignment"));}
+            if row.pid<=0 || row.id.is_empty() || row.session_id.is_empty() || !matches!(row.role.as_str(),"worker"|"coordinator") || row.task.len()>64*1024 || row.base_commit.as_ref().is_some_and(|id|!(40..=64).contains(&id.len())||!id.bytes().all(|byte|byte.is_ascii_hexdigit())) || self.assignments[..index].iter().any(|prior|prior.id==row.id||prior.session_id==row.session_id||prior.pid==row.pid) {return Err(invalid("invalid host-issued fleet assignment"));}
         }
         Ok(())
     }

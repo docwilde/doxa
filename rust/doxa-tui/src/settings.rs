@@ -178,6 +178,7 @@ pub fn coerce(s: &Setting, value: Option<&str>) -> io::Result<Option<toml::Value
         },
         Kind::Number => {
             let n = if s.key == "derive_secs" && value == "off" { 0.0 } else { value.parse::<f64>().map_err(|_| invalid("must be a nonnegative finite number"))? };
+            if s.key=="fleet_review_threshold"&&n>1.0{return Err(invalid("must be between 0 and 1"));}
             if !n.is_finite() || n < 0.0 { return Err(invalid("must be a nonnegative finite number")); }
             if s.key == "linger_secs" && n > crate::launch::MAX_LINGER_SECS { return Err(invalid("must be between 0 and 31536000 seconds")); }
             if matches!(s.key, "remote_port"|"remote_proxy_uid") && n.fract() != 0.0 { return Err(invalid("must be an integer")); }
@@ -186,7 +187,7 @@ pub fn coerce(s: &Setting, value: Option<&str>) -> io::Result<Option<toml::Value
         Kind::Choice => { if !s.choices.contains(&value) { return Err(invalid(&format!("accepts {}", s.choices.join(" | ")))); } toml::Value::String(value.into()) },
         Kind::Format => { crate::preferences::validate_clock_format(value).map_err(|_| invalid("invalid strftime format"))?; toml::Value::String(value.into()) },
         Kind::Key => { let chord = crate::keybindings::Chord::parse(value).map_err(|e| invalid(&e.to_string()))?; toml::Value::String(chord.map(|c| c.display()).unwrap_or_else(|| "none".into())) },
-        Kind::Text => toml::Value::String(value.into()),
+        Kind::Text => {if matches!(s.key,"fleet_alignment_supervisor"|"fleet_message_judge"){let model=doxa_fleet::judge::Model::parse(value).map_err(|_|invalid("requires a supported provider:model"))?;if s.key=="fleet_alignment_supervisor"&&model.provider=="jev"{return Err(invalid("Jev judges messages; select an LLM supervisor"));}}toml::Value::String(value.into())},
     }))
 }
 pub fn save(path: &Path, edits: &[(String, Option<String>)], engine: &str) -> io::Result<()> {
