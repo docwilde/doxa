@@ -40,6 +40,21 @@ pub enum RepoStatus {
 pub fn repo_status(cwd: &Path) -> Option<RepoStatus> {
     let cwd = cwd.canonicalize().ok()?;
     if !cwd.is_dir() { return None; }
+    if let Some(manifest) = doxa_isolation::workspace::manifest_for(&cwd).ok()? {
+        if manifest.profile.docker() {
+            // Container Git paths name /workspace, not a host directory. The
+            // host-owned manifest supplies location; Git supplies only bounded
+            // branch/commit values through the container transport below.
+            let checked_out = git_text(&cwd, &["symbolic-ref", "--quiet", "--short", "HEAD"])
+                .filter(|branch| safe_ref(branch));
+            let sha = git_text(&cwd, &["rev-parse", "--verify", "HEAD^{commit}"])
+                .filter(|oid| valid_commit_oid(oid)).map(|oid| oid[..7].to_owned());
+            let repo = manifest.source.file_name()?.to_str()?.to_owned();
+            let base = valid_commit_oid(&manifest.base_sha).then(|| manifest.base_sha[..7].to_owned());
+            return Some(RepoStatus::Repository { repo, base, checked_out, sha,
+                worktree: Some("independent Docker checkout".into()) });
+        }
+    }
     let top = git_text(&cwd, &["rev-parse", "--show-toplevel"])
         .and_then(|top| PathBuf::from(top).canonicalize().ok());
     let Some(checkout) = top else {
