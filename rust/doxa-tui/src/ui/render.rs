@@ -716,10 +716,24 @@ impl App {
                 }
             }
         }
-        // Keep the action hint visible even when a setting has a long caveat.
-        lines.truncate(usize::from(area.height.saturating_sub(3)));
+        let mermaid_selected = menu.rows.get(menu.selected).is_some_and(|row|
+            matches!(row.setting.key, "mermaid_renderer" | "mermaid_renderer_root"));
+        let preflight_lines = if mermaid_selected {
+            let status = self.mermaid_preflight.as_ref()
+                .map(|preflight| preflight.message(&menu.mermaid_paths()))
+                .unwrap_or_else(|| "Not checked".into());
+            let width = usize::from(area.width.saturating_sub(3)).max(1);
+            let mut footer = vec![Line::styled(" Ctrl+P: check proposed values with a fixed sample (no transcript source)",
+                Style::default().fg(theme::ACCENT))];
+            footer.extend(crate::memory_menu::wrap_review(&format!(" Preflight: {status}"), width)
+                .into_iter().take(3).map(Line::from));
+            footer
+        } else { Vec::new() };
+        // Keep the action hint and preflight result visible even when a note is long.
+        lines.truncate(usize::from(area.height.saturating_sub(3)).saturating_sub(preflight_lines.len()));
+        lines.extend(preflight_lines);
         lines.push(Line::from(if menu.draft.is_some() {
-            " Enter/Ctrl+S save · Esc cancel edit"
+            " Enter/Ctrl+S save · Ctrl+P preflight · Esc cancel edit"
         } else {
             " Enter edit/toggle · U unset · Ctrl+S save · Esc discard/close"
         }));

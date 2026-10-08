@@ -1,6 +1,6 @@
 # Mermaid in the Rust transcript
 
-Status: **local preview and sandbox doctor implemented; real Mermaid CLI validation open**.
+Status: **local preview, sandbox doctor and Settings preflight implemented; real Mermaid CLI validation open**.
 
 The native Ratatui transcript recognizes complete, standalone `mermaid` code
 fences. Without explicit configuration, it renders the source fence exactly as
@@ -19,6 +19,13 @@ readable. [Current controls and limits](../terminal-images.md#mermaid-fences).
 bubblewrap/user namespaces, and renders a fixed PNG with a bounded decoder.
 Its success confirms the sandbox command works with that executable; it does
 not establish Mermaid CLI diagram fidelity or terminal display quality.
+In Settings → Appearance, select either Mermaid renderer field and press
+**Ctrl+P** to run that same preflight against the proposed values before saving.
+It runs off the UI thread and shows a static, source-free failure reason for
+path policy, bubblewrap, user namespaces, renderer startup, timeout or invalid
+PNG. It uses only a fixed sample diagram; no transcript source enters the
+preflight. A changed setting invalidates the displayed result. Saving remains
+explicit, and a failed preview still leaves the source fence visible.
 
 ## Still open
 
@@ -28,8 +35,6 @@ not establish Mermaid CLI diagram fidelity or terminal display quality.
 - Decide whether the installer should offer the large optional Node/Chromium
   dependency. It should state the cost before installation and never install
   Node silently.
-- Add a settings preflight that explains sandbox startup failure before a
-  transcript preview, without exposing source.
 - Decide whether session-scoped persistent caching is useful. Current results
   live only in the TUI process; resize may rerun a diagram.
 - Evaluate macOS isolation separately. The Linux sandbox requirement currently

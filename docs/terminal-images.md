@@ -62,6 +62,12 @@ bounded PNG in the sandbox; it does not validate Mermaid CLI compatibility,
 Chromium, or a terminal graphics protocol. DOXA still has no managed renderer
 installer or browser provisioning.
 
+Before saving renderer settings, select either Mermaid field in Settings →
+Appearance and press **Ctrl+P**. The TUI checks the proposed values on a worker
+using the same fixed sample as `doxa doctor`. Settings shows a static failure
+reason without using or displaying transcript diagram source. If you edit a
+renderer value after the check, run it again; the old result is marked stale.
+
 Provider binary attachments, screenshots pasted into the prompt and remote
 image URLs still need separate input paths. Terminal protocol quality depends
 on the emulator, tmux and SSH path; halfblock is the portable fallback.

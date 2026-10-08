@@ -534,6 +534,7 @@ fn run_loop(
             changed = true;
         }
         changed |= app.poll_plugin_commands();
+        changed |= app.poll_mermaid_preflight();
         if !app.remote_mode {
             let status = app.native_status.poll(Instant::now());
             if let Some(plugin) = status.newly_disabled {

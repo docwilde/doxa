@@ -292,9 +292,51 @@ use super::*;
         app.settings_menu_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert_eq!(app.settings_menu.as_ref().unwrap().draft.as_ref().map(|(_,v)|v.as_str()), Some("120"));
         app.settings_menu_key(KeyEvent::new(KeyCode::Char('9'), KeyModifiers::NONE));
+        app.settings_menu_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
+        assert!(app.mermaid_preflight.is_none());
+        assert!(app.settings_menu.as_ref().unwrap().draft.is_some());
         app.settings_menu_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(app.settings_menu.as_ref().unwrap().draft.is_none());
         assert_eq!(app.settings_menu.as_ref().unwrap().rows[0].value, "120");
+    }
+
+    #[test]
+    fn mermaid_settings_preflight_checks_draft_without_saving_or_exposing_source() {
+        let mut app = App::default();
+        let rows = ["mermaid_renderer", "mermaid_renderer_root"].into_iter().map(|key| {
+            let setting = crate::settings::find(key).unwrap();
+            crate::settings::Row { setting, value: String::new(), stored: String::new(),
+                source: "default".into(), shadowed: false }
+        }).collect();
+        app.settings_menu = Some(SettingsMenu { rows, selected: 0, category: 3,
+            draft: Some(("mermaid_renderer".into(), "/missing/SECRET_RENDERER_PATH".into())),
+            edits: HashMap::from([("mermaid_renderer_root".into(), Some("/missing/package".into()))]),
+            engine: "claude".into() });
+        app.input = "private transcript diagram source".into();
+        assert!(app.settings_menu_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL)));
+        assert!(app.settings_menu.as_ref().unwrap().draft.is_none());
+        assert!(app.settings_menu.as_ref().unwrap().edits.contains_key("mermaid_renderer"));
+        assert!(app.notice.contains("fixed sample"));
+        assert!(!app.notice.contains("private transcript"));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !app.poll_mermaid_preflight() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let preflight = app.mermaid_preflight.as_ref().unwrap();
+        assert!(matches!(preflight.state, MermaidPreflightState::Complete(
+            transcript_mermaid::DoctorResult::Unavailable("renderer package root is unavailable"))));
+        assert!(!app.notice.contains("SECRET_RENDERER_PATH"));
+        assert!(!app.notice.contains("private transcript"));
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(100, 25)).unwrap();
+        terminal.draw(|frame| app.draw_settings_menu(frame, Rect::new(0, 0, 100, 25))).unwrap();
+        let rendered: String = terminal.backend().buffer().content().iter()
+            .map(|cell| cell.symbol()).collect();
+        assert!(rendered.contains("Preflight: Unavailable"));
+        assert!(rendered.contains("renderer package root is unavailable"));
+        assert!(!rendered.contains("private transcript diagram source"));
+        let menu = app.settings_menu.as_mut().unwrap();
+        menu.edits.insert("mermaid_renderer_root".into(), Some("/another/package".into()));
+        assert!(preflight.message(&menu.mermaid_paths()).contains("Configuration changed"));
     }
 
     #[cfg(unix)]

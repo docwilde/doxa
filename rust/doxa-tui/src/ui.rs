@@ -395,6 +395,25 @@ struct SettingsMenu {
     engine: String,
 }
 impl SettingsMenu {
+    fn effective_value(&self, key: &str) -> String {
+        let Some(row) = self.rows.iter().find(|row| row.setting.key == key) else {
+            return String::new();
+        };
+        if row.shadowed { return row.value.clone(); }
+        if let Some((_, value)) = self.draft.as_ref().filter(|(draft_key, _)| draft_key == key) {
+            return value.clone();
+        }
+        match self.edits.get(key) {
+            Some(Some(value)) => value.clone(),
+            Some(None) => row.setting.default.into(),
+            None => row.value.clone(),
+        }
+    }
+
+    fn mermaid_paths(&self) -> (String, String) {
+        (self.effective_value("mermaid_renderer"), self.effective_value("mermaid_renderer_root"))
+    }
+
     fn indices(&self) -> Vec<usize> {
         self.rows
             .iter()
@@ -420,6 +439,33 @@ impl SettingsMenu {
     fn finish_draft(&mut self) {
         if let Some((key, value)) = self.draft.take() {
             self.edits.insert(key, Some(value));
+        }
+    }
+}
+
+#[derive(Debug)]
+struct MermaidPreflight {
+    paths: (String, String),
+    state: MermaidPreflightState,
+}
+
+#[derive(Debug)]
+enum MermaidPreflightState {
+    Running(Receiver<transcript_mermaid::DoctorResult>),
+    Complete(transcript_mermaid::DoctorResult),
+}
+
+impl MermaidPreflight {
+    fn message(&self, paths: &(String, String)) -> String {
+        if &self.paths != paths { return "Configuration changed · press P to check these values".into(); }
+        match &self.state {
+            MermaidPreflightState::Running(_) => "Checking the sandbox with a fixed sample…".into(),
+            MermaidPreflightState::Complete(transcript_mermaid::DoctorResult::Disabled) =>
+                "Preview disabled · configure both renderer fields".into(),
+            MermaidPreflightState::Complete(transcript_mermaid::DoctorResult::Available) =>
+                "Sandbox ready · fixed PNG decoded; Mermaid CLI fidelity unverified".into(),
+            MermaidPreflightState::Complete(transcript_mermaid::DoctorResult::Unavailable(reason)) =>
+                format!("Unavailable · {reason}"),
         }
     }
 }
@@ -1572,6 +1618,7 @@ pub struct App {
     offline_ids: HashSet<String>,
     queue_picker: Option<QueuePicker>,
     settings_menu: Option<SettingsMenu>,
+    mermaid_preflight: Option<MermaidPreflight>,
     pending_queue_commands: Vec<crate::bridge::WorkerCommand>,
     diff_modal: bool,
     diff_pane: bool,
@@ -1843,6 +1890,7 @@ impl Default for App {
             offline_ids: HashSet::new(),
             queue_picker: None,
             settings_menu: None,
+            mermaid_preflight: None,
             pending_queue_commands: Vec::new(),
             diff_modal: false,
             diff_pane: false,

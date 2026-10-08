@@ -1,6 +1,7 @@
 //! Coordinate explicit setup, settings, fleet and maintenance operations.
 use super::{
-    fleet_dependency_review, fleet_menu, fleet_process, operations_menu, safe_label, App, ChipInfo, SettingsMenu, COMMANDS,
+    fleet_dependency_review, fleet_menu, fleet_process, operations_menu, safe_label, App, ChipInfo, MermaidPreflight,
+    MermaidPreflightState, SettingsMenu, COMMANDS,
     MAX_PENDING_PROMPTS,
 };
 use crossterm::event::KeyCode;
@@ -10,6 +11,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::mpsc::{self, TryRecvError};
 use std::time::Instant;
 
 impl App {
@@ -591,6 +593,40 @@ impl App {
             }
         }
     }
+
+    pub(super) fn start_mermaid_preflight(&mut self) {
+        let Some(menu) = self.settings_menu.as_ref() else { return; };
+        if self.mermaid_preflight.as_ref().is_some_and(|preflight|
+            matches!(&preflight.state, MermaidPreflightState::Running(_))) {
+            self.notice = "Mermaid preflight is already running".into();
+            return;
+        }
+        let paths = menu.mermaid_paths();
+        let workspaces = self.session_cwds.values().cloned().collect::<Vec<_>>();
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let worker_paths = paths.clone();
+        std::thread::spawn(move || {
+            let result = super::transcript_mermaid::diagnose(&worker_paths.0, &worker_paths.1, &workspaces);
+            let _ = sender.send(result);
+        });
+        self.mermaid_preflight = Some(MermaidPreflight { paths, state: MermaidPreflightState::Running(receiver) });
+        self.notice = "Mermaid preflight running with a fixed sample; no transcript source used".into();
+    }
+
+    pub(super) fn poll_mermaid_preflight(&mut self) -> bool {
+        let Some(preflight) = self.mermaid_preflight.as_mut() else { return false; };
+        let MermaidPreflightState::Running(receiver) = &preflight.state else { return false; };
+        let result = match receiver.try_recv() {
+            Ok(result) => result,
+            Err(TryRecvError::Disconnected) => super::transcript_mermaid::DoctorResult::Unavailable("preflight worker stopped"),
+            Err(TryRecvError::Empty) => return false,
+        };
+        preflight.state = MermaidPreflightState::Complete(result);
+        if let Some(menu) = &self.settings_menu {
+            self.notice = format!("Mermaid preflight: {}", preflight.message(&menu.mermaid_paths()));
+        }
+        true
+    }
     pub(super) fn save_settings_menu(&mut self) {
         let Some(menu) = &mut self.settings_menu else {
             return;
@@ -664,6 +700,16 @@ impl App {
         };
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('s') {
             self.save_settings_menu();
+            return true;
+        }
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('p') {
+            if !menu.rows.get(menu.selected).is_some_and(|row|
+                matches!(row.setting.key, "mermaid_renderer" | "mermaid_renderer_root")) {
+                self.notice = "Select a Mermaid renderer setting to run preflight".into();
+                return true;
+            }
+            menu.finish_draft();
+            self.start_mermaid_preflight();
             return true;
         }
         if key.modifiers.contains(KeyModifiers::SHIFT)
