@@ -38,7 +38,7 @@ Claude needs a signed-in Claude Code CLI. Codex needs a signed-in CLI and the pr
 
 ## Start and recover sessions
 
-`doxa` restores this project's saved tabs or starts the configured engine. `doxa new --engine codex|claude|deepseek|glm` always starts another session; `doxa list`, `attach`, and `stop` manage live daemons. Use `--model` and supported `--effort` choices. Titles default to `model@branch/repo` in Git and can be renamed.
+`doxa` restores this project's saved tabs or starts the configured engine. `doxa new --engine codex|claude|deepseek|glm` always starts another session; `doxa list`, `attach`, and `stop` manage live daemons. Use `--model` and supported `--effort` choices. Titles default to `model@repo:branch` in Git and can be renamed.
 
 `/resume [query]` opens verified saved state; `/attach` lists live daemons. Closing a tab leaves its daemon running. Ctrl+Q closes the window while all running sessions stay detached. Saved split layouts and drafts restore on launch. Historical data that the provider never stored cannot be reconstructed; unsafe or uncertain recovery stays read-only with a reason.
 

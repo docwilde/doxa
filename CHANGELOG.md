@@ -5,6 +5,23 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.11 — 2026-10-08
+
+**Terminal and documentation**
+
+- Add bounded local image previews in the Rust transcript with Kitty, Sixel, iTerm2 and Unicode halfblock rendering; keep Markdown links and alt text usable.
+- Rebuild the terminal gallery and shorten the root README, Rust guide and engine capability reference with contents and clearer navigation.
+
+**Session isolation**
+
+- Add a monitored 20 GiB Docker workspace soft ceiling and 2 GiB host free-space floor by default. Check launches, resumes, migrations and provider turns; show measurements in the TUI.
+- Keep hard filesystem quotas open: bind-mounted workspaces need administrator-configured project quotas.
+
+**Fleet coordination**
+
+- Add frozen per-worker tasks and optional path scopes to fleet launch review. Verify observed edits against the approved scope at checkpoints.
+- Add typed artifact handoff, acknowledgement and confirmation between workers; trigger an independent supervisor review when the handoff state changes.
+
 ## 2.0.0-beta.10 — 2026-10-08
 
 **Session isolation**
