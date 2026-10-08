@@ -30,14 +30,15 @@ PATCH = "d6c8a41c0370c12dcace10d6babe13de7852f0095fed7b46289b38e7a6cd0f4b"
 MAX_BINARY = 1024 * 1024 * 1024
 
 
-def owned_file(path: Path, maximum: int, *, private: bool = False) -> bytes:
+def owned_file(path: Path, maximum: int, *, private: bool = False,
+               single_link: bool = True) -> bytes:
     flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
     fd = os.open(path, flags)
     with os.fdopen(fd, "rb") as stream:
         before = os.fstat(stream.fileno())
         import stat
         if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid()
-                or before.st_nlink != 1 or before.st_size > maximum
+                or (single_link and before.st_nlink != 1) or before.st_size > maximum
                 or (private and before.st_mode & 0o077)):
             raise ValueError(f"unsafe provider artifact: {path.name}")
         data = stream.read(maximum + 1)
@@ -52,7 +53,10 @@ def copy_executable(source: Path, destination: Path) -> str:
     source = source.resolve(strict=True)
     if not os.access(source, os.X_OK):
         raise ValueError(f"not executable: {source.name}")
-    data = owned_file(source, MAX_BINARY)
+    # Cargo exposes the explicitly selected worker via a hardlink to deps/.
+    # Copy stable bytes into the context; protected package artifacts below
+    # still require private, single-link files and their receipt hashes.
+    data = owned_file(source, MAX_BINARY, single_link=False)
     destination.write_bytes(data)
     destination.chmod(0o755)
     return hashlib.sha256(data).hexdigest()

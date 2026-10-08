@@ -79,6 +79,18 @@ class PackageTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unsafe provider artifact"):
             image.populate_context(self.context(), self.worker, None, self.provider)
 
+    def test_cargo_hardlinked_worker_is_copied_without_linking_context(self):
+        os.link(self.worker, self.root / "cargo-deps-worker")
+        context = self.context()
+        image.populate_context(context, self.worker, None, None)
+        self.assertEqual((context / "worker").read_bytes(), self.worker.read_bytes())
+        self.assertEqual((context / "worker").stat().st_nlink, 1)
+
+    def test_protected_package_hardlink_is_rejected(self):
+        os.link(self.provider / "codex-app-server", self.root / "shared-payload")
+        with self.assertRaisesRegex(ValueError, "unsafe provider artifact"):
+            image.populate_context(self.context(), self.worker, None, self.provider)
+
     def test_fixture_image_contains_no_cli_or_provider_package(self):
         context = self.context()
         evidence = image.populate_context(context, self.worker, None, None)
