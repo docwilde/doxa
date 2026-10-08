@@ -29,6 +29,63 @@ pub struct PendingClusters {
     pub memory_clusters: Vec<Vec<Value>>,
     pub other: Vec<Value>,
 }
+
+/// Source-scoped pending IDs from one consistent LORE store snapshot. A
+/// missing or incomplete row cannot prove that a session has zero proposals.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingSession {
+    pub session_id: String,
+    pub pending_pids: Vec<String>,
+    pub complete: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingSessions {
+    pub source_project_slug: String,
+    pub snapshot: String,
+    pub complete: bool,
+    pub sessions: Vec<PendingSession>,
+}
+
+impl PendingSessions {
+    fn parse(value: Value, cwd: &str, requested: &[String]) -> Result<Self, LoreError> {
+        let object = value.as_object().filter(|object| object.len() == 4)
+            .ok_or(LoreError::InvalidFrame)?;
+        let source_project_slug = object["source_project_slug"].as_str()
+            .filter(|slug| *slug == lore_core::config::project_slug(Path::new(cwd)))
+            .ok_or(LoreError::InvalidFrame)?.to_owned();
+        let snapshot = object["snapshot"].as_str().filter(|digest| valid_digest(digest))
+            .ok_or(LoreError::InvalidFrame)?.to_owned();
+        let complete = object["complete"].as_bool().ok_or(LoreError::InvalidFrame)?;
+        let rows = object["sessions"].as_array().filter(|rows| rows.len() == requested.len())
+            .ok_or(LoreError::InvalidFrame)?;
+        let mut sessions = Vec::with_capacity(rows.len());
+        let mut seen_pids = HashSet::new();
+        for (row, expected) in rows.iter().zip(requested) {
+            let row = row.as_object().filter(|row| row.len() == 3)
+                .ok_or(LoreError::InvalidFrame)?;
+            let session_id = row["session_id"].as_str()
+                .filter(|id| *id == expected).ok_or(LoreError::InvalidFrame)?.to_owned();
+            let row_complete = row["complete"].as_bool().ok_or(LoreError::InvalidFrame)?;
+            let pids = row["pending_pids"].as_array().filter(|pids| pids.len() <= 4096)
+                .ok_or(LoreError::InvalidFrame)?;
+            let mut pending_pids = Vec::with_capacity(pids.len());
+            for pid in pids {
+                let pid = pid.as_str().filter(|pid| !pid.is_empty() && pid.len() <= 128
+                    && !pid.chars().any(char::is_control))
+                    .ok_or(LoreError::InvalidFrame)?;
+                if !seen_pids.insert(pid.to_owned()) { return Err(LoreError::InvalidFrame); }
+                if seen_pids.len() > 4096 { return Err(LoreError::InvalidFrame); }
+                pending_pids.push(pid.to_owned());
+            }
+            sessions.push(PendingSession { session_id, pending_pids, complete: row_complete });
+        }
+        if complete != sessions.iter().all(|row| row.complete) {
+            return Err(LoreError::InvalidFrame);
+        }
+        Ok(Self { source_project_slug, snapshot, complete, sessions })
+    }
+}
 impl PendingClusters {
     fn parse(value: Value) -> Result<Self, LoreError> {
         let groups = value["memory_clusters"].as_array().ok_or(LoreError::InvalidFrame)?;
@@ -290,6 +347,10 @@ impl LoreClient {
 
     pub fn can_resolve_reviewed(&self) -> bool {
         self.capabilities.contains("resolve_reviewed_v1")
+    }
+
+    pub fn can_pending_for_sessions(&self) -> bool {
+        self.capabilities.contains("pending_for_sessions_v1")
     }
 
     pub fn can_act_on_beliefs(&self) -> bool {
@@ -601,6 +662,20 @@ impl LoreClient {
         if cwd.is_empty() || cwd.len() > 4096 || cwd.contains('\0') { return Err(LoreError::InvalidFrame); }
         if !self.capabilities.contains("pending_cluster_v1") { return Err(LoreError::Remote("pending_cluster_unsupported")); }
         PendingClusters::parse(self.request_value("pending_cluster_v1", json!({"cwd":cwd}))?)
+    }
+
+    /// Read at most 64 source sessions in one snapshot. Unsupported older
+    /// LORE versions return an error; callers must retain unknown state.
+    pub fn pending_for_sessions(&mut self, cwd: &str, session_ids: &[String]) -> Result<PendingSessions, LoreError> {
+        if cwd.is_empty() || cwd.len() > 4096 || cwd.contains('\0')
+            || session_ids.is_empty() || session_ids.len() > 64 { return Err(LoreError::InvalidFrame); }
+        let mut seen = HashSet::new();
+        if !session_ids.iter().all(|id| !id.is_empty() && id.len() <= 128
+            && !id.chars().any(char::is_control) && seen.insert(id.as_str())) {
+            return Err(LoreError::InvalidFrame);
+        }
+        let value = self.request_value("pending_for_sessions_v1", json!({"cwd":cwd,"session_ids":session_ids}))?;
+        PendingSessions::parse(value, cwd, session_ids)
     }
 
     pub fn pending(&mut self, cwd: &str, offset: u16, limit: u8) -> Result<Vec<Value>, LoreError> {
@@ -1203,5 +1278,39 @@ mod pending_cluster_tests {
         assert!(PendingClusters::parse(json!({"memory_clusters":[[]],"other":[]})).is_err());
         assert!(PendingClusters::parse(json!({"memory_clusters":[[{"pid":4}]],"other":[]})).is_err());
         assert!(PendingClusters::parse(json!({"memory_clusters":[],"other":vec![row;4097]})).is_err());
+    }
+}
+
+#[cfg(test)]
+mod pending_sessions_tests {
+    use super::*;
+
+    #[test]
+    fn source_session_summary_requires_exact_scoped_complete_rows() {
+        let owned = tempfile::tempdir().unwrap();
+        let cwd = owned.path().to_str().unwrap();
+        let slug = lore_core::config::project_slug(owned.path());
+        let ids = vec!["one".to_owned(), "two".to_owned()];
+        let digest = "a".repeat(64);
+        let valid = json!({"source_project_slug":slug,"snapshot":digest,"complete":false,
+            "sessions":[
+                {"session_id":"one","pending_pids":["proposal-1"],"complete":true},
+                {"session_id":"two","pending_pids":[],"complete":false}
+            ]});
+        let parsed = PendingSessions::parse(valid.clone(), cwd, &ids).unwrap();
+        assert_eq!(parsed.sessions[0].pending_pids, ["proposal-1"]);
+        assert!(!parsed.sessions[1].complete);
+        let mut wrong = valid.clone();
+        wrong["source_project_slug"] = json!("another-project");
+        assert!(PendingSessions::parse(wrong, cwd, &ids).is_err());
+        let mut wrong = valid.clone();
+        wrong["sessions"][1]["session_id"] = json!("one");
+        assert!(PendingSessions::parse(wrong, cwd, &ids).is_err());
+        let mut wrong = valid.clone();
+        wrong["complete"] = json!(true);
+        assert!(PendingSessions::parse(wrong, cwd, &ids).is_err());
+        let mut wrong = valid;
+        wrong["sessions"][1]["pending_pids"] = json!(["proposal-1"]);
+        assert!(PendingSessions::parse(wrong, cwd, &ids).is_err());
     }
 }

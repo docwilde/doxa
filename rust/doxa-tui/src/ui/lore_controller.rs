@@ -1,6 +1,7 @@
 //! Coordinate exact LORE review menus, filtering and scoped memory workers.
 use super::{
-    raw_visual_rows, safe_label, unsafe_input_char, App, ChipInfo, LorePicker, REVIEW_BODY_RESERVE,
+    raw_visual_rows, safe_label, unsafe_input_char, App, ChipInfo, LorePendingRequest,
+    LorePendingSignal, LorePicker, REVIEW_BODY_RESERVE,
 };
 use crate::lore_picker;
 use crossterm::event::KeyCode;
@@ -13,6 +14,82 @@ use std::time::Duration;
 use std::time::Instant;
 
 impl App {
+    /// Keep source-session proposal counts off the event and render paths.
+    /// Expired, incomplete and unsupported responses are all unknown.
+    pub(super) fn poll_lore_pending(&mut self) -> bool {
+        const REFRESH: Duration = Duration::from_secs(45);
+        let now = Instant::now();
+        if self.remote_mode {
+            let changed = !self.lore_pending_cache.is_empty();
+            self.lore_pending_cache.clear();
+            self.lore_pending_request = None;
+            return changed;
+        }
+        let mut changed = false;
+        if let Some(request) = self.lore_pending_request.take() {
+            match request.receiver.try_recv() {
+                Ok(result) => {
+                    let rows = result.ok().map(|response| response.sessions);
+                    for (index, (id, cwd)) in request.sessions.into_iter().enumerate() {
+                        if self.session_cwds.get(&id) != Some(&cwd)
+                            || crate::remote_client::valid_target(&id)
+                            || self.offline_ids.contains(&id)
+                            || crate::memory_menu::scope_path(&cwd).0.to_str() != Some(request.scope.as_str()) {
+                            continue;
+                        }
+                        let pending = rows.as_ref().and_then(|rows| rows.get(index)).and_then(|row| {
+                            if !row.pending_pids.is_empty() { Some(true) }
+                            else if row.complete { Some(false) }
+                            else { None }
+                        });
+                        changed |= self.lore_pending_cache.get(&id).is_none_or(|old| old.pending != pending
+                            || old.cwd != cwd);
+                        self.lore_pending_cache.insert(id, LorePendingSignal { cwd, pending, checked: now });
+                    }
+                }
+                Err(TryRecvError::Empty) => {
+                    self.lore_pending_request = Some(request);
+                    return changed;
+                }
+                Err(TryRecvError::Disconnected) => {
+                    for (id, cwd) in request.sessions {
+                        if self.session_cwds.get(&id) != Some(&cwd)
+                            || crate::remote_client::valid_target(&id)
+                            || self.offline_ids.contains(&id) { continue; }
+                        changed |= self.lore_pending_cache.get(&id).is_some_and(|old| old.pending.is_some());
+                        self.lore_pending_cache.insert(id, LorePendingSignal { cwd, pending: None, checked: now });
+                    }
+                }
+            }
+        }
+        let mut scope = None;
+        let mut sessions = Vec::new();
+        for session in &self.sessions {
+            let id = &session.id;
+            if self.offline_ids.contains(id) || crate::remote_client::valid_target(id) { continue; }
+            let Some(cwd) = self.session_cwds.get(id) else { continue; };
+            if self.lore_pending_cache.get(id).is_some_and(|old| old.cwd == *cwd
+                && now.saturating_duration_since(old.checked) < REFRESH) { continue; }
+            let (project, _) = crate::memory_menu::scope_path(cwd);
+            let Some(project) = project.to_str() else { continue; };
+            if scope.is_none() { scope = Some(project.to_owned()); }
+            if scope.as_deref() != Some(project) { continue; }
+            sessions.push((id.clone(), cwd.clone()));
+            if sessions.len() == 64 { break; }
+        }
+        if let Some(scope) = scope {
+            let ids = sessions.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>();
+            let (tx, receiver) = mpsc::sync_channel(1);
+            let worker_scope = scope.clone();
+            std::thread::spawn(move || {
+                let result = doxa_lore::LoreClient::open(Duration::from_secs(2))
+                    .and_then(|mut lore| lore.pending_for_sessions(&worker_scope, &ids));
+                let _ = tx.send(result);
+            });
+            self.lore_pending_request = Some(LorePendingRequest { scope, sessions, receiver });
+        }
+        changed
+    }
     pub(super) fn open_belief_graph(&mut self) {
         if self.belief_browser_fixture {
             if let Some(picker) = &mut self.lore_picker {

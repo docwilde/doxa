@@ -516,6 +516,7 @@ fn run_loop(
         changed |= app.poll_lore();
         changed |= app.poll_belief_graph();
         changed |= app.poll_memory();
+        changed |= app.poll_lore_pending();
         changed |= app.poll_repo();
         changed |= app.poll_memory_menu();
         changed |= app.poll_shell();

@@ -3944,6 +3944,66 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn lore_pending_urgency_includes_collapsed_members_but_excludes_stale_and_remote() {
+        let mut app = App::default();
+        app.apply_update(DaemonUpdate::Upsert(Session { id:"local".into(), title:"Local".into(),
+            collection:"Work".into(), transcript:String::new(), status:"Ready".into() }));
+        app.apply_update(DaemonUpdate::Upsert(Session { id:"host~remote".into(), title:"Remote".into(),
+            collection:"Elsewhere".into(), transcript:String::new(), status:"Ready".into() }));
+        app.session_cwds.insert("local".into(), PathBuf::from("/fixture/own"));
+        app.session_cwds.insert("host~remote".into(), PathBuf::from("/fixture/elsewhere"));
+        app.collections = vec![
+            crate::collections::Collection { name:"Work".into(), sessions:vec!["local".into()], collapsed:true },
+            crate::collections::Collection { name:"Elsewhere".into(), sessions:vec!["host~remote".into()], collapsed:true },
+        ];
+        let now = Instant::now();
+        app.lore_pending_cache.insert("local".into(), LorePendingSignal {
+            cwd:PathBuf::from("/fixture/own"), pending:Some(true), checked:now });
+        app.lore_pending_cache.insert("host~remote".into(), LorePendingSignal {
+            cwd:PathBuf::from("/fixture/elsewhere"), pending:Some(true), checked:now });
+        let groups = app.rail_groups();
+        assert_eq!(groups[0].2, 2);
+        assert_eq!(groups[1].2, 0);
+        assert_eq!(groups[0].1.len(), 1); // Collapsed child is still counted.
+        app.lore_pending_cache.get_mut("local").unwrap().checked = now - Duration::from_secs(91);
+        assert_eq!(app.rail_groups()[0].2, 0);
+        app.lore_pending_cache.get_mut("local").unwrap().checked = now;
+        app.session_cwds.insert("local".into(), PathBuf::from("/fixture/changed"));
+        assert_eq!(app.rail_groups()[0].2, 0);
+        app.remote_mode = true;
+        assert!(app.poll_lore_pending());
+        assert!(app.lore_pending_cache.is_empty());
+    }
+
+    #[test]
+    fn lore_incomplete_empty_response_stays_unknown_and_positive_row_is_visible() {
+        let mut app = App::default();
+        let cwd = PathBuf::from("/fixture/source");
+        for id in ["empty", "positive"] {
+            app.apply_update(DaemonUpdate::Upsert(Session { id:id.into(), title:id.into(),
+                collection:id.into(), transcript:String::new(), status:"Ready".into() }));
+            app.session_cwds.insert(id.into(), cwd.clone());
+        }
+        let (tx, receiver) = mpsc::sync_channel(1);
+        app.lore_pending_request = Some(LorePendingRequest {
+            scope: crate::memory_menu::scope_path(&cwd).0.to_str().unwrap().into(),
+            sessions: vec![("empty".into(), cwd.clone()), ("positive".into(), cwd.clone())], receiver,
+        });
+        tx.send(Ok(doxa_lore::PendingSessions {
+            source_project_slug: "fixture".into(), snapshot: "a".repeat(64), complete: false,
+            sessions: vec![
+                doxa_lore::PendingSession { session_id:"empty".into(), pending_pids:vec![], complete:false },
+                doxa_lore::PendingSession { session_id:"positive".into(), pending_pids:vec!["p".into()], complete:false },
+            ],
+        })).unwrap();
+        assert!(app.poll_lore_pending());
+        assert_eq!(app.lore_pending_cache["empty"].pending, None);
+        assert_eq!(app.lore_pending_cache["positive"].pending, Some(true));
+        assert_eq!(app.rail_urgency(0), 0);
+        assert_eq!(app.rail_urgency(1), 2);
+    }
+
+    #[test]
     fn unnamed_collection_uses_known_project_and_task_without_changing_explicit_names() {
         let mut app = App::default();
         app.apply_update(DaemonUpdate::Upsert(Session { id:"s".into(), title:"Fix picker".into(),

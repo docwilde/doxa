@@ -1303,6 +1303,20 @@ enum RailGroupKey {
 }
 
 #[derive(Debug)]
+struct LorePendingSignal {
+    cwd: PathBuf,
+    pending: Option<bool>,
+    checked: Instant,
+}
+
+#[derive(Debug)]
+struct LorePendingRequest {
+    scope: String,
+    sessions: Vec<(String, PathBuf)>,
+    receiver: Receiver<Result<doxa_lore::PendingSessions, doxa_lore::LoreError>>,
+}
+
+#[derive(Debug)]
 enum RemoteHandoff {
     Hub(String),
     Local,
@@ -1384,6 +1398,11 @@ pub struct App {
         Receiver<Option<(doxa_lore::MemoryUsage, bool)>>,
     )>,
     memory_repo: HashMap<String, bool>,
+    // Source-session proposal signal. None is unknown, including incomplete,
+    // expired and unavailable LORE responses. A worker queries one project at
+    // a time so store I/O never runs in the draw path.
+    lore_pending_cache: HashMap<String, LorePendingSignal>,
+    lore_pending_request: Option<LorePendingRequest>,
     memory_manager: Option<crate::memory_menu::Manager>,
     memory_list: Option<crate::memory_menu::List>,
     operations_menu: Option<operations_menu::Menu>,
@@ -1666,6 +1685,8 @@ impl Default for App {
             memory_cache: HashMap::new(),
             memory_pending: None,
             memory_repo: HashMap::new(),
+            lore_pending_cache: HashMap::new(),
+            lore_pending_request: None,
             memory_menu_pending: None,
             memory_manager: None,
             memory_list: None,

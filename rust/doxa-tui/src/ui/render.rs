@@ -2026,8 +2026,9 @@ impl App {
         let rows = self.rail_rows();
         let ranks = self.rail_groups().into_iter().map(|(key, _, rank)| (key, rank)).collect::<Vec<_>>();
         let badge = |key: &RailGroupKey| match ranks.iter().find(|(candidate, _)| candidate == key).map(|(_, rank)| *rank).unwrap_or(0) {
-            3 => "!",        // stopped for a human
-            2 => "ctx",      // provider-reported context use >= 50%
+            4 => "!",        // stopped for a human
+            3 => "ctx",      // provider-reported context use >= 50%
+            2 => "lore",     // source-session proposals await review
             1 => "new",      // completed but unseen
             _ => "",
         };
