@@ -9,7 +9,7 @@ device and forwards its attested login to the hub.
 
 ## Build and connect
 
-Open this directory in Android Studio with Android SDK 37 and JDK 21,
+Open this directory in Android Studio with Android SDK 37.0 and JDK 21,
 or run `./gradlew :app:assembleDebug` after setting `ANDROID_HOME`. The
 wire contract tests also run without the Android SDK via `./gradlew :protocol:test`.
 The project uses Gradle 9.3.1, Android Gradle Plugin 9.1.1,
