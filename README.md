@@ -11,7 +11,7 @@
 > [!WARNING]
 > Rust 2.0 is in beta. Agents can edit files and run commands with your privileges. Choose a [session isolation profile](docs/session-isolation.md) and review the [platform limits](#platform-and-scope) before using DOXA on important work.
 
-![DOXA Rust session with an expanded tool call](assets/shots/rust-hero.png)
+![DOXA Rust beta.11 workspace with three engine tabs and a Markdown turn](assets/shots/rust-2.0.0-beta.11-hero.png)
 
 [How the gallery was captured](docs/rust-gallery.md)
 
@@ -73,13 +73,11 @@ Remote control is opt in. `doxa remote serve` exposes a private Rust browser vie
 
 ## Gallery
 
-These images use isolated example data. The [capture record](docs/rust-gallery.md) explains what is live, what is simulated, and how each image was made.
+These beta.11 frames render the production Ratatui app with deterministic example events. They show the interface without opening a provider, Docker container, or user store. The [capture record](docs/rust-gallery.md) includes more views and exact reproduction steps.
 
-| Sessions | Reviewed memory | Tool details |
+| Image preview | Isolation details | Fleet launch review |
 | --- | --- | --- |
-| ![Project sessions in the rail](assets/shots/rust-sessions.png) | ![LORE belief review](assets/shots/rust-beliefs.png) | ![Expanded tool call](assets/shots/rust-tool-entries.png) |
-
-[More views and capture notes](docs/rust-gallery.md)
+| ![A local image preview in the transcript](assets/shots/rust-2.0.0-beta.11-image-preview.png) | ![Docker isolation policy details in a fixture menu](assets/shots/rust-2.0.0-beta.11-isolation.png) | ![A fleet plan with independent supervision and message review](assets/shots/rust-2.0.0-beta.11-fleet-review.png) |
 
 ## Platform and scope
 
