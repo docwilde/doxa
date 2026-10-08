@@ -33,17 +33,26 @@ historical `price_read_on` identity is unchanged for existing resumes.
 
 ## What is known
 
-The native budget table already documented exact price rows for selected Codex,
-DeepSeek and GLM models, checked against the linked provider pages on
-2026-09-30. Those are the only populated registry facts today. They are fresh
-input and output USD per million tokens; cached input discounts are not used
-for conservative budget accounting. The code links each row to the provider
-pricing page.
+The native budget table documents exact price rows for selected Codex,
+DeepSeek and GLM models, checked on 2026-09-30. They are fresh input and output
+USD per million tokens; cached-input discounts are omitted for conservative
+budget accounting.
 
-Context windows and whether thinking is unsupported, optional, or mandatory
-remain unknown for every row. Runtime context observations do not establish a
-model's maximum window. Effort levels do not establish thinking behavior.
-No benchmark score, speed tier, or inferred family capability is recorded.
+Additional fields were checked on 2026-10-08. DeepSeek's [model-list example](https://api-docs.deepseek.com/api/list-models/)
+gives a 1,048,576-token context for exact IDs `deepseek-flash` and
+`deepseek-v4-pro`; its [model page](https://api-docs.deepseek.com/quick_start/pricing/)
+says both permit thinking on or off. Z.AI documents mandatory thinking for
+[`glm-5.3`](https://docs.z.ai/guides/llm/glm-5.3) and
+[`glm-5.3-flash`/`glm-5.3-flashx`](https://docs.z.ai/guides/vlm/glm-5.3-flash).
+Its [thinking guide](https://docs.z.ai/guides/capabilities/thinking-mode)
+documents an off switch for `glm-5.2`, `glm-5.1`, `glm-5`, and `glm-4.7`.
+Each populated field retains its own source and check date.
+
+Z.AI describes model context as “1M,” “200K,” or “128K” without a precise
+integer token count, so those fields remain unknown. Codex context and thinking
+facts also remain unknown. Runtime observations and effort labels do not
+establish maximum context or thinking behavior. No benchmark score, speed
+tier, or inferred family capability is recorded.
 
 ## Where it appears
 
@@ -55,8 +64,8 @@ owner-approved price ceiling or its fail-closed accounting behavior.
 
 ## Remaining work
 
-- Add context and thinking facts only after checking primary provider sources
-  against exact model IDs. Record a date for each field independently.
+- Continue filling unknown context and thinking fields only when primary
+  provider sources state exact values for exact model IDs.
 - Ingest trustworthy provider-supplied capability metadata where available,
   preserving its own source and observation time. Do not replace an unknown
   with a guessed family value.

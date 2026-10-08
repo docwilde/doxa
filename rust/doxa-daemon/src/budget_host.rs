@@ -294,6 +294,15 @@ mod tests {
         assert!(!host.can_set_model());
     }
     #[test]
+    fn registry_capabilities_do_not_expand_native_price_admission() {
+        let flash = vendor_price("deepseek", "deepseek-flash").unwrap();
+        assert_eq!((flash.input, flash.output), (0.3, 1.2));
+        assert!(vendor_price("deepseek", "deepseek-flash-latest").is_none());
+        assert!(vendor_price("glm", "glm-5.3-flash-latest").is_none());
+        assert!(vendor_price("glm", "glm-5.3-turbo").is_none());
+        assert!(vendor_price("claude", "glm-5.3").is_none());
+    }
+    #[test]
     fn priced_vendor_requires_complete_usage_and_consistent_model() {
         for field in ["usage_complete", "model_consistent"] {
             let mut data = priced_event();

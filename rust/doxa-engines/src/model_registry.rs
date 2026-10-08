@@ -94,11 +94,39 @@ pub fn lookup(engine: &str, model: &str) -> ModelFacts {
         ("glm", "glm-4.5-air") => (0.2, 1.1, "https://docs.z.ai/guides/overview/pricing"),
         _ => return ModelFacts::unknown(),
     };
-    ModelFacts {
+    let mut facts = ModelFacts {
         input_usd_per_million: Fact::static_value(input, source, "2026-09-30"),
         output_usd_per_million: Fact::static_value(output, source, "2026-09-30"),
         ..ModelFacts::unknown()
+    };
+    // DeepSeek's documented /models example gives an exact integer for these
+    // IDs. Its "1M" marketing label alone would not distinguish 1,000,000
+    // from 1,048,576 tokens.
+    if matches!((engine, model), ("deepseek", "deepseek-flash" | "deepseek-v4-pro")) {
+        facts.context_window = Fact::static_value(
+            1_048_576, "https://api-docs.deepseek.com/api/list-models/", "2026-10-08"
+        );
+        facts.thinking = Fact::static_value(
+            Thinking::Optional, "https://api-docs.deepseek.com/quick_start/pricing/", "2026-10-08"
+        );
     }
+    // The exact GLM-5.3 IDs below document that thinking cannot be disabled.
+    // Other named GLM models in the thinking guide permit disabling it. The
+    // GLM context labels are rounded ("1M", "200K", "128K"), so a precise
+    // integer window remains unknown until an exact value is published.
+    facts.thinking = match (engine, model) {
+        ("glm", "glm-5.3") => Fact::static_value(
+            Thinking::Mandatory, "https://docs.z.ai/guides/llm/glm-5.3", "2026-10-08"
+        ),
+        ("glm", "glm-5.3-flash" | "glm-5.3-flashx") => Fact::static_value(
+            Thinking::Mandatory, "https://docs.z.ai/guides/vlm/glm-5.3-flash", "2026-10-08"
+        ),
+        ("glm", "glm-5.2" | "glm-5.1" | "glm-5" | "glm-4.7") => Fact::static_value(
+            Thinking::Optional, "https://docs.z.ai/guides/capabilities/thinking-mode", "2026-10-08"
+        ),
+        _ => facts.thinking,
+    };
+    facts
 }
 
 #[cfg(test)]
@@ -133,5 +161,35 @@ mod tests {
         facts.input_usd_per_million = Fact::static_value(0.15, "https://docs.z.ai/guides/overview/pricing", "undated");
         facts.output_usd_per_million = Fact::static_value(0.5, "https://docs.z.ai/guides/overview/pricing", "undated");
         assert!(facts.priced_pair().is_none());
+    }
+
+    #[test]
+    fn dated_capabilities_are_exact_and_do_not_change_price_admission() {
+        let flash = lookup("deepseek", "deepseek-flash");
+        assert_eq!(flash.context_window, Fact::static_value(
+            1_048_576, "https://api-docs.deepseek.com/api/list-models/", "2026-10-08"
+        ));
+        assert_eq!(flash.thinking.value, Some(Thinking::Optional));
+        assert_eq!(lookup("deepseek", "deepseek-v4-pro").context_window, flash.context_window);
+        assert_eq!(lookup("glm", "glm-5.3-flash").thinking.value, Some(Thinking::Mandatory));
+        assert_eq!(lookup("glm", "glm-5.3-flashx").thinking.value, Some(Thinking::Mandatory));
+        assert_eq!(lookup("glm", "glm-5.3").thinking.value, Some(Thinking::Mandatory));
+        assert_eq!(lookup("glm", "glm-5.2").thinking.value, Some(Thinking::Optional));
+        assert_eq!(lookup("glm", "glm-5.3").context_window, Fact::unknown());
+        assert_eq!(lookup("glm", "glm-5.3-flash").context_window, Fact::unknown());
+        for (engine, model) in [
+            ("deepseek", "deepseek-flash-latest"),
+            ("glm", "glm-5.3-flash-latest"),
+            ("glm", "glm-5.3-turbo"),
+            ("claude", "glm-5.3"),
+        ] {
+            assert_eq!(lookup(engine, model), ModelFacts::unknown());
+            assert!(lookup(engine, model).priced_pair().is_none());
+        }
+        // Capability evidence is advisory; it never supplies a missing price.
+        let mut unpriced = lookup("glm", "glm-5.3");
+        unpriced.input_usd_per_million = Fact::unknown();
+        assert_eq!(unpriced.thinking.value, Some(Thinking::Mandatory));
+        assert!(unpriced.priced_pair().is_none());
     }
 }
