@@ -1,132 +1,36 @@
-# Native Codex integration
+# Codex engine contract
 
-`doxa-engines` translates Codex events into DOXA's `{ "type", "data" }`
-protocol. New daemon sessions use the app-server transport; saved CLI sessions
-keep their original provider thread in read-only mode until explicit migration. The daemon owns
-transcript persistence, LORE scrubbing, session recovery and spend guards.
+`doxa-engines` translates Codex app-server events into DOXA's `{ "type", "data" }` protocol. The daemon owns transcript persistence, LORE scrubbing, session recovery, and spend guards. This page covers the protected Codex path; see the [engine capability matrix](../../docs/engine-capabilities.md) for all four engines.
 
-## App server
+## Contents
 
-The native driver initializes the app server, starts or resumes a thread, and
-sends each prompt through `turn/start`. Model and reasoning effort changes
-apply to the next turn on that same thread. Account model discovery uses a
-separate bounded app-server process without starting a provider thread.
+- [Session and review flow](#session-and-review-flow)
+- [Compaction protection](#compaction-protection)
+- [Install the protected provider](#install-the-protected-provider)
+- [Ownership and recovery](#ownership-and-recovery)
+- [Verification](#verification)
 
-The driver handles user questions, command approvals, file approvals and
-DOXA peer tool requests. Replies are bound to the exact provider thread,
-turn and request. Approvals are for one action. File approvals require the
-complete cached proposal; secret input requests are refused until a masked
-input interface exists. Cancellation clears pending answers. Peer tools
-require human approval and accept only known operations with exact scoped
-session IDs. Returned peer text is marked as untrusted data.
+## Session and review flow
 
-Thread IDs and whether DOXA dynamic tools were registered are persisted.
-Legacy threads are not assumed to contain tools. Interrupted or failed turns
-keep the recovery guard instead of silently creating a replacement thread.
+New Codex sessions initialize the private app server, start or resume a thread, and send turns with `turn/start`. Model and reasoning changes apply on the next turn of that same thread. A separate bounded process discovers account models without starting a thread. DOXA persists the thread ID and whether dynamic tools were registered; an interrupted turn keeps its recovery guard instead of silently creating a replacement thread.
 
-Assistant and reasoning text are bounded and scrubbed as complete messages.
-The UI can count incoming reasoning while retaining its content behind a fold.
-Context usage follows the provider's telemetry and Codex TUI reserve. Usage
-is considered complete only when the reported model and accounting basis
-match; incomplete usage cannot authorize additional budgeted turns.
+User questions, command and file approvals, and peer tool calls bind to the exact thread, turn, and request. Approval covers one action. A file proposal needs its complete cached summary; stale replies cannot apply to a changed request. Secret input is refused until private masked input exists. Peer tools require review, known operations, and scoped session IDs; returned text is untrusted data.
 
-## Compaction review
+Assistant text and reasoning are bounded and scrubbed as complete messages. The UI folds reasoning without erasing it. Provider telemetry supplies context and usage; budgeted turns require matching model and accounting basis. Unknown components stay unknown.
 
-Protected native app-server sessions require **DOXA’s private Codex 0.156.1
-app-server build, contract `doxa-precompact-fail-closed-v1`**. Stock Codex
-refuses protected startup before creating or resuming a thread.
-Initialization checks the server's build identity and `hooks/list` verifies
-DOXA's synchronous, trusted `PreCompact` command hash before a thread starts.
-It also verifies that the provider's unhooked token-budget reset feature is
-disabled. An unsupported build, missing trusted hook or unverified reset
-configuration refuses startup with its reason.
-DOXA adds its own session configuration; it does not overwrite global Codex
-settings or trust unrelated user hooks.
+## Compaction protection
 
-The pinned hook binds the actual provider thread and owned rollout, creates
-a scrubbed private snapshot, and waits for the configured LORE reviewer.
-Failure or a changed source returns a blocking hook decision. Before sending
-manual `thread/compact/start`, DOXA independently reads the bound provider
-rollout, runs the native reviewer and verifies the same source identity and
-digest. Missing review, disabled memory/review, worker failure or changed proof
-refuses the request and retains the existing context. Supervisor approval
-requires a bounded receipt for the exact job; an exit code alone is insufficient.
-`/compact` cannot pass through as an ordinary provider prompt. After submission,
-DOXA still waits for matching hook and compaction events. A failed hook
-notification stops the protected session.
+Protected sessions require DOXA's private **Codex 0.156.1** app server with contract `doxa-precompact-fail-closed-v1`. Before thread startup, DOXA checks the build identity, trusted synchronous `PreCompact` hook hash, and disabled unhooked token-budget reset. Stock or unsupported app servers fail before creating or resuming a protected thread.
 
-The private provider makes the decision inside `run_pre_compact_hooks`, before
-local/remote compaction inference or history replacement. Exactly one required
-session hook must complete as a synchronous command with explicit JSON approval.
-Missing hooks, spawn/read failures, timeout, invalid/empty/plain output, stopped
-review, async handlers and duplicate required hooks cannot authorize replacement.
-DOXA still verifies trust, the exact hook hash and disabled token-budget feature.
-The provider identifies itself as `doxa_codex_rs/0.156.1` with the explicit private
-contract; it never impersonates stock Codex.
+The hook binds the actual provider thread and owned rollout, prepares a scrubbed snapshot, and waits for the native LORE reviewer. Manual `/compact` independently reviews the same bound source and rechecks its identity and digest before submission. Missing, failed, timed-out, changed, asynchronous, or duplicate review blocks replacement; a worker exit code without an exact receipt is insufficient. DOXA also waits for matching hook and compaction events after submission. It does not overwrite global Codex settings or trust unrelated user hooks.
 
-### Install the protected provider
+The private provider makes the decision inside `run_pre_compact_hooks`, before compaction inference or history replacement. Exactly one required synchronous command must return explicit JSON approval. The provider identifies itself as `doxa_codex_rs/0.156.1` and does not impersonate stock Codex. [Authenticated default-window verification](../../docs/live-default-window-compaction-2026-09-30.md).
 
-The standard installer builds a native Rust dispatcher, the pinned private
-app server and its matching native `codex-code-mode-host`. Models such as
-`gpt-6-sol` require code mode even when shell tools are enabled; their direct
-shell tools remain hidden if this helper is absent. The provider resolves its
-helper beside the app-server executable, independently of `PATH`.
-This is a separate, initially unoptimized `dev-small` provider build;
-no release-performance claim is made. The frontend/daemon keep their release
-profiles. The supported installer is Linux x86_64 with Python 3.11+, Git and a
-working user systemd scope. It bootstraps private Rust 1.95.0 using checksum-pinned
-Rustup 1.29.1, with a 12 GiB memory cap, zero swap and one build job. The first
-build downloads and compiles a large Codex dependency graph; later installs reuse
-its verified artifact. `--cargo` selects an existing Rust 1.95.0 toolchain on the
-supported host; it does not remove the Linux/systemd requirements. Set
-`DOXA_CODEX_PROTECTED_CACHE` for the standard installer or pass `--cache` to the
-standalone builder to select the private cache. Python is build tooling only.
+## Install the protected provider
 
-Legacy `exec` sessions and `DOXA_CODEX_APPSERVER=0` cannot run provider turns:
-review failure cannot be blocked inside stock exec. Refusal happens before any
-prompt/thread persistence or memory snapshot. Their transcripts remain readable.
-To explicitly migrate a verified saved legacy thread without creating a new one,
-resume it with `DOXA_CODEX_MIGRATE_APPSERVER=1`; the protected server must return
-that same `thread/resume` identity. New sessions should remove the old exec flag.
+The standard Linux x86_64 installer builds a native dispatcher, pinned private app server, and matching `codex-code-mode-host`. Some models require that helper even with shell tools enabled. It needs Python 3.11+, Git, and a working user systemd scope. The installer bootstraps checksum-pinned Rust 1.95.0 and uses one build job with a 12 GiB memory cap. Python is build tooling only. The first build downloads a large dependency graph; verified artifacts are reused.
 
-Verified provider artifacts are installed in immutable receipt-digest directories
-under `~/.local/share/doxa/providers/` (or `XDG_DATA_HOME`). The atomic
-`codex-current` pointer selects new launches; existing processes retain their
-original artifact directory. A complete legacy `codex-0.156.1-precompact-v1/`
-installation remains a fallback until migrated. Normal Codex sessions resolve the
-selected executable to its real artifact path; a broken active pointer refuses
-startup rather than falling back. An explicit `--codex-bin` takes precedence. Its native launcher verifies a private bounded receipt and executable
-SHA256, then executes the same open inode. Login, version and other CLI commands
-are delegated to the recorded official Codex executable, which is never replaced.
-The sibling code-mode dispatcher also verifies its helper payload and executes
-that checked open inode when Codex starts code mode. Its receipt binds the helper
-hash to the same pinned source. The helper has a separate verified build cache.
-its sandbox V8 archive and generated bindings come from the official Codex V8
-release. The pinned source authenticates that release's checksum manifest, and
-the installer verifies both input hashes before compilation. Their identity is
-recorded in the helper fingerprint and installed receipt. Inherited V8 archive,
-mirror, binding and source-build overrides cannot change these native inputs.
-Independently rebuilt bytes from the same reviewed source and patch may differ.
-Both incoming artifacts must match their private bounded build fingerprints, and
-the active receipt must match all installed server/helper/dispatcher bytes before
-publication. An unchanged reinstall reuses its immutable directory. A verified
-rebuild publishes a new directory and atomically changes only the active pointer;
-it does not overwrite the old receipt or executable. Corrupt installed artifacts,
-partial helper provenance or changed fingerprints are refused. Incomplete older
-receipts require a fresh installation root for review.
-
-Protected sessions run the native launcher as a dedicated Linux subreaper.
-A private control socket must complete its readiness/start handshake before
-it forks the verified provider. Cancellation, shutdown, Drop and daemon death
-close that socket. The owner kills only its own unreaped direct children,
-repeatedly adopts and reaps detached helpers/tools, including new sessions and
-already orphaned descendants. The daemon's shutdown wait stays bounded at five
-seconds; the small owner retains responsibility if the kernel cannot yet reap
-a child. It never makes the daemon a subreaper or signals unrelated processes.
-Old launchers that cannot acknowledge ownership are refused and killed before
-the protected session starts; rerun the installer to refresh the native shim.
-
-For a separate build/install from a checkout:
+From a checkout, build separately with:
 
 ```sh
 cargo build --locked -j 1 -p doxa-engines --bin doxa-codex-protected
@@ -134,16 +38,15 @@ python3 scripts/install_codex_protected.py \
   --launcher "$PWD/target/debug/doxa-codex-protected"
 ```
 
-The installer pins official source commit
-`b412ff32c417f855c2b2d1581b77058eed87c84b` and the reviewed patch checksum. The
-release tag leaves 155 local workspace package versions at `0.0.0` in its
-lockfile; the patch normalizes only these to `0.156.1`, with no external
-version/source/checksum/dependency changes. Every compile uses `--locked`.
-A real bounded initialize probe verifies the compiled contract before install.
-The receipt records source, patch and binary hashes. An existing differing
-provider receipt requires a separate install root for review. An explicit
-`DOXA_INSTALL_CODEX_PROTECTED=0` installs the other DOXA engines without this
-provider; protected Codex then remains unavailable until it is installed.
+The installer pins source commit `b412ff32c417f855c2b2d1581b77058eed87c84b` and a reviewed patch checksum. The patch normalizes local workspace package versions in the upstream lockfile; external sources and checksums stay fixed. A bounded initialize probe checks the compiled contract. Receipts bind the source, patch, dispatcher, server, and helper bytes. The code-mode helper's V8 inputs come from checksum-verified official artifacts. Changed fingerprints, corrupt installs, or partial receipts are refused; a fresh reviewed rebuild publishes a new immutable directory and atomically selects it for new launches. Existing processes keep their original files. An explicit `--codex-bin` takes precedence.
+
+Set `DOXA_CODEX_PROTECTED_CACHE` to choose the standard build cache, or pass `--cache` to the standalone builder. `DOXA_INSTALL_CODEX_PROTECTED=0` skips this optional provider. The official Codex CLI remains available for login and help; DOXA does not replace it.
+
+## Ownership and recovery
+
+The native launcher is a dedicated Linux subreaper. Its private control socket completes a readiness handshake before the provider starts. Closing that socket on cancellation, shutdown, or daemon death stops and reaps only its descendants, including detached helpers. A launcher that cannot confirm ownership is refused before a protected session starts. The daemon does not adopt unrelated jobs.
+
+Saved legacy `exec` sessions remain readable but cannot run protected turns. To migrate a verified thread, resume it with `DOXA_CODEX_MIGRATE_APPSERVER=1`; the protected server must confirm the same thread identity. `DOXA_CODEX_APPSERVER=0` cannot start new protected turns. No prompt, provider thread, or memory snapshot is created on refusal.
 
 ## Verification
 
@@ -151,28 +54,6 @@ provider; protected Codex then remains unavailable until it is installed.
 cargo test --locked -p doxa-engines
 ```
 
-Tests use local executable fixtures and fake review workers. They cover
-stream boundaries, deadlines, cancellation, exact input replies, one-action
-approvals, protected build/hook checks and compaction ordering without account
-inference. The Python 1.19 `doxa/codex.py` remains the legacy behavior reference.
-The credential-free compiled-provider probe is
-`scripts/codex-protected/verify_automatic.py --server PATH --scratch PRIVATE_DIR`.
-It uses a loopback Responses server, isolated credential-free homes, two synthetic
-turns and a small automatic threshold. Denied cases require exactly one original
-model request, no compaction request, no Compacted rollout record and retained
-history; the allow control requires a real replacement.
-See the [provider verification record](../../docs/live-provider-verification-2026-09-28.md)
-for actual account checks and their remaining authentication requirements.
+Tests use local fixtures and fake review workers to cover stream boundaries, cancellation, exact replies, one-action approvals, hook checks, and compaction ordering. The credential-free compiled-provider probe is `scripts/codex-protected/verify_automatic.py --server PATH --scratch PRIVATE_DIR`; it runs a loopback model and checks both denial and allow paths. [Provider verification records](../../docs/live-provider-verification-2026-09-28.md) distinguish fixture checks from authenticated behavior.
 
-
-## Current verification limits
-
-See the [2026-09-30 Codex result](../../docs/live-default-window-compaction-2026-09-30.md)
-for one authenticated default-window compaction and restart recall. The
-[2026-09-29 record](../../docs/live-provider-verification-2026-09-29.md)
-retains fixed Claude/vendor streaming observations and the earlier incomplete
-stress run. These debug daemon
-checks establish behavior only. Linux is verified; the full protected DOXA
-runtime is unsupported on macOS and Windows by its Linux supervision and
-ownership contracts. Standalone LORE macOS remains unverified; Windows is
-unsupported.
+Protected Codex is Linux-only because its supervision and owner contracts have no macOS equivalent. Windows is unsupported. The [platform record](../../docs/platform-verification.md) tracks other engines and operating systems.
