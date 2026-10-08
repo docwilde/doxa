@@ -16,6 +16,11 @@ impl Migration {
         if serde_json::to_value(&current)?!=plan["manifest"]||target.docker()==current.profile.docker(){
             return Err(error("isolation migration plan is stale or does not change backend"));
         }
+        // Prove a resumable CLI checkpoint while the original is still alive.
+        // Pre-first-turn CLI sessions retain their current backend and can
+        // select isolation in the new-session form instead.
+        let mut checked=current.clone();checked.profile=target;
+        provider_context(&plan,&current,&mut checked,false)?;
         if target.docker(){preflight(&Policy::configured(home)?)?;}
         let lock=OpenOptions::new().write(true).create(true).truncate(false).mode(0o600)
             .custom_flags(libc::O_NOFOLLOW|libc::O_NONBLOCK).open(path.parent().unwrap().join("migration.lock"))?;
@@ -151,12 +156,13 @@ fn copy_checkout(source:&Path,destination:&Path)->io::Result<()> {
     }
     File::open(destination)?.sync_all()
 }
-fn import_context(plan:&Value,previous:&Manifest,next:&mut Manifest)->io::Result<()> {
+fn import_context(plan:&Value,previous:&Manifest,next:&mut Manifest)->io::Result<()> {provider_context(plan,previous,next,true)}
+fn provider_context(plan:&Value,previous:&Manifest,next:&mut Manifest,copy:bool)->io::Result<()> {
     let engine=plan["launch"]["engine"].as_str().ok_or_else(||error("migration engine missing"))?;
     if engine=="codex"{
         let transcript=PathBuf::from(plan["transcript_path"].as_str().ok_or_else(||error("complete a turn before migrating Codex"))?);
         let record:Value=serde_json::from_slice(&bytes(&transcript.with_extension("codex.json"),64*1024)?)?;
-        if record["session_id"]!=previous.session_id||record["turn_incomplete"]!=false
+        if plan["transcript_bytes"].as_u64().is_none_or(|bytes|bytes==0)||record["session_id"]!=previous.session_id||record["turn_incomplete"]!=false
             ||record["transcript_bytes"]!=plan["transcript_bytes"]||record["transport"]!="app-server"{
             return Err(error("migration requires the exact clean protected Codex checkpoint"));
         }
@@ -173,8 +179,13 @@ fn import_context(plan:&Value,previous:&Manifest,next:&mut Manifest)->io::Result
         // reader. The file is still selected solely by its verified thread.
         let relative=Path::new("1970/01/01").join(format!("rollout-migration-{thread}.jsonl"));
         let destination=next.private_home.join("codex/sessions").join(relative);
-        write_copy(&destination,&content)?;next.provider_rollout=Some(destination);
+        if copy{write_copy(&destination,&content)?;}next.provider_rollout=Some(destination);
     }else if engine=="claude"{
+        let transcript=PathBuf::from(plan["transcript_path"].as_str().ok_or_else(||error("complete a turn before migrating Claude; original provider remains running"))?);
+        let record:Value=serde_json::from_slice(&bytes(&transcript.with_extension("codex.json"),64*1024)?)?;
+        if plan["transcript_bytes"].as_u64().is_none_or(|bytes|bytes==0)||record["session_id"]!=previous.session_id||record["thread_id"]!=previous.session_id||record["turn_incomplete"]!=false||record["transcript_bytes"]!=plan["transcript_bytes"]||record["transport"]!="stream-json"{
+            return Err(error("migration requires the exact clean Claude checkpoint; original provider remains running"));
+        }
         let home=PathBuf::from(plan["launch"]["claude_home"].as_str().ok_or_else(||error("Claude context home missing"))?);
         let old_cwd=if previous.profile.docker(){PathBuf::from("/workspace")}else{previous.checkout.clone()};
         let slug=|path:&Path|path.to_string_lossy().chars().map(|c|if c.is_ascii_alphanumeric(){c}else{'-'}).collect::<String>();
@@ -192,7 +203,7 @@ fn import_context(plan:&Value,previous:&Manifest,next:&mut Manifest)->io::Result
             if value.get("sessionId").is_some_and(|id|id!=&json!(previous.session_id)){return Err(error("Claude provider context identity changed"));}
         }
         let cwd=if next.profile.docker(){PathBuf::from("/workspace")}else{next.checkout.clone()};
-        write_copy(&next.private_home.join("claude/projects").join(slug(&cwd)).join(name),&content)?;
+        if copy{write_copy(&next.private_home.join("claude/projects").join(slug(&cwd)).join(name),&content)?;}
     }else if !matches!(engine,"deepseek"|"glm"){return Err(error("unsupported isolation migration engine"));}
     Ok(())
 }
@@ -223,6 +234,17 @@ mod tests{
         assert_eq!(git(&destination,&["status","--porcelain"]).unwrap(),"");assert_eq!(git(&source,&["status","--porcelain"]).unwrap(),"");
         assert_eq!(fs::read(source.join("tracked")).unwrap(),fs::read(destination.join("tracked")).unwrap());
         assert_ne!(fs::metadata(source.join(".git/objects")).unwrap().ino(),fs::metadata(destination.join(".git/objects")).unwrap().ino());
+    }
+    #[test]
+    fn missing_cli_checkpoint_refuses_before_stopping_or_creating_private_context(){
+        let dir=tempfile::tempdir().unwrap();let root=fs::canonicalize(dir.path()).unwrap();let source=root.join("source");repository(&source);
+        let home=root.join("doxa");let runtime=Runtime::prepare(&home,"pre-first",&source,Some(Profile::Native),false,None).unwrap();
+        for engine in ["codex","claude"]{
+            let plan=json!({"manifest":runtime.manifest(),"launch":{"engine":engine},"transcript_path":null,"transcript_bytes":null});
+            let error=Migration::prepare(&home,plan,Profile::DockerOffline).err().expect("pre-first CLI migration refused");
+            assert!(error.to_string().contains("complete a turn"));assert_eq!(read_manifest(&manifest_path(&home,"pre-first").unwrap()).unwrap().state,"ready");
+            assert!(!runtime.manifest().private_home.exists());assert_eq!(fs::read_to_string(source.join("tracked")).unwrap(),"base");
+        }
     }
     #[test]
     fn docker_to_native_keeps_private_clone_logical_identity_and_can_roll_back(){
