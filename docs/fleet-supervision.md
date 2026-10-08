@@ -77,8 +77,9 @@ at launch. Its exact command is frozen in the charter:
 ```
 
 After a worker finishes, the operator runs `doxa fleet test RUN SLOT`. The
-host copies bounded Git-visible source into a private snapshot, then invokes
-the approved argv without a shell in a separate rootless Docker container.
+host copies bounded checkout source, including ignored regular files, into a
+private snapshot, then invokes the approved argv without a shell in a separate
+rootless Docker container.
 That container has no network, provider home, broker, host credentials or
 Docker socket. It has a read-only source mount, bounded scratch, memory, PIDs,
 CPU, output and a deadline. The command returns signed `git_diff` and
@@ -87,7 +88,9 @@ snapshot. Completion messages must cite both IDs. Changed source, a different
 worker or image, an altered receipt, and a failed test are refused. Test
 execution never releases a dependent worker or grants scope. The first slice
 limits source to 4,096 files, 128 MiB total and 8 MiB per file; symlinks and
-special files fail closed. Rootless Docker end-to-end execution still needs a
+special files fail closed. Ignored files outside the approved assignment scope
+block receipts; a checkout that exceeds the capture bounds also fails closed.
+Rootless Docker end-to-end execution still needs a
 capable host and an owner-approved project recipe.
 
 After the predecessor finishes a turn, the host records

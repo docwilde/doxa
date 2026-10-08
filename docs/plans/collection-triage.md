@@ -2,7 +2,7 @@
 
 Status: **The Python 1.x implementation shipped Parts 0, 1 and 1b.** The
 Rust rail added derived collection names and settled, opt-in group ordering in
-beta.12. Beta.15 adds a verified local-session pending signal from LORE 0.62.18.
+beta.12. Beta.15 adds a verified local-session pending signal from LORE 0.62.19.
 
 Native Rust behavior: `/collection new` derives a name from configured
 customer, project and active session title when no name is supplied.
@@ -15,7 +15,7 @@ order and saved layout stay intact.
 
 ### Pending proposal signal
 
-LORE 0.62.18's `pending_for_sessions_v1` returns an atomic source-project
+LORE 0.62.19's `pending_for_sessions_v1` returns an atomic source-project
 snapshot with exact proposal IDs per session and explicit completeness flags.
 DOXA refreshes local sessions asynchronously at a bounded interval. Legacy,
 unreadable, overflowing or unresolved claims, stale results, and unavailable

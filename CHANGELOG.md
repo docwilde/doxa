@@ -9,12 +9,12 @@ the stable 2.0 release has not been cut.
 
 **Memory and navigation**
 
-- Pin LORE 0.62.18 and rank verified source-session pending proposals in the local rail. Incomplete or stale summaries remain unknown.
+- Pin LORE 0.62.19 and rank verified source-session pending proposals in the local rail. Incomplete, malformed or stale summaries remain unknown; scope checks run off the terminal loop.
 - Add a read-only `/codegraph` viewer for file, symbol, import, call and module syntax queries, with source hashes and explicit ambiguity.
 
 **Fleet and macOS**
 
-- Run an owner-frozen test recipe on a bounded, offline Docker source snapshot; signed receipts bind completion evidence to that snapshot. Rootless live validation remains open.
+- Run owner-frozen offline Docker tests on bounded checkout snapshots. Signed receipts bind exact source, including ignored files; rootless live validation remains open.
 - Keep macOS peer senders connected until the receiver reads the frame and samples its kernel PID; production-send fleet admission now passes macOS CI.
 
 **Isolation fixture**
