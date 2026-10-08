@@ -11,6 +11,10 @@ fn run() -> io::Result<()> {
             println!("doxa-isolation-worker self-test ok");Ok(())
         },
         Some("hold") if args.len() == 1 => loop { std::thread::park(); },
+        Some("egress-proxy") if args.len() == 2 => {
+            let port = args[1].parse().map_err(|_| io::Error::other("invalid fixture proxy port"))?;
+            doxa_isolation::egress::serve_loopback_adapter(port)
+        },
         Some("probe") if args.len() == 4 => {
             let memory = args[1].parse().map_err(|_| io::Error::other("invalid expected memory ceiling"))?;
             let cpus = args[2].parse().map_err(|_| io::Error::other("invalid expected CPU ceiling"))?;
@@ -84,7 +88,7 @@ fn run() -> io::Result<()> {
             let mut bytes = vec![0;size]; stream.read_exact(&mut bytes)?;
             let result: serde_json::Value = serde_json::from_slice(&bytes)?; println!("{result}"); Ok(())
         },
-        _ => Err(io::Error::other("usage: doxa-isolation-worker hold|probe MEMORY_BYTES CPUS PIDS|exec PROVIDER [ARGS]|hook SOCKET CAPABILITY")),
+        _ => Err(io::Error::other("usage: doxa-isolation-worker hold|probe MEMORY_BYTES CPUS PIDS|exec PROVIDER [ARGS]|hook SOCKET CAPABILITY|egress-proxy PORT")),
     }
 }
 fn main() {
