@@ -785,6 +785,19 @@ fn monitor(store: &Store, value: &mut Value, slots: &mut [Slot], timeout: Option
 mod tests {
     use super::*;
     #[test]
+    fn isolation_is_explicit_in_the_read_only_fleet_launch_review() {
+        let args = vec!["--pool".into(), "fixture:fixture-v1".into(), "--prompt".into(), "task".into(),
+            "--run-budget".into(), "1".into(), "--root".into(), format!("/fr-{}",std::process::id()),
+            "--isolation".into(), "docker-offline".into(), "--dry-run".into()];
+        let spec = Spec::parse(&args).unwrap();
+        assert_eq!(spec.review().unwrap()["isolation"], "docker-offline");
+        let mut invalid = args.clone();
+        let index = invalid.iter().position(|arg| arg == "--isolation").unwrap()+1;
+        invalid[index] = "hardened".into();
+        assert!(Spec::parse(&invalid).is_err());
+        assert!(!Path::new(&format!("/fr-{}",std::process::id())).exists());
+    }
+    #[test]
     fn host_git_observations_never_execute_worker_fsmonitor_or_clean_filters() {
         let dir=tempfile::tempdir().unwrap();let repo=dir.path().join("worker");fs::create_dir(&repo).unwrap();
         let git=|args:&[&str]|{let status=std::process::Command::new("/usr/bin/git").env_clear().env("PATH","/usr/bin:/bin").env("GIT_CONFIG_GLOBAL","/dev/null").env("GIT_CONFIG_NOSYSTEM","1").current_dir(&repo).args(args).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().unwrap();assert!(status.success(),"{args:?}");};
