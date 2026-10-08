@@ -9,7 +9,7 @@ the stable 2.0 release has not been cut.
 
 **Terminal and organization**
 
-- Render complete Mermaid fences through an explicitly configured local renderer in a networkless Linux sandbox. Keep the source visible while loading and on failure; a real Mermaid CLI and graphics terminal still need validation.
+- Preview complete Mermaid fences through an explicitly configured renderer in a networkless Linux sandbox with narrow package mounts. Keep source visible on failure; real CLI and terminal validation remain open.
 - Suggest collection names from explicit customer, project and task data. Offer opt-in urgency ordering that settles before moving groups and preserves child order.
 - Refresh the deterministic Rust gallery from the final beta.12 UI.
 
