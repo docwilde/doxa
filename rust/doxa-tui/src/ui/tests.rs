@@ -171,6 +171,22 @@ use super::*;
         app.preferences.set_test("background","transparent");let mut terminal=Terminal::new(ratatui::backend::TestBackend::new(90,30)).unwrap();terminal.draw(|f|app.draw(f)).unwrap();assert_eq!(terminal.backend().buffer().cell((1,1)).unwrap().bg,Color::Reset);
     }
     #[test]
+    fn isolation_popup_renders_verified_policy_and_idle_change_commands() {
+        let mut app = App::default();
+        app.handle(Event::Resize(140, 40));
+        app.apply_daemon_frame(&json!({"type":"hello", "session_id":"isolated", "cwd":"/fixture",
+            "isolation":{"profile":"docker-open", "state":"ready", "label":"docker · open egress",
+                "engine":"rootless Docker", "network":"bridge", "memory_bytes":4294967296_u64,
+                "cpus":2, "pids":256, "image":"sha256:fixture", "disk_limit":"no quota"}}));
+        app.open_isolation_info(0);
+        assert_eq!(app.chip_info.as_ref().map(|info| info.kind), Some("isolation"));
+        let rendered = painted_at(&app, 140, 40);
+        for expected in ["Memory: 4096 MiB", "Mounts: independent Git checkout", "Image: sha256:fixture",
+            "/isolation docker-offline --confirm", "/isolation docker-open --confirm"] {
+            assert!(rendered.contains(expected), "missing {expected}: {rendered}");
+        }
+    }
+    #[test]
     fn graph_reply_checks_selected_identity_and_ascii_expansion_keeps_prompt() {
         let mut app=App::default();app.size=Rect::new(0,0,140,32);app.show_belief_browser_fixture(0,&[(1,"user","first"),(2,"user","second")]);app.input="private draft".into();
         let(tx,rx)=mpsc::sync_channel(1);app.belief_graph_pending=Some((1,String::new(),false,rx));app.lore_picker.as_mut().unwrap().selected=1;

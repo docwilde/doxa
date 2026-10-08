@@ -818,7 +818,7 @@ impl App {
         }
         if matches!(
             info.kind,
-            "memory" | "usage" | "context" | "help" | "sessions" | "about" | "remote_history"
+            "memory" | "usage" | "context" | "help" | "sessions" | "about" | "remote_history" | "isolation"
         ) {
             let current = self.groups[self.active_group].active_id().and_then(|id| {
                 self.session_cwds
