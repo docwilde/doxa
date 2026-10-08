@@ -58,7 +58,10 @@ changes after backend and resume verification. A failed migration restores the
 preceding profile and resumes its original checkpoint; any incomplete recovery
 is reported explicitly. The Codex permission picker remains independent of the
 container boundary. Legacy Codex exec sessions require their explicit protected
-app-server upgrade before migrating. Workspace copies refuse special files,
+app-server upgrade before migrating. Codex and Claude need a completed clean
+turn and an owned provider context before a backend change; a pre-first-turn
+request is refused while its original provider stays running. API vendor sessions
+can checkpoint and migrate before the first prompt. Workspace copies refuse special files,
 more than 100000 entries or more than 8 GiB, retaining original files.
 
 The owner-private DOXA_HOME/isolation/SESSION_ID/manifest.json records the pinned

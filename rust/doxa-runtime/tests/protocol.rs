@@ -906,6 +906,56 @@ fn detached_linger_refuses_hidden_provider_work_and_reattached_clients() {
 }
 
 #[test]
+fn isolation_migration_refuses_provider_work_queued_turns_and_pending_approvals(){
+    struct MigrationGate{work:LingerWork,calls:AtomicUsize}
+    impl Host for MigrationGate{
+        fn prompt(&self,text:&str,emit:&mut dyn FnMut(Value)){self.work.prompt(text,emit)}
+        fn has_active_work(&self)->bool{self.work.has_active_work()}
+        fn call(&self,_:&str,_:&Value)->Result<Value,String>{self.calls.fetch_add(1,Ordering::SeqCst);Ok(json!({}))}
+    }
+    let dir=tempfile::tempdir().unwrap();let host=Arc::new(MigrationGate{work:LingerWork::new(),calls:AtomicUsize::new(0)});
+    let mut handle=Daemon::bind(dir.path(),session(),host.clone()).unwrap().start();let (mut reader,mut writer)=connect(handle.socket_path());recv(&mut reader);
+    send(&mut writer,json!({"type":"attach","cursor":null}));
+    host.work.provider_work.store(true,Ordering::Release);
+    send(&mut writer,json!({"type":"call","id":1,"method":"isolation_migration_plan","params":{}}));assert_eq!(linger_reply(&mut reader,1)["ok"],false);
+    host.work.provider_work.store(false,Ordering::Release);
+    handle.publish(json!({"type":"needs_input","data":{"kind":"permission"}}));
+    send(&mut writer,json!({"type":"call","id":10,"method":"isolation_migration_plan","params":{}}));assert_eq!(linger_reply(&mut reader,10)["ok"],false);
+    handle.publish(json!({"type":"turn_done","data":{}}));
+    handle.publish(json!({"type":"needs_input","data":{"id":"approval","kind":"permission","tool_name":"fixture"}}));
+    send(&mut writer,json!({"type":"call","id":2,"method":"isolation_migration_stop","params":{}}));assert_eq!(linger_reply(&mut reader,2)["ok"],false);
+    handle.publish(json!({"type":"needs_input_resolved","data":{"id":"approval"}}));
+    send(&mut writer,json!({"type":"prompt","id":3,"text":"running"}));assert_eq!(linger_reply(&mut reader,3)["ok"],true);
+    linger_wait(||host.work.entered.load(Ordering::Acquire)==1);
+    send(&mut writer,json!({"type":"prompt","id":4,"text":"queued"}));assert_eq!(linger_reply(&mut reader,4)["queued"],true);
+    for (id,method) in [(5,"isolation_migration_plan"),(6,"isolation_migration_stop"),(7,"checkpoint_for_migration")]{
+        send(&mut writer,json!({"type":"call","id":id,"method":method,"params":{}}));assert_eq!(linger_reply(&mut reader,id)["ok"],false);
+    }
+    assert_eq!(host.calls.load(Ordering::SeqCst),0);host.work.release(2);linger_wait(||!handle.has_active_work());handle.shutdown();
+}
+
+#[test]
+fn isolation_migration_stop_holds_peer_admission_until_shutdown_is_committed(){
+    struct StopGate{entered:AtomicBool,release:(Mutex<bool>,Condvar),prompts:AtomicUsize}
+    impl Host for StopGate{
+        fn prompt(&self,_:&str,_:&mut dyn FnMut(Value)){self.prompts.fetch_add(1,Ordering::SeqCst);}
+        fn call(&self,method:&str,_:&Value)->Result<Value,String>{
+            assert_eq!(method,"isolation_migration_stop");self.entered.store(true,Ordering::Release);
+            let mut released=self.release.0.lock().unwrap();while !*released{released=self.release.1.wait(released).unwrap();}Ok(json!({}))
+        }
+    }
+    let dir=tempfile::tempdir().unwrap();let host=Arc::new(StopGate{entered:AtomicBool::new(false),release:(Mutex::new(false),Condvar::new()),prompts:AtomicUsize::new(0)});
+    let mut handle=Arc::new(Daemon::bind(dir.path(),session(),host.clone()).unwrap().start());let (mut reader,mut writer)=connect(handle.socket_path());recv(&mut reader);
+    send(&mut writer,json!({"type":"attach","cursor":null}));send(&mut writer,json!({"type":"call","id":1,"method":"isolation_migration_stop","params":{}}));
+    linger_wait(||host.entered.load(Ordering::Acquire));let (tx,rx)=mpsc::channel();let admission=handle.clone();
+    let worker=std::thread::spawn(move||tx.send(admission.enqueue_peer_prompt("late peer turn".into(),"peer" )).unwrap());
+    assert!(matches!(rx.recv_timeout(Duration::from_millis(50)),Err(mpsc::RecvTimeoutError::Timeout)),"peer admission escaped the migration control lock");
+    *host.release.0.lock().unwrap()=true;host.release.1.notify_all();assert_eq!(linger_reply(&mut reader,1)["ok"],true);
+    assert!(rx.recv_timeout(Duration::from_secs(2)).unwrap().is_err());worker.join().unwrap();assert!(handle.is_stopping());assert_eq!(host.prompts.load(Ordering::SeqCst),0);
+    Arc::get_mut(&mut handle).unwrap().shutdown();
+}
+
+#[test]
 fn detached_linger_and_peer_admission_have_one_atomic_winner() {
     for _ in 0..16 {
         let dir = tempfile::tempdir().unwrap(); let work = Arc::new(LingerWork::new());

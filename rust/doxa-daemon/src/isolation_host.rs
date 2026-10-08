@@ -21,6 +21,32 @@ impl IsolationHost {
             "permission_mode":self.inner.initial_permission_mode()}))
     }
 }
+
+#[cfg(test)]
+mod tests{
+    use super::*;
+    use std::{fs,sync::atomic::{AtomicUsize,Ordering}};
+    struct Checkpoint{path:PathBuf,stops:AtomicUsize}
+    impl Host for Checkpoint{
+        fn prompt(&self,_:&str,_:&mut dyn FnMut(Value)){}
+        fn call(&self,method:&str,_:&Value)->Result<Value,String>{assert_eq!(method,"stop");self.stops.fetch_add(1,Ordering::SeqCst);Ok(json!({}))}
+        fn transcript_snapshot(&self)->io::Result<Option<(PathBuf,u64)>>{Ok(Some((self.path.clone(),fs::metadata(&self.path)?.len())))}
+    }
+    #[test]
+    fn migration_stop_binds_confirmation_to_exact_checkpoint_and_preserves_native_checkout(){
+        let dir=tempfile::tempdir().unwrap();let root=fs::canonicalize(dir.path()).unwrap();let source=root.join("source");fs::create_dir(&source).unwrap();
+        let path=root.join("transcript.jsonl");fs::write(&path,"old\n").unwrap();
+        let runtime=Arc::new(Mutex::new(Runtime::prepare(&root.join("home"),"session",&source,Some(Profile::Native),false,None).unwrap()));
+        let checkpoint=Arc::new(Checkpoint{path:path.clone(),stops:AtomicUsize::new(0)});let host=IsolationHost::new(checkpoint.clone(),runtime.clone(),json!({"engine":"codex"}));
+        let stale=host.call("isolation_migration_plan",&json!({})).unwrap();fs::write(&path,"new\n").unwrap();
+        assert!(host.call("isolation_migration_stop",&json!({"confirmed":true,"expected":stale})).is_err());
+        let current=host.call("isolation_migration_plan",&json!({})).unwrap();
+        assert!(host.call("isolation_migration_stop",&json!({"confirmed":false,"expected":current})).is_err());
+        assert_eq!(checkpoint.stops.load(Ordering::SeqCst),0);assert!(!runtime.lock().unwrap().preserves_native_checkout());
+        host.call("isolation_migration_stop",&json!({"confirmed":true,"expected":current})).unwrap();
+        assert_eq!(checkpoint.stops.load(Ordering::SeqCst),1);assert!(runtime.lock().unwrap().preserves_native_checkout());assert!(source.is_dir());
+    }
+}
 impl Host for IsolationHost {
     fn prompt(&self,text:&str,emit:&mut dyn FnMut(Value)) {
         if self.runtime.lock().unwrap().profile().docker() {

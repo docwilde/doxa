@@ -643,9 +643,10 @@ fn handle_call(inner: &Arc<Inner>, tx: &SyncSender<Vec<u8>>, frame: &Value) {
             "disabled_tools":lore_status.as_ref().and_then(|value|value["disabled_tools"].as_array().cloned()),
             "lore_enabled":inner.host.lore_enabled(),"lore_scrub":lore_scrub,"billing":billing,"account":inner.host.account_snapshot()}})), None)
     } else if matches!(method,"set_isolation"|"isolation_migration_plan"|"verify_resume" | "checkpoint_for_migration"|"isolation_migration_stop") {
+        let provider_active=inner.host.has_active_work();
         let idle = {
             let state = inner.state.lock().unwrap();
-            !state.busy && state.prompts.is_empty() && state.pending_inputs_complete && state.pending_inputs.is_empty() && !inner.stopping.load(Ordering::Acquire)
+            !provider_active && !state.busy && state.prompts.is_empty() && state.pending_inputs_complete && state.pending_inputs.is_empty() && !inner.stopping.load(Ordering::Acquire)
         };
         if !idle { (Err("isolation changes require an idle session with no queued prompts or pending approvals".into()),None) }
         else {
