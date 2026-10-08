@@ -92,7 +92,12 @@ impl PeerHost {
         if !ledger.is_absolute() { return Err(io::Error::new(io::ErrorKind::InvalidInput, "peer ledger must be absolute")); }
         let fleet_path = runtime.join(format!("fleet-{session_id}.json"));
         let fleet = match doxa_fleet::read_private::<doxa_fleet::Context>(&fleet_path, doxa_fleet::MAX_STATE) {
-            Ok(context) => { context.validate()?; context.assignment(&session_id)?; Some(context) },
+            Ok(context) => {
+                context.validate()?;
+                let own=context.assignment(&session_id)?;
+                if own.pid!=std::process::id() as i32||own.cwd!=cwd.to_string_lossy(){return Err(doxa_fleet::invalid("persisted fleet host identity changed; stop and review a new run"));}
+                Some(context)
+            },
             Err(error) if error.kind() == io::ErrorKind::NotFound => None,
             Err(error) => return Err(error),
         };
@@ -683,6 +688,11 @@ mod provider_target_tests {
         for method in ["isolation_migration_plan","isolation_migration_stop"]{assert!(peer.call(method,&json!({})).unwrap_err().contains("freeze daemon identity"));}
         assert_eq!(inner.0.load(Ordering::Relaxed),1,"migration plan or stop leaked into the host");
         assert_eq!(peer.call("set_isolation",&json!({"profile":"docker-offline"})).unwrap()["forwarded"],true,"same-container network changes retain daemon identity");
+        let mut persisted:doxa_fleet::Context=doxa_fleet::read_private(&peer.fleet_path,doxa_fleet::MAX_STATE).unwrap();persisted.assignments[0].pid+=1;
+        doxa_fleet::save_private(&peer.fleet_path,&persisted).unwrap();let(tx,_)=std::sync::mpsc::sync_channel(1);
+        assert!(PeerHost::new(inner.clone(),dir.path().into(),dir.path(),"session".into(),"session".into(),tx).err().unwrap().to_string().contains("persisted fleet host identity changed"));
+        persisted.assignments[0].pid=std::process::id() as i32;persisted.assignments[0].cwd=dir.path().join("replacement-cwd").display().to_string();doxa_fleet::save_private(&peer.fleet_path,&persisted).unwrap();let(tx,_)=std::sync::mpsc::sync_channel(1);
+        assert!(PeerHost::new(inner,dir.path().into(),dir.path(),"session".into(),"session".into(),tx).err().unwrap().to_string().contains("persisted fleet host identity changed"));
     }
     #[test]
     fn model_peer_tools_are_off_by_default_and_freeze_the_host_setting() {
