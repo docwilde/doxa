@@ -2035,8 +2035,8 @@ for line in sys.stdin:
         let models: Vec<_> = (0..30).map(|i| format!("model-{i:02}")).collect();
         app.model_picker = Some(ModelPicker { session_id: "session".into(), models: models.clone(),
             selected: 24, note: "Verified models".into(), loading: false, catalog_pending: false });
-        let (menu, start) = hover_first_picker_row(&mut app, 3);
-        click_picker_row(&mut app, menu, 3);
+        let (menu, start) = hover_first_picker_row(&mut app, 5);
+        click_picker_row(&mut app, menu, 5);
         assert_eq!(app.pending_model_changes, vec![("session".into(), models[start].clone())]);
     }
 
@@ -2047,19 +2047,19 @@ for line in sys.stdin:
         app.model_picker = Some(ModelPicker { session_id: "session".into(), models: models.clone(),
             selected: 24, note: "Verified models".into(), loading: false, catalog_pending: true });
         let menu = app.active_chooser_rect().unwrap();
-        click_picker_row(&mut app, menu, 3);
+        click_picker_row(&mut app, menu, 5);
         assert!(app.pending_model_changes.is_empty(), "probe text is not a model");
         assert!(app.model_picker.is_some());
         let picker = app.model_picker.as_ref().unwrap();
         let start = chooser_visible_start(&app.chooser_view_start, picker.selected, picker.visible_rows(menu.height));
         let text = painted_at(&app, 100, 28);
-        assert!(text.lines().nth(usize::from(menu.y + 4)).unwrap().contains(&models[start]));
+        assert!(text.lines().nth(usize::from(menu.y + 6)).unwrap().contains(&models[start]));
         app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Moved,
-            column: menu.x + 2, row: menu.y + 4, modifiers: KeyModifiers::NONE }));
+            column: menu.x + 2, row: menu.y + 6, modifiers: KeyModifiers::NONE }));
         assert_eq!(app.model_picker.as_ref().unwrap().selected, start);
         let hovered = painted_at(&app, 100, 28);
-        assert!(hovered.lines().nth(usize::from(menu.y + 4)).unwrap().contains(&models[start]));
-        click_picker_row(&mut app, menu, 4);
+        assert!(hovered.lines().nth(usize::from(menu.y + 6)).unwrap().contains(&models[start]));
+        click_picker_row(&mut app, menu, 6);
         assert_eq!(app.pending_model_changes, vec![("session".into(), models[start].clone())]);
     }
 
@@ -2120,11 +2120,11 @@ for line in sys.stdin:
         app.engine_picker = false;
         app.model_picker = Some(ModelPicker { session_id: "session".into(), models: vec!["one".into(), "two".into()],
             selected: 0, note: String::new(), loading: false, catalog_pending: false });
-        assert_eq!(app.active_chooser_rect().unwrap().height, 6);
+        assert_eq!(app.active_chooser_rect().unwrap().height, 8);
         app.chooser_height_override.set(Some(5));
         app.active_group = 1;
         app.groups[1].tabs.push("other".into());
-        assert_eq!(app.active_chooser_rect().unwrap().height, 6);
+        assert_eq!(app.active_chooser_rect().unwrap().height, 8);
     }
 
     #[test]
@@ -2352,7 +2352,7 @@ for line in sys.stdin:
             models: vec!["first".into(), "second".into()], selected: 0,
             note: "Verified models".into(), loading: false, catalog_pending: false });
         let menu = app.active_chooser_rect().unwrap();
-        let row = menu.y + 4;
+        let row = menu.y + app.model_picker.as_ref().unwrap().row_offset() + 1;
         assert!(app.mouse(MouseEvent { kind: MouseEventKind::Moved,
             column: menu.x + 2, row, modifiers: KeyModifiers::NONE }));
         assert_eq!(app.model_picker.as_ref().unwrap().selected, 1);

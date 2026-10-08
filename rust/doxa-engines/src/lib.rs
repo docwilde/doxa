@@ -13,6 +13,7 @@ pub mod provider_owner;
 pub mod codex_compact;
 pub mod review_worker;
 pub mod compact_hook;
+pub mod model_registry;
 #[cfg(unix)]
 pub mod codex_driver;
 

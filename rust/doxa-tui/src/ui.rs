@@ -218,7 +218,7 @@ struct ModelPicker {
 
 impl ModelPicker {
     fn row_offset(&self) -> u16 {
-        3 + u16::from(self.catalog_pending)
+        5 + u16::from(self.catalog_pending)
     }
     fn visible_rows(&self, height: u16) -> usize {
         usize::from(height.saturating_sub(self.row_offset() + 1)).max(1)

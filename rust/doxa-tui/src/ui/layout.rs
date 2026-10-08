@@ -459,11 +459,11 @@ impl App {
         } else if self.permission_picker.is_some() {
             10
         } else if let Some(picker) = &self.model_picker {
-            (4 + picker.models.len()
+            (6 + picker.models.len()
                 + usize::from(
                     picker.catalog_pending || !picker.loading && picker.models.is_empty(),
                 ))
-            .clamp(5, 13) as u16
+            .clamp(7, 15) as u16
         } else if let Some(picker) = &self.repo_picker {
             (picker.paths.len() + 3).clamp(5, 15) as u16
         } else if let Some(picker) = &self.lore_picker {

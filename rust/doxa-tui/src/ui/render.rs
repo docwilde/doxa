@@ -12,6 +12,64 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap};
 use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
+use doxa_engines::model_registry::{self, Fact, Provenance, Thinking};
+
+fn fact_source(provenance: Provenance) -> String {
+    match provenance {
+        Provenance::Unknown => "unknown".into(),
+        Provenance::Static { source, as_of } => {
+            let host = source.split("://").nth(1).unwrap_or(source).split('/').next().unwrap_or(source);
+            format!("{host} {as_of}")
+        }
+    }
+}
+
+fn model_fact_lines(engine: &str, model: &str) -> [String; 2] {
+    let facts = model_registry::lookup(engine, model);
+    let context = match facts.context_window {
+        Fact { value: Some(value), provenance } => format!("ctx {value} [{}]", fact_source(provenance)),
+        _ => "ctx ? (unknown)".into(),
+    };
+    let thinking = match facts.thinking {
+        Fact { value: Some(value), provenance } => {
+            let behavior = match value { Thinking::Unsupported => "unsupported", Thinking::Optional => "optional", Thinking::Mandatory => "mandatory" };
+            format!("thinking {behavior} [{}]", fact_source(provenance))
+        }
+        _ => "thinking ? (unknown)".into(),
+    };
+    let prices = match facts.priced_pair() {
+        Some((input, output, _, _)) => {
+            let source = fact_source(facts.input_usd_per_million.provenance);
+            format!("in ${input}/M · out ${output}/M [{source}]")
+        }
+        None => {
+            let one = |name: &str, fact: Fact<f64>| match fact {
+                Fact { value: Some(value), provenance: Provenance::Static { .. } } =>
+                    format!("{name} ${value}/M [{}]", fact_source(fact.provenance)),
+                _ => format!("{name} ? (unknown)"),
+            };
+            format!("{} · {}", one("in", facts.input_usd_per_million), one("out", facts.output_usd_per_million))
+        }
+    };
+    [format!(" {context} · {thinking}"), format!(" {prices}")]
+}
+
+#[cfg(test)]
+mod model_fact_tests {
+    use super::model_fact_lines;
+
+    #[test]
+    fn picker_shows_field_level_unknowns_and_dated_price_source() {
+        let known = model_fact_lines("codex", "gpt-5.6-sol");
+        assert!(known[0].contains("ctx ? (unknown) · thinking ? (unknown)"));
+        assert!(known[1].contains("in $8/M · out $40/M"));
+        assert!(known[1].contains("developers.openai.com 2026-09-30"));
+
+        let unknown = model_fact_lines("claude", "gpt-5.6-sol");
+        assert!(unknown[1].contains("in ? (unknown) · out ? (unknown)"));
+        assert!(!unknown[1].contains("developers.openai.com"));
+    }
+}
 
 impl App {
     pub fn draw(&self, frame: &mut Frame) {
@@ -474,6 +532,14 @@ impl App {
             title = " Model · this session · R retry · Enter select · Esc close ";
             let picker = self.model_picker.as_ref().unwrap();
             lines.push(Line::from(format!(" {}", picker.note)));
+            if let Some(model) = picker.models.get(picker.selected) {
+                let engine = self.session_identity.get(&picker.session_id)
+                    .and_then(|identity| identity.0.as_deref()).unwrap_or("");
+                for detail in model_fact_lines(engine, model) { lines.push(Line::from(detail)); }
+            } else {
+                lines.push(Line::from(""));
+                lines.push(Line::from(""));
+            }
             lines.push(Line::from(""));
             if picker.catalog_pending {
                 lines.push(Line::from(
