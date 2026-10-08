@@ -24,6 +24,10 @@ impl Migration {
         if target.docker(){preflight(&Policy::configured(home)?)?;}
         let lock=OpenOptions::new().write(true).create(true).truncate(false).mode(0o600)
             .custom_flags(libc::O_NOFOLLOW|libc::O_NONBLOCK).open(path.parent().unwrap().join("migration.lock"))?;
+        let metadata=lock.metadata()?;
+        if !metadata.is_file()||metadata.uid()!=unsafe{libc::geteuid()}||metadata.nlink()!=1||metadata.mode()&0o077!=0{
+            return Err(error("migration lock must be a private owned regular file"));
+        }
         if unsafe{libc::flock(std::os::fd::AsRawFd::as_raw_fd(&lock),libc::LOCK_EX|libc::LOCK_NB)}!=0{
             return Err(error("another isolation migration owns this session"));
         }

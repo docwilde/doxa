@@ -88,6 +88,9 @@ pub struct Managed {
 }
 impl Managed {
     pub fn path(&self) -> &Path { &self.path }
+    /// Retain this checkout and its ownership sidecar across a backend
+    /// migration. Keep its lifecycle lock until the handle is dropped.
+    pub fn preserve(&mut self) { self.finished = true; }
     pub fn finish(&mut self) -> String {
         if self.finished || !self.created { return String::new(); }
         self.finished = true;
@@ -897,6 +900,20 @@ mod tests {
         let mut created = create(&main, "lock0001session").unwrap();
         assert_eq!(created.path(), path);
         assert!(created.finish().is_empty());
+    }
+    #[test]
+    fn admitted_migration_preserves_clean_worktree_and_sidecar_after_drop(){
+        let _serial=TEST_ENV_LOCK.lock().unwrap_or_else(|poison|poison.into_inner());
+        let old_home=env::var_os("DOXA_HOME");let old_enabled=env::var_os("DOXA_WORKTREE");
+        let dir=tempfile::tempdir().unwrap();env::set_var("DOXA_HOME",dir.path().join("home"));env::set_var("DOXA_WORKTREE","1");
+        let main=dir.path().join("repo");fs::create_dir(&main).unwrap();run_git(&main,&["init","-q","-b","main"]);
+        fs::write(main.join("file"),"base\n").unwrap();run_git(&main,&["add","file"]);run_git(&main,&["-c","user.name=Test","-c","user.email=test@example.invalid","commit","-qm","test: base"]);
+        let mut tree=create(&main,"migr0001session").unwrap();let path=tree.path().to_owned();let sidecar=meta_path(&path).unwrap();let before=fs::read(&sidecar).unwrap();
+        assert_eq!(git_text(&path,&["status","--porcelain"]).as_deref(),Some(""));tree.preserve();
+        assert!(lock_worktree(&path).is_none(),"migration must retain ownership until daemon teardown");drop(tree);
+        assert_eq!(fs::read_to_string(path.join("file")).unwrap(),"base\n");assert_eq!(fs::read(&sidecar).unwrap(),before);
+        let reused=create(&path,"migr0001session").expect("retained clean worktree remains resumable");drop(reused);assert!(path.is_dir());
+        for (key,value) in [("DOXA_HOME",old_home),("DOXA_WORKTREE",old_enabled)]{match value{Some(value)=>env::set_var(key,value),None=>env::remove_var(key)}}
     }
 
     #[test]

@@ -165,17 +165,20 @@ mod tests{
             }
             let before=call(&mut client,"isolation_migration_plan",json!({})).unwrap();
             let (docker,status)=change(&mut client,Profile::DockerOffline).unwrap();client=docker;
+            assert_eq!(crate::discovery::sessions_in(&runtime).unwrap().into_iter().find(|s|s.id==session.id).unwrap().scope_key,session.scope_key);
             assert_eq!(status["profile"],"docker-offline");assert!(original.is_dir(),"admitted migration must preserve even a clean managed native worktree");
             let clone=PathBuf::from(client.hello["cwd"].as_str().unwrap());assert_ne!(clone,original);
             let after=call(&mut client,"isolation_migration_plan",json!({})).unwrap();assert_eq!(after["manifest"]["context_cwd"],json!(original));
             for key in ["transcript_path","transcript_bytes","model","effort","permission_mode"]{assert_eq!(before[key],after[key],"changed {key}");}
             if dirty{assert_eq!(git(&clone,&["show",":tracked"]),"staged");assert_eq!(fs::read_to_string(clone.join("tracked")).unwrap(),"working");assert!(!clone.join("removed").exists());assert!(clone.join("untracked").exists()&&clone.join("ignored").exists());}
             let (native,status)=change(&mut client,Profile::Native).unwrap();client=native;assert_eq!(status["profile"],"native");assert_eq!(client.hello["cwd"],json!(clone));
+            assert_eq!(crate::discovery::sessions_in(&runtime).unwrap().into_iter().find(|s|s.id==session.id).unwrap().scope_key,session.scope_key);
             assert_eq!(fs::read_to_string(source.join("tracked")).unwrap(),"base");assert!(!source.join("untracked").exists());
             environment.set("DOXA_DAEMON_BIN",&wrapper);
             let failure=change(&mut client,Profile::DockerOffline).err().expect("target start must fail");assert!(failure.to_string().contains("original isolation and conversation resumed"),"{failure}");
             let restored=crate::discovery::sessions_in(&runtime).unwrap().into_iter().find(|s|s.id==session.id).unwrap();client=DaemonClient::connect(&restored.socket,None).unwrap();
             assert_eq!(client.hello["isolation"]["profile"],"native");assert_eq!(client.hello["cwd"],json!(clone));
+            assert_eq!(restored.scope_key,session.scope_key);
             if dirty{assert_eq!(git(&clone,&["show",":tracked"]),"staged");assert_eq!(fs::read_to_string(clone.join("untracked")).unwrap(),"private work");}
             call(&mut client,"stop_if_idle",json!({})).unwrap();drop(stopped_claim(&runtime,&session.id).unwrap());
         }

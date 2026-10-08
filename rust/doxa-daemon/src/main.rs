@@ -684,7 +684,7 @@ fn run() -> io::Result<()> {
         },
         None => host,
     };
-    let repo_root = if profile.docker() { Some(doxa_peers::scope_for_cwd(&options.cwd)?) }
+    let repo_root = if profile.docker() || retained_private_checkout { Some(doxa_peers::scope_for_cwd(&options.cwd)?) }
         else { session_title::repo_root(&options.cwd) };
     let base_title = session_title::base(host.initial_model().as_deref().or(options.model.as_deref()),
         options.engine.name(), &options.cwd, repo_root.as_deref().map(Path::new));
@@ -832,9 +832,12 @@ fn run() -> io::Result<()> {
     handle.shutdown();
     if let Some(runtime) = &isolation { runtime.lock().unwrap().stop()?; }
     let preserve_checkout=isolation.as_ref().is_some_and(|runtime|runtime.lock().unwrap().preserves_native_checkout());
-    if let Some(tree) = managed.as_mut().filter(|_|!preserve_checkout) {
-        let note = tree.finish();
-        if !note.is_empty() { eprintln!("doxa-daemon: {note}"); }
+    if let Some(tree) = managed.as_mut() {
+        if preserve_checkout { tree.preserve(); }
+        else {
+            let note = tree.finish();
+            if !note.is_empty() { eprintln!("doxa-daemon: {note}"); }
+        }
     }
     result
 }
