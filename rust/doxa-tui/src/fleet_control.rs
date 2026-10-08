@@ -832,7 +832,9 @@ pub fn dependency_evidence(root:&Path,id:&str,worker:usize)->io::Result<Value>{
 
 fn host_test_changed_paths(cwd:&Path,baseline:&str)->io::Result<Vec<String>> {
     let paths=git_observation(cwd,&["-c","core.quotepath=false","diff","--no-ext-diff","--no-textconv","--name-only",baseline])?;
-    let untracked=git_observation(cwd,&["-c","core.quotepath=false","ls-files","--others","--exclude-standard"])?;
+    // Include ignored files: worker-controlled ignore rules cannot narrow the
+    // paths checked against the owner-approved assignment.
+    let untracked=git_observation(cwd,&["-c","core.quotepath=false","ls-files","--others"])?;
     let mut changed=paths.lines().chain(untracked.lines()).map(str::to_owned).collect::<Vec<_>>();
     changed.sort();changed.dedup();
     if changed.is_empty()||changed.len()>4096||changed.iter().any(|path|path.is_empty()||path.starts_with('/')
@@ -987,7 +989,7 @@ fn checkpoint(store:&Store,value:&mut Value,slots:&mut [Slot],initial:bool)->io:
         let cwd=Path::new(context.assignments[index].cwd.as_str());
         let baseline=context.assignments[index].base_commit.as_deref().unwrap_or("HEAD");
         let paths=git_observation(cwd,&["-c","core.quotepath=false","diff","--no-ext-diff","--no-textconv","--name-only",baseline]);
-        let untracked=git_observation(cwd,&["-c","core.quotepath=false","ls-files","--others","--exclude-standard"]);
+        let untracked=git_observation(cwd,&["-c","core.quotepath=false","ls-files","--others"]);
         let changed=match (&paths,&untracked){(Ok(paths),Ok(untracked))=>Some(format!("{paths}{untracked}")),_=>None};
         missing_git_evidence |= changed.is_none();
         if let Some(changed)=&changed{for path in changed.lines(){if !context.assignments[index].permits(&context.charter,path){out_of_scope=true;}}}
@@ -1111,6 +1113,39 @@ fn monitor(store: &Store, value: &mut Value, slots: &mut [Slot], timeout: Option
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn host_test_rejects_ignored_changes_outside_assignment_scope() {
+        let root=tempfile::tempdir().unwrap();let repo=root.path().join("worker");fs::create_dir(&repo).unwrap();
+        let git=|args:&[&str]|{let status=std::process::Command::new("/usr/bin/git")
+            .env_clear().env("PATH","/usr/bin:/bin").current_dir(&repo).args(args)
+            .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().unwrap();
+            assert!(status.success(),"{args:?}");};
+        git(&["init","-q"]);git(&["config","user.name","Fixture"]);
+        git(&["config","user.email","fixture@example.invalid"]);
+        fs::create_dir(repo.join("src")).unwrap();
+        fs::write(repo.join("src/lib.rs"),"before\n").unwrap();
+        fs::write(repo.join(".gitignore"),"outside/\n").unwrap();
+        git(&["add","src/lib.rs",".gitignore"]);git(&["commit","-qm","test: initial fixture"]);
+        let baseline=git_observation(&repo,&["rev-parse","HEAD"]).unwrap();
+        fs::write(repo.join("src/lib.rs"),"approved change\n").unwrap();
+        fs::create_dir(repo.join("outside")).unwrap();
+        fs::write(repo.join("outside/hidden.txt"),"unapproved change\n").unwrap();
+        fs::write(repo.join(".git/info/exclude"),"secret.log\n").unwrap();
+        fs::write(repo.join("secret.log"),"also unapproved\n").unwrap();
+        let changed=host_test_changed_paths(&repo,baseline.trim()).unwrap();
+        assert!(changed.contains(&"src/lib.rs".to_owned()));
+        assert!(changed.contains(&"outside/hidden.txt".to_owned()));
+        assert!(changed.contains(&"secret.log".to_owned()));
+        let charter=doxa_fleet::Charter{version:1,fleet_id:"run".into(),task:"Task".into(),
+            repo:repo.to_string_lossy().into_owned(),allowed_paths:vec!["src".into()],
+            required_evidence:vec![],worker_limit:1,run_budget_usd:None,deadline:0,
+            human_actions:vec![],test_recipe:None};
+        let assignment=doxa_fleet::Assignment{id:"worker".into(),session_id:"session".into(),
+            pid:1,role:"worker".into(),task:"Task".into(),cwd:repo.to_string_lossy().into_owned(),
+            base_commit:Some(baseline.trim().into()),allowed_paths:vec![],depends_on:vec![]};
+        assert!(changed.iter().any(|path|!assignment.permits(&charter,path)),
+            "ignored out-of-scope writes must block the host test before signing");
+    }
     #[test]
     fn worker_mounts_cannot_expose_guard_receipts_or_signing_key() {
         let run=Path::new("/owner/fleet/run");

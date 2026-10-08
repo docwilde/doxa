@@ -1,4 +1,4 @@
-//! Bounded Git-visible source capture for owner-run fleet tests. Only an
+//! Bounded checkout source capture for owner-run fleet tests. Only an
 //! offline Docker checkout can yield host evidence; no project executable is
 //! launched on the host.
 use crate::{error, workspace, Manifest, Profile};
@@ -124,8 +124,10 @@ fn execute_bounded(mut command: Command, timeout_s: u64, cleanup_container: impl
 
 fn git_visible(cwd: &Path) -> io::Result<BTreeSet<String>> {
     let mut git = Command::new("git");
+    // Include ignored files too. A worker controls .gitignore and
+    // .git/info/exclude, so exclusions cannot define signed source.
     git.current_dir(cwd).args(["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
-        "-c", "core.attributesFile=/dev/null", "ls-files", "--cached", "--others", "--exclude-standard", "-z"]);
+        "-c", "core.attributesFile=/dev/null", "ls-files", "--cached", "--others", "-z"]);
     let mut command = workspace::command(git)?;
     let mut child = command.process_group(0).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn()?;
     let mut output = child.stdout.take().ok_or_else(|| error("fleet source listing unavailable"))?;
@@ -231,6 +233,29 @@ pub fn capture(cwd: &Path, destination: Option<&Path>) -> io::Result<Capture> {
 mod tests {
     use super::*;
     use crate::Policy;
+    #[test]
+    fn ignored_regular_files_are_included_in_signed_source() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("worker"); fs::create_dir(&source).unwrap();
+        let git = |args: &[&str]| {
+            let status = Command::new("/usr/bin/git").env_clear().env("PATH", "/usr/bin:/bin")
+                .current_dir(&source).args(args).status().unwrap();
+            assert!(status.success(), "{args:?}");
+        };
+        git(&["init", "-q"]);
+        fs::write(source.join(".gitignore"), "outside/\n").unwrap();
+        fs::create_dir(source.join("outside")).unwrap();
+        fs::write(source.join("outside/hidden.txt"), "ignored but present\n").unwrap();
+        fs::write(source.join(".git/info/exclude"), "excluded.log\n").unwrap();
+        fs::write(source.join("excluded.log"), "also ignored\n").unwrap();
+        let paths = git_visible(&source).unwrap();
+        assert!(paths.contains("outside/hidden.txt"));
+        assert!(paths.contains("excluded.log"));
+        let copied = root.path().join("copy"); fs::create_dir(&copied).unwrap();
+        capture_paths(&source, Some(&copied), paths).unwrap();
+        assert_eq!(fs::read(copied.join("outside/hidden.txt")).unwrap(), b"ignored but present\n");
+        assert_eq!(fs::read(copied.join("excluded.log")).unwrap(), b"also ignored\n");
+    }
     #[test]
     fn copied_source_digest_changes_with_bytes_and_refuses_symlink_escape() {
         let root = tempfile::tempdir().unwrap();
