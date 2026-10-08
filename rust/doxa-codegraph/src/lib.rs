@@ -5,6 +5,10 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::Read;
+use std::ffi::CString;
+use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -133,13 +137,38 @@ fn listed_files(root: &Path) -> Result<BTreeSet<String>, String> {
 }
 
 fn file_bytes(root: &Path, relative: &str) -> Result<(String, String, u128), String> {
-    let path = root.join(relative);
-    let canonical = fs::canonicalize(&path).map_err(|e| format!("cannot resolve file: {e}"))?;
-    if !canonical.starts_with(root) { return Err("file resolves outside worktree".into()); }
-    let metadata = fs::symlink_metadata(&path).map_err(|e| format!("file metadata: {e}"))?;
+    // Anchor each component to an opened worktree descriptor. A repository
+    // writer may replace a symlink between path validation and File::open;
+    // canonicalize + symlink_metadata followed by a pathname open leaks the
+    // target's bytes in that race.
+    let expected_root = fs::metadata(root).map_err(|e| format!("worktree metadata: {e}"))?;
+    let mut directory = fs::OpenOptions::new().read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(root).map_err(|e| format!("worktree open: {e}"))?;
+    let opened_root = directory.metadata().map_err(|e| format!("worktree descriptor: {e}"))?;
+    if (expected_root.dev(), expected_root.ino()) != (opened_root.dev(), opened_root.ino()) {
+        return Err("worktree changed during open".into());
+    }
+    let parts = Path::new(relative).components().map(|part| match part {
+        std::path::Component::Normal(name) => CString::new(name.as_bytes())
+            .map_err(|_| "NUL in Git file path".to_owned()),
+        _ => Err("unsafe Git file path".to_owned()),
+    }).collect::<Result<Vec<_>, _>>()?;
+    if parts.is_empty() { return Err("empty Git file path".into()); }
+    let mut file = None;
+    for (index, part) in parts.iter().enumerate() {
+        let last = index + 1 == parts.len();
+        let flags = libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW
+            | if last { libc::O_NONBLOCK } else { libc::O_DIRECTORY };
+        let fd = unsafe { libc::openat(directory.as_raw_fd(), part.as_ptr(), flags) };
+        if fd < 0 { return Err(format!("file open: {}", std::io::Error::last_os_error())); }
+        let opened = unsafe { File::from_raw_fd(fd) };
+        if last { file = Some(opened); } else { directory = opened; }
+    }
+    let mut file = file.expect("nonempty Git path");
+    let metadata = file.metadata().map_err(|e| format!("file metadata: {e}"))?;
     if !metadata.is_file() { return Err("not a regular file (symlinks are skipped)".into()); }
     if metadata.len() > MAX_SOURCE_BYTES { return Err("source file exceeds 1 MiB limit".into()); }
-    let mut file = File::open(&path).map_err(|e| format!("file open: {e}"))?;
     let mut bytes = Vec::new();
     file.by_ref().take(MAX_SOURCE_BYTES + 1).read_to_end(&mut bytes).map_err(|e| format!("file read: {e}"))?;
     let after = file.metadata().map_err(|e| format!("file metadata after read: {e}"))?;
@@ -372,6 +401,21 @@ mod tests {
         assert_eq!(answer.coverage.skipped.count, 2);
         assert!(answer.coverage.skipped.examples.iter().any(|item| item.file == "linked.rs"));
         assert!(answer.coverage.skipped.examples.iter().any(|item| item.file == "huge.rs"));
+    }
+
+    #[test]
+    fn descriptor_walk_refuses_symlinked_final_and_parent_components() {
+        let root = worktree();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("secret.rs"), "fn secret() {}\n").unwrap();
+        symlink(outside.path().join("secret.rs"), root.path().join("linked.rs")).unwrap();
+        symlink(outside.path(), root.path().join("parent")).unwrap();
+        assert!(file_bytes(root.path(), "linked.rs").is_err());
+        assert!(file_bytes(root.path(), "parent/secret.rs").is_err());
+        assert!(file_bytes(root.path(), "../secret.rs").is_err());
+        fs::create_dir(root.path().join("safe")).unwrap();
+        fs::write(root.path().join("safe/real.rs"), "fn visible() {}\n").unwrap();
+        assert!(file_bytes(root.path(), "safe/real.rs").unwrap().0.contains("visible"));
     }
 
     #[test]

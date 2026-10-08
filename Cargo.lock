@@ -606,6 +606,7 @@ dependencies = [
 name = "doxa-codegraph"
 version = "2.0.0-beta.11"
 dependencies = [
+ "libc",
  "proc-macro2",
  "serde",
  "serde_json",
