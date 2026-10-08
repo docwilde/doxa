@@ -50,8 +50,11 @@ mod tests{
 impl Host for IsolationHost {
     fn prompt(&self,text:&str,emit:&mut dyn FnMut(Value)) {
         if self.runtime.lock().unwrap().profile().docker() {
-            // Every provider transport launch also checks the actual container.
-            if let Err(error) = doxa_isolation::active() {
+            // Gate each turn even when a provider transport stays connected;
+            // the transport launch independently checks the actual container.
+            if let Err(error) = doxa_isolation::active().and_then(|manifest|
+                manifest.ok_or_else(||doxa_isolation::error("Docker session manifest unavailable"))
+                    .and_then(|manifest|doxa_isolation::check_disk_budget(&manifest).map(|_|()))) {
                 emit(json!({"type":"turn_refused","data":{"message":error.to_string()}})); return;
             }
         }

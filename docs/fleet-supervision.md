@@ -44,6 +44,25 @@ completion without host-verified diff and passing test evidence, duplicates, and
 before a peer message can start a billed turn. Other peer sessions retain their
 ordinary messaging behavior and cannot enter the supervised fleet as free text.
 
+For planned parallel work, pass one `--worker-task INDEX:TEXT` per worker, with
+one-based indices. Optionally repeat `--worker-path INDEX:RELATIVE_PREFIX` to
+narrow each worker's file scope inside the overall `--allowed-path` prefixes.
+The launch review shows a task digest and path scope for every slot. The host freezes
+these assignments before dispatch, binds their hash in the private guard
+journal, briefs each worker with its own task, and pauses if a checkpoint sees
+that worker change paths outside its scope. Without worker tasks, each worker
+inherits the shared prompt. Per-worker path enforcement requires independent
+review; a plain unsupervised fleet has no host scope checkpoint.
+
+Supervised workers can use `fleet_kind=handoff` with host artifact IDs, followed
+by the recipient's `ack` and the original sender's `confirm`. The ACK and
+confirmation must reference the preceding message UUID and echo the same host
+artifact IDs. The host checks direction, ancestry and exact IDs. The message
+body still needs human or semantic review for meaning; a matching ACK proves
+the artifact reference was returned, not that a model understood the work.
+Handoff transitions request a bounded supervisor checkpoint in addition to
+turn milestones and the configured timer.
+
 The fast judge reviews each outgoing fleet message once. Its private cached
 verdict binds the exact envelope hash; the receiving host rechecks deterministic
 policy before admission. Shadow mode records semantic concerns; enforce mode
@@ -94,6 +113,12 @@ and a 12-second reviewer request deadline. Thresholds must be evaluated against
 labeled real fleet messages before relying on semantic enforcement. Deterministic
 fixtures and local HTTP tests validate the transport and policy; they do not
 measure real-model false positives or misalignment recall.
+
+Open coordination work includes dependency-based dispatch, objective artifact
+handoff acceptance, automatic trusted test results, and calibration against
+real fleet messages. The current supervisor receives assignment tasks and
+host checkpoints, but it does not infer that a handoff is accepted merely
+because an ACK was delivered.
 
 References: [TypeSafe API](https://docs.typesafe.ai/api),
 [Jev models and pricing](https://docs.typesafe.ai/models),

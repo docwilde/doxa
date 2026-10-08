@@ -12,7 +12,7 @@ Rust runtime guarantees.
 
 For the latest live provider checks and their remaining limits, see the
 [2026-09-29 native verification record](live-provider-verification-2026-09-29.md).
-For current Rust UI screenshots, see the [alpha.49 gallery](rust-gallery.md).
+For the current Rust app, start with the [Rust guide](../rust/README.md), [engine capabilities](engine-capabilities.md), and [gallery](rust-gallery.md).
 
 ## Contents
 
@@ -27,7 +27,7 @@ For current Rust UI screenshots, see the [alpha.49 gallery](rust-gallery.md).
 - [Worktrees and finalize](#worktrees-and-finalize)
 - [Where a session is](#where-a-session-is)
 - [Permission modes](#permission-modes)
-- [Containment](#containment) — [session spawn](#session-spawn--off-unless-you-turn-it-on) and [remote drivers](#remote-drivers--a-policy-and-no-transport)
+- [Containment](#containment) — [session spawn](#session-spawn--off-unless-you-turn-it-on) and [remote drivers](#remote-drivers)
 - [The status bar](#the-status-bar)
 - [LORE integration](#lore-integration)
 - [Shell escape](#shell-escape)
@@ -1129,7 +1129,7 @@ the plain, non-clickable ones and the git chip's inert `@sha` span.
 | chip | shows | clickable |
 |---|---|---|
 | `mode:` | permission mode (see above); hidden when the engine has no permission modes, and when it would show `default` on a row under 110 columns — every other mode is painted at every width | yes — mode picker |
-| `◎ remote:<id>` | a remote driver is attached to this session. Hidden at zero, and there is no companion "local" chip: the absence says it (see [Remote drivers](#remote-drivers--a-policy-and-no-transport)) | no |
+| `◎ remote:<id>` | a remote driver is attached to this session. Hidden at zero, and there is no companion "local" chip: the absence says it (see [Remote drivers](#remote-drivers)) | no |
 | model | the model handling this session's turns | yes — model picker, takes effect next turn |
 | `⚑ needs input` | a question or permission request is waiting on this pane | no |
 | `effort:` | reasoning effort asserted at connect (hidden when none was) | yes — effort picker, affects future sessions only |
@@ -1935,7 +1935,7 @@ parse is refused rather than clobbering it.
 | `notify_needs_input` | `DOXA_NOTIFY_NEEDS_INPUT` | **off** | notify when a session is waiting on you (a turn merely finishing never notifies); a fully detached session always notifies once this is on |
 | `notify_update` | `DOXA_NOTIFY_UPDATE` | on | notify when `/update` has something to pull |
 | `notify_lore` | `DOXA_NOTIFY_LORE` | on | `lore_core`'s own review banner; held silent while `notify_staged` is on |
-| `remote_enabled` | `DOXA_REMOTE_ENABLED` | off | allow a remote bridge to attach to this daemon at all. On by itself grants nothing — the allow-list below still has to name someone (see [Remote drivers](#remote-drivers--a-policy-and-no-transport)) |
+| `remote_enabled` | `DOXA_REMOTE_ENABLED` | off | allow a remote bridge to attach to this daemon at all. On by itself grants nothing — the allow-list below still has to name someone (see [Remote drivers](#remote-drivers)) |
 | `remote_allowed_logins` | `DOXA_REMOTE_ALLOWED_LOGINS` | empty | DOXA's own allow-list of logins, on top of the tailnet's. **Empty refuses everyone**, never everyone-allowed |
 | `remote_allow_shell` | `DOXA_REMOTE_ALLOW_SHELL` | off | let a remote driver run `!` shell lines — refused on the reduced remote surface without it |
 | `remote_allow_bypass` | `DOXA_REMOTE_ALLOW_BYPASS` | off | let a remote driver raise the permission mode to `bypassPermissions`; independent of `allow_bypass`, and both must be on |

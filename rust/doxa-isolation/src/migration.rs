@@ -21,7 +21,7 @@ impl Migration {
         // select isolation in the new-session form instead.
         let mut checked=current.clone();checked.profile=target;
         provider_context(&plan,&current,&mut checked,false)?;
-        if target.docker(){preflight(&Policy::configured(home)?)?;}
+        if target.docker(){let policy=Policy::configured(home)?;preflight(&policy)?;super::disk::check_host_floor(home,&policy)?;}
         let lock=OpenOptions::new().write(true).create(true).truncate(false).mode(0o600)
             .custom_flags(libc::O_NOFOLLOW|libc::O_NONBLOCK).open(path.parent().unwrap().join("migration.lock"))?;
         let metadata=lock.metadata()?;
@@ -69,6 +69,7 @@ impl Migration {
             let policy=Policy::configured(&self.home)?;preflight(&policy)?;
             next.policy_hash=policy.hash(next.profile);next.creation_policy_hash=next.policy_hash.clone();
             next.policy=Some(policy.clone());next.nonce=nonce()?;next.container_id=None;
+            check_disk_budget(&next)?;
             if let (Some(old_policy),Some(old_id))=(&self.previous.policy,&self.previous.container_id){
                 let listed=String::from_utf8(docker_run(old_policy,&["ps","-aq","--no-trunc","--filter",&format!("label=doxa.session={}",next.session_id)])?).map_err(|_|error("invalid container list"))?;
                 if listed.lines().any(|id|id==old_id){
@@ -226,7 +227,7 @@ mod tests{
         for dir in [&manifest.private_home,&manifest.cache,&manifest.broker]{private_directory(dir,true).unwrap();}
         manifest.checkout=root.join("checkout");clone_checkout(source,&manifest.checkout,&manifest.session_id,None).unwrap();
         let meta=fs::metadata(&manifest.checkout).unwrap();manifest.checkout_device=meta.dev();manifest.checkout_inode=meta.ino();
-        let policy=Policy{image:format!("sha256:{}","a".repeat(64)),docker_host:"unix:///run/user/1000/fixture.sock".into(),memory_bytes:512*1024*1024,cpus:1.0,pids:128};
+        let policy=Policy{image:format!("sha256:{}","a".repeat(64)),docker_host:"unix:///run/user/1000/fixture.sock".into(),memory_bytes:512*1024*1024,cpus:1.0,pids:128,disk_soft_limit_bytes:None,disk_free_floor_bytes:None};
         manifest.profile=Profile::DockerOpen;manifest.policy_hash=policy.hash(manifest.profile);manifest.creation_policy_hash=manifest.policy_hash.clone();
         manifest.policy=Some(policy);manifest.context_cwd=Some(source.to_owned());manifest.state="stopped".into();
         write_manifest(&manifest_path(home,&manifest.session_id).unwrap(),&manifest).unwrap();manifest

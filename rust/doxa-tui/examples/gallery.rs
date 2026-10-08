@@ -86,6 +86,39 @@ fn scene(name: &str) -> App {
                 worktree: Some("feat".into()),
             });
         }
+        "image-preview" => {
+            app.groups[0].tabs = vec!["demo-codex-01".into()];
+            if let Some(session) = app.sessions.iter_mut().find(|session| session.id == "demo-codex-01") {
+                session.transcript.clear();
+            }
+            let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../..").canonicalize().expect("gallery repository");
+            app.apply_daemon_frame(&json!({"type":"hello","session_id":"demo-codex-01",
+                "engine":"codex","model":"gpt-6-sol","cwd":repo}));
+            app.set_repo_status("demo-codex-01", RepoStatus::Directory { name: "example images".into() });
+            let image = repo.join("assets/logo.png")
+                .canonicalize().expect("checked-in image fixture");
+            event(&mut app, "demo-codex-01", "text_delta", json!({"text":format!(
+                "## Image preview\n\nA local image appears inside the transcript with its alt text.\n\n![DOXA logo](<{}>)\n\nThe Markdown and clickable links below keep their layout. [Guide](https://ratatui.rs/)",
+                image.display())}));
+            app.notice = "Fixture · local image · halfblock backend".into();
+        }
+        "isolation" => {
+            app.groups[0].tabs = vec!["demo-codex-01".into()];
+            event(&mut app, "demo-codex-01", "isolation_changed", json!({"isolation": {
+                "profile":"docker-open", "state":"ready", "engine":"rootless Docker",
+                "network":"open egress", "memory_bytes":4294967296_u64,
+                "cpus":2, "pids":256, "disk_usage_bytes":1610612736_u64,
+                "disk_soft_limit_bytes":21474836480_u64,
+                "disk_free_bytes":8589934592_u64,
+                "disk_free_floor_bytes":2147483648_u64,
+                "image":"doxa-session@sha256:example-fixture",
+                "disk_limit":"monitored turn gate", "credential_exposure":"selected provider only"
+            }}));
+            app.input = "/isolation".into();
+            key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+            app.notice = "Fixture · synthetic Docker policy · no container launched".into();
+        }
         "repo-picker" => {
             app.groups[0].tabs = vec!["demo-codex-01".into()];
             let cwd = std::env::current_dir().expect("gallery repository directory");
@@ -273,7 +306,7 @@ fn scene(name: &str) -> App {
         "fleet-review" => {
             app.groups[0].tabs=vec!["demo-codex-01".into()];
             app.sessions.iter_mut().for_each(|session|session.transcript.clear());
-            app.show_fleet_review_fixture(&json!({"review_version":1,"run_id":"parser-checks","root":"/demo/fleet","cwd":"/demo/project","mode":"symmetric","workers":2,"sessions":2,"seed":7,"run_budget_usd":6.0,"allow_unbudgeted":false,"approval_policy":"none","approval_grace_s":0,"dry_run":false,"prompt_sha256":"a".repeat(64),"quiescence_timeout_s":1800,"quiescence_grace_s":5,"preflight":"Planned 2 workers; budget bounded","slots":[{"index":0,"engine":"codex","model":"gpt-6-sol","role":"worker"},{"index":1,"engine":"claude","model":"claude-sonnet-4","role":"worker"}]})).unwrap();
+            app.show_fleet_review_fixture(&json!({"review_version":1,"run_id":"parser-checks","root":"/demo/fleet","cwd":"/demo/project","mode":"symmetric","isolation":"docker-open","workers":2,"sessions":2,"seed":7,"run_budget_usd":6.0,"allow_unbudgeted":false,"approval_policy":"peer","approval_grace_s":30,"dry_run":false,"prompt_sha256":"a".repeat(64),"charter_sha256":"b".repeat(64),"quiescence_timeout_s":1800,"quiescence_grace_s":5,"preflight":"Planned 2 workers; budget bounded","independent_review":{"supervisor":"claude:claude-sonnet-5-5","supervisor_mode":"enforce","message_judge":"jev:jev-1.13.0","message_mode":"shadow","budget_usd":1.5,"max_calls":20,"interval_s":60,"input_usd_per_million":0.4,"output_usd_per_million":0.8,"risk_threshold":0.7},"slots":[{"index":0,"engine":"codex","model":"gpt-6-sol","role":"worker","lore":true},{"index":1,"engine":"claude","model":"claude-sonnet-4","role":"worker","lore":true}]})).unwrap();
             // Drive the same reducer/visibility watermark used by the live menu.
             let mut terminal=Terminal::new(TestBackend::new(126,31)).unwrap();
             terminal.draw(|frame|app.draw(frame)).unwrap();
@@ -285,13 +318,16 @@ fn scene(name: &str) -> App {
             app.sessions.iter_mut().for_each(|session|session.transcript.clear());
             app.show_fleet_view_fixture("parser-checks",&[
                 "Fleet · ↑/↓ select · Enter open · B runs · R refresh · Esc close",
-                "fleet parser-checks — finished",
-                "mode symmetric · sessions 2",
-                "  slot 0 · worker · stopped · demo-codex-01",
-                "  slot 1 · worker · stopped · demo-claude-02",
-                "Native controller phase: finished",
+                "fleet parser-checks — monitoring",
+                "charter approved · isolation docker-open · sessions 2",
+                "  slot 0 · worker · active · demo-codex-01",
+                "  slot 1 · worker · active · demo-claude-02",
+                "Independent supervisor: claude:claude-sonnet-5-5 · enforce",
+                "Fast message judge: jev:jev-1.13.0 · shadow",
+                "Native controller phase: monitoring",
                 "Total budget USD: 6.0",
-                "Approval policy: none",
+                "Review allocation USD: 1.5",
+                "Approval policy: peer",
                 "Approvals asked: 0",
                 "Auto approved: 0",
                 "Attach a slot: /fleet attach parser-checks <index>",
@@ -317,7 +353,7 @@ fn main() {
     let name = std::env::args().nth(1).expect("scene name");
     let (width,height) = match name.as_str() {
         "welcome" => (72,18),
-        "hero" | "repo-picker" | "claude-session" | "tool-activity" | "tool-expanded" | "tool-entries" | "restored-tool" | "processing" | "reasoning" | "commands" | "help" | "needs-input" | "permissions" | "permission-request" | "effort" | "history" | "queue" | "beliefs" | "belief-hover" | "memory" | "memory-management" | "memory-change" | "fleet-review" | "fleet-view" => (126,31),
+        "hero" | "image-preview" | "isolation" | "repo-picker" | "claude-session" | "tool-activity" | "tool-expanded" | "tool-entries" | "restored-tool" | "processing" | "reasoning" | "commands" | "help" | "needs-input" | "permissions" | "permission-request" | "effort" | "history" | "queue" | "beliefs" | "belief-hover" | "memory" | "memory-management" | "memory-change" | "fleet-review" | "fleet-view" => (126,31),
         _ => panic!("unknown scene"),
     };
     let mut terminal = Terminal::new(TestBackend::new(width,height)).unwrap();
@@ -333,8 +369,19 @@ fn main() {
             frame.render_widget(Paragraph::new(lines).style(Style::default().bg(doxa_tui::theme::BASE)),inner);
         }).unwrap();
     } else {
+        if name == "image-preview" { std::env::set_var("DOXA_IMAGE_MODE", "halfblock"); }
         let app=scene(&name);
+        if name == "image-preview" { app.configure_terminal_images("halfblock"); }
         terminal.draw(|frame| app.draw(frame)).unwrap();
+        if name == "image-preview" {
+            for _ in 0..100 {
+                if app.poll_terminal_images() { break; }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            terminal.draw(|frame| app.draw(frame)).unwrap();
+            assert!(terminal.backend().buffer().content().iter().any(|cell|
+                cell.symbol() == "▀" || cell.symbol() == "▄"), "image fixture did not render");
+        }
     }
     let cells: Vec<Value> = (0..height).flat_map(|y| (0..width).map(move |x| (x,y)))
         .map(|(x,y)| {

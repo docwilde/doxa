@@ -1,111 +1,70 @@
-# Live Rust terminal gallery
+# Rust gallery
 
-The README images were captured on 2026-10-03 from the running **DOXA
-2.0.0-alpha.68** frontend and daemon. A private Xvfb display hosts a real
-GTK3/VTE terminal; FFmpeg records its framebuffer. The gallery uses an
-authenticated Codex CLI 0.156.1 through the protected DOXA app server and the
-native LORE 0.62.11 carrier. DOXA and LORE state are isolated from the user's
-stores. No `TestBackend`, demo engine, fixture events, or composited UI mockups
-appear in these images.
+The current terminal images show the **DOXA 2.0.0-beta.11** production Ratatui `App` fed deterministic example events through its `TestBackend`. A fixed DejaVu Sans Mono font rasterizes the styled cell buffer at **3068 × 1734**. No provider, daemon, Docker Engine, LORE store, network request, or private user session is opened during these captures. The examples include a checked-in image, synthetic turns, memory, fleet status, and isolation status passed through the same policy validator used for host reports. They demonstrate rendering and review layout; they do not verify a live provider, container, or fleet run.
 
-| Image | Live state |
+## Contents
+
+- [Current terminal captures](#current-terminal-captures)
+- [Reproduce the captures](#reproduce-the-captures)
+- [Earlier live terminal captures](#earlier-live-terminal-captures)
+- [Remote browser captures](#remote-browser-captures)
+
+## Current terminal captures
+
+| Scene | Image | What the fixture exercises |
+| --- | --- | --- |
+| Workspace | [hero](../assets/shots/rust-2.0.0-beta.11-hero.png) | Tabs, project rail, Markdown answer, and version line |
+| Image preview | [image-preview](../assets/shots/rust-2.0.0-beta.11-image-preview.png) | A checked-in local image rendered inside the transcript using the halfblock fallback |
+| Isolation | [isolation](../assets/shots/rust-2.0.0-beta.11-isolation.png) | The Docker policy chip and details from a synthetic rootless worker status |
+| Fleet review | [fleet-review](../assets/shots/rust-2.0.0-beta.11-fleet-review.png) | A plan with spending limits, independent supervisor, and message judge; launch is disabled |
+| Fleet status | [fleet-view](../assets/shots/rust-2.0.0-beta.11-fleet-view.png) | Synthetic worker and reviewer status; no controller starts |
+| Beliefs | [beliefs](../assets/shots/rust-2.0.0-beta.11-beliefs.png) | Belief selection and review actions; writes are disabled |
+| Tool details | [tool-entries](../assets/shots/rust-2.0.0-beta.11-tool-entries.png) | Expanded normalized tool event with synthetic input and output |
+| Memory | [memory-management](../assets/shots/rust-2.0.0-beta.11-memory-management.png) | Curated project memory controls; writes are disabled |
+| Commands | [commands](../assets/shots/rust-2.0.0-beta.11-commands.png) | Slash-command completion |
+| Help | [help](../assets/shots/rust-2.0.0-beta.11-help.png) | Built-in command help |
+
+The `image-preview` scene exercises the portable halfblock path. A terminal with Kitty or Sixel graphics may use another backend; this capture is not evidence of either terminal protocol. Fleet and isolation values are synthetic and labeled as fixtures in the UI. Paths under `/demo` are example data.
+
+## Reproduce the captures
+
+From the repository root, install system Python 3.11+ with Pillow and the DejaVu Sans Mono font. Build the gallery example from the same release as the frontend, then rasterize its cell buffers:
+
+```sh
+export TMPDIR=/path/on/real/disk
+cargo build --locked -j 2 -p doxa-tui --example gallery
+python3 scripts/render_rust_gallery.py --binary target/debug/examples/gallery
+```
+
+The script checks that the hero frame visibly reports the version from `rust/doxa-tui/Cargo.toml`, writes `rust-2.0.0-beta.11-*.png` under `assets/shots`, and verifies every image is 3068 × 1734. Pass scene names after the options to render a subset. The Rust example uses the production `App` reducer and widgets; the Python step only paints Ratatui cells. The captures are deterministic fixture views, not screenshots of a terminal emulator or authenticated account.
+
+## Earlier live terminal captures
+
+These unprefixed files remain historical **2.0.0-alpha.68** live captures from 2026-10-03:
+
+| File | Earlier live state |
 | --- | --- |
-| `rust-hero.png` | Completed Codex turn with two file reads and folded tool calls |
-| `rust-welcome.png` | Fresh session and block Greek ΔΟΞΑ banner |
-| `rust-sessions.png` | Two live sessions grouped by repository above one recoverable, muted Past sessions entry |
-| `rust-curated-memory.png` | Native LORE facts in a selectable, scrollable table |
-| `rust-beliefs.png` | Native LORE beliefs with a selected review row |
-| `rust-tool-entries.png` | One actual provider tool call expanded inside the turn |
-| `rust-commands.png` | Slash completion above the prompt |
-| `rust-help.png` | Local command help beside the grouped session rail |
-| `rust-settings.png` | Editable Keys settings category |
+| `rust-hero.png` | Completed Codex turn with folded tool calls |
+| `rust-welcome.png` | Opening screen |
+| `rust-sessions.png` | Grouped live and past sessions |
+| `rust-curated-memory.png` | LORE facts |
+| `rust-beliefs.png` | LORE belief review |
+| `rust-tool-entries.png` | Expanded provider tool call |
+| `rust-commands.png` | Slash completion |
+| `rust-help.png` | Command help |
+| `rust-settings.png` | Key settings |
 
-All nine PNGs measure **3068 × 1734**. The terminal used DejaVu Sans Mono 30
-at 127 columns by 36 rows. **Harbour notes** and **Lighthouse notes** contain
-only synthetic example files. Lighthouse notes appears only in the grouped
-session and help frames. The isolated LORE store contains synthetic user and
-project facts and beliefs; DOXA queried it through the native carrier. The
-provider read only two Harbour notes files and did not edit the repository.
-The published images contain no credentials, personal memory, or private
-workspace paths.
-
-## Reproduce a capture
-
-Build `doxa-rs`, `doxa-daemon`, and `lore-rs` from the same DOXA release.
-Prepare a committed example repository and an empty private state directory
-on real disk. Keep its runtime and control-socket paths short enough for Unix
-sockets. Set `TMPDIR` to a directory on real disk; avoid `/tmp` for build and
-capture files. The recorder leaves `HOME` intact for provider authentication
-while isolating DOXA and LORE state.
-
-```sh
-TMPDIR=/path/on/real/disk /usr/bin/python3 scripts/live_rust_gallery.py run \
-  --binary /absolute/path/to/doxa-rs \
-  --daemon /absolute/path/to/doxa-daemon \
-  --lore /absolute/path/to/lore-rs \
-  --repo /absolute/path/to/harbour-notes \
-  --state /short/private/gallery-state \
-  --control /short/private/gallery.sock \
-  --engine codex --model gpt-6-sol --with-lore \
-  --provider-bin /absolute/path/to/protected/codex
-```
-
-The script requires system Python with GTK3/VTE, Xvfb, FFmpeg, and the stated
-font. Seed only that isolated `LORE_ROOT` and `LORE_PROJECTS_DIR` with native
-`lore-rs memory add` and `lore-rs belief add`. Enter commands through the VTE
-control socket, wait for the desired live state, then capture it:
-
-```sh
-/usr/bin/python3 scripts/live_rust_gallery.py control \
-  --control /short/private/gallery.sock \
-  --action '{"kind":"input","text":"/memory\r"}'
-/usr/bin/python3 scripts/live_rust_gallery.py control \
-  --control /short/private/gallery.sock \
-  --action '{"kind":"capture","name":"rust-curated-memory"}'
-```
-
-For the provider frame, select `/effort low` and wait for verification before
-sending a prompt that asks Codex to read the two example files separately.
-Use Tab to focus the transcript, Enter to expand the tool section, `]` to
-select a tool, and Enter to expand it. `Ctrl+T` starts the additional tabs;
-wheel input over the tab header switches them. `/help`, `/settings`, `/beliefs`,
-and `/s` expose the other captured states. The script's `text` action reads
-the actual terminal text for state checks, and `status` reports cell geometry.
-
-For `rust-sessions.png`, create a second Harbour notes tab with Ctrl+T. Start
-another real session from Lighthouse notes using the same isolated DOXA home
-and runtime, then `/attach` it in the first TUI. Open the rail and drag its
-divider wider. Detach the completed Harbour notes tab with Ctrl+W, stop that
-exact daemon in the isolated runtime, and wait for the rail's Past sessions
-section. The capture shows two live sessions and the stopped session's retained
-label under separate repository headings.
-
-Inspect every PNG and its dimensions before copying it from
-`gallery-state/shots` to `assets/shots`. Stop the exact isolated capture
-sessions, then send `{"kind":"quit"}` through the control socket. The
-display and socket close on exit; session daemons have their own lifecycle.
-
-The gallery uses the live capture script above; the old fixture renderer has
-been removed.
+They were captured in a real GTK3/VTE terminal on private Xvfb with FFmpeg. That run used authenticated Codex CLI 0.156.1 through DOXA's protected app server and isolated LORE 0.62.11 data. The provider read only synthetic Harbour notes files. These files document the older live build; they do not show beta.11 features. The original recorder remains at `scripts/live_rust_gallery.py` for an operator who explicitly chooses an authenticated capture.
 
 ## Remote browser captures
 
-`rust-remote-browser-conversation.png` and `rust-remote-browser-review.png`
-show the **shipped** `rust/doxa-remote/assets` HTML, CSS and JavaScript running
-in Chromium. `scripts/capture_remote_gallery.py` serves those files unchanged
-with two isolated example sessions and bounded transcript and review responses.
-It does not open a real hub, authenticate through Tailscale, or use a live
-provider. These images document the browser UI; they do not verify remote
-transport or authorization. Both PNGs are 3068 × 1734 and contain no user data.
+The existing `rust-remote-browser-conversation.png` and `rust-remote-browser-review.png` show shipped `rust/doxa-remote/assets` in Chromium with isolated API fixtures. The browser UI did not change in this batch, so these two 3068 × 1734 captures were left intact. They do not verify an authenticated hub or remote transport.
 
-Reproduce them from the repository root on a machine with Google Chrome and
-Node.js 22 or newer:
+Reproduce them with Google Chrome and Node.js 22+:
 
 ```sh
+export TMPDIR=/path/on/real/disk
 python3 scripts/capture_remote_gallery.py
 ```
 
-The script stores temporary Chrome profiles under `~/.cache/doxa`, serves only
-on `127.0.0.1` for the capture, and writes the two reviewed images to
-`assets/shots`. The native hub and browser adapter behavior is covered by
-the Rust remote suites and the [remote hub plan](plans/remote-hub.md).
+That script serves local assets on `127.0.0.1`, keeps temporary Chrome profiles under `~/.cache/doxa`, and writes the two browser PNGs to `assets/shots`. See the [remote hub plan](plans/remote-hub.md) for transport behavior.

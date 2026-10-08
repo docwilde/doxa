@@ -6,44 +6,34 @@
   <img src="https://img.shields.io/badge/TUI-Ratatui-2f9e44" alt="Ratatui terminal interface">
 </p>
 
-**DOXA** is a Rust terminal for coding agents. Run Claude, Codex, DeepSeek, and GLM in separate tabs or panes, then reattach to their daemons after closing the terminal. Its integrated [LORE](https://github.com/docwilde/LORE) runtime shares reviewed user and project memory across DOXA, Claude Code, and Codex.
+**DOXA** is a Rust terminal workspace for coding agents. Run Claude, Codex, DeepSeek, or GLM in tabs and split panes, then close the terminal and reattach to running sessions later. Integrated [LORE](https://github.com/docwilde/LORE) shares reviewed memory across DOXA, Claude Code, and Codex.
 
 > [!WARNING]
-> Rust 2.0 is in beta. Configuration and stored formats may change. Agents can edit files and run commands with your privileges; review [scope and limits](#scope-and-limits) before using DOXA on important work.
+> Rust 2.0 is in beta. Agents can edit files and run commands with your privileges. Choose a [session isolation profile](docs/session-isolation.md) and review the [platform limits](#platform-and-scope) before using DOXA on important work.
 
-![DOXA Rust running a Codex session with an expandable tool section](assets/shots/rust-hero.png)
+![DOXA Rust beta.11 workspace with three engine tabs and a Markdown turn](assets/shots/rust-2.0.0-beta.11-hero.png)
 
-*Captured from the running 2.0.0-alpha.68 app in an isolated example repository. See the [capture record](docs/rust-gallery.md).*
+[How the gallery was captured](docs/rust-gallery.md)
 
-## What you get
+## Contents
 
-- **Four engines.** Choose Claude, Codex, DeepSeek, or GLM per session; available models and reasoning levels follow the selected engine.
-- **A flexible workspace.** Group tabs, split panes, drag dividers, and keep a separate prompt in each pane.
-- **Recoverable sessions.** Restore saved layouts and conversations or reattach to running daemons. The rail groups sessions by project, places recoverable past sessions last, and marks queued or unread work.
-- **Readable turns.** Watch streamed responses, expand reasoning and individual tool calls, and open links with Ctrl+click.
-- **Reviewed memory.** Browse LORE facts and beliefs, inspect evidence, and accept or reject proposed beliefs.
-- **Repo tools.** Navigate repositories and worktrees, switch branches, inspect diffs, and review tracked changes.
-- **Peer coordination.** Inspect peer messages in the TUI or browser map and run supervised fleets with spend controls.
-- **Session isolation.** Select native execution or a private Linux rootless Docker worker, with open egress or no network. The TUI chip shows the verified policy; idle changes preserve the session. See [configuration and limits](docs/session-isolation.md).
-- **Independent fleet review.** Select an alignment supervisor and a separate fast LLM or Jev message judge. Typed host gates, an approved charter and review budgets control admission. See [fleet supervision](docs/fleet-supervision.md).
-- **Private remote access.** Opt in to a Rust browser view or register sessions with a private hub for browser, CLI, and native TUI control from another device. Connected browser pages can report completed turns and input requests.
-- **Custom controls.** Manage provider login, API keys, plugins, and settings in the TUI. Remap window shortcuts without rebuilding.
+- [Install and start](#install-and-start)
+- [Workspace and sessions](#workspace-and-sessions)
+- [Engines and review](#engines-and-review)
+- [Remote access](#remote-access)
+- [Gallery](#gallery)
+- [Platform and scope](#platform-and-scope)
+- [Documentation](#documentation)
 
-## Install
+## Install and start
 
-Current release: **[v2.0.0-beta.10](https://github.com/docwilde/doxa/releases/tag/v2.0.0-beta.10)**.
+Install the [latest Rust prerelease](https://github.com/docwilde/doxa/releases):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/docwilde/doxa/main/scripts/install.sh | sh
 ```
 
-The installer builds the Rust frontend, daemon, remote adapter, isolation worker and LORE carrier and places `doxa` in `~/.local/bin` by default. It adds a Linux application-menu entry or `~/Applications/DOXA.command` on macOS; set `DOXA_NO_LAUNCHER=1` to skip that step. Use `doxa update` for a newer build or pass a tag after `sh -s --` to pin a release. Python is needed only when building the optional protected Codex provider.
-
-Claude requires its CLI. Codex uses a private protected app server; the installer builds it when Codex is present. DeepSeek and GLM use API credentials configured through `/setup` or provider environment variables. See the [Rust guide](rust/README.md) for setup, build requirements, and engine capabilities.
-
-From a checkout, use `./task build`, `./task run`, or `./task install`. Run `doxa help` for the CLI command list.
-
-## Quickstart
+The installer builds the frontend, daemon, remote adapter, isolation worker, and native LORE carrier, then puts `doxa` in `~/.local/bin` by default. It adds a Linux application-menu entry or a macOS `~/Applications/DOXA.command` shortcut. Set `DOXA_NO_LAUNCHER=1` to skip the shortcut. Run `doxa update` to update; pass a tag after `sh -s --` to pin a version.
 
 ```sh
 doxa doctor --engine codex
@@ -51,97 +41,56 @@ doxa new --engine codex
 doxa list
 ```
 
-Ctrl+T opens the new-tab engine picker. Alt+V splits side by side; Alt+H stacks panes. Ctrl+W closes the active tab while its daemon keeps running; Delete does the same when the tab bar has focus. Ctrl+X stops the active daemon and keeps its transcript visible. Ctrl+Delete opens a confirmation to stop the daemon and delete its DOXA transcript; provider-native history remains separate. Ctrl+Q exits DOXA and leaves sessions detached. Use `/resume` to reopen a closed or saved session. Tab reaches the session rail when visible; uncollected sessions group under their repository or project. The mouse wheel switches tabs over a tab header. Use `/settings` → **Keys** to change window shortcuts immediately, or `doxa settings set key_new_tab Alt+N` to change one for the next launch.
+Choose an installed engine in place of `codex`. Claude needs its CLI; protected Codex needs its private provider build on Linux. DeepSeek and GLM need API credentials through `/setup` or environment variables. `doxa help` lists CLI commands. From a checkout, use `./task build`, `./task run`, or `./task install`.
 
-DeepSeek and GLM show estimated API cost from provider token counts and published model rates. The estimate uses fresh-input rates (and DeepSeek peak rates), so cache discounts and off-peak billing can make the actual charge lower. Codex subscription usage appears after its app-server reports the Codex quota windows; missing values stay unknown.
+## Workspace and sessions
 
-`/pending` and `/lore:pending --cluster` open global LORE proposals plus those for the current project with either engine. `lore status` reports the whole-store pending count across all projects.
+- **Work in parallel.** Open tabs with Ctrl+T, split with Alt+V or Alt+H, and keep a prompt in each pane. The project rail groups live and recoverable sessions. Saved layouts restore on launch.
+- **Detach and return.** Ctrl+W closes a tab while its daemon runs; Ctrl+Q exits the window and leaves sessions detached. `/resume` finds saved sessions, including closed tabs. Ctrl+X stops the active daemon and retains its transcript.
+- **Review the work.** Expand reasoning and individual tool calls, inspect diffs and worktrees, and use the action palette or slash commands for navigation. LORE facts, beliefs, and pending proposals have review controls in the TUI.
+- **Choose isolation.** Start in `native`, `docker-open`, or `docker-offline`. Linux Docker profiles use a private rootless worker and checkout. The isolation chip shows the verified policy. Change an idle session with `/isolation PROFILE --confirm`. [Setup and limits](docs/session-isolation.md).
+
+The [Rust guide](rust/README.md) covers keys, session recovery, worktrees, settings, and review behavior.
+
+## Engines and review
+
+| Engine | Connection | Setup |
+| --- | --- | --- |
+| Claude | Claude Code CLI | Sign in with the CLI. |
+| Codex | Protected private app server | Linux build and Codex sign-in. |
+| DeepSeek | Rust API client | Supply an API key. |
+| GLM | Rust API client | Supply a z.ai API key. |
+
+[Engine capability matrix](docs/engine-capabilities.md) lists model, permission, cost, compaction, and platform support. DOXA does not silently switch engines during a session.
+
+Fleets can run an acting coordinator and workers under a reviewed charter, typed host gates, and spending limits. A separately selected alignment supervisor and fast LLM or Jev message judge can inspect work and messages. [Fleet guide](docs/fleet.md) · [Independent supervision](docs/fleet-supervision.md).
 
 ## Remote access
 
-Remote access is opt-in. Set `DOXA_REMOTE_ENABLED=1` and
-`DOXA_REMOTE_ALLOWED_LOGINS=you@example.com`, then run `doxa remote serve`
-behind private Tailscale Serve. The Rust browser view reads recent turns,
-follows live events, sends prompts, and resolves pending input.
+Remote control is opt in. `doxa remote serve` exposes a private Rust browser view through Tailscale Serve. A private `doxa-hub` lets another DOXA installation use browser, CLI, or native TUI control across machines. Native clients can encrypt transcript and control content end to end with a shared key; the hub still sees connection metadata. The [remote guide](rust/README.md#remote-access) covers setup and limits. The [Chrome extension](browser-extension/README.md) supports encrypted hub sessions. An Android client is planned.
 
-For control across machines, run `doxa-hub` on a private server and
-`doxa remote connect HUB_URL HOST_ID` on the session host. Use the browser at
-`HUB_URL` or `doxa remote list/send/answer` from another DOXA installation.
-Run `doxa remote tui HUB_URL` there to view live remote sessions in DOXA tabs,
-send prompts, and answer pending input. `Ctrl+T` selects another live remote
-session; tab and pane navigation use the usual DOXA keys. Remote tabs show
-live events; Ctrl+R opens a scrollable history view and PageUp at its top fetches
-older turns. Model, permission, filesystem and LORE controls stay on the host.
-Inside the local TUI, `/remote-connect HUB_URL HOST_ID` shares its live sessions
-while the window stays open; `/remote-disconnect` stops the connector. Use
-`/remote-control HUB_URL` to add remote tabs beside local tabs in the same
-window; `/local` selects an open local tab. Remote tabs carry an `◎` marker.
-The in-window connector stops on exit; run the CLI connector separately for
-persistent sharing. Remote tabs are not saved in the local tabset.
-The [Rust guide](rust/README.md) has setup steps, and the
-[hub plan](docs/plans/remote-hub.md) covers the Android client contract.
-The browser can enable encrypted background Web Push for turn completion and
-input requests. Configure a private VAPID key on the hub; push payloads
-contain only an event kind. The Android app is still planned.
-
-For native remote tabs, optional end-to-end encryption keeps prompts, approval
-answers, transcript pages, and event content opaque to the hub. Create a shared
-key with `doxa remote keygen ABS_PATH`, copy the owner-only file securely to the
-host and client, and set `DOXA_REMOTE_E2EE_KEY_FILE` to its absolute path on
-both. Messages above 1 KiB are compressed when useful before encryption.
-Encrypted sessions work in the native TUI, CLI, and the packaged
-[DOXA Remote Chrome extension](browser-extension/README.md). The extension's
-code is installed separately from the hub; choose the shared key file when
-opening it and allowlist its extension ID on the hub. The hub-served browser
-cannot read or control encrypted sessions. Session presence and event kinds
-remain visible to the hub.
-
-### Browser view
-
-These screens render the shipped Rust browser assets in Chromium with isolated
-example API responses. They show the browser interface, not an authenticated
-hub deployment; see the [capture record](docs/rust-gallery.md#remote-browser-captures).
-
-![Remote browser with two sessions, recent turns and a prompt](assets/shots/rust-remote-browser-conversation.png)
-
-![Remote browser with a pending permission request](assets/shots/rust-remote-browser-review.png)
+![Remote browser with a conversation and prompt](assets/shots/rust-remote-browser-conversation.png)
 
 ## Gallery
 
-These frames come from the running 2.0.0-alpha.68 Rust TUI with isolated DOXA and LORE state. The [capture record](docs/rust-gallery.md) explains the example data and reproduction steps.
+These beta.11 frames render the production Ratatui app with deterministic example events. They show the interface without opening a provider, Docker container, or user store. The [capture record](docs/rust-gallery.md) includes more views and exact reproduction steps.
 
-### Welcome and sessions
+| Image preview | Isolation details | Fleet launch review |
+| --- | --- | --- |
+| ![A local image preview in the transcript](assets/shots/rust-2.0.0-beta.11-image-preview.png) | ![Docker isolation policy details in a fixture menu](assets/shots/rust-2.0.0-beta.11-isolation.png) | ![A fleet plan with independent supervision and message review](assets/shots/rust-2.0.0-beta.11-fleet-review.png) |
 
-![The Greek block DOXA banner and a ready session prompt](assets/shots/rust-welcome.png)
+## Platform and scope
 
-![Live sessions grouped by example repository above a muted Past sessions entry](assets/shots/rust-sessions.png)
+Linux has bounded live checks for all four engines. macOS has build and transport CI, but authenticated provider sessions still need live verification; protected Codex is Linux only. Windows is unsupported. See [platform verification](docs/platform-verification.md). Python 1.x is archived at [v1.19.0](https://github.com/docwilde/doxa/tree/v1.19.0); its [manual](docs/manual.md) is historical.
 
-### Curated memory
+DOXA loads selected provider plugins with scoped adoption rules. Remote access needs explicit private network setup. The [parity tracker](docs/rust-1.19-parity.md) and [latest provider verification](docs/live-provider-verification-2026-10-04.md) record detailed evidence and open checks.
 
-![A selectable table of LORE facts with a filter and scrollbar](assets/shots/rust-curated-memory.png)
+## Documentation
 
-### Beliefs
+- [Rust guide](rust/README.md) — install, sessions, review, fleets, and remote use.
+- [Engine capabilities](docs/engine-capabilities.md) — what each provider supports.
+- [Session isolation](docs/session-isolation.md) — Docker profiles and their limits.
+- [Fleet supervision](docs/fleet-supervision.md) — independent review and message judging.
+- [Plans and open work](docs/plans/README.md) — current implementation status.
 
-![A table of recent beliefs with review actions, evidence, and selection](assets/shots/rust-beliefs.png)
-
-### Tool details
-
-![Individual tool calls in an expandable section](assets/shots/rust-tool-entries.png)
-
-### Commands and settings
-
-![Slash-command completion above the prompt](assets/shots/rust-commands.png)
-
-![DOXA command help beside live sessions grouped by repository](assets/shots/rust-help.png)
-
-![The configurable Keys page in DOXA settings](assets/shots/rust-settings.png)
-
-## Scope and limits
-
-Rust 2.0 is the main DOXA line. Linux has bounded live Claude, DeepSeek, GLM and Codex checks. macOS CI builds the native workspace and tests portable Rust crates, daemon suites, and local provider lifecycle fixtures; authenticated sessions have not been tested on macOS. The `.command` launcher is available there, while protected Codex remains Linux-only because its process-owner contract has no macOS equivalent yet. Windows remains unsupported; see [platform verification](docs/platform-verification.md). You choose the engine: DOXA does not switch between Claude, Codex, DeepSeek, and GLM based on your prompt or a provider failure. Plugin adoption excludes foreign hooks and MCP servers. The optional [Rust browser adapter and private hub](docs/plans/remote-hub.md) require explicit Tailscale Serve configuration; the Python browser adapter survives only in the historical 1.19 source tag.
-
-The [Rust guide](rust/README.md) covers workflows and provider limits. The [parity tracker](docs/rust-1.19-parity.md), [latest provider verification](docs/live-provider-verification-2026-10-04.md), [source audit](docs/source-audit-2026-09-27.md), and [UI benchmark](docs/rust-ui-benchmark-2026-09-30.md) hold detailed evidence and remaining gates. The Python 1.x app has been removed from the current tree; its source remains in the [v1.19.0 tag](https://github.com/docwilde/doxa/tree/v1.19.0). The [old manual](docs/manual.md) is historical.
-
-## License
-
-[AGPL-3.0-only](LICENSE) applies, including over a network. A [commercial licence](LICENSE-COMMERCIAL.md) is available; the DOXA name and mark are reserved under the [trademark policy](TRADEMARK.md).
+DOXA is licensed under [AGPL-3.0-only](LICENSE), with a [commercial licence](LICENSE-COMMERCIAL.md) available. The name and mark follow the [trademark policy](TRADEMARK.md).

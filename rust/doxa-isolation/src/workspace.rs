@@ -74,7 +74,7 @@ mod tests {
     #[test]
     fn container_git_never_inherits_host_keys_or_configuration() {
         let manifest = Manifest { version:1, session_id:"session".into(), profile:Profile::DockerOpen,
-            policy:Some(Policy { image:format!("sha256:{}", "a".repeat(64)), docker_host:"unix:///run/user/1000/task.sock".into(), memory_bytes:1024*1024*1024, cpus:1.0,pids:128 }),
+            policy:Some(Policy { image:format!("sha256:{}", "a".repeat(64)), docker_host:"unix:///run/user/1000/task.sock".into(), memory_bytes:1024*1024*1024, cpus:1.0,pids:128,disk_soft_limit_bytes:None,disk_free_floor_bytes:None }),
             policy_hash:String::new(),creation_policy_hash:String::new(),context_cwd:None,provider_rollout:None,source:"/original".into(),checkout:"/private/checkout".into(),
             checkout_device:0,checkout_inode:0,base_sha:String::new(),branch:String::new(),private_home:"/private/home".into(),cache:"/private/cache".into(),broker:"/private/broker".into(),container_id:Some("b".repeat(64)),nonce:"c".repeat(48),state:"ready".into() };
         let mut original = Command::new("git"); original.args(["diff", "--no-ext-diff"]).env("PRIVATE_KEY","never forward").env("GIT_CONFIG_COUNT","1");

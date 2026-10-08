@@ -2629,6 +2629,29 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn image_rows_survive_streaming_and_width_changes() {
+        let source = "**You:**\n\n![chart](/home/user/chart.png)\n\n**Assistant:**\n\nInitial";
+        let mut cached = RenderedTranscript::render_media(
+            0, "s", source, 30, None, None, 0, &[], transcript_tools::IMAGE_ROWS);
+        assert_eq!(cached.images.len(), 1);
+        let initial_row = cached.images[0].row;
+        let extended = format!("{source} response with [reference](https://example.com)");
+        cached.update_media(&extended, 30, None, None, 0, &[], transcript_tools::IMAGE_ROWS);
+        assert_eq!(cached.images[0].row, initial_row);
+        let full = RenderedTranscript::render_media(
+            0, "s", &extended, 30, None, None, 0, &[], transcript_tools::IMAGE_ROWS);
+        assert_eq!(cached.lines, full.lines);
+        assert_eq!(cached.links, full.links);
+        assert_eq!(cached.images, full.images);
+        cached.update_media(&extended, 18, None, None, 0, &[], transcript_tools::IMAGE_ROWS);
+        let resized = RenderedTranscript::render_media(
+            0, "s", &extended, 18, None, None, 0, &[], transcript_tools::IMAGE_ROWS);
+        assert_eq!(cached.lines, resized.lines);
+        assert_eq!(cached.links, resized.links);
+        assert_eq!(cached.images, resized.images);
+    }
+
+    #[test]
     fn link_pointer_revalidates_stationary_mouse_after_geometry_changes() {
         let mut app = App::default();
         app.link_hover = Some("https://old.example".into());

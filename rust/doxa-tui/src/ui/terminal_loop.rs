@@ -321,6 +321,8 @@ fn run_loop(
     }
     let mut saved_layout = crate::ui_state::LayoutSignature::capture(&app);
     terminal.draw(|frame| app.draw(frame))?;
+    app.image_store.borrow_mut().configure(app.preferences.value("image_mode"));
+    terminal.draw(|frame| app.draw(frame))?;
     let mut pointer_on_link = false;
     let mut remote_connector: Option<RemoteConnector> = None;
     let mut remote_worker:Option<crate::remote_client::RemoteWorker>=None;
@@ -332,7 +334,7 @@ fn run_loop(
         app.installation.update = crate::installation::Update::Unknown;
     }
     while !app.should_quit {
-        let mut changed = false;
+        let mut changed = app.image_store.borrow_mut().poll();
         if first_run_pending && app.offer_first_run() {
             first_run_pending = false;
             changed = true;

@@ -18,7 +18,8 @@ impl App {
         let engine=value["engine"].as_str().unwrap_or("unknown");
         let network=value["network"].as_str().unwrap_or("unknown");
         format!("{} · engine: {engine} · network: {network} · click for limits, mounts and idle change commands",
-            value["label"].as_str().unwrap_or("unavailable"))
+            value["label"].as_str().unwrap_or("unavailable")) +
+            if value["disk_budget_error"].as_str().is_some()||value["disk_monitor_error"].as_str().is_some(){" · disk hold"}else{""}
     }
     pub(super) fn open_isolation_info(&mut self,group:usize){
         let Some(id)=self.groups.get(group).and_then(PaneGroup::active_id).map(str::to_owned)else{return;};
@@ -28,6 +29,15 @@ impl App {
             format!("Network: {}",value["network"].as_str().unwrap_or("unknown"))];
         if value["profile"]!="native"{
             lines.push(format!("Memory: {} MiB · CPU: {} · PIDs: {}",value["memory_bytes"].as_u64().unwrap_or(0)/1024/1024,value["cpus"],value["pids"]));
+            let mib=1024*1024;
+            let usage=value["disk_usage_bytes"].as_u64().map(|n|format!("{} MiB",n/mib)).unwrap_or_else(||"unavailable".into());
+            let ceiling=value["disk_soft_limit_bytes"].as_u64().map(|n|format!("{} MiB",n/mib)).unwrap_or_else(||"legacy session: unset".into());
+            let free=value["disk_free_bytes"].as_u64().map(|n|format!("{} MiB",n/mib)).unwrap_or_else(||"unavailable".into());
+            let floor=value["disk_free_floor_bytes"].as_u64().map(|n|format!("{} MiB",n/mib)).unwrap_or_else(||"unavailable".into());
+            lines.push(format!("Disk used: {usage} / monitored soft ceiling {ceiling}"));
+            lines.push(format!("Host free: {free} / monitored floor {floor}"));
+            if let Some(error)=value["disk_monitor_error"].as_str(){lines.push(format!("Disk monitor: {}",safe_label(error)));}
+            if let Some(error)=value["disk_budget_error"].as_str(){lines.push(format!("New turns held: {}",safe_label(error)));}
             lines.push(format!("Image: {}",value["image"].as_str().unwrap_or("unavailable")));
             lines.push("Mounts: independent Git checkout, private home/cache and session hook broker".into());
             lines.push("Root read-only; capabilities dropped; no-new-privileges; private PID/IPC; rootless Engine".into());

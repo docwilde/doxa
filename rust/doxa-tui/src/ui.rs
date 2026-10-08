@@ -61,6 +61,7 @@ use crate::{diff_view, history, launch, lore_picker, markdown, peer_map::PeerMap
 use doxa_engines::EngineCapabilities;
 
 mod links;
+mod transcript_images;
 mod tool_cards;
 mod transcript_roles;
 pub(crate) mod transcript_tools;
@@ -1107,6 +1108,8 @@ struct RenderedTranscript {
     lines: Vec<Line<'static>>,
     sections: Vec<transcript_tools::Section>,
     links: Vec<markdown::LinkRegion>,
+    images: Vec<transcript_tools::ImagePlacement>,
+    image_rows: u16,
     turn_start: Option<usize>,
     prefix_lines: usize,
     prefix_sections: usize,
@@ -1149,7 +1152,17 @@ fn streamed_turn_start(source: &str) -> Option<usize> {
 }
 
 impl RenderedTranscript {
+    #[cfg(test)]
     fn render(
+        pane: usize, id: &str, source: &str, width: u16,
+        expanded: Option<&HashSet<transcript_tools::FoldKey>>,
+        selected: Option<transcript_tools::FoldKey>, cards_revision: u64,
+        cards: &[tool_cards::ToolCard],
+    ) -> Self {
+        Self::render_media(pane, id, source, width, expanded, selected, cards_revision, cards, 0)
+    }
+
+    fn render_media(
         pane: usize,
         id: &str,
         source: &str,
@@ -1158,12 +1171,14 @@ impl RenderedTranscript {
         selected: Option<transcript_tools::FoldKey>,
         cards_revision: u64,
         cards: &[tool_cards::ToolCard],
+        image_rows: u16,
     ) -> Self {
-        let (lines, sections, links) =
-            transcript_tools::render_with_links(source, width, expanded, selected.clone(), cards);
+        let (lines, sections, links, images) = transcript_tools::render_with_images(
+            source, width, expanded, selected.clone(), cards, image_rows, 0);
         let turn_start = streamed_turn_start(source);
         let (prefix_lines, prefix_sections) = turn_start.map(|start| {
-            let (prefix, folds) = transcript_tools::render_with_cards(&source[..start], width, expanded, selected.clone(), cards);
+            let (prefix, folds, _, _) = transcript_tools::render_with_images(
+                &source[..start], width, expanded, selected.clone(), cards, image_rows, 0);
             (prefix.len(), folds.iter().filter(|fold| matches!(fold.index, transcript_tools::FoldKey::Section(_))).count())
         }).unwrap_or((0, 0));
         Self {
@@ -1177,13 +1192,25 @@ impl RenderedTranscript {
             lines,
             sections,
             links,
+            images,
+            image_rows,
             turn_start,
             prefix_lines,
             prefix_sections,
         }
     }
 
+    #[cfg(test)]
     fn update(
+        &mut self, source: &str, width: u16,
+        expanded: Option<&HashSet<transcript_tools::FoldKey>>,
+        selected: Option<transcript_tools::FoldKey>, cards_revision: u64,
+        cards: &[tool_cards::ToolCard],
+    ) {
+        self.update_media(source, width, expanded, selected, cards_revision, cards, 0);
+    }
+
+    fn update_media(
         &mut self,
         source: &str,
         width: u16,
@@ -1191,8 +1218,10 @@ impl RenderedTranscript {
         selected: Option<transcript_tools::FoldKey>,
         cards_revision: u64,
         cards: &[tool_cards::ToolCard],
+        image_rows: u16,
     ) {
         if self.width == width
+            && self.image_rows == image_rows
             && self.expanded.as_ref() == expanded
             && self.selected == selected
             && self.cards_revision == cards_revision
@@ -1202,19 +1231,24 @@ impl RenderedTranscript {
             }
             if let Some(start) = self.turn_start.filter(|_| source.starts_with(&self.source)) {
                 if streamed_turn_start(source) == Some(start) {
-                    let (tail_lines, mut tail_sections, mut tail_links) = transcript_tools::render_with_links_from(
-                        &source[start..], width, expanded, selected.clone(), cards, self.prefix_sections);
+                    let (tail_lines, mut tail_sections, mut tail_links, mut tail_images) =
+                        transcript_tools::render_with_images(
+                            &source[start..], width, expanded, selected.clone(), cards,
+                            image_rows, self.prefix_sections);
                     self.links.retain(|link| link.row < self.prefix_lines);
+                    self.images.retain(|image| image.row < self.prefix_lines);
                     self.lines.truncate(self.prefix_lines);
                     if !self.lines.is_empty() && !self.lines.last().is_some_and(|line| line.spans.is_empty()) {
                         self.lines.push(Line::default());
                     }
                     let offset = self.lines.len();
                     for link in &mut tail_links { link.row += offset; }
+                    for image in &mut tail_images { image.row += offset; }
                     for section in &mut tail_sections {
                         section.line += offset;
                     }
                     self.links.extend(tail_links);
+                    self.images.extend(tail_images);
                     self.lines.extend(tail_lines);
                     self.sections.retain(|section| section.line < self.prefix_lines);
                     self.sections.extend(tail_sections);
@@ -1224,7 +1258,7 @@ impl RenderedTranscript {
                 }
             }
         }
-        *self = Self::render(
+        *self = Self::render_media(
             self.pane,
             &self.id,
             source,
@@ -1233,6 +1267,7 @@ impl RenderedTranscript {
             selected,
             cards_revision,
             cards,
+            image_rows,
         );
     }
 }
@@ -1438,6 +1473,7 @@ pub struct App {
     tool_cards: ToolCards,
     tool_cards_revision: HashMap<String, u64>,
     rendered_transcripts: RefCell<Vec<RenderedTranscript>>,
+    image_store: RefCell<transcript_images::Store>,
     transcript_selection: RefCell<crate::selection::Selection>,
     pending_clipboard_copy: Option<Vec<u8>>,
     clipboard_job: Option<crate::clipboard::Job>,
@@ -1502,6 +1538,18 @@ pub struct App {
     pub should_quit: bool,
     pub size: Rect,
     drag: Option<DragTarget>,
+}
+
+impl App {
+    /// Select the image backend after entering the alternate screen.
+    pub fn configure_terminal_images(&self, mode: &str) {
+        self.image_store.borrow_mut().configure(mode);
+    }
+
+    /// Apply completed image previews before the next frame.
+    pub fn poll_terminal_images(&self) -> bool {
+        self.image_store.borrow_mut().poll()
+    }
 }
 
 impl App {
@@ -1686,6 +1734,7 @@ impl Default for App {
             tool_cards: ToolCards::default(),
             tool_cards_revision: HashMap::new(),
             rendered_transcripts: RefCell::new(Vec::new()),
+            image_store: RefCell::new(transcript_images::Store::default()),
             transcript_selection: RefCell::new(crate::selection::Selection::default()),
             pending_clipboard_copy: None,
             clipboard_job: None,

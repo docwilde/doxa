@@ -2,7 +2,7 @@ use doxa_isolation::{create_args, manifest_path, read_manifest, validate_inspect
 use serde_json::{json, Value};
 use std::{fs, os::unix::fs::{MetadataExt,PermissionsExt}, path::Path};
 
-fn policy()->Policy{Policy{image:format!("sha256:{}","a".repeat(64)),docker_host:"unix:///run/user/1000/test.sock".into(),memory_bytes:512*1024*1024,cpus:1.5,pids:128}}
+fn policy()->Policy{Policy{image:format!("sha256:{}","a".repeat(64)),docker_host:"unix:///run/user/1000/test.sock".into(),memory_bytes:512*1024*1024,cpus:1.5,pids:128,disk_soft_limit_bytes:Some(20*1024*1024*1024),disk_free_floor_bytes:Some(2*1024*1024*1024)}}
 fn manifest(root:&Path)->Manifest{
     let root=fs::canonicalize(root).unwrap();let root=root.as_path();
     let dirs=["checkout","home","cache","broker"];
@@ -34,6 +34,18 @@ fn unsupported_profiles_and_unpinned_images_fail_closed(){
     value.docker_host="unix:///var/run/docker.sock".into();assert!(value.validate().is_err());
     value=policy();value.cpus=f64::NAN;assert!(value.validate().is_err());
     value=policy();value.pids=0;assert!(value.validate().is_err());
+    value=policy();value.disk_soft_limit_bytes=Some(0);assert!(value.validate().is_err());
+    value=policy();value.disk_free_floor_bytes=Some(0);assert!(value.validate().is_err());
+}
+#[test]
+fn disk_status_shows_sample_and_monitored_limits(){
+    let root=tempfile::tempdir().unwrap();fs::set_permissions(root.path(),fs::Permissions::from_mode(0o700)).unwrap();let value=manifest(root.path());
+    fs::write(value.cache.join("sample"),vec![b'x';8192]).unwrap();
+    let status=value.status();
+    assert!(status["disk_usage_bytes"].as_u64().is_some_and(|n|n>=8192),"{status}");
+    assert!(status["disk_free_bytes"].as_u64().unwrap()>0);
+    assert_eq!(status["disk_soft_limit_bytes"],20*1024*1024*1024_u64);
+    assert!(status["disk_limit"].as_str().unwrap().contains("no hard filesystem quota"));
 }
 #[test]
 fn docker_launch_contains_only_four_private_mounts_and_enforced_controls(){

@@ -1,369 +1,103 @@
-# DOXA Rust 2.0
+# DOXA Rust guide
 
-Rust is the main DOXA frontend. The installer exposes `doxa`; the compiled
-frontend is `doxa-rs`. Claude uses its native CLI control protocol, Codex uses
-its app server, and API vendors use Rust HTTP clients. Canonical LORE 0.62.17 is an
-integrated Rust library for memory, reviews, indexing, and secret scrubbing;
-`lore-rs` also provides detached review and standalone plugin commands.
-The installed runtime requires no Python interpreter.
-`doxa remote serve` starts the optional Rust browser adapter on an owner-private
-Unix socket. Set `DOXA_REMOTE_ENABLED=1` and `DOXA_REMOTE_ALLOWED_LOGINS` to a
-comma-separated list of Tailscale logins, then point private Tailscale Serve at
-the printed `remote-browser.sock` path. The browser can read transcripts,
-follow live events, send prompts and answer pending requests. Remote access is
-off by default. The [remote hub plan](../docs/plans/remote-hub.md) covers
-cross-machine control and the eventual Android client.
+The Rust 2.0 frontend is `doxa-rs`; the installer exposes it as `doxa`. Claude uses its CLI, Codex uses a private app server, and DeepSeek and GLM use Rust API clients. Integrated LORE handles reviewed memory, indexing, and secret scrubbing. The installed runtime needs no Python interpreter.
 
-For the private hub, build `cargo build --locked -p doxa-hub` on a Unix server.
-Create an owner-private directory and set `DOXA_HUB_RUNTIME_DIR` to its absolute
-path, `DOXA_REMOTE_ENABLED=1`, and `DOXA_REMOTE_ALLOWED_LOGINS` to the owner.
-Run `doxa-hub` and point Tailscale Serve at `hub.sock`. On a workstation run
-`doxa remote connect https://SERVER.tailnet.ts.net HOST_ID` (HOST_ID contains
-letters, digits and hyphens). The host connector makes outbound requests
-to the hub and registers its live sessions. The browser at the hub URL can
-control them while both processes run. The hub is volatile: it loses presence,
-command results and its event ring on restart. An uncertain command is never
-automatically replayed; inspect the daemon before sending it again.
-From a second DOXA installation, `doxa remote list HUB_URL`, `doxa remote
-send HUB_URL HOST_ID~SESSION_ID "prompt"`, and `doxa remote answer HUB_URL
-HOST_ID~SESSION_ID REQUEST_ID allow|deny` use the same owner-scoped hub API.
-`doxa remote tui HUB_URL` opens live hub sessions in the native DOXA tab layout.
-The first session opens immediately; `Ctrl+T` chooses another remote session.
-Prompts and pending answers use stable request IDs for uncertain delivery,
-while transcript snapshots and SSE events resume at a sequence cursor. Ctrl+R
-opens remote history; PageUp at the top requests older pages. This remote-only
-window does not restore its tab layout after exit.
-Provider settings, LORE management and filesystem operations remain on the
-host. The hub pages older transcript records from the host on demand.
+## Contents
 
-To encrypt native hub traffic end to end, create a shared key outside any
-repository with `doxa remote keygen /absolute/private/remote.key`. Copy that
-file through a secure channel to the session host and remote client, keep it
-owner-only (`0600`), and set `DOXA_REMOTE_E2EE_KEY_FILE` to its absolute path
-for `doxa remote connect`, `doxa remote tui`, and `doxa remote send/answer`.
-The key never goes to the hub. DOXA compresses useful payloads before AES-GCM
-encryption and pads ciphertext in 4 KiB buckets. The hub still sees session
-presence, target IDs, operation names, event kinds, timing, and bucketed sizes.
-Encrypted sessions cannot use the hub-served browser or `doxa remote serve`.
-The separately installed [Chrome extension](../browser-extension/README.md)
-uses the same envelope protocol and keeps its key only in the open tab. The
-hub must allowlist that extension's origin while continuing to authenticate
-each request through the Tailscale proxy.
-From the local TUI, `/remote-connect HUB_URL HOST_ID` starts the host connector
-for this window; `/remote-disconnect` stops it. `/remote-control HUB_URL`
-adds remote tabs to the current tab bar without detaching local sessions.
-The `◎` marker identifies remote tabs, and `/local` selects an open local tab.
-The local tabset saves only local sessions; remote tabs are attached afresh.
-The in-window connector stops when the local window closes; run
-`doxa remote connect` separately if
-sharing must continue after the TUI exits.
-To enable browser alerts after the page closes, set `DOXA_HUB_RUNTIME_DIR` to
-the same private directory and run `doxa-hub push-keygen` once. It creates a
-`0600` VAPID key file; keep this file across hub restarts. Set
-`DOXA_HUB_VAPID_SUBJECT=mailto:you@example.com`, restart `doxa-hub`, then
-choose **Enable background alerts** in the private hub browser view. Push is
-off if the key file is absent. The hub keeps subscriptions only in memory;
-the browser registers its subscription again when opened after a hub restart.
-Only Mozilla, Google FCM and Apple HTTPS push endpoints are accepted. Push
-payloads contain a generic event kind, never transcript or approval content.
-New session titles use `model@branch/repo` in Git or `model@short-path`
-elsewhere; a second matching session gets `-2`. Explicit renames stay pinned.
-The [parity tracker](../docs/rust-1.19-parity.md) records stable release gates.
-The [2026-09-29 verification record](../docs/live-provider-verification-2026-09-29.md)
-reports the alpha.46 candidate's observed provider behavior and remaining checks.
-The [current gallery](../docs/rust-gallery.md) records live terminal captures;
-it is visual evidence, not a new provider compatibility test.
-Linux is live verified. macOS has native build and transport CI, with Claude,
-DeepSeek and GLM as the supported engine path; authenticated macOS provider
-sessions still need live verification. Protected Codex remains Linux-only
-because its process-owner contract has no macOS equivalent. Windows is unsupported.
-On macOS, connected client sockets attest the daemon's effective UID with
-`getpeereid`; Linux additionally attests its PID for destructive requests.
+- [Install and build](#install-and-build)
+- [Start and recover sessions](#start-and-recover-sessions)
+- [Use the workspace](#use-the-workspace)
+- [Review and permissions](#review-and-permissions)
+- [Memory and context](#memory-and-context)
+- [Fleets and peers](#fleets-and-peers)
+- [Remote access](#remote-access)
+- [Verification and limits](#verification-and-limits)
 
-## Build and install
+## Install and build
 
-Run from the repository root:
+```sh
+curl -fsSL https://raw.githubusercontent.com/docwilde/doxa/main/scripts/install.sh | sh
+doxa doctor --engine codex
+doxa new --engine codex
+```
+
+Pass a release tag after `sh -s --` to pin it. Installation requires Git, Cargo, and Rust; binaries go to `~/.local/bin` unless `DOXA_RUST_BIN_DIR` is set. The installer adds a Linux menu entry or macOS `~/Applications/DOXA.command`; set `DOXA_NO_LAUNCHER=1` to skip it. `doxa update` updates an installed launcher. On macOS, the installer skips protected Codex. `doxa help` lists all CLI commands.
+
+From a checkout:
 
 ```sh
 cargo build --locked
 ./task doctor
-./task new
+./task run
 ./task test
 ```
 
-`./task` builds incrementally in `target/rust-task`; ordinary Cargo uses
-`target`. `./task build --release` selects a release build. `./task install`
-installs committed HEAD, including the native LORE carrier. Working-tree
-changes must be committed first. Pass `--claude-bin` or `--codex-bin` to
-select a provider CLI executable. `DOXA_LORE_RS` selects a detached native
-carrier; the installer places it beside the frontend and daemon.
-The Python 1.x app has been removed from the current tree. Its source remains
-in the v1.19.0 tag; the current build uses Rust crates and a few Python
-provider-build and verification scripts.
+`./task` uses incremental builds in `target/rust-task`; ordinary Cargo uses `target`. `./task install` installs committed HEAD, including native LORE, so commit local changes first. The optional protected Codex installer uses Python during its build; the running DOXA app does not. [Codex build details](doxa-engines/README.md#install-the-protected-provider).
 
-The POSIX installer builds `main` by default:
+Claude needs a signed-in Claude Code CLI. Codex needs a signed-in CLI and the protected provider build. Add DeepSeek or z.ai keys with `/setup` or `DEEPSEEK_API_KEY` / `ZAI_API_KEY`. DOXA stores setup keys in an owner-only credentials file; they override inherited environment keys and are never copied from project `.env` files. [Engine capability matrix](../docs/engine-capabilities.md).
 
-```sh
-curl -fsSL https://raw.githubusercontent.com/docwilde/doxa/main/scripts/install.sh | sh
-```
+## Start and recover sessions
 
-Append a tag or SHA after `sh -s --` to pin a ref. Installation requires Git,
-Cargo and Rust. Binaries go to `~/.local/bin`, overridable with
-`DOXA_RUST_BIN_DIR`. The installer adds a Linux application-menu entry or an
-executable `~/Applications/DOXA.command` shortcut on macOS. Disable either with
-`DOXA_NO_LAUNCHER=1`. On macOS it skips the protected Codex installer; use
-Claude or an API engine. `doxa update` updates an installed launcher; source builds
-use `./task install`. `doxa help` lists CLI forms and options.
-Verified Codex updates publish a fresh immutable provider artifact and select it
-for new launches. Running providers retain their original files. Corrupt installed
-artifacts or receipts are refused rather than silently replaced.
+`doxa` restores this project's saved tabs or starts the configured engine. `doxa new --engine codex|claude|deepseek|glm` always starts another session; `doxa list`, `attach`, and `stop` manage live daemons. Use `--model` and supported `--effort` choices. Titles default to `model@repo:branch` in Git and can be renamed.
 
-## Sessions and worktrees
+`/resume [query]` opens verified saved state; `/attach` lists live daemons. Closing a tab leaves its daemon running. Ctrl+Q closes the window while all running sessions stay detached. Saved split layouts and drafts restore on launch. Historical data that the provider never stored cannot be reconstructed; unsafe or uncertain recovery stays read-only with a reason.
 
-Select `--isolation native|docker-open|docker-offline` at launch, or use the
-new-session TUI picker. Linux Docker sessions use a pinned reviewed image,
-a local rootless Engine and an independent checkout with private Git metadata.
-The isolation chip reports the verified network, mounts and resource limits.
-`/isolation PROFILE --confirm` changes an idle session; cross-backend changes
-stop, verify, copy and resume the same conversation. See
-[session isolation](../docs/session-isolation.md) for setup and limitations.
+Git sessions normally get managed linked worktrees. `DOXA_WORKTREE=0` or `worktree_per_session=false` disables them. `new --branch NAME` selects a base; `/branch [name]` changes an idle, clean worktree. `/diff` or F2 opens a bounded diff, and F4 keeps it beside the session. `worktrees list` previews orphans; `worktrees cleanup FULL_ID --confirm` deletes only after ownership and Git state are rechecked. [Lifecycle contract](../docs/worktree-lifecycle.md).
 
-Bare `doxa` restores this project's saved tabs or starts the configured engine
-(default Claude). Safe saved conversations resume without a prompt; others remain
-read only with a reason. Offline restoration retains saved split layout and
-conversations. `restore_tabs` and `resume_restored` control this behavior. `new` always
-starts a session; `attach`, `stop`, and `list` manage live sessions. Select
-`--engine codex|claude|deepseek|glm`, `--model`, and supported `--effort` values.
-Claude needs the Claude Code CLI. Set DeepSeek or z.ai API keys in `/setup`,
-or inherit `DEEPSEEK_API_KEY` / `ZAI_API_KEY` from the launching environment.
-Doctor checks dependencies without printing credentials.
+Start with `--isolation native|docker-open|docker-offline` or choose a profile in the new-session picker. Linux Docker profiles require a local rootless Engine and a pinned image. Their chip shows verified network, mounts, and resource policy. `/isolation PROFILE --confirm` changes an idle session; a backend change verifies and resumes the same conversation. [Setup and limits](../docs/session-isolation.md).
 
-Git sessions receive managed linked worktrees unless `DOXA_WORKTREE=0` or
-`worktree_per_session=false`. `new --branch NAME` selects an existing base.
-`/branch [name]` changes an idle, clean verified worktree with no unique commits.
-Finalization removes only verified clean worktrees with no commits ahead of
-the pinned base. Dirty, switched, unpinned, or uncertain worktrees remain.
-`worktrees list` previews orphans; `worktrees cleanup FULL_ID --confirm`
-rechecks ownership, Git state, registry, and shared lock before deletion.
-Legacy 1.x sessions without the pinned ownership contract remain survey only.
-Saved-session recovery can recreate a deleted managed checkout from its retained
-branch only when all metadata agrees; deleted uncommitted files are unrecoverable.
+## Use the workspace
 
-`/resume [query]` restores verified Claude, Codex, or vendor state. `/attach`
-selects live sessions. History restoration is bounded and marks omissions;
-historical tool or reasoning data that was never stored cannot be reconstructed.
+| Action | Default control |
+| --- | --- |
+| Open an engine picker | Ctrl+T |
+| Split beside / above | Alt+V / Alt+H |
+| Switch tab / pane prompt | Ctrl+Left or Right / Shift+Left or Right |
+| Open action palette / peer map | Ctrl+P / Ctrl+M |
+| Search turns | Ctrl+R or `/search TEXT` |
+| Open tool calls | Alt+T |
+| Close tab / stop daemon / exit window | Ctrl+W / Ctrl+X / Ctrl+Q |
 
-## Window, prompt, and review
+Tab reaches the project rail when visible. `/split`, `/vsplit`, `/pane`, and `/movepane` manage up to 16 pane groups and 256 tabs. Divider dragging preserves minimum sizes. `/settings` → **Keys** remaps window shortcuts immediately; `doxa settings set key_new_tab Alt+N` applies on the next launch. Duplicate or malformed chords are refused.
 
-Nested horizontal and vertical splits support up to 16 pane groups and 256
-session tabs. `/split`, `/vsplit`, `/pane [number]`, and `/movepane [number]`
-operate on numbered groups. Moving the source's final tab is refused. Divider
-mouse dragging preserves each subtree's minimum size. Tabsets save layout,
-labels, collections, and per-session drafts; insufficient space temporarily
-collapses the display without discarding its saved topology.
+Typing `/` shows completion; unsupported DOXA commands stay in the draft with an error. `/model`, `/effort`, `/mode`, and `/engine` show supported choices. Live model and mode changes require an idle session and empty queue; selecting another engine starts a new session. `/queue` previews or cancels waiting prompts. `/cd PATH` opens a tab in a verified directory without moving an existing daemon.
 
-Ctrl+T opens the new-tab engine picker; Alt+T opens tool calls.
-Ctrl+P opens a queryable action palette generated from the command registry,
-open tabs, saved fleet views, and session actions. Typing `/` shows completion
-above the prompt. Unsupported DOXA forms remain in the draft with an error;
-unknown provider/plugin commands follow the normal engine prompt path.
-Ctrl+R and `/search TEXT` use the prompt as the query field, with results above
-it. Indexed excerpts and bounded fallback scans are scrubbed; external entries
-without verified readable session files do not become resumable sessions.
+## Review and permissions
 
-Window shortcuts can be changed in `/settings` under Keys, or with
-`doxa settings set key_new_tab Alt+N`. Changes saved in the TUI apply immediately;
-CLI changes apply on the next launch. Use `none` to unbind a shortcut. Duplicate
-or malformed chords are rejected without replacing the saved config. The prompt,
-approval and menu editing keys remain local to those controls.
+Codex's permission chip offers `on-request`, `auto`, and `full-access`. `on-request` reviews protected commands, file changes, and profile requests inline. `auto` keeps the Codex sandbox; `full-access` disables it. The choice applies to the idle session's next turn and restores with that session. DOXA peer and LORE tools retain separate review in every mode. DeepSeek and GLM have no provider permission mode; their peer and LORE calls require individual approval. [Engine capabilities](../docs/engine-capabilities.md#review-and-accounting).
 
-Ctrl+W closes the active tab and leaves its daemon running. Delete also closes a
-tab when the tab bar has focus; in the prompt it edits text.
-Ctrl+X stops the active daemon and keeps its transcript available. Ctrl+Delete
-opens an inline confirmation, stops a live daemon, and removes its verified
-DOXA JSONL transcript after shutdown. Provider-native archives remain separate.
-Ctrl+Q exits the frontend and leaves all running sessions detached. Ctrl+Left/Right
-switches tabs in the current pane; Shift+Left/Right switches between pane prompts.
-Closed tabs disappear from the session rail, including past sessions. Use
-`/resume` to find and reopen saved sessions; a still-live daemon is reattached.
-`/sessions` lists live daemons even when their tabs are closed. Closed tabs
-stay closed when a saved layout is restored; DOXA starts a fresh tab if
-none remain open. Saved labels remain visible. Inline questions
-support selectable answers, free text, and Other drafts. Secret-input requests
-are refused until private masked input exists. Permission approval requiring
-full review is unavailable until the complete summary has been read. Reconnect
-snapshots restore exact pending requests; stale answers cannot apply to changed
-requests. There is no blanket Codex permission approval.
+Permission answers bind to an exact pending request. Complete summaries must be read before full approval; changed or stale requests cannot inherit an answer. Secret-input requests wait for a private masked-input interface. Ctrl+Delete asks before stopping a daemon and removing its verified DOXA transcript; provider archives remain separate. Diff hunk rejection checks the current patch and staged state again before applying it.
 
-The Codex permission chip changes an idle session for its next turn. Choose
-`on-request` to review protected command, file-change, and permission-profile
-requests inline; approved profiles last for that exact request and turn.
-Choose `auto` to skip provider approval prompts while retaining the Codex
-sandbox, or `full-access` to skip prompts and disable that sandbox. The picker
-and `/mode on-request|auto|full-access` change the current session; saved
-sessions restore the selected mode. A queued or active turn must finish first.
-“Always approve this tool” applies only to canonical DOXA peer and LORE tools,
-which keep their own review even in Codex `auto` or `full-access`. DeepSeek and GLM have no provider permission mode;
-their peer and LORE tool calls require individual DOXA approval. The optional
-`DOXA_VENDOR_TOOLS=workspace-read` tool is read-only and enabled separately.
+Links, Markdown, reasoning, and individual tool calls render in the transcript. Standalone local images inside the session workspace have bounded previews; [image settings and limits](../docs/terminal-images.md) explain the supported terminals. Ctrl+click opens HTTP(S) links. Review panes and tool output have bounded sizes. Search uses scrubbed indexed excerpts and bounded fallback scans. Unverified external entries cannot become resumable sessions.
 
-In the belief browser, select a row and press A or R, or click its Accept or
-Reject button. DOXA fetches the exact current belief before applying the
-action. Enter opens detailed review and note editing. Press `/` or click the
-prompt field to filter the list; Enter returns from filtering to row actions.
+## Memory and context
 
-Markdown, HTTP(S) Ctrl+click links, expandable tool results and reasoning,
-processing indicators, and per-session chip menus use bounded data. `/queue`
-previews and cancels waiting prompts by stable ID. `/model [name]`,
-`/effort [name]`, `/mode [name]`, and `/engine [name]` use supported capability
-and catalog choices. Live changes require an idle session and empty queue.
-Claude model and effort changes are verified with the live CLI
-`get_settings` response; unknown state is not presented as applied. Engine selection starts a new session.
+The memory chip browses user and project facts; the belief browser supports evidence review, notes, accept, and reject. `/pending` opens proposals for the current project and global store. Mutations require a current snapshot and full review. DOXA calls canonical LORE and fails explicitly if its native carrier is unavailable; it keeps no separate memory store.
 
-`/diff` or F2 opens a bounded worktree diff; F4 keeps it beside the session.
-File/hunk navigation and exact tracked-text-hunk rejection are supported.
-Rejection rechecks the patch and staged state, queues until idle, and submits
-feedback through the session. Changed patches and whole-file metadata hunks
-are refused. `/cd PATH` starts a tab in a verified directory; it does not move
-the existing daemon. `/clear` requires an idle session and durable tabset swap.
+`/context` shows reported provider telemetry and snapshot details. `/usage` uses reported accounting and labels estimates. Missing or stale component counts and quota stay unknown. DeepSeek and GLM costs are estimates based on reported tokens and dated rates. Saved API keys are redacted before transcripts or memory boundaries. [LORE](https://github.com/docwilde/LORE) · [Engine accounting](../docs/engine-capabilities.md#review-and-accounting).
 
-## Memory, context, and operations
-
-The curated-memory chip browses project/user scopes with their own capacity
-percentages. Add, edit, and remove use full before/after review and exact snapshot
-checks before invoking canonical LORE mutations. Pending, conflict, trust, and
-detached-store gates remain authoritative. Beliefs and `/pending` use complete
-review and atomic exact-snapshot actions through the integrated canonical core.
-A missing native carrier is an explicit availability failure. DOXA does not
-implement a separate memory store. Memory browsing delays entry previews;
-review view titles distinguish **Pending** from **Clustered** proposals.
-Mouse-wheel input follows the hovered pane or control.
-
-`/context` shows available official provider telemetry and reported snapshot
-metadata. Claude can report categories, memory files, tools, agents, and local
-injection character counts. Codex shows verified model/window and input/cached/
-output usage; unavailable component counts remain unknown. Estimates are marked.
-`/usage` uses reported accounting; subscription quota is shown only from a
-verified source. Missing or stale provider data is not replaced with invented
-billing or component totals. Reported quota consumption becomes yellow above
-66% and red above 90%; missing quota stays unknown.
-
-`setup` and `/setup` guide provider authentication, LORE store selection, and
-model/effort defaults. `auth login claude|codex`, `auth logout claude|codex`, and
-corresponding slash commands invoke the selected provider CLI. Codex login
-supports `--device-auth`. Public sign-in URLs/codes are allowlisted; credentials
-and raw authentication output do not enter transcripts. Closing authentication
-cancels and reaps its worker. `auth status` checks CLI exit status.
-
-In `/setup`, select the DeepSeek or z.ai API key edit row, type or paste into
-the masked field, and choose Save or Cancel. Setup reports only the source
-(saved, environment, or missing); it never reveals the key. Remove deletes
-the saved override and falls back to the inherited environment key.
-Changes refresh the vendor model list and DeepSeek balance and apply to the
-next request in existing sessions.
-
-Saved keys are plaintext in the owner-only `~/.doxa/credentials.json` file
-(mode `0600`), under `DOXA_HOME` when configured. They override environment
-keys. DOXA does not load credentials from project files, `.env`, or LORE
-memory. Key input stays separate from prompt drafts and conversation history;
-known keys are redacted before crossing vendor memory or transcript boundaries.
-
-`plugins [refresh|adopt on|off]` and `/plugins` / `/reload-plugins` discover and
-control sanitized Claude plugin adoption for future sessions. Native settings
-and `/settings` edit the full categorized preference catalog; environment
-shadows remain read only. Settings are validated against the categorized catalog before they are saved.
+`/setup` handles provider credentials and defaults. `/plugins` and `/reload-plugins` control sanitized Claude plugin adoption for future sessions. `/settings` edits validated preferences; environment overrides remain read-only.
 
 ## Fleets and peers
 
-Select an independent read-only model with `--alignment-supervisor PROVIDER:MODEL`.
-Choose a separate fast message judge with `--message-judge llm:PROVIDER:MODEL`
-or `jev:MODEL`, and `--message-review off|shadow|enforce`. `/settings` → Fleet
-exposes these defaults. Reviewers use separate API credentials and a reserved
-budget; the acting coordinator selected by `--supervisor` remains a worker.
-Host gates bind messages to the approved charter and authenticated assignments.
-See [independent fleet supervision](../docs/fleet-supervision.md) for recovery,
-evidence requirements and the distinction between estimates and billed spend.
+`fleet preflight` checks capacity, spend ceiling, and socket paths before `fleet start`. Use `--worker-task INDEX:TEXT` to give each worker a frozen deliverable and optional `--worker-path INDEX:RELATIVE_PREFIX` to narrow its file scope. `fleet runs|status|attach|stop|resume` operate on owned manifests and verified slots. `/fleet` shows runs in the TUI; starting or resuming there requires reviewing and arming the complete plan. Budgeted resume needs complete persisted accounting. [Fleet guide](../docs/fleet.md).
 
-Native `fleet start` accepts pool, prompt/file, worker count, supervisor, budget,
-approval policy, and quiescence options. `fleet preflight` validates capacity,
-spend ceiling, and socket paths. `fleet runs|status|attach|stop|resume` use owned
-manifests and verified slot sockets. All production fleet orchestration is
-native; unsupported forms are refused with their original arguments retained.
+Select an independent supervisor with `--alignment-supervisor PROVIDER:MODEL`. Choose a separate fast message judge with `--message-judge llm:PROVIDER:MODEL` or `jev:MODEL`, and choose `--message-review off|shadow|enforce`. `/settings` → **Fleet** stores defaults. The acting `--supervisor` is a worker; the independent reviewer reads evidence and cannot grant its own approvals. Host gates bind peer traffic to the approved charter and assignments. [Supervisor contract](../docs/fleet-supervision.md).
 
-The native controller owns startup barriers, supervision, approval handling,
-budget checks, cancellation, and teardown. `fleet review` / `fleet answer`
-bind an answer to the exact reviewed request token. Budgeted resume requires
-complete persisted accounting; incomplete or unsupported pricing fails closed.
-Vendor cost is an estimate from a dated sheet, not a live balance. Reported
-Claude and Codex usage must match the accounting model and basis.
+`/peers` or Ctrl+M opens the peer map; `/msg PEER TEXT` sends a scrubbed same-project message. The optional private mesh shows fleet relationships in a browser. Remote peer routes use authenticated private sockets and verified rosters. [Transport contract](../docs/native-peernet.md).
 
-`/fleet` opens runs/status above the prompt and saves verified real run views
-in the action palette. `/fleet start OPTIONS` and `/fleet resume RUN` require
-complete plan review and explicit arming before spawning an owned controller.
-Arguments are passed directly, without shell evaluation. Task text and child
-output stay private. Ctrl+C cancels a controller; Ctrl+Q detaches it
-before exiting. Controller completion refreshes actual manifest state.
+## Remote access
 
-`/peers` and Ctrl+M open the native peer map. `/msg PEER TEXT` sends
-same-project scrubbed messages. Native inbound turns use bounded queues;
-supervisor peer tools are capability gated. CLI `mesh serve` and `fleet mesh RUN`
-serve the private graph through Hyper using compiled page assets and a
-private URL token.
-TUI `/mesh [RUN|stop]` opens or stops a browser graph owned by this window.
-`/fleet status`, `stop`, `detach`, `attach INDEX` and `mesh` use the current run.
-Old manifests lacking a verified private ledger are refused for browser serving.
-Remote routing uses a private Unix socket and kernel-attested proxy identity.
-Configured remote endpoints must have reciprocal verified rosters. See
-[the remote transport contract](../docs/native-peernet.md).
+Remote access is off by default. For a private browser view on the session host, set `DOXA_REMOTE_ENABLED=1` and `DOXA_REMOTE_ALLOWED_LOGINS=you@example.com`, run `doxa remote serve`, and point Tailscale Serve at the printed owner-private socket. The view reads recent turns, follows events, sends prompts, and answers pending requests.
 
-## Codex compaction protection
+For cross-machine control, run `doxa-hub` behind Tailscale Serve on a private server, then `doxa remote connect HUB_URL HOST_ID` on the session host. The hub browser, `doxa remote list/send/answer`, and `doxa remote tui HUB_URL` can control registered sessions. Remote TUI tabs use the normal keys; Ctrl+R opens history and PageUp fetches older records. `/remote-connect HUB_URL HOST_ID` shares sessions while the local window stays open; `/remote-control HUB_URL` adds remote tabs marked `◎` beside local ones. The hub is volatile, so inspect an uncertain command before retrying it. [Remote hub design](../docs/plans/remote-hub.md).
 
-Protected app-server startup requires the verified **Codex 0.156.1** hook
-contract and checks DOXA's trusted synchronous `PreCompact` hook hash. An
-unsupported build or missing trusted hook refuses startup. The hook binds the
-provider thread and owned rollout, prepares a scrubbed private snapshot, and
-waits for the native LORE review worker. Before the official manual `/compact`
-request, DOXA independently reviews the bound source and rechecks its identity
-and digest. Failed, disabled or missing review sends no compaction request.
-Startup verifies that Codex's unhooked token-budget reset feature is disabled.
-Claude compaction also waits for LORE review. Vendor `/compact` preserves the
-full durable conversation and writes a separate, reviewed summary checkpoint;
-it validates the original prefix before using that summary on resume.
+For native end-to-end encryption, generate a shared key with `doxa remote keygen /absolute/private/remote.key`. Keep it owner-only and set `DOXA_REMOTE_E2EE_KEY_FILE` to its path on both host and client. Transcript and control content stays opaque to the hub; session presence and event metadata remain visible. Encrypted sessions work in the native TUI, CLI, and separately installed [Chrome extension](../browser-extension/README.md), but not the hub-served browser. The hub can also deliver generic Web Push completion and input alerts when configured with a private VAPID key. An Android client remains planned.
 
-Alpha.41 requires DOXA's private Codex 0.156.1 app server and its matching
-`codex-code-mode-host`. Model-required Code Mode uses that native host; the
-launcher verifies both private artifacts before dispatch. The app server flushes the
-owned rollout before review and blocks local and remote compaction before
-inference or history replacement unless exactly one trusted synchronous hook
-explicitly allows continuation. Missing, failed, timed-out, malformed, asynchronous
-or duplicate review refuses compaction. Stock app servers refuse protected turns.
-Legacy exec sessions stay read only until an explicit same-thread migration with
-`DOXA_CODEX_MIGRATE_APPSERVER=1`. The official Codex CLI is retained for login/help.
+## Verification and limits
 
-Protected DOXA sessions use a private Linux provider supervisor. Its control
-handshake completes before the provider starts; control closure on cancellation,
-shutdown or daemon death stops and reaps provider descendants even across new
-process groups or sessions. The daemon does not adopt unrelated jobs.
+Run `./task test` for the Rust suite. CI checks portable crates, daemon behavior, and provider fixtures with disposable stores. Linux has bounded live checks for all four engines. macOS builds and transport tests run in CI, but authenticated provider sessions still need live verification. Protected Codex needs Linux process ownership and private compaction hooks; Windows is unsupported. [Platform record](../docs/platform-verification.md) · [Latest provider record](../docs/live-provider-verification-2026-10-04.md).
 
-Ten tests against the compiled provider cover nine refusal cases and a successful
-allow control with a loopback model. Real-account successful LORE review and
-large-context compaction require the reviewer's Claude authentication. Earlier
-manual and lowered-threshold automatic compaction passed native review. An
-[alpha.52 authenticated run](../docs/live-default-window-compaction-2026-09-30.md)
-also passed one default-window automatic compaction and exact recall after a
-daemon restart; the earlier September 29 run remains incomplete historical evidence.
-See [engine contracts](doxa-engines/README.md) for transport and review details.
+The protected Codex build verifies a pinned synchronous `PreCompact` hook before starting a thread. Missing or failed LORE review blocks compaction; stock app servers cannot run protected turns. The private Linux launcher owns and reaps provider descendants. [Codex engine contract](doxa-engines/README.md) records exact build and verification details. [Current gallery](../docs/rust-gallery.md) shows real TUI captures and isolated browser samples.
 
-## Verification and gallery
-
-Rust CI verifies the workspace and a native installation using disposable
-stores and controlled provider fixtures. Python is used by protected Codex
-build tooling and a few development verification scripts. Coverage
-includes layout, review gates, restoration, current-session controls, cancellation,
-interactive fleets, device login, private ledgers and malformed manifests.
-Run `./task test` for the current full suite. Preview tests do not establish live
-provider compatibility beyond the explicitly verified contracts.
-
-The [gallery](../docs/rust-gallery.md) captures the real application in a VTE
-terminal with an authenticated provider and isolated example repository.
-Development fixtures are kept separate. Terminal image probes are disabled.
+Python 1.x is archived at [v1.19.0](https://github.com/docwilde/doxa/tree/v1.19.0); its [manual](../docs/manual.md) documents that version.

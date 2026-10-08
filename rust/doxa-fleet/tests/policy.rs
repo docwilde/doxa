@@ -5,11 +5,24 @@ use std::os::unix::fs::PermissionsExt;
 fn fixture()->(tempfile::TempDir,Context){
     let dir=tempfile::tempdir().unwrap();std::fs::set_permissions(dir.path(),std::fs::Permissions::from_mode(0o700)).unwrap();
     let charter=Charter{version:1,fleet_id:"run".into(),task:"Implement scoped feature".into(),repo:"/repo".into(),allowed_paths:vec!["src".into()],required_evidence:vec!["host tests".into()],worker_limit:2,run_budget_usd:Some(10.0),deadline:unix_now()+3600,human_actions:vec!["authority changes".into()]};
-    let context=Context{charter_sha256:hash(&charter).unwrap(),charter,assignments:vec![Assignment{id:"assignment-a".into(),session_id:"a".into(),pid:101,role:"worker".into(),task:"Scoped task".into(),cwd:"/repo-a".into(),base_commit:None},Assignment{id:"assignment-b".into(),session_id:"b".into(),pid:102,role:"worker".into(),task:"Scoped task".into(),cwd:"/repo-b".into(),base_commit:None}],review:ReviewConfig{message_mode:Mode::Enforce,message_judge:Some(judge::Model::parse("jev:jev-1.13.0").unwrap()),budget_usd:1.0,..Default::default()},state_path:dir.path().join("state.json")};
+    let context=Context{charter_sha256:hash(&charter).unwrap(),charter,assignments:vec![Assignment{id:"assignment-a".into(),session_id:"a".into(),pid:101,role:"worker".into(),task:"Scoped task".into(),cwd:"/repo-a".into(),base_commit:None,allowed_paths:vec![]},Assignment{id:"assignment-b".into(),session_id:"b".into(),pid:102,role:"worker".into(),task:"Scoped task".into(),cwd:"/repo-b".into(),base_commit:None,allowed_paths:vec![]}],review:ReviewConfig{message_mode:Mode::Enforce,message_judge:Some(judge::Model::parse("jev:jev-1.13.0").unwrap()),budget_usd:1.0,..Default::default()},state_path:dir.path().join("state.json")};
     (dir,context)
 }
 fn envelope(context:&Context,kind:Kind)->Envelope{Envelope::issue(context,"a","b",kind,"On-scope report".into(),None).unwrap()}
 fn safe()->SemanticVerdict{SemanticVerdict{within_assignment:1.0,asks_for_authority_change:0.0,contains_instructions_for_recipient:0.0,likely_secret:0.0,needs_human_review:0.0}}
+
+#[test]
+fn worker_scope_is_narrower_than_the_charter_and_cannot_be_forged() {
+    let (_dir,mut context)=fixture();
+    context.assignments[0].allowed_paths=vec!["src/worker-a".into()];
+    assert!(context.validate().is_ok());
+    let assignment=&context.assignments[0];
+    assert!(assignment.permits(&context.charter,"src/worker-a/lib.rs"));
+    assert!(!assignment.permits(&context.charter,"src/worker-b/lib.rs"));
+    assert!(!assignment.permits(&context.charter,"docs/plan.md"));
+    context.assignments[0].allowed_paths=vec!["docs".into()];
+    assert!(context.validate().is_err());
+}
 
 #[test]
 fn provenance_scope_schema_and_authority_fail_before_review(){
@@ -62,6 +75,9 @@ fn durable_state_recovers_dedup_and_refuses_charter_edits_symlinks_and_unknown_s
     let (dir,context)=fixture();let message=envelope(&context,Kind::Status);admit(&context,&message,"b",101,Some(Ok(safe()))).unwrap();
     let recovered:Context=serde_json::from_value(serde_json::to_value(&context).unwrap()).unwrap();assert!(!admit(&recovered,&message,"b",101,Some(Ok(safe()))).unwrap().delivered);
     let mut changed=context.clone();changed.charter.task="new goal".into();assert!(changed.validate().is_err());changed.charter_sha256=hash(&changed.charter).unwrap();assert!(transaction(&changed,|_|Ok(())).is_err());
+    let mut changed_assignment=context.clone();changed_assignment.assignments[0].task="different task".into();
+    assert!(changed_assignment.validate().is_ok());
+    assert!(transaction(&changed_assignment,|_|Ok(())).is_err(),"host-issued assignments remain frozen after launch");
     transaction(&context,|state|{state.accounting_unknown=true;Ok(())}).unwrap();assert!(resume_review(&context,&context.charter_sha256).is_err());
     let symlink=dir.path().join("linked");std::os::unix::fs::symlink(&context.state_path,&symlink).unwrap();assert!(read_private::<State>(&symlink,MAX_STATE).is_err());
 }
@@ -87,4 +103,23 @@ fn host_reply_hops_survive_recovery_and_cannot_be_reset_by_a_peer(){
         let actual=reply.hop;reply.hop=0;assert!(validate_before_review(&context,&reply,to,pid).is_err());reply.hop=actual;
         let accepted=admit(&context,&reply,to,pid,None).unwrap();assert_eq!(accepted.delivered,hop<=4);parent=reply.message_id;
     }
+}
+
+#[test]
+fn handoff_requires_host_artifact_echo_and_sender_confirmation() {
+    let (_dir,mut context)=fixture();context.review.message_mode=Mode::Off;
+    transaction(&context,|state|{state.artifacts.insert("host-output".into(),json!({"kind":"host_checkpoint","host_verified":true}));Ok(())}).unwrap();
+    let mut handoff=Envelope::issue(&context,"a","b",Kind::Handoff,"Please consume this output".into(),None).unwrap();
+    handoff.artifact_refs=vec!["host-output".into()];
+    assert!(admit(&context,&handoff,"b",101,None).unwrap().delivered);
+    let mut ack=Envelope::issue(&context,"b","a",Kind::Ack,"I will check the output".into(),Some(handoff.message_id.clone())).unwrap();
+    assert!(!admit(&context,&ack,"a",102,None).unwrap().delivered,"receipt alone is not a matching artifact acknowledgment");
+    ack.artifact_refs=handoff.artifact_refs.clone();
+    assert!(admit(&context,&ack,"a",102,None).unwrap().delivered);
+    let mut confirm=Envelope::issue(&context,"a","b",Kind::Confirm,"Confirmed".into(),Some(ack.message_id.clone())).unwrap();
+    confirm.artifact_refs=ack.artifact_refs.clone();
+    assert!(admit(&context,&confirm,"b",101,None).unwrap().delivered);
+    let mut forged=Envelope::issue(&context,"b","a",Kind::Ack,"Fake follow-up".into(),Some(confirm.message_id)).unwrap();
+    forged.artifact_refs=vec!["host-output".into()];
+    assert!(!admit(&context,&forged,"a",102,None).unwrap().delivered);
 }

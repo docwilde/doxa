@@ -1,6 +1,6 @@
 [package]
 name = "doxa-isolation"
-version = "2.0.0-beta.10"
+version = "2.0.0-beta.11"
 edition = "2021"
 publish = false
 license = "AGPL-3.0-only"
@@ -10,6 +10,7 @@ name = "doxa-isolation-worker"
 path = "src/main.rs"
 
 [dependencies]
+errno = "0.3"
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

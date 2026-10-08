@@ -2210,7 +2210,12 @@ impl App {
             None
         };
         let show_welcome = content.trim().is_empty() && activity_line.is_none();
-        let (lines, sections, link_regions, top) = {
+        let image_rows = if self.preferences.value("image_mode") == "text" {
+            0
+        } else {
+            super::transcript_tools::IMAGE_ROWS
+        };
+        let (lines, sections, link_regions, images, top) = {
             let mut cache = self.rendered_transcripts.borrow_mut();
             let position = cache
                 .iter()
@@ -2224,7 +2229,7 @@ impl App {
                 if cache.len() == MAX_RENDERED_TRANSCRIPTS {
                     cache.remove(0);
                 }
-                cache.push(RenderedTranscript::render(
+                cache.push(RenderedTranscript::render_media(
                     index,
                     id,
                     content,
@@ -2233,16 +2238,18 @@ impl App {
                     self.tool_section_hover.as_ref().filter(|(session, _)| session == id).map(|(_, key)| key.clone()).or_else(|| (active && self.focus == Focus::Transcript).then(|| self.selected_tool_sections.get(id).cloned()).flatten()),
                     cards_revision,
                     self.tool_cards.for_session(id),
+                    image_rows,
                 ));
                 cache.len() - 1
             };
-            cache[position].update(
+            cache[position].update_media(
                 content,
                 inner[1].width.saturating_sub(2),
                 self.expanded_tool_sections.get(id),
                 self.tool_section_hover.as_ref().filter(|(session, _)| session == id).map(|(_, key)| key.clone()).or_else(|| (active && self.focus == Focus::Transcript).then(|| self.selected_tool_sections.get(id).cloned()).flatten()),
                 cards_revision,
                 self.tool_cards.for_session(id),
+                image_rows,
             );
             let (window, top) = transcript_window(
                 &cache[position].lines,
@@ -2275,6 +2282,7 @@ impl App {
                     ),
                     Vec::new(),
                     Vec::new(),
+                    Vec::new(),
                     0,
                 )
             } else {
@@ -2293,6 +2301,7 @@ impl App {
                             link
                         })
                         .collect::<Vec<_>>(),
+                    cache[position].images.clone(),
                     top,
                 )
             }
@@ -2382,6 +2391,34 @@ impl App {
                 ),
             inner[1],
         );
+        if image_rows > 0 {
+            let viewport = usize::from(inner[1].height);
+            let mut store = self.image_store.borrow_mut();
+            let workspace = (!self.remote_mode && !crate::remote_client::valid_target(id))
+                .then(|| self.session_cwds.get(id))
+                .flatten()
+                .map(std::path::PathBuf::as_path);
+            for image in images {
+                let start = image.row.max(top);
+                let end = (image.row + usize::from(image_rows)).min(top + viewport);
+                if start >= end { continue; }
+                let area = Rect::new(
+                    inner[1].x.saturating_add(1),
+                    inner[1].y.saturating_add((start - top) as u16),
+                    inner[1].width.saturating_sub(2),
+                    (end - start) as u16,
+                );
+                if start == image.row && end == image.row + usize::from(image_rows) {
+                    store.draw(frame, area, &image.source, &image.alt, workspace);
+                } else {
+                    let text = format!("Image clipped: {} · scroll to view", image.alt);
+                    frame.render_widget(
+                        Paragraph::new(text).style(Style::default().fg(theme::MUTED)),
+                        Rect::new(area.x, area.y, area.width, 1),
+                    );
+                }
+            }
+        }
         if !self.link_interaction_blocked() {
             self.transcript_selection.borrow_mut().register(
                 crate::selection::Owner {

@@ -1,6 +1,6 @@
 [package]
 name = "doxa-tui"
-version = "2.0.0-beta.10"
+version = "2.0.0-beta.11"
 edition = "2021"
 publish = false
 license = "AGPL-3.0-only"
@@ -21,6 +21,8 @@ doxa-vendors = { path = "../doxa-vendors" }
 doxa-lore = { path = "../doxa-lore" }
 doxa-remote-wire = { path = "../doxa-remote-wire" }
 crossterm = "0.28"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+ratatui-image = { version = "=8.0.2", default-features = false, features = ["crossterm"] }
 doxa-protocol = { path = "../doxa-protocol" }
 libc = "0.2"
 pulldown-cmark = "0.13"

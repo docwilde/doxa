@@ -4,7 +4,11 @@ Status: **Linux implementation shipped in 2.0.0-beta.10**. Native, Docker with
 open egress and Docker with no network are implemented; the TUI shows the
 host-verified profile. See [the operator guide](../session-isolation.md) and
 [reviewed image packaging](../../containers/session/README.md) for current
-settings and commands. Hardened egress, hard disk quotas, macOS Docker Desktop,
+settings and commands. A bounded allocated-block scan now gates launches,
+resumes, migrations and new turns against a saved soft ceiling and host
+free-space floor. The chip reports usage as monitoring, not a hard quota.
+Hard quotas still require administrator-managed filesystem project quotas and
+verified enforcement across bind mounts. Hardened egress, macOS Docker Desktop,
 remote Engines and a containerized controller remain open.
 
 Target: Linux first. This
