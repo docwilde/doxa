@@ -4,6 +4,7 @@ use std::{fs, os::unix::fs::{MetadataExt,PermissionsExt}, path::Path};
 
 fn policy()->Policy{Policy{image:format!("sha256:{}","a".repeat(64)),docker_host:"unix:///run/user/1000/test.sock".into(),memory_bytes:512*1024*1024,cpus:1.5,pids:128}}
 fn manifest(root:&Path)->Manifest{
+    let root=fs::canonicalize(root).unwrap();let root=root.as_path();
     let dirs=["checkout","home","cache","broker"];
     for directory in dirs{fs::create_dir(root.join(directory)).unwrap();fs::set_permissions(root.join(directory),fs::Permissions::from_mode(0o700)).unwrap();}
     let meta=fs::metadata(root.join("checkout")).unwrap();
@@ -78,8 +79,8 @@ fn mount_replacement_and_symlink_components_are_refused(){
 }
 #[test]
 fn native_resume_requires_original_manifest_and_never_relabels_a_running_session(){
-    let root=tempfile::tempdir().unwrap();let home=root.path().join("home");fs::create_dir(&home).unwrap();
-    let workspace=root.path().join("project");fs::create_dir(&workspace).unwrap();
+    let root=tempfile::tempdir().unwrap();let canonical=fs::canonicalize(root.path()).unwrap();let home=canonical.join("home");fs::create_dir(&home).unwrap();
+    let workspace=canonical.join("project");fs::create_dir(&workspace).unwrap();
     let mut runtime=Runtime::prepare(&home,"session",&workspace,Some(Profile::Native),false,None).unwrap();
     assert_eq!(runtime.status()["profile"],"native");
     assert!(runtime.set_profile(Profile::DockerOpen,false).is_err());

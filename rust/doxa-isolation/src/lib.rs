@@ -519,6 +519,10 @@ pub fn isolate_command(command: Command, provider: &str) -> io::Result<Command> 
         }
     }
     if provider == "codex" { isolated.args(["--env", "CODEX_HOME=/home/doxa/codex"]); }
+    // Pass only this CLI's explicitly selected API credential. Using the bare
+    // environment name keeps the secret out of Docker client argv/diagnostics.
+    let credential=if provider=="claude"{"ANTHROPIC_API_KEY"}else{"OPENAI_API_KEY"};
+    if std::env::var_os(credential).is_some_and(|value|!value.is_empty()){isolated.arg("--env").arg(credential);}
     isolated.arg(manifest.container_id.as_deref().unwrap()).arg("/usr/local/bin/doxa-isolation-worker").arg("exec")
         .arg(format!("/usr/local/bin/{provider}"));
     for arg in command.get_args() {

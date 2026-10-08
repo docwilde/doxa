@@ -29,6 +29,11 @@ pub const SETTINGS: &[Setting] = &[
     Setting { key: "fleet_review_input_price", env: "DOXA_FLEET_REVIEW_INPUT_PRICE", label: "review input price ($/Mtok)", category: "Fleet", kind: Kind::Number, choices: &[], default: "100", read_only: false, help: "Conservative owner-approved input rate for the selected LLM reviewer.", note: "Unknown model rates never imply free work. The default is deliberately conservative. Pinned Jev 1.13 uses documented input-only pricing." },
     Setting { key: "fleet_review_output_price", env: "DOXA_FLEET_REVIEW_OUTPUT_PRICE", label: "review output price ($/Mtok)", category: "Fleet", kind: Kind::Number, choices: &[], default: "100", read_only: false, help: "Conservative owner-approved output rate for the selected LLM reviewer.", note: "Every LLM call has a hard 512 output token limit." },
     Setting { key: "fleet_review_threshold", env: "DOXA_FLEET_REVIEW_THRESHOLD", label: "message risk threshold", category: "Fleet", kind: Kind::Number, choices: &[], default: "0.5", read_only: false, help: "Probability threshold for semantic quarantine; review against labeled examples before enforcing.", note: "Each new fleet review shows the exact threshold. Model confidence is evidence, never permission." },
+    Setting {key:"docker_image",env:"DOXA_DOCKER_IMAGE",label:"Docker worker image digest",category:"Session",kind:Kind::Text,choices:&[],default:"",read_only:false,help:"Reviewed local image pinned as sha256:CONTENT_ID or NAME@sha256:DIGEST.",note:"DOXA never builds repository Dockerfiles or pulls an unreviewed image when a session starts."},
+    Setting {key:"docker_host",env:"DOXA_DOCKER_HOST",label:"local rootless Docker socket",category:"Paths",kind:Kind::Text,choices:&[],default:"",read_only:false,help:"Local unix:///run/user/UID/docker.sock endpoint; default follows the host user.",note:"Remote TCP Engines, the rootful system socket and Docker sockets inside workers are forbidden."},
+    Setting {key:"docker_memory_bytes",env:"DOXA_DOCKER_MEMORY_BYTES",label:"Docker memory ceiling (bytes)",category:"Session",kind:Kind::Number,choices:&[],default:"4294967296",read_only:false,help:"Enforced cgroup memory limit; default 4 GiB, configurable for the workload.",note:"Disk usage is monitored and has no hard quota."},
+    Setting {key:"docker_cpus",env:"DOXA_DOCKER_CPUS",label:"Docker CPU ceiling",category:"Session",kind:Kind::Number,choices:&[],default:"2",read_only:false,help:"Enforced CPU quota; fractional CPUs are allowed.",note:"Requires effective rootless cgroup v2 delegation."},
+    Setting {key:"docker_pids",env:"DOXA_DOCKER_PIDS",label:"Docker process ceiling",category:"Session",kind:Kind::Number,choices:&[],default:"256",read_only:false,help:"Enforced cgroup process count limit.",note:"Session changes do not implicitly change resources or image; these defaults apply to new sessions."},
     key_setting!("key_new_tab", "new tab", "Ctrl+T"),
     key_setting!("key_close_tab", "close tab", "Ctrl+W"),
     key_setting!("key_close_tab_alt", "close focused tab", "Delete"),
@@ -183,6 +188,13 @@ pub fn coerce(s: &Setting, value: Option<&str>) -> io::Result<Option<toml::Value
             if !n.is_finite() || n < 0.0 { return Err(invalid("must be a nonnegative finite number")); }
             if s.key == "linger_secs" && n > crate::launch::MAX_LINGER_SECS { return Err(invalid("must be between 0 and 31536000 seconds")); }
             if matches!(s.key, "remote_port"|"remote_proxy_uid") && n.fract() != 0.0 { return Err(invalid("must be an integer")); }
+            if matches!(s.key,"docker_memory_bytes"|"docker_pids"){
+                if n.fract()!=0.0||n>i64::MAX as f64{return Err(invalid("must be a bounded integer"));}
+                if s.key=="docker_memory_bytes"&&!(134217728.0..=1099511627776.0).contains(&n){return Err(invalid("must be between 128 MiB and 1 TiB"));}
+                if s.key=="docker_pids"&&!(16.0..=65536.0).contains(&n){return Err(invalid("must be between 16 and 65536"));}
+                return Ok(Some(toml::Value::Integer(n as i64)));
+            }
+            if s.key=="docker_cpus"&&!(0.25..=256.0).contains(&n){return Err(invalid("must be between 0.25 and 256"));}
             toml::Value::Float(if s.key == "sidebar_width" { n.clamp(22.0,41.0) } else { n })
         },
         Kind::Choice => { if !s.choices.contains(&value) { return Err(invalid(&format!("accepts {}", s.choices.join(" | ")))); } toml::Value::String(value.into()) },
