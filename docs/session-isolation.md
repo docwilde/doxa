@@ -40,6 +40,10 @@ The system rootful socket is refused; the Engine must report rootless operation
 and cgroup v2 memory, CPU and PID support. Before admission and each CLI provider
 turn, the worker checks its own finite kernel cgroup memory, CPU, PID and swap
 limits. An unavailable controller or ineffective limit refuses the turn.
+The [remote Engine fixture preflight](remote-engine-preflight.md) evaluates
+mock rootless, broker, mount and cgroup evidence without connecting to an
+endpoint. It cannot authorize remote Docker or Docker Desktop; both remain
+unavailable until daemon-host and worker proofs run in the admission path.
 
 ## Resource limits and disk monitoring
 

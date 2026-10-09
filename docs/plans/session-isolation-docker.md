@@ -16,6 +16,10 @@ PID ceilings before admission and each CLI provider turn. Beta.16 adds an opt-in
 rootless restricted-egress transport smoke; it does not verify production cgroup
 or hard-quota enforcement. Hardened egress, macOS Docker Desktop,
 remote Engines and a containerized controller remain open.
+A [read-only remote Engine fixture preflight](../remote-engine-preflight.md)
+checks the evidence shape for rootless identity, private broker transport,
+daemon-host mount ownership and effective cgroup limits. Its output never
+authorizes remote or Docker Desktop admission.
 
 Target: Linux first. This
 spec covers both a DOXA controller running on the host and a DOXA controller

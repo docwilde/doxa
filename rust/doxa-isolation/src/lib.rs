@@ -518,6 +518,24 @@ mod checkout_tests {
     }
 }
 #[cfg(test)]
+mod remote_engine_policy_tests {
+    use super::*;
+    #[test]
+    fn remote_and_desktop_engine_endpoints_remain_refused_before_connection() {
+        let mut policy = Policy {
+            image: format!("sha256:{}", "a".repeat(64)),
+            docker_host: String::new(), memory_bytes: 512 * 1024 * 1024,
+            cpus: 1.0, pids: 128, disk_soft_limit_bytes: None,
+            disk_free_floor_bytes: None,
+        };
+        for endpoint in ["ssh://fixture.invalid", "tcp://fixture.invalid:2376",
+            "npipe:////./pipe/docker_engine", "unix:///var/run/docker.sock"] {
+            policy.docker_host = endpoint.into();
+            assert!(policy.validate().is_err(), "{endpoint} must not reach Docker");
+        }
+    }
+}
+#[cfg(test)]
 mod disk_policy_compatibility_tests {
     use super::*;
     #[test]
