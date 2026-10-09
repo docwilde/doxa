@@ -709,6 +709,7 @@ dependencies = [
 name = "doxa-lore"
 version = "2.0.0-beta.17"
 dependencies = [
+ "doxa-codegraph",
  "doxa-state",
  "libc",
  "lore-core",

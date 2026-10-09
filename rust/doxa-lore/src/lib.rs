@@ -8,7 +8,7 @@ pub mod stream;
 
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::io::{self, Read, Write};
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
@@ -81,6 +81,123 @@ pub struct StoredCodegraph {
     pub source_sha256: String,
     pub graph_sha256: String,
     pub graph: Value,
+    pub referenced_sources: ReferenceFreshness,
+}
+
+/// Read-time byte checks for files included in the stored answer. This says
+/// nothing about omitted rows, scan coverage, or semantic Rust bindings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReferenceFreshness {
+    pub status: &'static str,
+    pub checked_files: usize,
+    pub issues: Vec<ReferenceIssue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReferenceIssue {
+    pub path: String,
+    pub reason: &'static str,
+}
+
+const MAX_SNAPSHOT_REFERENCES: usize = 1024;
+const MAX_REFERENCE_ISSUES: usize = 8;
+
+#[derive(Default)]
+struct ReferenceCheck {
+    expected: BTreeMap<String, String>,
+    issues: Vec<ReferenceIssue>,
+    unknown: bool,
+    stale: bool,
+}
+
+impl ReferenceCheck {
+    fn issue(&mut self, path: &str, reason: &'static str, stale: bool) {
+        if stale { self.stale = true; } else { self.unknown = true; }
+        if self.issues.len() < MAX_REFERENCE_ISSUES {
+            self.issues.push(ReferenceIssue {
+                path: path.chars().take(128).collect(), reason,
+            });
+        }
+    }
+
+    fn record(&mut self, path: Option<&Value>, digest: Option<&Value>) {
+        let Some(path) = path.and_then(Value::as_str) else {
+            self.issue("<missing>", "missing_reference_path", false);
+            return;
+        };
+        if path.is_empty() || path.len() > 4096 || !path.ends_with(".rs")
+            || path.chars().any(char::is_control)
+            || !Path::new(path).components().all(|part|
+                matches!(part, std::path::Component::Normal(_))) {
+            self.issue(path, "unsafe_reference_path", false);
+            return;
+        }
+        let Some(digest) = digest.and_then(Value::as_str).filter(|digest| valid_digest(digest)) else {
+            self.issue(path, "missing_reference_hash", false);
+            return;
+        };
+        if let Some(previous) = self.expected.get(path) {
+            if previous != digest { self.issue(path, "conflicting_reference_hash", false); }
+        } else if self.expected.len() < MAX_SNAPSHOT_REFERENCES {
+            self.expected.insert(path.to_owned(), digest.to_owned());
+        } else {
+            self.issue(path, "reference_limit", false);
+        }
+    }
+
+    fn finish(mut self, cwd: &str) -> ReferenceFreshness {
+        let mut checked_files = 0;
+        for (path, expected) in std::mem::take(&mut self.expected) {
+            match doxa_codegraph::source_sha256(Path::new(cwd), &path) {
+                Ok(actual) => {
+                    checked_files += 1;
+                    if actual != expected { self.issue(&path, "source_hash_changed", true); }
+                }
+                Err(_) => self.issue(&path, "source_uncheckable", false),
+            }
+        }
+        ReferenceFreshness { status: if self.stale { "stale" } else if self.unknown {
+            "unknown" } else { "verified" }, checked_files, issues: self.issues }
+    }
+}
+
+impl ReferenceFreshness {
+    fn check(cwd: &str, graph: &Value) -> Self {
+        let mut check = ReferenceCheck::default();
+        match graph["rows"].as_array() {
+            Some(rows) => for row in rows {
+                check.record(row.get("file"), row.get("sha256"));
+            },
+            None => check.issue("<rows>", "malformed_reference_section", false),
+        }
+        match graph["edges"].as_array() {
+            Some(edges) => for edge in edges {
+                check.record(edge.get("file"), edge.get("sha256"));
+                match edge.get("candidates").and_then(Value::as_array) {
+                    Some(candidates) => for candidate in candidates {
+                        check.record(candidate.get("file"), candidate.get("sha256"));
+                    },
+                    None => check.issue("<edge>", "missing_candidates", false),
+                }
+            },
+            None => check.issue("<edges>", "malformed_reference_section", false),
+        }
+        match graph["module_edges"].as_array() {
+            Some(edges) => for edge in edges {
+                check.record(edge.get("source"), edge.get("source_sha256"));
+                for (path_key, hash_key) in [("target", "target_sha256"),
+                    ("conditional_candidate", "conditional_candidate_sha256")] {
+                    if edge.get(path_key).is_some_and(|value| !value.is_null()) {
+                        check.record(edge.get(path_key), edge.get(hash_key));
+                    } else if edge.get(hash_key).is_some_and(|value| !value.is_null()) {
+                        check.issue("<module>", "hash_without_reference_path", false);
+                    }
+                }
+            },
+            None => check.issue("<module_edges>", "malformed_reference_section", false),
+        }
+        check.finish(cwd)
+    }
 }
 
 impl CodegraphSnapshot {
@@ -121,8 +238,9 @@ impl CodegraphSnapshot {
                 if format!("{:x}", Sha256::digest(&bytes)) != graph_sha256 {
                     return Err(LoreError::InvalidFrame);
                 }
+                let referenced_sources = ReferenceFreshness::check(cwd, &graph);
                 Ok(Self::Current(StoredCodegraph { project_key, worktree_root, query: query.into(),
-                    path: path.into(), revision, source_sha256, graph_sha256, graph }))
+                    path: path.into(), revision, source_sha256, graph_sha256, graph, referenced_sources }))
             }
             _ => Err(LoreError::InvalidFrame),
         }
@@ -135,7 +253,11 @@ impl CodegraphSnapshot {
                 "project_key":row.project_key,"worktree_root":row.worktree_root,
                 "query":row.query,"path":row.path,"revision":row.revision,
                 "source_sha256":row.source_sha256,"graph_sha256":row.graph_sha256,
-                "binding":"unknown","freshness":"requested_source_verified_only","graph":row.graph}),
+                "binding":"unknown","freshness":"requested_source_verified_only","graph":row.graph,
+                "referenced_sources":{"status":row.referenced_sources.status,
+                    "checked_files":row.referenced_sources.checked_files,
+                    "issues":row.referenced_sources.issues.iter().map(|issue|
+                        json!({"path":issue.path,"reason":issue.reason})).collect::<Vec<_>>()}}),
         }
     }
 }
@@ -1534,7 +1656,13 @@ mod codegraph_snapshot_tests {
         let valid = response(cwd);
         let parsed = CodegraphSnapshot::parse(valid.clone(), cwd, "modules", "lib.rs").unwrap();
         assert!(matches!(parsed, CodegraphSnapshot::Current(_)));
-        assert_eq!(parsed.to_value(), valid);
+        let rendered = parsed.to_value();
+        assert_eq!(rendered["referenced_sources"]["status"], "unknown");
+        assert_eq!(rendered["referenced_sources"]["issues"][0]["reason"],
+            "missing_reference_hash");
+        let mut original = rendered.clone();
+        original.as_object_mut().unwrap().remove("referenced_sources");
+        assert_eq!(original, valid);
         assert_eq!(CodegraphSnapshot::parse(json!({"status":"missing"}), cwd,
             "modules", "lib.rs").unwrap(), CodegraphSnapshot::Missing);
         for pointer in ["/project_key", "/worktree_root", "/query", "/path",
@@ -1547,5 +1675,40 @@ mod codegraph_snapshot_tests {
         }
         assert!(CodegraphSnapshot::parse(json!({"status":"missing","graph":{}}), cwd,
             "modules", "lib.rs").is_err());
+    }
+
+
+    #[test]
+    fn referenced_call_candidates_require_safe_paths_and_matching_hashes() {
+        let owned = tempfile::tempdir().unwrap();
+        let cwd = owned.path().to_str().unwrap();
+        let candidate = owned.path().join("candidate.rs");
+        std::fs::write(&candidate, "pub fn f() {}\n").unwrap();
+        let digest = format!("{:x}", Sha256::digest(std::fs::read(&candidate).unwrap()));
+        let graph = json!({"rows":[],"module_edges":[],"edges":[{
+            "file":"candidate.rs","sha256":digest,"candidates":[
+                {"file":"candidate.rs","sha256":digest}]}]});
+        let fresh = ReferenceFreshness::check(cwd, &graph);
+        assert_eq!((fresh.status, fresh.checked_files), ("verified", 1));
+        std::fs::write(&candidate, "pub fn changed() {}\n").unwrap();
+        let stale = ReferenceFreshness::check(cwd, &graph);
+        assert_eq!(stale.status, "stale");
+        std::fs::write(&candidate, "pub fn f() {}\n").unwrap();
+        let mut unsafe_graph = graph.clone();
+        unsafe_graph["edges"][0]["candidates"][0]["file"] = json!("../escape.rs");
+        let unknown = ReferenceFreshness::check(cwd, &unsafe_graph);
+        assert_eq!(unknown.status, "unknown");
+        assert!(unknown.issues.iter().any(|issue| issue.reason == "unsafe_reference_path"));
+        let mut missing_hash = graph;
+        missing_hash["edges"][0]["candidates"][0].as_object_mut().unwrap().remove("sha256");
+        assert_eq!(ReferenceFreshness::check(cwd, &missing_hash).status, "unknown");
+        for missing in ["rows", "edges", "module_edges"] {
+            let mut malformed = json!({"rows":[],"edges":[],"module_edges":[]});
+            malformed.as_object_mut().unwrap().remove(missing);
+            let checked = ReferenceFreshness::check(cwd, &malformed);
+            assert_eq!(checked.status, "unknown", "accepted missing {missing}");
+            assert!(checked.issues.iter().any(|issue|
+                issue.reason == "malformed_reference_section"));
+        }
     }
 }

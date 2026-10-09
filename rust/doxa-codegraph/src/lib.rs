@@ -263,6 +263,12 @@ fn file_bytes(root: &Path, relative: &str) -> Result<(String, String, u128), Str
     Ok((content, sha, read_unix_ms))
 }
 
+/// Recheck one recorded Rust source without following symlinks in any path
+/// component. This uses the same 1 MiB, descriptor-anchored read as queries.
+pub fn source_sha256(root: &Path, relative: &str) -> Result<String, String> {
+    file_bytes(root, relative).map(|(_, sha, _)| sha)
+}
+
 #[derive(Clone)]
 struct ModuleDecl {
     name: String,

@@ -110,10 +110,15 @@ fn stored_lines(snapshot: &CodegraphSnapshot) -> Vec<String> {
                 format!("Worktree: {}", display(&row.worktree_root)),
                 format!("Requested source SHA-256: {}", row.source_sha256),
                 format!("Graph SHA-256: {}", row.graph_sha256),
-                "Freshness: requested source verified at read time; other source candidates may have changed".into(),
+                "Freshness: requested source verified at read time".into(),
+                format!("Included reference files: {} · {} checked at read time",
+                    row.referenced_sources.status, row.referenced_sources.checked_files),
                 "Binding: unknown · syntax data only".into(),
                 String::new(),
             ];
+            for issue in &row.referenced_sources.issues {
+                lines.push(format!("Reference {}: {}", display(&issue.path), issue.reason));
+            }
             match serde_json::to_string_pretty(&row.graph) {
                 Ok(graph) => lines.extend(graph.lines().map(display)),
                 Err(_) => lines.push("Stored graph could not be displayed".into()),
@@ -262,10 +267,13 @@ mod tests {
             graph: serde_json::json!({"module_edges":[{"resolution":"unknown",
                 "reason":"conditional_compilation_unverified",
                 "conditional_candidate":"child.rs","target":null}]}),
+            referenced_sources: doxa_lore::ReferenceFreshness { status: "unknown",
+                checked_files: 0, issues: vec![] },
         };
         let lines = stored_lines(&CodegraphSnapshot::Current(row)).join("\n");
         assert!(lines.contains("revision 3"));
         assert!(lines.contains("requested source verified at read time"));
+        assert!(lines.contains("Included reference files: unknown"));
         assert!(lines.contains("Binding: unknown"));
         assert!(lines.contains("conditional_candidate"));
         assert!(lines.contains("conditional_compilation_unverified"));

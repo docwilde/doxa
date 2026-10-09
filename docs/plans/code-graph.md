@@ -117,9 +117,12 @@ pins `lore-core` 0.62.20 and calls only `codegraph_snapshot_read_v1`; it checks
 the exact project, canonical worktree, query, path, revision, source hash,
 graph digest, and `unknown` binding claim. LORE checks Git worktree identity
 and rehashes the requested file on each read. A source edit or checkout
-replacement rejects the read. A stored call or module candidate from another
-file may have changed since review; its hash remains evidence for the original
-producer bytes, not current freshness or semantic binding.
+replacement rejects the read. DOXA also rechecks the hashes of included row,
+call-candidate, and module-target files through a bounded, symlink-safe reader.
+The result reports `verified`, `stale`, or `unknown` for those included
+references, with bounded reasons. A changed or uncheckable reference is never
+reported as verified. Omitted rows and scan coverage are outside that claim;
+no hash check proves a Rust binding or compilation reachability.
 
 To persist an export, an owner must inspect it and invoke LORE's explicit
 `codegraph_snapshot_store_v1` command with human-review authority and an
@@ -147,7 +150,8 @@ is read-only and creates no second memory authority.
 
 - Decide whether reviewed snapshots need an operator index, retention policy,
   and explicit invalidation across worktree lifecycle. The current read is
-  exact worktree/query/path and verifies only the requested source.
+  exact worktree/query/path; it verifies the requested source and reports
+  freshness only for included references.
 - Resolve imports and actual Rust call bindings with crate, trait, type, and
   conditional-compilation context. Module edges remain top-level and structural;
   `cfg_attr` and conditional reachability are unresolved. Call candidates stop
