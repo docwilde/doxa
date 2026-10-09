@@ -77,8 +77,9 @@ async fn connect(app: &App, entry: &PeerRecord, login: Option<&str>, cursor: Opt
     stream.set_nonblocking(false)?;
     // The registry is owner-checked; the connected process must be owned by
     // the same user before accepting its hello or transcript path.
-    if doxa_peers::credentials::peer_uid(&stream)? != unsafe { libc::geteuid() } {
-        return Err(io::Error::new(io::ErrorKind::PermissionDenied,"daemon owner differs"));
+    let peer = doxa_peers::credentials::peer_credentials(&stream)?;
+    if peer.uid != unsafe { libc::geteuid() } || peer.pid != entry.pid {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied,"daemon process identity differs"));
     }
     daemon::Client::from_stream(stream, &entry.session_id, login, cursor)
 }

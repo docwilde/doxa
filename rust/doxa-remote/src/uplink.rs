@@ -162,7 +162,13 @@ fn decode_command(target:&str,op:&str,payload:&Value,key:Option<&[u8;32]>)->Resu
     if android && !wire::command_is_fresh(&payload) {
         return Err("Android command expired");
     }
+    if android && op=="answer" && !payload["reviewed_request"].is_object() {
+        return Err("Android reviewed input required");
+    }
     Ok(payload)
+}
+fn reviewed_android_input_is_current(payload:&Value,current:&Value)->bool {
+    payload.get("reviewed_request")==Some(current)
 }
 async fn execute(app:&Arc<App>,owner:&str,host:&str,session_id:&str,op:&str,payload:&Value,key:Option<&[u8;32]>)->Value{
     let target=format!("{host}~{session_id}");
@@ -177,6 +183,7 @@ async fn execute(app:&Arc<App>,owner:&str,host:&str,session_id:&str,op:&str,payl
         return json!({"ok":false,"error":"Android session incarnation changed"});
     }
     let client=match connect(app,&entry,None,None).await{Ok(client)=>client,Err(_)=>return json!({"ok":false,"error":"session unavailable"})};
+    let transcript_identity=(entry.session_id.clone(),entry.started_at.clone(),entry.pid,entry.daemon_socket.clone());
     let op=op.to_owned();let app=app.clone();
     match tokio::task::spawn_blocking(move||->io::Result<Value>{
         let mut client=client;
@@ -196,6 +203,9 @@ async fn execute(app:&Arc<App>,owner:&str,host:&str,session_id:&str,op:&str,payl
                 if state["pending_inputs_complete"]!=true{return Err(invalid("pending review incomplete"));}
                 let reviewed=state["pending_inputs"].as_array().and_then(|items|items.iter().find(|item|item["id"]==id))
                     .ok_or_else(||invalid("input request changed or expired"))?;
+                if android && !reviewed_android_input_is_current(&payload,reviewed) {
+                    return Err(invalid("Android reviewed input changed"));
+                }
                 client.call("answer_needs_input",json!({"id":id,"answer":payload["answer"],"reviewed_request":reviewed}))
             },
             "transcript"=>{
@@ -205,6 +215,13 @@ async fn execute(app:&Arc<App>,owner:&str,host:&str,session_id:&str,op:&str,payl
                 history["pending_inputs"]=client.hello["pending_inputs"].clone();
                 history["pending_inputs_complete"]=client.hello["pending_inputs_complete"].clone();
                 scrub_data(&mut history,&app.lore)?;
+                let current=app.session(&transcript_identity.0)?
+                    .ok_or_else(||invalid("transcript session went offline"))?;
+                if current.started_at!=transcript_identity.1 || current.pid!=transcript_identity.2
+                    || current.daemon_socket!=transcript_identity.3 {
+                    return Err(invalid("transcript session incarnation changed"));
+                }
+                history["incarnation"]=json!(transcript_identity.1);
                 Ok(bounded_history(history))
             },
             _=>Err(invalid("unsupported remote command")),
@@ -365,5 +382,27 @@ pub async fn run(app:Arc<App>,url:&str,host:&str)->io::Result<()> {
         assert!(decode_command("host~session","prompt",&outer,Some(&key)).is_err());
         outer["request_id"]=json!(id);outer["hub_boot"]=json!("b".repeat(32));
         assert!(decode_command("host~session","prompt",&outer,Some(&key)).is_err());
+    }
+    #[test]fn android_answer_requires_the_exact_reviewed_input(){
+        let boot="a".repeat(32);
+        let id=format!("{boot}-11111111-1111-4111-8111-111111111111");
+        let current=json!({"id":"input-1","question":"Approve deletion?","options":["yes","no"]});
+        let mut inner=json!({"id":"input-1","answer":{"choice":"no"},
+            "request_id":id,"hub_boot":boot,"incarnation":"v1"});
+        wire::issue_command(&mut inner).unwrap();
+        let mut plain=inner.clone();plain["android_fence_v1"]=json!(true);
+        assert!(decode_command("host~session","answer",&plain,None).is_err());
+        inner["reviewed_request"]=current.clone();
+        plain=inner.clone();plain["android_fence_v1"]=json!(true);
+        let decoded=decode_command("host~session","answer",&plain,None).unwrap();
+        assert!(reviewed_android_input_is_current(&decoded,&current));
+        assert!(!reviewed_android_input_is_current(&decoded,
+            &json!({"id":"input-1","question":"Approve deletion?","options":["yes","always"]})));
+        let key=[7u8;32];
+        let sealed=wire::seal(&key,"host~session|command|answer",&inner).unwrap();
+        let outer=json!({"request_id":id,"hub_boot":boot,"incarnation":"v1",
+            "sealed":sealed,"android_fence_v1":true});
+        assert!(reviewed_android_input_is_current(
+            &decode_command("host~session","answer",&outer,Some(&key)).unwrap(),&current));
     }
 }
