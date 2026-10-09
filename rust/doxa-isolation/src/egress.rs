@@ -637,6 +637,35 @@ mod tests {
         assert_eq!(dns_calls.load(Ordering::Acquire), 0);
         assert_eq!(dial_calls.load(Ordering::Acquire), 0);
     }
+    #[test]
+    fn guarded_gateway_mock_approval_reaches_connect_handshake() {
+        // This exercises the gateway's guard wiring. A mock approval does not
+        // establish a real rootless container or authenticate its Engine.
+        let root = fixture_dir();
+        let guard_calls = Arc::new(AtomicUsize::new(0));
+        let dns_calls = Arc::new(AtomicUsize::new(0));
+        let dial_calls = Arc::new(AtomicUsize::new(0));
+        let gateway = EgressGateway::start_with_after_lock_and_origin(
+            root.path(), hosts(),
+            { let calls = dns_calls.clone(); Arc::new(move |_| {
+                calls.fetch_add(1, Ordering::AcqRel); Ok(vec!["1.1.1.1:443".parse().unwrap()])
+            }) },
+            { let calls = dial_calls.clone(); Arc::new(move |_| {
+                calls.fetch_add(1, Ordering::AcqRel); Err(error("unexpected upstream dial"))
+            }) },
+            Some({ let calls = guard_calls.clone(); Arc::new(move |_| {
+                calls.fetch_add(1, Ordering::AcqRel); Ok(())
+            }) }), || {},
+        ).unwrap();
+        let mut client = UnixStream::connect(gateway.socket()).unwrap();
+        client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        client.write_all(b"CONNECT api.example.test:443 HTTP/1.1\r\nHost: api.example.test:443\r\n\r\n").unwrap();
+        assert_eq!(read_response_header(&mut client), "HTTP/1.1 200 Connection Established\r\n\r\n");
+        drop(client);
+        assert_eq!(guard_calls.load(Ordering::Acquire), 1);
+        assert_eq!(dns_calls.load(Ordering::Acquire), 1);
+        assert_eq!(dial_calls.load(Ordering::Acquire), 0);
+    }
     fn request(socket: &Path, bytes: &[u8]) -> Vec<u8> {
         let mut stream = UnixStream::connect(socket).unwrap();
         stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
