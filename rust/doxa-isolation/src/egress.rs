@@ -303,8 +303,16 @@ fn gateway_lock_path(broker_dir: &Path) -> io::Result<PathBuf> {
 }
 fn gateway_lock(broker_dir: &Path) -> io::Result<File> {
     let path = gateway_lock_path(broker_dir)?;
+    // Reject known special files before opening them. A concurrent swap can
+    // still occur, so O_NONBLOCK and the descriptor check remain mandatory.
+    match fs::symlink_metadata(&path) {
+        Ok(meta) if !meta.is_file() => return Err(error("unsafe egress gateway lock")),
+        Ok(_) => {},
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {},
+        Err(e) => return Err(e),
+    }
     let file = OpenOptions::new().read(true).write(true).create(true).mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC).open(&path)?;
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK).open(&path)?;
     let meta = file.metadata()?;
     if !meta.is_file() || meta.nlink() != 1 || meta.uid() != unsafe { libc::geteuid() } || meta.mode() & 0o077 != 0 {
         return Err(error("unsafe egress gateway lock"));
@@ -828,6 +836,24 @@ mod tests {
         assert!(EgressGateway::start(root.path(), hosts()).is_err());
         assert!(!root.path().join("egress.sock").exists());
         assert!(!parent.join(".broker.egress.lock").exists());
+    }
+
+    #[test]
+    fn fifo_lock_path_is_refused_without_blocking_startup() {
+        use std::{ffi::CString, os::unix::ffi::OsStrExt};
+        let root = fixture_dir();
+        let lock = gateway_lock_path(root.path()).unwrap();
+        let path = CString::new(lock.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+        let broker = root.path().to_owned();
+        let (sent, received) = std::sync::mpsc::channel();
+        let attempt = thread::spawn(move || {
+            let _ = sent.send(EgressGateway::start(&broker, hosts()).err().map(|e| e.to_string()));
+        });
+        let result = received.recv_timeout(Duration::from_secs(2));
+        if result.is_ok() { attempt.join().unwrap(); }
+        assert!(result.unwrap().is_some_and(|e| e.contains("unsafe egress gateway lock")));
+        assert!(!root.path().join("egress.sock").exists());
     }
 
     #[test]
