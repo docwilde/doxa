@@ -1,18 +1,21 @@
 #!/usr/bin/env python3
-"""Bounded, read-only end-to-end benchmark of doxa-codegraph source scans.
+"""Bounded end-to-end benchmark of doxa-codegraph source scans.
 
 Build the production binary first, then pass it with --binary. A no-hit symbol
 query parses every listed Rust/Python source without depending on a known file.
-The harness never writes to a repository or creates a temporary directory.
+Use a trusted binary. The harness creates no temporary files or repository
+writes, and disables Git fsmonitor hooks and optional index locks in children.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
 import platform
+import selectors
 import signal
 import statistics
 import subprocess
@@ -26,37 +29,107 @@ def percentile(samples: list[float], fraction: float) -> float:
     return round(ordered[math.ceil(fraction * len(ordered)) - 1], 3)
 
 
-def run_query(binary: Path, root: Path, value: str, timeout: float) -> dict:
+def git_safe_env() -> dict[str, str]:
+    git_route = {"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
+                 "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+                 "GIT_NAMESPACE", "GIT_PREFIX"}
+    env = {key: value for key, value in os.environ.items()
+           if not key.startswith(("GIT_CONFIG_", "GIT_TRACE"))
+           and key != "GIT_CONFIG_PARAMETERS" and key not in git_route}
+    env.update({"GIT_OPTIONAL_LOCKS": "0", "GIT_PAGER": "cat",
+                "GIT_TERMINAL_PROMPT": "0", "GIT_CONFIG_COUNT": "1",
+                "GIT_CONFIG_KEY_0": "core.fsmonitor", "GIT_CONFIG_VALUE_0": "false"})
+    return env
+
+
+def kill_group(process: subprocess.Popen) -> None:
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    process.wait()
+
+
+def bounded_command(argv: list[str], timeout: float, stdout_cap: int = 128 * 1024,
+                    stderr_cap: int = 128 * 1024) -> dict:
+    """Capture at most the configured bytes per pipe, including for a noisy child."""
     started = time.perf_counter()
     process = subprocess.Popen(
-        [str(binary), "--root", str(root), "symbol", value],
+        argv,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
+        env=git_safe_env(),
         start_new_session=True,
     )
+    buffers = {"stdout": bytearray(), "stderr": bytearray()}
+    limits = {"stdout": stdout_cap, "stderr": stderr_cap}
+    outcome = "ok"
     try:
-        stdout, stderr = process.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        # Git enumeration is a child of the CLI; kill the whole group.
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        process.communicate()
-        return {"elapsed_ms": round((time.perf_counter() - started) * 1000, 3),
-                "outcome": "timeout"}
-    elapsed_ms = round((time.perf_counter() - started) * 1000, 3)
-    if process.returncode or len(stdout) > 128 * 1024 or len(stderr) > 128 * 1024:
+        with selectors.DefaultSelector() as selector:
+            for name, pipe in (("stdout", process.stdout), ("stderr", process.stderr)):
+                os.set_blocking(pipe.fileno(), False)
+                selector.register(pipe, selectors.EVENT_READ, name)
+            while selector.get_map():
+                remaining = started + timeout - time.perf_counter()
+                if remaining <= 0:
+                    outcome = "timeout"
+                    break
+                events = selector.select(remaining)
+                if not events:
+                    outcome = "timeout"
+                    break
+                for key, _ in events:
+                    name = key.data
+                    try:
+                        chunk = os.read(key.fileobj.fileno(),
+                                        min(65536, limits[name] - len(buffers[name]) + 1))
+                    except BlockingIOError:
+                        continue
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        continue
+                    buffers[name].extend(chunk)
+                    if len(buffers[name]) > limits[name]:
+                        outcome = f"{name}_limit"
+                        break
+                if outcome != "ok":
+                    break
+        if outcome == "ok":
+            remaining = started + timeout - time.perf_counter()
+            try:
+                process.wait(timeout=max(0, remaining))
+            except subprocess.TimeoutExpired:
+                outcome = "timeout"
+        if outcome != "ok":
+            kill_group(process)
+    finally:
+        process.stdout.close()
+        process.stderr.close()
+        if process.poll() is None:
+            kill_group(process)
+    return {"outcome": outcome, "stdout": bytes(buffers["stdout"]),
+            "stderr": bytes(buffers["stderr"]), "exit_code": process.returncode,
+            "elapsed_ms": round((time.perf_counter() - started) * 1000, 3)}
+
+
+def run_query(binary: Path, root: Path, value: str, timeout: float) -> dict:
+    result = bounded_command([str(binary), "--root", str(root), "symbol", value], timeout)
+    stdout, stderr = result["stdout"], result["stderr"]
+    elapsed_ms = result["elapsed_ms"]
+    if result["outcome"] != "ok":
+        return {"elapsed_ms": elapsed_ms, "outcome": result["outcome"]}
+    if result["exit_code"]:
         return {"elapsed_ms": elapsed_ms, "outcome": "error",
-                "exit_code": process.returncode,
+                "exit_code": result["exit_code"],
                 "error": stderr.decode("utf-8", "replace")[:512]}
     try:
         answer = json.loads(stdout)
         if (answer["scope"] != str(root) or answer["query"] != "symbol"
                 or answer["value"] != value):
             raise ValueError("reply does not match the requested worktree and query")
+        if answer["rows"] or answer["omitted_rows"]:
+            raise ValueError("benchmark sentinel has a symbol hit")
         coverage = answer["coverage"]
         return {"elapsed_ms": elapsed_ms, "outcome": "ok", "reply_bytes": len(stdout),
                 "status": answer["status"], "enumerated_files": coverage["enumerated_files"],
@@ -71,10 +144,22 @@ def run_query(binary: Path, root: Path, value: str, timeout: float) -> dict:
                 "error": str(error)[:512]}
 
 
-def git_head(root: Path) -> str:
-    result = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
-                            check=True, capture_output=True, text=True, timeout=5)
-    return result.stdout.strip()
+def git_metadata(root: Path, args: list[str], deadline: float) -> bytes:
+    remaining = deadline - time.perf_counter()
+    if remaining <= 0:
+        raise RuntimeError("overall budget exhausted before Git metadata")
+    result = bounded_command(["git", "-C", str(root), *args], min(5, remaining),
+                             stdout_cap=64 * 1024, stderr_cap=4 * 1024)
+    if result["outcome"] != "ok" or result["exit_code"]:
+        raise RuntimeError(f"Git metadata failed: {result['outcome']} exit={result['exit_code']}")
+    return result["stdout"]
+
+
+def status_evidence(root: Path, deadline: float) -> dict:
+    status = git_metadata(root, ["status", "--porcelain=v1", "--untracked-files=all", "-z"],
+                          deadline)
+    return {"dirty": bool(status), "entries": status.count(b"\0"), "bytes": len(status),
+            "sha256": hashlib.sha256(status).hexdigest()}
 
 
 def main() -> int:
@@ -112,8 +197,14 @@ def main() -> int:
               "warmups": args.warmups, "timeout_seconds": args.timeout_seconds,
               "budget_seconds": args.budget_seconds, "repositories": []}
     for root in roots:
-        entry = {"root": str(root), "head": git_head(root), "warmups": [], "samples": []}
+        entry = {"root": str(root), "warmups": [], "samples": []}
         report["repositories"].append(entry)
+        try:
+            entry["head"] = git_metadata(root, ["rev-parse", "HEAD"], deadline).decode().strip()
+            entry["status_before"] = status_evidence(root, deadline)
+        except (RuntimeError, UnicodeError) as error:
+            entry["metadata_error"] = str(error)
+            break
         for phase, count in (("warmups", args.warmups), ("samples", args.runs)):
             for _ in range(count):
                 remaining = deadline - time.perf_counter()
@@ -122,6 +213,11 @@ def main() -> int:
                     break
                 entry[phase].append(run_query(binary, root, args.symbol,
                                               min(args.timeout_seconds, remaining)))
+        try:
+            entry["status_after"] = status_evidence(root, deadline)
+            entry["worktree_status_changed"] = entry["status_before"] != entry["status_after"]
+        except RuntimeError as error:
+            entry["metadata_error"] = str(error)
         times = [sample["elapsed_ms"] for sample in entry["samples"]
                  if sample["outcome"] == "ok"]
         if times:
@@ -129,7 +225,9 @@ def main() -> int:
                                     "p95": percentile(times, 0.95), "min": min(times),
                                     "max": max(times)}
     print(json.dumps(report, indent=2))
-    return 0 if all(len(entry["samples"]) == args.runs and
+    return 0 if len(report["repositories"]) == len(roots) and all(
+                    "metadata_error" not in entry and not entry["worktree_status_changed"] and
+                    len(entry["samples"]) == args.runs and
                     len(entry["warmups"]) == args.warmups and
                     all(sample["outcome"] == "ok" for phase in ("warmups", "samples")
                         for sample in entry[phase])
