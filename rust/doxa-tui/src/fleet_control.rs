@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
-pub const HELP: &str = "Native DOXA fleet coordinator\n\nUsage: doxa fleet start --pool ENGINE[:MODEL][@WEIGHT],... [OPTIONS]\n\n  --prompt TEXT | --prompt-file PATH   Shared task (file takes precedence)\n  -n, --sessions N                    Worker count\n  --supervisor ENGINE[:MODEL]          Acting coordinator; task may be interactive\n  --alignment-supervisor PROVIDER:MODEL Independent read-only alignment model\n  --supervision-mode shadow|enforce     Independent review action (default enforce)\n  --message-review off|shadow|enforce   Fast semantic admission mode\n  --message-judge llm:PROVIDER:MODEL | jev:MODEL\n  --review-budget USD                  Reserved from the total run budget\n  --review-max-calls N --review-interval SECONDS\n  --review-input-price USD_PER_MTOK --review-output-price USD_PER_MTOK\n  --review-threshold PROBABILITY        Explicit enforcement threshold\n  --strict-unreviewed                  Hold every message if its judge is unavailable\n  --allowed-path RELATIVE_PREFIX       Approved scope (repeatable; default repository)\n  --worker-task INDEX:TEXT             Frozen task for each worker (1-based; specify all)\n  --worker-path INDEX:RELATIVE_PREFIX  Narrow one worker's approved paths (repeatable)\n  --worker-after INDEX:PREDECESSOR    Wait for an earlier worker (repeatable)\n  --test-recipe ABSOLUTE_JSON_PATH    Frozen offline Docker test command\n  --isolation native|docker-open|docker-offline\n  --cwd PATH --root PATH --run-id ID   Workspace and isolated run identity\n  --seed INTEGER                      Recorded deterministic assignment seed\n  --memory-off N                      Number of workers with memory disabled\n  --run-budget USD | --allow-unbudgeted\n  --approve none|peer|all              Permission policy; questions/spawns require a human\n  --approval-grace SECONDS             Human review window before policy applies\n  --quiescence-timeout SECONDS         Total wait deadline\n  --quiet-dwell SECONDS                Quiet period (alias: --quiescence-grace)\n  --force                             Override memory capacity refusal\n  --dry-run                           Review capacity and assignments without launching\n\nOther commands: preflight, runs, status, test RUN SLOT, resume, continue RUN CHARTER_HASH, dependency-evidence, dependency-review, dependency-release, review, answer, attach, stop\n  calibrate LABELED_JSONL               Offline threshold metrics; no model calls\n  evaluate-messages PRIVATE_JSONL --message-judge PROVIDER:MODEL\n                                       Offline labeled-message holdout metrics; no model calls\n";
+pub const HELP: &str = "Native DOXA fleet coordinator\n\nUsage: doxa fleet start --pool ENGINE[:MODEL][@WEIGHT],... [OPTIONS]\n\n  --prompt TEXT | --prompt-file PATH   Shared task (file takes precedence)\n  -n, --sessions N                    Worker count\n  --supervisor ENGINE[:MODEL]          Acting coordinator; task may be interactive\n  --alignment-supervisor PROVIDER:MODEL Independent read-only alignment model\n  --supervision-mode shadow|enforce     Independent review action (default enforce)\n  --message-review off|shadow|enforce   Fast semantic admission mode\n  --message-judge llm:PROVIDER:MODEL | jev:MODEL\n  --review-budget USD                  Reserved from the total run budget\n  --review-max-calls N --review-interval SECONDS\n  --review-input-price USD_PER_MTOK --review-output-price USD_PER_MTOK\n  --review-threshold PROBABILITY        Explicit enforcement threshold\n  --strict-unreviewed                  Hold every message if its judge is unavailable\n  --allowed-path RELATIVE_PREFIX       Approved scope (repeatable; default repository)\n  --worker-task INDEX:TEXT             Frozen task for each worker (1-based; specify all)\n  --worker-path INDEX:RELATIVE_PREFIX  Narrow one worker's approved paths (repeatable)\n  --worker-after INDEX:PREDECESSOR    Wait for an earlier worker (repeatable)\n  --test-recipe ABSOLUTE_JSON_PATH    Frozen offline Docker test command\n  --auto-test                         Collect host receipts after worker turns\n  --isolation native|docker-open|docker-offline\n  --cwd PATH --root PATH --run-id ID   Workspace and isolated run identity\n  --seed INTEGER                      Recorded deterministic assignment seed\n  --memory-off N                      Number of workers with memory disabled\n  --run-budget USD | --allow-unbudgeted\n  --approve none|peer|all              Permission policy; questions/spawns require a human\n  --approval-grace SECONDS             Human review window before policy applies\n  --quiescence-timeout SECONDS         Total wait deadline\n  --quiet-dwell SECONDS                Quiet period (alias: --quiescence-grace)\n  --force                             Override memory capacity refusal\n  --dry-run                           Review capacity and assignments without launching\n\nOther commands: preflight, runs, status, test RUN SLOT, resume, continue RUN CHARTER_HASH, dependency-evidence, dependency-review, dependency-release, review, answer, attach, stop\n  calibrate LABELED_JSONL               Offline threshold metrics; no model calls\n  evaluate-messages PRIVATE_JSONL --message-judge PROVIDER:MODEL\n                                       Offline labeled-message holdout metrics; no model calls\n";
 
 fn invalid(message: impl Into<String>) -> io::Error { io::Error::new(io::ErrorKind::InvalidInput, message.into()) }
 fn now() -> String { OffsetDateTime::now_utc().format(&Rfc3339).unwrap_or_default() }
@@ -73,7 +73,7 @@ fn engine_name(engine: launch::Engine) -> &'static str { match engine { launch::
 
 pub struct Spec {
     preflight: fleet_plan::Preflight, isolation:doxa_isolation::Profile, pool: Vec<Choice>, prompt: String, cwd: PathBuf,
-    review: doxa_fleet::ReviewConfig, allowed_paths:Vec<String>, worker_tasks:Vec<String>, worker_paths:Vec<Vec<String>>, worker_after:Vec<Vec<usize>>, test_recipe:Option<doxa_fleet::evidence::TestRecipe>, seed: u64, timeout: Option<Duration>, quiet: Duration, dry_run: bool, memory_off: u64, lore_enabled: bool,
+    review: doxa_fleet::ReviewConfig, allowed_paths:Vec<String>, worker_tasks:Vec<String>, worker_paths:Vec<Vec<String>>, worker_after:Vec<Vec<usize>>, test_recipe:Option<doxa_fleet::evidence::TestRecipe>, auto_test:bool, seed: u64, timeout: Option<Duration>, quiet: Duration, dry_run: bool, memory_off: u64, lore_enabled: bool,
 }
 impl Spec {
     pub fn parse(args: &[String]) -> io::Result<Self> {
@@ -97,11 +97,12 @@ impl Spec {
         let mut task_options=Vec::new(); let mut path_options=Vec::new(); let mut after_options=Vec::new();
         let mut base = Vec::new(); let mut pool = None; let mut prompt = String::new(); let mut prompt_file = None; let mut test_recipe = None;
         let mut cwd = std::env::current_dir()?; let mut seed = 0; let mut timeout = None;
-        let mut quiet = Duration::from_secs(20); let mut dry_run = false; let mut memory_off = 0; let mut index = 0;
+        let mut quiet = Duration::from_secs(20); let mut dry_run = false; let mut auto_test=false; let mut memory_off = 0; let mut index = 0;
         while index < args.len() {
             let key = args[index].as_str();
             if matches!(key, "--force" | "--allow-unbudgeted") { base.push(key.into()); }
             else if key == "--dry-run" { dry_run = true; }
+            else if key == "--auto-test" { auto_test=true; }
             else if key == "--strict-unreviewed" {review.strict_unavailable=true;}
             else {
                 index += 1; let value = args.get(index).ok_or_else(|| invalid(format!("missing value for {key}")))?;
@@ -174,6 +175,7 @@ impl Spec {
         let cwd = fs::canonicalize(cwd)?;
         if !cwd.is_dir() { return Err(invalid("fleet cwd must be a directory")); }
         if test_recipe.is_some() && (isolation!=doxa_isolation::Profile::DockerOffline || !review.enabled()) {return Err(invalid("host test evidence requires a supervised docker-offline fleet"));}
+        if auto_test && test_recipe.is_none() {return Err(invalid("automatic host tests require an owner-frozen --test-recipe"));}
         review.validate()?;
         if review.enabled() && (preflight.sessions>64 || prompt.len()>16*1024){return Err(invalid("independent review supports up to 64 workers and a 16 KiB approved task"));}
         if review.enabled() && prompt.trim().is_empty(){return Err(invalid("independent review needs the approved task at launch"));}
@@ -210,14 +212,14 @@ impl Spec {
             return Err(invalid("worker dependencies require Docker-isolated fleet sessions; native workers can invoke owner-local release commands"));
         }
         memory_off = memory_off.min(preflight.sessions);
-        Ok(Self { review, allowed_paths, worker_tasks, worker_paths, worker_after, test_recipe, preflight, isolation, pool, prompt, cwd, seed, timeout, quiet, dry_run, memory_off, lore_enabled: doxa_state::lore_enabled_default() })
+        Ok(Self { review, allowed_paths, worker_tasks, worker_paths, worker_after, test_recipe, auto_test, preflight, isolation, pool, prompt, cwd, seed, timeout, quiet, dry_run, memory_off, lore_enabled: doxa_state::lore_enabled_default() })
     }
     /// Complete validation and a readable launch review without provider
     /// discovery, session creation, prompt text or filesystem mutations.
     pub fn review(&self) -> io::Result<Value> {
         let preflight = fleet_plan::check(&self.preflight, fleet_plan::available_memory_mb())?;
         let assignments = self.assignments()?;
-        Ok(json!({"review_version":1,"isolation":self.isolation.key(),"independent_review":self.review,"allowed_paths":self.allowed_paths,"test_recipe":self.test_recipe,"prompt_sha256":format!("{:x}", Sha256::digest(self.prompt.as_bytes())),"assignments_sha256":self.assignment_plan_hash()?,"run_id":self.preflight.run_id,"root":self.preflight.root,"cwd":self.cwd,
+        Ok(json!({"review_version":1,"isolation":self.isolation.key(),"independent_review":self.review,"allowed_paths":self.allowed_paths,"test_recipe":self.test_recipe,"auto_test":self.auto_test,"prompt_sha256":format!("{:x}", Sha256::digest(self.prompt.as_bytes())),"assignments_sha256":self.assignment_plan_hash()?,"run_id":self.preflight.run_id,"root":self.preflight.root,"cwd":self.cwd,
             "mode":if self.preflight.supervisor.is_some() { "supervisor" } else { "symmetric" },
             "interactive":self.preflight.supervisor.is_some() && self.prompt.trim().is_empty(),
             "workers":self.preflight.sessions,"sessions":assignments.len(),"run_budget_usd":self.preflight.run_budget_usd,
@@ -467,7 +469,9 @@ pub fn resume(root: &Path, id: &str) -> io::Result<()> {
         validate_dependency_resume(&context,&guard,&rows)?;
         for slot in &mut slots {let state=rpc(&mut slot.client,"fleet_state",json!({}))?;if state["charter_sha256"]!=context.charter_sha256{return Err(invalid("fleet approved charter changed during resume"));}let identity=rpc(&mut slot.client,"fleet_identity",json!({}))?;if identity["pid"].as_i64()!=Some(context.assignment(&slot.session.id)?.pid as i64){return Err(invalid("fleet authenticated host identity changed during resume"));}}
     }
+    if interrupt_uncertain_auto_tests(&mut value){store.save(&value)?;}
     let result = monitor(&store, &mut value, &mut slots, timeout, quiet);
+    let result=if interrupt_uncertain_auto_tests(&mut value){store.save(&value).and(result)}else{result};
     let result = cancellation_result(result, &mut value, &store);
     let stop_failed = teardown_sessions(slots.iter().enumerate().map(|(index, slot)| (index, slot.session.clone())));
     value["live"] = json!(stop_failed); value["phase"] = json!(if stop_failed { "teardown_incomplete" } else { "finished" });
@@ -586,9 +590,9 @@ pub fn start(args: &[String]) -> io::Result<()> {
     let mut value = json!({"native_version":1,"run_id":spec.preflight.run_id,"ledger_path":ledger_home.join("peers/messages.jsonl"),"started_at":now(),"heartbeat_at":now(),
         "live":true,"phase":"starting","mode":if spec.preflight.supervisor.is_some() { "supervisor" } else { "symmetric" },
         "interactive":spec.preflight.supervisor.is_some() && spec.prompt.trim().is_empty(),
-        "spec":{"isolation":spec.isolation.key(),"n":spec.preflight.sessions,"sessions":assigned.len(),"memory_off":spec.memory_off,"lore_enabled":spec.lore_enabled,"memory_sampler":"splitmix64-memory-v1","seed":spec.seed,"sampler":"splitmix64-v1","run_budget_usd":spec.preflight.run_budget_usd,
+        "spec":{"isolation":spec.isolation.key(),"auto_test":spec.auto_test,"n":spec.preflight.sessions,"sessions":assigned.len(),"memory_off":spec.memory_off,"lore_enabled":spec.lore_enabled,"memory_sampler":"splitmix64-memory-v1","seed":spec.seed,"sampler":"splitmix64-v1","run_budget_usd":spec.preflight.run_budget_usd,
             "allow_unbudgeted":spec.preflight.allow_unbudgeted,"cwd":spec.cwd,"quiescence_timeout_s":spec.timeout.map(|duration| duration.as_secs_f64()),"quiet_dwell_s":spec.quiet.as_secs_f64(),"quiescence_grace_s":spec.quiet.as_secs_f64()},
-        "approvals":{"policy":spec.preflight.approve,"grace_s":spec.preflight.approval_grace_s,"asked":0,"auto_approved":0,"answered":0,"refused":0},"slots":[]});
+        "approvals":{"policy":spec.preflight.approve,"grace_s":spec.preflight.approval_grace_s,"asked":0,"auto_approved":0,"answered":0,"refused":0},"auto_test_runs":0,"slots":[]});
     store.save(&value)?;
     let mut slots = Vec::new();
     let result = (|| -> io::Result<()> {
@@ -643,6 +647,7 @@ pub fn start(args: &[String]) -> io::Result<()> {
         println!("native fleet {} ready; fleet attach {} 0", spec.preflight.run_id, spec.preflight.run_id);
         monitor(&store, &mut value, &mut slots, spec.timeout, spec.quiet)
     })();
+    let result=if interrupt_uncertain_auto_tests(&mut value){store.save(&value).and(result)}else{result};
     let result = cancellation_result(result, &mut value, &store);
     // Every identity successfully published is stopped, even when connect failed.
     let stop_failed = teardown_sessions(value["slots"].as_array().unwrap().iter().enumerate().map(|(index, row)| {
@@ -812,6 +817,7 @@ pub fn dependency_review(root:&Path,id:&str,worker:usize)->io::Result<Review>{
         "artifact_refs":handoff.artifact_refs,"checkpoint_id":handoff.checkpoint_id,
         "changed_paths":checkpoint["changed_paths"],"git_observation_available":true,
         "last_turn_sha256":doxa_fleet::hash(&value["slots"][worker]["last_turn"] )?,
+        "turn_serial":value["slots"][worker]["turn_serial"].as_u64().unwrap_or(0),
         "tests_verified":false,"approval":"explicit human dependency release","dependent_workers":dependents});
     let token=doxa_fleet::hash(&request)?;
     Ok(Review{request,token})
@@ -848,6 +854,10 @@ fn host_test_changed_paths(cwd:&Path,baseline:&str)->io::Result<Vec<String>> {
 /// Git-visible tree in a separate offline rootless Docker container; worker
 /// prose and project files cannot select a command or sign the resulting IDs.
 pub fn run_host_test(root:&Path,id:&str,worker:usize)->io::Result<Value>{
+    run_host_test_bound(root,id,worker,None)
+}
+
+fn run_host_test_bound(root:&Path,id:&str,worker:usize,auto_serial:Option<u64>)->io::Result<Value>{
     let before=snapshot(root,id)?;
     if before["phase"]!="monitoring"||before["live"]!=true||before["supervision"].is_null()
         ||before["spec"]["isolation"]!="docker-offline" {return Err(invalid("host tests require a live supervised offline Docker fleet"));}
@@ -858,8 +868,13 @@ pub fn run_host_test(root:&Path,id:&str,worker:usize)->io::Result<Value>{
     let assignment=context.assignments.get(worker).filter(|row|row.role=="worker").ok_or_else(||invalid("host test slot is not a worker"))?;
     let baseline=assignment.base_commit.as_deref().ok_or_else(||invalid("host test has no baseline commit"))?;
     let row=&before["slots"][worker];
+    if auto_serial.is_some_and(|serial|row["auto_test"]["state"]!="running"
+        ||row["auto_test"]["turn_serial"].as_u64()!=Some(serial)) {
+        return Err(invalid("automatic host test attempt changed"));
+    }
     if row["phase"]!="dispatched"||row["last_turn_kind"]!="turn_done"||row["last_turn"].is_null(){return Err(invalid("host test needs an observed completed worker turn"));}
     let turn_hash=doxa_fleet::hash(&row["last_turn"])?;
+    let turn_serial=row["turn_serial"].as_u64().unwrap_or(0);
     let (socket,session_id)=fleet_view::slot_socket(root,id,worker)?;
     let mut client=DaemonClient::connect(socket,None).map_err(io::Error::other)?;
     if client.hello["session_id"]!=session_id||session_id!=assignment.session_id{return Err(invalid("host test worker identity changed"));}
@@ -887,6 +902,9 @@ pub fn run_host_test(root:&Path,id:&str,worker:usize)->io::Result<Value>{
     let result=doxa_isolation::test_runner::run_offline(&manifest,&source,&recipe.argv,&recipe.cwd_relative,recipe.timeout_s)?;
     let after=snapshot(root,id)?;
     if after["phase"]!="monitoring"||after["live"]!=true||after["slots"][worker]["last_turn_kind"]!="turn_done"
+        ||after["slots"][worker]["turn_serial"].as_u64().unwrap_or(0)!=turn_serial
+        ||auto_serial.is_some_and(|serial|after["slots"][worker]["auto_test"]["state"]!="running"
+            ||after["slots"][worker]["auto_test"]["turn_serial"].as_u64()!=Some(serial))
         ||doxa_fleet::hash(&after["slots"][worker]["last_turn"])?!=turn_hash
         ||doxa_isolation::test_runner::capture(cwd,None)?.sha256!=captured.sha256{
         return Err(invalid("fleet source or completed turn changed during host test"));
@@ -912,6 +930,10 @@ pub fn run_host_test(root:&Path,id:&str,worker:usize)->io::Result<Value>{
     Ok(json!({"diff_id":diff_id,"test_id":test_id,"passed":result.passed,"exit_code":result.exit_code,
         "snapshot_sha256":captured.sha256,"source_files":captured.files,"source_bytes":captured.bytes,
         "output_bytes":result.output_bytes,"duration_ms":result.duration_ms}))
+}
+
+fn run_auto_host_test(root:&Path,id:&str,worker:usize,serial:u64)->io::Result<Value>{
+    run_host_test_bound(root,id,worker,Some(serial))
 }
 
 pub fn release_dependency(root:&Path,id:&str,worker:usize,token:&str)->io::Result<Value>{
@@ -1015,8 +1037,97 @@ fn checkpoint(store:&Store,value:&mut Value,slots:&mut [Slot],initial:bool)->io:
     value["supervision"]["review_reserved_usd"]=json!(state.reserved_usd);value["supervision"]["review_estimated_usd"]=json!(state.actual_estimated_usd);value["supervision"]["calls"]=json!(state.calls);
     value["supervision"]["last_checkpoint"]=json!(now());store.save(value)
 }
+
+const AUTO_TEST_MAX_RUNS:u64=32;
+const AUTO_TEST_MAX_PER_SLOT:u64=4;
+
+struct AutoTestTask {
+    worker:usize,
+    turn_serial:u64,
+    handle:std::thread::JoinHandle<io::Result<Value>>,
+}
+
+fn queue_auto_test(value:&mut Value,worker:usize)->io::Result<()> {
+    if value["spec"]["auto_test"]!=true || value["slots"][worker]["role"]!="worker"
+        ||value["slots"][worker]["phase"]!="dispatched" {return Ok(());}
+    let row=&value["slots"][worker];
+    if row["last_turn_kind"]!="turn_done" {return Ok(());}
+    let serial=row["turn_serial"].as_u64().ok_or_else(||invalid("host turn serial unavailable"))?;
+    value["slots"][worker]["auto_test"]=json!({"state":"pending","turn_serial":serial});
+    Ok(())
+}
+
+fn finish_auto_test(value:&mut Value,task:AutoTestTask)->bool {
+    let row=&value["slots"][task.worker];
+    if row["auto_test"]["state"]!="running" || row["auto_test"]["turn_serial"].as_u64()!=Some(task.turn_serial) {
+        let _=task.handle.join();
+        return false;
+    }
+    let result=task.handle.join().unwrap_or_else(|_|Err(io::Error::other("automatic test runner panicked")));
+    value["slots"][task.worker]["auto_test"]=match result {
+        Ok(receipt)=>json!({"state":if receipt["passed"]==true{"passed"}else{"failed"},
+            "turn_serial":task.turn_serial,"result":receipt}),
+        Err(error)=>json!({"state":"error","turn_serial":task.turn_serial,
+            "reason":error.to_string().chars().filter(|ch|!ch.is_control()).take(200).collect::<String>()}),
+    };
+    true
+}
+
+fn advance_auto_test(store:&Store,value:&mut Value,busy:&[bool],task:&mut Option<AutoTestTask>,
+    runner:fn(&Path,&str,usize,u64)->io::Result<Value>)->io::Result<()> {
+    if task.as_ref().is_some_and(|running|running.handle.is_finished()) {
+        if finish_auto_test(value,task.take().unwrap()){store.save(value)?;}
+    }
+    if task.is_some() || value["spec"]["auto_test"]!=true || value["supervision"]["paused"]==true {return Ok(());}
+    let Some(worker)=(0..busy.len()).find(|index|value["slots"][*index]["auto_test"]["state"]=="pending" && !busy[*index]) else {return Ok(());};
+    let total=value["auto_test_runs"].as_u64().unwrap_or(0);
+    let per_slot=value["slots"][worker]["auto_test_attempts"].as_u64().unwrap_or(0);
+    let serial=value["slots"][worker]["auto_test"]["turn_serial"].as_u64().ok_or_else(||invalid("pending host test has no turn serial"))?;
+    if total>=AUTO_TEST_MAX_RUNS || per_slot>=AUTO_TEST_MAX_PER_SLOT {
+        value["slots"][worker]["auto_test"]=json!({"state":"limit","turn_serial":serial,"reason":"automatic host test attempt limit reached; manual review required"});
+        store.save(value)?;
+        return Ok(());
+    }
+    value["auto_test_runs"]=json!(total+1);
+    value["slots"][worker]["auto_test_attempts"]=json!(per_slot+1);
+    value["slots"][worker]["auto_test"]=json!({"state":"running","turn_serial":serial});
+    // Persist the admission before the thread can run. An interrupted
+    // controller never replays an uncertain Docker test on resume.
+    store.save(value)?;
+    let root=store.run.parent().ok_or_else(||invalid("fleet root unavailable"))?.to_path_buf();
+    let id=store.run.file_name().and_then(|name|name.to_str()).ok_or_else(||invalid("fleet run ID unavailable"))?.to_owned();
+    let handle=match std::thread::Builder::new().name("doxa-fleet-host-test".into())
+        .spawn(move ||runner(&root,&id,worker,serial)) {
+        Ok(handle)=>handle,
+        Err(error)=>{
+            value["slots"][worker]["auto_test"]=json!({"state":"error","turn_serial":serial,
+                "reason":format!("host test worker could not start: {error}")});
+            store.save(value)?;
+            return Ok(());
+        }
+    };
+    *task=Some(AutoTestTask{worker,turn_serial:serial,handle});
+    Ok(())
+}
+
+fn interrupt_uncertain_auto_tests(value:&mut Value) -> bool {
+    let mut changed=false;
+    if let Some(rows)=value["slots"].as_array_mut() {
+        for row in rows {
+            if row["auto_test"]["state"]=="running" {
+                let serial=row["auto_test"]["turn_serial"].clone();
+                row["auto_test"]=json!({"state":"interrupted","turn_serial":serial,
+                    "reason":"controller restarted before the host test result was recorded; use fleet test after review"});
+                changed=true;
+            }
+        }
+    }
+    changed
+}
+
 fn monitor(store: &Store, value: &mut Value, slots: &mut [Slot], timeout: Option<Duration>, quiet: Duration) -> io::Result<()> {
     let started = Instant::now(); let mut quiet_since = None;
+    let mut auto_test_task:Option<AutoTestTask>=None;
     let mut last_checkpoint=Instant::now();
     let mut last_reviewed_handoff:Option<String>=None;
     // New manifests bind interactive lifetime independently of prompt delivery.
@@ -1051,7 +1162,16 @@ fn monitor(store: &Store, value: &mut Value, slots: &mut [Slot], timeout: Option
                 let event = &frame["event"]; let data = &event["data"];
                 match event["type"].as_str() {
                     Some("turn_start") => slot.busy = true,
-                    Some(kind @ ("turn_done" | "turn_refused")) => { milestone=true;slot.busy = false; value["slots"][index]["last_turn"] = data.clone(); value["slots"][index]["last_turn_kind"] = json!(kind); },
+                    Some(kind @ ("turn_done" | "turn_refused")) => {
+                        milestone=true;slot.busy=false;
+                        let serial=value["slots"][index]["turn_serial"].as_u64().unwrap_or(0).checked_add(1).ok_or_else(||invalid("host turn serial exhausted"))?;
+                        value["slots"][index]["turn_serial"]=json!(serial);
+                        value["slots"][index]["last_turn"]=data.clone();value["slots"][index]["last_turn_kind"]=json!(kind);
+                        if kind=="turn_done"{queue_auto_test(value,index)?;}
+                        else if value["spec"]["auto_test"]==true && value["slots"][index]["role"]=="worker" {
+                            value["slots"][index]["auto_test"]=json!({"state":"skipped","turn_serial":serial,"reason":"worker turn was refused"});
+                        }
+                    },
                     Some("needs_input") => {
                         if data["id"].as_str().is_some() && !slot.pending.iter().any(|(ask, _)| ask["id"] == data["id"]) {
                             if slot.pending.len() >= 64 { return Err(io::Error::other("fleet approval desk overflow")); }
@@ -1101,6 +1221,9 @@ fn monitor(store: &Store, value: &mut Value, slots: &mut [Slot], timeout: Option
         }
         if (milestone||handoff_transition.is_some())&&!value["supervision"].is_null()&&last_checkpoint.elapsed()>=Duration::from_secs(5){checkpoint(store,value,slots,false)?;last_checkpoint=Instant::now();if handoff_transition.is_some(){last_reviewed_handoff=handoff_transition;}}
         value["heartbeat_at"] = json!(now()); store.save(value)?;
+        let busy=slots.iter().map(|slot|slot.busy).collect::<Vec<_>>();
+        advance_auto_test(store,value,&busy,&mut auto_test_task,run_auto_host_test)?;
+        any_busy |= auto_test_task.is_some() || value["slots"].as_array().is_some_and(|rows|rows.iter().any(|row|row["auto_test"]["state"]=="pending"));
         if any_busy { quiet_since = None; } else if quiet_since.is_none() { quiet_since = Some(Instant::now()); }
         if value["slots"].as_array().is_some_and(|rows|rows.iter().any(|row|row["phase"]=="dependency_waiting")){quiet_since=None;}
         if value["supervision"]["paused"]==true {quiet_since=None;}
@@ -1113,6 +1236,81 @@ fn monitor(store: &Store, value: &mut Value, slots: &mut [Slot], timeout: Option
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn automatic_tests_require_a_frozen_offline_recipe_and_show_in_launch_review() {
+        let dir=tempfile::tempdir().unwrap();
+        let recipe=dir.path().join("test.json");
+        fs::write(&recipe,r#"{"argv":["/usr/bin/true"],"cwd_relative":"","timeout_s":5}"#).unwrap();
+        let mut args=vec!["--pool".into(),"fixture:fixture-v1".into(),"--prompt".into(),"task".into(),
+            "--run-budget".into(),"1".into(),"--review-budget".into(),"0.1".into(),
+            "--alignment-supervisor".into(),"deepseek:reviewer".into(),"--isolation".into(),"docker-offline".into(),
+            "--auto-test".into(),"--dry-run".into()];
+        assert!(Spec::parse(&args).is_err(),"automatic tests must not run without an approved recipe");
+        args.extend(["--test-recipe".into(),recipe.to_string_lossy().into_owned()]);
+        let spec=Spec::parse(&args).unwrap();
+        assert_eq!(spec.review().unwrap()["auto_test"],true);
+        let isolation=args.iter().position(|arg|arg=="--isolation").unwrap()+1;
+        args[isolation]="docker-open".into();
+        assert!(Spec::parse(&args).is_err(),"automatic tests need the offline Docker boundary");
+    }
+    #[test]
+    fn automatic_test_state_uses_host_turns_and_never_replays_uncertain_runs() {
+        let mut value=json!({"spec":{"auto_test":true},"slots":[
+            {"role":"coordinator","phase":"dispatched","turn_serial":1,"last_turn_kind":"turn_done"},
+            {"role":"worker","phase":"dispatched","turn_serial":2,"last_turn_kind":"turn_done"}]});
+        queue_auto_test(&mut value,0).unwrap();
+        assert!(value["slots"][0]["auto_test"].is_null());
+        queue_auto_test(&mut value,1).unwrap();
+        assert_eq!(value["slots"][1]["auto_test"],json!({"state":"pending","turn_serial":2}));
+        value["slots"][1]["auto_test"]["state"]=json!("running");
+        let stale=AutoTestTask{worker:1,turn_serial:1,handle:std::thread::spawn(||Ok(json!({"passed":true})))};
+        assert!(!finish_auto_test(&mut value,stale));
+        assert_eq!(value["slots"][1]["auto_test"]["state"],"running");
+        assert!(interrupt_uncertain_auto_tests(&mut value));
+        assert_eq!(value["slots"][1]["auto_test"]["state"],"interrupted");
+        assert!(!interrupt_uncertain_auto_tests(&mut value));
+        value["slots"][1]["auto_test"]=json!({"state":"running","turn_serial":2});
+        let failed=AutoTestTask{worker:1,turn_serial:2,handle:std::thread::spawn(||Ok(json!({"passed":false,"diff_id":"d","test_id":"t"})))};
+        assert!(finish_auto_test(&mut value,failed));
+        assert_eq!(value["slots"][1]["auto_test"]["state"],"failed");
+        assert_eq!(value["slots"][1]["auto_test"]["result"]["test_id"],"t");
+        // These markers expose results; only the separately reviewed human
+        // dependency-release path can change scheduling authority.
+        assert!(value.get("dependency_releases").is_none());
+    }
+    #[test]
+    fn automatic_test_scheduler_persists_admission_serializes_and_caps_runs() {
+        fn fixture_runner(root:&Path,id:&str,worker:usize,serial:u64)->io::Result<Value> {
+            let admitted=snapshot(root,id)?;
+            assert_eq!(admitted["slots"][worker]["auto_test"]["state"],"running");
+            assert_eq!(admitted["slots"][worker]["auto_test"]["turn_serial"],serial);
+            assert_eq!(admitted["auto_test_runs"],1);
+            Ok(json!({"passed":true,"diff_id":"host-diff","test_id":"host-test"}))
+        }
+        let root=tempfile::tempdir().unwrap();
+        fs::set_permissions(root.path(),fs::Permissions::from_mode(0o700)).unwrap();
+        let store=Store::create(root.path(),"auto-tests").unwrap();
+        let mut value=json!({"native_version":1,"run_id":"auto-tests","spec":{"auto_test":true},
+            "supervision":{"paused":false},"auto_test_runs":0,
+            "slots":[{"role":"worker","phase":"dispatched","auto_test":{"state":"pending","turn_serial":1}},
+                     {"role":"worker","phase":"dispatched","auto_test":{"state":"pending","turn_serial":1}}]});
+        store.save(&value).unwrap();
+        let mut task=None;
+        advance_auto_test(&store,&mut value,&[false,false],&mut task,fixture_runner).unwrap();
+        assert_eq!(task.as_ref().unwrap().worker,0);
+        assert_eq!(value["slots"][1]["auto_test"]["state"],"pending","only one Docker test runs at a time");
+        while !task.as_ref().unwrap().handle.is_finished(){std::thread::sleep(Duration::from_millis(1));}
+        // Mark the other worker busy so the completed receipt can be recorded
+        // without admitting a second fixture run.
+        advance_auto_test(&store,&mut value,&[false,true],&mut task,fixture_runner).unwrap();
+        assert!(task.is_none());
+        assert_eq!(snapshot(root.path(),"auto-tests").unwrap()["slots"][0]["auto_test"]["result"]["test_id"],"host-test");
+        value["auto_test_runs"]=json!(AUTO_TEST_MAX_RUNS);
+        advance_auto_test(&store,&mut value,&[false,false],&mut task,fixture_runner).unwrap();
+        assert!(task.is_none());
+        assert_eq!(value["slots"][1]["auto_test"]["state"],"limit");
+        assert!(value.get("dependency_releases").is_none());
+    }
     #[test]
     fn host_test_rejects_ignored_changes_outside_assignment_scope() {
         let root=tempfile::tempdir().unwrap();let repo=root.path().join("worker");fs::create_dir(&repo).unwrap();
