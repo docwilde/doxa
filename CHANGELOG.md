@@ -5,6 +5,20 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.37 — 2026-10-09
+
+**Docker hook boundary**
+
+- **`HookBroker`** now requires kernel pidfds and credentials for every hook frame segment; missing, mixed, or stalled writers fail. Hardened Docker production admission stays closed pending Engine, container and provider origin proof.
+
+**Code graph inventory**
+
+- **`doxa-codegraph`** bounds Git root and file-list subprocesses and kills descendants on failure, including after the leader exits. Source reads may still block; binding stays `unknown` and semantic production admission closed.
+
+**Native plugin admission**
+
+- **`/native-plugin run`** gates TUI worker dispatch on installed-host authority that production does not issue. Race tests cover cancellation and exit; production plugin admission stays closed pending installed-host cleanup proof.
+
 ## 2.0.0-beta.36 — 2026-10-09
 
 **Verified follow-ons**

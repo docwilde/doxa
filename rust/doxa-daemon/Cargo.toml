@@ -1,6 +1,6 @@
 [package]
 name = "doxa-daemon"
-version = "2.0.0-beta.36"
+version = "2.0.0-beta.37"
 edition = "2021"
 publish = false
 license = "AGPL-3.0-only"

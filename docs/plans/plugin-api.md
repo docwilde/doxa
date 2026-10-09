@@ -178,8 +178,11 @@ setup failure and a worker failure before its entry marker remain one
 conservative class. The explicit CLI command now calls this seam with a
 five-second deadline and signal-driven cancellation. The TUI run request has
 background ownership, bounded result classes and cancellation on panel, tab,
-owner and window exit. There is still no authenticated installed-host
-admission, so TUI execution stays disabled. Do not treat owner approval,
+owner and window exit. The TUI worker entry requires a private installed-host
+authority value; its production issuer remains closed until delegation and
+descendant cleanup are verified for the installed host. There is still no
+authenticated installed-host admission, so TUI execution stays disabled. Do
+not treat owner approval,
 the request frame, fuel or store limits as an execution switch. The handoff is
 `recheck_approved(home, review) -> RecheckedPackage`: it returns the exact,
 revalidated bytes and fails if either owner file, inode, digest, approval, or

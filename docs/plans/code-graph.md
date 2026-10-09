@@ -91,7 +91,12 @@ unknown for both Rust and Python rows.
 ## Freshness and coverage
 
 Every CLI query enumerates the current tracked **and untracked, nonignored** Git
-files and reads Rust and Python bytes afresh. The explicit TUI query cache
+files and reads Rust and Python bytes afresh. Git root lookup and file enumeration
+use a ten-second subprocess deadline, 4 KiB/4 MiB root/list stdout caps and a
+16 KiB stderr cap. On failure, `waitid(WNOWAIT)` reserves the leader's group ID
+until process-group cleanup kills descendants, including ones that closed their
+pipes. A timeout, failed command, oversized listing, or incomplete
+NUL-delimited path list returns no answer. The explicit TUI query cache
 re-reads and hashes those bytes before reusing an answer.
 Each row and call edge carries its file, line, SHA-256 of the parsed bytes, and
 read time. Candidate declarations carry their own source hashes and read times.
@@ -198,8 +203,9 @@ input at read time. An edit, addition, or removal makes that language's
 inventory stale; an unreadable or symlinked source makes it unknown. Older
 snapshots without the matching digest stay unknown. Each readback checks the
 full source set twice, with a 64 MiB cap and elapsed-time checks before and
-after file reads, then checks the Git path list again. Blocking Git enumeration
-or a source read may exceed ten seconds before the check can refuse the result.
+after file reads, then checks the Git path list again. Each Git subprocess has
+a ten-second deadline. A blocked source read may still exceed the source
+rehash deadline before the check can refuse the result.
 An early file that remains changed during the
 second pass makes the inventory unknown instead of falsely verified. Edits
 after a file's second read, or an edit restored between reads, can still escape

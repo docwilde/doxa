@@ -251,18 +251,20 @@ candidates, but an inherited-descriptor test proves that the pidfd still
 names the original connector when another process writes the frame. No
 production hook broker calls this probe.
 
-A disabled Linux probe now enables `SO_PASSPIDFD` and `SO_PASSCRED` before
-accepting a socket. Its 65,536-byte and five-second-bounded `recvmsg` loop
+A Linux frame reader now enables `SO_PASSPIDFD` and `SO_PASSCRED` before
+accepting a Docker hook socket; startup refuses the hook if either kernel
+option is unavailable. Its 65,536-byte and five-second-bounded `recvmsg` loop
 requires one kernel-supplied sender pidfd and credentials for every frame
 segment and refuses empty frames, stalled or mixed senders, missing control
 messages, and unsupported kernel options. An inherited socket test shows
 `SCM_PIDFD` names the child that sent bytes, while connect-time credentials
-name its parent. This is stronger sender evidence, but the probe is not wired
-into `HookBroker`. Gateway connector checks alone do not authenticate the
-Engine or a later writer. An authenticated exact-container Engine observation,
-per-message writer provenance, process-movement proof and real provider hook
-compatibility remain necessary; startup must refuse hardened mode without
-them.
+name its parent. The production `HookBroker` now reads Docker hook frames
+through this path, including the existing `docker-open` and `docker-offline`
+profiles. A same-UID host writer can still pass. Gateway connector checks and
+per-message writer identity do not authenticate the Engine or bind the writer
+to the inspected container. An authenticated exact-container Engine observation,
+writer-to-container binding, process-movement proof and real provider hook
+compatibility remain necessary; startup must refuse hardened mode without them.
 
 The [disposable egress-origin guest](../../scripts/egress-origin-guest/README.md)
 exercises the production connector pidfd check across real guest PID

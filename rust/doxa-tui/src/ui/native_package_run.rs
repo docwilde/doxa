@@ -1,7 +1,7 @@
 //! Lifecycle seam for an explicit grantless TUI request. No installed-host
 //! admission authority exists yet, so production requests stop before dispatch.
 use super::{App, ChipInfo};
-use crate::native_plugins::packages;
+use crate::native_plugins::{self, packages, InstalledHostAuthority};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
@@ -46,31 +46,30 @@ impl RunOutcome {
     }
 }
 
-/// Production admission has deliberately no config or environment override.
 /// A disposable-guest receipt is evidence for that guest, not an authority for
 /// the installed TUI's parent process, cgroup delegation, and worker identity.
-fn installed_host_admission() -> Result<(), RunOutcome> {
-    Err(RunOutcome::HostUnverified)
+fn installed_host_admission() -> Result<InstalledHostAuthority, RunOutcome> {
+    native_plugins::installed_host_authority().map_err(|_| RunOutcome::HostUnverified)
 }
 
-fn recheck_and_admit<G>(home: &Path, review: &packages::Review, cancel: &AtomicBool, gate: G) -> Result<(), RunOutcome>
-where G: FnOnce() -> Result<(), RunOutcome>
+fn recheck_and_admit<G>(home: &Path, review: &packages::Review, cancel: &AtomicBool, gate: G) -> Result<InstalledHostAuthority, RunOutcome>
+where G: FnOnce() -> Result<InstalledHostAuthority, RunOutcome>
 {
     if cancel.load(Ordering::Acquire) { return Err(RunOutcome::Cancelled); }
     if !review.owner_approved { return Err(RunOutcome::ApprovalRequired); }
     if !review.requested_grants.is_empty() { return Err(RunOutcome::GrantsRefused); }
     if packages::recheck_approved(home, review).is_err() { return Err(RunOutcome::PackageChanged); }
     if cancel.load(Ordering::Acquire) { return Err(RunOutcome::Cancelled); }
-    gate()?;
+    let authority = gate()?;
     if cancel.load(Ordering::Acquire) { return Err(RunOutcome::Cancelled); }
-    Ok(())
+    Ok(authority)
 }
 
 fn check_and_dispatch<G, F>(home: &Path, name: &str, cancel: &AtomicBool,
     phase: &AtomicU8, gate: G, dispatch: F) -> RunOutcome
 where
-    G: FnOnce() -> Result<(), RunOutcome>,
-    F: FnOnce(&Path, &packages::Review, &AtomicBool) -> io::Result<i32>,
+    G: FnOnce() -> Result<InstalledHostAuthority, RunOutcome>,
+    F: FnOnce(&InstalledHostAuthority, &Path, &packages::Review, &AtomicBool) -> io::Result<i32>,
 {
     check_and_dispatch_with(home, name, cancel, phase, gate, || {}, dispatch)
 }
@@ -78,16 +77,19 @@ where
 fn check_and_dispatch_with<G, H, F>(home: &Path, name: &str, cancel: &AtomicBool,
     phase: &AtomicU8, gate: G, before_claim: H, dispatch: F) -> RunOutcome
 where
-    G: FnOnce() -> Result<(), RunOutcome>,
+    G: FnOnce() -> Result<InstalledHostAuthority, RunOutcome>,
     H: FnOnce(),
-    F: FnOnce(&Path, &packages::Review, &AtomicBool) -> io::Result<i32>,
+    F: FnOnce(&InstalledHostAuthority, &Path, &packages::Review, &AtomicBool) -> io::Result<i32>,
 {
     if cancel.load(Ordering::Acquire) { return RunOutcome::Cancelled; }
     let review = match packages::preflight(home, name) {
         Ok(review) => review,
         Err(_) => return RunOutcome::PackageInvalid,
     };
-    if let Err(error) = recheck_and_admit(home, &review, cancel, gate) { return error; }
+    let authority = match recheck_and_admit(home, &review, cancel, gate) {
+        Ok(authority) => authority,
+        Err(error) => return error,
+    };
     before_claim();
     // Cancellation races with the last admission check. Only this atomic
     // transition may start a sandbox worker; a closed owner wins by changing
@@ -97,7 +99,7 @@ where
         return RunOutcome::Cancelled;
     }
     if cancel.load(Ordering::Acquire) { return RunOutcome::Cancelled; }
-    match dispatch(home, &review, cancel) {
+    match dispatch(&authority, home, &review, cancel) {
         Ok(value) if !cancel.load(Ordering::Acquire) => RunOutcome::Returned(value),
         Ok(_) => RunOutcome::Cancelled,
         Err(_) if cancel.load(Ordering::Acquire) => RunOutcome::Cancelled,
@@ -118,8 +120,8 @@ pub(super) struct PendingRun {
 impl PendingRun {
     fn spawn<G, F>(owner: (usize, String), home: PathBuf, name: String, gate: G, dispatch: F) -> io::Result<Self>
     where
-        G: FnOnce() -> Result<(), RunOutcome> + Send + 'static,
-        F: FnOnce(&Path, &packages::Review, &AtomicBool) -> io::Result<i32> + Send + 'static,
+        G: FnOnce() -> Result<InstalledHostAuthority, RunOutcome> + Send + 'static,
+        F: FnOnce(&InstalledHostAuthority, &Path, &packages::Review, &AtomicBool) -> io::Result<i32> + Send + 'static,
     {
         let cancel = Arc::new(AtomicBool::new(false));
         let phase = Arc::new(AtomicU8::new(CHECKING));
@@ -286,7 +288,7 @@ mod tests {
         let home = fixture(true, &[]);
         let cancel = AtomicBool::new(false);
         let outcome = check_and_dispatch(home.path(), "demo", &cancel, &AtomicU8::new(CHECKING),
-            installed_host_admission, |_, _, _| panic!("worker dispatch must stay closed"));
+            installed_host_admission, |_, _, _, _| panic!("worker dispatch must stay closed"));
         assert_eq!(outcome, RunOutcome::HostUnverified);
         assert_eq!(outcome.lines().len(), 1);
     }
@@ -301,14 +303,14 @@ mod tests {
             let cancel = AtomicBool::new(false);
             let result = check_and_dispatch(home.path(), "demo", &cancel, &AtomicU8::new(CHECKING),
                 || panic!("gate must not see rejected package"),
-                |_, _, _| panic!("worker must not start"));
+                |_, _, _, _| panic!("worker must not start"));
             assert_eq!(result, expected);
         }
         let home = fixture(true, &[]);
         let result = check_and_dispatch(home.path(), "demo", &AtomicBool::new(true),
             &AtomicU8::new(CHECKING),
             || panic!("gate must not see cancelled request"),
-            |_, _, _| panic!("worker must not start"));
+            |_, _, _, _| panic!("worker must not start"));
         assert_eq!(result, RunOutcome::Cancelled);
     }
 
@@ -317,9 +319,9 @@ mod tests {
         let home = fixture(true, &[]);
         let review = packages::preflight(home.path(), "demo").unwrap();
         private(&home.path().join("native-plugin-packages/demo/module.wasm"), b"\0asm\x01\0\0\0");
-        assert_eq!(recheck_and_admit(home.path(), &review, &AtomicBool::new(false),
+        assert!(matches!(recheck_and_admit(home.path(), &review, &AtomicBool::new(false),
             || panic!("stale bytes must not reach installed-host gate")),
-            Err(RunOutcome::PackageChanged));
+            Err(RunOutcome::PackageChanged)));
     }
 
     fn running_app(home: &Path) -> (App, Receiver<()>) {
@@ -329,7 +331,7 @@ mod tests {
         let (started, started_rx) = mpsc::channel();
         let (cancelled, cancelled_rx) = mpsc::channel();
         let run = PendingRun::spawn(app.prompt_owner(), home.to_owned(), "demo".into(),
-            || Ok(()), move |_, _, cancel| {
+            || Ok(native_plugins::test_installed_host_authority()), move |_, _, _, cancel| {
                 started.send(()).unwrap();
                 while !cancel.load(Ordering::Acquire) {
                     thread::sleep(Duration::from_millis(1));
@@ -392,7 +394,7 @@ mod tests {
         let count = Arc::new(AtomicUsize::new(0));
         let called = Arc::clone(&count);
         let run = PendingRun::spawn(app.prompt_owner(), home.path().to_owned(), "demo".into(),
-            || Ok(()), move |_, _, _| { called.fetch_add(1, Ordering::SeqCst); Ok(17) }).unwrap();
+            || Ok(native_plugins::test_installed_host_authority()), move |_, _, _, _| { called.fetch_add(1, Ordering::SeqCst); Ok(17) }).unwrap();
         app.chip_info = Some(ChipInfo { kind: RUN_KIND, label: "demo".into(),
             lines: vec!["running".into()], scroll: 0, owner: None });
         app.native_package_run = Some(run);
@@ -445,17 +447,30 @@ mod tests {
         let home = fixture(true, &[]);
         let (started, started_rx) = mpsc::channel();
         let (release, release_rx) = mpsc::channel();
+        let dispatched = Arc::new(AtomicUsize::new(0));
+        let task_dispatched = Arc::clone(&dispatched);
         let run = PendingRun::spawn((0, "session-one".into()), home.path().to_owned(),
             "demo".into(), move || {
                 started.send(()).unwrap();
                 release_rx.recv().unwrap();
-                Ok(())
-            }, |_, _, _| panic!("cancelled request must not dispatch")).unwrap();
+                Ok(native_plugins::test_installed_host_authority())
+            }, move |_, _, _, _| {
+                task_dispatched.fetch_add(1, Ordering::SeqCst);
+                Ok(17)
+            }).unwrap();
+        let phase = Arc::clone(&run.phase);
         started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         let started = Instant::now();
         drop(run);
         assert!(started.elapsed() < Duration::from_secs(1));
+        assert_eq!(phase.load(Ordering::Acquire), CANCELLED_BEFORE_DISPATCH);
         release.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while phase.load(Ordering::Acquire) != FINISHED && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(phase.load(Ordering::Acquire), FINISHED);
+        assert_eq!(dispatched.load(Ordering::SeqCst), 0);
     }
 
     #[test]
@@ -472,9 +487,9 @@ mod tests {
         let task_dispatched = Arc::clone(&dispatched);
         let task = thread::spawn(move || check_and_dispatch_with(&home_path, "demo",
             &task_cancel, &task_phase,
-            || Ok(()),
+            || Ok(native_plugins::test_installed_host_authority()),
             move || { at_claim.send(()).unwrap(); release_rx.recv().unwrap(); },
-            move |_, _, _| { task_dispatched.fetch_add(1, Ordering::SeqCst); Ok(17) }));
+            move |_, _, _, _| { task_dispatched.fetch_add(1, Ordering::SeqCst); Ok(17) }));
         at_claim_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         cancel.store(true, Ordering::Release);
         assert_eq!(phase.compare_exchange(CHECKING, CANCELLED_BEFORE_DISPATCH,
@@ -491,7 +506,7 @@ mod tests {
         let (cancel_seen, cancel_seen_rx) = mpsc::channel();
         let (release, release_rx) = mpsc::channel();
         let run = PendingRun::spawn((0, "session-one".into()), home.path().to_owned(),
-            "demo".into(), || Ok(()), move |_, _, cancel| {
+            "demo".into(), || Ok(native_plugins::test_installed_host_authority()), move |_, _, _, cancel| {
                 started.send(()).unwrap();
                 while !cancel.load(Ordering::Acquire) {
                     thread::sleep(Duration::from_millis(1));
@@ -512,6 +527,43 @@ mod tests {
         closer.join().unwrap();
     }
 
+    #[test]
+    fn owner_switch_during_successful_dispatch_discards_late_return() {
+        let home = fixture(true, &[]);
+        let mut app = App::default();
+        app.groups[0].tabs.push("session-one".into());
+        app.groups[0].tabs.push("session-two".into());
+        app.handle(Event::Resize(100, 30));
+        let (started, started_rx) = mpsc::channel();
+        let (cancel_seen, cancel_seen_rx) = mpsc::channel();
+        let (release, release_rx) = mpsc::channel();
+        let run = PendingRun::spawn(app.prompt_owner(), home.path().to_owned(),
+            "demo".into(), || Ok(native_plugins::test_installed_host_authority()),
+            move |_, _, _, cancel| {
+                started.send(()).unwrap();
+                while !cancel.load(Ordering::Acquire) {
+                    thread::sleep(Duration::from_millis(1));
+                }
+                cancel_seen.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Ok(17)
+            }).unwrap();
+        app.chip_info = Some(ChipInfo { kind: RUN_KIND, label: "demo".into(),
+            lines: vec!["running".into()], scroll: 0, owner: None });
+        app.native_package_run = Some(run);
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        app.groups[0].active = 1;
+        let releaser = thread::spawn(move || {
+            cancel_seen_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            release.send(()).unwrap();
+        });
+        assert!(app.poll_native_package_run());
+        releaser.join().unwrap();
+        assert!(app.native_package_run.is_none());
+        assert!(app.chip_info.is_none());
+        assert!(!app.poll_native_package_run());
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn owner_close_waits_for_real_process_group_cancellation_and_reap() {
@@ -520,7 +572,7 @@ mod tests {
         let child_marker = marker.clone();
         let (cleaned, cleaned_rx) = mpsc::channel();
         let run = PendingRun::spawn((0, "session-one".into()), home.path().to_owned(),
-            "demo".into(), || Ok(()), move |_, _, cancel| {
+            "demo".into(), || Ok(native_plugins::test_installed_host_authority()), move |_, _, _, cancel| {
                 let mut command = std::process::Command::new("/bin/sh");
                 command.arg("-c").arg("printf ready > \"$1\"; exec /bin/sleep 30")
                     .arg("sh").arg(&child_marker);

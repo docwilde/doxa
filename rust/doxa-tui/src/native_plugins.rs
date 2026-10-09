@@ -28,6 +28,22 @@ pub(crate) mod runner_sandbox;
 /// commands never invoke it in-process.
 pub fn plugin_worker_stdio() -> io::Result<()> { runner::serve_stdio() }
 
+/// A TUI worker launch must carry installed-host authority in addition to
+/// owner package approval. There is no issuer in production until the
+/// installed delegation and cleanup contract has been accepted. The explicit
+/// CLI prototype has its separate, opt-in admission path.
+pub(crate) struct InstalledHostAuthority { _private: () }
+
+pub(crate) fn installed_host_authority() -> io::Result<InstalledHostAuthority> {
+    Err(io::Error::new(io::ErrorKind::PermissionDenied,
+        "installed plugin host delegation and cleanup are unverified"))
+}
+
+#[cfg(test)]
+pub(crate) fn test_installed_host_authority() -> InstalledHostAuthority {
+    InstalledHostAuthority { _private: () }
+}
+
 /// An explicit CLI prototype. No TUI startup, slash command, plugin discovery,
 /// or grantful package can reach the worker through this function.
 #[cfg(target_os = "linux")]
@@ -53,7 +69,8 @@ pub fn run_grantless_package(home: &Path, name: &str, cancel: &std::sync::atomic
 /// independently authenticated installed-host policy.
 #[cfg(target_os = "linux")]
 pub(crate) fn run_reviewed_grantless_package(
-    home: &Path, review: &packages::Review, cancel: &std::sync::atomic::AtomicBool,
+    _authority: &InstalledHostAuthority, home: &Path, review: &packages::Review,
+    cancel: &std::sync::atomic::AtomicBool,
 ) -> io::Result<i32> {
     if !review.owner_approved || !review.requested_grants.is_empty() {
         return Err(io::Error::new(io::ErrorKind::PermissionDenied,
@@ -73,7 +90,8 @@ pub(crate) fn run_reviewed_grantless_package(
 
 #[cfg(not(target_os = "linux"))]
 pub(crate) fn run_reviewed_grantless_package(
-    _home: &Path, _review: &packages::Review, _cancel: &std::sync::atomic::AtomicBool,
+    _authority: &InstalledHostAuthority, _home: &Path, _review: &packages::Review,
+    _cancel: &std::sync::atomic::AtomicBool,
 ) -> io::Result<i32> {
     Err(io::Error::new(io::ErrorKind::Unsupported, "isolated plugin runner requires Linux"))
 }
