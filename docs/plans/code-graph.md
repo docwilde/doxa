@@ -3,7 +3,8 @@
 Status: **read-only syntax queries, explicit file-map export, and reviewed LORE
 snapshot reads implemented**. DOXA can query current Rust source for definitions, imports,
 conservative call-site candidates, and bounded top-level module-file layout,
-including literal paths and unverified conditional candidates.
+including literal paths and unverified conditional candidates. Python `.py`
+files support syntax-only definitions and imports.
 LORE 0.62.20 owns durable source-hashed snapshots; DOXA does not write them.
 
 ## Contents
@@ -19,10 +20,14 @@ LORE 0.62.20 owns durable source-hashed snapshots; DOXA does not write them.
 
 `doxa codegraph [--root WORKTREE] file PATH | symbol NAME | imports PATH | calls PATH | modules PATH`
 returns bounded JSON. With no `--root`, it uses the current Git worktree.
-`file` lists parsed definitions and import declarations in one Rust file;
+`file` lists parsed definitions and import declarations in one Rust or Python file;
 `symbol` finds all exact name or qualified-name matches across that worktree;
-`imports` lists the syntactic `use` and `extern crate` declarations in one
-file. `modules` lists top-level `mod child;` declarations and resolves a unique
+`imports` lists syntactic Rust `use` and `extern crate`, or Python `import`,
+`from ... import`, and `__future__` declarations in one file. Python rows cover
+classes, functions, methods, and nested definitions with dotted lexical names.
+Aliases and glob imports stay declarations; they do not prove a module target or
+binding. Python `calls` and `modules` return explicit unsupported statuses.
+Rust `modules` lists top-level `mod child;` declarations and resolves a unique
 listed, readable, parseable `child.rs` or `child/mod.rs` with source and target
 hashes. A literal `#[path = "relative/file.rs"]` can resolve a top-level module
 against the containing source file's directory; only relative, traversal-free
@@ -55,8 +60,9 @@ the input/render loop and displays revision, hashes, freshness limit, and the
 original graph JSON, including ambiguous candidates. A missing snapshot is
 shown explicitly; stale or malformed data fails closed.
 
-The parser is [Syn's Rust source parser](https://docs.rs/syn/latest/syn/fn.parse_file.html).
-It records top-level definitions, inline modules, trait methods, and methods
+Rust uses [Syn's source parser](https://docs.rs/syn/latest/syn/fn.parse_file.html);
+Python uses Tree-sitter Python. Both parse source bytes without executing them.
+The Rust parser records top-level definitions, inline modules, trait methods, and methods
 whose `impl` self type is a simple path. Imports are declarations, not resolved
 file dependencies. A call edge records its lexical caller and spelled target.
 Direct paths carry up to eight function or method definitions whose final name
@@ -66,27 +72,32 @@ no match and receiver-method calls are `unresolved`. The answer counts omitted
 candidates. Calls through variables, closures, macros, function-local items,
 and qualified-self paths are not resolved. Neither macro expansion nor
 conditional compilation is evaluated.
-A Python, TypeScript, or other recognized non-Rust source file is reported as
-unsupported rather than silently treated as empty.
+TypeScript and other recognized languages without a parser are reported as
+unsupported rather than silently treated as empty. Semantic binding remains
+unknown for both Rust and Python rows.
 
 ## Freshness and coverage
 
 Every query enumerates the current tracked **and untracked, nonignored** Git
-files and reads Rust bytes afresh. There is no index that can lag an edit.
+files and reads Rust and Python bytes afresh. There is no index that can lag an edit.
 Each row and call edge carries its file, line, SHA-256 of the parsed bytes, and
 read time. Candidate declarations carry their own source hashes and read times.
 When **every listed Rust file parses**, the answer also contains a deterministic
 `scan_input_sha256` over each Rust path and source hash. A skipped or
-unparseable Rust file leaves it null. This inventory covers listed Rust inputs,
-not ignored files, other languages, macro expansion, or compiler semantics.
+unparseable Rust file leaves it null. Python issues do not alter this Rust-only
+digest. This inventory covers listed Rust inputs, not ignored files, Python,
+macro expansion, or compiler semantics. Coverage counts parsed Python files and
+names Python parse or read issues in the bounded issue lists.
 File-scoped answers also carry the requested source's hash and read time, even
 when that parsed file produces no rows.
 The answer names its worktree and reports parsed files, unsupported languages,
 syntax errors, skipped files, and unsupported syntax. Same-name definitions
 remain separate candidates. A no-hit answer names a live-search fallback.
 
-Work is bounded: at most 20,000 files, 1 MiB per Rust file, 64 MiB total Rust
-source, 100 result rows, call edges, or module declarations, 10,000 call sites in the requested file,
+Work is bounded: at most 20,000 files, 1 MiB per Rust or Python file, 64 MiB
+total source per language, and two seconds of parsing, 200,000 syntax nodes,
+and 128 nested definition levels per Python file. Results hold at most 100 rows,
+call edges, or module declarations, 10,000 call sites in the requested Rust file,
 100,000 candidate declarations, and a 64 KiB reply. The answer counts omitted
 rows, edges, and per-edge candidates.
 When enumeration or the total scan budget fails, the command returns an error
@@ -179,6 +190,7 @@ is read-only and creates no second memory authority.
 - Decide whether a reviewed agent tool or persistent TUI tree is useful. The
   current viewer offers explicit fresh and stored queries only.
 - Decide whether other languages justify a parser dependency and coverage bar.
-  Python support from the old plan has **not** shipped.
+  Python calls, module resolution, runtime imports, and type-aware binding are
+  outside the shipped syntax slice.
 - Benchmark scan latency on large repositories before using this query in an
   automatic turn path or adding a persisted incremental index.

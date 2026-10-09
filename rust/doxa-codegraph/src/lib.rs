@@ -11,7 +11,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 
@@ -24,6 +24,9 @@ const MAX_PATH_BYTES: usize = 4_096;
 const MAX_LIST_BYTES: usize = 4 * 1024 * 1024;
 const MAX_SOURCE_BYTES: u64 = 1024 * 1024;
 const MAX_TOTAL_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_PYTHON_NODES: usize = 200_000;
+const MAX_PYTHON_SCOPE_DEPTH: usize = 128;
+const MAX_PYTHON_PARSE_TIME: Duration = Duration::from_secs(2);
 const MAX_ROWS: usize = 100;
 const MAX_ISSUE_EXAMPLES: usize = 20;
 const MAX_REPLY_BYTES: usize = 64 * 1024;
@@ -72,7 +75,7 @@ pub struct Answer {
     pub query: &'static str,
     pub value: String,
     pub observed_unix_ms: u128,
-    /// Parsed bytes of the specifically requested Rust file, including an
+    /// Parsed bytes of the specifically requested source file, including an
     /// empty file with no rows or module declarations.
     pub requested_source_sha256: Option<String>,
     pub requested_source_read_unix_ms: Option<u128>,
@@ -97,6 +100,7 @@ pub struct Answer {
 pub struct Coverage {
     pub enumerated_files: usize,
     pub parsed_rust_files: usize,
+    pub parsed_python_files: usize,
     pub unsupported_languages: BTreeMap<String, usize>,
     pub other_files: usize,
     pub unparseable: Issues,
@@ -179,7 +183,7 @@ pub struct ModuleEdge {
     pub conditional_candidate_read_unix_ms: Option<u128>,
 }
 
-const NOTE: &str = "Rust syntax only. Call candidates match a final name segment, not Rust bindings; even one candidate is unverified. Imports are declarations. Module edges resolve file layout only, not compilation reachability; cfg-gated files are candidates, never verified targets. cfg predicates, cfg_attr, macro expansion, local definitions/imports, other expression calls, references, and non-Rust languages are not resolved.";
+const NOTE: &str = "Rust and Python syntax only; semantic binding is unknown. Rust call candidates match a final name segment, not bindings; even one candidate is unverified. Imports are declarations. Rust module edges resolve file layout only, not compilation reachability; cfg-gated files are candidates, never verified targets. Python calls and modules are unsupported. cfg predicates, cfg_attr, macro expansion, local definitions/imports, and other expression calls are not resolved.";
 
 fn source_language(path: &str) -> Option<&'static str> {
     match Path::new(path).extension().and_then(|s| s.to_str()) {
@@ -267,7 +271,7 @@ fn file_bytes(root: &Path, relative: &str) -> Result<(String, String, u128), Str
     }
     let sha = format!("{:x}", Sha256::digest(&bytes));
     let read_unix_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis();
-    let content = String::from_utf8(bytes).map_err(|_| "non-UTF-8 Rust source")?;
+    let content = String::from_utf8(bytes).map_err(|_| "non-UTF-8 source")?;
     Ok((content, sha, read_unix_ms))
 }
 
@@ -551,6 +555,109 @@ fn parse_rust(content: &str, file: &str, sha: &str, read_unix_ms: u128,
     Ok(parsed)
 }
 
+fn python_text(node: tree_sitter::Node<'_>, source: &str) -> Result<String, String> {
+    node.utf8_text(source.as_bytes())
+        .map(|text| text.chars().filter(|ch| !ch.is_whitespace()).collect())
+        .map_err(|_| "Python syntax node is outside source bytes".into())
+}
+
+fn python_import_name(node: tree_sitter::Node<'_>, source: &str)
+    -> Result<(String, Option<String>), String> {
+    if node.kind() == "aliased_import" {
+        let name = node.child_by_field_name("name").ok_or("Python import lacks a name")?;
+        let alias = node.child_by_field_name("alias").ok_or("Python import lacks an alias")?;
+        Ok((python_text(name, source)?, Some(python_text(alias, source)?)))
+    } else {
+        Ok((python_text(node, source)?, None))
+    }
+}
+
+fn python_imports(node: tree_sitter::Node<'_>, source: &str, file: &str, sha: &str,
+    read_unix_ms: u128, rows: &mut Vec<Row>) -> Result<(), String> {
+    let module = if node.kind() == "import_from_statement" {
+        Some(node.child_by_field_name("module_name")
+            .ok_or("Python from-import lacks a module")?)
+    } else { None };
+    let prefix = if node.kind() == "future_import_statement" {
+        "__future__".to_owned()
+    } else if let Some(module) = module {
+        python_text(module, source)?
+    } else { String::new() };
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        if module.is_some_and(|module| module.id() == child.id()) { continue; }
+        if !matches!(child.kind(), "dotted_name" | "aliased_import" | "wildcard_import") {
+            return Err(format!("unsupported Python import syntax: {}", child.kind()));
+        }
+        let glob = child.kind() == "wildcard_import";
+        let (name, alias) = python_import_name(child, source)?;
+        let full = if prefix.is_empty() { name }
+            else if prefix.ends_with('.') { format!("{prefix}{name}") }
+            else { format!("{prefix}.{name}") };
+        rows.push(row(if glob { "python_import_glob" } else { "python_import" }, file,
+            child.start_position().row + 1, full.clone(), full, alias, glob, sha, read_unix_ms));
+    }
+    Ok(())
+}
+
+fn parse_python(content: &str, file: &str, sha: &str, read_unix_ms: u128)
+    -> Result<(Vec<Row>, Vec<Row>), String> {
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_python::LANGUAGE.into())
+        .map_err(|e| format!("Python parser setup: {e}"))?;
+    let started = Instant::now();
+    let mut read = |offset, _: tree_sitter::Point| content.as_bytes().get(offset..).unwrap_or_default();
+    let mut out_of_time = |_: &tree_sitter::ParseState| started.elapsed() >= MAX_PYTHON_PARSE_TIME;
+    let tree = parser.parse_with_options(&mut read, None,
+        Some(tree_sitter::ParseOptions::new().progress_callback(&mut out_of_time)))
+        .ok_or("Python parse exceeded two-second limit")?;
+    if tree.root_node().has_error() {
+        return Err("Python syntax error".into());
+    }
+    let mut symbols = Vec::new();
+    let mut imports = Vec::new();
+    let mut stack = vec![(tree.root_node(), String::new(), false, 0usize)];
+    let mut visited = 0usize;
+    while let Some((node, scope, in_class, depth)) = stack.pop() {
+        visited += 1;
+        if visited > MAX_PYTHON_NODES {
+            return Err("Python syntax tree exceeds 200,000 nodes".into());
+        }
+        let mut child_scope = scope.clone();
+        let mut child_in_class = in_class;
+        let mut child_depth = depth;
+        match node.kind() {
+            "class_definition" | "function_definition" => {
+                if depth >= MAX_PYTHON_SCOPE_DEPTH {
+                    return Err("Python definition nesting exceeds 128 levels".into());
+                }
+                let name_node = node.child_by_field_name("name")
+                    .ok_or("Python definition lacks a name")?;
+                let name = python_text(name_node, content)?;
+                let qualified = if scope.is_empty() { name.clone() }
+                    else { format!("{scope}.{name}") };
+                let is_class = node.kind() == "class_definition";
+                symbols.push(row(if is_class { "class" } else if in_class { "method" } else { "function" },
+                    file, name_node.start_position().row + 1, name, qualified.clone(),
+                    None, false, sha, read_unix_ms));
+                child_scope = qualified;
+                child_in_class = is_class;
+                child_depth += 1;
+            }
+            "import_statement" | "import_from_statement" | "future_import_statement" => {
+                python_imports(node, content, file, sha, read_unix_ms, &mut imports)?;
+            }
+            _ => {}
+        }
+        let mut cursor = node.walk();
+        let children = node.named_children(&mut cursor).collect::<Vec<_>>();
+        for child in children.into_iter().rev() {
+            stack.push((child, child_scope.clone(), child_in_class, child_depth));
+        }
+    }
+    Ok((symbols, imports))
+}
+
 enum SourceFact {
     Parsed { sha256: String, read_unix_ms: u128 },
     Skipped,
@@ -697,6 +804,8 @@ pub fn query(root: &Path, request: Query) -> Result<Answer, String> {
         note: NOTE, fallback: None };
     answer.coverage.enumerated_files = paths.len();
     let mut total = 0u64;
+    let mut python_total = 0u64;
+    let mut rust_scan_complete = true;
     let mut candidates: BTreeMap<String, Vec<Row>> = BTreeMap::new();
     let mut candidate_count = 0usize;
     let mut source_facts = BTreeMap::<String, SourceFact>::new();
@@ -706,14 +815,14 @@ pub fn query(root: &Path, request: Query) -> Result<Answer, String> {
             Some("rust") => {
                 let (content, sha, read_unix_ms) = match file_bytes(&root, &path) {
                     Ok(result) => result,
-                    Err(reason) => { answer.coverage.skipped.add(&path, reason); source_facts.insert(path.clone(), SourceFact::Skipped); if path == &value { answer.status = "skipped".into(); } continue; }
+                    Err(reason) => { answer.coverage.skipped.add(&path, reason); source_facts.insert(path.clone(), SourceFact::Skipped); rust_scan_complete = false; if path == &value { answer.status = "skipped".into(); } continue; }
                 };
                 total = total.saturating_add(content.len() as u64);
                 if total > MAX_TOTAL_SOURCE_BYTES { return Err("Rust source scan exceeded 64 MiB; no partial answer".into()); }
                 let parsed = match parse_rust(&content, &path, &sha, read_unix_ms,
                     kind == "calls" && path == &value) {
                     Ok(result) => result,
-                    Err(reason) => { answer.coverage.unparseable.add(&path, reason); source_facts.insert(path.clone(), SourceFact::Unparseable); if path == &value { answer.status = "unparseable".into(); } continue; }
+                    Err(reason) => { answer.coverage.unparseable.add(&path, reason); source_facts.insert(path.clone(), SourceFact::Unparseable); rust_scan_complete = false; if path == &value { answer.status = "unparseable".into(); } continue; }
                 };
                 source_facts.insert(path.clone(), SourceFact::Parsed { sha256: sha.clone(), read_unix_ms });
                 if path == &value && kind != "symbol" {
@@ -756,6 +865,47 @@ pub fn query(root: &Path, request: Query) -> Result<Answer, String> {
                     if answer.rows.len() < MAX_ROWS { answer.rows.push(row); } else { answer.omitted_rows += 1; }
                 }
             }
+            Some("python") => {
+                let (content, sha, read_unix_ms) = match file_bytes(&root, path) {
+                    Ok(result) => result,
+                    Err(reason) => {
+                        answer.coverage.skipped.add(path, reason);
+                        if path == &value { answer.status = "skipped".into(); }
+                        continue;
+                    }
+                };
+                python_total = python_total.saturating_add(content.len() as u64);
+                if python_total > MAX_TOTAL_SOURCE_BYTES {
+                    return Err("Python source scan exceeded 64 MiB; no partial answer".into());
+                }
+                let (symbols, imports) = match parse_python(&content, path, &sha, read_unix_ms) {
+                    Ok(result) => result,
+                    Err(reason) => {
+                        answer.coverage.unparseable.add(path, reason);
+                        if path == &value { answer.status = "unparseable".into(); }
+                        continue;
+                    }
+                };
+                answer.coverage.parsed_python_files += 1;
+                if path == &value && kind != "symbol" {
+                    answer.requested_source_sha256 = Some(sha);
+                    answer.requested_source_read_unix_ms = Some(read_unix_ms);
+                }
+                if path == &value && matches!(kind, "calls" | "modules") {
+                    answer.status = format!("unsupported:python_{kind}");
+                    continue;
+                }
+                let relevant = if kind == "symbol" {
+                    symbols.into_iter().filter(|row| row.name == value || row.qualified == value)
+                        .collect::<Vec<_>>()
+                } else if path == &value && kind == "imports" { imports }
+                else if path == &value && kind == "file" {
+                    symbols.into_iter().chain(imports).collect::<Vec<_>>()
+                } else { Vec::new() };
+                for row in relevant {
+                    if answer.rows.len() < MAX_ROWS { answer.rows.push(row); } else { answer.omitted_rows += 1; }
+                }
+            }
             Some(language) => {
                 *answer.coverage.unsupported_languages.entry(language.into()).or_default() += 1;
                 if path == &value { answer.status = format!("unsupported:{language}"); }
@@ -763,7 +913,7 @@ pub fn query(root: &Path, request: Query) -> Result<Answer, String> {
             None => { answer.coverage.other_files += 1; if path == &value { answer.status = "unsupported:unknown".into(); } }
         }
     }
-    if answer.coverage.skipped.count == 0 && answer.coverage.unparseable.count == 0 {
+    if rust_scan_complete {
         answer.scan_input_sha256 = Some(scan_digest(source_facts.iter().map(|(path, fact)| {
             let SourceFact::Parsed { sha256, .. } = fact else {
                 unreachable!("complete scan has only parsed Rust sources")
@@ -856,8 +1006,8 @@ mod tests {
         fs::write(root.path().join("b.rs"), "fn duplicate() {}\n").unwrap();
         fs::write(root.path().join("other.py"), "def duplicate(): pass\n").unwrap();
         let symbols = query(root.path(), Query::Symbol("duplicate".into())).unwrap();
-        assert_eq!(symbols.rows.len(), 3);
-        assert_eq!(symbols.coverage.unsupported_languages["python"], 1);
+        assert_eq!(symbols.rows.len(), 4);
+        assert_eq!(symbols.coverage.parsed_python_files, 1);
         assert!(symbols.rows.iter().any(|row| row.qualified == "inner::duplicate" && row.line == 2));
         assert!(symbols.rows.iter().all(|row| row.sha256.len() == 64 && row.read_unix_ms > 0));
         let imports = query(root.path(), Query::Imports("a.rs".into())).unwrap();
@@ -866,8 +1016,122 @@ mod tests {
         assert_eq!(imports.rows[0].alias.as_deref(), Some("B"));
         assert!(imports.rows[2].glob);
         let python = query(root.path(), Query::File("other.py".into())).unwrap();
-        assert_eq!(python.status, "unsupported:python");
-        assert!(python.rows.is_empty());
+        assert_eq!(python.status, "ok");
+        assert_eq!(python.rows[0].qualified, "duplicate");
+        assert!(python.requested_source_sha256.is_some());
+    }
+
+    #[test]
+    fn python_definitions_and_imports_are_syntactic_and_source_hashed() {
+        let root = worktree();
+        fs::write(root.path().join("service.py"), concat!(
+            "import os.path as osp, json\n",
+            "from .helpers import one as first, two\n",
+            "from pkg.api import *\n",
+            "class Worker:\n",
+            "    def run(self):\n",
+            "        from .tasks import task\n",
+            "        def nested(): pass\n",
+            "def outer(): pass\n",
+        )).unwrap();
+        let file = query(root.path(), Query::File("service.py".into())).unwrap();
+        assert_eq!(file.status, "ok");
+        assert_eq!(file.coverage.parsed_python_files, 1);
+        assert_eq!(file.rows.iter().filter(|row| row.kind == "class").count(), 1);
+        let method = file.rows.iter().find(|row| row.qualified == "Worker.run").unwrap();
+        assert_eq!(method.kind, "method");
+        assert_eq!(method.line, 5);
+        assert!(file.rows.iter().any(|row| row.qualified == "Worker.run.nested"));
+        assert!(file.rows.iter().all(|row| row.sha256 == file.requested_source_sha256.clone().unwrap()
+            && row.read_unix_ms > 0));
+        let names = query(root.path(), Query::Symbol("Worker.run".into())).unwrap();
+        assert_eq!(names.rows.len(), 1);
+        assert_eq!(names.rows[0].name, "run");
+        let imports = query(root.path(), Query::Imports("service.py".into())).unwrap();
+        let names = imports.rows.iter().map(|row| row.name.as_str()).collect::<Vec<_>>();
+        assert_eq!(names, ["os.path", "json", ".helpers.one", ".helpers.two", "pkg.api.*", ".tasks.task"]);
+        assert_eq!(imports.rows[0].alias.as_deref(), Some("osp"));
+        assert_eq!(imports.rows[2].alias.as_deref(), Some("first"));
+        assert!(imports.rows[4].glob);
+        assert_eq!(imports.rows[5].line, 6);
+        for kind in [Query::Calls("service.py".into()), Query::Modules("service.py".into())] {
+            let unsupported = query(root.path(), kind).unwrap();
+            assert!(unsupported.status.starts_with("unsupported:python_"));
+            assert!(unsupported.rows.is_empty() && unsupported.edges.is_empty()
+                && unsupported.module_edges.is_empty());
+        }
+        fs::write(root.path().join("service.py"), "def replacement(): pass\n").unwrap();
+        let changed = query(root.path(), Query::File("service.py".into())).unwrap();
+        assert_ne!(file.requested_source_sha256, changed.requested_source_sha256);
+        assert_eq!(changed.rows.len(), 1);
+        assert_eq!(changed.rows[0].name, "replacement");
+    }
+
+    #[test]
+    fn python_errors_and_symlinks_do_not_change_rust_scan_digest() {
+        let root = worktree();
+        fs::write(root.path().join("lib.rs"), "fn stable() {}\n").unwrap();
+        fs::write(root.path().join("broken.py"), "def broken(:\n").unwrap();
+        let baseline = query(root.path(), Query::File("lib.rs".into())).unwrap();
+        assert_eq!(baseline.coverage.unparseable.count, 1);
+        let digest = baseline.scan_input_sha256.unwrap();
+        assert_eq!(current_scan_input_sha256(root.path()).unwrap().0, digest);
+        let broken = query(root.path(), Query::File("broken.py".into())).unwrap();
+        assert_eq!(broken.status, "unparseable");
+        assert!(broken.rows.is_empty());
+        fs::write(root.path().join("broken.py"), "def fixed(): pass\n").unwrap();
+        symlink(root.path().join("broken.py"), root.path().join("linked.py")).unwrap();
+        let linked = query(root.path(), Query::File("linked.py".into())).unwrap();
+        assert_eq!(linked.status, "skipped");
+        assert!(linked.rows.is_empty());
+        assert_eq!(linked.scan_input_sha256.as_deref(), Some(digest.as_str()));
+        fs::write(root.path().join("oversized.py"), vec![b' '; MAX_SOURCE_BYTES as usize + 1]).unwrap();
+        let oversized = query(root.path(), Query::File("oversized.py".into())).unwrap();
+        assert_eq!(oversized.status, "skipped");
+        assert!(oversized.coverage.skipped.examples.iter().any(|item| item.file == "oversized.py"));
+        assert_eq!(oversized.scan_input_sha256.as_deref(), Some(digest.as_str()));
+        fs::write(root.path().join("added.py"), "class Added: pass\n").unwrap();
+        assert_eq!(query(root.path(), Query::File("lib.rs".into())).unwrap()
+            .scan_input_sha256.as_deref(), Some(digest.as_str()));
+    }
+
+    #[test]
+    fn python_rows_are_bounded_and_empty_file_retains_source_hash() {
+        let root = worktree();
+        fs::write(root.path().join("many.py"), "def repeated(): pass\n".repeat(MAX_ROWS + 7)).unwrap();
+        let many = query(root.path(), Query::Symbol("repeated".into())).unwrap();
+        assert_eq!(many.rows.len(), MAX_ROWS);
+        assert_eq!(many.omitted_rows, 7);
+        fs::write(root.path().join("empty.py"), "").unwrap();
+        let empty = query(root.path(), Query::File("empty.py".into())).unwrap();
+        assert_eq!(empty.status, "ok");
+        assert!(empty.rows.is_empty());
+        assert_eq!(empty.requested_source_sha256.as_deref(),
+            Some(format!("{:x}", Sha256::digest(b"")).as_str()));
+    }
+
+    #[test]
+    fn python_multiline_imports_and_decorated_definitions_exclude_text_lookalikes() {
+        let root = worktree();
+        fs::write(root.path().join("syntax.py"), concat!(
+            "from __future__ import annotations\n",
+            "from . import local\n",
+            "from ..pkg import (\n",
+            "    first as renamed,\n",
+            "    second,\n",
+            ")\n",
+            "# def fake(): pass\n",
+            "text = 'import ghost'\n",
+            "@decorator\n",
+            "def real(): pass\n",
+        )).unwrap();
+        let answer = query(root.path(), Query::File("syntax.py".into())).unwrap();
+        assert_eq!(answer.status, "ok");
+        let imports = answer.rows.iter().filter(|row| row.kind == "python_import")
+            .map(|row| row.name.as_str()).collect::<Vec<_>>();
+        assert_eq!(imports, ["__future__.annotations", ".local", "..pkg.first", "..pkg.second"]);
+        assert!(answer.rows.iter().any(|row| row.kind == "function" && row.name == "real" && row.line == 10));
+        assert!(!answer.rows.iter().any(|row| row.name == "fake" || row.name == "ghost"));
     }
 
     #[test]
