@@ -30,6 +30,7 @@ pub use terminal_loop::{
     run_with_frames, run_with_worker_channels, run_with_worker_channels_state_guarded,
     run_remote_with_worker_channels,
 };
+pub(crate) use terminal_loop::run_remote_with_worker_channels_layout;
 mod session_events;
 mod session_telemetry;
 mod transcript_events;

@@ -129,11 +129,11 @@ impl Hub {
     }
     pub fn list(&mut self,owner:&str)->Value{
         self.reap();
-        json!({"sessions":self.hosts.iter().filter(|((login,_),_)|login==owner).flat_map(|((_,host_id),host)|{
+        json!({"owner":owner,"sessions":self.hosts.iter().filter(|((login,_),_)|login==owner).flat_map(|((_,host_id),host)|{
             host.sessions.iter().map(move |session|json!({"id":format!("{}~{}",host_id,session["id"].as_str().unwrap_or("")),
                 "host_id":host_id,"session_id":session["id"],"title":session["title"],
                 "engine":session["engine"],"model":session["model"],
-                "encrypted":session["encrypted"]}))
+                "incarnation":session["incarnation"],"encrypted":session["encrypted"]}))
         }).collect::<Vec<_>>()})
     }
     pub fn enqueue(&mut self,owner:&str,host_id:&str,session_id:&str,op:&str,payload:Value)->Result<Value,&'static str>{
@@ -247,6 +247,16 @@ impl Hub {
 
 #[cfg(test)]mod tests{
     use super::*;
+    #[test] fn inventory_scopes_owner_and_reports_session_incarnation(){
+        let mut hub=Hub::new();
+        hub.register("one@example.com","host",bounded_sessions(&json!([{
+            "id":"session","incarnation":"started-1"}])).unwrap(),None).unwrap();
+        let visible=hub.list("one@example.com");
+        assert_eq!(visible["owner"],"one@example.com");
+        assert_eq!(visible["sessions"][0]["id"],"host~session");
+        assert_eq!(visible["sessions"][0]["incarnation"],"started-1");
+        assert_eq!(hub.list("other@example.com")["sessions"],json!([]));
+    }
     #[test] fn encrypted_sessions_reject_plaintext_commands_and_events(){
         let mut hub=Hub::new();
         let owner="owner@example.com";

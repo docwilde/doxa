@@ -64,7 +64,7 @@ Commands:
   remote connect URL HOST_ID
                        Register this machine's sessions with a private hub
   remote list URL        List sessions registered with a private hub
-  remote tui URL         Open live hub sessions as native DOXA tabs
+  remote tui URL [--save-layout]  Open live hub sessions as native DOXA tabs
   remote keygen ABS_PATH Create an owner-only shared key for encrypted remote tabs
   remote send URL SESSION TEXT
                        Send a prompt through the private hub
@@ -211,10 +211,11 @@ fn run(args: &[String]) -> io::Result<()> {
                         return Ok(());
                     }
                 }
-                if let [first, second, url] = args {
-                    if first == "remote" && second == "tui" {
+                if let [first, second, url, rest @ ..] = args {
+                    if first == "remote" && second == "tui"
+                        && (rest.is_empty() || matches!(rest, [flag] if flag == "--save-layout")) {
                         startup_message("Connecting to DOXA hub");
-                        return remote_client::run(url);
+                        return remote_client::run(url, !rest.is_empty());
                     }
                 }
                 if !matches!(args, [first, second] if first == "remote" && second == "serve")
@@ -222,7 +223,7 @@ fn run(args: &[String]) -> io::Result<()> {
                     && !matches!(args, [first, second, _, _, _] if first == "remote" && second == "send")
                     && !matches!(args, [first, second, _] if first == "remote" && second == "list")
                     && !matches!(args, [first, second, _, _, _, _] if first == "remote" && second == "answer") {
-                    return Err(invalid("usage: doxa remote serve | connect URL HOST_ID | tui URL | keygen ABS_PATH | list URL | send URL SESSION TEXT | answer URL SESSION REQUEST_ID allow|deny"));
+                    return Err(invalid("usage: doxa remote serve | connect URL HOST_ID | tui URL [--save-layout] | keygen ABS_PATH | list URL | send URL SESSION TEXT | answer URL SESSION REQUEST_ID allow|deny"));
                 }
                 let executable = std::env::var_os("DOXA_REMOTE_BIN").map(PathBuf::from)
                     .unwrap_or_else(|| std::env::current_exe().unwrap_or_default().with_file_name("doxa-remote"));

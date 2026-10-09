@@ -380,6 +380,7 @@ async fn command_worker(command: WorkerCommand, http: Client, base: Url,
 pub struct RemoteWorker {
     pub frames: Receiver<WorkerFrame>,
     pub commands: SyncSender<WorkerCommand>,
+    pub(crate) initial_inventory: Value,
     cancel: watch::Sender<bool>,
     router: std::thread::JoinHandle<()>,
     engine: std::thread::JoinHandle<()>,
@@ -387,7 +388,7 @@ pub struct RemoteWorker {
 }
 impl RemoteWorker {
     pub fn shutdown(self) {
-        let Self { frames, commands, cancel, router, engine, forward }=self;
+        let Self { frames, commands, initial_inventory: _, cancel, router, engine, forward }=self;
         let _=cancel.send(true);
         drop(commands);drop(frames);
         let _=router.join();let _=engine.join();let _=forward.join();
@@ -399,7 +400,8 @@ pub fn start(raw_url: &str) -> io::Result<RemoteWorker> {
     let http = http_client()?;
     let key=wire::configured_key()?;
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-    let initial = runtime.block_on(async { sessions(&get(&http, &base, "api/sessions").await?) })?;
+    let initial_inventory = runtime.block_on(async { get(&http, &base, "api/sessions").await })?;
+    let initial = sessions(&initial_inventory)?;
     if initial.iter().any(|session|session.encrypted!=key.is_some()) {
         return Err(invalid("remote key configuration does not match hub sessions"));
     }
@@ -468,12 +470,29 @@ pub fn start(raw_url: &str) -> io::Result<RemoteWorker> {
             }
         });
     });
-    Ok(RemoteWorker { frames, commands, cancel:cancel_tx, router, engine, forward })
+    Ok(RemoteWorker { frames, commands, initial_inventory, cancel:cancel_tx, router, engine, forward })
 }
 
-pub fn run(raw_url: &str) -> io::Result<()> {
+pub(crate) fn fresh_inventory(raw_url: &str) -> io::Result<Value> {
+    let base = hub_url(raw_url)?;
+    let http = http_client()?;
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    runtime.block_on(get(&http, &base, "api/sessions"))
+}
+
+pub fn run(raw_url: &str, save_layout: bool) -> io::Result<()> {
     let worker=start(raw_url)?;
-    let result=crate::ui::run_remote_with_worker_channels(worker.frames,worker.commands.clone());
+    let store = if save_layout {
+        let result = crate::remote_layout::Inventory::parse(&worker.initial_inventory)
+            .and_then(|inventory| crate::operations::doxa_home().and_then(|home|
+                crate::remote_layout::Store::open(&home, raw_url, inventory)));
+        match result { Ok(store) => Some(store), Err(error) => { worker.shutdown(); return Err(error); } }
+    } else { None };
+    let result = if let Some(store) = store {
+        crate::ui::run_remote_with_worker_channels_layout(worker.frames, worker.commands.clone(), store)
+    } else {
+        crate::ui::run_remote_with_worker_channels(worker.frames,worker.commands.clone())
+    };
     // The terminal owns the receiver until it exits; after return only worker
     // channels remain, so cancellation can join every worker promptly.
     let _=worker.cancel.send(true);

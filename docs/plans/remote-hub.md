@@ -8,6 +8,11 @@ the hub also holds a short live event ring. The packaged Chrome extension can
 control encrypted sessions with code installed separately from the hub.
 The native TUI can open remote-only tabs through `doxa remote tui HUB_URL` or
 mix local and remote tabs in an open window with `/remote-control HUB_URL`.
+`doxa remote tui HUB_URL --save-layout` opts into owner-scoped remote-only
+pane persistence on this client. It restores tabs only when the authenticated
+owner, session IDs and session incarnations match a fresh hub inventory. The
+layout file contains pane geometry and tab IDs, never transcript, input or
+event cursors; each restored stream obtains a new host snapshot and cursor.
 `/local` selects an open local tab. Remote tabs use an `◎` marker.
 The browser can receive encrypted background Web Push after explicit opt-in.
 An Android Kotlin/Compose client project is now in `android-client/`. Its debug
@@ -164,8 +169,9 @@ source devices, so the initial Android path assumes a user-owned device.
    implemented. Add deployment QA across two isolated hosts.
 3. **Remote DOXA client:** mixed local/remote tabs, bounded snapshot replay,
    scrollable history pages, stable retry IDs, pending-input review and optional
-   compressed end-to-end encryption are implemented. Persistent remote tab
-   layouts remain open.
+   compressed end-to-end encryption are implemented. Opt-in remote-only tab
+   layout persistence is implemented; mixed local/remote layout persistence
+   remains open.
 4. **Background delivery:** private browser Web Push with service worker is
    implemented. The Android client project renders transcript and events,
    sends prompts and answers, and uses the existing Serve sign-in. Android SDK
