@@ -16,6 +16,7 @@ use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 
 pub mod semantic_evidence;
+pub mod semantic_producer;
 
 const MAX_FILES: usize = 20_000;
 const MAX_PATH_BYTES: usize = 4_096;

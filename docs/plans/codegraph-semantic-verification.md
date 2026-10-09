@@ -11,17 +11,33 @@ external or encoded URIs, changed files, unsupported UTF-16 lines, and oversized
 messages. A matching exchange returns `protocol_match_untrusted` and
 `binding: unknown`.
 
-This checker is deliberately not wired to `/codegraph calls` or persisted
-snapshots. Neither an LSP JSON object nor a local rust-analyzer process proves
-which workspace configuration, build scripts, proc macros, or network access it
-used. No rust-analyzer binary is installed in the development environment.
+`semantic_producer::plan_rust_analyzer` is a separate opt-in, data-only launch
+contract. It requires an image digest and a local non-root Docker socket URI,
+then emits a `docker run` argument vector with `--pull=never`, no network, a
+read-only worktree and root filesystem, dropped capabilities, no-new-privileges,
+1 GiB memory and swap ceilings, one CPU, 64 PIDs and file descriptors, and a
+64 MiB temporary filesystem. Its LSP initialization disables build scripts,
+proc macros, automatic Cargo reload, and check-on-save. LSP frame parsing caps
+headers at 1 KiB and bodies at 32 KiB. The Docker command clears the inherited
+environment. **The plan has no spawn method or runtime attestation.** Neither
+it nor an LSP JSON object proves the server actually used those settings.
 
-Before promoting any LSP result to a binding, implement a pinned rust-analyzer
-producer in a quota-limited, no-egress container with a read-only worktree and
-no host secrets. Disable build scripts and proc macros in both server settings
-and server launch policy. Bound memory, CPU, PIDs, file descriptors, time, and
-output; require successful workspace indexing and a quiescent diagnostic state.
-Attest the exact server binary/configuration, request and response, source and
+This checker and plan are deliberately not wired to `/codegraph calls` or
+persisted snapshots. No rust-analyzer binary or reviewed, pinned image is
+installed in the development environment. The
+[rust-analyzer configuration reference](https://rust-analyzer.github.io/book/configuration)
+documents the settings. Its
+[security guide](https://rust-analyzer.github.io/book/security.html) says
+project configuration can execute code, so disabling two features is not a
+substitute for enforcing the container boundary.
+
+Before promoting any LSP result to a binding, verify the rootless Engine and
+effective cgroup v2 memory/CPU/PID controls, pinned image bytes, exact mount
+set, offline network namespace, process limits, disk quota, and absence of host
+secrets at runtime. Add a bounded process supervisor with a hard deadline and
+kill/reap path. It must complete the LSP initialize/initialized exchange,
+observe successful workspace indexing and a quiescent diagnostic state, and
+attest the exact server binary/configuration, request and response, source and
 target hashes, and container policy. Treat missing, timed-out, conditional,
-ambiguous, generated, or uncheckable evidence as `unknown`. Verify the final
+ambiguous, generated, or uncheckable evidence as `unknown`. Recheck the final
 binding against the same source bytes before surfacing it in the TUI or LORE.
