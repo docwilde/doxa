@@ -11,7 +11,7 @@ use std::path::Path;
 use wasmparser::{Parser, Payload, Validator, WasmFeatures};
 
 const MAX_PACKAGE_MANIFEST: u64 = 16 * 1024;
-const MAX_MODULE: u64 = 8 * 1024 * 1024;
+pub(super) const MAX_MODULE: u64 = 8 * 1024 * 1024;
 const MAX_PACKAGES: usize = 16;
 // Admission bounds for a future runner, not a substitute for a runtime store
 // limiter and an operating-system memory limit in a separate process.
@@ -89,7 +89,7 @@ fn valid_grants(grants: &[String]) -> bool {
         && grants.iter().collect::<HashSet<_>>().len() == grants.len()
 }
 
-fn validate_module(bytes: &[u8]) -> io::Result<()> {
+pub(super) fn validate_module(bytes: &[u8]) -> io::Result<()> {
     if !bytes.starts_with(WASM_CORE_V1) {
         return Err(invalid("plugin package artifact is not a WebAssembly core module"));
     }

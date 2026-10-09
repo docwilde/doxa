@@ -118,7 +118,11 @@ switch. The digests pin local bytes; they do not authenticate a publisher. A
 fresh `recheck_approved` call re-opens both files, checks their digests, opened
 inodes and current owner approval against the earlier review, and returns the
 validated module bytes. A future runner must use those bytes without re-opening
-a path, enforce each grant, isolate crashes and resource use, and define a
-bounded host protocol
-before executable plugins can run. Native shared libraries, scripts, provider
-backends, hooks and automatic startup remain unsupported.
+a path, enforce each grant and isolate crashes and resource use.
+
+Wasmi 2.0.0 now supplies an unwired interpreter core and bounded,
+digest-checked request and response frames for approved packages with zero
+grants. It has no public run command or isolated child yet. The interpreter
+is currently exercised only by tests; running untrusted code inside DOXA
+would be unsafe. Native shared libraries, scripts, provider backends, hooks
+and automatic startup remain unsupported.

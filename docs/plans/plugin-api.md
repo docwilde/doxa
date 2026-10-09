@@ -1,6 +1,6 @@
 # Native DOXA plugin API
 
-Status: **data-only v1 and explicit package identity preflight implemented; executable plugins remain open**.
+Status: **data-only v1, package preflight and an unwired runner contract implemented; executable plugins remain open**.
 This plan supersedes the Python/Textual `Plugin` and `PANE_COMMANDS` draft. The
 Rust frontend uses its own command registry, palette and help panel. Claude Code
 plugin adoption through `/plugins` is a separate provider feature.
@@ -93,14 +93,29 @@ in-process callbacks remain out of scope.
 
 ### Runner design and test seam
 
-No WASM execution engine is pinned in this workspace's lockfile or available
-in the local build cache. DOXA therefore has **no runner command, child binary,
-or plugin execution path**. Do not treat owner approval or the new static
-memory/table limits as an execution switch. The concrete handoff is
+Wasmi 2.0.0 is now pinned in the workspace. A private worker core validates
+the exact WebAssembly 1.0 bytes again, requires a single exported
+`doxa_main: () -> i32`, instantiates without imports, and runs with
+5,000,000 fuel, a 16 MiB memory store limit, a 1,024-entry table limit
+and one instance. The bounded request frame carries at most 8 MiB, a
+protocol version and SHA-256 digest. The response is exactly 13 bytes:
+a protocol version, one result code and one integer. The encoder accepts only
+a freshly rechecked, owner-approved package with **zero grants**. Focused tests exercise
+a return value, infinite loop fuel exhaustion, trap, wrong signature, memory
+growth at the cap, changed approval and malformed request/response frames.
+
+This interpreter core is **not wired to a command or TUI path**. Its current
+tests invoke it in-process; doing that with an untrusted package in production
+would be unsafe. A Bubblewrap probe succeeded on one Linux host, but there
+is no verified child launcher with an enforceable OS memory/CPU budget,
+deadline, cancellation, process-tree reaping, bounded pipe reads, and
+compromised child file/network tests across supported hosts. Thus DOXA has **no runner
+command, child binary, or plugin execution path**. Do not treat owner approval,
+the request frame, fuel or store limits as an execution switch. The handoff is
 `recheck_approved(home, review) -> RecheckedPackage`: it returns the exact,
 revalidated bytes and fails if either owner file, inode, digest, approval, or
-requested grant changed. Tests cover stale identities and unbounded/excessive
-declared memory and tables.
+requested grant changed. The encoder consumes those bytes, never a reopened
+path.
 
 The first runnable prototype should be an explicit, grantless developer-only
 command, never TUI startup or a native slash command. It should require an
@@ -114,11 +129,11 @@ integer result and bounded failure reason may return. `render-local-panel-v1`
 remains a reserved name until a separate reviewed protocol and grant gate
 exist.
 
-Pin a WASM engine with fuel accounting and an enforceable store memory/table
-limiter, then run it only in a separate process whose sandbox setup fails
-closed. On Linux, prove a private mount and network namespace, no inherited
-secrets or writable host mounts, `no_new_privs`, a process/cgroup memory and
-CPU budget, and a file-descriptor/process limit. Enforce an independent wall
+The remaining step is to run this core only in a separate process whose
+sandbox setup fails closed. On Linux, prove a private mount and network
+namespace, no inherited secrets or writable host mounts, `no_new_privs`,
+a process/cgroup memory and CPU budget, and a file-descriptor/process limit.
+Enforce an independent wall
 deadline; cancellation must kill and reap the entire child process group.
 Bound pipe input/output, close inherited descriptors, and report timeout,
 cancel, trap, crash and sandbox failure distinctly. Neither a parent-side
