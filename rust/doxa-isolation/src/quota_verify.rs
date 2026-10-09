@@ -39,6 +39,7 @@ fn inspect_with(manifest: &Manifest, expected: QuotaExpectation, reader: &impl Q
         return Err(error("hard-quota inspection requires a ready network-none Docker session"));
     }
     if expected.project_id == 0 || expected.hard_limit_bytes == 0
+        || expected.hard_limit_bytes % 512 != 0
         || expected.hard_limit_bytes > MAX_HARD_BYTES {
         return Err(error("hard-quota expectation has no finite project ID and hard block limit"));
     }
@@ -205,6 +206,17 @@ mod linux {
                 enforcing: status.flags & FS_QUOTA_PDQ_ENFD != 0 })
         }
     }
+
+    #[cfg(test)]
+    #[test]
+    fn kernel_quota_ffi_layout_matches_linux_uapi() {
+        // linux/dqblk_xfs.h and linux/fs.h on the supported Linux ABIs.
+        assert_eq!(std::mem::size_of::<Fsxattr>(), 28);
+        assert_eq!(std::mem::size_of::<FsDiskQuota>(), 112);
+        assert_eq!(std::mem::size_of::<QuotaStatV>(), 160);
+        assert_eq!(std::mem::offset_of!(FsDiskQuota, blk_hardlimit), 8);
+        assert_eq!(std::mem::offset_of!(QuotaStatV, flags), 2);
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -293,6 +305,7 @@ mod tests {
         let (_temp, mut manifest, reader, expected) = fixture();
         assert!(inspect_with(&manifest, QuotaExpectation { project_id: 0, ..expected }, &reader).is_err());
         assert!(inspect_with(&manifest, QuotaExpectation { hard_limit_bytes: 0, ..expected }, &reader).is_err());
+        assert!(inspect_with(&manifest, QuotaExpectation { hard_limit_bytes: 513, ..expected }, &reader).is_err());
         manifest.private_home = PathBuf::from("/outside/home");
         assert!(inspect_with(&manifest, expected, &reader).is_err());
     }

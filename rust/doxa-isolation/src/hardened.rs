@@ -3,7 +3,7 @@
 //! A bounded EDQUOT receipt from an administrator's fixture is useful evidence,
 //! but cannot authorize a different session tree or survive a restart without
 //! an on-session kernel verifier. This seam keeps that distinction executable.
-use crate::{error, quota_verify::{inspect_session_hard_quota, QuotaExpectation}, Manifest, Profile};
+use crate::{error, quota_verify::{inspect_session_hard_quota, QuotaExpectation, QuotaSnapshot}, Manifest, Profile};
 use serde::Deserialize;
 use std::{collections::BTreeMap, io, path::PathBuf};
 
@@ -57,9 +57,13 @@ pub(crate) fn require_session_hard_quota(manifest: &Manifest, receipt: &[u8]) ->
     // supply an exact limit; no inference from the receipt is admissible.
     let hard_limit_bytes = proof.expected_hard_limit_bytes
         .ok_or_else(|| error("hardened admission lacks an exact hard block limit"))?;
-    let _current_snapshot = inspect_session_hard_quota(manifest, QuotaExpectation {
+    let current_snapshot = inspect_session_hard_quota(manifest, QuotaExpectation {
         project_id: proof.project_id, hard_limit_bytes,
     })?;
+    require_runtime_enforcement_proof(current_snapshot)
+}
+
+fn require_runtime_enforcement_proof(_snapshot: QuotaSnapshot) -> io::Result<()> {
     // A read-only inode/quota snapshot and forgeable JSON cannot attest
     // descendant IDs, EDQUOT through bind mounts, or restart/remount behavior.
     Err(error("per-session EDQUOT, descendant and restart verification is unavailable"))
@@ -116,5 +120,12 @@ mod tests {
         assert!(require_session_hard_quota(&native,
             &receipt("/owner-private/isolation/session", true))
             .unwrap_err().to_string().contains("network-none"));
+    }
+    #[test]
+    fn positive_kernel_snapshot_still_cannot_admit_without_runtime_proof() {
+        let snapshot = QuotaSnapshot { project_id: 42, hard_limit_bytes: 64 * 1024 * 1024,
+            mount_id: 123, filesystem_device: 456 };
+        assert!(require_runtime_enforcement_proof(snapshot).unwrap_err().to_string()
+            .contains("EDQUOT, descendant and restart"));
     }
 }
