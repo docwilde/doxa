@@ -15,6 +15,8 @@ use super::*;
                 "charter_sha256":"c".repeat(64), "assignment_id":"assignment-1",
                 "task_sha256":"t".repeat(64), "checkpoint_id":"checkpoint-1",
                 "handoff_id":"handoff-1", "artifact_refs":["artifact-1"],
+                "readback":{"next_action":"Review the change","assumptions":[],"open_questions":[]},
+                "sender_response":{"agrees":true,"correction":null},"handoff_resolved":true,
                 "changed_paths":(0..40).map(|i| format!("src/very-long-component-{i}/implementation.rs\n")).collect::<Vec<_>>().join(""),
                 "last_turn_sha256":"l".repeat(64), "dependent_workers":[2,3],
                 "git_observation_available":true, "tests_verified":false

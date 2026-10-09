@@ -374,6 +374,8 @@ fn scene(name: &str) -> App {
                 "charter_sha256":"c".repeat(64), "assignment_id":"assignment-parser-1",
                 "task_sha256":"t".repeat(64), "checkpoint_id":"checkpoint-parser-1",
                 "handoff_id":"handoff-parser-1", "artifact_refs":["src/parser.rs"],
+                "readback":{"next_action":"Review parser output and prepare dependent work","assumptions":["The checkpoint names the parser diff"],"open_questions":[]},
+                "sender_response":{"agrees":true,"correction":null},"handoff_resolved":true,
                 "changed_paths":"src/parser.rs\nsrc/parser_test.rs",
                 "last_turn_sha256":"l".repeat(64), "dependent_workers":[2],
                 "git_observation_available":true, "tests_verified":false,

@@ -173,12 +173,26 @@ binds evidence but is not a separate authentication credential.
 
 Supervised workers can use `fleet_kind=handoff` with host artifact IDs, followed
 by the recipient's `ack` and the original sender's `confirm`. The ACK and
-confirmation must reference the preceding message UUID and echo the same host
-artifact IDs. The host checks direction, ancestry and exact IDs. The message
-body still needs human or semantic review for meaning; a matching ACK proves
-the artifact reference was returned, not that a model understood the work.
-Handoff transitions request a bounded supervisor checkpoint in addition to
-turn milestones and the configured timer.
+confirmation reference the preceding message UUID and echo the same host IDs.
+The ACK also requires a structured receiver `readback`:
+
+```json
+{"next_action":"Review the parser diff","assumptions":["The checkpoint names the final diff"],"open_questions":[]}
+```
+
+The sender's confirm requires `handoff_response`: either
+`{"agrees":true,"correction":null}` or
+`{"agrees":false,"correction":"Use the revised parser branch"}`. The next
+action is limited to 320 bytes; each of at most three assumptions and three
+open questions is limited to 160 bytes; a correction is limited to 600 bytes.
+The host scrubs these fields through LORE and records them against the exact
+handoff, ACK and artifact IDs. Missing read-back fields on older messages fail
+closed. Open questions or a correction appear in the dependency review and
+supervisor snapshot; they require a fresh handoff cycle before release. The
+owner still reads the host evidence and explicitly releases dependencies.
+Peer text never changes the assignment, verifies a test, or proves that the
+receiver understood the work. Handoff transitions request a bounded supervisor
+checkpoint in addition to turn milestones and the configured timer.
 
 The fast judge reviews each outgoing fleet message once. Its private cached
 verdict binds the exact envelope hash; the receiving host rechecks deterministic

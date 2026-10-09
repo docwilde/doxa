@@ -16,6 +16,10 @@ full live fleet coordination remains unverified.
 The native TUI now reviews a predecessor's host evidence and
 releases its dependent workers after full read-through and two explicit keys;
 see the [operator procedure](../fleet-supervision.md).
+The next handoff slice records a bounded receiver read-back and sender
+agree-or-correct response against the exact host artifacts. Open questions or
+corrections remain visible as review evidence and require another handoff
+before human dependency release; the text grants no authority.
 
 This plan complements
 [per-session Docker isolation](session-isolation-docker.md). Containers limit

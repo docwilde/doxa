@@ -95,21 +95,55 @@ impl Assignment {
 #[serde(rename_all="snake_case")]
 pub enum Kind { #[default] Status, Question, Evidence, Proposal, TaskRequest, Completion, Handoff, Ack, Confirm }
 impl Kind { pub fn parse(value:&str)->io::Result<Self>{serde_json::from_value(json!(value)).map_err(|_|invalid("unknown fleet message kind"))} pub fn ordinary(self)->bool{matches!(self,Self::Status|Self::Evidence)} }
+/// Receiver's bounded interpretation of one exact handoff. This is untrusted
+/// peer evidence, never a task amendment or proof that the work is correct.
+#[derive(Clone,Debug,PartialEq,Eq,Serialize,Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HandoffReadback { pub next_action:String, pub assumptions:Vec<String>, pub open_questions:Vec<String> }
+impl HandoffReadback {
+    pub fn validate(&self)->io::Result<()> {
+        fn bounded(text:&str,limit:usize)->bool { !text.trim().is_empty()&&text.len()<=limit&&!text.chars().any(char::is_control) }
+        if !bounded(&self.next_action,320)||self.assumptions.len()>3||self.open_questions.len()>3
+            ||self.assumptions.iter().chain(&self.open_questions).any(|text|!bounded(text,160)) {
+            return Err(invalid("handoff read-back exceeds bounded fields"));
+        }
+        Ok(())
+    }
+}
+/// A correction requires a fresh receiver read-back in a new handoff chain;
+/// prose cannot silently settle a disagreement.
+#[derive(Clone,Debug,PartialEq,Eq,Serialize,Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HandoffResponse { pub agrees:bool, pub correction:Option<String> }
+impl HandoffResponse {
+    pub fn validate(&self)->io::Result<()> {
+        let valid=self.correction.as_ref().is_none_or(|text|!text.trim().is_empty()&&text.len()<=600&&!text.chars().any(char::is_control));
+        if !valid||self.agrees==self.correction.is_some(){return Err(invalid("handoff confirmation must agree or give one bounded correction"));}
+        Ok(())
+    }
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Envelope {
     pub v:u32,pub fleet_id:String,pub message_id:String,pub from_session:String,pub to_session:String,
     pub kind:Kind,pub assignment_id:String,pub charter_sha256:String,pub in_reply_to:Option<String>,pub body:String,
     pub artifact_refs:Vec<String>,pub requested_action:Option<String>,pub hop:u8,
+    #[serde(default,skip_serializing_if="Option::is_none")] pub readback:Option<HandoffReadback>,
+    #[serde(default,skip_serializing_if="Option::is_none")] pub handoff_response:Option<HandoffResponse>,
 }
 impl Envelope {
     pub fn issue(context:&Context,from:&str,to:&str,kind:Kind,body:String,reply:Option<String>)->io::Result<Self>{
         let row=context.assignment(from)?;context.assignment(to)?;
         let hop=if let Some(parent)=&reply{transaction(context,|state|state.traces.get(parent).map(|trace|trace.hop.saturating_add(1)).ok_or_else(||invalid("unknown fleet reply ancestry")))?}else{0};
-        Ok(Self{v:1,fleet_id:context.charter.fleet_id.clone(),message_id:uuid::Uuid::new_v4().to_string(),from_session:from.into(),to_session:to.into(),kind,assignment_id:row.id.clone(),charter_sha256:context.charter_sha256.clone(),in_reply_to:reply,body,artifact_refs:Vec::new(),requested_action:None,hop})
+        Ok(Self{v:1,fleet_id:context.charter.fleet_id.clone(),message_id:uuid::Uuid::new_v4().to_string(),from_session:from.into(),to_session:to.into(),kind,assignment_id:row.id.clone(),charter_sha256:context.charter_sha256.clone(),in_reply_to:reply,body,artifact_refs:Vec::new(),requested_action:None,hop,readback:None,handoff_response:None})
     }
     pub fn wire(&self)->io::Result<String>{Ok(format!("{PREFIX}{}",serde_json::to_string(self)?))}
     pub fn parse(wire:&str)->io::Result<Self>{if wire.len()>24*1024{return Err(invalid("fleet envelope exceeds bounds"));}serde_json::from_str(wire.strip_prefix(PREFIX).ok_or_else(||invalid("free-form message cannot enter a supervised fleet"))?).map_err(|_|invalid("invalid fleet envelope schema"))}
+    fn text_bytes(&self)->usize {
+        self.body.len()
+            +self.readback.as_ref().map_or(0,|row|row.next_action.len()+row.assumptions.iter().map(String::len).sum::<usize>()+row.open_questions.iter().map(String::len).sum::<usize>())
+            +self.handoff_response.as_ref().and_then(|row|row.correction.as_ref()).map_or(0,String::len)
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -127,48 +161,54 @@ pub struct State {
 }
 #[derive(Clone,Debug,Serialize,Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct MessageTrace {pub from:String,pub to:String,pub hop:u8,#[serde(default)] pub kind:Kind,#[serde(default)] pub artifact_refs:Vec<String>,#[serde(default,skip_serializing_if="Option::is_none")] pub in_reply_to:Option<String>}
+pub struct MessageTrace {pub from:String,pub to:String,pub hop:u8,#[serde(default)] pub seq:u64,#[serde(default)] pub kind:Kind,#[serde(default)] pub artifact_refs:Vec<String>,#[serde(default,skip_serializing_if="Option::is_none")] pub in_reply_to:Option<String>,#[serde(default,skip_serializing_if="Option::is_none")] pub readback:Option<HandoffReadback>,#[serde(default,skip_serializing_if="Option::is_none")] pub handoff_response:Option<HandoffResponse>}
 #[derive(Clone,Debug,Serialize,Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DependencyRelease {pub assignment_id:String,pub handoff_id:String,pub artifact_refs:Vec<String>,#[serde(default)] pub checkpoint_id:String,#[serde(default)] pub checkpoint_turn_serial:u64,#[serde(default)] pub checkpoint_turn_sha256:String,#[serde(default)] pub turn_serial:u64,pub last_turn_sha256:String,pub at:u64}
 #[derive(Clone,Debug,PartialEq,Eq,Serialize,Deserialize)]
-pub struct AcceptedHandoff {pub handoff_id:String,pub artifact_refs:Vec<String>,pub checkpoint_id:String,pub checkpoint_turn_serial:u64,pub checkpoint_turn_sha256:String}
+pub struct AcceptedHandoff {pub handoff_id:String,pub artifact_refs:Vec<String>,pub checkpoint_id:String,pub checkpoint_turn_serial:u64,pub checkpoint_turn_sha256:String,pub readback:HandoffReadback,pub response:HandoffResponse}
+
+impl AcceptedHandoff { pub fn resolved(&self)->bool { self.response.agrees&&self.readback.open_questions.is_empty() } }
 
 /// A coordinator's ACK and the sender's confirmation must echo the same
 /// host-owned checkpoint. This is provenance, not a model judgment of quality.
 pub fn accepted_handoff(context:&Context,state:&State,predecessor:&str)->Option<AcceptedHandoff>{
     let worker=context.assignments.iter().find(|row|row.id==predecessor&&row.role=="worker")?;
     let coordinator=context.assignments.iter().find(|row|row.role=="coordinator")?;
-    let mut newest=None;
-    for confirm in state.traces.values().filter(|row|row.kind==Kind::Confirm&&row.from==worker.session_id&&row.to==coordinator.session_id){
-        let Some(ack)=confirm.in_reply_to.as_deref().and_then(|id|state.traces.get(id)) else {continue;};
-        let Some(handoff_id)=ack.in_reply_to.as_deref() else {continue;};
-        let Some(handoff)=state.traces.get(handoff_id) else {continue;};
-        if ack.kind!=Kind::Ack||ack.from!=coordinator.session_id||ack.to!=worker.session_id
-            ||handoff.kind!=Kind::Handoff||handoff.from!=worker.session_id||handoff.to!=coordinator.session_id
-            ||handoff.artifact_refs.is_empty()||ack.artifact_refs!=handoff.artifact_refs||confirm.artifact_refs!=handoff.artifact_refs {continue;}
-        let Some((checkpoint_id,turn_serial,last_turn_sha256))=handoff.artifact_refs.iter().find_map(|id|{
-            let row=state.artifacts.get(id)?;
-            if row["kind"]!="host_checkpoint"||row["assignment_id"]!=worker.id
-                ||row["session_id"]!=worker.session_id||row["git_observation_available"]!=true
-                ||!row["changed_paths"].is_string()||row["last_turn_kind"]!="turn_done"
-                ||row["last_turn"].is_null()||row["running"]!=false||row["queued"].as_u64()!=Some(0){return None;}
-            let serial=row["turn_serial"].as_u64().filter(|serial|*serial>0)?;
-            let digest=row["last_turn_sha256"].as_str()?;
-            if digest!=hash(&row["last_turn"]).ok()? {return None;}
-            Some((id.clone(),serial,digest.to_owned()))
-        }) else {continue;};
-        let accepted=AcceptedHandoff{handoff_id:handoff_id.into(),artifact_refs:handoff.artifact_refs.clone(),checkpoint_id,checkpoint_turn_serial:turn_serial,checkpoint_turn_sha256:last_turn_sha256};
-        if newest.as_ref().is_none_or(|prior:&AcceptedHandoff|accepted.checkpoint_turn_serial>prior.checkpoint_turn_serial){newest=Some(accepted);}
-    }
-    newest
+    // A newer handoff supersedes older agreement, even while its ACK or
+    // confirmation is pending. Lexical UUID order is never message order.
+    let (handoff_id,handoff)=state.traces.iter().filter(|(_,row)|row.kind==Kind::Handoff
+        &&row.from==worker.session_id&&row.to==coordinator.session_id).max_by_key(|(_,row)|row.seq)?;
+    if handoff.seq==0||handoff.artifact_refs.is_empty(){return None;}
+    let (ack_id,ack)=state.traces.iter().filter(|(_,row)|row.kind==Kind::Ack
+        &&row.from==coordinator.session_id&&row.to==worker.session_id
+        &&row.in_reply_to.as_deref()==Some(handoff_id.as_str())).max_by_key(|(_,row)|row.seq)?;
+    let (_,confirm)=state.traces.iter().filter(|(_,row)|row.kind==Kind::Confirm
+        &&row.from==worker.session_id&&row.to==coordinator.session_id
+        &&row.in_reply_to.as_deref()==Some(ack_id.as_str())).max_by_key(|(_,row)|row.seq)?;
+    if ack.seq<=handoff.seq||confirm.seq<=ack.seq
+        ||ack.artifact_refs!=handoff.artifact_refs||confirm.artifact_refs!=handoff.artifact_refs{return None;}
+    let (Some(readback),Some(response))=(ack.readback.as_ref(),confirm.handoff_response.as_ref()) else {return None;};
+    if readback.validate().is_err()||response.validate().is_err(){return None;}
+    let (checkpoint_id,checkpoint_turn_serial,checkpoint_turn_sha256)=handoff.artifact_refs.iter().find_map(|id|{
+        let row=state.artifacts.get(id)?;
+        if row["kind"]!="host_checkpoint"||row["assignment_id"]!=worker.id
+            ||row["session_id"]!=worker.session_id||row["git_observation_available"]!=true
+            ||!row["changed_paths"].is_string()||row["last_turn_kind"]!="turn_done"
+            ||row["last_turn"].is_null()||row["running"]!=false||row["queued"].as_u64()!=Some(0){return None;}
+        let serial=row["turn_serial"].as_u64().filter(|serial|*serial>0)?;
+        let digest=row["last_turn_sha256"].as_str()?;
+        if digest!=hash(&row["last_turn"]).ok()? {return None;}
+        Some((id.clone(),serial,digest.to_owned()))
+    })?;
+    Some(AcceptedHandoff{handoff_id:handoff_id.clone(),artifact_refs:handoff.artifact_refs.clone(),checkpoint_id,checkpoint_turn_serial,checkpoint_turn_sha256,readback:readback.clone(),response:response.clone()})
 }
 
 pub fn predecessor_released(context:&Context,state:&State,predecessor:&str,turn_serial:u64,last_turn_sha256:&str)->bool{
     let Some(release)=state.dependency_releases.get(predecessor) else{return false;};
     turn_serial>0&&release.assignment_id==predecessor&&release.turn_serial==turn_serial&&release.last_turn_sha256==last_turn_sha256
         && accepted_handoff(context,state,predecessor).is_some_and(|handoff|
-            handoff.handoff_id==release.handoff_id&&handoff.artifact_refs==release.artifact_refs
+            handoff.resolved()&&handoff.handoff_id==release.handoff_id&&handoff.artifact_refs==release.artifact_refs
             &&handoff.checkpoint_id==release.checkpoint_id
             &&handoff.checkpoint_turn_serial==release.checkpoint_turn_serial
             &&handoff.checkpoint_turn_sha256==release.checkpoint_turn_sha256
@@ -237,6 +277,13 @@ fn deterministic(context:&Context,envelope:&Envelope,recipient:&str,pid:i32,stat
     if !target.depends_on.is_empty()&&!state.dispatched_assignments.get(&target.id).copied().unwrap_or(false){return Err(invalid("dependent worker awaits host dispatch"));}
     if envelope.v!=1||envelope.fleet_id!=context.charter.fleet_id||envelope.charter_sha256!=context.charter_sha256||envelope.to_session!=recipient||from.pid!=pid||envelope.assignment_id!=from.id||envelope.from_session==recipient||uuid::Uuid::parse_str(&envelope.message_id).is_err(){return Err(invalid("fleet sender, assignment or scope is not verified"));}
     if envelope.body.trim().is_empty()||envelope.body.len()>MAX_BODY||envelope.hop>4||!envelope.artifact_refs.iter().all(|id|state.artifacts.contains_key(id))||envelope.artifact_refs.len()>8{return Err(invalid("fleet message bounds or artifact provenance refused"));}
+    match envelope.kind {
+        Kind::Ack if envelope.readback.as_ref().is_some_and(|row|row.validate().is_ok())&&envelope.handoff_response.is_none()=>{},
+        Kind::Confirm if envelope.readback.is_none()&&envelope.handoff_response.as_ref().is_some_and(|row|row.validate().is_ok())=>{},
+        Kind::Ack|Kind::Confirm=>return Err(invalid("handoff ACK requires read-back; confirmation requires a bounded response")),
+        _ if envelope.readback.is_none()&&envelope.handoff_response.is_none()=>{},
+        _=>return Err(invalid("read-back fields are only valid on handoff ACK and confirmation")),
+    }
     if let Some(parent)=&envelope.in_reply_to{
         let trace=state.traces.get(parent).ok_or_else(||invalid("unknown fleet reply ancestry"))?;
         let same_pair=(trace.from==envelope.from_session&&trace.to==recipient)||(trace.to==envelope.from_session&&trace.from==recipient);
@@ -257,7 +304,8 @@ fn deterministic(context:&Context,envelope:&Envelope,recipient:&str,pid:i32,stat
     }
     if context.charter.deadline>0&&unix_now()>=context.charter.deadline{return Err(invalid("fleet charter deadline reached"));}
     if state.received.contains_key(&envelope.message_id){return Err(invalid("duplicate fleet message; turn not started"));}
-    if state.received.len()>=10_000||state.total_bytes.saturating_add(envelope.body.len() as u64)>8*1024*1024{return Err(invalid("fleet message journal or byte ceiling reached"));}
+    let text_bytes=envelope.text_bytes();
+    if state.received.len()>=10_000||state.total_bytes.saturating_add(text_bytes as u64)>8*1024*1024{return Err(invalid("fleet message journal or byte ceiling reached"));}
     let minute=unix_now()/60;if state.minute!=minute{state.minute=minute;state.message_count=0;}
     if state.message_count>=60{return Err(invalid("fleet message rate ceiling reached"));}
     if (state.paused||state.accounting_unknown)&&!envelope.kind.ordinary(){return Err(invalid("fleet is paused; actionable messages withheld"));}
@@ -277,7 +325,8 @@ pub fn admit(context:&Context,envelope:&Envelope,recipient:&str,pid:i32,semantic
             }
         }
         if admission.delivered{
-            state.received.insert(envelope.message_id.clone(),unix_now());state.traces.insert(envelope.message_id.clone(),MessageTrace{from:envelope.from_session.clone(),to:recipient.into(),hop:envelope.hop,kind:envelope.kind,artifact_refs:envelope.artifact_refs.clone(),in_reply_to:envelope.in_reply_to.clone()});state.message_count+=1;state.total_bytes+=envelope.body.len() as u64;
+            let seq=state.received.len() as u64+1;
+            state.received.insert(envelope.message_id.clone(),unix_now());state.traces.insert(envelope.message_id.clone(),MessageTrace{from:envelope.from_session.clone(),to:recipient.into(),hop:envelope.hop,seq,kind:envelope.kind,artifact_refs:envelope.artifact_refs.clone(),in_reply_to:envelope.in_reply_to.clone(),readback:envelope.readback.clone(),handoff_response:envelope.handoff_response.clone()});state.message_count+=1;state.total_bytes+=envelope.text_bytes() as u64;
             state.recent_messages.push(envelope.clone());while state.recent_messages.len()>8||state.recent_messages.iter().map(|row|row.body.len()).sum::<usize>()>12*1024{state.recent_messages.remove(0);}
         }
         record(state,json!({"event":"admission","admission":admission,"from":envelope.from_session,"to":recipient,"kind":envelope.kind,"input_sha256":hash(envelope)?,"at":unix_now()}));
