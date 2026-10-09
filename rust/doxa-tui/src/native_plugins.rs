@@ -20,6 +20,8 @@ pub(crate) mod runner;
 #[cfg(target_os = "linux")]
 #[allow(dead_code)]
 pub(crate) mod runner_process;
+#[cfg(target_os = "linux")]
+pub(crate) mod runner_sandbox;
 const MAX_CONFIG: u64 = 1024 * 1024;
 const MAX_MANIFEST: u64 = 16 * 1024;
 const MAX_PLUGINS: usize = 16;

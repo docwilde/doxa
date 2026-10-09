@@ -106,21 +106,37 @@ growth at the cap, changed approval and malformed request/response frames.
 
 This interpreter core is **not wired to a command or TUI path**. Its current
 tests invoke it in-process; doing that with an untrusted package in production
-would be unsafe. A separate, unwired child supervisor now starts a caller-built
+would be unsafe. A separate, unwired child supervisor starts a caller-built
 command in its own process group, bounds captured stdout and stderr to 64 KiB
-each, polls a wall deadline and cancellation flag, sends SIGKILL to the group
-on every outcome and reaps its leader. Linux tests use a Bubblewrap fixture
-when user namespaces are available. They cover normal exit, timeout,
-cancellation, output flood, signal death and no surviving marked descendant.
+each, and can send one input frame of at most 8 MiB plus its header through a
+nonblocking pipe. It polls a wall deadline and cancellation flag, sends SIGKILL
+to the group on every outcome and reaps its leader. Linux Bubblewrap fixtures
+cover normal exit, timeout, cancellation, output flood, stalled input, signal
+death and no surviving marked descendant.
 The fixture also shows a diagnostic limit: Bubblewrap maps a child killed by
 SIGKILL to exit code 137, which is indistinguishable from a deliberate exit 137.
 
-This supervisor accepts a caller-built command; it does not prove that command
-is sandboxed. There is still no child launcher with an enforceable OS memory
-and CPU budget, a process limit, file/network isolation tests or containment
-of a compromised descendant that changes process groups. Child and wrapper
-crashes need a reliable distinction. Thus DOXA has **no runner
-command, child binary, or plugin execution path**. Do not treat owner approval,
+An unwired Linux sandbox seam now requires a delegated cgroup v2 subtree with
+`memory`, `pids` and `cpu` controllers before it can build a child command. It
+installs 256 MiB memory, zero swap, 16 PIDs and one CPU of aggregate bandwidth;
+the child also gets address-space, CPU-time, file-descriptor and core-dump
+limits. Setup moves the child into the cgroup before Bubblewrap executes,
+sets `no_new_privs`, marks ambient descriptors close-on-exec, clears the
+environment and uses private mount, PID, user and network namespaces with no
+host home or repository mount. The parent kills the entire cgroup on every
+outcome, including a descendant that changes process groups. Bubblewrap
+fixtures show host files, mounts, a host TCP listener and inherited test
+environment are unavailable; resource fixtures show memory and CPU exhaustion
+stopped by kernel limits. This host has no user-delegated cgroup subtree, so
+the aggregate limits and cgroup cleanup **cannot be exercised here**; admission
+refuses to spawn in that condition.
+
+There is still no dedicated child binary, independent child-side request
+decoder in a process, response classification or end-to-end cgroup acceptance
+run. The worker-binary mount needs descriptor-bound identity to eliminate a
+path-swap race before activation. Child and wrapper crashes also need a
+reliable distinction. Thus DOXA has **no runner command, child binary, or
+plugin execution path**. Do not treat owner approval,
 the request frame, fuel or store limits as an execution switch. The handoff is
 `recheck_approved(home, review) -> RecheckedPackage`: it returns the exact,
 revalidated bytes and fails if either owner file, inode, digest, approval, or
@@ -139,16 +155,13 @@ integer result and bounded failure reason may return. `render-local-panel-v1`
 remains a reserved name until a separate reviewed protocol and grant gate
 exist.
 
-The remaining step is to run this core only in a separate process whose
-sandbox setup fails closed. On Linux, prove a private mount and network
-namespace, no inherited secrets or writable host mounts, `no_new_privs`,
-a process/cgroup memory and CPU budget, and a file-descriptor/process limit.
-The staged supervisor already bounds stdout/stderr, applies an independent
-wall deadline, and kills the owned group; a real launcher must also bound stdin,
-close inherited descriptors and report timeout, cancel, trap, crash and sandbox
-failure distinctly. Neither a parent-side timeout nor the module's declared
-maximum is a hard resource guarantee. Other
-platforms stay unavailable until equivalent isolation is proven.
+The remaining step is to run the interpreter in a dedicated child binary and
+prove the cgroup-backed path on a host with delegated controllers, including
+fork and process-group escape attempts. That binary must decode the request
+again and emit the fixed-size response. A real launcher must report timeout,
+cancel, trap, crash and sandbox failure distinctly. Parent-side deadlines and
+module-declared maxima are not hard resource guarantees. Other platforms stay
+unavailable until equivalent isolation is proven.
 
 The acceptance fixture must run a valid return module, an infinite loop,
 memory growth at the cap, a trap and a crashing child; exercise cancellation
