@@ -14,7 +14,7 @@ every proposed extension exists in Rust.
 | [DOXA plugin API](plugin-api.md) | Beta.13 added owner-allowlisted data-only native text commands; beta.16 reads owner-produced status files with bounded refresh and a visible failure ledger. Executable plugins, hooks and provider extensions remain open. Adoption of selected Claude provider plugins is separate. |
 | [Mermaid transcript diagrams](mermaid.md) | Opt-in local previews, sandbox doctor and beta.16 Settings preflight exist. A pinned real CLI harness awaits an explicitly provisioned package; terminal validation and installer decision remain open. |
 | [Collection triage](collection-triage.md) | Suggested names, settled opt-in group sorting and verified local LORE pending rank exist. Beta.16 colours headings only after exact project-root verification and adds hidden-tab urgency to pane badges. Full pane-row grouping, editable project labels and manual hues remain open. |
-| [macOS daemon process coverage](https://github.com/docwilde/doxa/issues/197) | Portable crates and daemon process tests run in macOS CI; beta.15 verifies production peer delivery and fleet PID admission. Protected Codex success and authenticated provider checks remain unverified. |
+| [macOS daemon process coverage](https://github.com/docwilde/doxa/issues/197) | Portable crates and daemon process tests run in macOS CI; beta.15 verifies production peer delivery and fleet PID admission. An opt-in source-only Claude lifecycle harness is available; an authenticated macOS pass and protected Codex success remain unverified. |
 
 Native UI, LORE, provider and remote parity is tracked in
 [the Rust parity record](../rust-1.19-parity.md). Older split-pane, rail,

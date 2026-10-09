@@ -33,3 +33,33 @@ usage checks passed on Linux with alpha.68; see
 Authenticated macOS provider sessions remain unverified. Protected Codex is
 supported only on Linux. Windows remains unsupported because native session
 transport, peer credentials and process supervision rely on Unix facilities.
+
+## Opt-in authenticated macOS check
+
+An operator on a macOS host can run the source-only lifecycle verifier after
+building the native daemon and signing in to the Claude Code CLI through its
+normal flow. It does not accept a credential argument or print account data:
+
+```sh
+# Use a private, short path on real disk for Unix sockets and scratch state.
+mkdir -p "$HOME/.t"
+chmod 700 "$HOME/.t"
+export TMPDIR="$HOME/.t"
+cargo build --locked -p doxa-daemon
+DOXA_NATIVE_DAEMON="$PWD/target/debug/doxa-daemon" \
+  python3 scripts/verify_macos_authenticated_lifecycle.py --live --provider claude
+```
+
+The command requires macOS and explicit `--live` opt-in. It launches two short
+synthetic subscription turns through DOXA's normal isolated Claude CLI path,
+checks native event delivery, acknowledges and waits for each daemon stop,
+then resumes the same session. LORE and peer tools are disabled; the verifier
+uses an owner-private disposable workspace and suppresses provider output.
+Its JSON receipt contains only `passed` or `unknown`, four stage results,
+the submitted-turn count, and a bounded reason code. An unknown result is not
+evidence of provider success. Run `--provider codex` to record the explicit
+`protected_codex_linux_only` unknown state; no Codex process is launched.
+
+This harness has only source and mock-test evidence on Linux. No authenticated
+macOS pass has been recorded. CI's credential-free daemon and vendor fixtures
+remain the automatic checks.
