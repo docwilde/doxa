@@ -125,7 +125,8 @@ remains unsupported.
   credentials. The private Rust hub brokers prompts and live events through an
   outbound host connector; its history and commands are volatile. The retained
   Python browser adapter is a compatibility path. Native remote tabs and
-  background push remain open.
+  browser Web Push are available; Android FCM source and protocol tests exist.
+  Provisioned Android, two-host tailnet and authenticated macOS QA remain open.
 
 ## Commands
 

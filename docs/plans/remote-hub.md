@@ -23,10 +23,9 @@ mixed overlay is skipped. Missing or replaced remote sessions are pruned.
 The browser can receive encrypted background Web Push after explicit opt-in.
 An Android Kotlin/Compose client project is in `android-client/`. Its FCM
 background-push source and protocol tests exist, with owner- and
-incarnation-scoped registration and generic tagged notifications. This host
-cannot build the APK because its JDK compiler and Android SDK 37 are absent;
-provisioned-device, FCM and private-tailnet QA remain open, so Android is not
-yet shipped.
+incarnation-scoped registration and generic tagged notifications. The debug
+APK builds and opens in an offline emulator. Provisioned-device, FCM and
+private-tailnet QA remain open, so Android is not yet shipped.
 
 ## User journey
 
