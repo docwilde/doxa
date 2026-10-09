@@ -13,7 +13,7 @@ the stable 2.0 release has not been cut.
 
 **Code graph**
 
-- Parse bounded Python definitions and imports with source hashes and coverage. Python calls, modules, and semantic bindings remain unknown; the complete input digest still covers Rust only.
+- Parse bounded Python definitions and imports with source hashes and coverage. Python calls and modules remain unsupported, semantic binding unknown, and the complete input digest Rust-only.
 
 **Terminal diagrams**
 
