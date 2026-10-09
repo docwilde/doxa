@@ -530,6 +530,35 @@ mod tests {
         FixtureDir { _root: root, broker }
     }
     fn hosts() -> AllowedHosts { AllowedHosts::new(&["api.example.test".to_owned()]).unwrap() }
+    // Other tests spawn children while libtest runs cases in parallel. A child
+    // can retain a CLOEXEC listener or flock between fork and exec, after the
+    // fixture's owner has dropped it. That is a genuinely live descriptor:
+    // production must refuse it. Wait only for that bounded fixture lifetime.
+    #[cfg(target_os = "linux")]
+    fn assert_eventually_stale(socket: &Path) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            match stale_socket(socket) {
+                Ok(true) => return,
+                Ok(false) if Instant::now() < deadline => thread::sleep(Duration::from_millis(5)),
+                Ok(false) => panic!("abandoned egress socket still has a listener"),
+                Err(err) => panic!("stale egress socket check failed: {err}"),
+            }
+        }
+    }
+    #[cfg(target_os = "linux")]
+    fn restart_after_transient_lock(broker: &Path) -> EgressGateway {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            match EgressGateway::start(broker, hosts()) {
+                Ok(gateway) => return gateway,
+                Err(err) if err.kind() == io::ErrorKind::PermissionDenied
+                    && err.to_string() == "egress gateway already starting or live"
+                    && Instant::now() < deadline => thread::sleep(Duration::from_millis(5)),
+                Err(err) => panic!("egress gateway did not restart after owner drop: {err}"),
+            }
+        }
+    }
     fn gateway(root: &Path, addresses: Vec<SocketAddr>, upstream: SocketAddr, calls: Arc<AtomicUsize>) -> EgressGateway {
         EgressGateway::start_with(root, hosts(),
             Arc::new(move |_| Ok(addresses.clone())),
@@ -823,8 +852,12 @@ mod tests {
         let root = fixture_dir();
         let socket = root.path().join("egress.sock");
         let stale = UnixListener::bind(&socket).unwrap();
+        let retained = stale.try_clone().unwrap();
         drop(stale);
-        assert!(stale_socket(&socket).unwrap());
+        assert!(!stale_socket(&socket).unwrap(), "a retained listener must not be reclaimed");
+        assert!(EgressGateway::start(root.path(), hosts()).is_err());
+        drop(retained);
+        assert_eventually_stale(&socket);
         let gateway = EgressGateway::start(root.path(), hosts()).unwrap();
         assert!(!stale_socket(gateway.socket()).unwrap());
         drop(gateway);
@@ -838,6 +871,7 @@ mod tests {
         let socket = root.path().join("egress.sock");
         let stale = UnixListener::bind(&socket).unwrap();
         drop(stale);
+        assert_eventually_stale(&socket);
         let (locked, ready) = std::sync::mpsc::channel();
         let (release, proceed) = std::sync::mpsc::channel();
         let broker = root.path().to_owned();
@@ -854,8 +888,12 @@ mod tests {
         assert!(UnixStream::connect(gateway.socket()).is_ok());
         let occupied = EgressGateway::start(root.path(), hosts()).err().unwrap();
         assert!(occupied.to_string().contains("already starting or live"), "{occupied}");
+        let retained_lock = gateway._lock.try_clone().unwrap();
         drop(gateway);
         assert!(!socket.exists());
+        let occupied = EgressGateway::start(root.path(), hosts()).err().unwrap();
+        assert!(occupied.to_string().contains("already starting or live"), "{occupied}");
+        drop(retained_lock);
         let lock = gateway_lock_path(root.path()).unwrap();
         assert!(lock.exists());
         assert_eq!(lock.parent(), root.path().parent());
@@ -864,7 +902,7 @@ mod tests {
         assert_eq!(meta.uid(), unsafe { libc::geteuid() });
         assert_eq!(meta.mode() & 0o777, 0o600);
         assert_eq!(meta.nlink(), 1);
-        let restarted = EgressGateway::start(root.path(), hosts()).unwrap();
+        let restarted = restart_after_transient_lock(root.path());
         drop(restarted);
     }
 
