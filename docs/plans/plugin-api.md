@@ -189,6 +189,13 @@ revalidated bytes and fails if either owner file, inode, digest, approval, or
 requested grant changed. The encoder consumes those bytes, never a reopened
 path.
 
+The explicit `doxa native-plugin host-check` operator command now makes one
+read-only observation of the running CLI's delegated cgroup parent and
+supervisor membership and the exact opened frontend, worker and Bubblewrap
+binary hashes/inodes. It refuses stale worker cgroups and ambiguous or
+changing identities. This is a prerequisite report, not a cleanup exercise or
+authority token; the production `InstalledHostAuthority` issuer remains closed.
+
 The runnable prototype is an explicit, grantless developer-only CLI command,
 never TUI startup or a native slash command. It requires an
 approved package with **zero** requested grants and a single exported

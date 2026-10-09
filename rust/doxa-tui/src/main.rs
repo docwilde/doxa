@@ -59,6 +59,8 @@ Commands:
                        Discover plugins or change sanitized adoption for new sessions
   native-plugin preflight NAME
                        Review one owner-local WebAssembly package without running it
+  native-plugin host-check
+                       Observe this host's delegation and exact runner binary identities
   native-plugin run NAME --grantless-prototype
                        Run a zero-grant, owner-approved package in a Linux cgroup sandbox
   model-facts ENGINE MODEL [--review-before YYYY-MM-DD] [--check-catalog]
@@ -267,11 +269,13 @@ fn run(args: &[String]) -> io::Result<()> {
             }
             "native-plugin" => {
                 match args {
+                    [_, action] if action == "host-check" =>
+                        print!("{}", operations::native_plugin_host_check()?),
                     [_, action, name] if action == "preflight" =>
                         print!("{}", operations::native_plugin_package_preflight(name)?),
                     [_, action, name, flag] if action == "run" && flag == "--grantless-prototype" =>
                         println!("isolated plugin returned {}", operations::native_plugin_run_grantless(name)?),
-                    _ => return Err(invalid("usage: doxa native-plugin preflight NAME | run NAME --grantless-prototype")),
+                    _ => return Err(invalid("usage: doxa native-plugin host-check | preflight NAME | run NAME --grantless-prototype")),
                 }
                 return Ok(());
             }

@@ -125,6 +125,27 @@ freshness, and revocation independently of owner-editable config or a
 disposable-guest receipt. Until then, the explicit Linux CLI is the only
 grantless execution route; TUI execution stays disabled.
 
+`doxa native-plugin host-check` is a read-only operator inventory on Linux.
+It requires the running CLI to occupy a direct supervisor leaf beneath an
+empty, owner-delegated cgroup v2 parent with `memory`, `pids` and `cpu`
+controllers enabled. It refuses leftover `doxa-plugin-*` children, unsafe or
+linked executables, and binary replacement during observation. The report
+records the parent's and supervisor's device/inode identities plus SHA-256,
+size and device/inode for the opened frontend, companion
+`doxa-plugin-worker` and `/usr/bin/bwrap` binaries. It does not create a
+cgroup, launch a worker or issue TUI authority.
+
+For an installed-host acceptance review, retain this report together with a
+fresh seven-case proof log and receipt from the **same** delegated host.
+Compare the report's worker and Bubblewrap digests with the receipt's
+`worker_sha256` and `bwrap_sha256`, and its delegated parent identity with
+`host.cgroup`. The acceptance must also bind the exact installed frontend
+binary and its current supervisor membership, exercise return, timeout,
+cancellation and error-path descendant cleanup, and define revocation before
+an authority issuer can be implemented. The existing proof command builds a
+worker from a clean checkout and records review evidence; neither its receipt
+nor a successful `host-check` activates the TUI.
+
 After reviewing both files and the requested grant, the owner can record the
 exact identity in private `$DOXA_HOME/config.toml`:
 
