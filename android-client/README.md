@@ -19,23 +19,21 @@ view requires a user-owned device and private hub.
 <img src="../assets/shots/android-remote-beta28-recovery-fence-offline.png" alt="Synthetic uncertain-write recovery fence with acknowledgment disabled" width="320">
 
 To reproduce the home capture, install the Android 36 default x86_64 system
-image, build the unconfigured APK, and start a fresh Pixel 6 emulator. The
-capture script turns on airplane mode, disables Wi-Fi and mobile data, clears
-app storage, verifies the empty URL field, and checks the PNG dimensions. It
-refuses a physical device.
+image and build the unconfigured APK. The capture script creates its own fresh
+Pixel 6 AVD under `TMPDIR`, refuses an occupied emulator port, and checks the
+booted AVD identity and empty third-party app inventory before touching it. It
+then turns on airplane mode, disables Wi-Fi and mobile data, verifies the exact
+connection screen and empty URL, decodes the entire PNG, and deletes the AVD.
+Python Pillow is required for image validation. Set `DOXA_CAPTURE_PORT` to a
+free even emulator port if 5580 is occupied. If the SDK installs command-line
+tools under a versioned directory, set `ANDROID_AVDMANAGER_BIN` to its
+`avdmanager` executable.
 
 ```bash
 export TMPDIR="$HOME/t" ANDROID_HOME=/path/to/android-sdk
-export ANDROID_AVD_HOME="$HOME/.cache/doxa-android-capture/avd"
-mkdir -p "$TMPDIR" "$ANDROID_AVD_HOME"
+mkdir -p "$TMPDIR"
 ./gradlew :app:assembleDebug
-"$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" create avd \
-  -n doxa-home-offline -k 'system-images;android-36;default;x86_64' \
-  -p "$ANDROID_AVD_HOME/doxa-home-offline.avd" --device pixel_6 --force
-"$ANDROID_HOME/emulator/emulator" -avd doxa-home-offline -port 5580 \
-  -no-window -no-snapshot -no-audio -no-boot-anim -gpu swiftshader_indirect &
-# Wait for emulator-5580 to report sys.boot_completed=1.
-ANDROID_SERIAL=emulator-5580 ../scripts/capture_android_home.sh
+../scripts/capture_android_home.sh
 ```
 
 ## Build and connect
