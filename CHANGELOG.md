@@ -9,7 +9,7 @@ the stable 2.0 release has not been cut.
 
 **Native plugin runner**
 
-- Recheck opened worker and Bubblewrap executable metadata just before sandbox exec, and reject writable delegated cgroup components.
+- Recheck opened worker and Bubblewrap executable metadata just before sandbox exec, reject writable delegated cgroup components, and resolve Ubuntu's symlinked `awk` for the read-only namespace preflight without mounting host `/etc`.
 - A same-user edit in the final check-to-exec interval remains possible. The nine-case installed-host run is unperformed and TUI authority stays closed.
 
 **Guarded egress relay**
