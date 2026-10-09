@@ -1,4 +1,4 @@
-use doxa_peers::{now as peer_now, PeerRecord, Registry as PeerRegistry};
+use doxa_peers::{now as peer_now, valid_incarnation, PeerRecord, Registry as PeerRegistry};
 use serde_json::{json, Value};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -606,6 +606,7 @@ fn registry_peer(runtime: &Path, id: &str, scope: &str, title: &str) -> (UnixLis
         repo_root: None,
         title: title.into(),
         started_at: peer_now(),
+        incarnation: None,
         heartbeat_at: peer_now(),
         daemon_socket: None,
         clients: Some(0),
@@ -642,6 +643,8 @@ fn registry_wire_prompt_and_stop() {
     let mut process = Process::start(dir.path(), "1");
     let entry = process.entry();
     assert_eq!(entry["session_id"], "fixture-session");
+    let incarnation = entry["incarnation"].as_str().unwrap();
+    assert!(valid_incarnation(incarnation));
     assert_ne!(entry["socket_path"], entry["daemon_socket"]);
     assert_eq!(
         entry["daemon_socket"],
@@ -672,6 +675,7 @@ fn registry_wire_prompt_and_stop() {
     assert_eq!(receive(&mut reader)["proto"], 1);
     send(&mut socket, json!({"type":"attach","cursor":null}));
     wait_until(|| process.entry()["clients"] == 1);
+    assert_eq!(process.entry()["incarnation"], incarnation);
     send(
         &mut socket,
         json!({"type":"prompt","id":1,"text":"secret prompt"}),
@@ -723,6 +727,7 @@ fn concurrent_process_cannot_claim_same_session_and_lock_survives_restart() {
     assert!(dir.path().join("registry/fixture-session.lock").exists());
     let mut restarted = Process::start(dir.path(), "10");
     assert_ne!(restarted.entry()["pid"], owner["pid"]);
+    assert_ne!(restarted.entry()["incarnation"], owner["incarnation"]);
     let (mut reader, mut socket) = restarted.connect();
     receive(&mut reader);
     send(&mut socket, json!({"type":"attach","cursor":null}));

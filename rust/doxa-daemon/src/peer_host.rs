@@ -326,6 +326,7 @@ impl PeerHost {
             repo_root: None,
             title: clean_title,
             started_at: now(),
+            incarnation: None,
             heartbeat_at: now(),
             daemon_socket: None,
             clients: None,

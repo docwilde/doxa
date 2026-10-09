@@ -169,8 +169,11 @@ before retrying an expired write. Before each POST, it synchronously saves a
 versioned, bounded marker containing only hub origin, target/incarnation,
 operation, request ID, and creation time. A failed save prevents submission.
 After process death or a scope change, it never replays a lost body. Android
-writes use a hub-boot-scoped request ID and exact incarnation. Before review,
-the client fences that ID at the hub; a queued command is cancelled, while an
+writes use a hub-boot-scoped request ID and exact incarnation. New native
+sessions publish a random registry incarnation; older entries keep
+their timestamp for existing remote clients but cannot pass Android's strict
+write check. The timestamp remains available for ordering and diagnostics.
+Before review, the client fences that ID at the hub; a queued command is cancelled, while an
 already delivered command remains blocked until a terminal host result. Only a
 safe fence followed by an authoritative snapshot of the original incarnation
 with a matching host incarnation receipt, matching inventory before and after

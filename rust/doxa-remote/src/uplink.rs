@@ -170,6 +170,15 @@ fn decode_command(target:&str,op:&str,payload:&Value,key:Option<&[u8;32]>)->Resu
 fn reviewed_android_input_is_current(payload:&Value,current:&Value)->bool {
     payload.get("reviewed_request")==Some(current)
 }
+fn strict_incarnation(entry:&doxa_peers::PeerRecord)->Option<&str>{
+    entry.incarnation.as_deref().filter(|value|doxa_peers::valid_incarnation(value))
+}
+fn remote_incarnation(entry:&doxa_peers::PeerRecord)->&str{
+    strict_incarnation(entry).unwrap_or(&entry.started_at)
+}
+fn android_incarnation_matches(entry:&doxa_peers::PeerRecord,payload:&Value)->bool{
+    strict_incarnation(entry).is_some_and(|value|payload["incarnation"].as_str()==Some(value))
+}
 async fn execute(app:&Arc<App>,owner:&str,host:&str,session_id:&str,op:&str,payload:&Value,key:Option<&[u8;32]>)->Value{
     let target=format!("{host}~{session_id}");
     let android=payload["android_fence_v1"]==true;
@@ -179,11 +188,11 @@ async fn execute(app:&Arc<App>,owner:&str,host:&str,session_id:&str,op:&str,payl
         return json!({"ok":false,"error":"remote policy refused command"});
     }
     let entry=match app.session(session_id){Ok(Some(entry))=>entry,_=>return json!({"ok":false,"error":"session offline"})};
-    if android && payload["incarnation"]!=entry.started_at {
+    if android && !android_incarnation_matches(&entry,&payload) {
         return json!({"ok":false,"error":"Android session incarnation changed"});
     }
     let client=match connect(app,&entry,None,None).await{Ok(client)=>client,Err(_)=>return json!({"ok":false,"error":"session unavailable"})};
-    let transcript_identity=(entry.session_id.clone(),entry.started_at.clone(),entry.pid,entry.daemon_socket.clone());
+    let transcript_identity=(entry.session_id.clone(),entry.started_at.clone(),entry.incarnation.clone(),entry.pid,entry.daemon_socket.clone());
     let op=op.to_owned();let app=app.clone();
     match tokio::task::spawn_blocking(move||->io::Result<Value>{
         let mut client=client;
@@ -217,11 +226,11 @@ async fn execute(app:&Arc<App>,owner:&str,host:&str,session_id:&str,op:&str,payl
                 scrub_data(&mut history,&app.lore)?;
                 let current=app.session(&transcript_identity.0)?
                     .ok_or_else(||invalid("transcript session went offline"))?;
-                if current.started_at!=transcript_identity.1 || current.pid!=transcript_identity.2
-                    || current.daemon_socket!=transcript_identity.3 {
+                if current.started_at!=transcript_identity.1 || current.incarnation!=transcript_identity.2
+                    || current.pid!=transcript_identity.3 || current.daemon_socket!=transcript_identity.4 {
                     return Err(invalid("transcript session incarnation changed"));
                 }
-                history["incarnation"]=json!(transcript_identity.1);
+                history["incarnation"]=json!(remote_incarnation(&current));
                 Ok(bounded_history(history))
             },
             _=>Err(invalid("unsupported remote command")),
@@ -233,10 +242,10 @@ async fn execute(app:&Arc<App>,owner:&str,host:&str,session_id:&str,op:&str,payl
 }
 async fn forward_events(app:&Arc<App>,http:&Client,base:&Url,host:&str,lease:&str,cursors:&mut HashMap<String,u64>,key:Option<&[u8;32]>){
     let entries=match app.sessions(){Ok(entries)=>entries,Err(_)=>return};
-    let live=entries.iter().map(|entry|format!("{}~{}",entry.session_id,entry.started_at)).collect::<Vec<_>>();
+    let live=entries.iter().map(|entry|format!("{}~{}",entry.session_id,remote_incarnation(entry))).collect::<Vec<_>>();
     cursors.retain(|key,_|live.contains(key));
     for entry in entries{
-        let cursor_key=format!("{}~{}",entry.session_id,entry.started_at);
+        let cursor_key=format!("{}~{}",entry.session_id,remote_incarnation(&entry));
         let cursor=cursors.get(&cursor_key).copied();
         let client=match connect(app,&entry,None,cursor).await{Ok(client)=>client,Err(_)=>continue};
         if cursor.is_none(){
@@ -288,7 +297,7 @@ pub async fn run(app:Arc<App>,url:&str,host:&str)->io::Result<()> {
                 "title":if key.is_some(){"Encrypted session"}else{&entry.title},
                 "engine":if key.is_some(){""}else{entry.engine.as_deref().unwrap_or("")},
                 "model":if key.is_some(){""}else{entry.model.as_deref().unwrap_or("")},
-                "incarnation":entry.started_at,"encrypted":key.is_some()})).collect::<Vec<_>>();
+                "incarnation":remote_incarnation(&entry),"encrypted":key.is_some()})).collect::<Vec<_>>();
             let registration=post(&http,&base,"api/host/register",json!({"host_id":host,"sessions":sessions}),lease.as_deref()).await;
             match registration{
                 Ok(value)=>{
@@ -337,6 +346,24 @@ pub async fn run(app:Arc<App>,url:&str,host:&str)->io::Result<()> {
 
 #[cfg(test)]mod tests{
     use super::*;
+    #[test]fn android_requires_random_registry_incarnation_while_legacy_remote_identity_remains_available(){
+        let mut entry:doxa_peers::PeerRecord=serde_json::from_value(json!({
+            "session_id":"session","pid":1,"socket_path":"/private/socket",
+            "cwd":"/work","repo_root":null,"title":"session",
+            "started_at":"2026-10-09T00:00:00.000000Z","heartbeat_at":"2026-10-09T00:00:00.000000Z"
+        })).unwrap();
+        let old=entry.started_at.clone();
+        assert_eq!(remote_incarnation(&entry),old);
+        assert!(!android_incarnation_matches(&entry,&json!({"incarnation":old})));
+        let nonce=doxa_peers::new_incarnation();
+        entry.incarnation=Some(nonce.clone());
+        assert_eq!(remote_incarnation(&entry),nonce);
+        assert!(android_incarnation_matches(&entry,&json!({"incarnation":nonce})));
+        assert!(!android_incarnation_matches(&entry,&json!({"incarnation":old})));
+        entry.incarnation=Some("invalid".into());
+        assert_eq!(remote_incarnation(&entry),old);
+        assert!(!android_incarnation_matches(&entry,&json!({"incarnation":"invalid"})));
+    }
     #[test]fn only_private_tailscale_https_origins(){
         assert!(hub_url("https://host.tail.ts.net/").is_ok());
         for url in ["http://host.tail.ts.net/","https://evil.example.com/","https://user@host.tail.ts.net/","https://host.tail.ts.net/other"]{assert!(hub_url(url).is_err(),"{url}");}

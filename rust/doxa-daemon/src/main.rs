@@ -15,7 +15,7 @@ use claude_host::ClaudeHost;
 use budget_host::BudgetHost;
 use codex_host::CodexHost;
 use doxa_engines::codex_driver::{DriverOptions, SandboxMode};
-use doxa_peers::delivery::Inbox;
+use doxa_peers::{delivery::Inbox, new_incarnation};
 use doxa_runtime::{Daemon, ExternalPrompt, Host, Session};
 use doxa_vendors::Vendor;
 use peer_host::PeerHost;
@@ -411,6 +411,7 @@ struct Registry {
     // the ownership check below (an ABA race).
     owned_file: Option<File>,
     started_at: String,
+    incarnation: String,
     repo_root: Option<String>,
     cwd: String,
     session_id: String,
@@ -437,6 +438,7 @@ impl Registry {
             identity: None,
             owned_file: None,
             started_at: iso_now(),
+            incarnation: new_incarnation(),
             repo_root,
             cwd: options.cwd.to_string_lossy().into_owned(),
             session_id: options.session_id.clone(),
@@ -451,7 +453,8 @@ impl Registry {
         let entry = json!({"session_id":self.session_id,"pid":std::process::id(),
             "socket_path":self.socket,"daemon_socket":self.daemon_socket,"cwd":self.cwd,
             "repo_root":self.repo_root,"title":self.title,
-            "started_at":self.started_at,"heartbeat_at":iso_now(),"clients":clients,
+            "started_at":self.started_at,"incarnation":self.incarnation,
+            "heartbeat_at":iso_now(),"clients":clients,
             "engine":self.engine.name(),"parent_session_id":self.parent_session_id});
         let tmp = self
             .path
