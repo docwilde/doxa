@@ -5,6 +5,13 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.19 — 2026-10-09
+
+**Native plugins**
+
+- Stage an unwired Linux child supervisor with bounded output, deadline, cancellation, process-group kill and leader reap for a future WASM runner.
+- Exercise exit, crash, timeout, cancellation and output flood in Bubblewrap fixtures. OS resource and file/network isolation and plugin execution remain open.
+
 ## 2.0.0-beta.18 — 2026-10-09
 
 **Workspace and code graph**
