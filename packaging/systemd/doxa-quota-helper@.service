@@ -1,0 +1,23 @@
+[Unit]
+Description=DOXA read-only project quota inspector for session %i
+RefuseManualStart=yes
+
+[Service]
+Type=simple
+ExecStart=/usr/libexec/doxa/doxa-quota-helper /etc/doxa/quota/%i.json
+User=root
+Group=root
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_SYS_ADMIN
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+UMask=0077
