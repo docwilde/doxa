@@ -11,6 +11,7 @@ LORE 0.62.20 owns durable source-hashed snapshots; DOXA does not write them.
 
 - [Shipped surface](#shipped-surface)
 - [Freshness and coverage](#freshness-and-coverage)
+- [Repeated explicit TUI queries](#repeated-explicit-tui-queries)
 - [Explicit snapshot export](#explicit-snapshot-export)
 - [Reviewed snapshot read](#reviewed-snapshot-read)
 - [Architecture boundary](#architecture-boundary)
@@ -89,8 +90,9 @@ unknown for both Rust and Python rows.
 
 ## Freshness and coverage
 
-Every query enumerates the current tracked **and untracked, nonignored** Git
-files and reads Rust and Python bytes afresh. There is no index that can lag an edit.
+Every CLI query enumerates the current tracked **and untracked, nonignored** Git
+files and reads Rust and Python bytes afresh. The explicit TUI query cache
+re-reads and hashes those bytes before reusing an answer.
 Each row and call edge carries its file, line, SHA-256 of the parsed bytes, and
 read time. Candidate declarations carry their own source hashes and read times.
 When **every listed Rust file parses**, the answer contains deterministic
@@ -132,6 +134,25 @@ instead of a partial result. Oversized, changed-during-read, symlinked, and
 unparseable files are named in bounded issue summaries. A file hash is evidence
 for the bytes parsed, not a promise that the worktree has stayed unchanged since
 that read.
+
+## Repeated explicit TUI queries
+
+The TUI keeps at most one prior syntax answer in process memory for an identical
+`/codegraph` query in the same canonical worktree. Before reuse, it re-enumerates
+the complete Git path list and reads every listed Rust and Python source three
+times: one inventory pass and two hash rechecks. The check is capped at 64 MiB
+per language per pass and ten seconds overall, with the same no-symlink reader
+as a fresh query. It compares both language digests and the whole path listing;
+any mismatch triggers a fresh query. Skipped or unparseable inputs are never
+cached. The viewer labels a reused answer and preserves its original observed
+time, so a cache hit is not presented as a newly parsed graph. The CLI and
+reviewed LORE snapshot path do not use this cache.
+
+This is a read-only optimization for repeated **explicit** queries. It does
+not index a worktree persistently, run on every agent turn, or prove an atomic
+snapshot. Changes restored between reads can escape detection. Warm and cold
+latency measurements are still needed before any automatic turn path or
+multi-query index is justified.
 
 ## Explicit snapshot export
 
@@ -228,4 +249,4 @@ is read-only and creates no second memory authority.
 - The [warm-cache scan benchmark](../codegraph-scan-benchmark-2026-10-09.md)
   measured 0.371 s median on DOXA and 1.641 s on a 6,944-file Python-heavy
   checkout. Define a repeated-query latency budget and measure cold-cache
-  tails before adding an automatic turn path or a worktree-scoped index.
+  tails before adding an automatic turn path or a persistent multi-query index.

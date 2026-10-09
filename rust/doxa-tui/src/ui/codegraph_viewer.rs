@@ -1,6 +1,7 @@
 //! Read-only presentation of the bounded, fresh codegraph syntax queries.
 use super::{App, ChipInfo};
 use doxa_codegraph::{Answer, Query};
+use doxa_codegraph::cache::Origin;
 use doxa_lore::CodegraphSnapshot;
 use std::sync::mpsc::{self, TryRecvError};
 use std::time::Duration;
@@ -193,6 +194,7 @@ impl App {
         }
         let (sender, receiver) = mpsc::channel();
         let root = cwd.clone();
+        let cache = self.codegraph_cache.clone();
         std::thread::spawn(move || {
             let result = if stored {
                 (|| {
@@ -206,7 +208,17 @@ impl App {
                         .map_err(|error| error.to_string())
                 })()
             } else {
-                doxa_codegraph::query(&root, request).map(|answer| answer_lines(&answer))
+                (|| {
+                    let mut cache = cache.lock()
+                        .map_err(|_| "Code graph cache is unavailable".to_owned())?;
+                    cache.query(&root, request).map(|(answer, origin)| {
+                        let mut lines = answer_lines(&answer);
+                        if origin == Origin::Revalidated {
+                            lines.insert(3, "Reused syntax answer · Git paths and Rust/Python source hashes rechecked".into());
+                        }
+                        lines
+                    })
+                })()
             };
             let _ = sender.send(result);
         });
@@ -324,6 +336,33 @@ mod tests {
         app.open_codegraph("stored symbol Child");
         assert!(app.codegraph_pending.is_none());
         assert!(app.notice.contains("requires file|imports|calls|modules"));
+    }
+
+    #[test]
+    fn repeated_explicit_query_shows_revalidation_and_edit_rebuilds_answer() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(Command::new("git").args(["init", "-q"]).arg(root.path()).status().unwrap().success());
+        fs::write(root.path().join("lib.rs"), "fn original() {}\n").unwrap();
+        let mut app = App::default();
+        app.size = Rect::new(0, 0, 96, 32);
+        app.rail_visible = false;
+        app.groups[0].tabs.push("session".into());
+        app.session_cwds.insert("session".into(), root.path().to_path_buf());
+        for expected_reuse in [false, true, false] {
+            if !expected_reuse && app.chip_info.is_some() {
+                fs::write(root.path().join("lib.rs"), "fn changed() {}\n").unwrap();
+            }
+            app.open_codegraph("file lib.rs");
+            for _ in 0..100 {
+                if app.poll_codegraph() { break; }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            let lines = app.chip_info.as_ref().unwrap().lines.join("\n");
+            assert_eq!(lines.contains("Reused syntax answer"), expected_reuse, "{lines}");
+            if !expected_reuse && lines.contains("changed") {
+                assert!(!lines.contains("original"));
+            }
+        }
     }
 
     #[test]
