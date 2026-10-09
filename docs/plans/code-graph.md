@@ -152,9 +152,15 @@ reviewed LORE snapshot path do not use this cache.
 
 This is a read-only optimization for repeated **explicit** queries. It does
 not index a worktree persistently, run on every agent turn, or prove an atomic
-snapshot. Changes restored between reads can escape detection. Warm and cold
-latency measurements are still needed before any automatic turn path or
-multi-query index is justified.
+snapshot. Changes restored between reads can escape detection. Cold-cache
+tails and representative larger repositories still need measurement before
+any automatic turn path or multi-query index is justified.
+
+For the explicit repeated-query path, the warm DOXA target is p95 below
+100 ms. Five same-process no-hit `symbol` samples with the release build on
+this branch measured fresh p50/p95 at 417.8/421.1 ms and revalidated reuse at
+29.8/30.4 ms. Other desktop load was uncontrolled; this says nothing about
+cold-cache tails or larger repositories.
 
 ## Explicit snapshot export
 
