@@ -4278,6 +4278,70 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn project_label_follows_verified_root_and_mixed_panes_keep_original_heading() {
+        let mut app = App::default();
+        app.project_labels = Some(HashMap::new());
+        for id in ["a", "b"] {
+            app.apply_update(DaemonUpdate::Upsert(Session { id:id.into(), title:id.into(),
+                collection:"repo".into(), transcript:String::new(), status:"Ready".into() }));
+        }
+        app.groups[0].tabs = vec!["a".into(), "b".into()];
+        let root = PathBuf::from("/verified/repo");
+        app.project_labels.as_mut().unwrap().insert(root.clone(), "Client Work".into());
+        app.project_roots.insert("a".into(), root.clone());
+        assert_eq!(app.rail_project_label(0), "repo");
+        app.project_roots.insert("b".into(), PathBuf::from("/verified/other"));
+        assert_eq!(app.rail_project_label(0), "repo");
+        app.project_roots.insert("b".into(), root);
+        assert_eq!(app.rail_project_label(0), "Client Work");
+        assert_eq!(app.rail_project_label(1), "Client Work");
+        assert!(app.rail_groups().iter().any(|(key, _, _)|
+            matches!(key, RailGroupKey::Project(label) if label == "Client Work")));
+        app.apply_update(DaemonUpdate::Upsert(Session { id:"c".into(), title:"c".into(),
+            collection:"Client Work".into(), transcript:String::new(), status:"Ready".into() }));
+        assert_eq!(app.rail_project_label(0), "repo");
+    }
+
+    #[test]
+    fn project_label_edit_requires_fresh_one_root_and_rejects_collisions() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("one");
+        let other = dir.path().join("two");
+        std::fs::create_dir(&root).unwrap(); std::fs::create_dir(&other).unwrap();
+        let root = root.canonicalize().unwrap();
+        let other = other.canonicalize().unwrap();
+        let mut app = App::default();
+        app.project_labels = Some(HashMap::new());
+        for id in ["a", "b", "c"] {
+            app.apply_update(DaemonUpdate::Upsert(Session { id:id.into(), title:id.into(),
+                collection:id.into(), transcript:String::new(), status:"Ready".into() }));
+        }
+        app.groups[0].tabs = vec!["a".into(), "b".into()];
+        app.groups[1].tabs = vec!["c".into()];
+        app.session_cwds.insert("a".into(), root.clone());
+        app.session_cwds.insert("b".into(), root.clone());
+        app.session_cwds.insert("c".into(), other.clone());
+        app.project_roots.insert("a".into(), root.clone());
+        assert!(app.active_verified_project_root().unwrap_err().contains("unresolved"));
+        app.project_roots.insert("b".into(), other.clone());
+        assert!(app.active_verified_project_root().unwrap_err().contains("changed"));
+        app.project_roots.insert("b".into(), root.clone());
+        assert_eq!(app.active_verified_project_root().unwrap(), root);
+        app.project_roots.insert("c".into(), other);
+        assert!(app.project_label_collides(&root, "c"));
+        assert!(!app.project_label_collides(&root, "Client Work"));
+        let path = dir.path().join("owner").join("config.toml");
+        app.edit_project_label(&path, Some("Client Work")).unwrap();
+        assert_eq!(app.rail_project_label(0), "Client Work");
+        assert_eq!(doxa_state::load_config_checked(&path).unwrap()["project_labels"]
+            [root.to_str().unwrap()].as_str(), Some("Client Work"));
+        assert!(app.edit_project_label(&path, Some("c")).is_err());
+        assert_eq!(app.rail_project_label(0), "Client Work");
+        app.edit_project_label(&path, None).unwrap();
+        assert_eq!(app.rail_project_label(0), "a");
+    }
+
+    #[test]
     fn project_hue_requires_one_known_root_even_when_labels_match() {
         let mut app = App::default();
         app.project_colours = Some(HashMap::new());

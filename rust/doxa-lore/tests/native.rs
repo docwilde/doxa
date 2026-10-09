@@ -50,6 +50,56 @@ fn reviewed_codegraph_read_is_scoped_and_rejects_stale_source() {
 }
 
 #[test]
+fn reviewed_module_references_report_current_stale_and_uncheckable_bytes() {
+    let owned = tempfile::tempdir().unwrap();
+    let source = owned.path().join("worktree");
+    std::fs::create_dir(&source).unwrap();
+    assert!(std::process::Command::new("git").args(["init", "-q"])
+        .arg(&source).status().unwrap().success());
+    std::fs::write(source.join("lib.rs"), "mod child;\n").unwrap();
+    let child = source.join("child.rs");
+    std::fs::write(&child, "pub fn child() {}\n").unwrap();
+    let cwd = source.to_str().unwrap();
+    let graph = serde_json::to_value(doxa_codegraph::query(&source,
+        doxa_codegraph::Query::Modules("lib.rs".into())).unwrap()).unwrap();
+    assert_eq!(graph["module_edges"][0]["target"], "child.rs");
+    let config = lore_core::config::Config::for_root(owned.path().join("store"));
+    let authority = lore_core::gate::Authority::HumanReview {
+        agent: "fixture".into(), engine: "human".into(),
+    };
+    lore_core::codegraph_snapshot::store(&config, &serde_json::json!({
+        "cwd":cwd,"query":"modules","path":"lib.rs","expected_revision":0,
+        "snapshot":{"schema_version":1,"storage":"export_only_not_persisted",
+            "graph_binding":"unknown","curated_purpose":{
+                "project_key":lore_core::config::project_slug(&source)},"graph":graph}
+    }), &authority).unwrap();
+    let mut client = LoreClient::open_config(config, Duration::from_secs(2)).unwrap();
+    let CodegraphSnapshot::Current(current) = client.codegraph_snapshot(cwd, "modules", "lib.rs").unwrap()
+        else { panic!("expected reviewed snapshot") };
+    assert_eq!(current.referenced_sources.status, "verified");
+    assert_eq!(current.referenced_sources.checked_files, 2);
+    assert!(current.referenced_sources.issues.is_empty());
+
+    std::fs::write(&child, "pub fn changed() {}\n").unwrap();
+    let CodegraphSnapshot::Current(changed) = client.codegraph_snapshot(cwd, "modules", "lib.rs").unwrap()
+        else { panic!("requested source should remain current") };
+    assert_eq!(changed.referenced_sources.status, "stale");
+    assert!(changed.referenced_sources.issues.iter().any(|issue|
+        issue.path == "child.rs" && issue.reason == "source_hash_changed"));
+    assert_eq!(CodegraphSnapshot::Current(changed).to_value()["referenced_sources"]["status"], "stale");
+
+    std::fs::remove_file(&child).unwrap();
+    let outside = owned.path().join("outside.rs");
+    std::fs::write(&outside, "pub fn child() {}\n").unwrap();
+    std::os::unix::fs::symlink(&outside, &child).unwrap();
+    let CodegraphSnapshot::Current(uncheckable) = client.codegraph_snapshot(cwd, "modules", "lib.rs").unwrap()
+        else { panic!("requested source should remain current") };
+    assert_eq!(uncheckable.referenced_sources.status, "unknown");
+    assert!(uncheckable.referenced_sources.issues.iter().any(|issue|
+        issue.path == "child.rs" && issue.reason == "source_uncheckable"));
+}
+
+#[test]
 fn native_source_session_pending_summary_respects_project_and_session() {
     let owned = tempfile::tempdir().unwrap();
     let config = lore_core::config::Config::for_root(owned.path().join("store"));

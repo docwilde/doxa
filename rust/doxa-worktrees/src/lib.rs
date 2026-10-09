@@ -131,6 +131,7 @@ fn git(cwd: &Path, args: &[&str], timeout: Duration) -> Option<(bool, Vec<u8>)> 
     git_program(Path::new("git"), cwd, args, timeout)
 }
 fn git_program(program: &Path, cwd: &Path, args: &[&str], timeout: Duration) -> Option<(bool, Vec<u8>)> {
+    let deadline = Instant::now() + timeout;
     let mut command = Command::new(program);
     command.args(args).current_dir(cwd)
         .env_remove("GIT_DIR").env_remove("GIT_WORK_TREE")
@@ -138,14 +139,29 @@ fn git_program(program: &Path, cwd: &Path, args: &[&str], timeout: Duration) -> 
     let mut command = if program == Path::new("git") {
         doxa_isolation::workspace::command(command).ok()?
     } else { command };
-    let mut child = command.process_group(0).stdin(Stdio::null())
-        .stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
+    command.process_group(0).stdin(Stdio::null())
+        .stdout(Stdio::piped()).stderr(Stdio::null());
+    // A Git update can briefly hold its executable open for writing. Include
+    // bounded ETXTBSY retries in the caller's deadline; other failures stay
+    // immediate and never create a managed worktree.
+    let mut busy_retries = 0;
+    let mut child = loop {
+        if Instant::now() >= deadline { return None; }
+        match command.spawn() {
+            Ok(child) => break child,
+            Err(error) if error.raw_os_error() == Some(libc::ETXTBSY)
+                && busy_retries < 3 && Instant::now() + Duration::from_millis(30) < deadline => {
+                busy_retries += 1;
+                std::thread::sleep(Duration::from_millis(30));
+            }
+            Err(_) => return None,
+        }
+    };
     let pid = child.id() as i32;
     let result = (|| {
         let mut stdout = child.stdout.take()?;
         let flags = unsafe { libc::fcntl(stdout.as_raw_fd(), libc::F_GETFL) };
         if flags < 0 || unsafe { libc::fcntl(stdout.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 { return None; }
-        let deadline = Instant::now() + timeout;
         let mut bytes = Vec::new();
         let mut chunk = [0u8; 8192];
         let mut eof = false;
@@ -883,8 +899,8 @@ mod tests {
         fs::write(&program, "#!/bin/sh\nprintf '%s\\n' \"$$\" > leader\n/bin/sleep 30 &\nprintf '%s\\n' \"$!\" > descendant\nexit 0\n").unwrap();
         fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
         let started = Instant::now();
-        assert!(git_program(&program, dir.path(), &[], Duration::from_millis(80)).is_none());
-        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(git_program(&program, dir.path(), &[], Duration::from_secs(1)).is_none());
+        assert!(started.elapsed() < Duration::from_secs(2));
         let leader: i32 = fs::read_to_string(dir.path().join("leader")).unwrap().trim().parse().unwrap();
         assert_eq!(unsafe { libc::kill(leader, 0) }, -1);
         let descendant: i32 = fs::read_to_string(dir.path().join("descendant")).unwrap().trim().parse().unwrap();
@@ -903,6 +919,22 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(1));
         fs::write(&program, "#!/bin/sh\nprintf 'bounded output'\nexit 7\n").unwrap();
         assert_eq!(git_program(&program, dir.path(), &[], Duration::from_secs(1)), Some((false, b"bounded output".to_vec())));
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn briefly_busy_git_program_recovers_before_deadline() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("git-fixture");
+        fs::write(&program, "#!/bin/sh\nprintf 'ready'\n").unwrap();
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
+        let writer = OpenOptions::new().write(true).open(&program).unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            drop(writer);
+        });
+        let result = git_program(&program, dir.path(), &[], Duration::from_secs(1));
+        release.join().unwrap();
+        assert_eq!(result, Some((true, b"ready".to_vec())));
     }
     #[test]
     fn creation_requires_lifecycle_lock_before_creating_a_branch_or_sidecar() {

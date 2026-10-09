@@ -1,4 +1,4 @@
-//! Owner-approved, data-only TUI contributions. This module never loads code.
+//! Owner-approved, data-only TUI contributions. The TUI never loads code.
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::ffi::CString;
@@ -13,6 +13,9 @@ use std::time::{Duration, Instant, SystemTime};
 
 pub const API_VERSION: u32 = 1;
 pub mod packages;
+// Staged worker contract has no production caller until the OS sandbox lands.
+#[allow(dead_code)]
+pub(crate) mod runner;
 const MAX_CONFIG: u64 = 1024 * 1024;
 const MAX_MANIFEST: u64 = 16 * 1024;
 const MAX_PLUGINS: usize = 16;

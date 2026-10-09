@@ -11,7 +11,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from check_docker_quota_preflight import inspect, main, mount_for, parse_mountinfo
+from check_docker_quota_preflight import audit_descendants, inspect, main, mount_for, parse_mountinfo
 
 
 class QuotaPreflightTests(unittest.TestCase):
@@ -40,7 +40,65 @@ class QuotaPreflightTests(unittest.TestCase):
         self.assertFalse(report["hard_enforcement_verified"])
         self.assertFalse(report["admissible_as_hard_quota"])
         self.assertEqual({row["project_id"] for row in report["sources"].values()}, {42})
+        self.assertEqual(report["descendants_checked"], 3)
         self.assertEqual(before, sorted(p.name for p in self.root.iterdir()))
+
+    def test_existing_file_with_different_project_id_refuses_candidate(self) -> None:
+        (self.root / "checkout" / "existing.txt").write_text("fixture")
+
+        def projects(fd: int) -> tuple[int, bool]:
+            path = os.readlink(f"/proc/self/fd/{fd}")
+            return (43 if path.endswith("/existing.txt") else 42), True
+
+        report = inspect(self.root, self.mountinfo(), projects)
+        self.assertFalse(report["capability_candidate"])
+        self.assertIn("private tree contains a different project ID", report["reasons"])
+
+    def test_matching_nested_content_remains_unverified_candidate(self) -> None:
+        nested = self.root / "checkout" / "nested"
+        nested.mkdir(mode=0o700)
+        existing = nested / "existing.txt"
+        existing.write_text("fixture")
+        report = inspect(self.root, self.mountinfo(), self.project)
+        self.assertEqual(report["descendants_checked"], 5)
+        self.assertTrue(report["capability_candidate"])
+        self.assertFalse(report["hard_enforcement_verified"])
+        self.assertFalse(report["admissible_as_hard_quota"])
+        self.assertEqual(existing.read_text(), "fixture")
+
+    def test_nested_directory_without_inheritance_refuses_candidate(self) -> None:
+        (self.root / "home" / "nested").mkdir(mode=0o700)
+
+        def projects(fd: int) -> tuple[int, bool]:
+            path = os.readlink(f"/proc/self/fd/{fd}")
+            return 42, not path.endswith("/nested")
+
+        report = inspect(self.root, self.mountinfo(), projects)
+        self.assertFalse(report["capability_candidate"])
+        self.assertIn("private tree directory lacks project inheritance", report["reasons"])
+
+    def test_symlink_and_special_descendants_refuse_candidate(self) -> None:
+        link = self.root / "cache" / "shortcut"
+        link.symlink_to(self.root / "home", target_is_directory=True)
+        report = inspect(self.root, self.mountinfo(), self.project)
+        self.assertIn("private tree contains a symlink or special entry", report["reasons"])
+        link.unlink()
+        os.mkfifo(self.root / "cache" / "pipe")
+        report = inspect(self.root, self.mountinfo(), self.project)
+        self.assertIn("private tree contains a symlink or special entry", report["reasons"])
+
+    def test_descendant_count_and_depth_limits_fail_closed(self) -> None:
+        nested = self.root / "checkout" / "nested"
+        nested.mkdir(mode=0o700)
+        (nested / "existing.txt").write_text("fixture")
+        fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            with self.assertRaisesRegex(ValueError, "inspection limit"):
+                audit_descendants(fd, os.fstat(fd).st_dev, 42, self.project, max_entries=3)
+            with self.assertRaisesRegex(ValueError, "depth limit"):
+                audit_descendants(fd, os.fstat(fd).st_dev, 42, self.project, max_depth=1)
+        finally:
+            os.close(fd)
 
     def test_missing_mount_option_and_project_inheritance_are_unknown(self) -> None:
         report = inspect(self.root, self.mountinfo("rw"), lambda _fd: (42, False))

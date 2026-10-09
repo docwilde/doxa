@@ -218,7 +218,24 @@ fn run(program: &Path, args: &[&str], cwd: Option<&Path>, cancel: &AtomicBool, d
     let mut command = Command::new(program); command.args(args).process_group(0).stdin(Stdio::null()).stderr(Stdio::null()).stdout(Stdio::piped())
         .env("GIT_TERMINAL_PROMPT", "0").env("GIT_ASKPASS", "/bin/false").env("SSH_ASKPASS", "/bin/false");
     if let Some(cwd) = cwd { command.current_dir(cwd); }
-    let mut child = command.spawn()?; let mut output = child.stdout.take().ok_or_else(|| io::Error::other("advisory output unavailable"))?;
+    // An updater can briefly hold Git open for writing. Bound retries to the
+    // transient executable-busy case and stay within the advisory deadline.
+    let mut busy_retries = 0;
+    let mut child = loop {
+        if cancel.load(Ordering::Acquire) || Instant::now() >= deadline {
+            return Err(io::Error::other("advisory cancelled or timed out"));
+        }
+        match command.spawn() {
+            Ok(child) => break child,
+            Err(error) if error.raw_os_error() == Some(libc::ETXTBSY)
+                && busy_retries < 3 && Instant::now() + Duration::from_millis(30) < deadline => {
+                busy_retries += 1;
+                thread::sleep(Duration::from_millis(30));
+            }
+            Err(error) => return Err(error),
+        }
+    };
+    let mut output = child.stdout.take().ok_or_else(|| io::Error::other("advisory output unavailable"))?;
     let fd = output.as_raw_fd();
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
     let nonblocking = flags >= 0 && unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } >= 0;
@@ -292,6 +309,21 @@ mod tests {
         let git = script(dir.path(), &format!("printf '{}\\trefs/heads/main\\n'", B));
         assert_eq!(measure(&exe, dir.path(), &dir.path().join("config.toml"), DEFAULT_REPO, false, &cancel, Instant::now()+TIMEOUT, &git).update, Update::Available);
         assert_eq!(repo_display("https://secret@example.test/repo"), "https://[redacted]@example.test/repo");
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn briefly_busy_git_advisory_recovers_within_deadline() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = script(dir.path(), "printf 'ready'");
+        let writer = fs::OpenOptions::new().write(true).open(&git).unwrap();
+        let release = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(50));
+            drop(writer);
+        });
+        let cancel = AtomicBool::new(false);
+        let output = run(&git, &[], None, &cancel, Instant::now() + TIMEOUT).unwrap();
+        release.join().unwrap();
+        assert_eq!(output, "ready");
     }
     #[test]
     fn hanging_and_oversized_commands_are_stopped_and_invalid_remote_rows_rejected() {

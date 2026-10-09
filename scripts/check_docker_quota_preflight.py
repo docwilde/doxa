@@ -26,6 +26,8 @@ FS_XFLAG_PROJINHERIT = 0x00000200
 FSXATTR_SIZE = 28
 SOURCES = ("checkout", "home", "cache")
 O_DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+MAX_DESCENDANTS = 4096
+MAX_DEPTH = 64
 
 
 @dataclass(frozen=True)
@@ -109,6 +111,61 @@ def _private_directory(path: Path, uid: int) -> int:
         raise
 
 
+def audit_descendants(root_fd: int, expected_dev: int, expected_project: int,
+                      read_project: Callable[[int], tuple[int, bool]],
+                      max_entries: int = MAX_DESCENDANTS,
+                      max_depth: int = MAX_DEPTH) -> int:
+    """Inspect existing entries without following links or reading file data.
+
+    The walk has fixed work and descriptor-depth limits. It remains a snapshot,
+    not proof that a project quota has a configured, enforced block limit.
+    """
+    checked = 0
+
+    def walk(parent_fd: int, depth: int) -> None:
+        nonlocal checked
+        with os.scandir(parent_fd) as entries:
+            for entry in entries:
+                checked += 1
+                if checked > max_entries:
+                    raise ValueError("private tree exceeds the descendant inspection limit")
+                try:
+                    before = entry.stat(follow_symlinks=False)
+                except OSError as exc:
+                    raise ValueError("private tree entry cannot be inspected") from exc
+                if not (stat.S_ISDIR(before.st_mode) or stat.S_ISREG(before.st_mode)):
+                    raise ValueError("private tree contains a symlink or special entry")
+                try:
+                    child_fd = os.open(entry.name, os.O_RDONLY | os.O_NONBLOCK |
+                                       os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent_fd)
+                except OSError as exc:
+                    raise ValueError("private tree entry changed or cannot be opened") from exc
+                try:
+                    current = os.fstat(child_fd)
+                    if (current.st_dev, current.st_ino, stat.S_IFMT(current.st_mode)) != (
+                            before.st_dev, before.st_ino, stat.S_IFMT(before.st_mode)):
+                        raise ValueError("private tree entry changed during inspection")
+                    if current.st_dev != expected_dev:
+                        raise ValueError("private tree entry crosses a filesystem boundary")
+                    try:
+                        project_id, inherits = read_project(child_fd)
+                    except OSError as exc:
+                        raise ValueError("private tree project metadata is unavailable") from exc
+                    if project_id != expected_project:
+                        raise ValueError("private tree contains a different project ID")
+                    if stat.S_ISDIR(current.st_mode):
+                        if not inherits:
+                            raise ValueError("private tree directory lacks project inheritance")
+                        if depth >= max_depth:
+                            raise ValueError("private tree exceeds the directory depth limit")
+                        walk(child_fd, depth + 1)
+                finally:
+                    os.close(child_fd)
+
+    walk(root_fd, 0)
+    return checked
+
+
 def inspect(root: Path, mountinfo: str,
             read_project: Callable[[int], tuple[int, bool]] = project_metadata) -> dict:
     if not root.is_absolute() or ".." in root.parts:
@@ -154,6 +211,12 @@ def inspect(root: Path, mountinfo: str,
             report["sources"][name] = {"project_id": project_id, "inherits_project": inherits}
         if len(project_ids) != 1:
             reasons.append("private bind sources have different project IDs")
+        if not reasons:
+            try:
+                report["descendants_checked"] = audit_descendants(
+                    descriptors["root"], root_stat.st_dev, next(iter(project_ids)), read_project)
+            except ValueError as exc:
+                reasons.append(str(exc))
     finally:
         for fd in descriptors.values():
             os.close(fd)

@@ -30,9 +30,15 @@ it is still deliberately nonzero. Remove the empty fixture after review.
 The candidate check requires private owner-owned directories, no nested host
 mount, one mount and filesystem for all sources, explicit `prjquota`/`pquota`
 on XFS or ext4, and one nonzero project ID with project inheritance on the
-root and each bind source. These are necessary hints, not proof of an active
-hard block limit. Existing descendants may have different project IDs. A
-mount can change after this snapshot, and the test does not exercise Docker.
+root and each bind source. It also walks existing descendants through open
+directory descriptors: every file and directory must carry that project ID,
+and every directory must inherit it. Symlinks, special entries, inaccessible
+metadata, more than 4,096 descendants, or more than 64 directory levels
+refuse the candidate. The JSON reports `descendants_checked` on a completed
+walk. The tool reads metadata only, never file contents.
+
+These are necessary hints, not proof of an active hard block limit. A file
+or mount can change after this snapshot, and the test does not exercise Docker.
 
 ## Evidence required before production support
 
@@ -40,8 +46,9 @@ An administrator must provision a unique per-session project ID, enable
 accounting **and enforcement** on the backing filesystem, set a nonzero hard
 block limit, and show the effective limit through filesystem quota tooling.
 For XFS, record the `prjquota` mount and a numeric project report from
-`xfs_quota`; consult the filesystem administrator for ext4 tooling. Check
-every existing descendant's project ID, not only the three top directories.
+`xfs_quota`; consult the filesystem administrator for ext4 tooling. Run this
+preflight against the exact private tree being assessed and repeat after
+provisioning or changing its contents.
 
 Then use a separate, credential-free fixture with a deliberately small hard
 limit on a task-local rootless Engine.

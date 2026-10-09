@@ -46,7 +46,13 @@ members within a group. `/collection view sessions` restores session rows.
 Manual collections now accept a named hue with `/collection hue <name>
 <blue|teal|amber|violet|coral|green|none>`; their names remain editable with
 `/collection rename <old> -> <new>`. Invalid saved hue names remain stored but
-render without a hue. Automatic project-label editing remains open.
+render without a hue. Beta.18 adds explicit editing of an
+automatic project's heading with `/collection project-label <label>` and
+`/collection project-label --clear`. The edit is keyed to the selected pane's
+freshly verified canonical project root, including all of its tabs, and
+persists in owner `[project_labels]` config. Unknown, changed, or mixed roots,
+invalid labels, and collisions with another visible group are refused. It
+never renames a manually named collection or guesses a new project label.
 
 The remainder of this document is the historical Python design and uses
 Python module/test names. Its shipped labels do not describe the Rust rail.

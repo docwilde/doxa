@@ -5,6 +5,23 @@ them (`v0.1.0` … `v1.19.0`); the 1.x ranges below are derived from that
 history, not written from memory. Rust alpha and beta tags identify previews;
 the stable 2.0 release has not been cut.
 
+## 2.0.0-beta.18 — 2026-10-09
+
+**Workspace and code graph**
+
+- Add `/collection project-label` for a pane whose tabs share a freshly verified canonical root; `--clear` restores its derived heading.
+- Report verified, stale or unknown freshness for included references in reviewed LORE code-graph snapshots. Semantic bindings remain unverified.
+
+**Isolation and budgets**
+
+- Audit existing descendants of a hard-quota candidate for one inherited project ID. This read-only preflight does not verify quota enforcement.
+- Expose **`BudgetHost`** static price source, review date and upper bound; billed tier and provider charge remain unknown.
+
+**Extensions and provider startup**
+
+- Bound WASM package memory and table declarations and stage a grantless child protocol. There is no plugin runner or execution path yet.
+- Fix transient executable-busy spawn failures with bounded retries in Claude CLI startup, worktree Git commands, and the TUI update advisory.
+
 ## 2.0.0-beta.17 — 2026-10-09
 
 **Remote and workspace**

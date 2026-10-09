@@ -829,6 +829,22 @@ impl App {
             };
             return;
         }
+        if verb == "project-label" {
+            if rest.is_empty() {
+                self.notice = "Usage: /collection project-label <label>|--clear".into();
+                return;
+            }
+            let label = (rest != "--clear").then_some(rest);
+            self.notice = match (|| {
+                let path = crate::settings::config_path().map_err(|error| error.to_string())?;
+                let notice = self.edit_project_label(&path, label)?;
+                self.input.clear(); self.input_cursor = 0;
+                Ok::<_, String>(notice)
+            })() {
+                Ok(note) | Err(note) => note,
+            };
+            return;
+        }
         let active = self.groups[self.active_group]
             .active_id()
             .map(str::to_owned);
@@ -991,6 +1007,14 @@ impl App {
     /// Live sessions receive this only from the background repository probe.
     pub fn set_project_root_fixture(&mut self, id: &str, root: PathBuf) {
         self.project_roots.insert(id.to_owned(), root);
+    }
+
+    /// Show an explicit owner label in a gallery fixture without writing the
+    /// real owner config. Live edits use `/collection project-label`.
+    pub fn set_project_label_fixture(&mut self, root: PathBuf, label: String) {
+        self.project_labels.get_or_insert_with(Default::default).insert(root, label);
+        self.rail_sort_signature.clear();
+        self.rail_sort_order.clear();
     }
 
     /// Deterministic gallery state for the read-only memory menu. Live menus
