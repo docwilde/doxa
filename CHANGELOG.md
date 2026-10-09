@@ -9,8 +9,8 @@ the stable 2.0 release has not been cut.
 
 **Runtime proof**
 
-- Add an opt-in disposable-host plugin proof for the approved Wasm worker, aggregate cgroup limits, namespaces, egress and cleanup. The cgroup-writing run and broader TUI activation remain open.
-- Test that the restricted-egress gateway dials its checked DNS address and rejects a later private answer. Production hardened Docker admission still needs live host and provider proof.
+- Prove the approved Wasm worker, aggregate cgroup limits, namespaces, egress and cleanup in a disposable delegated guest. Broader TUI activation remains closed.
+- Test checked-address DNS dialing and reject rebinding. A disposable ext4 rootless fixture passed aggregate and restart `EDQUOT`; production admission still needs broker, remount and provider proof.
 - Add a disabled direct Engine attach probe and document the same-user daemon spoofing gap. Code-graph semantic binding still reports unknown.
 
 **Model facts**

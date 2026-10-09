@@ -132,8 +132,9 @@ conservative failure class on error. The caller must run in a supervisor leaf
 below an empty, user-owned delegated cgroup v2 parent with memory, CPU and PID
 controllers enabled for its children. Each worker gets a sibling cgroup under
 that parent. Without this layout, admission fails closed before spawning the
-worker. End-to-end aggregate cgroup containment still needs proof on a
-disposable delegated host. TUI execution, nonempty grants, native shared
+worker. A disposable delegated Ubuntu guest passed the seven-case acceptance
+fixture, including the approved Wasm worker, aggregate limits, namespace
+boundary and cleanup. TUI execution, nonempty grants, native shared
 libraries, scripts, provider backends, hooks and
 automatic startup remain unsupported.
 
@@ -141,7 +142,8 @@ Before broader activation, a delegated-host acceptance run must verify the
 installed memory, swap, CPU and PID limits; worker membership before exec;
 aggregate limits under fork and process-group escape attempts; no host file or
 network access; and removal of all descendants after return, timeout and
-cancellation. The current host cannot exercise those cgroup checks.
+cancellation. The disposable guest passed these checks; broader activation
+still requires a reviewed operator path and installed-host acceptance.
 
 ### Delegated-host acceptance fixture
 

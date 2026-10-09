@@ -1,6 +1,6 @@
 # Native DOXA plugin API
 
-Status: **data-only TUI v1; explicit Linux grantless CLI prototype; delegated-host containment proof open**.
+Status: **data-only TUI v1; explicit Linux grantless CLI prototype; disposable delegated-host proof passed; broader activation open**.
 This plan supersedes the Python/Textual `Plugin` and `PANE_COMMANDS` draft. The
 Rust frontend uses its own command registry, palette and help panel. Claude Code
 plugin adoption through `/plugins` is a separate provider feature.
@@ -89,8 +89,8 @@ make the module safe to run.
 The explicit `doxa native-plugin run NAME --grantless-prototype` command now
 routes an approved zero-grant package through the cgroup-gated child boundary.
 It refuses execution when the delegated cgroup controls are unavailable.
-Aggregate containment still needs proof on a delegated host before TUI
-activation or broader plugin capabilities. Native shared libraries and
+Aggregate containment passed on a disposable delegated guest. TUI activation
+and broader plugin capabilities still need a reviewed operator path. Native shared libraries and
 in-process callbacks remain out of scope.
 
 ### Runner design and test seam
@@ -135,8 +135,8 @@ outcome, including a descendant that changes process groups. Bubblewrap
 fixtures show host files, mounts, a host TCP listener and inherited test
 environment are unavailable; resource fixtures show memory and CPU exhaustion
 stopped by kernel limits. Without a user-delegated cgroup subtree, admission
-refuses to spawn. Aggregate limits and cgroup cleanup still need a recorded
-run on a disposable delegated host.
+refuses to spawn. A disposable delegated guest recorded aggregate limits and
+cgroup cleanup; installed-host acceptance remains open.
 An [ignored delegated-host acceptance fixture](../native-plugins.md#delegated-host-acceptance-fixture)
 now measures the actual aggregate limits, namespace boundary and cgroup
 cleanup in one bounded run. The opt-in `scripts/plugin-delegated-host-proof.py`
@@ -147,8 +147,9 @@ fixture. One case sends an approved zero-grant Wasm module through the
 production review, frame and sandbox path, and rejects stale approval before
 spawn. Its boundary case
 compares worker network, mount, user and PID namespace identities with the
-host and rejects any non-loopback network interface or route. It has not yet
-run the cgroup-writing cases on a disposable delegated host.
+host and rejects any non-loopback network interface or route. All seven cases,
+including cgroup writes, passed on a disposable delegated Ubuntu guest. This
+does not authorize TUI execution or nonempty grants.
 
 The sandbox opens the trusted worker executable with `O_NOFOLLOW` and
 binds that descriptor into the private mount; replacing its pathname after
@@ -166,7 +167,7 @@ a deliberate nonzero exit, so those remain one abnormal-worker class. A
 setup failure and a worker failure before its entry marker remain one
 conservative class. The explicit CLI command now calls this seam with a
 five-second deadline and signal-driven cancellation. There is still no
-end-to-end cgroup acceptance run on a delegated host, so TUI execution stays
+installed-host acceptance or TUI execution path, so TUI execution stays
 disabled. Do not treat owner approval,
 the request frame, fuel or store limits as an execution switch. The handoff is
 `recheck_approved(home, review) -> RecheckedPackage`: it returns the exact,

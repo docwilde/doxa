@@ -97,6 +97,14 @@ fixture, not runtime admission or a broker-path/remount proof. No quota is
 configured or changed by the probe. The host's ordinary Docker context and
 credential helpers are not used.
 
+On a disposable Ubuntu 26.04 guest (kernel 7.0.0-34), rootless Docker 29.1.3
+and an ext4 `prjquota` fixture with a 32 MiB project hard limit, all three
+binds returned `EDQUOT` and the aggregate limit persisted after restarting
+the same container. The receipt still reports `admissible_as_hard_quota=false`.
+An otherwise equivalent XFS fixture returned `ENOSPC` at the limit and was
+correctly refused. Neither run restarted the Engine, remounted a source, or
+tested the production broker and provider path.
+
 The Rust hardened-admission seam reads a bounded receipt and checks the saved
 session profile and exact tree. Its read-only Linux XFS verifier can inspect
 the exact session root and three bind-source directory descriptors, then walk
