@@ -90,5 +90,7 @@ the fixture. The uncompressed serial log's SHA-256 is
 The kernel digest matches the prior disposable anchor guest receipt; the
 kernel bytes came from the Ubuntu package recorded there.
 That retained run predates the scan-digest packet field. Its sender-continuity
-result remains historical evidence for the earlier packet format; run the
-updated fixture on a disposable guest to verify the current format.
+result remains historical evidence for the earlier packet format. The updated
+format passed a separate [six-case offline guest run](evidence/stream-source-basis-2026-10-09/RUN.md)
+against source commit `d5b2347f`, with input hashes and the full serial log
+retained there. The synthetic sender still proves no Engine or analyzer origin.

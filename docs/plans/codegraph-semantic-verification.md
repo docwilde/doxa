@@ -174,8 +174,8 @@ ID and container ID are syntax-checked, not verified against image bytes or
 Engine state. The Rust digest covers Git-listed, nonignored `.rs` files at
 separate read times; it excludes ignored files, manifests, configuration, and
 other bytes visible to a whole-worktree mount. Edits restored between reads
-can escape it. The guest fixture predates the added digest field and needs a
-new offline run before its prior receipt can cover this packet format. PID
+can escape it. The [updated six-case offline guest receipt](../../scripts/semantic-broker-proof/evidence/stream-source-basis-2026-10-09/RUN.md)
+covers the added packet field but still uses a synthetic LSP frame. PID
 continuity alone does not pin an executable or exclude PID reuse after process
 exit.
 
