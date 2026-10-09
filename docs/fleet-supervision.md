@@ -33,9 +33,12 @@ short-context rates of $10 input/$50 output per million, and reasoning efforts
 [GPT-6 guide](https://developers.openai.com/api/docs/guides/latest-model)
 excludes `none` for Astra. DOXA sends bounded text to the Responses API with
 no tools and a 512-output-token cap; incomplete output fails closed. Account
-availability, effective latency, and review quality remain unverified without
-an owner-run live evaluation. Selecting Astra as the message judge does not
-establish that it meets the fast judge's latency needs.
+catalog listing can be checked without a generation call using the same API
+key and OpenAI's [Models API](https://developers.openai.com/api/reference/resources/models/methods/list).
+No account check was run here. A listing does not establish that a Responses
+request will succeed, its billed tier, effective latency, or review quality;
+those require an owner-run live evaluation. Selecting Astra as the message
+judge does not establish that it meets the fast judge's latency needs.
 
 Reviewer providers `claude`, `codex`, `deepseek`, and `glm` use stateless API
 calls and their API keys (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,

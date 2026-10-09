@@ -59,6 +59,10 @@ pub fn report(engine: &str, model: &str, review_before: Option<&str>) -> Result<
         "An API model context window does not establish this session's effective context allocation.".into(),
         "A checked date does not verify current availability, price, billing tier, or provider charge.".into(),
     ];
+    if engine == "codex" && facts.context_window.value.is_some() {
+        lines.push("For an OpenAI API key, GET /v1/models can check catalog listing without a generation call; a listing does not prove a successful Responses call or billed tier.".into());
+        lines.push("  source: https://developers.openai.com/api/reference/resources/models/methods/list".into());
+    }
     if let Some(date) = review_before {
         lines.push(format!("Review facts checked before {date} (operator-selected cutoff; no automatic expiry)."));
     }
@@ -124,5 +128,18 @@ mod tests {
         }
         assert!(report("codex", "gpt-6-astra\x1b[0m", None).is_err());
         assert!(report("codex", "", None).is_err());
+    }
+
+    #[test]
+    fn openai_catalog_check_is_distinct_from_static_facts_and_inference() {
+        let known = report("codex", "gpt-6-astra", None).unwrap();
+        assert!(known.contains("GET /v1/models can check catalog listing without a generation call"));
+        assert!(known.contains("a listing does not prove a successful Responses call or billed tier"));
+        assert!(known.contains("source: https://developers.openai.com/api/reference/resources/models/methods/list"));
+        assert!(known.contains("A checked date does not verify current availability"));
+        let alias = report("codex", "gpt-6-astra-latest", None).unwrap();
+        assert!(!alias.contains("GET /v1/models"), "an unknown alias has no sourced model facts");
+        let other = report("deepseek", "deepseek-flash", None).unwrap();
+        assert!(!other.contains("GET /v1/models"), "the OpenAI endpoint cannot verify another provider");
     }
 }
