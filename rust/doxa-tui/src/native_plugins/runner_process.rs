@@ -1,6 +1,6 @@
-//! Bounded child supervision for a future plugin sandbox launcher.
+//! Bounded child supervision for the explicit grantless plugin CLI launcher.
 //! This accepts a caller-built Command and does not certify its isolation.
-//! It is unwired from native-plugin commands and the TUI.
+//! The cgroup/Bubblewrap wrapper calls it; the TUI does not.
 use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
