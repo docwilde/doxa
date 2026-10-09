@@ -1,22 +1,25 @@
 //! Optional local Mermaid previews. Model-authored source reaches only a
 //! reviewed renderer inside a networkless, narrow filesystem sandbox.
 use std::{
-    collections::HashSet,
+    collections::{HashSet, VecDeque},
     fs::{self, File, OpenOptions},
-    io::Write,
-    os::unix::{fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt}, process::CommandExt},
+    io::{Read, Seek, SeekFrom, Write},
+    os::unix::{fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt}, process::CommandExt},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::{atomic::{AtomicBool, Ordering}, mpsc::{self, Receiver, TryRecvError}, Arc},
+    sync::{atomic::{AtomicBool, Ordering}, mpsc::{self, Receiver, TryRecvError}, Arc, Mutex},
     time::{Duration, Instant},
 };
 use ratatui::{layout::Rect, style::Style, widgets::Paragraph, Frame};
 use ratatui_image::{picker::Picker, protocol::Protocol, Image};
+use sha2::{Digest, Sha256};
 
 use super::{transcript_images, transcript_tools};
 use crate::theme;
 
 const MAX_CACHED: usize = 8;
+const MAX_CACHE_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_PNG_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_ACTIVE: usize = 2;
 const TIMEOUT: Duration = Duration::from_secs(5);
 const BWRAP: &str = "/usr/bin/bwrap";
@@ -29,12 +32,94 @@ struct Preview {
 }
 enum State { Loading(Receiver<Option<Protocol>>), Ready(Protocol), Unavailable }
 
+struct CacheEntry {
+    key: String,
+    bytes: u64,
+    digest: [u8; 32],
+}
+
+/// One private directory per TUI store/configuration. Its TempDir owner keeps
+/// files alive for active workers and removes them when the session ends.
+struct PngCache {
+    dir: tempfile::TempDir,
+    entries: VecDeque<CacheEntry>,
+    bytes: u64,
+}
+
+impl PngCache {
+    fn new() -> Option<Self> {
+        let dir = tempfile::Builder::new().prefix("doxa-mermaid-cache-")
+            .tempdir_in(private_temp_root()?).ok()?;
+        let meta = fs::symlink_metadata(dir.path()).ok()?;
+        if !meta.is_dir() || meta.file_type().is_symlink() || meta.permissions().mode() & 0o777 != 0o700 {
+            return None;
+        }
+        Some(Self { dir, entries: VecDeque::new(), bytes: 0 })
+    }
+
+    fn path(&self, key: &str) -> PathBuf { self.dir.path().join(format!("{key}.png")) }
+
+    fn evict(&mut self, index: usize) {
+        if let Some(entry) = self.entries.remove(index) {
+            self.bytes -= entry.bytes;
+            let _ = fs::remove_file(self.path(&entry.key));
+        }
+    }
+
+    fn load(&mut self, key: &str, width: u16, picker: &Picker) -> Option<Protocol> {
+        let index = self.entries.iter().position(|entry| entry.key == key)?;
+        let expected = &self.entries[index];
+        let result = (|| {
+            let mut file = open_png(&self.path(key))?;
+            let meta = file.metadata().ok()?;
+            if !meta.is_file() || meta.len() != expected.bytes || meta.len() > MAX_PNG_BYTES { return None; }
+            let mut bytes = Vec::with_capacity(meta.len() as usize);
+            file.read_to_end(&mut bytes).ok()?;
+            if bytes.len() as u64 != expected.bytes || Sha256::digest(&bytes).as_slice() != expected.digest {
+                return None;
+            }
+            file.seek(SeekFrom::Start(0)).ok()?;
+            transcript_images::decode_file(file, width, picker)
+        })();
+        if result.is_some() {
+            if let Some(entry) = self.entries.remove(index) { self.entries.push_back(entry); }
+        } else {
+            self.evict(index);
+        }
+        result
+    }
+
+    fn insert(&mut self, key: &str, mut source: File) {
+        if self.entries.iter().any(|entry| entry.key == key) { return; }
+        let Ok(meta) = source.metadata() else { return; };
+        if !meta.is_file() || meta.len() == 0 || meta.len() > MAX_PNG_BYTES { return; }
+        if source.seek(SeekFrom::Start(0)).is_err() { return; }
+        let mut bytes = Vec::with_capacity(meta.len() as usize);
+        if source.take(MAX_PNG_BYTES + 1).read_to_end(&mut bytes).is_err()
+            || bytes.len() as u64 != meta.len() { return; }
+        while self.entries.len() >= MAX_CACHED || self.bytes + meta.len() > MAX_CACHE_BYTES {
+            self.evict(0);
+        }
+        let Ok(mut target) = OpenOptions::new().write(true).create_new(true).mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC).open(self.path(key)) else { return; };
+        if target.write_all(&bytes).is_err() {
+            let _ = fs::remove_file(self.path(key));
+            return;
+        }
+        self.bytes += meta.len();
+        self.entries.push_back(CacheEntry { key: key.to_owned(), bytes: meta.len(),
+            digest: Sha256::digest(&bytes).into() });
+    }
+}
+
 #[derive(Default)]
 pub(super) struct Store {
     renderer: String,
     root: String,
+    identity: Option<String>,
     workspace: Vec<PathBuf>,
     previews: Vec<Preview>,
+    cache: Option<Arc<Mutex<PngCache>>>,
     revision: u64,
 }
 
@@ -49,6 +134,7 @@ impl Store {
     pub fn clear(&mut self) {
         for preview in &self.previews { preview.cancel.store(true, Ordering::Relaxed); }
         self.previews.clear();
+        self.cache = None;
         self.revision = self.revision.wrapping_add(1);
     }
 
@@ -83,14 +169,18 @@ impl Store {
         renderer: &str, root: &str, workspaces: &[PathBuf], picker: Option<Picker>) {
         let mut workspace_key=workspaces.to_vec();
         workspace_key.sort();
-        if self.renderer != renderer || self.root != root || self.workspace != workspace_key {
+        let identity = renderer_identity(renderer, root);
+        if self.renderer != renderer || self.root != root || self.identity != identity
+            || self.workspace != workspace_key {
             self.clear();
             self.renderer = renderer.to_owned();
             self.root = root.to_owned();
+            self.identity = identity;
             self.workspace = workspace_key;
         }
         let Some(picker) = picker else { return; };
         if renderer.is_empty() || root.is_empty() || !Path::new(BWRAP).is_file() { return; }
+        if self.cache.is_none() { self.cache = PngCache::new().map(|cache| Arc::new(Mutex::new(cache))); }
         // A transcript can contain many restored diagrams. Admit the latest
         // eight so older entries cannot evict them on every frame.
         for source in transcript_tools::mermaid_sources(transcript).into_iter().rev().take(MAX_CACHED) {
@@ -110,8 +200,10 @@ impl Store {
             let renderer = renderer.to_owned();
             let root = root.to_owned();
             let workspaces = workspaces.to_vec();
+            let cache = self.cache.clone();
             std::thread::spawn(move || {
-                let result = render_source(&source, width, &renderer, &root, &workspaces, &worker_picker, &worker_cancel);
+                let result = render_source_cached(&source, width, &renderer, &root, &workspaces,
+                    &worker_picker, &worker_cancel, cache.as_ref());
                 let _ = sender.send(result);
             });
             self.previews.push(Preview { key, width, cancel, state: State::Loading(receiver) });
@@ -128,6 +220,24 @@ impl Store {
                 .style(Style::default().fg(theme::MUTED)), area);
         }
     }
+}
+
+fn renderer_identity(renderer: &str, root: &str) -> Option<String> {
+    let renderer = Path::new(renderer).canonicalize().ok()?;
+    let root = Path::new(root).canonicalize().ok()?;
+    let renderer_meta = renderer.metadata().ok()?;
+    let root_meta = root.metadata().ok()?;
+    if !renderer_meta.is_file() || !root_meta.is_dir() { return None; }
+    let mut hash = Sha256::new();
+    hash.update(b"doxa-mermaid-renderer-v1\0");
+    for (path, meta) in [(&renderer, renderer_meta), (&root, root_meta)] {
+        hash.update(path.as_os_str().as_encoded_bytes());
+        for value in [meta.dev(), meta.ino(), meta.len(), meta.mtime() as u64, meta.mtime_nsec() as u64,
+            meta.ctime() as u64, meta.ctime_nsec() as u64] {
+            hash.update(value.to_be_bytes());
+        }
+    }
+    Some(format!("{hash:x}"))
 }
 
 fn private_temp_root() -> Option<PathBuf> {
@@ -308,10 +418,25 @@ fn sandbox_command(root: &Path, relative: &Path, work: &Path) -> Command {
     command
 }
 
+#[cfg(test)]
 fn render_source(source: &str, width: u16, renderer: &str, root: &str,
     workspaces:&[PathBuf], picker: &Picker, cancel: &AtomicBool) -> Option<Protocol> {
+    render_source_cached(source, width, renderer, root, workspaces, picker, cancel, None)
+}
+
+fn render_source_cached(source: &str, width: u16, renderer: &str, root: &str,
+    workspaces:&[PathBuf], picker: &Picker, cancel: &AtomicBool,
+    cache: Option<&Arc<Mutex<PngCache>>>) -> Option<Protocol> {
     if source.len() > transcript_tools::MAX_MERMAID_SOURCE || cancel.load(Ordering::Relaxed) { return None; }
     let (_, root, relative) = reviewed_paths(renderer, root, workspaces)?;
+    let identity = renderer_identity(renderer, root.to_str()?)?;
+    let key = transcript_tools::mermaid_cache_key(&transcript_tools::mermaid_key(source), &identity, width);
+    if let Some(cache) = cache {
+        if let Ok(mut cache) = cache.lock() {
+            if let Some(protocol) = cache.load(&key, width, picker) { return Some(protocol); }
+        }
+    }
+    if cancel.load(Ordering::Relaxed) { return None; }
     let work = tempfile::Builder::new().prefix("doxa-mermaid-")
         .tempdir_in(private_temp_root()?).ok()?;
     let input = work.path().join("input.mmd");
@@ -320,7 +445,13 @@ fn render_source(source: &str, width: u16, renderer: &str, root: &str,
     drop(file);
     if run_sandbox(sandbox_command(&root, &relative, work.path()), cancel) != RunResult::Success { return None; }
     let file = open_png(&work.path().join("output.png"))?;
-    transcript_images::decode_file(file, width, picker)
+    let protocol = transcript_images::decode_file(file.try_clone().ok()?, width, picker)?;
+    if !cancel.load(Ordering::Relaxed) {
+        if let Some(cache) = cache {
+            if let Ok(mut cache) = cache.lock() { cache.insert(&key, file); }
+        }
+    }
+    Some(protocol)
 }
 
 fn open_png(output: &Path) -> Option<File> {
@@ -491,6 +622,85 @@ mod tests {
     }
 
     #[test]
+    fn private_cache_reuses_valid_png_and_rejects_corruption_or_symlinks() {
+        let mut cache = PngCache::new().unwrap();
+        assert_eq!(fs::symlink_metadata(cache.dir.path()).unwrap().permissions().mode() & 0o777, 0o700);
+        let fixture = tempfile::tempdir_in(private_temp_root().unwrap()).unwrap();
+        let png = fixture.path().join("pixel.png");
+        image::RgbaImage::from_pixel(16, 16, image::Rgba([10, 20, 30, 255]))
+            .save(&png).unwrap();
+        let key = transcript_tools::mermaid_cache_key(&transcript_tools::mermaid_key("graph TD"), "renderer-a", 24);
+        cache.insert(&key, open_png(&png).unwrap());
+        let path = cache.path(&key);
+        assert_eq!(cache.entries.len(), 1);
+        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert!(cache.load(&key, 24, &picker()).is_some());
+        fs::write(&path, b"\x89PNG\r\n\x1a\ncorrupt").unwrap();
+        assert!(cache.load(&key, 24, &picker()).is_none());
+        assert_eq!(cache.entries.len(), 0);
+        cache.insert(&key, open_png(&png).unwrap());
+        fs::remove_file(&path).unwrap();
+        symlink(&png, &path).unwrap();
+        assert!(cache.load(&key, 24, &picker()).is_none());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn private_cache_bounds_entries_and_total_bytes() {
+        let mut cache = PngCache::new().unwrap();
+        let fixture = tempfile::tempdir_in(private_temp_root().unwrap()).unwrap();
+        let png = fixture.path().join("large.png");
+        let mut bytes = vec![0u8; 6 * 1024 * 1024];
+        bytes[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+        fs::write(&png, bytes).unwrap();
+        for index in 0..10 {
+            cache.insert(&format!("{index:064x}"), open_png(&png).unwrap());
+            assert!(cache.entries.len() <= MAX_CACHED);
+            assert!(cache.bytes <= MAX_CACHE_BYTES);
+        }
+        assert_eq!(cache.entries.len(), 5);
+        assert!(!cache.path(&format!("{:064x}", 0)).exists());
+        assert_eq!(cache.bytes, 30 * 1024 * 1024);
+    }
+
+    #[test]
+    fn renderer_identity_tracks_package_and_binary_changes() {
+        let (package, renderer) = fixture("exit 7");
+        let root = package.path().to_str().unwrap();
+        let initial = renderer_identity(&renderer, root).unwrap();
+        fs::write(&renderer, "#!/bin/sh\nexit 8\nextra\n").unwrap();
+        assert_ne!(renderer_identity(&renderer, root).unwrap(), initial);
+        let after_binary = renderer_identity(&renderer, root).unwrap();
+        fs::write(package.path().join("new-package-entry"), "data").unwrap();
+        assert_ne!(renderer_identity(&renderer, root).unwrap(), after_binary);
+    }
+
+    #[test]
+    fn corrupt_cache_and_failed_renderer_keep_source_fence() {
+        if !sandbox_available() { return; }
+        let (package, renderer) = fixture("exit 7");
+        let root = package.path().to_str().unwrap();
+        let cache = Arc::new(Mutex::new(PngCache::new().unwrap()));
+        let source = "graph TD\nA-->B";
+        let key = transcript_tools::mermaid_cache_key(&transcript_tools::mermaid_key(source),
+            &renderer_identity(&renderer, root).unwrap(), 24);
+        let fixture = tempfile::tempdir_in(private_temp_root().unwrap()).unwrap();
+        let png = fixture.path().join("pixel.png");
+        image::RgbaImage::from_pixel(8, 8, image::Rgba([10, 20, 30, 255]))
+            .save(&png).unwrap();
+        cache.lock().unwrap().insert(&key, open_png(&png).unwrap());
+        fs::write(cache.lock().unwrap().path(&key), b"corrupt").unwrap();
+        assert!(render_source_cached(source, 24, &renderer, root, &[], &picker(),
+            &AtomicBool::new(false), Some(&cache)).is_none());
+        assert!(cache.lock().unwrap().entries.is_empty());
+        let transcript = format!("```mermaid\n{source}\n```");
+        let (lines, _, _, _, placements) = transcript_tools::render_with_media(
+            &transcript, 24, None, None, &[], transcript_tools::IMAGE_ROWS, 0, Some(&HashSet::new()));
+        assert!(placements.is_empty());
+        assert!(lines.iter().any(|line| line.to_string().contains("graph TD")));
+    }
+
+    #[test]
     fn renderer_cannot_see_a_host_file_outside_its_package() {
         if !sandbox_available() { return; }
         let secret = tempfile::tempdir_in(private_temp_root().unwrap()).unwrap();
@@ -510,7 +720,8 @@ mod tests {
         let (root, renderer) = fixture("exit 7");
         let package = root.path().to_string_lossy().into_owned();
         let mut store = Store { renderer: renderer.clone(), root: package.clone(),
-            workspace: Vec::new(), previews: Vec::new(), revision: 0 };
+            identity: renderer_identity(&renderer, &package), workspace: Vec::new(),
+            previews: Vec::new(), cache: None, revision: 0 };
         for index in 0..MAX_CACHED {
             store.previews.push(Preview { key: format!("old-{index}"), width: 24,
                 cancel: Arc::new(AtomicBool::new(false)), state: State::Unavailable });

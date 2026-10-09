@@ -1,6 +1,6 @@
 # Mermaid in the Rust transcript
 
-Status: **local preview, sandbox doctor and Settings preflight implemented; pinned real CLI sandbox suite passed on Linux**.
+Status: **local preview, sandbox doctor, Settings preflight and bounded session PNG cache implemented; pinned real CLI sandbox suite passed on Linux**.
 
 The native Ratatui transcript recognizes complete, standalone `mermaid` code
 fences. Without explicit configuration, it renders the source fence exactly as
@@ -36,8 +36,6 @@ explicit, and a failed preview still leaves the source fence visible.
 - Decide whether the installer should offer the large optional Node/Chromium
   dependency. It should state the cost before installation and never install
   Node silently.
-- Decide whether session-scoped persistent caching is useful. Current results
-  live only in the TUI process; resize may rerun a diagram.
 - Evaluate macOS isolation separately. The Linux sandbox requirement currently
   leaves Mermaid source visible on other platforms.
 

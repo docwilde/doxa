@@ -45,6 +45,18 @@ pub(super) fn mermaid_key(source: &str) -> String {
     format!("{:x}", Sha256::digest(source.as_bytes()))
 }
 
+/// The PNG cache is separate from the layout key: a source may have several
+/// width-specific renders, and a renderer change must never reuse old pixels.
+pub(super) fn mermaid_cache_key(source_hash: &str, renderer_identity: &str, width: u16) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"doxa-mermaid-png-v1\0");
+    digest.update(source_hash.as_bytes());
+    digest.update(b"\0");
+    digest.update(renderer_identity.as_bytes());
+    digest.update(width.to_be_bytes());
+    format!("{digest:x}")
+}
+
 fn fence_marker(line: &str) -> Option<(u8, usize, &str)> {
     let indent = line.bytes().take_while(|byte| *byte == b' ').count();
     if indent > 3 { return None; }
@@ -536,6 +548,16 @@ mod tests {
     use super::*;
     use super::super::tool_cards::ToolCards;
     use serde_json::json;
+
+    #[test]
+    fn mermaid_png_keys_bind_source_renderer_and_width() {
+        let source = mermaid_key("graph TD\nA-->B");
+        let key = mermaid_cache_key(&source, "renderer-a", 40);
+        assert_eq!(key.len(), 64);
+        assert_ne!(key, mermaid_cache_key(&mermaid_key("graph TD\nA-->C"), "renderer-a", 40));
+        assert_ne!(key, mermaid_cache_key(&source, "renderer-b", 40));
+        assert_ne!(key, mermaid_cache_key(&source, "renderer-a", 80));
+    }
 
     #[test]
     fn mermaid_fence_stays_markdown_without_a_ready_local_render() {
